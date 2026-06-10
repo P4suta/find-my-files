@@ -1,0 +1,296 @@
+//! Process-wide diagnostics: every WARN+ tracing event and every panic ends
+//! up in (a) the rolling log file, (b) a global ring buffer surfaced through
+//! MetricsSnapshot → the F12 panel and `fmf stats`, and (c) any registered
+//! sinks (the FFI forwards them as ENGINE_ERROR events to the UI).
+//! 「落ちない・固まらない・黙らない」の「黙らない」を担う層。
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Once, OnceLock};
+use std::time::Instant;
+
+use parking_lot::Mutex;
+use serde::Serialize;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Warn,
+    Error,
+    Panic,
+}
+
+impl Severity {
+    /// Numeric form carried in the POD FFI event payload.
+    pub fn as_u64(self) -> u64 {
+        match self {
+            Severity::Warn => 1,
+            Severity::Error => 2,
+            Severity::Panic => 3,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ErrorEvent {
+    pub seq: u64,
+    pub uptime_ms: u64,
+    pub severity: Severity,
+    /// tracing target (module path) — "where".
+    pub area: String,
+    pub volume: Option<String>,
+    pub message: String,
+}
+
+const RING_CAP: usize = 128;
+
+static START: OnceLock<Instant> = OnceLock::new();
+static SEQ: AtomicU64 = AtomicU64::new(1);
+static RING: Mutex<VecDeque<ErrorEvent>> = Mutex::new(VecDeque::new());
+static SINKS: Mutex<Vec<(u64, Sink)>> = Mutex::new(Vec::new());
+static SINK_IDS: AtomicU64 = AtomicU64::new(1);
+
+type Sink = Arc<dyn Fn(&ErrorEvent) + Send + Sync>;
+
+/// Register a fan-out target for new error events; dropping the guard
+/// unregisters it (the FFI ties this to the engine handle's lifetime).
+pub fn register_sink(sink: Sink) -> SinkGuard {
+    let id = SINK_IDS.fetch_add(1, Ordering::Relaxed);
+    SINKS.lock().push((id, sink));
+    SinkGuard(id)
+}
+
+pub struct SinkGuard(u64);
+
+impl Drop for SinkGuard {
+    fn drop(&mut self) {
+        SINKS.lock().retain(|(id, _)| *id != self.0);
+    }
+}
+
+/// Record one diagnostic event (ring + sinks). Normally reached via the
+/// tracing layer rather than called directly.
+pub fn record(severity: Severity, area: &str, volume: Option<String>, message: String) {
+    let ev = ErrorEvent {
+        seq: SEQ.fetch_add(1, Ordering::Relaxed),
+        uptime_ms: START.get_or_init(Instant::now).elapsed().as_millis() as u64,
+        severity,
+        area: area.to_string(),
+        volume,
+        message,
+    };
+    {
+        let mut ring = RING.lock();
+        if ring.len() == RING_CAP {
+            ring.pop_front();
+        }
+        ring.push_back(ev.clone());
+    }
+    // Snapshot the sinks first: a sink may log (or register) and must not
+    // re-enter the lock.
+    let sinks: Vec<Sink> = SINKS.lock().iter().map(|(_, s)| s.clone()).collect();
+    for s in sinks {
+        s(&ev);
+    }
+}
+
+pub fn recent_errors() -> Vec<ErrorEvent> {
+    RING.lock().iter().cloned().collect()
+}
+
+// ── tracing layer ───────────────────────────────────────────────────────
+
+/// Routes WARN/ERROR tracing events into the diagnostics ring + sinks.
+/// Events with `target: "panic"` are classified as panics.
+pub struct DiagLayer;
+
+struct FieldGrab {
+    message: String,
+    volume: Option<String>,
+}
+
+impl tracing::field::Visit for FieldGrab {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        match field.name() {
+            "message" => self.message = format!("{value:?}"),
+            "volume" => self.volume = Some(format!("{value:?}").trim_matches('"').to_string()),
+            _ => {}
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "message" => self.message = value.to_string(),
+            "volume" => self.volume = Some(value.to_string()),
+            _ => {}
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DiagLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let level = *event.metadata().level();
+        if level > tracing::Level::WARN {
+            return; // Level orders ERROR < WARN < INFO …
+        }
+        let mut grab = FieldGrab {
+            message: String::new(),
+            volume: None,
+        };
+        event.record(&mut grab);
+        let target = event.metadata().target();
+        let severity = if target == "panic" {
+            Severity::Panic
+        } else if level == tracing::Level::ERROR {
+            Severity::Error
+        } else {
+            Severity::Warn
+        };
+        record(severity, target, grab.volume, grab.message);
+    }
+}
+
+// ── panic hook & logging bootstrap ──────────────────────────────────────
+
+/// Route every panic (any thread) through tracing with a backtrace, so it
+/// reaches the log file, the ring and the UI. Idempotent.
+pub fn install_panic_hook() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let payload = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            tracing::error!(
+                target: "panic",
+                "panic at {location}: {payload}\n{backtrace}"
+            );
+            previous(info);
+        }));
+    });
+}
+
+static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+
+/// Initialize process-wide logging once. `log_dir = Some(..)` writes a daily
+/// rolling `engine.log`; `None` writes to stderr (CLI). The `FMF_LOG` env
+/// var overrides `level`. Safe to call repeatedly — later calls no-op.
+pub fn init_logging(log_dir: Option<&std::path::Path>, level: &str) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    START.get_or_init(Instant::now);
+    let filter = tracing_subscriber::EnvFilter::try_from_env("FMF_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level));
+    let registry = tracing_subscriber::registry().with(filter).with(DiagLayer);
+
+    match log_dir {
+        Some(dir) => {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                // Last resort: stderr, and leave a breadcrumb in the ring.
+                record(
+                    Severity::Error,
+                    "diag",
+                    None,
+                    format!("cannot create log dir {}: {e}", dir.display()),
+                );
+                let _ = registry
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_ansi(false)
+                            .with_writer(std::io::stderr),
+                    )
+                    .try_init();
+                return;
+            }
+            let appender = tracing_appender::rolling::daily(dir, "engine.log");
+            let (writer, guard) = tracing_appender::non_blocking(appender);
+            let _ = registry
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(writer),
+                )
+                .try_init();
+            let _ = LOG_GUARD.set(guard);
+        }
+        None => {
+            let _ = registry
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(std::io::stderr),
+                )
+                .try_init();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Single test for the global pipeline (ring/sinks/hook are process-wide
+    /// state; parallel tests would interleave).
+    #[test]
+    fn ring_sinks_layer_and_panic_hook() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Layer → ring + sink.
+        let seen = Arc::new(Mutex::new(Vec::<ErrorEvent>::new()));
+        let seen2 = seen.clone();
+        let guard = register_sink(Arc::new(move |ev| seen2.lock().push(ev.clone())));
+
+        let subscriber = tracing_subscriber::registry().with(DiagLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(volume = "C:", "snapshot stale");
+            tracing::error!("boom");
+            tracing::info!("ignored");
+
+            // The hook fires during unwinding on this thread (with_default
+            // is thread-local, so a spawned thread would miss the layer).
+            install_panic_hook();
+            let _ = std::panic::catch_unwind(|| panic!("test panic"));
+        });
+
+        let events = seen.lock().clone();
+        assert!(events.len() >= 3, "expected 3+ events, got {events:?}");
+        let warn = events
+            .iter()
+            .find(|e| e.severity == Severity::Warn)
+            .unwrap();
+        assert_eq!(warn.volume.as_deref(), Some("C:"));
+        assert!(warn.message.contains("snapshot stale"));
+        assert!(events.iter().any(|e| e.severity == Severity::Error));
+        let panic_ev = events
+            .iter()
+            .find(|e| e.severity == Severity::Panic)
+            .expect("panic captured");
+        assert!(panic_ev.message.contains("test panic"));
+        assert!(panic_ev.message.contains("diag.rs") || panic_ev.message.contains("backtrace"));
+
+        // Ring kept them too, with monotonically increasing seq.
+        let ring = recent_errors();
+        assert!(ring.len() >= 3);
+        assert!(ring.windows(2).all(|w| w[0].seq < w[1].seq));
+
+        // Dropping the guard unregisters the sink.
+        drop(guard);
+        let before = seen.lock().len();
+        record(Severity::Warn, "t", None, "after-drop".into());
+        assert_eq!(seen.lock().len(), before);
+    }
+}

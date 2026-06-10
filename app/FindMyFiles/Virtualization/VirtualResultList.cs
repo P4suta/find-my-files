@@ -122,7 +122,24 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         {
             // Result freed mid-flight — the list is being torn down.
         }
+        catch (Exception ex)
+        {
+            // Anything else is a real bug: log it, tell the user once (not
+            // once per page — scrolling would cause a notification storm).
+            Services.FileLog.Error("virtualization", $"page fetch failed (page {page})", ex);
+            if (!_fetchFailureNotified)
+            {
+                _fetchFailureNotified = true;
+                Services.Notifier.Post(
+                    Services.NotifySeverity.Error,
+                    "結果の読み込みでエラーが発生しました",
+                    ex.Message);
+            }
+            _dispatcher.TryEnqueue(() => _inFlight.Remove(page));
+        }
     }
+
+    private bool _fetchFailureNotified;
 
     private void Touch(long page)
     {

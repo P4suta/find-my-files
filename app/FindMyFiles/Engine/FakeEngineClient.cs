@@ -11,6 +11,9 @@ public sealed class FakeEngineClient : IEngineClient
 
     public event Action<string>? IndexChanged { add { } remove { } }
     public event Action<VolumeStatus>? VolumeUpdated { add { } remove { } }
+    public event Action<int>? EngineErrorOccurred;
+
+    private readonly List<ErrorEventData> _injectedErrors = [];
 
     public FakeEngineClient()
     {
@@ -68,12 +71,33 @@ public sealed class FakeEngineClient : IEngineClient
                     BytesPerEntry = 110,
                 },
             ],
+            RecentErrors = [.. _injectedErrors],
         };
         return Task.FromResult<EngineStatsData?>(stats);
     }
 
     public Task<SearchOutcome> SearchAsync(string query, SearchOptions options)
     {
+#if DEBUG
+        // Fault injection for end-to-end verification of the error pipeline
+        // (InfoBar, F12 panel, app.log) without touching real volumes.
+        if (query.Trim() == "!!panic")
+        {
+            throw new EngineException("fault injection: simulated engine panic", 99);
+        }
+        if (query.Trim() == "!!warn")
+        {
+            _injectedErrors.Add(new ErrorEventData
+            {
+                Seq = (ulong)_injectedErrors.Count + 1,
+                Severity = "warn",
+                Area = "fake",
+                Volume = "F:",
+                Message = "fault injection: simulated warning",
+            });
+            EngineErrorOccurred?.Invoke(1);
+        }
+#endif
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var needle = query.Trim();
         IEnumerable<RowData> hits = needle.Length == 0

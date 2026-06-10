@@ -32,6 +32,18 @@ fn set_error(msg: impl Into<String>) {
     LAST_ERROR.with(|e| *e.borrow_mut() = msg.into());
 }
 
+/// Full cause chain — "query parse: …" alone hides the why.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(cause) = src {
+        s.push_str(" — caused by: ");
+        s.push_str(&cause.to_string());
+        src = cause.source();
+    }
+    s
+}
+
 fn guard<F: FnOnce() -> i32>(f: F) -> i32 {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(code) => code,
@@ -94,6 +106,27 @@ pub unsafe extern "C" fn fmf_engine_create(
             set_error("config json: missing required key index_dir");
             return FMF_E_INVALID_ARG;
         };
+
+        // Logging + panic capture first: everything after this point is
+        // observable (file log, diag ring, ENGINE_ERROR events).
+        let log_dir = parsed
+            .get("log_dir")
+            .and_then(|v| v.as_str())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                let base =
+                    std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
+                std::path::Path::new(&base)
+                    .join("find-my-files")
+                    .join("logs")
+            });
+        let log_level = parsed
+            .get("log_level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info");
+        fmf_core::diag::init_logging(Some(&log_dir), log_level);
+        fmf_core::diag::install_panic_hook();
+
         let engine = Engine::new(EngineConfig {
             index_dir: index_dir.into(),
         });
@@ -134,6 +167,8 @@ pub const FMF_EVENT_VOLUME_READY: u32 = 2;
 pub const FMF_EVENT_INDEX_CHANGED: u32 = 3;
 pub const FMF_EVENT_RESCAN_STARTED: u32 = 4;
 pub const FMF_EVENT_VOLUME_FAILED: u32 = 5;
+/// entries = severity (1=warn 2=error 3=panic); details via fmf_engine_stats.
+pub const FMF_EVENT_ENGINE_ERROR: u32 = 6;
 
 /// POD event payload. `volume` is NUL-terminated UTF-8 ("C:").
 #[repr(C)]
@@ -200,6 +235,9 @@ pub unsafe extern "C" fn fmf_set_event_callback(
                             }
                             EngineEvent::VolumeFailed { volume, .. } => {
                                 (FMF_EVENT_VOLUME_FAILED, volume, 0)
+                            }
+                            EngineEvent::EngineError { severity, volume } => {
+                                (FMF_EVENT_ENGINE_ERROR, volume, *severity)
                             }
                         };
                         let payload = FmfEvent {
@@ -448,11 +486,11 @@ pub unsafe extern "C" fn fmf_query(
                 FMF_OK
             }
             Err(e @ (EngineError::Parse(_) | EngineError::Compile(_))) => {
-                set_error(e.to_string());
+                set_error(error_chain(&e));
                 FMF_E_QUERY_SYNTAX
             }
             Err(e) => {
-                set_error(e.to_string());
+                set_error(error_chain(&e));
                 FMF_E_STALE
             }
         }

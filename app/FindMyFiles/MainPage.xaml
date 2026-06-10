@@ -5,6 +5,8 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:local="using:FindMyFiles"
+    xmlns:svc="using:FindMyFiles.Services"
     xmlns:vm="using:FindMyFiles.ViewModels"
     mc:Ignorable="d">
 
@@ -13,6 +15,7 @@
             <KeyboardAccelerator Key="F12" Invoked="PerfPanel_Toggle" />
         </Grid.KeyboardAccelerators>
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -45,8 +48,27 @@
             </ToggleButton>
         </Grid>
 
+        <!-- Notification stack: the visible end of every error path. -->
+        <ItemsControl
+            Grid.Row="1"
+            Margin="12,0,12,4"
+            AutomationProperties.AutomationId="NotifyBar"
+            ItemsSource="{x:Bind ViewModel.Notifications}">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="svc:AppNotification">
+                    <InfoBar
+                        Title="{x:Bind Message}"
+                        Margin="0,0,0,4"
+                        Closed="Notification_Closed"
+                        IsOpen="True"
+                        Message="{x:Bind Detail}"
+                        Severity="{x:Bind local:MainPage.ToInfoSeverity(Severity)}" />
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
         <!-- Column headers -->
-        <Grid Grid.Row="1" Margin="16,0,28,4">
+        <Grid Grid.Row="2" Margin="16,0,28,4">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="2*" />
                 <ColumnDefinition Width="3*" />
@@ -91,7 +113,7 @@
         <!-- Results. ItemsPanel stays ItemsStackPanel (CLAUDE.md UI固定則). -->
         <ListView
             x:Name="ResultsList"
-            Grid.Row="2"
+            Grid.Row="3"
             AutomationProperties.AutomationId="ResultsList"
             DoubleTapped="ResultsList_DoubleTapped"
             ItemsSource="{x:Bind ViewModel.ResultsSource, Mode=OneWay}"
@@ -163,7 +185,7 @@
         <!-- Performance panel (F12). Rendering of the stage bar / sparkline
              happens in code-behind — it is diagnostic chrome, not app data. -->
         <Border
-            Grid.Row="3"
+            Grid.Row="4"
             Padding="16,8"
             AutomationProperties.AutomationId="PerfPanel"
             BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
@@ -196,6 +218,13 @@
                         FontFamily="Consolas"
                         FontSize="11"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock
+                        x:Name="ErrorsText"
+                        AutomationProperties.AutomationId="PerfErrors"
+                        FontFamily="Consolas"
+                        FontSize="11"
+                        Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                        TextWrapping="Wrap" />
                 </StackPanel>
                 <StackPanel Grid.Column="1" MinWidth="280" Spacing="4">
                     <TextBlock
@@ -208,12 +237,22 @@
                         FontFamily="Consolas"
                         FontSize="11"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock
+                        x:Name="CountersText"
+                        FontFamily="Consolas"
+                        FontSize="11"
+                        Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+                    <Button
+                        AutomationProperties.AutomationId="CopyDiag"
+                        Click="CopyDiag_Click"
+                        Content="診断情報をコピー"
+                        FontSize="11" />
                 </StackPanel>
             </Grid>
         </Border>
 
         <!-- Status bar -->
-        <Grid Grid.Row="4" Padding="16,4" BorderThickness="0,1,0,0"
+        <Grid Grid.Row="5" Padding="16,4" BorderThickness="0,1,0,0"
               BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
             <TextBlock
                 HorizontalAlignment="Left"

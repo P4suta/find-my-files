@@ -340,8 +340,20 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
         let f = NtfsFile::new(*number, bytes);
         match resolve_attr_list_name(&f, &mut rr) {
             Some(name) => push_record(&mut b, &mut stats, &f, &name),
-            None => stats.skipped_no_name += 1,
+            None => stats.deferred_unresolved += 1,
         }
+    }
+
+    // Degradations are normal in small numbers; make them visible either way.
+    if stats.corrupt_records > 0 {
+        tracing::warn!(volume = %drive, count = stats.corrupt_records, "corrupt MFT records skipped");
+    }
+    if stats.deferred_unresolved > 0 {
+        tracing::warn!(
+            volume = %drive,
+            count = stats.deferred_unresolved,
+            "attribute-list names unresolved"
+        );
     }
 
     let idx = b.finish();

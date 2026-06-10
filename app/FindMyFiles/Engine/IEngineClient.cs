@@ -12,6 +12,12 @@ public interface IEngineClient : IDisposable
     event Action<string>? IndexChanged;
     event Action<VolumeStatus>? VolumeUpdated;
 
+    /// <summary>
+    /// The engine recorded a diagnostic (1=warn 2=error 3=panic). Details
+    /// live in <see cref="EngineStatsData.RecentErrors"/> — pull on demand.
+    /// </summary>
+    event Action<int>? EngineErrorOccurred;
+
     IReadOnlyList<string> ListVolumes();
     void StartIndexing(IReadOnlyList<string> volumes);
     IReadOnlyList<VolumeStatus> GetStatus();
@@ -64,6 +70,27 @@ public sealed class UsnTraceData
     public ulong ApplyUs { get; set; }
 }
 
+public sealed class ErrorEventData
+{
+    public ulong Seq { get; set; }
+    public ulong UptimeMs { get; set; }
+    public string Severity { get; set; } = string.Empty; // warn|error|panic
+    public string Area { get; set; } = string.Empty;
+    public string? Volume { get; set; }
+    public string Message { get; set; } = string.Empty;
+}
+
+public sealed class CountersData
+{
+    public ulong StatFetchFailures { get; set; }
+    public ulong UsnBatchesTruncated { get; set; }
+    public ulong SnapshotLoadFailures { get; set; }
+    public ulong SnapshotSaveFailures { get; set; }
+    public ulong DeferredNamesUnresolved { get; set; }
+    public ulong CorruptMftRecords { get; set; }
+    public ulong JournalRescans { get; set; }
+}
+
 public sealed class EngineStatsData
 {
     public List<QueryTraceData> RecentQueries { get; set; } = [];
@@ -71,6 +98,8 @@ public sealed class EngineStatsData
     public ulong P99Us { get; set; }
     public List<UsnTraceData> RecentUsn { get; set; } = [];
     public List<IndexStatsData> Indexes { get; set; } = [];
+    public CountersData Counters { get; set; } = new();
+    public List<ErrorEventData> RecentErrors { get; set; } = [];
 }
 
 public enum FmfSort { Name = 0, Size = 1, Mtime = 2 }

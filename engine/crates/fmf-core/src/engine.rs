@@ -12,7 +12,7 @@ use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
 use crate::index::{EntryId, SortKey, VolumeIndex, flags};
-use crate::metrics::{MetricsHub, QueryTrace, ScanTrace, UsnTrace};
+use crate::metrics::{Counters, MetricsHub, QueryTrace, ScanTrace, UsnTrace};
 use crate::query::{self, QueryOptions};
 
 #[derive(Debug, Clone)]
@@ -49,6 +49,12 @@ pub enum EngineEvent {
         volume: String,
         message: String,
     },
+    /// A WARN/ERROR/panic was recorded in the diagnostics ring; the UI pulls
+    /// details from the metrics snapshot (push notification + pull detail).
+    EngineError {
+        severity: u64, // 1=warn 2=error 3=panic
+        volume: String,
+    },
 }
 
 pub type EventSink = Arc<dyn Fn(&EngineEvent) + Send + Sync>;
@@ -77,6 +83,8 @@ pub struct Engine {
     volumes: RwLock<Vec<Arc<VolumeSlot>>>,
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     metrics: MetricsHub,
+    /// Keeps the diag→EngineError forwarding registered for our lifetime.
+    _diag_guard: Mutex<Option<crate::diag::SinkGuard>>,
 }
 
 /// Engine-side debounce for IndexChanged — the only throttle in the whole
@@ -85,13 +93,29 @@ const INDEX_CHANGED_DEBOUNCE: Duration = Duration::from_millis(200);
 
 impl Engine {
     pub fn new(config: EngineConfig) -> Arc<Self> {
-        Arc::new(Self {
+        let engine = Arc::new(Self {
             config,
             sink: RwLock::new(None),
             volumes: RwLock::new(Vec::new()),
             threads: Mutex::new(Vec::new()),
             metrics: MetricsHub::new(),
-        })
+            _diag_guard: Mutex::new(None),
+        });
+        // Forward every diagnostics event (WARN+/panic, any thread) to the
+        // event sink as a POD EngineError — the UI fetches the message text
+        // from the metrics snapshot. Weak: the registry must not keep the
+        // engine alive.
+        let weak = Arc::downgrade(&engine);
+        let guard = crate::diag::register_sink(Arc::new(move |ev| {
+            if let Some(e) = weak.upgrade() {
+                e.emit(EngineEvent::EngineError {
+                    severity: ev.severity.as_u64(),
+                    volume: ev.volume.clone().unwrap_or_default(),
+                });
+            }
+        }));
+        *engine._diag_guard.lock() = Some(guard);
+        engine
     }
 
     pub fn set_event_sink(&self, sink: Option<EventSink>) {
@@ -168,7 +192,27 @@ impl Engine {
     }
 
     #[cfg(windows)]
+    /// Panic firewall: a crashing volume thread must never leave the UI
+    /// stuck on "Scanning" with no explanation. The panic itself is logged
+    /// (with backtrace) by the diag hook; this converts it into a visible
+    /// Failed state.
     fn volume_thread(self: Arc<Self>, slot: Arc<VolumeSlot>) {
+        let this = self.clone();
+        let slot2 = slot.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            this.volume_thread_inner(slot2);
+        }));
+        if result.is_err() {
+            *slot.phase.lock() = VolumePhase::Failed;
+            self.emit(EngineEvent::VolumeFailed {
+                volume: slot.label.clone(),
+                message: "internal panic — engine.log に詳細".to_string(),
+            });
+        }
+    }
+
+    #[cfg(windows)]
+    fn volume_thread_inner(self: Arc<Self>, slot: Arc<VolumeSlot>) {
         use crate::usn::{ReadOutcome, UsnJournal, VolumeStatFetcher, apply_batch};
 
         let label = slot.label.clone();
@@ -195,13 +239,27 @@ impl Engine {
                 }
             };
 
-            let loaded =
-                VolumeIndex::load_from(&snapshot_path)
-                    .ok()
-                    .filter(|(_, journal_id, next_usn)| match journal.query() {
-                        Ok(data) => *journal_id == data.UsnJournalID && *next_usn >= data.FirstUsn,
-                        Err(_) => false,
-                    });
+            let loaded = match VolumeIndex::load_from(&snapshot_path) {
+                Ok(t) => Some(t),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None, // first run
+                Err(e) => {
+                    // Corrupt/unreadable snapshot: rescanning recovers, but
+                    // the fact must not vanish.
+                    Counters::bump(&self.metrics.counters.snapshot_load_failures);
+                    tracing::warn!(volume = %label, error = %e, "snapshot unusable — full scan");
+                    None
+                }
+            }
+            .filter(|(_, journal_id, next_usn)| match journal.query() {
+                Ok(data) => {
+                    let valid = *journal_id == data.UsnJournalID && *next_usn >= data.FirstUsn;
+                    if !valid {
+                        tracing::info!(volume = %label, "snapshot checkpoint stale — full scan");
+                    }
+                    valid
+                }
+                Err(_) => false,
+            });
 
             let idx = match loaded {
                 Some((idx, _journal_id, next_usn)) => {
@@ -218,6 +276,14 @@ impl Engine {
                             "full scan complete"
                         );
                         idx.shrink_to_fit();
+                        Counters::add(
+                            &self.metrics.counters.corrupt_mft_records,
+                            stats.corrupt_records,
+                        );
+                        Counters::add(
+                            &self.metrics.counters.deferred_names_unresolved,
+                            stats.deferred_unresolved,
+                        );
                         self.metrics.record_scan(ScanTrace {
                             volume: label.clone(),
                             read_bytes: stats.mft_bytes,
@@ -284,19 +350,31 @@ impl Engine {
                     return;
                 }
                 match journal.read_blocking(&mut buf) {
-                    Ok(ReadOutcome::Records(rs)) => {
+                    Ok(ReadOutcome::Records {
+                        records: rs,
+                        truncated,
+                    }) => {
+                        if truncated {
+                            Counters::bump(&self.metrics.counters.usn_batches_truncated);
+                            tracing::warn!(volume = %label, "USN batch had malformed tail bytes");
+                        }
                         if rs.is_empty() {
                             continue;
                         }
                         if let Some(idx) = slot.index.write().as_mut() {
                             let stage = crate::metrics::Stage::start();
                             let s = apply_batch(idx, &rs, &fetch);
+                            Counters::add(
+                                &self.metrics.counters.stat_fetch_failures,
+                                s.stat_failures as u64,
+                            );
                             self.metrics.record_usn(UsnTrace {
                                 volume: label.clone(),
                                 records: rs.len() as u64,
                                 upserted: s.created_or_renamed as u64,
                                 deleted: s.deleted as u64,
                                 stat_updated: s.stat_updated as u64,
+                                stat_failures: s.stat_failures as u64,
                                 apply_us: stage.elapsed_us(),
                             });
                             *slot.scanned.lock() = idx.live_len() as u64;
@@ -309,6 +387,7 @@ impl Engine {
                         }
                     }
                     Ok(ReadOutcome::Gone(gone)) => {
+                        Counters::bump(&self.metrics.counters.journal_rescans);
                         tracing::warn!(volume = %label, ?gone, "journal gone — full rescan");
                         *slot.phase.lock() = VolumePhase::Rescanning;
                         self.emit(EngineEvent::RescanStarted {
@@ -340,6 +419,7 @@ impl Engine {
         if let Some(idx) = slot.index.read().as_ref()
             && let Err(e) = idx.save_to(path, journal.journal_id, journal.next_usn)
         {
+            Counters::bump(&self.metrics.counters.snapshot_save_failures);
             tracing::warn!(volume = %slot.label, error = %e, "snapshot save failed");
         }
     }

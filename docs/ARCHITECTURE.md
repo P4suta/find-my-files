@@ -102,6 +102,26 @@ int32_t fmf_engine_stats(FmfEngineHandle h, FmfStats* out);  // entries, heap_by
 - 再クエリの2系統: **タイプ起因=先頭リセット** / **IndexChanged起因=先頭可視インデックスと選択を退避→復元**。
 - `VirtualResultList`(非ジェネリックIList+INCC+IItemsRangeInfo): indexer は絶対にフェッチせずプレースホルダ返却。`RangesChanged` で可視範囲±2ページを64行単位バックグラウンドフェッチ→既存 ResultRow のプロパティ充填(INCC Replace は発行しない)。ページLRU上限4096行。ハードSTALE受領→VMへ再クエリ要求。
 
+## エラーハンドリングと診断(原則:「落ちない・固まらない・黙らない」)
+
+全異常は3経路に必ず届く: **①ログファイル ②diagリング(=F12パネル/fmf statsに自動表示) ③UIのInfoBar**。テレメトリ送信はしない(ローカルのみ)。
+
+- **ログ**: エンジン=`%ProgramData%\find-my-files\logs\engine.log`(日次ローテーション、`FMF_LOG`環境変数でフィルタ)、アプリ=`%APPDATA%\find-my-files\logs\app.log`(2MBで1世代ローテーション)
+- **diagリング**(fmf-core::diag): WARN以上のtracingイベント+panic(バックトレース付き)を直近128件保持。`MetricsSnapshot.recent_errors`に常時含まれる
+- **panic**: グローバルフックで捕捉→ログ+リング。volume threadは`catch_unwind`の防火壁付きで、panicしてもUIには必ず`VolumeFailed`が届く(無言のハングは起きない)
+- **イベント種6 `FMF_EVENT_ENGINE_ERROR`**: diagイベント発生のPOD通知(entries=severity 1=warn/2=error/3=panic)。詳細テキストはstats JSONからpull(push通知+pull詳細)
+- **劣化カウンタ**(`MetricsSnapshot.counters`、0でなければF12に表示): stat_fetch_failures / usn_batches_truncated / snapshot_load_failures / snapshot_save_failures / deferred_names_unresolved / corrupt_mft_records / journal_rescans
+- **C#規約**: fire-and-forgetは必ず `task.Forget(area)`(例外→app.log+InfoBar)。シェル操作は`ShellOps`経由。グローバル例外ハンドラがクラッシュマーカーを書き、次回起動時に通知
+- **診断コピー**: F12パネルの「診断情報をコピー」= stats JSON+app.log末尾+環境情報
+
+| FFIコード | 意味 | UI挙動 | リトライ |
+|---|---|---|---|
+| FMF_E_QUERY_SYNTAX(5) | クエリ構文エラー | ステータスバーに表示 | 入力修正 |
+| FMF_E_STALE(2) | 構造的世代交代 | 同一クエリ自動再発行 | 自動 |
+| FMF_E_NOT_ADMIN(3) | 昇格不足 | InfoBar+説明 | 再起動 |
+| FMF_E_PANIC(99) | エンジン内panic | InfoBar+engine.log誘導 | 不可(報告) |
+| その他(1,4,6) | 引数/ボリューム/IO | InfoBar | 場合による |
+
 ## 遅延予算(変更→画面反映 ≤1s のAC内訳)
 
 USNバッチ確定 ≤100ms + エンジンIndexChangedデバウンス 200ms(唯一のスロットル)+ UI再クエリ ≤100ms + 描画 ≤100ms = **≤500ms**(2倍余裕)。UI側に追加スロットルを置かないこと。

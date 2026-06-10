@@ -1,9 +1,8 @@
-using System.Diagnostics;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Windows.ApplicationModel.DataTransfer;
 using Windows.System;
 using FindMyFiles.Engine;
+using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
 
 namespace FindMyFiles;
@@ -20,7 +19,7 @@ public sealed partial class MainPage : Page
         InitializeComponent();
         _statsTimer = App.DispatcherQueue.CreateTimer();
         _statsTimer.Interval = TimeSpan.FromSeconds(1);
-        _statsTimer.Tick += (_, _) => _ = ViewModel.RefreshStatsAsync();
+        _statsTimer.Tick += (_, _) => ViewModel.RefreshStatsAsync().Forget("perf.stats");
         ViewModel.PerfDataChanged += RenderPerf;
         ViewModel.PropertyChanged += (_, e) =>
         {
@@ -29,7 +28,7 @@ public sealed partial class MainPage : Page
                 if (ViewModel.IsPerfPanelOpen)
                 {
                     _statsTimer.Start();
-                    _ = ViewModel.RefreshStatsAsync();
+                    ViewModel.RefreshStatsAsync().Forget("perf.stats");
                 }
                 else
                 {
@@ -46,6 +45,44 @@ public sealed partial class MainPage : Page
 
     public Microsoft.UI.Xaml.Visibility BoolToVis(bool value) =>
         value ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+
+    public static InfoBarSeverity ToInfoSeverity(NotifySeverity s) => s switch
+    {
+        NotifySeverity.Error => InfoBarSeverity.Error,
+        NotifySeverity.Warning => InfoBarSeverity.Warning,
+        _ => InfoBarSeverity.Informational,
+    };
+
+    private void Notification_Closed(InfoBar sender, InfoBarClosedEventArgs args)
+    {
+        if (sender.DataContext is AppNotification n)
+        {
+            ViewModel.RemoveNotification(n);
+        }
+    }
+
+    /// <summary>
+    /// One-click bug-report payload: engine stats JSON + app log tail +
+    /// environment. The dev-side half of「黙らない」.
+    /// </summary>
+    private void CopyDiag_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        var statsJson = ViewModel.Stats is { } s
+            ? System.Text.Json.JsonSerializer.Serialize(s, new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = true,
+                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower,
+            })
+            : "(no stats yet)";
+        var dump =
+            $"find-my-files diagnostics {DateTimeOffset.Now:O}\n" +
+            $"app: v{typeof(App).Assembly.GetName().Version}  os: {Environment.OSVersion.VersionString}\n" +
+            $"engine log: %ProgramData%\\find-my-files\\logs\\engine.log\n" +
+            $"app log: {FileLog.LogPath}\n\n=== engine stats ===\n{statsJson}\n\n" +
+            $"=== app.log (tail) ===\n{FileLog.Tail(50)}\n";
+        ShellOps.CopyText(dump, "diagnostics");
+        Notifier.Post(NotifySeverity.Info, "診断情報をクリップボードにコピーしました");
+    }
 
     private void PerfPanel_Toggle(
         Microsoft.UI.Xaml.Input.KeyboardAccelerator sender,
@@ -137,7 +174,34 @@ public sealed partial class MainPage : Page
             UsnFeed.Text = string.Join("\n", stats.RecentUsn.TakeLast(6).Select(u =>
                 $"{u.Volume} {u.Records}rec → +{u.Upserted} -{u.Deleted} ~{u.StatUpdated}" +
                 $" ({u.ApplyUs}µs)"));
+
+            // Degradations: recent WARN+/panic events and nonzero counters.
+            ErrorsText.Text = string.Join("\n", stats.RecentErrors.TakeLast(8).Select(er =>
+                $"[{er.UptimeMs / 1000}s] {er.Severity.ToUpperInvariant()} {er.Area}" +
+                $"{(string.IsNullOrEmpty(er.Volume) ? "" : $" ({er.Volume})")}: " +
+                $"{FirstLine(er.Message)}"));
+            var c = stats.Counters;
+            var nonzero = new (string Name, ulong V)[]
+            {
+                ("stat_fetch_failures", c.StatFetchFailures),
+                ("usn_batches_truncated", c.UsnBatchesTruncated),
+                ("snapshot_load_failures", c.SnapshotLoadFailures),
+                ("snapshot_save_failures", c.SnapshotSaveFailures),
+                ("deferred_names_unresolved", c.DeferredNamesUnresolved),
+                ("corrupt_mft_records", c.CorruptMftRecords),
+                ("journal_rescans", c.JournalRescans),
+            }.Where(x => x.V > 0).ToList();
+            CountersText.Text = nonzero.Count == 0
+                ? string.Empty
+                : "劣化カウンタ: " + string.Join("  ", nonzero.Select(x => $"{x.Name}={x.V}"));
         }
+    }
+
+    private static string FirstLine(string s)
+    {
+        var i = s.IndexOf('\n');
+        var line = i < 0 ? s : s[..i];
+        return line.Length > 120 ? line[..120] + "…" : line;
     }
 
     private void SearchBox_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -208,37 +272,20 @@ public sealed partial class MainPage : Page
     private void MenuCopyPath_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         CopySelectedPaths();
 
-    /// <summary>
-    /// Open via explorer.exe so the target launches *unelevated* — launching
-    /// directly from this admin process would elevate the associated app
-    /// (CLAUDE.md UI固定則).
-    /// </summary>
     private static void OpenRow(ResultRow? row)
     {
-        if (row is null || row.IsPlaceholder)
+        if (row is { IsPlaceholder: false })
         {
-            return;
+            ShellOps.Open(row.FullPath);
         }
-        Process.Start(new ProcessStartInfo
-        {
-            FileName = "explorer.exe",
-            Arguments = $"\"{row.FullPath}\"",
-            UseShellExecute = false,
-        });
     }
 
     private static void RevealRow(ResultRow? row)
     {
-        if (row is null || row.IsPlaceholder)
+        if (row is { IsPlaceholder: false })
         {
-            return;
+            ShellOps.Reveal(row.FullPath);
         }
-        Process.Start(new ProcessStartInfo
-        {
-            FileName = "explorer.exe",
-            Arguments = $"/select,\"{row.FullPath}\"",
-            UseShellExecute = false,
-        });
     }
 
     private void CopySelectedPaths()
@@ -248,13 +295,10 @@ public sealed partial class MainPage : Page
             .Where(r => !r.IsPlaceholder)
             .Select(r => r.FullPath)
             .ToList();
-        if (paths.Count == 0)
+        if (paths.Count > 0)
         {
-            return;
+            ShellOps.CopyText(string.Join("\r\n", paths), "paths");
         }
-        var pkg = new DataPackage();
-        pkg.SetText(string.Join("\r\n", paths));
-        Clipboard.SetContent(pkg);
     }
 
     private void HeaderName_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>

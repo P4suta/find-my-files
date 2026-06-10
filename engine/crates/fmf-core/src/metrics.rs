@@ -54,6 +54,7 @@ pub struct UsnTrace {
     pub upserted: u64,
     pub deleted: u64,
     pub stat_updated: u64,
+    pub stat_failures: u64,
     pub apply_us: u64,
 }
 
@@ -123,6 +124,53 @@ impl Histogram {
     }
 }
 
+/// Degradation counters — "this happened N times" facts that would
+/// otherwise vanish into fallback paths. Zero-cost atomics, always on.
+#[derive(Debug, Default)]
+pub struct Counters {
+    pub stat_fetch_failures: std::sync::atomic::AtomicU64,
+    pub usn_batches_truncated: std::sync::atomic::AtomicU64,
+    pub snapshot_load_failures: std::sync::atomic::AtomicU64,
+    pub snapshot_save_failures: std::sync::atomic::AtomicU64,
+    pub deferred_names_unresolved: std::sync::atomic::AtomicU64,
+    pub corrupt_mft_records: std::sync::atomic::AtomicU64,
+    pub journal_rescans: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CountersSnapshot {
+    pub stat_fetch_failures: u64,
+    pub usn_batches_truncated: u64,
+    pub snapshot_load_failures: u64,
+    pub snapshot_save_failures: u64,
+    pub deferred_names_unresolved: u64,
+    pub corrupt_mft_records: u64,
+    pub journal_rescans: u64,
+}
+
+impl Counters {
+    pub fn bump(counter: &std::sync::atomic::AtomicU64) {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn add(counter: &std::sync::atomic::AtomicU64, n: u64) {
+        counter.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> CountersSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        CountersSnapshot {
+            stat_fetch_failures: self.stat_fetch_failures.load(Relaxed),
+            usn_batches_truncated: self.usn_batches_truncated.load(Relaxed),
+            snapshot_load_failures: self.snapshot_load_failures.load(Relaxed),
+            snapshot_save_failures: self.snapshot_save_failures.load(Relaxed),
+            deferred_names_unresolved: self.deferred_names_unresolved.load(Relaxed),
+            corrupt_mft_records: self.corrupt_mft_records.load(Relaxed),
+            journal_rescans: self.journal_rescans.load(Relaxed),
+        }
+    }
+}
+
 /// Aggregated, JSON-serializable snapshot for the FFI/UI.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct MetricsSnapshot {
@@ -133,6 +181,9 @@ pub struct MetricsSnapshot {
     pub recent_usn: Vec<UsnTrace>,
     pub scans: Vec<ScanTrace>,
     pub indexes: Vec<IndexStats>,
+    pub counters: CountersSnapshot,
+    /// WARN+ events and panics (diag ring), oldest first.
+    pub recent_errors: Vec<crate::diag::ErrorEvent>,
 }
 
 const RING: usize = 256;
@@ -145,6 +196,7 @@ pub struct MetricsHub {
     histogram: Mutex<Histogram>,
     usn: Mutex<VecDeque<UsnTrace>>,
     scans: Mutex<Vec<ScanTrace>>,
+    pub counters: Counters,
 }
 
 impl MetricsHub {
@@ -194,6 +246,8 @@ impl MetricsHub {
             recent_usn: self.usn.lock().iter().cloned().collect(),
             scans: self.scans.lock().clone(),
             indexes,
+            counters: self.counters.snapshot(),
+            recent_errors: crate::diag::recent_errors(),
         }
     }
 }

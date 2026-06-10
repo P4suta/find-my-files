@@ -66,13 +66,15 @@ fn u64_at(b: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(b[off..off + 8].try_into().unwrap())
 }
 
-/// Parse a raw FSCTL output buffer. Returns the leading "next" cursor value
-/// and the decoded records. Malformed tails are dropped rather than panicking
-/// (a truncated final record can occur with undersized buffers).
-pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>) {
+/// Parse a raw FSCTL output buffer. Returns the leading "next" cursor
+/// value, the decoded records, and whether trailing bytes had to be dropped
+/// (malformed/truncated input — callers surface this as a counter+warning
+/// instead of letting it vanish).
+pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>, bool) {
     let mut records = Vec::new();
+    let mut truncated = false;
     if buf.len() < 8 {
-        return (0, records);
+        return (0, records, !buf.is_empty());
     }
     let next = u64_at(buf, 0);
     let mut off = 8usize;
@@ -81,6 +83,7 @@ pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>) {
         let rec = &buf[off..];
         let record_length = u32_at(rec, 0) as usize;
         if record_length < 60 || off + record_length > buf.len() {
+            truncated = true;
             break;
         }
         let major = u16_at(rec, 4);
@@ -106,7 +109,7 @@ pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>) {
         // Records are 8-byte aligned; RecordLength already includes padding.
         off += record_length.next_multiple_of(8);
     }
-    (next, records)
+    (next, records, truncated)
 }
 
 /// Serialize records into the FSCTL wire format — used to build test
@@ -166,7 +169,8 @@ mod tests {
             ),
         ];
         let buf = encode_buffer(42, &records);
-        let (next, parsed) = parse_buffer(&buf);
+        let (next, parsed, truncated) = parse_buffer(&buf);
+        assert!(!truncated);
         assert_eq!(next, 42);
         assert_eq!(parsed, records);
     }
@@ -176,7 +180,8 @@ mod tests {
         let records = vec![rec(7, 5, reason::FILE_CREATE, "abc.txt")];
         let mut buf = encode_buffer(9, &records);
         buf.truncate(buf.len() - 4);
-        let (next, parsed) = parse_buffer(&buf);
+        let (next, parsed, truncated) = parse_buffer(&buf);
+        assert!(truncated);
         assert_eq!(next, 9);
         assert!(parsed.is_empty());
     }

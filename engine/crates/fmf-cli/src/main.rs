@@ -42,6 +42,8 @@ enum Command {
     },
     /// Index a volume and dump per-column memory accounting as JSON.
     Stats { drive: String },
+    /// Print versions, log locations and the in-process diagnostics ring.
+    Diag,
     /// Index a volume, then tail its USN journal and apply changes live,
     /// printing one line per applied batch (Ctrl+C to stop).
     Watch { drive: String },
@@ -57,12 +59,9 @@ fn date_resolver() -> impl query::DateResolver {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    // Same pipeline as the DLL: stderr log + diag ring + panic capture.
+    fmf_core::diag::init_logging(None, "info");
+    fmf_core::diag::install_panic_hook();
 
     let cli = Cli::parse();
     let result = match cli.command {
@@ -78,10 +77,16 @@ fn main() {
             baseline,
         } => bench(&drive, json.as_deref(), baseline.as_deref()),
         Command::Stats { drive } => stats(&drive),
+        Command::Diag => diag(),
         Command::Watch { drive } => watch(&drive),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
+        let mut source = e.source();
+        while let Some(cause) = source {
+            eprintln!("  caused by: {cause}");
+            source = cause.source();
+        }
         std::process::exit(1);
     }
 }
@@ -223,7 +228,13 @@ fn watch(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = Vec::new();
     loop {
         match journal.read_blocking(&mut buf)? {
-            ReadOutcome::Records(rs) => {
+            ReadOutcome::Records {
+                records: rs,
+                truncated,
+            } => {
+                if truncated {
+                    eprintln!("warning: USN batch had malformed tail bytes");
+                }
                 if rs.is_empty() {
                     continue;
                 }
@@ -380,5 +391,21 @@ fn stats(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
     let idx = build_index(drive)?;
     let s = idx.stats(drive);
     println!("{}", serde_json::to_string_pretty(&s)?);
+    Ok(())
+}
+
+fn diag() -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "fmf {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH
+    );
+    let program_data = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
+    println!(r"engine log : {program_data}\find-my-files\logs\engine.log");
+    println!(r"app log    : %APPDATA%\find-my-files\logs\app.log");
+    println!("log filter : FMF_LOG (env var, e.g. FMF_LOG=debug)");
+    let errors = fmf_core::diag::recent_errors();
+    println!("recent in-process diagnostics ({}):", errors.len());
+    println!("{}", serde_json::to_string_pretty(&errors)?);
     Ok(())
 }

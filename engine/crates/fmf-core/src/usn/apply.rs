@@ -29,6 +29,9 @@ pub struct BatchStats {
     pub deleted: u32,
     pub stat_updated: u32,
     pub ignored: u32,
+    /// Volume lookups (size/mtime) that came back empty — usually the file
+    /// vanished before we could stat it; floods indicate a real problem.
+    pub stat_failures: u32,
 }
 
 struct Agg {
@@ -96,8 +99,12 @@ pub fn apply_batch(
             }
             // Carry size/mtime over from the previous entry when the volume
             // can't answer (file already gone, or replay without fixtures).
+            let fetched = fetch.stat(last.frn);
+            if fetched.is_none() {
+                stats.stat_failures += 1;
+            }
             let carried = existing.map(|id| (idx.size(id), idx.mtime(id)));
-            let (size, mtime) = fetch.stat(last.frn).or(carried).unwrap_or((0, 0));
+            let (size, mtime) = fetched.or(carried).unwrap_or((0, 0));
             idx.upsert(&RawEntry {
                 record: key,
                 parent_record: last.parent_frn,
@@ -121,6 +128,7 @@ pub fn apply_batch(
                     stats.ignored += 1;
                 }
             } else {
+                stats.stat_failures += 1;
                 stats.ignored += 1;
             }
         } else {

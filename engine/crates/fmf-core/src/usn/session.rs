@@ -44,7 +44,12 @@ pub enum JournalGone {
 }
 
 pub enum ReadOutcome {
-    Records(Vec<UsnRecord>),
+    Records {
+        records: Vec<UsnRecord>,
+        /// Trailing bytes were malformed and dropped — surfaced as a
+        /// counter + warning by the caller.
+        truncated: bool,
+    },
     Gone(JournalGone),
 }
 
@@ -209,11 +214,11 @@ impl UsnJournal {
                     other => Err(UsnError::Fsctl(other)),
                 };
             }
-            let (next, records) = parse_buffer(&buf[..returned as usize]);
+            let (next, records, truncated) = parse_buffer(&buf[..returned as usize]);
             if next != 0 {
                 self.next_usn = next as i64;
             }
-            Ok(ReadOutcome::Records(records))
+            Ok(ReadOutcome::Records { records, truncated })
         }
     }
 }
@@ -232,13 +237,30 @@ fn raw(h: &OwnedHandle) -> HANDLE {
 /// size + mtime. Read-only, never follows the open with any mutation.
 pub struct VolumeStatFetcher {
     handle: OwnedHandle,
+    failures: std::sync::atomic::AtomicU64,
 }
 
 impl VolumeStatFetcher {
     pub fn open(drive: &str) -> Result<Self, UsnError> {
         Ok(Self {
             handle: open_volume_handle(drive)?,
+            failures: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+}
+
+impl VolumeStatFetcher {
+    /// Failures here are expected (file deleted before we look) but a flood
+    /// of them is not — count every one, log the first few with the win32
+    /// code so the pattern is diagnosable.
+    fn note_failure(&self, frn: u64, stage: &str) {
+        let n = self
+            .failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n < 5 {
+            let code = unsafe { GetLastError() };
+            tracing::warn!(frn, stage, code, "stat fetch failed");
+        }
     }
 }
 
@@ -258,11 +280,13 @@ impl StatFetcher for VolumeStatFetcher {
                 FILE_FLAG_BACKUP_SEMANTICS,
             );
             if h == INVALID_HANDLE_VALUE {
+                self.note_failure(frn, "OpenFileById");
                 return None;
             }
             let h = OwnedHandle::from_raw_handle(h as RawHandle);
             let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
             if GetFileInformationByHandle(raw(&h), &mut info) == 0 {
+                self.note_failure(frn, "GetFileInformationByHandle");
                 return None;
             }
             let size = ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64;

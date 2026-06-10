@@ -15,6 +15,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
 
     public event Action<string>? IndexChanged;
     public event Action<VolumeStatus>? VolumeUpdated;
+    public event Action<int>? EngineErrorOccurred;
 
     public FfiEngineClient()
     {
@@ -70,6 +71,9 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                 break;
             case 5: // VolumeFailed
                 self.VolumeUpdated?.Invoke(new VolumeStatus(volume, VolumeState.Failed, 0));
+                break;
+            case 6: // EngineError (entries = severity 1..3)
+                self.EngineErrorOccurred?.Invoke((int)ev->Entries);
                 break;
         }
     }

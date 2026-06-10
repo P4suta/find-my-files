@@ -161,6 +161,8 @@ pub struct ScanStats {
     pub extension_records: u64,
     /// Records failing signature/fixup validation.
     pub corrupt_records: u64,
+    /// Deferred $ATTRIBUTE_LIST records whose name never resolved.
+    pub deferred_unresolved: u64,
 }
 
 /// Full initial scan: read the volume's $MFT and build the in-memory index.

@@ -4,6 +4,7 @@
 //! (`fmf-cli`) must not contain logic of their own. See docs/ARCHITECTURE.md
 //! for the canonical contract this crate fulfills.
 
+pub mod diag;
 pub mod engine;
 pub mod index;
 pub mod metrics;
