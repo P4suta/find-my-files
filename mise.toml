@@ -1,0 +1,6 @@
+# Toolchain pinning for find-my-files.
+# This machine manages tools via chezmoi + mise — do NOT install toolchains ad hoc;
+# declare them here and run `mise install`.
+[tools]
+rust = "1.95"
+dotnet = "10"

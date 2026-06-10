@@ -1,0 +1,21 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: typos
+      run: typos
+    - name: rustfmt
+      root: engine/
+      glob: "*.rs"
+      run: cargo fmt --all -- --check
+    - name: taplo
+      glob: "*.toml"
+      run: taplo check
+
+pre-push:
+  jobs:
+    - name: clippy
+      root: engine/
+      run: cargo clippy --workspace --all-targets -- -D warnings
+    - name: test
+      root: engine/
+      run: cargo test --workspace

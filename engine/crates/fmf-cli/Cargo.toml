@@ -1,0 +1,16 @@
+[package]
+name = "fmf-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "fmf"
+path = "src/main.rs"
+
+[dependencies]
+fmf-core = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }

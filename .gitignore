@@ -1,0 +1,21 @@
+# Rust
+engine/target/
+
+# .NET / WinUI
+app/**/bin/
+app/**/obj/
+.vs/
+*.user
+
+# Build artifacts & distribution
+dist/
+screenshots/
+test-results.json
+
+# Engine runtime artifacts
+*.fmfidx
+engine/crates/fmf-core/testdata/large/
+
+# Local-only tool overrides
+mise.local.toml
+.mise.local.toml

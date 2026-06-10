@@ -1,0 +1,18 @@
+[package]
+name = "fmf-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ntfs-reader = { workspace = true }
+windows-sys = { workspace = true }
+memchr = { workspace = true }
+rustc-hash = { workspace = true }
+rayon = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+xxhash-rust = { workspace = true }
+regex = { workspace = true }

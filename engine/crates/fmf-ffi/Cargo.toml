@@ -1,0 +1,14 @@
+[package]
+name = "fmf-ffi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# DLL name is fixed: fmf_engine.dll, paired with [LibraryImport("fmf_engine")] in C#.
+[lib]
+name = "fmf_engine"
+crate-type = ["cdylib"]
+
+[dependencies]
+fmf-core = { workspace = true }
