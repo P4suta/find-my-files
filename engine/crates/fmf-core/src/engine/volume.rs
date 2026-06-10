@@ -190,6 +190,10 @@ impl Engine {
                             &self.metrics.counters.deferred_names_unresolved,
                             stats.deferred_unresolved,
                         );
+                        Counters::add(
+                            &self.metrics.counters.scan_pipeline_fallbacks,
+                            stats.pipeline_fallbacks,
+                        );
                         self.metrics.record_scan(ScanTrace {
                             volume: label.clone(),
                             source: "scan".to_string(),
@@ -202,11 +206,7 @@ impl Engine {
                             } else {
                                 0.0
                             },
-                            parse_ms: stats
-                                .elapsed_total_ms
-                                .saturating_sub(stats.elapsed_mft_load_ms)
-                                .saturating_sub(stats.elapsed_build_ms)
-                                .saturating_sub(stats.elapsed_sort_ms),
+                            parse_ms: stats.elapsed_parse_ms,
                             build_ms: stats.elapsed_build_ms,
                             sort_ms: stats.elapsed_sort_ms,
                             total_ms: stats.elapsed_total_ms,

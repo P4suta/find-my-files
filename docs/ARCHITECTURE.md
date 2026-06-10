@@ -59,6 +59,7 @@ app/FindMyFiles/
 - **クエリ時マテリアライズ**: `fmf_query` がボリューム毎の該当順列を1パスフィルタし、ソート順確定済みの連続配列 `Vec<u64>`(volume_id<<32|entry_id 相当)に確定+マルチボリューム k-way マージ。以後のページ取得は **O(1) スライス**。列クリック=同一クエリを別ソートで再発行。
 - **ロック**: `parking_lot::RwLock`。検索=read、USNバッチ適用=write(ms級)。
 - **スレッド**: 初回スキャン=ボリューム毎1スレッド並列。USN追従=ボリューム毎1スレッド(ブロッキング読み→吸い尽くし→バッチ適用)。停止は `CancelSynchronousIo`。
+- **初回スキャンの内部並列**: $MFTを16MiBチャンクでストリーミング読みしつつ、(a) 専用I/OスレッドがチャンクN+1を先読み(read-aheadパイプライン、バッファ3本で上限RAM固定。スレッド起動失敗は`scan_pipeline_fallbacks`カウンタ+逐次読みに劣化)、(b) チャンク内はレコード境界1MiBサブレンジでrayon並列パース(fixup→属性抽出→WTF-8変換までワーカー側)。ワーカーバッチをチャンク順に追記するためEntryId割当は逐次版と決定的に一致(等価性ゲート=admin test `streaming_scan_matches_reference`)。
 - **検索実行**: クエリ→AST→`CompiledTerm` 列(コスト順: 数値フィルタ→memmem→wildcard/regex、AND短絡)。rayonで64kチャンク並列。smart case(全小文字needle→lower_pool、大文字含む→name_pool)。`dm:` はローカルTZ解釈。NFC/NFD正規化はしない(既知制約)。
 - **永続化**: `{index_dir}\{volume-guid}.fmfidx`。自前バイナリ(magic+version+JournalID+最終USN+セクションテーブル+生列ダンプ+xxhash64)。temp→`MoveFileEx(REPLACE_EXISTING)`。起動時: ロード→検証→USN再生で追いつき→ライブ追従。失敗は常にフルリスキャンへ。
 
@@ -141,7 +142,7 @@ int32_t fmf_last_error(char* buf, uint32_t* len);
 - **diagリング**(fmf-core::diag): WARN以上のtracingイベント+panic(バックトレース付き)を直近128件保持。`MetricsSnapshot.recent_errors`に常時含まれる
 - **panic**: グローバルフックで捕捉→ログ+リング。volume threadは`catch_unwind`の防火壁付きで、panicしてもUIには必ず`VolumeFailed`が届く(無言のハングは起きない)
 - **イベント種6 `FMF_EVENT_ENGINE_ERROR`**: diagイベント発生のPOD通知(entries=severity 1=warn/2=error/3=panic)。詳細テキストはstats JSONからpull(push通知+pull詳細)
-- **劣化カウンタ**(`MetricsSnapshot.counters`、0でなければF12に表示): stat_fetch_failures / usn_batches_truncated / snapshot_load_failures / snapshot_save_failures / deferred_names_unresolved / corrupt_mft_records / journal_rescans
+- **劣化カウンタ**(`MetricsSnapshot.counters`、0でなければF12に表示): stat_fetch_failures / usn_batches_truncated / snapshot_load_failures / snapshot_save_failures / deferred_names_unresolved / corrupt_mft_records / journal_rescans / scan_pipeline_fallbacks(スキャンのread-ahead I/Oスレッド起動失敗→逐次読みに劣化)
 - **C#規約**: fire-and-forgetは必ず `task.Forget(area)`(例外→app.log+InfoBar)。シェル操作は`ShellOps`経由。グローバル例外ハンドラがクラッシュマーカーを書き、次回起動時に通知
 - **診断コピー**: F12パネルの「診断情報をコピー」= stats JSON+app.log末尾+環境情報
 

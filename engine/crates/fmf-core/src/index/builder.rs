@@ -1,7 +1,7 @@
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use super::{EntryId, NO_PARENT, RawEntry, SortKey, VolumeIndex, masked};
+use super::{EncodedEntry, EntryId, NO_PARENT, RawEntry, SortKey, VolumeIndex, masked};
 
 /// Two-pass builder for the initial scan: collect everything, then resolve
 /// parents and sort the permutations (scan order ≠ parent-before-child).
@@ -71,6 +71,15 @@ impl VolumeIndexBuilder {
         debug_assert_eq!(self.parent_records.len(), id as usize + 1);
     }
 
+    /// Append an entry whose name was WTF-8 encoded off-thread (parallel
+    /// scan workers). Identical semantics to [`Self::push`].
+    pub fn push_encoded(&mut self, e: EncodedEntry) {
+        let id = self.idx.push_encoded(&e);
+        self.idx.frn_map.insert(masked(e.record), id);
+        self.parent_records.push(e.parent_record);
+        debug_assert_eq!(self.parent_records.len(), id as usize + 1);
+    }
+
     pub fn len(&self) -> usize {
         self.idx.len()
     }
@@ -90,14 +99,22 @@ impl VolumeIndexBuilder {
         let t = std::time::Instant::now();
 
         // Pass 2: resolve parents now that every record is in the map.
-        for i in 1..self.idx.len() {
-            let p = self
-                .idx
-                .frn_map
-                .get(&masked(self.parent_records[i]))
-                .copied()
-                .unwrap_or(VolumeIndex::ROOT);
-            self.idx.parent[i] = p;
+        // Read-only map lookups, one write per slot — embarrassingly parallel.
+        {
+            let VolumeIndex {
+                frn_map, parent, ..
+            } = &mut self.idx;
+            let records = &self.parent_records;
+            parent
+                .par_iter_mut()
+                .enumerate()
+                .skip(1) // the root keeps NO_PARENT
+                .for_each(|(i, p)| {
+                    *p = frn_map
+                        .get(&masked(records[i]))
+                        .copied()
+                        .unwrap_or(VolumeIndex::ROOT);
+                });
         }
 
         // Pass 3: propagate EXCLUDED down resolved parent chains. `done`

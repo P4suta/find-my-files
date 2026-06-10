@@ -142,17 +142,14 @@ fn build_index(drive: &str) -> Result<VolumeIndex, Box<dyn std::error::Error>> {
         0
     };
     eprintln!(
-        "indexed {} entries ({} files, {} dirs, {} skipped) in {} ms ($MFT load {} ms, parse {} ms, build {} ms, sort {} ms)",
+        "indexed {} entries ({} files, {} dirs, {} skipped) in {} ms ($MFT read {} ms, parse {} ms, build {} ms, sort {} ms — read/parse overlap)",
         idx.len(),
         s.files,
         s.dirs,
         s.skipped_no_name,
         s.elapsed_total_ms,
         s.elapsed_mft_load_ms,
-        s.elapsed_total_ms
-            .saturating_sub(s.elapsed_mft_load_ms)
-            .saturating_sub(s.elapsed_build_ms)
-            .saturating_sub(s.elapsed_sort_ms),
+        s.elapsed_parse_ms,
         s.elapsed_build_ms,
         s.elapsed_sort_ms
     );

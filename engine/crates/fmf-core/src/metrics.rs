@@ -139,6 +139,7 @@ pub struct Counters {
     pub deferred_names_unresolved: std::sync::atomic::AtomicU64,
     pub corrupt_mft_records: std::sync::atomic::AtomicU64,
     pub journal_rescans: std::sync::atomic::AtomicU64,
+    pub scan_pipeline_fallbacks: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -150,6 +151,7 @@ pub struct CountersSnapshot {
     pub deferred_names_unresolved: u64,
     pub corrupt_mft_records: u64,
     pub journal_rescans: u64,
+    pub scan_pipeline_fallbacks: u64,
 }
 
 impl Counters {
@@ -171,6 +173,7 @@ impl Counters {
             deferred_names_unresolved: self.deferred_names_unresolved.load(Relaxed),
             corrupt_mft_records: self.corrupt_mft_records.load(Relaxed),
             journal_rescans: self.journal_rescans.load(Relaxed),
+            scan_pipeline_fallbacks: self.scan_pipeline_fallbacks.load(Relaxed),
         }
     }
 }

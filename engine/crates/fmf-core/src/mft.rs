@@ -149,11 +149,19 @@ pub fn spike_scan(drive: &str) -> Result<SpikeStats, MftError> {
 pub struct ScanStats {
     pub volume: String,
     pub elapsed_total_ms: u64,
+    /// Accumulated device-read time. Overlaps with parsing on the pipelined
+    /// path, so read + parse + build + sort may exceed total — that gap is
+    /// the pipeline win.
     pub elapsed_mft_load_ms: u64,
+    /// Accumulated record-parse time (fixup + attribute walk + WTF-8).
+    pub elapsed_parse_ms: u64,
     /// Builder finish: parent resolution + EXCLUDED propagation.
     pub elapsed_build_ms: u64,
     /// Builder finish: the three permutation sorts.
     pub elapsed_sort_ms: u64,
+    /// 1 when the read-ahead I/O thread could not start and the scan
+    /// degraded to inline sequential reads.
+    pub pipeline_fallbacks: u64,
     pub files: u64,
     pub dirs: u64,
     pub skipped_no_name: u64,

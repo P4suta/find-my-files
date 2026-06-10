@@ -1,6 +1,6 @@
 use crate::wtf8;
 
-use super::{EntryId, NO_PARENT, RawEntry, SortKey, VolumeIndex, flags, masked};
+use super::{EncodedEntry, EntryId, NO_PARENT, RawEntry, SortKey, VolumeIndex, flags, masked};
 
 impl VolumeIndex {
     // ── Incremental mutation (USN batches; see module docs) ──────────────
@@ -122,40 +122,91 @@ impl VolumeIndex {
 
     pub(super) fn push_raw(&mut self, e: &RawEntry) -> EntryId {
         assert!(
+            self.name_pool.len() + e.name_utf16.len() * 4 < u32::MAX as usize,
+            "name pool overflow"
+        );
+        let off = self.name_pool.len();
+        wtf8::push_wtf8_pair(e.name_utf16, &mut self.name_pool, &mut self.lower_pool);
+        self.push_columns(
+            off,
+            e.parent_record,
+            e.frn,
+            e.size,
+            e.mtime,
+            e.is_dir,
+            e.is_reparse,
+            e.is_hidden,
+            e.is_system,
+        )
+    }
+
+    pub(super) fn push_encoded(&mut self, e: &EncodedEntry) -> EntryId {
+        debug_assert_eq!(e.name_wtf8.len(), e.lower_wtf8.len());
+        assert!(
+            self.name_pool.len() + e.name_wtf8.len() < u32::MAX as usize,
+            "name pool overflow"
+        );
+        let off = self.name_pool.len();
+        self.name_pool.extend_from_slice(e.name_wtf8);
+        self.lower_pool.extend_from_slice(e.lower_wtf8);
+        self.push_columns(
+            off,
+            e.parent_record,
+            e.frn,
+            e.size,
+            e.mtime,
+            e.is_dir,
+            e.is_reparse,
+            e.is_hidden,
+            e.is_system,
+        )
+    }
+
+    /// Shared column append after the name bytes already landed in the pools
+    /// at `off`. The flag/parent logic must stay identical between the
+    /// utf16 (`push_raw`) and pre-encoded (`push_encoded`) entry points.
+    #[allow(clippy::too_many_arguments)]
+    fn push_columns(
+        &mut self,
+        off: usize,
+        parent_record: u64,
+        frn: u64,
+        size: u64,
+        mtime: i64,
+        is_dir: bool,
+        is_reparse: bool,
+        is_hidden: bool,
+        is_system: bool,
+    ) -> EntryId {
+        assert!(
             self.len() < u32::MAX as usize - 1,
             "volume entry count overflow"
         );
         let id = self.len() as EntryId;
-        let off = self.name_pool.len();
-        assert!(
-            off + e.name_utf16.len() * 4 < u32::MAX as usize,
-            "name pool overflow"
-        );
-        wtf8::push_wtf8_pair(e.name_utf16, &mut self.name_pool, &mut self.lower_pool);
         self.name_off.push(off as u32);
         self.name_len.push((self.name_pool.len() - off) as u16);
         // Parent is resolved against the map; unknown parents attach to root
         // (orphan records do occur in real MFTs).
         let parent = self
             .frn_map
-            .get(&masked(e.parent_record))
+            .get(&masked(parent_record))
             .copied()
             .unwrap_or(Self::ROOT);
         self.parent.push(parent);
-        self.size.push(e.size);
-        self.mtime.push(e.mtime);
-        self.frn.push(e.frn);
+        self.size.push(size);
+        self.mtime.push(mtime);
+        self.frn.push(frn);
         let mut f = 0u8;
-        if e.is_dir {
+        if is_dir {
             f |= flags::IS_DIR;
         }
-        if e.is_reparse {
+        if is_reparse {
             f |= flags::REPARSE;
         }
-        if e.is_hidden {
+        if is_hidden {
             f |= flags::HIDDEN;
         }
-        if e.is_system {
+        if is_system {
             f |= flags::SYSTEM;
         }
         // Provisional during the initial scan (parents may resolve later —
@@ -165,7 +216,7 @@ impl VolumeIndex {
             .flag
             .get(parent as usize)
             .is_some_and(|pf| pf & flags::EXCLUDED != 0);
-        if e.is_hidden || e.is_system || parent_excluded {
+        if is_hidden || is_system || parent_excluded {
             f |= flags::EXCLUDED;
         }
         self.flag.push(f);

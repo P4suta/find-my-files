@@ -64,6 +64,24 @@ pub struct RawEntry<'a> {
     pub mtime: i64,
 }
 
+/// A [`RawEntry`] whose name is already WTF-8 encoded — parallel scan
+/// workers encode off the builder thread, the builder just memcpys.
+/// `name_wtf8`/`lower_wtf8` must come from [`crate::wtf8::push_wtf8_pair`]
+/// (equal lengths, shared offsets).
+pub struct EncodedEntry<'a> {
+    pub record: u64,
+    pub parent_record: u64,
+    pub frn: u64,
+    pub name_wtf8: &'a [u8],
+    pub lower_wtf8: &'a [u8],
+    pub is_dir: bool,
+    pub is_reparse: bool,
+    pub is_hidden: bool,
+    pub is_system: bool,
+    pub size: u64,
+    pub mtime: i64,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SortKey {
     Name,
