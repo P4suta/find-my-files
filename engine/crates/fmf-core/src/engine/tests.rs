@@ -76,6 +76,22 @@ fn parent_paths_come_back_per_volume() {
 }
 
 #[test]
+fn rebuilt_volume_hard_stales_open_results() {
+    let e = engine_with_two_volumes();
+    let r = e.query("txt", &QueryOptions::default()).unwrap().0;
+    assert_eq!(r.page(0, 10).unwrap().len(), 4);
+
+    // Journal gone → full rescan: C:'s index is rebuilt from scratch and
+    // swapped into the slot. The open ResultSet still holds C: entry ids
+    // from the old index — without a structural bump it would silently
+    // serve rows for unrelated entries (docs/ARCHITECTURE.md: full rescan
+    // hard-stales open handles).
+    e.replace_ready_volume("C:", vol("C:", &[("omega.txt", 1), ("zeta.txt", 2)]));
+
+    assert!(matches!(r.page(0, 10), Err(EngineError::Stale)));
+}
+
+#[test]
 fn status_reports_ready_volumes() {
     let e = engine_with_two_volumes();
     let st = e.status();

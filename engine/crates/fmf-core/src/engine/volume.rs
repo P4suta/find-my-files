@@ -17,6 +17,22 @@ pub(super) struct VolumeSlot {
     pub(super) stop: Arc<AtomicBool>,
 }
 
+impl VolumeSlot {
+    /// Install a freshly built index. Replacing an existing one is a
+    /// structural change (journal-gone full rescan): the new index inherits
+    /// the previous `structural_generation + 1` so open `ResultSet`s go
+    /// hard-stale (docs/ARCHITECTURE.md, generation 2層). A first install
+    /// (initial scan or snapshot restore) keeps the value the index was
+    /// built with.
+    pub(super) fn install_index(&self, mut idx: VolumeIndex) {
+        let mut guard = self.index.write();
+        if let Some(prev) = guard.as_ref() {
+            idx.bump_structural_from(prev.structural_generation());
+        }
+        *guard = Some(idx);
+    }
+}
+
 /// Engine-side debounce for IndexChanged — the only throttle in the whole
 /// change path (docs/ARCHITECTURE.md 遅延予算).
 const INDEX_CHANGED_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -193,7 +209,7 @@ impl Engine {
 
             let entries = idx.live_len() as u64;
             *slot.scanned.lock() = entries;
-            *slot.index.write() = Some(idx);
+            slot.install_index(idx);
             *slot.phase.lock() = VolumePhase::Ready;
             self.emit(EngineEvent::VolumeReady {
                 volume: label.clone(),

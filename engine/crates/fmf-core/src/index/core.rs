@@ -122,6 +122,14 @@ impl VolumeIndex {
         self.structural_generation
     }
 
+    /// Carry the structural generation across a rebuild: a freshly built
+    /// index replacing one whose generation was `prev` must read as strictly
+    /// newer, so open result handles go hard-stale (docs/ARCHITECTURE.md,
+    /// generation 2層). Compaction (M2) will reuse this.
+    pub(crate) fn bump_structural_from(&mut self, prev: u64) {
+        self.structural_generation = prev + 1;
+    }
+
     /// Return the cached content-derived value of type `T`, rebuilding it
     /// with `build` when the content generation moved. All cached types are
     /// invalidated together on a generation change.

@@ -206,4 +206,16 @@ impl Engine {
         });
         self.volumes.write().push(slot);
     }
+
+    /// Test/dev helper: swap a rebuilt index into an existing Ready volume —
+    /// the same structural replacement a journal-gone full rescan performs.
+    pub fn replace_ready_volume(&self, label: &str, idx: VolumeIndex) {
+        let volumes = self.volumes.read();
+        let slot = volumes
+            .iter()
+            .find(|s| s.label == label)
+            .expect("replace_ready_volume: unknown volume");
+        *slot.scanned.lock() = idx.live_len() as u64;
+        slot.install_index(idx);
+    }
 }
