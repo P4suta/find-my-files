@@ -368,7 +368,7 @@ pub unsafe extern "C" fn fmf_query(
             include_hidden_system: o.include_hidden_system != 0,
         };
         match handle.engine.query(text, &opt) {
-            Ok(rs) => {
+            Ok((rs, _trace)) => {
                 unsafe {
                     *out_count = rs.len() as u64;
                     *out_handle = Box::into_raw(Box::new(rs)).cast();

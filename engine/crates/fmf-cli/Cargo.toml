@@ -12,5 +12,6 @@ path = "src/main.rs"
 [dependencies]
 fmf-core = { workspace = true }
 clap = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing-subscriber = { workspace = true }

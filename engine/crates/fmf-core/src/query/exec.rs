@@ -20,6 +20,16 @@ pub struct SearchResult {
     pub structural_generation: u64,
 }
 
+/// Per-volume stage timings for [`crate::metrics::QueryTrace`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SearchMetrics {
+    pub memo_us: u64,
+    pub scan_us: u64,
+    pub materialize_us: u64,
+    pub entries_scanned: u64,
+    pub excluded_skipped: u64,
+}
+
 /// Memoized full paths for every directory (only built when the query
 /// contains path terms). Entry paths are `memo[parent] + name`.
 struct DirPaths {
@@ -200,7 +210,14 @@ fn matches(
     false
 }
 
-pub fn search(idx: &VolumeIndex, q: &CompiledQuery, opt: &QueryOptions) -> SearchResult {
+pub fn search(
+    idx: &VolumeIndex,
+    q: &CompiledQuery,
+    opt: &QueryOptions,
+) -> (SearchResult, SearchMetrics) {
+    let mut metrics = SearchMetrics::default();
+    let mut stage = crate::metrics::Stage::start();
+
     // The dir-path memo depends only on index content, not the query, so it
     // is cached on the index per content generation (a cold build costs
     // ~150ms on 300k dirs — too slow to repeat per keystroke). Both pools are
@@ -217,56 +234,83 @@ pub fn search(idx: &VolumeIndex, q: &CompiledQuery, opt: &QueryOptions) -> Searc
         };
         &empty
     };
+    metrics.memo_us = stage.lap();
 
     let skip_excluded = !opt.include_hidden_system;
     let n = idx.len();
-    let chunk_bitmaps: Vec<Vec<u64>> = (0..n.div_ceil(CHUNK))
+    let chunk_bitmaps: Vec<(Vec<u64>, u64, u64)> = (0..n.div_ceil(CHUNK))
         .into_par_iter()
         .map(|ci| {
             let start = ci * CHUNK;
             let end = (start + CHUNK).min(n);
             let mut words = vec![0u64; (end - start).div_ceil(64)];
             let mut ctx = EvalCtx::default();
+            let mut scanned = 0u64;
+            let mut skipped = 0u64;
             for id in start..end {
                 let id = id as EntryId;
-                if !idx.is_live(id) || (skip_excluded && idx.is_excluded(id)) {
+                if !idx.is_live(id) {
                     continue;
                 }
+                if skip_excluded && idx.is_excluded(id) {
+                    skipped += 1;
+                    continue;
+                }
+                scanned += 1;
                 if matches(idx, memo, &mut ctx, q, id) {
                     let rel = id as usize - start;
                     words[rel / 64] |= 1u64 << (rel % 64);
                 }
             }
-            words
+            (words, scanned, skipped)
         })
         .collect();
 
     let mut bitmap: Vec<u64> = Vec::with_capacity(n.div_ceil(64));
-    for w in &chunk_bitmaps {
+    for (w, scanned, skipped) in &chunk_bitmaps {
         bitmap.extend_from_slice(w);
+        metrics.entries_scanned += scanned;
+        metrics.excluded_skipped += skipped;
     }
+    metrics.scan_us = stage.lap();
+
+    let ids = materialize(idx, &bitmap, opt);
+    metrics.materialize_us = stage.lap();
+
+    (
+        SearchResult {
+            ids,
+            content_generation: idx.content_generation(),
+            structural_generation: idx.structural_generation(),
+        },
+        metrics,
+    )
+}
+
+/// Walk the pre-sorted permutation and keep bitmap hits — parallel chunks,
+/// order preserved by concatenation.
+fn materialize(idx: &VolumeIndex, bitmap: &[u64], opt: &QueryOptions) -> Vec<EntryId> {
+    let perm = idx.permutation(opt.sort);
     let hit = |id: EntryId| bitmap[id as usize / 64] >> (id as usize % 64) & 1 == 1;
 
-    let perm = idx.permutation(opt.sort);
-    let mut ids = Vec::new();
+    const MAT_CHUNK: usize = 1 << 17;
+    let mut chunks: Vec<Vec<EntryId>> = perm
+        .par_chunks(MAT_CHUNK)
+        .map(|chunk| chunk.iter().copied().filter(|&id| hit(id)).collect())
+        .collect();
     if opt.desc {
-        for &id in perm.iter().rev() {
-            if hit(id) {
-                ids.push(id);
-            }
+        chunks.reverse();
+        let mut ids = Vec::with_capacity(chunks.iter().map(Vec::len).sum());
+        for c in &chunks {
+            ids.extend(c.iter().rev());
         }
+        ids
     } else {
-        for &id in perm {
-            if hit(id) {
-                ids.push(id);
-            }
+        let mut ids = Vec::with_capacity(chunks.iter().map(Vec::len).sum());
+        for c in &chunks {
+            ids.extend_from_slice(c);
         }
-    }
-
-    SearchResult {
-        ids,
-        content_generation: idx.content_generation(),
-        structural_generation: idx.structural_generation(),
+        ids
     }
 }
 
@@ -281,6 +325,7 @@ mod tests {
         let ast = parse(query).unwrap();
         let q = compile(&ast, opt.case, &UtcResolver).unwrap();
         search(idx, &q, &opt)
+            .0
             .ids
             .iter()
             .map(|&id| String::from_utf8_lossy(idx.name(id)).into_owned())

@@ -6,6 +6,7 @@
 
 pub mod engine;
 pub mod index;
+pub mod metrics;
 pub mod mft;
 pub mod query;
 pub mod usn;

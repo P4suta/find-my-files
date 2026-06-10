@@ -17,7 +17,7 @@ pub use compile::{CaseMode, CompileError, CompiledQuery, compile};
 #[cfg(windows)]
 pub use dates::WindowsLocalResolver;
 pub use dates::{DateResolver, UtcResolver};
-pub use exec::{SearchResult, search};
+pub use exec::{SearchMetrics, SearchResult, search};
 
 use crate::index::SortKey;
 

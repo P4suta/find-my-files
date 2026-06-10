@@ -186,6 +186,68 @@ impl VolumeIndex {
         t
     }
 
+    /// Per-column memory accounting for the perf panel / `fmf stats`.
+    /// The map size is an estimate (hashbrown control bytes + slot padding).
+    pub fn stats(&self, volume: &str) -> crate::metrics::IndexStats {
+        let n = self.len() as u64;
+        let offsets = (self.name_off.capacity() * 4 + self.name_len.capacity() * 2) as u64;
+        let perms =
+            ((self.perm_name.capacity() + self.perm_size.capacity() + self.perm_mtime.capacity())
+                * 4) as u64;
+        let frn_map = (self.frn_map.capacity() as u64) * 17;
+        let mut s = crate::metrics::IndexStats {
+            volume: volume.to_string(),
+            entries: n,
+            live_entries: self.live_len() as u64,
+            tombstones: self.tombstones as u64,
+            name_pool_bytes: self.name_pool.capacity() as u64,
+            lower_pool_bytes: self.lower_pool.capacity() as u64,
+            offsets_bytes: offsets,
+            parent_bytes: (self.parent.capacity() * 4) as u64,
+            size_bytes: (self.size.capacity() * 8) as u64,
+            mtime_bytes: (self.mtime.capacity() * 8) as u64,
+            frn_bytes: (self.frn.capacity() * 8) as u64,
+            flag_bytes: self.flag.capacity() as u64,
+            permutations_bytes: perms,
+            frn_map_bytes: frn_map,
+            content_generation: self.content_generation,
+            structural_generation: self.structural_generation,
+            ..Default::default()
+        };
+        s.total_bytes = s.name_pool_bytes
+            + s.lower_pool_bytes
+            + s.offsets_bytes
+            + s.parent_bytes
+            + s.size_bytes
+            + s.mtime_bytes
+            + s.frn_bytes
+            + s.flag_bytes
+            + s.permutations_bytes
+            + s.frn_map_bytes;
+        s.bytes_per_entry = if n > 0 {
+            s.total_bytes as f64 / n as f64
+        } else {
+            0.0
+        };
+        s
+    }
+
+    /// Trim over-allocated columns after a bulk build.
+    pub fn shrink_to_fit(&mut self) {
+        self.name_pool.shrink_to_fit();
+        self.lower_pool.shrink_to_fit();
+        self.name_off.shrink_to_fit();
+        self.name_len.shrink_to_fit();
+        self.parent.shrink_to_fit();
+        self.size.shrink_to_fit();
+        self.mtime.shrink_to_fit();
+        self.frn.shrink_to_fit();
+        self.flag.shrink_to_fit();
+        self.perm_name.shrink_to_fit();
+        self.perm_size.shrink_to_fit();
+        self.perm_mtime.shrink_to_fit();
+    }
+
     pub fn permutation(&self, key: SortKey) -> &[EntryId] {
         match key {
             SortKey::Name => &self.perm_name,

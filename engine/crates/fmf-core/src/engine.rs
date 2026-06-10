@@ -12,6 +12,7 @@ use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
 use crate::index::{EntryId, SortKey, VolumeIndex, flags};
+use crate::metrics::{MetricsHub, QueryTrace, ScanTrace, UsnTrace};
 use crate::query::{self, QueryOptions};
 
 #[derive(Debug, Clone)]
@@ -75,6 +76,7 @@ pub struct Engine {
     sink: RwLock<Option<EventSink>>,
     volumes: RwLock<Vec<Arc<VolumeSlot>>>,
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    metrics: MetricsHub,
 }
 
 /// Engine-side debounce for IndexChanged — the only throttle in the whole
@@ -88,6 +90,7 @@ impl Engine {
             sink: RwLock::new(None),
             volumes: RwLock::new(Vec::new()),
             threads: Mutex::new(Vec::new()),
+            metrics: MetricsHub::new(),
         })
     }
 
@@ -207,13 +210,34 @@ impl Engine {
                     idx
                 }
                 None => match crate::mft::scan_volume(&label) {
-                    Ok((idx, stats)) => {
+                    Ok((mut idx, stats)) => {
                         tracing::info!(
                             volume = %label,
                             entries = idx.len(),
                             ms = stats.elapsed_total_ms,
                             "full scan complete"
                         );
+                        idx.shrink_to_fit();
+                        self.metrics.record_scan(ScanTrace {
+                            volume: label.clone(),
+                            read_bytes: stats.mft_bytes,
+                            read_ms: stats.elapsed_mft_load_ms,
+                            mb_per_s: if stats.elapsed_mft_load_ms > 0 {
+                                stats.mft_bytes as f64
+                                    / 1_048.576
+                                    / stats.elapsed_mft_load_ms as f64
+                            } else {
+                                0.0
+                            },
+                            parse_ms: stats
+                                .elapsed_total_ms
+                                .saturating_sub(stats.elapsed_mft_load_ms),
+                            build_ms: 0,
+                            sort_ms: 0,
+                            total_ms: stats.elapsed_total_ms,
+                            entries: idx.len() as u64,
+                            peak_ws_bytes: stats.peak_working_set_bytes,
+                        });
                         idx
                     }
                     Err(e) => {
@@ -260,7 +284,16 @@ impl Engine {
                             continue;
                         }
                         if let Some(idx) = slot.index.write().as_mut() {
-                            apply_batch(idx, &rs, &fetch);
+                            let stage = crate::metrics::Stage::start();
+                            let s = apply_batch(idx, &rs, &fetch);
+                            self.metrics.record_usn(UsnTrace {
+                                volume: label.clone(),
+                                records: rs.len() as u64,
+                                upserted: s.created_or_renamed as u64,
+                                deleted: s.deleted as u64,
+                                stat_updated: s.stat_updated as u64,
+                                apply_us: stage.elapsed_us(),
+                            });
                             *slot.scanned.lock() = idx.live_len() as u64;
                         }
                         if last_emit.elapsed() >= INDEX_CHANGED_DEBOUNCE {
@@ -316,9 +349,23 @@ impl Engine {
 
     /// Run a query against every Ready volume and merge the per-volume,
     /// already-sorted id lists into one ordered result set.
-    pub fn query(&self, text: &str, opt: &QueryOptions) -> Result<ResultSet, EngineError> {
+    pub fn query(
+        &self,
+        text: &str,
+        opt: &QueryOptions,
+    ) -> Result<(ResultSet, QueryTrace), EngineError> {
+        let mut trace = QueryTrace {
+            query: text.to_string(),
+            driver: "full-scan".to_string(),
+            ..Default::default()
+        };
+        let t_total = crate::metrics::Stage::start();
+        let mut stage = crate::metrics::Stage::start();
+
         let ast = query::parse(text)?;
+        trace.parse_us = stage.lap();
         let compiled = query::compile(&ast, opt.case, &date_resolver())?;
+        trace.compile_us = stage.lap();
 
         let slots: Vec<Arc<VolumeSlot>> = self
             .volumes
@@ -332,9 +379,16 @@ impl Engine {
         for slot in &slots {
             let guard = slot.index.read();
             let Some(idx) = guard.as_ref() else { continue };
-            let r = query::search(idx, &compiled, opt);
+            let (r, m) = query::search(idx, &compiled, opt);
+            trace.memo_us += m.memo_us;
+            trace.scan_us += m.scan_us;
+            trace.materialize_us += m.materialize_us;
+            trace.entries_scanned += m.entries_scanned;
+            trace.excluded_skipped += m.excluded_skipped;
             per_volume.push((slot.clone(), r.ids, r.structural_generation));
         }
+        trace.volumes = per_volume.len() as u32;
+        stage.lap();
 
         // K-way merge by the sort key (typically 1-3 volumes).
         let total: usize = per_volume.iter().map(|(_, ids, _)| ids.len()).sum();
@@ -376,11 +430,37 @@ impl Engine {
             }
         }
 
-        Ok(ResultSet {
-            slots: per_volume.iter().map(|(s, _, _)| s.clone()).collect(),
-            structural: per_volume.iter().map(|(_, _, g)| *g).collect(),
-            rows,
-        })
+        trace.merge_us = stage.lap();
+        trace.hits = rows.len() as u64;
+        trace.total_us = t_total.elapsed_us();
+        self.metrics.record_query(trace.clone());
+
+        Ok((
+            ResultSet {
+                slots: per_volume.iter().map(|(s, _, _)| s.clone()).collect(),
+                structural: per_volume.iter().map(|(_, _, g)| *g).collect(),
+                rows,
+            },
+            trace,
+        ))
+    }
+
+    pub fn metrics(&self) -> &MetricsHub {
+        &self.metrics
+    }
+
+    /// Per-volume memory accounting (perf panel / `fmf stats`).
+    pub fn index_stats(&self) -> Vec<crate::metrics::IndexStats> {
+        self.volumes
+            .read()
+            .iter()
+            .filter_map(|slot| slot.index.read().as_ref().map(|idx| idx.stats(&slot.label)))
+            .collect()
+    }
+
+    /// Full observability snapshot (JSON-serializable).
+    pub fn metrics_snapshot(&self) -> crate::metrics::MetricsSnapshot {
+        self.metrics.snapshot(64, self.index_stats())
     }
 
     /// Persist all volumes (graceful shutdown / explicit flush). Tailing
@@ -555,7 +635,7 @@ mod tests {
     #[test]
     fn query_merges_volumes_in_name_order() {
         let e = engine_with_two_volumes();
-        let r = e.query("txt", &QueryOptions::default()).unwrap();
+        let r = e.query("txt", &QueryOptions::default()).unwrap().0;
         let rows = r.page(0, 10).unwrap();
         let names: Vec<String> = rows
             .iter()
@@ -579,7 +659,7 @@ mod tests {
 
             ..Default::default()
         };
-        let r = e.query("txt", &opt).unwrap();
+        let r = e.query("txt", &opt).unwrap().0;
         assert_eq!(r.len(), 4);
         let page = r.page(1, 2).unwrap();
         let sizes: Vec<u64> = page.iter().map(|r| r.size).collect();
@@ -591,7 +671,7 @@ mod tests {
     #[test]
     fn parent_paths_come_back_per_volume() {
         let e = engine_with_two_volumes();
-        let r = e.query("beta", &QueryOptions::default()).unwrap();
+        let r = e.query("beta", &QueryOptions::default()).unwrap().0;
         let rows = r.page(0, 1).unwrap();
         assert_eq!(rows[0].parent_path, b"D:\\");
     }

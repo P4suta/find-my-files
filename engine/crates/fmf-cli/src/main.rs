@@ -30,7 +30,18 @@ enum Command {
         include_hidden_system: bool,
     },
     /// Index a volume and run the fixed benchmark query set.
-    Bench { drive: String },
+    Bench {
+        drive: String,
+        /// Write the full report as JSON.
+        #[arg(long)]
+        json: Option<std::path::PathBuf>,
+        /// Compare against a previous --json report; exit 1 when p50 or p99
+        /// regress by more than 20%.
+        #[arg(long)]
+        baseline: Option<std::path::PathBuf>,
+    },
+    /// Index a volume and dump per-column memory accounting as JSON.
+    Stats { drive: String },
     /// Index a volume, then tail its USN journal and apply changes live,
     /// printing one line per applied batch (Ctrl+C to stop).
     Watch { drive: String },
@@ -61,7 +72,12 @@ fn main() {
             stats,
             include_hidden_system,
         } => index(&drive, stats, include_hidden_system),
-        Command::Bench { drive } => bench(&drive),
+        Command::Bench {
+            drive,
+            json,
+            baseline,
+        } => bench(&drive, json.as_deref(), baseline.as_deref()),
+        Command::Stats { drive } => stats(&drive),
         Command::Watch { drive } => watch(&drive),
     };
     if let Err(e) = result {
@@ -129,7 +145,7 @@ fn run_query(
     idx: &VolumeIndex,
     input: &str,
     opt: QueryOptions,
-) -> Result<query::SearchResult, Box<dyn std::error::Error>> {
+) -> Result<(query::SearchResult, query::SearchMetrics), Box<dyn std::error::Error>> {
     let ast = query::parse(input)?;
     let q = query::compile(&ast, opt.case, &date_resolver())?;
     Ok(query::search(idx, &q, &opt))
@@ -166,7 +182,7 @@ fn index(
         }
         let t = Instant::now();
         match run_query(&idx, input, opt) {
-            Ok(r) => {
+            Ok((r, m)) => {
                 let elapsed = t.elapsed();
                 let mut path = Vec::new();
                 for &id in r.ids.iter().take(20) {
@@ -175,7 +191,16 @@ fn index(
                     out.write_all(&path)?;
                     out.write_all(b"\n")?;
                 }
-                println!("-- {} hits in {:?}", r.ids.len(), elapsed);
+                println!(
+                    "-- {} hits in {:?} (memo {}µs, scan {}µs, materialize {}µs, {} scanned, {} excluded)",
+                    r.ids.len(),
+                    elapsed,
+                    m.memo_us,
+                    m.scan_us,
+                    m.materialize_us,
+                    m.entries_scanned,
+                    m.excluded_skipped
+                );
             }
             Err(e) => println!("query error: {e}"),
         }
@@ -223,7 +248,9 @@ fn watch(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 const BENCH_QUERIES: &[&str] = &[
-    "a",                        // worst case: 1 char, huge hit count
+    "",                         // match-all (UI shows this on launch)
+    "e",                        // 1 char, huge hit count
+    "a",                        // 1 char, huge hit count
     "win",                      // common 3-char substring
     "qzx",                      // rare substring
     "ext:dll",                  // extension filter
@@ -231,37 +258,127 @@ const BENCH_QUERIES: &[&str] = &[
     "*.rs",                     // wildcard
 ];
 
-fn bench(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(serde::Serialize, serde::Deserialize)]
+struct QueryBench {
+    query: String,
+    hits: u64,
+    p50_us: u64,
+    p99_us: u64,
+    max_us: u64,
+    p50_memo_us: u64,
+    p50_scan_us: u64,
+    p50_materialize_us: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BenchReport {
+    volume: String,
+    entries: u64,
+    peak_working_set_bytes: u64,
+    queries: Vec<QueryBench>,
+}
+
+fn median(mut v: Vec<u64>) -> u64 {
+    v.sort_unstable();
+    v[v.len() / 2]
+}
+
+fn bench(
+    drive: &str,
+    json: Option<&std::path::Path>,
+    baseline: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let idx = build_index(drive)?;
     let opt = QueryOptions::default();
 
+    let mut report = BenchReport {
+        volume: drive.to_string(),
+        entries: idx.len() as u64,
+        peak_working_set_bytes: 0,
+        queries: Vec::new(),
+    };
+
     println!(
-        "{:<28} {:>10} {:>10} {:>10} {:>10}",
-        "query", "hits", "p50_us", "p99_us", "max_us"
+        "{:<28} {:>10} {:>9} {:>9} {:>9} | {:>8} {:>8} {:>8}",
+        "query", "hits", "p50_us", "p99_us", "max_us", "memo", "scan", "mat"
     );
     for q in BENCH_QUERIES {
         const RUNS: usize = 50;
-        let mut times = Vec::with_capacity(RUNS);
-        let mut hits = 0usize;
+        let mut totals = Vec::with_capacity(RUNS);
+        let (mut memos, mut scans, mut mats) = (Vec::new(), Vec::new(), Vec::new());
+        let mut hits = 0u64;
         for _ in 0..RUNS {
             let t = Instant::now();
-            let r = run_query(&idx, q, opt)?;
-            times.push(t.elapsed().as_micros() as u64);
-            hits = r.ids.len();
+            let (r, m) = run_query(&idx, q, opt)?;
+            totals.push(t.elapsed().as_micros() as u64);
+            memos.push(m.memo_us);
+            scans.push(m.scan_us);
+            mats.push(m.materialize_us);
+            hits = r.ids.len() as u64;
         }
-        times.sort_unstable();
-        println!(
-            "{:<28} {:>10} {:>10} {:>10} {:>10}",
-            q,
+        totals.sort_unstable();
+        let qb = QueryBench {
+            query: q.to_string(),
             hits,
-            times[RUNS / 2],
-            times[RUNS * 99 / 100],
-            times[RUNS - 1]
+            p50_us: totals[RUNS / 2],
+            p99_us: totals[RUNS * 99 / 100],
+            max_us: totals[RUNS - 1],
+            p50_memo_us: median(memos),
+            p50_scan_us: median(scans),
+            p50_materialize_us: median(mats),
+        };
+        println!(
+            "{:<28} {:>10} {:>9} {:>9} {:>9} | {:>8} {:>8} {:>8}",
+            qb.query,
+            qb.hits,
+            qb.p50_us,
+            qb.p99_us,
+            qb.max_us,
+            qb.p50_memo_us,
+            qb.p50_scan_us,
+            qb.p50_materialize_us
         );
+        report.queries.push(qb);
     }
+    report.peak_working_set_bytes = fmf_core::mft::peak_working_set();
     println!(
         "peak working set {:.1} MiB",
-        fmf_core::mft::peak_working_set() as f64 / (1024.0 * 1024.0)
+        report.peak_working_set_bytes as f64 / (1024.0 * 1024.0)
     );
+
+    if let Some(path) = json {
+        std::fs::write(path, serde_json::to_string_pretty(&report)?)?;
+        eprintln!("report written to {}", path.display());
+    }
+
+    if let Some(path) = baseline {
+        let old: BenchReport = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        let mut regressed = false;
+        for qb in &report.queries {
+            let Some(prev) = old.queries.iter().find(|p| p.query == qb.query) else {
+                continue;
+            };
+            // Ignore sub-200µs noise; flag >20% regressions.
+            let gate = |new: u64, old: u64| new > old.max(200) + old.max(200) / 5;
+            if gate(qb.p50_us, prev.p50_us) || gate(qb.p99_us, prev.p99_us) {
+                eprintln!(
+                    "REGRESSION {:<24} p50 {}→{}µs p99 {}→{}µs",
+                    qb.query, prev.p50_us, qb.p50_us, prev.p99_us, qb.p99_us
+                );
+                regressed = true;
+            }
+        }
+        if regressed {
+            return Err("benchmark regression vs baseline".into());
+        }
+        eprintln!("no regression vs {}", path.display());
+    }
+    Ok(())
+}
+
+fn stats(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let idx = build_index(drive)?;
+    let s = idx.stats(drive);
+    println!("{}", serde_json::to_string_pretty(&s)?);
     Ok(())
 }

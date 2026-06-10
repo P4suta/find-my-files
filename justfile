@@ -38,5 +38,20 @@ index drive="C:":
 
 # Run the benchmark suite against a real volume (requires elevated terminal)
 [working-directory: 'engine']
-bench drive="C:":
-    cargo run --release -p fmf-cli -- bench {{drive}}
+bench drive="C:" *args="":
+    cargo run --release -p fmf-cli -- bench {{drive}} {{args}}
+
+# Regression gate vs the committed baseline (requires elevated terminal)
+[working-directory: 'engine']
+bench-check drive="C:":
+    cargo run --release -p fmf-cli -- bench {{drive}} --baseline benches/baseline.json
+
+# Criterion micro-benchmarks on a synthetic 1M-entry index (no elevation)
+[working-directory: 'engine']
+bench-micro *args="":
+    cargo bench -p fmf-core {{args}}
+
+# Per-column memory accounting for a real volume (requires elevated terminal)
+[working-directory: 'engine']
+stats drive="C:":
+    cargo run --release -p fmf-cli -- stats {{drive}}

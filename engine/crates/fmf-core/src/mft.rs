@@ -150,6 +150,8 @@ pub struct ScanStats {
     pub dirs: u64,
     pub skipped_no_name: u64,
     pub peak_working_set_bytes: u64,
+    /// Raw $MFT size — the bytes the initial scan reads.
+    pub mft_bytes: u64,
 }
 
 /// Full initial scan: read the volume's $MFT and build the in-memory index.
@@ -172,6 +174,7 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     let t1 = Instant::now();
     let mft = Mft::new(volume)?;
     stats.elapsed_mft_load_ms = t1.elapsed().as_millis() as u64;
+    stats.mft_bytes = mft.data.len() as u64;
 
     const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
     const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
