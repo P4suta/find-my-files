@@ -1,0 +1,181 @@
+//! Pure USN_RECORD_V2 buffer parsing — no OS calls, so the whole layer is
+//! testable from raw byte fixtures (docs/ARCHITECTURE.md, CLAUDE.md 昇格規約).
+//!
+//! Buffer layout returned by FSCTL_READ_USN_JOURNAL / FSCTL_ENUM_USN_DATA:
+//! a leading u64 (the next USN / next FRN to resume from), then a sequence of
+//! USN_RECORD_V2 structures, each RecordLength bytes, 8-byte aligned.
+
+/// Reason flags we act on (winioctl.h).
+pub mod reason {
+    pub const DATA_OVERWRITE: u32 = 0x0000_0001;
+    pub const DATA_EXTEND: u32 = 0x0000_0002;
+    pub const DATA_TRUNCATION: u32 = 0x0000_0004;
+    pub const BASIC_INFO_CHANGE: u32 = 0x0000_8000;
+    pub const FILE_CREATE: u32 = 0x0000_0100;
+    pub const FILE_DELETE: u32 = 0x0000_0200;
+    pub const RENAME_OLD_NAME: u32 = 0x0000_1000;
+    pub const RENAME_NEW_NAME: u32 = 0x0000_2000;
+    pub const HARD_LINK_CHANGE: u32 = 0x0001_0000;
+    pub const CLOSE: u32 = 0x8000_0000;
+}
+
+pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+/// One decoded journal record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsnRecord {
+    pub usn: i64,
+    /// Full 64-bit FRN (with sequence).
+    pub frn: u64,
+    pub parent_frn: u64,
+    pub reason: u32,
+    pub attributes: u32,
+    /// File name in UTF-16 units (single link name, see RESEARCH.md on
+    /// hard links).
+    pub name: Vec<u16>,
+}
+
+impl UsnRecord {
+    pub fn is_dir(&self) -> bool {
+        self.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+    }
+    pub fn is_reparse(&self) -> bool {
+        self.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+}
+
+#[inline]
+fn u16_at(b: &[u8], off: usize) -> u16 {
+    u16::from_le_bytes([b[off], b[off + 1]])
+}
+#[inline]
+fn u32_at(b: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
+}
+#[inline]
+fn u64_at(b: &[u8], off: usize) -> u64 {
+    u64::from_le_bytes(b[off..off + 8].try_into().unwrap())
+}
+
+/// Parse a raw FSCTL output buffer. Returns the leading "next" cursor value
+/// and the decoded records. Malformed tails are dropped rather than panicking
+/// (a truncated final record can occur with undersized buffers).
+pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>) {
+    let mut records = Vec::new();
+    if buf.len() < 8 {
+        return (0, records);
+    }
+    let next = u64_at(buf, 0);
+    let mut off = 8usize;
+
+    while off + 60 <= buf.len() {
+        let rec = &buf[off..];
+        let record_length = u32_at(rec, 0) as usize;
+        if record_length < 60 || off + record_length > buf.len() {
+            break;
+        }
+        let major = u16_at(rec, 4);
+        if major == 2 {
+            let name_len = u16_at(rec, 56) as usize; // bytes
+            let name_off = u16_at(rec, 58) as usize;
+            if name_off + name_len <= record_length {
+                let mut name = Vec::with_capacity(name_len / 2);
+                let nb = &rec[name_off..name_off + name_len];
+                for ch in nb.chunks_exact(2) {
+                    name.push(u16::from_le_bytes([ch[0], ch[1]]));
+                }
+                records.push(UsnRecord {
+                    usn: u64_at(rec, 24) as i64,
+                    frn: u64_at(rec, 8),
+                    parent_frn: u64_at(rec, 16),
+                    reason: u32_at(rec, 40),
+                    attributes: u32_at(rec, 52),
+                    name,
+                });
+            }
+        }
+        // Records are 8-byte aligned; RecordLength already includes padding.
+        off += record_length.next_multiple_of(8);
+    }
+    (next, records)
+}
+
+/// Serialize records into the FSCTL wire format — used to build test
+/// fixtures and replay files (`fmf capture-usn`).
+pub fn encode_buffer(next: u64, records: &[UsnRecord]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&next.to_le_bytes());
+    for r in records {
+        let name_bytes: Vec<u8> = r.name.iter().flat_map(|u| u.to_le_bytes()).collect();
+        let len = (60 + name_bytes.len()).next_multiple_of(8);
+        let start = out.len();
+        out.resize(start + len, 0);
+        let w = &mut out[start..];
+        w[0..4].copy_from_slice(&(len as u32).to_le_bytes());
+        w[4..6].copy_from_slice(&2u16.to_le_bytes()); // major
+        w[8..16].copy_from_slice(&r.frn.to_le_bytes());
+        w[16..24].copy_from_slice(&r.parent_frn.to_le_bytes());
+        w[24..32].copy_from_slice(&(r.usn as u64).to_le_bytes());
+        w[40..44].copy_from_slice(&r.reason.to_le_bytes());
+        w[52..56].copy_from_slice(&r.attributes.to_le_bytes());
+        w[56..58].copy_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        w[58..60].copy_from_slice(&60u16.to_le_bytes());
+        w[60..60 + name_bytes.len()].copy_from_slice(&name_bytes);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(frn: u64, parent: u64, reason: u32, name: &str) -> UsnRecord {
+        UsnRecord {
+            usn: 1000,
+            frn,
+            parent_frn: parent,
+            reason,
+            attributes: 0x20,
+            name: name.encode_utf16().collect(),
+        }
+    }
+
+    #[test]
+    fn roundtrip() {
+        let records = vec![
+            rec(
+                0x1_0000_0000_0007,
+                5,
+                reason::FILE_CREATE | reason::CLOSE,
+                "new file.txt",
+            ),
+            rec(
+                0x2_0000_0000_0008,
+                5,
+                reason::FILE_DELETE | reason::CLOSE,
+                "夢.dat",
+            ),
+        ];
+        let buf = encode_buffer(42, &records);
+        let (next, parsed) = parse_buffer(&buf);
+        assert_eq!(next, 42);
+        assert_eq!(parsed, records);
+    }
+
+    #[test]
+    fn truncated_tail_is_dropped() {
+        let records = vec![rec(7, 5, reason::FILE_CREATE, "abc.txt")];
+        let mut buf = encode_buffer(9, &records);
+        buf.truncate(buf.len() - 4);
+        let (next, parsed) = parse_buffer(&buf);
+        assert_eq!(next, 9);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn empty_buffer() {
+        assert_eq!(parse_buffer(&[]).1, vec![]);
+        assert_eq!(parse_buffer(&7u64.to_le_bytes()).1, vec![]);
+    }
+}

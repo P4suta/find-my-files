@@ -7,4 +7,5 @@
 pub mod index;
 pub mod mft;
 pub mod query;
+pub mod usn;
 pub mod wtf8;

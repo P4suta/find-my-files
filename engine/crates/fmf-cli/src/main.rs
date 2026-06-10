@@ -28,6 +28,9 @@ enum Command {
     },
     /// Index a volume and run the fixed benchmark query set.
     Bench { drive: String },
+    /// Index a volume, then tail its USN journal and apply changes live,
+    /// printing one line per applied batch (Ctrl+C to stop).
+    Watch { drive: String },
 }
 
 #[cfg(windows)]
@@ -52,6 +55,7 @@ fn main() {
         Command::Spike { drive } => spike(&drive),
         Command::Index { drive, stats } => index(&drive, stats),
         Command::Bench { drive } => bench(&drive),
+        Command::Watch { drive } => watch(&drive),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
@@ -162,6 +166,45 @@ fn index(drive: &str, stats_only: bool) -> Result<(), Box<dyn std::error::Error>
                 println!("-- {} hits in {:?}", r.ids.len(), elapsed);
             }
             Err(e) => println!("query error: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Scan, then tail the journal. The checkpoint is taken *before* the scan so
+/// changes made during the scan are replayed, not lost (ARCHITECTURE.md).
+fn watch(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use fmf_core::usn::{ReadOutcome, UsnJournal, VolumeStatFetcher, apply_batch};
+
+    let mut journal = UsnJournal::open(drive, None)?;
+    let mut idx = build_index(drive)?;
+    let fetch = VolumeStatFetcher::open(drive)?;
+    eprintln!(
+        "watching {drive} (journal id {:#x}, from usn {}) — Ctrl+C to stop",
+        journal.journal_id, journal.next_usn
+    );
+    let mut buf = Vec::new();
+    loop {
+        match journal.read_blocking(&mut buf)? {
+            ReadOutcome::Records(rs) => {
+                if rs.is_empty() {
+                    continue;
+                }
+                let s = apply_batch(&mut idx, &rs, &fetch);
+                eprintln!(
+                    "{} records → {} upserted, {} deleted, {} stat, {} ignored (live {})",
+                    rs.len(),
+                    s.created_or_renamed,
+                    s.deleted,
+                    s.stat_updated,
+                    s.ignored,
+                    idx.live_len()
+                );
+            }
+            ReadOutcome::Gone(g) => {
+                eprintln!("journal unavailable ({g:?}) — full rescan required, exiting");
+                break;
+            }
         }
     }
     Ok(())
