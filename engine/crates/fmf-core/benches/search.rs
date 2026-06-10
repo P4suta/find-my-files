@@ -213,5 +213,32 @@ fn bench_post_usn(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_queries, bench_typing, bench_post_usn);
+/// Snapshot restore (deserialize + checksum + frn_map rebuild) on the
+/// synthetic 1M index — the unelevated proxy for the restore→ready ≤2s
+/// gate's CPU-bound share (page-cache warm by design).
+fn bench_snapshot(c: &mut Criterion) {
+    let idx = build_synthetic();
+    let path = std::env::temp_dir().join(format!("fmf-bench-snap-{}.fmfidx", std::process::id()));
+    idx.save_to(&path, 1, 1).unwrap();
+
+    let mut g = c.benchmark_group("snapshot");
+    g.sample_size(20);
+    g.measurement_time(std::time::Duration::from_secs(6));
+    g.bench_function("load_1m", |b| {
+        b.iter(|| {
+            let (loaded, _, _) = VolumeIndex::load_from(&path).unwrap();
+            std::hint::black_box(loaded.len())
+        })
+    });
+    g.finish();
+    let _ = std::fs::remove_file(&path);
+}
+
+criterion_group!(
+    benches,
+    bench_queries,
+    bench_typing,
+    bench_post_usn,
+    bench_snapshot
+);
 criterion_main!(benches);

@@ -32,7 +32,7 @@ fn write_vec<T: Copy, W: std::io::Write>(
     w.write_all(bytes)
 }
 
-fn read_vec<T: Copy + Default, R: std::io::Read>(
+fn read_vec<T: Copy, R: std::io::Read>(
     r: &mut R,
     h: &mut xxhash_rust::xxh64::Xxh64,
 ) -> std::io::Result<Vec<T>> {
@@ -46,23 +46,25 @@ fn read_vec<T: Copy + Default, R: std::io::Read>(
         return Err(Error::new(ErrorKind::InvalidData, "section size mismatch"));
     }
     // The length prefix is untrusted input: a corrupt value must come back
-    // as Err (→ full-rescan fallback), not as one giant upfront allocation
-    // that aborts the process. Growing in ~1MiB steps bounds the overshoot
-    // to a single chunk past the bytes actually present.
+    // as Err (→ full-rescan fallback), not abort the process. try_reserve
+    // turns an absurd claim into a clean Err; a plausible-but-lying length
+    // then fails at read_exact EOF and the buffer drops. Reserving once and
+    // reading in 8MiB strides replaces the old 1MiB grow-loop, whose
+    // repeated reallocations dominated large-column load time.
     let elems = len / elem;
-    let chunk_elems = (1 << 20) / elem.max(1) + 1;
     let mut out: Vec<T> = Vec::new();
-    while out.len() < elems {
-        let n = chunk_elems.min(elems - out.len());
-        let start = out.len();
-        out.resize(start + n, T::default());
-        // Safety: same POD reasoning as pod_bytes, writable side.
-        let bytes = unsafe {
-            std::slice::from_raw_parts_mut(out.as_mut_ptr().add(start).cast::<u8>(), n * elem)
-        };
-        r.read_exact(bytes)?;
-        h.update(bytes);
+    if out.try_reserve_exact(elems).is_err() {
+        return Err(Error::new(ErrorKind::InvalidData, "section size overflow"));
     }
+    // Safety: same POD reasoning as pod_bytes, writable side — the spare
+    // capacity is fully overwritten before set_len, and read failures leave
+    // the length at 0.
+    let bytes = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), len) };
+    for chunk in bytes.chunks_mut(8 << 20) {
+        r.read_exact(chunk)?;
+        h.update(chunk);
+    }
+    unsafe { out.set_len(elems) };
     Ok(out)
 }
 
@@ -152,7 +154,9 @@ impl VolumeIndex {
             return Err(bad("column length mismatch"));
         }
 
-        let mut frn_map = FxHashMap::default();
+        // Presized to the live upper bound: the default-capacity map paid a
+        // rehash cascade over a million inserts.
+        let mut frn_map = FxHashMap::with_capacity_and_hasher(count, Default::default());
         let mut tombstones = 0u32;
         for (i, &f) in flag.iter().enumerate() {
             if f & flags::TOMBSTONE != 0 {
