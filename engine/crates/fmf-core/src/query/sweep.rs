@@ -71,6 +71,18 @@ pub(super) fn driver_candidates(
                         }
                         let id = table.ids[k];
                         let off = table.offs[k] as usize;
+                        // A pair whose entry has since moved its name (in-
+                        // place dir rename, incremental table) covers dead
+                        // bytes — skip its whole region like a stale gap.
+                        if idx.name_off_of(id) as usize != off {
+                            let next = if k + 1 < table.len() {
+                                (table.offs[k + 1] as usize).min(pool_end)
+                            } else {
+                                pool_end
+                            };
+                            pos = next.max(hit + 1) - pool_start;
+                            continue;
+                        }
                         let end = off + idx.name(id).len();
                         if hit + needle_len <= end && anchor(hit, off, end) {
                             if accept(id) {
@@ -115,6 +127,9 @@ pub(super) fn driver_candidates(
                     for k in ks..ke {
                         let id = table.ids[k];
                         let off = table.offs[k] as usize;
+                        if idx.name_off_of(id) as usize != off {
+                            continue; // stale pair: dead bytes
+                        }
                         let name = &pool[off..off + idx.name(id).len()];
                         if suffixes.iter().any(|s| name.ends_with(s))
                             && (!*files_only || !idx.is_dir(id))

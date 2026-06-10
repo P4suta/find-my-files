@@ -182,5 +182,36 @@ fn bench_typing(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_queries, bench_typing);
+/// First query after a USN batch: the content generation moved, so the
+/// derived caches (offset table, dir paths) must be re-established. Setup
+/// bumps the generation without growing the index — the measured delta
+/// between full rebuild and incremental extend is then size-stable.
+fn bench_post_usn(c: &mut Criterion) {
+    let idx = std::cell::RefCell::new(build_synthetic());
+    let opt = QueryOptions::default();
+    let ast = query::parse("win").unwrap();
+    let compiled = query::compile(&ast, opt.case, &UtcResolver).unwrap();
+
+    let mut g = c.benchmark_group("post_usn");
+    g.sample_size(20);
+    g.measurement_time(std::time::Duration::from_secs(4));
+    g.bench_function("first_query_win", |b| {
+        b.iter_batched(
+            || {
+                let mut i = idx.borrow_mut();
+                let len = i.len() as u32;
+                i.merge_new_into_permutations(len); // empty batch: generation++
+            },
+            |()| {
+                let i = idx.borrow();
+                let (r, m) = query::search(&i, &compiled, &opt);
+                std::hint::black_box((r.ids.len(), m.memo_us))
+            },
+            BatchSize::PerIteration,
+        )
+    });
+    g.finish();
+}
+
+criterion_group!(benches, bench_queries, bench_typing, bench_post_usn);
 criterion_main!(benches);

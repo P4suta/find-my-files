@@ -26,10 +26,20 @@ pub struct VolumeIndex {
     /// Query-independent caches derived from index content (dir-path memo,
     /// pool offset table, …) keyed by `content_generation` and value type.
     /// Type-erased so the index stays ignorant of query-module types.
-    pub(super) derived_cache: Mutex<Option<(u64, DerivedMap)>>,
+    pub(super) derived_cache: Mutex<Option<DerivedCache>>,
 }
 
 pub(super) type DerivedMap = FxHashMap<std::any::TypeId, Arc<dyn Any + Send + Sync>>;
+
+/// The previous generation's values stick around (`prev`) so incremental
+/// builders can extend them instead of starting over; a value is consumed
+/// (removed) the first time its type resolves under the new generation, and
+/// anything never consumed drops on the following generation change.
+pub(super) struct DerivedCache {
+    generation: u64,
+    current: DerivedMap,
+    prev: DerivedMap,
+}
 
 impl VolumeIndex {
     pub fn len(&self) -> usize {
@@ -138,28 +148,45 @@ impl VolumeIndex {
         T: Any + Send + Sync,
         F: FnOnce() -> T,
     {
+        self.with_derived(|_| build())
+    }
+
+    /// Like [`Self::cached_derived`], but on a generation change `build`
+    /// receives the previous generation's value so it can extend it
+    /// incrementally instead of rebuilding from scratch.
+    pub(crate) fn cached_derived_or_update<T, F>(&self, build: F) -> Arc<T>
+    where
+        T: Any + Send + Sync,
+        F: FnOnce(Option<Arc<T>>) -> T,
+    {
+        self.with_derived(build)
+    }
+
+    fn with_derived<T, F>(&self, build: F) -> Arc<T>
+    where
+        T: Any + Send + Sync,
+        F: FnOnce(Option<Arc<T>>) -> T,
+    {
         let key = std::any::TypeId::of::<T>();
         let mut guard = self.derived_cache.lock();
-        match guard.as_mut() {
-            Some((generation, map)) if *generation == self.content_generation => {
-                if let Some(v) = map.get(&key)
-                    && let Ok(t) = v.clone().downcast::<T>()
-                {
-                    return t;
-                }
-                let t = Arc::new(build());
-                map.insert(key, t.clone());
-                t
-            }
-            _ => {
-                let t = Arc::new(build());
-                let mut map: FxHashMap<std::any::TypeId, Arc<dyn Any + Send + Sync>> =
-                    FxHashMap::default();
-                map.insert(key, t.clone());
-                *guard = Some((self.content_generation, map));
-                t
-            }
+        let cache = guard.get_or_insert_with(|| DerivedCache {
+            generation: self.content_generation,
+            current: DerivedMap::default(),
+            prev: DerivedMap::default(),
+        });
+        if cache.generation != self.content_generation {
+            cache.prev = std::mem::take(&mut cache.current);
+            cache.generation = self.content_generation;
         }
+        if let Some(v) = cache.current.get(&key)
+            && let Ok(t) = v.clone().downcast::<T>()
+        {
+            return t;
+        }
+        let previous = cache.prev.remove(&key).and_then(|v| v.downcast::<T>().ok());
+        let t = Arc::new(build(previous));
+        cache.current.insert(key, t.clone());
+        t
     }
 
     /// Per-column memory accounting for the perf panel / `fmf stats`.
