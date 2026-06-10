@@ -246,4 +246,150 @@ mod tests {
         truncated.truncate(truncated.len() - 3);
         assert!(VolumeIndex::read_snapshot(&mut truncated.as_slice()).is_err());
     }
+
+    /// Checksum-valid stream built from raw section bytes, so structural
+    /// validation (not the digest) is what must reject it.
+    fn craft_stream(count: u64, sections: &[&[u8]]) -> Vec<u8> {
+        let mut h = xxhash_rust::xxh64::Xxh64::new(0);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(SNAPSHOT_MAGIC);
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&2i64.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        h.update(&buf);
+        for s in sections {
+            write_vec(&mut buf, &mut h, s).unwrap();
+        }
+        let digest = h.digest().to_le_bytes();
+        buf.extend_from_slice(&digest);
+        buf
+    }
+
+    /// Section byte sizes for a structurally valid count=1 snapshot, in
+    /// read order: pools ×2, name_off, name_len, parent, size, mtime, frn,
+    /// flag, perm ×3.
+    fn valid_sections() -> Vec<Vec<u8>> {
+        vec![
+            b"a".to_vec(), // name_pool
+            b"a".to_vec(), // lower_pool
+            vec![0u8; 4],  // name_off (1 × u32)
+            vec![0u8; 2],  // name_len (1 × u16)
+            vec![0u8; 4],  // parent
+            vec![0u8; 8],  // size
+            vec![0u8; 8],  // mtime
+            vec![0u8; 8],  // frn
+            vec![0u8; 1],  // flag
+            vec![0u8; 4],  // perm_name
+            vec![0u8; 4],  // perm_size
+            vec![0u8; 4],  // perm_mtime
+        ]
+    }
+
+    /// `unwrap_err` needs `Debug` on the Ok side; VolumeIndex has none.
+    fn expect_load_err(buf: &[u8]) -> std::io::Error {
+        match VolumeIndex::read_snapshot(&mut &*buf) {
+            Ok(_) => panic!("corrupted snapshot must not load"),
+            Err(e) => e,
+        }
+    }
+
+    fn read_crafted(sections: Vec<Vec<u8>>) -> std::io::Error {
+        let refs: Vec<&[u8]> = sections.iter().map(Vec::as_slice).collect();
+        expect_load_err(&craft_stream(1, &refs))
+    }
+
+    #[test]
+    fn snapshot_wrong_magic_is_rejected() {
+        let idx = build_sample();
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 1, 1).unwrap();
+        buf[..8].copy_from_slice(b"FMFIDX01"); // previous format version
+        let err = expect_load_err(&buf);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("magic"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_crafted_stream_sanity_loads() {
+        // Control: the crafted-stream helper itself round-trips, so the
+        // corruption tests below fail for the corruption, not the harness.
+        let refs: Vec<Vec<u8>> = valid_sections();
+        let refs: Vec<&[u8]> = refs.iter().map(Vec::as_slice).collect();
+        let buf = craft_stream(1, &refs);
+        let (idx, journal_id, next_usn) = VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+        assert_eq!((journal_id, next_usn), (1, 2));
+        assert_eq!(idx.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_column_count_mismatch_is_rejected_not_panic() {
+        // name_off carries 2 entries while the header says count=1.
+        let mut sections = valid_sections();
+        sections[2] = vec![0u8; 8];
+        let err = read_crafted(sections);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("column length"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_misaligned_section_is_rejected_not_panic() {
+        // 7 bytes cannot be a u32 column.
+        let mut sections = valid_sections();
+        sections[2] = vec![0u8; 7];
+        let err = read_crafted(sections);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("section size"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_pool_length_mismatch_is_rejected() {
+        // name_pool and lower_pool must be byte-for-byte the same length.
+        let mut sections = valid_sections();
+        sections[0] = b"ab".to_vec();
+        let err = read_crafted(sections);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("column length"), "{err}");
+    }
+
+    #[test]
+    fn truncated_snapshot_errors_at_every_cut_point() {
+        let mut idx = build_sample();
+        idx.delete(60); // include a tombstone for variety
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 1, 1).unwrap();
+        assert!(VolumeIndex::read_snapshot(&mut buf.as_slice()).is_ok());
+        for cut in 0..buf.len() {
+            assert!(
+                VolumeIndex::read_snapshot(&mut &buf[..cut]).is_err(),
+                "cut at {cut} must error, not panic or succeed"
+            );
+        }
+    }
+
+    #[test]
+    fn save_to_leaves_no_tmp_file_and_overwrites() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fmf-core-snap-test-{}-{unique}",
+            std::process::id()
+        ));
+        let target = dir.join("vol_c.fmfidx");
+        let idx = build_sample();
+        idx.save_to(&target, 7, 8).unwrap();
+        idx.save_to(&target, 9, 10).unwrap(); // overwrite an existing target
+
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["vol_c.fmfidx"], "no .tmp or stray files");
+
+        let (loaded, journal_id, next_usn) = VolumeIndex::load_from(&target).unwrap();
+        assert_eq!((journal_id, next_usn), (9, 10));
+        assert_eq!(loaded.len(), idx.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

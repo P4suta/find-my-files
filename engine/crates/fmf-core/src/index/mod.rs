@@ -18,7 +18,7 @@ mod core;
 mod mutate;
 mod snapshot;
 #[cfg(test)]
-mod testutil;
+pub(crate) mod testutil;
 
 pub use self::builder::VolumeIndexBuilder;
 pub use self::core::VolumeIndex;

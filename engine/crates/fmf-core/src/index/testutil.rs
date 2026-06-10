@@ -1,6 +1,6 @@
 use super::{RawEntry, VolumeIndex, VolumeIndexBuilder};
 
-pub(super) fn raw<'a>(
+pub(crate) fn raw<'a>(
     record: u64,
     parent: u64,
     name: &'a [u16],
@@ -22,12 +22,12 @@ pub(super) fn raw<'a>(
     }
 }
 
-pub(super) fn u16s(s: &str) -> Vec<u16> {
+pub(crate) fn u16s(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
 /// C:\ ├─ docs\ ├─ note.txt   docs comes *after* its child in scan order.
-pub(super) fn build_sample() -> VolumeIndex {
+pub(crate) fn build_sample() -> VolumeIndex {
     let mut b = VolumeIndexBuilder::new("C:", 5);
     let note = u16s("Note.TXT");
     let docs = u16s("docs");
@@ -38,7 +38,7 @@ pub(super) fn build_sample() -> VolumeIndex {
     b.finish()
 }
 
-pub(super) fn raw_attr<'a>(
+pub(crate) fn raw_attr<'a>(
     record: u64,
     parent: u64,
     name: &'a [u16],
