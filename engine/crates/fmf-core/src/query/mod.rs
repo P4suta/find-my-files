@@ -11,14 +11,17 @@ mod ast;
 mod compile;
 mod dates;
 mod exec;
+mod matchers;
+mod memo;
+mod sweep;
 
 pub use ast::{Ast, ParseError, Term, parse};
 pub use compile::{CaseMode, CompileError, CompiledQuery, compile};
 #[cfg(windows)]
 pub use dates::WindowsLocalResolver;
 pub use dates::{DateResolver, UtcResolver};
-pub(crate) use exec::prewarm;
 pub use exec::{SearchMetrics, SearchResult, search};
+pub(crate) use memo::prewarm;
 
 use crate::index::SortKey;
 
