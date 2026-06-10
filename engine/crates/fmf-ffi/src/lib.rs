@@ -31,6 +31,9 @@ pub const FMF_E_IO: i32 = 6;
 pub const FMF_E_PANIC: i32 = 99;
 
 #[cfg(test)]
+mod contract_tests;
+
+#[cfg(test)]
 mod export_pins {
     //! Every extern "C" function pinned by name and signature — a deleted or
     //! re-typed export fails this build before the C# side can crash at runtime.
