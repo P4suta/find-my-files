@@ -296,3 +296,63 @@ impl StatFetcher for VolumeStatFetcher {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Live smoke for the OS-facing session: open the C: journal, query it,
+    /// and complete one blocking read. Run from an elevated shell:
+    /// FMF_ADMIN_TESTS=1 cargo test -p fmf-core -- --ignored usn_journal
+    #[test]
+    #[ignore]
+    fn usn_journal_live_open_query_and_one_read() {
+        if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
+            eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
+            return;
+        }
+        let mut journal = UsnJournal::open("C:", None).expect("open C: journal (elevated?)");
+        assert_ne!(journal.journal_id, 0);
+
+        let data = journal.query().expect("FSCTL_QUERY_USN_JOURNAL");
+        assert_eq!(data.UsnJournalID, journal.journal_id);
+        assert!(journal.checkpoint_valid(data.UsnJournalID, data.FirstUsn));
+        assert!(!journal.checkpoint_valid(data.UsnJournalID.wrapping_add(1), data.FirstUsn));
+
+        // Rewind to the oldest retained USN so the blocking read returns
+        // existing history immediately instead of waiting for new activity.
+        let first_usn = data.FirstUsn;
+        journal.next_usn = first_usn;
+
+        // read_blocking has no timeout by design; run it on a helper thread
+        // and bound the wait here so a regression hangs the test, not the
+        // suite. The tickle file (temp dir is on C: on a stock setup) covers
+        // the freshly-created-journal case where no history exists yet.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let outcome = journal.read_blocking(&mut buf);
+            let _ = tx.send((outcome, journal.next_usn));
+        });
+        let tickle = std::env::temp_dir().join("fmf-usn-smoke.tmp");
+        let _ = std::fs::write(&tickle, b"tick");
+        let _ = std::fs::remove_file(&tickle);
+
+        let (outcome, advanced_usn) = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("read_blocking did not return within 30s");
+        reader.join().unwrap();
+
+        match outcome.expect("FSCTL_READ_USN_JOURNAL") {
+            ReadOutcome::Records { records, truncated } => {
+                assert!(!truncated, "live FSCTL buffer flagged as truncated");
+                assert!(!records.is_empty(), "blocking read returned no records");
+                assert!(
+                    advanced_usn > first_usn,
+                    "next_usn must advance past the batch"
+                );
+            }
+            ReadOutcome::Gone(gone) => panic!("journal gone during smoke: {gone:?}"),
+        }
+    }
+}

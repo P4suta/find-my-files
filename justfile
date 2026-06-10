@@ -16,6 +16,11 @@ build:
 test:
     cargo test --workspace
 
+# Elevation-gated #[ignore] tests (real-volume MFT/USN) — run from an elevated terminal
+[working-directory: 'engine']
+test-admin:
+    FMF_ADMIN_TESTS=1 cargo test --workspace -- --ignored
+
 # C# unit tests for the app (no elevation; never rebuilds the Rust engine)
 test-app:
     dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true

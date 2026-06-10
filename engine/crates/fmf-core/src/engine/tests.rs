@@ -101,3 +101,89 @@ fn status_reports_ready_volumes() {
             .all(|(_, p, n)| *p == VolumePhase::Ready && *n > 0)
     );
 }
+
+/// Real-volume E2E: index_start → VolumeReady → query → snapshot save on
+/// shutdown → load_from restores the same entry count. Run from an elevated
+/// shell: FMF_ADMIN_TESTS=1 cargo test -p fmf-core -- --ignored engine_e2e
+#[test]
+#[ignore]
+fn engine_e2e_scan_query_snapshot_restore() {
+    if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
+        eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
+        return;
+    }
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    // Fresh per-run index dir → guaranteed full-scan path (no stale snapshot).
+    let dir = std::env::temp_dir().join(format!("fmf-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let e = Engine::new(EngineConfig {
+        index_dir: dir.clone(),
+    });
+    let (tx, rx) = mpsc::channel::<EngineEvent>();
+    e.set_event_sink(Some(Arc::new(move |ev| {
+        let _ = tx.send(ev.clone());
+    })));
+    e.index_start(&["C:".to_string()]);
+
+    let ready_entries = loop {
+        match rx.recv_timeout(Duration::from_secs(600)) {
+            Ok(EngineEvent::VolumeReady { entries, .. }) => break entries,
+            Ok(EngineEvent::VolumeFailed { message, .. }) => panic!("volume failed: {message}"),
+            Ok(_) => continue, // Progress / IndexChanged / EngineError
+            Err(err) => panic!("no VolumeReady within timeout: {err}"),
+        }
+    };
+    assert!(
+        ready_entries > 10_000,
+        "suspiciously small C: index: {ready_entries}"
+    );
+
+    let (r, _trace) = e
+        .query("windows", &QueryOptions::default())
+        .expect("query against the live index");
+    assert!(!r.is_empty(), "'windows' must match something on C:");
+    let rows = r.page(0, 10).unwrap();
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter().all(|row| row.parent_path.starts_with(br"C:\")),
+        "parent paths must resolve to the scanned volume"
+    );
+
+    // The tailing thread sits in a blocking journal read; generate volume
+    // activity until shutdown's join completes so the test never hangs on an
+    // otherwise idle machine (temp_dir lives on C: on a stock setup).
+    let stop_tickle = Arc::new(AtomicBool::new(false));
+    let tickle_flag = stop_tickle.clone();
+    let tickle = std::thread::spawn(move || {
+        let p = std::env::temp_dir().join("fmf-e2e-tickle.tmp");
+        while !tickle_flag.load(Ordering::Relaxed) {
+            let _ = std::fs::write(&p, b"tick");
+            let _ = std::fs::remove_file(&p);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+    e.shutdown(); // joins the volume thread → snapshot saved with checkpoint
+    stop_tickle.store(true, Ordering::Relaxed);
+    tickle.join().unwrap();
+
+    // After join the in-memory state is frozen; the saved snapshot must
+    // restore to exactly the entry count the engine last reported.
+    let final_entries = e
+        .status()
+        .iter()
+        .find(|(v, _, _)| v == "C:")
+        .map(|(_, _, n)| *n)
+        .expect("C: slot still registered");
+    let snapshot = dir.join("c.fmfidx");
+    let (restored, journal_id, next_usn) =
+        VolumeIndex::load_from(&snapshot).expect("snapshot written on shutdown and loadable");
+    assert_ne!(journal_id, 0, "checkpoint must carry the journal id");
+    assert!(next_usn > 0, "checkpoint must carry a USN cursor");
+    assert_eq!(restored.live_len() as u64, final_entries);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
