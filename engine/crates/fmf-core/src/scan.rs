@@ -356,7 +356,9 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
         );
     }
 
-    let idx = b.finish();
+    let (idx, finish) = b.finish_timed();
+    stats.elapsed_build_ms = finish.build_ms;
+    stats.elapsed_sort_ms = finish.sort_ms;
     stats.elapsed_total_ms = t0.elapsed().as_millis() as u64;
     stats.peak_working_set_bytes = peak_working_set();
     Ok((idx, stats))

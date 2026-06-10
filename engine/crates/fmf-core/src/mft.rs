@@ -150,6 +150,10 @@ pub struct ScanStats {
     pub volume: String,
     pub elapsed_total_ms: u64,
     pub elapsed_mft_load_ms: u64,
+    /// Builder finish: parent resolution + EXCLUDED propagation.
+    pub elapsed_build_ms: u64,
+    /// Builder finish: the three permutation sorts.
+    pub elapsed_sort_ms: u64,
     pub files: u64,
     pub dirs: u64,
     pub skipped_no_name: u64,

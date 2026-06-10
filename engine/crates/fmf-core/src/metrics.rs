@@ -31,10 +31,14 @@ pub struct QueryTrace {
     pub volumes: u32,
 }
 
-/// One initial-scan (or rescan) of a volume.
+/// One index-established event of a volume: an initial scan/rescan ("scan")
+/// or a snapshot restore ("snapshot"). Sharing one timeline keeps the ≤2s
+/// restore gate visible next to full-scan costs.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ScanTrace {
     pub volume: String,
+    /// "scan" | "snapshot".
+    pub source: String,
     pub read_bytes: u64,
     pub read_ms: u64,
     pub mb_per_s: f64,

@@ -10,6 +10,15 @@ pub struct VolumeIndexBuilder {
     parent_records: Vec<u64>,
 }
 
+/// Stage timings of [`VolumeIndexBuilder::finish_timed`], in milliseconds.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FinishTimings {
+    /// Parent resolution + EXCLUDED propagation.
+    pub build_ms: u64,
+    /// The three permutation sorts.
+    pub sort_ms: u64,
+}
+
 impl VolumeIndexBuilder {
     /// `volume_label` is the root display name, e.g. `C:`.
     /// `root_record` is the MFT record number of the root directory (5 on NTFS).
@@ -70,8 +79,15 @@ impl VolumeIndexBuilder {
         self.idx.is_empty()
     }
 
-    pub fn finish(mut self) -> VolumeIndex {
+    pub fn finish(self) -> VolumeIndex {
+        self.finish_timed().0
+    }
+
+    pub fn finish_timed(mut self) -> (VolumeIndex, FinishTimings) {
         use rayon::prelude::*;
+
+        let mut timings = FinishTimings::default();
+        let t = std::time::Instant::now();
 
         // Pass 2: resolve parents now that every record is in the map.
         for i in 1..self.idx.len() {
@@ -110,6 +126,9 @@ impl VolumeIndexBuilder {
             }
         }
 
+        timings.build_ms = t.elapsed().as_millis() as u64;
+        let t = std::time::Instant::now();
+
         let ids: Vec<EntryId> = (0..self.idx.len() as u32).collect();
         let idx = &self.idx;
         let mut perm_name = ids.clone();
@@ -121,7 +140,8 @@ impl VolumeIndexBuilder {
         self.idx.perm_name = perm_name;
         self.idx.perm_size = perm_size;
         self.idx.perm_mtime = perm_mtime;
-        self.idx
+        timings.sort_ms = t.elapsed().as_millis() as u64;
+        (self.idx, timings)
     }
 }
 

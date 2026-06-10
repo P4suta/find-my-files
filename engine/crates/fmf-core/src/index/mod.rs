@@ -20,7 +20,7 @@ mod snapshot;
 #[cfg(test)]
 pub(crate) mod testutil;
 
-pub use self::builder::VolumeIndexBuilder;
+pub use self::builder::{FinishTimings, VolumeIndexBuilder};
 pub use self::core::VolumeIndex;
 
 pub type EntryId = u32;

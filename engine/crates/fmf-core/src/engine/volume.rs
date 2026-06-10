@@ -129,6 +129,7 @@ impl Engine {
                 }
             };
 
+            let load_stage = std::time::Instant::now();
             let loaded = match VolumeIndex::load_from(&snapshot_path) {
                 Ok(t) => Some(t),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None, // first run
@@ -150,11 +151,26 @@ impl Engine {
                 }
                 Err(_) => false,
             });
+            let load_ms = load_stage.elapsed().as_millis() as u64;
 
             let idx = match loaded {
                 Some((idx, _journal_id, next_usn)) => {
                     journal.next_usn = next_usn;
-                    tracing::info!(volume = %label, entries = idx.len(), "snapshot restored");
+                    tracing::info!(volume = %label, entries = idx.len(), ms = load_ms, "snapshot restored");
+                    let file_bytes = std::fs::metadata(&snapshot_path).map_or(0, |m| m.len());
+                    self.metrics.record_scan(ScanTrace {
+                        volume: label.clone(),
+                        source: "snapshot".to_string(),
+                        read_bytes: file_bytes,
+                        read_ms: 0,
+                        mb_per_s: 0.0,
+                        parse_ms: 0,
+                        build_ms: 0,
+                        sort_ms: 0,
+                        total_ms: load_ms,
+                        entries: idx.len() as u64,
+                        peak_ws_bytes: crate::mft::peak_working_set(),
+                    });
                     idx
                 }
                 None => match crate::mft::scan_volume(&label) {
@@ -176,6 +192,7 @@ impl Engine {
                         );
                         self.metrics.record_scan(ScanTrace {
                             volume: label.clone(),
+                            source: "scan".to_string(),
                             read_bytes: stats.mft_bytes,
                             read_ms: stats.elapsed_mft_load_ms,
                             mb_per_s: if stats.elapsed_mft_load_ms > 0 {
@@ -187,9 +204,11 @@ impl Engine {
                             },
                             parse_ms: stats
                                 .elapsed_total_ms
-                                .saturating_sub(stats.elapsed_mft_load_ms),
-                            build_ms: 0,
-                            sort_ms: 0,
+                                .saturating_sub(stats.elapsed_mft_load_ms)
+                                .saturating_sub(stats.elapsed_build_ms)
+                                .saturating_sub(stats.elapsed_sort_ms),
+                            build_ms: stats.elapsed_build_ms,
+                            sort_ms: stats.elapsed_sort_ms,
                             total_ms: stats.elapsed_total_ms,
                             entries: idx.len() as u64,
                             peak_ws_bytes: stats.peak_working_set_bytes,

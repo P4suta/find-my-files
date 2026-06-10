@@ -47,6 +47,17 @@ enum Command {
     /// Index a volume, then tail its USN journal and apply changes live,
     /// printing one line per applied batch (Ctrl+C to stop).
     Watch { drive: String },
+    /// Gate criterion micro-bench results: scan change reports written by
+    /// `cargo bench -- --baseline <name>` and exit 1 past the threshold
+    /// (criterion itself never sets an exit code on regressions).
+    CriterionGate {
+        /// Criterion output directory.
+        #[arg(long, default_value = "target/criterion")]
+        dir: std::path::PathBuf,
+        /// Relative median regression threshold (0.10 = +10%).
+        #[arg(long, default_value_t = 0.10)]
+        threshold: f64,
+    },
 }
 
 #[cfg(windows)]
@@ -79,6 +90,7 @@ fn main() {
         Command::Stats { drive } => stats(&drive),
         Command::Diag => diag(),
         Command::Watch { drive } => watch(&drive),
+        Command::CriterionGate { dir, threshold } => criterion_gate(&dir, threshold),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
@@ -130,13 +142,19 @@ fn build_index(drive: &str) -> Result<VolumeIndex, Box<dyn std::error::Error>> {
         0
     };
     eprintln!(
-        "indexed {} entries ({} files, {} dirs, {} skipped) in {} ms ($MFT load {} ms)",
+        "indexed {} entries ({} files, {} dirs, {} skipped) in {} ms ($MFT load {} ms, parse {} ms, build {} ms, sort {} ms)",
         idx.len(),
         s.files,
         s.dirs,
         s.skipped_no_name,
         s.elapsed_total_ms,
-        s.elapsed_mft_load_ms
+        s.elapsed_mft_load_ms,
+        s.elapsed_total_ms
+            .saturating_sub(s.elapsed_mft_load_ms)
+            .saturating_sub(s.elapsed_build_ms)
+            .saturating_sub(s.elapsed_sort_ms),
+        s.elapsed_build_ms,
+        s.elapsed_sort_ms
     );
     eprintln!(
         "peak working set {:.1} MiB (≈{} B/entry incl. $MFT buffer)",
@@ -279,6 +297,22 @@ struct QueryBench {
     p50_memo_us: u64,
     p50_scan_us: u64,
     p50_materialize_us: u64,
+    /// First iteration of the run — the only one that pays cold derived-cache
+    /// builds (memo/offset-table). Single sample: recorded, never gated.
+    #[serde(default)]
+    cold_us: u64,
+}
+
+/// Snapshot save/restore timings (page-cache warm: the reproducible
+/// CPU-bound part of the ≤2s restore gate; cold I/O is not benchable
+/// without admin cache-purge APIs and is too noisy anyway).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RestoreBench {
+    file_bytes: u64,
+    entries: u64,
+    save_ms: u64,
+    p50_ms: u64,
+    min_ms: u64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -287,6 +321,9 @@ struct BenchReport {
     entries: u64,
     peak_working_set_bytes: u64,
     queries: Vec<QueryBench>,
+    /// Absent in baselines recorded before the restore scenario existed.
+    #[serde(default)]
+    restore: Option<RestoreBench>,
 }
 
 fn median(mut v: Vec<u64>) -> u64 {
@@ -307,11 +344,12 @@ fn bench(
         entries: idx.len() as u64,
         peak_working_set_bytes: 0,
         queries: Vec::new(),
+        restore: None,
     };
 
     println!(
-        "{:<28} {:>10} {:>9} {:>9} {:>9} | {:>8} {:>8} {:>8}",
-        "query", "hits", "p50_us", "p99_us", "max_us", "memo", "scan", "mat"
+        "{:<28} {:>10} {:>9} {:>9} {:>9} {:>9} | {:>8} {:>8} {:>8}",
+        "query", "hits", "p50_us", "p99_us", "max_us", "cold_us", "memo", "scan", "mat"
     );
     for q in BENCH_QUERIES {
         const RUNS: usize = 50;
@@ -327,6 +365,7 @@ fn bench(
             mats.push(m.materialize_us);
             hits = r.ids.len() as u64;
         }
+        let cold_us = totals[0];
         totals.sort_unstable();
         let qb = QueryBench {
             query: q.to_string(),
@@ -337,14 +376,16 @@ fn bench(
             p50_memo_us: median(memos),
             p50_scan_us: median(scans),
             p50_materialize_us: median(mats),
+            cold_us,
         };
         println!(
-            "{:<28} {:>10} {:>9} {:>9} {:>9} | {:>8} {:>8} {:>8}",
+            "{:<28} {:>10} {:>9} {:>9} {:>9} {:>9} | {:>8} {:>8} {:>8}",
             qb.query,
             qb.hits,
             qb.p50_us,
             qb.p99_us,
             qb.max_us,
+            qb.cold_us,
             qb.p50_memo_us,
             qb.p50_scan_us,
             qb.p50_materialize_us
@@ -357,6 +398,18 @@ fn bench(
         report.peak_working_set_bytes as f64 / (1024.0 * 1024.0)
     );
 
+    report.restore = Some(bench_restore(&idx)?);
+    if let Some(r) = &report.restore {
+        println!(
+            "snapshot save {} ms; restore p50 {} ms / min {} ms ({:.1} MiB, {} entries)",
+            r.save_ms,
+            r.p50_ms,
+            r.min_ms,
+            r.file_bytes as f64 / (1024.0 * 1024.0),
+            r.entries
+        );
+    }
+
     if let Some(path) = json {
         std::fs::write(path, serde_json::to_string_pretty(&report)?)?;
         eprintln!("report written to {}", path.display());
@@ -364,14 +417,24 @@ fn bench(
 
     if let Some(path) = baseline {
         let old: BenchReport = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        // A live volume drifts; past ±10% the 20% gate compares apples to
+        // oranges — tell the human to re-record rather than chase ghosts.
+        if report.entries.abs_diff(old.entries) > old.entries / 10 {
+            eprintln!(
+                "WARNING entries drifted {}→{} (>10%) since the baseline was recorded — \
+                 regression verdicts are unreliable; consider `just bench-baseline`",
+                old.entries, report.entries
+            );
+        }
         let mut regressed = false;
+        // Flag >20% regressions above a noise floor (`floor`, in the value's
+        // own unit: 200µs for queries, 50ms for restore).
+        let gate = |new: u64, old: u64, floor: u64| new > old.max(floor) + old.max(floor) / 5;
         for qb in &report.queries {
             let Some(prev) = old.queries.iter().find(|p| p.query == qb.query) else {
                 continue;
             };
-            // Ignore sub-200µs noise; flag >20% regressions.
-            let gate = |new: u64, old: u64| new > old.max(200) + old.max(200) / 5;
-            if gate(qb.p50_us, prev.p50_us) || gate(qb.p99_us, prev.p99_us) {
+            if gate(qb.p50_us, prev.p50_us, 200) || gate(qb.p99_us, prev.p99_us, 200) {
                 eprintln!(
                     "REGRESSION {:<24} p50 {}→{}µs p99 {}→{}µs",
                     qb.query, prev.p50_us, qb.p50_us, prev.p99_us, qb.p99_us
@@ -379,10 +442,110 @@ fn bench(
                 regressed = true;
             }
         }
+        if let (Some(new), Some(prev)) = (&report.restore, &old.restore)
+            && gate(new.p50_ms, prev.p50_ms, 50)
+        {
+            eprintln!(
+                "REGRESSION snapshot restore p50 {}→{}ms",
+                prev.p50_ms, new.p50_ms
+            );
+            regressed = true;
+        }
         if regressed {
             return Err("benchmark regression vs baseline".into());
         }
         eprintln!("no regression vs {}", path.display());
+    }
+    Ok(())
+}
+
+/// Save the freshly built index to a temp snapshot and measure restores.
+/// Page-cache-warm by design: reproducible CPU-bound numbers for the
+/// restore→ready gate's deserialization + frn_map rebuild share.
+fn bench_restore(idx: &VolumeIndex) -> Result<RestoreBench, Box<dyn std::error::Error>> {
+    const RUNS: usize = 10;
+    let temp = std::env::temp_dir().join(format!("fmf-bench-{}.fmfidx", std::process::id()));
+    let t = Instant::now();
+    idx.save_to(&temp, 0, 0)?;
+    let save_ms = t.elapsed().as_millis() as u64;
+    let file_bytes = std::fs::metadata(&temp)?.len();
+
+    let mut runs = Vec::with_capacity(RUNS);
+    let mut entries = 0u64;
+    for _ in 0..RUNS {
+        let t = Instant::now();
+        let (loaded, _, _) = VolumeIndex::load_from(&temp)?;
+        runs.push(t.elapsed().as_millis() as u64);
+        entries = loaded.len() as u64;
+    }
+    let _ = std::fs::remove_file(&temp);
+    runs.sort_unstable();
+    Ok(RestoreBench {
+        file_bytes,
+        entries,
+        save_ms,
+        p50_ms: runs[RUNS / 2],
+        min_ms: runs[0],
+    })
+}
+
+/// Collect `<bench>/change/estimates.json` paths under criterion's output dir.
+fn collect_change_reports(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_change_reports(&p, out);
+        } else if p.file_name().is_some_and(|f| f == "estimates.json")
+            && p.parent()
+                .and_then(|d| d.file_name())
+                .is_some_and(|d| d == "change")
+        {
+            out.push(p);
+        }
+    }
+}
+
+fn criterion_gate(dir: &std::path::Path, threshold: f64) -> Result<(), Box<dyn std::error::Error>> {
+    let mut reports = Vec::new();
+    collect_change_reports(dir, &mut reports);
+    if reports.is_empty() {
+        return Err(format!(
+            "no criterion change reports under {} — run `just bench-micro-baseline` first, \
+             then `cargo bench -p fmf-core -- --baseline committed`",
+            dir.display()
+        )
+        .into());
+    }
+
+    let mut regressed = false;
+    let mut checked = 0u32;
+    for path in &reports {
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        let Some(median) = v["median"]["point_estimate"].as_f64() else {
+            continue;
+        };
+        checked += 1;
+        // Bench id = the path between the criterion dir and /change/.
+        let name = path
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.strip_prefix(dir).ok())
+            .map(|p| p.display().to_string().replace('\\', "/"))
+            .unwrap_or_else(|| path.display().to_string());
+        if median > threshold {
+            eprintln!("REGRESSION {name} median {:+.1}%", median * 100.0);
+            regressed = true;
+        }
+    }
+    println!(
+        "criterion-gate: {checked} benches compared, threshold {:+.0}%",
+        threshold * 100.0
+    );
+    if regressed {
+        return Err("micro-benchmark regression vs criterion baseline".into());
     }
     Ok(())
 }
