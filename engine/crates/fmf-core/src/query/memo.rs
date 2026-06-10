@@ -242,12 +242,37 @@ impl DirPaths {
     }
 }
 
-/// Build the generation-cached query accelerators (dir-path memo + pool
-/// offset table) ahead of the first query — the engine calls this once a
-/// volume turns Ready so no keystroke ever pays the cold cost.
-pub(crate) fn prewarm(idx: &VolumeIndex) {
-    let _ = idx.cached_derived(|| DirPaths::build(idx));
+/// Build the pool offset table ahead of the first query — the engine calls
+/// this once a volume turns Ready so no keystroke pays the cold cost.
+///
+/// The dir-path memo is *not* prewarmed: most sessions never issue a path
+/// query, and its footprint (full paths of every directory, ×2 pools) is
+/// real RAM. The first keystroke containing `\` or `path:` builds it once;
+/// after a USN batch it was already rebuilt lazily, so nothing regresses.
+pub fn prewarm(idx: &VolumeIndex) {
     let _: std::sync::Arc<OffsetTable> = idx.cached_derived(|| OffsetTable::build(idx));
+}
+
+/// Bytes currently held by this index's derived caches (offset table +
+/// dir-path memo), for the RAM accounting in `IndexStats`. Probes only —
+/// never builds.
+pub fn derived_cache_bytes(idx: &VolumeIndex) -> u64 {
+    let mut total = 0u64;
+    if let Some(t) = idx.derived_probe::<OffsetTable>() {
+        total += (t.offs.capacity() * 4 + t.ids.capacity() * 4) as u64;
+    }
+    if let Some(d) = idx.derived_probe::<DirPaths>() {
+        let slots =
+            (d.lower.capacity() + d.orig.capacity()) * std::mem::size_of::<Option<Box<[u8]>>>();
+        let boxed: usize = d
+            .lower
+            .iter()
+            .chain(d.orig.iter())
+            .filter_map(|p| p.as_ref().map(|b| b.len()))
+            .sum();
+        total += (slots + boxed) as u64;
+    }
+    total
 }
 
 #[cfg(test)]
@@ -514,11 +539,19 @@ mod tests {
     }
 
     #[test]
-    fn prewarm_populates_both_derived_caches() {
+    fn prewarm_builds_offset_table_but_leaves_dir_paths_lazy() {
         let idx = build_sample();
         prewarm(&idx);
-        let _: Arc<DirPaths> = idx.cached_derived(|| unreachable!("DirPaths not prewarmed"));
         let _: Arc<OffsetTable> = idx.cached_derived(|| unreachable!("OffsetTable not prewarmed"));
+        // The dir-path memo only materializes on the first path query.
+        assert!(idx.derived_probe::<DirPaths>().is_none());
+        assert!(derived_cache_bytes(&idx) > 0, "offset table accounted");
+        let before = derived_cache_bytes(&idx);
+        let _ = idx.cached_derived(|| DirPaths::build(&idx));
+        assert!(
+            derived_cache_bytes(&idx) > before,
+            "dir-path memo joins the accounting once built"
+        );
     }
 
     #[test]

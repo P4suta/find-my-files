@@ -164,7 +164,13 @@ impl Engine {
         self.volumes
             .read()
             .iter()
-            .filter_map(|slot| slot.index.read().as_ref().map(|idx| idx.stats(&slot.label)))
+            .filter_map(|slot| {
+                slot.index.read().as_ref().map(|idx| {
+                    let mut s = idx.stats(&slot.label);
+                    s.add_derived_bytes(query::derived_cache_bytes(idx));
+                    s
+                })
+            })
             .collect()
     }
 

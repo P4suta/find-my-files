@@ -210,6 +210,24 @@ fn bench_post_usn(c: &mut Criterion) {
             BatchSize::PerIteration,
         )
     });
+    // First *path* query: pays the lazily built dir-path memo on top.
+    let path_ast = query::parse("path:windows report").unwrap();
+    let path_q = query::compile(&path_ast, opt.case, &UtcResolver).unwrap();
+    g.bench_function("first_query_path", |b| {
+        b.iter_batched(
+            || {
+                let mut i = idx.borrow_mut();
+                let len = i.len() as u32;
+                i.merge_new_into_permutations(len);
+            },
+            |()| {
+                let i = idx.borrow();
+                let (r, m) = query::search(&i, &path_q, &opt);
+                std::hint::black_box((r.ids.len(), m.memo_us))
+            },
+            BatchSize::PerIteration,
+        )
+    });
     g.finish();
 }
 

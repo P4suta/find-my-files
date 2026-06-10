@@ -549,7 +549,11 @@ fn criterion_gate(dir: &std::path::Path, threshold: f64) -> Result<(), Box<dyn s
 
 fn stats(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
     let idx = build_index(drive)?;
-    let s = idx.stats(drive);
+    // Mirror the engine's Ready state (offset table prewarmed) so the
+    // accounting reflects what the app actually holds.
+    query::prewarm(&idx);
+    let mut s = idx.stats(drive);
+    s.add_derived_bytes(query::derived_cache_bytes(&idx));
     println!("{}", serde_json::to_string_pretty(&s)?);
     Ok(())
 }

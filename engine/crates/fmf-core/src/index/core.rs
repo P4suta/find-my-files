@@ -162,6 +162,22 @@ impl VolumeIndex {
         self.with_derived(build)
     }
 
+    /// Read-only probe of the current generation's cached `T` — never
+    /// builds. For memory accounting (`IndexStats.derived_cache_bytes`).
+    pub(crate) fn derived_probe<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        let guard = self.derived_cache.lock();
+        let cache = guard.as_ref()?;
+        if cache.generation != self.content_generation {
+            return None;
+        }
+        cache
+            .current
+            .get(&std::any::TypeId::of::<T>())?
+            .clone()
+            .downcast::<T>()
+            .ok()
+    }
+
     fn with_derived<T, F>(&self, build: F) -> Arc<T>
     where
         T: Any + Send + Sync,

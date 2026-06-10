@@ -82,10 +82,27 @@ pub struct IndexStats {
     pub flag_bytes: u64,
     pub permutations_bytes: u64,
     pub frn_map_bytes: u64,
+    /// Generation-cached query accelerators (offset table, dir-path memo).
+    /// Part of the bytes/entry gate — they live in the engine process.
+    pub derived_cache_bytes: u64,
     pub total_bytes: u64,
     pub bytes_per_entry: f64,
     pub content_generation: u64,
     pub structural_generation: u64,
+}
+
+impl IndexStats {
+    /// Fold the derived-cache footprint in (the index module cannot compute
+    /// it itself — the cached types belong to the query layer).
+    pub fn add_derived_bytes(&mut self, bytes: u64) {
+        self.derived_cache_bytes = bytes;
+        self.total_bytes += bytes;
+        self.bytes_per_entry = if self.entries > 0 {
+            self.total_bytes as f64 / self.entries as f64
+        } else {
+            0.0
+        };
+    }
 }
 
 /// Log2-bucketed microsecond histogram: bucket i counts values in
