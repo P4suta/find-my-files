@@ -13,6 +13,11 @@ pre-commit:
 
 pre-push:
   jobs:
+    # Non-blocking reminder: the perf gates need an elevated shell, so they
+    # cannot run here — nudge instead of silently skipping them.
+    - name: perf-nudge
+      glob: "engine/crates/fmf-core/**"
+      run: echo "fmf-core changed — run 'just perf-gate' from an elevated shell before merging" && exit 0
     - name: clippy
       root: engine/
       run: cargo clippy --workspace --all-targets -- -D warnings

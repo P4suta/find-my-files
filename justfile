@@ -16,6 +16,11 @@ build:
 test:
     cargo test --workspace
 
+# Fast daily iteration: type-check without codegen (clippy runs on pre-push)
+[working-directory: 'engine']
+check:
+    cargo check --workspace --all-targets
+
 # Elevation-gated #[ignore] tests (real-volume MFT/USN) — run from an elevated terminal
 [working-directory: 'engine']
 test-admin:
@@ -65,6 +70,31 @@ bench-baseline drive="C:":
 [working-directory: 'engine']
 bench-micro *args="":
     cargo bench -p fmf-core {{args}}
+
+# Record the local criterion baseline — run at the start of an optimization
+# session. Lives in target/criterion (machine-local, gone on cargo clean).
+[working-directory: 'engine']
+bench-micro-baseline:
+    cargo bench -p fmf-core -- --save-baseline committed
+
+# Compare micro-benchmarks against the local baseline; fail on >10% median
+# regressions (criterion itself never sets an exit code)
+[working-directory: 'engine']
+bench-micro-check:
+    cargo bench -p fmf-core -- --baseline committed
+    cargo run --release -p fmf-cli -- criterion-gate
+
+# Full performance gate — run from an elevated terminal before merging
+# fmf-core changes (real-volume 20% gate + micro-bench 10% gate)
+perf-gate: bench-check bench-micro-check
+
+# Profile fmf-cli under samply (ETW — run from an elevated terminal), e.g.
+# `just profile bench C:` / `just profile index C: --stats`. Opens the
+# Firefox Profiler UI; machine code is identical to release.
+[working-directory: 'engine']
+profile *args="bench C:":
+    cargo build --profile profiling -p fmf-cli
+    samply record -- ./target/profiling/fmf-cli {{args}}
 
 # Per-column memory accounting for a real volume (requires elevated terminal)
 [working-directory: 'engine']

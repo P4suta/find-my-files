@@ -43,3 +43,9 @@ serde_json = "1"
 debug = "line-tables-only"
 lto = "thin"
 codegen-units = 1
+
+# Profiling builds (just profile): identical machine code to release — only
+# the debuginfo is upgraded to full so samply resolves inlined frames.
+[profile.profiling]
+inherits = "release"
+debug = true

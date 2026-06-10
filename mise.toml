@@ -4,3 +4,7 @@
 [tools]
 rust = "1.95"
 dotnet = "10"
+# ETW-based sampling profiler (just profile) — pairs with the elevated
+# terminals the engine already requires for real-volume work. cargo backend:
+# the GitHub release tags (samply-v*) don't resolve via ubi/github backends.
+"cargo:samply" = "0.13.1"
