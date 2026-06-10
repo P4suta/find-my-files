@@ -41,7 +41,14 @@ enum Command {
         baseline: Option<std::path::PathBuf>,
     },
     /// Index a volume and dump per-column memory accounting as JSON.
-    Stats { drive: String },
+    Stats {
+        drive: String,
+        /// Also estimate what a trigram index would cost on this volume's
+        /// real names — input to the n-gram go/no-go criteria in
+        /// docs/ARCHITECTURE.md (read-only, nothing is built).
+        #[arg(long)]
+        trigram_estimate: bool,
+    },
     /// Print versions, log locations and the in-process diagnostics ring.
     Diag,
     /// Index a volume, then tail its USN journal and apply changes live,
@@ -87,7 +94,10 @@ fn main() {
             json,
             baseline,
         } => bench(&drive, json.as_deref(), baseline.as_deref()),
-        Command::Stats { drive } => stats(&drive),
+        Command::Stats {
+            drive,
+            trigram_estimate,
+        } => stats(&drive, trigram_estimate),
         Command::Diag => diag(),
         Command::Watch { drive } => watch(&drive),
         Command::CriterionGate { dir, threshold } => criterion_gate(&dir, threshold),
@@ -547,7 +557,7 @@ fn criterion_gate(dir: &std::path::Path, threshold: f64) -> Result<(), Box<dyn s
     Ok(())
 }
 
-fn stats(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn stats(drive: &str, trigram_estimate: bool) -> Result<(), Box<dyn std::error::Error>> {
     let idx = build_index(drive)?;
     // Mirror the engine's Ready state (offset table prewarmed) so the
     // accounting reflects what the app actually holds.
@@ -555,7 +565,45 @@ fn stats(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut s = idx.stats(drive);
     s.add_derived_bytes(query::derived_cache_bytes(&idx));
     println!("{}", serde_json::to_string_pretty(&s)?);
+    if trigram_estimate {
+        print_trigram_estimate(&idx);
+    }
     Ok(())
+}
+
+/// Estimate a byte-trigram index over the live folded names: distinct
+/// trigrams (dictionary) + total postings (delta-varint assumed ~1.5B
+/// each). Feeds criterion (2) of the n-gram go/no-go in ARCHITECTURE.md.
+fn print_trigram_estimate(idx: &VolumeIndex) {
+    let mut distinct: std::collections::HashSet<[u8; 3]> = std::collections::HashSet::new();
+    let mut postings = 0u64;
+    let mut live = 0u64;
+    for id in 0..idx.len() as u32 {
+        if !idx.is_live(id) {
+            continue;
+        }
+        live += 1;
+        let name = idx.lower_name(id);
+        for w in name.windows(3) {
+            distinct.insert([w[0], w[1], w[2]]);
+            postings += 1;
+        }
+    }
+    let dict_bytes = distinct.len() as u64 * (3 + 4 + 4); // key + offset + len
+    let posting_bytes = postings * 3 / 2; // delta varint ≈ 1.5B/posting
+    let total = dict_bytes + posting_bytes;
+    let per_entry = if live > 0 {
+        total as f64 / live as f64
+    } else {
+        0.0
+    };
+    println!(
+        "trigram estimate: {} distinct, {} postings → ≈{:.1} MiB ({:.1} B/entry; go/no-go gate: ≤15 B/entry AND total bytes/entry ≤110)",
+        distinct.len(),
+        postings,
+        total as f64 / (1024.0 * 1024.0),
+        per_entry
+    );
 }
 
 fn diag() -> Result<(), Box<dyn std::error::Error>> {
