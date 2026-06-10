@@ -17,7 +17,6 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="32" />
@@ -48,27 +47,8 @@
             </ToggleButton>
         </Grid>
 
-        <!-- Notification stack: the visible end of every error path. -->
-        <ItemsControl
-            Grid.Row="1"
-            Margin="12,0,12,4"
-            AutomationProperties.AutomationId="NotifyBar"
-            ItemsSource="{x:Bind ViewModel.Notifications}">
-            <ItemsControl.ItemTemplate>
-                <DataTemplate x:DataType="svc:AppNotification">
-                    <InfoBar
-                        Title="{x:Bind Message}"
-                        Margin="0,0,0,4"
-                        Closed="Notification_Closed"
-                        IsOpen="True"
-                        Message="{x:Bind Detail}"
-                        Severity="{x:Bind local:MainPage.ToInfoSeverity(Severity)}" />
-                </DataTemplate>
-            </ItemsControl.ItemTemplate>
-        </ItemsControl>
-
         <!-- Column headers -->
-        <Grid Grid.Row="2" Margin="16,0,28,4">
+        <Grid Grid.Row="1" Margin="16,0,28,4">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="2*" />
                 <ColumnDefinition Width="3*" />
@@ -110,13 +90,17 @@
                 HorizontalContentAlignment="Left" />
         </Grid>
 
-        <!-- Results. ItemsPanel stays ItemsStackPanel (CLAUDE.md UI固定則). -->
+        <!-- Results. ItemsPanel stays ItemsStackPanel (CLAUDE.md UI固定則).
+             ItemsSource is bound OneTime by design: the VirtualResultList
+             instance lives as long as the page and new results arrive via a
+             seeded Reset — swapping the ItemsSource resets the ListView's
+             virtualization state and flickers. -->
         <ListView
             x:Name="ResultsList"
-            Grid.Row="3"
+            Grid.Row="2"
             AutomationProperties.AutomationId="ResultsList"
             DoubleTapped="ResultsList_DoubleTapped"
-            ItemsSource="{x:Bind ViewModel.ResultsSource, Mode=OneWay}"
+            ItemsSource="{x:Bind ViewModel.Results.ResultsSource}"
             KeyDown="ResultsList_KeyDown"
             SelectionMode="Extended"
             ShowsScrollingPlaceholders="True">
@@ -182,15 +166,39 @@
             </ListView.ContextFlyout>
         </ListView>
 
+        <!-- Notification stack: the visible end of every error path.
+             Overlays the results (same grid cell, top-aligned) so a
+             notification appearing or dissolving never resizes the list —
+             a resizing list reads as flicker. -->
+        <ItemsControl
+            Grid.Row="2"
+            Margin="12,0,12,0"
+            VerticalAlignment="Top"
+            Canvas.ZIndex="1"
+            AutomationProperties.AutomationId="NotifyBar"
+            ItemsSource="{x:Bind ViewModel.Notifications.Items}">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="svc:AppNotification">
+                    <InfoBar
+                        Title="{x:Bind Message}"
+                        Margin="0,0,0,4"
+                        Closed="Notification_Closed"
+                        IsOpen="True"
+                        Message="{x:Bind Detail}"
+                        Severity="{x:Bind local:MainPage.ToInfoSeverity(Severity)}" />
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
         <!-- Performance panel (F12). Rendering of the stage bar / sparkline
              happens in code-behind — it is diagnostic chrome, not app data. -->
         <Border
-            Grid.Row="4"
+            Grid.Row="3"
             Padding="16,8"
             AutomationProperties.AutomationId="PerfPanel"
             BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
             BorderThickness="0,1,0,0"
-            Visibility="{x:Bind BoolToVis(ViewModel.IsPerfPanelOpen), Mode=OneWay}">
+            Visibility="{x:Bind BoolToVis(ViewModel.Perf.IsOpen), Mode=OneWay}">
             <Grid ColumnSpacing="24">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
@@ -252,13 +260,13 @@
         </Border>
 
         <!-- Status bar -->
-        <Grid Grid.Row="5" Padding="16,4" BorderThickness="0,1,0,0"
+        <Grid Grid.Row="4" Padding="16,4" BorderThickness="0,1,0,0"
               BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
             <TextBlock
                 HorizontalAlignment="Left"
                 AutomationProperties.AutomationId="StatusCount"
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                Text="{x:Bind ViewModel.CountText, Mode=OneWay}" />
+                Text="{x:Bind ViewModel.Results.CountText, Mode=OneWay}" />
             <TextBlock
                 HorizontalAlignment="Right"
                 AutomationProperties.AutomationId="StatusState"

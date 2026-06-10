@@ -30,10 +30,15 @@ public sealed partial class ResultRow : ObservableObject
     public string FullPath { get; private set; } = string.Empty;
     public bool IsPlaceholder { get; private set; } = true;
 
+    /// <summary>Engine row identity — lets the view re-find a selected row
+    /// after a position-preserving requery (best effort).</summary>
+    public ulong EntryRef { get; private set; }
+
     public static ResultRow CreatePlaceholder(long index) => new() { Index = index };
 
     public void Fill(RowData data)
     {
+        EntryRef = data.EntryRef;
         FullPath = data.FullPath;
         IsPlaceholder = false;
         Name = data.Name;

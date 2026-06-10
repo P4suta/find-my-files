@@ -15,20 +15,21 @@ public sealed partial class MainPage : Page
 
     public MainPage()
     {
-        ViewModel = new MainViewModel(App.EngineClient, App.DispatcherQueue);
+        ViewModel = new MainViewModel(
+            App.EngineClient, new DispatcherQueueDispatcher(App.DispatcherQueue));
         InitializeComponent();
         _statsTimer = App.DispatcherQueue.CreateTimer();
         _statsTimer.Interval = TimeSpan.FromSeconds(1);
-        _statsTimer.Tick += (_, _) => ViewModel.RefreshStatsAsync().Forget("perf.stats");
-        ViewModel.PerfDataChanged += RenderPerf;
-        ViewModel.PropertyChanged += (_, e) =>
+        _statsTimer.Tick += (_, _) => ViewModel.Perf.RefreshStatsAsync().Forget("perf.stats");
+        ViewModel.Perf.PerfDataChanged += RenderPerf;
+        ViewModel.Perf.PropertyChanged += (_, e) =>
         {
-            if (e.PropertyName == nameof(ViewModel.IsPerfPanelOpen))
+            if (e.PropertyName == nameof(ViewModel.Perf.IsOpen))
             {
-                if (ViewModel.IsPerfPanelOpen)
+                if (ViewModel.Perf.IsOpen)
                 {
                     _statsTimer.Start();
-                    ViewModel.RefreshStatsAsync().Forget("perf.stats");
+                    ViewModel.Perf.RefreshStatsAsync().Forget("perf.stats");
                 }
                 else
                 {
@@ -36,11 +37,83 @@ public sealed partial class MainPage : Page
                 }
             }
         };
+        ViewModel.Results.ResultsPublished += OnResultsPublished;
+        ResultsList.SelectionChanged += (_, _) =>
+        {
+            // Remember the last real selection so a position-preserving
+            // requery can re-find it (Reset clears the ListView selection).
+            if (ResultsList.SelectedItem is ResultRow { IsPlaceholder: false } row)
+            {
+                _lastSelectedEntryRef = row.EntryRef;
+            }
+        };
         Loaded += (_, _) =>
         {
             SearchBox.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
             ViewModel.Start();
         };
+    }
+
+    // ── Viewport placement after each published result ──────────────────
+
+    private ScrollViewer? _resultsScroller;
+    private ulong? _lastSelectedEntryRef;
+
+    /// <summary>
+    /// Reset origins (typing, sort…) land at the top; position-preserving
+    /// origins (index changed, stale…) restore the previous first visible row
+    /// and, best effort, the selection. Explicit placement — the ListView's
+    /// own behavior after a Reset is version-dependent.
+    /// </summary>
+    private void OnResultsPublished(ResultsPublication pub)
+    {
+        if (pub.RestoreIndex is { } restore && restore < ResultsList.Items.Count)
+        {
+            ResultsList.ScrollIntoView(
+                ResultsList.Items[restore], ScrollIntoViewAlignment.Leading);
+            RestoreSelection(pub);
+        }
+        else
+        {
+            _resultsScroller ??= FindScrollViewer(ResultsList);
+            _resultsScroller?.ChangeView(null, 0, null, disableAnimation: true);
+        }
+    }
+
+    private void RestoreSelection(ResultsPublication pub)
+    {
+        if (_lastSelectedEntryRef is not { } entryRef)
+        {
+            return;
+        }
+        for (var i = pub.FirstSeededIndex;
+             i <= pub.LastSeededIndex && i < ResultsList.Items.Count;
+             i++)
+        {
+            if (ResultsList.Items[i] is ResultRow { IsPlaceholder: false } row
+                && row.EntryRef == entryRef)
+            {
+                ResultsList.SelectedIndex = i;
+                return;
+            }
+        }
+    }
+
+    private static ScrollViewer? FindScrollViewer(Microsoft.UI.Xaml.DependencyObject root)
+    {
+        for (var i = 0; i < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i);
+            if (child is ScrollViewer viewer)
+            {
+                return viewer;
+            }
+            if (FindScrollViewer(child) is { } nested)
+            {
+                return nested;
+            }
+        }
+        return null;
     }
 
     public Microsoft.UI.Xaml.Visibility BoolToVis(bool value) =>
@@ -57,7 +130,7 @@ public sealed partial class MainPage : Page
     {
         if (sender.DataContext is AppNotification n)
         {
-            ViewModel.RemoveNotification(n);
+            ViewModel.Notifications.Remove(n);
         }
     }
 
@@ -67,7 +140,7 @@ public sealed partial class MainPage : Page
     /// </summary>
     private void CopyDiag_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
-        var statsJson = ViewModel.Stats is { } s
+        var statsJson = ViewModel.Perf.Stats is { } s
             ? System.Text.Json.JsonSerializer.Serialize(s, new System.Text.Json.JsonSerializerOptions
             {
                 WriteIndented = true,
@@ -88,7 +161,7 @@ public sealed partial class MainPage : Page
         Microsoft.UI.Xaml.Input.KeyboardAccelerator sender,
         Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
     {
-        ViewModel.TogglePerfPanel();
+        ViewModel.Perf.Toggle();
         args.Handled = true;
     }
 
@@ -98,12 +171,12 @@ public sealed partial class MainPage : Page
     /// </summary>
     private void RenderPerf()
     {
-        if (!ViewModel.IsPerfPanelOpen)
+        if (!ViewModel.Perf.IsOpen)
         {
             return;
         }
 
-        var t = ViewModel.LastTrace;
+        var t = ViewModel.Perf.LastTrace;
         if (t is not null)
         {
             PerfHeadline.Text =
@@ -148,7 +221,7 @@ public sealed partial class MainPage : Page
         }
 
         // Sparkline over the recent query latencies.
-        var recent = ViewModel.RecentTotalsUs;
+        var recent = ViewModel.Perf.RecentTotalsUs;
         if (recent.Count >= 2)
         {
             var w = Math.Max(Spark.ActualWidth, 240.0);
@@ -164,7 +237,7 @@ public sealed partial class MainPage : Page
             Spark.Points = points;
         }
 
-        var stats = ViewModel.Stats;
+        var stats = ViewModel.Perf.Stats;
         if (stats is not null)
         {
             HistText.Text = $"p50 {stats.P50Us / 1000.0:F2}ms   p99 {stats.P99Us / 1000.0:F2}ms";

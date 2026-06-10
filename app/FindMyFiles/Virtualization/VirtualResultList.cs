@@ -1,12 +1,20 @@
 using System.Collections;
 using System.Collections.Specialized;
-using Microsoft.UI.Dispatching;
+using System.Diagnostics;
 using Microsoft.UI.Xaml.Data;
 using FindMyFiles.Engine;
+using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
 using Windows.Foundation.Collections;
 
 namespace FindMyFiles.Virtualization;
+
+/// <summary>
+/// A page of already-fetched rows handed to
+/// <see cref="VirtualResultList.Reassign"/>, so the viewport is filled the
+/// instant a new result is published — never a placeholder flash.
+/// </summary>
+public readonly record struct PageSeed(long Page, IReadOnlyList<RowData> Rows);
 
 /// <summary>
 /// Random-access data virtualization for ListView: non-generic IList +
@@ -15,37 +23,86 @@ namespace FindMyFiles.Virtualization;
 /// instances and never fetches; RangesChanged drives 64-row page fetches on
 /// a background task, and arriving data fills those same instances in place
 /// (INotifyPropertyChanged updates the bindings — no container churn).
+///
+/// The instance lives as long as the page: new query results arrive through
+/// <see cref="Reassign"/> (seeded pages + one Reset), never by swapping the
+/// ItemsSource — swapping resets the ListView's virtualization state and is
+/// what made the screen flicker on every keystroke. An epoch counter makes
+/// fetches started against a previous result fall on the floor.
 /// </summary>
 public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsRangeInfo
 {
-    private const int PageSize = 64;
+    internal const int PageSize = 64;
     private const int MaxCachedPages = 64; // ≈4096 rows
 
-    private readonly ISearchResult _result;
-    private readonly DispatcherQueue _dispatcher;
+    private readonly IDispatcher _dispatcher;
     private readonly Dictionary<long, ResultRow[]> _pages = [];
     private readonly LinkedList<long> _lru = [];
     private readonly HashSet<long> _loaded = [];
     private readonly HashSet<long> _inFlight = [];
+    private ISearchResult? _result;
+    private int _epoch;
     private bool _disposed;
+    private bool _fetchFailureNotified;
 
     /// <summary>Raised on the UI thread when a fetch reported staleness.</summary>
     public event Action? BecameStale;
 
-    public VirtualResultList(ISearchResult result, DispatcherQueue dispatcher)
+    /// <summary>Raised (Reset) on the UI thread by <see cref="Reassign"/>.</summary>
+    public event NotifyCollectionChangedEventHandler? CollectionChanged;
+
+    public VirtualResultList(IDispatcher dispatcher)
     {
-        _result = result;
         _dispatcher = dispatcher;
-        Count = (int)Math.Min(_result.Count, int.MaxValue);
     }
 
-    public int Count { get; }
+    public int Count { get; private set; }
 
-    // Contract-required interface; we never mutate, so no events fire.
-    public event NotifyCollectionChangedEventHandler? CollectionChanged
+    /// <summary>
+    /// Visible (first, last) indexes from the most recent RangesChanged —
+    /// what position-preserving requeries prefetch before publishing.
+    /// </summary>
+    public (int First, int Last)? LastVisibleRange { get; private set; }
+
+    /// <summary>
+    /// Atomically replace the backing result: bump the epoch (in-flight
+    /// fetches for the old result drop their data), drop the page cache,
+    /// apply the pre-fetched seeds, then raise one Reset. UI thread only —
+    /// a cross-thread CollectionChanged crashes XAML.
+    /// </summary>
+    public void Reassign(ISearchResult? result, IReadOnlyList<PageSeed> seeds)
     {
-        add { }
-        remove { }
+        Debug.Assert(_dispatcher.HasThreadAccess, "Reassign must run on the UI thread");
+        _epoch++;
+        var old = _result;
+        _result = result;
+        _pages.Clear();
+        _lru.Clear();
+        _loaded.Clear();
+        _inFlight.Clear();
+        Count = (int)Math.Min(result?.Count ?? 0, int.MaxValue);
+        LastVisibleRange = null;
+        foreach (var seed in seeds)
+        {
+            ApplySeed(seed);
+        }
+        old?.Dispose();
+        CollectionChanged?.Invoke(
+            this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+    }
+
+    private void ApplySeed(PageSeed seed)
+    {
+        if (seed.Rows.Count == 0)
+        {
+            return;
+        }
+        var rows = GetOrCreatePage(seed.Page);
+        for (var i = 0; i < seed.Rows.Count && i < rows.Length; i++)
+        {
+            rows[i].Fill(seed.Rows[i]);
+        }
+        _loaded.Add(seed.Page);
     }
 
     public object? this[int index]
@@ -74,34 +131,46 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
 
     public void RangesChanged(ItemIndexRange visibleRange, IReadOnlyList<ItemIndexRange> trackedItems)
     {
-        if (_disposed || Count == 0)
+        LastVisibleRange = (visibleRange.FirstIndex, visibleRange.LastIndex);
+        EnsureRange(visibleRange.FirstIndex, visibleRange.LastIndex);
+    }
+
+    /// <summary>
+    /// Kick background fetches for the pages covering the given visible
+    /// range ± one page of buffer. WinRT-free seam (unit-testable).
+    /// </summary>
+    internal void EnsureRange(int firstVisible, int lastVisible)
+    {
+        if (_disposed || Count == 0 || _result is not { } result)
         {
             return;
         }
-        // Visible range ± one page of buffer in each direction.
-        var first = Math.Max(0, visibleRange.FirstIndex - PageSize);
-        var last = Math.Min(Count - 1, visibleRange.LastIndex + PageSize);
+        var first = Math.Max(0, firstVisible - PageSize);
+        var last = Math.Min(Count - 1, lastVisible + PageSize);
         for (var page = (long)(first / PageSize); page <= last / PageSize; page++)
         {
             if (!_loaded.Contains(page) && _inFlight.Add(page))
             {
-                _ = FetchPageAsync(page);
+                FetchPageAsync(result, page, _epoch).Forget("virtualization.fetch");
             }
         }
     }
 
-    private async Task FetchPageAsync(long page)
+    private async Task FetchPageAsync(ISearchResult result, long page, int epoch)
     {
         try
         {
-            var data = await _result.GetRangeAsync(page * PageSize, PageSize).ConfigureAwait(false);
+            var data = await result.GetRangeAsync(page * PageSize, PageSize).ConfigureAwait(false);
             _dispatcher.TryEnqueue(() =>
             {
-                _inFlight.Remove(page);
-                if (_disposed)
+                // Epoch check first: after a Reassign this fetch belongs to a
+                // dead result — touching _inFlight/_pages would corrupt the
+                // new result's bookkeeping.
+                if (epoch != _epoch || _disposed)
                 {
                     return;
                 }
+                _inFlight.Remove(page);
                 var rows = GetOrCreatePage(page);
                 for (var i = 0; i < data.Count && i < rows.Length; i++)
                 {
@@ -114,32 +183,40 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         {
             _dispatcher.TryEnqueue(() =>
             {
+                if (epoch != _epoch || _disposed)
+                {
+                    return; // a requery already replaced this result — no stale storm
+                }
                 _inFlight.Remove(page);
                 BecameStale?.Invoke();
             });
         }
         catch (ObjectDisposedException)
         {
-            // Result freed mid-flight — the list is being torn down.
+            // Result freed mid-flight — the list moved on to a newer result.
         }
         catch (Exception ex)
         {
             // Anything else is a real bug: log it, tell the user once (not
             // once per page — scrolling would cause a notification storm).
-            Services.FileLog.Error("virtualization", $"page fetch failed (page {page})", ex);
+            FileLog.Error("virtualization", $"page fetch failed (page {page})", ex);
             if (!_fetchFailureNotified)
             {
                 _fetchFailureNotified = true;
-                Services.Notifier.Post(
-                    Services.NotifySeverity.Error,
+                Notifier.Post(
+                    NotifySeverity.Error,
                     "結果の読み込みでエラーが発生しました",
                     ex.Message);
             }
-            _dispatcher.TryEnqueue(() => _inFlight.Remove(page));
+            _dispatcher.TryEnqueue(() =>
+            {
+                if (epoch == _epoch)
+                {
+                    _inFlight.Remove(page);
+                }
+            });
         }
     }
-
-    private bool _fetchFailureNotified;
 
     private void Touch(long page)
     {
@@ -163,7 +240,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     public void Dispose()
     {
         _disposed = true;
-        _result.Dispose();
+        _result?.Dispose();
     }
 
     // ── IList boilerplate (read-only) ───────────────────────────────────
