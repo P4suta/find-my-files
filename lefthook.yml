@@ -19,3 +19,5 @@ pre-push:
     - name: test
       root: engine/
       run: cargo test --workspace
+    - name: test-app
+      run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true

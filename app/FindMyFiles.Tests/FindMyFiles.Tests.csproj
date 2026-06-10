@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Mirror the app's TFM/platform so the ProjectReference resolves 1:1. -->
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EnableMsixTooling>false</EnableMsixTooling>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- SkipRustBuild must reach the app project: a property set in this
+         csproj's PropertyGroup does NOT cross a ProjectReference, but
+         AdditionalProperties metadata does. So plain `dotnet test` never
+         invokes cargo; passing -p:SkipRustBuild=true on the CLI still works
+         (global properties merge with the same value). -->
+    <ProjectReference Include="..\FindMyFiles\FindMyFiles.csproj"
+                      AdditionalProperties="SkipRustBuild=true" />
+  </ItemGroup>
+</Project>

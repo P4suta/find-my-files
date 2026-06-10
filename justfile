@@ -16,6 +16,10 @@ build:
 test:
     cargo test --workspace
 
+# C# unit tests for the app (no elevation; never rebuilds the Rust engine)
+test-app:
+    dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
+
 [working-directory: 'engine']
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
