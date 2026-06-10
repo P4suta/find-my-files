@@ -259,6 +259,11 @@ impl Engine {
                 volume: label.clone(),
                 entries,
             });
+            // Prewarm the query accelerators (dir-path memo, offset table)
+            // so the first keystroke never pays the cold-cache cost.
+            if let Some(idx) = slot.index.read().as_ref() {
+                crate::query::prewarm(idx);
+            }
 
             // 2. Tail the journal until stop or journal-gone.
             let fetch = match VolumeStatFetcher::open(&label) {

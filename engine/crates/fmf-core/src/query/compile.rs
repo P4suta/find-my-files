@@ -1,7 +1,8 @@
-//! AST → compiled matcher lists. Terms inside each AND group are ordered by
-//! evaluation cost (numeric filters → memmem → regex → path) so the cheap
-//! filters short-circuit the expensive ones (Everything's "compiled byte
-//! code" idea, docs/RESEARCH.md).
+//! AST → compiled execution plan. Each AND group gets a *driver* — the most
+//! selective positive literal, executed as a single SIMD sweep over the name
+//! pool — plus residual matchers ordered by evaluation cost (numeric filters
+//! → memmem → regex → path). Everything's "compiled byte code" idea taken
+//! one step further (docs/RESEARCH.md, perf plan Workstream B).
 
 use memchr::memmem;
 use regex::bytes::{Regex, RegexBuilder};
@@ -34,6 +35,16 @@ pub(super) enum Matcher {
     /// Substring in the name. `folded` selects the lower pool + folded needle.
     NameSub {
         finder: memmem::Finder<'static>,
+        folded: bool,
+    },
+    /// Name starts with the bytes (`lit*`).
+    NamePrefix {
+        bytes: Vec<u8>,
+        folded: bool,
+    },
+    /// Name ends with the bytes (`*.lit`).
+    NameSuffix {
+        bytes: Vec<u8>,
         folded: bool,
     },
     /// Substring in the full path.
@@ -69,7 +80,7 @@ impl Matcher {
     fn cost(&self) -> u8 {
         match self {
             Matcher::True | Matcher::Size { .. } | Matcher::Mtime { .. } | Matcher::IsDir(_) => 0,
-            Matcher::Ext { .. } => 1,
+            Matcher::Ext { .. } | Matcher::NamePrefix { .. } | Matcher::NameSuffix { .. } => 1,
             Matcher::NameSub { .. } => 2,
             Matcher::NameRegex { .. } => 3,
             Matcher::PathSub { .. } => 4,
@@ -94,8 +105,53 @@ pub(super) struct CTerm {
     pub matcher: Matcher,
 }
 
+/// Candidate generator for one AND group — a single sweep over the name
+/// pools instead of a per-entry matcher call.
+// The Finder-carrying variants dwarf the unit ones; boxing would add an
+// indirection to the hottest call in the engine for no measurable win.
+#[allow(clippy::large_enum_variant)]
+pub(super) enum Driver {
+    /// No usable positive literal: evaluate every entry.
+    FullScan,
+    /// Group has no terms at all (empty query / bare `folder:`-less group).
+    MatchAll,
+    Sub {
+        finder: memmem::Finder<'static>,
+        needle_len: usize,
+        folded: bool,
+    },
+    Prefix {
+        bytes: Vec<u8>,
+        folded: bool,
+    },
+    Suffixes {
+        suffixes: Vec<Vec<u8>>,
+        folded: bool,
+        files_only: bool,
+    },
+}
+
+impl Driver {
+    pub(super) fn label(&self) -> &'static str {
+        match self {
+            Driver::FullScan => "full-scan",
+            Driver::MatchAll => "match-all",
+            Driver::Sub { .. } => "pool-scan",
+            Driver::Prefix { .. } => "prefix",
+            Driver::Suffixes { .. } => "suffix",
+        }
+    }
+}
+
+pub(super) struct CompiledGroup {
+    pub driver: Driver,
+    /// Residual matchers (cost-ordered); the driver's own condition is fully
+    /// checked by the sweep and removed from here.
+    pub terms: Vec<CTerm>,
+}
+
 pub struct CompiledQuery {
-    pub(super) groups: Vec<Vec<CTerm>>,
+    pub(super) groups: Vec<CompiledGroup>,
     pub(super) needs_folded_paths: bool,
     pub(super) needs_orig_paths: bool,
 }
@@ -109,12 +165,43 @@ fn insensitive(needle: &str, case: CaseMode) -> bool {
     }
 }
 
-fn substring_finder(needle: &str, case: CaseMode) -> (memmem::Finder<'static>, bool) {
+fn fold_needle(needle: &str, case: CaseMode) -> (Vec<u8>, bool) {
     if insensitive(needle, case) {
-        let folded = wtf8::fold_str(needle);
-        (memmem::Finder::new(folded.as_bytes()).into_owned(), true)
+        (wtf8::fold_str(needle).into_bytes(), true)
     } else {
-        (memmem::Finder::new(needle.as_bytes()).into_owned(), false)
+        (needle.as_bytes().to_vec(), false)
+    }
+}
+
+fn substring_finder(needle: &str, case: CaseMode) -> (memmem::Finder<'static>, bool) {
+    let (bytes, folded) = fold_needle(needle, case);
+    (memmem::Finder::new(&bytes).into_owned(), folded)
+}
+
+/// `lit*` / `*lit` / `*lit*` style patterns collapse to anchored byte
+/// comparisons; everything else stays a regex.
+enum WildShape {
+    Prefix(String),
+    Suffix(String),
+    Inner(String),
+    General,
+}
+
+fn classify_wildcard(pattern: &str) -> WildShape {
+    if pattern.contains('?') {
+        return WildShape::General;
+    }
+    let starts = pattern.starts_with('*');
+    let ends = pattern.ends_with('*');
+    let inner = pattern.trim_matches('*');
+    if inner.contains('*') || inner.is_empty() {
+        return WildShape::General; // "a*b", "**", "*"
+    }
+    match (starts, ends) {
+        (true, true) => WildShape::Inner(inner.to_string()),
+        (true, false) => WildShape::Suffix(inner.to_string()),
+        (false, true) => WildShape::Prefix(inner.to_string()),
+        (false, false) => WildShape::General, // no '*' at all → parser bug
     }
 }
 
@@ -162,12 +249,26 @@ fn compile_term(
             let (finder, folded) = substring_finder(s, case);
             Matcher::PathSub { finder, folded }
         }
-        Term::Wildcard(s) => {
-            let body = format!("^{}$", wildcard_to_regex_body(s));
-            Matcher::NameRegex {
-                re: build_regex(&body, insensitive(s, case), s)?,
+        Term::Wildcard(s) => match classify_wildcard(s) {
+            WildShape::Prefix(lit) => {
+                let (bytes, folded) = fold_needle(&lit, case);
+                Matcher::NamePrefix { bytes, folded }
             }
-        }
+            WildShape::Suffix(lit) => {
+                let (bytes, folded) = fold_needle(&lit, case);
+                Matcher::NameSuffix { bytes, folded }
+            }
+            WildShape::Inner(lit) => {
+                let (finder, folded) = substring_finder(&lit, case);
+                Matcher::NameSub { finder, folded }
+            }
+            WildShape::General => {
+                let body = format!("^{}$", wildcard_to_regex_body(s));
+                Matcher::NameRegex {
+                    re: build_regex(&body, insensitive(s, case), s)?,
+                }
+            }
+        },
         Term::PathWildcard(s) => Matcher::PathRegex {
             re: build_regex(&wildcard_to_regex_body(s), insensitive(s, case), s)?,
         },
@@ -198,6 +299,55 @@ fn compile_term(
     Ok(CTerm { negated, matcher })
 }
 
+/// Driver candidate score — longer literals are more selective. Returns
+/// None for matchers that cannot drive a pool sweep.
+fn driver_score(t: &CTerm) -> Option<usize> {
+    if t.negated {
+        return None;
+    }
+    match &t.matcher {
+        Matcher::NameSub { finder, .. } => Some(finder.needle().len() * 2),
+        Matcher::NamePrefix { bytes, .. } | Matcher::NameSuffix { bytes, .. } => {
+            Some(bytes.len() * 2)
+        }
+        // The sweep needle is ".<ext>" — score like the other literals.
+        Matcher::Ext { exts } if !exts.is_empty() => {
+            Some(exts.iter().map(|e| (e.len() + 1) * 2).min().unwrap_or(0))
+        }
+        _ => None,
+    }
+}
+
+fn into_driver(t: CTerm) -> Driver {
+    match t.matcher {
+        Matcher::NameSub { finder, folded } => Driver::Sub {
+            needle_len: finder.needle().len(),
+            finder,
+            folded,
+        },
+        Matcher::NamePrefix { bytes, folded } => Driver::Prefix { bytes, folded },
+        Matcher::NameSuffix { bytes, folded } => Driver::Suffixes {
+            suffixes: vec![bytes],
+            folded,
+            files_only: false,
+        },
+        Matcher::Ext { exts } => Driver::Suffixes {
+            suffixes: exts
+                .into_iter()
+                .map(|e| {
+                    let mut s = Vec::with_capacity(e.len() + 1);
+                    s.push(b'.');
+                    s.extend_from_slice(&e);
+                    s
+                })
+                .collect(),
+            folded: true,
+            files_only: true,
+        },
+        _ => unreachable!("driver_score gated"),
+    }
+}
+
 pub fn compile(
     ast: &Ast,
     case: CaseMode,
@@ -209,15 +359,37 @@ pub fn compile(
         for t in g {
             terms.push(compile_term(t, case, dates)?);
         }
+
+        // Pick the most selective positive literal as the driver and pull it
+        // out of the residual list. Empty needles (Matcher::True) never score.
+        let driver = if terms.is_empty() {
+            Driver::MatchAll
+        } else {
+            let best = terms
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| driver_score(t).map(|s| (s, i)))
+                .max_by_key(|(s, _)| *s);
+            // Single-byte needles hit nearly every entry — the per-hit sweep
+            // bookkeeping then costs more than a plain full scan does.
+            match best {
+                Some((score, i)) if score >= 4 => into_driver(terms.swap_remove(i)),
+                _ => Driver::FullScan,
+            }
+        };
+
         terms.sort_by_key(|t| t.matcher.cost());
-        groups.push(terms);
+        groups.push(CompiledGroup { driver, terms });
     }
 
     let needs_folded_paths = groups
         .iter()
-        .flatten()
+        .flat_map(|g| &g.terms)
         .any(|t| t.matcher.needs_folded_path());
-    let needs_orig_paths = groups.iter().flatten().any(|t| t.matcher.needs_orig_path());
+    let needs_orig_paths = groups
+        .iter()
+        .flat_map(|g| &g.terms)
+        .any(|t| t.matcher.needs_orig_path());
     Ok(CompiledQuery {
         groups,
         needs_folded_paths,
@@ -228,5 +400,12 @@ pub fn compile(
 impl CompiledQuery {
     pub(super) fn needs_paths(&self) -> bool {
         self.needs_folded_paths || self.needs_orig_paths
+    }
+
+    /// Human-readable driver summary for QueryTrace.
+    pub fn driver_label(&self) -> String {
+        let mut labels: Vec<&str> = self.groups.iter().map(|g| g.driver.label()).collect();
+        labels.dedup();
+        labels.join("+")
     }
 }

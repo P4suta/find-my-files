@@ -1,0 +1,4 @@
+# typos-cli configuration.
+[default.extend-words]
+# Deliberate test fragment for boundary-spanning pool-scan checks.
+ba = "ba"
