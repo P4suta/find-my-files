@@ -15,6 +15,10 @@ use thiserror::Error;
 
 use crate::index::{RawEntry, VolumeIndex, VolumeIndexBuilder};
 
+// The production scanner lives in crate::scan; re-exported here so callers
+// keep one import path.
+pub use crate::scan::scan_volume;
+
 #[derive(Debug, Error)]
 pub enum MftError {
     #[error("volume scan requires an elevated process (run from an administrator terminal)")]
@@ -59,7 +63,7 @@ impl SpikeStats {
 /// namespaces, fall back to POSIX, ignore DOS-only short names. Unlike
 /// ntfs-reader's `get_best_file_name`, reparse-point names are kept —
 /// junctions and symlinks are indexed as plain entries.
-fn pick_name(file: &NtfsFile) -> Option<NtfsFileName> {
+pub(crate) fn pick_name(file: &NtfsFile) -> Option<NtfsFileName> {
     let mut best: Option<NtfsFileName> = None;
     file.attributes(|att| {
         if att.header.type_id != NtfsAttributeType::FileName as u32 {
@@ -152,11 +156,16 @@ pub struct ScanStats {
     pub peak_working_set_bytes: u64,
     /// Raw $MFT size — the bytes the initial scan reads.
     pub mft_bytes: u64,
+    /// Extension records (base_reference != 0) — parts of other files,
+    /// correctly not indexed standalone.
+    pub extension_records: u64,
+    /// Records failing signature/fixup validation.
+    pub corrupt_records: u64,
 }
 
 /// Full initial scan: read the volume's $MFT and build the in-memory index.
 /// `drive` is a drive letter spec like `C:`.
-pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
+pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     use ntfs_reader::api::ROOT_RECORD;
 
     let drive = drive.trim_end_matches(['\\', '/']);
