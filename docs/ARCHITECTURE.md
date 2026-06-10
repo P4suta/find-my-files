@@ -24,13 +24,38 @@
 v2(サービス分離)では `fmf-service` crate(fmf-core を再利用)+ `PipeEngineClient` を追加。
 **FFI 1関数 = pipe 1メッセージ、イベントコールバック = pipe プッシュ通知**に写像できるよう、本契約の境界を維持する。
 
+## モジュールマップ(1ファイル=1責務)
+
+```
+fmf-core/src/
+├─ index/        mod(型+再エクスポート) / core(VolumeIndex+読み取り+派生キャッシュ)
+│                / mutate(USNミューテーション) / snapshot(永続化、unsafe POD はここに封じ込め)
+│                / builder(2パス構築+EXCLUDED伝播) / testutil
+├─ query/        mod(AST/compile 公開面) / exec(searchドライバループ+materialize)
+│                / sweep(pool-sweep候補生成) / matchers(残余評価) / memo(DirPaths/OffsetTable)
+├─ engine/       mod(Engine+ライフサイクル+イベント) / volume(VolumeSlot+スレッド防火壁+install_index)
+│                / search(ボリューム横断+k-wayマージ) / results(ResultSet+STALE判定) / tests
+├─ mft.rs / scan.rs / usn/{records,apply,session} / metrics.rs / diag.rs / wtf8.rs
+fmf-ffi/src/     lib(エラーコード+再エクスポート+エクスポートピン) / error / handle / events
+                 / volumes / blob / results / contract_tests(ABIレイアウト・null・エラー経路の固定)
+app/FindMyFiles/
+├─ Engine/       IEngineClient(境界) / FfiEngineClient / FakeEngineClient / NativeEngine(P/Invoke)
+├─ ViewModels/   MainViewModel(合成ルート) / SearchOrchestrator / ResultsPresenter
+│                / NotificationCenter / PerfPanelViewModel / StatusFormatter / ResultRow
+├─ Virtualization/ VirtualResultList(生涯単一+Reassign/epoch)
+├─ Services/     IDispatcher(テストシーム) / DispatcherQueueDispatcher / Notifier / FileLog / ShellOps
+└─ FindMyFiles.Tests/  xUnit(ManualDispatcher fake で決定的にUIスレッド模倣)
+```
+
+新フィールド・新メソッドの可視性は「その責務のディレクトリ内」を既定とする(`pub(super)`)。crate 外公開は mod.rs の `pub use` 経由のみ。
+
 ## エンジン内部の要点
 
 - **VolumeIndex(ボリューム毎、struct-of-arrays)**: 名前プール2本(表示用 WTF-8 原文+simple case fold 済み検索用。オフセット同期)/ name_off(u32)+name_len(u16) / parent(EntryId=u32) / size(u64) / mtime(i64, FILETIME) / frn(u64) / flags(is_dir|tombstone|reparse) / FRN→EntryId マップ / fast sort 用順列配列3本(name/size/mtime)。パス文字列は保持せず親チェーンで遅延構築。削除は tombstone、閾値超でコンパクション。
 - **既定除外(EXCLUDED)**: flagsにH(hidden)/S(system)の生属性と、計算済みEXCLUDEDビット(自分がH|S、または祖先にH|Sがいる)を保持。クエリは既定でEXCLUDEDをスキップ(`include_hidden_system`で解除)。継承はスキャンfinish時にO(n)伝播、USN挿入/移動時に親から再計算。**制限**: 除外ブランチからのsubtree移動では配下のビットが次回リスキャンまで陳腐化(dir-rename制限と同類)。
 - **generation 2層**:
   - `content_generation`: USNバッチ適用毎に++。既存結果ハンドルは**読み出し継続可**(tombstone+末尾追記なので安全。削除済みが残る/新規が出ないだけの Everything 同等の結果整合)。
-  - `structural_generation`: コンパクション/フルリスキャン時のみ++。既存ハンドルは**ハードSTALE**(`FMF_E_STALE`)。
+  - `structural_generation`: コンパクション/フルリスキャン時のみ++。既存ハンドルは**ハードSTALE**(`FMF_E_STALE`)。実装: index の差し替えは必ず `VolumeSlot::install_index` を通り、旧 index の値+1 を新 index に引き継ぐ(初回インストール/スナップショット復元は bump しない)。スナップショットはこの値を**永続化しない**(復元時0)— 結果ハンドルはプロセスを跨がないため、プロセス内の単調性で十分。
 - **クエリ時マテリアライズ**: `fmf_query` がボリューム毎の該当順列を1パスフィルタし、ソート順確定済みの連続配列 `Vec<u64>`(volume_id<<32|entry_id 相当)に確定+マルチボリューム k-way マージ。以後のページ取得は **O(1) スライス**。列クリック=同一クエリを別ソートで再発行。
 - **ロック**: `parking_lot::RwLock`。検索=read、USNバッチ適用=write(ms級)。
 - **スレッド**: 初回スキャン=ボリューム毎1スレッド並列。USN追従=ボリューム毎1スレッド(ブロッキング読み→吸い尽くし→バッチ適用)。停止は `CancelSynchronousIo`。
@@ -47,19 +72,20 @@ v2(サービス分離)では `fmf-service` crate(fmf-core を再利用)+ `PipeEn
 
 ```c
 // ── ライフサイクル ──
+uint32_t fmf_abi_version(void);                         // 現在 1。C#側が起動時に照合
 // config_json: { "index_dir": "...", "log_dir": "...", "log_level": "info" } (必須キー)
 int32_t fmf_engine_create(const char* config_json, FmfEngineHandle* out);
-int32_t fmf_engine_destroy(FmfEngineHandle h);          // 内部スレッドjoin+flush
-int32_t fmf_flush(FmfEngineHandle h);                   // 明示保存
+int32_t fmf_engine_destroy(FmfEngineHandle h);          // 内部スレッドjoin+保存(明示flushはMVPでは無し)
 
 // ── イベント(エンジン内部スレッドから発火。受け側がDispatcherQueueへマーシャリング) ──
-// kind: Progress(volume, scanned, total_estimate) / IndexChanged(エンジン側200msデバウンス、唯一のスロットル)
-//       / RescanStarted(volume, reason) / VolumeFailed(volume, code)
+// kind: 1=Progress(volume, scanned) / 2=VolumeReady(volume, entries)
+//       / 3=IndexChanged(エンジン側200msデバウンス、唯一のスロットル)
+//       / 4=RescanStarted(volume) / 5=VolumeFailed(volume) / 6=EngineError(severity)
 typedef void (*FmfEventCb)(const FmfEvent* ev /*POD*/, void* user);
 int32_t fmf_set_event_callback(FmfEngineHandle h, FmfEventCb cb, void* user); // cb=NULLで解除
 
 // ── ボリュームと索引 ──
-int32_t fmf_list_volumes(FmfEngineHandle h, FmfVolumeInfo* buf, uint32_t cap, uint32_t* count);
+int32_t fmf_list_volumes(FmfEngineHandle h, FmfVolumeStatus* buf, uint32_t cap, uint32_t* count);
 int32_t fmf_index_start(FmfEngineHandle h, const char* const* volume_guids, uint32_t n); // 明示開始・非同期
 int32_t fmf_index_status(FmfEngineHandle h, FmfVolumeStatus* buf, uint32_t cap, uint32_t* count);
 // FmfVolumeStatus.state: Scanning / Ready / Rescanning / Failed
@@ -77,21 +103,23 @@ int32_t fmf_query(FmfEngineHandle h, const char* query_utf8,
 int32_t fmf_engine_stats(FmfEngineHandle h, FmfBlob** out); // MetricsSnapshot(直近トレース・ヒストグラム・USNフィード・カラム別メモリ)
 int32_t fmf_blob_free(FmfBlob*);
 // ── ページ取得: エンジン確保の連続ブロック(行ヘッダ配列+文字列blob)。P/Invoke 1回・コピー1回 ──
-// 行: { entry_ref u64, frn u64, size u64, mtime i64, flags u32,
-//       name_off u32, name_len u16, parent_path_off u32, parent_path_len u16 } + 末尾blob
+// FmfRow(48バイト・パディング無し。fmf-ffi の contract_tests が size/offset を固定):
+//   { entry_ref u64, frn u64, size u64, mtime i64,
+//     name_off u32, parent_path_off u32, flags u32, name_len u16, parent_path_len u16 } + 末尾blob
 // 戻り FMF_E_STALE = structural_generation 不一致。UIは同一クエリを再発行
 int32_t fmf_result_page(FmfResultHandle r, uint64_t offset, uint32_t count, FmfPage** out);
 int32_t fmf_page_free(FmfPage* p);
 int32_t fmf_result_free(FmfResultHandle r);
 
 // ── 診断 ──
+// len は in/out: in=バッファ容量、out=書いた長さ(NUL含まず)。容量不足は黙って切り詰め
+// (常にNUL終端)。buf=NULL は必要サイズの照会。
 int32_t fmf_last_error(char* buf, uint32_t* len);
-int32_t fmf_engine_stats(FmfEngineHandle h, FmfStats* out);  // entries, heap_bytes, per-volume
 ```
 
 エラーコード表(v2 pipeプロトコルと共用): `FMF_OK=0, FMF_E_INVALID_ARG=1, FMF_E_STALE=2, FMF_E_NOT_ADMIN=3, FMF_E_VOLUME=4, FMF_E_QUERY_SYNTAX=5, FMF_E_IO=6, FMF_E_PANIC=99`。
 
-**MVPで意図的に入れないもの**: `fmf_entry_full_path`(行が name+parent_path を持つので不要)/ クエリキャンセル(クエリは数十ms想定。UIは世代カウンタで古い結果を捨てる。重くなったら `fmf_query_cancel` を追加する余地のみ残す)。
+**MVPで意図的に入れないもの**: `fmf_entry_full_path`(行が name+parent_path を持つので不要)/ クエリキャンセル(クエリは数十ms想定。UIは世代カウンタで古い結果を捨てる。重くなったら `fmf_query_cancel` を追加する余地のみ残す)/ `fmf_flush`(明示保存。destroy が join+保存を行うため不要。サービス化(v2)で必要になれば追加)。
 
 ## C# 側の契約
 
@@ -99,8 +127,11 @@ int32_t fmf_engine_stats(FmfEngineHandle h, FmfStats* out);  // entries, heap_by
 - `SearchResultHandle : SafeHandle`。ページフェッチは `DangerousAddRef/Release` を挟み、`Dispose()` 後も in-flight フェッチ完了まで実体を解放しない。
 - ページ受領→`ResultRow` へコピー→**即 `fmf_page_free`**。
 - コールバック delegate はクライアントのフィールドに保持(GC回収防止)。受領後 `DispatcherQueue.TryEnqueue` でUIへ。
-- 再クエリの2系統: **タイプ起因=先頭リセット** / **IndexChanged起因=先頭可視インデックスと選択を退避→復元**。
-- `VirtualResultList`(非ジェネリックIList+INCC+IItemsRangeInfo): indexer は絶対にフェッチせずプレースホルダ返却。`RangesChanged` で可視範囲±2ページを64行単位バックグラウンドフェッチ→既存 ResultRow のプロパティ充填(INCC Replace は発行しない)。ページLRU上限4096行。ハードSTALE受領→VMへ再クエリ要求。
+- **検索パイプラインの責務分割**(MainViewModel は合成ルートのみ):
+  - `SearchOrchestrator` — いつ・何を検索するか: 50msデバウンス(クリアは即時)、generationカウンタによる陳腐結果のDispose、`RequeryOrigin` 分類、Stale有界リトライ(1回)、例外分類。
+  - `ResultsPresenter` — 結果の提示: 公開**前**に可視範囲ページをプリフェッチし、`VirtualResultList.Reassign` で原子的に公開(旧結果は新結果が揃うまで画面に残る=空白フレームゼロ)。件数テキストと viewport 配置イベント。
+- 再クエリの2系統(`RequeryOrigin` が分類): **タイプ/クリア/ソート/フィルタ起因=先頭リセット** / **IndexChanged/VolumeReady/Stale起因=先頭可視インデックスを退避→復元、選択はseed内EntryRef一致時のみベストエフォート復元**。
+- `VirtualResultList`(非ジェネリックIList+INCC+IItemsRangeInfo): **ページと同寿命の単一インスタンス**(ItemsSource は x:Bind OneTime — 差し替えるとListViewの仮想化状態が破棄されてちらつく)。新結果は `Reassign(result, seeds)` = epoch++ → ページキャッシュ破棄 → seed適用 → **INCC Reset を1回発行**(UIスレッド限定)。indexer は絶対にフェッチせずプレースホルダ返却。`RangesChanged` で可視範囲±1ページを64行単位バックグラウンドフェッチ→既存 ResultRow のプロパティ充填。旧epochのフェッチ完了は黙って破棄。ページLRU上限4096行。ハードSTALE受領→`BecameStale`(epoch一致時のみ)→ Orchestrator が再クエリ。
 
 ## エラーハンドリングと診断(原則:「落ちない・固まらない・黙らない」)
 

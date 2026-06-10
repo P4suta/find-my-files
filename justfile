@@ -55,6 +55,12 @@ bench drive="C:" *args="":
 bench-check drive="C:":
     cargo run --release -p fmf-cli -- bench {{drive}} --baseline benches/baseline.json
 
+# (Re)record the committed real-volume baseline (requires elevated terminal).
+# Note the machine (CPU, entry count) in benches/README when regenerating.
+[working-directory: 'engine']
+bench-baseline drive="C:":
+    cargo run --release -p fmf-cli -- bench {{drive}} --json benches/baseline.json
+
 # Criterion micro-benchmarks on a synthetic 1M-entry index (no elevation)
 [working-directory: 'engine']
 bench-micro *args="":
