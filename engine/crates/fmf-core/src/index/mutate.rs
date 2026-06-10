@@ -27,13 +27,16 @@ impl VolumeIndex {
     }
 
     /// Move `record` under a new parent. Cheap: no permutation depends on
-    /// the path, and child paths rebuild lazily.
+    /// the path, and child paths rebuild lazily. A corrupt record naming
+    /// itself as parent keeps its current parent (no self-cycles).
     pub fn reparent(&mut self, record: u64, new_parent_record: u64) -> Option<EntryId> {
         let id = self.entry_by_record(record)?;
         let parent = self
             .entry_by_record(new_parent_record)
             .unwrap_or(Self::ROOT);
-        self.parent[id as usize] = parent;
+        if parent != id {
+            self.parent[id as usize] = parent;
+        }
         self.recompute_excluded(id);
         Some(id)
     }
@@ -372,15 +375,14 @@ mod tests {
     }
 
     #[test]
-    fn reparent_to_self_is_unguarded_current_behavior() {
-        // Pin of current behavior: unlike rename_dir_in_place, reparent has
-        // no `parent != id` guard, so a corrupt USN record whose parent FRN
-        // equals its own FRN creates a self-cycle. Reported as a suspicious
-        // path (path building relies on the 128-hop cap to terminate).
+    fn reparent_to_self_keeps_current_parent() {
+        // A corrupt USN record whose parent FRN equals its own FRN must not
+        // create a self-cycle (same guard as rename_dir_in_place).
         let mut idx = build_sample();
         let docs = idx.entry_by_record(50).unwrap();
+        let before = idx.parent(docs);
         assert_eq!(idx.reparent(50, 50), Some(docs));
-        assert_eq!(idx.parent(docs), docs);
+        assert_eq!(idx.parent(docs), before);
     }
 
     #[test]

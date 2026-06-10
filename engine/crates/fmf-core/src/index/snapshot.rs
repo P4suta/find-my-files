@@ -45,11 +45,24 @@ fn read_vec<T: Copy + Default, R: std::io::Read>(
     if !len.is_multiple_of(elem) {
         return Err(Error::new(ErrorKind::InvalidData, "section size mismatch"));
     }
-    let mut out = vec![T::default(); len / elem];
-    // Safety: same POD reasoning as pod_bytes, writable side.
-    let bytes = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), len) };
-    r.read_exact(bytes)?;
-    h.update(bytes);
+    // The length prefix is untrusted input: a corrupt value must come back
+    // as Err (→ full-rescan fallback), not as one giant upfront allocation
+    // that aborts the process. Growing in ~1MiB steps bounds the overshoot
+    // to a single chunk past the bytes actually present.
+    let elems = len / elem;
+    let chunk_elems = (1 << 20) / elem.max(1) + 1;
+    let mut out: Vec<T> = Vec::new();
+    while out.len() < elems {
+        let n = chunk_elems.min(elems - out.len());
+        let start = out.len();
+        out.resize(start + n, T::default());
+        // Safety: same POD reasoning as pod_bytes, writable side.
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(out.as_mut_ptr().add(start).cast::<u8>(), n * elem)
+        };
+        r.read_exact(bytes)?;
+        h.update(bytes);
+    }
     Ok(out)
 }
 
@@ -349,6 +362,18 @@ mod tests {
         let err = read_crafted(sections);
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("column length"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_lying_length_prefix_errors_without_huge_allocation() {
+        // A corrupt section length (here 2^60) must come back as Err — the
+        // old code pre-allocated the claimed size before any validation,
+        // which aborts the process instead of falling back to a rescan.
+        let idx = build_sample();
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 1, 1).unwrap();
+        buf[32..40].copy_from_slice(&(1u64 << 60).to_le_bytes());
+        assert!(VolumeIndex::read_snapshot(&mut buf.as_slice()).is_err());
     }
 
     #[test]

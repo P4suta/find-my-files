@@ -53,6 +53,7 @@ impl DirPaths {
         let mut depth: Vec<u32> = vec![u32::MAX; n];
         let mut stack: Vec<EntryId> = Vec::new();
         let mut max_depth = 0u32;
+        let mut cycle_members = 0u64;
         for id in 0..n as u32 {
             if !idx.is_dir(id) {
                 continue;
@@ -73,11 +74,29 @@ impl DirPaths {
                 let v = if d == VolumeIndex::ROOT {
                     0
                 } else {
-                    depth[idx.parent(d) as usize].saturating_add(1)
+                    match depth[idx.parent(d) as usize] {
+                        // Unresolved parent: `d` sits on a corrupt parent
+                        // cycle (or a >4096 chain). Attach it at the root —
+                        // propagating u32::MAX here used to poison max_depth
+                        // and size the level table at ~4G entries (abort).
+                        u32::MAX => {
+                            cycle_members += 1;
+                            1
+                        }
+                        pd => pd + 1,
+                    }
                 };
                 depth[d as usize] = v;
                 max_depth = max_depth.max(v);
             }
+        }
+        if cycle_members > 0 {
+            // No MetricsHub at this layer; the WARN lands in the diag ring
+            // (F12 panel + engine-error event), so the degradation is loud.
+            tracing::warn!(
+                cycle_members,
+                "corrupt parent chain while building dir paths — affected dirs attached at root"
+            );
         }
 
         let mut levels: Vec<Vec<EntryId>> = vec![Vec::new(); max_depth as usize + 1];
@@ -285,5 +304,30 @@ mod tests {
         prewarm(&idx);
         let _: Arc<DirPaths> = idx.cached_derived(|| unreachable!("DirPaths not prewarmed"));
         let _: Arc<OffsetTable> = idx.cached_derived(|| unreachable!("OffsetTable not prewarmed"));
+    }
+
+    #[test]
+    fn parent_cycle_attaches_dirs_at_root_instead_of_aborting() {
+        // Corrupt USN records can produce a parent cycle (a→b→a). The
+        // unresolved depth used to propagate as u32::MAX into max_depth,
+        // sizing the level table at ~4G entries — an allocation abort. Cycle
+        // members must instead come out root-attached, with paths intact.
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let (da, db, f) = (u16s("a"), u16s("b"), u16s("f.txt"));
+        b.push(raw(10, 5, &da, true, 0, 1));
+        b.push(raw(20, 10, &db, true, 0, 2));
+        b.push(raw(30, 20, &f, false, 1, 3));
+        let mut idx = b.finish();
+        idx.reparent(10, 20); // a under b while b is under a — cycle
+        let a = idx.entry_by_record(10).unwrap();
+        let bb = idx.entry_by_record(20).unwrap();
+
+        let memo = DirPaths::build(&idx);
+        for d in [a, bb] {
+            let lower = memo.lower[d as usize]
+                .as_deref()
+                .expect("cycle members still get a path");
+            assert!(lower.ends_with(b"\\"));
+        }
     }
 }

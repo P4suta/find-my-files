@@ -443,11 +443,11 @@ fn corrupt_record_length_replay_stops_without_panic() {
 }
 
 #[test]
-fn name_escaping_its_record_is_dropped_and_following_records_survive() {
+fn name_escaping_its_record_is_dropped_flagged_and_following_records_survive() {
     // FileNameLength pointing past RecordLength: the record is skipped (the
-    // parser does not read out of bounds) and parsing resumes at the next
-    // record. NOTE: current behavior drops it silently — `truncated` stays
-    // false; see the report on the missing degradation counter.
+    // parser does not read out of bounds), parsing resumes at the next
+    // record, and the malformed-bytes flag is raised so the loss reaches
+    // the usn_batches_truncated counter instead of vanishing.
     let mut buf = usn_buffer(
         700,
         &[
@@ -473,10 +473,11 @@ fn name_escaping_its_record_is_dropped_and_following_records_survive() {
     // FileNameLength field (offset 56 inside the record).
     buf[8 + 56..8 + 58].copy_from_slice(&0xFFFFu16.to_le_bytes());
 
-    let (next, records, _truncated) = parse_buffer(&buf);
+    let (next, records, truncated) = parse_buffer(&buf);
     assert_eq!(next, 700);
     assert_eq!(records.len(), 1, "out-of-bounds name must not parse");
     assert_eq!(String::from_utf16(&records[0].name).unwrap(), "good.txt");
+    assert!(truncated, "a dropped record must not be silent");
 }
 
 #[test]

@@ -104,10 +104,18 @@ pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>, bool) {
                     attributes: u32_at(rec, 52),
                     name,
                 });
+            } else {
+                // Name escapes its record: corrupt bytes. The record is
+                // dropped, but the caller must hear about it (counter +
+                // warning) — a silently lost rename means a stale index.
+                truncated = true;
             }
         }
         // Records are 8-byte aligned; RecordLength already includes padding.
         off += record_length.next_multiple_of(8);
+    }
+    if off != buf.len() {
+        truncated = true; // sub-record trailing garbage (< 60 bytes)
     }
     (next, records, truncated)
 }
