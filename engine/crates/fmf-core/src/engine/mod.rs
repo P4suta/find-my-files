@@ -135,6 +135,7 @@ impl Engine {
                 scanned: Mutex::new(0),
                 index: RwLock::new(None),
                 stop: Arc::new(AtomicBool::new(false)),
+                last_query: Mutex::new(None),
             });
             self.volumes.write().push(slot.clone());
             let engine = self.clone();
@@ -203,6 +204,7 @@ impl Engine {
             scanned: Mutex::new(idx.live_len() as u64),
             index: RwLock::new(Some(idx)),
             stop: Arc::new(AtomicBool::new(false)),
+            last_query: Mutex::new(None),
         });
         self.volumes.write().push(slot);
     }

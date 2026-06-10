@@ -3,7 +3,8 @@
 //! measurement. Run via `just bench-micro`; compare before/after every
 //! kernel change.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use fmf_core::engine::{Engine, EngineConfig};
 use fmf_core::index::{RawEntry, VolumeIndex, VolumeIndexBuilder};
 use fmf_core::query::{self, QueryOptions, UtcResolver};
 
@@ -129,5 +130,57 @@ fn bench_queries(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_queries);
+/// One keystroke through the engine's incremental query cache: `setup`
+/// seeds the per-volume cache, `routine` runs the next keystroke. The
+/// refine/cold pairs share the routine query, so the delta is purely the
+/// cache path (engine/search.rs + query/subsume.rs + exec::refine).
+fn bench_typing(c: &mut Criterion) {
+    let engine = Engine::new(EngineConfig {
+        index_dir: std::env::temp_dir(),
+    });
+    engine.insert_ready_volume("C:", build_synthetic());
+    let opt = QueryOptions::default();
+
+    // Sanity: the pairs must actually take the intended paths.
+    engine.query("win", &opt).unwrap();
+    let (_, t) = engine.query("wind", &opt).unwrap();
+    assert_eq!(t.cache, "refine", "typing bench setup is broken");
+    let (_, t) = engine.query("qzx9", &opt).unwrap();
+    assert_eq!(t.cache, "miss");
+
+    let mut g = c.benchmark_group("typing");
+    g.sample_size(20);
+    g.measurement_time(std::time::Duration::from_secs(4));
+    // (label, cache-seeding query, measured keystroke). The refine win
+    // scales with how selective the seed already was: `wind` keeps ~10% of
+    // the index matching (worst realistic case), `file_0001_` starts from
+    // ~1k hits (the common deep-typing case).
+    let steps: &[(&str, &str, &str)] = &[
+        ("refine_wind", "win", "wind"),
+        ("cold_wind", "qzx9", "wind"),
+        ("refine_e_from_matchall", "", "e"),
+        ("cold_e", "qzx9", "e"),
+        ("refine_add_filter", "report", "report ext:dll"),
+        ("cold_add_filter", "qzx9", "report ext:dll"),
+        ("refine_narrow", "file_0001_", "file_0001_05"),
+        ("cold_narrow", "qzx9", "file_0001_05"),
+    ];
+    for (label, seed, keystroke) in steps {
+        g.bench_function(*label, |b| {
+            b.iter_batched(
+                || {
+                    engine.query(seed, &opt).unwrap();
+                },
+                |()| {
+                    let (r, t) = engine.query(keystroke, &opt).unwrap();
+                    std::hint::black_box((r.len(), t.cache.len()))
+                },
+                BatchSize::PerIteration,
+            )
+        });
+    }
+    g.finish();
+}
+
+criterion_group!(benches, bench_queries, bench_typing);
 criterion_main!(benches);

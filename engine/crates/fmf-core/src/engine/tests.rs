@@ -92,6 +92,37 @@ fn rebuilt_volume_hard_stales_open_results() {
 }
 
 #[test]
+fn typing_refines_cached_results_and_invalidation_goes_cold() {
+    let e = engine_with_two_volumes();
+    let opt = QueryOptions::default();
+
+    // Cold first query, refined on each extension, identical results.
+    let (_, t1) = e.query("a", &opt).unwrap();
+    assert_eq!(t1.cache, "miss");
+    let (r2, t2) = e.query("al", &opt).unwrap();
+    assert_eq!(t2.cache, "refine");
+    let names: Vec<String> = r2
+        .page(0, 10)
+        .unwrap()
+        .iter()
+        .map(|r| String::from_utf8_lossy(&r.name).into_owned())
+        .collect();
+    assert_eq!(names, vec!["alpha.txt"]);
+
+    // Widening goes cold but stays correct.
+    let (r3, t3) = e.query("a", &opt).unwrap();
+    assert_eq!(t3.cache, "miss");
+    assert_eq!(r3.len(), 4); // alpha/gamma/beta/delta all contain "a"
+
+    // Structural replacement invalidates the cache (and clears it).
+    e.replace_ready_volume("C:", vol("C:", &[("omega.txt", 1)]));
+    let (_, t4) = e.query("a t", &opt).unwrap();
+    assert_eq!(t4.cache, "partial", "D: refines, rebuilt C: goes cold");
+    let (_, t5) = e.query("a tx", &opt).unwrap();
+    assert_eq!(t5.cache, "refine");
+}
+
+#[test]
 fn status_reports_ready_volumes() {
     let e = engine_with_two_volumes();
     let st = e.status();

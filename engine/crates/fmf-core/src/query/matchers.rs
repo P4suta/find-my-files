@@ -112,6 +112,19 @@ pub(super) fn terms_match(
     terms: &[CTerm],
     id: EntryId,
 ) -> bool {
+    terms_match_iter(idx, memo, ctx, terms.iter(), id)
+}
+
+/// Iterator form so refine can chain the driver term with the residuals
+/// without cloning matchers (`CompiledGroup::all_terms`).
+#[inline]
+pub(super) fn terms_match_iter<'a>(
+    idx: &VolumeIndex,
+    memo: &DirPaths,
+    ctx: &mut EvalCtx,
+    terms: impl Iterator<Item = &'a CTerm>,
+    id: EntryId,
+) -> bool {
     ctx.reset();
     for t in terms {
         if eval(idx, memo, ctx, &t.matcher, id) == t.negated {

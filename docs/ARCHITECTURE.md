@@ -56,7 +56,8 @@ app/FindMyFiles/
 - **generation 2層**:
   - `content_generation`: USNバッチ適用毎に++。既存結果ハンドルは**読み出し継続可**(tombstone+末尾追記なので安全。削除済みが残る/新規が出ないだけの Everything 同等の結果整合)。
   - `structural_generation`: コンパクション/フルリスキャン時のみ++。既存ハンドルは**ハードSTALE**(`FMF_E_STALE`)。実装: index の差し替えは必ず `VolumeSlot::install_index` を通り、旧 index の値+1 を新 index に引き継ぐ(初回インストール/スナップショット復元は bump しない)。スナップショットはこの値を**永続化しない**(復元時0)— 結果ハンドルはプロセスを跨がないため、プロセス内の単調性で十分。
-- **クエリ時マテリアライズ**: `fmf_query` がボリューム毎の該当順列を1パスフィルタし、ソート順確定済みの連続配列 `Vec<u64>`(volume_id<<32|entry_id 相当)に確定+マルチボリューム k-way マージ。以後のページ取得は **O(1) スライス**。列クリック=同一クエリを別ソートで再発行。
+- **クエリ時マテリアライズ**: `fmf_query` がボリューム毎の該当順列を1パスフィルタし、ソート順確定済みの連続配列 `Vec<u64>`(volume_id<<32|entry_id 相当)に確定+マルチボリューム k-way マージ(単一ボリュームは直コピーのfast path)。以後のページ取得は **O(1) スライス**。列クリック=同一クエリを別ソートで再発行。
+- **インクリメンタル検索(クエリキャッシュ)**: `VolumeSlot::last_query` がボリューム毎に直前の(compiled, options, 両generation, ids)を保持。新クエリが前回を**証明可能に**絞り込み(`query/subsume.rs`の保守的包含規則: 同一ソート・単一ANDグループ・needle包含/範囲縮小/フィルタ追加のみ。fold橋渡しはorig→folded方向のみ健全)、かつ両generationが不変なら、`query::refine` が前回idsを完全評価でフィルタ — **O(前回ヒット数)**でスキャンもO(n)マテリアライズも省略(Everything本家の核心技法)。USNバッチはgeneration++で暗黙に無効化、構造交代は`install_index`で明示クリア。正しさはoracleプロパティテスト(refine==fresh search)で担保、キルスイッチ=`FMF_QUERY_CACHE=0`、観測=`QueryTrace.cache`(miss/refine/partial)。FFI/C#は完全無変更。
 - **ロック**: `parking_lot::RwLock`。検索=read、USNバッチ適用=write(ms級)。
 - **スレッド**: 初回スキャン=ボリューム毎1スレッド並列。USN追従=ボリューム毎1スレッド(ブロッキング読み→吸い尽くし→バッチ適用)。停止は `CancelSynchronousIo`。
 - **初回スキャンの内部並列**: $MFTを16MiBチャンクでストリーミング読みしつつ、(a) 専用I/OスレッドがチャンクN+1を先読み(read-aheadパイプライン、バッファ3本で上限RAM固定。スレッド起動失敗は`scan_pipeline_fallbacks`カウンタ+逐次読みに劣化)、(b) チャンク内はレコード境界1MiBサブレンジでrayon並列パース(fixup→属性抽出→WTF-8変換までワーカー側)。ワーカーバッチをチャンク順に追記するためEntryId割当は逐次版と決定的に一致(等価性ゲート=admin test `streaming_scan_matches_reference`)。

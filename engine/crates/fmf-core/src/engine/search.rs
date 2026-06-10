@@ -4,12 +4,26 @@ use crate::index::{EntryId, SortKey, VolumeIndex};
 use crate::metrics::QueryTrace;
 use crate::query::{self, QueryOptions};
 
-use super::volume::VolumeSlot;
+use super::volume::{VolumeQueryCache, VolumeSlot};
 use super::{Engine, EngineError, ResultSet, VolumePhase};
+
+/// Kill switch for the incremental query cache (`FMF_QUERY_CACHE=0`) — if a
+/// subsumption bug ever surfaces in the field, users get correctness back
+/// without a rebuild.
+fn query_cache_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("FMF_QUERY_CACHE").map_or(true, |v| v != "0"))
+}
 
 impl Engine {
     /// Run a query against every Ready volume and merge the per-volume,
     /// already-sorted id lists into one ordered result set.
+    ///
+    /// Per volume, the previous result is kept (`VolumeSlot::last_query`);
+    /// when the new query provably narrows it and the index generation is
+    /// unchanged, the candidate set is the previous hits instead of the
+    /// whole index (`query::refine`) — typing one more letter costs
+    /// O(previous hits), not O(index).
     pub fn query(
         &self,
         text: &str,
@@ -17,7 +31,6 @@ impl Engine {
     ) -> Result<(ResultSet, QueryTrace), EngineError> {
         let mut trace = QueryTrace {
             query: text.to_string(),
-            driver: "full-scan".to_string(),
             ..Default::default()
         };
         let t_total = crate::metrics::Stage::start();
@@ -25,7 +38,8 @@ impl Engine {
 
         let ast = query::parse(text)?;
         trace.parse_us = stage.lap();
-        let compiled = query::compile(&ast, opt.case, &date_resolver())?;
+        let compiled = Arc::new(query::compile(&ast, opt.case, &date_resolver())?);
+        trace.driver = compiled.driver_label();
         trace.compile_us = stage.lap();
 
         let slots: Vec<Arc<VolumeSlot>> = self
@@ -36,25 +50,64 @@ impl Engine {
             .cloned()
             .collect();
 
-        let mut per_volume: Vec<(Arc<VolumeSlot>, Vec<EntryId>, u64)> = Vec::new();
+        let mut per_volume: Vec<(Arc<VolumeSlot>, Arc<Vec<EntryId>>, u64)> = Vec::new();
+        let mut refined = 0usize;
         for slot in &slots {
             let guard = slot.index.read();
             let Some(idx) = guard.as_ref() else { continue };
-            let (r, m) = query::search(idx, &compiled, opt);
+            let mut cache = slot.last_query.lock();
+            let prev_ids = if query_cache_enabled() {
+                cache.as_ref().and_then(|c| {
+                    (c.content_generation == idx.content_generation()
+                        && c.structural_generation == idx.structural_generation()
+                        && query::subsumes(&c.compiled, &c.opt, &compiled, opt))
+                    .then(|| c.ids.clone())
+                })
+            } else {
+                None
+            };
+            let (r, m) = match &prev_ids {
+                Some(ids) => {
+                    refined += 1;
+                    query::refine(idx, &compiled, opt, ids)
+                }
+                None => query::search(idx, &compiled, opt),
+            };
             trace.memo_us += m.memo_us;
             trace.scan_us += m.scan_us;
             trace.materialize_us += m.materialize_us;
             trace.entries_scanned += m.entries_scanned;
             trace.excluded_skipped += m.excluded_skipped;
-            per_volume.push((slot.clone(), r.ids, r.structural_generation));
+            let ids = Arc::new(r.ids);
+            *cache = Some(VolumeQueryCache {
+                compiled: compiled.clone(),
+                opt: *opt,
+                content_generation: r.content_generation,
+                structural_generation: r.structural_generation,
+                ids: ids.clone(),
+            });
+            drop(cache);
+            per_volume.push((slot.clone(), ids, r.structural_generation));
         }
         trace.volumes = per_volume.len() as u32;
+        trace.cache = if refined == 0 {
+            "miss"
+        } else if refined == per_volume.len() {
+            "refine"
+        } else {
+            "partial"
+        }
+        .to_string();
         stage.lap();
 
-        // K-way merge by the sort key (typically 1-3 volumes).
+        // K-way merge by the sort key (typically 1-3 volumes). One volume —
+        // the common setup — is a straight copy; the cursor merge below
+        // costs more than the whole scan for large result sets.
         let total: usize = per_volume.iter().map(|(_, ids, _)| ids.len()).sum();
         let mut rows: Vec<(u32, EntryId)> = Vec::with_capacity(total);
-        {
+        if let [(_, ids, _)] = per_volume.as_slice() {
+            rows.extend(ids.iter().map(|&id| (0u32, id)));
+        } else {
             let guards: Vec<_> = per_volume
                 .iter()
                 .map(|(slot, _, _)| slot.index.read())

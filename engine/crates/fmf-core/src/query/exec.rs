@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use super::QueryOptions;
 use super::compile::{CTerm, CompiledQuery, Driver};
-use super::matchers::{EvalCtx, terms_match};
+use super::matchers::{EvalCtx, terms_match, terms_match_iter};
 use super::memo::{DirPaths, OffsetTable};
 use super::sweep::driver_candidates;
 use crate::index::{EntryId, VolumeIndex};
@@ -157,6 +157,76 @@ pub fn search(
     let ids = materialize_filtered(idx, opt, |id| {
         bitmap[id as usize / 64] >> (id as usize % 64) & 1 == 1
     });
+    metrics.materialize_us = stage.lap();
+
+    (
+        SearchResult {
+            ids,
+            content_generation: idx.content_generation(),
+            structural_generation: idx.structural_generation(),
+        },
+        metrics,
+    )
+}
+
+/// Incremental refinement: when the previous query's result provably
+/// contains the next one's (subsume.rs) and the index generation is
+/// unchanged, filter the cached ids with a *complete* per-entry evaluation
+/// instead of sweeping pools and walking the whole permutation. `prev_ids`
+/// are already in the requested order, so the filtered subsequence is the
+/// answer — O(previous hits) instead of O(index).
+pub fn refine(
+    idx: &VolumeIndex,
+    q: &CompiledQuery,
+    opt: &QueryOptions,
+    prev_ids: &[EntryId],
+) -> (SearchResult, SearchMetrics) {
+    const REFINE_CHUNK: usize = 4096;
+    let mut metrics = SearchMetrics {
+        driver: q.driver_label(),
+        ..Default::default()
+    };
+    let mut stage = crate::metrics::Stage::start();
+    let skip_excluded = !opt.include_hidden_system;
+
+    let cached_memo;
+    let empty_memo;
+    let memo: &DirPaths = if q.needs_paths() {
+        cached_memo = idx.cached_derived(|| DirPaths::build(idx));
+        &cached_memo
+    } else {
+        empty_memo = DirPaths {
+            lower: Vec::new(),
+            orig: Vec::new(),
+        };
+        &empty_memo
+    };
+    metrics.memo_us = stage.lap();
+
+    let chunks: Vec<Vec<EntryId>> = prev_ids
+        .par_chunks(REFINE_CHUNK)
+        .map(|chunk| {
+            let mut ctx = EvalCtx::default();
+            chunk
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    idx.is_live(id)
+                        && !(skip_excluded && idx.is_excluded(id))
+                        && q.groups
+                            .iter()
+                            .any(|g| terms_match_iter(idx, memo, &mut ctx, g.all_terms(), id))
+                })
+                .collect()
+        })
+        .collect();
+    metrics.entries_scanned = prev_ids.len() as u64;
+    metrics.scan_us = stage.lap();
+
+    let mut ids = Vec::with_capacity(chunks.iter().map(Vec::len).sum());
+    for c in &chunks {
+        ids.extend_from_slice(c);
+    }
     metrics.materialize_us = stage.lap();
 
     (
@@ -567,5 +637,55 @@ mod tests {
             got.sort();
             assert_eq!(got, expect, "needle `{needle}` diverged from oracle");
         }
+
+        // ── Refine oracle: for every subsumed step of a typing sequence,
+        // refining the previous ids must equal a fresh search, byte for
+        // byte and in order. False positives here lose results — the one
+        // unacceptable failure mode of the query cache.
+        let sequences: &[&[&str]] = &[
+            &["", "a", "ab", "abb", "abba"],
+            &["r", "re", "rep", "repo", "report"],
+            &["ab", "ab ba", "ab ba _3"],
+            &["日", "日本", "日本 語"],
+            &["t", "ta", "tab", "tab *ab*"],
+            &["re", "renamed", "renamed !zzz"],
+            &["a", "a size:>100", "a size:>100 size:<400"],
+            &["", "x", "x𠮷"],
+            &["or", "Ort"], // smart-case flip: folded prev → orig next
+        ];
+        let opts = [
+            QueryOptions::default(),
+            QueryOptions {
+                sort: SortKey::Size,
+                desc: true,
+                ..Default::default()
+            },
+        ];
+        let mut refined_pairs = 0;
+        for opt in opts {
+            for seq in sequences {
+                let mut prev: Option<(super::super::CompiledQuery, Vec<EntryId>)> = None;
+                for text in *seq {
+                    let q = compile(&parse(text).unwrap(), opt.case, &UtcResolver).unwrap();
+                    let fresh = search(&idx, &q, &opt).0.ids;
+                    if let Some((pq, pids)) = &prev
+                        && super::super::subsumes(pq, &opt, &q, &opt)
+                    {
+                        let refined = refine(&idx, &q, &opt, pids).0.ids;
+                        assert_eq!(
+                            refined, fresh,
+                            "refine diverged from fresh search at `{text}` (sort {:?})",
+                            opt.sort
+                        );
+                        refined_pairs += 1;
+                    }
+                    prev = Some((q, fresh));
+                }
+            }
+        }
+        assert!(
+            refined_pairs >= 20,
+            "subsumption barely fired ({refined_pairs} pairs) — the oracle is vacuous"
+        );
     }
 }

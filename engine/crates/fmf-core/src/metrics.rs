@@ -16,6 +16,9 @@ pub struct QueryTrace {
     /// Which execution strategy drove candidate generation (visualized in
     /// the perf panel): e.g. "full-scan", "pool-scan", "suffix", "perm-walk".
     pub driver: String,
+    /// Per-volume query-cache outcome: "miss", "refine" (all volumes
+    /// narrowed the previous result) or "partial" (mixed).
+    pub cache: String,
     pub parse_us: u64,
     pub compile_us: u64,
     /// Dir-path memo (only path queries; 0 when cached/warm).

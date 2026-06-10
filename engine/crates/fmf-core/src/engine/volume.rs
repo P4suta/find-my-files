@@ -4,10 +4,22 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 
-use crate::index::VolumeIndex;
+use crate::index::{EntryId, VolumeIndex};
 use crate::metrics::{Counters, ScanTrace, UsnTrace};
+use crate::query::{CompiledQuery, QueryOptions};
 
 use super::{Engine, EngineEvent, VolumePhase};
+
+/// Last materialized per-volume result, kept for incremental refinement
+/// (query/subsume.rs). Validity = both generations still match; USN batches
+/// invalidate implicitly by bumping `content_generation`.
+pub(super) struct VolumeQueryCache {
+    pub(super) compiled: Arc<CompiledQuery>,
+    pub(super) opt: QueryOptions,
+    pub(super) content_generation: u64,
+    pub(super) structural_generation: u64,
+    pub(super) ids: Arc<Vec<EntryId>>,
+}
 
 pub(super) struct VolumeSlot {
     pub(super) label: String,
@@ -15,6 +27,8 @@ pub(super) struct VolumeSlot {
     pub(super) scanned: Mutex<u64>,
     pub(super) index: RwLock<Option<VolumeIndex>>,
     pub(super) stop: Arc<AtomicBool>,
+    /// Single-entry query cache (lock order: `index` read first, then this).
+    pub(super) last_query: Mutex<Option<VolumeQueryCache>>,
 }
 
 impl VolumeSlot {
@@ -29,6 +43,9 @@ impl VolumeSlot {
         if let Some(prev) = guard.as_ref() {
             idx.bump_structural_from(prev.structural_generation());
         }
+        // Generation checks already reject it, but holding onto a dead
+        // index's id list (4B × entries) serves nobody.
+        *self.last_query.lock() = None;
         *guard = Some(idx);
     }
 }

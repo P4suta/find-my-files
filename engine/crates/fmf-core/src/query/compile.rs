@@ -148,6 +148,19 @@ pub(super) struct CompiledGroup {
     /// Residual matchers (cost-ordered); the driver's own condition is fully
     /// checked by the sweep and removed from here.
     pub terms: Vec<CTerm>,
+    /// The term the driver was built from (None for FullScan/MatchAll).
+    /// The sweep never reads it — it exists so cached-query refinement can
+    /// re-evaluate the *complete* group per candidate (exec::refine) and so
+    /// subsumption sees every condition (subsume.rs).
+    pub driver_term: Option<CTerm>,
+}
+
+impl CompiledGroup {
+    /// Every condition of this AND group: the driver's source term (most
+    /// selective, so first) followed by the cost-ordered residuals.
+    pub(super) fn all_terms(&self) -> impl Iterator<Item = &CTerm> {
+        self.driver_term.iter().chain(self.terms.iter())
+    }
 }
 
 pub struct CompiledQuery {
@@ -318,26 +331,31 @@ fn driver_score(t: &CTerm) -> Option<usize> {
     }
 }
 
-fn into_driver(t: CTerm) -> Driver {
-    match t.matcher {
+/// Build the sweep driver from a term, leaving the term intact (it is kept
+/// as `CompiledGroup::driver_term` for refinement/subsumption).
+fn driver_for(t: &CTerm) -> Driver {
+    match &t.matcher {
         Matcher::NameSub { finder, folded } => Driver::Sub {
             needle_len: finder.needle().len(),
-            finder,
-            folded,
+            finder: finder.clone(),
+            folded: *folded,
         },
-        Matcher::NamePrefix { bytes, folded } => Driver::Prefix { bytes, folded },
+        Matcher::NamePrefix { bytes, folded } => Driver::Prefix {
+            bytes: bytes.clone(),
+            folded: *folded,
+        },
         Matcher::NameSuffix { bytes, folded } => Driver::Suffixes {
-            suffixes: vec![bytes],
-            folded,
+            suffixes: vec![bytes.clone()],
+            folded: *folded,
             files_only: false,
         },
         Matcher::Ext { exts } => Driver::Suffixes {
             suffixes: exts
-                .into_iter()
+                .iter()
                 .map(|e| {
                     let mut s = Vec::with_capacity(e.len() + 1);
                     s.push(b'.');
-                    s.extend_from_slice(&e);
+                    s.extend_from_slice(e);
                     s
                 })
                 .collect(),
@@ -362,6 +380,7 @@ pub fn compile(
 
         // Pick the most selective positive literal as the driver and pull it
         // out of the residual list. Empty needles (Matcher::True) never score.
+        let mut driver_term = None;
         let driver = if terms.is_empty() {
             Driver::MatchAll
         } else {
@@ -373,13 +392,22 @@ pub fn compile(
             // Single-byte needles hit nearly every entry — the per-hit sweep
             // bookkeeping then costs more than a plain full scan does.
             match best {
-                Some((score, i)) if score >= 4 => into_driver(terms.swap_remove(i)),
+                Some((score, i)) if score >= 4 => {
+                    let t = terms.swap_remove(i);
+                    let d = driver_for(&t);
+                    driver_term = Some(t);
+                    d
+                }
                 _ => Driver::FullScan,
             }
         };
 
         terms.sort_by_key(|t| t.matcher.cost());
-        groups.push(CompiledGroup { driver, terms });
+        groups.push(CompiledGroup {
+            driver,
+            terms,
+            driver_term,
+        });
     }
 
     let needs_folded_paths = groups
