@@ -12,3 +12,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 fmf-core = { workspace = true }
+parking_lot = { workspace = true }
+serde_json = { workspace = true }

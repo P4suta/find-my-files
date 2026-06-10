@@ -219,6 +219,8 @@ name = "fmf-ffi"
 version = "0.1.0"
 dependencies = [
  "fmf-core",
+ "parking_lot",
+ "serde_json",
 ]
 
 [[package]]

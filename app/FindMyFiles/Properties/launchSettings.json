@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "FindMyFiles (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "FindMyFiles (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

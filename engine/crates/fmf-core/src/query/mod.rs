@@ -13,7 +13,7 @@ mod dates;
 mod exec;
 
 pub use ast::{Ast, ParseError, Term, parse};
-pub use compile::{CaseMode, CompiledQuery, compile};
+pub use compile::{CaseMode, CompileError, CompiledQuery, compile};
 #[cfg(windows)]
 pub use dates::WindowsLocalResolver;
 pub use dates::{DateResolver, UtcResolver};
