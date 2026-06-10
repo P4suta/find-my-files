@@ -35,6 +35,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Engine is always built/measured in release; keep stack traces usable.
+# codegen-units=1: rustc partitions codegen units by module, so the query
+# kernel's split into exec/sweep/matchers/memo cost ~10% query latency via
+# lost inlining (measured, A/B at identical machine state). One unit keeps
+# hot-path inlining independent of module layout.
 [profile.release]
 debug = "line-tables-only"
 lto = "thin"
+codegen-units = 1
