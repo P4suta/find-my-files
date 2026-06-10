@@ -149,10 +149,15 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         return result;
     }
 
-    public Task<ISearchResult> SearchAsync(string query, SearchOptions options)
+    private static readonly System.Text.Json.JsonSerializerOptions JsonOpts = new()
+    {
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower,
+    };
+
+    public Task<SearchOutcome> SearchAsync(string query, SearchOptions options)
     {
         var handle = _handle;
-        return Task.Run<ISearchResult>(() =>
+        return Task.Run(() =>
         {
             var native = new NativeEngine.FmfQueryOptions
             {
@@ -161,12 +166,44 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                 CaseMode = (uint)options.Case,
                 IncludeHiddenSystem = options.IncludeHiddenSystem ? 1u : 0u,
             };
-            var rc = NativeEngine.fmf_query(handle, query, in native, out var result, out var count);
+            int rc;
+            IntPtr result;
+            ulong count;
+            string? traceJson;
+            unsafe
+            {
+                rc = NativeEngine.fmf_query(
+                    handle, query, in native, out result, out count, out var trace);
+                traceJson = rc == NativeEngine.Ok ? NativeEngine.TakeBlob(trace) : null;
+            }
             if (rc != NativeEngine.Ok)
             {
                 NativeEngine.Throw(rc, "fmf_query");
             }
-            return new FfiSearchResult(result, (long)count);
+            QueryTraceData? traceData = null;
+            if (traceJson is not null)
+            {
+                traceData = System.Text.Json.JsonSerializer
+                    .Deserialize<QueryTraceData>(traceJson, JsonOpts);
+            }
+            return new SearchOutcome(new FfiSearchResult(result, (long)count), traceData);
+        });
+    }
+
+    public Task<EngineStatsData?> GetStatsAsync()
+    {
+        var handle = _handle;
+        return Task.Run(() =>
+        {
+            string? json;
+            unsafe
+            {
+                var rc = NativeEngine.fmf_engine_stats(handle, out var blob);
+                json = rc == NativeEngine.Ok ? NativeEngine.TakeBlob(blob) : null;
+            }
+            return json is null
+                ? null
+                : System.Text.Json.JsonSerializer.Deserialize<EngineStatsData>(json, JsonOpts);
         });
     }
 

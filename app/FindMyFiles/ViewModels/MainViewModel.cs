@@ -44,6 +44,33 @@ public sealed partial class MainViewModel : ObservableObject
 
     partial void OnIncludeHiddenSystemChanged(bool value) => _ = RunQueryAsync();
 
+    // ── Performance panel (F12) ─────────────────────────────────────────
+
+    [ObservableProperty]
+    public partial bool IsPerfPanelOpen { get; set; }
+
+    [ObservableProperty]
+    public partial QueryTraceData? LastTrace { get; set; }
+
+    [ObservableProperty]
+    public partial EngineStatsData? Stats { get; set; }
+
+    private readonly List<ulong> _recentTotalsUs = [];
+
+    /// <summary>Latencies of the most recent queries (µs, oldest first).</summary>
+    public IReadOnlyList<ulong> RecentTotalsUs => _recentTotalsUs;
+
+    /// <summary>Raised on the UI thread whenever trace/stats data moved.</summary>
+    public event Action? PerfDataChanged;
+
+    public void TogglePerfPanel() => IsPerfPanelOpen = !IsPerfPanelOpen;
+
+    public async Task RefreshStatsAsync()
+    {
+        Stats = await _engine.GetStatsAsync();
+        PerfDataChanged?.Invoke();
+    }
+
     public MainViewModel(IEngineClient engine, DispatcherQueue dispatcher)
     {
         _engine = engine;
@@ -117,7 +144,8 @@ public sealed partial class MainViewModel : ObservableObject
         var options = new SearchOptions(Sort, SortDescending, FmfCase.Smart, IncludeHiddenSystem);
         try
         {
-            var result = await _engine.SearchAsync(query, options);
+            var outcome = await _engine.SearchAsync(query, options);
+            var result = outcome.Result;
             if (generation != Interlocked.Read(ref _generation))
             {
                 result.Dispose(); // a newer query superseded this one
@@ -128,7 +156,22 @@ public sealed partial class MainViewModel : ObservableObject
             list.BecameStale += () => _ = RunQueryAsync();
             ResultsSource = list;
             old?.Dispose();
-            CountText = $"{result.Count:N0} 件";
+
+            LastTrace = outcome.Trace;
+            if (outcome.Trace is { } t)
+            {
+                _recentTotalsUs.Add(t.TotalUs);
+                if (_recentTotalsUs.Count > 64)
+                {
+                    _recentTotalsUs.RemoveAt(0);
+                }
+                CountText = $"{t.TotalUs / 1000.0:F1} ms · {result.Count:N0} 件";
+            }
+            else
+            {
+                CountText = $"{result.Count:N0} 件";
+            }
+            PerfDataChanged?.Invoke();
         }
         catch (QuerySyntaxException e)
         {

@@ -90,13 +90,44 @@ internal static partial class NativeEngine
     internal static unsafe partial int fmf_index_status(
         IntPtr handle, FmfVolumeStatus* buf, uint cap, out uint count);
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct FmfBlob
+    {
+        public IntPtr Data;
+        public uint Len;
+        public uint _pad;
+    }
+
+    [LibraryImport("fmf_engine")]
+    internal static unsafe partial int fmf_blob_free(FmfBlob* blob);
+
+    [LibraryImport("fmf_engine")]
+    internal static unsafe partial int fmf_engine_stats(IntPtr handle, out FmfBlob* blob);
+
     [LibraryImport("fmf_engine", StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int fmf_query(
+    internal static unsafe partial int fmf_query(
         IntPtr handle,
         string query,
         in FmfQueryOptions options,
         out IntPtr resultHandle,
-        out ulong count);
+        out ulong count,
+        out FmfBlob* trace);
+
+    internal static unsafe string? TakeBlob(FmfBlob* blob)
+    {
+        if (blob == null)
+        {
+            return null;
+        }
+        try
+        {
+            return System.Text.Encoding.UTF8.GetString((byte*)blob->Data, (int)blob->Len);
+        }
+        finally
+        {
+            fmf_blob_free(blob);
+        }
+    }
 
     [LibraryImport("fmf_engine")]
     internal static unsafe partial int fmf_result_page(

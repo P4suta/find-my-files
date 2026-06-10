@@ -17,7 +17,60 @@ public interface IEngineClient : IDisposable
     IReadOnlyList<VolumeStatus> GetStatus();
 
     /// <exception cref="QuerySyntaxException">malformed query text</exception>
-    Task<ISearchResult> SearchAsync(string query, SearchOptions options);
+    Task<SearchOutcome> SearchAsync(string query, SearchOptions options);
+
+    /// <summary>Observability snapshot for the performance panel.</summary>
+    Task<EngineStatsData?> GetStatsAsync();
+}
+
+public sealed record SearchOutcome(ISearchResult Result, QueryTraceData? Trace);
+
+/// <summary>Stage breakdown of one query (mirrors fmf-core metrics.rs).</summary>
+public sealed class QueryTraceData
+{
+    public string Query { get; set; } = string.Empty;
+    public string Driver { get; set; } = string.Empty;
+    public ulong ParseUs { get; set; }
+    public ulong CompileUs { get; set; }
+    public ulong MemoUs { get; set; }
+    public ulong ScanUs { get; set; }
+    public ulong MaterializeUs { get; set; }
+    public ulong MergeUs { get; set; }
+    public ulong TotalUs { get; set; }
+    public ulong EntriesScanned { get; set; }
+    public ulong ExcludedSkipped { get; set; }
+    public ulong Hits { get; set; }
+    public uint Volumes { get; set; }
+}
+
+public sealed class IndexStatsData
+{
+    public string Volume { get; set; } = string.Empty;
+    public ulong Entries { get; set; }
+    public ulong LiveEntries { get; set; }
+    public ulong Tombstones { get; set; }
+    public ulong TotalBytes { get; set; }
+    public double BytesPerEntry { get; set; }
+    public ulong ContentGeneration { get; set; }
+}
+
+public sealed class UsnTraceData
+{
+    public string Volume { get; set; } = string.Empty;
+    public ulong Records { get; set; }
+    public ulong Upserted { get; set; }
+    public ulong Deleted { get; set; }
+    public ulong StatUpdated { get; set; }
+    public ulong ApplyUs { get; set; }
+}
+
+public sealed class EngineStatsData
+{
+    public List<QueryTraceData> RecentQueries { get; set; } = [];
+    public ulong P50Us { get; set; }
+    public ulong P99Us { get; set; }
+    public List<UsnTraceData> RecentUsn { get; set; } = [];
+    public List<IndexStatsData> Indexes { get; set; } = [];
 }
 
 public enum FmfSort { Name = 0, Size = 1, Mtime = 2 }

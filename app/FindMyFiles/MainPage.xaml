@@ -9,10 +9,14 @@
     mc:Ignorable="d">
 
     <Grid>
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Key="F12" Invoked="PerfPanel_Toggle" />
+        </Grid.KeyboardAccelerators>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="32" />
         </Grid.RowDefinitions>
 
@@ -156,8 +160,60 @@
             </ListView.ContextFlyout>
         </ListView>
 
+        <!-- Performance panel (F12). Rendering of the stage bar / sparkline
+             happens in code-behind — it is diagnostic chrome, not app data. -->
+        <Border
+            Grid.Row="3"
+            Padding="16,8"
+            AutomationProperties.AutomationId="PerfPanel"
+            BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+            BorderThickness="0,1,0,0"
+            Visibility="{x:Bind BoolToVis(ViewModel.IsPerfPanelOpen), Mode=OneWay}">
+            <Grid ColumnSpacing="24">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Spacing="4">
+                    <TextBlock
+                        x:Name="PerfHeadline"
+                        FontFamily="Consolas"
+                        Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                    <Grid x:Name="StageBar" Height="14" />
+                    <TextBlock
+                        x:Name="StageLegend"
+                        FontFamily="Consolas"
+                        FontSize="11"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Grid Height="44" Margin="0,4,0,0">
+                        <Polyline
+                            x:Name="Spark"
+                            Stroke="{ThemeResource AccentFillColorDefaultBrush}"
+                            StrokeThickness="1.5" />
+                    </Grid>
+                    <TextBlock
+                        x:Name="HistText"
+                        FontFamily="Consolas"
+                        FontSize="11"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" MinWidth="280" Spacing="4">
+                    <TextBlock
+                        x:Name="VolumesText"
+                        FontFamily="Consolas"
+                        FontSize="11"
+                        Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                    <TextBlock
+                        x:Name="UsnFeed"
+                        FontFamily="Consolas"
+                        FontSize="11"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
         <!-- Status bar -->
-        <Grid Grid.Row="3" Padding="16,4" BorderThickness="0,1,0,0"
+        <Grid Grid.Row="4" Padding="16,4" BorderThickness="0,1,0,0"
               BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
             <TextBlock
                 HorizontalAlignment="Left"

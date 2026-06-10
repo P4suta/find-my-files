@@ -48,8 +48,33 @@ public sealed class FakeEngineClient : IEngineClient
     public IReadOnlyList<VolumeStatus> GetStatus() =>
         [new("F:", VolumeState.Ready, (ulong)_rows.Count)];
 
-    public Task<ISearchResult> SearchAsync(string query, SearchOptions options)
+    private readonly List<QueryTraceData> _traces = [];
+
+    public Task<EngineStatsData?> GetStatsAsync()
     {
+        var stats = new EngineStatsData
+        {
+            RecentQueries = _traces.TakeLast(64).ToList(),
+            P50Us = 1500,
+            P99Us = 4000,
+            Indexes =
+            [
+                new IndexStatsData
+                {
+                    Volume = "F:",
+                    Entries = (ulong)_rows.Count,
+                    LiveEntries = (ulong)_rows.Count,
+                    TotalBytes = (ulong)_rows.Count * 110,
+                    BytesPerEntry = 110,
+                },
+            ],
+        };
+        return Task.FromResult<EngineStatsData?>(stats);
+    }
+
+    public Task<SearchOutcome> SearchAsync(string query, SearchOptions options)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         var needle = query.Trim();
         IEnumerable<RowData> hits = needle.Length == 0
             ? _rows
@@ -66,7 +91,25 @@ public sealed class FakeEngineClient : IEngineClient
             _ => hits.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase),
         };
         var list = (options.Descending ? sorted.Reverse() : sorted).ToList();
-        return Task.FromResult<ISearchResult>(new FakeResult(list));
+        var totalUs = (ulong)(sw.Elapsed.TotalMicroseconds + 1);
+        var trace = new QueryTraceData
+        {
+            Query = query,
+            Driver = "fake",
+            ScanUs = totalUs * 7 / 10,
+            MaterializeUs = totalUs * 2 / 10,
+            ParseUs = totalUs / 10,
+            TotalUs = totalUs,
+            EntriesScanned = (ulong)_rows.Count,
+            Hits = (ulong)list.Count,
+            Volumes = 1,
+        };
+        _traces.Add(trace);
+        if (_traces.Count > 256)
+        {
+            _traces.RemoveAt(0);
+        }
+        return Task.FromResult(new SearchOutcome(new FakeResult(list), trace));
     }
 
     public void Dispose() { }

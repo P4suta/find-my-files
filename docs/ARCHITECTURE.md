@@ -69,7 +69,13 @@ int32_t fmf_index_status(FmfEngineHandle h, FmfVolumeStatus* buf, uint32_t cap, 
 // options: { sort: Name|Size|Mtime, dir: Asc|Desc, case_mode: Smart|Insensitive|Sensitive,
 //            include_hidden_system: bool(既定false=H/S属性とその配下を除外) }
 int32_t fmf_query(FmfEngineHandle h, const char* query_utf8,
-                  const FmfQueryOptions* options, FmfResultHandle* out, uint64_t* out_count);
+                  const FmfQueryOptions* options, FmfResultHandle* out, uint64_t* out_count,
+                  FmfBlob** out_trace /* nullable: QueryTraceのJSON */);
+
+// ── 可観測性(JSONブロブ。FmfPageと同じ「エンジン確保+free」パターン) ──
+// FmfBlob { data: *const u8, len: u32 } — UTF-8 JSON
+int32_t fmf_engine_stats(FmfEngineHandle h, FmfBlob** out); // MetricsSnapshot(直近トレース・ヒストグラム・USNフィード・カラム別メモリ)
+int32_t fmf_blob_free(FmfBlob*);
 // ── ページ取得: エンジン確保の連続ブロック(行ヘッダ配列+文字列blob)。P/Invoke 1回・コピー1回 ──
 // 行: { entry_ref u64, frn u64, size u64, mtime i64, flags u32,
 //       name_off u32, name_len u16, parent_path_off u32, parent_path_len u16 } + 末尾blob
