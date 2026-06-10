@@ -11,7 +11,11 @@ public sealed class FakeEngineClient : IEngineClient
 
     public event Action<string>? IndexChanged { add { } remove { } }
     public event Action<VolumeStatus>? VolumeUpdated { add { } remove { } }
+    // Only the DEBUG-only fault injection raises this; Release builds keep
+    // the member to satisfy IEngineClient.
+#pragma warning disable CS0067
     public event Action<int>? EngineErrorOccurred;
+#pragma warning restore CS0067
 
     private readonly List<ErrorEventData> _injectedErrors = [];
 
