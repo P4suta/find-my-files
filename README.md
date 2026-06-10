@@ -30,6 +30,10 @@ Reading the NTFS Master File Table and USN journal requires elevated volume acce
 constraint Everything has (it ships a privileged service). The MVP runs elevated; a split
 privileged-service + unprivileged-UI architecture is planned for v2.
 
+By default, hidden/system files — and everything under hidden/system folders
+($Recycle.Bin contents, `pagefile.sys`, `.git` internals…) — are excluded from
+results. A toolbar toggle brings them back instantly (they stay indexed).
+
 Known MVP limitations: drag & drop from Explorer into the (elevated) window does not work;
 names with unpaired surrogates are searchable but displayed with replacement characters.
 

@@ -22,15 +22,20 @@ public sealed class FakeEngineClient : IEngineClient
         for (var i = 0; i < EntryCount; i++)
         {
             var isDir = i % 50 == 0;
-            var name = isDir
-                ? $"folder_{i:D6}"
-                : $"file_{i:D6}_{(char)('a' + rng.Next(26))}.{exts[rng.Next(exts.Length)]}";
+            // Every 97th entry plays a hidden/system file so the UI toggle is
+            // exercisable against deterministic data.
+            var isHiddenSystem = i % 97 == 0;
+            var name = isHiddenSystem
+                ? $"hidden_sys_{i:D6}.dat"
+                : isDir
+                    ? $"folder_{i:D6}"
+                    : $"file_{i:D6}_{(char)('a' + rng.Next(26))}.{exts[rng.Next(exts.Length)]}";
             _rows.Add(new RowData(
                 EntryRef: (ulong)i,
                 Frn: (uint)i | (1UL << 48),
                 Size: isDir ? 0UL : (ulong)rng.Next(0, 1 << 24),
                 Mtime: baseTime + (long)i * 10_000_000,
-                Flags: isDir ? 1u : 0u,
+                Flags: (isDir ? 1u : 0u) | (isHiddenSystem ? 4u : 0u),
                 Name: name,
                 ParentPath: dirs[rng.Next(dirs.Length)]));
         }
@@ -49,6 +54,10 @@ public sealed class FakeEngineClient : IEngineClient
         IEnumerable<RowData> hits = needle.Length == 0
             ? _rows
             : _rows.Where(r => r.Name.Contains(needle, StringComparison.OrdinalIgnoreCase));
+        if (!options.IncludeHiddenSystem)
+        {
+            hits = hits.Where(r => (r.Flags & 4) == 0);
+        }
 
         var sorted = options.Sort switch
         {

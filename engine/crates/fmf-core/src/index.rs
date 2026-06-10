@@ -28,6 +28,15 @@ pub mod flags {
     pub const IS_DIR: u8 = 1;
     pub const TOMBSTONE: u8 = 2;
     pub const REPARSE: u8 = 4;
+    /// Raw FILE_ATTRIBUTE_HIDDEN.
+    pub const HIDDEN: u8 = 8;
+    /// Raw FILE_ATTRIBUTE_SYSTEM.
+    pub const SYSTEM: u8 = 16;
+    /// Computed: this entry or any ancestor carries HIDDEN|SYSTEM. Queries
+    /// skip these by default (toggleable). Kept in sync on insert/move; a
+    /// subtree moved out of an excluded branch keeps stale bits until the
+    /// next full rescan (same accepted-limitation class as dir renames).
+    pub const EXCLUDED: u8 = 32;
 }
 
 /// Mask an NTFS file reference number down to the record number (low 48 bits).
@@ -46,6 +55,8 @@ pub struct RawEntry<'a> {
     pub name_utf16: &'a [u16],
     pub is_dir: bool,
     pub is_reparse: bool,
+    pub is_hidden: bool,
+    pub is_system: bool,
     pub size: u64,
     /// FILETIME (100ns ticks since 1601, UTC).
     pub mtime: i64,
@@ -111,6 +122,12 @@ impl VolumeIndex {
     #[inline]
     pub fn is_live(&self, id: EntryId) -> bool {
         self.flag[id as usize] & flags::TOMBSTONE == 0
+    }
+
+    /// Hidden/system (or under such a branch) — skipped by default queries.
+    #[inline]
+    pub fn is_excluded(&self, id: EntryId) -> bool {
+        self.flag[id as usize] & flags::EXCLUDED != 0
     }
 
     #[inline]
@@ -241,6 +258,7 @@ impl VolumeIndex {
             .entry_by_record(new_parent_record)
             .unwrap_or(Self::ROOT);
         self.parent[id as usize] = parent;
+        self.recompute_excluded(id);
         Some(id)
     }
 
@@ -269,6 +287,7 @@ impl VolumeIndex {
         if parent != id {
             self.parent[id as usize] = parent;
         }
+        self.recompute_excluded(id);
 
         let ins = self
             .perm_name
@@ -371,8 +390,53 @@ impl VolumeIndex {
         if e.is_reparse {
             f |= flags::REPARSE;
         }
+        if e.is_hidden {
+            f |= flags::HIDDEN;
+        }
+        if e.is_system {
+            f |= flags::SYSTEM;
+        }
+        // Provisional during the initial scan (parents may resolve later —
+        // the builder recomputes in finish()); exact on the USN path where
+        // parents are already live.
+        let parent_excluded = self
+            .flag
+            .get(parent as usize)
+            .is_some_and(|pf| pf & flags::EXCLUDED != 0);
+        if e.is_hidden || e.is_system || parent_excluded {
+            f |= flags::EXCLUDED;
+        }
         self.flag.push(f);
         id
+    }
+
+    /// Re-derive EXCLUDED for `id` from its own H/S bits and current parent.
+    fn recompute_excluded(&mut self, id: EntryId) {
+        let p = self.parent[id as usize];
+        let inherited = p != NO_PARENT && p != id && self.flag[p as usize] & flags::EXCLUDED != 0;
+        let own = self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM) != 0;
+        if own || inherited {
+            self.flag[id as usize] |= flags::EXCLUDED;
+        } else {
+            self.flag[id as usize] &= !flags::EXCLUDED;
+        }
+    }
+
+    /// Update raw attribute bits (USN BASIC_INFO_CHANGE) and the derived
+    /// EXCLUDED bit.
+    pub fn update_attrs(
+        &mut self,
+        record: u64,
+        is_hidden: bool,
+        is_system: bool,
+    ) -> Option<EntryId> {
+        let id = self.entry_by_record(record)?;
+        let f = &mut self.flag[id as usize];
+        *f = (*f & !(flags::HIDDEN | flags::SYSTEM))
+            | if is_hidden { flags::HIDDEN } else { 0 }
+            | if is_system { flags::SYSTEM } else { 0 };
+        self.recompute_excluded(id);
+        Some(id)
     }
 }
 
@@ -383,7 +447,9 @@ impl VolumeIndex {
 // mismatch falls back to a full rescan, so the format favors speed over
 // portability (docs/ARCHITECTURE.md).
 
-const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX01";
+// 02: flag byte gained HIDDEN/SYSTEM/EXCLUDED bits — older snapshots must
+// trigger a full rescan rather than load with wrong semantics.
+const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX02";
 
 fn pod_bytes<T: Copy>(v: &[T]) -> &[u8] {
     // Safety: T is a plain-old-data column type (u8/u16/u32/u64/i64).
@@ -609,6 +675,8 @@ impl VolumeIndexBuilder {
             name_utf16: &units,
             is_dir: true,
             is_reparse: false,
+            is_hidden: false,
+            is_system: false,
             size: 0,
             mtime: 0,
         });
@@ -650,6 +718,32 @@ impl VolumeIndexBuilder {
             self.idx.parent[i] = p;
         }
 
+        // Pass 3: propagate EXCLUDED down resolved parent chains. `done`
+        // marks finalized entries; the stack unwinds each unresolved chain
+        // top-down exactly once → O(n) total.
+        {
+            let n = self.idx.len();
+            let mut done = vec![false; n];
+            let root = VolumeIndex::ROOT as usize;
+            self.idx.recompute_excluded(VolumeIndex::ROOT);
+            done[root] = true;
+            let mut stack: Vec<EntryId> = Vec::new();
+            for start in 0..n as u32 {
+                let mut cur = start;
+                while !done[cur as usize] && stack.len() < 4096 {
+                    stack.push(cur);
+                    cur = self.idx.parent[cur as usize];
+                    if cur == NO_PARENT {
+                        break;
+                    }
+                }
+                while let Some(id) = stack.pop() {
+                    self.idx.recompute_excluded(id);
+                    done[id as usize] = true;
+                }
+            }
+        }
+
         let ids: Vec<EntryId> = (0..self.idx.len() as u32).collect();
         let idx = &self.idx;
         let mut perm_name = ids.clone();
@@ -684,6 +778,8 @@ mod tests {
             name_utf16: name,
             is_dir,
             is_reparse: false,
+            is_hidden: false,
+            is_system: false,
             size,
             mtime,
         }
@@ -840,5 +936,76 @@ mod tests {
         idx.write_snapshot(&mut truncated, 1, 1).unwrap();
         truncated.truncate(truncated.len() - 3);
         assert!(VolumeIndex::read_snapshot(&mut truncated.as_slice()).is_err());
+    }
+
+    fn raw_attr<'a>(
+        record: u64,
+        parent: u64,
+        name: &'a [u16],
+        is_dir: bool,
+        is_hidden: bool,
+        is_system: bool,
+    ) -> RawEntry<'a> {
+        RawEntry {
+            record,
+            parent_record: parent,
+            frn: (1u64 << 48) | record,
+            name_utf16: name,
+            is_dir,
+            is_reparse: false,
+            is_hidden,
+            is_system,
+            size: 0,
+            mtime: 0,
+        }
+    }
+
+    #[test]
+    fn excluded_propagates_down_branches() {
+        // C:\ ├─ $Recycle.Bin\(system dir) │ └─ sub\ │   └─ ghost.txt(plain)
+        //     ├─ .git(hidden file)  └─ normal.txt
+        let bin = u16s("$Recycle.Bin");
+        let sub = u16s("sub");
+        let ghost = u16s("ghost.txt");
+        let git = u16s(".git");
+        let normal = u16s("normal.txt");
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        // Push the deep child FIRST so propagation must survive scan order.
+        b.push(raw_attr(30, 20, &ghost, false, false, false));
+        b.push(raw_attr(20, 10, &sub, true, false, false));
+        b.push(raw_attr(10, 5, &bin, true, false, true)); // system
+        b.push(raw_attr(40, 5, &git, false, true, false)); // hidden
+        b.push(raw_attr(50, 5, &normal, false, false, false));
+        let idx = b.finish();
+
+        for (rec, want) in [(10, true), (20, true), (30, true), (40, true), (50, false)] {
+            let id = idx.entry_by_record(rec).unwrap();
+            assert_eq!(idx.is_excluded(id), want, "record {rec}");
+        }
+    }
+
+    #[test]
+    fn usn_insert_and_moves_track_exclusion() {
+        let sysdir = u16s("sysdir");
+        let normal = u16s("docs");
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        b.push(raw_attr(10, 5, &sysdir, true, false, true));
+        b.push(raw_attr(20, 5, &normal, true, false, false));
+        let mut idx = b.finish();
+
+        // New plain file created under the system dir → inherits.
+        let name = u16s("payload.tmp");
+        let first_new = idx.len() as u32;
+        let id = idx.upsert(&raw_attr(30, 10, &name, false, false, false));
+        idx.merge_new_into_permutations(first_new);
+        assert!(idx.is_excluded(id));
+
+        // Moved out into a normal dir → bit clears.
+        idx.reparent(30, 20);
+        assert!(!idx.is_excluded(id));
+
+        // Attribute change marks it hidden → re-excluded.
+        idx.update_attrs(30, true, false);
+        assert!(idx.is_excluded(id));
     }
 }

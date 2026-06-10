@@ -18,6 +18,7 @@ internal static partial class NativeEngine
         public uint Sort;
         public uint Desc;
         public uint CaseMode;
+        public uint IncludeHiddenSystem;
     }
 
     [StructLayout(LayoutKind.Sequential)]

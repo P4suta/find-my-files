@@ -27,6 +27,7 @@ v2(サービス分離)では `fmf-service` crate(fmf-core を再利用)+ `PipeEn
 ## エンジン内部の要点
 
 - **VolumeIndex(ボリューム毎、struct-of-arrays)**: 名前プール2本(表示用 WTF-8 原文+simple case fold 済み検索用。オフセット同期)/ name_off(u32)+name_len(u16) / parent(EntryId=u32) / size(u64) / mtime(i64, FILETIME) / frn(u64) / flags(is_dir|tombstone|reparse) / FRN→EntryId マップ / fast sort 用順列配列3本(name/size/mtime)。パス文字列は保持せず親チェーンで遅延構築。削除は tombstone、閾値超でコンパクション。
+- **既定除外(EXCLUDED)**: flagsにH(hidden)/S(system)の生属性と、計算済みEXCLUDEDビット(自分がH|S、または祖先にH|Sがいる)を保持。クエリは既定でEXCLUDEDをスキップ(`include_hidden_system`で解除)。継承はスキャンfinish時にO(n)伝播、USN挿入/移動時に親から再計算。**制限**: 除外ブランチからのsubtree移動では配下のビットが次回リスキャンまで陳腐化(dir-rename制限と同類)。
 - **generation 2層**:
   - `content_generation`: USNバッチ適用毎に++。既存結果ハンドルは**読み出し継続可**(tombstone+末尾追記なので安全。削除済みが残る/新規が出ないだけの Everything 同等の結果整合)。
   - `structural_generation`: コンパクション/フルリスキャン時のみ++。既存ハンドルは**ハードSTALE**(`FMF_E_STALE`)。
@@ -65,7 +66,8 @@ int32_t fmf_index_status(FmfEngineHandle h, FmfVolumeStatus* buf, uint32_t cap, 
 // クエリは常に「Ready なボリュームのみ」を対象に成功する(UIはstateで部分結果InfoBarを判定)
 
 // ── クエリ(同期・高速。ソートはクエリ時に確定) ──
-// options: { sort: Name|Size|Mtime, dir: Asc|Desc, case_mode: Smart|Insensitive|Sensitive }
+// options: { sort: Name|Size|Mtime, dir: Asc|Desc, case_mode: Smart|Insensitive|Sensitive,
+//            include_hidden_system: bool(既定false=H/S属性とその配下を除外) }
 int32_t fmf_query(FmfEngineHandle h, const char* query_utf8,
                   const FmfQueryOptions* options, FmfResultHandle* out, uint64_t* out_count);
 // ── ページ取得: エンジン確保の連続ブロック(行ヘッダ配列+文字列blob)。P/Invoke 1回・コピー1回 ──

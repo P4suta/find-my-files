@@ -218,6 +218,7 @@ pub fn search(idx: &VolumeIndex, q: &CompiledQuery, opt: &QueryOptions) -> Searc
         &empty
     };
 
+    let skip_excluded = !opt.include_hidden_system;
     let n = idx.len();
     let chunk_bitmaps: Vec<Vec<u64>> = (0..n.div_ceil(CHUNK))
         .into_par_iter()
@@ -228,7 +229,7 @@ pub fn search(idx: &VolumeIndex, q: &CompiledQuery, opt: &QueryOptions) -> Searc
             let mut ctx = EvalCtx::default();
             for id in start..end {
                 let id = id as EntryId;
-                if !idx.is_live(id) {
+                if !idx.is_live(id) || (skip_excluded && idx.is_excluded(id)) {
                     continue;
                 }
                 if matches(idx, memo, &mut ctx, q, id) {
@@ -312,6 +313,8 @@ mod tests {
                 name_utf16: &units,
                 is_dir: *is_dir,
                 is_reparse: false,
+                is_hidden: false,
+                is_system: false,
                 size: *size,
                 mtime: *mtime,
             });
@@ -448,5 +451,47 @@ mod tests {
         let mut idx = sample();
         idx.delete(11); // Report.PDF
         assert!(names(&idx, "report").is_empty());
+    }
+
+    #[test]
+    fn hidden_system_excluded_by_default_and_toggleable() {
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mk = |name: &str| name.encode_utf16().collect::<Vec<u16>>();
+        let (bin, ghost, vis) = (mk("$Recycle.Bin"), mk("ghost.txt"), mk("visible.txt"));
+        let mut push = |rec: u64, parent: u64, name: &[u16], is_dir, is_system| {
+            b.push(RawEntry {
+                record: rec,
+                parent_record: parent,
+                frn: (1 << 48) | rec,
+                name_utf16: name,
+                is_dir,
+                is_reparse: false,
+                is_hidden: false,
+                is_system,
+                size: 1,
+                mtime: 1,
+            });
+        };
+        push(10, 5, &bin, true, true); // system dir
+        push(11, 10, &ghost, false, false); // plain file inside it
+        push(20, 5, &vis, false, false);
+        let idx = b.finish();
+
+        // Default: only the visible file (plus root) shows, even for "".
+        assert_eq!(names(&idx, "txt"), vec!["visible.txt"]);
+        assert_eq!(names(&idx, "").len(), 2); // root + visible.txt
+
+        // Toggle on: everything is searchable again.
+        let all = run(
+            &idx,
+            "txt",
+            QueryOptions {
+                include_hidden_system: true,
+                ..Default::default()
+            },
+        );
+        let mut all = all;
+        all.sort();
+        assert_eq!(all, vec!["ghost.txt", "visible.txt"]);
     }
 }

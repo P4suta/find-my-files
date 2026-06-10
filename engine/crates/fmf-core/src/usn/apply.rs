@@ -105,11 +105,15 @@ pub fn apply_batch(
                 name_utf16: &last.name,
                 is_dir: last.is_dir(),
                 is_reparse: last.is_reparse(),
+                is_hidden: last.is_hidden(),
+                is_system: last.is_system(),
                 size,
                 mtime,
             });
             stats.created_or_renamed += 1;
         } else if a.reasons & STAT_REASONS != 0 {
+            // BASIC_INFO_CHANGE may have flipped hidden/system attributes.
+            idx.update_attrs(key, last.is_hidden(), last.is_system());
             if let Some((size, mtime)) = fetch.stat(last.frn) {
                 if idx.update_stat(key, size, mtime).is_some() {
                     stats.stat_updated += 1;
@@ -155,6 +159,8 @@ mod tests {
             name_utf16: &docs,
             is_dir: true,
             is_reparse: false,
+            is_hidden: false,
+            is_system: false,
             size: 0,
             mtime: 0,
         });
@@ -165,6 +171,8 @@ mod tests {
             name_utf16: &note,
             is_dir: false,
             is_reparse: false,
+            is_hidden: false,
+            is_system: false,
             size: 100,
             mtime: 7,
         });

@@ -25,6 +25,9 @@ enum Command {
         /// Print stats and exit without the REPL.
         #[arg(long)]
         stats: bool,
+        /// Include hidden/system entries (excluded by default, like the app).
+        #[arg(long)]
+        include_hidden_system: bool,
     },
     /// Index a volume and run the fixed benchmark query set.
     Bench { drive: String },
@@ -53,7 +56,11 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Spike { drive } => spike(&drive),
-        Command::Index { drive, stats } => index(&drive, stats),
+        Command::Index {
+            drive,
+            stats,
+            include_hidden_system,
+        } => index(&drive, stats, include_hidden_system),
         Command::Bench { drive } => bench(&drive),
         Command::Watch { drive } => watch(&drive),
     };
@@ -128,7 +135,11 @@ fn run_query(
     Ok(query::search(idx, &q, &opt))
 }
 
-fn index(drive: &str, stats_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn index(
+    drive: &str,
+    stats_only: bool,
+    include_hidden_system: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let idx = build_index(drive)?;
     if stats_only {
         return Ok(());
@@ -138,6 +149,7 @@ fn index(drive: &str, stats_only: bool) -> Result<(), Box<dyn std::error::Error>
         sort: SortKey::Name,
         desc: false,
         case: CaseMode::Smart,
+        include_hidden_system,
     };
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();

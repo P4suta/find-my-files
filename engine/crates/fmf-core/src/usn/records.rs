@@ -19,6 +19,8 @@ pub mod reason {
     pub const CLOSE: u32 = 0x8000_0000;
 }
 
+pub const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+pub const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
 pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
@@ -42,6 +44,12 @@ impl UsnRecord {
     }
     pub fn is_reparse(&self) -> bool {
         self.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    pub fn is_hidden(&self) -> bool {
+        self.attributes & FILE_ATTRIBUTE_HIDDEN != 0
+    }
+    pub fn is_system(&self) -> bool {
+        self.attributes & FILE_ATTRIBUTE_SYSTEM != 0
     }
 }
 

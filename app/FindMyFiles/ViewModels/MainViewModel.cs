@@ -35,6 +35,15 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     public partial bool SortDescending { get; set; }
 
+    /// <summary>
+    /// Hidden/system entries (and their subtrees) are excluded by default;
+    /// the toolbar toggle flips this and re-runs the query instantly.
+    /// </summary>
+    [ObservableProperty]
+    public partial bool IncludeHiddenSystem { get; set; }
+
+    partial void OnIncludeHiddenSystemChanged(bool value) => _ = RunQueryAsync();
+
     public MainViewModel(IEngineClient engine, DispatcherQueue dispatcher)
     {
         _engine = engine;
@@ -105,7 +114,7 @@ public sealed partial class MainViewModel : ObservableObject
     {
         var generation = Interlocked.Increment(ref _generation);
         var query = SearchText;
-        var options = new SearchOptions(Sort, SortDescending, FmfCase.Smart);
+        var options = new SearchOptions(Sort, SortDescending, FmfCase.Smart, IncludeHiddenSystem);
         try
         {
             var result = await _engine.SearchAsync(query, options);

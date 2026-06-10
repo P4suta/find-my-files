@@ -2,6 +2,10 @@
 //! docs/ARCHITECTURE.md). Conversion, handle management and panic catching
 //! only; every function maps 1:1 onto a future named-pipe message.
 
+// Safety contracts for every entry point live in docs/ARCHITECTURE.md (the
+// canonical FFI contract) rather than per-function doc comments.
+#![allow(clippy::missing_safety_doc)]
+
 use std::cell::RefCell;
 use std::ffi::{CStr, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -324,6 +328,8 @@ pub struct FmfQueryOptions {
     pub sort: u32, // 0=Name 1=Size 2=Mtime
     pub desc: u32,
     pub case_mode: u32, // 0=Smart 1=Insensitive 2=Sensitive
+    /// Nonzero shows hidden/system entries (default-excluded otherwise).
+    pub include_hidden_system: u32,
 }
 
 #[unsafe(no_mangle)]
@@ -359,6 +365,7 @@ pub unsafe extern "C" fn fmf_query(
                 2 => CaseMode::Sensitive,
                 _ => CaseMode::Smart,
             },
+            include_hidden_system: o.include_hidden_system != 0,
         };
         match handle.engine.query(text, &opt) {
             Ok(rs) => {

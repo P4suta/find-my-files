@@ -26,6 +26,9 @@ pub struct QueryOptions {
     pub sort: SortKey,
     pub desc: bool,
     pub case: CaseMode,
+    /// Hidden/system entries (and everything under such branches) are
+    /// skipped unless this is set — the UI toggle maps straight here.
+    pub include_hidden_system: bool,
 }
 
 impl Default for QueryOptions {
@@ -34,6 +37,7 @@ impl Default for QueryOptions {
             sort: SortKey::Name,
             desc: false,
             case: CaseMode::Smart,
+            include_hidden_system: false,
         }
     }
 }

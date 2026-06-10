@@ -159,6 +159,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                 Sort = (uint)options.Sort,
                 Desc = options.Descending ? 1u : 0u,
                 CaseMode = (uint)options.Case,
+                IncludeHiddenSystem = options.IncludeHiddenSystem ? 1u : 0u,
             };
             var rc = NativeEngine.fmf_query(handle, query, in native, out var result, out var count);
             if (rc != NativeEngine.Ok)

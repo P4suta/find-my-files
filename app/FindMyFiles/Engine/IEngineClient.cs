@@ -24,7 +24,11 @@ public enum FmfSort { Name = 0, Size = 1, Mtime = 2 }
 
 public enum FmfCase { Smart = 0, Insensitive = 1, Sensitive = 2 }
 
-public sealed record SearchOptions(FmfSort Sort, bool Descending, FmfCase Case)
+public sealed record SearchOptions(
+    FmfSort Sort,
+    bool Descending,
+    FmfCase Case,
+    bool IncludeHiddenSystem = false)
 {
     public static readonly SearchOptions Default = new(FmfSort.Name, false, FmfCase.Smart);
 }

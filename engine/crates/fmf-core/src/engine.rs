@@ -12,7 +12,7 @@ use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
 use crate::index::{EntryId, SortKey, VolumeIndex, flags};
-use crate::query::{self, CaseMode, QueryOptions};
+use crate::query::{self, QueryOptions};
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -299,10 +299,10 @@ impl Engine {
         journal: &crate::usn::UsnJournal,
         path: &std::path::Path,
     ) {
-        if let Some(idx) = slot.index.read().as_ref() {
-            if let Err(e) = idx.save_to(path, journal.journal_id, journal.next_usn) {
-                tracing::warn!(volume = %slot.label, error = %e, "snapshot save failed");
-            }
+        if let Some(idx) = slot.index.read().as_ref()
+            && let Err(e) = idx.save_to(path, journal.journal_id, journal.next_usn)
+        {
+            tracing::warn!(volume = %slot.label, error = %e, "snapshot save failed");
         }
     }
 
@@ -534,6 +534,8 @@ mod tests {
                 name_utf16: &units,
                 is_dir: false,
                 is_reparse: false,
+                is_hidden: false,
+                is_system: false,
                 size: *size,
                 mtime: i as i64,
             });
@@ -574,7 +576,7 @@ mod tests {
         let opt = QueryOptions {
             sort: SortKey::Size,
             desc: true,
-            case: CaseMode::Smart,
+
             ..Default::default()
         };
         let r = e.query("txt", &opt).unwrap();

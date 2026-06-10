@@ -18,14 +18,28 @@
 
         <!-- Search box: a plain TextBox on purpose (AutoSuggestBox's accept
              semantics fight live filtering — docs/ARCHITECTURE.md). -->
-        <TextBox
-            x:Name="SearchBox"
-            Grid.Row="0"
-            Margin="12,8,12,8"
-            AutomationProperties.AutomationId="SearchBox"
-            KeyDown="SearchBox_KeyDown"
-            PlaceholderText="検索  (ext:  path:  size:  dm:  regex:  |  !  &quot;&quot;)"
-            Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+        <Grid Grid.Row="0" Margin="12,8,12,8" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBox
+                x:Name="SearchBox"
+                Grid.Column="0"
+                AutomationProperties.AutomationId="SearchBox"
+                KeyDown="SearchBox_KeyDown"
+                PlaceholderText="検索  (ext:  path:  size:  dm:  regex:  |  !  &quot;&quot;)"
+                Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            <ToggleButton
+                Grid.Column="1"
+                VerticalAlignment="Stretch"
+                AutomationProperties.AutomationId="ToggleSystem"
+                AutomationProperties.Name="システム・隠しファイルを含める"
+                IsChecked="{x:Bind ViewModel.IncludeHiddenSystem, Mode=TwoWay}"
+                ToolTipService.ToolTip="システム・隠しファイルを含める">
+                <FontIcon FontSize="14" Glyph="&#xED25;" />
+            </ToggleButton>
+        </Grid>
 
         <!-- Column headers -->
         <Grid Grid.Row="1" Margin="16,0,28,4">

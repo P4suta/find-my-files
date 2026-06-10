@@ -173,6 +173,8 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     let mft = Mft::new(volume)?;
     stats.elapsed_mft_load_ms = t1.elapsed().as_millis() as u64;
 
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
     let mut b = VolumeIndexBuilder::new(drive, ROOT_RECORD);
@@ -191,14 +193,18 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
 
         let mut size = 0u64;
         let mut mtime = 0i64;
-        // The reparse flag in $FILE_NAME is updated lazily by NTFS; the
+        // Attribute flags in $FILE_NAME are updated lazily by NTFS; the
         // authoritative copy lives in $STANDARD_INFORMATION.
         let mut is_reparse = false;
+        let mut is_hidden = false;
+        let mut is_system = false;
         file.attributes(|att| {
             if att.header.type_id == NtfsAttributeType::StandardInformation as u32 {
                 if let Some(si) = att.as_standard_info() {
                     mtime = si.modification_time as i64;
                     is_reparse = si.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+                    is_hidden = si.file_attributes & FILE_ATTRIBUTE_HIDDEN != 0;
+                    is_system = si.file_attributes & FILE_ATTRIBUTE_SYSTEM != 0;
                 }
             } else if att.header.type_id == NtfsAttributeType::Data as u32 {
                 if att.header.is_non_resident == 0 {
@@ -223,6 +229,8 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
             name_utf16: &name_data[..name_len],
             is_dir: file.is_directory(),
             is_reparse,
+            is_hidden,
+            is_system,
             size,
             mtime,
         });
