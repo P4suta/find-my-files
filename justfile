@@ -73,15 +73,16 @@ bench-micro *args="":
 
 # Record the local criterion baseline — run at the start of an optimization
 # session. Lives in target/criterion (machine-local, gone on cargo clean).
+# (--bench search: criterion-only flags would crash the libtest harness)
 [working-directory: 'engine']
 bench-micro-baseline:
-    cargo bench -p fmf-core -- --save-baseline committed
+    cargo bench -p fmf-core --bench search -- --save-baseline committed
 
 # Compare micro-benchmarks against the local baseline; fail on >10% median
 # regressions (criterion itself never sets an exit code)
 [working-directory: 'engine']
 bench-micro-check:
-    cargo bench -p fmf-core -- --baseline committed
+    cargo bench -p fmf-core --bench search -- --baseline committed
     cargo run --release -p fmf-cli -- criterion-gate
 
 # Full performance gate — run from an elevated terminal before merging
