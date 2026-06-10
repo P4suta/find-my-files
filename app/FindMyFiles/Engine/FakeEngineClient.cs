@@ -104,6 +104,17 @@ public sealed class FakeEngineClient : IEngineClient
 #endif
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var needle = query.Trim();
+        var pageLag = TimeSpan.Zero;
+#if DEBUG
+        // Fault injection: `!!lag` makes every page fetch take 250ms, so the
+        // results-publication path can be verified to never show blank rows
+        // (the rest of the query still filters normally).
+        if (needle.Contains("!!lag", StringComparison.Ordinal))
+        {
+            pageLag = TimeSpan.FromMilliseconds(250);
+            needle = needle.Replace("!!lag", "", StringComparison.Ordinal).Trim();
+        }
+#endif
         IEnumerable<RowData> hits = needle.Length == 0
             ? _rows
             : _rows.Where(r => r.Name.Contains(needle, StringComparison.OrdinalIgnoreCase));
@@ -137,20 +148,24 @@ public sealed class FakeEngineClient : IEngineClient
         {
             _traces.RemoveAt(0);
         }
-        return Task.FromResult(new SearchOutcome(new FakeResult(list), trace));
+        return Task.FromResult(new SearchOutcome(new FakeResult(list, pageLag), trace));
     }
 
     public void Dispose() { }
 
-    private sealed class FakeResult(List<RowData> rows) : ISearchResult
+    private sealed class FakeResult(List<RowData> rows, TimeSpan pageLag) : ISearchResult
     {
         public long Count => rows.Count;
 
-        public Task<IReadOnlyList<RowData>> GetRangeAsync(long offset, int count)
+        public async Task<IReadOnlyList<RowData>> GetRangeAsync(long offset, int count)
         {
+            if (pageLag > TimeSpan.Zero)
+            {
+                await Task.Delay(pageLag).ConfigureAwait(false);
+            }
             var start = (int)Math.Min(offset, rows.Count);
             var n = Math.Min(count, rows.Count - start);
-            return Task.FromResult<IReadOnlyList<RowData>>(rows.GetRange(start, n));
+            return rows.GetRange(start, n);
         }
 
         public void Dispose() { }
