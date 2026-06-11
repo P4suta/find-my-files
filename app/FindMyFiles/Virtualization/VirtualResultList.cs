@@ -292,8 +292,27 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     public object SyncRoot => this;
     public int Add(object? value) => throw new NotSupportedException();
     public void Clear() => throw new NotSupportedException();
-    public bool Contains(object? value) => value is ResultRow;
-    public int IndexOf(object? value) => value is ResultRow r ? (int)r.Index : -1;
+
+    // Honesty matters here: after a Reset the ListView re-locates its
+    // selected/focused item through Contains/IndexOf. Answering for a row
+    // of a *previous* result (stale Index, evicted page) sends XAML to
+    // GetAt(staleIndex), which the WinRT adapter rejects with the cryptic
+    // "Int32.MaxValue - 1" ArgumentOutOfRangeException once the new count
+    // is smaller. A row is in this collection iff its slot still holds
+    // that exact instance.
+    public bool Contains(object? value) => IndexOf(value) >= 0;
+
+    public int IndexOf(object? value)
+    {
+        if (value is not ResultRow r || r.Index >= Count)
+        {
+            return -1;
+        }
+        return _pages.TryGetValue(r.Index / PageSize, out var rows)
+            && ReferenceEquals(rows[r.Index % PageSize], r)
+            ? (int)r.Index
+            : -1;
+    }
     public void Insert(int index, object? value) => throw new NotSupportedException();
     public void Remove(object? value) => throw new NotSupportedException();
     public void RemoveAt(int index) => throw new NotSupportedException();

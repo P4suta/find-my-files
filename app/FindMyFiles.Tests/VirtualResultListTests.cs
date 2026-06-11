@@ -154,6 +154,26 @@ public sealed class VirtualResultListTests
     }
 
     [Fact]
+    public void IndexOf_AnswersOnlyForRowsOfTheCurrentResult()
+    {
+        var rows = Rows.Many(100);
+        _list.Reassign(new StubSearchResult(rows), SeedPage0(rows));
+        var row = Row(5);
+        Assert.Equal(5, _list.IndexOf(row));
+        Assert.True(_list.Contains(row));
+
+        // After shrinking to empty, rows of the previous result are no
+        // longer "in" the collection. Claiming otherwise (the old behavior)
+        // sent the ListView's Reset handling to GetAt(staleIndex) — the
+        // reliably reproducible Int32.MaxValue index crash on clearing a
+        // populated search box.
+        _list.Reassign(new StubSearchResult(Rows.Many(0)), []);
+        Assert.Equal(-1, _list.IndexOf(row));
+        Assert.False(_list.Contains(row));
+        Assert.Equal(-1, _list.IndexOf("not a row"));
+    }
+
+    [Fact]
     public void NotifyVisibleRange_EmptyViewportReport_IsForgottenNotRemembered()
     {
         var rows = Rows.Many(100);
