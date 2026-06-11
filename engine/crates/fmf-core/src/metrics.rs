@@ -186,12 +186,15 @@ pub struct CountersSnapshot {
     pub journal_rescans: u64,
     pub scan_pipeline_fallbacks: u64,
     pub offset_table_rebuild_fallbacks: u64,
+    pub lazy_perm_rebuild_fallbacks: u64,
 }
 
 /// The query layer has no `MetricsHub` handle (its degradations normally go
-/// through the diag ring — see memo.rs), so this one counter is a process
-/// global folded into every snapshot.
+/// through the diag ring — see memo.rs), so these counters are process
+/// globals folded into every snapshot.
 static OFFSET_TABLE_REBUILD_FALLBACKS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static LAZY_PERM_REBUILD_FALLBACKS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 impl Counters {
@@ -201,6 +204,10 @@ impl Counters {
 
     pub(crate) fn bump_offset_table_rebuild_fallbacks() {
         OFFSET_TABLE_REBUILD_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn bump_lazy_perm_rebuild_fallbacks() {
+        LAZY_PERM_REBUILD_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn add(counter: &std::sync::atomic::AtomicU64, n: u64) {
@@ -219,6 +226,7 @@ impl Counters {
             journal_rescans: self.journal_rescans.load(Relaxed),
             scan_pipeline_fallbacks: self.scan_pipeline_fallbacks.load(Relaxed),
             offset_table_rebuild_fallbacks: OFFSET_TABLE_REBUILD_FALLBACKS.load(Relaxed),
+            lazy_perm_rebuild_fallbacks: LAZY_PERM_REBUILD_FALLBACKS.load(Relaxed),
         }
     }
 }

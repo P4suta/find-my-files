@@ -7,11 +7,13 @@
 
 use parking_lot::Mutex;
 
-use super::{VolumeIndex, flags};
+use super::{EntryId, VolumeIndex, flags};
 
 // 02: flag byte gained HIDDEN/SYSTEM/EXCLUDED bits — older snapshots must
 // trigger a full rescan rather than load with wrong semantics.
-const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX02";
+// 03: perm_size/perm_mtime sections dropped (lazy derived caches now) and
+//     the size column split into u32 + an overflow id/size pair list.
+const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX03";
 
 fn pod_bytes<T: Copy>(v: &[T]) -> &[u8] {
     // Safety: T is a plain-old-data column type (u8/u16/u32/u64/i64).
@@ -89,13 +91,19 @@ impl VolumeIndex {
         write_vec(w, &mut h, &self.name_off)?;
         write_vec(w, &mut h, &self.name_len)?;
         write_vec(w, &mut h, &self.parent)?;
-        write_vec(w, &mut h, &self.size)?;
+        write_vec(w, &mut h, &self.size_lo)?;
+        // Overflow sizes as two parallel sections, id-sorted (deterministic
+        // bytes for identical content; the map iterates in hash order).
+        let mut ovf: Vec<(EntryId, u64)> = self.size_ovf.iter().map(|(&k, &v)| (k, v)).collect();
+        ovf.sort_unstable();
+        let ovf_ids: Vec<u32> = ovf.iter().map(|p| p.0).collect();
+        let ovf_sizes: Vec<u64> = ovf.iter().map(|p| p.1).collect();
+        write_vec(w, &mut h, &ovf_ids)?;
+        write_vec(w, &mut h, &ovf_sizes)?;
         write_vec(w, &mut h, &self.mtime)?;
         write_vec(w, &mut h, &self.frn)?;
         write_vec(w, &mut h, &self.flag)?;
         write_vec(w, &mut h, &self.perm_name)?;
-        write_vec(w, &mut h, &self.perm_size)?;
-        write_vec(w, &mut h, &self.perm_mtime)?;
         w.write_all(&h.digest().to_le_bytes())
     }
 
@@ -122,13 +130,13 @@ impl VolumeIndex {
         let name_off: Vec<u32> = read_vec(r, &mut h)?;
         let name_len: Vec<u16> = read_vec(r, &mut h)?;
         let parent: Vec<u32> = read_vec(r, &mut h)?;
-        let size: Vec<u64> = read_vec(r, &mut h)?;
+        let size_lo: Vec<u32> = read_vec(r, &mut h)?;
+        let ovf_ids: Vec<u32> = read_vec(r, &mut h)?;
+        let ovf_sizes: Vec<u64> = read_vec(r, &mut h)?;
         let mtime: Vec<i64> = read_vec(r, &mut h)?;
         let frn: Vec<u64> = read_vec(r, &mut h)?;
         let flag: Vec<u8> = read_vec(r, &mut h)?;
         let perm_name: Vec<u32> = read_vec(r, &mut h)?;
-        let perm_size: Vec<u32> = read_vec(r, &mut h)?;
-        let perm_mtime: Vec<u32> = read_vec(r, &mut h)?;
 
         let mut digest = [0u8; 8];
         r.read_exact(&mut digest)?;
@@ -139,19 +147,40 @@ impl VolumeIndex {
             name_off.len(),
             name_len.len(),
             parent.len(),
-            size.len(),
+            size_lo.len(),
             mtime.len(),
             frn.len(),
             flag.len(),
             perm_name.len(),
-            perm_size.len(),
-            perm_mtime.len(),
         ]
         .iter()
         .all(|&l| l == count);
         if !columns_ok || name_pool.len() != lower_pool.len() {
             return Err(bad("column length mismatch"));
         }
+        // Overflow pairs are untrusted too: every id must point at a
+        // sentinel slot (strictly ascending — no duplicates), every
+        // sentinel must have its pair, and the stored size must actually
+        // need the overflow.
+        if ovf_ids.len() != ovf_sizes.len() {
+            return Err(bad("size overflow length mismatch"));
+        }
+        let sentinels = size_lo.iter().filter(|&&v| v == u32::MAX).count();
+        if sentinels != ovf_ids.len() {
+            return Err(bad("size overflow sentinel mismatch"));
+        }
+        for (i, (&id, &sz)) in ovf_ids.iter().zip(&ovf_sizes).enumerate() {
+            let ascending = i == 0 || ovf_ids[i - 1] < id;
+            if !ascending
+                || (id as usize) >= count
+                || size_lo[id as usize] != u32::MAX
+                || sz < u32::MAX as u64
+            {
+                return Err(bad("size overflow pair invalid"));
+            }
+        }
+        let size_ovf: rustc_hash::FxHashMap<u32, u64> =
+            ovf_ids.into_iter().zip(ovf_sizes).collect();
 
         // One parallel sort instead of the million serial hashmap inserts
         // this rebuild used to be.
@@ -173,14 +202,13 @@ impl VolumeIndex {
                 name_off,
                 name_len,
                 parent,
-                size,
+                size_lo,
+                size_ovf,
                 mtime,
                 frn,
                 flag,
                 frn_index,
                 perm_name,
-                perm_size,
-                perm_mtime,
                 content_generation: 0,
                 structural_generation: 0,
                 dir_topology_generation: 0,
@@ -222,13 +250,26 @@ impl VolumeIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::SortKey;
+
     use crate::index::testutil::build_sample;
 
     #[test]
     fn snapshot_roundtrip_preserves_everything() {
         let mut idx = build_sample();
         idx.delete(60); // include a tombstone
+        // A ≥4GiB file exercises the size-overflow sections.
+        let first_new = idx.len() as u32;
+        let huge = crate::index::testutil::u16s("huge.iso");
+        let huge_id = idx.upsert(&crate::index::testutil::raw(
+            777,
+            50,
+            &huge,
+            false,
+            (5u64 << 30) + 123,
+            1,
+        ));
+        idx.merge_new_into_permutations(first_new);
+
         let mut buf = Vec::new();
         idx.write_snapshot(&mut buf, 0xDEAD_BEEF_u64, 12345)
             .unwrap();
@@ -245,10 +286,39 @@ mod tests {
         let mut p = Vec::new();
         loaded.append_path(note, &mut p);
         assert_eq!(p, b"C:\\docs\\Note.TXT");
-        assert_eq!(
-            loaded.permutation(SortKey::Name),
-            idx.permutation(SortKey::Name)
-        );
+        assert_eq!(loaded.name_permutation(), idx.name_permutation());
+        assert_eq!(loaded.size(huge_id), (5u64 << 30) + 123);
+    }
+
+    #[test]
+    fn snapshot_size_overflow_inconsistencies_are_rejected() {
+        // An overflow pair pointing at a non-sentinel slot.
+        let mut sections = valid_sections();
+        sections[6] = vec![0u8; 4]; // ovf id 0, but size_lo[0] != MAX
+        sections[7] = 0x00FF_FFFF_FFFF_u64.to_le_bytes().to_vec();
+        let err = read_crafted(sections);
+        assert!(err.to_string().contains("sentinel mismatch"), "{err}");
+
+        // A sentinel slot without its overflow pair.
+        let mut sections = valid_sections();
+        sections[5] = u32::MAX.to_le_bytes().to_vec();
+        let err = read_crafted(sections);
+        assert!(err.to_string().contains("sentinel mismatch"), "{err}");
+
+        // Pair present but the stored size doesn't need the overflow.
+        let mut sections = valid_sections();
+        sections[5] = u32::MAX.to_le_bytes().to_vec();
+        sections[6] = vec![0u8; 4];
+        sections[7] = 42u64.to_le_bytes().to_vec();
+        let err = read_crafted(sections);
+        assert!(err.to_string().contains("pair invalid"), "{err}");
+
+        // Mismatched ids/sizes section lengths.
+        let mut sections = valid_sections();
+        sections[5] = u32::MAX.to_le_bytes().to_vec();
+        sections[6] = vec![0u8; 4];
+        let err = read_crafted(sections);
+        assert!(err.to_string().contains("length mismatch"), "{err}");
     }
 
     #[test]
@@ -285,8 +355,8 @@ mod tests {
     }
 
     /// Section byte sizes for a structurally valid count=1 snapshot, in
-    /// read order: pools ×2, name_off, name_len, parent, size, mtime, frn,
-    /// flag, perm ×3.
+    /// read order: pools ×2, name_off, name_len, parent, size_lo,
+    /// size-overflow ids/sizes (empty), mtime, frn, flag, perm_name.
     fn valid_sections() -> Vec<Vec<u8>> {
         vec![
             b"a".to_vec(), // name_pool
@@ -294,13 +364,13 @@ mod tests {
             vec![0u8; 4],  // name_off (1 × u32)
             vec![0u8; 2],  // name_len (1 × u16)
             vec![0u8; 4],  // parent
-            vec![0u8; 8],  // size
+            vec![0u8; 4],  // size_lo (1 × u32)
+            Vec::new(),    // size overflow ids (none)
+            Vec::new(),    // size overflow sizes (none)
             vec![0u8; 8],  // mtime
             vec![0u8; 8],  // frn
             vec![0u8; 1],  // flag
             vec![0u8; 4],  // perm_name
-            vec![0u8; 4],  // perm_size
-            vec![0u8; 4],  // perm_mtime
         ]
     }
 

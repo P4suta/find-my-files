@@ -13,14 +13,20 @@ pub struct VolumeIndex {
     pub(super) name_off: Vec<u32>,
     pub(super) name_len: Vec<u16>,
     pub(super) parent: Vec<EntryId>,
-    pub(super) size: Vec<u64>,
+    /// File sizes < u32::MAX, 4 bytes per entry; u32::MAX is the sentinel
+    /// for the overflow map (≥4GiB files — 10 of 1.27M on the measured
+    /// real C:, docs/RESEARCH.md). Read through [`VolumeIndex::size`].
+    pub(super) size_lo: Vec<u32>,
+    pub(super) size_ovf: FxHashMap<EntryId, u64>,
     pub(super) mtime: Vec<i64>,
     pub(super) frn: Vec<u64>,
     pub(super) flag: Vec<u8>,
     pub(super) frn_index: FrnIndex,
+    /// The one always-maintained permutation: name order is the default
+    /// sort and the merge target of every USN batch. Size/mtime orders are
+    /// lazily derived caches (query::memo::{SizePerm, MtimePerm}) — built on
+    /// the first sorted query, extended per generation, never persisted.
     pub(super) perm_name: Vec<EntryId>,
-    pub(super) perm_size: Vec<EntryId>,
-    pub(super) perm_mtime: Vec<EntryId>,
     pub(super) content_generation: u64,
     pub(super) structural_generation: u64,
     /// Bumped whenever an existing directory's name or parent changes —
@@ -102,7 +108,34 @@ impl VolumeIndex {
 
     #[inline]
     pub fn size(&self, id: EntryId) -> u64 {
-        self.size[id as usize]
+        match self.size_lo[id as usize] {
+            u32::MAX => self.size_ovf[&id],
+            v => v as u64,
+        }
+    }
+
+    /// The single write path for sizes — keeps the column and the overflow
+    /// map consistent in both directions (a file can shrink back under the
+    /// sentinel).
+    pub(super) fn set_size(&mut self, id: EntryId, v: u64) {
+        if v >= u32::MAX as u64 {
+            self.size_lo[id as usize] = u32::MAX;
+            self.size_ovf.insert(id, v);
+        } else {
+            self.size_lo[id as usize] = v as u32;
+            self.size_ovf.remove(&id);
+        }
+    }
+
+    /// Append form of [`Self::set_size`] (column construction).
+    pub(super) fn push_size(&mut self, v: u64) {
+        if v >= u32::MAX as u64 {
+            let id = self.size_lo.len() as EntryId;
+            self.size_lo.push(u32::MAX);
+            self.size_ovf.insert(id, v);
+        } else {
+            self.size_lo.push(v as u32);
+        }
     }
 
     #[inline]
@@ -231,9 +264,9 @@ impl VolumeIndex {
     pub fn stats(&self, volume: &str) -> crate::metrics::IndexStats {
         let n = self.len() as u64;
         let offsets = (self.name_off.capacity() * 4 + self.name_len.capacity() * 2) as u64;
-        let perms =
-            ((self.perm_name.capacity() + self.perm_size.capacity() + self.perm_mtime.capacity())
-                * 4) as u64;
+        // perm_name only — the lazy size/mtime permutations are accounted
+        // with the derived caches (`derived_cache_bytes`).
+        let perms = (self.perm_name.capacity() * 4) as u64;
         // Field name kept for FFI/JSON compatibility; the structure is the
         // sorted FRN permutation these days (index/frn.rs).
         let frn_map = self.frn_index.bytes();
@@ -246,7 +279,12 @@ impl VolumeIndex {
             lower_pool_bytes: self.lower_pool.capacity() as u64,
             offsets_bytes: offsets,
             parent_bytes: (self.parent.capacity() * 4) as u64,
-            size_bytes: (self.size.capacity() * 8) as u64,
+            // Column + the overflow map (hashbrown: (K,V) slot + 1 control
+            // byte per capacity slot — an estimate, the map holds ~10
+            // entries on a real volume).
+            size_bytes: (self.size_lo.capacity() * 4
+                + self.size_ovf.capacity() * (std::mem::size_of::<(EntryId, u64)>() + 1))
+                as u64,
             mtime_bytes: (self.mtime.capacity() * 8) as u64,
             frn_bytes: (self.frn.capacity() * 8) as u64,
             flag_bytes: self.flag.capacity() as u64,
@@ -289,21 +327,16 @@ impl VolumeIndex {
         self.name_off.shrink_to_fit();
         self.name_len.shrink_to_fit();
         self.parent.shrink_to_fit();
-        self.size.shrink_to_fit();
+        self.size_lo.shrink_to_fit();
+        self.size_ovf.shrink_to_fit();
         self.mtime.shrink_to_fit();
         self.frn.shrink_to_fit();
         self.flag.shrink_to_fit();
         self.perm_name.shrink_to_fit();
-        self.perm_size.shrink_to_fit();
-        self.perm_mtime.shrink_to_fit();
     }
 
-    pub fn permutation(&self, key: SortKey) -> &[EntryId] {
-        match key {
-            SortKey::Name => &self.perm_name,
-            SortKey::Size => &self.perm_size,
-            SortKey::Mtime => &self.perm_mtime,
-        }
+    pub fn name_permutation(&self) -> &[EntryId] {
+        &self.perm_name
     }
 
     /// Append the full WTF-8 path of `id` ("C:\dir\file.txt") to `out`.
@@ -347,8 +380,11 @@ impl VolumeIndex {
         }
     }
 
+    /// The one definition of each sort key's strict total order (id
+    /// tie-break) — `pub(crate)` so the lazy permutation caches in the
+    /// query layer sort by exactly the same order the merge maintains.
     #[inline]
-    pub(super) fn cmp_by(&self, key: SortKey, a: EntryId, b: EntryId) -> std::cmp::Ordering {
+    pub(crate) fn cmp_by(&self, key: SortKey, a: EntryId, b: EntryId) -> std::cmp::Ordering {
         self.sort_columns().cmp_by(key, a, b)
     }
 
@@ -357,7 +393,8 @@ impl VolumeIndex {
             lower_pool: &self.lower_pool,
             name_off: &self.name_off,
             name_len: &self.name_len,
-            size: &self.size,
+            size_lo: &self.size_lo,
+            size_ovf: &self.size_ovf,
             mtime: &self.mtime,
         }
     }
@@ -371,7 +408,8 @@ pub(super) struct SortColumns<'a> {
     lower_pool: &'a [u8],
     name_off: &'a [u32],
     name_len: &'a [u16],
-    size: &'a [u64],
+    size_lo: &'a [u32],
+    size_ovf: &'a FxHashMap<EntryId, u64>,
     mtime: &'a [i64],
 }
 
@@ -380,14 +418,16 @@ impl<'a> SortColumns<'a> {
         lower_pool: &'a [u8],
         name_off: &'a [u32],
         name_len: &'a [u16],
-        size: &'a [u64],
+        size_lo: &'a [u32],
+        size_ovf: &'a FxHashMap<EntryId, u64>,
         mtime: &'a [i64],
     ) -> Self {
         Self {
             lower_pool,
             name_off,
             name_len,
-            size,
+            size_lo,
+            size_ovf,
             mtime,
         }
     }
@@ -398,15 +438,21 @@ impl<'a> SortColumns<'a> {
         &self.lower_pool[off..off + self.name_len[id as usize] as usize]
     }
 
+    #[inline]
+    fn size_of(&self, id: EntryId) -> u64 {
+        match self.size_lo[id as usize] {
+            u32::MAX => self.size_ovf[&id],
+            v => v as u64,
+        }
+    }
+
     /// Strict total order (id tie-break): no two distinct ids compare equal,
     /// which is what makes merged permutations byte-deterministic.
     #[inline]
     pub(super) fn cmp_by(&self, key: SortKey, a: EntryId, b: EntryId) -> std::cmp::Ordering {
         match key {
             SortKey::Name => self.lower_name(a).cmp(self.lower_name(b)).then(a.cmp(&b)),
-            SortKey::Size => self.size[a as usize]
-                .cmp(&self.size[b as usize])
-                .then(a.cmp(&b)),
+            SortKey::Size => self.size_of(a).cmp(&self.size_of(b)).then(a.cmp(&b)),
             SortKey::Mtime => self.mtime[a as usize]
                 .cmp(&self.mtime[b as usize])
                 .then(a.cmp(&b)),
@@ -416,7 +462,7 @@ impl<'a> SortColumns<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use crate::index::testutil::build_sample;
 
     #[test]
@@ -433,22 +479,15 @@ mod tests {
     }
 
     #[test]
-    fn permutations_are_sorted() {
+    fn name_permutation_is_sorted() {
         let idx = build_sample();
         let by_name: Vec<&[u8]> = idx
-            .permutation(SortKey::Name)
+            .name_permutation()
             .iter()
             .map(|&id| idx.lower_name(id))
             .collect();
         let mut expect = by_name.clone();
         expect.sort();
         assert_eq!(by_name, expect);
-
-        let sizes: Vec<u64> = idx
-            .permutation(SortKey::Size)
-            .iter()
-            .map(|&id| idx.size(id))
-            .collect();
-        assert!(sizes.is_sorted());
     }
 }

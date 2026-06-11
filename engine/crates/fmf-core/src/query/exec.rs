@@ -11,9 +11,9 @@ use rayon::prelude::*;
 use super::QueryOptions;
 use super::compile::{CTerm, CompiledQuery, Driver};
 use super::matchers::{EvalCtx, terms_match, terms_match_iter};
-use super::memo::{DirPathsLower, DirPathsOrig, OffsetTable, PathMemos};
+use super::memo::{DirPathsLower, DirPathsOrig, MtimePerm, OffsetTable, PathMemos, SizePerm};
 use super::sweep::driver_candidates;
-use crate::index::{EntryId, VolumeIndex};
+use crate::index::{EntryId, SortKey, VolumeIndex};
 
 /// Build (or incrementally extend) exactly the dir-path memos this query
 /// reads — `None` pools cost nothing, which is the whole point of keeping
@@ -289,13 +289,28 @@ fn full_scan_group(
 }
 
 /// Walk the pre-sorted permutation keeping entries that pass `keep` —
-/// parallel chunks, order preserved by concatenation.
+/// parallel chunks, order preserved by concatenation. Name order is the
+/// always-maintained index column; size/mtime orders are lazily derived
+/// caches that build on the first query sorting by them (one parallel sort)
+/// and extend per generation after that.
 fn materialize_filtered(
     idx: &VolumeIndex,
     opt: &QueryOptions,
     keep: impl Fn(EntryId) -> bool + Sync,
 ) -> Vec<EntryId> {
-    let perm = idx.permutation(opt.sort);
+    let size_perm;
+    let mtime_perm;
+    let perm: &[EntryId] = match opt.sort {
+        SortKey::Name => idx.name_permutation(),
+        SortKey::Size => {
+            size_perm = SizePerm::get(idx);
+            &size_perm.0.ids
+        }
+        SortKey::Mtime => {
+            mtime_perm = MtimePerm::get(idx);
+            &mtime_perm.0.ids
+        }
+    };
     // Fine-grained chunks: at 2^17 a 1M-entry walk only fans out 8 ways and
     // the walk becomes the latency floor for every query.
     const MAT_CHUNK: usize = 1 << 14;

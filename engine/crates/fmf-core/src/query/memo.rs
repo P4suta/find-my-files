@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 
-use crate::index::{EntryId, VolumeIndex};
+use crate::index::{EntryId, SortKey, VolumeIndex};
 
 // ── Pool offset table (generation-cached) ───────────────────────────────
 
@@ -126,6 +126,112 @@ impl OffsetTable {
 
     pub(super) fn len(&self) -> usize {
         self.offs.len()
+    }
+}
+
+// ── Lazy sort permutations (generation-cached) ──────────────────────────
+
+/// Pre-sorted id order for one sort key, built on the first query that
+/// sorts by it and extended per content generation after that — the same
+/// insertion-point in-place merge the name permutation uses, through the
+/// same `cmp_by` order. The name permutation stays an always-maintained
+/// index column (default sort, needed before the first keystroke); size
+/// and mtime orders are pure RAM (8 B/entry together) for sessions that
+/// never click those columns, so they live here instead.
+///
+/// Never persisted: a snapshot restore re-sorts on first use, which also
+/// resets any staleness in-place stat updates accumulated.
+#[derive(Clone)]
+pub(super) struct SortPerm {
+    pub(super) ids: Vec<EntryId>,
+    /// Entries `[0, covers)` are placed; a generation step sorts and
+    /// merges only the ids past the watermark.
+    covers: u32,
+}
+
+/// Size order — its own derived-cache slot (TypeId-keyed).
+pub(super) struct SizePerm(pub(super) SortPerm);
+/// Mtime order — separate slot.
+pub(super) struct MtimePerm(pub(super) SortPerm);
+
+impl SizePerm {
+    pub(super) fn get(idx: &VolumeIndex) -> std::sync::Arc<Self> {
+        idx.cached_derived_or_update(|prev| match prev {
+            Some(p) => Self(SortPerm::extend(
+                idx,
+                take_perm(p, |m: &Self| &m.0),
+                SortKey::Size,
+            )),
+            None => Self(SortPerm::build(idx, SortKey::Size)),
+        })
+    }
+}
+
+impl MtimePerm {
+    pub(super) fn get(idx: &VolumeIndex) -> std::sync::Arc<Self> {
+        idx.cached_derived_or_update(|prev| match prev {
+            Some(p) => Self(SortPerm::extend(
+                idx,
+                take_perm(p, |m: &Self| &m.0),
+                SortKey::Mtime,
+            )),
+            None => Self(SortPerm::build(idx, SortKey::Mtime)),
+        })
+    }
+}
+
+/// Reuse the previous permutation's allocation when the cache slot held
+/// the only Arc, clone otherwise (same policy as the other derived caches).
+fn take_perm<T>(prev: std::sync::Arc<T>, perm_of: impl Fn(&T) -> &SortPerm) -> SortPerm
+where
+    SortPerm: From<T>,
+{
+    match std::sync::Arc::try_unwrap(prev) {
+        Ok(owned) => owned.into(),
+        Err(shared) => perm_of(&shared).clone(),
+    }
+}
+
+impl From<SizePerm> for SortPerm {
+    fn from(p: SizePerm) -> Self {
+        p.0
+    }
+}
+impl From<MtimePerm> for SortPerm {
+    fn from(p: MtimePerm) -> Self {
+        p.0
+    }
+}
+
+impl SortPerm {
+    fn build(idx: &VolumeIndex, key: SortKey) -> SortPerm {
+        let mut ids: Vec<EntryId> = (0..idx.len() as u32).collect();
+        ids.par_sort_unstable_by(|&a, &b| idx.cmp_by(key, a, b));
+        SortPerm {
+            ids,
+            covers: idx.len() as u32,
+        }
+    }
+
+    fn extend(idx: &VolumeIndex, mut perm: SortPerm, key: SortKey) -> SortPerm {
+        let n = idx.len() as u32;
+        // Entries are append-only within a structural generation — a
+        // regressed watermark means the cache got crossed with a different
+        // index. Rebuilding recovers; the fact must not vanish.
+        if perm.covers > n {
+            crate::metrics::Counters::bump_lazy_perm_rebuild_fallbacks();
+            tracing::warn!(
+                covers = perm.covers,
+                entries = n,
+                "lazy sort permutation watermark regressed — falling back to a full rebuild"
+            );
+            return Self::build(idx, key);
+        }
+        let mut batch: Vec<EntryId> = (perm.covers..n).collect();
+        batch.sort_unstable_by(|&a, &b| idx.cmp_by(key, a, b));
+        crate::index::merge_sorted_tail(&mut perm.ids, &batch, |a, b| idx.cmp_by(key, a, b));
+        perm.covers = n;
+        perm
     }
 }
 
@@ -403,6 +509,12 @@ pub fn derived_cache_bytes(idx: &VolumeIndex) -> u64 {
     }
     if let Some(d) = idx.derived_probe::<DirPathsOrig>() {
         total += d.0.bytes();
+    }
+    if let Some(p) = idx.derived_probe::<SizePerm>() {
+        total += (p.0.ids.capacity() * 4) as u64;
+    }
+    if let Some(p) = idx.derived_probe::<MtimePerm>() {
+        total += (p.0.ids.capacity() * 4) as u64;
     }
     total
 }
@@ -737,6 +849,60 @@ mod tests {
         for (off, &id) in extended.offs.iter().zip(&extended.ids) {
             assert_eq!(*off, idx.name_off_of(id));
         }
+    }
+
+    /// Oracle: an incrementally extended lazy sort permutation equals a
+    /// fresh parallel sort byte-for-byte across append/delete generations
+    /// (strict total order → the sorted result is unique).
+    #[test]
+    fn lazy_sort_perms_extend_like_fresh_builds() {
+        let mut idx = build_sample();
+        let mut size_perm = SortPerm::build(&idx, SortKey::Size);
+        let mut mtime_perm = SortPerm::build(&idx, SortKey::Mtime);
+        for g in 0..20u64 {
+            let first_new = idx.len() as u32;
+            let record = 200 + g;
+            // Mix sizes across the u32 overflow boundary.
+            let size = if g % 4 == 0 { (4u64 << 30) + g } else { g * 37 };
+            let name = u16s(&format!("lazy_{g}.bin"));
+            idx.upsert(&raw(record, 50, &name, false, size, (g * 13) as i64));
+            if g % 3 == 0 {
+                idx.delete(200 + g / 2);
+            }
+            idx.merge_new_into_permutations(first_new);
+
+            size_perm = SortPerm::extend(&idx, size_perm, SortKey::Size);
+            mtime_perm = SortPerm::extend(&idx, mtime_perm, SortKey::Mtime);
+            assert_eq!(
+                size_perm.ids,
+                SortPerm::build(&idx, SortKey::Size).ids,
+                "size order diverged at generation {g}"
+            );
+            assert_eq!(
+                mtime_perm.ids,
+                SortPerm::build(&idx, SortKey::Mtime).ids,
+                "mtime order diverged at generation {g}"
+            );
+        }
+    }
+
+    /// The cached lazy permutation survives stat updates as a complete
+    /// permutation (stale positions are pinned behavior), and `get`
+    /// caches within a generation / extends across one.
+    #[test]
+    fn size_perm_get_caches_and_stays_complete_under_stat_updates() {
+        let mut idx = build_sample();
+        let p1 = SizePerm::get(&idx);
+        let p2 = SizePerm::get(&idx);
+        assert!(Arc::ptr_eq(&p1, &p2), "same generation must cache-hit");
+        drop((p1, p2));
+
+        idx.update_stat(100, 999_999, 1).unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32);
+        let p3 = SizePerm::get(&idx);
+        let mut seen: Vec<u32> = p3.0.ids.clone();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..idx.len() as u32).collect::<Vec<_>>());
     }
 
     #[test]

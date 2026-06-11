@@ -143,7 +143,7 @@ pub fn apply_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::{SortKey, VolumeIndexBuilder};
+    use crate::index::VolumeIndexBuilder;
 
     fn rec(frn: u64, parent: u64, reason: u32, attrs: u32, name: &str) -> UsnRecord {
         UsnRecord {
@@ -320,7 +320,7 @@ mod tests {
             "aaa_first.txt",
         )];
         apply_batch(&mut idx, &batch, &NullStatFetcher);
-        let perm = idx.permutation(SortKey::Name);
+        let perm = idx.name_permutation();
         let live: Vec<&[u8]> = perm
             .iter()
             .filter(|&&id| idx.is_live(id))

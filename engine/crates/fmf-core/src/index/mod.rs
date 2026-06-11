@@ -60,6 +60,47 @@ fn reserve_bounded<T>(v: &mut Vec<T>, additional: usize) {
     }
 }
 
+/// Merge sorted `batch` into `perm` in place. Batches are tiny against the
+/// array (~1k vs ~1M), so instead of a full-length element-wise merge (one
+/// key comparison — for names, a string compare — per existing element,
+/// plus a full-length reallocation), each batch element binary-searches its
+/// insertion point and the segments between insertion points move once
+/// with `copy_within`: O(batch·log n) comparisons + O(moved) memmove + no
+/// allocation.
+///
+/// Old elements are never reordered, and on a sorted array the strict
+/// total order (`cmp` id tie-break) makes the result the unique sorted
+/// merge. Arrays ordered by size/mtime can be locally stale-sorted
+/// (in-place `update_stat` never repositions an entry — long-standing
+/// behavior); placement there is deterministic best-effort, exactly like
+/// the entry the stat update left behind.
+pub(crate) fn merge_sorted_tail(
+    perm: &mut Vec<EntryId>,
+    batch: &[EntryId],
+    cmp: impl Fn(EntryId, EntryId) -> std::cmp::Ordering,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    let old = perm.len();
+    reserve_bounded(perm, batch.len());
+    perm.resize(old + batch.len(), 0);
+    let mut hi = old; // unmoved prefix of the old array (exclusive end)
+    let mut k = old + batch.len(); // write cursor (exclusive end)
+    for j in (0..batch.len()).rev() {
+        let b = batch[j];
+        // First old index whose element orders after `b`.
+        let pos = perm[..hi].partition_point(|&x| !cmp(x, b).is_gt());
+        let seg = hi - pos;
+        perm.copy_within(pos..hi, k - seg);
+        k -= seg + 1;
+        perm[k] = b;
+        hi = pos;
+    }
+    // k - hi == unplaced batch elements throughout; both cursors meet here.
+    debug_assert_eq!(k, hi, "merge cursors must close");
+}
+
 /// One record produced by an initial-scan source (raw $MFT today, ReFS
 /// enumeration in the future).
 pub struct RawEntry<'a> {

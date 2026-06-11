@@ -29,14 +29,13 @@ impl VolumeIndexBuilder {
             name_off: Vec::new(),
             name_len: Vec::new(),
             parent: Vec::new(),
-            size: Vec::new(),
+            size_lo: Vec::new(),
+            size_ovf: rustc_hash::FxHashMap::default(),
             mtime: Vec::new(),
             frn: Vec::new(),
             flag: Vec::new(),
             frn_index: FrnIndex::default(),
             perm_name: Vec::new(),
-            perm_size: Vec::new(),
-            perm_mtime: Vec::new(),
             content_generation: 0,
             structural_generation: 0,
             dir_topology_generation: 0,
@@ -157,17 +156,14 @@ impl VolumeIndexBuilder {
         timings.build_ms = t.elapsed().as_millis() as u64;
         let t = std::time::Instant::now();
 
-        let ids: Vec<EntryId> = (0..self.idx.len() as u32).collect();
+        // Name order only — the default sort, needed before the volume can
+        // serve its first query. Size/mtime orders build lazily on the
+        // first sorted query (query::memo), shaving two full sorts off
+        // every initial scan.
+        let mut perm_name: Vec<EntryId> = (0..self.idx.len() as u32).collect();
         let idx = &self.idx;
-        let mut perm_name = ids.clone();
-        let mut perm_size = ids.clone();
-        let mut perm_mtime = ids;
         perm_name.par_sort_unstable_by(|&a, &b| idx.cmp_by(SortKey::Name, a, b));
-        perm_size.par_sort_unstable_by(|&a, &b| idx.cmp_by(SortKey::Size, a, b));
-        perm_mtime.par_sort_unstable_by(|&a, &b| idx.cmp_by(SortKey::Mtime, a, b));
         self.idx.perm_name = perm_name;
-        self.idx.perm_size = perm_size;
-        self.idx.perm_mtime = perm_mtime;
         timings.sort_ms = t.elapsed().as_millis() as u64;
         (self.idx, timings)
     }
