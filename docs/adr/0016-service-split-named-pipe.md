@@ -1,6 +1,6 @@
 # ADR-0016: v2サービス分離 — fmf-service + named pipe
 
-日付: 2026-06-11 / 状態: 採用済み
+日付: 2026-06-11 / 状態: 採用済み(契約定数の複製+値ピン同期の運用のみ [ADR-0018](0018-contract-single-source.md) が supersede)
 
 ## 決定
 

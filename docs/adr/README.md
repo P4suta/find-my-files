@@ -17,3 +17,4 @@
 - [0015](0015-winui-data-virtualization.md) — WinUI 3データ仮想化(IList+INCC+IItemsRangeInfo)
 - [0016](0016-service-split-named-pipe.md) — v2サービス分離: fmf-service+named pipe、トランスポート却下案、flush公開面
 - [0017](0017-service-security-model.md) — サービスのセキュリティモデル: LocalSystem+特権最小化、pipe DACL 4層
+- [0018](0018-contract-single-source.md) — 契約の単一正本化(fmf-contract)+捕獲先行ゴールデンコーパス、シーム2本上限
