@@ -1,113 +1,113 @@
 {
   "volume": "C:",
-  "entries": 1268461,
-  "peak_working_set_bytes": 309178368,
+  "entries": 1269181,
+  "peak_working_set_bytes": 257216512,
   "queries": [
     {
       "query": "",
-      "hits": 697122,
-      "p50_us": 2533,
-      "p99_us": 4354,
-      "max_us": 4890,
+      "hits": 697420,
+      "p50_us": 2355,
+      "p99_us": 3128,
+      "max_us": 3332,
       "p50_memo_us": 0,
       "p50_scan_us": 0,
-      "p50_materialize_us": 2528,
-      "cold_us": 2614
+      "p50_materialize_us": 2350,
+      "cold_us": 3039
     },
     {
       "query": "e",
-      "hits": 478251,
-      "p50_us": 5650,
-      "p99_us": 8967,
-      "max_us": 9286,
+      "hits": 478556,
+      "p50_us": 5022,
+      "p99_us": 6078,
+      "max_us": 6345,
       "p50_memo_us": 0,
-      "p50_scan_us": 4319,
-      "p50_materialize_us": 1282,
-      "cold_us": 4864
+      "p50_scan_us": 3866,
+      "p50_materialize_us": 1138,
+      "cold_us": 4799
     },
     {
       "query": "a",
-      "hits": 440316,
-      "p50_us": 5349,
-      "p99_us": 7447,
-      "max_us": 7887,
+      "hits": 440548,
+      "p50_us": 5050,
+      "p99_us": 6231,
+      "max_us": 7041,
       "p50_memo_us": 0,
-      "p50_scan_us": 4179,
-      "p50_materialize_us": 1119,
-      "cold_us": 6156
+      "p50_scan_us": 3888,
+      "p50_materialize_us": 1081,
+      "cold_us": 5934
     },
     {
       "query": "win",
-      "hits": 145909,
-      "p50_us": 3519,
-      "p99_us": 4687,
-      "max_us": 10642,
+      "hits": 145912,
+      "p50_us": 3261,
+      "p99_us": 3875,
+      "max_us": 11284,
       "p50_memo_us": 0,
-      "p50_scan_us": 2933,
-      "p50_materialize_us": 571,
-      "cold_us": 10642
+      "p50_scan_us": 2709,
+      "p50_materialize_us": 516,
+      "cold_us": 11284
     },
     {
       "query": "Win",
       "hits": 24173,
-      "p50_us": 2481,
-      "p99_us": 3113,
-      "max_us": 3193,
+      "p50_us": 3571,
+      "p99_us": 4460,
+      "max_us": 4706,
       "p50_memo_us": 0,
-      "p50_scan_us": 1989,
-      "p50_materialize_us": 460,
-      "cold_us": 2434
+      "p50_scan_us": 3067,
+      "p50_materialize_us": 481,
+      "cold_us": 3485
     },
     {
       "query": "qzx",
-      "hits": 5,
-      "p50_us": 1884,
-      "p99_us": 2707,
-      "max_us": 2793,
+      "hits": 4,
+      "p50_us": 1625,
+      "p99_us": 2049,
+      "max_us": 2881,
       "p50_memo_us": 0,
-      "p50_scan_us": 1481,
-      "p50_materialize_us": 370,
-      "cold_us": 1970
+      "p50_scan_us": 1301,
+      "p50_materialize_us": 296,
+      "cold_us": 2049
     },
     {
       "query": "ext:dll",
       "hits": 52680,
-      "p50_us": 3699,
-      "p99_us": 5702,
-      "max_us": 5982,
+      "p50_us": 3564,
+      "p99_us": 4266,
+      "max_us": 4309,
       "p50_memo_us": 0,
-      "p50_scan_us": 3025,
-      "p50_materialize_us": 642,
-      "cold_us": 3401
+      "p50_scan_us": 2898,
+      "p50_materialize_us": 609,
+      "cold_us": 3762
     },
     {
       "query": "size:>100mb path:windows",
       "hits": 31,
-      "p50_us": 2366,
-      "p99_us": 3036,
-      "max_us": 89648,
+      "p50_us": 2248,
+      "p99_us": 3023,
+      "max_us": 53741,
       "p50_memo_us": 0,
-      "p50_scan_us": 1888,
-      "p50_materialize_us": 419,
-      "cold_us": 89648
+      "p50_scan_us": 1822,
+      "p50_materialize_us": 400,
+      "cold_us": 53741
     },
     {
       "query": "*.rs",
       "hits": 33076,
-      "p50_us": 3472,
-      "p99_us": 4524,
-      "max_us": 5250,
-      "p50_memo_us": 1,
-      "p50_scan_us": 2878,
-      "p50_materialize_us": 579,
-      "cold_us": 3256
+      "p50_us": 3200,
+      "p99_us": 4442,
+      "max_us": 4622,
+      "p50_memo_us": 0,
+      "p50_scan_us": 2595,
+      "p50_materialize_us": 554,
+      "cold_us": 3317
     }
   ],
   "restore": {
-    "file_bytes": 134847253,
-    "entries": 1268461,
-    "save_ms": 89,
-    "p50_ms": 97,
-    "min_ms": 89
+    "file_bytes": 96871104,
+    "entries": 1269181,
+    "save_ms": 52,
+    "p50_ms": 80,
+    "min_ms": 73
   }
 }
