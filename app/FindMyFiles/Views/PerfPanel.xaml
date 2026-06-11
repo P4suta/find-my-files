@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="FindMyFiles.Views.PerfPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <!-- Performance panel (F12). Rendering of the stage bar / sparkline
+         happens in code-behind — it is diagnostic chrome, not app data. -->
+    <Border
+        Padding="16,8"
+        AutomationProperties.AutomationId="PerfPanel"
+        BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+        BorderThickness="0,1,0,0">
+        <Grid ColumnSpacing="24">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Spacing="4">
+                <TextBlock
+                    x:Name="PerfHeadline"
+                    FontFamily="Consolas"
+                    Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                <Grid x:Name="StageBar" Height="14" />
+                <TextBlock
+                    x:Name="StageLegend"
+                    FontFamily="Consolas"
+                    FontSize="11"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Grid Height="44" Margin="0,4,0,0">
+                    <Polyline
+                        x:Name="Spark"
+                        Stroke="{ThemeResource AccentFillColorDefaultBrush}"
+                        StrokeThickness="1.5" />
+                </Grid>
+                <TextBlock
+                    x:Name="HistText"
+                    FontFamily="Consolas"
+                    FontSize="11"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock
+                    x:Name="ErrorsText"
+                    AutomationProperties.AutomationId="PerfErrors"
+                    FontFamily="Consolas"
+                    FontSize="11"
+                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                    TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" MinWidth="280" Spacing="4">
+                <TextBlock
+                    x:Name="VolumesText"
+                    FontFamily="Consolas"
+                    FontSize="11"
+                    Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                <TextBlock
+                    x:Name="UsnFeed"
+                    FontFamily="Consolas"
+                    FontSize="11"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock
+                    x:Name="TransportText"
+                    FontFamily="Consolas"
+                    FontSize="11"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock
+                    x:Name="CountersText"
+                    FontFamily="Consolas"
+                    FontSize="11"
+                    Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+                <Button
+                    AutomationProperties.AutomationId="CopyDiag"
+                    Click="CopyDiag_Click"
+                    Content="診断情報をコピー"
+                    FontSize="11" />
+            </StackPanel>
+        </Grid>
+    </Border>
+</UserControl>

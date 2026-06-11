@@ -19,46 +19,13 @@ public partial class App : Application
     public static nint WindowHandle =>
         WinRT.Interop.WindowNative.GetWindowHandle(Window);
 
-    private int _unhandledStorm;
-
     public App()
     {
         InitializeComponent();
 
-        // 「落ちない・固まらない・黙らない」: every escape hatch logs, and
-        // recoverable ones surface in the InfoBar instead of killing the app.
-        UnhandledException += (_, e) =>
-        {
-            FileLog.Error("xaml", "unhandled exception", e.Exception);
-            if (System.Threading.Interlocked.Increment(ref _unhandledStorm) <= 3)
-            {
-                e.Handled = true;
-                Notifier.Post(
-                    NotifySeverity.Error,
-                    "予期しないエラーが発生しました",
-                    e.Exception?.Message);
-            }
-            else
-            {
-                // Exception storm — record and let the process die honestly.
-                FileLog.WriteCrashMarker(e.Exception?.ToString() ?? "exception storm");
-            }
-        };
-        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
-        {
-            var ex = e.ExceptionObject as Exception;
-            FileLog.Error("appdomain", "fatal unhandled exception", ex);
-            FileLog.WriteCrashMarker(ex?.ToString() ?? "unknown fatal exception");
-        };
-        TaskScheduler.UnobservedTaskException += (_, e) =>
-        {
-            FileLog.Error("task", "unobserved task exception", e.Exception);
-            e.SetObserved();
-            Notifier.Post(
-                NotifySeverity.Error,
-                "バックグラウンド処理でエラーが発生しました",
-                e.Exception.InnerException?.Message ?? e.Exception.Message);
-        };
+        // 「落ちない・固まらない・黙らない」: suppression rules, crash markers
+        // and log routing are documented in one place — ExceptionPolicy.
+        ExceptionPolicy.Install(this);
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
@@ -84,14 +51,7 @@ public partial class App : Application
             EngineClient = new FakeEngineClient();
         }
 
-        if (FileLog.TakeCrashMarker() is { } marker)
-        {
-            FileLog.Warn("app", "previous run crashed");
-            Notifier.Post(
-                NotifySeverity.Warning,
-                "前回、アプリが異常終了しました",
-                $"詳細: {FileLog.LogPath}\n{marker.Split('\n').FirstOrDefault()}");
-        }
+        ExceptionPolicy.ReportPreviousCrash();
 
         DispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         Window = new MainWindow();
