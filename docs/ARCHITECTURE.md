@@ -31,43 +31,78 @@
 
 ## モジュールマップ(1ファイル=1責務)
 
+叙述順=データが流れる順(取込: mft/scan→usn→index、検索: query→engine、横断: diag/metrics)。
+
 ```
+fmf-contract/src/ 契約の機械可読正本(ADR-0018・依存ゼロ・ロジック禁止): codes / opcodes
+                 / events(EventKind) / options(SortKey/CaseMode/VolumeState+from_u32)
+                 / pod(repr(C)+const レイアウトピン) / volume(label 16B詰め) / versions
+                 / limits / counters(カウンタ名簿) / bin/gen-contract(EngineContract.g.cs
+                 エミッタ) / tests/drift(生成物一致 — cargo test 内で常時)
 fmf-core/src/
+├─ mft.rs        $MFT レコード形式(scan が消費)
+├─ scan/         mod(scan_volume+ScanStats) / volume_io(生ボリュームopen+fixup)
+│                / pipeline(16MiB×3 read-ahead+逐次劣化) / parse(rayon並列+RecordArena)
+│                / deferred(NameCache 128Ki+LazyRecordReader — 劣化はstatsで返す)
+│                / probe(io-probe計測。本体フローから独立)
+├─ usn/          records / apply / session(ジャーナル追従)
 ├─ index/        mod(型+再エクスポート+in-placeマージ) / core(VolumeIndex+読み取り+派生キャッシュ)
 │                / mutate(USNミューテーション) / snapshot(永続化、unsafe POD はここに封じ込め)
-│                / builder(2パス構築+EXCLUDED伝播) / compact(コンパクション) / frn / testutil
-├─ query/        mod(AST/compile 公開面) / exec(searchドライバループ+materialize)
+│                / builder(2パス構築+EXCLUDED伝播) / compact(コンパクション) / frn
+│                / testutil(TestDir RAII 等。feature "testutil" で他クレートのテストへ)
+├─ query/        mod(AST/compile 公開面+wire→QueryOptions 変換) / exec(searchドライバ+materialize)
 │                / sweep(pool-sweep候補生成) / matchers(残余評価) / memo(DirPaths/OffsetTable)
-├─ engine/       mod(Engine+ライフサイクル+イベント) / volume(VolumeSlot+スレッド防火壁+install_index)
-│                / search(ボリューム横断+k-wayマージ) / results(ResultSet+STALE判定) / tests
-├─ mft.rs / scan.rs / usn/{records,apply,session} / metrics.rs / diag.rs / wtf8.rs
-fmf-contract/src/ 契約の機械可読正本(ADR-0018・依存ゼロ・ロジック禁止): codes / opcodes
-                 / events(EventKind) / options(SortKey/CaseMode/VolumeState) / pod(repr(C)
-                 +const レイアウトピン) / volume(label 16B詰め) / versions / limits
+├─ engine/       mod(Engine+ライフサイクル+EngineEvent::to_wire=イベント写像の単一点)
+│                / volume(VolumeSlot+install_index+checkpoint — 状態の家)
+│                / worker(volumeスレッド+遷移判断の純関数: snapshot_decision 等 — フローの駆動)
+│                / seams(SnapshotStore+JournalSource の2traitのみ。追加ポート化禁止=ADR-0018)
+│                / worker_tests(障害経路の非昇格・決定的リプレイ)
+│                / search(ボリューム横断+k-wayマージ) / results(ResultSet+fill_page=行+blob
+│                  構築の単一実装+STALE判定) / tests
+├─ diag.rs       init_diag(全入口の唯一のブートストラップ) / resolve_log_dir / error_chain(4KiB)
+│                / degrade!(warn+カウンタ不可分) / diagリング+sink
+├─ metrics.rs / wtf8.rs
 fmf-ffi/src/     lib(contract再エクスポート+エクスポートピン) / error / handle / events
                  / volumes / blob / results / contract_tests(リテラル絶対値ピン+ABIレイアウト
-                 +null・エラー経路 — 正本誤編集の独立トリップワイヤ)
+                 +null・エラー経路 — 正本誤編集の独立トリップワイヤ)。clippy.toml で
+                 unwrap_or_default 禁止(黙殺のコンパイル時拒否)
 fmf-proto/src/   lib(contract再公開) / frame(16Bヘッダ+長さ前置きcodec)
                  / messages(ペイロードcodec — 型はcontract) / tests/golden(コーパスピン)
-fmf-service/src/ lib(モジュール公開 — ループバックテストが実サーバを駆動) / main(clap: run)
+fmf-service/src/ lib(モジュール公開 — ループバックテストが実サーバを駆動)
                  / pipe(overlapped I/OのRead/Write化+listener。accept は connect/停止Event の2-wait)
                  / server(接続毎: reader+worker2+書き込みmutex) / dispatch(オペコード→Engine、
-                 catch_unwind防火壁、結果ハンドルLRU64) / events(Subscribe+有界キュー256)
-                 / config(service.json) / host(ロック敗者の5s→60sリトライ)
+                 catch_unwind防火壁、結果ハンドルLRU64=evictはカウンタ+warn) / events(Subscribe
+                 +有界キュー256) / config(service.json) / host(ロック敗者の5s→60sリトライ)
                  / faults(--debug-faults: !!lag/!!panic/!!drop)
                  / security(SDDL構築ピン+SID捕捉+接続時トークン照合+dir DACL)
                  / svc(serve共通コア+SCMエントリ: Stop/PRESHUTDOWN→flush→graceful)
-                 / main(run/install/uninstall --purge-data/start/stop/status)
+                 / main(run/install/uninstall --purge-data/start/stop/status)。clippy.toml 同上
+fmf-cli/src/     main(clap定義+dispatchのみ) / cmd/{index,stats,bench,io_probe,criterion_gate,diag}
+                 / bench_support(BENCH_QUERIES+baseline JSON形状+median+TempSnapshotGuard)
 app/FindMyFiles/
-├─ Engine/       IEngineClient(境界) / FfiEngineClient / PipeEngineClient / FakeEngineClient
-│                / NativeEngine(P/Invoke) / PipeProtocol(codec) / PageCodec(FmfRow+blob→RowData)
+├─ Engine/       IEngineClient(境界 — interface+例外型のみ。全asyncに CancellationToken)
+│                / EngineTypes(DTO群 — goldenの実形状と同期) / EngineJson(snake_case設定の唯一の定義)
+│                / Generated/EngineContract.g.cs(gen-contract生成・手編集禁止)
+│                / EngineEventMarshaler(イベント→IDispatcher越境の唯一の点)
+│                / FakeEngineClient(契約適合: invalid_queries.json共有+BumpEpoch)
+│                / PipeProtocol(codec — 定数はGenerated参照) / PageCodec(行デコード — 同)
+│                / NativeEngine(P/Invokeシグネチャ+生成構造体の片割れ+起動時SizeOfアサート)
 │                / EngineClientFactory(CLI>settings>auto の選択)
+│                / Transport/ PipeEngineClient(監督+多重化のみ) / PipeConnection(1接続の
+│                  所有単位 — 切断レースの構造的解消) / PipeSearchResult / PipeServerIdentity
+│                  / FfiEngineClient(世代カウンタ防御つきコールバック)
 ├─ ViewModels/   MainViewModel(合成ルート) / SearchOrchestrator / ResultsPresenter
 │                / NotificationCenter / PerfPanelViewModel / StatusFormatter / ResultRow
-├─ Virtualization/ VirtualResultList(生涯単一+Reassign/epoch)
+├─ Views/        PerfPanel(F12パネルのカスタムコントロール)
+├─ Controls/     ResultsViewportManager(viewport退避/復元・選択復元 — UIスレッド専用)
+├─ Converters/   UiConverters(x:Bind 静的純関数)
+├─ Virtualization/ VirtualResultList(生涯単一+Reassign/epoch+per-epoch ct=二重防御)
 ├─ Services/     IDispatcher(テストシーム) / DispatcherQueueDispatcher / Notifier / FileLog / ShellOps
+│                / ExceptionPolicy(3種ハンドラ+クラッシュマーカーの単一の家)
 │                / AppSettings(%APPDATA%\settings.json: engineモード等。破損はwarn+既定値+.bad退避)
 └─ FindMyFiles.Tests/  xUnit(ManualDispatcher fake で決定的にUIスレッド模倣)
+                 / Contract/(EngineClientContractTests 抽象スイート×4派生
+                   + GoldenCorpusTests=両言語同一バイトピン)
 ```
 
 新フィールド・新メソッドの可視性は「その責務のディレクトリ内」を既定とする(`pub(super)`)。crate 外公開は mod.rs の `pub use` 経由のみ。

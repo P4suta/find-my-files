@@ -4,12 +4,19 @@
 //! (`fmf-cli`) must not contain logic of their own. See docs/ARCHITECTURE.md
 //! for the canonical contract this crate fulfills.
 
-pub mod diag;
-pub mod engine;
-pub mod index;
-pub mod metrics;
+// Declared in dataflow order — reading order = the order data moves
+// (ingest: mft/scan → usn → index; search: query → engine; cross-cutting
+// last). Names are unchanged; only the narrative order is meaningful.
 pub mod mft;
-pub mod query;
 pub mod scan;
 pub mod usn;
+
+pub mod index;
+
+pub mod query;
+
+pub mod engine;
+
+pub mod diag;
+pub mod metrics;
 pub mod wtf8;
