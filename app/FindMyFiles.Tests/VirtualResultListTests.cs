@@ -189,6 +189,86 @@ public sealed class VirtualResultListTests
     }
 
     [Fact]
+    public void Indexer_OutOfRange_ThrowsInsteadOfFabricatingRows()
+    {
+        var rows = Rows.Many(10);
+        _list.Reassign(new StubSearchResult(rows), SeedPage0(rows));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => _list[-1]);
+        Assert.Throws<ArgumentOutOfRangeException>(() => _list[10]);
+        Assert.NotNull(_list[9]); // bounds are exact, not off by one
+    }
+
+    [Fact]
+    public void Enumeration_DoesNotDisturbTheVirtualizationState()
+    {
+        var rows = Rows.Many(10_000); // 157 pages — way past MaxCachedPages
+        _list.Reassign(new StubSearchResult(rows), SeedPage0(rows));
+        var viewportRow = Row(0); // realized, seeded instance
+
+        var enumerated = _list.Cast<ResultRow>().Count();
+
+        Assert.Equal(10_000, enumerated);
+        // The seeded viewport page survived: same instance, still filled —
+        // enumerating must not evict realized pages (placeholder flash).
+        Assert.Same(viewportRow, Row(0));
+        Assert.False(Row(0).IsPlaceholder);
+        // Transient enumeration rows are honestly absent.
+        Assert.Equal(-1, _list.IndexOf(_list.Cast<ResultRow>().Last()));
+    }
+
+    [Fact]
+    public void CopyTo_FillsTheArray_WithoutLandmines()
+    {
+        var rows = Rows.Many(5);
+        _list.Reassign(new StubSearchResult(rows), SeedPage0(rows));
+
+        var target = new object[7];
+        ((System.Collections.ICollection)_list).CopyTo(target, 2);
+
+        Assert.Same(Row(0), target[2]);
+        Assert.Equal(rows[4].Name, Assert.IsType<ResultRow>(target[6]).Name);
+    }
+
+    [Fact]
+    public void RefreshInPlace_CountMismatch_FallsBackToAFullReset()
+    {
+        var rows = Rows.Many(10);
+        _list.Reassign(new StubSearchResult(rows), SeedPage0(rows));
+        var events = new List<NotifyCollectionChangedAction>();
+        _list.CollectionChanged += (_, e) => events.Add(e.Action);
+
+        // The engine guarantees identical results on this path; if the
+        // guarantee ever breaks, the list must re-present, not lie.
+        var different = Rows.Many(7);
+        _list.RefreshInPlace(new StubSearchResult(different), SeedPage0(different));
+
+        Assert.Equal([NotifyCollectionChangedAction.Reset], events);
+        Assert.Equal(7, _list.Count);
+        Assert.Equal(different[0].Name, Row(0).Name);
+    }
+
+    [Fact]
+    public void Mutations_OffTheUiThread_FailLoudAtTheSource()
+    {
+        var offThread = new OffThreadDispatcher();
+        var list = new VirtualResultList(offThread);
+
+        Assert.Throws<InvalidOperationException>(
+            () => list.Reassign(new StubSearchResult(Rows.Many(1)), []));
+        Assert.Throws<InvalidOperationException>(
+            () => list.RefreshInPlace(new StubSearchResult(Rows.Many(1)), []));
+    }
+
+    private sealed class OffThreadDispatcher : FindMyFiles.Services.IDispatcher
+    {
+        public bool HasThreadAccess => false;
+        public bool TryEnqueue(Action action) => true;
+        public FindMyFiles.Services.IDispatcherTimer CreateOneShotTimer(
+            TimeSpan interval, Action tick) => throw new NotSupportedException();
+    }
+
+    [Fact]
     public void Reassign_DisposesThePreviousResult()
     {
         var old = new StubSearchResult(Rows.Many(3));

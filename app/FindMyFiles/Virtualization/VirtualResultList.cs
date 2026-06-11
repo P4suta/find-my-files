@@ -1,6 +1,5 @@
 using System.Collections;
 using System.Collections.Specialized;
-using System.Diagnostics;
 using Microsoft.UI.Xaml.Data;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
@@ -29,6 +28,18 @@ public readonly record struct PageSeed(long Page, IReadOnlyList<RowData> Rows);
 /// ItemsSource — swapping resets the ListView's virtualization state and is
 /// what made the screen flicker on every keystroke. An epoch counter makes
 /// fetches started against a previous result fall on the floor.
+///
+/// Contract invariant — everything XAML asks goes through the WinRT IList
+/// adapter, which trusts these answers blindly: **never vouch for
+/// membership falsely.** A false "absent" merely re-realizes a container; a
+/// false "present" sends the ListView to GetAt(staleIndex) and dies deep
+/// inside XAML. A row is a member iff its index is inside <see cref="Count"/>
+/// AND the current page cache holds that exact instance in that slot; rows
+/// from previous results, evicted pages or transient enumeration answer
+/// absent. The indexer enforces its bounds, mutating entry points enforce
+/// the UI thread (always, not just in Debug), and the whole read surface of
+/// IList is implemented — no landmines for whichever member XAML or a LINQ
+/// helper decides to call next.
 /// </summary>
 public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsRangeInfo
 {
@@ -72,7 +83,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// </summary>
     public void Reassign(ISearchResult? result, IReadOnlyList<PageSeed> seeds)
     {
-        Debug.Assert(_dispatcher.HasThreadAccess, "Reassign must run on the UI thread");
+        EnsureUiThread(nameof(Reassign));
         _epoch++;
         var old = _result;
         _result = result;
@@ -102,10 +113,19 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// </summary>
     public void RefreshInPlace(ISearchResult result, IReadOnlyList<PageSeed> seeds)
     {
-        Debug.Assert(_dispatcher.HasThreadAccess, "RefreshInPlace must run on the UI thread");
-        Debug.Assert(
-            (int)Math.Min(result.Count, int.MaxValue) == Count,
-            "RefreshInPlace requires an identical result (caller falls back to Reassign)");
+        EnsureUiThread(nameof(RefreshInPlace));
+        if ((int)Math.Min(result.Count, int.MaxValue) != Count)
+        {
+            // The engine guarantees identical results on this path; if that
+            // ever breaks, a full seeded Reset is the screen-consistent
+            // fallback — silently keeping a mismatched count is exactly the
+            // membership lie this class must never tell.
+            FileLog.Warn(
+                "virtualization",
+                $"RefreshInPlace count mismatch ({result.Count} vs {Count}) — falling back to Reassign");
+            Reassign(result, seeds);
+            return;
+        }
         _epoch++;
         var old = _result;
         _result = result;
@@ -119,6 +139,16 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         if (LastVisibleRange is { } visible)
         {
             EnsureRange(visible.First, visible.Last);
+        }
+    }
+
+    /// <summary>Always-on (not Debug-only): a cross-thread mutation reaches
+    /// XAML as a marshaling crash far from the cause — fail loud here.</summary>
+    private void EnsureUiThread(string member)
+    {
+        if (!_dispatcher.HasThreadAccess)
+        {
+            throw new InvalidOperationException($"{member} must run on the UI thread");
         }
     }
 
@@ -138,7 +168,17 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
 
     public object? this[int index]
     {
-        get => GetOrCreatePage(index / PageSize)[index % PageSize];
+        get
+        {
+            // A negative index previously walked into page 0's array as
+            // rows[-1]; an index past Count fabricated phantom pages that
+            // polluted the LRU. Out of range is out of range.
+            if ((uint)index >= (uint)Count)
+            {
+                throw new ArgumentOutOfRangeException(nameof(index), index, $"Count={Count}");
+            }
+            return GetOrCreatePage(index / PageSize)[index % PageSize];
+        }
         set => throw new NotSupportedException();
     }
 
@@ -316,13 +356,41 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     public void Insert(int index, object? value) => throw new NotSupportedException();
     public void Remove(object? value) => throw new NotSupportedException();
     public void RemoveAt(int index) => throw new NotSupportedException();
-    public void CopyTo(Array array, int index) => throw new NotSupportedException();
 
+    /// <summary>Read surface stays landmine-free: copy what is cached, hand
+    /// out transient placeholders for the rest (never cached — see
+    /// <see cref="GetEnumerator"/>).</summary>
+    public void CopyTo(Array array, int index)
+    {
+        ArgumentNullException.ThrowIfNull(array);
+        ArgumentOutOfRangeException.ThrowIfNegative(index);
+        if (array.Length - index < Count)
+        {
+            throw new ArgumentException("destination array too small", nameof(array));
+        }
+        for (var i = 0; i < Count; i++)
+        {
+            array.SetValue(RowAtWithoutCaching(i), index + i);
+        }
+    }
+
+    /// <summary>
+    /// Enumeration must not disturb the virtualization state: walking a
+    /// million-row result through the cache would evict every realized
+    /// viewport page (placeholder flash + refetch). Cached slots yield
+    /// their live instances; everything else yields transient placeholders,
+    /// which by the membership invariant safely answer "absent".
+    /// </summary>
     public IEnumerator GetEnumerator()
     {
         for (var i = 0; i < Count; i++)
         {
-            yield return this[i];
+            yield return RowAtWithoutCaching(i);
         }
     }
+
+    private ResultRow RowAtWithoutCaching(int index) =>
+        _pages.TryGetValue(index / PageSize, out var rows)
+            ? rows[index % PageSize]
+            : ResultRow.CreatePlaceholder(index);
 }
