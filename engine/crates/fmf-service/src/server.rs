@@ -87,6 +87,9 @@ fn accept_loop(
             }
         }
     };
+    // Live-connection count: incremented per accepted connection, freed by
+    // the guard when its thread exits (ServiceInfo reports it).
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut listener = PipeListener::new(&opts.pipe_name, MAX_INSTANCES, security);
     loop {
         match listener.accept(stop) {
@@ -105,9 +108,10 @@ fn accept_loop(
                 let engine = engine.clone();
                 let broadcaster = broadcaster.clone();
                 let faults = Faults::new(opts.debug_faults);
+                let active = active.clone();
                 std::thread::Builder::new()
                     .name("fmf-pipe-conn".to_string())
-                    .spawn(move || run_connection(engine, broadcaster, stream, faults))
+                    .spawn(move || run_connection(engine, broadcaster, stream, faults, active))
                     .ok();
             }
             Err(e) => {
@@ -126,8 +130,20 @@ fn run_connection(
     broadcaster: Arc<Broadcaster>,
     stream: PipeStream,
     faults: Faults,
+    active: Arc<std::sync::atomic::AtomicUsize>,
 ) {
-    let conn = Arc::new(Connection::new(engine.clone(), faults));
+    active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Decrement on every exit path (including panics) — the count must
+    // never drift from the number of live connection threads.
+    struct ActiveGuard(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for ActiveGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let _guard = ActiveGuard(active.clone());
+
+    let conn = Arc::new(Connection::new(engine.clone(), faults, active));
     let writer = Arc::new(Mutex::new(stream.clone()));
     // (queue handle, event-writer join) — at most one subscription per
     // connection; Subscribe is idempotent.

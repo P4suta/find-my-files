@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using FindMyFiles.Engine;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
 
@@ -192,25 +193,26 @@ public sealed partial class PerfPanel : UserControl
                 $"[{er.UptimeMs / 1000}s] {er.Severity.ToUpperInvariant()} {er.Area}" +
                 $"{(string.IsNullOrEmpty(er.Volume) ? "" : $" ({er.Volume})")}: " +
                 $"{FirstLine(er.Message)}"));
+            // Reflect over the generated CountersData (EngineContract.g.cs)
+            // so a counter added to the contract registry shows up here with
+            // zero UI edits — the hand-written list this replaced silently
+            // missed 8 of 18 counters.
             var c = stats.Counters;
-            var nonzero = new (string Name, ulong V)[]
-            {
-                ("stat_fetch_failures", c.StatFetchFailures),
-                ("usn_batches_truncated", c.UsnBatchesTruncated),
-                ("snapshot_load_failures", c.SnapshotLoadFailures),
-                ("snapshot_save_failures", c.SnapshotSaveFailures),
-                ("deferred_names_unresolved", c.DeferredNamesUnresolved),
-                ("corrupt_mft_records", c.CorruptMftRecords),
-                ("journal_rescans", c.JournalRescans),
-                ("pipe_malformed_frames", c.PipeMalformedFrames),
-                ("pipe_events_dropped", c.PipeEventsDropped),
-                ("pipe_connections_rejected", c.PipeConnectionsRejected),
-            }.Where(x => x.V > 0).ToList();
+            var nonzero = CounterProps
+                .Select(p => (
+                    Name: System.Text.Json.JsonNamingPolicy.SnakeCaseLower.ConvertName(p.Name),
+                    V: (ulong)p.GetValue(c)!))
+                .Where(x => x.V > 0)
+                .ToList();
             CountersText.Text = nonzero.Count == 0
                 ? string.Empty
                 : "劣化カウンタ: " + string.Join("  ", nonzero.Select(x => $"{x.Name}={x.V}"));
         }
     }
+
+    private static readonly System.Reflection.PropertyInfo[] CounterProps =
+        [.. typeof(CountersData).GetProperties()
+            .Where(p => p.PropertyType == typeof(ulong))];
 
     private static string FirstLine(string s)
     {

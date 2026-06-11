@@ -18,3 +18,9 @@ justfile text eol=lf
 *.ico binary
 *.bin binary
 *.fmfidx binary
+
+# The golden corpus is byte-exact by definition (ADR-0018): the Rust/C# pin
+# tests compare file bytes verbatim, so EOL conversion must never touch it.
+# Without this, a checkout smudges the JSON goldens to CRLF and the pins
+# break (the .bin files only survived via the binary heuristic above).
+contract/golden/** -text

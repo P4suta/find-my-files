@@ -290,6 +290,10 @@ impl Engine {
     }
 
     pub fn shutdown(&self) {
+        // Close the diag→EngineError forwarding window first: shutdown-time
+        // WARNs (final flush, journal teardown) still reach the log and the
+        // diag ring, but no longer race the dying event sink.
+        *self._diag_guard.lock() = None;
         for slot in self.volumes.read().iter() {
             slot.stop.store(true, Ordering::Relaxed);
         }

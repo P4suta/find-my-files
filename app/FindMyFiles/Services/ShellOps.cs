@@ -56,11 +56,20 @@ public static class ShellOps
         catch (Exception ex)
         {
             FileLog.Warn("shell", $"shell op failed for {path}", ex);
-            // The most common cause: the file vanished/renamed after indexing.
             Notifier.Post(
                 NotifySeverity.Warning,
                 $"{failureMessage}: {Path.GetFileName(path)}",
-                $"{ex.Message}(ファイルが移動・削除された直後の可能性があります)");
+                $"{ex.Message}({Hint(ex)})");
         }
     }
+
+    /// <summary>Win32-error-specific hint — "access denied" must not read
+    /// like "the file vanished" (the two have opposite remedies).</summary>
+    private static string Hint(Exception ex) =>
+        (ex as System.ComponentModel.Win32Exception)?.NativeErrorCode switch
+        {
+            2 or 3 => "ファイルが移動・削除された可能性があります",     // FILE/PATH_NOT_FOUND
+            5 => "アクセスが拒否されました — 権限を確認してください",   // ACCESS_DENIED
+            _ => "ファイルが移動・削除された直後の可能性があります",
+        };
 }

@@ -32,6 +32,9 @@ pub struct Connection {
     next_result_id: AtomicU64,
     use_clock: AtomicU64,
     pub hello_done: AtomicBool,
+    /// Live-connection count shared with the accept loop (ServiceInfo
+    /// reports it; the server owns increment/decrement).
+    active_connections: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// What the worker should do after answering (or instead of answering).
@@ -47,7 +50,11 @@ pub enum Outcome {
 }
 
 impl Connection {
-    pub fn new(engine: Arc<Engine>, faults: Faults) -> Self {
+    pub fn new(
+        engine: Arc<Engine>,
+        faults: Faults,
+        active_connections: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
         Self {
             engine,
             faults,
@@ -55,6 +62,7 @@ impl Connection {
             next_result_id: AtomicU64::new(1),
             use_clock: AtomicU64::new(0),
             hello_done: AtomicBool::new(false),
+            active_connections,
         }
     }
 
@@ -160,7 +168,7 @@ impl Connection {
                 "ServiceInfo",
                 &messages::ServiceInfoResp {
                     uptime_ms: self.faults.uptime_ms(),
-                    connections: 1, // per-listener count comes with P4's hardening
+                    connections: self.active_connections.load(Ordering::Relaxed) as u32,
                     version: env!("CARGO_PKG_VERSION").to_string(),
                 },
             ),

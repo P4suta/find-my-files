@@ -17,6 +17,8 @@ fmf-contract = { workspace = true }
 fmf-core = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
+# degrade!(warn+カウンタ不可分)の warn 側 — 変換失敗の劣化記録のみに使う。
+tracing = { workspace = true }
 
 [dev-dependencies]
 # Test-only feature union: exposes fmf-core's index::testutil (TestDir RAII)

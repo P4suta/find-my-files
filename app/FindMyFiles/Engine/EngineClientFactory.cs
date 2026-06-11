@@ -32,7 +32,9 @@ public static class EngineClientFactory
             case "auto":
                 break;
             default:
-                FileLog.Warn("app", $"unknown engine mode `{mode}` — using auto");
+                FileLog.Warn(
+                    "app",
+                    $"unknown engine mode `{mode}` (allowed: pipe | inproc | auto) — using auto");
                 break;
         }
         if (PipeEngineClient.Probe(pipeName, ProbeTimeout))

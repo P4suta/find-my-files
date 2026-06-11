@@ -336,6 +336,7 @@ dependencies = [
  "fmf-core",
  "parking_lot",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
