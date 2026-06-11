@@ -66,22 +66,21 @@ public partial class App : Application
         FileLog.Info("app", $"launch v{typeof(App).Assembly.GetName().Version} "
             + $"os={Environment.OSVersion.VersionString}");
 
-        var fake = Environment.GetCommandLineArgs()
-            .Any(a => a.Equals("--fake-engine", StringComparison.OrdinalIgnoreCase));
         try
         {
-            EngineClient = fake ? new FakeEngineClient() : new FfiEngineClient();
+            EngineClient = EngineClientFactory.Resolve(Environment.GetCommandLineArgs());
         }
         catch (Exception ex)
         {
-            // Engine refused to start (DLL missing, config issue…) — run the
-            // UI on the fake engine so the user sees an explanation instead
-            // of an instant crash.
+            // Engine refused to start (DLL missing, service down, index dir
+            // locked by another engine…) — run the UI on the fake engine so
+            // the user sees an explanation instead of an instant crash.
             FileLog.Error("app", "engine initialization failed; falling back to fake", ex);
             Notifier.Post(
                 NotifySeverity.Error,
                 "検索エンジンの初期化に失敗しました(フォールバック動作中)",
-                ex.Message);
+                $"{ex.Message}\nfmf-service が未起動か、インデックスを他のエンジンが"
+                + "ロックしている可能性があります(詳細は engine.log)。");
             EngineClient = new FakeEngineClient();
         }
 

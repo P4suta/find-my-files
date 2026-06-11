@@ -55,7 +55,7 @@ public sealed partial class MainPage : Page
         Loaded += (_, _) =>
         {
             SearchBox.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
-            ViewModel.Start();
+            ViewModel.StartAsync().Forget("startup");
         };
     }
 

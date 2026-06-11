@@ -215,4 +215,48 @@ internal static class Wtf8
         }
         return new string(chars, 0, n);
     }
+
+    /// <summary>WTF-8 encoding: the inverse of <see cref="Decode"/>. Lone
+    /// surrogates become 3-byte sequences instead of U+FFFD.</summary>
+    public static byte[] Encode(string s)
+    {
+        var bytes = new byte[s.Length * 3]; // WTF-8 bytes ≤ 3 × UTF-16 units
+        int n = 0, i = 0;
+        while (i < s.Length)
+        {
+            uint cp = s[i];
+            if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+            {
+                cp = (uint)char.ConvertToUtf32(s[i], s[i + 1]);
+                i += 2;
+            }
+            else
+            {
+                i++; // lone surrogates fall through as 3-byte sequences
+            }
+            if (cp < 0x80)
+            {
+                bytes[n++] = (byte)cp;
+            }
+            else if (cp < 0x800)
+            {
+                bytes[n++] = (byte)(0xC0 | (cp >> 6));
+                bytes[n++] = (byte)(0x80 | (cp & 0x3F));
+            }
+            else if (cp < 0x10000)
+            {
+                bytes[n++] = (byte)(0xE0 | (cp >> 12));
+                bytes[n++] = (byte)(0x80 | ((cp >> 6) & 0x3F));
+                bytes[n++] = (byte)(0x80 | (cp & 0x3F));
+            }
+            else
+            {
+                bytes[n++] = (byte)(0xF0 | (cp >> 18));
+                bytes[n++] = (byte)(0x80 | ((cp >> 12) & 0x3F));
+                bytes[n++] = (byte)(0x80 | ((cp >> 6) & 0x3F));
+                bytes[n++] = (byte)(0x80 | (cp & 0x3F));
+            }
+        }
+        return bytes[..n];
+    }
 }

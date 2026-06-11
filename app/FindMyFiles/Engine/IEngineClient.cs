@@ -2,9 +2,10 @@ namespace FindMyFiles.Engine;
 
 /// <summary>
 /// The single boundary the app uses to talk to the engine
-/// (docs/ARCHITECTURE.md). Implementations: <see cref="FfiEngineClient"/>
-/// (in-proc DLL, MVP), <see cref="FakeEngineClient"/> (deterministic data for
-/// UI tests via --fake-engine), and a future named-pipe client (v2 service).
+/// (docs/ARCHITECTURE.md). Implementations: <see cref="PipeEngineClient"/>
+/// (named pipe to fmf-service), <see cref="FfiEngineClient"/> (in-proc DLL,
+/// --engine=inproc) and <see cref="FakeEngineClient"/> (deterministic data
+/// for UI tests via --fake-engine).
 /// </summary>
 public interface IEngineClient : IDisposable
 {
@@ -18,16 +19,32 @@ public interface IEngineClient : IDisposable
     /// </summary>
     event Action<int>? EngineErrorOccurred;
 
-    IReadOnlyList<string> ListVolumes();
-    void StartIndexing(IReadOnlyList<string> volumes);
-    IReadOnlyList<VolumeStatus> GetStatus();
+    /// <summary>InProc for Ffi/Fake (fixed, never raises
+    /// <see cref="ConnectionChanged"/>); the pipe client moves through
+    /// Connecting/Connected/Reconnecting.</summary>
+    EngineConnectionState Connection { get; }
+    event Action<EngineConnectionState>? ConnectionChanged;
+
+    /// <exception cref="EngineUnavailableException">service unreachable</exception>
+    Task<IReadOnlyList<string>> ListVolumesAsync();
+
+    /// <exception cref="EngineUnavailableException">service unreachable</exception>
+    Task StartIndexingAsync(IReadOnlyList<string> volumes);
+
+    /// <exception cref="EngineUnavailableException">service unreachable</exception>
+    Task<IReadOnlyList<VolumeStatus>> GetStatusAsync();
 
     /// <exception cref="QuerySyntaxException">malformed query text</exception>
+    /// <exception cref="EngineUnavailableException">service unreachable</exception>
     Task<SearchOutcome> SearchAsync(string query, SearchOptions options);
 
     /// <summary>Observability snapshot for the performance panel.</summary>
     Task<EngineStatsData?> GetStatsAsync();
 }
+
+/// <summary>Transport state of the engine boundary. In-proc clients are
+/// always InProc; the pipe client reports its supervisor state.</summary>
+public enum EngineConnectionState { InProc, Connecting, Connected, Reconnecting }
 
 public sealed record SearchOutcome(ISearchResult Result, QueryTraceData? Trace);
 
@@ -93,6 +110,20 @@ public sealed class CountersData
     public ulong DeferredNamesUnresolved { get; set; }
     public ulong CorruptMftRecords { get; set; }
     public ulong JournalRescans { get; set; }
+    public ulong PipeMalformedFrames { get; set; }
+    public ulong PipeEventsDropped { get; set; }
+    public ulong PipeConnectionsRejected { get; set; }
+}
+
+/// <summary>Client-side pipe transport metrics. Null for in-proc clients;
+/// the pipe client fills it on every <see cref="IEngineClient.GetStatsAsync"/>.</summary>
+public sealed class TransportStatsData
+{
+    public string State { get; set; } = string.Empty;
+    public long Reconnects { get; set; }
+    public double PageRttEwmaUs { get; set; }
+    public uint ServerPid { get; set; }
+    public uint AbiVersion { get; set; }
 }
 
 public sealed class EngineStatsData
@@ -104,6 +135,7 @@ public sealed class EngineStatsData
     public List<IndexStatsData> Indexes { get; set; } = [];
     public CountersData Counters { get; set; } = new();
     public List<ErrorEventData> RecentErrors { get; set; } = [];
+    public TransportStatsData? Transport { get; set; }
 }
 
 public enum FmfSort { Name = 0, Size = 1, Mtime = 2 }
@@ -153,6 +185,11 @@ public sealed class StaleResultException : Exception
 }
 
 public sealed class QuerySyntaxException(string message) : Exception(message);
+
+/// <summary>The engine transport is down (pipe disconnected, request timed
+/// out, service not running). Pending requests fail fast with this; the
+/// supervisor keeps reconnecting in the background.</summary>
+public sealed class EngineUnavailableException(string message) : Exception(message);
 
 public sealed class EngineException(string message, int code) : Exception(message)
 {

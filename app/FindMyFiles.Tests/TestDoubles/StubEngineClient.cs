@@ -39,14 +39,19 @@ public sealed class StubEngineClient : IEngineClient
     public event Action<string>? IndexChanged;
     public event Action<VolumeStatus>? VolumeUpdated { add { } remove { } }
     public event Action<int>? EngineErrorOccurred { add { } remove { } }
+    public event Action<EngineConnectionState>? ConnectionChanged { add { } remove { } }
+
+    public EngineConnectionState Connection => EngineConnectionState.InProc;
 
     public void RaiseIndexChanged(string volume) => IndexChanged?.Invoke(volume);
 
-    public IReadOnlyList<string> ListVolumes() => ["F:"];
+    public Task<IReadOnlyList<string>> ListVolumesAsync() =>
+        Task.FromResult<IReadOnlyList<string>>(["F:"]);
 
-    public void StartIndexing(IReadOnlyList<string> volumes) { }
+    public Task StartIndexingAsync(IReadOnlyList<string> volumes) => Task.CompletedTask;
 
-    public IReadOnlyList<VolumeStatus> GetStatus() => [];
+    public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync() =>
+        Task.FromResult<IReadOnlyList<VolumeStatus>>([]);
 
     public Task<EngineStatsData?> GetStatsAsync() => Task.FromResult<EngineStatsData?>(null);
 

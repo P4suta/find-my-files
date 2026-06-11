@@ -17,6 +17,11 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     public event Action<VolumeStatus>? VolumeUpdated;
     public event Action<int>? EngineErrorOccurred;
 
+    /// <summary>In-proc: no transport, no state transitions.</summary>
+    public EngineConnectionState Connection => EngineConnectionState.InProc;
+
+    public event Action<EngineConnectionState>? ConnectionChanged { add { } remove { } }
+
     public FfiEngineClient()
     {
         var indexDir = Path.Combine(
@@ -78,20 +83,27 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         }
     }
 
-    public IReadOnlyList<string> ListVolumes()
+    // The three volume calls are cheap in-proc, but the interface contract
+    // is async (the pipe client crosses a process boundary) — Task.Run keeps
+    // the UI thread out of the FFI entirely.
+    public Task<IReadOnlyList<string>> ListVolumesAsync()
     {
-        var buf = stackalloc NativeEngine.FmfVolumeStatus[26];
-        var rc = NativeEngine.fmf_list_volumes(_handle, buf, 26, out var count);
-        if (rc != NativeEngine.Ok)
+        var handle = _handle;
+        return Task.Run<IReadOnlyList<string>>(() =>
         {
-            NativeEngine.Throw(rc, "fmf_list_volumes");
-        }
-        var result = new List<string>((int)count);
-        for (var i = 0; i < count && i < 26; i++)
-        {
-            result.Add(LabelOf(buf[i]));
-        }
-        return result;
+            var buf = stackalloc NativeEngine.FmfVolumeStatus[26];
+            var rc = NativeEngine.fmf_list_volumes(handle, buf, 26, out var count);
+            if (rc != NativeEngine.Ok)
+            {
+                NativeEngine.Throw(rc, "fmf_list_volumes");
+            }
+            var result = new List<string>((int)count);
+            for (var i = 0; i < count && i < 26; i++)
+            {
+                result.Add(LabelOf(buf[i]));
+            }
+            return result;
+        });
     }
 
     private static string LabelOf(in NativeEngine.FmfVolumeStatus s)
@@ -107,50 +119,59 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         }
     }
 
-    public void StartIndexing(IReadOnlyList<string> volumes)
+    public Task StartIndexingAsync(IReadOnlyList<string> volumes)
     {
-        var ptrs = new IntPtr[volumes.Count];
-        try
+        var handle = _handle;
+        return Task.Run(() =>
         {
-            for (var i = 0; i < volumes.Count; i++)
+            var ptrs = new IntPtr[volumes.Count];
+            try
             {
-                ptrs[i] = Marshal.StringToCoTaskMemUTF8(volumes[i]);
-            }
-            fixed (IntPtr* pp = ptrs)
-            {
-                var rc = NativeEngine.fmf_index_start(_handle, (byte**)pp, (uint)volumes.Count);
-                if (rc != NativeEngine.Ok)
+                for (var i = 0; i < volumes.Count; i++)
                 {
-                    NativeEngine.Throw(rc, "fmf_index_start");
+                    ptrs[i] = Marshal.StringToCoTaskMemUTF8(volumes[i]);
+                }
+                fixed (IntPtr* pp = ptrs)
+                {
+                    var rc = NativeEngine.fmf_index_start(handle, (byte**)pp, (uint)volumes.Count);
+                    if (rc != NativeEngine.Ok)
+                    {
+                        NativeEngine.Throw(rc, "fmf_index_start");
+                    }
                 }
             }
-        }
-        finally
-        {
-            foreach (var p in ptrs)
+            finally
             {
-                if (p != IntPtr.Zero)
+                foreach (var p in ptrs)
                 {
-                    Marshal.FreeCoTaskMem(p);
+                    if (p != IntPtr.Zero)
+                    {
+                        Marshal.FreeCoTaskMem(p);
+                    }
                 }
             }
-        }
+        });
     }
 
-    public IReadOnlyList<VolumeStatus> GetStatus()
+    public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync()
     {
-        var buf = stackalloc NativeEngine.FmfVolumeStatus[26];
-        var rc = NativeEngine.fmf_index_status(_handle, buf, 26, out var count);
-        if (rc != NativeEngine.Ok)
+        var handle = _handle;
+        return Task.Run<IReadOnlyList<VolumeStatus>>(() =>
         {
-            NativeEngine.Throw(rc, "fmf_index_status");
-        }
-        var result = new List<VolumeStatus>((int)count);
-        for (var i = 0; i < count && i < 26; i++)
-        {
-            result.Add(new VolumeStatus(LabelOf(buf[i]), (VolumeState)buf[i].State, buf[i].Entries));
-        }
-        return result;
+            var buf = stackalloc NativeEngine.FmfVolumeStatus[26];
+            var rc = NativeEngine.fmf_index_status(handle, buf, 26, out var count);
+            if (rc != NativeEngine.Ok)
+            {
+                NativeEngine.Throw(rc, "fmf_index_status");
+            }
+            var result = new List<VolumeStatus>((int)count);
+            for (var i = 0; i < count && i < 26; i++)
+            {
+                result.Add(new VolumeStatus(
+                    LabelOf(buf[i]), (VolumeState)buf[i].State, buf[i].Entries));
+            }
+            return result;
+        });
     }
 
     private static readonly System.Text.Json.JsonSerializerOptions JsonOpts = new()
@@ -255,22 +276,12 @@ internal sealed unsafe class FfiSearchResult(IntPtr handle, long count) : SafeHa
                 }
                 try
                 {
-                    var rows = new List<RowData>((int)page->RowCount);
-                    var blob = new ReadOnlySpan<byte>(page->Blob.ToPointer(), (int)page->BlobLen);
-                    var native = (NativeEngine.FmfRow*)page->Rows;
-                    for (var i = 0; i < page->RowCount; i++)
-                    {
-                        ref readonly var r = ref native[i];
-                        rows.Add(new RowData(
-                            r.EntryRef,
-                            r.Frn,
-                            r.Size,
-                            r.Mtime,
-                            r.Flags,
-                            Wtf8.Decode(blob.Slice((int)r.NameOff, r.NameLen)),
-                            Wtf8.Decode(blob.Slice((int)r.ParentPathOff, r.ParentPathLen))));
-                    }
-                    return (IReadOnlyList<RowData>)rows;
+                    // The native page is the same layout the pipe carries:
+                    // 48-byte rows + blob, decoded by the shared PageCodec.
+                    return (IReadOnlyList<RowData>)PageCodec.Decode(
+                        new ReadOnlySpan<byte>(
+                            page->Rows.ToPointer(), (int)page->RowCount * PageCodec.RowSize),
+                        new ReadOnlySpan<byte>(page->Blob.ToPointer(), (int)page->BlobLen));
                 }
                 finally
                 {

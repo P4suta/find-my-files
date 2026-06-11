@@ -57,13 +57,16 @@ public sealed partial class MainViewModel : ObservableObject
         Notifications.AttachToNotifier();
     }
 
-    public void Start()
+    /// <summary>Startup sequence, in order: status text → StartIndexing →
+    /// initial requery. Runs on the UI thread; the engine calls are awaited
+    /// so a pipe transport never blocks it.</summary>
+    public async Task StartAsync()
     {
         try
         {
-            var volumes = _engine.ListVolumes();
+            var volumes = await _engine.ListVolumesAsync();
             StatusText = StatusFormatter.IndexingStarted(volumes);
-            _engine.StartIndexing(volumes);
+            await _engine.StartIndexingAsync(volumes);
         }
         catch (Exception ex)
         {

@@ -11,6 +11,10 @@ public sealed class FakeEngineClient : IEngineClient
 
     public event Action<string>? IndexChanged { add { } remove { } }
     public event Action<VolumeStatus>? VolumeUpdated { add { } remove { } }
+    public event Action<EngineConnectionState>? ConnectionChanged { add { } remove { } }
+
+    /// <summary>In-proc: no transport, no state transitions.</summary>
+    public EngineConnectionState Connection => EngineConnectionState.InProc;
     // Only the DEBUG-only fault injection raises this; Release builds keep
     // the member to satisfy IEngineClient.
 #pragma warning disable CS0067
@@ -48,12 +52,14 @@ public sealed class FakeEngineClient : IEngineClient
         }
     }
 
-    public IReadOnlyList<string> ListVolumes() => ["F:"];
+    public Task<IReadOnlyList<string>> ListVolumesAsync() =>
+        Task.FromResult<IReadOnlyList<string>>(["F:"]);
 
-    public void StartIndexing(IReadOnlyList<string> volumes) { }
+    public Task StartIndexingAsync(IReadOnlyList<string> volumes) => Task.CompletedTask;
 
-    public IReadOnlyList<VolumeStatus> GetStatus() =>
-        [new("F:", VolumeState.Ready, (ulong)_rows.Count)];
+    public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync() =>
+        Task.FromResult<IReadOnlyList<VolumeStatus>>(
+            [new("F:", VolumeState.Ready, (ulong)_rows.Count)]);
 
     private readonly List<QueryTraceData> _traces = [];
 

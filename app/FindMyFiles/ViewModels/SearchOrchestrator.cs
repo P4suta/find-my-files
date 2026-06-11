@@ -145,6 +145,14 @@ public sealed class SearchOrchestrator
         {
             _presenter.PresentQueryError(e.Message);
         }
+        catch (EngineUnavailableException e)
+        {
+            // The pipe supervisor is already reconnecting; its synthesized
+            // IndexChanged will requery once the service is back.
+            FileLog.Warn("query", $"engine unavailable for query `{request.Query}`: {e.Message}");
+            _presenter.PresentEngineFailure();
+            SearchFailed?.Invoke(e);
+        }
         catch (EngineException e)
         {
             FileLog.Error("query", $"engine error for query `{request.Query}`", e);
