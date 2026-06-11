@@ -110,6 +110,29 @@ impl FrnIndex {
         debug_assert_eq!(k, hi, "merge cursors must close");
     }
 
+    /// Remapped copy for compaction: dead ids drop out, survivors renumber.
+    /// Keys (masked record numbers) are copied unchanged by the caller and
+    /// the remap preserves relative id order, so the (key, id) order — and
+    /// with it lookup's binary search — survives without a re-sort.
+    pub(super) fn compact(&self, remap: &[EntryId], new_len: u32) -> FrnIndex {
+        debug_assert_eq!(
+            self.covers as usize,
+            remap.len(),
+            "compact at a batch boundary only (unmerged tail would be lost)"
+        );
+        FrnIndex {
+            ids: self
+                .ids
+                .iter()
+                .filter_map(|&id| match remap[id as usize] {
+                    super::NO_PARENT => None,
+                    new_id => Some(new_id),
+                })
+                .collect(),
+            covers: new_len,
+        }
+    }
+
     pub(super) fn bytes(&self) -> u64 {
         (self.ids.capacity() * 4) as u64
     }

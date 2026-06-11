@@ -174,6 +174,10 @@ pub struct Counters {
     pub corrupt_mft_records: std::sync::atomic::AtomicU64,
     pub journal_rescans: std::sync::atomic::AtomicU64,
     pub scan_pipeline_fallbacks: std::sync::atomic::AtomicU64,
+    /// A compacted copy was discarded because the index mutated under it —
+    /// impossible while the volume thread is the only writer; nonzero means
+    /// that invariant broke somewhere.
+    pub compaction_aborts: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -188,6 +192,7 @@ pub struct CountersSnapshot {
     pub scan_pipeline_fallbacks: u64,
     pub offset_table_rebuild_fallbacks: u64,
     pub lazy_perm_rebuild_fallbacks: u64,
+    pub compaction_aborts: u64,
 }
 
 /// The query layer has no `MetricsHub` handle (its degradations normally go
@@ -228,6 +233,7 @@ impl Counters {
             scan_pipeline_fallbacks: self.scan_pipeline_fallbacks.load(Relaxed),
             offset_table_rebuild_fallbacks: OFFSET_TABLE_REBUILD_FALLBACKS.load(Relaxed),
             lazy_perm_rebuild_fallbacks: LAZY_PERM_REBUILD_FALLBACKS.load(Relaxed),
+            compaction_aborts: self.compaction_aborts.load(Relaxed),
         }
     }
 }

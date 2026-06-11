@@ -521,3 +521,84 @@ fn foreign_major_versions_are_skipped_between_v2_records() {
         .collect();
     assert_eq!(names, ["first.txt", "second.txt"]);
 }
+
+// ── Scenario: compaction mid-stream ──────────────────────────────────────
+
+#[test]
+fn replay_continues_correctly_across_a_mid_stream_compaction() {
+    let mut idx = base_index();
+    // Batch 1: a rename (tombstone + pool garbage) and a create.
+    replay(
+        &mut idx,
+        100,
+        &[
+            RecSpec {
+                usn: 10,
+                frn: frn(11),
+                parent_frn: frn(10),
+                reason: reason::RENAME_NEW_NAME | reason::CLOSE,
+                attributes: ARCHIVE,
+                name: "Renamed.TXT",
+            },
+            RecSpec {
+                usn: 20,
+                frn: frn(30),
+                parent_frn: frn(20),
+                reason: reason::FILE_CREATE | reason::CLOSE,
+                attributes: ARCHIVE,
+                name: "fresh.log",
+            },
+        ],
+        &no_stats(),
+    );
+    assert!(idx.len() > idx.live_len(), "the rename left a tombstone");
+
+    // Compact exactly where the volume thread would: between batches.
+    idx = idx.compacted();
+    assert_eq!(idx.len(), idx.live_len());
+    assert_eq!(path_of(&idx, 11), r"C:\docs\Renamed.TXT");
+
+    // Batch 2 runs against the remapped index: rename the fresh file,
+    // delete the renamed one, create another under docs.
+    replay(
+        &mut idx,
+        200,
+        &[
+            RecSpec {
+                usn: 30,
+                frn: frn(30),
+                parent_frn: frn(20),
+                reason: reason::RENAME_NEW_NAME | reason::CLOSE,
+                attributes: ARCHIVE,
+                name: "fresh2.log",
+            },
+            RecSpec {
+                usn: 40,
+                frn: frn(11),
+                parent_frn: frn(10),
+                reason: reason::FILE_DELETE | reason::CLOSE,
+                attributes: ARCHIVE,
+                name: "Renamed.TXT",
+            },
+            RecSpec {
+                usn: 50,
+                frn: frn(40),
+                parent_frn: frn(10),
+                reason: reason::FILE_CREATE | reason::CLOSE,
+                attributes: ARCHIVE,
+                name: "new_note.md",
+            },
+        ],
+        &no_stats(),
+    );
+
+    assert_eq!(path_of(&idx, 30), r"C:\archive\fresh2.log");
+    assert_eq!(path_of(&idx, 40), r"C:\docs\new_note.md");
+    assert!(
+        idx.entry_by_record(11).is_none(),
+        "deleted after compaction"
+    );
+    let names = live_names(&idx);
+    assert!(names.contains(&"fresh2.log".to_string()));
+    assert!(!names.contains(&"fresh.log".to_string()));
+}

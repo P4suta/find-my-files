@@ -14,6 +14,7 @@
 //! batches bump `content_generation` only; open results stay readable.
 
 mod builder;
+mod compact;
 mod core;
 mod frn;
 mod mutate;

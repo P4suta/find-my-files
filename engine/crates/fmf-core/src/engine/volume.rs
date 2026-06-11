@@ -311,6 +311,7 @@ impl Engine {
                             });
                             *slot.scanned.lock() = idx.live_len() as u64;
                         }
+                        self.maybe_compact(&slot);
                         if last_emit.elapsed() >= INDEX_CHANGED_DEBOUNCE {
                             last_emit = Instant::now();
                             self.emit(EngineEvent::IndexChanged {
@@ -338,6 +339,51 @@ impl Engine {
                     }
                 }
             }
+        }
+    }
+
+    /// Compact once the tombstone/garbage thresholds trip (checked per
+    /// applied USN batch). The copy builds under a *read* guard — queries
+    /// run alongside, and this volume thread is the index's only writer, so
+    /// nothing can mutate it meanwhile; the write lock is held for the swap
+    /// alone (µs). `install_index` bumps the structural generation: open
+    /// result handles go hard-stale and the UI re-queries.
+    fn maybe_compact(&self, slot: &VolumeSlot) {
+        let compacted = {
+            let guard = slot.index.read();
+            let Some(idx) = guard.as_ref().filter(|idx| idx.compaction_due()) else {
+                return;
+            };
+            let stage = crate::metrics::Stage::start();
+            let generation = idx.content_generation();
+            let dropped = idx.len() - idx.live_len();
+            let new_idx = idx.compacted();
+            tracing::info!(
+                volume = %slot.label,
+                dropped_entries = dropped,
+                reclaimed_name_bytes = idx.stats(&slot.label).dead_name_bytes,
+                ms = stage.elapsed_us() / 1000,
+                "index compacted"
+            );
+            (new_idx, generation)
+        };
+        // Single-writer invariant: nothing can have advanced the generation
+        // between copy and swap. If it ever does, installing would lose
+        // those mutations — drop the copy loudly instead.
+        let guard = slot.index.read();
+        let current = guard.as_ref().map(|i| i.content_generation());
+        drop(guard);
+        if current != Some(compacted.1) {
+            Counters::bump(&self.metrics.counters.compaction_aborts);
+            tracing::warn!(
+                volume = %slot.label,
+                "index mutated during compaction — copy discarded"
+            );
+            return;
+        }
+        slot.install_index(compacted.0);
+        if let Some(idx) = slot.index.read().as_ref() {
+            crate::query::prewarm(idx);
         }
     }
 
