@@ -6,13 +6,8 @@ use crate::{FMF_E_INVALID_ARG, FMF_E_IO, FMF_OK};
 
 // ── JSON blobs (stats / traces) ─────────────────────────────────────────
 
-/// Engine-allocated UTF-8 JSON payload; release with fmf_blob_free.
-#[repr(C)]
-pub struct FmfBlob {
-    pub data: *const u8,
-    pub len: u32,
-    pub _pad: u32,
-}
+// The blob POD radiates from the contract (ADR-0018).
+pub use fmf_contract::pod::FmfBlob;
 
 #[repr(C)]
 struct BlobOwned {

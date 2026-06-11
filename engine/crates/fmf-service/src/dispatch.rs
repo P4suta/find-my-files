@@ -11,15 +11,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use fmf_core::engine::{Engine, EngineError, ResultSet, VolumePhase};
 use fmf_core::index::SortKey;
 use fmf_core::query::{CaseMode, QueryOptions};
+use fmf_proto::limits::MAX_RESULTS_PER_CONN;
 use fmf_proto::messages::{self, opcode};
-use fmf_proto::{PROTOCOL_VERSION, codes};
+use fmf_proto::{ABI_VERSION, PROTOCOL_VERSION, codes};
 use parking_lot::Mutex;
 
 use crate::faults::Faults;
-
-/// Per-connection result registry cap (LRU by last access — an actively
-/// scrolled result must not be evicted by a burst of newer queries).
-const MAX_RESULTS: usize = 64;
 
 struct ResultEntry {
     set: ResultSet,
@@ -86,7 +83,7 @@ impl Connection {
                         codes::OK,
                         messages::HelloResp {
                             protocol_version: PROTOCOL_VERSION,
-                            abi_version: 1,
+                            abi_version: ABI_VERSION,
                             server_pid: std::process::id(),
                         }
                         .encode(),
@@ -209,7 +206,7 @@ impl Connection {
                 let id = self.next_result_id.fetch_add(1, Ordering::Relaxed);
                 let lagged = self.faults.lag_marker(text);
                 let mut results = self.results.lock();
-                if results.len() >= MAX_RESULTS {
+                if results.len() >= MAX_RESULTS_PER_CONN {
                     // Evict the least recently *used* (not oldest-created):
                     // the on-screen result survives query bursts.
                     if let Some((&victim, _)) = results.iter().min_by_key(|(_, e)| e.last_used) {
@@ -270,7 +267,7 @@ impl Connection {
                     blob.extend_from_slice(&row.name);
                     let parent_off = blob.len() as u32;
                     blob.extend_from_slice(&row.parent_path);
-                    wire_rows.push(messages::WireRow {
+                    wire_rows.push(messages::FmfRow {
                         entry_ref: row.entry_ref,
                         frn: row.frn,
                         size: row.size,

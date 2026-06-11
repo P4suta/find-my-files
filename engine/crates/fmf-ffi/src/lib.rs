@@ -21,15 +21,13 @@ pub use events::{
 pub use results::{FmfPage, FmfQueryOptions, FmfRow};
 pub use volumes::FmfVolumeStatus;
 
-pub const FMF_OK: i32 = 0;
-pub const FMF_E_INVALID_ARG: i32 = 1;
-pub const FMF_E_STALE: i32 = 2;
-pub const FMF_E_NOT_ADMIN: i32 = 3;
-pub const FMF_E_VOLUME: i32 = 4;
-pub const FMF_E_QUERY_SYNTAX: i32 = 5;
-pub const FMF_E_IO: i32 = 6;
-pub const FMF_E_LOCKED: i32 = 7;
-pub const FMF_E_PANIC: i32 = 99;
+// Status codes radiate from the contract (ADR-0018); the FMF_-prefixed
+// names are this crate's public Rust spelling of the same table.
+pub use fmf_contract::codes::{
+    INVALID_ARG as FMF_E_INVALID_ARG, IO as FMF_E_IO, LOCKED as FMF_E_LOCKED,
+    NOT_ADMIN as FMF_E_NOT_ADMIN, OK as FMF_OK, PANIC as FMF_E_PANIC,
+    QUERY_SYNTAX as FMF_E_QUERY_SYNTAX, STALE as FMF_E_STALE, VOLUME as FMF_E_VOLUME,
+};
 
 #[cfg(test)]
 mod contract_tests;

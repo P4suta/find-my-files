@@ -302,6 +302,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fmf-contract"
+version = "0.1.0"
+
+[[package]]
 name = "fmf-core"
 version = "0.1.0"
 dependencies = [
@@ -326,8 +330,8 @@ dependencies = [
 name = "fmf-ffi"
 version = "0.1.0"
 dependencies = [
+ "fmf-contract",
  "fmf-core",
- "fmf-proto",
  "parking_lot",
  "serde_json",
 ]
@@ -336,6 +340,7 @@ dependencies = [
 name = "fmf-proto"
 version = "0.1.0"
 dependencies = [
+ "fmf-contract",
  "serde",
  "serde_json",
  "thiserror",

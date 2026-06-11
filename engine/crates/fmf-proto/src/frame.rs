@@ -1,28 +1,17 @@
 //! 16-byte little-endian frame header + length-prefixed payload
-//! (docs/ARCHITECTURE.md「Pipe プロトコル」§フレーム).
+//! (docs/ARCHITECTURE.md「Pipe プロトコル」§フレーム). The header type and
+//! its byte conversion live in `fmf_contract::pod`; this module adds the
+//! stream I/O and the MAX_PAYLOAD_LEN policy.
 
 use std::io::{Read, Write};
 
-pub const HEADER_LEN: usize = 16;
+pub use fmf_contract::limits::MAX_PAYLOAD_LEN;
+pub use fmf_contract::pod::FrameHeader;
 
-/// Hard cap on a single frame's payload. A header announcing more is a
-/// protocol violation: the connection is torn down (counted by the server).
-pub const MAX_PAYLOAD_LEN: u32 = 16 * 1024 * 1024;
+pub const HEADER_LEN: usize = FrameHeader::LEN;
 
 pub const FLAG_RESPONSE: u16 = 1 << 0;
 pub const FLAG_EVENT: u16 = 1 << 1;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FrameHeader {
-    /// Payload length in bytes (the header itself excluded).
-    pub len: u32,
-    pub opcode: u16,
-    pub flags: u16,
-    /// Request/response correlation; 0 on event pushes.
-    pub request_id: u32,
-    /// Error code (`crate::codes`); meaningful on responses only.
-    pub status: i32,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
@@ -32,30 +21,15 @@ pub enum FrameError {
     Io(#[from] std::io::Error),
 }
 
-impl FrameHeader {
-    pub fn to_bytes(self) -> [u8; HEADER_LEN] {
-        let mut b = [0u8; HEADER_LEN];
-        b[0..4].copy_from_slice(&self.len.to_le_bytes());
-        b[4..6].copy_from_slice(&self.opcode.to_le_bytes());
-        b[6..8].copy_from_slice(&self.flags.to_le_bytes());
-        b[8..12].copy_from_slice(&self.request_id.to_le_bytes());
-        b[12..16].copy_from_slice(&self.status.to_le_bytes());
-        b
+/// Decodes a header and enforces the payload cap. A header announcing more
+/// is a protocol violation: the connection is torn down (counted by the
+/// server).
+pub fn decode_header(b: &[u8; HEADER_LEN]) -> Result<FrameHeader, FrameError> {
+    let h = FrameHeader::from_bytes(b);
+    if h.len > MAX_PAYLOAD_LEN {
+        return Err(FrameError::TooLong(h.len));
     }
-
-    pub fn from_bytes(b: &[u8; HEADER_LEN]) -> Result<Self, FrameError> {
-        let h = Self {
-            len: u32::from_le_bytes(b[0..4].try_into().unwrap()),
-            opcode: u16::from_le_bytes(b[4..6].try_into().unwrap()),
-            flags: u16::from_le_bytes(b[6..8].try_into().unwrap()),
-            request_id: u32::from_le_bytes(b[8..12].try_into().unwrap()),
-            status: i32::from_le_bytes(b[12..16].try_into().unwrap()),
-        };
-        if h.len > MAX_PAYLOAD_LEN {
-            return Err(FrameError::TooLong(h.len));
-        }
-        Ok(h)
-    }
+    Ok(h)
 }
 
 /// Writes header + payload as one frame. `header.len` is taken from
@@ -80,7 +54,7 @@ pub fn write_frame(
 pub fn read_frame(r: &mut impl Read) -> Result<(FrameHeader, Vec<u8>), FrameError> {
     let mut hb = [0u8; HEADER_LEN];
     r.read_exact(&mut hb)?;
-    let header = FrameHeader::from_bytes(&hb)?;
+    let header = decode_header(&hb)?;
     let mut payload = vec![0u8; header.len as usize];
     r.read_exact(&mut payload)?;
     Ok((header, payload))
@@ -111,7 +85,7 @@ mod tests {
                 0xFE, 0xFF, 0xFF, 0xFF, // status (-2)
             ]
         );
-        assert_eq!(FrameHeader::from_bytes(&b).unwrap(), h);
+        assert_eq!(decode_header(&b).unwrap(), h);
     }
 
     #[test]
@@ -125,10 +99,7 @@ mod tests {
         }
         .to_bytes();
         b[0..4].copy_from_slice(&(MAX_PAYLOAD_LEN + 1).to_le_bytes());
-        assert!(matches!(
-            FrameHeader::from_bytes(&b),
-            Err(FrameError::TooLong(_))
-        ));
+        assert!(matches!(decode_header(&b), Err(FrameError::TooLong(_))));
     }
 
     #[test]

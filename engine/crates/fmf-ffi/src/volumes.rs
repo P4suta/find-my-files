@@ -1,21 +1,16 @@
 use std::ffi::{c_char, c_void};
 
+use fmf_contract::volume::encode_label;
 use fmf_core::engine::{Engine, VolumePhase};
 
 use crate::error::{guard, utf8_arg};
-use crate::events::volume_bytes;
 use crate::handle::engine;
 use crate::{FMF_E_INVALID_ARG, FMF_OK};
 
 // ── Volumes & indexing ──────────────────────────────────────────────────
 
-#[repr(C)]
-pub struct FmfVolumeStatus {
-    pub label: [u8; 16],
-    pub state: u32, // 0=Scanning 1=Ready 2=Rescanning 3=Failed
-    pub _pad: u32,
-    pub entries: u64,
-}
+// The status POD radiates from the contract (ADR-0018).
+pub use fmf_contract::pod::FmfVolumeStatus;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_list_volumes(
@@ -34,7 +29,7 @@ pub unsafe extern "C" fn fmf_list_volumes(
             for (i, v) in vols.iter().take(cap as usize).enumerate() {
                 unsafe {
                     *buf.add(i) = FmfVolumeStatus {
-                        label: volume_bytes(v),
+                        label: encode_label(v),
                         state: 0,
                         _pad: 0,
                         entries: 0,
@@ -99,7 +94,7 @@ pub unsafe extern "C" fn fmf_index_status(
                 };
                 unsafe {
                     *buf.add(i) = FmfVolumeStatus {
-                        label: volume_bytes(label),
+                        label: encode_label(label),
                         state,
                         _pad: 0,
                         entries: *entries,

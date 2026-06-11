@@ -183,7 +183,7 @@ impl Client {
     fn query(&mut self, text: &str) -> (i32, Option<(u64, u64)>) {
         let (h, p) = self.request(
             opcode::QUERY,
-            &messages::encode_query_req(messages::QueryOptionsWire::default(), text),
+            &messages::encode_query_req(messages::FmfQueryOptions::default(), text),
         );
         if h.status != codes::OK {
             return (h.status, None);
@@ -274,7 +274,7 @@ fn request_before_hello_drops_the_connection() {
             request_id: 1,
             status: 0,
         },
-        &messages::encode_query_req(messages::QueryOptionsWire::default(), "x"),
+        &messages::encode_query_req(messages::FmfQueryOptions::default(), "x"),
     )
     .unwrap();
     assert!(
@@ -320,7 +320,7 @@ fn subscribe_receives_engine_events() {
     let (eh, body) = c.next_event();
     assert_eq!(eh.flags & FLAG_EVENT, FLAG_EVENT);
     assert_eq!(eh.request_id, 0);
-    let ev = messages::EventWire::decode(&body).unwrap();
+    let ev = messages::decode_event(&body).unwrap();
     assert_eq!(ev.kind, 5, "VolumeFailed");
     assert_eq!(ev.volume_str(), "?:");
     assert_eq!(eh.opcode as u32, ev.kind, "opcode mirrors the event kind");
@@ -387,7 +387,7 @@ fn drop_fault_severs_the_connection() {
             request_id: 9,
             status: 0,
         },
-        &messages::encode_query_req(messages::QueryOptionsWire::default(), "!!drop"),
+        &messages::encode_query_req(messages::FmfQueryOptions::default(), "!!drop"),
     )
     .unwrap();
     assert!(read_frame(&mut c.stream).is_err());

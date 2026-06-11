@@ -17,7 +17,7 @@ pub(crate) struct EngineHandle {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fmf_abi_version() -> u32 {
-    1
+    fmf_contract::versions::ABI_VERSION
 }
 
 // ── Lifecycle ───────────────────────────────────────────────────────────

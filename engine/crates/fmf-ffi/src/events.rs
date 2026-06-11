@@ -9,22 +9,12 @@ use crate::handle::engine;
 
 // ── Events ──────────────────────────────────────────────────────────────
 
-pub const FMF_EVENT_PROGRESS: u32 = 1;
-pub const FMF_EVENT_VOLUME_READY: u32 = 2;
-pub const FMF_EVENT_INDEX_CHANGED: u32 = 3;
-pub const FMF_EVENT_RESCAN_STARTED: u32 = 4;
-pub const FMF_EVENT_VOLUME_FAILED: u32 = 5;
-/// entries = severity (1=warn 2=error 3=panic); details via fmf_engine_stats.
-pub const FMF_EVENT_ENGINE_ERROR: u32 = 6;
-
-/// POD event payload. `volume` is NUL-terminated UTF-8 ("C:").
-#[repr(C)]
-pub struct FmfEvent {
-    pub kind: u32,
-    pub _pad: u32,
-    pub entries: u64,
-    pub volume: [u8; 16],
-}
+// Event kinds and the POD radiate from the contract (ADR-0018).
+pub use fmf_contract::events::{
+    FMF_EVENT_ENGINE_ERROR, FMF_EVENT_INDEX_CHANGED, FMF_EVENT_PROGRESS, FMF_EVENT_RESCAN_STARTED,
+    FMF_EVENT_VOLUME_FAILED, FMF_EVENT_VOLUME_READY,
+};
+pub use fmf_contract::pod::FmfEvent;
 
 pub type FmfEventCb = Option<unsafe extern "C" fn(ev: *const FmfEvent, user: *mut c_void)>;
 
@@ -36,14 +26,6 @@ pub(crate) struct CallbackSink {
 // is treated as an opaque token.
 unsafe impl Send for CallbackSink {}
 unsafe impl Sync for CallbackSink {}
-
-pub(crate) fn volume_bytes(label: &str) -> [u8; 16] {
-    let mut out = [0u8; 16];
-    let bytes = label.as_bytes();
-    let n = bytes.len().min(15);
-    out[..n].copy_from_slice(&bytes[..n]);
-    out
-}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_set_event_callback(
@@ -87,12 +69,7 @@ pub unsafe extern "C" fn fmf_set_event_callback(
                                 (FMF_EVENT_ENGINE_ERROR, volume, *severity)
                             }
                         };
-                        let payload = FmfEvent {
-                            kind,
-                            _pad: 0,
-                            entries,
-                            volume: volume_bytes(volume),
-                        };
+                        let payload = FmfEvent::new(kind, entries, volume);
                         unsafe { (sink.cb)(&payload, sink.user) };
                     })));
                 *handle._sink_keepalive.lock() = Some(keep);

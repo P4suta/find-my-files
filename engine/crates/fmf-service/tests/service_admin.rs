@@ -142,7 +142,7 @@ fn service_e2e_flush_survives_kill_and_restores() {
         &mut s,
         id,
         opcode::QUERY,
-        &messages::encode_query_req(messages::QueryOptionsWire::default(), "windows"),
+        &messages::encode_query_req(messages::FmfQueryOptions::default(), "windows"),
     );
     assert_eq!(h.status, codes::OK);
     let (head, _) = messages::QueryRespHead::decode(&p).unwrap();
@@ -195,7 +195,7 @@ fn service_e2e_flush_survives_kill_and_restores() {
     while touched.elapsed() < deadline {
         let (eh, body) = read_frame(&mut s2).expect("event stream");
         if eh.flags & FLAG_EVENT != 0 {
-            let ev = messages::EventWire::decode(&body).unwrap();
+            let ev = messages::decode_event(&body).unwrap();
             if ev.kind == 3 {
                 latency = Some(touched.elapsed());
                 break;

@@ -41,10 +41,14 @@ fmf-core/src/
 ├─ engine/       mod(Engine+ライフサイクル+イベント) / volume(VolumeSlot+スレッド防火壁+install_index)
 │                / search(ボリューム横断+k-wayマージ) / results(ResultSet+STALE判定) / tests
 ├─ mft.rs / scan.rs / usn/{records,apply,session} / metrics.rs / diag.rs / wtf8.rs
-fmf-ffi/src/     lib(エラーコード+再エクスポート+エクスポートピン) / error / handle / events
-                 / volumes / blob / results / contract_tests(ABIレイアウト・null・エラー経路の固定)
-fmf-proto/src/   lib(PROTOCOL_VERSION+エラー定数。fmf-ffiのcontract_testsが値をピン)
-                 / frame(16Bヘッダ+長さ前置きcodec) / messages(オペコード+wire構造体)
+fmf-contract/src/ 契約の機械可読正本(ADR-0018・依存ゼロ・ロジック禁止): codes / opcodes
+                 / events(EventKind) / options(SortKey/CaseMode/VolumeState) / pod(repr(C)
+                 +const レイアウトピン) / volume(label 16B詰め) / versions / limits
+fmf-ffi/src/     lib(contract再エクスポート+エクスポートピン) / error / handle / events
+                 / volumes / blob / results / contract_tests(リテラル絶対値ピン+ABIレイアウト
+                 +null・エラー経路 — 正本誤編集の独立トリップワイヤ)
+fmf-proto/src/   lib(contract再公開) / frame(16Bヘッダ+長さ前置きcodec)
+                 / messages(ペイロードcodec — 型はcontract) / tests/golden(コーパスピン)
 fmf-service/src/ lib(モジュール公開 — ループバックテストが実サーバを駆動) / main(clap: run)
                  / pipe(overlapped I/OのRead/Write化+listener。accept は connect/停止Event の2-wait)
                  / server(接続毎: reader+worker2+書き込みmutex) / dispatch(オペコード→Engine、
@@ -157,9 +161,13 @@ int32_t fmf_flush(FmfEngineHandle h);
 
 ## Pipe プロトコル(v2 サービス分離)
 
-`fmf-service`(特権サービス)と非特権UIの間のワイヤ仕様。本節が正本。ワイヤ型と
-エンコード/デコードの実装は `fmf-proto`(rlib)に置き、fmf-ffi とは値ピンのテストで同期する
-(cdylib は依存できないため定数は複製し、fmf-ffi の contract_tests が一致を固定する)。
+`fmf-service`(特権サービス)と非特権UIの間のワイヤ仕様。本節が正本。機械可読な定義
+(エラーコード・オペコード・イベント種・POD・上限値・版数)は依存ゼロの leaf クレート
+**`fmf-contract`** が単一正本として持ち、`fmf-proto`(エンコード/デコードの実装)・
+`fmf-ffi`・`fmf-service` はそこから放射される([ADR-0018](adr/0018-contract-single-source.md)。
+かつての「cdylib は依存できないため定数を複製」は Cargo の事実誤認だった — 不可能なのは
+cdylib **に**依存する方向のみ)。fmf-ffi の contract_tests はリテラル絶対値ピンとして残り、
+正本そのものの誤編集を検出する独立トリップワイヤを務める。
 
 ### トランスポート
 

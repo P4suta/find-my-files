@@ -11,11 +11,9 @@ name = "fmf_engine"
 crate-type = ["cdylib"]
 
 [dependencies]
+# A cdylib can depend on rlibs just fine (the old "cannot depend" comment
+# was a Cargo misconception — ADR-0018); the contract is the single source.
+fmf-contract = { workspace = true }
 fmf-core = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
-
-[dev-dependencies]
-# The pipe protocol duplicates the error-code table (a cdylib cannot be a
-# dependency); this pin keeps the copies from drifting (contract_tests).
-fmf-proto = { workspace = true }

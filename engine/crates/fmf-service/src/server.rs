@@ -11,6 +11,7 @@ use std::sync::mpsc;
 use fmf_core::engine::Engine;
 use fmf_core::metrics::Counters;
 use fmf_proto::frame::{self, FLAG_EVENT, FLAG_RESPONSE, FrameError, FrameHeader};
+use fmf_proto::messages;
 use parking_lot::Mutex;
 
 use crate::dispatch::{Connection, Outcome};
@@ -247,7 +248,8 @@ fn spawn_event_writer(q: Arc<crate::events::EventQueue>, writer: Arc<Mutex<PipeS
                     request_id: 0,
                     status: 0,
                 };
-                if frame::write_frame(&mut *writer.lock(), h, &ev.encode()).is_err() {
+                if frame::write_frame(&mut *writer.lock(), h, &messages::encode_event(&ev)).is_err()
+                {
                     return;
                 }
             }

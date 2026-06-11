@@ -1,26 +1,13 @@
-//! Opcodes and payload codecs. Binary payloads are little-endian, padding
-//! free, concatenated in documented order; cold-path payloads are UTF-8
-//! JSON with snake_case fields (docs/ARCHITECTURE.md「Pipe プロトコル」
-//! §オペコード表 — the canonical table).
+//! Payload codecs. Binary payloads are little-endian, padding free,
+//! concatenated in documented order; cold-path payloads are UTF-8 JSON with
+//! snake_case fields (docs/ARCHITECTURE.md「Pipe プロトコル」§オペコード表
+//! — the canonical table). The types themselves come from `fmf_contract`;
+//! only the byte logic lives here.
 
 use serde::{Deserialize, Serialize};
 
-pub mod opcode {
-    pub const HELLO: u16 = 1;
-    pub const SUBSCRIBE: u16 = 2;
-    pub const UNSUBSCRIBE: u16 = 3;
-    pub const LIST_VOLUMES: u16 = 4;
-    pub const INDEX_START: u16 = 5;
-    pub const INDEX_STATUS: u16 = 6;
-    pub const QUERY: u16 = 7;
-    pub const RESULT_PAGE: u16 = 8;
-    pub const RESULT_FREE: u16 = 9;
-    pub const STATS: u16 = 10;
-    /// Number reserved, deliberately unimplemented (client-driven flush is
-    /// a local-DoS lever — ARCHITECTURE.md op table).
-    pub const FLUSH_RESERVED: u16 = 11;
-    pub const SERVICE_INFO: u16 = 12;
-}
+pub use fmf_contract::opcodes as opcode;
+pub use fmf_contract::pod::{FmfEvent, FmfQueryOptions, FmfRow};
 
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
@@ -38,6 +25,10 @@ pub enum WireError {
         #[source]
         source: serde_json::Error,
     },
+}
+
+fn u16_at(b: &[u8], off: usize) -> u16 {
+    u16::from_le_bytes(b[off..off + 2].try_into().unwrap())
 }
 
 fn u32_at(b: &[u8], off: usize) -> u32 {
@@ -111,23 +102,8 @@ impl HelloResp {
 
 // ── Query (op 7, binary options + UTF-8 text) ───────────────────────────
 
-/// Mirrors FFI `FmfQueryOptions`: 16 bytes, no padding, LE
-/// (sort 0=Name 1=Size 2=Mtime / desc 0|1 / case 0=Smart 1=Insensitive
-/// 2=Sensitive / include_hidden_system 0|1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct QueryOptionsWire {
-    pub sort: u32,
-    pub desc: u32,
-    pub case_mode: u32,
-    pub include_hidden_system: u32,
-}
-
-impl QueryOptionsWire {
-    pub const LEN: usize = 16;
-}
-
-pub fn encode_query_req(opt: QueryOptionsWire, text: &str) -> Vec<u8> {
-    let mut v = Vec::with_capacity(QueryOptionsWire::LEN + text.len());
+pub fn encode_query_req(opt: FmfQueryOptions, text: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(FmfQueryOptions::LEN + text.len());
     v.extend_from_slice(&opt.sort.to_le_bytes());
     v.extend_from_slice(&opt.desc.to_le_bytes());
     v.extend_from_slice(&opt.case_mode.to_le_bytes());
@@ -136,21 +112,21 @@ pub fn encode_query_req(opt: QueryOptionsWire, text: &str) -> Vec<u8> {
     v
 }
 
-pub fn decode_query_req(b: &[u8]) -> Result<(QueryOptionsWire, &str), WireError> {
-    if b.len() < QueryOptionsWire::LEN {
+pub fn decode_query_req(b: &[u8]) -> Result<(FmfQueryOptions, &str), WireError> {
+    if b.len() < FmfQueryOptions::LEN {
         return Err(WireError::Length {
             what: "QueryReq",
-            expected: QueryOptionsWire::LEN,
+            expected: FmfQueryOptions::LEN,
             got: b.len(),
         });
     }
-    let opt = QueryOptionsWire {
+    let opt = FmfQueryOptions {
         sort: u32_at(b, 0),
         desc: u32_at(b, 4),
         case_mode: u32_at(b, 8),
         include_hidden_system: u32_at(b, 12),
     };
-    let text = std::str::from_utf8(&b[QueryOptionsWire::LEN..])
+    let text = std::str::from_utf8(&b[FmfQueryOptions::LEN..])
         .map_err(|_| WireError::Utf8 { what: "QueryReq" })?;
     Ok((opt, text))
 }
@@ -221,64 +197,47 @@ impl ResultPageReq {
     }
 }
 
-/// One row in a ResultPage response — byte-for-byte the FFI `FmfRow`
-/// (48 bytes, no padding; offsets are relative to the string blob start).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WireRow {
-    pub entry_ref: u64,
-    pub frn: u64,
-    pub size: u64,
-    pub mtime: i64,
-    pub name_off: u32,
-    pub parent_path_off: u32,
-    pub flags: u32,
-    pub name_len: u16,
-    pub parent_path_len: u16,
+/// One row on the wire — byte-for-byte the FFI `FmfRow` (48 bytes, no
+/// padding; offsets are relative to the string blob start).
+fn write_row(v: &mut Vec<u8>, r: &FmfRow) {
+    v.extend_from_slice(&r.entry_ref.to_le_bytes());
+    v.extend_from_slice(&r.frn.to_le_bytes());
+    v.extend_from_slice(&r.size.to_le_bytes());
+    v.extend_from_slice(&r.mtime.to_le_bytes());
+    v.extend_from_slice(&r.name_off.to_le_bytes());
+    v.extend_from_slice(&r.parent_path_off.to_le_bytes());
+    v.extend_from_slice(&r.flags.to_le_bytes());
+    v.extend_from_slice(&r.name_len.to_le_bytes());
+    v.extend_from_slice(&r.parent_path_len.to_le_bytes());
 }
 
-impl WireRow {
-    pub const LEN: usize = 48;
-
-    pub fn write_to(self, v: &mut Vec<u8>) {
-        v.extend_from_slice(&self.entry_ref.to_le_bytes());
-        v.extend_from_slice(&self.frn.to_le_bytes());
-        v.extend_from_slice(&self.size.to_le_bytes());
-        v.extend_from_slice(&self.mtime.to_le_bytes());
-        v.extend_from_slice(&self.name_off.to_le_bytes());
-        v.extend_from_slice(&self.parent_path_off.to_le_bytes());
-        v.extend_from_slice(&self.flags.to_le_bytes());
-        v.extend_from_slice(&self.name_len.to_le_bytes());
-        v.extend_from_slice(&self.parent_path_len.to_le_bytes());
-    }
-
-    pub fn read_at(b: &[u8], off: usize) -> Self {
-        Self {
-            entry_ref: u64_at(b, off),
-            frn: u64_at(b, off + 8),
-            size: u64_at(b, off + 16),
-            mtime: u64_at(b, off + 24) as i64,
-            name_off: u32_at(b, off + 32),
-            parent_path_off: u32_at(b, off + 36),
-            flags: u32_at(b, off + 40),
-            name_len: u16::from_le_bytes(b[off + 44..off + 46].try_into().unwrap()),
-            parent_path_len: u16::from_le_bytes(b[off + 46..off + 48].try_into().unwrap()),
-        }
+fn read_row_at(b: &[u8], off: usize) -> FmfRow {
+    FmfRow {
+        entry_ref: u64_at(b, off),
+        frn: u64_at(b, off + 8),
+        size: u64_at(b, off + 16),
+        mtime: u64_at(b, off + 24) as i64,
+        name_off: u32_at(b, off + 32),
+        parent_path_off: u32_at(b, off + 36),
+        flags: u32_at(b, off + 40),
+        name_len: u16_at(b, off + 44),
+        parent_path_len: u16_at(b, off + 46),
     }
 }
 
 /// Decoded view of a ResultPage response payload:
 /// `{row_count:u32, blob_len:u32}` → rows (48 B × row_count) → blob.
 pub struct PageView<'a> {
-    pub rows: Vec<WireRow>,
+    pub rows: Vec<FmfRow>,
     pub blob: &'a [u8],
 }
 
-pub fn encode_page(rows: &[WireRow], blob: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(8 + rows.len() * WireRow::LEN + blob.len());
+pub fn encode_page(rows: &[FmfRow], blob: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + rows.len() * FmfRow::LEN + blob.len());
     v.extend_from_slice(&(rows.len() as u32).to_le_bytes());
     v.extend_from_slice(&(blob.len() as u32).to_le_bytes());
     for r in rows {
-        r.write_to(&mut v);
+        write_row(&mut v, r);
     }
     v.extend_from_slice(blob);
     v
@@ -294,14 +253,14 @@ pub fn decode_page(b: &[u8]) -> Result<PageView<'_>, WireError> {
     }
     let row_count = u32_at(b, 0) as usize;
     let blob_len = u32_at(b, 4) as usize;
-    let expected = 8 + row_count * WireRow::LEN + blob_len;
+    let expected = 8 + row_count * FmfRow::LEN + blob_len;
     check_len("PageResp", b, expected)?;
     let rows = (0..row_count)
-        .map(|i| WireRow::read_at(b, 8 + i * WireRow::LEN))
+        .map(|i| read_row_at(b, 8 + i * FmfRow::LEN))
         .collect();
     Ok(PageView {
         rows,
-        blob: &b[8 + row_count * WireRow::LEN..],
+        blob: &b[8 + row_count * FmfRow::LEN..],
     })
 }
 
@@ -318,48 +277,25 @@ pub fn decode_result_free(b: &[u8]) -> Result<u64, WireError> {
 
 // ── Event push (flags = FLAG_EVENT, opcode = kind 1..=6, binary) ────────
 
-/// Byte-for-byte the FFI `FmfEvent` (32 bytes). `volume` is the UTF-8
-/// drive label ("C:") zero-padded — not a GUID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EventWire {
-    pub kind: u32,
-    pub entries: u64,
-    pub volume: [u8; 16],
+/// Body is the FFI `FmfEvent` POD (32 bytes), serialized explicitly:
+/// `{kind:u32, _pad:u32(0), entries:u64, volume:[u8;16]}`.
+pub fn encode_event(ev: &FmfEvent) -> Vec<u8> {
+    let mut v = Vec::with_capacity(FmfEvent::LEN);
+    v.extend_from_slice(&ev.kind.to_le_bytes());
+    v.extend_from_slice(&0u32.to_le_bytes()); // _pad
+    v.extend_from_slice(&ev.entries.to_le_bytes());
+    v.extend_from_slice(&ev.volume);
+    v
 }
 
-impl EventWire {
-    pub const LEN: usize = 32;
-
-    pub fn volume_bytes(label: &str) -> [u8; 16] {
-        let mut out = [0u8; 16];
-        let bytes = label.as_bytes();
-        let n = bytes.len().min(15);
-        out[..n].copy_from_slice(&bytes[..n]);
-        out
-    }
-
-    pub fn volume_str(&self) -> &str {
-        let len = self.volume.iter().position(|&b| b == 0).unwrap_or(16);
-        std::str::from_utf8(&self.volume[..len]).unwrap_or("")
-    }
-
-    pub fn encode(self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(Self::LEN);
-        v.extend_from_slice(&self.kind.to_le_bytes());
-        v.extend_from_slice(&0u32.to_le_bytes()); // _pad
-        v.extend_from_slice(&self.entries.to_le_bytes());
-        v.extend_from_slice(&self.volume);
-        v
-    }
-
-    pub fn decode(b: &[u8]) -> Result<Self, WireError> {
-        check_len("EventWire", b, Self::LEN)?;
-        Ok(Self {
-            kind: u32_at(b, 0),
-            entries: u64_at(b, 8),
-            volume: b[16..32].try_into().unwrap(),
-        })
-    }
+pub fn decode_event(b: &[u8]) -> Result<FmfEvent, WireError> {
+    check_len("Event", b, FmfEvent::LEN)?;
+    Ok(FmfEvent {
+        kind: u32_at(b, 0),
+        _pad: 0,
+        entries: u64_at(b, 8),
+        volume: b[16..32].try_into().unwrap(),
+    })
 }
 
 // ── JSON messages (op 4/5/6/10/12) ──────────────────────────────────────
@@ -420,7 +356,7 @@ mod tests {
 
     #[test]
     fn query_req_roundtrip_and_golden_bytes() {
-        let opt = QueryOptionsWire {
+        let opt = FmfQueryOptions {
             sort: 1,
             desc: 1,
             case_mode: 2,
@@ -452,7 +388,7 @@ mod tests {
 
     #[test]
     fn page_roundtrip_pins_the_48_byte_row() {
-        let row = WireRow {
+        let row = FmfRow {
             entry_ref: 1,
             frn: (1 << 48) | 100,
             size: 1234,
@@ -465,7 +401,7 @@ mod tests {
         };
         let blob = b"alpha.txtC:\\";
         let bytes = encode_page(&[row], blob);
-        assert_eq!(bytes.len(), 8 + WireRow::LEN + blob.len());
+        assert_eq!(bytes.len(), 8 + FmfRow::LEN + blob.len());
         let v = decode_page(&bytes).unwrap();
         assert_eq!(v.rows, vec![row]);
         assert_eq!(v.blob, blob);
@@ -478,14 +414,10 @@ mod tests {
 
     #[test]
     fn event_roundtrip_and_label_semantics() {
-        let ev = EventWire {
-            kind: 3,
-            entries: 7,
-            volume: EventWire::volume_bytes("C:"),
-        };
-        let b = ev.encode();
-        assert_eq!(b.len(), EventWire::LEN);
-        let d = EventWire::decode(&b).unwrap();
+        let ev = FmfEvent::new(3, 7, "C:");
+        let b = encode_event(&ev);
+        assert_eq!(b.len(), FmfEvent::LEN);
+        let d = decode_event(&b).unwrap();
         assert_eq!(d, ev);
         assert_eq!(d.volume_str(), "C:");
     }

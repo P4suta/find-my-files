@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/fmf-contract",
   "crates/fmf-core",
   "crates/fmf-ffi",
   "crates/fmf-cli",
@@ -14,6 +15,7 @@ license = "Apache-2.0"
 repository = "https://github.com/find-my-files/find-my-files"
 
 [workspace.dependencies]
+fmf-contract = { path = "crates/fmf-contract" }
 fmf-core = { path = "crates/fmf-core" }
 fmf-proto = { path = "crates/fmf-proto" }
 ntfs-reader = "0.4"

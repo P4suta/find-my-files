@@ -14,11 +14,11 @@
 
 use std::path::PathBuf;
 
-use fmf_proto::frame::{FLAG_EVENT, FLAG_RESPONSE, FrameHeader, HEADER_LEN};
+use fmf_proto::frame::{FLAG_EVENT, FLAG_RESPONSE, FrameHeader, HEADER_LEN, decode_header};
 use fmf_proto::messages::{
-    EventWire, HelloReq, HelloResp, IndexStartReq, QueryOptionsWire, QueryRespHead, ResultPageReq,
-    ServiceInfoResp, VolumeStatusWire, WireRow, encode_json, encode_page, encode_query_req,
-    encode_result_free, opcode,
+    FmfEvent, FmfQueryOptions, FmfRow, HelloReq, HelloResp, IndexStartReq, QueryRespHead,
+    ResultPageReq, ServiceInfoResp, VolumeStatusWire, decode_event, encode_event, encode_json,
+    encode_page, encode_query_req, encode_result_free, opcode,
 };
 
 fn golden_dir() -> PathBuf {
@@ -180,7 +180,7 @@ fn corpus() -> Vec<Case> {
             0,
             7,
             0,
-            &encode_query_req(QueryOptionsWire::default(), "win"),
+            &encode_query_req(FmfQueryOptions::default(), "win"),
         ),
     );
     case(
@@ -192,7 +192,7 @@ fn corpus() -> Vec<Case> {
             8,
             0,
             &encode_query_req(
-                QueryOptionsWire {
+                FmfQueryOptions {
                     sort: 2,
                     desc: 1,
                     case_mode: 2,
@@ -256,14 +256,14 @@ fn corpus() -> Vec<Case> {
     // (U+D800 = ED A0 80): file names are WTF-8, not UTF-8.
     {
         let mut blob: Vec<u8> = Vec::new();
-        let mut rows: Vec<WireRow> = Vec::new();
+        let mut rows: Vec<FmfRow> = Vec::new();
         let mut push_row =
             |name: &[u8], parent: &[u8], frn: u64, size: u64, mtime: i64, flags: u32| {
                 let name_off = blob.len() as u32;
                 blob.extend_from_slice(name);
                 let parent_off = blob.len() as u32;
                 blob.extend_from_slice(parent);
-                rows.push(WireRow {
+                rows.push(FmfRow {
                     entry_ref: rows.len() as u64 + 1,
                     frn,
                     size,
@@ -363,12 +363,7 @@ fn corpus() -> Vec<Case> {
                 FLAG_EVENT,
                 0,
                 0,
-                &EventWire {
-                    kind,
-                    entries,
-                    volume: EventWire::volume_bytes(volume),
-                }
-                .encode(),
+                &encode_event(&FmfEvent::new(kind, entries, volume)),
             ),
         );
     }
@@ -444,14 +439,14 @@ fn corpus_pins_the_wire_bytes() {
 fn corpus_frames_decode_back() {
     for c in corpus() {
         let header_bytes: [u8; HEADER_LEN] = c.bytes[..HEADER_LEN].try_into().unwrap();
-        let header = FrameHeader::from_bytes(&header_bytes).unwrap();
+        let header = decode_header(&header_bytes).unwrap();
         let payload = &c.bytes[HEADER_LEN..];
         assert_eq!(header.len as usize, payload.len(), "{}", c.file);
 
         if header.flags & FLAG_EVENT != 0 {
-            let ev = EventWire::decode(payload).unwrap();
+            let ev = decode_event(payload).unwrap();
             assert_eq!(ev.kind as u16, header.opcode, "{}", c.file);
-            assert_eq!(ev.encode(), payload, "{}", c.file);
+            assert_eq!(encode_event(&ev), payload, "{}", c.file);
             continue;
         }
         if header.status != 0 {

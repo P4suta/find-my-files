@@ -8,13 +8,12 @@ use std::sync::Arc;
 
 use fmf_core::engine::{Engine, EngineEvent};
 use fmf_core::metrics::Counters;
-use fmf_proto::messages::EventWire;
+use fmf_proto::limits::EVENT_QUEUE_CAP;
+use fmf_proto::messages::FmfEvent;
 use parking_lot::{Condvar, Mutex};
 
-const QUEUE_CAP: usize = 256;
-
-/// FFI event kinds (fmf-ffi/src/events.rs values — the wire uses the same).
-fn wire_of(ev: &EngineEvent) -> EventWire {
+/// Contract event kinds (fmf-contract events.rs — FFI and wire share them).
+fn wire_of(ev: &EngineEvent) -> FmfEvent {
     let (kind, volume, entries) = match ev {
         EngineEvent::Progress { volume, entries } => (1, volume, *entries),
         EngineEvent::VolumeReady { volume, entries } => (2, volume, *entries),
@@ -23,15 +22,11 @@ fn wire_of(ev: &EngineEvent) -> EventWire {
         EngineEvent::VolumeFailed { volume, .. } => (5, volume, 0),
         EngineEvent::EngineError { severity, volume } => (6, volume, *severity),
     };
-    EventWire {
-        kind,
-        entries,
-        volume: EventWire::volume_bytes(volume),
-    }
+    FmfEvent::new(kind, entries, volume)
 }
 
 struct QueueState {
-    items: VecDeque<EventWire>,
+    items: VecDeque<FmfEvent>,
     closed: bool,
 }
 
@@ -52,12 +47,12 @@ impl EventQueue {
         })
     }
 
-    fn push(&self, ev: EventWire) -> bool {
+    fn push(&self, ev: FmfEvent) -> bool {
         let mut s = self.state.lock();
         if s.closed {
             return false;
         }
-        let dropped = if s.items.len() >= QUEUE_CAP {
+        let dropped = if s.items.len() >= EVENT_QUEUE_CAP {
             s.items.pop_front();
             true
         } else {
@@ -69,7 +64,7 @@ impl EventQueue {
     }
 
     /// Blocks until an event arrives or the queue is closed (None).
-    pub fn pop(&self) -> Option<EventWire> {
+    pub fn pop(&self) -> Option<FmfEvent> {
         let mut s = self.state.lock();
         loop {
             if let Some(ev) = s.items.pop_front() {

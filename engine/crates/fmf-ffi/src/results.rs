@@ -11,14 +11,8 @@ use crate::{FMF_E_INVALID_ARG, FMF_E_IO, FMF_E_QUERY_SYNTAX, FMF_E_STALE, FMF_OK
 
 // ── Query & paging ──────────────────────────────────────────────────────
 
-#[repr(C)]
-pub struct FmfQueryOptions {
-    pub sort: u32, // 0=Name 1=Size 2=Mtime
-    pub desc: u32,
-    pub case_mode: u32, // 0=Smart 1=Insensitive 2=Sensitive
-    /// Nonzero shows hidden/system entries (default-excluded otherwise).
-    pub include_hidden_system: u32,
-}
+// The query/page PODs radiate from the contract (ADR-0018).
+pub use fmf_contract::pod::{FmfPage, FmfQueryOptions, FmfRow};
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_query(
@@ -80,30 +74,6 @@ pub unsafe extern "C" fn fmf_query(
             }
         }
     })
-}
-
-/// 48-byte row, no internal padding. Mirrored by C# LayoutKind.Sequential.
-#[repr(C)]
-pub struct FmfRow {
-    pub entry_ref: u64,
-    pub frn: u64,
-    pub size: u64,
-    pub mtime: i64,
-    pub name_off: u32,
-    pub parent_path_off: u32,
-    pub flags: u32,
-    pub name_len: u16,
-    pub parent_path_len: u16,
-}
-
-#[repr(C)]
-pub struct FmfPage {
-    pub row_count: u32,
-    pub _pad: u32,
-    pub rows: *const FmfRow,
-    pub blob: *const u8,
-    pub blob_len: u32,
-    pub _pad2: u32,
 }
 
 #[repr(C)]

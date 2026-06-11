@@ -169,23 +169,39 @@ fn abi_version_is_pinned() {
 }
 
 #[test]
-fn pipe_protocol_constants_match_the_ffi_table() {
-    // fmf-proto duplicates the status codes (it cannot depend on a cdylib);
-    // the shared table lives in ARCHITECTURE.md and both copies pin here.
-    assert_eq!(fmf_proto::codes::OK, FMF_OK);
-    assert_eq!(fmf_proto::codes::INVALID_ARG, FMF_E_INVALID_ARG);
-    assert_eq!(fmf_proto::codes::STALE, FMF_E_STALE);
-    assert_eq!(fmf_proto::codes::NOT_ADMIN, FMF_E_NOT_ADMIN);
-    assert_eq!(fmf_proto::codes::VOLUME, FMF_E_VOLUME);
-    assert_eq!(fmf_proto::codes::QUERY_SYNTAX, FMF_E_QUERY_SYNTAX);
-    assert_eq!(fmf_proto::codes::IO, FMF_E_IO);
-    assert_eq!(fmf_proto::codes::LOCKED, FMF_E_LOCKED);
-    assert_eq!(fmf_proto::codes::PANIC, FMF_E_PANIC);
-    // Hello carries the FFI abi_version; the wire rows/events mirror the
-    // FFI PODs whose layouts are pinned elsewhere in this file.
-    assert_eq!(fmf_proto::PROTOCOL_VERSION, 1);
-    assert_eq!(fmf_proto::messages::WireRow::LEN, size_of::<FmfRow>());
-    assert_eq!(fmf_proto::messages::EventWire::LEN, size_of::<FmfEvent>());
+fn contract_values_are_pinned_literally() {
+    // The single source (fmf-contract) removed the duplicate definitions;
+    // these literal pins are the independent tripwire that catches an
+    // accidental edit of the canonical file itself (ADR-0018). Append-only
+    // table: renumbering is a breaking protocol change.
+    assert_eq!(fmf_contract::versions::PROTOCOL_VERSION, 1);
+    assert_eq!(fmf_contract::versions::ABI_VERSION, 1);
+    assert_eq!(fmf_contract::versions::PIPE_NAME, r"\\.\pipe\fmf-engine-v1");
+    assert_eq!(fmf_contract::opcodes::HELLO, 1);
+    assert_eq!(fmf_contract::opcodes::SUBSCRIBE, 2);
+    assert_eq!(fmf_contract::opcodes::UNSUBSCRIBE, 3);
+    assert_eq!(fmf_contract::opcodes::LIST_VOLUMES, 4);
+    assert_eq!(fmf_contract::opcodes::INDEX_START, 5);
+    assert_eq!(fmf_contract::opcodes::INDEX_STATUS, 6);
+    assert_eq!(fmf_contract::opcodes::QUERY, 7);
+    assert_eq!(fmf_contract::opcodes::RESULT_PAGE, 8);
+    assert_eq!(fmf_contract::opcodes::RESULT_FREE, 9);
+    assert_eq!(fmf_contract::opcodes::STATS, 10);
+    assert_eq!(fmf_contract::opcodes::FLUSH_RESERVED, 11);
+    assert_eq!(fmf_contract::opcodes::SERVICE_INFO, 12);
+    assert_eq!(fmf_contract::limits::MAX_PAYLOAD_LEN, 16 * 1024 * 1024);
+    assert_eq!(fmf_contract::limits::MAX_RESULTS_PER_CONN, 64);
+    assert_eq!(fmf_contract::limits::EVENT_QUEUE_CAP, 256);
+    assert_eq!(fmf_contract::options::SortKey::Name as u32, 0);
+    assert_eq!(fmf_contract::options::SortKey::Size as u32, 1);
+    assert_eq!(fmf_contract::options::SortKey::Mtime as u32, 2);
+    assert_eq!(fmf_contract::options::CaseMode::Smart as u32, 0);
+    assert_eq!(fmf_contract::options::CaseMode::Insensitive as u32, 1);
+    assert_eq!(fmf_contract::options::CaseMode::Sensitive as u32, 2);
+    assert_eq!(fmf_contract::options::VolumeState::Scanning as u32, 0);
+    assert_eq!(fmf_contract::options::VolumeState::Ready as u32, 1);
+    assert_eq!(fmf_contract::options::VolumeState::Rescanning as u32, 2);
+    assert_eq!(fmf_contract::options::VolumeState::Failed as u32, 3);
 }
 
 #[test]
