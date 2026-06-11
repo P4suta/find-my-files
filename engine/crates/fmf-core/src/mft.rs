@@ -13,9 +13,9 @@ use thiserror::Error;
 
 use crate::index::{RawEntry, VolumeIndex, VolumeIndexBuilder};
 
-// The production scanner lives in crate::scan; re-exported here so callers
-// keep one import path.
-pub use crate::scan::scan_volume;
+// The production scanner (and the ScanStats both scanners fill) lives in
+// crate::scan; re-exported here so callers keep one import path.
+pub use crate::scan::{ScanStats, scan_volume};
 
 #[derive(Debug, Error)]
 pub enum MftError {
@@ -140,45 +140,6 @@ pub fn spike_scan(drive: &str) -> Result<SpikeStats, MftError> {
     stats.peak_working_set_bytes = peak_working_set();
 
     Ok(stats)
-}
-
-/// Statistics from a full index build.
-#[derive(Debug, Default)]
-pub struct ScanStats {
-    pub volume: String,
-    pub elapsed_total_ms: u64,
-    /// Accumulated device-read time. Overlaps with parsing on the pipelined
-    /// path, so read + parse + build + sort may exceed total.
-    pub elapsed_mft_load_ms: u64,
-    /// Accumulated record-parse time (fixup + attribute walk + WTF-8).
-    pub elapsed_parse_ms: u64,
-    /// Deferred $ATTRIBUTE_LIST name resolution.
-    pub elapsed_deferred_ms: u64,
-    /// Records whose name needed the deferred pass at all.
-    pub deferred_names: u64,
-    /// Builder finish: parent resolution + EXCLUDED propagation.
-    pub elapsed_build_ms: u64,
-    /// Builder finish: the three permutation sorts.
-    pub elapsed_sort_ms: u64,
-    /// 1 when the read-ahead I/O thread could not start and the scan
-    /// degraded to inline sequential reads.
-    pub pipeline_fallbacks: u64,
-    pub files: u64,
-    pub dirs: u64,
-    pub skipped_no_name: u64,
-    pub peak_working_set_bytes: u64,
-    /// Raw $MFT size — the bytes the initial scan reads.
-    pub mft_bytes: u64,
-    /// Extension records (base_reference != 0) — parts of other files,
-    /// correctly not indexed standalone.
-    pub extension_records: u64,
-    /// Records failing signature/fixup validation.
-    pub corrupt_records: u64,
-    /// Deferred $ATTRIBUTE_LIST records whose name never resolved.
-    pub deferred_unresolved: u64,
-    /// Name-bearing extension records past the in-RAM cache cap (those
-    /// targets fall back to disk reads in the deferred pass).
-    pub ext_name_cache_skipped: u64,
 }
 
 /// Full initial scan: read the volume's $MFT and build the in-memory index.

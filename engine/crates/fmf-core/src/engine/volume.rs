@@ -233,6 +233,32 @@ impl Engine {
                             &self.metrics.counters.scan_pipeline_fallbacks,
                             stats.pipeline_fallbacks,
                         );
+                        // stats→counters写像の単一点: スキャン内部は劣化を
+                        // ScanStats で返すだけで warn しない。件数加算が要る
+                        // ので degrade!(bump=+1専用)ではなく、加算と warn
+                        // を明示2行で隣接させて不可分に行う。
+                        if stats.ext_name_cache_skipped > 0 {
+                            Counters::add(
+                                &self.metrics.counters.deferred_name_cache_overflow,
+                                stats.ext_name_cache_skipped,
+                            );
+                            tracing::warn!(
+                                volume = %label,
+                                skipped = stats.ext_name_cache_skipped,
+                                "extension-record name cache full — remainder resolved via disk reads"
+                            );
+                        }
+                        if stats.deferred_name_read_failures > 0 {
+                            Counters::add(
+                                &self.metrics.counters.deferred_name_read_failures,
+                                stats.deferred_name_read_failures,
+                            );
+                            tracing::warn!(
+                                volume = %label,
+                                failures = stats.deferred_name_read_failures,
+                                "deferred-name disk reads failed — those names stay unresolved until rescan"
+                            );
+                        }
                         self.metrics.record_scan(ScanTrace {
                             volume: label.clone(),
                             source: "scan".to_string(),
