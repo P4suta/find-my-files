@@ -9,15 +9,19 @@ namespace FindMyFiles.Engine;
 
 /// <summary>
 /// Engine client over the fmf-service named pipe (docs/ARCHITECTURE.md
-/// 「Pipe プロトコル」). A resident supervisor task owns the connection:
+/// 「Pipe プロトコル」). This class is the connection *supervisor* plus the
+/// request multiplexing table; the established connection itself (stream,
+/// read loop, serialized writer, epoch) is one <see cref="PipeConnection"/>
+/// object, replaced wholesale on every (re)connect. The supervisor loop:
 /// connect → server-is-SYSTEM check (default pipe name only; SECURITY.md
 /// 脅威4) → Hello (version check; a mismatch is fatal) → Subscribe →
 /// IndexStatus (synthesized VolumeUpdated + IndexChanged) → Connected. On
 /// disconnect every pending request fails fast with
-/// <see cref="EngineUnavailableException"/>, live results turn stale via an
-/// epoch bump, and reconnection retries forever with 250ms→5s backoff.
-/// Events fire on the read-loop thread — consumers marshal, same contract as
-/// the FFI client. No DispatcherQueue dependency.
+/// <see cref="EngineUnavailableException"/>, live results turn stale because
+/// their connection's epoch can never be current again, and reconnection
+/// retries forever with 250ms→5s backoff. Events fire on the read-loop
+/// thread — consumers marshal (see <see cref="EngineEventMarshaler"/>), same
+/// contract as the FFI client. No DispatcherQueue dependency.
 /// </summary>
 public sealed class PipeEngineClient : IEngineClient
 {
@@ -26,17 +30,16 @@ public sealed class PipeEngineClient : IEngineClient
 
     private readonly string _pipeName;
     private readonly CancellationTokenSource _cts = new();
-    private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ConcurrentDictionary<
         uint, TaskCompletionSource<(int Status, byte[] Payload)>> _pending = new();
     private readonly object _statsLock = new();
 
-    private NamedPipeClientStream? _stream;
+    private PipeConnection? _connection;
     private Task? _supervisor;
     private int _requestId;
-    private int _epoch;
+    private int _epochSeq;
     private int _disposed;
-    private EngineConnectionState _connection = EngineConnectionState.Connecting;
+    private EngineConnectionState _connectionState = EngineConnectionState.Connecting;
     private long _reconnects;
     private double _pageRttEwmaUs;
     private uint _serverPid;
@@ -50,7 +53,7 @@ public sealed class PipeEngineClient : IEngineClient
     public event Action<int>? EngineErrorOccurred;
     public event Action<EngineConnectionState>? ConnectionChanged;
 
-    public EngineConnectionState Connection => _connection;
+    public EngineConnectionState Connection => _connectionState;
 
     public PipeEngineClient(string pipeName = PipeProtocol.DefaultPipeName)
         : this(pipeName, autoStart: true)
@@ -152,8 +155,10 @@ public sealed class PipeEngineClient : IEngineClient
                         $@"server on \\.\pipe\{_pipeName} is not running as SYSTEM "
                         + "— refusing to connect (possible pipe squatting; SECURITY.md 脅威4)");
                 }
-                Volatile.Write(ref _stream, stream);
-                var readLoop = Task.Run(() => ReadLoopAsync(stream, ct), CancellationToken.None);
+                var conn = new PipeConnection(
+                    stream, Interlocked.Increment(ref _epochSeq), DispatchEvent, OnResponse, ct);
+                stream = null; // owned by conn from here on
+                Volatile.Write(ref _connection, conn);
                 await HandshakeAsync(ct).ConfigureAwait(false);
                 if (everConnected)
                 {
@@ -162,7 +167,7 @@ public sealed class PipeEngineClient : IEngineClient
                 everConnected = true;
                 backoff = InitialBackoff;
                 SetConnection(EngineConnectionState.Connected);
-                await readLoop.ConfigureAwait(false); // returns when the pipe dies
+                await conn.ReadLoop.ConfigureAwait(false); // returns when the pipe dies
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -175,14 +180,16 @@ public sealed class PipeEngineClient : IEngineClient
                 // (pipe spec / SECURITY.md 脅威4). Requests keep failing with
                 // EngineUnavailableException.
                 FileLog.Error("pipe", $"fatal pipe failure — not reconnecting: {ex.Message}");
-                TearDownConnection(stream);
+                SafeDispose(stream);
+                TearDownConnection();
                 return;
             }
             catch (Exception ex)
             {
                 FileLog.Warn("pipe", $"connection attempt failed: {ex.Message}");
             }
-            TearDownConnection(stream);
+            SafeDispose(stream);
+            TearDownConnection();
             SetConnection(everConnected
                 ? EngineConnectionState.Reconnecting
                 : EngineConnectionState.Connecting);
@@ -196,7 +203,7 @@ public sealed class PipeEngineClient : IEngineClient
             }
             backoff = TimeSpan.FromTicks(Math.Min(backoff.Ticks * 2, MaxBackoff.Ticks));
         }
-        TearDownConnection(null);
+        TearDownConnection();
     }
 
     /// <summary>Fixed (re)connect sequence — the pipe spec is canonical:
@@ -251,52 +258,17 @@ public sealed class PipeEngineClient : IEngineClient
         RaiseSafe(() => IndexChanged?.Invoke("*"), "IndexChanged");
     }
 
-    private async Task ReadLoopAsync(NamedPipeClientStream stream, CancellationToken ct)
+    /// <summary>Response frames from the connection's read loop land in the
+    /// multiplexing table (out-of-order completion is wire-legal).</summary>
+    private void OnResponse(uint requestId, int status, byte[] payload)
     {
-        var header = new byte[PipeProtocol.HeaderLen];
-        try
+        if (_pending.TryRemove(requestId, out var tcs))
         {
-            while (!ct.IsCancellationRequested)
-            {
-                await stream.ReadExactlyAsync(header, ct).ConfigureAwait(false);
-                var h = PipeProtocol.ReadHeader(header); // oversize throws → drop the link
-                var payload = new byte[h.Len];
-                if (h.Len > 0)
-                {
-                    await stream.ReadExactlyAsync(payload, ct).ConfigureAwait(false);
-                }
-                if (h.IsEvent)
-                {
-                    DispatchEvent(payload);
-                }
-                else if (h.IsResponse)
-                {
-                    if (_pending.TryRemove(h.RequestId, out var tcs))
-                    {
-                        tcs.TrySetResult((h.StatusCode, payload));
-                    }
-                }
-                else
-                {
-                    throw new InvalidDataException(
-                        $"frame with neither response nor event flag (opcode {h.Opcode})");
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (EndOfStreamException)
-        {
-            FileLog.Warn("pipe", "server closed the connection");
-        }
-        catch (Exception ex)
-        {
-            FileLog.Warn("pipe", $"read loop ended: {ex.Message}");
+            tcs.TrySetResult((status, payload));
         }
     }
 
-    /// <summary>Event pushes fire handlers on this (read-loop) thread; the
+    /// <summary>Event pushes fire handlers on the read-loop thread; the
     /// same contract as FFI engine threads — consumers marshal.</summary>
     private void DispatchEvent(byte[] payload)
     {
@@ -349,19 +321,12 @@ public sealed class PipeEngineClient : IEngineClient
         }
     }
 
-    private void TearDownConnection(NamedPipeClientStream? stream)
+    /// <summary>Retires the current connection object (its epoch can never
+    /// be current again — results born on it are stale by construction) and
+    /// fails every pending request fast.</summary>
+    private void TearDownConnection()
     {
-        var active = Interlocked.Exchange(ref _stream, null);
-        if (active is not null)
-        {
-            // Results born on this connection can never be paged again.
-            Interlocked.Increment(ref _epoch);
-        }
-        SafeDispose(active);
-        if (!ReferenceEquals(active, stream))
-        {
-            SafeDispose(stream);
-        }
+        Interlocked.Exchange(ref _connection, null)?.Dispose();
         foreach (var id in _pending.Keys)
         {
             if (_pending.TryRemove(id, out var tcs))
@@ -386,11 +351,11 @@ public sealed class PipeEngineClient : IEngineClient
 
     private void SetConnection(EngineConnectionState state)
     {
-        if (_connection == state)
+        if (_connectionState == state)
         {
             return;
         }
-        _connection = state;
+        _connectionState = state;
         RaiseSafe(() => ConnectionChanged?.Invoke(state), "ConnectionChanged");
     }
 
@@ -399,7 +364,11 @@ public sealed class PipeEngineClient : IEngineClient
     private async Task<(int Status, byte[] Payload)> RequestAsync(
         ushort opcode, byte[] payload, CancellationToken ct = default)
     {
-        var stream = Volatile.Read(ref _stream)
+        // Grab the connection object once; from here on it answers its own
+        // liveness (a write racing teardown surfaces as
+        // EngineUnavailableException inside PipeConnection) — there is no
+        // null-check-then-write window against a mutable stream field.
+        var conn = Volatile.Read(ref _connection)
             ?? throw new EngineUnavailableException("engine service is not connected");
         var id = unchecked((uint)Interlocked.Increment(ref _requestId));
         var tcs = new TaskCompletionSource<(int Status, byte[] Payload)>(
@@ -413,15 +382,7 @@ public sealed class PipeEngineClient : IEngineClient
         try
         {
             var frame = PipeProtocol.EncodeFrame(opcode, 0, id, 0, payload);
-            await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false);
-            try
-            {
-                await stream.WriteAsync(frame, linked.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                _writeLock.Release();
-            }
+            await conn.WriteFrameAsync(frame, linked.Token).ConfigureAwait(false);
             return await tcs.Task.WaitAsync(RequestTimeout, linked.Token).ConfigureAwait(false);
         }
         catch (TimeoutException)
@@ -432,10 +393,6 @@ public sealed class PipeEngineClient : IEngineClient
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             throw new EngineUnavailableException("engine client disposed");
-        }
-        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
-        {
-            throw new EngineUnavailableException($"engine service connection lost: {ex.Message}");
         }
         finally
         {
@@ -528,7 +485,7 @@ public sealed class PipeEngineClient : IEngineClient
             {
                 stats.Transport = new TransportStatsData
                 {
-                    State = _connection.ToString(),
+                    State = _connectionState.ToString(),
                     Reconnects = Interlocked.Read(ref _reconnects),
                     PageRttEwmaUs = _pageRttEwmaUs,
                     ServerPid = _serverPid,
@@ -541,7 +498,11 @@ public sealed class PipeEngineClient : IEngineClient
 
     // ── Result paging (used by PipeSearchResult) ────────────────────────
 
-    internal int CurrentEpoch => Volatile.Read(ref _epoch);
+    /// <summary>Epoch of the live connection; 0 (never a connection's value)
+    /// while disconnected. A result is current iff its birth epoch equals
+    /// this — connection generations are never reused, so a result born on a
+    /// dead connection can never read as current again.</summary>
+    internal int CurrentEpoch => Volatile.Read(ref _connection)?.Epoch ?? 0;
 
     internal async Task<IReadOnlyList<RowData>> FetchPageAsync(
         ulong resultId, long offset, int count, CancellationToken ct)
@@ -561,7 +522,7 @@ public sealed class PipeEngineClient : IEngineClient
 
     internal void ReleaseResult(ulong resultId, int epoch)
     {
-        if (epoch != CurrentEpoch || Volatile.Read(ref _stream) is null)
+        if (Volatile.Read(ref _connection) is not { } conn || conn.Epoch != epoch)
         {
             return; // the server freed it together with the dead connection
         }
@@ -589,11 +550,11 @@ public sealed class PipeEngineClient : IEngineClient
         {
             return;
         }
-        // Stop the supervisor and break the stream; never block shutdown on
-        // the background task. The CTS stays undisposed on purpose — the
+        // Stop the supervisor and break the connection; never block shutdown
+        // on the background task. The CTS stays undisposed on purpose — the
         // supervisor may still observe the token after we return.
         _cts.Cancel();
-        TearDownConnection(null);
+        TearDownConnection();
     }
 
     /// <summary>Conditions a reconnect can never cure — the supervisor stops
@@ -603,61 +564,4 @@ public sealed class PipeEngineClient : IEngineClient
     private sealed class ProtocolMismatchException(string message) : FatalPipeException(message);
 
     private sealed class ServerIdentityException(string message) : FatalPipeException(message);
-}
-
-/// <summary>
-/// Pipe-backed <see cref="ISearchResult"/>. Pages stale out when the
-/// connection epoch moves (disconnects); Dispose defers the wire-level
-/// ResultFree until every in-flight page fetch has drained.
-/// </summary>
-internal sealed class PipeSearchResult(
-    PipeEngineClient client, ulong resultId, long count, int epoch) : ISearchResult
-{
-    private int _inFlight;
-    private int _released;
-    private volatile bool _disposed;
-
-    public long Count { get; } = count;
-
-    public async Task<IReadOnlyList<RowData>> GetRangeAsync(
-        long offset, int count, CancellationToken ct = default)
-    {
-        if (_disposed || epoch != client.CurrentEpoch)
-        {
-            throw new StaleResultException();
-        }
-        Interlocked.Increment(ref _inFlight);
-        try
-        {
-            if (epoch != client.CurrentEpoch)
-            {
-                throw new StaleResultException(); // re-check inside the guard
-            }
-            return await client.FetchPageAsync(resultId, offset, count, ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            if (Interlocked.Decrement(ref _inFlight) == 0 && _disposed)
-            {
-                MaybeRelease();
-            }
-        }
-    }
-
-    public void Dispose()
-    {
-        _disposed = true;
-        if (Volatile.Read(ref _inFlight) == 0)
-        {
-            MaybeRelease();
-        }
-    }
-
-    private void MaybeRelease()
-    {
-        if (Interlocked.Exchange(ref _released, 1) == 0)
-        {
-            client.ReleaseResult(resultId, epoch);
-        }
-    }
 }

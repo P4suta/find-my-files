@@ -16,6 +16,10 @@ public sealed partial class MainViewModel : ObservableObject
 {
     private readonly IEngineClient _engine;
 
+    /// <summary>The one place engine events cross onto the UI thread —
+    /// every handler below already runs dispatched.</summary>
+    private readonly EngineEventMarshaler _engineEvents;
+
     [ObservableProperty]
     public partial string SearchText { get; set; } = string.Empty;
 
@@ -44,21 +48,22 @@ public sealed partial class MainViewModel : ObservableObject
     public MainViewModel(IEngineClient engine, IDispatcher dispatcher)
     {
         _engine = engine;
+        _engineEvents = new EngineEventMarshaler(engine, dispatcher);
         Results = new ResultsPresenter(dispatcher);
-        Search = new SearchOrchestrator(engine, dispatcher, Results, () => new SearchRequest(
-            SearchText,
-            new SearchOptions(Sort, SortDescending, FmfCase.Smart, IncludeHiddenSystem)));
+        Search = new SearchOrchestrator(engine, _engineEvents, dispatcher, Results,
+            () => new SearchRequest(
+                SearchText,
+                new SearchOptions(Sort, SortDescending, FmfCase.Smart, IncludeHiddenSystem)));
         Notifications = new NotificationCenter(dispatcher);
         Perf = new PerfPanelViewModel(engine);
 
         Search.TraceCaptured += Perf.RecordTrace;
         Search.SearchFailed += OnSearchFailed;
 
-        _engine.VolumeUpdated += s => dispatcher.TryEnqueue(() => OnVolumeUpdated(s));
-        _engine.EngineErrorOccurred += severity =>
-            dispatcher.TryEnqueue(() =>
-                HandleEngineErrorAsync(severity).Forget("engine.error"));
-        _engine.ConnectionChanged += s => dispatcher.TryEnqueue(() => OnConnectionChanged(s));
+        _engineEvents.VolumeUpdated += OnVolumeUpdated;
+        _engineEvents.EngineErrorOccurred += severity =>
+            HandleEngineErrorAsync(severity).Forget("engine.error");
+        _engineEvents.ConnectionChanged += OnConnectionChanged;
         EngineModeText = StatusFormatter.EngineMode(_engine);
 
         Notifications.AttachToNotifier();

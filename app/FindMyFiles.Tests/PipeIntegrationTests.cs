@@ -80,6 +80,55 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>!!drop fault injection (fmf-service --debug-faults): the
+    /// service hard-drops the connection instead of answering, exercising
+    /// the disconnect → fail-fast → supervisor-reconnect path against the
+    /// real server, not the in-test fake.</summary>
+    [Fact]
+    public async Task RealService_DropFault_FailsFast_AndTheSupervisorRecovers()
+    {
+        if (Environment.GetEnvironmentVariable(GateVariable) != "1")
+        {
+            output.WriteLine($"{GateVariable} != 1 — skipped (run via `just test-pipe`)");
+            return;
+        }
+        var exe = FindServiceExe();
+        var pipeName = @"\\.\pipe\fmf-itest-" + Guid.NewGuid().ToString("N");
+        var dataDir = Path.Combine(Path.GetTempPath(), "fmf-itest-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dataDir);
+
+        Process? service = null;
+        try
+        {
+            service = StartService(exe, pipeName, dataDir, debugFaults: true);
+            using var client = new PipeEngineClient(pipeName);
+            await WaitUntilAsync(
+                () => client.Connection == EngineConnectionState.Connected,
+                "connect to fmf-service", 30_000);
+
+            // The dropped request fails fast with the transport exception —
+            // not a query error, and not the 10s request timeout.
+            await Assert.ThrowsAsync<EngineUnavailableException>(
+                () => client.SearchAsync("!!drop", SearchOptions.Default));
+
+            // The supervisor reconnects on its own and the next query works.
+            await WaitUntilAsync(
+                () => client.Connection == EngineConnectionState.Reconnecting,
+                "client noticed the drop", 15_000);
+            await WaitUntilAsync(
+                () => client.Connection == EngineConnectionState.Connected,
+                "reconnect after !!drop", 30_000);
+            var outcome = await client.SearchAsync("anything", SearchOptions.Default);
+            Assert.Equal(0, outcome.Result.Count);
+            outcome.Result.Dispose();
+        }
+        finally
+        {
+            KillQuietly(service);
+            TryDeleteDirectory(dataDir);
+        }
+    }
+
     /// <summary>Resolve engine/target/release/fmf-service.exe by walking up
     /// from the test assembly (repo-relative; built by `just service-build`).</summary>
     private static string FindServiceExe()
@@ -98,7 +147,8 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
             + $"{AppContext.BaseDirectory} — run `just service-build` first");
     }
 
-    private Process StartService(string exe, string pipeName, string dataDir)
+    private Process StartService(
+        string exe, string pipeName, string dataDir, bool debugFaults = false)
     {
         var psi = new ProcessStartInfo
         {
@@ -114,6 +164,10 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
         psi.ArgumentList.Add("--data-dir");
         psi.ArgumentList.Add(dataDir);
         psi.ArgumentList.Add("--no-index");
+        if (debugFaults)
+        {
+            psi.ArgumentList.Add("--debug-faults");
+        }
 
         var p = Process.Start(psi)
             ?? throw new InvalidOperationException($"failed to start {exe}");

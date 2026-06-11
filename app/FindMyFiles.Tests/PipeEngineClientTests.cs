@@ -111,6 +111,31 @@ public sealed class PipeEngineClientTests
     }
 
     [Fact]
+    public async Task RequestWhileDisconnected_FailsFast_NotAfterTheRequestTimeout()
+    {
+        var server = new FakePipeServer();
+        using var client = new PipeEngineClient(server.PipeName);
+        await WaitUntilAsync(
+            () => client.Connection == EngineConnectionState.Connected, "connected");
+
+        // Server fully gone: accept loop stopped and live connections cut —
+        // the supervisor stays in Reconnecting with no connection object.
+        server.Dispose();
+        await WaitUntilAsync(
+            () => client.Connection == EngineConnectionState.Reconnecting, "noticed the drop");
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await Assert.ThrowsAsync<EngineUnavailableException>(
+            () => client.SearchAsync("a", SearchOptions.Default));
+        sw.Stop();
+        // There is no connection to write to, so the failure is immediate —
+        // never the 10s per-request deadline.
+        Assert.True(
+            sw.Elapsed < TimeSpan.FromSeconds(5),
+            $"disconnected request took {sw.Elapsed} — should fail fast");
+    }
+
+    [Fact]
     public async Task Reconnect_RedoesHandshake_AndRefiresIndexChanged()
     {
         using var server = new FakePipeServer();

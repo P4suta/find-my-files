@@ -18,7 +18,6 @@ public readonly record struct SearchRequest(string Query, SearchOptions Options)
 public sealed class SearchOrchestrator
 {
     private readonly IEngineClient _engine;
-    private readonly IDispatcher _dispatcher;
     private readonly ResultsPresenter _presenter;
     private readonly Func<SearchRequest> _request;
     private readonly IDispatcherTimer _debounce;
@@ -34,12 +33,12 @@ public sealed class SearchOrchestrator
 
     public SearchOrchestrator(
         IEngineClient engine,
+        EngineEventMarshaler engineEvents,
         IDispatcher dispatcher,
         ResultsPresenter presenter,
         Func<SearchRequest> request)
     {
         _engine = engine;
-        _dispatcher = dispatcher;
         _presenter = presenter;
         _request = request;
         _debounce = dispatcher.CreateOneShotTimer(
@@ -47,8 +46,8 @@ public sealed class SearchOrchestrator
             () => Requery(RequeryOrigin.Typing));
 
         _presenter.ResultsSource.BecameStale += () => Requery(RequeryOrigin.Stale);
-        _engine.IndexChanged += _ =>
-            _dispatcher.TryEnqueue(() => Requery(RequeryOrigin.IndexChanged));
+        // Already on the UI thread — the marshaler is the crossing point.
+        engineEvents.IndexChanged += _ => Requery(RequeryOrigin.IndexChanged);
     }
 
     private bool _composing;

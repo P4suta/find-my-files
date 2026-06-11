@@ -10,6 +10,18 @@ namespace FindMyFiles.Engine;
 /// </summary>
 public sealed unsafe class FfiEngineClient : IEngineClient
 {
+    /// <summary>Global registration clock (advanced with Interlocked only).
+    /// Every callback registration takes a unique generation from it, and
+    /// Dispose advances the instance's live generation to another unique
+    /// value, so "live == registered" can never hold again for that
+    /// instance. This closes the dispose/recreate window: a native callback
+    /// still in flight while Dispose runs resolves the instance but fails
+    /// the generation check, instead of racing the engine teardown.</summary>
+    private static long s_generation;
+
+    private readonly long _registeredGeneration;
+    private long _liveGeneration;
+
     private IntPtr _handle;
     private GCHandle _self;
 
@@ -42,7 +54,11 @@ public sealed unsafe class FfiEngineClient : IEngineClient
 
         // The callback is an [UnmanagedCallersOnly] static — nothing the GC
         // can collect — and `user` carries a GCHandle back to this instance.
+        // The registration generation is recorded on the instance: events
+        // only flow while the live generation still equals it (see OnEvent).
         _self = GCHandle.Alloc(this, GCHandleType.Weak);
+        _registeredGeneration = Interlocked.Increment(ref s_generation);
+        _liveGeneration = _registeredGeneration;
         rc = NativeEngine.fmf_set_event_callback(_handle, &OnEvent, GCHandle.ToIntPtr(_self));
         if (rc != NativeEngine.Ok)
         {
@@ -54,8 +70,12 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     private static void OnEvent(NativeEngine.FmfEvent* ev, IntPtr user)
     {
         var handle = GCHandle.FromIntPtr(user);
-        if (handle.Target is not FfiEngineClient self)
+        if (handle.Target is not FfiEngineClient self
+            || Volatile.Read(ref self._liveGeneration) != self._registeredGeneration)
         {
+            // Weak handle dead, handle slot recycled to another instance, or
+            // the instance is mid-Dispose (generation already advanced) —
+            // never deliver an event from a dying engine.
             return;
         }
         string volume;
@@ -239,12 +259,18 @@ public sealed unsafe class FfiEngineClient : IEngineClient
 
     public void Dispose()
     {
+        // Advance the generation FIRST: a native callback already in flight
+        // on an engine thread resolves this instance but fails the
+        // generation check, before fmf_set_event_callback(NULL) even lands.
+        Volatile.Write(ref _liveGeneration, Interlocked.Increment(ref s_generation));
         if (_handle != IntPtr.Zero)
         {
             NativeEngine.fmf_set_event_callback(_handle, null, IntPtr.Zero);
-            NativeEngine.fmf_engine_destroy(_handle);
+            NativeEngine.fmf_engine_destroy(_handle); // joins engine threads
             _handle = IntPtr.Zero;
         }
+        // Freed last: fmf_engine_destroy joined the threads that could still
+        // dereference the handle, so no recycled-slot access is reachable.
         if (_self.IsAllocated)
         {
             _self.Free();

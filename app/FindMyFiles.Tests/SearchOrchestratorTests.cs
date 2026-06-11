@@ -19,7 +19,9 @@ public sealed class SearchOrchestratorTests
     public SearchOrchestratorTests()
     {
         _presenter = new ResultsPresenter(_dispatcher);
-        _orchestrator = new SearchOrchestrator(_engine, _dispatcher, _presenter, () => _request);
+        _orchestrator = new SearchOrchestrator(
+            _engine, new EngineEventMarshaler(_engine, _dispatcher), _dispatcher, _presenter,
+            () => _request);
     }
 
     [Fact]

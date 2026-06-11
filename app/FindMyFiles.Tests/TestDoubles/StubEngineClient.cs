@@ -43,13 +43,24 @@ public sealed class StubEngineClient : IEngineClient
     public Exception? ThrowOnSearch { get; set; }
 
     public event Action<string>? IndexChanged;
-    public event Action<VolumeStatus>? VolumeUpdated { add { } remove { } }
-    public event Action<int>? EngineErrorOccurred { add { } remove { } }
-    public event Action<EngineConnectionState>? ConnectionChanged { add { } remove { } }
+    public event Action<VolumeStatus>? VolumeUpdated;
+    public event Action<int>? EngineErrorOccurred;
+    public event Action<EngineConnectionState>? ConnectionChanged;
 
     public EngineConnectionState Connection => EngineConnectionState.InProc;
 
     public void RaiseIndexChanged(string volume) => IndexChanged?.Invoke(volume);
+
+    public void RaiseVolumeUpdated(VolumeStatus status) => VolumeUpdated?.Invoke(status);
+
+    public void RaiseEngineError(int severity) => EngineErrorOccurred?.Invoke(severity);
+
+    public void RaiseConnectionChanged(EngineConnectionState state) =>
+        ConnectionChanged?.Invoke(state);
+
+    /// <summary>Live subscriber count per event — lets tests pin that
+    /// Dispose paths actually unsubscribe.</summary>
+    public int IndexChangedSubscribers => IndexChanged?.GetInvocationList().Length ?? 0;
 
     public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<string>>(["F:"]);
