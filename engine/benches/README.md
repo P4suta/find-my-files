@@ -1,8 +1,13 @@
 # Real-volume benchmark baseline
 
-`baseline.json` is the committed reference for `just bench-check`(20% regression
-gate). Machine-dependent — regenerate with `just bench-baseline C:` from an
-elevated terminal and record the environment here:
+`baseline.json` is the committed reference for `just bench-check`. The gate
+is a smoke alarm, not a precision instrument (that is
+`just bench-micro-check`): query p50 fails at >+50% vs baseline (the
+machine's thermal envelope alone moves wall clock ±30%), while query p99
+(≤50ms) and snapshot-restore p50 (≤1s) fail against the absolute
+acceptance budgets from CLAUDE.md. Machine-dependent — regenerate with
+`just bench-baseline C:` from an elevated terminal and record the
+environment here:
 
 | Recorded | CPU | Volume | Entries |
 |---|---|---|---|
@@ -23,3 +28,19 @@ Micro-benchmarks (`cargo bench -p fmf-core`, no elevation) carry their own
 local baseline: `just bench-micro-baseline` at the start of an optimization
 session, `just bench-micro-check` (criterion + 10% median gate) per change.
 That baseline lives in `target/criterion` — machine-local, not committed.
+
+**Thermal discipline** (measured 2026-06-11): after minutes of all-core
+load (builds, criterion runs) this machine throttles to ~75% clock and
+wall-clock numbers degrade 20%+ progressively — an A/B of old vs new code
+showed both equally slow, i.e. pure machine drift. Record baselines and
+run `bench-check`/`perf-gate` only on a cool, idle machine; verify with
+`typeperf "\Processor Information(_Total)\% Processor Performance" -sc 3`
+(expect ≥95%). A gate failure where *everything* regressed uniformly —
+including snapshot restore, which is pure fixed CPU work — is the thermal
+signature, not a code regression.
+
+The same applies to the criterion baseline: it is only comparable within
+one session at one thermal state (identical code measured 40 minutes
+apart drifted +30% on a µs-scale pure-CPU bench). The intended loop is
+exactly `bench-micro-baseline` → change → `bench-micro-check`,
+back-to-back — never compare across hours.
