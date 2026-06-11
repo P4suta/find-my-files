@@ -19,8 +19,8 @@ mod core;
 mod frn;
 mod mutate;
 mod snapshot;
-#[cfg(test)]
-pub(crate) mod testutil;
+#[cfg(any(test, feature = "testutil"))]
+pub mod testutil;
 
 pub use self::builder::{FinishTimings, VolumeIndexBuilder};
 pub use self::core::VolumeIndex;

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
+use crate::index::testutil::TestDir;
 use crate::index::{RawEntry, VolumeIndex, VolumeIndexBuilder};
 use crate::query::QueryOptions;
 use crate::usn::records::reason;
@@ -312,16 +313,16 @@ impl StatFetcher for FakeStat {
 
 const WAIT: Duration = Duration::from_secs(10);
 
-/// Engine on a unique temp index dir — the writer lock makes a shared dir
-/// a cross-test collision under the default parallel test runner.
-fn test_engine() -> Arc<Engine> {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "fmf-worker-tests-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    Engine::new(EngineConfig { index_dir: dir }).expect("engine create")
+/// Engine on a fresh [`TestDir`] — the writer lock makes a shared dir a
+/// cross-test collision under the default parallel test runner. Callers
+/// hold the guard (`let (_dir, e) = …`) so it drops *after* the engine.
+fn test_engine() -> (TestDir, Arc<Engine>) {
+    let dir = TestDir::new();
+    let e = Engine::new(EngineConfig {
+        index_dir: dir.path().to_path_buf(),
+    })
+    .expect("engine create");
+    (dir, e)
 }
 
 fn sink_channel(e: &Arc<Engine>) -> mpsc::Receiver<EngineEvent> {
@@ -429,7 +430,7 @@ fn phase_of(e: &Engine, volume: &str) -> VolumeState {
 #[test]
 fn corrupt_snapshot_counts_and_degrades_to_full_scan() {
     let label = "FMFWK1:";
-    let e = test_engine();
+    let (_dir, e) = test_engine();
     let rx = sink_channel(&e);
     let store = FakeStore::new(vec![LoadScript::Corrupt], false);
     let query_calls = Arc::new(AtomicU64::new(0));
@@ -479,7 +480,7 @@ fn corrupt_snapshot_counts_and_degrades_to_full_scan() {
 #[test]
 fn journal_gone_rescans_and_returns_to_ready() {
     let label = "FMFWK2:";
-    let e = test_engine();
+    let (_dir, e) = test_engine();
     let rx = sink_channel(&e);
     let store = FakeStore::new(
         vec![
@@ -577,7 +578,7 @@ fn journal_gone_rescans_and_returns_to_ready() {
 #[test]
 fn save_failure_is_counted_and_engine_survives() {
     let label = "FMFWK3:";
-    let e = test_engine();
+    let (_dir, e) = test_engine();
     let rx = sink_channel(&e);
     let store = FakeStore::new(
         vec![LoadScript::Found(
@@ -640,7 +641,7 @@ fn save_failure_is_counted_and_engine_survives() {
 #[test]
 fn stat_fetch_failure_storm_counts_and_batches_still_apply() {
     let label = "FMFWK4:";
-    let e = test_engine();
+    let (_dir, e) = test_engine();
     let rx = sink_channel(&e);
     let store = FakeStore::new(
         vec![LoadScript::Found(

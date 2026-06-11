@@ -169,3 +169,11 @@ io-probe drive="C:" mode="buffered" *args="":
 profile *args="bench C:":
     cargo build --profile profiling -p fmf-cli
     samply record -- ./target/profiling/fmf-cli {{args}}
+
+# ── Hygiene ──────────────────────────────────────────────────────────────
+
+# Sweep leftover TestDir fixtures (engine/target/test-tmp). Their Drop-time
+# removal is best-effort, so killed test runs can leave directories behind;
+# cargo clean also removes them, this is the cheaper broom.
+clean-temp:
+    Remove-Item -Recurse -Force engine/target/test-tmp -ErrorAction SilentlyContinue; exit 0

@@ -1,4 +1,5 @@
 use super::*;
+use crate::index::testutil::TestDir;
 use crate::index::{RawEntry, SortKey, VolumeIndexBuilder};
 use crate::query::QueryOptions;
 
@@ -22,28 +23,28 @@ fn vol(label: &str, names: &[(&str, u64)]) -> VolumeIndex {
     b.finish()
 }
 
-/// Engine on a unique temp index dir — the writer lock makes a shared dir
-/// a cross-test collision under the default parallel test runner.
-fn test_engine() -> Arc<Engine> {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "fmf-engine-tests-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    Engine::new(EngineConfig { index_dir: dir }).expect("engine create")
+/// Engine on a fresh [`TestDir`] — the writer lock makes a shared dir a
+/// cross-test collision under the default parallel test runner. Callers
+/// hold the guard (`let (_dir, e) = …`) so it drops *after* the engine.
+fn test_engine() -> (TestDir, Arc<Engine>) {
+    let dir = TestDir::new();
+    let e = Engine::new(EngineConfig {
+        index_dir: dir.path().to_path_buf(),
+    })
+    .expect("engine create");
+    (dir, e)
 }
 
-fn engine_with_two_volumes() -> Arc<Engine> {
-    let e = test_engine();
+fn engine_with_two_volumes() -> (TestDir, Arc<Engine>) {
+    let (dir, e) = test_engine();
     e.insert_ready_volume("C:", vol("C:", &[("alpha.txt", 10), ("gamma.txt", 30)]));
     e.insert_ready_volume("D:", vol("D:", &[("beta.txt", 20), ("delta.txt", 40)]));
-    e
+    (dir, e)
 }
 
 #[test]
 fn query_merges_volumes_in_name_order() {
-    let e = engine_with_two_volumes();
+    let (_dir, e) = engine_with_two_volumes();
     let r = e.query("txt", &QueryOptions::default()).unwrap().0;
     let rows = r.page(0, 10).unwrap();
     let names: Vec<String> = rows
@@ -61,7 +62,7 @@ fn query_merges_volumes_in_name_order() {
 
 #[test]
 fn paging_is_a_slice_and_size_sort_descends() {
-    let e = engine_with_two_volumes();
+    let (_dir, e) = engine_with_two_volumes();
     let opt = QueryOptions {
         sort: SortKey::Size,
         desc: true,
@@ -79,7 +80,7 @@ fn paging_is_a_slice_and_size_sort_descends() {
 
 #[test]
 fn parent_paths_come_back_per_volume() {
-    let e = engine_with_two_volumes();
+    let (_dir, e) = engine_with_two_volumes();
     let r = e.query("beta", &QueryOptions::default()).unwrap().0;
     let rows = r.page(0, 1).unwrap();
     assert_eq!(rows[0].parent_path, b"D:\\");
@@ -87,7 +88,7 @@ fn parent_paths_come_back_per_volume() {
 
 #[test]
 fn rebuilt_volume_hard_stales_open_results() {
-    let e = engine_with_two_volumes();
+    let (_dir, e) = engine_with_two_volumes();
     let r = e.query("txt", &QueryOptions::default()).unwrap().0;
     assert_eq!(r.page(0, 10).unwrap().len(), 4);
 
@@ -103,7 +104,7 @@ fn rebuilt_volume_hard_stales_open_results() {
 
 #[test]
 fn typing_refines_cached_results_and_invalidation_goes_cold() {
-    let e = engine_with_two_volumes();
+    let (_dir, e) = engine_with_two_volumes();
     let opt = QueryOptions::default();
 
     // Cold first query, refined on each extension, identical results.
@@ -137,7 +138,7 @@ fn typing_refines_cached_results_and_invalidation_goes_cold() {
 /// that flag is what stops the UI from repainting an unchanged screen.
 #[test]
 fn idle_requery_of_identical_results_reports_unchanged() {
-    let e = engine_with_two_volumes();
+    let (_dir, e) = engine_with_two_volumes();
     let opt = QueryOptions::default();
     let (_, t1) = e.query("txt", &opt).unwrap();
     assert!(!t1.unchanged, "first run has no previous result");
@@ -191,7 +192,7 @@ fn idle_requery_of_identical_results_reports_unchanged() {
 
 #[test]
 fn status_reports_ready_volumes() {
-    let e = engine_with_two_volumes();
+    let (_dir, e) = engine_with_two_volumes();
     let st = e.status();
     assert_eq!(st.len(), 2);
     assert!(
@@ -206,7 +207,7 @@ fn status_reports_ready_volumes() {
 #[cfg(windows)]
 #[test]
 fn flush_saves_dirty_volumes_and_skips_clean_ones() {
-    let e = test_engine();
+    let (_dir, e) = test_engine();
     e.insert_ready_volume("C:", vol("C:", &[("alpha.txt", 10)]));
     // First flush writes the snapshot…
     assert_eq!(e.flush(), 1);
@@ -220,20 +221,23 @@ fn flush_saves_dirty_volumes_and_skips_clean_ones() {
 #[cfg(windows)]
 #[test]
 fn second_engine_on_same_index_dir_is_locked() {
-    let dir = std::env::temp_dir().join(format!("fmf-lock-test-{}", std::process::id()));
+    let dir = TestDir::new();
     let first = Engine::new(EngineConfig {
-        index_dir: dir.clone(),
+        index_dir: dir.path().to_path_buf(),
     })
     .expect("first engine");
     match Engine::new(EngineConfig {
-        index_dir: dir.clone(),
+        index_dir: dir.path().to_path_buf(),
     }) {
         Err(EngineCreateError::Locked(pid)) => assert_eq!(pid, Some(std::process::id())),
         Err(e) => panic!("expected Locked, got {e}"),
         Ok(_) => panic!("expected Locked, got a second engine"),
     }
     drop(first);
-    Engine::new(EngineConfig { index_dir: dir }).expect("lock must free on drop");
+    Engine::new(EngineConfig {
+        index_dir: dir.path().to_path_buf(),
+    })
+    .expect("lock must free on drop");
 }
 
 #[test]
@@ -247,12 +251,10 @@ fn engine_e2e_scan_query_snapshot_restore() {
     use std::time::Duration;
 
     // Fresh per-run index dir → guaranteed full-scan path (no stale snapshot).
-    let dir = std::env::temp_dir().join(format!("fmf-e2e-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = TestDir::new();
 
     let e = Engine::new(EngineConfig {
-        index_dir: dir.clone(),
+        index_dir: dir.path().to_path_buf(),
     })
     .expect("engine create");
     let (tx, rx) = mpsc::channel::<EngineEvent>();
@@ -316,6 +318,4 @@ fn engine_e2e_scan_query_snapshot_restore() {
     assert_ne!(journal_id, 0, "checkpoint must carry the journal id");
     assert!(next_usn > 0, "checkpoint must carry a USN cursor");
     assert_eq!(restored.live_len() as u64, final_entries);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

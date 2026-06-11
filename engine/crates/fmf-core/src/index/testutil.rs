@@ -1,6 +1,68 @@
+//! Test fixtures: the RAII test directory and sample-index builders.
+//! `feature = "testutil"` exposes this module to the other workspace
+//! crates' test suites (dev-dependencies only — production builds never
+//! compile it).
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::{RawEntry, VolumeIndex, VolumeIndexBuilder};
 
-pub(crate) fn raw<'a>(
+/// RAII per-test directory: `{workspace target}/test-tmp/fmf-<pid>-<seq>`,
+/// created by [`TestDir::new`], removed (best-effort) on drop.
+///
+/// Per-call uniqueness matters: the engine's writer lock turns a shared
+/// index dir into a cross-test collision under the parallel test runner.
+/// The dir lives under the workspace `target/` — not %TEMP% — so whatever
+/// a killed test run leaves behind is swept by `cargo clean` or
+/// `just clean-temp`.
+///
+/// Hold the guard for the whole test (`let (_dir, e) = …`): it must drop
+/// *after* everything that has files open inside it, or the removal
+/// quietly fails and the directory outlives the test.
+pub struct TestDir {
+    path: PathBuf,
+}
+
+impl TestDir {
+    pub fn new() -> Self {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+        let path = target.join("test-tmp").join(format!(
+            "fmf-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("create test dir");
+        TestDir { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn join(&self, p: impl AsRef<Path>) -> PathBuf {
+        self.path.join(p)
+    }
+}
+
+impl Default for TestDir {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        // Best-effort by design: a still-open handle (a leaked engine, a
+        // child process on its way down) keeps files alive on Windows.
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+pub fn raw<'a>(
     record: u64,
     parent: u64,
     name: &'a [u16],
@@ -22,12 +84,12 @@ pub(crate) fn raw<'a>(
     }
 }
 
-pub(crate) fn u16s(s: &str) -> Vec<u16> {
+pub fn u16s(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
 /// C:\ ├─ docs\ ├─ note.txt   docs comes *after* its child in scan order.
-pub(crate) fn build_sample() -> VolumeIndex {
+pub fn build_sample() -> VolumeIndex {
     let mut b = VolumeIndexBuilder::new("C:", 5);
     let note = u16s("Note.TXT");
     let docs = u16s("docs");
@@ -38,7 +100,7 @@ pub(crate) fn build_sample() -> VolumeIndex {
     b.finish()
 }
 
-pub(crate) fn raw_attr<'a>(
+pub fn raw_attr<'a>(
     record: u64,
     parent: u64,
     name: &'a [u16],

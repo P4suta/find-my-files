@@ -17,3 +17,8 @@ fmf-contract = { workspace = true }
 fmf-core = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# Test-only feature union: exposes fmf-core's index::testutil (TestDir RAII)
+# to the contract tests without touching the production cdylib build.
+fmf-core = { workspace = true, features = ["testutil"] }

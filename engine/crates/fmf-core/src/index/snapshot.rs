@@ -273,7 +273,7 @@ impl VolumeIndex {
 mod tests {
     use super::*;
 
-    use crate::index::testutil::build_sample;
+    use crate::index::testutil::{TestDir, build_sample};
 
     #[test]
     fn snapshot_roundtrip_preserves_everything() {
@@ -508,20 +508,13 @@ mod tests {
 
     #[test]
     fn save_to_leaves_no_tmp_file_and_overwrites() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "fmf-core-snap-test-{}-{unique}",
-            std::process::id()
-        ));
+        let dir = TestDir::new();
         let target = dir.join("vol_c.fmfidx");
         let idx = build_sample();
         idx.save_to(&target, 7, 8).unwrap();
         idx.save_to(&target, 9, 10).unwrap(); // overwrite an existing target
 
-        let names: Vec<String> = std::fs::read_dir(&dir)
+        let names: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
@@ -530,6 +523,5 @@ mod tests {
         let (loaded, journal_id, next_usn) = VolumeIndex::load_from(&target).unwrap();
         assert_eq!((journal_id, next_usn), (9, 10));
         assert_eq!(loaded.len(), idx.len());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

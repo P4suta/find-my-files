@@ -18,6 +18,8 @@ use std::ffi::{CString, c_char, c_void};
 use std::mem::offset_of;
 use std::ptr;
 
+use fmf_core::index::testutil::TestDir;
+
 use crate::blob::{FmfBlob, fmf_blob_free, fmf_engine_stats};
 use crate::error::fmf_last_error;
 use crate::events::{
@@ -38,21 +40,12 @@ use crate::{
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
-/// A per-call unique base dir: the engine's writer lock turns a shared
-/// index dir into a cross-test collision under the parallel test runner.
-fn unique_test_dir() -> std::path::PathBuf {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
-        "fmf-ffi-contract-tests-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ))
-}
-
-/// Creates an engine against temp directories — no volume is touched, so
-/// this needs no elevation (Engine::new only builds in-memory state).
-fn create_engine() -> *mut c_void {
-    let dir = unique_test_dir();
+/// Creates an engine against a fresh [`TestDir`] — no volume is touched, so
+/// this needs no elevation (Engine::new only builds in-memory state). The
+/// guard is returned because it must outlive the engine handle: callers
+/// bind it (`let (h, _dir) = …`) and call `destroy` before scope end.
+fn create_engine() -> (*mut c_void, TestDir) {
+    let dir = TestDir::new();
     let cfg = serde_json::json!({
         "index_dir": dir.join("index").to_string_lossy(),
         "log_dir": dir.join("logs").to_string_lossy(),
@@ -69,7 +62,7 @@ fn create_engine() -> *mut c_void {
         read_last_error()
     );
     assert!(!h.is_null());
-    h
+    (h, dir)
 }
 
 fn destroy(h: *mut c_void) {
@@ -105,10 +98,10 @@ fn json_from_blob(blob: *mut FmfBlob) -> serde_json::Value {
 
 /// Engine with one injected Ready volume ("C:", two files) — the unelevated
 /// stand-in for a real MFT scan.
-fn ready_engine() -> *mut c_void {
+fn ready_engine() -> (*mut c_void, TestDir) {
     use fmf_core::index::{RawEntry, VolumeIndexBuilder};
 
-    let h = create_engine();
+    let (h, dir) = create_engine();
     let mut b = VolumeIndexBuilder::new("C:", 5);
     let alpha: Vec<u16> = "alpha.txt".encode_utf16().collect();
     b.push(RawEntry {
@@ -140,7 +133,7 @@ fn ready_engine() -> *mut c_void {
     // behind the opaque pointer without an extra FFI test hook.
     let handle = unsafe { &*h.cast::<EngineHandle>() };
     handle.engine.insert_ready_volume("C:", b.finish());
-    h
+    (h, dir)
 }
 
 unsafe extern "C" fn noop_event_cb(_ev: *const FmfEvent, _user: *mut c_void) {}
@@ -342,7 +335,7 @@ fn flush_null_matrix_and_roundtrip() {
     assert_eq!(unsafe { fmf_flush(ptr::null_mut()) }, FMF_E_INVALID_ARG);
     // Roundtrip on an injected Ready volume: flush succeeds and writes the
     // snapshot file the engine layer is contracted to produce.
-    let h = ready_engine();
+    let (h, _dir) = ready_engine();
     assert_eq!(unsafe { fmf_flush(h) }, FMF_OK);
     // Second flush is also FMF_OK — "nothing dirty" is success, not an error.
     assert_eq!(unsafe { fmf_flush(h) }, FMF_OK);
@@ -351,7 +344,7 @@ fn flush_null_matrix_and_roundtrip() {
 
 #[test]
 fn second_engine_on_same_index_dir_reports_locked() {
-    let dir = unique_test_dir();
+    let dir = TestDir::new();
     let cfg = serde_json::json!({
         "index_dir": dir.join("index").to_string_lossy(),
         "log_dir": dir.join("logs").to_string_lossy(),
@@ -394,7 +387,7 @@ fn set_event_callback_matrix() {
         unsafe { fmf_set_event_callback(ptr::null_mut(), Some(noop_event_cb), ptr::null_mut()) },
         FMF_E_INVALID_ARG
     );
-    let h = create_engine();
+    let (h, _dir) = create_engine();
     assert_eq!(
         unsafe { fmf_set_event_callback(h, Some(noop_event_cb), ptr::null_mut()) },
         FMF_OK
@@ -430,7 +423,7 @@ fn index_start_null_matrix() {
         unsafe { fmf_index_start(ptr::null_mut(), ptr::null(), 0) },
         FMF_E_INVALID_ARG
     );
-    let h = create_engine();
+    let (h, _dir) = create_engine();
     assert_eq!(
         unsafe { fmf_index_start(h, ptr::null(), 3) },
         FMF_E_INVALID_ARG
@@ -454,7 +447,7 @@ fn index_status_null_matrix() {
         unsafe { fmf_index_status(ptr::null_mut(), ptr::null_mut(), 0, &mut count) },
         FMF_E_INVALID_ARG
     );
-    let h = create_engine();
+    let (h, _dir) = create_engine();
     assert_eq!(
         unsafe { fmf_index_status(h, ptr::null_mut(), 0, ptr::null_mut()) },
         FMF_E_INVALID_ARG
@@ -470,7 +463,7 @@ fn index_status_null_matrix() {
 
 #[test]
 fn query_null_matrix() {
-    let h = create_engine();
+    let (h, _dir) = create_engine();
     let q = CString::new("foo").unwrap();
     let opts = default_opts();
     let mut rh: *mut c_void = ptr::null_mut();
@@ -558,7 +551,7 @@ fn engine_stats_null_matrix_and_json_roundtrip() {
         unsafe { fmf_engine_stats(ptr::null_mut(), &mut blob) },
         FMF_E_INVALID_ARG
     );
-    let h = create_engine();
+    let (h, _dir) = create_engine();
     assert_eq!(
         unsafe { fmf_engine_stats(h, ptr::null_mut()) },
         FMF_E_INVALID_ARG
@@ -649,7 +642,7 @@ fn last_error_truncation_roundtrip() {
 
 #[test]
 fn query_syntax_error_reports_cause_chain() {
-    let h = create_engine();
+    let (h, _dir) = create_engine();
     let opts = default_opts();
     let mut rh: *mut c_void = ptr::null_mut();
     let mut count: u64 = 0;
@@ -691,7 +684,7 @@ fn query_syntax_error_reports_cause_chain() {
 fn valid_query_on_volumeless_engine_succeeds_empty() {
     // Contract: queries succeed against "Ready volumes only" — zero Ready
     // volumes is an empty result, not an error.
-    let h = create_engine();
+    let (h, _dir) = create_engine();
     let q = CString::new("foo").unwrap();
     let opts = default_opts();
     let mut rh: *mut c_void = ptr::null_mut();
@@ -724,7 +717,7 @@ fn valid_query_on_volumeless_engine_succeeds_empty() {
 
 #[test]
 fn page_packs_rows_and_string_blob_per_contract() {
-    let h = ready_engine();
+    let (h, _dir) = ready_engine();
     let q = CString::new("alpha").unwrap();
     let opts = default_opts();
     let mut rh: *mut c_void = ptr::null_mut();

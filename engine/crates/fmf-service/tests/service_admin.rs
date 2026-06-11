@@ -6,6 +6,7 @@
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
+use fmf_core::index::testutil::TestDir;
 use fmf_proto::frame::{FLAG_EVENT, FrameHeader, read_frame, write_frame};
 use fmf_proto::messages::{self, opcode};
 use fmf_proto::{PROTOCOL_VERSION, codes};
@@ -119,9 +120,8 @@ fn service_e2e_flush_survives_kill_and_restores() {
     if !admin_gate() {
         return;
     }
-    let data_dir = std::env::temp_dir().join(format!("fmf-svc-e2e-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    std::fs::create_dir_all(&data_dir).unwrap();
+    // Fresh per-run data dir (TestDir) → guaranteed full-scan cold start.
+    let data_dir = TestDir::new();
     // Short flush interval: durability must not depend on a graceful stop.
     let mut f = std::fs::File::create(data_dir.join("service.json")).unwrap();
     f.write_all(br#"{ "volumes": ["C:"], "flush_interval_secs": 10 }"#)
@@ -130,7 +130,7 @@ fn service_e2e_flush_survives_kill_and_restores() {
     let pipe_name = format!(r"\\.\pipe\fmf-svc-e2e-{}", std::process::id());
 
     // 1. Cold start: full scan → Ready → queries answer.
-    let child = spawn_service(&data_dir, &pipe_name);
+    let child = spawn_service(data_dir.path(), &pipe_name);
     let mut s = connect_with_retry(&pipe_name, Duration::from_secs(30));
     let mut id = 0u32;
     hello(&mut s, 0);
@@ -163,7 +163,7 @@ fn service_e2e_flush_survives_kill_and_restores() {
     drop(s);
 
     // 3. Restart: must come up from the snapshot (fast Ready), not a rescan.
-    let _child2 = spawn_service(&data_dir, &pipe_name);
+    let _child2 = spawn_service(data_dir.path(), &pipe_name);
     let mut s2 = connect_with_retry(&pipe_name, Duration::from_secs(30));
     let mut id2 = 0u32;
     hello(&mut s2, 0);
@@ -211,6 +211,5 @@ fn service_e2e_flush_survives_kill_and_restores() {
     eprintln!(
         "M2 gate record: restore→ready {ready_in:?} (incl. process spawn), USN→event {latency:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&data_dir);
+    // data_dir (TestDir) drops last — after _child2 is killed on drop.
 }

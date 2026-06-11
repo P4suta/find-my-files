@@ -139,6 +139,7 @@ pub(super) fn run_chunk_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::testutil::TestDir;
 
     /// Pins plan_chunks arithmetic: record alignment, sparse-hole
     /// skipping, full logical coverage in order.
@@ -175,8 +176,7 @@ mod tests {
     #[test]
     fn pipeline_delivers_chunks_in_order_with_recycled_buffers() {
         let rs = 512usize;
-        let dir = std::env::temp_dir().join(format!("fmf-scan-pipe-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::new();
         let path = dir.join("stream.bin");
         // 8 runs of 2KiB each, deliberately not in physical order.
         let total = 16 * 1024usize;
@@ -206,13 +206,11 @@ mod tests {
         assert_eq!(seen, (0..8).collect::<Vec<_>>(), "strict chunk order");
         assert_eq!(fallbacks, 0);
         assert!(read_time <= std::time::Duration::from_secs(5));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn pipeline_propagates_read_errors() {
-        let dir = std::env::temp_dir().join(format!("fmf-scan-pipe-err-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::new();
         let path = dir.join("short.bin");
         std::fs::write(&path, vec![0u8; 1024]).unwrap();
         // Plan claims 4KiB at physical 0 — read_exact must fail past EOF and
@@ -226,6 +224,5 @@ mod tests {
         let r = run_chunk_pipeline(path.to_str().unwrap(), &chunks, &mut |_, _| called += 1);
         assert!(r.is_err());
         assert_eq!(called, 0);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

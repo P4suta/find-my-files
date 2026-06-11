@@ -21,6 +21,12 @@ xxhash-rust = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 
+[features]
+# Exposes index::testutil (TestDir RAII + sample-index builders) to the
+# other workspace crates' test suites via their dev-dependencies. Never
+# enabled by production builds.
+testutil = []
+
 [dev-dependencies]
 criterion = "0.5"
 # Golden JSON-shape pins (tests/golden_json.rs) — the serde output consumed

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fmf_core::engine::{Engine, EngineConfig};
+use fmf_core::index::testutil::TestDir;
 use fmf_core::index::{RawEntry, VolumeIndexBuilder};
 use fmf_proto::frame::{FLAG_EVENT, FLAG_RESPONSE, FrameHeader, read_frame, write_frame};
 use fmf_proto::messages::{self, opcode};
@@ -25,14 +26,12 @@ fn unique_name(tag: &str) -> String {
     )
 }
 
-fn test_engine(tag: &str) -> Arc<Engine> {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "fmf-loopback-{tag}-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let e = Engine::new(EngineConfig { index_dir: dir }).expect("engine");
+fn test_engine() -> (TestDir, Arc<Engine>) {
+    let dir = TestDir::new();
+    let e = Engine::new(EngineConfig {
+        index_dir: dir.path().to_path_buf(),
+    })
+    .expect("engine");
     let mut b = VolumeIndexBuilder::new("C:", 5);
     let alpha: Vec<u16> = "alpha.txt".encode_utf16().collect();
     b.push(RawEntry {
@@ -61,17 +60,19 @@ fn test_engine(tag: &str) -> Arc<Engine> {
         mtime: 888,
     });
     e.insert_ready_volume("C:", b.finish());
-    e
+    (dir, e)
 }
 
 struct Harness {
     engine: Arc<Engine>,
     server: Arc<Server>,
     pipe_name: String,
+    /// Declared last: the index dir must drop after the engine and server.
+    _dir: TestDir,
 }
 
 fn start(tag: &str, debug_faults: bool) -> Harness {
-    let engine = test_engine(tag);
+    let (dir, engine) = test_engine();
     let pipe_name = unique_name(tag);
     let server = Server::start(
         engine.clone(),
@@ -86,6 +87,7 @@ fn start(tag: &str, debug_faults: bool) -> Harness {
         engine,
         server,
         pipe_name,
+        _dir: dir,
     }
 }
 
