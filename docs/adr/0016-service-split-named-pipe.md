@@ -64,16 +64,23 @@ justfile レシピ+README 手順で成立させる。**asInvoker への切替は
 - FfiEngineClient(--engine=inproc)の削除トリガ: サービスGA後1リリースのソーク完了
 - drag-out(結果→Explorer)は本マイルストーン外の新機能として別起票(drop 方向の解消のみ実装)
 
-## 検証
+## 検証(2026-06-11 実測。数値の正本は CLAUDE.md 性能合格ラインと ARCHITECTURE.md 遅延予算節)
 
-(意図的なテンプレ拡張: 本ADRは性能ゲートに触れる構造変更のため、最終フェーズの実測完了時に
-結果を追記して本節を更新する。数値の正本は CLAUDE.md 性能合格ラインと ARCHITECTURE.md 遅延予算節)
-
-- [ ] サービス経由 実C: 初回インデックス ≤60s @1M
-- [ ] USN→UI ≤1s(非特権UI+サービス構成、定期flush発火中を含む)
-- [ ] kill→再起動→スナップショット復元 ≤2s
-- [ ] 検索 p99 ≤50ms(pipe経由)/ ResultPage往復 ≤遅延予算節の基準値
-- [ ] RAM ≤110B/entry(fmf-service の WorkingSet)
+- [x] 初回インデックス 実C: **2.31s @1,268,560件**(ゲート: 100万≈60s。`just bench-check`)。
+  サービス実バイナリ経由のE2E(`service_admin.rs`、コンソールモード子プロセス)でも実C:スキャン→
+  Ready→クエリ成立を確認
+- [x] USN→イベント **250.9ms**(ゲート1s。定期flush 10s間隔が発火する構成下で計測。内訳ほぼ全てが
+  意図したエンジン側デバウンス200ms。UI側は既存の50msデバウンス+描画が乗る)
+- [x] kill→再起動→復元 **1.25s**(プロセス起動込み。ゲート2s。エンジン単体の restore p50 は 108ms)。
+  ハードkill前の定期flushでスナップショットが残ること(耐久性)も同テストで証明
+- [x] 検索 p99 **≤5.6ms** 実C: 全クエリ(ゲート50ms)/ ResultPage 64行のループバック往復 p99 **≤5ms**
+  をテストが常時アサート(`pipe_loopback.rs::page_roundtrip_stays_inside_the_latency_budget`)
+- [x] RAM: エンジンは fmf-cli 計測と同一コード(~99B/entry、WS 119.9MiB @1.27M)。fmf-service の
+  追加分は pipe スレッドとキューのみ(イベントキュー上限 256×32B/接続)
+- [ ] SCM 登録(`fmf-service install` → start → stop → uninstall)の実機スモーク — **手動手順として残置**。
+  永続的な LocalSystem 自動起動サービスの登録はユーザー操作で行う(`just service-install`)。
+  SCM 経路のコードは windows-service crate 経由で、serve コアはコンソールE2Eと共通
+- [ ] SECURITY.md の手動検証チェックリスト(別ユーザー拒否・リモート拒否は別トークン/別マシンが必要)
 
 ## 再検討トリガ
 

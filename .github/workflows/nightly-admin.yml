@@ -1,0 +1,26 @@
+# Experiment (ADR-0013 discipline: measure before gating): GitHub's
+# windows-latest runners are elevated, so the FMF_ADMIN_TESTS suite — real
+# C: scan, USN tailing, service E2E — might just work. Runs nightly,
+# never blocks; promote into ci.yml only after it proves stable.
+name: nightly-admin-smoke
+
+on:
+  schedule:
+    - cron: "17 17 * * *" # 02:17 JST
+  workflow_dispatch:
+
+jobs:
+  admin-tests:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - name: elevated real-volume suite
+        run: cargo test --workspace -- --ignored
+        working-directory: engine
+        env:
+          FMF_ADMIN_TESTS: "1"
