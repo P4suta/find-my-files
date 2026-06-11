@@ -17,17 +17,10 @@ pub(super) fn driver_candidates(
     driver: &Driver,
     skip_excluded: bool,
 ) -> Vec<EntryId> {
-    let folded = match driver {
-        Driver::Sub { folded, .. }
-        | Driver::Prefix { folded, .. }
-        | Driver::Suffixes { folded, .. } => *folded,
-        _ => unreachable!("non-sweep driver"),
-    };
-    let pool: &[u8] = if folded {
-        idx.lower_pool_bytes()
-    } else {
-        idx.name_pool_bytes()
-    };
+    // The folded pool is the only contiguous one; case-exact drivers sweep
+    // it with a folded needle (superset — original-case match implies the
+    // folded match) and the exact comparison runs as a residual.
+    let pool: &[u8] = idx.lower_pool_bytes();
     if table.len() == 0 || pool.is_empty() {
         return Vec::new();
     }
@@ -83,7 +76,7 @@ pub(super) fn driver_candidates(
                             pos = next.max(hit + 1) - pool_start;
                             continue;
                         }
-                        let end = off + idx.name(id).len();
+                        let end = off + idx.name_len_of(id);
                         if hit + needle_len <= end && anchor(hit, off, end) {
                             if accept(id) {
                                 out.push(id);
@@ -130,7 +123,7 @@ pub(super) fn driver_candidates(
                         if idx.name_off_of(id) as usize != off {
                             continue; // stale pair: dead bytes
                         }
-                        let name = &pool[off..off + idx.name(id).len()];
+                        let name = &pool[off..off + idx.name_len_of(id)];
                         if suffixes.iter().any(|s| name.ends_with(s))
                             && (!*files_only || !idx.is_dir(id))
                             && accept(id)
@@ -159,7 +152,6 @@ mod tests {
         Driver::Sub {
             finder: memmem::Finder::new(needle.as_bytes()).into_owned(),
             needle_len: needle.len(),
-            folded: true,
         }
     }
 
@@ -252,7 +244,6 @@ mod tests {
         let abc = idx.entry_by_record(10).unwrap();
         let driver = Driver::Prefix {
             bytes: b"abc".to_vec(),
-            folded: true,
         };
         // "zzabc.txt" contains the needle but not at the name start.
         assert_eq!(run(&idx, &driver, true), vec![abc]);
@@ -282,7 +273,6 @@ mod tests {
 
         let log = |files_only: bool| Driver::Suffixes {
             suffixes: vec![b".log".to_vec()],
-            folded: true,
             files_only,
         };
         // files_only drops the dir; tombstone and hidden drop implicitly.
@@ -294,7 +284,6 @@ mod tests {
         // Multiple suffixes union within one pass.
         let multi = Driver::Suffixes {
             suffixes: vec![b".log".to_vec(), b".txt".to_vec()],
-            folded: true,
             files_only: true,
         };
         assert_eq!(run(&idx, &multi, true), vec![trace, notes]);

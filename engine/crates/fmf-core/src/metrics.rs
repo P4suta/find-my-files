@@ -89,11 +89,12 @@ pub struct IndexStats {
     pub flag_bytes: u64,
     pub permutations_bytes: u64,
     pub frn_map_bytes: u64,
-    /// Abandoned name bytes per pool (tombstoned rows, in-place dir
-    /// renames); ×2 pools is the reclaimable garbage. Compaction-trigger
-    /// input; a lower bound right after a snapshot restore.
+    /// Abandoned name bytes across both pools (tombstoned rows, in-place
+    /// dir renames: the folded copy always, the original copy when one
+    /// existed) — the reclaimable garbage. Compaction-trigger input; a
+    /// lower bound right after a snapshot restore.
     pub dead_name_bytes: u64,
-    /// `dead_name_bytes × 2 / (name_pool + lower_pool)`.
+    /// `dead_name_bytes / (name_pool + lower_pool)`.
     pub pool_garbage_ratio: f64,
     /// Generation-cached query accelerators (offset table, dir-path memo).
     /// Part of the bytes/entry gate — they live in the engine process.

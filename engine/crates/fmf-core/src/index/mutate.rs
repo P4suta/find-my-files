@@ -8,6 +8,17 @@ use super::{
 impl VolumeIndex {
     // ── Incremental mutation (USN batches; see module docs) ──────────────
 
+    /// Pool bytes `id` owns that compaction could reclaim: the folded copy
+    /// always, plus the original copy when one exists.
+    fn owned_name_bytes(&self, id: EntryId) -> u64 {
+        let len = self.name_len[id as usize] as u64;
+        if self.orig_off[id as usize] == u32::MAX {
+            len
+        } else {
+            len * 2
+        }
+    }
+
     /// Insert or replace an entry for `record`. Replacement (same record
     /// number) tombstones the old entry — this is how renames work.
     /// Returns the new id. Caller must finish the batch with
@@ -16,7 +27,7 @@ impl VolumeIndex {
         if let Some(old) = self.entry_by_record(e.record) {
             self.flag[old as usize] |= flags::TOMBSTONE;
             self.tombstones += 1;
-            self.dead_name_bytes += self.name_len[old as usize] as u64;
+            self.dead_name_bytes += self.owned_name_bytes(old);
         }
         // Parents are already live on the USN path; unknown ones attach to
         // root (orphan records do occur in real MFTs).
@@ -30,7 +41,7 @@ impl VolumeIndex {
         let id = self.entry_by_record(record)?;
         self.flag[id as usize] |= flags::TOMBSTONE;
         self.tombstones += 1;
-        self.dead_name_bytes += self.name_len[id as usize] as u64;
+        self.dead_name_bytes += self.owned_name_bytes(id);
         Some(id)
     }
 
@@ -67,12 +78,14 @@ impl VolumeIndex {
         let pos = self.perm_name.iter().position(|&x| x == id)?;
         self.perm_name.remove(pos);
 
-        // The old name bytes are abandoned in both pools.
-        self.dead_name_bytes += self.name_len[id as usize] as u64;
-        let off = self.name_pool.len();
-        wtf8::push_wtf8_pair(name_utf16, &mut self.name_pool, &mut self.lower_pool);
+        // The old name bytes are abandoned where they live.
+        self.dead_name_bytes += self.owned_name_bytes(id);
+        let off = self.lower_pool.len();
+        let mut orig = Vec::with_capacity(name_utf16.len() * 3);
+        wtf8::push_wtf8_pair(name_utf16, &mut orig, &mut self.lower_pool);
         self.name_off[id as usize] = off as u32;
-        self.name_len[id as usize] = (self.name_pool.len() - off) as u16;
+        self.name_len[id as usize] = (self.lower_pool.len() - off) as u16;
+        self.orig_off[id as usize] = self.push_orig_if_differs(off, &orig);
         let parent = self
             .entry_by_record(new_parent_record)
             .unwrap_or(Self::ROOT);
@@ -134,19 +147,40 @@ impl VolumeIndex {
         self.content_generation += 1;
     }
 
+    /// Store the original spelling only when it differs from the folded
+    /// bytes just appended at `lower_off` — the fold-identical majority
+    /// (73.2% on real C:) costs nothing beyond the sentinel.
+    fn push_orig_if_differs(&mut self, lower_off: usize, orig: &[u8]) -> u32 {
+        if orig == &self.lower_pool[lower_off..] {
+            u32::MAX
+        } else {
+            // < MAX, not <=: u32::MAX is the fold-identical sentinel.
+            assert!(
+                self.orig_pool.len() + orig.len() < u32::MAX as usize,
+                "orig pool overflow"
+            );
+            let off = self.orig_pool.len() as u32;
+            self.orig_pool.extend_from_slice(orig);
+            off
+        }
+    }
+
     /// Append with a pre-resolved parent: the USN path resolves against the
     /// live index (see [`Self::upsert`]); the initial-scan builder passes a
     /// provisional ROOT because `finish()` re-resolves every parent anyway —
     /// a per-push lookup against the unmerged FRN tail would be O(n²) there.
     pub(super) fn push_raw(&mut self, e: &RawEntry, parent: EntryId) -> EntryId {
         assert!(
-            self.name_pool.len() + e.name_utf16.len() * 4 < u32::MAX as usize,
+            self.lower_pool.len() + e.name_utf16.len() * 4 < u32::MAX as usize,
             "name pool overflow"
         );
-        let off = self.name_pool.len();
-        wtf8::push_wtf8_pair(e.name_utf16, &mut self.name_pool, &mut self.lower_pool);
+        let off = self.lower_pool.len();
+        let mut orig = Vec::with_capacity(e.name_utf16.len() * 3);
+        wtf8::push_wtf8_pair(e.name_utf16, &mut orig, &mut self.lower_pool);
+        let orig_off = self.push_orig_if_differs(off, &orig);
         self.push_columns(
             off,
+            orig_off,
             parent,
             e.frn,
             e.size,
@@ -161,14 +195,15 @@ impl VolumeIndex {
     pub(super) fn push_encoded(&mut self, e: &EncodedEntry, parent: EntryId) -> EntryId {
         debug_assert_eq!(e.name_wtf8.len(), e.lower_wtf8.len());
         assert!(
-            self.name_pool.len() + e.name_wtf8.len() < u32::MAX as usize,
+            self.lower_pool.len() + e.lower_wtf8.len() < u32::MAX as usize,
             "name pool overflow"
         );
-        let off = self.name_pool.len();
-        self.name_pool.extend_from_slice(e.name_wtf8);
+        let off = self.lower_pool.len();
         self.lower_pool.extend_from_slice(e.lower_wtf8);
+        let orig_off = self.push_orig_if_differs(off, e.name_wtf8);
         self.push_columns(
             off,
+            orig_off,
             parent,
             e.frn,
             e.size,
@@ -181,12 +216,13 @@ impl VolumeIndex {
     }
 
     /// Shared column append after the name bytes already landed in the pools
-    /// at `off`. The flag/parent logic must stay identical between the
-    /// utf16 (`push_raw`) and pre-encoded (`push_encoded`) entry points.
+    /// at `off`/`orig_off`. The flag/parent logic must stay identical between
+    /// the utf16 (`push_raw`) and pre-encoded (`push_encoded`) entry points.
     #[allow(clippy::too_many_arguments)]
     fn push_columns(
         &mut self,
         off: usize,
+        orig_off: u32,
         parent: EntryId,
         frn: u64,
         size: u64,
@@ -202,7 +238,8 @@ impl VolumeIndex {
         );
         let id = self.len() as EntryId;
         self.name_off.push(off as u32);
-        self.name_len.push((self.name_pool.len() - off) as u16);
+        self.name_len.push((self.lower_pool.len() - off) as u16);
+        self.orig_off.push(orig_off);
         self.parent.push(parent);
         self.push_size(size);
         self.mtime.push(mtime);
@@ -575,6 +612,78 @@ mod tests {
         }
     }
 
+    /// name() must return the exact WTF-8 input bytes through every write
+    /// path and a snapshot roundtrip — the fold-overflow layout (originals
+    /// stored only where they differ) must be invisible to readers.
+    #[test]
+    fn names_roundtrip_byte_exact_through_fold_overflow_layout() {
+        let cases: &[&str] = &[
+            "lowercase.txt",
+            "File.TXT",
+            "ALLCAPS",
+            "日本語ファイル.txt",
+            "ΣΟΦΟΣ.doc",
+            "İstanbul.log",
+            "Mixed日本語Name.TXT",
+            "𠮷野家🦀.txt",
+        ];
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        for (i, name) in cases.iter().enumerate() {
+            let units = u16s(name);
+            b.push(raw(100 + i as u64, 5, &units, false, 1, 1));
+        }
+        let mut idx = b.finish();
+        // Lone surrogate through the USN write path.
+        let first_new = idx.len() as u32;
+        idx.upsert(&raw(900, 5, &[0x0041, 0xD800, 0x0042], false, 1, 1));
+        idx.merge_new_into_permutations(first_new);
+
+        let check = |idx: &VolumeIndex| {
+            for (i, name) in cases.iter().enumerate() {
+                let id = idx.entry_by_record(100 + i as u64).unwrap();
+                assert_eq!(idx.name(id), name.as_bytes(), "{name}");
+                assert_eq!(idx.name(id).len(), idx.lower_name(id).len(), "{name}");
+            }
+            let id = idx.entry_by_record(900).unwrap();
+            let mut units = Vec::new();
+            crate::wtf8::wtf8_to_utf16(idx.name(id), &mut units);
+            assert_eq!(units, vec![0x0041, 0xD800, 0x0042]);
+        };
+        check(&idx);
+
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 1, 1).unwrap();
+        let (loaded, _, _) = VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+        check(&loaded);
+    }
+
+    /// In-place dir renames cross the fold-identity boundary in both
+    /// directions: gaining an original copy and dropping back to the
+    /// shared folded bytes.
+    #[test]
+    fn dir_rename_crosses_fold_identity_both_ways() {
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let plain = u16s("plain");
+        b.push(raw(10, 5, &plain, true, 0, 1));
+        let mut idx = b.finish();
+        let id = idx.entry_by_record(10).unwrap();
+        assert_eq!(idx.name(id), b"plain");
+        assert_eq!(idx.lower_name(id), b"plain");
+
+        let upper = u16s("Upper");
+        idx.rename_dir_in_place(10, &upper, 5).unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32);
+        assert_eq!(idx.name(id), b"Upper");
+        assert_eq!(idx.lower_name(id), b"upper");
+
+        let back = u16s("back_to_lower");
+        idx.rename_dir_in_place(10, &back, 5).unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32);
+        assert_eq!(idx.name(id), b"back_to_lower");
+        assert_eq!(idx.lower_name(id), b"back_to_lower");
+        assert_perm_name_sorted(&idx);
+    }
+
     /// Sizes round-trip across the u32 column + overflow map in both
     /// directions (grow past the sentinel, shrink back under it).
     #[test]
@@ -597,35 +706,48 @@ mod tests {
         assert_eq!(idx.size(id), u64::MAX);
     }
 
-    /// dead_name_bytes follows every pool-garbage source; snapshot restore
-    /// recomputes the tombstone share (rename gaps are a lost lower bound).
+    /// dead_name_bytes follows every pool-garbage source — the folded copy
+    /// always, the original copy when one existed ("Note.TXT" does, the
+    /// all-lowercase names don't); snapshot restore recomputes the
+    /// tombstone share (rename gaps are a lost lower bound).
     #[test]
     fn dead_name_bytes_tracks_pool_garbage() {
+        let owned = |idx: &VolumeIndex, record: u64| {
+            let id = idx.entry_by_record(record).unwrap();
+            let len = idx.name(id).len() as u64;
+            if idx.name(id) == idx.lower_name(id) {
+                len
+            } else {
+                len * 2
+            }
+        };
         let mut idx = build_sample();
         assert_eq!(idx.stats("C:").dead_name_bytes, 0);
 
-        let old_len = idx.name(idx.entry_by_record(100).unwrap()).len() as u64;
+        let note = owned(&idx, 100); // "Note.TXT": folded + orig copy
+        assert_eq!(note, 16);
         let first_new = idx.len() as u32;
         let renamed = u16s("renamed.txt");
         idx.upsert(&raw(100, 50, &renamed, false, 1, 1));
         idx.merge_new_into_permutations(first_new);
-        assert_eq!(idx.stats("C:").dead_name_bytes, old_len);
+        assert_eq!(idx.stats("C:").dead_name_bytes, note);
 
-        let del_len = idx.name(idx.entry_by_record(60).unwrap()).len() as u64;
+        let big = owned(&idx, 60); // "big.bin": folded copy only
+        assert_eq!(big, 7);
         idx.delete(60);
-        assert_eq!(idx.stats("C:").dead_name_bytes, old_len + del_len);
+        assert_eq!(idx.stats("C:").dead_name_bytes, note + big);
 
-        let dir_len = idx.name(idx.entry_by_record(50).unwrap()).len() as u64;
+        let docs = owned(&idx, 50);
         let dir2 = u16s("docs2");
         idx.rename_dir_in_place(50, &dir2, 5);
         let s = idx.stats("C:");
-        assert_eq!(s.dead_name_bytes, old_len + del_len + dir_len);
+        assert_eq!(s.dead_name_bytes, note + big + docs);
         assert!(s.pool_garbage_ratio > 0.0);
 
         let mut buf = Vec::new();
         idx.write_snapshot(&mut buf, 1, 1).unwrap();
         let (loaded, _, _) = VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
-        assert_eq!(loaded.stats("C:").dead_name_bytes, old_len + del_len);
+        assert_eq!(loaded.stats("C:").dead_name_bytes, note + big);
     }
 
     #[test]

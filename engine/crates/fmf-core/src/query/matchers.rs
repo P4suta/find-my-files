@@ -50,9 +50,27 @@ impl EvalCtx {
     }
 }
 
+/// The haystack for a case-exact name literal. Fold-identical entries (73%
+/// on real C:) resolve in O(1): a needle that is not its own fold can never
+/// occur in a name whose every character is fold-stable (UTF-8/WTF-8
+/// self-synchronization makes the byte-level argument sound), and for a
+/// fold-stable needle the folded bytes *are* the original bytes.
 #[inline]
-fn eval(idx: &VolumeIndex, memo: &PathMemos, ctx: &mut EvalCtx, m: &Matcher, id: EntryId) -> bool {
-    match m {
+fn exact_hay<'a>(idx: &'a VolumeIndex, t: &CTerm, id: EntryId) -> Option<&'a [u8]> {
+    if idx.is_fold_identical(id) {
+        if t.exact_needle_unstable {
+            None
+        } else {
+            Some(idx.lower_name(id))
+        }
+    } else {
+        Some(idx.name(id))
+    }
+}
+
+#[inline]
+fn eval(idx: &VolumeIndex, memo: &PathMemos, ctx: &mut EvalCtx, t: &CTerm, id: EntryId) -> bool {
+    match &t.matcher {
         Matcher::True => true,
         Matcher::Size { min, max } => !idx.is_dir(id) && (*min..=*max).contains(&idx.size(id)),
         Matcher::Mtime { min, max } => (*min..=*max).contains(&idx.mtime(id)),
@@ -71,7 +89,10 @@ fn eval(idx: &VolumeIndex, memo: &PathMemos, ctx: &mut EvalCtx, m: &Matcher, id:
             let hay = if *folded {
                 idx.lower_name(id)
             } else {
-                idx.name(id)
+                match exact_hay(idx, t, id) {
+                    Some(h) => h,
+                    None => return false,
+                }
             };
             finder.find(hay).is_some()
         }
@@ -79,7 +100,10 @@ fn eval(idx: &VolumeIndex, memo: &PathMemos, ctx: &mut EvalCtx, m: &Matcher, id:
             let hay = if *folded {
                 idx.lower_name(id)
             } else {
-                idx.name(id)
+                match exact_hay(idx, t, id) {
+                    Some(h) => h,
+                    None => return false,
+                }
             };
             hay.starts_with(bytes)
         }
@@ -87,7 +111,10 @@ fn eval(idx: &VolumeIndex, memo: &PathMemos, ctx: &mut EvalCtx, m: &Matcher, id:
             let hay = if *folded {
                 idx.lower_name(id)
             } else {
-                idx.name(id)
+                match exact_hay(idx, t, id) {
+                    Some(h) => h,
+                    None => return false,
+                }
             };
             hay.ends_with(bytes)
         }
@@ -127,7 +154,7 @@ pub(super) fn terms_match_iter<'a>(
 ) -> bool {
     ctx.reset();
     for t in terms {
-        if eval(idx, memo, ctx, &t.matcher, id) == t.negated {
+        if eval(idx, memo, ctx, t, id) == t.negated {
             return false;
         }
     }

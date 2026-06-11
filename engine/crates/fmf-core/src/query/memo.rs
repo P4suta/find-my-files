@@ -38,7 +38,7 @@ impl OffsetTable {
             offs: pairs.iter().map(|p| p.0).collect(),
             ids: pairs.iter().map(|p| p.1).collect(),
             covers_entries: idx.len() as u32,
-            covers_pool_len: idx.name_pool_bytes().len() as u32,
+            covers_pool_len: idx.lower_pool_bytes().len() as u32,
             stale_pairs: 0,
         }
     }
@@ -51,7 +51,7 @@ impl OffsetTable {
     /// in and their old pairs left behind as stale.
     pub(super) fn extend_from(idx: &VolumeIndex, prev: std::sync::Arc<OffsetTable>) -> Self {
         let n = idx.len() as u32;
-        let pool_len = idx.name_pool_bytes().len() as u32;
+        let pool_len = idx.lower_pool_bytes().len() as u32;
         // Entries and pool are append-only within a structural generation —
         // a regressed watermark means the cache got crossed with a different
         // index. Rebuilding recovers; the fact must not vanish.
@@ -752,20 +752,16 @@ mod tests {
                 Driver::Sub {
                     finder: memmem::Finder::new(b"doc").into_owned(),
                     needle_len: 3,
-                    folded: true,
                 },
                 Driver::Sub {
                     finder: memmem::Finder::new(b"renamed").into_owned(),
                     needle_len: 7,
-                    folded: true,
                 },
                 Driver::Prefix {
                     bytes: b"note".to_vec(),
-                    folded: true,
                 },
                 Driver::Suffixes {
                     suffixes: vec![b".txt".to_vec()],
-                    folded: true,
                     files_only: true,
                 },
             ];

@@ -139,7 +139,10 @@ pub fn search(
                 let table = table.as_ref().expect("offset table built");
                 let candidates = driver_candidates(idx, table, driver, skip_excluded);
                 metrics.entries_scanned += candidates.len() as u64;
-                if group.terms.is_empty() {
+                // A case-exact source term makes the folded sweep a superset:
+                // its exact comparison joins the residual pass (the same
+                // matcher refine already runs — matchers.rs is unchanged).
+                if group.terms.is_empty() && group.driver_exact {
                     for id in candidates {
                         bitmap[id as usize / 64] |= 1u64 << (id as usize % 64);
                     }
@@ -151,7 +154,15 @@ pub fn search(
                             chunk
                                 .iter()
                                 .copied()
-                                .filter(|&id| terms_match(idx, &memo, &mut ctx, &group.terms, id))
+                                .filter(|&id| {
+                                    terms_match_iter(
+                                        idx,
+                                        &memo,
+                                        &mut ctx,
+                                        group.residual_terms(),
+                                        id,
+                                    )
+                                })
                                 .collect()
                         })
                         .collect();
@@ -576,8 +587,10 @@ mod tests {
             "x",
             "𠮷",
             "report",
+            "Report",
             "ort",
             "tab",
+            "TAB",
             "ba",
             "ファイル",
         ];
@@ -652,6 +665,42 @@ mod tests {
             let mut got = names(&idx, needle);
             got.sort();
             assert_eq!(got, expect, "needle `{needle}` diverged from oracle");
+        }
+
+        // Smart-case uppercase needles: the folded sweep over-approximates
+        // (case-exact terms drive as folded supersets) and the exact
+        // residual must filter back to byte-exact matches.
+        let upper_needles = ["Report", "Rep", "TAB", "Ort"];
+        assert!(
+            names_made.iter().any(|n| n.contains("Report")),
+            "oracle coverage: mixed-case names must exist"
+        );
+        for needle in upper_needles {
+            let mut expect: Vec<String> = names_made
+                .iter()
+                .filter(|n| n.contains(needle))
+                .cloned()
+                .collect();
+            expect.sort();
+            let mut got = names(&idx, needle);
+            got.sort();
+            assert_eq!(got, expect, "smart-case needle `{needle}` diverged");
+        }
+        // Sensitive mode: every needle is byte-exact, lowercase ones too.
+        let sensitive = QueryOptions {
+            case: CaseMode::Sensitive,
+            ..Default::default()
+        };
+        for needle in needles.iter().chain(upper_needles.iter()) {
+            let mut expect: Vec<String> = names_made
+                .iter()
+                .filter(|n| n.contains(needle))
+                .cloned()
+                .collect();
+            expect.sort();
+            let mut got = run(&idx, needle, sensitive);
+            got.sort();
+            assert_eq!(got, expect, "sensitive needle `{needle}` diverged");
         }
 
         // ── Refine oracle: for every subsumed step of a typing sequence,

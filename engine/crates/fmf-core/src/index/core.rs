@@ -8,8 +8,15 @@ use super::frn::FrnIndex;
 use super::{EntryId, NO_PARENT, SortKey, flags, masked};
 
 pub struct VolumeIndex {
-    pub(super) name_pool: Vec<u8>,
+    /// The one contiguous, sweepable pool: every entry's *folded* name at
+    /// `name_off..name_off+name_len`. 73.2% of real-C: names fold to
+    /// themselves (docs/RESEARCH.md), so the original spelling is stored
+    /// only where it differs — in `orig_pool` at `orig_off`, same length
+    /// (the fold is length-preserving, wtf8.rs). `orig_off == u32::MAX`
+    /// means the folded bytes *are* the original.
     pub(super) lower_pool: Vec<u8>,
+    pub(super) orig_pool: Vec<u8>,
+    pub(super) orig_off: Vec<u32>,
     pub(super) name_off: Vec<u32>,
     pub(super) name_len: Vec<u16>,
     pub(super) parent: Vec<EntryId>,
@@ -35,10 +42,11 @@ pub struct VolumeIndex {
     /// updates leave it untouched.
     pub(super) dir_topology_generation: u64,
     pub(super) tombstones: u32,
-    /// Abandoned name bytes *per pool* (tombstoned rows and in-place dir
-    /// renames leave their old bytes behind; ×2 pools is the reclaimable
-    /// garbage). Compaction-trigger input. Not persisted — recomputed from
-    /// tombstones on restore, so rename gaps make it a lower bound there.
+    /// Abandoned name bytes across both pools (tombstoned rows and in-place
+    /// dir renames leave their old bytes behind: folded copy always, the
+    /// original copy when one existed). Compaction-trigger input. Not
+    /// persisted — recomputed from tombstones on restore, so rename gaps
+    /// make it a lower bound there.
     pub(super) dead_name_bytes: u64,
     /// Query-independent caches derived from index content (dir-path memo,
     /// pool offset table, …) keyed by `content_generation` and value type.
@@ -73,10 +81,16 @@ impl VolumeIndex {
 
     pub const ROOT: EntryId = 0;
 
+    /// The original-spelling name. Fold-identical entries (most of them)
+    /// borrow straight from the folded pool — the bytes are the same.
     #[inline]
     pub fn name(&self, id: EntryId) -> &[u8] {
-        let off = self.name_off[id as usize] as usize;
-        &self.name_pool[off..off + self.name_len[id as usize] as usize]
+        match self.orig_off[id as usize] {
+            u32::MAX => self.lower_name(id),
+            off => {
+                &self.orig_pool[off as usize..off as usize + self.name_len[id as usize] as usize]
+            }
+        }
     }
 
     #[inline]
@@ -165,8 +179,17 @@ impl VolumeIndex {
     }
 
     #[inline]
-    pub(crate) fn name_pool_bytes(&self) -> &[u8] {
-        &self.name_pool
+    pub(crate) fn name_len_of(&self, id: EntryId) -> usize {
+        self.name_len[id as usize] as usize
+    }
+
+    /// True when the entry's original spelling is its folded form — the
+    /// case-exact matchers' fast path: such a name can never contain a
+    /// needle with fold-unstable characters, and for fold-stable needles
+    /// the folded comparison *is* the exact comparison.
+    #[inline]
+    pub(crate) fn is_fold_identical(&self, id: EntryId) -> bool {
+        self.orig_off[id as usize] == u32::MAX
     }
 
     #[inline]
@@ -263,7 +286,9 @@ impl VolumeIndex {
     /// The map size is an estimate (hashbrown control bytes + slot padding).
     pub fn stats(&self, volume: &str) -> crate::metrics::IndexStats {
         let n = self.len() as u64;
-        let offsets = (self.name_off.capacity() * 4 + self.name_len.capacity() * 2) as u64;
+        let offsets = (self.name_off.capacity() * 4
+            + self.name_len.capacity() * 2
+            + self.orig_off.capacity() * 4) as u64;
         // perm_name only — the lazy size/mtime permutations are accounted
         // with the derived caches (`derived_cache_bytes`).
         let perms = (self.perm_name.capacity() * 4) as u64;
@@ -275,7 +300,10 @@ impl VolumeIndex {
             entries: n,
             live_entries: self.live_len() as u64,
             tombstones: self.tombstones as u64,
-            name_pool_bytes: self.name_pool.capacity() as u64,
+            // Field name kept for FFI/JSON compatibility; this is the
+            // original-spelling overflow pool these days (fold-identical
+            // names live only in lower_pool).
+            name_pool_bytes: self.orig_pool.capacity() as u64,
             lower_pool_bytes: self.lower_pool.capacity() as u64,
             offsets_bytes: offsets,
             parent_bytes: (self.parent.capacity() * 4) as u64,
@@ -295,9 +323,11 @@ impl VolumeIndex {
             structural_generation: self.structural_generation,
             ..Default::default()
         };
+        // dead_name_bytes already counts every abandoned copy across both
+        // pools (folded always, original when present).
         let pool_bytes = s.name_pool_bytes + s.lower_pool_bytes;
         s.pool_garbage_ratio = if pool_bytes > 0 {
-            (self.dead_name_bytes * 2) as f64 / pool_bytes as f64
+            self.dead_name_bytes as f64 / pool_bytes as f64
         } else {
             0.0
         };
@@ -322,8 +352,9 @@ impl VolumeIndex {
     /// Trim over-allocated columns after a bulk build.
     pub fn shrink_to_fit(&mut self) {
         self.frn_index.shrink_to_fit();
-        self.name_pool.shrink_to_fit();
         self.lower_pool.shrink_to_fit();
+        self.orig_pool.shrink_to_fit();
+        self.orig_off.shrink_to_fit();
         self.name_off.shrink_to_fit();
         self.name_len.shrink_to_fit();
         self.parent.shrink_to_fit();

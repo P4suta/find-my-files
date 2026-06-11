@@ -24,8 +24,9 @@ impl VolumeIndexBuilder {
     /// `root_record` is the MFT record number of the root directory (5 on NTFS).
     pub fn new(volume_label: &str, root_record: u64) -> Self {
         let mut idx = VolumeIndex {
-            name_pool: Vec::new(),
             lower_pool: Vec::new(),
+            orig_pool: Vec::new(),
+            orig_off: Vec::new(),
             name_off: Vec::new(),
             name_len: Vec::new(),
             parent: Vec::new(),

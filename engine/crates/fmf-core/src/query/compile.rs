@@ -103,10 +103,18 @@ impl Matcher {
 pub(super) struct CTerm {
     pub negated: bool,
     pub matcher: Matcher,
+    /// Derived for case-exact name literals: the needle is *not* its own
+    /// fold (it contains an uppercase/foldable character). Such a needle
+    /// can never occur in a fold-identical name — the matcher's O(1)
+    /// reject for 73% of real-C: entries (matchers.rs).
+    pub exact_needle_unstable: bool,
 }
 
-/// Candidate generator for one AND group — a single sweep over the name
-/// pools instead of a per-entry matcher call.
+/// Candidate generator for one AND group — a single sweep over the folded
+/// name pool (the only contiguous one) instead of a per-entry matcher call.
+/// Needles are always folded; a case-exact source term makes the sweep a
+/// superset and its exact comparison runs as a residual
+/// (`CompiledGroup::driver_exact`).
 // The Finder-carrying variants dwarf the unit ones; boxing would add an
 // indirection to the hottest call in the engine for no measurable win.
 #[allow(clippy::large_enum_variant)]
@@ -118,15 +126,12 @@ pub(super) enum Driver {
     Sub {
         finder: memmem::Finder<'static>,
         needle_len: usize,
-        folded: bool,
     },
     Prefix {
         bytes: Vec<u8>,
-        folded: bool,
     },
     Suffixes {
         suffixes: Vec<Vec<u8>>,
-        folded: bool,
         files_only: bool,
     },
 }
@@ -150,9 +155,13 @@ pub(super) struct CompiledGroup {
     pub terms: Vec<CTerm>,
     /// The term the driver was built from (None for FullScan/MatchAll).
     /// The sweep never reads it — it exists so cached-query refinement can
-    /// re-evaluate the *complete* group per candidate (exec::refine) and so
-    /// subsumption sees every condition (subsume.rs).
+    /// re-evaluate the *complete* group per candidate (exec::refine), so
+    /// subsumption sees every condition (subsume.rs), and so the exec can
+    /// verify it per candidate when the sweep was a superset (below).
     pub driver_term: Option<CTerm>,
+    /// False when the source term is case-exact: the folded sweep then
+    /// over-approximates and `driver_term` must be verified per candidate.
+    pub driver_exact: bool,
 }
 
 impl CompiledGroup {
@@ -160,6 +169,15 @@ impl CompiledGroup {
     /// selective, so first) followed by the cost-ordered residuals.
     pub(super) fn all_terms(&self) -> impl Iterator<Item = &CTerm> {
         self.driver_term.iter().chain(self.terms.iter())
+    }
+
+    /// The conditions the sweep did *not* fully check: the residuals, plus
+    /// the driver's source term when the sweep was a folded superset.
+    pub(super) fn residual_terms(&self) -> impl Iterator<Item = &CTerm> {
+        self.driver_term
+            .iter()
+            .filter(|_| !self.driver_exact)
+            .chain(self.terms.iter())
     }
 }
 
@@ -309,7 +327,30 @@ fn compile_term(
         Term::Not(_) => unreachable!("nested Not is flattened by the parser"),
     };
 
-    Ok(CTerm { negated, matcher })
+    let unstable = |bytes: &[u8]| {
+        let s = std::str::from_utf8(bytes).expect("query needles are valid UTF-8");
+        wtf8::has_uppercase(s)
+    };
+    let exact_needle_unstable = match &matcher {
+        Matcher::NameSub {
+            finder,
+            folded: false,
+        } => unstable(finder.needle()),
+        Matcher::NamePrefix {
+            bytes,
+            folded: false,
+        }
+        | Matcher::NameSuffix {
+            bytes,
+            folded: false,
+        } => unstable(bytes),
+        _ => false,
+    };
+    Ok(CTerm {
+        negated,
+        matcher,
+        exact_needle_unstable,
+    })
 }
 
 /// Driver candidate score — longer literals are more selective. Returns
@@ -331,37 +372,72 @@ fn driver_score(t: &CTerm) -> Option<usize> {
     }
 }
 
+/// Fold a case-exact needle for the superset sweep. Needles always
+/// originate from the query `&str`, so the bytes are valid UTF-8; the
+/// fold's length preservation keeps prefix/suffix anchors sound.
+fn fold_exact_needle(bytes: &[u8]) -> Vec<u8> {
+    let s = std::str::from_utf8(bytes).expect("query needles are valid UTF-8");
+    wtf8::fold_str(s).into_bytes()
+}
+
 /// Build the sweep driver from a term, leaving the term intact (it is kept
-/// as `CompiledGroup::driver_term` for refinement/subsumption).
-fn driver_for(t: &CTerm) -> Driver {
+/// as `CompiledGroup::driver_term` for refinement/subsumption/superset
+/// verification). Returns the driver and whether it fully checks the term
+/// (false = folded superset of a case-exact term; the original-case
+/// comparison runs as a residual — the folded pool is the only contiguous
+/// one, and an original-case match always implies the folded match).
+fn driver_for(t: &CTerm) -> (Driver, bool) {
     match &t.matcher {
-        Matcher::NameSub { finder, folded } => Driver::Sub {
-            needle_len: finder.needle().len(),
-            finder: finder.clone(),
-            folded: *folded,
-        },
-        Matcher::NamePrefix { bytes, folded } => Driver::Prefix {
-            bytes: bytes.clone(),
-            folded: *folded,
-        },
-        Matcher::NameSuffix { bytes, folded } => Driver::Suffixes {
-            suffixes: vec![bytes.clone()],
-            folded: *folded,
-            files_only: false,
-        },
-        Matcher::Ext { exts } => Driver::Suffixes {
-            suffixes: exts
-                .iter()
-                .map(|e| {
-                    let mut s = Vec::with_capacity(e.len() + 1);
-                    s.push(b'.');
-                    s.extend_from_slice(e);
-                    s
-                })
-                .collect(),
-            folded: true,
-            files_only: true,
-        },
+        Matcher::NameSub { finder, folded } => {
+            let needle = if *folded {
+                finder.needle().to_vec()
+            } else {
+                fold_exact_needle(finder.needle())
+            };
+            (
+                Driver::Sub {
+                    needle_len: needle.len(),
+                    finder: memmem::Finder::new(&needle).into_owned(),
+                },
+                *folded,
+            )
+        }
+        Matcher::NamePrefix { bytes, folded } => (
+            Driver::Prefix {
+                bytes: if *folded {
+                    bytes.clone()
+                } else {
+                    fold_exact_needle(bytes)
+                },
+            },
+            *folded,
+        ),
+        Matcher::NameSuffix { bytes, folded } => (
+            Driver::Suffixes {
+                suffixes: vec![if *folded {
+                    bytes.clone()
+                } else {
+                    fold_exact_needle(bytes)
+                }],
+                files_only: false,
+            },
+            *folded,
+        ),
+        Matcher::Ext { exts } => (
+            Driver::Suffixes {
+                suffixes: exts
+                    .iter()
+                    .map(|e| {
+                        let mut s = Vec::with_capacity(e.len() + 1);
+                        s.push(b'.');
+                        s.extend_from_slice(e);
+                        s
+                    })
+                    .collect(),
+                files_only: true,
+            },
+            true,
+        ),
         _ => unreachable!("driver_score gated"),
     }
 }
@@ -381,6 +457,7 @@ pub fn compile(
         // Pick the most selective positive literal as the driver and pull it
         // out of the residual list. Empty needles (Matcher::True) never score.
         let mut driver_term = None;
+        let mut driver_exact = true;
         let driver = if terms.is_empty() {
             Driver::MatchAll
         } else {
@@ -394,8 +471,9 @@ pub fn compile(
             match best {
                 Some((score, i)) if score >= 4 => {
                     let t = terms.swap_remove(i);
-                    let d = driver_for(&t);
+                    let (d, exact) = driver_for(&t);
                     driver_term = Some(t);
+                    driver_exact = exact;
                     d
                 }
                 _ => Driver::FullScan,
@@ -407,6 +485,7 @@ pub fn compile(
             driver,
             terms,
             driver_term,
+            driver_exact,
         });
     }
 

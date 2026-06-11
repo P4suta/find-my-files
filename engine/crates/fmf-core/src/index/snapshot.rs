@@ -13,7 +13,10 @@ use super::{EntryId, VolumeIndex, flags};
 // trigger a full rescan rather than load with wrong semantics.
 // 03: perm_size/perm_mtime sections dropped (lazy derived caches now) and
 //     the size column split into u32 + an overflow id/size pair list.
-const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX03";
+// 04: name_pool replaced by the fold-overflow layout — lower_pool is the
+//     only full-length pool, originals live in orig_pool via the orig_off
+//     sentinel column.
+const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX04";
 
 fn pod_bytes<T: Copy>(v: &[T]) -> &[u8] {
     // Safety: T is a plain-old-data column type (u8/u16/u32/u64/i64).
@@ -86,8 +89,9 @@ impl VolumeIndex {
         h.update(&head);
         w.write_all(&head)?;
 
-        write_vec(w, &mut h, &self.name_pool)?;
         write_vec(w, &mut h, &self.lower_pool)?;
+        write_vec(w, &mut h, &self.orig_pool)?;
+        write_vec(w, &mut h, &self.orig_off)?;
         write_vec(w, &mut h, &self.name_off)?;
         write_vec(w, &mut h, &self.name_len)?;
         write_vec(w, &mut h, &self.parent)?;
@@ -125,8 +129,9 @@ impl VolumeIndex {
         let next_usn = i64::from_le_bytes(head[16..24].try_into().unwrap());
         let count = u64::from_le_bytes(head[24..32].try_into().unwrap()) as usize;
 
-        let name_pool: Vec<u8> = read_vec(r, &mut h)?;
         let lower_pool: Vec<u8> = read_vec(r, &mut h)?;
+        let orig_pool: Vec<u8> = read_vec(r, &mut h)?;
+        let orig_off: Vec<u32> = read_vec(r, &mut h)?;
         let name_off: Vec<u32> = read_vec(r, &mut h)?;
         let name_len: Vec<u16> = read_vec(r, &mut h)?;
         let parent: Vec<u32> = read_vec(r, &mut h)?;
@@ -144,6 +149,7 @@ impl VolumeIndex {
             return Err(bad("checksum mismatch"));
         }
         let columns_ok = [
+            orig_off.len(),
             name_off.len(),
             name_len.len(),
             parent.len(),
@@ -155,8 +161,26 @@ impl VolumeIndex {
         ]
         .iter()
         .all(|&l| l == count);
-        if !columns_ok || name_pool.len() != lower_pool.len() {
+        if !columns_ok {
             return Err(bad("column length mismatch"));
+        }
+        // Name slices are untrusted input: every (offset, len) pair must
+        // stay inside its pool or `name()`/`lower_name()` would panic on a
+        // crafted-but-checksum-valid stream.
+        for i in 0..count {
+            let len = name_len[i] as usize;
+            let lower_ok = (name_off[i] as usize)
+                .checked_add(len)
+                .is_some_and(|end| end <= lower_pool.len());
+            let orig_ok = match orig_off[i] {
+                u32::MAX => true,
+                off => (off as usize)
+                    .checked_add(len)
+                    .is_some_and(|end| end <= orig_pool.len()),
+            };
+            if !lower_ok || !orig_ok {
+                return Err(bad("name slice out of pool bounds"));
+            }
         }
         // Overflow pairs are untrusted too: every id must point at a
         // sentinel slot (strictly ascending — no duplicates), every
@@ -191,14 +215,20 @@ impl VolumeIndex {
         for (i, f) in flag.iter().enumerate() {
             if f & flags::TOMBSTONE != 0 {
                 tombstones += 1;
-                dead_name_bytes += name_len[i] as u64;
+                let len = name_len[i] as u64;
+                dead_name_bytes += if orig_off[i] == u32::MAX {
+                    len
+                } else {
+                    len * 2
+                };
             }
         }
 
         Ok((
             Self {
-                name_pool,
                 lower_pool,
+                orig_pool,
+                orig_off,
                 name_off,
                 name_len,
                 parent,
@@ -294,29 +324,29 @@ mod tests {
     fn snapshot_size_overflow_inconsistencies_are_rejected() {
         // An overflow pair pointing at a non-sentinel slot.
         let mut sections = valid_sections();
-        sections[6] = vec![0u8; 4]; // ovf id 0, but size_lo[0] != MAX
-        sections[7] = 0x00FF_FFFF_FFFF_u64.to_le_bytes().to_vec();
+        sections[7] = vec![0u8; 4]; // ovf id 0, but size_lo[0] != MAX
+        sections[8] = 0x00FF_FFFF_FFFF_u64.to_le_bytes().to_vec();
         let err = read_crafted(sections);
         assert!(err.to_string().contains("sentinel mismatch"), "{err}");
 
         // A sentinel slot without its overflow pair.
         let mut sections = valid_sections();
-        sections[5] = u32::MAX.to_le_bytes().to_vec();
+        sections[6] = u32::MAX.to_le_bytes().to_vec();
         let err = read_crafted(sections);
         assert!(err.to_string().contains("sentinel mismatch"), "{err}");
 
         // Pair present but the stored size doesn't need the overflow.
         let mut sections = valid_sections();
-        sections[5] = u32::MAX.to_le_bytes().to_vec();
-        sections[6] = vec![0u8; 4];
-        sections[7] = 42u64.to_le_bytes().to_vec();
+        sections[6] = u32::MAX.to_le_bytes().to_vec();
+        sections[7] = vec![0u8; 4];
+        sections[8] = 42u64.to_le_bytes().to_vec();
         let err = read_crafted(sections);
         assert!(err.to_string().contains("pair invalid"), "{err}");
 
         // Mismatched ids/sizes section lengths.
         let mut sections = valid_sections();
-        sections[5] = u32::MAX.to_le_bytes().to_vec();
-        sections[6] = vec![0u8; 4];
+        sections[6] = u32::MAX.to_le_bytes().to_vec();
+        sections[7] = vec![0u8; 4];
         let err = read_crafted(sections);
         assert!(err.to_string().contains("length mismatch"), "{err}");
     }
@@ -355,22 +385,24 @@ mod tests {
     }
 
     /// Section byte sizes for a structurally valid count=1 snapshot, in
-    /// read order: pools ×2, name_off, name_len, parent, size_lo,
-    /// size-overflow ids/sizes (empty), mtime, frn, flag, perm_name.
+    /// read order: lower_pool, orig_pool (empty), orig_off (sentinel),
+    /// name_off, name_len, parent, size_lo, size-overflow ids/sizes
+    /// (empty), mtime, frn, flag, perm_name.
     fn valid_sections() -> Vec<Vec<u8>> {
         vec![
-            b"a".to_vec(), // name_pool
-            b"a".to_vec(), // lower_pool
-            vec![0u8; 4],  // name_off (1 × u32)
-            vec![0u8; 2],  // name_len (1 × u16)
-            vec![0u8; 4],  // parent
-            vec![0u8; 4],  // size_lo (1 × u32)
-            Vec::new(),    // size overflow ids (none)
-            Vec::new(),    // size overflow sizes (none)
-            vec![0u8; 8],  // mtime
-            vec![0u8; 8],  // frn
-            vec![0u8; 1],  // flag
-            vec![0u8; 4],  // perm_name
+            b"a".to_vec(),                   // lower_pool
+            Vec::new(),                      // orig_pool (fold-identical)
+            u32::MAX.to_le_bytes().to_vec(), // orig_off (sentinel)
+            vec![0u8; 4],                    // name_off (1 × u32)
+            1u16.to_le_bytes().to_vec(),     // name_len (1 byte name)
+            vec![0u8; 4],                    // parent
+            vec![0u8; 4],                    // size_lo (1 × u32)
+            Vec::new(),                      // size overflow ids (none)
+            Vec::new(),                      // size overflow sizes (none)
+            vec![0u8; 8],                    // mtime
+            vec![0u8; 8],                    // frn
+            vec![0u8; 1],                    // flag
+            vec![0u8; 4],                    // perm_name
         ]
     }
 
@@ -414,7 +446,7 @@ mod tests {
     fn snapshot_column_count_mismatch_is_rejected_not_panic() {
         // name_off carries 2 entries while the header says count=1.
         let mut sections = valid_sections();
-        sections[2] = vec![0u8; 8];
+        sections[3] = vec![0u8; 8];
         let err = read_crafted(sections);
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("column length"), "{err}");
@@ -424,20 +456,36 @@ mod tests {
     fn snapshot_misaligned_section_is_rejected_not_panic() {
         // 7 bytes cannot be a u32 column.
         let mut sections = valid_sections();
-        sections[2] = vec![0u8; 7];
+        sections[3] = vec![0u8; 7];
         let err = read_crafted(sections);
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("section size"), "{err}");
     }
 
     #[test]
-    fn snapshot_pool_length_mismatch_is_rejected() {
-        // name_pool and lower_pool must be byte-for-byte the same length.
+    fn snapshot_out_of_bounds_name_slices_are_rejected() {
+        // Lower slice runs past the pool (len 2 over a 1-byte pool).
         let mut sections = valid_sections();
-        sections[0] = b"ab".to_vec();
+        sections[4] = 2u16.to_le_bytes().to_vec();
         let err = read_crafted(sections);
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("column length"), "{err}");
+        assert!(err.to_string().contains("out of pool bounds"), "{err}");
+
+        // A non-sentinel orig_off pointing past the (empty) orig pool.
+        let mut sections = valid_sections();
+        sections[2] = 0u32.to_le_bytes().to_vec();
+        let err = read_crafted(sections);
+        assert!(err.to_string().contains("out of pool bounds"), "{err}");
+
+        // Control: a real orig byte at offset 0 loads fine and reads back.
+        let mut sections = valid_sections();
+        sections[1] = b"A".to_vec();
+        sections[2] = 0u32.to_le_bytes().to_vec();
+        let refs: Vec<&[u8]> = sections.iter().map(Vec::as_slice).collect();
+        let buf = craft_stream(1, &refs);
+        let (idx, _, _) = VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+        assert_eq!(idx.name(0), b"A");
+        assert_eq!(idx.lower_name(0), b"a");
     }
 
     #[test]
