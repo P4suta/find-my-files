@@ -180,6 +180,9 @@ pub struct ScanStats {
     pub corrupt_records: u64,
     /// Deferred $ATTRIBUTE_LIST records whose name never resolved.
     pub deferred_unresolved: u64,
+    /// Name-bearing extension records past the in-RAM cache cap (those
+    /// targets fall back to disk reads in the deferred pass).
+    pub ext_name_cache_skipped: u64,
 }
 
 /// Full initial scan: read the volume's $MFT and build the in-memory index.

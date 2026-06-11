@@ -28,6 +28,8 @@ use ntfs_reader::file::NtfsFile;
 use ntfs_reader::mft::Mft;
 use ntfs_reader::volume::Volume;
 
+use rustc_hash::FxHashMap;
+
 use crate::index::{EncodedEntry, VolumeIndex, VolumeIndexBuilder};
 use crate::mft::{MftError, ScanStats, peak_working_set, pick_name};
 use crate::wtf8;
@@ -39,6 +41,10 @@ const PARSE_SUB: usize = 1 << 20;
 /// Chunk buffers cycling between the I/O thread and the parser (one being
 /// read, one queued, one being parsed) — bounds peak RAM at 3 chunks.
 const PIPELINE_BUFFERS: usize = 3;
+/// Upper bound on cached name-bearing extension records (~1KiB each, so
+/// ≤128MiB transient). A real C: has tens of thousands; past the cap the
+/// deferred pass falls back to disk reads for the remainder.
+const EXT_NAME_CACHE_CAP: usize = 128 << 10;
 const SECTOR: usize = 512;
 
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
@@ -143,10 +149,58 @@ impl RecordReader<'_> {
     }
 }
 
+/// Disk fallback for extension records missing from the streamed cache —
+/// opened only when actually needed (expected: never on a healthy scan).
+struct LazyRecordReader<'a> {
+    volume_path: &'a str,
+    map: &'a RunMap,
+    record_size: usize,
+    inner: Option<RecordReader<'a>>,
+    failed: bool,
+}
+
+impl<'a> LazyRecordReader<'a> {
+    fn new(volume_path: &'a str, map: &'a RunMap, record_size: usize) -> Self {
+        LazyRecordReader {
+            volume_path,
+            map,
+            record_size,
+            inner: None,
+            failed: false,
+        }
+    }
+
+    fn read_record(&mut self, number: u64) -> Option<&[u8]> {
+        if self.inner.is_none() && !self.failed {
+            match open_raw_volume(self.volume_path) {
+                Ok(file) => {
+                    self.inner = Some(RecordReader {
+                        file,
+                        map: self.map,
+                        record_size: self.record_size,
+                        buf: Vec::new(),
+                    });
+                }
+                Err(e) => {
+                    self.failed = true;
+                    tracing::warn!(error = %e, "deferred-pass fallback volume handle unavailable");
+                }
+            }
+        }
+        self.inner.as_mut()?.read_record(number)
+    }
+}
+
 /// Resolve the display name of a record whose $FILE_NAME lives in extension
-/// records (resident $ATTRIBUTE_LIST → referenced records). Mirrors
-/// ntfs-reader's get_best_file_name without needing the whole MFT in RAM.
-fn resolve_attr_list_name(base: &NtfsFile, rr: &mut RecordReader) -> Option<NtfsFileName> {
+/// records (resident $ATTRIBUTE_LIST → referenced records). Targets come
+/// from the streamed extension-record cache; anything missing (cache cap,
+/// torn records) falls back to a targeted disk read. Mirrors ntfs-reader's
+/// get_best_file_name without needing the whole MFT in RAM.
+fn resolve_attr_list_name(
+    base: &NtfsFile,
+    ext: &FxHashMap<u64, Box<[u8]>>,
+    rr: &mut LazyRecordReader,
+) -> Option<NtfsFileName> {
     let attr = base.get_attribute(NtfsAttributeType::AttributeList)?;
     if attr.header.is_non_resident != 0 {
         return None; // rare; counted as skipped
@@ -170,11 +224,14 @@ fn resolve_attr_list_name(base: &NtfsFile, rr: &mut RecordReader) -> Option<Ntfs
         }
         if entry.type_id == NtfsAttributeType::FileName as u32 {
             let target = entry.reference();
-            if target != base.number
-                && let Some(bytes) = rr.read_record(target)
-            {
-                let f = NtfsFile::new(target, bytes);
-                if let Some(name) = pick_name(&f) {
+            if target != base.number {
+                let picked = match ext.get(&target) {
+                    Some(bytes) => pick_name(&NtfsFile::new(target, bytes)),
+                    None => rr
+                        .read_record(target)
+                        .and_then(|bytes| pick_name(&NtfsFile::new(target, bytes))),
+                };
+                if let Some(name) = picked {
                     let ns = name.header.namespace;
                     if ns == NtfsFileNamespace::Win32 as u8
                         || ns == NtfsFileNamespace::Win32AndDos as u8
@@ -245,6 +302,10 @@ struct ParsedBatch {
     name_pool: Vec<u8>,
     lower_pool: Vec<u8>,
     deferred: Vec<(u64, Box<[u8]>)>,
+    /// Extension records carrying a $FILE_NAME — the targets the deferred
+    /// pass will need. Keeping them now turns that pass's random disk reads
+    /// into RAM lookups (the whole $MFT just streamed through here anyway).
+    extensions: Vec<(u64, Box<[u8]>)>,
     files: u64,
     dirs: u64,
     corrupt_records: u64,
@@ -306,6 +367,10 @@ fn parse_subrange(bytes: &mut [u8], first_logical: u64, record_size: usize) -> P
         }
         if { f.header.base_reference } & 0x0000_FFFF_FFFF_FFFF != 0 {
             out.extension_records += 1;
+            if f.get_attribute(NtfsAttributeType::FileName).is_some() {
+                out.extensions
+                    .push((number, rec.to_vec().into_boxed_slice()));
+            }
             continue;
         }
 
@@ -322,61 +387,32 @@ fn parse_subrange(bytes: &mut [u8], first_logical: u64, record_size: usize) -> P
     out
 }
 
-/// Resolve deferred $ATTRIBUTE_LIST names in parallel, so the random
-/// single-record reads — the slowest part of a real-volume scan once
-/// streaming overlaps — issue at queue depth instead of one at a time.
-/// Volume handles are pooled per rayon thread and opened lazily: opening
-/// `\\.\C:` goes through every filesystem filter driver and costs tens of
-/// ms — a per-chunk open measured 5× slower than the serial pass it was
-/// meant to replace. Chunk order is preserved, so EntryId assignment
-/// matches a serial loop.
+/// Resolve deferred $ATTRIBUTE_LIST names in parallel — almost entirely
+/// from RAM: every target is an extension record and the whole $MFT just
+/// streamed through the pipeline, so `ext` already holds the bytes. (The
+/// previous design re-read targets from disk; random reads through the
+/// volume handle serialize in the kernel no matter how many handles issue
+/// them — measured ~2.9s on a real C: — while the cache makes this pass
+/// CPU-bound.) Chunk order is preserved, so EntryId assignment matches a
+/// serial loop.
 fn resolve_deferred(
     volume_path: &str,
     runmap: &RunMap,
     record_size: usize,
+    ext: &FxHashMap<u64, Box<[u8]>>,
     deferred: &[(u64, Box<[u8]>)],
 ) -> Vec<ParsedBatch> {
     use rayon::prelude::*;
     const DEFER_CHUNK: usize = 256;
 
-    let readers: Vec<parking_lot::Mutex<Option<RecordReader>>> = (0..rayon::current_num_threads()
-        .max(1))
-        .map(|_| parking_lot::Mutex::new(None))
-        .collect();
-
     deferred
         .par_chunks(DEFER_CHUNK)
         .map(|chunk| {
             let mut out = ParsedBatch::default();
-            let slot = &readers[rayon::current_thread_index().unwrap_or(0) % readers.len()];
-            let mut guard = slot.lock(); // uncontended: one slot per thread
-            if guard.is_none() {
-                match open_raw_volume(volume_path) {
-                    Ok(file) => {
-                        *guard = Some(RecordReader {
-                            file,
-                            map: runmap,
-                            record_size,
-                            buf: Vec::new(),
-                        });
-                    }
-                    Err(e) => {
-                        // Degraded but loud: these names stay unresolved and
-                        // are counted like any other resolution failure.
-                        tracing::warn!(
-                            error = %e,
-                            lost = chunk.len(),
-                            "volume handle for deferred name pass unavailable"
-                        );
-                        out.deferred_unresolved += chunk.len() as u64;
-                        return out;
-                    }
-                }
-            }
-            let rr = guard.as_mut().expect("reader installed above");
+            let mut rr = LazyRecordReader::new(volume_path, runmap, record_size);
             for (number, bytes) in chunk {
                 let f = NtfsFile::new(*number, bytes);
-                match resolve_attr_list_name(&f, rr) {
+                match resolve_attr_list_name(&f, ext, &mut rr) {
                     Some(name) => out.push_named(&f, &name),
                     None => out.deferred_unresolved += 1,
                 }
@@ -403,9 +439,17 @@ fn append_batches(
     b: &mut VolumeIndexBuilder,
     stats: &mut ScanStats,
     deferred: &mut Vec<(u64, Box<[u8]>)>,
+    extensions: &mut FxHashMap<u64, Box<[u8]>>,
     batches: Vec<ParsedBatch>,
 ) {
     for batch in batches {
+        for (number, bytes) in batch.extensions {
+            if extensions.len() < EXT_NAME_CACHE_CAP {
+                extensions.insert(number, bytes);
+            } else {
+                stats.ext_name_cache_skipped += 1;
+            }
+        }
         for m in &batch.metas {
             let range = m.name_off as usize..(m.name_off + m.name_len) as usize;
             b.push_encoded(EncodedEntry {
@@ -591,12 +635,13 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     let chunks = plan_chunks(&runmap, data_size, record_size);
     let mut b = VolumeIndexBuilder::new(drive, ROOT_RECORD);
     let mut deferred: Vec<(u64, Box<[u8]>)> = Vec::new();
+    let mut extensions: FxHashMap<u64, Box<[u8]>> = FxHashMap::default();
     let mut parse_time = Duration::ZERO;
 
     let (read_time, fallbacks) = run_chunk_pipeline(&volume_path, &chunks, &mut |i, bytes| {
         let t = Instant::now();
         let batches = parse_chunk(bytes, chunks[i].logical, record_size);
-        append_batches(&mut b, &mut stats, &mut deferred, batches);
+        append_batches(&mut b, &mut stats, &mut deferred, &mut extensions, batches);
         parse_time += t.elapsed();
     })
     .map_err(MftError::Ntfs)?;
@@ -605,14 +650,30 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     stats.pipeline_fallbacks = fallbacks;
 
     // Deferred pass: names hiding behind $ATTRIBUTE_LIST (~tens of
-    // thousands on a real C:) resolved with targeted single-record reads —
-    // in parallel: measured on a real 1.27M-entry C:, the serial version of
-    // this pass cost more than the streaming read it followed.
+    // thousands on a real C:), resolved in parallel from the streamed
+    // extension-record cache — measured on a real 1.27M-entry C:, the
+    // disk-read version of this pass cost more than the streaming read it
+    // followed.
     let t_deferred = Instant::now();
     stats.deferred_names = deferred.len() as u64;
-    let batches = resolve_deferred(&volume_path, &runmap, record_size, &deferred);
-    append_batches(&mut b, &mut stats, &mut Vec::new(), batches);
+    let batches = resolve_deferred(&volume_path, &runmap, record_size, &extensions, &deferred);
+    append_batches(
+        &mut b,
+        &mut stats,
+        &mut Vec::new(),
+        &mut FxHashMap::default(),
+        batches,
+    );
     stats.elapsed_deferred_ms = t_deferred.elapsed().as_millis() as u64;
+    drop(extensions);
+    drop(deferred);
+    if stats.ext_name_cache_skipped > 0 {
+        tracing::warn!(
+            volume = %drive,
+            skipped = stats.ext_name_cache_skipped,
+            "extension-record name cache full — remainder resolved via disk reads"
+        );
+    }
 
     // Degradations are normal in small numbers; make them visible either way.
     if stats.corrupt_records > 0 {
@@ -760,6 +821,7 @@ mod tests {
         let mut checked = 0u64;
         let mut matched = 0u64;
         let mut size_matched = 0u64;
+        let mut mismatches: Vec<String> = Vec::new();
         for sample in (0..old_idx.len() as u32).step_by(997) {
             let old_rec = crate::index::masked(old_idx.frn(sample));
             let (Some(o), Some(n)) = (
@@ -774,6 +836,30 @@ mod tests {
             checked += 1;
             if old_idx.name(o) == new_idx.name(n) {
                 matched += 1;
+            } else {
+                // The resolvers legitimately disagree on attribute-list
+                // names: get_best_file_name returns the *first* $FILE_NAME
+                // of a target record (often the DOS 8.3 short name) and the
+                // first Win32 link of hardlinked files, while pick_name
+                // scans for the best Win32 name. Arbitrate with the disk:
+                // if the streaming-derived full path exists, the streaming
+                // name is right.
+                let mut p = Vec::new();
+                new_idx.append_path(n, &mut p);
+                let mut units = Vec::new();
+                crate::wtf8::wtf8_to_utf16(&p, &mut units);
+                use std::os::windows::ffi::OsStringExt;
+                let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&units));
+                if std::fs::symlink_metadata(&path).is_ok() {
+                    matched += 1;
+                } else if mismatches.len() < 16 {
+                    mismatches.push(format!(
+                        "record {old_rec}: reference `{}` vs streaming `{}` (path gone: {})",
+                        String::from_utf8_lossy(old_idx.name(o)),
+                        String::from_utf8_lossy(new_idx.name(n)),
+                        path.display(),
+                    ));
+                }
             }
             if old_idx.size(o) == new_idx.size(n) {
                 size_matched += 1;
@@ -782,7 +868,8 @@ mod tests {
         assert!(checked > 100, "sample too small: {checked}");
         assert!(
             matched as f64 / checked as f64 > 0.999,
-            "sampled name mismatch: {matched}/{checked}"
+            "sampled name mismatch: {matched}/{checked}\n{}",
+            mismatches.join("\n")
         );
         // Sizes drift legitimately: the volume is live and the two scans run
         // a minute apart, so actively-written files differ. Names only move

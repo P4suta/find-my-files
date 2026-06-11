@@ -267,6 +267,9 @@ impl VolumeIndex {
 
     /// Trim over-allocated columns after a bulk build.
     pub fn shrink_to_fit(&mut self) {
+        // The map grows by doubling during the scan; one rehash here trims
+        // ~5 B/entry off the resident footprint.
+        self.frn_map.shrink_to_fit();
         self.name_pool.shrink_to_fit();
         self.lower_pool.shrink_to_fit();
         self.name_off.shrink_to_fit();
