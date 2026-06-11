@@ -145,4 +145,19 @@ S6b=287f659+9d7a30d(+文書収束コミット)。
   ループバック ResultPage p99 ≤5ms / RAM ~99B/entry(WS 119.9MiB @1.27M)
 - 非昇格ゲート(`just verify`)green 確認: 2026-06-11 ブランチ作成直後に実行 —
   fmt-check / clippy -D warnings / cargo test --workspace / C# 80/80 すべて pass
-- 昇格ゲート(`just perf-gate` / `FMF_ADMIN_TESTS=1`): S1b 着手前にユーザー実行で再確認予定
+
+## 付録: 最終ゲート判定(2026-06-12、全ステージ完了時点)
+
+- `FMF_ADMIN_TESTS=1`(昇格): green — `streaming_scan_matches_reference`(scan/ 分割の
+  等価ゲート)・実C: E2E・USNライブ・サービス kill→復元 すべて pass
+- 実ボリューム絶対ゲート(`just bench-check`、昇格): **green、回帰なし** —
+  1,289,867件 2.05s / 検索 p99 全クエリ ≤6.2ms(ゲート50ms)/ restore p50 79ms(ゲート2s)
+- criterion 10%ゲート: 初回 2件超過 → ADR-0013 の交互A/B/A で裁定:
+  - `post_usn/apply_batch_1k` +10.6%: **ノイズ**。同一コード(97df250自身 vs 自基準)の
+    再計測で CI −5.9%〜+10.4% — このベンチの固有振れ幅が閾値と同程度。再計測Bは +2.5%(p=0.52)
+  - `parse_compile` +13.7%→再計測 +5.7%(再現性あり): **実差だが採択** — 絶対値は
+    1.9µs 中の約100ns/クエリ(p99予算50msの0.0002%)。推定原因: 契約統一で
+    SortKey/CaseMode が repr(u32)(旧はrustc既定の1バイト)になった分のメモリ幅、
+    または宣言順変更によるコード配置シフト。正本(実ボリューム絶対ゲート)が
+    全項目大差greenのため、S4退路(ファイル統合ロールバック)の発動条件には該当しない
+- criterion「committed」基準はリファクタ tip で再記録済み(次の最適化セッションの基準)
