@@ -91,6 +91,37 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
             this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
     }
 
+    /// <summary>
+    /// Swap to a result the engine verified to contain the same rows
+    /// (<see cref="QueryTraceData.Unchanged"/>) without raising Reset:
+    /// realized rows keep their instances and re-fill from the seeds (the
+    /// MVVM setters only notify on actual value changes, so an idle USN
+    /// requery repaints nothing). Cached pages are marked unloaded so later
+    /// scrolling re-fetches from the new handle, and the visible range is
+    /// re-ensured immediately for pages the seeds missed. UI thread only.
+    /// </summary>
+    public void RefreshInPlace(ISearchResult result, IReadOnlyList<PageSeed> seeds)
+    {
+        Debug.Assert(_dispatcher.HasThreadAccess, "RefreshInPlace must run on the UI thread");
+        Debug.Assert(
+            (int)Math.Min(result.Count, int.MaxValue) == Count,
+            "RefreshInPlace requires an identical result (caller falls back to Reassign)");
+        _epoch++;
+        var old = _result;
+        _result = result;
+        _loaded.Clear();
+        _inFlight.Clear();
+        foreach (var seed in seeds)
+        {
+            ApplySeed(seed);
+        }
+        old?.Dispose();
+        if (LastVisibleRange is { } visible)
+        {
+            EnsureRange(visible.First, visible.Last);
+        }
+    }
+
     private void ApplySeed(PageSeed seed)
     {
         if (seed.Rows.Count == 0)

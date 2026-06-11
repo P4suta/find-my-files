@@ -28,7 +28,7 @@ pub(crate) use subsume::subsumes;
 
 use crate::index::SortKey;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueryOptions {
     pub sort: SortKey,
     pub desc: bool,

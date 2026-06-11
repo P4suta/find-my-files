@@ -51,6 +51,35 @@ public sealed class SearchOrchestratorTests
     }
 
     [Fact]
+    public void UnchangedRequery_SwapsTheHandle_WithoutRepublishingOrTextChurn()
+    {
+        SyncContext.RunContinuationsInline();
+        var publications = new List<ResultsPublication>();
+        _presenter.ResultsPublished += publications.Add;
+
+        _request = new SearchRequest("a", SearchOptions.Default);
+        _orchestrator.Requery(RequeryOrigin.Initial);
+        var first = _engine.Searches[0].CompleteWith(Rows.Many(5));
+        Assert.Single(publications);
+        var countText = _presenter.CountText;
+
+        // Idle USN tick: the engine re-ran the query and verified identical
+        // results — the screen must not be touched.
+        _engine.RaiseIndexChanged("F:");
+        _dispatcher.DrainQueue();
+        Assert.Equal(2, _engine.Searches.Count);
+        var second = _engine.Searches[1]
+            .CompleteWith(Rows.Many(5), new QueryTraceData { Unchanged = true });
+
+        Assert.Single(publications); // no second Reset
+        Assert.True(first.Disposed); // the handle still swapped forward…
+        Assert.False(second.Disposed);
+        Assert.Equal(countText, _presenter.CountText); // …and the ms text held still
+        Assert.Equal(5, _presenter.ResultsSource.Count);
+        Assert.Equal("row_000000.txt", ((ResultRow)_presenter.ResultsSource[0]!).Name);
+    }
+
+    [Fact]
     public void QuerySyntaxError_BecomesCountText_NotASearchFailure()
     {
         SyncContext.RunContinuationsInline();

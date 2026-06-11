@@ -47,6 +47,10 @@ public sealed class QueryTraceData
     public ulong ExcludedSkipped { get; set; }
     public ulong Hits { get; set; }
     public uint Volumes { get; set; }
+
+    /// <summary>Engine-verified: same query as last time with identical id
+    /// lists on every volume — the screen has nothing to change.</summary>
+    public bool Unchanged { get; set; }
 }
 
 public sealed class IndexStatsData

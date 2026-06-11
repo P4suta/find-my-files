@@ -52,6 +52,7 @@ impl Engine {
 
         let mut per_volume: Vec<(Arc<VolumeSlot>, Arc<Vec<EntryId>>, u64)> = Vec::new();
         let mut refined = 0usize;
+        let mut all_unchanged = true;
         for slot in &slots {
             let guard = slot.index.read();
             let Some(idx) = guard.as_ref() else { continue };
@@ -79,7 +80,14 @@ impl Engine {
             trace.entries_scanned += m.entries_scanned;
             trace.excluded_skipped += m.excluded_skipped;
             let ids = Arc::new(r.ids);
+            // Same query text+options re-issued (USN-driven requery) with an
+            // identical id list → the screen has nothing to change. Vec
+            // equality is a memcmp and only runs when text+opt match.
+            all_unchanged &= cache
+                .as_ref()
+                .is_some_and(|c| c.text == text && c.opt == *opt && c.ids[..] == ids[..]);
             *cache = Some(VolumeQueryCache {
+                text: text.to_string(),
                 compiled: compiled.clone(),
                 opt: *opt,
                 content_generation: r.content_generation,
@@ -90,6 +98,7 @@ impl Engine {
             per_volume.push((slot.clone(), ids, r.structural_generation));
         }
         trace.volumes = per_volume.len() as u32;
+        trace.unchanged = all_unchanged && !per_volume.is_empty();
         trace.cache = if refined == 0 {
             "miss"
         } else if refined == per_volume.len() {

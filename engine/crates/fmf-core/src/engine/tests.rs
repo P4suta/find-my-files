@@ -122,6 +122,63 @@ fn typing_refines_cached_results_and_invalidation_goes_cold() {
     assert_eq!(t5.cache, "refine");
 }
 
+/// Idle USN traffic (logs, telemetry) re-queries the same text every few
+/// hundred ms. When the id lists come back identical the trace must say so —
+/// that flag is what stops the UI from repainting an unchanged screen.
+#[test]
+fn idle_requery_of_identical_results_reports_unchanged() {
+    let e = engine_with_two_volumes();
+    let opt = QueryOptions::default();
+    let (_, t1) = e.query("txt", &opt).unwrap();
+    assert!(!t1.unchanged, "first run has no previous result");
+
+    // A no-op USN batch: generation bumps, ids stay identical.
+    for slot in e.volumes.read().iter() {
+        let mut g = slot.index.write();
+        let idx = g.as_mut().unwrap();
+        let n = idx.len() as u32;
+        idx.merge_new_into_permutations(n);
+    }
+    let (_, t2) = e.query("txt", &opt).unwrap();
+    assert!(t2.unchanged, "same query, same ids");
+    assert_eq!(
+        t2.cache, "miss",
+        "the generation moved, so the cache was cold"
+    );
+
+    // A real change to the result set flips it off.
+    {
+        let volumes = e.volumes.read();
+        let slot = volumes.iter().find(|s| s.label == "C:").unwrap();
+        let mut g = slot.index.write();
+        let idx = g.as_mut().unwrap();
+        let first_new = idx.len() as u32;
+        let units: Vec<u16> = "epsilon.txt".encode_utf16().collect();
+        idx.upsert(&RawEntry {
+            record: 999,
+            parent_record: 5,
+            frn: (1 << 48) | 999,
+            name_utf16: &units,
+            is_dir: false,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 5,
+            mtime: 5,
+        });
+        idx.merge_new_into_permutations(first_new);
+    }
+    let (r3, t3) = e.query("txt", &opt).unwrap();
+    assert!(!t3.unchanged, "a new hit must repaint");
+    assert_eq!(r3.len(), 5);
+
+    // Different text is never "unchanged", but its stable repeat is.
+    let (_, t4) = e.query("tx", &opt).unwrap();
+    assert!(!t4.unchanged);
+    let (_, t5) = e.query("tx", &opt).unwrap();
+    assert!(t5.unchanged, "stable repeat via the refine path");
+}
+
 #[test]
 fn status_reports_ready_volumes() {
     let e = engine_with_two_volumes();

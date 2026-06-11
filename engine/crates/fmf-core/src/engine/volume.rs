@@ -11,9 +11,13 @@ use crate::query::{CompiledQuery, QueryOptions};
 use super::{Engine, EngineEvent, VolumePhase};
 
 /// Last materialized per-volume result, kept for incremental refinement
-/// (query/subsume.rs). Validity = both generations still match; USN batches
+/// (query/subsume.rs) and unchanged-result detection (`QueryTrace::
+/// unchanged`). Validity = both generations still match; USN batches
 /// invalidate implicitly by bumping `content_generation`.
 pub(super) struct VolumeQueryCache {
+    /// The raw query text — equality here (with `opt`) defines "the same
+    /// query" for unchanged detection; subsumption defines refinement.
+    pub(super) text: String,
     pub(super) compiled: Arc<CompiledQuery>,
     pub(super) opt: QueryOptions,
     pub(super) content_generation: u64,

@@ -118,6 +118,58 @@ public sealed partial class ResultsPresenter : ObservableObject
         ResultsPublished?.Invoke(new ResultsPublication(origin, restoreIndex, firstIndex, lastIndex));
     }
 
+    /// <summary>
+    /// Same-results refresh (<see cref="QueryTraceData.Unchanged"/>): swap
+    /// the new handle in without a Reset, so an idle USN requery repaints
+    /// nothing — only cells whose values actually changed in place
+    /// (sizes/mtimes of files being written) update. The count text stays
+    /// untouched on purpose: a churning ms display reads as flicker.
+    /// Falls back to a full publish if the counts somehow disagree.
+    /// </summary>
+    public async Task RefreshInPlaceAsync(
+        ISearchResult result,
+        QueryTraceData? trace,
+        RequeryOrigin origin,
+        Func<bool> isCurrent)
+    {
+        Debug.Assert(_dispatcher.HasThreadAccess, "RefreshInPlaceAsync must start on the UI thread");
+
+        var count = (int)Math.Min(result.Count, int.MaxValue);
+        if (count != ResultsSource.Count)
+        {
+            await PublishAsync(result, trace, origin, isCurrent);
+            return;
+        }
+
+        // Always the position-preserving window: the screen is not moving.
+        var (firstIndex, lastIndex, _) = SeedWindow(RequeryOrigin.IndexChanged, count);
+        var seeds = new List<PageSeed>();
+        try
+        {
+            for (var page = firstIndex / VirtualResultList.PageSize;
+                 page <= lastIndex / VirtualResultList.PageSize && count > 0;
+                 page++)
+            {
+                var rows = await result.GetRangeAsync(
+                    (long)page * VirtualResultList.PageSize, VirtualResultList.PageSize);
+                seeds.Add(new PageSeed(page, rows));
+            }
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
+
+        if (!isCurrent())
+        {
+            result.Dispose(); // superseded while prefetching — keep the old screen
+            return;
+        }
+
+        ResultsSource.RefreshInPlace(result, seeds);
+    }
+
     /// <summary>Show a query problem without touching the published results.</summary>
     public void PresentQueryError(string message) => CountText = StatusFormatter.QueryError(message);
 

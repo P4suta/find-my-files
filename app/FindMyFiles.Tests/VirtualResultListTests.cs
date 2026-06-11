@@ -115,6 +115,45 @@ public sealed class VirtualResultListTests
     }
 
     [Fact]
+    public void RefreshInPlace_NoReset_SameRowInstances_AndChangedCellsUpdate()
+    {
+        var oldRows = Rows.Many(10);
+        var old = new StubSearchResult(oldRows);
+        _list.Reassign(old, SeedPage0(oldRows));
+        var rowBefore = Row(0);
+        var events = new List<NotifyCollectionChangedAction>();
+        _list.CollectionChanged += (_, e) => events.Add(e.Action);
+
+        // Same ids; one file grew in place (USN stat update).
+        var newRows = Rows.Many(10);
+        newRows[0] = newRows[0] with { Size = 4096 };
+        var fresh = new StubSearchResult(newRows);
+        _list.RefreshInPlace(fresh, SeedPage0(newRows));
+
+        Assert.Empty(events); // no Reset — an unchanged screen repaints nothing
+        Assert.Same(rowBefore, Row(0)); // bound instances survive the swap
+        Assert.Equal("4 KB", Row(0).SizeText); // …but live values still update
+        Assert.True(old.Disposed);
+        Assert.False(fresh.Disposed);
+        Assert.Equal(10, _list.Count);
+    }
+
+    [Fact]
+    public void RefreshInPlace_DropsLoadedFlags_SoScrollingRefetchesFromTheNewHandle()
+    {
+        var rows = Rows.Many(100);
+        _list.Reassign(new StubSearchResult(rows), SeedPage0(rows));
+        var fresh = new StubSearchResult(rows);
+        _list.RefreshInPlace(fresh, SeedPage0(rows));
+        Assert.Equal(0, fresh.FetchCount); // the seed covered page 0
+
+        _list.EnsureRange(0, 10); // page 0 re-seeded; page 1 must hit the new handle
+        Assert.Equal(1, fresh.FetchCount);
+        _dispatcher.DrainQueue();
+        Assert.Equal(rows[70].Name, Row(70).Name);
+    }
+
+    [Fact]
     public void Reassign_DisposesThePreviousResult()
     {
         var old = new StubSearchResult(Rows.Many(3));

@@ -80,6 +80,17 @@ public sealed class SearchOrchestrator
                 return;
             }
             TraceCaptured?.Invoke(outcome.Trace);
+            if (outcome.Trace?.Unchanged == true)
+            {
+                // Identical results (engine-verified): no Reset, no count
+                // text churn — idle USN traffic stops repainting the screen.
+                await _presenter.RefreshInPlaceAsync(
+                    outcome.Result,
+                    outcome.Trace,
+                    origin,
+                    () => generation == Interlocked.Read(ref _generation));
+                return;
+            }
             await _presenter.PublishAsync(
                 outcome.Result,
                 outcome.Trace,

@@ -19,6 +19,11 @@ pub struct QueryTrace {
     /// Per-volume query-cache outcome: "miss", "refine" (all volumes
     /// narrowed the previous result) or "partial" (mixed).
     pub cache: String,
+    /// True when this query is identical (text + options) to the previous
+    /// one on every volume *and* produced identical id lists — the UI keeps
+    /// the displayed result instead of re-publishing (no repaint churn from
+    /// idle USN traffic).
+    pub unchanged: bool,
     pub parse_us: u64,
     pub compile_us: u64,
     /// Dir-path memo (only path queries; 0 when cached/warm).
