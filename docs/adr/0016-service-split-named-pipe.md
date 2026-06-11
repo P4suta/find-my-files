@@ -1,0 +1,82 @@
+# ADR-0016: v2サービス分離 — fmf-service + named pipe
+
+日付: 2026-06-11 / 状態: 採用済み
+
+## 決定
+
+エンジンを特権サービス `fmf-service`(fmf-core を直接ホスト、LocalSystem)に載せ、UIは非特権
+(asInvoker)化して named pipe で接続する。ワイヤ定義は新規 rlib `fmf-proto` に置き、
+`PipeEngineClient` が `IEngineClient` の第3実装になる。仕様の正本は docs/ARCHITECTURE.md
+「Pipe プロトコル」節。FFI(fmf_engine.dll)と in-proc 経路は当面存続する(`--engine=inproc`、
+要手動昇格)。
+
+## 根拠
+
+- MVPの requireAdministrator はアプリ全体を管理者で走らせる: UIPI で Explorer→ウィンドウの
+  drag & drop が死に(README既知制限)、「開く」は explorer.exe 経由の脱昇格ワークアラウンドが必要だった
+- 設計は最初からこの分離を予約済み: fmf-ffi 無ロジック則、IEngineClient 差し替え境界、
+  %ProgramData% のマシン単位インデックス、エラーコード表の「pipe プロトコルと共用」
+- 常駐サービスは「UIが起動していなくてもUSN追従でインデックスが新鮮」を実現する(Everything Service と同形)
+
+### トランスポートの却下案
+
+- **COM / RPC(out-of-process)**: レジストリ登録・マーシャリング定義・昇格境界の複雑さが、
+  長さ前置きフレームの named pipe に対して見合わない。ワイヤの可観測性(フレームをそのまま
+  ログ/テストにピンできる)も劣る
+- **gRPC / HTTP(localhost)**: ネットワークスタック経由は「やらないことリスト」のサーバ機能に接近し、
+  依存(tokio/tonic)が fmf-core の同期スレッド文化と衝突する。ローカルIPCに HTTP/2 は過剰
+- **共有メモリ+イベント**: ページ転送は最速だが、寿命・権限・世代管理を自前設計することになり
+  「FFI 1関数=1メッセージ」の単純な写像が失われる。pipe の往復(基準値は ARCHITECTURE.md
+  遅延予算節)で予算に対し余裕があるため不要
+- **asyncランタイム(tokio)**: 接続は高々数本。blocking I/O+スレッドが既存設計と整合。
+  依存とビルド時間だけ増える
+
+### flush の公開面(3案)
+
+前提として `Engine::flush()` を実体化する(VolumeSlot の共有チェックポイント+世代ペアの dirty-skip)。
+公開面は3案を比較した:
+
+- **①pipe オペコードとして公開** — 却下。クライアント起動の flush 連打は index.read() 保持の反復で
+  USN 適用を停止させるローカル DoS 経路(SECURITY.md 脅威6)
+- **②FFI にも置かずサービス内部関数のみ** — 却下。in-proc(--engine=inproc)経路とテストが
+  保存タイミングを再現できず、契約の写像表(FFI 1関数=1メッセージ)にも穴が開く
+- **③採用: FFI `fmf_flush` はエクスポート、pipe はオペコード11の番号予約のみ**
+
+保存はサービス内部の責務 — 定期(既定300s・volume間スタガ・dirtyのみ)+SCM Stop/PRESHUTDOWN 時。
+PRESHUTDOWN の既定猶予は現行 Windows では 10 秒に短縮されているため(docs/RESEARCH.md)、
+install 時に `SERVICE_PRESHUTDOWN_INFO` で明示的に延長を設定する。
+
+### 配布
+
+MSIX/インストーラは本マイルストーンでは見送り(WindowsPackageType=None 維持)。サービス導入は
+`fmf-service install`(SID捕捉・DACL設定・特権剥奪を原子的に行うため sc.exe では代替不能)+
+justfile レシピ+README 手順で成立させる。**asInvoker への切替はサービス導入手段の成立が前提条件**
+(サービス未導入の既定挙動: 説明付き InfoBar+fake フォールバック+「管理者として再起動」ボタン)。
+
+## 影響
+
+- 新規 crate 2つ(fmf-proto / fmf-service)。fmf-ffi と DLL 名 `fmf_engine` は不変更
+- IEngineClient の同期3メソッド(ListVolumes/StartIndexing/GetStatus)が Task 返しになる
+  (pipe 越え同期=UIスレッド「固まらない」違反)
+- 単一書き手不変条件がプロセス間に拡張: `{index_dir}\.writer.lock` + `FMF_E_LOCKED=7`
+- Rust/C# 両テストスイートに同一のゴールデンフレーム(バイト列)をピンし、ワイヤの漂流を
+  contract_tests と同じ流儀で固定する
+- FfiEngineClient(--engine=inproc)の削除トリガ: サービスGA後1リリースのソーク完了
+- drag-out(結果→Explorer)は本マイルストーン外の新機能として別起票(drop 方向の解消のみ実装)
+
+## 検証
+
+(意図的なテンプレ拡張: 本ADRは性能ゲートに触れる構造変更のため、最終フェーズの実測完了時に
+結果を追記して本節を更新する。数値の正本は CLAUDE.md 性能合格ラインと ARCHITECTURE.md 遅延予算節)
+
+- [ ] サービス経由 実C: 初回インデックス ≤60s @1M
+- [ ] USN→UI ≤1s(非特権UI+サービス構成、定期flush発火中を含む)
+- [ ] kill→再起動→スナップショット復元 ≤2s
+- [ ] 検索 p99 ≤50ms(pipe経由)/ ResultPage往復 ≤遅延予算節の基準値
+- [ ] RAM ≤110B/entry(fmf-service の WorkingSet)
+
+## 再検討トリガ
+
+- pipe ページ取得 p99 が実測で 5ms を超える環境が常態化した場合(複数ページ一括取得オペコード、
+  または共有メモリページ転送を再評価)
+- マルチユーザー同時利用の実需要(`fmf-service authorize <user>` での認可SID複数登録)

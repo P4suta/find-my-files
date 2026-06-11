@@ -15,3 +15,5 @@
 - [0013](0013-measurement-discipline.md) — 計測規律: 冷機・back-to-back・実ボリューム絶対ゲート
 - [0014](0014-build-tooling-rejections.md) — rust-lld/sccache/nextest却下、codegen-units=1の理由
 - [0015](0015-winui-data-virtualization.md) — WinUI 3データ仮想化(IList+INCC+IItemsRangeInfo)
+- [0016](0016-service-split-named-pipe.md) — v2サービス分離: fmf-service+named pipe、トランスポート却下案、flush公開面
+- [0017](0017-service-security-model.md) — サービスのセキュリティモデル: LocalSystem+特権最小化、pipe DACL 4層

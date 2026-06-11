@@ -63,6 +63,26 @@
 - **昇格プロセスの既知制約**: Explorerからの D&D 不可(UIPI)。昇格プロセスから直接ShellExecuteすると関連付けアプリも昇格起動 → `explorer.exe "<path>"` 経由で脱昇格(定石)。
 - WASDK 1.6+でNative AOT対応(公式サンプルで起動約50%短縮)。ただし「即時起動」体験はトレイ常駐+ホットキーで担保するのが本筋。
 
-## セキュリティ(v2向けメモ)
+## セキュリティ — v2 サービス分離(2026-06-11 調査、一次情報確認済み)
 
-特権インデクサ→非特権UIの構成は、ACL上見えないはずのファイル名・パスを露出させる情報漏洩を内包(Everything自身の既知問題。ETP/HTTPサーバでは実際に事件化しLite版でIPC削除)。v2では pipe DACL で「同一ユーザーのみ」を保証+脅威モデルをドキュメント化。MVPは昇格プロセス内完結なので非該当。
+特権インデクサ→非特権UIの構成は、ACL上見えないはずのファイル名・パスを露出させる情報漏洩を内包(Everything自身の既知問題。ETP/HTTPサーバでは実際に事件化しLite版でIPC削除)。v2の脅威モデルと防御は `docs/SECURITY.md`、判断記録は ADR-0016/0017。以下はその裏取り:
+
+- **PIPE_REJECT_REMOTE_CLIENTS**(CreateNamedPipeW dwPipeMode): 「Connections from remote clients are automatically rejected」と公式明記。リモート拒否の直接機構。
+  https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew
+- **FILE_FLAG_FIRST_PIPE_INSTANCE**: 2個目のインスタンス作成が ERROR_ACCESS_DENIED で失敗(公式明記)。pipe名スクワッティング対策。出典同上。
+- **GetNamedPipeServerProcessId**: クライアントからサーバプロセスPIDを取得可能(偽サーバ検出: PID→トークンがSYSTEMか検証)。
+  https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeserverprocessid
+- **匿名アクセス(注意)**: NullSessionPipes による匿名制限の既定は**マシン種別/ポリシー依存**(DC/スタンドアロンは有効、メンバー/クライアントは Not defined)。匿名遮断は明示DACL(匿名ACEなし=既定拒否)を一次防御にすること。
+  https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-access-restrict-anonymous-access-to-named-pipes-and-shares
+- **UACフィルタ済みトークンの deny-only Administrators**: 非昇格プロセスでは BUILTIN\Administrators SID が SE_GROUP_USE_FOR_DENY_ONLY となり、**許可ACEには使われない**(deny ACE照合のみ)。「Administratorsに許可」のpipe DACLでは非昇格UIは接続できない → 利用者の個別SID名指しが必須。
+  https://learn.microsoft.com/en-us/windows/win32/secauthz/sid-attributes-in-an-access-token
+- **ImpersonateNamedPipeClient**: サーバがクライアントのトークンを取得・検査できる(接続時SID照合 = DACL設定ミスへの多重防御)。
+  https://learn.microsoft.com/en-us/windows/win32/ipc/impersonating-a-named-pipe-client
+- **SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO**(ChangeServiceConfig2): 必要特権を宣言すると SCM が起動時に宣言外特権をプロセストークンから除去(SeChangeNotifyPrivilege は常に残る。同一プロセス共有サービスは和集合)。LocalSystem の武装解除に使う。
+  https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_required_privileges_infow
+- **SERVICE_CONTROL_PRESHUTDOWN(注意)**: 猶予の既定は **Windows 10 1703 以降 10 秒**(それ以前は3分)。大きいスナップショット保存には `SERVICE_PRESHUTDOWN_INFO`(dwPreshutdownTimeout)で明示延長が必要。
+  https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_preshutdown_info
+- **windows-service crate**(Mullvad、v0.8.1 2026-05、MIT/Apache-2.0): define_windows_service! と service_control_handler::register を提供。PRESHUTDOWN ハンドラ登録可。
+  https://github.com/mullvad/windows-service-rs
+- **SeBackupPrivilege と生ボリューム読み**: 文書化されているのは「通常ファイルのACLバイパスでの内容取得」まで。\\.\C: の生ボリュームハンドルが SeBackupPrivilege 単独で開ける保証は**文書上存在しない**(調査範囲: Managing Privileges in a File System ほか)。ボリュームハンドルは管理者必須(上記「権限」項)→ ADR-0017 が専用低権限アカウント案を却下した根拠。
+  https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/privileges
