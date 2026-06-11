@@ -11,9 +11,29 @@ use rayon::prelude::*;
 use super::QueryOptions;
 use super::compile::{CTerm, CompiledQuery, Driver};
 use super::matchers::{EvalCtx, terms_match, terms_match_iter};
-use super::memo::{DirPaths, OffsetTable};
+use super::memo::{DirPathsLower, DirPathsOrig, OffsetTable, PathMemos};
 use super::sweep::driver_candidates;
 use crate::index::{EntryId, VolumeIndex};
+
+/// Build (or incrementally extend) exactly the dir-path memos this query
+/// reads — `None` pools cost nothing, which is the whole point of keeping
+/// folded and original-case memos in separate cache slots.
+fn path_memos(idx: &VolumeIndex, q: &CompiledQuery) -> PathMemos {
+    PathMemos {
+        lower: q.needs_folded_paths.then(|| {
+            idx.cached_derived_or_update(|prev| match prev {
+                Some(p) => DirPathsLower::extend_from(idx, p),
+                None => DirPathsLower::build(idx),
+            })
+        }),
+        orig: q.needs_orig_paths.then(|| {
+            idx.cached_derived_or_update(|prev| match prev {
+                Some(p) => DirPathsOrig::extend_from(idx, p),
+                None => DirPathsOrig::build(idx),
+            })
+        }),
+    }
+}
 
 /// 65536 entries per parallel task for full scans.
 const CHUNK: usize = 1 << 16;
@@ -74,18 +94,7 @@ pub fn search(
     }
 
     // Generation-cached lookup structures.
-    let cached_memo;
-    let empty_memo;
-    let memo: &DirPaths = if q.needs_paths() {
-        cached_memo = idx.cached_derived_or_update(|prev| match prev {
-            Some(p) => DirPaths::extend_from(idx, p),
-            None => DirPaths::build(idx),
-        });
-        &cached_memo
-    } else {
-        empty_memo = DirPaths::empty();
-        &empty_memo
-    };
+    let memo = path_memos(idx, q);
     let needs_table = q
         .groups
         .iter()
@@ -109,7 +118,7 @@ pub fn search(
                 // No terms in this OR-branch → every live entry matches.
                 full_scan_group(
                     idx,
-                    memo,
+                    &memo,
                     &group.terms,
                     skip_excluded,
                     &mut bitmap,
@@ -119,7 +128,7 @@ pub fn search(
             Driver::FullScan => {
                 full_scan_group(
                     idx,
-                    memo,
+                    &memo,
                     &group.terms,
                     skip_excluded,
                     &mut bitmap,
@@ -142,7 +151,7 @@ pub fn search(
                             chunk
                                 .iter()
                                 .copied()
-                                .filter(|&id| terms_match(idx, memo, &mut ctx, &group.terms, id))
+                                .filter(|&id| terms_match(idx, &memo, &mut ctx, &group.terms, id))
                                 .collect()
                         })
                         .collect();
@@ -192,18 +201,7 @@ pub fn refine(
     let mut stage = crate::metrics::Stage::start();
     let skip_excluded = !opt.include_hidden_system;
 
-    let cached_memo;
-    let empty_memo;
-    let memo: &DirPaths = if q.needs_paths() {
-        cached_memo = idx.cached_derived_or_update(|prev| match prev {
-            Some(p) => DirPaths::extend_from(idx, p),
-            None => DirPaths::build(idx),
-        });
-        &cached_memo
-    } else {
-        empty_memo = DirPaths::empty();
-        &empty_memo
-    };
+    let memo = path_memos(idx, q);
     metrics.memo_us = stage.lap();
 
     let chunks: Vec<Vec<EntryId>> = prev_ids
@@ -218,7 +216,7 @@ pub fn refine(
                         && !(skip_excluded && idx.is_excluded(id))
                         && q.groups
                             .iter()
-                            .any(|g| terms_match_iter(idx, memo, &mut ctx, g.all_terms(), id))
+                            .any(|g| terms_match_iter(idx, &memo, &mut ctx, g.all_terms(), id))
                 })
                 .collect()
         })
@@ -244,7 +242,7 @@ pub fn refine(
 
 fn full_scan_group(
     idx: &VolumeIndex,
-    memo: &DirPaths,
+    memo: &PathMemos,
     terms: &[CTerm],
     skip_excluded: bool,
     bitmap: &mut [u64],

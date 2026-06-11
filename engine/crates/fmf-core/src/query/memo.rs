@@ -129,92 +129,129 @@ impl OffsetTable {
     }
 }
 
-// ── Dir-path memo (generation-cached) ───────────────────────────────────
+// ── Dir-path memo (generation-cached, one per name pool) ────────────────
 
-/// Memoized full paths for every directory (only built when the query
-/// contains path terms). Entry paths are `memo[parent] + name`.
+/// Memoized full paths for every directory, for one name pool. Only built
+/// when the query contains path terms — and split per pool so a query only
+/// pays for the pool(s) it reads: nearly all path queries are folded, and
+/// the original-case memo used to be built (and held, ×full dir paths)
+/// unconditionally alongside it. Entry paths are `memo[parent] + name`.
 ///
-/// Across generations the memo extends incrementally as long as no
-/// existing directory was renamed or moved (`dir_topology_generation`):
-/// appends never change old dir paths, so new dirs just memoize on top.
-/// A topology change rebuilds from scratch — dir renames are rare and the
-/// alternative (subtree invalidation) is not worth its complexity.
-pub(super) struct DirPaths {
-    pub(super) lower: Vec<Option<Box<[u8]>>>,
-    pub(super) orig: Vec<Option<Box<[u8]>>>,
+/// Across generations a memo extends incrementally as long as no existing
+/// directory was renamed or moved (`dir_topology_generation`): appends
+/// never change old dir paths, so new dirs just memoize on top. A topology
+/// change rebuilds from scratch — dir renames are rare and the alternative
+/// (subtree invalidation) is not worth its complexity.
+pub(super) struct DirPathsPool {
+    paths: Vec<Option<Box<[u8]>>>,
     /// Entries `[0, covers_entries)` are memoized.
     covers_entries: usize,
     /// The dir-topology generation this memo is valid for.
     topo_generation: u64,
 }
 
-impl DirPaths {
-    /// Placeholder for queries without path terms — never read.
-    pub(super) fn empty() -> Self {
-        DirPaths {
-            lower: Vec::new(),
-            orig: Vec::new(),
-            covers_entries: 0,
-            topo_generation: 0,
+/// Folded-name memo — its own derived-cache slot (TypeId-keyed).
+pub(super) struct DirPathsLower(DirPathsPool);
+/// Original-name memo — separate slot, built only by orig-case path terms.
+pub(super) struct DirPathsOrig(DirPathsPool);
+
+impl DirPathsLower {
+    pub(super) fn build(idx: &VolumeIndex) -> Self {
+        Self(DirPathsPool::build(idx, true))
+    }
+
+    pub(super) fn extend_from(idx: &VolumeIndex, prev: std::sync::Arc<Self>) -> Self {
+        Self(DirPathsPool::extend(idx, take_pool(prev, |m| &m.0), true))
+    }
+}
+
+impl DirPathsOrig {
+    pub(super) fn build(idx: &VolumeIndex) -> Self {
+        Self(DirPathsPool::build(idx, false))
+    }
+
+    pub(super) fn extend_from(idx: &VolumeIndex, prev: std::sync::Arc<Self>) -> Self {
+        Self(DirPathsPool::extend(idx, take_pool(prev, |m| &m.0), false))
+    }
+}
+
+/// Reuse the previous memo's allocations when the cache slot held the only
+/// Arc (the common case — no in-flight query still reads it), clone
+/// otherwise.
+fn take_pool<T>(prev: std::sync::Arc<T>, pool_of: impl Fn(&T) -> &DirPathsPool) -> DirPathsPool
+where
+    DirPathsPool: From<T>,
+{
+    match std::sync::Arc::try_unwrap(prev) {
+        Ok(owned) => owned.into(),
+        Err(shared) => {
+            let p = pool_of(&shared);
+            DirPathsPool {
+                paths: p.paths.clone(),
+                covers_entries: p.covers_entries,
+                topo_generation: p.topo_generation,
+            }
+        }
+    }
+}
+
+impl From<DirPathsLower> for DirPathsPool {
+    fn from(m: DirPathsLower) -> Self {
+        m.0
+    }
+}
+impl From<DirPathsOrig> for DirPathsPool {
+    fn from(m: DirPathsOrig) -> Self {
+        m.0
+    }
+}
+
+impl DirPathsPool {
+    #[inline]
+    fn name_of(idx: &VolumeIndex, id: EntryId, folded: bool) -> &[u8] {
+        if folded {
+            idx.lower_name(id)
+        } else {
+            idx.name(id)
         }
     }
 
-    /// Extend `prev` to the current generation: memoize only the appended
+    /// Extend `pool` to the current generation: memoize only the appended
     /// dirs. Their parents were live entries when pushed (lower id or
     /// root), so one increasing-id pass resolves every prefix. Falls back
     /// to a full build when a dir was renamed/moved (paths of arbitrary
     /// descendants changed) — the normal policy switch, not a degradation.
-    pub(super) fn extend_from(idx: &VolumeIndex, prev: std::sync::Arc<DirPaths>) -> Self {
+    fn extend(idx: &VolumeIndex, mut pool: DirPathsPool, folded: bool) -> DirPathsPool {
         let n = idx.len();
-        if prev.topo_generation != idx.dir_topology_generation() || prev.covers_entries > n {
-            return Self::build(idx);
+        if pool.topo_generation != idx.dir_topology_generation() || pool.covers_entries > n {
+            return Self::build(idx, folded);
         }
-        let mut memo = match std::sync::Arc::try_unwrap(prev) {
-            Ok(owned) => owned,
-            Err(shared) => DirPaths {
-                lower: shared.lower.clone(),
-                orig: shared.orig.clone(),
-                covers_entries: shared.covers_entries,
-                topo_generation: shared.topo_generation,
-            },
-        };
-        memo.lower.resize(n, None);
-        memo.orig.resize(n, None);
-        for id in memo.covers_entries as u32..n as u32 {
+        pool.paths.resize(n, None);
+        for id in pool.covers_entries as u32..n as u32 {
             if !idx.is_dir(id) {
                 continue;
             }
             let p = idx.parent(id) as usize;
-            let mut lower = memo
-                .lower
+            let mut path = pool
+                .paths
                 .get(p)
                 .and_then(|x| x.as_deref())
                 .unwrap_or(&[])
                 .to_vec();
-            let mut orig = memo
-                .orig
-                .get(p)
-                .and_then(|x| x.as_deref())
-                .unwrap_or(&[])
-                .to_vec();
-            lower.extend_from_slice(idx.lower_name(id));
-            lower.push(b'\\');
-            orig.extend_from_slice(idx.name(id));
-            orig.push(b'\\');
-            memo.lower[id as usize] = Some(lower.into_boxed_slice());
-            memo.orig[id as usize] = Some(orig.into_boxed_slice());
+            path.extend_from_slice(Self::name_of(idx, id, folded));
+            path.push(b'\\');
+            pool.paths[id as usize] = Some(path.into_boxed_slice());
         }
-        memo.covers_entries = n;
-        memo
+        pool.covers_entries = n;
+        pool
     }
 
     /// Level-order parallel build: a directory's path depends only on its
     /// parent's (one level up), so each depth level fans out across cores.
-    pub(super) fn build(idx: &VolumeIndex) -> Self {
+    fn build(idx: &VolumeIndex, folded: bool) -> DirPathsPool {
         let n = idx.len();
-        let mut memo = DirPaths {
-            lower: vec![None; n],
-            orig: vec![None; n],
+        let mut memo = DirPathsPool {
+            paths: vec![None; n],
             covers_entries: n,
             topo_generation: idx.dir_topology_generation(),
         };
@@ -276,40 +313,69 @@ impl DirPaths {
             }
         }
 
-        type BuiltDir = (EntryId, Box<[u8]>, Box<[u8]>);
         for level in levels {
-            let built: Vec<BuiltDir> = level
+            let built: Vec<(EntryId, Box<[u8]>)> = level
                 .into_par_iter()
                 .map(|d| {
-                    let (mut lower, mut orig) = if d == VolumeIndex::ROOT {
-                        (Vec::new(), Vec::new())
+                    let mut path = if d == VolumeIndex::ROOT {
+                        Vec::new()
                     } else {
                         let p = idx.parent(d) as usize;
-                        (
-                            memo.lower[p].as_deref().unwrap_or(&[]).to_vec(),
-                            memo.orig[p].as_deref().unwrap_or(&[]).to_vec(),
-                        )
+                        memo.paths[p].as_deref().unwrap_or(&[]).to_vec()
                     };
-                    lower.extend_from_slice(idx.lower_name(d));
-                    lower.push(b'\\');
-                    orig.extend_from_slice(idx.name(d));
-                    orig.push(b'\\');
-                    (d, lower.into_boxed_slice(), orig.into_boxed_slice())
+                    path.extend_from_slice(Self::name_of(idx, d, folded));
+                    path.push(b'\\');
+                    (d, path.into_boxed_slice())
                 })
                 .collect();
-            for (d, lower, orig) in built {
-                memo.lower[d as usize] = Some(lower);
-                memo.orig[d as usize] = Some(orig);
+            for (d, path) in built {
+                memo.paths[d as usize] = Some(path);
             }
         }
         memo
     }
 
     #[inline]
-    pub(super) fn parent_prefix(pool: &[Option<Box<[u8]>>], parent: EntryId) -> &[u8] {
-        pool.get(parent as usize)
+    fn parent_prefix(&self, parent: EntryId) -> &[u8] {
+        self.paths
+            .get(parent as usize)
             .and_then(|p| p.as_deref())
             .unwrap_or(&[])
+    }
+
+    fn bytes(&self) -> u64 {
+        let slots = self.paths.capacity() * std::mem::size_of::<Option<Box<[u8]>>>();
+        let boxed: usize = self
+            .paths
+            .iter()
+            .filter_map(|p| p.as_ref().map(|b| b.len()))
+            .sum();
+        (slots + boxed) as u64
+    }
+}
+
+/// The path memos one query execution may read. `None` means the compiled
+/// query proved it never reads that pool — most path queries are folded
+/// and skip the original-name memo entirely.
+#[derive(Default)]
+pub(super) struct PathMemos {
+    pub(super) lower: Option<std::sync::Arc<DirPathsLower>>,
+    pub(super) orig: Option<std::sync::Arc<DirPathsOrig>>,
+}
+
+impl PathMemos {
+    #[inline]
+    pub(super) fn lower_prefix(&self, parent: EntryId) -> &[u8] {
+        self.lower
+            .as_ref()
+            .map_or(&[][..], |m| m.0.parent_prefix(parent))
+    }
+
+    #[inline]
+    pub(super) fn orig_prefix(&self, parent: EntryId) -> &[u8] {
+        self.orig
+            .as_ref()
+            .map_or(&[][..], |m| m.0.parent_prefix(parent))
     }
 }
 
@@ -325,23 +391,18 @@ pub fn prewarm(idx: &VolumeIndex) {
 }
 
 /// Bytes currently held by this index's derived caches (offset table +
-/// dir-path memo), for the RAM accounting in `IndexStats`. Probes only —
+/// dir-path memos), for the RAM accounting in `IndexStats`. Probes only —
 /// never builds.
 pub fn derived_cache_bytes(idx: &VolumeIndex) -> u64 {
     let mut total = 0u64;
     if let Some(t) = idx.derived_probe::<OffsetTable>() {
         total += (t.offs.capacity() * 4 + t.ids.capacity() * 4) as u64;
     }
-    if let Some(d) = idx.derived_probe::<DirPaths>() {
-        let slots =
-            (d.lower.capacity() + d.orig.capacity()) * std::mem::size_of::<Option<Box<[u8]>>>();
-        let boxed: usize = d
-            .lower
-            .iter()
-            .chain(d.orig.iter())
-            .filter_map(|p| p.as_ref().map(|b| b.len()))
-            .sum();
-        total += (slots + boxed) as u64;
+    if let Some(d) = idx.derived_probe::<DirPathsLower>() {
+        total += d.0.bytes();
+    }
+    if let Some(d) = idx.derived_probe::<DirPathsOrig>() {
+        total += d.0.bytes();
     }
     total
 }
@@ -392,17 +453,18 @@ mod tests {
     }
 
     fn assert_memo_matches_oracle(idx: &VolumeIndex) {
-        let memo = DirPaths::build(idx);
+        let lower_memo = DirPathsLower::build(idx);
+        let orig_memo = DirPathsOrig::build(idx);
         for id in 0..idx.len() as u32 {
             if idx.is_dir(id) {
                 let (lower, orig) = oracle_paths(idx, id);
                 assert_eq!(
-                    memo.lower[id as usize].as_deref(),
+                    lower_memo.0.paths[id as usize].as_deref(),
                     Some(lower.as_slice()),
                     "lower path of dir {id}"
                 );
                 assert_eq!(
-                    memo.orig[id as usize].as_deref(),
+                    orig_memo.0.paths[id as usize].as_deref(),
                     Some(orig.as_slice()),
                     "orig path of dir {id}"
                 );
@@ -417,8 +479,8 @@ mod tests {
                     assert_eq!(orig, ap, "append_path oracle of dir {id}");
                 }
             } else {
-                assert!(memo.lower[id as usize].is_none());
-                assert!(memo.orig[id as usize].is_none());
+                assert!(lower_memo.0.paths[id as usize].is_none());
+                assert!(orig_memo.0.paths[id as usize].is_none());
             }
         }
     }
@@ -430,19 +492,29 @@ mod tests {
 
     /// Oracle: an incrementally extended dir-path memo must equal a fresh
     /// build — across appended dirs (extend fast path) and dir renames /
-    /// moves (topology bump → internal full rebuild).
+    /// moves (topology bump → internal full rebuild). Both pools, since
+    /// they extend independently in their own cache slots.
     #[test]
     fn extended_dir_paths_match_fresh_build() {
-        let assert_same_as_fresh = |idx: &VolumeIndex, memo: &DirPaths, what: &str| {
-            let fresh = DirPaths::build(idx);
-            for id in 0..idx.len() {
-                assert_eq!(memo.lower[id], fresh.lower[id], "{what}: lower of {id}");
-                assert_eq!(memo.orig[id], fresh.orig[id], "{what}: orig of {id}");
-            }
-        };
+        let assert_same_as_fresh =
+            |idx: &VolumeIndex, lower: &DirPathsLower, orig: &DirPathsOrig, what: &str| {
+                let fresh_lower = DirPathsLower::build(idx);
+                let fresh_orig = DirPathsOrig::build(idx);
+                for id in 0..idx.len() {
+                    assert_eq!(
+                        lower.0.paths[id], fresh_lower.0.paths[id],
+                        "{what}: lower of {id}"
+                    );
+                    assert_eq!(
+                        orig.0.paths[id], fresh_orig.0.paths[id],
+                        "{what}: orig of {id}"
+                    );
+                }
+            };
 
         let mut idx = deep_index();
-        let memo = DirPaths::build(&idx);
+        let lower = DirPathsLower::build(&idx);
+        let orig = DirPathsOrig::build(&idx);
 
         // Gen step 1: append a new dir under an existing one, a file in it,
         // and a nested dir under the *new* dir (parent inside the batch).
@@ -454,22 +526,25 @@ mod tests {
         let nested = u16s("nested");
         idx.upsert(&raw(502, 500, &nested, true, 0, 3));
         idx.merge_new_into_permutations(first_new);
-        let memo = DirPaths::extend_from(&idx, Arc::new(memo));
-        assert_same_as_fresh(&idx, &memo, "append generation");
+        let lower = DirPathsLower::extend_from(&idx, Arc::new(lower));
+        let orig = DirPathsOrig::extend_from(&idx, Arc::new(orig));
+        assert_same_as_fresh(&idx, &lower, &orig, "append generation");
 
         // Gen step 2: in-place dir rename — topology bump, extend must
         // rebuild and descendants must reflect the new name.
         let renamed = u16s("renamed_mid");
         idx.rename_dir_in_place(110, &renamed, 109).unwrap();
         idx.merge_new_into_permutations(idx.len() as u32);
-        let memo = DirPaths::extend_from(&idx, Arc::new(memo));
-        assert_same_as_fresh(&idx, &memo, "rename generation");
+        let lower = DirPathsLower::extend_from(&idx, Arc::new(lower));
+        let orig = DirPathsOrig::extend_from(&idx, Arc::new(orig));
+        assert_same_as_fresh(&idx, &lower, &orig, "rename generation");
 
         // Gen step 3: dir move (reparent) — also a topology bump.
         idx.reparent(500, 100).unwrap();
         idx.merge_new_into_permutations(idx.len() as u32);
-        let memo = DirPaths::extend_from(&idx, Arc::new(memo));
-        assert_same_as_fresh(&idx, &memo, "reparent generation");
+        let lower = DirPathsLower::extend_from(&idx, Arc::new(lower));
+        let orig = DirPathsOrig::extend_from(&idx, Arc::new(orig));
+        assert_same_as_fresh(&idx, &lower, &orig, "reparent generation");
 
         // File-only batches keep the fast path: same topology generation.
         let first_new = idx.len() as u32;
@@ -477,9 +552,10 @@ mod tests {
         idx.upsert(&raw(503, 100, &f2, false, 1, 4));
         idx.merge_new_into_permutations(first_new);
         let topo_before = idx.dir_topology_generation();
-        let memo = DirPaths::extend_from(&idx, Arc::new(memo));
+        let lower = DirPathsLower::extend_from(&idx, Arc::new(lower));
+        let orig = DirPathsOrig::extend_from(&idx, Arc::new(orig));
         assert_eq!(idx.dir_topology_generation(), topo_before);
-        assert_same_as_fresh(&idx, &memo, "file-only generation");
+        assert_same_as_fresh(&idx, &lower, &orig, "file-only generation");
     }
 
     #[test]
@@ -526,19 +602,19 @@ mod tests {
     #[test]
     fn cached_derived_invalidates_on_content_generation_change() {
         let mut idx = build_sample();
-        let d1 = idx.cached_derived(|| DirPaths::build(&idx));
-        let d2: Arc<DirPaths> = idx.cached_derived(|| unreachable!("cache hit expected"));
+        let d1 = idx.cached_derived(|| DirPathsLower::build(&idx));
+        let d2: Arc<DirPathsLower> = idx.cached_derived(|| unreachable!("cache hit expected"));
         assert!(Arc::ptr_eq(&d1, &d2));
         // A second cached type joins the generation without evicting the first.
         let t1 = idx.cached_derived(|| OffsetTable::build(&idx));
-        let d3: Arc<DirPaths> = idx.cached_derived(|| unreachable!("cache hit expected"));
+        let d3: Arc<DirPathsLower> = idx.cached_derived(|| unreachable!("cache hit expected"));
         assert!(Arc::ptr_eq(&d1, &d3));
 
         idx.merge_new_into_permutations(idx.len() as u32); // no-op batch: gen +1
-        let d4 = idx.cached_derived(|| DirPaths::build(&idx));
+        let d4 = idx.cached_derived(|| DirPathsLower::build(&idx));
         assert!(
             !Arc::ptr_eq(&d1, &d4),
-            "DirPaths must rebuild on a new generation"
+            "DirPathsLower must rebuild on a new generation"
         );
         let t2 = idx.cached_derived(|| OffsetTable::build(&idx));
         assert!(
@@ -668,14 +744,26 @@ mod tests {
         let idx = build_sample();
         prewarm(&idx);
         let _: Arc<OffsetTable> = idx.cached_derived(|| unreachable!("OffsetTable not prewarmed"));
-        // The dir-path memo only materializes on the first path query.
-        assert!(idx.derived_probe::<DirPaths>().is_none());
+        // The dir-path memos only materialize on the first path query that
+        // reads them — and independently of each other.
+        assert!(idx.derived_probe::<DirPathsLower>().is_none());
+        assert!(idx.derived_probe::<DirPathsOrig>().is_none());
         assert!(derived_cache_bytes(&idx) > 0, "offset table accounted");
         let before = derived_cache_bytes(&idx);
-        let _ = idx.cached_derived(|| DirPaths::build(&idx));
+        let _ = idx.cached_derived(|| DirPathsLower::build(&idx));
+        let with_lower = derived_cache_bytes(&idx);
         assert!(
-            derived_cache_bytes(&idx) > before,
-            "dir-path memo joins the accounting once built"
+            with_lower > before,
+            "lower memo joins the accounting once built"
+        );
+        assert!(
+            idx.derived_probe::<DirPathsOrig>().is_none(),
+            "building the folded memo must not drag the orig memo in"
+        );
+        let _ = idx.cached_derived(|| DirPathsOrig::build(&idx));
+        assert!(
+            derived_cache_bytes(&idx) > with_lower,
+            "orig memo accounted separately"
         );
     }
 
@@ -695,9 +783,9 @@ mod tests {
         let a = idx.entry_by_record(10).unwrap();
         let bb = idx.entry_by_record(20).unwrap();
 
-        let memo = DirPaths::build(&idx);
+        let memo = DirPathsLower::build(&idx);
         for d in [a, bb] {
-            let lower = memo.lower[d as usize]
+            let lower = memo.0.paths[d as usize]
                 .as_deref()
                 .expect("cycle members still get a path");
             assert!(lower.ends_with(b"\\"));

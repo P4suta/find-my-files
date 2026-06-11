@@ -426,10 +426,6 @@ pub fn compile(
 }
 
 impl CompiledQuery {
-    pub(super) fn needs_paths(&self) -> bool {
-        self.needs_folded_paths || self.needs_orig_paths
-    }
-
     /// Human-readable driver summary for QueryTrace.
     pub fn driver_label(&self) -> String {
         let mut labels: Vec<&str> = self.groups.iter().map(|g| g.driver.label()).collect();

@@ -1,5 +1,5 @@
 use super::compile::{CTerm, Matcher};
-use super::memo::DirPaths;
+use super::memo::PathMemos;
 use crate::index::{EntryId, VolumeIndex};
 
 // ── Residual matcher evaluation ─────────────────────────────────────────
@@ -22,12 +22,12 @@ impl EvalCtx {
     }
 
     #[inline]
-    fn lower_path<'a>(&'a mut self, idx: &VolumeIndex, memo: &DirPaths, id: EntryId) -> &'a [u8] {
+    fn lower_path<'a>(&'a mut self, idx: &VolumeIndex, memo: &PathMemos, id: EntryId) -> &'a [u8] {
         if !self.lower_built {
             self.lower_path.clear();
             if id != VolumeIndex::ROOT {
                 self.lower_path
-                    .extend_from_slice(DirPaths::parent_prefix(&memo.lower, idx.parent(id)));
+                    .extend_from_slice(memo.lower_prefix(idx.parent(id)));
             }
             self.lower_path.extend_from_slice(idx.lower_name(id));
             self.lower_built = true;
@@ -36,12 +36,12 @@ impl EvalCtx {
     }
 
     #[inline]
-    fn orig_path<'a>(&'a mut self, idx: &VolumeIndex, memo: &DirPaths, id: EntryId) -> &'a [u8] {
+    fn orig_path<'a>(&'a mut self, idx: &VolumeIndex, memo: &PathMemos, id: EntryId) -> &'a [u8] {
         if !self.orig_built {
             self.orig_path.clear();
             if id != VolumeIndex::ROOT {
                 self.orig_path
-                    .extend_from_slice(DirPaths::parent_prefix(&memo.orig, idx.parent(id)));
+                    .extend_from_slice(memo.orig_prefix(idx.parent(id)));
             }
             self.orig_path.extend_from_slice(idx.name(id));
             self.orig_built = true;
@@ -51,7 +51,7 @@ impl EvalCtx {
 }
 
 #[inline]
-fn eval(idx: &VolumeIndex, memo: &DirPaths, ctx: &mut EvalCtx, m: &Matcher, id: EntryId) -> bool {
+fn eval(idx: &VolumeIndex, memo: &PathMemos, ctx: &mut EvalCtx, m: &Matcher, id: EntryId) -> bool {
     match m {
         Matcher::True => true,
         Matcher::Size { min, max } => !idx.is_dir(id) && (*min..=*max).contains(&idx.size(id)),
@@ -107,7 +107,7 @@ fn eval(idx: &VolumeIndex, memo: &DirPaths, ctx: &mut EvalCtx, m: &Matcher, id: 
 #[inline]
 pub(super) fn terms_match(
     idx: &VolumeIndex,
-    memo: &DirPaths,
+    memo: &PathMemos,
     ctx: &mut EvalCtx,
     terms: &[CTerm],
     id: EntryId,
@@ -120,7 +120,7 @@ pub(super) fn terms_match(
 #[inline]
 pub(super) fn terms_match_iter<'a>(
     idx: &VolumeIndex,
-    memo: &DirPaths,
+    memo: &PathMemos,
     ctx: &mut EvalCtx,
     terms: impl Iterator<Item = &'a CTerm>,
     id: EntryId,

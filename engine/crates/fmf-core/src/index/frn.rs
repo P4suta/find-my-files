@@ -1,15 +1,18 @@
 //! Record-number → EntryId lookup as a sorted permutation.
 //!
 //! Replaces the FxHashMap (~25 B/entry once capacity padding is counted —
-//! the single largest RAM line after the name pools) with two parallel
-//! arrays (12 B/entry) maintained merge-only, exactly like the sort
-//! permutations: appends collect in an unmerged tail that lookups scan
-//! linearly, and the end-of-batch merge folds them in sorted order.
+//! the single largest RAM line after the name pools) with one id array
+//! (4 B/entry) maintained merge-only, exactly like the sort permutations:
+//! appends collect in an unmerged tail that lookups scan linearly, and the
+//! end-of-batch merge folds them in sorted order. The keys are the `frn`
+//! column itself, read through the id indirection — a probe pays one extra
+//! cache miss, which only the USN path and the builder's parent resolution
+//! ever do (never a search).
 //!
-//! Deletions never touch the arrays: a tombstoned entry simply fails the
+//! Deletions never touch the array: a tombstoned entry simply fails the
 //! liveness filter at lookup time. Renames (tombstone + append, same
-//! record) and NTFS record reuse therefore leave several pairs per key,
-//! of which at most one is live — the invariant the mutation API upholds.
+//! record) and NTFS record reuse therefore leave several ids per key, of
+//! which at most one is live — the invariant the mutation API upholds.
 
 use rayon::prelude::*;
 
@@ -17,8 +20,8 @@ use super::{EntryId, flags, masked};
 
 #[derive(Default)]
 pub(super) struct FrnIndex {
-    /// Masked record numbers, ascending (duplicates possible — see above).
-    keys: Vec<u64>,
+    /// EntryIds ordered by (masked record number, id). Appended entries
+    /// always carry the largest ids, so equal keys read old-before-new.
     ids: Vec<EntryId>,
     /// Entries `[0, covers)` are represented; later ids are found by the
     /// tail scan until [`Self::merge_appended`] runs (end of USN batch).
@@ -40,7 +43,6 @@ impl FrnIndex {
             .collect();
         pairs.par_sort_unstable();
         FrnIndex {
-            keys: pairs.iter().map(|p| p.0).collect(),
             ids: pairs.iter().map(|p| p.1).collect(),
             covers: frn.len() as u32,
         }
@@ -55,13 +57,14 @@ impl FrnIndex {
                 return Some(id);
             }
         }
-        let start = self.keys.partition_point(|&k| k < key);
-        for i in start..self.keys.len() {
-            if self.keys[i] != key {
+        let key_of = |id: EntryId| masked(frn[id as usize]);
+        let start = self.ids.partition_point(|&id| key_of(id) < key);
+        for &id in &self.ids[start..] {
+            if key_of(id) != key {
                 break;
             }
-            if is_live(flag, self.ids[i]) {
-                return Some(self.ids[i]);
+            if is_live(flag, id) {
+                return Some(id);
             }
         }
         None
@@ -89,21 +92,18 @@ impl FrnIndex {
         }
         batch.sort_unstable();
 
-        let old = self.keys.len();
-        super::reserve_bounded(&mut self.keys, batch.len());
+        let old = self.ids.len();
         super::reserve_bounded(&mut self.ids, batch.len());
-        self.keys.resize(old + batch.len(), 0);
         self.ids.resize(old + batch.len(), 0);
-        let mut hi = old; // unmoved prefix of the old arrays (exclusive end)
+        let key_of = |id: EntryId| masked(frn[id as usize]);
+        let mut hi = old; // unmoved prefix of the old array (exclusive end)
         let mut k = old + batch.len(); // write cursor (exclusive end)
         for j in (0..batch.len()).rev() {
             let (key, id) = batch[j];
-            let pos = self.keys[..hi].partition_point(|&x| x <= key);
+            let pos = self.ids[..hi].partition_point(|&oid| key_of(oid) <= key);
             let seg = hi - pos;
-            self.keys.copy_within(pos..hi, k - seg);
             self.ids.copy_within(pos..hi, k - seg);
             k -= seg + 1;
-            self.keys[k] = key;
             self.ids[k] = id;
             hi = pos;
         }
@@ -111,11 +111,10 @@ impl FrnIndex {
     }
 
     pub(super) fn bytes(&self) -> u64 {
-        (self.keys.capacity() * 8 + self.ids.capacity() * 4) as u64
+        (self.ids.capacity() * 4) as u64
     }
 
     pub(super) fn shrink_to_fit(&mut self) {
-        self.keys.shrink_to_fit();
         self.ids.shrink_to_fit();
     }
 }
@@ -158,14 +157,17 @@ mod tests {
     }
 
     /// Random rename/delete storms: the in-place merge must produce the
-    /// byte-identical arrays the forward reference does, batch after batch
-    /// (keys are never mutated in place, so both stay truly sorted and the
-    /// sorted stable merge is unique).
+    /// byte-identical id array the forward reference does, batch after
+    /// batch (record keys are never mutated in place, so both orders stay
+    /// truly sorted and the sorted stable merge is unique). The reference
+    /// carries explicit key/id pairs — the production array dropped the
+    /// key copy and reads keys through the id indirection, so the derived
+    /// key sequence is asserted too.
     #[test]
     fn in_place_merge_is_byte_identical_to_the_forward_reference() {
         let mut idx = build_sample();
-        let mut ref_keys = idx.frn_index.keys.clone();
         let mut ref_ids = idx.frn_index.ids.clone();
+        let mut ref_keys: Vec<u64> = ref_ids.iter().map(|&id| masked(idx.frn(id))).collect();
         let mut state = 0x1234_5678_9ABC_DEF0u64;
         let mut rng = move || {
             state ^= state << 13;
@@ -194,8 +196,14 @@ mod tests {
             forward_merge_reference(&mut ref_keys, &mut ref_ids, &batch);
 
             idx.merge_new_into_permutations(first_new);
-            assert_eq!(idx.frn_index.keys, ref_keys);
             assert_eq!(idx.frn_index.ids, ref_ids);
+            let derived_keys: Vec<u64> = idx
+                .frn_index
+                .ids
+                .iter()
+                .map(|&id| masked(idx.frn(id)))
+                .collect();
+            assert_eq!(derived_keys, ref_keys);
         }
     }
 
