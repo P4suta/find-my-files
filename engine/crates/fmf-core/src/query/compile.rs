@@ -11,13 +11,9 @@ use super::ast::{Ast, Term};
 use super::dates::DateResolver;
 use crate::wtf8;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CaseMode {
-    /// Case-insensitive unless the needle contains an uppercase letter.
-    Smart,
-    Insensitive,
-    Sensitive,
-}
+// The case mode is contract surface (FmfQueryOptions.case_mode carries it
+// as u32) — the canonical definition is used directly (ADR-0018).
+pub use fmf_contract::options::CaseMode;
 
 #[derive(Debug, Error)]
 pub enum CompileError {

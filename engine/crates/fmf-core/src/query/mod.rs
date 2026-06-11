@@ -48,3 +48,16 @@ impl Default for QueryOptions {
         }
     }
 }
+
+/// The single wire→engine options conversion — both boundaries (FFI
+/// `fmf_query` and pipe dispatch) go through this (ADR-0018).
+impl From<fmf_contract::pod::FmfQueryOptions> for QueryOptions {
+    fn from(o: fmf_contract::pod::FmfQueryOptions) -> Self {
+        Self {
+            sort: SortKey::from_u32(o.sort),
+            desc: o.desc != 0,
+            case: CaseMode::from_u32(o.case_mode),
+            include_hidden_system: o.include_hidden_system != 0,
+        }
+    }
+}

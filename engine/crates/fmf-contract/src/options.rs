@@ -29,3 +29,25 @@ pub enum VolumeState {
     Rescanning = 2,
     Failed = 3,
 }
+
+// Wire u32 → enum, defaulting unknown values like the boundaries always
+// did (pure value conversion — the one place the mapping table lives).
+impl SortKey {
+    pub const fn from_u32(v: u32) -> Self {
+        match v {
+            1 => Self::Size,
+            2 => Self::Mtime,
+            _ => Self::Name,
+        }
+    }
+}
+
+impl CaseMode {
+    pub const fn from_u32(v: u32) -> Self {
+        match v {
+            1 => Self::Insensitive,
+            2 => Self::Sensitive,
+            _ => Self::Smart,
+        }
+    }
+}

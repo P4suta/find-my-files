@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+fmf-contract = { workspace = true }
 ntfs-reader = { workspace = true }
 windows-sys = { workspace = true }
 memchr = { workspace = true }

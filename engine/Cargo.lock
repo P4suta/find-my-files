@@ -310,6 +310,7 @@ name = "fmf-core"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "fmf-contract",
  "memchr",
  "ntfs-reader",
  "parking_lot",

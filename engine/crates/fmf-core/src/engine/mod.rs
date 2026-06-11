@@ -30,13 +30,10 @@ pub struct EngineConfig {
     pub index_dir: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VolumePhase {
-    Scanning,
-    Ready,
-    Rescanning,
-    Failed,
-}
+// The volume state is contract surface (FmfVolumeStatus.state /
+// VolumeStatusWire.state carry it as u32) — the engine uses the canonical
+// definition directly, so no wire↔engine mapping exists (ADR-0018).
+pub use fmf_contract::options::VolumeState;
 
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
@@ -65,6 +62,24 @@ pub enum EngineEvent {
         severity: u64, // 1=warn 2=error 3=panic
         volume: String,
     },
+}
+
+impl EngineEvent {
+    /// The single EngineEvent → contract POD mapping — the FFI callback and
+    /// the pipe event push both consume this (ADR-0018: no per-boundary
+    /// kind tables).
+    pub fn to_wire(&self) -> fmf_contract::pod::FmfEvent {
+        use fmf_contract::events::EventKind;
+        let (kind, volume, entries) = match self {
+            Self::Progress { volume, entries } => (EventKind::Progress, volume, *entries),
+            Self::VolumeReady { volume, entries } => (EventKind::VolumeReady, volume, *entries),
+            Self::IndexChanged { volume } => (EventKind::IndexChanged, volume, 0),
+            Self::RescanStarted { volume } => (EventKind::RescanStarted, volume, 0),
+            Self::VolumeFailed { volume, .. } => (EventKind::VolumeFailed, volume, 0),
+            Self::EngineError { severity, volume } => (EventKind::EngineError, volume, *severity),
+        };
+        fmf_contract::pod::FmfEvent::new(kind as u32, entries, volume)
+    }
 }
 
 pub type EventSink = Arc<dyn Fn(&EngineEvent) + Send + Sync>;
@@ -190,7 +205,7 @@ impl Engine {
         for label in volumes {
             let slot = Arc::new(VolumeSlot {
                 label: label.clone(),
-                phase: Mutex::new(VolumePhase::Scanning),
+                phase: Mutex::new(VolumeState::Scanning),
                 scanned: Mutex::new(0),
                 index: RwLock::new(None),
                 stop: Arc::new(AtomicBool::new(false)),
@@ -209,7 +224,7 @@ impl Engine {
         }
     }
 
-    pub fn status(&self) -> Vec<(String, VolumePhase, u64)> {
+    pub fn status(&self) -> Vec<(String, VolumeState, u64)> {
         self.volumes
             .read()
             .iter()
@@ -251,7 +266,7 @@ impl Engine {
         let volumes: Vec<_> = self.volumes.read().clone();
         let mut saved = 0;
         for slot in volumes {
-            if *slot.phase.lock() != VolumePhase::Ready {
+            if *slot.phase.lock() != VolumeState::Ready {
                 continue;
             }
             // Checkpoint before index: a batch landing in between leaves the
@@ -295,7 +310,7 @@ impl Engine {
     pub fn insert_ready_volume(&self, label: &str, idx: VolumeIndex) {
         let slot = Arc::new(VolumeSlot {
             label: label.to_string(),
-            phase: Mutex::new(VolumePhase::Ready),
+            phase: Mutex::new(VolumeState::Ready),
             scanned: Mutex::new(idx.live_len() as u64),
             index: RwLock::new(Some(idx)),
             stop: Arc::new(AtomicBool::new(false)),

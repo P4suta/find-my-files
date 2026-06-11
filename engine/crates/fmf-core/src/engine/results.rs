@@ -34,6 +34,39 @@ impl ResultSet {
         self.rows.is_empty()
     }
 
+    /// Builds the shared page representation — 48-byte contract rows plus
+    /// one string blob, offsets blob-relative — the single implementation
+    /// behind both the FFI `FmfPage` and the pipe ResultPage payload
+    /// (ADR-0018). Blob layout: per row, name bytes then parent bytes, in
+    /// row order (the canonical layout the golden corpus pins).
+    pub fn fill_page(
+        &self,
+        offset: usize,
+        count: usize,
+    ) -> Result<(Vec<fmf_contract::pod::FmfRow>, Vec<u8>), EngineError> {
+        let rows_data = self.page(offset, count)?;
+        let mut blob = Vec::new();
+        let mut rows = Vec::with_capacity(rows_data.len());
+        for row in &rows_data {
+            let name_off = blob.len() as u32;
+            blob.extend_from_slice(&row.name);
+            let parent_off = blob.len() as u32;
+            blob.extend_from_slice(&row.parent_path);
+            rows.push(fmf_contract::pod::FmfRow {
+                entry_ref: row.entry_ref,
+                frn: row.frn,
+                size: row.size,
+                mtime: row.mtime,
+                name_off,
+                parent_path_off: parent_off,
+                flags: row.flags,
+                name_len: row.name.len() as u16,
+                parent_path_len: row.parent_path.len() as u16,
+            });
+        }
+        Ok((rows, blob))
+    }
+
     pub fn page(&self, offset: usize, count: usize) -> Result<Vec<Row>, EngineError> {
         let end = (offset.saturating_add(count)).min(self.rows.len());
         let start = offset.min(end);

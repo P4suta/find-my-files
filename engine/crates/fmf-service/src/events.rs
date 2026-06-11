@@ -12,19 +12,6 @@ use fmf_proto::limits::EVENT_QUEUE_CAP;
 use fmf_proto::messages::FmfEvent;
 use parking_lot::{Condvar, Mutex};
 
-/// Contract event kinds (fmf-contract events.rs — FFI and wire share them).
-fn wire_of(ev: &EngineEvent) -> FmfEvent {
-    let (kind, volume, entries) = match ev {
-        EngineEvent::Progress { volume, entries } => (1, volume, *entries),
-        EngineEvent::VolumeReady { volume, entries } => (2, volume, *entries),
-        EngineEvent::IndexChanged { volume } => (3, volume, 0),
-        EngineEvent::RescanStarted { volume } => (4, volume, 0),
-        EngineEvent::VolumeFailed { volume, .. } => (5, volume, 0),
-        EngineEvent::EngineError { severity, volume } => (6, volume, *severity),
-    };
-    FmfEvent::new(kind, entries, volume)
-}
-
 struct QueueState {
     items: VecDeque<FmfEvent>,
     closed: bool,
@@ -99,7 +86,8 @@ impl Broadcaster {
         // would be a reference cycle keeping the engine alive forever.
         let engine_for_counters = Arc::downgrade(engine);
         engine.set_event_sink(Some(Arc::new(move |ev: &EngineEvent| {
-            let wire = wire_of(ev);
+            // EngineEvent::to_wire is the single kind mapping (ADR-0018).
+            let wire = ev.to_wire();
             let mut dropped = 0u64;
             for q in sink.subscribers.lock().iter() {
                 if q.push(wire) {

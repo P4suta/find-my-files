@@ -8,7 +8,7 @@ use crate::index::{EntryId, VolumeIndex};
 use crate::metrics::{Counters, ScanTrace, UsnTrace};
 use crate::query::{CompiledQuery, QueryOptions};
 
-use super::{Engine, EngineEvent, VolumePhase};
+use super::{Engine, EngineEvent, VolumeState};
 
 /// Last materialized per-volume result, kept for incremental refinement
 /// (query/subsume.rs) and unchanged-result detection (`QueryTrace::
@@ -39,7 +39,7 @@ pub(super) struct JournalCheckpoint {
 
 pub(super) struct VolumeSlot {
     pub(super) label: String,
-    pub(super) phase: Mutex<VolumePhase>,
+    pub(super) phase: Mutex<VolumeState>,
     pub(super) scanned: Mutex<u64>,
     pub(super) index: RwLock<Option<VolumeIndex>>,
     pub(super) stop: Arc<AtomicBool>,
@@ -134,7 +134,7 @@ impl Engine {
             this.volume_thread_inner(slot2);
         }));
         if result.is_err() {
-            *slot.phase.lock() = VolumePhase::Failed;
+            *slot.phase.lock() = VolumeState::Failed;
             self.emit(EngineEvent::VolumeFailed {
                 volume: slot.label.clone(),
                 message: "internal panic — engine.log に詳細".to_string(),
@@ -158,7 +158,7 @@ impl Engine {
             let mut journal = match UsnJournal::open(&label, None) {
                 Ok(j) => j,
                 Err(e) => {
-                    *slot.phase.lock() = VolumePhase::Failed;
+                    *slot.phase.lock() = VolumeState::Failed;
                     self.emit(EngineEvent::VolumeFailed {
                         volume: label.clone(),
                         message: e.to_string(),
@@ -256,7 +256,7 @@ impl Engine {
                         idx
                     }
                     Err(e) => {
-                        *slot.phase.lock() = VolumePhase::Failed;
+                        *slot.phase.lock() = VolumeState::Failed;
                         self.emit(EngineEvent::VolumeFailed {
                             volume: label.clone(),
                             message: e.to_string(),
@@ -276,7 +276,7 @@ impl Engine {
                 journal_id: journal.journal_id,
                 next_usn: journal.next_usn,
             });
-            *slot.phase.lock() = VolumePhase::Ready;
+            *slot.phase.lock() = VolumeState::Ready;
             self.emit(EngineEvent::VolumeReady {
                 volume: label.clone(),
                 entries,
@@ -361,7 +361,7 @@ impl Engine {
                         // The old journal id is dead; a flush during the
                         // rescan must not pair it with the new index.
                         *slot.checkpoint.lock() = None;
-                        *slot.phase.lock() = VolumePhase::Rescanning;
+                        *slot.phase.lock() = VolumeState::Rescanning;
                         self.emit(EngineEvent::RescanStarted {
                             volume: label.clone(),
                         });
@@ -369,7 +369,7 @@ impl Engine {
                         break; // restart the outer loop → fresh journal + scan
                     }
                     Err(e) => {
-                        *slot.phase.lock() = VolumePhase::Failed;
+                        *slot.phase.lock() = VolumeState::Failed;
                         self.emit(EngineEvent::VolumeFailed {
                             volume: label.clone(),
                             message: e.to_string(),

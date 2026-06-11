@@ -5,7 +5,7 @@ use crate::metrics::QueryTrace;
 use crate::query::{self, QueryOptions};
 
 use super::volume::{VolumeQueryCache, VolumeSlot};
-use super::{Engine, EngineError, ResultSet, VolumePhase};
+use super::{Engine, EngineError, ResultSet, VolumeState};
 
 /// Kill switch for the incremental query cache (`FMF_QUERY_CACHE=0`) — if a
 /// subsumption bug ever surfaces in the field, users get correctness back
@@ -46,7 +46,7 @@ impl Engine {
             .volumes
             .read()
             .iter()
-            .filter(|s| *s.phase.lock() == VolumePhase::Ready)
+            .filter(|s| *s.phase.lock() == VolumeState::Ready)
             .cloned()
             .collect();
 

@@ -196,7 +196,7 @@ fn status_reports_ready_volumes() {
     assert_eq!(st.len(), 2);
     assert!(
         st.iter()
-            .all(|(_, p, n)| *p == VolumePhase::Ready && *n > 0)
+            .all(|(_, p, n)| *p == VolumeState::Ready && *n > 0)
     );
 }
 

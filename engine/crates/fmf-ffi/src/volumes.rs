@@ -1,7 +1,7 @@
 use std::ffi::{c_char, c_void};
 
 use fmf_contract::volume::encode_label;
-use fmf_core::engine::{Engine, VolumePhase};
+use fmf_core::engine::Engine;
 
 use crate::error::{guard, utf8_arg};
 use crate::handle::engine;
@@ -86,12 +86,8 @@ pub unsafe extern "C" fn fmf_index_status(
         unsafe { *count = status.len() as u32 };
         if !buf.is_null() {
             for (i, (label, phase, entries)) in status.iter().take(cap as usize).enumerate() {
-                let state = match phase {
-                    VolumePhase::Scanning => 0,
-                    VolumePhase::Ready => 1,
-                    VolumePhase::Rescanning => 2,
-                    VolumePhase::Failed => 3,
-                };
+                // VolumeState is the contract enum (repr u32) — no mapping.
+                let state = *phase as u32;
                 unsafe {
                     *buf.add(i) = FmfVolumeStatus {
                         label: encode_label(label),

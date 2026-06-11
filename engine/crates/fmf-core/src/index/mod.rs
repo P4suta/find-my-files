@@ -131,9 +131,6 @@ pub struct EncodedEntry<'a> {
     pub mtime: i64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SortKey {
-    Name,
-    Size,
-    Mtime,
-}
+// The sort key is contract surface (FmfQueryOptions.sort carries it as
+// u32) — the index uses the canonical definition directly (ADR-0018).
+pub use fmf_contract::options::SortKey;

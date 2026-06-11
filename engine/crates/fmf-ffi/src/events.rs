@@ -49,27 +49,8 @@ pub unsafe extern "C" fn fmf_set_event_callback(
                 handle
                     .engine
                     .set_event_sink(Some(Arc::new(move |ev: &EngineEvent| {
-                        let (kind, volume, entries) = match ev {
-                            EngineEvent::Progress { volume, entries } => {
-                                (FMF_EVENT_PROGRESS, volume, *entries)
-                            }
-                            EngineEvent::VolumeReady { volume, entries } => {
-                                (FMF_EVENT_VOLUME_READY, volume, *entries)
-                            }
-                            EngineEvent::IndexChanged { volume } => {
-                                (FMF_EVENT_INDEX_CHANGED, volume, 0)
-                            }
-                            EngineEvent::RescanStarted { volume } => {
-                                (FMF_EVENT_RESCAN_STARTED, volume, 0)
-                            }
-                            EngineEvent::VolumeFailed { volume, .. } => {
-                                (FMF_EVENT_VOLUME_FAILED, volume, 0)
-                            }
-                            EngineEvent::EngineError { severity, volume } => {
-                                (FMF_EVENT_ENGINE_ERROR, volume, *severity)
-                            }
-                        };
-                        let payload = FmfEvent::new(kind, entries, volume);
+                        // EngineEvent::to_wire is the single kind mapping.
+                        let payload = ev.to_wire();
                         unsafe { (sink.cb)(&payload, sink.user) };
                     })));
                 *handle._sink_keepalive.lock() = Some(keep);

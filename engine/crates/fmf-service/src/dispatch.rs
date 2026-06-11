@@ -8,9 +8,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use fmf_core::engine::{Engine, EngineError, ResultSet, VolumePhase};
-use fmf_core::index::SortKey;
-use fmf_core::query::{CaseMode, QueryOptions};
+use fmf_core::engine::{Engine, EngineError, ResultSet};
+use fmf_core::query::QueryOptions;
 use fmf_proto::limits::MAX_RESULTS_PER_CONN;
 use fmf_proto::messages::{self, opcode};
 use fmf_proto::{ABI_VERSION, PROTOCOL_VERSION, codes};
@@ -135,12 +134,8 @@ impl Connection {
                     .into_iter()
                     .map(|(volume, phase, entries)| messages::VolumeStatusWire {
                         volume,
-                        state: match phase {
-                            VolumePhase::Scanning => 0,
-                            VolumePhase::Ready => 1,
-                            VolumePhase::Rescanning => 2,
-                            VolumePhase::Failed => 3,
-                        },
+                        // VolumeState is the contract enum (repr u32).
+                        state: phase as u32,
                         entries,
                     })
                     .collect();
@@ -186,20 +181,7 @@ impl Connection {
         if let Some(outcome) = self.faults.on_query(text) {
             return outcome;
         }
-        let q = QueryOptions {
-            sort: match opt.sort {
-                1 => SortKey::Size,
-                2 => SortKey::Mtime,
-                _ => SortKey::Name,
-            },
-            desc: opt.desc != 0,
-            case: match opt.case_mode {
-                1 => CaseMode::Insensitive,
-                2 => CaseMode::Sensitive,
-                _ => CaseMode::Smart,
-            },
-            include_hidden_system: opt.include_hidden_system != 0,
-        };
+        let q: QueryOptions = opt.into();
         match self.engine.query(text, &q) {
             Ok((set, trace)) => {
                 let count = set.len() as u64;
@@ -256,31 +238,12 @@ impl Connection {
             if entry.lagged {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
-            entry.set.page(req.offset as usize, req.count as usize)
+            // Row+blob packing is fmf-core's single implementation
+            // (ResultSet::fill_page); this layer only frames it.
+            entry.set.fill_page(req.offset as usize, req.count as usize)
         };
         match page {
-            Ok(rows) => {
-                let mut blob = Vec::new();
-                let mut wire_rows = Vec::with_capacity(rows.len());
-                for row in &rows {
-                    let name_off = blob.len() as u32;
-                    blob.extend_from_slice(&row.name);
-                    let parent_off = blob.len() as u32;
-                    blob.extend_from_slice(&row.parent_path);
-                    wire_rows.push(messages::FmfRow {
-                        entry_ref: row.entry_ref,
-                        frn: row.frn,
-                        size: row.size,
-                        mtime: row.mtime,
-                        name_off,
-                        parent_path_off: parent_off,
-                        flags: row.flags,
-                        name_len: row.name.len() as u16,
-                        parent_path_len: row.parent_path.len() as u16,
-                    });
-                }
-                Outcome::Reply(codes::OK, messages::encode_page(&wire_rows, &blob))
-            }
+            Ok((rows, blob)) => Outcome::Reply(codes::OK, messages::encode_page(&rows, &blob)),
             Err(EngineError::Stale) => Outcome::Reply(
                 codes::STALE,
                 b"structural generation moved; re-run the query".to_vec(),

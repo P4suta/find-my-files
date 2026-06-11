@@ -1,8 +1,7 @@
 use std::ffi::{c_char, c_void};
 
 use fmf_core::engine::{EngineError, ResultSet};
-use fmf_core::index::SortKey;
-use fmf_core::query::{CaseMode, QueryOptions};
+use fmf_core::query::QueryOptions;
 
 use crate::blob::{FmfBlob, blob_from_json};
 use crate::error::{error_chain, guard, set_error, utf8_arg};
@@ -35,21 +34,7 @@ pub unsafe extern "C" fn fmf_query(
             Ok(s) => s,
             Err(c) => return c,
         };
-        let o = unsafe { &*options };
-        let opt = QueryOptions {
-            sort: match o.sort {
-                1 => SortKey::Size,
-                2 => SortKey::Mtime,
-                _ => SortKey::Name,
-            },
-            desc: o.desc != 0,
-            case: match o.case_mode {
-                1 => CaseMode::Insensitive,
-                2 => CaseMode::Sensitive,
-                _ => CaseMode::Smart,
-            },
-            include_hidden_system: o.include_hidden_system != 0,
-        };
+        let opt: QueryOptions = unsafe { *options }.into();
         match handle.engine.query(text, &opt) {
             Ok((rs, trace)) => {
                 unsafe {
@@ -95,8 +80,10 @@ pub unsafe extern "C" fn fmf_result_page(
             return FMF_E_INVALID_ARG;
         }
         let rs = unsafe { &*r.cast::<ResultSet>() };
-        let rows_data = match rs.page(offset as usize, count as usize) {
-            Ok(rows) => rows,
+        // The row+blob packing is fmf-core's single implementation
+        // (ResultSet::fill_page) — this layer only wraps it in FmfPage.
+        let (rows, blob) = match rs.fill_page(offset as usize, count as usize) {
+            Ok(page) => page,
             Err(EngineError::Stale) => {
                 set_error("structural generation moved; re-run the query");
                 return FMF_E_STALE;
@@ -106,26 +93,6 @@ pub unsafe extern "C" fn fmf_result_page(
                 return FMF_E_IO;
             }
         };
-
-        let mut blob = Vec::new();
-        let mut rows = Vec::with_capacity(rows_data.len());
-        for row in &rows_data {
-            let name_off = blob.len() as u32;
-            blob.extend_from_slice(&row.name);
-            let parent_off = blob.len() as u32;
-            blob.extend_from_slice(&row.parent_path);
-            rows.push(FmfRow {
-                entry_ref: row.entry_ref,
-                frn: row.frn,
-                size: row.size,
-                mtime: row.mtime,
-                name_off,
-                parent_path_off: parent_off,
-                flags: row.flags,
-                name_len: row.name.len() as u16,
-                parent_path_len: row.parent_path.len() as u16,
-            });
-        }
         let mut owned = Box::new(PageOwned {
             page: FmfPage {
                 row_count: rows.len() as u32,
