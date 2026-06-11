@@ -199,7 +199,10 @@ struct FrameHeader {            // 16 bytes, little-endian
 「JSON」= UTF-8 JSON、**フィールド名は snake_case(serde 既定)**。POD+可変長データは記載順に
 隙間なく連結。ボリューム識別子は全箇所で**ドライブラベル文字列 `"C:"`**(GUIDは使わない)。
 バイナリ・JSON とも代表メッセージは Rust/C# 両スイートで同一の**ゴールデンフレーム**(バイト列)
-としてピンする。
+としてピンする。正本コーパスは **`contract/golden/`**(リポジトリルート): fmf-proto
+`tests/golden.rs` と fmf-core `tests/golden_json.rs` が捕獲・ピンし、C# は
+`GoldenCorpusTests` が同一ファイルを独立に decode→re-encode してピンする。再捕獲は
+`FMF_BLESS=1` を付けた明示実行のみ(意図的な契約変更の儀式 — [ADR-0018](adr/0018-contract-single-source.md))。
 
 | op | 名前 | FFI対応 | ペイロード(req → resp) |
 |---|---|---|---|

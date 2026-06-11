@@ -313,6 +313,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "serde",
+ "serde_json",
  "thiserror",
  "tracing",
  "tracing-appender",

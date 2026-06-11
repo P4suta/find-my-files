@@ -22,6 +22,9 @@ serde = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
+# Golden JSON-shape pins (tests/golden_json.rs) — the serde output consumed
+# by the C# side is contract surface (ADR-0018).
+serde_json = { workspace = true }
 
 [[bench]]
 name = "search"

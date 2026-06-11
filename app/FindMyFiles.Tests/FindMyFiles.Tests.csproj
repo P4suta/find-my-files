@@ -18,6 +18,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Shared golden corpus (contract/golden at the repo root) — the exact
+         files fmf-proto/fmf-core pin. Both languages reading one corpus is
+         the contract gate (ADR-0018). FMF_GOLDEN_DIR overrides at runtime. -->
+    <Content Include="..\..\contract\golden\**"
+             Link="golden\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- SkipRustBuild must reach the app project: a property set in this
          csproj's PropertyGroup does NOT cross a ProjectReference, but
          AdditionalProperties metadata does. So plain `dotnet test` never

@@ -1,0 +1,17 @@
+{
+  "query": "win ext:txt",
+  "driver": "pool-scan",
+  "cache": "refine",
+  "unchanged": false,
+  "parse_us": 11,
+  "compile_us": 12,
+  "memo_us": 13,
+  "scan_us": 14,
+  "materialize_us": 15,
+  "merge_us": 16,
+  "total_us": 81,
+  "entries_scanned": 1268560,
+  "excluded_skipped": 17,
+  "hits": 18,
+  "volumes": 2
+}

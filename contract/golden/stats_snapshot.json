@@ -1,0 +1,140 @@
+{
+  "recent_queries": [
+    {
+      "query": "win ext:txt",
+      "driver": "pool-scan",
+      "cache": "refine",
+      "unchanged": false,
+      "parse_us": 11,
+      "compile_us": 12,
+      "memo_us": 13,
+      "scan_us": 14,
+      "materialize_us": 15,
+      "merge_us": 16,
+      "total_us": 81,
+      "entries_scanned": 1268560,
+      "excluded_skipped": 17,
+      "hits": 18,
+      "volumes": 2
+    }
+  ],
+  "query_histogram": {
+    "buckets": [
+      1,
+      2,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "count": 6,
+    "sum_us": 11106,
+    "max_us": 10000
+  },
+  "p50_us": 4,
+  "p99_us": 16384,
+  "recent_usn": [
+    {
+      "volume": "C:",
+      "records": 21,
+      "upserted": 22,
+      "deleted": 23,
+      "stat_updated": 24,
+      "stat_failures": 25,
+      "apply_us": 26
+    }
+  ],
+  "scans": [
+    {
+      "volume": "C:",
+      "source": "snapshot",
+      "read_bytes": 31,
+      "read_ms": 32,
+      "mb_per_s": 33.5,
+      "parse_ms": 34,
+      "deferred_ms": 35,
+      "build_ms": 36,
+      "sort_ms": 37,
+      "total_ms": 38,
+      "entries": 39,
+      "peak_ws_bytes": 40
+    }
+  ],
+  "indexes": [
+    {
+      "volume": "C:",
+      "entries": 41,
+      "live_entries": 42,
+      "tombstones": 43,
+      "name_pool_bytes": 44,
+      "lower_pool_bytes": 45,
+      "offsets_bytes": 46,
+      "parent_bytes": 47,
+      "size_bytes": 48,
+      "mtime_bytes": 49,
+      "frn_bytes": 50,
+      "flag_bytes": 51,
+      "permutations_bytes": 52,
+      "frn_map_bytes": 53,
+      "dead_name_bytes": 54,
+      "pool_garbage_ratio": 0.5,
+      "derived_cache_bytes": 55,
+      "total_bytes": 56,
+      "bytes_per_entry": 57.5,
+      "content_generation": 58,
+      "structural_generation": 59
+    }
+  ],
+  "counters": {
+    "stat_fetch_failures": 61,
+    "usn_batches_truncated": 62,
+    "snapshot_load_failures": 63,
+    "snapshot_save_failures": 64,
+    "deferred_names_unresolved": 65,
+    "corrupt_mft_records": 66,
+    "journal_rescans": 67,
+    "scan_pipeline_fallbacks": 68,
+    "offset_table_rebuild_fallbacks": 69,
+    "lazy_perm_rebuild_fallbacks": 70,
+    "compaction_aborts": 71,
+    "pipe_malformed_frames": 72,
+    "pipe_events_dropped": 73,
+    "pipe_connections_rejected": 74
+  },
+  "recent_errors": [
+    {
+      "seq": 81,
+      "uptime_ms": 82,
+      "severity": "warn",
+      "area": "fmf_core::scan",
+      "volume": "C:",
+      "message": "read-ahead spawn failed; fell back to sequential reads"
+    }
+  ]
+}

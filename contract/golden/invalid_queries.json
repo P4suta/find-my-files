@@ -1,0 +1,13 @@
+{
+  "comment": "Query strings the real engine rejects (parse or compile error → FMF_E_QUERY_SYNTAX). Shared fixture: fmf-core pins rejection here; the C# fake engine uses the same file for its syntax verdicts. Re-capture via FMF_BLESS=1.",
+  "queries": [
+    "\"unterminated",
+    "regex:[",
+    "regex:(",
+    "size:abc",
+    "size:>",
+    "size:1..x",
+    "dm:notadate",
+    "dm:2026-13-45"
+  ]
+}

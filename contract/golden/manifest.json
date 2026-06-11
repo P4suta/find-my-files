@@ -1,0 +1,98 @@
+{
+  "cases": [
+    {
+      "desc": "op1 request: HelloReq{protocol_version:1}",
+      "file": "hello_req.bin"
+    },
+    {
+      "desc": "op1 response: HelloResp{protocol_version:1, abi_version:1, server_pid:0x04030201}",
+      "file": "hello_resp.bin"
+    },
+    {
+      "desc": "op2 request: empty payload",
+      "file": "subscribe_req.bin"
+    },
+    {
+      "desc": "op2 response: empty payload",
+      "file": "subscribe_resp.bin"
+    },
+    {
+      "desc": "op3 request: empty payload",
+      "file": "unsubscribe_req.bin"
+    },
+    {
+      "desc": "op4 response: JSON [{volume,state,entries}] — two volumes, Ready+Scanning",
+      "file": "list_volumes_resp.bin"
+    },
+    {
+      "desc": "op5 request: JSON {volumes:[C:,D:]}",
+      "file": "index_start_req.bin"
+    },
+    {
+      "desc": "op6 response: JSON, single volume Rescanning(2)",
+      "file": "index_status_resp.bin"
+    },
+    {
+      "desc": "op7 request: default options (Name/Asc/Smart/no-hidden) + ASCII text",
+      "file": "query_req_basic.bin"
+    },
+    {
+      "desc": "op7 request: Mtime/Desc/Sensitive/include-hidden + multi-byte UTF-8 text",
+      "file": "query_req_unicode.bin"
+    },
+    {
+      "desc": "op7 response: QueryRespHead{result_id:1,count:3} + opaque trace JSON",
+      "file": "query_resp.bin"
+    },
+    {
+      "desc": "op8 request: {result_id:1, offset:128, count:64}",
+      "file": "result_page_req.bin"
+    },
+    {
+      "desc": "op8 response: zero rows, empty blob",
+      "file": "result_page_resp_empty.bin"
+    },
+    {
+      "desc": "op8 response: 3 rows (ASCII / multi-byte / WTF-8 unpaired surrogate), u64 size overflow, negative mtime, dir flag",
+      "file": "result_page_resp_rows.bin"
+    },
+    {
+      "desc": "op9 request: {result_id:1}",
+      "file": "result_free_req.bin"
+    },
+    {
+      "desc": "kind1 Progress: scanned count",
+      "file": "event_progress.bin"
+    },
+    {
+      "desc": "kind2 VolumeReady: entries",
+      "file": "event_volume_ready.bin"
+    },
+    {
+      "desc": "kind3 IndexChanged (debounced)",
+      "file": "event_index_changed.bin"
+    },
+    {
+      "desc": "kind4 RescanStarted",
+      "file": "event_rescan_started.bin"
+    },
+    {
+      "desc": "kind5 VolumeFailed",
+      "file": "event_volume_failed.bin"
+    },
+    {
+      "desc": "kind6 EngineError: entries=severity(2=error)",
+      "file": "event_engine_error.bin"
+    },
+    {
+      "desc": "op7 response with status=QUERY_SYNTAX(5): payload is the UTF-8 detail text",
+      "file": "error_resp.bin"
+    },
+    {
+      "desc": "op12 response: JSON {uptime_ms, connections, version}",
+      "file": "service_info_resp.bin"
+    }
+  ],
+  "comment": "Captured wire bytes — the executable contract spec. Re-capture only via FMF_BLESS=1 (ADR-0018).",
+  "version": 1
+}
