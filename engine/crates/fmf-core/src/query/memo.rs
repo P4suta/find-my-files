@@ -133,12 +133,81 @@ impl OffsetTable {
 
 /// Memoized full paths for every directory (only built when the query
 /// contains path terms). Entry paths are `memo[parent] + name`.
+///
+/// Across generations the memo extends incrementally as long as no
+/// existing directory was renamed or moved (`dir_topology_generation`):
+/// appends never change old dir paths, so new dirs just memoize on top.
+/// A topology change rebuilds from scratch — dir renames are rare and the
+/// alternative (subtree invalidation) is not worth its complexity.
 pub(super) struct DirPaths {
     pub(super) lower: Vec<Option<Box<[u8]>>>,
     pub(super) orig: Vec<Option<Box<[u8]>>>,
+    /// Entries `[0, covers_entries)` are memoized.
+    covers_entries: usize,
+    /// The dir-topology generation this memo is valid for.
+    topo_generation: u64,
 }
 
 impl DirPaths {
+    /// Placeholder for queries without path terms — never read.
+    pub(super) fn empty() -> Self {
+        DirPaths {
+            lower: Vec::new(),
+            orig: Vec::new(),
+            covers_entries: 0,
+            topo_generation: 0,
+        }
+    }
+
+    /// Extend `prev` to the current generation: memoize only the appended
+    /// dirs. Their parents were live entries when pushed (lower id or
+    /// root), so one increasing-id pass resolves every prefix. Falls back
+    /// to a full build when a dir was renamed/moved (paths of arbitrary
+    /// descendants changed) — the normal policy switch, not a degradation.
+    pub(super) fn extend_from(idx: &VolumeIndex, prev: std::sync::Arc<DirPaths>) -> Self {
+        let n = idx.len();
+        if prev.topo_generation != idx.dir_topology_generation() || prev.covers_entries > n {
+            return Self::build(idx);
+        }
+        let mut memo = match std::sync::Arc::try_unwrap(prev) {
+            Ok(owned) => owned,
+            Err(shared) => DirPaths {
+                lower: shared.lower.clone(),
+                orig: shared.orig.clone(),
+                covers_entries: shared.covers_entries,
+                topo_generation: shared.topo_generation,
+            },
+        };
+        memo.lower.resize(n, None);
+        memo.orig.resize(n, None);
+        for id in memo.covers_entries as u32..n as u32 {
+            if !idx.is_dir(id) {
+                continue;
+            }
+            let p = idx.parent(id) as usize;
+            let mut lower = memo
+                .lower
+                .get(p)
+                .and_then(|x| x.as_deref())
+                .unwrap_or(&[])
+                .to_vec();
+            let mut orig = memo
+                .orig
+                .get(p)
+                .and_then(|x| x.as_deref())
+                .unwrap_or(&[])
+                .to_vec();
+            lower.extend_from_slice(idx.lower_name(id));
+            lower.push(b'\\');
+            orig.extend_from_slice(idx.name(id));
+            orig.push(b'\\');
+            memo.lower[id as usize] = Some(lower.into_boxed_slice());
+            memo.orig[id as usize] = Some(orig.into_boxed_slice());
+        }
+        memo.covers_entries = n;
+        memo
+    }
+
     /// Level-order parallel build: a directory's path depends only on its
     /// parent's (one level up), so each depth level fans out across cores.
     pub(super) fn build(idx: &VolumeIndex) -> Self {
@@ -146,6 +215,8 @@ impl DirPaths {
         let mut memo = DirPaths {
             lower: vec![None; n],
             orig: vec![None; n],
+            covers_entries: n,
+            topo_generation: idx.dir_topology_generation(),
         };
 
         // Depth per directory via memoized chain walks (serial, O(n)).
@@ -355,6 +426,60 @@ mod tests {
     #[test]
     fn dir_paths_match_append_path_oracle() {
         assert_memo_matches_oracle(&deep_index());
+    }
+
+    /// Oracle: an incrementally extended dir-path memo must equal a fresh
+    /// build — across appended dirs (extend fast path) and dir renames /
+    /// moves (topology bump → internal full rebuild).
+    #[test]
+    fn extended_dir_paths_match_fresh_build() {
+        let assert_same_as_fresh = |idx: &VolumeIndex, memo: &DirPaths, what: &str| {
+            let fresh = DirPaths::build(idx);
+            for id in 0..idx.len() {
+                assert_eq!(memo.lower[id], fresh.lower[id], "{what}: lower of {id}");
+                assert_eq!(memo.orig[id], fresh.orig[id], "{what}: orig of {id}");
+            }
+        };
+
+        let mut idx = deep_index();
+        let memo = DirPaths::build(&idx);
+
+        // Gen step 1: append a new dir under an existing one, a file in it,
+        // and a nested dir under the *new* dir (parent inside the batch).
+        let first_new = idx.len() as u32;
+        let new_dir = u16s("new_dir");
+        idx.upsert(&raw(500, 110, &new_dir, true, 0, 1));
+        let new_file = u16s("new_file.txt");
+        idx.upsert(&raw(501, 500, &new_file, false, 1, 2));
+        let nested = u16s("nested");
+        idx.upsert(&raw(502, 500, &nested, true, 0, 3));
+        idx.merge_new_into_permutations(first_new);
+        let memo = DirPaths::extend_from(&idx, Arc::new(memo));
+        assert_same_as_fresh(&idx, &memo, "append generation");
+
+        // Gen step 2: in-place dir rename — topology bump, extend must
+        // rebuild and descendants must reflect the new name.
+        let renamed = u16s("renamed_mid");
+        idx.rename_dir_in_place(110, &renamed, 109).unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32);
+        let memo = DirPaths::extend_from(&idx, Arc::new(memo));
+        assert_same_as_fresh(&idx, &memo, "rename generation");
+
+        // Gen step 3: dir move (reparent) — also a topology bump.
+        idx.reparent(500, 100).unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32);
+        let memo = DirPaths::extend_from(&idx, Arc::new(memo));
+        assert_same_as_fresh(&idx, &memo, "reparent generation");
+
+        // File-only batches keep the fast path: same topology generation.
+        let first_new = idx.len() as u32;
+        let f2 = u16s("plain.txt");
+        idx.upsert(&raw(503, 100, &f2, false, 1, 4));
+        idx.merge_new_into_permutations(first_new);
+        let topo_before = idx.dir_topology_generation();
+        let memo = DirPaths::extend_from(&idx, Arc::new(memo));
+        assert_eq!(idx.dir_topology_generation(), topo_before);
+        assert_same_as_fresh(&idx, &memo, "file-only generation");
     }
 
     #[test]

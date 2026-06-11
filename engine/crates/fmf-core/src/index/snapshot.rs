@@ -183,6 +183,7 @@ impl VolumeIndex {
                 perm_mtime,
                 content_generation: 0,
                 structural_generation: 0,
+                dir_topology_generation: 0,
                 tombstones,
                 derived_cache: Mutex::new(None),
             },

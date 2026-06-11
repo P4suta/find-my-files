@@ -152,7 +152,7 @@ fn build_index(drive: &str) -> Result<VolumeIndex, Box<dyn std::error::Error>> {
         0
     };
     eprintln!(
-        "indexed {} entries ({} files, {} dirs, {} skipped) in {} ms ($MFT read {} ms, parse {} ms, deferred {} ms, build {} ms, sort {} ms — read/parse overlap)",
+        "indexed {} entries ({} files, {} dirs, {} skipped) in {} ms ($MFT read {} ms, parse {} ms, deferred {} names {} ms, build {} ms, sort {} ms — read/parse overlap)",
         idx.len(),
         s.files,
         s.dirs,
@@ -160,6 +160,7 @@ fn build_index(drive: &str) -> Result<VolumeIndex, Box<dyn std::error::Error>> {
         s.elapsed_total_ms,
         s.elapsed_mft_load_ms,
         s.elapsed_parse_ms,
+        s.deferred_names,
         s.elapsed_deferred_ms,
         s.elapsed_build_ms,
         s.elapsed_sort_ms

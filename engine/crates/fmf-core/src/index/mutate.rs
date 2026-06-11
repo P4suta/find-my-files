@@ -38,6 +38,9 @@ impl VolumeIndex {
             self.parent[id as usize] = parent;
         }
         self.recompute_excluded(id);
+        if self.is_dir(id) {
+            self.dir_topology_generation += 1; // descendant paths moved
+        }
         Some(id)
     }
 
@@ -73,6 +76,7 @@ impl VolumeIndex {
             .binary_search_by(|&x| self.cmp_by(SortKey::Name, x, id))
             .unwrap_or_else(|e| e);
         self.perm_name.insert(ins, id);
+        self.dir_topology_generation += 1; // descendant paths renamed
         Some(id)
     }
 

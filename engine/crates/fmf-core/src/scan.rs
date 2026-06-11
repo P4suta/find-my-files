@@ -322,11 +322,14 @@ fn parse_subrange(bytes: &mut [u8], first_logical: u64, record_size: usize) -> P
     out
 }
 
-/// Resolve deferred $ATTRIBUTE_LIST names in parallel. Each worker owns its
-/// own volume handle, so the random single-record reads — the slowest part
-/// of a real-volume scan once streaming overlaps — issue at queue depth
-/// instead of one at a time. Chunk order is preserved, so EntryId
-/// assignment matches the old serial loop.
+/// Resolve deferred $ATTRIBUTE_LIST names in parallel, so the random
+/// single-record reads — the slowest part of a real-volume scan once
+/// streaming overlaps — issue at queue depth instead of one at a time.
+/// Volume handles are pooled per rayon thread and opened lazily: opening
+/// `\\.\C:` goes through every filesystem filter driver and costs tens of
+/// ms — a per-chunk open measured 5× slower than the serial pass it was
+/// meant to replace. Chunk order is preserved, so EntryId assignment
+/// matches a serial loop.
 fn resolve_deferred(
     volume_path: &str,
     runmap: &RunMap,
@@ -335,32 +338,45 @@ fn resolve_deferred(
 ) -> Vec<ParsedBatch> {
     use rayon::prelude::*;
     const DEFER_CHUNK: usize = 256;
+
+    let readers: Vec<parking_lot::Mutex<Option<RecordReader>>> = (0..rayon::current_num_threads()
+        .max(1))
+        .map(|_| parking_lot::Mutex::new(None))
+        .collect();
+
     deferred
         .par_chunks(DEFER_CHUNK)
         .map(|chunk| {
             let mut out = ParsedBatch::default();
-            let mut rr = match open_raw_volume(volume_path) {
-                Ok(file) => RecordReader {
-                    file,
-                    map: runmap,
-                    record_size,
-                    buf: Vec::new(),
-                },
-                Err(e) => {
-                    // Degraded but loud: these names stay unresolved and are
-                    // counted like any other resolution failure.
-                    tracing::warn!(
-                        error = %e,
-                        lost = chunk.len(),
-                        "volume handle for deferred name pass unavailable"
-                    );
-                    out.deferred_unresolved += chunk.len() as u64;
-                    return out;
+            let slot = &readers[rayon::current_thread_index().unwrap_or(0) % readers.len()];
+            let mut guard = slot.lock(); // uncontended: one slot per thread
+            if guard.is_none() {
+                match open_raw_volume(volume_path) {
+                    Ok(file) => {
+                        *guard = Some(RecordReader {
+                            file,
+                            map: runmap,
+                            record_size,
+                            buf: Vec::new(),
+                        });
+                    }
+                    Err(e) => {
+                        // Degraded but loud: these names stay unresolved and
+                        // are counted like any other resolution failure.
+                        tracing::warn!(
+                            error = %e,
+                            lost = chunk.len(),
+                            "volume handle for deferred name pass unavailable"
+                        );
+                        out.deferred_unresolved += chunk.len() as u64;
+                        return out;
+                    }
                 }
-            };
+            }
+            let rr = guard.as_mut().expect("reader installed above");
             for (number, bytes) in chunk {
                 let f = NtfsFile::new(*number, bytes);
-                match resolve_attr_list_name(&f, &mut rr) {
+                match resolve_attr_list_name(&f, rr) {
                     Some(name) => out.push_named(&f, &name),
                     None => out.deferred_unresolved += 1,
                 }
@@ -593,6 +609,7 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     // in parallel: measured on a real 1.27M-entry C:, the serial version of
     // this pass cost more than the streaming read it followed.
     let t_deferred = Instant::now();
+    stats.deferred_names = deferred.len() as u64;
     let batches = resolve_deferred(&volume_path, &runmap, record_size, &deferred);
     append_batches(&mut b, &mut stats, &mut Vec::new(), batches);
     stats.elapsed_deferred_ms = t_deferred.elapsed().as_millis() as u64;
@@ -736,8 +753,13 @@ mod tests {
         );
 
         // Sampled records must agree on name and size where both saw them.
+        // Reparse points are excluded: pick_name keeps their names on
+        // purpose while the reference's get_best_file_name skips them, so
+        // the two resolvers legitimately disagree there (and on this class
+        // only — see the module docs of `pick_name`).
         let mut checked = 0u64;
         let mut matched = 0u64;
+        let mut size_matched = 0u64;
         for sample in (0..old_idx.len() as u32).step_by(997) {
             let old_rec = crate::index::masked(old_idx.frn(sample));
             let (Some(o), Some(n)) = (
@@ -746,15 +768,28 @@ mod tests {
             ) else {
                 continue;
             };
+            if old_idx.is_reparse(o) || new_idx.is_reparse(n) {
+                continue;
+            }
             checked += 1;
-            if old_idx.name(o) == new_idx.name(n) && old_idx.size(o) == new_idx.size(n) {
+            if old_idx.name(o) == new_idx.name(n) {
                 matched += 1;
+            }
+            if old_idx.size(o) == new_idx.size(n) {
+                size_matched += 1;
             }
         }
         assert!(checked > 100, "sample too small: {checked}");
         assert!(
             matched as f64 / checked as f64 > 0.999,
-            "sampled mismatch: {matched}/{checked}"
+            "sampled name mismatch: {matched}/{checked}"
+        );
+        // Sizes drift legitimately: the volume is live and the two scans run
+        // a minute apart, so actively-written files differ. Names only move
+        // on renames — hence the looser size bar.
+        assert!(
+            size_matched as f64 / checked as f64 > 0.99,
+            "sampled size mismatch: {size_matched}/{checked}"
         );
     }
 }

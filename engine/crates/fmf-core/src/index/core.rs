@@ -22,6 +22,11 @@ pub struct VolumeIndex {
     pub(super) perm_mtime: Vec<EntryId>,
     pub(super) content_generation: u64,
     pub(super) structural_generation: u64,
+    /// Bumped whenever an existing directory's name or parent changes —
+    /// the two mutations that invalidate memoized descendant paths in ways
+    /// an append-only extension cannot express. Plain appends/deletes/stat
+    /// updates leave it untouched.
+    pub(super) dir_topology_generation: u64,
     pub(super) tombstones: u32,
     /// Query-independent caches derived from index content (dir-path memo,
     /// pool offset table, …) keyed by `content_generation` and value type.
@@ -85,6 +90,11 @@ impl VolumeIndex {
     }
 
     #[inline]
+    pub fn is_reparse(&self, id: EntryId) -> bool {
+        self.flag[id as usize] & flags::REPARSE != 0
+    }
+
+    #[inline]
     pub fn size(&self, id: EntryId) -> u64 {
         self.size[id as usize]
     }
@@ -130,6 +140,10 @@ impl VolumeIndex {
 
     pub fn structural_generation(&self) -> u64 {
         self.structural_generation
+    }
+
+    pub(crate) fn dir_topology_generation(&self) -> u64 {
+        self.dir_topology_generation
     }
 
     /// Carry the structural generation across a rebuild: a freshly built

@@ -77,13 +77,13 @@ pub fn search(
     let cached_memo;
     let empty_memo;
     let memo: &DirPaths = if q.needs_paths() {
-        cached_memo = idx.cached_derived(|| DirPaths::build(idx));
+        cached_memo = idx.cached_derived_or_update(|prev| match prev {
+            Some(p) => DirPaths::extend_from(idx, p),
+            None => DirPaths::build(idx),
+        });
         &cached_memo
     } else {
-        empty_memo = DirPaths {
-            lower: Vec::new(),
-            orig: Vec::new(),
-        };
+        empty_memo = DirPaths::empty();
         &empty_memo
     };
     let needs_table = q
@@ -195,13 +195,13 @@ pub fn refine(
     let cached_memo;
     let empty_memo;
     let memo: &DirPaths = if q.needs_paths() {
-        cached_memo = idx.cached_derived(|| DirPaths::build(idx));
+        cached_memo = idx.cached_derived_or_update(|prev| match prev {
+            Some(p) => DirPaths::extend_from(idx, p),
+            None => DirPaths::build(idx),
+        });
         &cached_memo
     } else {
-        empty_memo = DirPaths {
-            lower: Vec::new(),
-            orig: Vec::new(),
-        };
+        empty_memo = DirPaths::empty();
         &empty_memo
     };
     metrics.memo_us = stage.lap();

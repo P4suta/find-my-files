@@ -39,6 +39,7 @@ impl VolumeIndexBuilder {
             perm_mtime: Vec::new(),
             content_generation: 0,
             structural_generation: 0,
+            dir_topology_generation: 0,
             tombstones: 0,
             derived_cache: Mutex::new(None),
         };

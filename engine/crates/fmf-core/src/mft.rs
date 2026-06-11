@@ -158,6 +158,8 @@ pub struct ScanStats {
     /// Deferred $ATTRIBUTE_LIST name resolution (random single-record
     /// reads) — on a fragmented volume this rivals the streaming read.
     pub elapsed_deferred_ms: u64,
+    /// Records whose name needed the deferred pass at all.
+    pub deferred_names: u64,
     /// Builder finish: parent resolution + EXCLUDED propagation.
     pub elapsed_build_ms: u64,
     /// Builder finish: the three permutation sorts.
