@@ -22,10 +22,20 @@ fn vol(label: &str, names: &[(&str, u64)]) -> VolumeIndex {
     b.finish()
 }
 
+/// Engine on a unique temp index dir — the writer lock makes a shared dir
+/// a cross-test collision under the default parallel test runner.
+fn test_engine() -> Arc<Engine> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "fmf-engine-tests-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    Engine::new(EngineConfig { index_dir: dir }).expect("engine create")
+}
+
 fn engine_with_two_volumes() -> Arc<Engine> {
-    let e = Engine::new(EngineConfig {
-        index_dir: std::env::temp_dir(),
-    });
+    let e = test_engine();
     e.insert_ready_volume("C:", vol("C:", &[("alpha.txt", 10), ("gamma.txt", 30)]));
     e.insert_ready_volume("D:", vol("D:", &[("beta.txt", 20), ("delta.txt", 40)]));
     e
@@ -193,6 +203,39 @@ fn status_reports_ready_volumes() {
 /// Real-volume E2E: index_start → VolumeReady → query → snapshot save on
 /// shutdown → load_from restores the same entry count. Run from an elevated
 /// shell: FMF_ADMIN_TESTS=1 cargo test -p fmf-core -- --ignored engine_e2e
+#[cfg(windows)]
+#[test]
+fn flush_saves_dirty_volumes_and_skips_clean_ones() {
+    let e = test_engine();
+    e.insert_ready_volume("C:", vol("C:", &[("alpha.txt", 10)]));
+    // First flush writes the snapshot…
+    assert_eq!(e.flush(), 1);
+    // …and an unchanged volume is skipped (the periodic-timer common case).
+    assert_eq!(e.flush(), 0);
+    // A structural replacement (what a journal-gone rescan does) is dirty.
+    e.replace_ready_volume("C:", vol("C:", &[("alpha.txt", 10), ("beta.txt", 20)]));
+    assert_eq!(e.flush(), 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn second_engine_on_same_index_dir_is_locked() {
+    let dir = std::env::temp_dir().join(format!("fmf-lock-test-{}", std::process::id()));
+    let first = Engine::new(EngineConfig {
+        index_dir: dir.clone(),
+    })
+    .expect("first engine");
+    match Engine::new(EngineConfig {
+        index_dir: dir.clone(),
+    }) {
+        Err(EngineCreateError::Locked(pid)) => assert_eq!(pid, Some(std::process::id())),
+        Err(e) => panic!("expected Locked, got {e}"),
+        Ok(_) => panic!("expected Locked, got a second engine"),
+    }
+    drop(first);
+    Engine::new(EngineConfig { index_dir: dir }).expect("lock must free on drop");
+}
+
 #[test]
 #[ignore]
 fn engine_e2e_scan_query_snapshot_restore() {
@@ -210,7 +253,8 @@ fn engine_e2e_scan_query_snapshot_restore() {
 
     let e = Engine::new(EngineConfig {
         index_dir: dir.clone(),
-    });
+    })
+    .expect("engine create");
     let (tx, rx) = mpsc::channel::<EngineEvent>();
     e.set_event_sink(Some(Arc::new(move |ev| {
         let _ = tx.send(ev.clone());

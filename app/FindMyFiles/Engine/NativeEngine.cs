@@ -11,6 +11,7 @@ internal static partial class NativeEngine
     internal const int Ok = 0;
     internal const int Stale = 2;
     internal const int QuerySyntax = 5;
+    internal const int Locked = 7;
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct FmfQueryOptions
@@ -72,6 +73,11 @@ internal static partial class NativeEngine
 
     [LibraryImport("fmf_engine")]
     internal static partial int fmf_engine_destroy(IntPtr handle);
+
+    // Save-now for Ready, dirty volumes. The UI never calls this on its own;
+    // it exists for in-proc parity with the service path (ARCHITECTURE.md).
+    [LibraryImport("fmf_engine")]
+    internal static partial int fmf_flush(IntPtr handle);
 
     [LibraryImport("fmf_engine")]
     internal static unsafe partial int fmf_set_event_callback(

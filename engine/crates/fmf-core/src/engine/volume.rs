@@ -25,6 +25,18 @@ pub(super) struct VolumeQueryCache {
     pub(super) ids: Arc<Vec<EntryId>>,
 }
 
+/// USN position paired with the index state, shared with `Engine::flush`.
+/// The tailing thread owns the journal handle; "save now" from another
+/// thread needs (journal_id, next_usn) without touching it. Updated *after*
+/// a batch is applied, so a concurrent flush that reads the checkpoint
+/// first always saves checkpoint ≤ index — the USN replay on load covers
+/// the gap (re-applying records is idempotent; skipping them would not be).
+#[derive(Clone, Copy)]
+pub(super) struct JournalCheckpoint {
+    pub(super) journal_id: u64,
+    pub(super) next_usn: i64,
+}
+
 pub(super) struct VolumeSlot {
     pub(super) label: String,
     pub(super) phase: Mutex<VolumePhase>,
@@ -33,6 +45,14 @@ pub(super) struct VolumeSlot {
     pub(super) stop: Arc<AtomicBool>,
     /// Single-entry query cache (lock order: `index` read first, then this).
     pub(super) last_query: Mutex<Option<VolumeQueryCache>>,
+    /// None until the volume is Ready (flush skips it).
+    pub(super) checkpoint: Mutex<Option<JournalCheckpoint>>,
+    /// (content, structural) generations at the last snapshot save — the
+    /// dirty check that keeps periodic flushes from rewriting unchanged
+    /// volumes.
+    pub(super) last_saved: Mutex<Option<(u64, u64)>>,
+    /// Serializes snapshot writers for this slot (flush vs. stop-save).
+    pub(super) save_lock: Mutex<()>,
 }
 
 impl VolumeSlot {
@@ -127,10 +147,7 @@ impl Engine {
         use crate::usn::{ReadOutcome, UsnJournal, VolumeStatFetcher, apply_batch};
 
         let label = slot.label.clone();
-        let snapshot_path = self.config.index_dir.join(format!(
-            "{}.fmfidx",
-            label.trim_end_matches(':').to_ascii_lowercase()
-        ));
+        let snapshot_path = snapshot_path(&self.config.index_dir, &label);
 
         loop {
             if slot.stop.load(Ordering::Relaxed) {
@@ -252,6 +269,13 @@ impl Engine {
             let entries = idx.live_len() as u64;
             *slot.scanned.lock() = entries;
             slot.install_index(idx);
+            // Scan path: next_usn is the position at journal open (before the
+            // scan), so a flush taken now replays the scan window — correct,
+            // just slightly redundant.
+            *slot.checkpoint.lock() = Some(JournalCheckpoint {
+                journal_id: journal.journal_id,
+                next_usn: journal.next_usn,
+            });
             *slot.phase.lock() = VolumePhase::Ready;
             self.emit(EngineEvent::VolumeReady {
                 volume: label.clone(),
@@ -278,7 +302,14 @@ impl Engine {
             let mut last_emit = Instant::now() - INDEX_CHANGED_DEBOUNCE;
             loop {
                 if slot.stop.load(Ordering::Relaxed) {
-                    self.save_slot(&slot, &journal, &snapshot_path);
+                    self.save_slot(
+                        &slot,
+                        JournalCheckpoint {
+                            journal_id: journal.journal_id,
+                            next_usn: journal.next_usn,
+                        },
+                        &snapshot_path,
+                    );
                     return;
                 }
                 match journal.read_blocking(&mut buf) {
@@ -311,6 +342,11 @@ impl Engine {
                             });
                             *slot.scanned.lock() = idx.live_len() as u64;
                         }
+                        // Index first, checkpoint second (see JournalCheckpoint).
+                        *slot.checkpoint.lock() = Some(JournalCheckpoint {
+                            journal_id: journal.journal_id,
+                            next_usn: journal.next_usn,
+                        });
                         self.maybe_compact(&slot);
                         if last_emit.elapsed() >= INDEX_CHANGED_DEBOUNCE {
                             last_emit = Instant::now();
@@ -322,6 +358,9 @@ impl Engine {
                     Ok(ReadOutcome::Gone(gone)) => {
                         Counters::bump(&self.metrics.counters.journal_rescans);
                         tracing::warn!(volume = %label, ?gone, "journal gone — full rescan");
+                        // The old journal id is dead; a flush during the
+                        // rescan must not pair it with the new index.
+                        *slot.checkpoint.lock() = None;
                         *slot.phase.lock() = VolumePhase::Rescanning;
                         self.emit(EngineEvent::RescanStarted {
                             volume: label.clone(),
@@ -386,18 +425,37 @@ impl Engine {
         }
     }
 
+    /// Writes the slot's snapshot under the per-slot save lock and records
+    /// the saved generations (the flush dirty check). Returns false on a
+    /// failed write — already counted and logged here.
     #[cfg(windows)]
-    fn save_slot(
+    pub(super) fn save_slot(
         &self,
         slot: &VolumeSlot,
-        journal: &crate::usn::UsnJournal,
+        checkpoint: JournalCheckpoint,
         path: &std::path::Path,
-    ) {
-        if let Some(idx) = slot.index.read().as_ref()
-            && let Err(e) = idx.save_to(path, journal.journal_id, journal.next_usn)
-        {
+    ) -> bool {
+        let _writer = slot.save_lock.lock();
+        let guard = slot.index.read();
+        let Some(idx) = guard.as_ref() else {
+            return false;
+        };
+        let generations = (idx.content_generation(), idx.structural_generation());
+        if let Err(e) = idx.save_to(path, checkpoint.journal_id, checkpoint.next_usn) {
             Counters::bump(&self.metrics.counters.snapshot_save_failures);
             tracing::warn!(volume = %slot.label, error = %e, "snapshot save failed");
+            return false;
         }
+        *slot.last_saved.lock() = Some(generations);
+        true
     }
+}
+
+/// `{index_dir}\{drive-letter}.fmfidx` — shared by the tailing thread's
+/// stop-save and `Engine::flush`.
+pub(super) fn snapshot_path(index_dir: &std::path::Path, label: &str) -> std::path::PathBuf {
+    index_dir.join(format!(
+        "{}.fmfidx",
+        label.trim_end_matches(':').to_ascii_lowercase()
+    ))
 }

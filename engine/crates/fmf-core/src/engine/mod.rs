@@ -23,7 +23,7 @@ use crate::index::VolumeIndex;
 use crate::metrics::MetricsHub;
 use crate::query;
 
-use volume::VolumeSlot;
+use volume::{JournalCheckpoint, VolumeSlot};
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -79,6 +79,20 @@ pub enum EngineError {
     Stale,
 }
 
+/// Why `Engine::new` refused to start. `Locked` is the cross-process arm of
+/// the single-writer invariant (FFI: `FMF_E_LOCKED`, docs/ARCHITECTURE.md
+/// Pipe プロトコル §単一書き手の排他).
+#[derive(Debug, Error)]
+pub enum EngineCreateError {
+    #[error(
+        "index directory is locked by another engine process (holder pid: {})",
+        .0.map_or_else(|| "unknown".to_string(), |p| p.to_string())
+    )]
+    Locked(Option<u32>),
+    #[error("index directory: {0}")]
+    Io(#[from] std::io::Error),
+}
+
 pub struct Engine {
     config: EngineConfig,
     sink: RwLock<Option<EventSink>>,
@@ -87,10 +101,17 @@ pub struct Engine {
     metrics: MetricsHub,
     /// Keeps the diag→EngineError forwarding registered for our lifetime.
     _diag_guard: Mutex<Option<crate::diag::SinkGuard>>,
+    /// Exclusive-write handle on `{index_dir}\.writer.lock` for our whole
+    /// lifetime — the OS releases it on process death, so no stale locks.
+    #[cfg(windows)]
+    _writer_lock: std::fs::File,
 }
 
 impl Engine {
-    pub fn new(config: EngineConfig) -> Arc<Self> {
+    pub fn new(config: EngineConfig) -> Result<Arc<Self>, EngineCreateError> {
+        std::fs::create_dir_all(&config.index_dir)?;
+        #[cfg(windows)]
+        let writer_lock = Self::acquire_writer_lock(&config.index_dir)?;
         let engine = Arc::new(Self {
             config,
             sink: RwLock::new(None),
@@ -98,6 +119,8 @@ impl Engine {
             threads: Mutex::new(Vec::new()),
             metrics: MetricsHub::new(),
             _diag_guard: Mutex::new(None),
+            #[cfg(windows)]
+            _writer_lock: writer_lock,
         });
         // Forward every diagnostics event (WARN+/panic, any thread) to the
         // event sink as a POD EngineError — the UI fetches the message text
@@ -113,7 +136,43 @@ impl Engine {
             }
         }));
         *engine._diag_guard.lock() = Some(guard);
-        engine
+        Ok(engine)
+    }
+
+    /// Cross-process single-writer guard: exclusive write access on
+    /// `.writer.lock` (readers allowed, so a losing process can report the
+    /// holder's pid). Held until drop; the OS frees it on process death.
+    #[cfg(windows)]
+    fn acquire_writer_lock(
+        index_dir: &std::path::Path,
+    ) -> Result<std::fs::File, EngineCreateError> {
+        use std::io::Write;
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+
+        let path = index_dir.join(".writer.lock");
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                // Best effort — the pid is diagnostics for the loser, not state.
+                let _ = write!(f, "{}", std::process::id());
+                let _ = f.flush();
+                Ok(f)
+            }
+            Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
+                let holder = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok());
+                Err(EngineCreateError::Locked(holder))
+            }
+            Err(e) => Err(EngineCreateError::Io(e)),
+        }
     }
 
     pub fn set_event_sink(&self, sink: Option<EventSink>) {
@@ -136,6 +195,9 @@ impl Engine {
                 index: RwLock::new(None),
                 stop: Arc::new(AtomicBool::new(false)),
                 last_query: Mutex::new(None),
+                checkpoint: Mutex::new(None),
+                last_saved: Mutex::new(None),
+                save_lock: Mutex::new(()),
             });
             self.volumes.write().push(slot.clone());
             let engine = self.clone();
@@ -179,14 +241,39 @@ impl Engine {
         self.metrics.snapshot(64, self.index_stats())
     }
 
-    /// Persist all volumes (graceful shutdown / explicit flush). Tailing
-    /// threads also save on stop; this covers "save now" requests.
+    /// Persist every Ready volume whose generations moved since its last
+    /// save ("dirty"), using the tailing thread's shared checkpoint. The
+    /// checkpoint may trail the index by an in-flight batch — the USN
+    /// replay on load covers that. Returns the number of snapshots written
+    /// (failed writes are counted in `snapshot_save_failures` and excluded).
     #[cfg(windows)]
-    pub fn flush(&self) {
-        // Snapshots are written by the tailing threads on stop; an explicit
-        // flush from a live engine writes with the thread-held checkpoint
-        // being slightly behind, which the USN replay covers. For MVP we only
-        // save on shutdown to keep a single writer per file.
+    pub fn flush(&self) -> usize {
+        let volumes: Vec<_> = self.volumes.read().clone();
+        let mut saved = 0;
+        for slot in volumes {
+            if *slot.phase.lock() != VolumePhase::Ready {
+                continue;
+            }
+            // Checkpoint before index: a batch landing in between leaves the
+            // index newer than the checkpoint, never older.
+            let Some(ckpt) = *slot.checkpoint.lock() else {
+                continue;
+            };
+            let dirty = {
+                let guard = slot.index.read();
+                let Some(idx) = guard.as_ref() else { continue };
+                *slot.last_saved.lock()
+                    != Some((idx.content_generation(), idx.structural_generation()))
+            };
+            if !dirty {
+                continue;
+            }
+            let path = volume::snapshot_path(&self.config.index_dir, &slot.label);
+            if self.save_slot(&slot, ckpt, &path) {
+                saved += 1;
+            }
+        }
+        saved
     }
 
     pub fn shutdown(&self) {
@@ -203,6 +290,8 @@ impl Engine {
     }
 
     /// Test/dev helper: register an already-built index as a Ready volume.
+    /// The zero checkpoint stands in for a journal position so `flush` can
+    /// exercise the save path on injected volumes.
     pub fn insert_ready_volume(&self, label: &str, idx: VolumeIndex) {
         let slot = Arc::new(VolumeSlot {
             label: label.to_string(),
@@ -211,6 +300,12 @@ impl Engine {
             index: RwLock::new(Some(idx)),
             stop: Arc::new(AtomicBool::new(false)),
             last_query: Mutex::new(None),
+            checkpoint: Mutex::new(Some(JournalCheckpoint {
+                journal_id: 0,
+                next_usn: 0,
+            })),
+            last_saved: Mutex::new(None),
+            save_lock: Mutex::new(()),
         });
         self.volumes.write().push(slot);
     }

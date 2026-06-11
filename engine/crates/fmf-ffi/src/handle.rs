@@ -1,11 +1,11 @@
 use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
-use fmf_core::engine::{Engine, EngineConfig};
+use fmf_core::engine::{Engine, EngineConfig, EngineCreateError};
 
 use crate::error::{guard, set_error, utf8_arg};
 use crate::events::CallbackSink;
-use crate::{FMF_E_INVALID_ARG, FMF_OK};
+use crate::{FMF_E_INVALID_ARG, FMF_E_IO, FMF_E_LOCKED, FMF_OK};
 
 // ── Handles ─────────────────────────────────────────────────────────────
 
@@ -69,14 +69,37 @@ pub unsafe extern "C" fn fmf_engine_create(
         fmf_core::diag::init_logging(Some(&log_dir), log_level);
         fmf_core::diag::install_panic_hook();
 
-        let engine = Engine::new(EngineConfig {
+        let engine = match Engine::new(EngineConfig {
             index_dir: index_dir.into(),
-        });
+        }) {
+            Ok(e) => e,
+            Err(e @ EngineCreateError::Locked(_)) => {
+                set_error(e.to_string());
+                return FMF_E_LOCKED;
+            }
+            Err(e) => {
+                set_error(e.to_string());
+                return FMF_E_IO;
+            }
+        };
         let handle = Box::new(EngineHandle {
             engine,
             _sink_keepalive: parking_lot::Mutex::new(None),
         });
         unsafe { *out = Box::into_raw(handle).cast() };
+        FMF_OK
+    })
+}
+
+/// Saves every Ready, dirty volume now (docs/ARCHITECTURE.md fmf_flush).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fmf_flush(h: *mut c_void) -> i32 {
+    guard(|| {
+        let handle = match unsafe { engine(h) } {
+            Ok(e) => e,
+            Err(c) => return c,
+        };
+        handle.engine.flush();
         FMF_OK
     })
 }

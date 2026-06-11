@@ -24,22 +24,35 @@ use crate::events::{
     FMF_EVENT_ENGINE_ERROR, FMF_EVENT_INDEX_CHANGED, FMF_EVENT_PROGRESS, FMF_EVENT_RESCAN_STARTED,
     FMF_EVENT_VOLUME_FAILED, FMF_EVENT_VOLUME_READY, FmfEvent, FmfEventCb, fmf_set_event_callback,
 };
-use crate::handle::{EngineHandle, fmf_abi_version, fmf_engine_create, fmf_engine_destroy};
+use crate::handle::{
+    EngineHandle, fmf_abi_version, fmf_engine_create, fmf_engine_destroy, fmf_flush,
+};
 use crate::results::{
     FmfPage, FmfQueryOptions, FmfRow, fmf_page_free, fmf_query, fmf_result_free, fmf_result_page,
 };
 use crate::volumes::{FmfVolumeStatus, fmf_index_start, fmf_index_status, fmf_list_volumes};
 use crate::{
-    FMF_E_INVALID_ARG, FMF_E_IO, FMF_E_NOT_ADMIN, FMF_E_PANIC, FMF_E_QUERY_SYNTAX, FMF_E_STALE,
-    FMF_E_VOLUME, FMF_OK,
+    FMF_E_INVALID_ARG, FMF_E_IO, FMF_E_LOCKED, FMF_E_NOT_ADMIN, FMF_E_PANIC, FMF_E_QUERY_SYNTAX,
+    FMF_E_STALE, FMF_E_VOLUME, FMF_OK,
 };
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
+/// A per-call unique base dir: the engine's writer lock turns a shared
+/// index dir into a cross-test collision under the parallel test runner.
+fn unique_test_dir() -> std::path::PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "fmf-ffi-contract-tests-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+}
+
 /// Creates an engine against temp directories — no volume is touched, so
 /// this needs no elevation (Engine::new only builds in-memory state).
 fn create_engine() -> *mut c_void {
-    let dir = std::env::temp_dir().join("fmf-ffi-contract-tests");
+    let dir = unique_test_dir();
     let cfg = serde_json::json!({
         "index_dir": dir.join("index").to_string_lossy(),
         "log_dir": dir.join("logs").to_string_lossy(),
@@ -137,8 +150,8 @@ unsafe extern "C" fn noop_event_cb(_ev: *const FmfEvent, _user: *mut c_void) {}
 #[test]
 fn error_codes_match_contract_table() {
     // ARCHITECTURE.md: FMF_OK=0, INVALID_ARG=1, STALE=2, NOT_ADMIN=3,
-    // VOLUME=4, QUERY_SYNTAX=5, IO=6, PANIC=99 (shared with the v2 pipe
-    // protocol — renumbering is a breaking protocol change).
+    // VOLUME=4, QUERY_SYNTAX=5, IO=6, LOCKED=7, PANIC=99 (shared with the
+    // pipe protocol — renumbering is a breaking protocol change).
     assert_eq!(FMF_OK, 0);
     assert_eq!(FMF_E_INVALID_ARG, 1);
     assert_eq!(FMF_E_STALE, 2);
@@ -146,6 +159,7 @@ fn error_codes_match_contract_table() {
     assert_eq!(FMF_E_VOLUME, 4);
     assert_eq!(FMF_E_QUERY_SYNTAX, 5);
     assert_eq!(FMF_E_IO, 6);
+    assert_eq!(FMF_E_LOCKED, 7);
     assert_eq!(FMF_E_PANIC, 99);
 }
 
@@ -285,6 +299,57 @@ fn null_is_ok_for_frees_but_not_destroy() {
         unsafe { fmf_engine_destroy(ptr::null_mut()) },
         FMF_E_INVALID_ARG
     );
+}
+
+#[test]
+fn flush_null_matrix_and_roundtrip() {
+    assert_eq!(unsafe { fmf_flush(ptr::null_mut()) }, FMF_E_INVALID_ARG);
+    // Roundtrip on an injected Ready volume: flush succeeds and writes the
+    // snapshot file the engine layer is contracted to produce.
+    let h = ready_engine();
+    assert_eq!(unsafe { fmf_flush(h) }, FMF_OK);
+    // Second flush is also FMF_OK — "nothing dirty" is success, not an error.
+    assert_eq!(unsafe { fmf_flush(h) }, FMF_OK);
+    destroy(h);
+}
+
+#[test]
+fn second_engine_on_same_index_dir_reports_locked() {
+    let dir = unique_test_dir();
+    let cfg = serde_json::json!({
+        "index_dir": dir.join("index").to_string_lossy(),
+        "log_dir": dir.join("logs").to_string_lossy(),
+        "log_level": "warn",
+    })
+    .to_string();
+    let cfg = CString::new(cfg).unwrap();
+
+    let mut first: *mut c_void = ptr::null_mut();
+    assert_eq!(
+        unsafe { fmf_engine_create(cfg.as_ptr(), &mut first) },
+        FMF_OK
+    );
+
+    let mut second: *mut c_void = ptr::null_mut();
+    assert_eq!(
+        unsafe { fmf_engine_create(cfg.as_ptr(), &mut second) },
+        FMF_E_LOCKED
+    );
+    assert!(second.is_null(), "no handle on a locked dir");
+    assert!(
+        read_last_error().contains("locked"),
+        "detail must explain the lock: {}",
+        read_last_error()
+    );
+
+    destroy(first);
+    // The lock dies with the engine — the dir is usable again.
+    let mut third: *mut c_void = ptr::null_mut();
+    assert_eq!(
+        unsafe { fmf_engine_create(cfg.as_ptr(), &mut third) },
+        FMF_OK
+    );
+    destroy(third);
 }
 
 #[test]

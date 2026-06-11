@@ -28,6 +28,7 @@ pub const FMF_E_NOT_ADMIN: i32 = 3;
 pub const FMF_E_VOLUME: i32 = 4;
 pub const FMF_E_QUERY_SYNTAX: i32 = 5;
 pub const FMF_E_IO: i32 = 6;
+pub const FMF_E_LOCKED: i32 = 7;
 pub const FMF_E_PANIC: i32 = 99;
 
 #[cfg(test)]
@@ -50,6 +51,7 @@ mod export_pins {
         let _: unsafe extern "C" fn(*const c_char, *mut *mut c_void) -> i32 =
             crate::handle::fmf_engine_create;
         let _: unsafe extern "C" fn(*mut c_void) -> i32 = crate::handle::fmf_engine_destroy;
+        let _: unsafe extern "C" fn(*mut c_void) -> i32 = crate::handle::fmf_flush;
         let _: unsafe extern "C" fn(*mut c_void, FmfEventCb, *mut c_void) -> i32 =
             crate::events::fmf_set_event_callback;
         let _: unsafe extern "C" fn(*mut c_void, *mut FmfVolumeStatus, u32, *mut u32) -> i32 =

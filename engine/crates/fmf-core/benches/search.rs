@@ -247,9 +247,12 @@ fn bench_queries(c: &mut Criterion) {
 /// refine/cold pairs share the routine query, so the delta is purely the
 /// cache path (engine/search.rs + query/subsume.rs + exec::refine).
 fn bench_typing(c: &mut Criterion) {
+    // Unique dir: the engine's writer lock would collide with any other
+    // engine on the shared temp dir (setup cost, outside all measurements).
     let engine = Engine::new(EngineConfig {
-        index_dir: std::env::temp_dir(),
-    });
+        index_dir: std::env::temp_dir().join(format!("fmf-bench-typing-{}", std::process::id())),
+    })
+    .expect("bench engine");
     engine.insert_ready_volume("C:", build_synthetic());
     let opt = QueryOptions::default();
 
