@@ -1,6 +1,6 @@
 use crate::wtf8;
 
-use super::{EncodedEntry, EntryId, NO_PARENT, RawEntry, SortKey, VolumeIndex, flags, masked};
+use super::{EncodedEntry, EntryId, NO_PARENT, RawEntry, SortKey, VolumeIndex, flags};
 
 impl VolumeIndex {
     // ── Incremental mutation (USN batches; see module docs) ──────────────
@@ -10,17 +10,20 @@ impl VolumeIndex {
     /// Returns the new id. Caller must finish the batch with
     /// [`Self::merge_new_into_permutations`].
     pub fn upsert(&mut self, e: &RawEntry) -> EntryId {
-        if let Some(old) = self.frn_map.get(&masked(e.record)).copied() {
+        if let Some(old) = self.entry_by_record(e.record) {
             self.flag[old as usize] |= flags::TOMBSTONE;
             self.tombstones += 1;
         }
-        let id = self.push_raw(e);
-        self.frn_map.insert(masked(e.record), id);
-        id
+        // Parents are already live on the USN path; unknown ones attach to
+        // root (orphan records do occur in real MFTs).
+        let parent = self.entry_by_record(e.parent_record).unwrap_or(Self::ROOT);
+        self.push_raw(e, parent)
     }
 
+    /// Tombstoning is the whole deletion: the FRN index never finds dead
+    /// entries (liveness filter), so there is nothing to unmap.
     pub fn delete(&mut self, record: u64) -> Option<EntryId> {
-        let id = self.frn_map.remove(&masked(record))?;
+        let id = self.entry_by_record(record)?;
         self.flag[id as usize] |= flags::TOMBSTONE;
         self.tombstones += 1;
         Some(id)
@@ -92,6 +95,16 @@ impl VolumeIndex {
     /// permutation arrays in one pass per key, then bump the content
     /// generation. Call once per USN batch.
     pub fn merge_new_into_permutations(&mut self, first_new: EntryId) {
+        // The FRN index rides the same batch boundary (its own watermark).
+        {
+            let VolumeIndex {
+                frn_index,
+                frn,
+                flag,
+                ..
+            } = self;
+            frn_index.merge_appended(frn, flag);
+        }
         let new_ids: Vec<EntryId> = (first_new..self.len() as u32).collect();
         if !new_ids.is_empty() {
             for key in [SortKey::Name, SortKey::Size, SortKey::Mtime] {
@@ -124,7 +137,11 @@ impl VolumeIndex {
         self.content_generation += 1;
     }
 
-    pub(super) fn push_raw(&mut self, e: &RawEntry) -> EntryId {
+    /// Append with a pre-resolved parent: the USN path resolves against the
+    /// live index (see [`Self::upsert`]); the initial-scan builder passes a
+    /// provisional ROOT because `finish()` re-resolves every parent anyway —
+    /// a per-push lookup against the unmerged FRN tail would be O(n²) there.
+    pub(super) fn push_raw(&mut self, e: &RawEntry, parent: EntryId) -> EntryId {
         assert!(
             self.name_pool.len() + e.name_utf16.len() * 4 < u32::MAX as usize,
             "name pool overflow"
@@ -133,7 +150,7 @@ impl VolumeIndex {
         wtf8::push_wtf8_pair(e.name_utf16, &mut self.name_pool, &mut self.lower_pool);
         self.push_columns(
             off,
-            e.parent_record,
+            parent,
             e.frn,
             e.size,
             e.mtime,
@@ -144,7 +161,7 @@ impl VolumeIndex {
         )
     }
 
-    pub(super) fn push_encoded(&mut self, e: &EncodedEntry) -> EntryId {
+    pub(super) fn push_encoded(&mut self, e: &EncodedEntry, parent: EntryId) -> EntryId {
         debug_assert_eq!(e.name_wtf8.len(), e.lower_wtf8.len());
         assert!(
             self.name_pool.len() + e.name_wtf8.len() < u32::MAX as usize,
@@ -155,7 +172,7 @@ impl VolumeIndex {
         self.lower_pool.extend_from_slice(e.lower_wtf8);
         self.push_columns(
             off,
-            e.parent_record,
+            parent,
             e.frn,
             e.size,
             e.mtime,
@@ -173,7 +190,7 @@ impl VolumeIndex {
     fn push_columns(
         &mut self,
         off: usize,
-        parent_record: u64,
+        parent: EntryId,
         frn: u64,
         size: u64,
         mtime: i64,
@@ -189,13 +206,6 @@ impl VolumeIndex {
         let id = self.len() as EntryId;
         self.name_off.push(off as u32);
         self.name_len.push((self.name_pool.len() - off) as u16);
-        // Parent is resolved against the map; unknown parents attach to root
-        // (orphan records do occur in real MFTs).
-        let parent = self
-            .frn_map
-            .get(&masked(parent_record))
-            .copied()
-            .unwrap_or(Self::ROOT);
         self.parent.push(parent);
         self.size.push(size);
         self.mtime.push(mtime);

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
+use super::frn::FrnIndex;
 use super::{EntryId, NO_PARENT, SortKey, flags, masked};
 
 pub struct VolumeIndex {
@@ -16,7 +17,7 @@ pub struct VolumeIndex {
     pub(super) mtime: Vec<i64>,
     pub(super) frn: Vec<u64>,
     pub(super) flag: Vec<u8>,
-    pub(super) frn_map: FxHashMap<u64, EntryId>,
+    pub(super) frn_index: FrnIndex,
     pub(super) perm_name: Vec<EntryId>,
     pub(super) perm_size: Vec<EntryId>,
     pub(super) perm_mtime: Vec<EntryId>,
@@ -115,7 +116,8 @@ impl VolumeIndex {
     }
 
     pub fn entry_by_record(&self, record_or_frn: u64) -> Option<EntryId> {
-        self.frn_map.get(&masked(record_or_frn)).copied()
+        self.frn_index
+            .lookup(masked(record_or_frn), &self.frn, &self.flag)
     }
 
     // Raw pool access for the pool-scan query kernel (same crate only).
@@ -227,7 +229,9 @@ impl VolumeIndex {
         let perms =
             ((self.perm_name.capacity() + self.perm_size.capacity() + self.perm_mtime.capacity())
                 * 4) as u64;
-        let frn_map = (self.frn_map.capacity() as u64) * 17;
+        // Field name kept for FFI/JSON compatibility; the structure is the
+        // sorted FRN permutation these days (index/frn.rs).
+        let frn_map = self.frn_index.bytes();
         let mut s = crate::metrics::IndexStats {
             volume: volume.to_string(),
             entries: n,
@@ -267,9 +271,7 @@ impl VolumeIndex {
 
     /// Trim over-allocated columns after a bulk build.
     pub fn shrink_to_fit(&mut self) {
-        // The map grows by doubling during the scan; one rehash here trims
-        // ~5 B/entry off the resident footprint.
-        self.frn_map.shrink_to_fit();
+        self.frn_index.shrink_to_fit();
         self.name_pool.shrink_to_fit();
         self.lower_pool.shrink_to_fit();
         self.name_off.shrink_to_fit();

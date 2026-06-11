@@ -15,6 +15,7 @@
 
 mod builder;
 mod core;
+mod frn;
 mod mutate;
 mod snapshot;
 #[cfg(test)]

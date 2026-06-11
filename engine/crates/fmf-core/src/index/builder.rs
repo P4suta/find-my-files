@@ -1,6 +1,6 @@
 use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
 
+use super::frn::FrnIndex;
 use super::{EncodedEntry, EntryId, NO_PARENT, RawEntry, SortKey, VolumeIndex, masked};
 
 /// Two-pass builder for the initial scan: collect everything, then resolve
@@ -33,7 +33,7 @@ impl VolumeIndexBuilder {
             mtime: Vec::new(),
             frn: Vec::new(),
             flag: Vec::new(),
-            frn_map: FxHashMap::default(),
+            frn_index: FrnIndex::default(),
             perm_name: Vec::new(),
             perm_size: Vec::new(),
             perm_mtime: Vec::new(),
@@ -44,21 +44,25 @@ impl VolumeIndexBuilder {
             derived_cache: Mutex::new(None),
         };
         let units: Vec<u16> = volume_label.encode_utf16().collect();
-        let root = idx.push_raw(&RawEntry {
-            record: root_record,
-            parent_record: u64::MAX, // resolves to nothing → NO_PARENT below
-            frn: root_record,
-            name_utf16: &units,
-            is_dir: true,
-            is_reparse: false,
-            is_hidden: false,
-            is_system: false,
-            size: 0,
-            mtime: 0,
-        });
+        // Parents are provisional ROOT during the build — finish() resolves
+        // them all in one parallel pass once the FRN index exists.
+        let root = idx.push_raw(
+            &RawEntry {
+                record: root_record,
+                parent_record: u64::MAX, // resolves to nothing → NO_PARENT below
+                frn: root_record,
+                name_utf16: &units,
+                is_dir: true,
+                is_reparse: false,
+                is_hidden: false,
+                is_system: false,
+                size: 0,
+                mtime: 0,
+            },
+            VolumeIndex::ROOT,
+        );
         debug_assert_eq!(root, VolumeIndex::ROOT);
         idx.parent[root as usize] = NO_PARENT;
-        idx.frn_map.insert(masked(root_record), root);
         Self {
             idx,
             parent_records: vec![u64::MAX],
@@ -66,8 +70,7 @@ impl VolumeIndexBuilder {
     }
 
     pub fn push(&mut self, e: RawEntry) {
-        let id = self.idx.push_raw(&e);
-        self.idx.frn_map.insert(masked(e.record), id);
+        let id = self.idx.push_raw(&e, VolumeIndex::ROOT);
         self.parent_records.push(e.parent_record);
         debug_assert_eq!(self.parent_records.len(), id as usize + 1);
     }
@@ -75,8 +78,7 @@ impl VolumeIndexBuilder {
     /// Append an entry whose name was WTF-8 encoded off-thread (parallel
     /// scan workers). Identical semantics to [`Self::push`].
     pub fn push_encoded(&mut self, e: EncodedEntry) {
-        let id = self.idx.push_encoded(&e);
-        self.idx.frn_map.insert(masked(e.record), id);
+        let id = self.idx.push_encoded(&e, VolumeIndex::ROOT);
         self.parent_records.push(e.parent_record);
         debug_assert_eq!(self.parent_records.len(), id as usize + 1);
     }
@@ -99,11 +101,19 @@ impl VolumeIndexBuilder {
         let mut timings = FinishTimings::default();
         let t = std::time::Instant::now();
 
-        // Pass 2: resolve parents now that every record is in the map.
-        // Read-only map lookups, one write per slot — embarrassingly parallel.
+        // Pass 1.5: the FRN index, in one parallel sort (the per-push
+        // hashmap inserts this replaces were the build's serial tax).
+        self.idx.frn_index = FrnIndex::build(&self.idx.frn, &self.idx.flag);
+
+        // Pass 2: resolve parents now that every record is findable.
+        // Read-only lookups, one write per slot — embarrassingly parallel.
         {
             let VolumeIndex {
-                frn_map, parent, ..
+                frn_index,
+                parent,
+                frn,
+                flag,
+                ..
             } = &mut self.idx;
             let records = &self.parent_records;
             parent
@@ -111,9 +121,8 @@ impl VolumeIndexBuilder {
                 .enumerate()
                 .skip(1) // the root keeps NO_PARENT
                 .for_each(|(i, p)| {
-                    *p = frn_map
-                        .get(&masked(records[i]))
-                        .copied()
+                    *p = frn_index
+                        .lookup(masked(records[i]), frn, flag)
                         .unwrap_or(VolumeIndex::ROOT);
                 });
         }

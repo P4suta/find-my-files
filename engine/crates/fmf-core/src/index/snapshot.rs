@@ -6,9 +6,8 @@
 // portability (docs/ARCHITECTURE.md).
 
 use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
 
-use super::{EntryId, VolumeIndex, flags, masked};
+use super::{VolumeIndex, flags};
 
 // 02: flag byte gained HIDDEN/SYSTEM/EXCLUDED bits — older snapshots must
 // trigger a full rescan rather than load with wrong semantics.
@@ -154,17 +153,10 @@ impl VolumeIndex {
             return Err(bad("column length mismatch"));
         }
 
-        // Presized to the live upper bound: the default-capacity map paid a
-        // rehash cascade over a million inserts.
-        let mut frn_map = FxHashMap::with_capacity_and_hasher(count, Default::default());
-        let mut tombstones = 0u32;
-        for (i, &f) in flag.iter().enumerate() {
-            if f & flags::TOMBSTONE != 0 {
-                tombstones += 1;
-            } else {
-                frn_map.insert(masked(frn[i]), i as EntryId);
-            }
-        }
+        // One parallel sort instead of the million serial hashmap inserts
+        // this rebuild used to be.
+        let frn_index = super::frn::FrnIndex::build(&frn, &flag);
+        let tombstones = flag.iter().filter(|f| *f & flags::TOMBSTONE != 0).count() as u32;
 
         Ok((
             Self {
@@ -177,7 +169,7 @@ impl VolumeIndex {
                 mtime,
                 frn,
                 flag,
-                frn_map,
+                frn_index,
                 perm_name,
                 perm_size,
                 perm_mtime,

@@ -51,7 +51,8 @@ app/FindMyFiles/
 
 ## エンジン内部の要点
 
-- **VolumeIndex(ボリューム毎、struct-of-arrays)**: 名前プール2本(表示用 WTF-8 原文+simple case fold 済み検索用。オフセット同期)/ name_off(u32)+name_len(u16) / parent(EntryId=u32) / size(u64) / mtime(i64, FILETIME) / frn(u64) / flags(is_dir|tombstone|reparse) / FRN→EntryId マップ / fast sort 用順列配列3本(name/size/mtime)。パス文字列は保持せず親チェーンで遅延構築。削除は tombstone、閾値超でコンパクション。
+- **VolumeIndex(ボリューム毎、struct-of-arrays)**: 名前プール2本(表示用 WTF-8 原文+simple case fold 済み検索用。オフセット同期)/ name_off(u32)+name_len(u16) / parent(EntryId=u32) / size(u64) / mtime(i64, FILETIME) / frn(u64) / flags(is_dir|tombstone|reparse) / **FRN→EntryId はソート済み順列**(index/frn.rs: keys u64+ids u32=12B/entry。旧FxHashMapはcapacityパディング込み~25B/entryで最大のRAM行だった)/ fast sort 用順列配列3本(name/size/mtime)。パス文字列は保持せず親チェーンで遅延構築。削除は tombstone、閾値超でコンパクション。
+- **FRN索引のlookup意味論**: 検索順=未マージ尾部(バッチ内の最新upsertが勝つ)→二分探索、**常にtombstone生存フィルタ**(削除=tombstoneのみ、unmap不要。rename/レコード再利用は同キー複数ペアになるが生存は常に高々1)。バッチ末尾の `merge_new_into_permutations` がperm群と同じ2-pointerマージで尾部を畳む。初回スキャン中はビルダがparent解決を遅延(全部finish()の並列パスで解決)するためO(n²)にならない。
 - **既定除外(EXCLUDED)**: flagsにH(hidden)/S(system)の生属性と、計算済みEXCLUDEDビット(自分がH|S、または祖先にH|Sがいる)を保持。クエリは既定でEXCLUDEDをスキップ(`include_hidden_system`で解除)。継承はスキャンfinish時にO(n)伝播、USN挿入/移動時に親から再計算。**制限**: 除外ブランチからのsubtree移動では配下のビットが次回リスキャンまで陳腐化(dir-rename制限と同類)。
 - **generation 2層**:
   - `content_generation`: USNバッチ適用毎に++。既存結果ハンドルは**読み出し継続可**(tombstone+末尾追記なので安全。削除済みが残る/新規が出ないだけの Everything 同等の結果整合)。
