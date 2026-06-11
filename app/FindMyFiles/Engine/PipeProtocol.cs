@@ -12,44 +12,46 @@ namespace FindMyFiles.Engine;
 /// </summary>
 internal static class PipeProtocol
 {
-    public const uint ProtocolVersion = 1;
+    // All values radiate from Generated/EngineContract.g.cs (ADR-0018);
+    // these aliases keep the historical spelling at the call sites.
+    public const uint ProtocolVersion = EngineContract.ProtocolVersion;
 
     /// <summary>Short pipe name (without the <c>\\.\pipe\</c> prefix).</summary>
-    public const string DefaultPipeName = "fmf-engine-v1";
+    public const string DefaultPipeName = EngineContract.PipeNameShort;
 
-    public const int HeaderLen = 16;
-    public const uint MaxPayloadLen = 16 * 1024 * 1024;
+    public const int HeaderLen = EngineContract.FrameHeaderLen;
+    public const uint MaxPayloadLen = EngineContract.MaxPayloadLen;
     public const ushort FlagResponse = 1 << 0;
     public const ushort FlagEvent = 1 << 1;
-    public const int RowSize = PageCodec.RowSize;
+    public const int RowSize = EngineContract.RowSize;
 
     public static class Op
     {
-        public const ushort Hello = 1;
-        public const ushort Subscribe = 2;
-        public const ushort Unsubscribe = 3;
-        public const ushort ListVolumes = 4;
-        public const ushort IndexStart = 5;
-        public const ushort IndexStatus = 6;
-        public const ushort Query = 7;
-        public const ushort ResultPage = 8;
-        public const ushort ResultFree = 9;
-        public const ushort Stats = 10;
-        public const ushort ServiceInfo = 12;
+        public const ushort Hello = EngineContract.Op.Hello;
+        public const ushort Subscribe = EngineContract.Op.Subscribe;
+        public const ushort Unsubscribe = EngineContract.Op.Unsubscribe;
+        public const ushort ListVolumes = EngineContract.Op.ListVolumes;
+        public const ushort IndexStart = EngineContract.Op.IndexStart;
+        public const ushort IndexStatus = EngineContract.Op.IndexStatus;
+        public const ushort Query = EngineContract.Op.Query;
+        public const ushort ResultPage = EngineContract.Op.ResultPage;
+        public const ushort ResultFree = EngineContract.Op.ResultFree;
+        public const ushort Stats = EngineContract.Op.Stats;
+        public const ushort ServiceInfo = EngineContract.Op.ServiceInfo;
     }
 
     /// <summary>Status codes — the FFI error table verbatim (shared).</summary>
     public static class Status
     {
-        public const int Ok = 0;
-        public const int InvalidArg = 1;
-        public const int Stale = 2;
-        public const int NotAdmin = 3;
-        public const int Volume = 4;
-        public const int QuerySyntax = 5;
-        public const int Io = 6;
-        public const int Locked = 7;
-        public const int Panic = 99;
+        public const int Ok = EngineContract.Status.Ok;
+        public const int InvalidArg = EngineContract.Status.InvalidArg;
+        public const int Stale = EngineContract.Status.Stale;
+        public const int NotAdmin = EngineContract.Status.NotAdmin;
+        public const int Volume = EngineContract.Status.Volume;
+        public const int QuerySyntax = EngineContract.Status.QuerySyntax;
+        public const int Io = EngineContract.Status.Io;
+        public const int Locked = EngineContract.Status.Locked;
+        public const int Panic = EngineContract.Status.Panic;
     }
 
     public readonly record struct FrameHeader(
@@ -234,15 +236,19 @@ internal static class PipeProtocol
             blob.AddRange(parent);
 
             var r = rowBytes.AsSpan(i * RowSize, RowSize);
-            BinaryPrimitives.WriteUInt64LittleEndian(r, row.EntryRef);
-            BinaryPrimitives.WriteUInt64LittleEndian(r[8..], row.Frn);
-            BinaryPrimitives.WriteUInt64LittleEndian(r[16..], row.Size);
-            BinaryPrimitives.WriteInt64LittleEndian(r[24..], row.Mtime);
-            BinaryPrimitives.WriteUInt32LittleEndian(r[32..], nameOff);
-            BinaryPrimitives.WriteUInt32LittleEndian(r[36..], parentOff);
-            BinaryPrimitives.WriteUInt32LittleEndian(r[40..], row.Flags);
-            BinaryPrimitives.WriteUInt16LittleEndian(r[44..], (ushort)name.Length);
-            BinaryPrimitives.WriteUInt16LittleEndian(r[46..], (ushort)parent.Length);
+            BinaryPrimitives.WriteUInt64LittleEndian(
+                r[EngineContract.RowOffsets.EntryRef..], row.EntryRef);
+            BinaryPrimitives.WriteUInt64LittleEndian(r[EngineContract.RowOffsets.Frn..], row.Frn);
+            BinaryPrimitives.WriteUInt64LittleEndian(r[EngineContract.RowOffsets.Size..], row.Size);
+            BinaryPrimitives.WriteInt64LittleEndian(r[EngineContract.RowOffsets.Mtime..], row.Mtime);
+            BinaryPrimitives.WriteUInt32LittleEndian(r[EngineContract.RowOffsets.NameOff..], nameOff);
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                r[EngineContract.RowOffsets.ParentPathOff..], parentOff);
+            BinaryPrimitives.WriteUInt32LittleEndian(r[EngineContract.RowOffsets.Flags..], row.Flags);
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                r[EngineContract.RowOffsets.NameLen..], (ushort)name.Length);
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                r[EngineContract.RowOffsets.ParentPathLen..], (ushort)parent.Length);
         }
         var b = new byte[8 + rowBytes.Length + blob.Count];
         BinaryPrimitives.WriteUInt32LittleEndian(b, (uint)rows.Count);

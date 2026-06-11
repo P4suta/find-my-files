@@ -57,6 +57,12 @@ fmt-check:
 # Everything the pre-push hook checks, in one shot
 verify: fmt-check lint test test-app
 
+# Regenerate app/FindMyFiles/Engine/Generated/EngineContract.g.cs from the
+# contract single source (ADR-0018). cargo test runs the drift check.
+[working-directory: 'engine']
+contract-gen:
+    cargo run -p fmf-contract --bin gen-contract
+
 # ── Service (v2: fmf-service + named pipe; ADR-0016/0017) ────────────────
 
 # Console-mode service in the foreground — the dev inner loop (elevated;

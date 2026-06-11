@@ -24,6 +24,7 @@
 //! - 上限値(16MiB・64件 等)   → [`limits`]
 
 pub mod codes;
+pub mod counters;
 pub mod events;
 pub mod limits;
 pub mod opcodes;

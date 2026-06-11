@@ -101,19 +101,10 @@ public sealed class ErrorEventData
     public string Message { get; set; } = string.Empty;
 }
 
-public sealed class CountersData
-{
-    public ulong StatFetchFailures { get; set; }
-    public ulong UsnBatchesTruncated { get; set; }
-    public ulong SnapshotLoadFailures { get; set; }
-    public ulong SnapshotSaveFailures { get; set; }
-    public ulong DeferredNamesUnresolved { get; set; }
-    public ulong CorruptMftRecords { get; set; }
-    public ulong JournalRescans { get; set; }
-    public ulong PipeMalformedFrames { get; set; }
-    public ulong PipeEventsDropped { get; set; }
-    public ulong PipeConnectionsRejected { get; set; }
-}
+// CountersData is generated (Generated/EngineContract.g.cs) from the
+// contract's counter-name registry — adding an engine counter radiates to
+// C# via `just contract-gen` (ADR-0018). The handwritten copy that lived
+// here was missing four counters; the generated one cannot be.
 
 /// <summary>Client-side pipe transport metrics. Null for in-proc clients;
 /// the pipe client fills it on every <see cref="IEngineClient.GetStatsAsync"/>.</summary>

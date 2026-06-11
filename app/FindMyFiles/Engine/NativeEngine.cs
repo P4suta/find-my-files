@@ -8,61 +8,30 @@ namespace FindMyFiles.Engine;
 /// </summary>
 internal static partial class NativeEngine
 {
-    internal const int Ok = 0;
-    internal const int Stale = 2;
-    internal const int QuerySyntax = 5;
-    internal const int Locked = 7;
+    // The struct definitions live in Generated/EngineContract.g.cs (the
+    // other half of this partial class — LayoutKind.Explicit with offsets
+    // radiated from Rust offset_of!). These aliases keep the historical
+    // spelling at the call sites; the values are the contract's.
+    internal const int Ok = EngineContract.Status.Ok;
+    internal const int Stale = EngineContract.Status.Stale;
+    internal const int QuerySyntax = EngineContract.Status.QuerySyntax;
+    internal const int Locked = EngineContract.Status.Locked;
 
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct FmfQueryOptions
+    /// <summary>Marshaled sizes must equal the contract's — catches a stale
+    /// Generated file at first touch, before any P/Invoke crosses.</summary>
+    static NativeEngine()
     {
-        public uint Sort;
-        public uint Desc;
-        public uint CaseMode;
-        public uint IncludeHiddenSystem;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct FmfRow
-    {
-        public ulong EntryRef;
-        public ulong Frn;
-        public ulong Size;
-        public long Mtime;
-        public uint NameOff;
-        public uint ParentPathOff;
-        public uint Flags;
-        public ushort NameLen;
-        public ushort ParentPathLen;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct FmfPage
-    {
-        public uint RowCount;
-        public uint _pad;
-        public IntPtr Rows;
-        public IntPtr Blob;
-        public uint BlobLen;
-        public uint _pad2;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    internal unsafe struct FmfEvent
-    {
-        public uint Kind;
-        public uint _pad;
-        public ulong Entries;
-        public fixed byte Volume[16];
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    internal unsafe struct FmfVolumeStatus
-    {
-        public fixed byte Label[16];
-        public uint State;
-        public uint _pad;
-        public ulong Entries;
+        if (Marshal.SizeOf<FmfRow>() != EngineContract.RowSize
+            || Marshal.SizeOf<FmfEvent>() != EngineContract.EventSize
+            || Marshal.SizeOf<FmfQueryOptions>() != EngineContract.QueryOptionsSize
+            || Marshal.SizeOf<FmfVolumeStatus>() != EngineContract.VolumeStatusSize
+            || Marshal.SizeOf<FmfPage>() != EngineContract.PageStructSize
+            || Marshal.SizeOf<FmfBlob>() != EngineContract.BlobSize)
+        {
+            throw new InvalidOperationException(
+                "EngineContract.g.cs layout disagrees with the marshaled structs — "
+                + "regenerate with `just contract-gen` (ADR-0018)");
+        }
     }
 
     [LibraryImport("fmf_engine")]
@@ -95,14 +64,6 @@ internal static partial class NativeEngine
     [LibraryImport("fmf_engine")]
     internal static unsafe partial int fmf_index_status(
         IntPtr handle, FmfVolumeStatus* buf, uint cap, out uint count);
-
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct FmfBlob
-    {
-        public IntPtr Data;
-        public uint Len;
-        public uint _pad;
-    }
 
     [LibraryImport("fmf_engine")]
     internal static unsafe partial int fmf_blob_free(FmfBlob* blob);

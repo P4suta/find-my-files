@@ -136,6 +136,31 @@ fn query_trace_json_shape_is_pinned() {
     check_file("query_trace.json", &bytes);
 }
 
+/// CountersSnapshot's serde keys must equal the contract's counter-name
+/// registry — the registry is what gen-contract radiates into the C#
+/// CountersData, so a counter added here without a registry entry would
+/// silently vanish from the F12 panel (ADR-0018).
+#[test]
+fn counter_names_match_the_contract_registry() {
+    // serde_json::Value sorts object keys, so compare as sorted sets (the
+    // golden stats_snapshot.json pins the actual serialization order).
+    let json = serde_json::to_value(CountersSnapshot::default()).unwrap();
+    let mut keys: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort_unstable();
+    let mut registry: Vec<&str> = fmf_contract::counters::COUNTER_NAMES.to_vec();
+    registry.sort_unstable();
+    assert_eq!(
+        keys, registry,
+        "CountersSnapshot fields and fmf-contract::counters::COUNTER_NAMES \
+         drifted — update both together, then `just contract-gen` + FMF_BLESS"
+    );
+}
+
 #[test]
 fn metrics_snapshot_json_shape_is_pinned() {
     let mut histogram = Histogram::new();

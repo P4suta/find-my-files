@@ -306,33 +306,33 @@ public sealed class PipeEngineClient : IEngineClient
     private void DispatchEvent(byte[] payload)
     {
         var (kind, entries, volume) = PipeProtocol.DecodeEvent(payload);
-        switch (kind)
+        switch ((EventKind)kind)
         {
-            case 1:
+            case EventKind.Progress:
                 RaiseSafe(
                     () => VolumeUpdated?.Invoke(
                         new VolumeStatus(volume, VolumeState.Scanning, entries)),
                     "VolumeUpdated");
                 break;
-            case 2:
+            case EventKind.VolumeReady:
                 RaiseSafe(
                     () => VolumeUpdated?.Invoke(new VolumeStatus(volume, VolumeState.Ready, entries)),
                     "VolumeUpdated");
                 break;
-            case 3:
+            case EventKind.IndexChanged:
                 RaiseSafe(() => IndexChanged?.Invoke(volume), "IndexChanged");
                 break;
-            case 4:
+            case EventKind.RescanStarted:
                 RaiseSafe(
                     () => VolumeUpdated?.Invoke(new VolumeStatus(volume, VolumeState.Rescanning, 0)),
                     "VolumeUpdated");
                 break;
-            case 5:
+            case EventKind.VolumeFailed:
                 RaiseSafe(
                     () => VolumeUpdated?.Invoke(new VolumeStatus(volume, VolumeState.Failed, 0)),
                     "VolumeUpdated");
                 break;
-            case 6:
+            case EventKind.EngineError: // entries = severity 1..3
                 RaiseSafe(() => EngineErrorOccurred?.Invoke((int)entries), "EngineErrorOccurred");
                 break;
             default:

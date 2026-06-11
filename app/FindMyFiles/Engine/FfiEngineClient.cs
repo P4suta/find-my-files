@@ -60,24 +60,24 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         }
         volume = Encoding.UTF8.GetString(ev->Volume, len);
 
-        switch (ev->Kind)
+        switch ((EventKind)ev->Kind)
         {
-            case 3: // IndexChanged
+            case EventKind.IndexChanged:
                 self.IndexChanged?.Invoke(volume);
                 break;
-            case 1: // Progress
+            case EventKind.Progress:
                 self.VolumeUpdated?.Invoke(new VolumeStatus(volume, VolumeState.Scanning, ev->Entries));
                 break;
-            case 2: // VolumeReady
+            case EventKind.VolumeReady:
                 self.VolumeUpdated?.Invoke(new VolumeStatus(volume, VolumeState.Ready, ev->Entries));
                 break;
-            case 4: // RescanStarted
+            case EventKind.RescanStarted:
                 self.VolumeUpdated?.Invoke(new VolumeStatus(volume, VolumeState.Rescanning, 0));
                 break;
-            case 5: // VolumeFailed
+            case EventKind.VolumeFailed:
                 self.VolumeUpdated?.Invoke(new VolumeStatus(volume, VolumeState.Failed, 0));
                 break;
-            case 6: // EngineError (entries = severity 1..3)
+            case EventKind.EngineError: // Entries = severity 1..3
                 self.EngineErrorOccurred?.Invoke((int)ev->Entries);
                 break;
         }
