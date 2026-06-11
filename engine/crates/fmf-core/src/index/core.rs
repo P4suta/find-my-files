@@ -9,11 +9,11 @@ use super::{EntryId, NO_PARENT, SortKey, flags, masked};
 
 pub struct VolumeIndex {
     /// The one contiguous, sweepable pool: every entry's *folded* name at
-    /// `name_off..name_off+name_len`. 73.2% of real-C: names fold to
-    /// themselves (docs/RESEARCH.md), so the original spelling is stored
-    /// only where it differs — in `orig_pool` at `orig_off`, same length
-    /// (the fold is length-preserving, wtf8.rs). `orig_off == u32::MAX`
-    /// means the folded bytes *are* the original.
+    /// `name_off..name_off+name_len`. Most names fold to themselves
+    /// (ADR-0004), so the original spelling is stored only where it differs
+    /// — in `orig_pool` at `orig_off`, same length (the fold is
+    /// length-preserving, wtf8.rs). `orig_off == u32::MAX` means the folded
+    /// bytes *are* the original.
     pub(super) lower_pool: Vec<u8>,
     pub(super) orig_pool: Vec<u8>,
     pub(super) orig_off: Vec<u32>,
@@ -21,8 +21,8 @@ pub struct VolumeIndex {
     pub(super) name_len: Vec<u16>,
     pub(super) parent: Vec<EntryId>,
     /// File sizes < u32::MAX, 4 bytes per entry; u32::MAX is the sentinel
-    /// for the overflow map (≥4GiB files — 10 of 1.27M on the measured
-    /// real C:, docs/RESEARCH.md). Read through [`VolumeIndex::size`].
+    /// for the overflow map (≥4GiB files, ADR-0007). Read through
+    /// [`VolumeIndex::size`].
     pub(super) size_lo: Vec<u32>,
     pub(super) size_ovf: FxHashMap<EntryId, u64>,
     pub(super) mtime: Vec<i64>,
@@ -293,7 +293,7 @@ impl VolumeIndex {
         // with the derived caches (`derived_cache_bytes`).
         let perms = (self.perm_name.capacity() * 4) as u64;
         // Field name kept for FFI/JSON compatibility; the structure is the
-        // sorted FRN permutation these days (index/frn.rs).
+        // sorted FRN permutation (index/frn.rs).
         let frn_map = self.frn_index.bytes();
         let mut s = crate::metrics::IndexStats {
             volume: volume.to_string(),
@@ -301,15 +301,14 @@ impl VolumeIndex {
             live_entries: self.live_len() as u64,
             tombstones: self.tombstones as u64,
             // Field name kept for FFI/JSON compatibility; this is the
-            // original-spelling overflow pool these days (fold-identical
-            // names live only in lower_pool).
+            // original-spelling overflow pool (fold-identical names live
+            // only in lower_pool).
             name_pool_bytes: self.orig_pool.capacity() as u64,
             lower_pool_bytes: self.lower_pool.capacity() as u64,
             offsets_bytes: offsets,
             parent_bytes: (self.parent.capacity() * 4) as u64,
-            // Column + the overflow map (hashbrown: (K,V) slot + 1 control
-            // byte per capacity slot — an estimate, the map holds ~10
-            // entries on a real volume).
+            // Column + the overflow map (hashbrown estimate: (K,V) slot +
+            // 1 control byte per capacity slot; the map is tiny, ADR-0007).
             size_bytes: (self.size_lo.capacity() * 4
                 + self.size_ovf.capacity() * (std::mem::size_of::<(EntryId, u64)>() + 1))
                 as u64,

@@ -50,10 +50,8 @@ pub fn masked(record_or_frn: u64) -> u64 {
 }
 
 /// `reserve_exact` with a `len/64` floor, for merge-only arrays that grow a
-/// small batch at a time: a full-length copy happens at most once per ~1.6%
-/// growth and slack stays bounded by the same 1.6% — the doubling policy
-/// would pin up to 2× the array as permanent slack, which the B/entry RAM
-/// gate pays forever (these arrays are only shrunk after the initial scan).
+/// small batch at a time: bounds both copy frequency and permanent slack to
+/// ~1.6% (doubling would pin up to 2× as slack against the B/entry RAM gate).
 fn reserve_bounded<T>(v: &mut Vec<T>, additional: usize) {
     let want = v.len() + additional;
     if want > v.capacity() {
@@ -61,20 +59,16 @@ fn reserve_bounded<T>(v: &mut Vec<T>, additional: usize) {
     }
 }
 
-/// Merge sorted `batch` into `perm` in place. Batches are tiny against the
-/// array (~1k vs ~1M), so instead of a full-length element-wise merge (one
-/// key comparison — for names, a string compare — per existing element,
-/// plus a full-length reallocation), each batch element binary-searches its
-/// insertion point and the segments between insertion points move once
-/// with `copy_within`: O(batch·log n) comparisons + O(moved) memmove + no
-/// allocation.
+/// Merge sorted `batch` into `perm` in place: each batch element
+/// binary-searches its insertion point and the segments between insertion
+/// points move once with `copy_within` — O(batch·log n) comparisons +
+/// O(moved) memmove + no allocation (ADR-0008).
 ///
 /// Old elements are never reordered, and on a sorted array the strict
 /// total order (`cmp` id tie-break) makes the result the unique sorted
 /// merge. Arrays ordered by size/mtime can be locally stale-sorted
-/// (in-place `update_stat` never repositions an entry — long-standing
-/// behavior); placement there is deterministic best-effort, exactly like
-/// the entry the stat update left behind.
+/// (in-place `update_stat` never repositions an entry); placement there is
+/// deterministic best-effort.
 pub(crate) fn merge_sorted_tail(
     perm: &mut Vec<EntryId>,
     batch: &[EntryId],

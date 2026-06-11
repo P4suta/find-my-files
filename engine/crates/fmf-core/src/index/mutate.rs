@@ -149,7 +149,7 @@ impl VolumeIndex {
 
     /// Store the original spelling only when it differs from the folded
     /// bytes just appended at `lower_off` — the fold-identical majority
-    /// (73.2% on real C:) costs nothing beyond the sentinel.
+    /// costs nothing beyond the sentinel (ADR-0004).
     fn push_orig_if_differs(&mut self, lower_off: usize, orig: &[u8]) -> u32 {
         if orig == &self.lower_pool[lower_off..] {
             u32::MAX

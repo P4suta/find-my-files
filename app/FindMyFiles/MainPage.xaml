@@ -92,9 +92,8 @@
 
         <!-- Results. ItemsPanel stays ItemsStackPanel (CLAUDE.md UI固定則).
              ItemsSource is bound OneTime by design: the VirtualResultList
-             instance lives as long as the page and new results arrive via a
-             seeded Reset — swapping the ItemsSource resets the ListView's
-             virtualization state and flickers. -->
+             instance lives as long as the page; new results arrive via a
+             seeded Reset, never by swapping the ItemsSource (ADR-0015). -->
         <ListView
             x:Name="ResultsList"
             Grid.Row="2"

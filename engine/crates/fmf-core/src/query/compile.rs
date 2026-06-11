@@ -1,8 +1,7 @@
 //! AST → compiled execution plan. Each AND group gets a *driver* — the most
 //! selective positive literal, executed as a single SIMD sweep over the name
 //! pool — plus residual matchers ordered by evaluation cost (numeric filters
-//! → memmem → regex → path). Everything's "compiled byte code" idea taken
-//! one step further (docs/RESEARCH.md, perf plan Workstream B).
+//! → memmem → regex → path).
 
 use memchr::memmem;
 use regex::bytes::{Regex, RegexBuilder};
@@ -106,7 +105,7 @@ pub(super) struct CTerm {
     /// Derived for case-exact name literals: the needle is *not* its own
     /// fold (it contains an uppercase/foldable character). Such a needle
     /// can never occur in a fold-identical name — the matcher's O(1)
-    /// reject for 73% of real-C: entries (matchers.rs).
+    /// reject (matchers.rs, ADR-0004).
     pub exact_needle_unstable: bool,
 }
 
@@ -380,12 +379,11 @@ fn fold_exact_needle(bytes: &[u8]) -> Vec<u8> {
     wtf8::fold_str(s).into_bytes()
 }
 
-/// Build the sweep driver from a term, leaving the term intact (it is kept
-/// as `CompiledGroup::driver_term` for refinement/subsumption/superset
-/// verification). Returns the driver and whether it fully checks the term
-/// (false = folded superset of a case-exact term; the original-case
-/// comparison runs as a residual — the folded pool is the only contiguous
-/// one, and an original-case match always implies the folded match).
+/// Build the sweep driver from a term, leaving the term intact (kept as
+/// `CompiledGroup::driver_term`). Returns the driver and whether it fully
+/// checks the term — false for a case-exact term: the sweep folds its
+/// needle (sound: an original-case match always implies the folded match)
+/// and the exact comparison runs as a residual.
 fn driver_for(t: &CTerm) -> (Driver, bool) {
     match &t.matcher {
         Matcher::NameSub { finder, folded } => {

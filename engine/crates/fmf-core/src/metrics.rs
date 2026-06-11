@@ -51,7 +51,7 @@ pub struct ScanTrace {
     pub read_ms: u64,
     pub mb_per_s: f64,
     pub parse_ms: u64,
-    /// Deferred $ATTRIBUTE_LIST name resolution (parallel random reads).
+    /// Deferred $ATTRIBUTE_LIST name resolution.
     pub deferred_ms: u64,
     pub build_ms: u64,
     pub sort_ms: u64,

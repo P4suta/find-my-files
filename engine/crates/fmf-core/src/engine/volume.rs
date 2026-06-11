@@ -343,11 +343,10 @@ impl Engine {
     }
 
     /// Compact once the tombstone/garbage thresholds trip (checked per
-    /// applied USN batch). The copy builds under a *read* guard — queries
-    /// run alongside, and this volume thread is the index's only writer, so
-    /// nothing can mutate it meanwhile; the write lock is held for the swap
-    /// alone (µs). `install_index` bumps the structural generation: open
-    /// result handles go hard-stale and the UI re-queries.
+    /// applied USN batch). The copy builds under a *read* guard — this
+    /// volume thread is the index's only writer — and the write lock is
+    /// held for the swap alone. `install_index` bumps the structural
+    /// generation, hard-staling open result handles.
     fn maybe_compact(&self, slot: &VolumeSlot) {
         let compacted = {
             let guard = slot.index.read();

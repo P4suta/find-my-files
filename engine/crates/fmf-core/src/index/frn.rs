@@ -1,9 +1,6 @@
-//! Record-number → EntryId lookup as a sorted permutation.
-//!
-//! Replaces the FxHashMap (~25 B/entry once capacity padding is counted —
-//! the single largest RAM line after the name pools) with one id array
-//! (4 B/entry) maintained merge-only, exactly like the sort permutations:
-//! appends collect in an unmerged tail that lookups scan linearly, and the
+//! Record-number → EntryId lookup as a sorted permutation (ADR-0005): one
+//! id array maintained merge-only, exactly like the sort permutations.
+//! Appends collect in an unmerged tail that lookups scan linearly, and the
 //! end-of-batch merge folds them in sorted order. The keys are the `frn`
 //! column itself, read through the id indirection — a probe pays one extra
 //! cache miss, which only the USN path and the builder's parent resolution
@@ -72,14 +69,11 @@ impl FrnIndex {
 
     /// Fold the appended entries into sorted order — live ones only;
     /// anything tombstoned before its first merge can never be looked up
-    /// again. In place: USN batches are tiny against the arrays, so each
-    /// batch pair binary-searches its insertion point and the segments
-    /// between insertion points move once (`copy_within`) — O(batch·log n)
-    /// comparisons, no full-length reallocation. New records usually carry
-    /// the highest record numbers, so the moved segments are short.
-    /// Equal keys keep old-before-new order (same as the previous full
-    /// merge); liveness never depends on that order anyway (at most one
-    /// live pair per key).
+    /// again. In place: each batch pair binary-searches its insertion point
+    /// and the segments between insertion points move once (`copy_within`)
+    /// — O(batch·log n) comparisons, no reallocation (ADR-0008).
+    /// Equal keys keep old-before-new order; liveness never depends on
+    /// that order anyway (at most one live pair per key).
     pub(super) fn merge_appended(&mut self, frn: &[u64], flag: &[u8]) {
         let n = frn.len() as u32;
         let mut batch: Vec<(u64, EntryId)> = (self.covers..n)
@@ -148,8 +142,8 @@ mod tests {
     use crate::index::masked;
     use crate::index::testutil::{build_sample, raw, u16s};
 
-    /// The forward full merge this module shipped before the in-place
-    /// rewrite — kept as the reference: equal keys take the old pair first.
+    /// Reference implementation (forward full merge): equal keys take the
+    /// old pair first.
     fn forward_merge_reference(
         keys: &mut Vec<u64>,
         ids: &mut Vec<EntryId>,

@@ -1,8 +1,6 @@
 //! Initial full-volume index source: raw $MFT scan via ntfs-reader.
-//!
-//! Spike S0: measure a real volume scan to validate the core assumptions
-//! (speed, FRN availability, name-length distribution, peak RAM). The real
-//! `IndexSource` implementation for M0 grows out of this module.
+//! Holds the measurement spike (`spike_scan`) and the whole-$MFT reference
+//! scanner used as the streaming scanner's equivalence gate.
 
 use std::time::Instant;
 
@@ -150,13 +148,11 @@ pub struct ScanStats {
     pub volume: String,
     pub elapsed_total_ms: u64,
     /// Accumulated device-read time. Overlaps with parsing on the pipelined
-    /// path, so read + parse + build + sort may exceed total — that gap is
-    /// the pipeline win.
+    /// path, so read + parse + build + sort may exceed total.
     pub elapsed_mft_load_ms: u64,
     /// Accumulated record-parse time (fixup + attribute walk + WTF-8).
     pub elapsed_parse_ms: u64,
-    /// Deferred $ATTRIBUTE_LIST name resolution (random single-record
-    /// reads) — on a fragmented volume this rivals the streaming read.
+    /// Deferred $ATTRIBUTE_LIST name resolution.
     pub elapsed_deferred_ms: u64,
     /// Records whose name needed the deferred pass at all.
     pub deferred_names: u64,

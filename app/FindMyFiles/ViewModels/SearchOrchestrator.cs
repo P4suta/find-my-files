@@ -93,10 +93,8 @@ public sealed class SearchOrchestrator
     {
         var generation = Interlocked.Increment(ref _generation);
         var request = _request();
-        // Product rule: no query, no results. The engine could list every
-        // file, but an empty box has nothing to answer — and the match-all
-        // listing was pure churn (its ids change on every USN tick, so the
-        // startup screen repainted forever).
+        // Product rule: no query, no results — a match-all listing would
+        // also churn on every USN tick (its ids keep changing).
         if (string.IsNullOrWhiteSpace(request.Query))
         {
             TraceCaptured?.Invoke(null);

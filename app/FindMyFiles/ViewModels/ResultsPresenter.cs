@@ -205,9 +205,8 @@ public sealed partial class ResultsPresenter : ObservableObject
         var lastRow = Math.Max(0, count - 1);
         if (origin.PreservesPosition() && ResultsSource.LastVisibleRange is { } visible)
         {
-            // Clamp below as well: an empty viewport once reported (-1,-1)
-            // and Items[-1] surfaces as the cryptic WinRT Int32.MaxValue
-            // index error (the adapter sees (uint)-1).
+            // Clamp below as well: an empty viewport reports (-1,-1), and
+            // Items[-1] crashes in the WinRT IList adapter (ADR-0015).
             var restore = Math.Clamp(visible.First, 0, lastRow);
             var first = Math.Max(0, restore - VirtualResultList.PageSize);
             var last = Math.Min(lastRow, Math.Min(visible.Last, lastRow) + VirtualResultList.PageSize);

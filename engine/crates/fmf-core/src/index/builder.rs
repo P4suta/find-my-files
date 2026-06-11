@@ -15,7 +15,7 @@ pub struct VolumeIndexBuilder {
 pub struct FinishTimings {
     /// Parent resolution + EXCLUDED propagation.
     pub build_ms: u64,
-    /// The three permutation sorts.
+    /// The name-permutation sort.
     pub sort_ms: u64,
 }
 
@@ -102,8 +102,7 @@ impl VolumeIndexBuilder {
         let mut timings = FinishTimings::default();
         let t = std::time::Instant::now();
 
-        // Pass 1.5: the FRN index, in one parallel sort (the per-push
-        // hashmap inserts this replaces were the build's serial tax).
+        // Pass 1.5: the FRN index, in one parallel sort (ADR-0005).
         self.idx.frn_index = FrnIndex::build(&self.idx.frn, &self.idx.flag);
 
         // Pass 2: resolve parents now that every record is findable.
@@ -159,8 +158,7 @@ impl VolumeIndexBuilder {
 
         // Name order only — the default sort, needed before the volume can
         // serve its first query. Size/mtime orders build lazily on the
-        // first sorted query (query::memo), shaving two full sorts off
-        // every initial scan.
+        // first sorted query (query::memo, ADR-0006).
         let mut perm_name: Vec<EntryId> = (0..self.idx.len() as u32).collect();
         let idx = &self.idx;
         perm_name.par_sort_unstable_by(|&a, &b| idx.cmp_by(SortKey::Name, a, b));

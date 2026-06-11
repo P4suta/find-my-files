@@ -410,8 +410,7 @@ fn bench(
         "query", "hits", "p50_us", "p99_us", "max_us", "cold_us", "memo", "scan", "mat"
     );
     for q in BENCH_QUERIES {
-        // 200 runs make p99 a real percentile (top 2 excluded). At 50 it
-        // was the max, and a single OS hiccup tripped the regression gate.
+        // 200 runs make p99 a real percentile, not the max (ADR-0013).
         const RUNS: usize = 200;
         let mut totals = Vec::with_capacity(RUNS);
         let (mut memos, mut scans, mut mats) = (Vec::new(), Vec::new(), Vec::new());
@@ -477,8 +476,7 @@ fn bench(
 
     if let Some(path) = baseline {
         let old: BenchReport = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-        // A live volume drifts; past ±10% the 20% gate compares apples to
-        // oranges — tell the human to re-record rather than chase ghosts.
+        // Entry-count drift past ±10% invalidates the baseline (ADR-0013).
         if report.entries.abs_diff(old.entries) > old.entries / 10 {
             eprintln!(
                 "WARNING entries drifted {}→{} (>10%) since the baseline was recorded — \
@@ -487,18 +485,11 @@ fn bench(
             );
         }
         let mut regressed = false;
-        // This gate is the smoke alarm, not the precision instrument: the
-        // machine's thermal envelope alone moves real-volume wall clock by
-        // ±30% (measured — an old-code/new-code A/B was equally slow warm),
-        // so the relative bar sits at +50%, which real algorithmic breakage
-        // (today's samples: +48%, 5×) clears and weather does not. The
-        // fine-grained per-change gate is `just bench-micro-check`
-        // (criterion on a fixed synthetic index, 10% median).
+        // Coarse smoke alarm: relative p50 gate at +50%; the fine-grained
+        // per-change gate is `just bench-micro-check` (ADR-0013).
         let gate = |new: u64, old: u64, floor: u64| new > (old.max(floor) * 3) / 2;
-        // Tail latency and restore are gated against the *absolute*
-        // acceptance budgets (CLAUDE.md: search p99 ≤50ms, restore→ready
-        // ≤2s — the load itself gets half): their relative values swing
-        // with OS/thermal noise even at 200 runs.
+        // Tail latency and restore are gated on *absolute* acceptance
+        // budgets, never relative (ADR-0013).
         const P99_BUDGET_US: u64 = 50_000;
         const RESTORE_BUDGET_MS: u64 = 1_000;
         for qb in &report.queries {

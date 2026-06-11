@@ -18,28 +18,24 @@ public readonly record struct PageSeed(long Page, IReadOnlyList<RowData> Rows);
 /// <summary>
 /// Random-access data virtualization for ListView: non-generic IList +
 /// INotifyCollectionChanged + IItemsRangeInfo (the only combination that
-/// works — CLAUDE.md UI固定則). The indexer hands out stable placeholder
-/// instances and never fetches; RangesChanged drives 64-row page fetches on
-/// a background task, and arriving data fills those same instances in place
-/// (INotifyPropertyChanged updates the bindings — no container churn).
+/// works — microsoft-ui-xaml#1809, ADR-0015). The indexer hands out stable
+/// placeholder instances and never fetches; RangesChanged drives 64-row page
+/// fetches on a background task, and arriving data fills those same
+/// instances in place.
 ///
 /// The instance lives as long as the page: new query results arrive through
 /// <see cref="Reassign"/> (seeded pages + one Reset), never by swapping the
-/// ItemsSource — swapping resets the ListView's virtualization state and is
-/// what made the screen flicker on every keystroke. An epoch counter makes
-/// fetches started against a previous result fall on the floor.
+/// ItemsSource (ADR-0015). An epoch counter makes fetches started against a
+/// previous result fall on the floor.
 ///
-/// Contract invariant — everything XAML asks goes through the WinRT IList
-/// adapter, which trusts these answers blindly: **never vouch for
-/// membership falsely.** A false "absent" merely re-realizes a container; a
-/// false "present" sends the ListView to GetAt(staleIndex) and dies deep
-/// inside XAML. A row is a member iff its index is inside <see cref="Count"/>
-/// AND the current page cache holds that exact instance in that slot; rows
-/// from previous results, evicted pages or transient enumeration answer
-/// absent. The indexer enforces its bounds, mutating entry points enforce
-/// the UI thread (always, not just in Debug), and the whole read surface of
-/// IList is implemented — no landmines for whichever member XAML or a LINQ
-/// helper decides to call next.
+/// Membership invariant — the WinRT IList adapter trusts these answers
+/// blindly: **never vouch for membership falsely.** A false "absent" merely
+/// re-realizes a container; a false "present" sends the ListView to
+/// GetAt(staleIndex) and dies deep inside XAML (ADR-0015). A row is a member
+/// iff its index is inside <see cref="Count"/> AND the current page cache
+/// holds that exact instance in that slot; rows from previous results,
+/// evicted pages or transient enumeration answer absent. Mutating entry
+/// points enforce the UI thread (always, not just in Debug).
 /// </summary>
 public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsRangeInfo
 {
@@ -170,9 +166,8 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     {
         get
         {
-            // A negative index previously walked into page 0's array as
-            // rows[-1]; an index past Count fabricated phantom pages that
-            // polluted the LRU. Out of range is out of range.
+            // Out of range must throw — never fetch, never fabricate
+            // phantom pages into the LRU (ADR-0015).
             if ((uint)index >= (uint)Count)
             {
                 throw new ArgumentOutOfRangeException(nameof(index), index, $"Count={Count}");
@@ -333,13 +328,10 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     public int Add(object? value) => throw new NotSupportedException();
     public void Clear() => throw new NotSupportedException();
 
-    // Honesty matters here: after a Reset the ListView re-locates its
-    // selected/focused item through Contains/IndexOf. Answering for a row
-    // of a *previous* result (stale Index, evicted page) sends XAML to
-    // GetAt(staleIndex), which the WinRT adapter rejects with the cryptic
-    // "Int32.MaxValue - 1" ArgumentOutOfRangeException once the new count
-    // is smaller. A row is in this collection iff its slot still holds
-    // that exact instance.
+    // After a Reset the ListView re-locates its selected/focused item
+    // through Contains/IndexOf. Answer only for rows whose slot still holds
+    // that exact instance — vouching for a row of a previous result sends
+    // XAML to GetAt(staleIndex) and crashes (ADR-0015).
     public bool Contains(object? value) => IndexOf(value) >= 0;
 
     public int IndexOf(object? value)

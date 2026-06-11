@@ -1,15 +1,13 @@
-//! Streaming $MFT scanner (perf plan Workstream C).
+//! Streaming $MFT scanner (ADR-0011).
 //!
-//! Replaces the whole-$MFT-in-RAM approach: the $MFT's data runs are read in
-//! 16MiB aligned chunks through our own volume handle (large sequential
-//! reads run at device speed instead of ntfs-reader's small buffered ones),
-//! records are fixed up and parsed per chunk, and the buffers are recycled —
-//! peak RAM drops from "size of $MFT" to a few chunks. ntfs-reader still
+//! The $MFT's data runs are read in 16MiB aligned chunks through our own
+//! volume handle, records are fixed up and parsed per chunk, and the
+//! buffers are recycled — peak RAM is bounded at a few chunks. ntfs-reader
 //! provides the bootstrap (boot-sector geometry + record 0's data runs) and
 //! the per-record attribute parsing types.
 //!
-//! Two layers of overlap (macro-parallel by construction, entry order stays
-//! byte-for-byte identical to a sequential scan):
+//! Two layers of overlap (entry order stays byte-for-byte identical to a
+//! sequential scan):
 //! - a dedicated I/O thread reads chunk N+1 while chunk N parses
 //!   ([`run_chunk_pipeline`]; degrades to inline reads if the thread can't
 //!   start — `scan_pipeline_fallbacks`)
@@ -123,12 +121,8 @@ fn apply_fixup(data: &mut [u8]) -> bool {
     true
 }
 
-/// Fixed-size record store for the deferred/extension caches. These used
-/// to hold tens of thousands of individually boxed ~1KiB records per scan;
-/// the freed boxes left the Windows heap fragmented enough to show up as
-/// working-set bytes the accounting couldn't see. Records now live
-/// back-to-back in one growable allocation (large enough to come from — and
-/// return to — the OS), addressed by slot.
+/// Fixed-size record store for the deferred/extension caches: records live
+/// back-to-back in one growable allocation, addressed by slot (ADR-0012).
 struct RecordArena {
     data: Vec<u8>,
     record_size: usize,
@@ -433,11 +427,8 @@ fn parse_subrange(bytes: &mut [u8], first_logical: u64, record_size: usize) -> P
 
 /// Resolve deferred $ATTRIBUTE_LIST names in parallel — almost entirely
 /// from RAM: every target is an extension record and the whole $MFT just
-/// streamed through the pipeline, so `ext` already holds the bytes. (The
-/// previous design re-read targets from disk; random reads through the
-/// volume handle serialize in the kernel no matter how many handles issue
-/// them — measured ~2.9s on a real C: — while the cache makes this pass
-/// CPU-bound.) Chunk order is preserved, so EntryId assignment matches a
+/// streamed through the pipeline, so `ext` already holds the bytes
+/// (ADR-0011). Chunk order is preserved, so EntryId assignment matches a
 /// serial loop.
 fn resolve_deferred(
     volume_path: &str,
@@ -533,8 +524,8 @@ struct Chunk {
     want: usize,
 }
 
-/// Pure arithmetic version of the old read loop: same chunking, same
-/// sparse-hole skipping, no I/O.
+/// Pure chunk-plan arithmetic: record-aligned chunking, sparse-hole
+/// skipping, no I/O.
 fn plan_chunks(map: &RunMap, data_size: u64, record_size: usize) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut logical = 0u64;
@@ -706,11 +697,8 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     stats.elapsed_parse_ms = parse_time.as_millis() as u64;
     stats.pipeline_fallbacks = fallbacks;
 
-    // Deferred pass: names hiding behind $ATTRIBUTE_LIST (~tens of
-    // thousands on a real C:), resolved in parallel from the streamed
-    // extension-record cache — measured on a real 1.27M-entry C:, the
-    // disk-read version of this pass cost more than the streaming read it
-    // followed.
+    // Deferred pass: names hiding behind $ATTRIBUTE_LIST, resolved in
+    // parallel from the streamed extension-record cache (ADR-0011).
     let t_deferred = Instant::now();
     stats.deferred_names = deferred.len() as u64;
     let batches = resolve_deferred(
@@ -764,9 +752,7 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
 // ── I/O strategy probe (`fmf io-probe`) ─────────────────────────────────
 //
 // Measurement only: reads the exact chunk plan the scan would, parses
-// nothing, and reports throughput per strategy. Production stays on the
-// buffered pipeline until a mode earns its keep on numbers
-// (docs/RESEARCH.md records the verdicts).
+// nothing, and reports throughput per strategy (ADR-0011).
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IoProbeMode {
@@ -996,8 +982,8 @@ pub fn io_probe(
 mod tests {
     use super::*;
 
-    /// plan_chunks must reproduce the old read loop's arithmetic: record
-    /// alignment, sparse-hole skipping, full logical coverage in order.
+    /// Pins plan_chunks arithmetic: record alignment, sparse-hole
+    /// skipping, full logical coverage in order.
     #[test]
     fn plan_chunks_is_record_aligned_and_ordered() {
         let rs = 1024usize;

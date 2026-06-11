@@ -9,13 +9,9 @@ use parking_lot::Mutex;
 
 use super::{EntryId, VolumeIndex, flags};
 
-// 02: flag byte gained HIDDEN/SYSTEM/EXCLUDED bits — older snapshots must
-// trigger a full rescan rather than load with wrong semantics.
-// 03: perm_size/perm_mtime sections dropped (lazy derived caches now) and
-//     the size column split into u32 + an overflow id/size pair list.
-// 04: name_pool replaced by the fold-overflow layout — lower_pool is the
-//     only full-length pool, originals live in orig_pool via the orig_off
-//     sentinel column.
+// Any semantic change to a section bumps the version in the magic: older
+// snapshots must fail the magic check and trigger a full rescan rather
+// than load with wrong semantics (ADR-0010, no backward compatibility).
 const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX04";
 
 fn pod_bytes<T: Copy>(v: &[T]) -> &[u8] {
@@ -52,9 +48,7 @@ fn read_vec<T: Copy, R: std::io::Read>(
     // The length prefix is untrusted input: a corrupt value must come back
     // as Err (→ full-rescan fallback), not abort the process. try_reserve
     // turns an absurd claim into a clean Err; a plausible-but-lying length
-    // then fails at read_exact EOF and the buffer drops. Reserving once and
-    // reading in 8MiB strides replaces the old 1MiB grow-loop, whose
-    // repeated reallocations dominated large-column load time.
+    // then fails at read_exact EOF and the buffer drops.
     let elems = len / elem;
     let mut out: Vec<T> = Vec::new();
     if out.try_reserve_exact(elems).is_err() {
@@ -206,8 +200,6 @@ impl VolumeIndex {
         let size_ovf: rustc_hash::FxHashMap<u32, u64> =
             ovf_ids.into_iter().zip(ovf_sizes).collect();
 
-        // One parallel sort instead of the million serial hashmap inserts
-        // this rebuild used to be.
         let frn_index = super::frn::FrnIndex::build(&frn, &flag);
         let mut tombstones = 0u32;
         // Lower bound: rename gaps aren't tombstoned and are lost here.
@@ -490,9 +482,8 @@ mod tests {
 
     #[test]
     fn snapshot_lying_length_prefix_errors_without_huge_allocation() {
-        // A corrupt section length (here 2^60) must come back as Err — the
-        // old code pre-allocated the claimed size before any validation,
-        // which aborts the process instead of falling back to a rescan.
+        // A corrupt section length (here 2^60) must come back as Err, not
+        // allocate the claimed size and abort the process.
         let idx = build_sample();
         let mut buf = Vec::new();
         idx.write_snapshot(&mut buf, 1, 1).unwrap();

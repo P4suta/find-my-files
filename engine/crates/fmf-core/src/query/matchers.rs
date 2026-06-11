@@ -50,8 +50,8 @@ impl EvalCtx {
     }
 }
 
-/// The haystack for a case-exact name literal. Fold-identical entries (73%
-/// on real C:) resolve in O(1): a needle that is not its own fold can never
+/// The haystack for a case-exact name literal. Fold-identical entries
+/// resolve in O(1) (ADR-0004): a needle that is not its own fold can never
 /// occur in a name whose every character is fold-stable (UTF-8/WTF-8
 /// self-synchronization makes the byte-level argument sound), and for a
 /// fold-stable needle the folded bytes *are* the original bytes.

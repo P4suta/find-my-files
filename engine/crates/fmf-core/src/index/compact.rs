@@ -6,8 +6,7 @@
 //! id order (old-id ascending → new ids 0..live). Every sorted structure
 //! orders by (key, id) with identical keys on both sides, so filtering the
 //! dead and renumbering the survivors preserves sortedness — `perm_name`
-//! and the FRN index copy over in O(n) with **no re-sort** (the builder's
-//! three parallel sorts are exactly what this avoids paying again).
+//! and the FRN index copy over in O(n) with **no re-sort** (ADR-0009).
 //!
 //! Swap-in goes through `VolumeSlot::install_index`, which bumps the
 //! structural generation: open result handles go hard-stale and the UI

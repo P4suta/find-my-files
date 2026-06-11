@@ -134,10 +134,7 @@ impl OffsetTable {
 /// Pre-sorted id order for one sort key, built on the first query that
 /// sorts by it and extended per content generation after that — the same
 /// insertion-point in-place merge the name permutation uses, through the
-/// same `cmp_by` order. The name permutation stays an always-maintained
-/// index column (default sort, needed before the first keystroke); size
-/// and mtime orders are pure RAM (8 B/entry together) for sessions that
-/// never click those columns, so they live here instead.
+/// same `cmp_by` order (ADR-0006).
 ///
 /// Never persisted: a snapshot restore re-sorts on first use, which also
 /// resets any staleness in-place stat updates accumulated.
@@ -239,9 +236,8 @@ impl SortPerm {
 
 /// Memoized full paths for every directory, for one name pool. Only built
 /// when the query contains path terms — and split per pool so a query only
-/// pays for the pool(s) it reads: nearly all path queries are folded, and
-/// the original-case memo used to be built (and held, ×full dir paths)
-/// unconditionally alongside it. Entry paths are `memo[parent] + name`.
+/// pays for the pool(s) it reads (nearly all path queries are folded).
+/// Entry paths are `memo[parent] + name`.
 ///
 /// Across generations a memo extends incrementally as long as no existing
 /// directory was renamed or moved (`dir_topology_generation`): appends
@@ -390,8 +386,8 @@ impl DirPathsPool {
                     match depth[idx.parent(d) as usize] {
                         // Unresolved parent: `d` sits on a corrupt parent
                         // cycle (or a >4096 chain). Attach it at the root —
-                        // propagating u32::MAX here used to poison max_depth
-                        // and size the level table at ~4G entries (abort).
+                        // u32::MAX must not propagate into max_depth, which
+                        // sizes the level table.
                         u32::MAX => {
                             cycle_members += 1;
                             1
@@ -931,10 +927,9 @@ mod tests {
 
     #[test]
     fn parent_cycle_attaches_dirs_at_root_instead_of_aborting() {
-        // Corrupt USN records can produce a parent cycle (a→b→a). The
-        // unresolved depth used to propagate as u32::MAX into max_depth,
-        // sizing the level table at ~4G entries — an allocation abort. Cycle
-        // members must instead come out root-attached, with paths intact.
+        // Corrupt USN records can produce a parent cycle (a→b→a). Cycle
+        // members must come out root-attached, with paths intact — not
+        // abort via a u32::MAX depth poisoning the level-table size.
         let mut b = VolumeIndexBuilder::new("C:", 5);
         let (da, db, f) = (u16s("a"), u16s("b"), u16s("f.txt"));
         b.push(raw(10, 5, &da, true, 0, 1));

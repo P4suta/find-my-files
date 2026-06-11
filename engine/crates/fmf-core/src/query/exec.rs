@@ -4,7 +4,7 @@
 //! candidates. Groups without a usable literal fall back to a chunked
 //! full scan, and the empty query walks the permutation directly. Results
 //! materialize as O(1)-pageable, sort-ordered id arrays
-//! (docs/ARCHITECTURE.md「クエリ時マテリアライズ」+ perf plan Workstream B).
+//! (docs/ARCHITECTURE.md「クエリ時マテリアライズ」).
 
 use rayon::prelude::*;
 
@@ -140,8 +140,7 @@ pub fn search(
                 let candidates = driver_candidates(idx, table, driver, skip_excluded);
                 metrics.entries_scanned += candidates.len() as u64;
                 // A case-exact source term makes the folded sweep a superset:
-                // its exact comparison joins the residual pass (the same
-                // matcher refine already runs — matchers.rs is unchanged).
+                // its exact comparison joins the residual pass.
                 if group.terms.is_empty() && group.driver_exact {
                     for id in candidates {
                         bitmap[id as usize / 64] |= 1u64 << (id as usize % 64);

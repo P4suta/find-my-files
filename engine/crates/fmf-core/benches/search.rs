@@ -1,8 +1,7 @@
 //! Micro-benchmarks for the query path over a synthetic 1M-entry index
 //! whose name distribution is calibrated to the real-C: measurement
-//! (`fmf stats --name-stats`, 2026-06: fold-identical 73.2%, unique names
-//! 53.2%, mean WTF-8 length 29.7B). Run via `just bench-micro`; compare
-//! before/after every kernel change.
+//! (ADR-0013). Run via `just bench-micro`; compare before/after every
+//! kernel change.
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use fmf_core::engine::{Engine, EngineConfig};
@@ -25,10 +24,9 @@ impl Rng {
 const DIRS: usize = 1_000;
 const FILES_PER_DIR: usize = 1_000;
 
-/// The asserts at the end of `build_synthetic` keep the generator honest:
-/// pool-layout work is tuned against the measured real-C: ratios, so silent
-/// drift here would invalidate every micro-baseline. Re-calibrate against
-/// `fmf stats --name-stats` when touching the distribution.
+/// Asserted at the end of `build_synthetic`: silent distribution drift off
+/// the measured real-C: ratios would invalidate every micro-baseline
+/// (ADR-0013). Re-calibrate via `fmf stats --name-stats`.
 const FOLD_IDENTICAL_RANGE: std::ops::RangeInclusive<f64> = 0.70..=0.76;
 const UNIQUE_RANGE: std::ops::RangeInclusive<f64> = 0.50..=0.56;
 const MEAN_LEN_RANGE: std::ops::RangeInclusive<f64> = 28.0..=32.0;
@@ -219,8 +217,8 @@ fn bench_queries(c: &mut Criterion) {
             })
         });
     }
-    // Sensitive mode sweeps the original pool today; after the orig-overflow
-    // layout it becomes folded-sweep + exact residual — gate that move here.
+    // Sensitive mode exercises the original-name path of the fold-overflow
+    // layout (ADR-0004) — gated here.
     let sensitive = QueryOptions {
         case: CaseMode::Sensitive,
         ..QueryOptions::default()
@@ -342,11 +340,9 @@ fn bench_post_usn(c: &mut Criterion) {
             BatchSize::PerIteration,
         )
     });
-    // First size-sorted query after a generation bump. Today the size
-    // permutation is an always-maintained index column, so this is just a
-    // perm walk; once the permutation is a lazily derived cache, this
-    // measures its steady extend path (the one-time cold build is a UX
-    // number, measured on the real volume instead).
+    // First size-sorted query after a generation bump: the lazy size
+    // permutation's steady extend path (ADR-0006). Its one-time cold build
+    // is a UX number, measured on the real volume instead.
     let size_opt = QueryOptions {
         sort: SortKey::Size,
         ..QueryOptions::default()
@@ -369,10 +365,10 @@ fn bench_post_usn(c: &mut Criterion) {
         )
     });
     // A real (non-empty) batch: 700 creates + 300 deletes, then the one
-    // permutation/FRN merge per batch — the path the in-place merge work
-    // targets. Runs on its own index because it grows it: the growth is
-    // deterministic per iteration, and keeping it last in the group leaves
-    // every other bench's input untouched.
+    // permutation/FRN merge per batch (ADR-0008). Runs on its own index
+    // because it grows it: the growth is deterministic per iteration, and
+    // keeping it last in the group leaves every other bench's input
+    // untouched.
     let batch_idx = std::cell::RefCell::new(build_synthetic());
     let names: Vec<Vec<u16>> = (0..16)
         .map(|i| format!("usn_new_{i:02}.tmp").encode_utf16().collect())

@@ -6,12 +6,12 @@
 //! unpaired surrogates as their 3-byte sequences, is a superset of UTF-8, and
 //! round-trips back to the original UTF-16.
 //!
-//! The index keeps two pools with shared offsets (docs/ARCHITECTURE.md), so
-//! the folded form of a name must have exactly the same byte length as the
-//! original. Folding therefore lowercases a code point only when the result
-//! is a single code point of identical encoded length; everything else is
-//! kept as-is. The same rule must be applied to query needles (`fold_str`)
-//! or case-insensitive matches would misalign.
+//! The index keeps two pools with shared offsets (docs/ARCHITECTURE.md,
+//! ADR-0003), so the folded form of a name must have exactly the same byte
+//! length as the original. Folding therefore lowercases a code point only
+//! when the result is a single code point of identical encoded length;
+//! everything else is kept as-is. The same rule must be applied to query
+//! needles (`fold_str`) or case-insensitive matches would misalign.
 
 /// Append the WTF-8 encoding of a single code point (may be a lone surrogate).
 #[inline]

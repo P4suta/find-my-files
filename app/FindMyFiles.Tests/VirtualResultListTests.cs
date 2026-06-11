@@ -163,10 +163,8 @@ public sealed class VirtualResultListTests
         Assert.True(_list.Contains(row));
 
         // After shrinking to empty, rows of the previous result are no
-        // longer "in" the collection. Claiming otherwise (the old behavior)
-        // sent the ListView's Reset handling to GetAt(staleIndex) — the
-        // reliably reproducible Int32.MaxValue index crash on clearing a
-        // populated search box.
+        // longer "in" the collection — a false "present" sends the
+        // ListView's Reset handling to GetAt(staleIndex) (ADR-0015).
         _list.Reassign(new StubSearchResult(Rows.Many(0)), []);
         Assert.Equal(-1, _list.IndexOf(row));
         Assert.False(_list.Contains(row));
@@ -181,9 +179,8 @@ public sealed class VirtualResultListTests
         _list.NotifyVisibleRange(0, 20);
         Assert.Equal((0, 20), _list.LastVisibleRange);
 
-        // An emptied list reports (-1,-1); remembering it poisoned later
-        // position-preserving requeries with Items[-1] (the WinRT adapter
-        // throws the Int32.MaxValue index error on (uint)-1).
+        // An emptied list reports (-1,-1); remembering it would poison
+        // later position-preserving requeries with Items[-1] (ADR-0015).
         _list.NotifyVisibleRange(-1, -1);
         Assert.Null(_list.LastVisibleRange);
     }
