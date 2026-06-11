@@ -155,6 +155,9 @@ pub struct ScanStats {
     pub elapsed_mft_load_ms: u64,
     /// Accumulated record-parse time (fixup + attribute walk + WTF-8).
     pub elapsed_parse_ms: u64,
+    /// Deferred $ATTRIBUTE_LIST name resolution (random single-record
+    /// reads) — on a fragmented volume this rivals the streaming read.
+    pub elapsed_deferred_ms: u64,
     /// Builder finish: parent resolution + EXCLUDED propagation.
     pub elapsed_build_ms: u64,
     /// Builder finish: the three permutation sorts.
@@ -205,6 +208,14 @@ pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), Mf
 
     let mut b = VolumeIndexBuilder::new(drive, ROOT_RECORD);
     for file in mft.files() {
+        // files() yields extension records too (no base_reference filter in
+        // ntfs-reader). They are parts of other files; indexing them would
+        // duplicate every fragmented file that keeps its $FILE_NAME in an
+        // extension record — skip, like the streaming scanner does.
+        if { file.header.base_reference } & 0x0000_FFFF_FFFF_FFFF != 0 {
+            stats.extension_records += 1;
+            continue;
+        }
         // Names of heavily fragmented files live in extension records via
         // $ATTRIBUTE_LIST — fall back to ntfs-reader's resolver for those
         // (~4% of records on a real C:).

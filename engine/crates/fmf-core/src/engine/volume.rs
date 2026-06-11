@@ -182,6 +182,7 @@ impl Engine {
                         read_ms: 0,
                         mb_per_s: 0.0,
                         parse_ms: 0,
+                        deferred_ms: 0,
                         build_ms: 0,
                         sort_ms: 0,
                         total_ms: load_ms,
@@ -224,6 +225,7 @@ impl Engine {
                                 0.0
                             },
                             parse_ms: stats.elapsed_parse_ms,
+                            deferred_ms: stats.elapsed_deferred_ms,
                             build_ms: stats.elapsed_build_ms,
                             sort_ms: stats.elapsed_sort_ms,
                             total_ms: stats.elapsed_total_ms,

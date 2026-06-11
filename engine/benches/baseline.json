@@ -1,0 +1,102 @@
+{
+  "volume": "C:",
+  "entries": 1275274,
+  "peak_working_set_bytes": 332238848,
+  "queries": [
+    {
+      "query": "",
+      "hits": 690250,
+      "p50_us": 2563,
+      "p99_us": 3049,
+      "max_us": 3049,
+      "p50_memo_us": 0,
+      "p50_scan_us": 0,
+      "p50_materialize_us": 2559,
+      "cold_us": 3049
+    },
+    {
+      "query": "e",
+      "hits": 474212,
+      "p50_us": 5907,
+      "p99_us": 6262,
+      "max_us": 6262,
+      "p50_memo_us": 0,
+      "p50_scan_us": 4085,
+      "p50_materialize_us": 1800,
+      "cold_us": 6148
+    },
+    {
+      "query": "a",
+      "hits": 436260,
+      "p50_us": 5754,
+      "p99_us": 6800,
+      "max_us": 6800,
+      "p50_memo_us": 0,
+      "p50_scan_us": 4184,
+      "p50_materialize_us": 1592,
+      "cold_us": 5849
+    },
+    {
+      "query": "win",
+      "hits": 145534,
+      "p50_us": 3354,
+      "p99_us": 10063,
+      "max_us": 10063,
+      "p50_memo_us": 0,
+      "p50_scan_us": 2816,
+      "p50_materialize_us": 527,
+      "cold_us": 10063
+    },
+    {
+      "query": "qzx",
+      "hits": 3,
+      "p50_us": 1692,
+      "p99_us": 1988,
+      "max_us": 1988,
+      "p50_memo_us": 0,
+      "p50_scan_us": 1346,
+      "p50_materialize_us": 329,
+      "cold_us": 1833
+    },
+    {
+      "query": "ext:dll",
+      "hits": 52500,
+      "p50_us": 3615,
+      "p99_us": 4270,
+      "max_us": 4270,
+      "p50_memo_us": 0,
+      "p50_scan_us": 2992,
+      "p50_materialize_us": 609,
+      "cold_us": 3690
+    },
+    {
+      "query": "size:>100mb path:windows",
+      "hits": 28,
+      "p50_us": 2202,
+      "p99_us": 90263,
+      "max_us": 90263,
+      "p50_memo_us": 0,
+      "p50_scan_us": 1753,
+      "p50_materialize_us": 437,
+      "cold_us": 90263
+    },
+    {
+      "query": "*.rs",
+      "hits": 33071,
+      "p50_us": 3258,
+      "p99_us": 3786,
+      "max_us": 3786,
+      "p50_memo_us": 0,
+      "p50_scan_us": 2647,
+      "p50_materialize_us": 564,
+      "cold_us": 3326
+    }
+  ],
+  "restore": {
+    "file_bytes": 135178246,
+    "entries": 1275274,
+    "save_ms": 78,
+    "p50_ms": 76,
+    "min_ms": 75
+  }
+}

@@ -28,7 +28,7 @@ use ntfs_reader::file::NtfsFile;
 use ntfs_reader::mft::Mft;
 use ntfs_reader::volume::Volume;
 
-use crate::index::{EncodedEntry, RawEntry, VolumeIndex, VolumeIndexBuilder};
+use crate::index::{EncodedEntry, VolumeIndex, VolumeIndexBuilder};
 use crate::mft::{MftError, ScanStats, peak_working_set, pick_name};
 use crate::wtf8;
 
@@ -225,35 +225,6 @@ fn extract_attrs(f: &NtfsFile) -> RecordAttrs {
     a
 }
 
-fn push_record(
-    b: &mut VolumeIndexBuilder,
-    stats: &mut ScanStats,
-    f: &NtfsFile,
-    name: &NtfsFileName,
-) {
-    let name_data = name.data;
-    let name_len = name.header.name_length as usize;
-    let a = extract_attrs(f);
-
-    if f.is_directory() {
-        stats.dirs += 1;
-    } else {
-        stats.files += 1;
-    }
-    b.push(RawEntry {
-        record: f.number,
-        parent_record: name.header.parent_directory_reference,
-        frn: f.reference_number(),
-        name_utf16: &name_data[..name_len],
-        is_dir: f.is_directory(),
-        is_reparse: a.is_reparse,
-        is_hidden: a.is_hidden,
-        is_system: a.is_system,
-        size: a.size,
-        mtime: a.mtime,
-    });
-}
-
 // ── Parallel chunk parsing ───────────────────────────────────────────────
 
 /// One entry parsed by a worker; the name lives in its batch's pools.
@@ -279,6 +250,36 @@ struct ParsedBatch {
     corrupt_records: u64,
     extension_records: u64,
     skipped_no_name: u64,
+    deferred_unresolved: u64,
+}
+
+impl ParsedBatch {
+    /// Encode a named record into this batch (WTF-8 pair + meta).
+    fn push_named(&mut self, f: &NtfsFile, name: &NtfsFileName) {
+        let name_data = name.data;
+        let units = name.header.name_length as usize;
+        let a = extract_attrs(f);
+        if f.is_directory() {
+            self.dirs += 1;
+        } else {
+            self.files += 1;
+        }
+        let name_off = self.name_pool.len() as u32;
+        wtf8::push_wtf8_pair(
+            &name_data[..units],
+            &mut self.name_pool,
+            &mut self.lower_pool,
+        );
+        self.metas.push(ParsedMeta {
+            record: f.number,
+            parent_record: name.header.parent_directory_reference,
+            frn: f.reference_number(),
+            name_off,
+            name_len: self.name_pool.len() as u32 - name_off,
+            is_dir: f.is_directory(),
+            attrs: a,
+        });
+    }
 }
 
 /// Validate, fix up and parse every record in `bytes` (a record-aligned
@@ -316,27 +317,57 @@ fn parse_subrange(bytes: &mut [u8], first_logical: u64, record_size: usize) -> P
             }
             continue;
         };
-        let name_data = name.data;
-        let units = name.header.name_length as usize;
-        let a = extract_attrs(&f);
-        if f.is_directory() {
-            out.dirs += 1;
-        } else {
-            out.files += 1;
-        }
-        let name_off = out.name_pool.len() as u32;
-        wtf8::push_wtf8_pair(&name_data[..units], &mut out.name_pool, &mut out.lower_pool);
-        out.metas.push(ParsedMeta {
-            record: f.number,
-            parent_record: name.header.parent_directory_reference,
-            frn: f.reference_number(),
-            name_off,
-            name_len: out.name_pool.len() as u32 - name_off,
-            is_dir: f.is_directory(),
-            attrs: a,
-        });
+        out.push_named(&f, &name);
     }
     out
+}
+
+/// Resolve deferred $ATTRIBUTE_LIST names in parallel. Each worker owns its
+/// own volume handle, so the random single-record reads — the slowest part
+/// of a real-volume scan once streaming overlaps — issue at queue depth
+/// instead of one at a time. Chunk order is preserved, so EntryId
+/// assignment matches the old serial loop.
+fn resolve_deferred(
+    volume_path: &str,
+    runmap: &RunMap,
+    record_size: usize,
+    deferred: &[(u64, Box<[u8]>)],
+) -> Vec<ParsedBatch> {
+    use rayon::prelude::*;
+    const DEFER_CHUNK: usize = 256;
+    deferred
+        .par_chunks(DEFER_CHUNK)
+        .map(|chunk| {
+            let mut out = ParsedBatch::default();
+            let mut rr = match open_raw_volume(volume_path) {
+                Ok(file) => RecordReader {
+                    file,
+                    map: runmap,
+                    record_size,
+                    buf: Vec::new(),
+                },
+                Err(e) => {
+                    // Degraded but loud: these names stay unresolved and are
+                    // counted like any other resolution failure.
+                    tracing::warn!(
+                        error = %e,
+                        lost = chunk.len(),
+                        "volume handle for deferred name pass unavailable"
+                    );
+                    out.deferred_unresolved += chunk.len() as u64;
+                    return out;
+                }
+            };
+            for (number, bytes) in chunk {
+                let f = NtfsFile::new(*number, bytes);
+                match resolve_attr_list_name(&f, &mut rr) {
+                    Some(name) => out.push_named(&f, &name),
+                    None => out.deferred_unresolved += 1,
+                }
+            }
+            out
+        })
+        .collect()
 }
 
 /// Fan a chunk's record sub-ranges across rayon workers. The returned
@@ -380,6 +411,7 @@ fn append_batches(
         stats.corrupt_records += batch.corrupt_records;
         stats.extension_records += batch.extension_records;
         stats.skipped_no_name += batch.skipped_no_name;
+        stats.deferred_unresolved += batch.deferred_unresolved;
         deferred.extend(batch.deferred);
     }
 }
@@ -557,23 +589,13 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     stats.pipeline_fallbacks = fallbacks;
 
     // Deferred pass: names hiding behind $ATTRIBUTE_LIST (~tens of
-    // thousands on a real C:) resolved with targeted single-record reads.
-    // `deferred` is in record order (chunk-ordered append), which is also
-    // the best read locality this pass can get.
-    let file = open_raw_volume(&volume_path).map_err(NtfsReaderError::from)?;
-    let mut rr = RecordReader {
-        file,
-        map: &runmap,
-        record_size,
-        buf: Vec::new(),
-    };
-    for (number, bytes) in &deferred {
-        let f = NtfsFile::new(*number, bytes);
-        match resolve_attr_list_name(&f, &mut rr) {
-            Some(name) => push_record(&mut b, &mut stats, &f, &name),
-            None => stats.deferred_unresolved += 1,
-        }
-    }
+    // thousands on a real C:) resolved with targeted single-record reads —
+    // in parallel: measured on a real 1.27M-entry C:, the serial version of
+    // this pass cost more than the streaming read it followed.
+    let t_deferred = Instant::now();
+    let batches = resolve_deferred(&volume_path, &runmap, record_size, &deferred);
+    append_batches(&mut b, &mut stats, &mut Vec::new(), batches);
+    stats.elapsed_deferred_ms = t_deferred.elapsed().as_millis() as u64;
 
     // Degradations are normal in small numbers; make them visible either way.
     if stats.corrupt_records > 0 {

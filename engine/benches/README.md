@@ -6,7 +6,7 @@ elevated terminal and record the environment here:
 
 | Recorded | CPU | Volume | Entries |
 |---|---|---|---|
-| (未記録 — 昇格シェルで `just bench-baseline C:` を実行して追記) | | | |
+| 2026-06-11 | AMD Ryzen (Zen 3, Family 25 Model 80) | C: (NTFS) | 1,275,274 |
 
 Report fields beyond the per-query timings:
 
