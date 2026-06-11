@@ -1,6 +1,48 @@
 use crate::wtf8;
 
+use super::core::SortColumns;
 use super::{EncodedEntry, EntryId, NO_PARENT, RawEntry, SortKey, VolumeIndex, flags};
+
+/// Merge sorted `batch` into `perm` in place. USN batches are tiny against
+/// the array (~1k vs ~1M), so instead of a full-length element-wise merge
+/// (one key comparison — for names, a string compare — per existing
+/// element, plus a full-length reallocation), each batch element binary-
+/// searches its insertion point and the segments between insertion points
+/// move once with `copy_within`: O(batch·log n) comparisons + O(moved)
+/// memmove + no allocation.
+///
+/// Old elements are never reordered, and on a sorted array the strict total
+/// order (`cmp` id tie-break) makes the result the unique sorted merge.
+/// `perm_size`/`perm_mtime` can be locally stale-sorted (in-place
+/// `update_stat` never repositions an entry — long-standing behavior, the
+/// full merge had it too); placement there is deterministic best-effort,
+/// exactly like the entry the stat update left behind.
+fn merge_sorted_tail(
+    perm: &mut Vec<EntryId>,
+    batch: &[EntryId],
+    cmp: impl Fn(EntryId, EntryId) -> std::cmp::Ordering,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    let old = perm.len();
+    super::reserve_bounded(perm, batch.len());
+    perm.resize(old + batch.len(), 0);
+    let mut hi = old; // unmoved prefix of the old array (exclusive end)
+    let mut k = old + batch.len(); // write cursor (exclusive end)
+    for j in (0..batch.len()).rev() {
+        let b = batch[j];
+        // First old index whose element orders after `b`.
+        let pos = perm[..hi].partition_point(|&x| !cmp(x, b).is_gt());
+        let seg = hi - pos;
+        perm.copy_within(pos..hi, k - seg);
+        k -= seg + 1;
+        perm[k] = b;
+        hi = pos;
+    }
+    // k - hi == unplaced batch elements throughout; both cursors meet here.
+    debug_assert_eq!(k, hi, "merge cursors must close");
+}
 
 impl VolumeIndex {
     // ── Incremental mutation (USN batches; see module docs) ──────────────
@@ -13,6 +55,7 @@ impl VolumeIndex {
         if let Some(old) = self.entry_by_record(e.record) {
             self.flag[old as usize] |= flags::TOMBSTONE;
             self.tombstones += 1;
+            self.dead_name_bytes += self.name_len[old as usize] as u64;
         }
         // Parents are already live on the USN path; unknown ones attach to
         // root (orphan records do occur in real MFTs).
@@ -26,6 +69,7 @@ impl VolumeIndex {
         let id = self.entry_by_record(record)?;
         self.flag[id as usize] |= flags::TOMBSTONE;
         self.tombstones += 1;
+        self.dead_name_bytes += self.name_len[id as usize] as u64;
         Some(id)
     }
 
@@ -62,6 +106,8 @@ impl VolumeIndex {
         let pos = self.perm_name.iter().position(|&x| x == id)?;
         self.perm_name.remove(pos);
 
+        // The old name bytes are abandoned in both pools.
+        self.dead_name_bytes += self.name_len[id as usize] as u64;
         let off = self.name_pool.len();
         wtf8::push_wtf8_pair(name_utf16, &mut self.name_pool, &mut self.lower_pool);
         self.name_off[id as usize] = off as u32;
@@ -92,8 +138,8 @@ impl VolumeIndex {
     }
 
     /// Merge entries `first_new..len` (already appended, unsorted) into all
-    /// permutation arrays in one pass per key, then bump the content
-    /// generation. Call once per USN batch.
+    /// permutation arrays (in place — see [`merge_sorted_tail`]), then bump
+    /// the content generation. Call once per USN batch.
     pub fn merge_new_into_permutations(&mut self, first_new: EntryId) {
         // The FRN index rides the same batch boundary (its own watermark).
         {
@@ -107,31 +153,31 @@ impl VolumeIndex {
         }
         let new_ids: Vec<EntryId> = (first_new..self.len() as u32).collect();
         if !new_ids.is_empty() {
-            for key in [SortKey::Name, SortKey::Size, SortKey::Mtime] {
+            // Split the borrow: `&mut` permutations alongside the shared
+            // key columns, comparing through the same SortColumns order
+            // that built the permutations.
+            let VolumeIndex {
+                perm_name,
+                perm_size,
+                perm_mtime,
+                ..
+            } = self;
+            let perms = [
+                (SortKey::Name, perm_name),
+                (SortKey::Size, perm_size),
+                (SortKey::Mtime, perm_mtime),
+            ];
+            let cols = SortColumns::new(
+                &self.lower_pool,
+                &self.name_off,
+                &self.name_len,
+                &self.size,
+                &self.mtime,
+            );
+            for (key, perm) in perms {
                 let mut batch = new_ids.clone();
-                batch.sort_unstable_by(|&a, &b| self.cmp_by(key, a, b));
-                let merged = {
-                    let old = self.permutation(key);
-                    let mut merged = Vec::with_capacity(old.len() + batch.len());
-                    let (mut i, mut j) = (0, 0);
-                    while i < old.len() && j < batch.len() {
-                        if self.cmp_by(key, old[i], batch[j]).is_le() {
-                            merged.push(old[i]);
-                            i += 1;
-                        } else {
-                            merged.push(batch[j]);
-                            j += 1;
-                        }
-                    }
-                    merged.extend_from_slice(&old[i..]);
-                    merged.extend_from_slice(&batch[j..]);
-                    merged
-                };
-                match key {
-                    SortKey::Name => self.perm_name = merged,
-                    SortKey::Size => self.perm_size = merged,
-                    SortKey::Mtime => self.perm_mtime = merged,
-                }
+                batch.sort_unstable_by(|&a, &b| cols.cmp_by(key, a, b));
+                merge_sorted_tail(perm, &batch, |a, b| cols.cmp_by(key, a, b));
             }
         }
         self.content_generation += 1;
@@ -489,6 +535,162 @@ mod tests {
         let h_id = idx.upsert(&raw_attr(50, 20, &h, false, false, false));
         idx.merge_new_into_permutations(first_new);
         assert!(idx.is_excluded(h_id));
+    }
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    /// Random create/rename/delete/stat batches through the in-place merge:
+    /// every permutation stays a complete permutation, perm_name stays
+    /// strictly sorted (names are never mutated in place), and every record
+    /// resolves per a side model — both mid-batch (tail scan) and after the
+    /// merge (sorted lookup).
+    #[test]
+    fn random_batches_keep_permutations_canonical_and_lookups_model_true() {
+        use std::collections::HashMap;
+        let mut rng = Rng(0x5EED_CAFE_D00D);
+        let mut idx = build_sample();
+        // record → the live entry's expected name (None = deleted).
+        let mut model: HashMap<u64, Option<Vec<u8>>> = HashMap::new();
+        for record in [50u64, 60, 100] {
+            let id = idx.entry_by_record(record).unwrap();
+            model.insert(record, Some(idx.name(id).to_vec()));
+        }
+        let check = |idx: &VolumeIndex, record: u64, expect: &Option<Vec<u8>>| match (
+            idx.entry_by_record(record),
+            expect,
+        ) {
+            (Some(id), Some(name)) => assert_eq!(idx.name(id), &name[..]),
+            (None, None) => {}
+            (got, want) => panic!("record {record}: got {got:?}, want live={}", want.is_some()),
+        };
+
+        for _ in 0..100 {
+            let first_new = idx.len() as u32;
+            for _ in 0..(1 + rng.next() % 8) {
+                let record = 100 + rng.next() % 30;
+                match rng.next() % 4 {
+                    0 | 1 => {
+                        let name = format!("n{}_{}.txt", record, rng.next() % 100);
+                        let units = u16s(&name);
+                        idx.upsert(&raw(
+                            record,
+                            50,
+                            &units,
+                            false,
+                            rng.next() % 1000,
+                            (rng.next() % 1000) as i64,
+                        ));
+                        model.insert(record, Some(name.into_bytes()));
+                    }
+                    2 => {
+                        idx.delete(record);
+                        model.insert(record, None);
+                    }
+                    _ => {
+                        // In-place stat update: leaves perm_size/perm_mtime
+                        // locally stale-sorted (pinned behavior, full merge
+                        // had it too); names unaffected.
+                        idx.update_stat(record, rng.next() % 5000, (rng.next() % 5000) as i64);
+                    }
+                }
+                if let Some(expect) = model.get(&record) {
+                    check(&idx, record, expect); // unmerged-tail resolution
+                }
+            }
+            idx.merge_new_into_permutations(first_new);
+
+            // Permutation property: every id exactly once, in all orders.
+            for key in [SortKey::Name, SortKey::Size, SortKey::Mtime] {
+                let mut seen: Vec<EntryId> = idx.permutation(key).to_vec();
+                seen.sort_unstable();
+                assert_eq!(seen, (0..idx.len() as u32).collect::<Vec<_>>(), "{key:?}");
+            }
+            assert_perm_name_sorted(&idx);
+            for (record, expect) in &model {
+                check(&idx, *record, expect);
+            }
+        }
+    }
+
+    /// Without in-place stat updates, all three permutations must stay
+    /// strictly sorted under the in-place merge (the unique sorted result —
+    /// equivalent to byte-comparing against any correct merge).
+    #[test]
+    fn merges_without_stat_updates_keep_all_permutations_strictly_sorted() {
+        let mut rng = Rng(0xD00D_F00D_5EED);
+        let mut idx = build_sample();
+        for _ in 0..40 {
+            let first_new = idx.len() as u32;
+            for _ in 0..(1 + rng.next() % 8) {
+                let record = 100 + rng.next() % 30;
+                if rng.next() % 3 < 2 {
+                    let name = format!("s{}_{}.log", record, rng.next() % 100);
+                    let units = u16s(&name);
+                    idx.upsert(&raw(
+                        record,
+                        50,
+                        &units,
+                        false,
+                        rng.next() % 1000,
+                        (rng.next() % 1000) as i64,
+                    ));
+                } else {
+                    idx.delete(record);
+                }
+            }
+            idx.merge_new_into_permutations(first_new);
+            for key in [SortKey::Name, SortKey::Size, SortKey::Mtime] {
+                let perm = idx.permutation(key);
+                assert_eq!(perm.len(), idx.len());
+                for w in perm.windows(2) {
+                    assert!(
+                        idx.cmp_by(key, w[0], w[1]).is_lt(),
+                        "{key:?} out of order at {w:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// dead_name_bytes follows every pool-garbage source; snapshot restore
+    /// recomputes the tombstone share (rename gaps are a lost lower bound).
+    #[test]
+    fn dead_name_bytes_tracks_pool_garbage() {
+        let mut idx = build_sample();
+        assert_eq!(idx.stats("C:").dead_name_bytes, 0);
+
+        let old_len = idx.name(idx.entry_by_record(100).unwrap()).len() as u64;
+        let first_new = idx.len() as u32;
+        let renamed = u16s("renamed.txt");
+        idx.upsert(&raw(100, 50, &renamed, false, 1, 1));
+        idx.merge_new_into_permutations(first_new);
+        assert_eq!(idx.stats("C:").dead_name_bytes, old_len);
+
+        let del_len = idx.name(idx.entry_by_record(60).unwrap()).len() as u64;
+        idx.delete(60);
+        assert_eq!(idx.stats("C:").dead_name_bytes, old_len + del_len);
+
+        let dir_len = idx.name(idx.entry_by_record(50).unwrap()).len() as u64;
+        let dir2 = u16s("docs2");
+        idx.rename_dir_in_place(50, &dir2, 5);
+        let s = idx.stats("C:");
+        assert_eq!(s.dead_name_bytes, old_len + del_len + dir_len);
+        assert!(s.pool_garbage_ratio > 0.0);
+
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 1, 1).unwrap();
+        let (loaded, _, _) = VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+        assert_eq!(loaded.stats("C:").dead_name_bytes, old_len + del_len);
     }
 
     #[test]

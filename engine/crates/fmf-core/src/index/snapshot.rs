@@ -156,7 +156,15 @@ impl VolumeIndex {
         // One parallel sort instead of the million serial hashmap inserts
         // this rebuild used to be.
         let frn_index = super::frn::FrnIndex::build(&frn, &flag);
-        let tombstones = flag.iter().filter(|f| *f & flags::TOMBSTONE != 0).count() as u32;
+        let mut tombstones = 0u32;
+        // Lower bound: rename gaps aren't tombstoned and are lost here.
+        let mut dead_name_bytes = 0u64;
+        for (i, f) in flag.iter().enumerate() {
+            if f & flags::TOMBSTONE != 0 {
+                tombstones += 1;
+                dead_name_bytes += name_len[i] as u64;
+            }
+        }
 
         Ok((
             Self {
@@ -177,6 +185,7 @@ impl VolumeIndex {
                 structural_generation: 0,
                 dir_topology_generation: 0,
                 tombstones,
+                dead_name_bytes,
                 derived_cache: Mutex::new(None),
             },
             journal_id,

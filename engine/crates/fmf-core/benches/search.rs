@@ -73,7 +73,7 @@ fn build_synthetic() -> VolumeIndex {
         let tag = (r >> 24) & 0xFF_FFFF;
         let upper = r2 % 100 < 27;
         let style = |w: &str| if upper { cap_first(w) } else { w.to_string() };
-        if (r2 >> 8) % 2 == 0 {
+        if (r2 >> 8).is_multiple_of(2) {
             let w3 = words[(r2 >> 16) as usize % words.len()];
             format!("{}_{}_{}_{tag:06x}.{ext}", style(w1), style(w2), style(w3))
         } else {

@@ -41,6 +41,7 @@ impl VolumeIndexBuilder {
             structural_generation: 0,
             dir_topology_generation: 0,
             tombstones: 0,
+            dead_name_bytes: 0,
             derived_cache: Mutex::new(None),
         };
         let units: Vec<u16> = volume_label.encode_utf16().collect();

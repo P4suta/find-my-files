@@ -69,7 +69,14 @@ impl FrnIndex {
 
     /// Fold the appended entries into sorted order — live ones only;
     /// anything tombstoned before its first merge can never be looked up
-    /// again. Two-pointer merge, O(existing + batch log batch).
+    /// again. In place: USN batches are tiny against the arrays, so each
+    /// batch pair binary-searches its insertion point and the segments
+    /// between insertion points move once (`copy_within`) — O(batch·log n)
+    /// comparisons, no full-length reallocation. New records usually carry
+    /// the highest record numbers, so the moved segments are short.
+    /// Equal keys keep old-before-new order (same as the previous full
+    /// merge); liveness never depends on that order anyway (at most one
+    /// live pair per key).
     pub(super) fn merge_appended(&mut self, frn: &[u64], flag: &[u8]) {
         let n = frn.len() as u32;
         let mut batch: Vec<(u64, EntryId)> = (self.covers..n)
@@ -82,28 +89,25 @@ impl FrnIndex {
         }
         batch.sort_unstable();
 
-        let mut keys = Vec::with_capacity(self.keys.len() + batch.len());
-        let mut ids = Vec::with_capacity(self.ids.len() + batch.len());
-        let (mut i, mut j) = (0, 0);
-        while i < self.keys.len() && j < batch.len() {
-            if self.keys[i] <= batch[j].0 {
-                keys.push(self.keys[i]);
-                ids.push(self.ids[i]);
-                i += 1;
-            } else {
-                keys.push(batch[j].0);
-                ids.push(batch[j].1);
-                j += 1;
-            }
+        let old = self.keys.len();
+        super::reserve_bounded(&mut self.keys, batch.len());
+        super::reserve_bounded(&mut self.ids, batch.len());
+        self.keys.resize(old + batch.len(), 0);
+        self.ids.resize(old + batch.len(), 0);
+        let mut hi = old; // unmoved prefix of the old arrays (exclusive end)
+        let mut k = old + batch.len(); // write cursor (exclusive end)
+        for j in (0..batch.len()).rev() {
+            let (key, id) = batch[j];
+            let pos = self.keys[..hi].partition_point(|&x| x <= key);
+            let seg = hi - pos;
+            self.keys.copy_within(pos..hi, k - seg);
+            self.ids.copy_within(pos..hi, k - seg);
+            k -= seg + 1;
+            self.keys[k] = key;
+            self.ids[k] = id;
+            hi = pos;
         }
-        keys.extend_from_slice(&self.keys[i..]);
-        ids.extend_from_slice(&self.ids[i..]);
-        for &(k, id) in &batch[j..] {
-            keys.push(k);
-            ids.push(id);
-        }
-        self.keys = keys;
-        self.ids = ids;
+        debug_assert_eq!(k, hi, "merge cursors must close");
     }
 
     pub(super) fn bytes(&self) -> u64 {
@@ -118,7 +122,82 @@ impl FrnIndex {
 
 #[cfg(test)]
 mod tests {
+    use super::EntryId;
+    use crate::index::masked;
     use crate::index::testutil::{build_sample, raw, u16s};
+
+    /// The forward full merge this module shipped before the in-place
+    /// rewrite — kept as the reference: equal keys take the old pair first.
+    fn forward_merge_reference(
+        keys: &mut Vec<u64>,
+        ids: &mut Vec<EntryId>,
+        batch: &[(u64, EntryId)],
+    ) {
+        let mut nk = Vec::with_capacity(keys.len() + batch.len());
+        let mut ni = Vec::with_capacity(ids.len() + batch.len());
+        let (mut i, mut j) = (0, 0);
+        while i < keys.len() && j < batch.len() {
+            if keys[i] <= batch[j].0 {
+                nk.push(keys[i]);
+                ni.push(ids[i]);
+                i += 1;
+            } else {
+                nk.push(batch[j].0);
+                ni.push(batch[j].1);
+                j += 1;
+            }
+        }
+        nk.extend_from_slice(&keys[i..]);
+        ni.extend_from_slice(&ids[i..]);
+        for &(k, id) in &batch[j..] {
+            nk.push(k);
+            ni.push(id);
+        }
+        *keys = nk;
+        *ids = ni;
+    }
+
+    /// Random rename/delete storms: the in-place merge must produce the
+    /// byte-identical arrays the forward reference does, batch after batch
+    /// (keys are never mutated in place, so both stay truly sorted and the
+    /// sorted stable merge is unique).
+    #[test]
+    fn in_place_merge_is_byte_identical_to_the_forward_reference() {
+        let mut idx = build_sample();
+        let mut ref_keys = idx.frn_index.keys.clone();
+        let mut ref_ids = idx.frn_index.ids.clone();
+        let mut state = 0x1234_5678_9ABC_DEF0u64;
+        let mut rng = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for _ in 0..100 {
+            let first_new = idx.len() as u32;
+            for _ in 0..(1 + rng() % 8) {
+                let record = 100 + rng() % 40;
+                if rng() % 3 < 2 {
+                    let name = u16s(&format!("f{}.txt", rng() % 1000));
+                    idx.upsert(&raw(record, 50, &name, false, 1, 1));
+                } else {
+                    idx.delete(record);
+                }
+            }
+            // Mirror merge_appended's batch input exactly (live tail only).
+            let mut batch: Vec<(u64, EntryId)> = (first_new..idx.len() as u32)
+                .filter(|&id| idx.is_live(id))
+                .map(|id| (masked(idx.frn(id)), id))
+                .collect();
+            batch.sort_unstable();
+            forward_merge_reference(&mut ref_keys, &mut ref_ids, &batch);
+
+            idx.merge_new_into_permutations(first_new);
+            assert_eq!(idx.frn_index.keys, ref_keys);
+            assert_eq!(idx.frn_index.ids, ref_ids);
+        }
+    }
 
     /// The latest upsert of a record must win — found via the unmerged
     /// tail during the batch and via the sorted arrays after the merge,

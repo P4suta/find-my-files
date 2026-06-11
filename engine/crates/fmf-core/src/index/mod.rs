@@ -48,6 +48,18 @@ pub fn masked(record_or_frn: u64) -> u64 {
     record_or_frn & 0x0000_FFFF_FFFF_FFFF
 }
 
+/// `reserve_exact` with a `len/64` floor, for merge-only arrays that grow a
+/// small batch at a time: a full-length copy happens at most once per ~1.6%
+/// growth and slack stays bounded by the same 1.6% — the doubling policy
+/// would pin up to 2× the array as permanent slack, which the B/entry RAM
+/// gate pays forever (these arrays are only shrunk after the initial scan).
+fn reserve_bounded<T>(v: &mut Vec<T>, additional: usize) {
+    let want = v.len() + additional;
+    if want > v.capacity() {
+        v.reserve_exact(additional.max(v.len() / 64));
+    }
+}
+
 /// One record produced by an initial-scan source (raw $MFT today, ReFS
 /// enumeration in the future).
 pub struct RawEntry<'a> {

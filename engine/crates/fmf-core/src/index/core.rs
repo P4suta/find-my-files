@@ -29,6 +29,11 @@ pub struct VolumeIndex {
     /// updates leave it untouched.
     pub(super) dir_topology_generation: u64,
     pub(super) tombstones: u32,
+    /// Abandoned name bytes *per pool* (tombstoned rows and in-place dir
+    /// renames leave their old bytes behind; ×2 pools is the reclaimable
+    /// garbage). Compaction-trigger input. Not persisted — recomputed from
+    /// tombstones on restore, so rename gaps make it a lower bound there.
+    pub(super) dead_name_bytes: u64,
     /// Query-independent caches derived from index content (dir-path memo,
     /// pool offset table, …) keyed by `content_generation` and value type.
     /// Type-erased so the index stays ignorant of query-module types.
@@ -247,9 +252,16 @@ impl VolumeIndex {
             flag_bytes: self.flag.capacity() as u64,
             permutations_bytes: perms,
             frn_map_bytes: frn_map,
+            dead_name_bytes: self.dead_name_bytes,
             content_generation: self.content_generation,
             structural_generation: self.structural_generation,
             ..Default::default()
+        };
+        let pool_bytes = s.name_pool_bytes + s.lower_pool_bytes;
+        s.pool_garbage_ratio = if pool_bytes > 0 {
+            (self.dead_name_bytes * 2) as f64 / pool_bytes as f64
+        } else {
+            0.0
         };
         s.total_bytes = s.name_pool_bytes
             + s.lower_pool_bytes
@@ -337,10 +349,67 @@ impl VolumeIndex {
 
     #[inline]
     pub(super) fn cmp_by(&self, key: SortKey, a: EntryId, b: EntryId) -> std::cmp::Ordering {
+        self.sort_columns().cmp_by(key, a, b)
+    }
+
+    pub(super) fn sort_columns(&self) -> SortColumns<'_> {
+        SortColumns {
+            lower_pool: &self.lower_pool,
+            name_off: &self.name_off,
+            name_len: &self.name_len,
+            size: &self.size,
+            mtime: &self.mtime,
+        }
+    }
+}
+
+/// Borrowed view of the sort-key columns, so permutation maintenance can
+/// hold `&mut` permutation arrays while comparing through the one
+/// definition of each key's order (a drifting duplicate of `cmp_by` would
+/// silently corrupt the merge).
+pub(super) struct SortColumns<'a> {
+    lower_pool: &'a [u8],
+    name_off: &'a [u32],
+    name_len: &'a [u16],
+    size: &'a [u64],
+    mtime: &'a [i64],
+}
+
+impl<'a> SortColumns<'a> {
+    pub(super) fn new(
+        lower_pool: &'a [u8],
+        name_off: &'a [u32],
+        name_len: &'a [u16],
+        size: &'a [u64],
+        mtime: &'a [i64],
+    ) -> Self {
+        Self {
+            lower_pool,
+            name_off,
+            name_len,
+            size,
+            mtime,
+        }
+    }
+
+    #[inline]
+    fn lower_name(&self, id: EntryId) -> &[u8] {
+        let off = self.name_off[id as usize] as usize;
+        &self.lower_pool[off..off + self.name_len[id as usize] as usize]
+    }
+
+    /// Strict total order (id tie-break): no two distinct ids compare equal,
+    /// which is what makes merged permutations byte-deterministic.
+    #[inline]
+    pub(super) fn cmp_by(&self, key: SortKey, a: EntryId, b: EntryId) -> std::cmp::Ordering {
         match key {
             SortKey::Name => self.lower_name(a).cmp(self.lower_name(b)).then(a.cmp(&b)),
-            SortKey::Size => self.size(a).cmp(&self.size(b)).then(a.cmp(&b)),
-            SortKey::Mtime => self.mtime(a).cmp(&self.mtime(b)).then(a.cmp(&b)),
+            SortKey::Size => self.size[a as usize]
+                .cmp(&self.size[b as usize])
+                .then(a.cmp(&b)),
+            SortKey::Mtime => self.mtime[a as usize]
+                .cmp(&self.mtime[b as usize])
+                .then(a.cmp(&b)),
         }
     }
 }
