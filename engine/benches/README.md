@@ -11,7 +11,15 @@ environment here:
 
 | Recorded | CPU | Volume | Entries |
 |---|---|---|---|
-| 2026-06-11 | AMD Ryzen (Zen 3, Family 25 Model 80) | C: (NTFS) | 1,275,274 |
+| 2026-06-11 (am) | AMD Ryzen (Zen 3, Family 25 Model 80) | C: (NTFS) | 1,275,274 |
+| 2026-06-11 (pm, adds `Win`) | AMD Ryzen (Zen 3, Family 25 Model 80) | C: (NTFS) | 1,268,461 |
+
+The synthetic index behind the micro-benchmarks is calibrated to the
+real-C: name statistics (`fmf stats C: --name-stats`, 2026-06-11:
+fold-identical 73.2%, unique names 53.2%, mean WTF-8 length 29.7B;
+docs/RESEARCH.md has the full numbers). `build_synthetic` asserts those
+ratios on every run — re-calibrate the generator against a fresh
+`--name-stats` dump instead of widening the ranges.
 
 Report fields beyond the per-query timings:
 

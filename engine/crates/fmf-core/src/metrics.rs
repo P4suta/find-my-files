@@ -234,6 +234,7 @@ pub struct MetricsSnapshot {
 
 const RING: usize = 256;
 const USN_RING: usize = 64;
+const SCAN_RING: usize = 64;
 
 /// Thread-safe metrics collector owned by the engine.
 #[derive(Default)]
@@ -241,7 +242,7 @@ pub struct MetricsHub {
     queries: Mutex<VecDeque<QueryTrace>>,
     histogram: Mutex<Histogram>,
     usn: Mutex<VecDeque<UsnTrace>>,
-    scans: Mutex<Vec<ScanTrace>>,
+    scans: Mutex<VecDeque<ScanTrace>>,
     pub counters: Counters,
 }
 
@@ -271,7 +272,11 @@ impl MetricsHub {
     }
 
     pub fn record_scan(&self, trace: ScanTrace) {
-        self.scans.lock().push(trace);
+        let mut s = self.scans.lock();
+        if s.len() == SCAN_RING {
+            s.pop_front();
+        }
+        s.push_back(trace);
     }
 
     pub fn last_query(&self) -> Option<QueryTrace> {
@@ -290,7 +295,7 @@ impl MetricsHub {
             p99_us: hist.percentile_us(0.99),
             query_histogram: hist,
             recent_usn: self.usn.lock().iter().cloned().collect(),
-            scans: self.scans.lock().clone(),
+            scans: self.scans.lock().iter().cloned().collect(),
             indexes,
             counters: self.counters.snapshot(),
             recent_errors: crate::diag::recent_errors(),
@@ -343,11 +348,18 @@ mod tests {
                 total_us: i,
                 ..Default::default()
             });
+            hub.record_scan(ScanTrace {
+                total_ms: i,
+                ..Default::default()
+            });
         }
         let snap = hub.snapshot(16, Vec::new());
         assert_eq!(snap.query_histogram.count, 300);
         assert_eq!(snap.recent_queries.len(), 16);
         // Newest last.
         assert_eq!(snap.recent_queries.last().unwrap().total_us, 299);
+        // Scans are a ring too — a long-lived process must not grow it.
+        assert_eq!(snap.scans.len(), SCAN_RING);
+        assert_eq!(snap.scans.last().unwrap().total_ms, 299);
     }
 }

@@ -36,6 +36,17 @@
 - EverythingToolbar(14.1k stars)= 「エンジンは本家のままUIだけモダンに」で大支持 → **UI刷新自体に大きな需要**。
 - Everything本家: 1.5が約5年alphaの末2026-05-14にbeta移行。ソースは非公開(License.txt文面はMIT形式だがコード未配布)。周辺ツール(ES/etp_server等)は2025年にOSS化されたが本体はクローズドのまま。
 
+## 実C:の名前・サイズ統計(2026-06-11、`fmf stats C: --name-stats` 実測、1,268,450件)
+
+プール/カラムレイアウト判断の一次データ(エンジン本体と同じWTF-8/fold規則で計測):
+
+- **fold同一(lower==orig バイト一致)= 73.2%** — lower_pool への重複格納の約3/4は原文と同一バイト
+- ユニーク名 53.2% / folded後ユニーク 53.0%(大文字小文字違いの同名はほぼ無い)
+- 名前長(WTF-8バイト): 平均 29.7 / p50 18 / p90 90 / p99 110 / max 171
+- **4GiB超ファイル = 10件(0.0008%)** → size列 u32+オーバーフロー側テーブルは余裕で成立
+- 原文オーバーフロー化の予測節約: 全entry u32カラム方式 **−17.7B/entry**、ソート済みペア方式 −19.6B/entry(後者はresidual毎の二分探索コストが乗るため、p99リスク回避で前者を採用)
+- 参考(計測時点の収支): 計上126.3B/entry、WS 142B/entry(172.1MiB)
+
 ## Rust crates(実在・成熟度確認済み)
 
 - `ntfs-reader` 0.4.5(MIT/Apache-2.0、2026-03更新): 生$MFT全レコードスキャン(README記載ベンチ: Vec Cache 3.756s/HashMap 4.981s/No Cache 12.3s、環境記載なし)。FileInfoで name/path/size/created/modified。**全ハードリンク名は取れない(代表名1つ)**。
