@@ -178,6 +178,14 @@ pub struct Counters {
     /// impossible while the volume thread is the only writer; nonzero means
     /// that invariant broke somewhere.
     pub compaction_aborts: std::sync::atomic::AtomicU64,
+    /// Pipe server (fmf-service): a frame failed validation and the
+    /// connection was dropped.
+    pub pipe_malformed_frames: std::sync::atomic::AtomicU64,
+    /// Pipe server: a subscriber's bounded event queue overflowed and the
+    /// oldest event was dropped.
+    pub pipe_events_dropped: std::sync::atomic::AtomicU64,
+    /// Pipe server: a client was turned away at the instance cap.
+    pub pipe_connections_rejected: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -193,6 +201,9 @@ pub struct CountersSnapshot {
     pub offset_table_rebuild_fallbacks: u64,
     pub lazy_perm_rebuild_fallbacks: u64,
     pub compaction_aborts: u64,
+    pub pipe_malformed_frames: u64,
+    pub pipe_events_dropped: u64,
+    pub pipe_connections_rejected: u64,
 }
 
 /// The query layer has no `MetricsHub` handle (its degradations normally go
@@ -234,6 +245,9 @@ impl Counters {
             offset_table_rebuild_fallbacks: OFFSET_TABLE_REBUILD_FALLBACKS.load(Relaxed),
             lazy_perm_rebuild_fallbacks: LAZY_PERM_REBUILD_FALLBACKS.load(Relaxed),
             compaction_aborts: self.compaction_aborts.load(Relaxed),
+            pipe_malformed_frames: self.pipe_malformed_frames.load(Relaxed),
+            pipe_events_dropped: self.pipe_events_dropped.load(Relaxed),
+            pipe_connections_rejected: self.pipe_connections_rejected.load(Relaxed),
         }
     }
 }

@@ -1,0 +1,229 @@
+//! Pipe server: accept loop (2-wait on connect/stop) + per-connection
+//! threads. One reader decodes frames into a small queue, two workers
+//! dispatch out-of-order (a page fetch never queues behind a slow query),
+//! all frame writes — responses and event pushes — serialize on one mutex
+//! so frames can't interleave mid-stream.
+
+use std::io;
+use std::sync::Arc;
+use std::sync::mpsc;
+
+use fmf_core::engine::Engine;
+use fmf_core::metrics::Counters;
+use fmf_proto::frame::{self, FLAG_EVENT, FLAG_RESPONSE, FrameError, FrameHeader};
+use parking_lot::Mutex;
+
+use crate::dispatch::{Connection, Outcome};
+use crate::events::Broadcaster;
+use crate::faults::Faults;
+use crate::pipe::{Accepted, Event, PipeListener, PipeStream};
+
+pub const MAX_INSTANCES: u32 = 8;
+const WORKERS_PER_CONNECTION: usize = 2;
+
+pub struct ServerOptions {
+    pub pipe_name: String,
+    pub debug_faults: bool,
+}
+
+pub struct Server {
+    stop: Arc<Event>,
+    accept_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Server {
+    pub fn start(engine: Arc<Engine>, opts: ServerOptions) -> io::Result<Arc<Self>> {
+        let stop = Arc::new(Event::new()?);
+        let broadcaster = Broadcaster::install(&engine);
+        let accept_stop = stop.clone();
+        let accept_thread = std::thread::Builder::new()
+            .name("fmf-pipe-accept".to_string())
+            .spawn(move || {
+                accept_loop(engine, broadcaster, opts, &accept_stop);
+            })
+            .expect("spawn accept thread");
+        Ok(Arc::new(Self {
+            stop,
+            accept_thread: Some(accept_thread),
+        }))
+    }
+
+    /// Stops accepting new connections. Live connections end with their
+    /// clients (the engine is flushed/shut down by the caller afterwards).
+    pub fn stop(&self) {
+        self.stop.set();
+    }
+
+    pub fn join(mut self: Arc<Self>) {
+        if let Some(s) = Arc::get_mut(&mut self)
+            && let Some(t) = s.accept_thread.take()
+        {
+            let _ = t.join();
+        }
+    }
+}
+
+fn accept_loop(
+    engine: Arc<Engine>,
+    broadcaster: Arc<Broadcaster>,
+    opts: ServerOptions,
+    stop: &Event,
+) {
+    let mut listener = PipeListener::new(&opts.pipe_name, MAX_INSTANCES);
+    loop {
+        match listener.accept(stop) {
+            Ok(Accepted::Stopped) => return,
+            Ok(Accepted::Connection(stream)) => {
+                let engine = engine.clone();
+                let broadcaster = broadcaster.clone();
+                let faults = Faults::new(opts.debug_faults);
+                std::thread::Builder::new()
+                    .name("fmf-pipe-conn".to_string())
+                    .spawn(move || run_connection(engine, broadcaster, stream, faults))
+                    .ok();
+            }
+            Err(e) => {
+                // Typically ERROR_PIPE_BUSY at the instance cap — the
+                // client was turned away by the OS; count, breathe, retry.
+                Counters::bump(&engine.metrics().counters.pipe_connections_rejected);
+                tracing::warn!(error = %e, "pipe accept failed — retrying");
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
+    }
+}
+
+fn run_connection(
+    engine: Arc<Engine>,
+    broadcaster: Arc<Broadcaster>,
+    stream: PipeStream,
+    faults: Faults,
+) {
+    let conn = Arc::new(Connection::new(engine.clone(), faults));
+    let writer = Arc::new(Mutex::new(stream.clone()));
+    // (queue handle, event-writer join) — at most one subscription per
+    // connection; Subscribe is idempotent.
+    let subscription: Arc<Mutex<Option<Arc<crate::events::EventQueue>>>> =
+        Arc::new(Mutex::new(None));
+
+    let (tx, rx) = mpsc::channel::<(FrameHeader, Vec<u8>)>();
+    let rx = Arc::new(Mutex::new(rx));
+    let mut workers = Vec::new();
+    for _ in 0..WORKERS_PER_CONNECTION {
+        let rx = rx.clone();
+        let conn = conn.clone();
+        let writer = writer.clone();
+        let broadcaster = broadcaster.clone();
+        let subscription = subscription.clone();
+        let stream = stream.clone();
+        workers.push(std::thread::spawn(move || {
+            loop {
+                let msg = rx.lock().recv();
+                let Ok((header, payload)) = msg else { return };
+                match conn.dispatch(header.opcode, &payload) {
+                    Outcome::Reply(status, body) => {
+                        let h = FrameHeader {
+                            len: 0,
+                            opcode: header.opcode,
+                            flags: FLAG_RESPONSE,
+                            request_id: header.request_id,
+                            status,
+                        };
+                        if frame::write_frame(&mut *writer.lock(), h, &body).is_err() {
+                            return; // client went away; reader notices too
+                        }
+                    }
+                    Outcome::Subscribe => {
+                        {
+                            let mut sub = subscription.lock();
+                            if sub.is_none() {
+                                let q = broadcaster.subscribe();
+                                spawn_event_writer(q.clone(), writer.clone());
+                                *sub = Some(q);
+                            }
+                        }
+                        let h = FrameHeader {
+                            len: 0,
+                            opcode: header.opcode,
+                            flags: FLAG_RESPONSE,
+                            request_id: header.request_id,
+                            status: 0,
+                        };
+                        let _ = frame::write_frame(&mut *writer.lock(), h, &[]);
+                    }
+                    Outcome::Unsubscribe => {
+                        if let Some(q) = subscription.lock().take() {
+                            broadcaster.unsubscribe(&q);
+                        }
+                        let h = FrameHeader {
+                            len: 0,
+                            opcode: header.opcode,
+                            flags: FLAG_RESPONSE,
+                            request_id: header.request_id,
+                            status: 0,
+                        };
+                        let _ = frame::write_frame(&mut *writer.lock(), h, &[]);
+                    }
+                    Outcome::Drop => {
+                        stream.disconnect();
+                        return;
+                    }
+                }
+            }
+        }));
+    }
+
+    // Reader: the only thread that touches the receive side.
+    let mut reader = stream.clone();
+    loop {
+        match frame::read_frame(&mut reader) {
+            Ok((header, payload)) => {
+                // Requests must not carry response/event flags.
+                if header.flags != 0 {
+                    Counters::bump(&engine.metrics().counters.pipe_malformed_frames);
+                    tracing::warn!("malformed frame (flags on a request) — dropping connection");
+                    stream.disconnect();
+                    break;
+                }
+                if tx.send((header, payload)).is_err() {
+                    break; // a worker dropped the connection
+                }
+            }
+            Err(FrameError::TooLong(len)) => {
+                Counters::bump(&engine.metrics().counters.pipe_malformed_frames);
+                tracing::warn!(len, "oversized frame — dropping connection");
+                stream.disconnect();
+                break;
+            }
+            Err(FrameError::Io(_)) => break, // disconnect / shutdown
+        }
+    }
+
+    drop(tx); // workers drain and exit
+    if let Some(q) = subscription.lock().take() {
+        broadcaster.unsubscribe(&q); // closes the queue → event writer exits
+    }
+    for w in workers {
+        let _ = w.join();
+    }
+}
+
+fn spawn_event_writer(q: Arc<crate::events::EventQueue>, writer: Arc<Mutex<PipeStream>>) {
+    std::thread::Builder::new()
+        .name("fmf-pipe-events".to_string())
+        .spawn(move || {
+            while let Some(ev) = q.pop() {
+                let h = FrameHeader {
+                    len: 0,
+                    opcode: ev.kind as u16,
+                    flags: FLAG_EVENT,
+                    request_id: 0,
+                    status: 0,
+                };
+                if frame::write_frame(&mut *writer.lock(), h, &ev.encode()).is_err() {
+                    return;
+                }
+            }
+        })
+        .ok();
+}

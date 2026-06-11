@@ -169,6 +169,26 @@ fn abi_version_is_pinned() {
 }
 
 #[test]
+fn pipe_protocol_constants_match_the_ffi_table() {
+    // fmf-proto duplicates the status codes (it cannot depend on a cdylib);
+    // the shared table lives in ARCHITECTURE.md and both copies pin here.
+    assert_eq!(fmf_proto::codes::OK, FMF_OK);
+    assert_eq!(fmf_proto::codes::INVALID_ARG, FMF_E_INVALID_ARG);
+    assert_eq!(fmf_proto::codes::STALE, FMF_E_STALE);
+    assert_eq!(fmf_proto::codes::NOT_ADMIN, FMF_E_NOT_ADMIN);
+    assert_eq!(fmf_proto::codes::VOLUME, FMF_E_VOLUME);
+    assert_eq!(fmf_proto::codes::QUERY_SYNTAX, FMF_E_QUERY_SYNTAX);
+    assert_eq!(fmf_proto::codes::IO, FMF_E_IO);
+    assert_eq!(fmf_proto::codes::LOCKED, FMF_E_LOCKED);
+    assert_eq!(fmf_proto::codes::PANIC, FMF_E_PANIC);
+    // Hello carries the FFI abi_version; the wire rows/events mirror the
+    // FFI PODs whose layouts are pinned elsewhere in this file.
+    assert_eq!(fmf_proto::PROTOCOL_VERSION, 1);
+    assert_eq!(fmf_proto::messages::WireRow::LEN, size_of::<FmfRow>());
+    assert_eq!(fmf_proto::messages::EventWire::LEN, size_of::<FmfEvent>());
+}
+
+#[test]
 fn fmf_row_layout_is_48_bytes_no_padding() {
     // Contractual: "48-byte row, no internal padding", mirrored by C#
     // LayoutKind.Sequential. Note the field *order* here (the implemented

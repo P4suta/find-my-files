@@ -45,11 +45,13 @@ fmf-ffi/src/     lib(エラーコード+再エクスポート+エクスポート
                  / volumes / blob / results / contract_tests(ABIレイアウト・null・エラー経路の固定)
 fmf-proto/src/   lib(PROTOCOL_VERSION+エラー定数。fmf-ffiのcontract_testsが値をピン)
                  / frame(16Bヘッダ+長さ前置きcodec) / messages(オペコード+wire構造体)
-fmf-service/src/ main(clap: run/install/uninstall/start/stop/status) / config(service.json)
-                 / host(Engine生成+ロック敗者リトライ) / server(pipe accept+停止Event 2-wait)
-                 / dispatch(オペコード→Engine呼び出し、catch_unwind防火壁、結果ハンドルLRU)
-                 / events(Subscribe+有界キュー) / security(SDDL構築+トークン照合)
-                 / svc(SCMエントリ+定期flush) / faults(--debug-faults: !!lag/!!panic/!!drop)
+fmf-service/src/ lib(モジュール公開 — ループバックテストが実サーバを駆動) / main(clap: run)
+                 / pipe(overlapped I/OのRead/Write化+listener。accept は connect/停止Event の2-wait)
+                 / server(接続毎: reader+worker2+書き込みmutex) / dispatch(オペコード→Engine、
+                 catch_unwind防火壁、結果ハンドルLRU64) / events(Subscribe+有界キュー256)
+                 / config(service.json) / host(ロック敗者の5s→60sリトライ)
+                 / faults(--debug-faults: !!lag/!!panic/!!drop)。SCM統合とSDDL硬化は security/svc
+                 として追加予定(SECURITY.md の防御表が要件)
 app/FindMyFiles/
 ├─ Engine/       IEngineClient(境界) / FfiEngineClient / PipeEngineClient / FakeEngineClient
 │                / NativeEngine(P/Invoke) / PipeProtocol(codec) / PageCodec(FmfRow+blob→RowData)

@@ -326,8 +326,33 @@ name = "fmf-ffi"
 version = "0.1.0"
 dependencies = [
  "fmf-core",
+ "fmf-proto",
  "parking_lot",
  "serde_json",
+]
+
+[[package]]
+name = "fmf-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "fmf-service"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "fmf-core",
+ "fmf-proto",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "windows-sys",
 ]
 
 [[package]]

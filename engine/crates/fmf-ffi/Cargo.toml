@@ -14,3 +14,8 @@ crate-type = ["cdylib"]
 fmf-core = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# The pipe protocol duplicates the error-code table (a cdylib cannot be a
+# dependency); this pin keeps the copies from drifting (contract_tests).
+fmf-proto = { workspace = true }
