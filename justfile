@@ -1,6 +1,11 @@
 # find-my-files task runner. Requires: mise (rust/dotnet), see mise.toml.
 # Engine recipes work in any shell; app recipes (M1+) may require an elevated terminal.
 
+# just defaults to `sh` even on Windows — present in Git Bash sessions but
+# not in elevated PowerShell, exactly where the admin recipes must run.
+# powershell.exe ships with every Windows.
+set windows-shell := ["powershell.exe", "-NoProfile", "-Command"]
+
 default: test
 
 # One-time setup: install pinned toolchain + git hooks
@@ -24,7 +29,7 @@ check:
 # Elevation-gated #[ignore] tests (real-volume MFT/USN) — run from an elevated terminal
 [working-directory: 'engine']
 test-admin:
-    FMF_ADMIN_TESTS=1 cargo test --workspace -- --ignored
+    $env:FMF_ADMIN_TESTS='1'; cargo test --workspace -- --ignored
 
 # C# unit tests for the app (no elevation; never rebuilds the Rust engine)
 test-app:
