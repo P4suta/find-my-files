@@ -190,7 +190,14 @@
                         Closed="Notification_Closed"
                         IsOpen="True"
                         Message="{x:Bind Detail}"
-                        Severity="{x:Bind conv:UiConverters.ToInfoSeverity(Severity)}" />
+                        Severity="{x:Bind conv:UiConverters.ToInfoSeverity(Severity)}">
+                        <InfoBar.ActionButton>
+                            <Button
+                                Click="{x:Bind Invoke}"
+                                Content="{x:Bind ActionLabel}"
+                                Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ActionLabel)}" />
+                        </InfoBar.ActionButton>
+                    </InfoBar>
                 </DataTemplate>
             </ItemsControl.ItemTemplate>
         </ItemsControl>

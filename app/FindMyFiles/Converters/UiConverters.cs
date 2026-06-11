@@ -13,6 +13,9 @@ public static class UiConverters
     public static Visibility BoolToVis(bool value) =>
         value ? Visibility.Visible : Visibility.Collapsed;
 
+    public static Visibility VisibleIfNotEmpty(string? value) =>
+        string.IsNullOrEmpty(value) ? Visibility.Collapsed : Visibility.Visible;
+
     /// <summary>App severity → InfoBar severity (the InfoBar enum is the
     /// view's vocabulary; the app's is <see cref="NotifySeverity"/>).</summary>
     public static InfoBarSeverity ToInfoSeverity(NotifySeverity s) => s switch

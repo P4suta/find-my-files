@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.UI.Xaml;
 using Windows.ApplicationModel.DataTransfer;
 
 namespace FindMyFiles.Services;
@@ -30,6 +31,26 @@ public static class ShellOps
                 Arguments = $"/select,\"{fullPath}\"",
                 UseShellExecute = false,
             }));
+    }
+
+    /// <summary>Relaunch this app elevated and exit — strictly user-initiated
+    /// (the「管理者として再起動」button; automatic runas loops are forbidden
+    /// by the ARCHITECTURE.md engine-selection contract). A declined UAC
+    /// prompt notifies and leaves the current instance running.</summary>
+    public static void RestartElevated(IEnumerable<string> args)
+    {
+        Run("管理者として再起動できませんでした", "FindMyFiles", () =>
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = Environment.ProcessPath!,
+                Arguments = string.Join(" ", args.Select(a => $"\"{a}\"")),
+                UseShellExecute = true,
+                Verb = "runas",
+            });
+            // Only reached when the elevated instance actually launched.
+            Application.Current.Exit();
+        });
     }
 
     public static void CopyText(string text, string what)
@@ -70,6 +91,7 @@ public static class ShellOps
         {
             2 or 3 => "ファイルが移動・削除された可能性があります",     // FILE/PATH_NOT_FOUND
             5 => "アクセスが拒否されました — 権限を確認してください",   // ACCESS_DENIED
+            1223 => "UAC で操作が取り消されました",                     // ERROR_CANCELLED
             _ => "ファイルが移動・削除された直後の可能性があります",
         };
 }

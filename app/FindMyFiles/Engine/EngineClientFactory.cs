@@ -42,8 +42,32 @@ public static class EngineClientFactory
             FileLog.Info("app", $"engine: pipe ({pipeName}, probe succeeded)");
             return new PipeEngineClient(pipeName);
         }
-        FileLog.Info("app", "engine: in-proc FFI (pipe probe failed)");
-        return new FfiEngineClient();
+        if (IsElevated())
+        {
+            FileLog.Info("app", "engine: in-proc FFI (pipe probe failed, process is elevated)");
+            return new FfiEngineClient();
+        }
+        // ARCHITECTURE.md エンジン選択の契約: サービス不在+非昇格で in-proc を
+        // 作っても MFT 読みで必ず失敗する(原因を語らない「インデックスに失敗」
+        // になる)。Fake に劣化し、理由と出口 — サービス導入(恒久)または明示の
+        // 昇格再起動 — を提示する。自動 runas ループは禁止。
+        FileLog.Warn("app", "engine: fake fallback (no service answered, not elevated)");
+        Notifier.Post(
+            NotifySeverity.Warning,
+            "検索サービスが見つからないため、デモデータで起動しました",
+            "実ファイルを検索するには、管理者ターミナルで一度 `just service-install` を実行して"
+            + "サービスを登録してください(以後は通常起動で動きます)。"
+            + "今すぐ試す場合は右のボタンで管理者として再起動できます。",
+            actionLabel: "管理者として再起動",
+            action: () => ShellOps.RestartElevated(args));
+        return new FakeEngineClient();
+    }
+
+    private static bool IsElevated()
+    {
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        return new System.Security.Principal.WindowsPrincipal(identity)
+            .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
     }
 
     private static bool HasFlag(string[] args, string flag) =>

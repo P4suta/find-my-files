@@ -9,9 +9,18 @@ public enum NotifySeverity
     Error,
 }
 
-public sealed record AppNotification(NotifySeverity Severity, string Message, string? Detail = null)
+public sealed record AppNotification(
+    NotifySeverity Severity,
+    string Message,
+    string? Detail = null,
+    string? ActionLabel = null,
+    Action? Action = null)
 {
     public string Id { get; } = Guid.NewGuid().ToString("N");
+
+    /// <summary>x:Bind target for the InfoBar action button (no-op when the
+    /// notification carries no action).</summary>
+    public void Invoke() => Action?.Invoke();
 }
 
 /// <summary>
@@ -27,9 +36,14 @@ public static class Notifier
     /// <summary>Queue for posts that happen before the UI subscribes.</summary>
     private static readonly ConcurrentQueue<AppNotification> Pending = new();
 
-    public static void Post(NotifySeverity severity, string message, string? detail = null)
+    public static void Post(
+        NotifySeverity severity,
+        string message,
+        string? detail = null,
+        string? actionLabel = null,
+        Action? action = null)
     {
-        var n = new AppNotification(severity, message, detail);
+        var n = new AppNotification(severity, message, detail, actionLabel, action);
         switch (severity)
         {
             case NotifySeverity.Error:
