@@ -50,8 +50,10 @@ fmf-service/src/ lib(モジュール公開 — ループバックテストが実
                  / server(接続毎: reader+worker2+書き込みmutex) / dispatch(オペコード→Engine、
                  catch_unwind防火壁、結果ハンドルLRU64) / events(Subscribe+有界キュー256)
                  / config(service.json) / host(ロック敗者の5s→60sリトライ)
-                 / faults(--debug-faults: !!lag/!!panic/!!drop)。SCM統合とSDDL硬化は security/svc
-                 として追加予定(SECURITY.md の防御表が要件)
+                 / faults(--debug-faults: !!lag/!!panic/!!drop)
+                 / security(SDDL構築ピン+SID捕捉+接続時トークン照合+dir DACL)
+                 / svc(serve共通コア+SCMエントリ: Stop/PRESHUTDOWN→flush→graceful)
+                 / main(run/install/uninstall --purge-data/start/stop/status)
 app/FindMyFiles/
 ├─ Engine/       IEngineClient(境界) / FfiEngineClient / PipeEngineClient / FakeEngineClient
 │                / NativeEngine(P/Invoke) / PipeProtocol(codec) / PageCodec(FmfRow+blob→RowData)

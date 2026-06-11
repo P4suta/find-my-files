@@ -78,6 +78,7 @@ fn start(tag: &str, debug_faults: bool) -> Harness {
         ServerOptions {
             pipe_name: pipe_name.clone(),
             debug_faults,
+            authorized_sids: Vec::new(),
         },
     )
     .expect("server start");

@@ -57,6 +57,46 @@ fmt-check:
 # Everything the pre-push hook checks, in one shot
 verify: fmt-check lint test test-app
 
+# ── Service (v2: fmf-service + named pipe; ADR-0016/0017) ────────────────
+
+# Console-mode service in the foreground — the dev inner loop (elevated;
+# Ctrl+C = flush + graceful stop). Unelevated pipe debugging: add --no-index
+[working-directory: 'engine']
+service-dev *args="":
+    cargo run --release -p fmf-service -- run {{args}}
+
+[working-directory: 'engine']
+service-build:
+    cargo build --release -p fmf-service
+
+# Register the Windows service: captures your SID, hardens the data-dir
+# DACLs, delayed auto start + crash recovery (elevated)
+service-install: service-build
+    engine/target/release/fmf-service.exe install
+
+# Deregister; data stays unless you pass --purge-data (elevated)
+service-uninstall *args="":
+    engine/target/release/fmf-service.exe uninstall {{args}}
+
+# (elevated)
+service-start:
+    engine/target/release/fmf-service.exe start
+
+# (elevated)
+service-stop:
+    engine/target/release/fmf-service.exe stop
+
+# Rebuild + restart the installed service (elevated)
+service-restart: service-stop service-build service-start
+
+# SCM state + live pipe handshake (works unelevated)
+service-status:
+    engine/target/release/fmf-service.exe status
+
+# C# client × real fmf-service integration (FMF_PIPE_TESTS gate; no elevation)
+test-pipe: service-build
+    $env:FMF_PIPE_TESTS='1'; dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
+
 # ── Benchmarks & gates (discipline: ADR-0013, engine/benches/README.md) ──
 
 # Run the benchmark query set against a real volume (elevated)

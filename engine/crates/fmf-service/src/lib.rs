@@ -9,4 +9,6 @@ pub mod events;
 pub mod faults;
 pub mod host;
 pub mod pipe;
+pub mod security;
 pub mod server;
+pub mod svc;

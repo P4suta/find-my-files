@@ -12,6 +12,7 @@ use windows_sys::Win32::Foundation::{
     ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
     GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE,
     OPEN_EXISTING, ReadFile, WriteFile,
@@ -67,7 +68,7 @@ pub struct PipeStream {
 }
 
 impl PipeStream {
-    fn raw(&self) -> HANDLE {
+    pub(crate) fn raw(&self) -> HANDLE {
         self.handle.as_raw_handle() as HANDLE
     }
 
@@ -172,6 +173,9 @@ pub struct PipeListener {
     path_w: Vec<u16>,
     instances: u32,
     first_created: bool,
+    /// Explicit descriptor (security::PipeSecurity). None = process default
+    /// (console/test mode only — the installed service always sets one).
+    security: Option<crate::security::PipeSecurity>,
 }
 
 pub enum Accepted {
@@ -180,11 +184,16 @@ pub enum Accepted {
 }
 
 impl PipeListener {
-    pub fn new(path: &str, instances: u32) -> Self {
+    pub fn new(
+        path: &str,
+        instances: u32,
+        security: Option<crate::security::PipeSecurity>,
+    ) -> Self {
         Self {
             path_w: wide(path),
             instances,
             first_created: false,
+            security,
         }
     }
 
@@ -198,6 +207,7 @@ impl PipeListener {
         } else {
             FILE_FLAG_FIRST_PIPE_INSTANCE
         };
+        let attrs = self.security.as_ref().map(|s| s.attributes());
         let h = unsafe {
             CreateNamedPipeW(
                 self.path_w.as_ptr(),
@@ -207,7 +217,9 @@ impl PipeListener {
                 BUFFER_SIZE,
                 BUFFER_SIZE,
                 0,
-                std::ptr::null(), // default SD until P4's explicit SDDL (security.rs)
+                attrs
+                    .as_ref()
+                    .map_or(std::ptr::null(), |a| a as *const SECURITY_ATTRIBUTES),
             )
         };
         if h == INVALID_HANDLE_VALUE {

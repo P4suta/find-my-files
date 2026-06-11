@@ -24,6 +24,9 @@ const WORKERS_PER_CONNECTION: usize = 2;
 pub struct ServerOptions {
     pub pipe_name: String,
     pub debug_faults: bool,
+    /// Connect-time token allowlist (docs/SECURITY.md 4層防御の④)。Empty =
+    /// no check (console/test mode); the installed service always fills it.
+    pub authorized_sids: Vec<String>,
 }
 
 pub struct Server {
@@ -69,11 +72,35 @@ fn accept_loop(
     opts: ServerOptions,
     stop: &Event,
 ) {
-    let mut listener = PipeListener::new(&opts.pipe_name, MAX_INSTANCES);
+    let security = if opts.authorized_sids.is_empty() {
+        None
+    } else {
+        match crate::security::PipeSecurity::from_sddl(&crate::security::pipe_sddl(
+            &opts.authorized_sids,
+        )) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                // Refusing to serve wide-open beats serving wide-open.
+                tracing::error!(error = %e, "pipe SDDL conversion failed — not serving");
+                return;
+            }
+        }
+    };
+    let mut listener = PipeListener::new(&opts.pipe_name, MAX_INSTANCES, security);
     loop {
         match listener.accept(stop) {
             Ok(Accepted::Stopped) => return,
             Ok(Accepted::Connection(stream)) => {
+                // Defense in depth behind the DACL: verify the client token.
+                match crate::security::verify_client(&stream, &opts.authorized_sids) {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => {
+                        Counters::bump(&engine.metrics().counters.pipe_connections_rejected);
+                        tracing::warn!("pipe client token rejected");
+                        stream.disconnect();
+                        continue;
+                    }
+                }
                 let engine = engine.clone();
                 let broadcaster = broadcaster.clone();
                 let faults = Faults::new(opts.debug_faults);
