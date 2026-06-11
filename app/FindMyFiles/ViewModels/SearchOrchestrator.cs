@@ -51,8 +51,14 @@ public sealed class SearchOrchestrator
             _dispatcher.TryEnqueue(() => Requery(RequeryOrigin.IndexChanged));
     }
 
+    private bool _composing;
+
     public void NotifyTextChanged(string value)
     {
+        if (_composing)
+        {
+            return; // IME composition in flight — wait for the commit
+        }
         if (string.IsNullOrEmpty(value))
         {
             _debounce.Stop();
@@ -64,6 +70,22 @@ public sealed class SearchOrchestrator
         }
     }
 
+    /// <summary>IME composition began: hold queries so half-composed text
+    /// (romaji fragments, candidate strings) never hits the engine.</summary>
+    public void NotifyCompositionStarted()
+    {
+        _composing = true;
+        _debounce.Stop();
+    }
+
+    /// <summary>IME composition committed (or cancelled) — search the final
+    /// text through the normal debounce.</summary>
+    public void NotifyCompositionEnded(string value)
+    {
+        _composing = false;
+        NotifyTextChanged(value);
+    }
+
     public void Requery(RequeryOrigin origin) =>
         RunQueryAsync(origin).Forget($"query.{origin}");
 
@@ -71,6 +93,16 @@ public sealed class SearchOrchestrator
     {
         var generation = Interlocked.Increment(ref _generation);
         var request = _request();
+        // Product rule: no query, no results. The engine could list every
+        // file, but an empty box has nothing to answer — and the match-all
+        // listing was pure churn (its ids change on every USN tick, so the
+        // startup screen repainted forever).
+        if (string.IsNullOrWhiteSpace(request.Query))
+        {
+            TraceCaptured?.Invoke(null);
+            _presenter.PresentEmpty();
+            return;
+        }
         try
         {
             var outcome = await _engine.SearchAsync(request.Query, request.Options);

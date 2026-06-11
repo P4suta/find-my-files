@@ -47,6 +47,11 @@ public sealed partial class MainPage : Page
                 _lastSelectedEntryRef = row.EntryRef;
             }
         };
+        // IME: half-composed text (romaji fragments, candidate strings)
+        // must not query — search the final string on commit/cancel.
+        SearchBox.TextCompositionStarted += (_, _) => ViewModel.Search.NotifyCompositionStarted();
+        SearchBox.TextCompositionEnded += (_, _) =>
+            ViewModel.Search.NotifyCompositionEnded(ViewModel.SearchText);
         Loaded += (_, _) =>
         {
             SearchBox.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
@@ -67,7 +72,7 @@ public sealed partial class MainPage : Page
     /// </summary>
     private void OnResultsPublished(ResultsPublication pub)
     {
-        if (pub.RestoreIndex is { } restore && restore < ResultsList.Items.Count)
+        if (pub.RestoreIndex is { } restore && restore >= 0 && restore < ResultsList.Items.Count)
         {
             ResultsList.ScrollIntoView(
                 ResultsList.Items[restore], ScrollIntoViewAlignment.Leading);

@@ -61,10 +61,28 @@ public sealed partial class ResultsPresenter : ObservableObject
     /// <summary>Raised on the UI thread right after each seeded Reset.</summary>
     public event Action<ResultsPublication>? ResultsPublished;
 
+    /// <summary>True while the empty-query presentation is on screen, so
+    /// repeated index-changed requeries with an empty box are no-ops
+    /// (re-Resetting an empty list would flicker the startup screen).
+    /// Starts true: the list is born empty.</summary>
+    private bool _emptyPresented = true;
+
     public ResultsPresenter(IDispatcher dispatcher)
     {
         _dispatcher = dispatcher;
         ResultsSource = new VirtualResultList(dispatcher);
+    }
+
+    /// <summary>Empty search box → empty screen, idempotently.</summary>
+    public void PresentEmpty()
+    {
+        if (_emptyPresented)
+        {
+            return;
+        }
+        _emptyPresented = true;
+        ResultsSource.Reassign(null, []);
+        CountText = string.Empty;
     }
 
     /// <summary>
@@ -113,6 +131,7 @@ public sealed partial class ResultsPresenter : ObservableObject
             return;
         }
 
+        _emptyPresented = false;
         ResultsSource.Reassign(result, seeds);
         CountText = StatusFormatter.Count(trace, result.Count);
         ResultsPublished?.Invoke(new ResultsPublication(origin, restoreIndex, firstIndex, lastIndex));
@@ -186,7 +205,10 @@ public sealed partial class ResultsPresenter : ObservableObject
         var lastRow = Math.Max(0, count - 1);
         if (origin.PreservesPosition() && ResultsSource.LastVisibleRange is { } visible)
         {
-            var restore = Math.Min(visible.First, lastRow);
+            // Clamp below as well: an empty viewport once reported (-1,-1)
+            // and Items[-1] surfaces as the cryptic WinRT Int32.MaxValue
+            // index error (the adapter sees (uint)-1).
+            var restore = Math.Clamp(visible.First, 0, lastRow);
             var first = Math.Max(0, restore - VirtualResultList.PageSize);
             var last = Math.Min(lastRow, Math.Min(visible.Last, lastRow) + VirtualResultList.PageSize);
             return (first, last, restore);

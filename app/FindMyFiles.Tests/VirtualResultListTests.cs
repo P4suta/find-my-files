@@ -154,6 +154,21 @@ public sealed class VirtualResultListTests
     }
 
     [Fact]
+    public void NotifyVisibleRange_EmptyViewportReport_IsForgottenNotRemembered()
+    {
+        var rows = Rows.Many(100);
+        _list.Reassign(new StubSearchResult(rows), SeedPage0(rows));
+        _list.NotifyVisibleRange(0, 20);
+        Assert.Equal((0, 20), _list.LastVisibleRange);
+
+        // An emptied list reports (-1,-1); remembering it poisoned later
+        // position-preserving requeries with Items[-1] (the WinRT adapter
+        // throws the Int32.MaxValue index error on (uint)-1).
+        _list.NotifyVisibleRange(-1, -1);
+        Assert.Null(_list.LastVisibleRange);
+    }
+
+    [Fact]
     public void Reassign_DisposesThePreviousResult()
     {
         var old = new StubSearchResult(Rows.Many(3));

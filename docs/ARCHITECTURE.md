@@ -134,7 +134,7 @@ int32_t fmf_last_error(char* buf, uint32_t* len);
 - ページ受領→`ResultRow` へコピー→**即 `fmf_page_free`**。
 - コールバック delegate はクライアントのフィールドに保持(GC回収防止)。受領後 `DispatcherQueue.TryEnqueue` でUIへ。
 - **検索パイプラインの責務分割**(MainViewModel は合成ルートのみ):
-  - `SearchOrchestrator` — いつ・何を検索するか: 50msデバウンス(クリアは即時)、generationカウンタによる陳腐結果のDispose、`RequeryOrigin` 分類、Stale有界リトライ(1回)、例外分類。
+  - `SearchOrchestrator` — いつ・何を検索するか: 50msデバウンス(クリアは即時)、generationカウンタによる陳腐結果のDispose、`RequeryOrigin` 分類、Stale有界リトライ(1回)、例外分類。**空クエリはエンジンに投げない**(空欄に返すべき結果はない、というプロダクト規則。match-all列挙はUSNティック毎にIDが動くため起動画面が永遠に再描画される)— `PresentEmpty`(冪等)で空画面。**IME変換中はクエリ保留**(`TextCompositionStarted/Ended`、確定文字列だけが通常デバウンスで流れる)。
   - `ResultsPresenter` — 結果の提示: 公開**前**に可視範囲ページをプリフェッチし、`VirtualResultList.Reassign` で原子的に公開(旧結果は新結果が揃うまで画面に残る=空白フレームゼロ)。件数テキストと viewport 配置イベント。
 - 再クエリの2系統(`RequeryOrigin` が分類): **タイプ/クリア/ソート/フィルタ起因=先頭リセット** / **IndexChanged/VolumeReady/Stale起因=先頭可視インデックスを退避→復元、選択はseed内EntryRef一致時のみベストエフォート復元**。
 - `VirtualResultList`(非ジェネリックIList+INCC+IItemsRangeInfo): **ページと同寿命の単一インスタンス**(ItemsSource は x:Bind OneTime — 差し替えるとListViewの仮想化状態が破棄されてちらつく)。新結果は `Reassign(result, seeds)` = epoch++ → ページキャッシュ破棄 → seed適用 → **INCC Reset を1回発行**(UIスレッド限定)。**同一結果の再クエリ**(エンジンが`QueryTrace.unchanged`で保証: 同一テキスト+オプションかつ全ボリュームでID列がmemcmp一致)は `RefreshInPlace` = epoch++ → ハンドル差し替え → 可視seedを既存行インスタンスにin-place充填(MVVMセッターは値変化時のみ通知)→ **Resetなし・件数テキスト不変** — アイドルのUSNトラフィック(ログ・テレメトリ等)が200ms毎に引き起こす再クエリで画面が再描画されない。in-place更新されたsize/mtimeは値が変わったセルだけ更新される。indexer は絶対にフェッチせずプレースホルダ返却。`RangesChanged` で可視範囲±1ページを64行単位バックグラウンドフェッチ→既存 ResultRow のプロパティ充填。旧epochのフェッチ完了は黙って破棄。ページLRU上限4096行。ハードSTALE受領→`BecameStale`(epoch一致時のみ)→ Orchestrator が再クエリ。

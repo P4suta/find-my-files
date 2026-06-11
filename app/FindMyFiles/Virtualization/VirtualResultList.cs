@@ -160,10 +160,21 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         return rows;
     }
 
-    public void RangesChanged(ItemIndexRange visibleRange, IReadOnlyList<ItemIndexRange> trackedItems)
+    public void RangesChanged(ItemIndexRange visibleRange, IReadOnlyList<ItemIndexRange> trackedItems) =>
+        NotifyVisibleRange(visibleRange.FirstIndex, visibleRange.LastIndex);
+
+    /// <summary>WinRT-free body of RangesChanged (unit-testable). An empty
+    /// list reports (-1,-1); remembering that would poison every later
+    /// position-preserving requery with Items[-1].</summary>
+    internal void NotifyVisibleRange(int firstVisible, int lastVisible)
     {
-        LastVisibleRange = (visibleRange.FirstIndex, visibleRange.LastIndex);
-        EnsureRange(visibleRange.FirstIndex, visibleRange.LastIndex);
+        if (firstVisible < 0 || lastVisible < firstVisible)
+        {
+            LastVisibleRange = null;
+            return;
+        }
+        LastVisibleRange = (firstVisible, lastVisible);
+        EnsureRange(firstVisible, lastVisible);
     }
 
     /// <summary>

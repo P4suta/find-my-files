@@ -51,6 +51,60 @@ public sealed class SearchOrchestratorTests
     }
 
     [Fact]
+    public void EmptyQuery_NeverHitsTheEngine_AndPresentsEmptyIdempotently()
+    {
+        SyncContext.RunContinuationsInline();
+        var resets = 0;
+        _presenter.ResultsSource.CollectionChanged += (_, _) => resets++;
+
+        // Startup: empty box → no engine call, and the list is already
+        // empty, so not even a Reset fires (the startup flicker source).
+        _orchestrator.Requery(RequeryOrigin.Initial);
+        Assert.Empty(_engine.Searches);
+        Assert.Equal(0, resets);
+
+        // Idle USN ticks with the box still empty stay no-ops.
+        _engine.RaiseIndexChanged("F:");
+        _dispatcher.DrainQueue();
+        Assert.Empty(_engine.Searches);
+        Assert.Equal(0, resets);
+
+        // A real query publishes; clearing it empties the screen once.
+        _request = new SearchRequest("a", SearchOptions.Default);
+        _orchestrator.Requery(RequeryOrigin.Typing);
+        _engine.Searches[0].CompleteWith(Rows.Many(3));
+        Assert.Equal(3, _presenter.ResultsSource.Count);
+
+        _request = new SearchRequest(string.Empty, SearchOptions.Default);
+        var resetsBeforeClear = resets;
+        _orchestrator.NotifyTextChanged(string.Empty);
+        Assert.Equal(0, _presenter.ResultsSource.Count);
+        Assert.Equal(string.Empty, _presenter.CountText);
+        Assert.Equal(resetsBeforeClear + 1, resets); // exactly one clearing Reset
+        Assert.Single(_engine.Searches); // still only the "a" search
+    }
+
+    [Fact]
+    public void ImeComposition_HoldsQueries_UntilTheCommit()
+    {
+        SyncContext.RunContinuationsInline();
+        _orchestrator.NotifyCompositionStarted();
+
+        // Per-keystroke binding updates during composition do nothing.
+        _request = new SearchRequest("省", SearchOptions.Default);
+        _orchestrator.NotifyTextChanged("省");
+        Assert.False(Debounce.IsStarted);
+        Assert.Empty(_engine.Searches);
+
+        // The commit searches the final string through the normal debounce.
+        _request = new SearchRequest("省察", SearchOptions.Default);
+        _orchestrator.NotifyCompositionEnded("省察");
+        Assert.True(Debounce.IsStarted);
+        Debounce.Fire();
+        Assert.Equal("省察", Assert.Single(_engine.Searches).Query);
+    }
+
+    [Fact]
     public void UnchangedRequery_SwapsTheHandle_WithoutRepublishingOrTextChurn()
     {
         SyncContext.RunContinuationsInline();
@@ -87,6 +141,7 @@ public sealed class SearchOrchestratorTests
         _orchestrator.SearchFailed += failures.Add;
         _engine.ThrowOnSearch = new QuerySyntaxException("unbalanced quote");
 
+        _request = new SearchRequest("\"broken", SearchOptions.Default);
         _orchestrator.Requery(RequeryOrigin.Typing);
 
         Assert.Equal("クエリエラー: unbalanced quote", _presenter.CountText);
@@ -101,6 +156,7 @@ public sealed class SearchOrchestratorTests
         _orchestrator.SearchFailed += failures.Add;
         _engine.ThrowOnSearch = new EngineException("boom", 7);
 
+        _request = new SearchRequest("a", SearchOptions.Default);
         _orchestrator.Requery(RequeryOrigin.Typing);
 
         Assert.Equal(string.Empty, _presenter.CountText);
@@ -126,25 +182,32 @@ public sealed class SearchOrchestratorTests
     }
 
     [Fact]
-    public void ClearingTheQuery_BypassesTheDebounce()
+    public void ClearingTheQuery_BypassesTheDebounce_AndEmptiesWithoutTheEngine()
     {
         SyncContext.RunContinuationsInline();
+        _request = new SearchRequest("h", SearchOptions.Default);
         _orchestrator.NotifyTextChanged("h"); // debounce armed
+        Debounce.Fire();
+        _engine.Searches[0].CompleteWith(Rows.Many(2));
+        Assert.Equal(2, _presenter.ResultsSource.Count);
+
+        _orchestrator.NotifyTextChanged("he"); // debounce re-armed…
         _request = new SearchRequest(string.Empty, SearchOptions.Default);
         _orchestrator.NotifyTextChanged(string.Empty);
 
-        var search = Assert.Single(_engine.Searches); // ran immediately
-        Assert.Equal(string.Empty, search.Query);
+        Assert.Equal(0, _presenter.ResultsSource.Count); // …cleared instantly
         Assert.False(Debounce.IsStarted); // the pending typing requery was cancelled
+        Assert.Single(_engine.Searches); // and the empty query never hit the engine
 
         _dispatcher.FireTimers();
-        Assert.Single(_engine.Searches); // and it stays cancelled
+        Assert.Single(_engine.Searches); // it stays cancelled
     }
 
     [Fact]
     public void StaleResult_RetriesOnce_ThenGivesUp()
     {
         SyncContext.RunContinuationsInline();
+        _request = new SearchRequest("a", SearchOptions.Default);
         _orchestrator.Requery(RequeryOrigin.Initial);
         var first = new StubSearchResult(Rows.Many(3))
         {
@@ -170,6 +233,7 @@ public sealed class SearchOrchestratorTests
     public void IndexChanged_RequeriesViaTheDispatcher()
     {
         SyncContext.RunContinuationsInline();
+        _request = new SearchRequest("a", SearchOptions.Default);
         _engine.RaiseIndexChanged("C:");
 
         Assert.Empty(_engine.Searches); // marshaled to the UI queue first

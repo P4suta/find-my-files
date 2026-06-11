@@ -289,7 +289,7 @@ fn watch(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 const BENCH_QUERIES: &[&str] = &[
-    "",                         // match-all (UI shows this on launch)
+    "",                         // match-all (engine capability; the UI keeps an empty box blank)
     "e",                        // 1 char, huge hit count
     "a",                        // 1 char, huge hit count
     "win",                      // common 3-char substring
