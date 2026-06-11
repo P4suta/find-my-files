@@ -10,7 +10,12 @@
     xmlns:vm="using:FindMyFiles.ViewModels"
     mc:Ignorable="d">
 
-    <Grid>
+    <!-- AllowDrop: a dropped folder injects a path: filter, a dropped file
+         searches its name (drop-in only; rows are not drag-out sources). -->
+    <Grid
+        AllowDrop="True"
+        DragOver="Page_DragOver"
+        Drop="Page_Drop">
         <Grid.KeyboardAccelerators>
             <KeyboardAccelerator Key="F12" Invoked="PerfPanel_Toggle" />
         </Grid.KeyboardAccelerators>
@@ -245,6 +250,11 @@
                         FontSize="11"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <TextBlock
+                        x:Name="TransportText"
+                        FontFamily="Consolas"
+                        FontSize="11"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock
                         x:Name="CountersText"
                         FontFamily="Consolas"
                         FontSize="11"
@@ -266,11 +276,19 @@
                 AutomationProperties.AutomationId="StatusCount"
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                 Text="{x:Bind ViewModel.Results.CountText, Mode=OneWay}" />
-            <TextBlock
+            <StackPanel
                 HorizontalAlignment="Right"
-                AutomationProperties.AutomationId="StatusState"
-                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" />
+                Orientation="Horizontal"
+                Spacing="12">
+                <TextBlock
+                    AutomationProperties.AutomationId="StatusState"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" />
+                <TextBlock
+                    AutomationProperties.AutomationId="EngineMode"
+                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                    Text="{x:Bind ViewModel.EngineModeText, Mode=OneWay}" />
+            </StackPanel>
         </Grid>
     </Grid>
 </Page>

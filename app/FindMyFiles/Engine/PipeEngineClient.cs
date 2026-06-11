@@ -10,7 +10,8 @@ namespace FindMyFiles.Engine;
 /// <summary>
 /// Engine client over the fmf-service named pipe (docs/ARCHITECTURE.md
 /// 「Pipe プロトコル」). A resident supervisor task owns the connection:
-/// connect → Hello (version check; a mismatch is fatal) → Subscribe →
+/// connect → server-is-SYSTEM check (default pipe name only; SECURITY.md
+/// 脅威4) → Hello (version check; a mismatch is fatal) → Subscribe →
 /// IndexStatus (synthesized VolumeUpdated + IndexChanged) → Connected. On
 /// disconnect every pending request fails fast with
 /// <see cref="EngineUnavailableException"/>, live results turn stale via an
@@ -61,11 +62,16 @@ public sealed class PipeEngineClient : IEngineClient
     {
     }
 
+    /// <summary>Server identity is verified on the default pipe name only;
+    /// a custom --pipe-name (tests) skips the check (SECURITY.md 脅威4).</summary>
+    private readonly bool _verifyServerIdentity;
+
     /// <summary>Tests pass autoStart=false to attach event handlers before
     /// the supervisor races them to the first connection.</summary>
     internal PipeEngineClient(string pipeName, bool autoStart)
     {
         _pipeName = ToShortName(pipeName);
+        _verifyServerIdentity = _pipeName == PipeProtocol.DefaultPipeName;
         if (autoStart)
         {
             Start();
@@ -145,6 +151,12 @@ public sealed class PipeEngineClient : IEngineClient
                 stream = new NamedPipeClientStream(
                     ".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
                 await stream.ConnectAsync(ct).ConfigureAwait(false);
+                if (_verifyServerIdentity && !PipeServerIdentity.IsServerSystem(stream.SafePipeHandle))
+                {
+                    throw new ServerIdentityException(
+                        $@"server on \\.\pipe\{_pipeName} is not running as SYSTEM "
+                        + "— refusing to connect (possible pipe squatting; SECURITY.md 脅威4)");
+                }
                 Volatile.Write(ref _stream, stream);
                 var readLoop = Task.Run(() => ReadLoopAsync(stream, ct), CancellationToken.None);
                 await HandshakeAsync(ct).ConfigureAwait(false);
@@ -161,11 +173,13 @@ public sealed class PipeEngineClient : IEngineClient
             {
                 break;
             }
-            catch (ProtocolMismatchException ex)
+            catch (FatalPipeException ex)
             {
-                // A version skew never fixes itself by retrying — stay down
-                // until someone updates one side (per the pipe spec).
-                FileLog.Error("pipe", $"fatal protocol mismatch — not reconnecting: {ex.Message}");
+                // A version skew or a non-SYSTEM impostor server never fixes
+                // itself by retrying — stay down until a human fixes one side
+                // (pipe spec / SECURITY.md 脅威4). Requests keep failing with
+                // EngineUnavailableException.
+                FileLog.Error("pipe", $"fatal pipe failure — not reconnecting: {ex.Message}");
                 TearDownConnection(stream);
                 return;
             }
@@ -575,7 +589,13 @@ public sealed class PipeEngineClient : IEngineClient
         TearDownConnection(null);
     }
 
-    private sealed class ProtocolMismatchException(string message) : Exception(message);
+    /// <summary>Conditions a reconnect can never cure — the supervisor stops
+    /// for good and every request fails with EngineUnavailableException.</summary>
+    private class FatalPipeException(string message) : Exception(message);
+
+    private sealed class ProtocolMismatchException(string message) : FatalPipeException(message);
+
+    private sealed class ServerIdentityException(string message) : FatalPipeException(message);
 }
 
 /// <summary>

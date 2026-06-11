@@ -1,5 +1,7 @@
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Windows.ApplicationModel.DataTransfer;
+using Windows.Storage;
 using Windows.System;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
@@ -246,6 +248,10 @@ public sealed partial class MainPage : Page
         if (stats is not null)
         {
             HistText.Text = $"p50 {stats.P50Us / 1000.0:F2}ms   p99 {stats.P99Us / 1000.0:F2}ms";
+            TransportText.Text = stats.Transport is { } tr
+                ? $"Transport: {tr.State} / reconnects {tr.Reconnects}"
+                    + $" / page RTT EWMA {tr.PageRttEwmaUs:F0}µs / server pid {tr.ServerPid}"
+                : string.Empty;
             VolumesText.Text = string.Join("\n", stats.Indexes.Select(v =>
                 $"{v.Volume}  {v.LiveEntries:N0} 件  {v.TotalBytes / (1024.0 * 1024.0):F0} MB" +
                 $"  ({v.BytesPerEntry:F0} B/件)  gen {v.ContentGeneration}"));
@@ -268,6 +274,9 @@ public sealed partial class MainPage : Page
                 ("deferred_names_unresolved", c.DeferredNamesUnresolved),
                 ("corrupt_mft_records", c.CorruptMftRecords),
                 ("journal_rescans", c.JournalRescans),
+                ("pipe_malformed_frames", c.PipeMalformedFrames),
+                ("pipe_events_dropped", c.PipeEventsDropped),
+                ("pipe_connections_rejected", c.PipeConnectionsRejected),
             }.Where(x => x.V > 0).ToList();
             CountersText.Text = nonzero.Count == 0
                 ? string.Empty
@@ -280,6 +289,58 @@ public sealed partial class MainPage : Page
         var i = s.IndexOf('\n');
         var line = i < 0 ? s : s[..i];
         return line.Length > 120 ? line[..120] + "…" : line;
+    }
+
+    // ── Drag & drop: folder → path: filter, file → name search ──────────
+
+    private void Page_DragOver(object sender, Microsoft.UI.Xaml.DragEventArgs e)
+    {
+        if (e.DataView.Contains(StandardDataFormats.StorageItems))
+        {
+            e.AcceptedOperation = DataPackageOperation.Link;
+            if (e.DragUIOverride is { } ui)
+            {
+                ui.Caption = "検索条件として追加";
+            }
+        }
+    }
+
+    /// <summary>Drop-in only (rows are not drag-out sources). Anything that
+    /// goes wrong is logged and swallowed — a failed drop must never take
+    /// the app down (落ちない).</summary>
+    private async void Page_Drop(object sender, Microsoft.UI.Xaml.DragEventArgs e)
+    {
+        var deferral = e.GetDeferral();
+        try
+        {
+            if (!e.DataView.Contains(StandardDataFormats.StorageItems))
+            {
+                return;
+            }
+            var items = await e.DataView.GetStorageItemsAsync();
+            var item = items.FirstOrDefault();
+            if (item is null)
+            {
+                return;
+            }
+            if (item.IsOfType(StorageItemTypes.Folder))
+            {
+                // Scope the current query to the dropped folder.
+                ViewModel.SearchText = $"path:\"{item.Path}\" " + ViewModel.SearchText;
+            }
+            else
+            {
+                ViewModel.SearchText = item.Name;
+            }
+        }
+        catch (Exception ex)
+        {
+            FileLog.Error("dragdrop", "drop handling failed", ex);
+        }
+        finally
+        {
+            deferral.Complete();
+        }
     }
 
     private void SearchBox_KeyDown(object sender, KeyRoutedEventArgs e)

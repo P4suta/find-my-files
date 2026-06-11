@@ -22,11 +22,16 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: engine
-      - name: test (elevated tests are #[ignore]-gated and skip here)
+      # Elevated tests are #[ignore]-gated and skip here; the pipe loopback
+      # suite runs for real (\\.\pipe\ needs no elevation).
+      - name: test
         run: cargo test --workspace
         working-directory: engine
       - name: build engine dll
         run: cargo build --release -p fmf-ffi
+        working-directory: engine
+      - name: build service
+        run: cargo build --release -p fmf-service
         working-directory: engine
 
       - uses: actions/setup-dotnet@v4
@@ -37,8 +42,18 @@ jobs:
       - name: test app
         run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
 
+      - name: pipe integration (C# client × real service, unelevated)
+        run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
+        env:
+          FMF_PIPE_TESTS: "1"
+
       - uses: actions/upload-artifact@v4
         with:
           name: find-my-files-win-x64
           path: app/FindMyFiles/bin/Release/net10.0-windows10.0.26100.0/win-x64/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fmf-service-win-x64
+          path: engine/target/release/fmf-service.exe
           if-no-files-found: error

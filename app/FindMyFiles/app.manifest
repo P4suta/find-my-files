@@ -2,12 +2,15 @@
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
   <assemblyIdentity version="1.0.0.0" name="FindMyFiles.app"/>
 
-  <!-- MFT/USN access requires elevation in the MVP (single-process design;
-       a privileged service + unprivileged UI is the v2 plan). -->
+  <!-- Privileged work (MFT/USN reads) lives in the fmf-engine service; the
+       UI runs unprivileged. In-proc mode (-engine=inproc) is the exception:
+       start it manually from an administrator terminal (asInvoker does not
+       block launching from an elevated shell). NOTE: mt.exe cannot parse
+       non-ASCII text in this file - keep this comment ASCII. -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

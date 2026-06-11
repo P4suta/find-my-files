@@ -1,6 +1,7 @@
 using FindMyFiles.Engine;
 using FindMyFiles.Tests.TestDoubles;
 using Xunit;
+using static FindMyFiles.Tests.TestDoubles.Polling;
 
 namespace FindMyFiles.Tests;
 
@@ -11,20 +12,6 @@ namespace FindMyFiles.Tests;
 /// </summary>
 public sealed class PipeEngineClientTests
 {
-    private static async Task WaitUntilAsync(
-        Func<bool> condition, string what, int timeoutMs = 5000)
-    {
-        var deadline = Environment.TickCount64 + timeoutMs;
-        while (!condition())
-        {
-            if (Environment.TickCount64 > deadline)
-            {
-                throw new TimeoutException($"timed out waiting for: {what}");
-            }
-            await Task.Delay(10);
-        }
-    }
-
     [Fact]
     public async Task Connection_RunsFixedHandshake_AndSynthesizesEvents()
     {

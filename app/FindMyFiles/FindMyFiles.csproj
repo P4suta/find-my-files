@@ -5,9 +5,10 @@
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>FindMyFiles</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <!-- Unpackaged + self-contained by design: requireAdministrator and MSIX
-         do not mix (docs/RESEARCH.md). Deliberate deviation from the winui
-         skill defaults — do not "fix" back to packaged. -->
+    <!-- Unpackaged + self-contained by design: the engine service install
+         needs a non-MSIX story anyway, and packaging is a separate
+         milestone (ADR-0016). Deliberate deviation from the winui skill
+         defaults — do not "fix" back to packaged. -->
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <Platforms>x64</Platforms>

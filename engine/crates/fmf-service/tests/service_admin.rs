@@ -180,5 +180,37 @@ fn service_e2e_flush_survives_kill_and_restores() {
         "restore took {ready_in:?} — did it full-rescan instead of restoring?"
     );
 
+    // 4. Change-to-event latency (M2: USN→UI ≤1s; the engine-side debounce
+    //    is 200ms and the pipe push is the only extra hop). Subscribe, touch
+    //    a file on C:, expect IndexChanged within the budget — while the
+    //    short flush interval keeps periodic flushes firing around it.
+    id2 += 1;
+    let (h, _) = request(&mut s2, id2, opcode::SUBSCRIBE, &[]);
+    assert_eq!(h.status, codes::OK);
+    let tickle = std::env::temp_dir().join(format!("fmf-usn-latency-{}.tmp", std::process::id()));
+    let touched = Instant::now();
+    std::fs::write(&tickle, b"tick").unwrap();
+    let deadline = Duration::from_secs(5); // budget 1s; CI slack on top
+    let mut latency = None;
+    while touched.elapsed() < deadline {
+        let (eh, body) = read_frame(&mut s2).expect("event stream");
+        if eh.flags & FLAG_EVENT != 0 {
+            let ev = messages::EventWire::decode(&body).unwrap();
+            if ev.kind == 3 {
+                latency = Some(touched.elapsed());
+                break;
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tickle);
+    let latency = latency.expect("IndexChanged never arrived");
+    assert!(
+        latency < Duration::from_secs(1),
+        "USN→event took {latency:?} (budget 1s)"
+    );
+    eprintln!(
+        "M2 gate record: restore→ready {ready_in:?} (incl. process spawn), USN→event {latency:?}"
+    );
+
     let _ = std::fs::remove_dir_all(&data_dir);
 }

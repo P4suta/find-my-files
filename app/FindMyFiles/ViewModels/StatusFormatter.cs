@@ -17,6 +17,21 @@ public static class StatusFormatter
             ? "NTFS固定ドライブが見つかりません"
             : $"インデックス作成中: {string.Join(", ", volumes)}";
 
+    /// <summary>Status-bar transport badge: which engine the app talks to
+    /// right now (client type + live connection state).</summary>
+    public static string EngineMode(IEngineClient engine) => engine switch
+    {
+        FakeEngineClient => "fake",
+        FfiEngineClient => "管理者(in-proc)",
+        PipeEngineClient => engine.Connection switch
+        {
+            EngineConnectionState.Connected => "サービス接続",
+            EngineConnectionState.Reconnecting => "再接続中…",
+            _ => "接続中…",
+        },
+        _ => string.Empty,
+    };
+
     /// <summary>Status-bar line for a volume state change; falls back to the
     /// current text for states that carry no message.</summary>
     public static string Volume(VolumeStatus s, string current) => s.State switch

@@ -31,6 +31,11 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     public partial bool IncludeHiddenSystem { get; set; }
 
+    /// <summary>Status-bar badge: which engine transport is active
+    /// (サービス接続 / 再接続中… / 管理者(in-proc) / fake).</summary>
+    [ObservableProperty]
+    public partial string EngineModeText { get; set; } = string.Empty;
+
     public ResultsPresenter Results { get; }
     public SearchOrchestrator Search { get; }
     public NotificationCenter Notifications { get; }
@@ -53,8 +58,36 @@ public sealed partial class MainViewModel : ObservableObject
         _engine.EngineErrorOccurred += severity =>
             dispatcher.TryEnqueue(() =>
                 HandleEngineErrorAsync(severity).Forget("engine.error"));
+        _engine.ConnectionChanged += s => dispatcher.TryEnqueue(() => OnConnectionChanged(s));
+        EngineModeText = StatusFormatter.EngineMode(_engine);
 
         Notifications.AttachToNotifier();
+    }
+
+    /// <summary>The single persistent banner while the pipe reconnects —
+    /// held by reference so it never duplicates and is removed on recovery.
+    /// Non-Info notifications never auto-dissolve (NotificationCenter).</summary>
+    private AppNotification? _reconnectBanner;
+
+    private void OnConnectionChanged(EngineConnectionState state)
+    {
+        EngineModeText = StatusFormatter.EngineMode(_engine);
+        if (state == EngineConnectionState.Reconnecting)
+        {
+            if (_reconnectBanner is null)
+            {
+                _reconnectBanner = new AppNotification(
+                    NotifySeverity.Warning,
+                    "エンジンサービスに再接続しています…",
+                    "接続が回復すると結果は自動的に更新されます");
+                Notifications.Push(_reconnectBanner);
+            }
+        }
+        else if (state == EngineConnectionState.Connected && _reconnectBanner is not null)
+        {
+            Notifications.Remove(_reconnectBanner);
+            _reconnectBanner = null;
+        }
     }
 
     /// <summary>Startup sequence, in order: status text → StartIndexing →
@@ -113,11 +146,17 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
-    private void OnSearchFailed(Exception e) =>
+    private void OnSearchFailed(Exception e)
+    {
+        if (_engine.Connection == EngineConnectionState.Reconnecting)
+        {
+            return; // the persistent reconnect banner already explains this
+        }
         Notifications.Push(new AppNotification(
             NotifySeverity.Error,
             e is EngineException ? "検索に失敗しました" : "検索中に予期しないエラーが発生しました",
             e.Message));
+    }
 
     /// <summary>Engine diagnostics: pull the detail text behind the POD event.</summary>
     private async Task HandleEngineErrorAsync(int severity)

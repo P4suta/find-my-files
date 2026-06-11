@@ -24,29 +24,39 @@ find-my-files goes the other way: **Windows-only, file names only, as fast as Ev
 Content/property indexing, tags, previews, FTP/HTTP servers, FAT/exFAT/network drives (initially).
 Indexing file names only is *the* reason Everything is fast. Feature creep is a non-goal.
 
-## Why administrator rights?
+## Where did the admin prompt go?
 
 Reading the NTFS Master File Table and USN journal requires elevated volume access — the same
-constraint Everything has (it ships a privileged service). The MVP runs elevated; a split
-privileged-service + unprivileged-UI architecture is planned for v2.
+constraint Everything has. find-my-files splits that privilege off into a small Windows service
+(`fmf-engine`, LocalSystem with stripped privileges); the UI runs unprivileged and talks to it
+over a locked-down named pipe (same-user only — see `docs/SECURITY.md` for the threat model).
+
+```
+just service-install   # register + harden (elevated, once)
+just service-start
+```
+
+Without the service installed, the app offers to relaunch elevated and runs the engine
+in-process instead (`--engine=inproc`, the original MVP mode).
 
 By default, hidden/system files — and everything under hidden/system folders
 ($Recycle.Bin contents, `pagefile.sys`, `.git` internals…) — are excluded from
 results. A toolbar toggle brings them back instantly (they stay indexed).
 
-Known MVP limitations: drag & drop from Explorer into the (elevated) window does not work;
-names with unpaired surrogates are searchable but displayed with replacement characters.
+Known limitations: names with unpaired surrogates are searchable but displayed with
+replacement characters.
 
 ## Building
 
 Toolchain is pinned via [mise](https://mise.jdx.dev/) (`mise.toml`), tasks run via `just`:
 
 ```
-mise install      # rust + dotnet toolchains
-just setup        # toolchain + git hooks (lefthook)
-just build        # engine (cargo, release)
-just test         # engine unit tests
-just index C:     # index a volume from the CLI (elevated terminal required)
+mise install        # rust + dotnet toolchains
+just setup          # toolchain + git hooks (lefthook)
+just build          # engine (cargo, release)
+just test           # engine unit tests
+just service-dev    # run the engine service in the foreground (elevated)
+just index C:       # index a volume from the CLI (elevated terminal required)
 ```
 
 The WinUI 3 app lives in `app/` (from milestone M1 onward).
@@ -54,10 +64,10 @@ The WinUI 3 app lives in `app/` (from milestone M1 onward).
 ## Architecture
 
 ```
-WinUI 3 app (C#, elevated)  ──P/Invoke──▶  fmf_engine.dll (Rust)
-   └─ IEngineClient boundary                  └─ fmf-core: $MFT scan, USN tailing,
-      (swaps to a named-pipe client                in-memory index, query engine
-       when v2 splits off a service)
+WinUI 3 app (C#, unprivileged) ──named pipe──▶  fmf-service (Rust, LocalSystem)
+   └─ IEngineClient boundary                       └─ fmf-core: $MFT scan, USN tailing,
+       ├─ PipeEngineClient (default)                    in-memory index, query engine
+       └─ FfiEngineClient ──P/Invoke──▶  fmf_engine.dll (in-proc fallback, elevated)
 ```
 
 See `docs/ARCHITECTURE.md` for the FFI contract and `docs/RESEARCH.md` for the verified

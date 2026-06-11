@@ -1,7 +1,9 @@
 using System.Globalization;
 using FindMyFiles.Engine;
+using FindMyFiles.Tests.TestDoubles;
 using FindMyFiles.ViewModels;
 using Xunit;
+using static FindMyFiles.Tests.TestDoubles.Polling;
 
 namespace FindMyFiles.Tests;
 
@@ -62,5 +64,37 @@ public sealed class StatusFormatterTests
     {
         var status = new VolumeStatus("C:", (VolumeState)99, 0);
         Assert.Equal("前のテキスト", StatusFormatter.Volume(status, "前のテキスト"));
+    }
+
+    [Fact]
+    public void EngineMode_FakeClient_SaysFake()
+    {
+        using var fake = new FakeEngineClient();
+        Assert.Equal("fake", StatusFormatter.EngineMode(fake));
+    }
+
+    [Fact]
+    public void EngineMode_PipeBeforeFirstConnect_SaysConnecting()
+    {
+        using var pipe = new PipeEngineClient(
+            "fmf-test-mode-" + Guid.NewGuid().ToString("N"), autoStart: false);
+        Assert.Equal("接続中…", StatusFormatter.EngineMode(pipe));
+    }
+
+    [Fact]
+    public async Task EngineMode_PipeConnected_SaysServiceConnection()
+    {
+        using var server = new FakePipeServer();
+        using var client = new PipeEngineClient(server.PipeName);
+        await WaitUntilAsync(
+            () => client.Connection == EngineConnectionState.Connected, "connected");
+        Assert.Equal("サービス接続", StatusFormatter.EngineMode(client));
+    }
+
+    [Fact]
+    public void EngineMode_UnknownClientType_IsEmpty()
+    {
+        using var stub = new StubEngineClient();
+        Assert.Equal(string.Empty, StatusFormatter.EngineMode(stub));
     }
 }

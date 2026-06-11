@@ -394,6 +394,32 @@ fn drop_fault_severs_the_connection() {
 }
 
 #[test]
+fn page_roundtrip_stays_inside_the_latency_budget() {
+    // 遅延予算 (ARCHITECTURE.md): ResultPage 64行 p99 ≤5ms。ループバックの
+    // RTT は通常 ~0.1-0.3ms — 5ms はサーマルドリフト下でも余裕の絶対線で、
+    // ここで破れたら設計の問題(直列化・コピー過多)を疑う。
+    let hx = start("latency", false);
+    let mut c = Client::hello(&hx.pipe_name);
+    let (_, Some((rid, _))) = c.query("alpha") else {
+        panic!()
+    };
+    let mut samples: Vec<std::time::Duration> = (0..200)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            let (status, _) = c.page(rid, 0, 64);
+            assert_eq!(status, codes::OK);
+            t.elapsed()
+        })
+        .collect();
+    samples.sort();
+    let p99 = samples[samples.len() * 99 / 100];
+    assert!(
+        p99 < std::time::Duration::from_millis(5),
+        "ResultPage p99 {p99:?} blew the 5ms budget"
+    );
+}
+
+#[test]
 fn lag_fault_delays_pages_not_queries() {
     let hx = start("lag", true);
     let mut c = Client::hello(&hx.pipe_name);
