@@ -46,6 +46,7 @@
 - **4GiB超ファイル = 10件(0.0008%)** → size列 u32+オーバーフロー側テーブルは余裕で成立
 - 原文オーバーフロー化の予測節約: 全entry u32カラム方式 **−17.7B/entry**、ソート済みペア方式 −19.6B/entry(後者はresidual毎の二分探索コストが乗るため、p99リスク回避で前者を採用)
 - 参考(計測時点の収支): 計上126.3B/entry、WS 142B/entry(172.1MiB)
+- **最適化後(同日、perf/data-driven-macro-opt 完了時)**: 計上 **88.3B/entry**、WS **119.9MiB = 99B/entry**(M2ゲート110Bを7B余裕でクリア)。内訳: FRN索引 keys 削除 −8B / perm_size+perm_mtime 遅延化 −8B / size u32+overflow −4B / 原文 fold-overflow 化 −16B / スキャン一時物アリーナ化 −4.3MiB。スナップショット 128.6→92.4MiB、restore p50 97→81ms、scan 2.2→2.0s、USNバッチマージ 54.6→2.0ms@1M
 
 ## 却下済み最適化(数値根拠つき。再提案しない)
 

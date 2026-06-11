@@ -28,9 +28,9 @@ v2(サービス分離)では `fmf-service` crate(fmf-core を再利用)+ `PipeEn
 
 ```
 fmf-core/src/
-├─ index/        mod(型+再エクスポート) / core(VolumeIndex+読み取り+派生キャッシュ)
+├─ index/        mod(型+再エクスポート+in-placeマージ) / core(VolumeIndex+読み取り+派生キャッシュ)
 │                / mutate(USNミューテーション) / snapshot(永続化、unsafe POD はここに封じ込め)
-│                / builder(2パス構築+EXCLUDED伝播) / testutil
+│                / builder(2パス構築+EXCLUDED伝播) / compact(コンパクション) / frn / testutil
 ├─ query/        mod(AST/compile 公開面) / exec(searchドライバループ+materialize)
 │                / sweep(pool-sweep候補生成) / matchers(残余評価) / memo(DirPaths/OffsetTable)
 ├─ engine/       mod(Engine+ライフサイクル+イベント) / volume(VolumeSlot+スレッド防火壁+install_index)
@@ -51,7 +51,9 @@ app/FindMyFiles/
 
 ## エンジン内部の要点
 
-- **VolumeIndex(ボリューム毎、struct-of-arrays)**: 名前プール2本(表示用 WTF-8 原文+simple case fold 済み検索用。オフセット同期)/ name_off(u32)+name_len(u16) / parent(EntryId=u32) / size(u64) / mtime(i64, FILETIME) / frn(u64) / flags(is_dir|tombstone|reparse) / **FRN→EntryId はソート済み順列**(index/frn.rs: keys u64+ids u32=12B/entry。旧FxHashMapはcapacityパディング込み~25B/entryで最大のRAM行だった)/ fast sort 用順列配列3本(name/size/mtime)。パス文字列は保持せず親チェーンで遅延構築。削除は tombstone、閾値超でコンパクション。
+- **VolumeIndex(ボリューム毎、struct-of-arrays)**: 名前は**fold-overflow レイアウト**(index/core.rs) — 連続スイープ可能なプールは fold 済み `lower_pool` の1本だけで、原文は fold と異なる場合(実C:実測 26.8%、docs/RESEARCH.md)のみ `orig_pool` に格納し `orig_off`(u32、`u32::MAX`=fold同一)で参照。`name()` は fold 同一エントリでは lower スライスをそのまま貸す(バイト同一)。name_off(u32)+name_len(u16)(fold は長さ保存、wtf8.rs)/ parent(EntryId=u32)/ **size は u32 カラム+オーバーフロー map**(4GiB 超は実C:で10件 — sentinel `u32::MAX`)/ mtime(i64, FILETIME)/ frn(u64)/ flags(is_dir|tombstone|reparse|hidden|system|excluded)/ **FRN→EntryId はソート済み id 順列のみ**(index/frn.rs: ids u32=4B/entry。キーは frn カラムを間接参照 — 検索ホットパスは触らないので+1ミスで済む)/ fast sort 順列は **name の1本のみ常時維持**。size/mtime 順は derived cache の遅延順列(query/memo.rs の SizePerm/MtimePerm: 初回ソートクエリで par_sort 一回、以後世代毎に差分マージ、非永続)。パス文字列は保持せず親チェーンで遅延構築。削除は tombstone、閾値超でコンパクション(下記)。
+- **USNバッチのマージは挿入位置二分探索+in-placeセグメント移動**(index/mod.rs `merge_sorted_tail`): バッチ(~1k)対既存(~1M)で全長要素比較・全長再アロケをやめ、O(batch·log n) 比較+copy_within 一回。実測 54.6ms→2.0ms/バッチ@1M。容量は `reserve_exact(max(add, len/64))` でスラック上限~1.6%。
+- **コンパクション(実装済み)**: volume スレッドがバッチ適用毎に判定(`len≥100k かつ tombstone_ratio>12.5% または dead_name_bytes>32MiB`)。**旧id昇順リマップで perm/FRN索引はソートなしの filter+remap**(O(n) コピー、生存エントリの相対順序が保存されるため)。read guard 下でコピー構築(クエリ並走可、書き手は volume スレッド1本)→ `install_index` で µs 級 swap+structural bump → 開いている結果ハンドルはハードSTALE→UI再クエリ。死んだ dir の子は root へ付け替え(push_raw の orphan 方針と同じ)。防御の世代チェック失敗は `compaction_aborts` カウンタ+破棄。
 - **FRN索引のlookup意味論**: 検索順=未マージ尾部(バッチ内の最新upsertが勝つ)→二分探索、**常にtombstone生存フィルタ**(削除=tombstoneのみ、unmap不要。rename/レコード再利用は同キー複数ペアになるが生存は常に高々1)。バッチ末尾の `merge_new_into_permutations` がperm群と同じ2-pointerマージで尾部を畳む。初回スキャン中はビルダがparent解決を遅延(全部finish()の並列パスで解決)するためO(n²)にならない。
 - **既定除外(EXCLUDED)**: flagsにH(hidden)/S(system)の生属性と、計算済みEXCLUDEDビット(自分がH|S、または祖先にH|Sがいる)を保持。クエリは既定でEXCLUDEDをスキップ(`include_hidden_system`で解除)。継承はスキャンfinish時にO(n)伝播、USN挿入/移動時に親から再計算。**制限**: 除外ブランチからのsubtree移動では配下のビットが次回リスキャンまで陳腐化(dir-rename制限と同類)。
 - **generation 2層**:
@@ -63,10 +65,10 @@ app/FindMyFiles/
 - **スレッド**: 初回スキャン=ボリューム毎1スレッド並列。USN追従=ボリューム毎1スレッド(ブロッキング読み→吸い尽くし→バッチ適用)。停止は `CancelSynchronousIo`。
 - **初回スキャンの内部並列**: $MFTを16MiBチャンクでストリーミング読みしつつ、(a) 専用I/OスレッドがチャンクN+1を先読み(read-aheadパイプライン、バッファ3本で上限RAM固定。スレッド起動失敗は`scan_pipeline_fallbacks`カウンタ+逐次読みに劣化)、(b) チャンク内はレコード境界1MiBサブレンジでrayon並列パース(fixup→属性抽出→WTF-8変換までワーカー側)。ワーカーバッチをチャンク順に追記するためEntryId割当は逐次版と決定的に一致(等価性ゲート=admin test `streaming_scan_matches_reference`)。
 - **deferred($ATTRIBUTE_LIST)名前解決はRAMから**: ターゲットは必ず拡張レコードで、ストリーミング中に全$MFTが手元を通る — $FILE_NAME持ち拡張レコードをパース時にキャッシュ(上限128Ki件≈128MiB一時、超過分は`ext_name_cache_skipped`+ディスクフォールバック)し、deferredパスをディスク読みゼロのCPU処理にする。実C:(20k件)実測: ディスク読み版2.9s(ボリューム直読みはハンドル数によらずカーネルで直列化されるため並列I/O不可)→ **8ms**。スキャン全体5.0s→2.1s(read 1.6sが律速)。
-- **検索実行**: クエリ→AST→`CompiledTerm` 列(コスト順: 数値フィルタ→memmem→wildcard/regex、AND短絡)。rayonで64kチャンク並列。smart case(全小文字needle→lower_pool、大文字含む→name_pool)。`dm:` はローカルTZ解釈。NFC/NFD正規化はしない(既知制約)。
+- **検索実行**: クエリ→AST→`CompiledTerm` 列(コスト順: 数値フィルタ→memmem→wildcard/regex、AND短絡)。rayonで64kチャンク並列。**スイープは常に lower_pool**(唯一の連続プール)。smart case で大文字を含む needle / Sensitive モードは **fold した needle のスーパーセットスイープ+原文 residual 検証**(原文一致⇒fold一致の含意。subsume.rs の bridge_needle と同じ代数)。residual には O(1) fast path: fold 不安定文字を含む needle は fold 同一名(73%)に絶対に現れない(`CTerm::exact_needle_unstable` + `orig_off` sentinel 一発)。`dm:` はローカルTZ解釈。NFC/NFD正規化はしない(既知制約)。
 - **派生キャッシュ(OffsetTable/DirPaths)**: content_generation毎に世代管理。OffsetTableはプール追記が常に末尾である性質を使い、世代遷移で**ソートなしの差分延長**(前世代テーブルを可能ならin-place再利用+追記分マージ。in-place dirリネームの旧ペアはstaleとして残し、sweepが`name_off`照合でスキップ)。stale比がn/8超で正常な方針切替としてフル再構築。ウォーターマーク不整合(起きないはずの状態)は warn+`offset_table_rebuild_fallbacks`+フル再構築。DirPathsはprewarmせず初回pathクエリで遅延構築(pathクエリを使わないセッションのRAMをディレクトリ全パス×2プール分節約)し、以後は**dir-topology世代**(`rename_dir_in_place`/dirの`reparent`のみが++)が不変な限り追記分のみの差分延長(合成1M実測: USNバッチ後の初回pathクエリ21ms→5ms)。dirリネーム/移動はフル再構築(正常な方針切替)。両キャッシュのバイト数は `IndexStats.derived_cache_bytes` としてB/entryゲートの分母に計上。
 - **n-gram(trigram)索引は不採用(2026-06判定・数値根拠つき)**: 合成1M件でのコールド3文字クエリは約2.9ms(クエリキャッシュMISS+派生キャッシュwarm、materialize込み)で、判定基準「per-volume scan_us p99 > 25ms @1M」を一桁下回る。線形プールスイープ(SIMD memmem)+インクリメンタル検索+OffsetTable差分延長で予算内のため、posting維持コスト(RAM ≤110B/file制約下で+10〜15B/file、USNバッチ毎の差分維持)に見合わない。**再検討トリガ**(全て満たす場合のみ): (1)キャッシュMISS時コールド3文字 scan_us p99>25ms@1M (2)`fmf stats --trigram-estimate` の実測見積もり≤15B/fileかつ合計≤110B/file (3)posting差分維持≤2ms/バッチ (4)1ボリューム400万件超の実需要。
-- **永続化**: `{index_dir}\{volume-guid}.fmfidx`。自前バイナリ(magic+version+JournalID+最終USN+セクションテーブル+生列ダンプ+xxhash64)。temp→`MoveFileEx(REPLACE_EXISTING)`。起動時: ロード→検証→USN再生で追いつき→ライブ追従。失敗は常にフルリスキャンへ。
+- **永続化**: `{index_dir}\{volume-guid}.fmfidx`。自前バイナリ **FMFIDX04**(magic+JournalID+最終USN+生列ダンプ+xxhash64。セクション: lower_pool / orig_pool / orig_off / name_off / name_len / parent / size_lo / size-overflow ids+sizes / mtime / frn / flag / perm_name)。ロード時は checksum に加え **全スライス境界とオーバーフロー対応の構造検証**(壊れた入力で panic せず Err→リスキャン)。size/mtime 順列と FRN 索引は非永続(初回利用時/復元時に再構築)。temp→`MoveFileEx(REPLACE_EXISTING)`。起動時: ロード→検証→USN再生で追いつき→ライブ追従。失敗は常にフルリスキャンへ。実C: 1.27M件で 92.4MiB。
 
 ## FFI 契約(C ABI)
 
@@ -148,7 +150,7 @@ int32_t fmf_last_error(char* buf, uint32_t* len);
 - **diagリング**(fmf-core::diag): WARN以上のtracingイベント+panic(バックトレース付き)を直近128件保持。`MetricsSnapshot.recent_errors`に常時含まれる
 - **panic**: グローバルフックで捕捉→ログ+リング。volume threadは`catch_unwind`の防火壁付きで、panicしてもUIには必ず`VolumeFailed`が届く(無言のハングは起きない)
 - **イベント種6 `FMF_EVENT_ENGINE_ERROR`**: diagイベント発生のPOD通知(entries=severity 1=warn/2=error/3=panic)。詳細テキストはstats JSONからpull(push通知+pull詳細)
-- **劣化カウンタ**(`MetricsSnapshot.counters`、0でなければF12に表示): stat_fetch_failures / usn_batches_truncated / snapshot_load_failures / snapshot_save_failures / deferred_names_unresolved / corrupt_mft_records / journal_rescans / scan_pipeline_fallbacks(スキャンのread-ahead I/Oスレッド起動失敗→逐次読みに劣化)/ offset_table_rebuild_fallbacks(オフセットテーブルのウォーターマーク不整合→フル再構築に劣化)
+- **劣化カウンタ**(`MetricsSnapshot.counters`、0でなければF12に表示): stat_fetch_failures / usn_batches_truncated / snapshot_load_failures / snapshot_save_failures / deferred_names_unresolved / corrupt_mft_records / journal_rescans / scan_pipeline_fallbacks(スキャンのread-ahead I/Oスレッド起動失敗→逐次読みに劣化)/ offset_table_rebuild_fallbacks(オフセットテーブルのウォーターマーク不整合→フル再構築に劣化)/ lazy_perm_rebuild_fallbacks(遅延ソート順列の同種防御)/ compaction_aborts(コンパクション中の世代不整合→コピー破棄。単一書き手不変条件の破れ検知)
 - **C#規約**: fire-and-forgetは必ず `task.Forget(area)`(例外→app.log+InfoBar)。シェル操作は`ShellOps`経由。グローバル例外ハンドラがクラッシュマーカーを書き、次回起動時に通知
 - **診断コピー**: F12パネルの「診断情報をコピー」= stats JSON+app.log末尾+環境情報
 
