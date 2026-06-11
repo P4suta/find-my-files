@@ -183,6 +183,65 @@ pub fn install_panic_hook() {
     });
 }
 
+/// Resolves the engine log directory: an explicit override (config key,
+/// CLI flag) wins; the machine-wide default is `%ProgramData%\find-my-files\logs`.
+/// The one implementation of this rule — every entry point (FFI, service,
+/// CLI) resolves through here (ADR-0018; the rule's prose lives in
+/// docs/ARCHITECTURE.md).
+pub fn resolve_log_dir(explicit: Option<std::path::PathBuf>) -> std::path::PathBuf {
+    explicit.unwrap_or_else(|| {
+        let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
+        std::path::Path::new(&base)
+            .join("find-my-files")
+            .join("logs")
+    })
+}
+
+/// The one diagnostics bootstrap: file/stderr logging + panic capture +
+/// diag-ring wiring, idempotent — FFI `fmf_engine_create`, the service
+/// entry points and the CLI all call exactly this (ADR-0018).
+pub fn init_diag(log_dir: Option<&std::path::Path>, level: &str) {
+    init_logging(log_dir, level);
+    install_panic_hook();
+}
+
+/// Full error cause chain as one line — the single implementation behind
+/// the FFI `fmf_last_error` detail and the pipe error-response payload.
+/// Capped at 4 KiB (a pathological chain of nested I/O errors must not
+/// balloon a frame); the cap is part of the contract's error-detail spec.
+pub fn error_chain(e: &dyn std::error::Error) -> String {
+    const CAP: usize = 4096;
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(cause) = src {
+        s.push_str(" — caused by: ");
+        s.push_str(&cause.to_string());
+        src = cause.source();
+    }
+    if s.len() > CAP {
+        let mut end = CAP;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push('…');
+    }
+    s
+}
+
+/// 劣化パス(フォールバックで回復するもの)の唯一の記録手段: warn と
+/// カウンタ増分を不可分に行う(「黙らない」の構文形 — ADR-0018)。
+/// `rg degrade!` が劣化パスの全列挙になる。バッチ経路(スキャン内部)は
+/// stats フィールドで劣化を返し、worker 層で一括して counters へ写像する
+/// (ホットパスにマクロを散らさない)。
+#[macro_export]
+macro_rules! degrade {
+    ($counter:expr, $($arg:tt)*) => {{
+        $crate::metrics::Counters::bump(&$counter);
+        tracing::warn!($($arg)*);
+    }};
+}
+
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
 /// Initialize process-wide logging once. `log_dir = Some(..)` writes a daily

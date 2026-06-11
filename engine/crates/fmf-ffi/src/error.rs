@@ -12,17 +12,9 @@ pub(crate) fn set_error(msg: impl Into<String>) {
     LAST_ERROR.with(|e| *e.borrow_mut() = msg.into());
 }
 
-/// Full cause chain — "query parse: …" alone hides the why.
-pub(crate) fn error_chain(e: &dyn std::error::Error) -> String {
-    let mut s = e.to_string();
-    let mut src = e.source();
-    while let Some(cause) = src {
-        s.push_str(" — caused by: ");
-        s.push_str(&cause.to_string());
-        src = cause.source();
-    }
-    s
-}
+/// Full cause chain — fmf-core::diag owns the single implementation
+/// (4 KiB cap included; shared with the pipe error responses — ADR-0018).
+pub(crate) use fmf_core::diag::error_chain;
 
 pub(crate) fn guard<F: FnOnce() -> i32>(f: F) -> i32 {
     match catch_unwind(AssertUnwindSafe(f)) {

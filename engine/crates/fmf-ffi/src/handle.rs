@@ -49,25 +49,20 @@ pub unsafe extern "C" fn fmf_engine_create(
             return FMF_E_INVALID_ARG;
         };
 
-        // Logging + panic capture first: everything after this point is
-        // observable (file log, diag ring, ENGINE_ERROR events).
-        let log_dir = parsed
-            .get("log_dir")
-            .and_then(|v| v.as_str())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                let base =
-                    std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
-                std::path::Path::new(&base)
-                    .join("find-my-files")
-                    .join("logs")
-            });
+        // Diagnostics first: everything after this point is observable
+        // (file log, diag ring, ENGINE_ERROR events). Resolution rule and
+        // bootstrap live in fmf-core::diag — the single home (ADR-0018).
+        let log_dir = fmf_core::diag::resolve_log_dir(
+            parsed
+                .get("log_dir")
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from),
+        );
         let log_level = parsed
             .get("log_level")
             .and_then(|v| v.as_str())
             .unwrap_or("info");
-        fmf_core::diag::init_logging(Some(&log_dir), log_level);
-        fmf_core::diag::install_panic_hook();
+        fmf_core::diag::init_diag(Some(&log_dir), log_level);
 
         let engine = match Engine::new(EngineConfig {
             index_dir: index_dir.into(),

@@ -120,8 +120,7 @@ define_windows_service!(ffi_service_main, service_main);
 fn service_main(_args: Vec<OsString>) {
     let data_dir = config::default_data_dir();
     let cfg = config::ServiceConfig::load(&data_dir.join("service.json"));
-    fmf_core::diag::init_logging(Some(&data_dir.join("logs")), &cfg.log_level);
-    fmf_core::diag::install_panic_hook();
+    fmf_core::diag::init_diag(Some(&data_dir.join("logs")), &cfg.log_level);
 
     let status_handle =
         match service_control_handler::register(SERVICE_NAME, |control| match control {

@@ -1,0 +1,6 @@
+# 「黙らない」の機械強制(ADR-0018): 境界層での黙ったフォールバック禁止。
+# 劣化は fmf_core::degrade!(warn+カウンタ不可分)+明示のフォールバックで。
+disallowed-methods = [
+  { path = "core::result::Result::unwrap_or_default", reason = "silent degradation at the boundary — use fmf_core::degrade! and an explicit fallback (ADR-0018)" },
+  { path = "core::option::Option::unwrap_or_default", reason = "silent degradation at the boundary — make the fallback explicit (ADR-0018)" },
+]

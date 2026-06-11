@@ -8,6 +8,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use fmf_core::diag::error_chain;
 use fmf_core::engine::{Engine, EngineError, ResultSet};
 use fmf_core::query::QueryOptions;
 use fmf_proto::limits::MAX_RESULTS_PER_CONN;
@@ -193,6 +194,11 @@ impl Connection {
                     // the on-screen result survives query bursts.
                     if let Some((&victim, _)) = results.iter().min_by_key(|(_, e)| e.last_used) {
                         results.remove(&victim);
+                        fmf_core::degrade!(
+                            self.engine.metrics().counters.pipe_results_evicted,
+                            result_id = victim,
+                            "result handle LRU-evicted at the per-connection cap"
+                        );
                     }
                 }
                 results.insert(
@@ -203,7 +209,20 @@ impl Connection {
                         lagged,
                     },
                 );
-                let trace_json = serde_json::to_vec(&trace).unwrap_or_default();
+                // 黙らない: a trace serialization failure is counted and
+                // warned; the query itself succeeded, so the client gets
+                // its result with an (explicitly) empty trace.
+                let trace_json = match serde_json::to_vec(&trace) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        fmf_core::degrade!(
+                            self.engine.metrics().counters.trace_serialize_failures,
+                            error = %e,
+                            "query trace serialization failed — replying with an empty trace"
+                        );
+                        Vec::new()
+                    }
+                };
                 Outcome::Reply(
                     codes::OK,
                     messages::QueryRespHead {
@@ -251,16 +270,4 @@ impl Connection {
             Err(e) => Outcome::Reply(codes::IO, e.to_string().into_bytes()),
         }
     }
-}
-
-/// Full cause chain (same shape as fmf-ffi's error detail).
-fn error_chain(e: &dyn std::error::Error) -> String {
-    let mut s = e.to_string();
-    let mut src = e.source();
-    while let Some(cause) = src {
-        s.push_str(" — caused by: ");
-        s.push_str(&cause.to_string());
-        src = cause.source();
-    }
-    s
 }

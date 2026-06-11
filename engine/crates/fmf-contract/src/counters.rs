@@ -21,4 +21,8 @@ pub const COUNTER_NAMES: &[&str] = &[
     "pipe_malformed_frames",
     "pipe_events_dropped",
     "pipe_connections_rejected",
+    "deferred_name_cache_overflow",
+    "deferred_name_read_failures",
+    "pipe_results_evicted",
+    "trace_serialize_failures",
 ];

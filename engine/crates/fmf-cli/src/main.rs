@@ -116,8 +116,7 @@ fn date_resolver() -> impl query::DateResolver {
 
 fn main() {
     // Same pipeline as the DLL: stderr log + diag ring + panic capture.
-    fmf_core::diag::init_logging(None, "info");
-    fmf_core::diag::install_panic_hook();
+    fmf_core::diag::init_diag(None, "info");
 
     let cli = Cli::parse();
     let result = match cli.command {

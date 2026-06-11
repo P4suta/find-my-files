@@ -121,6 +121,10 @@ public sealed class CountersData
     public ulong PipeMalformedFrames { get; set; }
     public ulong PipeEventsDropped { get; set; }
     public ulong PipeConnectionsRejected { get; set; }
+    public ulong DeferredNameCacheOverflow { get; set; }
+    public ulong DeferredNameReadFailures { get; set; }
+    public ulong PipeResultsEvicted { get; set; }
+    public ulong TraceSerializeFailures { get; set; }
 }
 
 // ── Native PODs (LayoutKind.Explicit: offsets are the Rust offset_of!

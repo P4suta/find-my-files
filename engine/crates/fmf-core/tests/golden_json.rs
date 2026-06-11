@@ -233,6 +233,10 @@ fn metrics_snapshot_json_shape_is_pinned() {
             pipe_malformed_frames: 72,
             pipe_events_dropped: 73,
             pipe_connections_rejected: 74,
+            deferred_name_cache_overflow: 75,
+            deferred_name_read_failures: 76,
+            pipe_results_evicted: 77,
+            trace_serialize_failures: 78,
         },
         recent_errors: vec![ErrorEvent {
             seq: 81,

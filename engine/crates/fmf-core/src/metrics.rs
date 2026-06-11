@@ -186,6 +186,18 @@ pub struct Counters {
     pub pipe_events_dropped: std::sync::atomic::AtomicU64,
     /// Pipe server: a client was turned away at the instance cap.
     pub pipe_connections_rejected: std::sync::atomic::AtomicU64,
+    /// Scan: the extension-record name cache hit its capacity; remaining
+    /// deferred names fall back to per-record disk reads.
+    pub deferred_name_cache_overflow: std::sync::atomic::AtomicU64,
+    /// Scan: a deferred-name disk read failed (the entry keeps a
+    /// placeholder name until the next rescan).
+    pub deferred_name_read_failures: std::sync::atomic::AtomicU64,
+    /// Pipe server: a result handle was LRU-evicted at the per-connection
+    /// cap; its next page fetch answers STALE("evicted").
+    pub pipe_results_evicted: std::sync::atomic::AtomicU64,
+    /// QueryTrace JSON serialization failed; the response carried an empty
+    /// trace (the query itself succeeded).
+    pub trace_serialize_failures: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -204,6 +216,10 @@ pub struct CountersSnapshot {
     pub pipe_malformed_frames: u64,
     pub pipe_events_dropped: u64,
     pub pipe_connections_rejected: u64,
+    pub deferred_name_cache_overflow: u64,
+    pub deferred_name_read_failures: u64,
+    pub pipe_results_evicted: u64,
+    pub trace_serialize_failures: u64,
 }
 
 /// The query layer has no `MetricsHub` handle (its degradations normally go
@@ -248,6 +264,10 @@ impl Counters {
             pipe_malformed_frames: self.pipe_malformed_frames.load(Relaxed),
             pipe_events_dropped: self.pipe_events_dropped.load(Relaxed),
             pipe_connections_rejected: self.pipe_connections_rejected.load(Relaxed),
+            deferred_name_cache_overflow: self.deferred_name_cache_overflow.load(Relaxed),
+            deferred_name_read_failures: self.deferred_name_read_failures.load(Relaxed),
+            pipe_results_evicted: self.pipe_results_evicted.load(Relaxed),
+            trace_serialize_failures: self.trace_serialize_failures.load(Relaxed),
         }
     }
 }
