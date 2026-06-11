@@ -12,6 +12,17 @@ namespace FindMyFiles.Tests.TestDoubles;
 /// the client reassembles frames across arbitrary boundaries. Requests are
 /// handled concurrently (out-of-order completion is wire-legal), so a held
 /// response never blocks the next incoming frame.
+///
+/// Mimicry scope and guarantees: the wire is faithful — every frame this
+/// server emits is well-formed (PipeProtocol codecs both ways), the
+/// handshake sequence, response correlation and event push match
+/// fmf-service. The semantics behind the wire are deliberately shallow:
+/// Query ignores the query text and always answers Ok from
+/// <see cref="Rows"/> (no syntax verdicts), results never go stale on their
+/// own, nothing is indexed. Tests that need behavioral semantics (e.g. the
+/// contract suite's QuerySyntax case) script them through
+/// <see cref="Handler"/>; tests that need the real semantics use the real
+/// service (FMF_PIPE_TESTS).
 /// </summary>
 public sealed class FakePipeServer : IDisposable
 {

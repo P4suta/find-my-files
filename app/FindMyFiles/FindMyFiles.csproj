@@ -23,6 +23,12 @@
 
   <ItemGroup>
     <Content Include="Assets\AppIcon.ico" />
+    <!-- Shared syntax fixture (ADR-0018): FakeEngineClient's query-syntax
+         verdicts come from the same golden file the Rust parser tests pin,
+         so the fake cannot drift from the real engine's rejections. -->
+    <Content Include="..\..\contract\golden\invalid_queries.json"
+             Link="golden\invalid_queries.json"
+             CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

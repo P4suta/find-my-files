@@ -7,6 +7,12 @@ namespace FindMyFiles.Tests.TestDoubles;
 /// caller-controlled TaskCompletionSources — the test decides when (and in
 /// which order) each query completes, which makes generation/supersede races
 /// fully deterministic.
+///
+/// Recording-only: this stub does NOT claim contract conformance and is
+/// deliberately excluded from EngineClientContractTests — queries never fail
+/// with QuerySyntaxException, nothing goes stale, cancellation is ignored.
+/// Use <see cref="FindMyFiles.Engine.FakeEngineClient"/> when a test needs a
+/// contract-conforming in-proc engine.
 /// </summary>
 public sealed class StubEngineClient : IEngineClient
 {
@@ -45,17 +51,20 @@ public sealed class StubEngineClient : IEngineClient
 
     public void RaiseIndexChanged(string volume) => IndexChanged?.Invoke(volume);
 
-    public Task<IReadOnlyList<string>> ListVolumesAsync() =>
+    public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<string>>(["F:"]);
 
-    public Task StartIndexingAsync(IReadOnlyList<string> volumes) => Task.CompletedTask;
+    public Task StartIndexingAsync(
+        IReadOnlyList<string> volumes, CancellationToken ct = default) => Task.CompletedTask;
 
-    public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync() =>
+    public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<VolumeStatus>>([]);
 
-    public Task<EngineStatsData?> GetStatsAsync() => Task.FromResult<EngineStatsData?>(null);
+    public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default) =>
+        Task.FromResult<EngineStatsData?>(null);
 
-    public Task<SearchOutcome> SearchAsync(string query, SearchOptions options)
+    public Task<SearchOutcome> SearchAsync(
+        string query, SearchOptions options, CancellationToken ct = default)
     {
         if (ThrowOnSearch is { } ex)
         {

@@ -20,11 +20,6 @@ public sealed class GoldenCorpusTests
         Environment.GetEnvironmentVariable("FMF_GOLDEN_DIR")
         ?? Path.Combine(AppContext.BaseDirectory, "golden");
 
-    private static readonly JsonSerializerOptions SnakeCase = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-    };
-
     private static byte[] Load(string file) =>
         File.ReadAllBytes(Path.Combine(GoldenDir, file));
 
@@ -164,14 +159,17 @@ public sealed class GoldenCorpusTests
     public void StatsSnapshotJson_DeserializesIntoEngineStatsData()
     {
         var stats = JsonSerializer.Deserialize<EngineStatsData>(
-            Load("stats_snapshot.json"), SnakeCase)!;
+            Load("stats_snapshot.json"), EngineJson.SnakeCase)!;
 
         var trace = Assert.Single(stats.RecentQueries);
         Assert.Equal("win ext:txt", trace.Query);
+        Assert.Equal("refine", trace.Cache);
         Assert.Equal(81UL, trace.TotalUs);
         Assert.NotEqual(0UL, stats.P50Us);
         Assert.NotEqual(0UL, stats.P99Us);
-        Assert.Equal(26UL, Assert.Single(stats.RecentUsn).ApplyUs);
+        var usn = Assert.Single(stats.RecentUsn);
+        Assert.Equal(25UL, usn.StatFailures);
+        Assert.Equal(26UL, usn.ApplyUs);
         var index = Assert.Single(stats.Indexes);
         Assert.Equal("C:", index.Volume);
         Assert.Equal(41UL, index.Entries);
@@ -189,10 +187,11 @@ public sealed class GoldenCorpusTests
     public void QueryTraceJson_DeserializesIntoQueryTraceData()
     {
         var trace = JsonSerializer.Deserialize<QueryTraceData>(
-            Load("query_trace.json"), SnakeCase)!;
+            Load("query_trace.json"), EngineJson.SnakeCase)!;
 
         Assert.Equal("win ext:txt", trace.Query);
         Assert.Equal("pool-scan", trace.Driver);
+        Assert.Equal("refine", trace.Cache);
         Assert.False(trace.Unchanged);
         Assert.Equal(11UL, trace.ParseUs);
         Assert.Equal(12UL, trace.CompileUs);

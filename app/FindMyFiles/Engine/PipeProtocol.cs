@@ -302,12 +302,7 @@ internal static class PipeProtocol
         return b;
     }
 
-    // ── JSON payloads (op 4/5/6/10/12, snake_case) ──────────────────────
-
-    private static readonly JsonSerializerOptions JsonOpts = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-    };
+    // ── JSON payloads (op 4/5/6/10/12, snake_case via EngineJson) ───────
 
     private sealed class VolumeStatusJson
     {
@@ -325,7 +320,7 @@ internal static class PipeProtocol
     /// IndexStatus share this shape; state values equal VolumeState.</summary>
     public static List<VolumeStatus> DecodeVolumeStatuses(ReadOnlySpan<byte> payload)
     {
-        var wire = JsonSerializer.Deserialize<List<VolumeStatusJson>>(payload, JsonOpts) ?? [];
+        var wire = JsonSerializer.Deserialize<List<VolumeStatusJson>>(payload, EngineJson.SnakeCase) ?? [];
         return [.. wire.Select(w => new VolumeStatus(w.Volume, (VolumeState)w.State, w.Entries))];
     }
 
@@ -339,14 +334,14 @@ internal static class PipeProtocol
                 Entries = s.Entries,
             })
             .ToList();
-        return JsonSerializer.SerializeToUtf8Bytes(wire, JsonOpts);
+        return JsonSerializer.SerializeToUtf8Bytes(wire, EngineJson.SnakeCase);
     }
 
     public static byte[] EncodeIndexStartReq(IReadOnlyList<string> volumes) =>
-        JsonSerializer.SerializeToUtf8Bytes(new IndexStartJson { Volumes = [.. volumes] }, JsonOpts);
+        JsonSerializer.SerializeToUtf8Bytes(new IndexStartJson { Volumes = [.. volumes] }, EngineJson.SnakeCase);
 
     public static IReadOnlyList<string> DecodeIndexStartReq(ReadOnlySpan<byte> payload) =>
-        (JsonSerializer.Deserialize<IndexStartJson>(payload, JsonOpts) ?? new()).Volumes;
+        (JsonSerializer.Deserialize<IndexStartJson>(payload, EngineJson.SnakeCase) ?? new()).Volumes;
 
     private static void CheckLen(string what, ReadOnlySpan<byte> payload, int expected)
     {

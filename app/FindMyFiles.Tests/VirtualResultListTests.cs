@@ -96,6 +96,64 @@ public sealed class VirtualResultListTests
         Assert.Equal(10, _list.Count);
     }
 
+    // The two-layer protection against fetches of a dead epoch is pinned by
+    // two tests: the one above lets the old fetch COMPLETE WITH DATA (stub
+    // ignores ct) and proves the epoch check drops it; the one below makes
+    // the old fetch OBSERVE THE CANCELLATION and proves the per-epoch token
+    // is wired through GetRangeAsync and that a cancelled fetch mutates
+    // nothing either. Both defenses must keep passing independently.
+    [Fact]
+    public void Reassign_CancelsInFlightFetches_AndACancelledFetchMutatesNothing()
+    {
+        SyncContext.RunContinuationsInline();
+        var old = new StubSearchResult(Rows.Many(10, "old"))
+        {
+            Gate = new TaskCompletionSource(),
+            HonorCancellation = true,
+        };
+        _list.Reassign(old, []);
+        _list.EnsureRange(0, 9); // one page, held in flight by the gate
+        Assert.Equal(1, old.FetchCount);
+        Assert.False(old.LastFetchToken.IsCancellationRequested); // live epoch
+
+        var newRows = Rows.Many(10, "new");
+        _list.Reassign(new StubSearchResult(newRows), SeedPage0(newRows));
+
+        // The epoch turn cancelled the old epoch's token…
+        Assert.True(old.LastFetchToken.IsCancellationRequested);
+
+        old.Gate!.SetResult(); // …the resumed fetch throws OperationCanceled…
+        _dispatcher.DrainQueue();
+
+        // …and nothing of the new result was touched.
+        Assert.Equal("new_000000.txt", Row(0).Name);
+        Assert.Equal(10, _list.Count);
+    }
+
+    [Fact]
+    public void RefreshInPlace_AlsoCancelsInFlightFetchesOfThePreviousEpoch()
+    {
+        SyncContext.RunContinuationsInline();
+        var oldRows = Rows.Many(10, "old");
+        var old = new StubSearchResult(oldRows)
+        {
+            Gate = new TaskCompletionSource(),
+            HonorCancellation = true,
+        };
+        _list.Reassign(old, []);
+        _list.EnsureRange(0, 9);
+        Assert.Equal(1, old.FetchCount);
+
+        var newRows = Rows.Many(10, "new"); // same count: the in-place path
+        _list.RefreshInPlace(new StubSearchResult(newRows), SeedPage0(newRows));
+
+        Assert.True(old.LastFetchToken.IsCancellationRequested);
+        old.Gate!.SetResult();
+        _dispatcher.DrainQueue();
+
+        Assert.Equal("new_000000.txt", Row(0).Name);
+    }
+
     [Fact]
     public void EnsureRange_StaleResult_RaisesBecameStaleOnce()
     {
@@ -231,18 +289,22 @@ public sealed class VirtualResultListTests
     public void RefreshInPlace_CountMismatch_FallsBackToAFullReset()
     {
         var rows = Rows.Many(10);
-        _list.Reassign(new StubSearchResult(rows), SeedPage0(rows));
+        var old = new StubSearchResult(rows);
+        _list.Reassign(old, SeedPage0(rows));
         var events = new List<NotifyCollectionChangedAction>();
         _list.CollectionChanged += (_, e) => events.Add(e.Action);
 
         // The engine guarantees identical results on this path; if the
         // guarantee ever breaks, the list must re-present, not lie.
         var different = Rows.Many(7);
-        _list.RefreshInPlace(new StubSearchResult(different), SeedPage0(different));
+        var fresh = new StubSearchResult(different);
+        _list.RefreshInPlace(fresh, SeedPage0(different));
 
         Assert.Equal([NotifyCollectionChangedAction.Reset], events);
         Assert.Equal(7, _list.Count);
         Assert.Equal(different[0].Name, Row(0).Name);
+        Assert.True(old.Disposed);   // the Reassign fallback owns the swap…
+        Assert.False(fresh.Disposed); // …and the new result stays live
     }
 
     [Fact]

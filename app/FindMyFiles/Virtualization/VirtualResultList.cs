@@ -49,6 +49,11 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     private readonly HashSet<long> _inFlight = [];
     private ISearchResult? _result;
     private int _epoch;
+
+    // Per-epoch cancellation, second line of defense behind the epoch check:
+    // the epoch check makes late completions fall on the floor; the token
+    // stops them from wasting transport work first. Both must stay.
+    private CancellationTokenSource _fetchCts = new();
     private bool _disposed;
     private bool _fetchFailureNotified;
 
@@ -73,14 +78,22 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
 
     /// <summary>
     /// Atomically replace the backing result: bump the epoch (in-flight
-    /// fetches for the old result drop their data), drop the page cache,
-    /// apply the pre-fetched seeds, then raise one Reset. UI thread only —
-    /// a cross-thread CollectionChanged crashes XAML.
+    /// fetches for the old result are cancelled, and their completions drop
+    /// their data either way), drop the page cache, apply the pre-fetched
+    /// seeds, then raise one Reset.
+    ///
+    /// Contract: UI thread only (a cross-thread CollectionChanged crashes
+    /// XAML); <paramref name="seeds"/> must be pages of
+    /// <paramref name="result"/> within its count; ownership of
+    /// <paramref name="result"/> transfers to this list (it is disposed by
+    /// the next Reassign/RefreshInPlace or by <see cref="Dispose"/>).
     /// </summary>
     public void Reassign(ISearchResult? result, IReadOnlyList<PageSeed> seeds)
     {
         EnsureUiThread(nameof(Reassign));
         _epoch++;
+        _fetchCts.Cancel();
+        _fetchCts = new CancellationTokenSource();
         var old = _result;
         _result = result;
         _pages.Clear();
@@ -105,7 +118,15 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// MVVM setters only notify on actual value changes, so an idle USN
     /// requery repaints nothing). Cached pages are marked unloaded so later
     /// scrolling re-fetches from the new handle, and the visible range is
-    /// re-ensured immediately for pages the seeds missed. UI thread only.
+    /// re-ensured immediately for pages the seeds missed.
+    ///
+    /// Contract: UI thread only; the engine must have verified
+    /// <paramref name="result"/> holds the same rows as the published one —
+    /// same Count required, a mismatch falls back to a full seeded
+    /// <see cref="Reassign"/> (Reset) rather than lying about membership;
+    /// seeds must be pages of <paramref name="result"/>; ownership of
+    /// <paramref name="result"/> transfers to this list. In-flight fetches
+    /// of the previous epoch are cancelled here too.
     /// </summary>
     public void RefreshInPlace(ISearchResult result, IReadOnlyList<PageSeed> seeds)
     {
@@ -123,6 +144,8 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
             return;
         }
         _epoch++;
+        _fetchCts.Cancel();
+        _fetchCts = new CancellationTokenSource();
         var old = _result;
         _result = result;
         _loaded.Clear();
@@ -228,16 +251,19 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         {
             if (!_loaded.Contains(page) && _inFlight.Add(page))
             {
-                FetchPageAsync(result, page, _epoch).Forget("virtualization.fetch");
+                FetchPageAsync(result, page, _epoch, _fetchCts.Token)
+                    .Forget("virtualization.fetch");
             }
         }
     }
 
-    private async Task FetchPageAsync(ISearchResult result, long page, int epoch)
+    private async Task FetchPageAsync(
+        ISearchResult result, long page, int epoch, CancellationToken ct)
     {
         try
         {
-            var data = await result.GetRangeAsync(page * PageSize, PageSize).ConfigureAwait(false);
+            var data = await result.GetRangeAsync(page * PageSize, PageSize, ct)
+                .ConfigureAwait(false);
             _dispatcher.TryEnqueue(() =>
             {
                 // Epoch check first: after a Reassign this fetch belongs to a
@@ -266,6 +292,20 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
                 }
                 _inFlight.Remove(page);
                 BecameStale?.Invoke();
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelled by an epoch turn (Reassign/RefreshInPlace) or
+            // Dispose — the second defense fired; nothing to fill. If this
+            // epoch is somehow still live, free the slot so the page can be
+            // re-fetched by a later visible-range pass.
+            _dispatcher.TryEnqueue(() =>
+            {
+                if (epoch == _epoch && !_disposed)
+                {
+                    _inFlight.Remove(page);
+                }
             });
         }
         catch (ObjectDisposedException)
@@ -317,6 +357,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     public void Dispose()
     {
         _disposed = true;
+        _fetchCts.Cancel(); // CTS stays undisposed: in-flight fetches still observe it
         _result?.Dispose();
     }
 

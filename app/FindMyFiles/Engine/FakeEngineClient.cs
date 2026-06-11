@@ -1,13 +1,23 @@
+using System.Text.Json;
+using FindMyFiles.Services;
+
 namespace FindMyFiles.Engine;
 
 /// <summary>
 /// Deterministic in-memory engine for UI tests and unelevated development
 /// (`--fake-engine`). 100k entries from a fixed seed; substring search only.
+/// Contract-conforming (EngineClientContractTests): query-syntax verdicts
+/// come from the shared golden fixture (contract/golden/invalid_queries.json,
+/// pinned by the real Rust parser — verdict drift is caught on the Rust
+/// side), cancellation is honored, and <see cref="BumpEpoch"/> lets tests
+/// drive the Stale→requery recovery path without a real engine.
 /// </summary>
 public sealed class FakeEngineClient : IEngineClient
 {
     private const int EntryCount = 100_000;
     private readonly List<RowData> _rows;
+    private readonly IReadOnlySet<string> _invalidQueries = LoadInvalidQueries();
+    private int _epoch;
 
     public event Action<string>? IndexChanged { add { } remove { } }
     public event Action<VolumeStatus>? VolumeUpdated { add { } remove { } }
@@ -52,18 +62,46 @@ public sealed class FakeEngineClient : IEngineClient
         }
     }
 
-    public Task<IReadOnlyList<string>> ListVolumesAsync() =>
+    /// <summary>The shared syntax fixture: queries the real engine rejects.
+    /// A missing/corrupt file degrades to accept-everything — loudly, never
+    /// fatally (the fake must keep working in stripped-down test hosts).</summary>
+    private static IReadOnlySet<string> LoadInvalidQueries()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "golden", "invalid_queries.json");
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
+            return doc.RootElement.GetProperty("queries").EnumerateArray()
+                .Select(q => q.GetString()!)
+                .ToHashSet(StringComparer.Ordinal);
+        }
+        catch (Exception ex)
+        {
+            FileLog.Warn(
+                "fake-engine",
+                $"invalid_queries.json not loadable ({path}) — accepting every query", ex);
+            return new HashSet<string>();
+        }
+    }
+
+    /// <summary>Test hook: structurally invalidate every result handed out
+    /// so far — their next GetRangeAsync throws <see cref="StaleResultException"/>,
+    /// exactly like a real index rebuild (UI Stale→requery recovery).</summary>
+    public void BumpEpoch() => Interlocked.Increment(ref _epoch);
+
+    public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<string>>(["F:"]);
 
-    public Task StartIndexingAsync(IReadOnlyList<string> volumes) => Task.CompletedTask;
+    public Task StartIndexingAsync(
+        IReadOnlyList<string> volumes, CancellationToken ct = default) => Task.CompletedTask;
 
-    public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync() =>
+    public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<VolumeStatus>>(
             [new("F:", VolumeState.Ready, (ulong)_rows.Count)]);
 
     private readonly List<QueryTraceData> _traces = [];
 
-    public Task<EngineStatsData?> GetStatsAsync()
+    public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default)
     {
         var stats = new EngineStatsData
         {
@@ -86,8 +124,15 @@ public sealed class FakeEngineClient : IEngineClient
         return Task.FromResult<EngineStatsData?>(stats);
     }
 
-    public Task<SearchOutcome> SearchAsync(string query, SearchOptions options)
+    public Task<SearchOutcome> SearchAsync(
+        string query, SearchOptions options, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+        if (_invalidQueries.Contains(query.Trim()))
+        {
+            throw new QuerySyntaxException(
+                $"syntax error (shared golden fixture): {query.Trim()}");
+        }
 #if DEBUG
         // Fault injection for end-to-end verification of the error pipeline
         // (InfoBar, F12 panel, app.log) without touching real volumes.
@@ -154,23 +199,31 @@ public sealed class FakeEngineClient : IEngineClient
         {
             _traces.RemoveAt(0);
         }
-        return Task.FromResult(new SearchOutcome(new FakeResult(list, pageLag), trace));
+        return Task.FromResult(new SearchOutcome(
+            new FakeResult(this, Volatile.Read(ref _epoch), list, pageLag), trace));
     }
 
     public void Dispose() { }
 
-    private sealed class FakeResult(List<RowData> rows, TimeSpan pageLag) : ISearchResult
+    private sealed class FakeResult(
+        FakeEngineClient owner, int epoch, List<RowData> rows, TimeSpan pageLag) : ISearchResult
     {
         public long Count => rows.Count;
 
-        public async Task<IReadOnlyList<RowData>> GetRangeAsync(long offset, int count)
+        public async Task<IReadOnlyList<RowData>> GetRangeAsync(
+            long offset, int count, CancellationToken ct = default)
         {
+            ct.ThrowIfCancellationRequested();
+            if (epoch != Volatile.Read(ref owner._epoch))
+            {
+                throw new StaleResultException(); // BumpEpoch invalidated us
+            }
             if (pageLag > TimeSpan.Zero)
             {
-                await Task.Delay(pageLag).ConfigureAwait(false);
+                await Task.Delay(pageLag, ct).ConfigureAwait(false);
             }
             var start = (int)Math.Min(offset, rows.Count);
-            var n = Math.Min(count, rows.Count - start);
+            var n = Math.Max(0, Math.Min(count, rows.Count - start));
             return rows.GetRange(start, n);
         }
 

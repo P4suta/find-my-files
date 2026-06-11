@@ -23,10 +23,16 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     public event Action<EngineConnectionState>? ConnectionChanged { add { } remove { } }
 
     public FfiEngineClient()
-    {
-        var indexDir = Path.Combine(
+        : this(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "find-my-files", "index");
+            "find-my-files", "index"))
+    {
+    }
+
+    /// <summary>Test seam (contract suite): a throwaway index dir keeps the
+    /// suite off %ProgramData% and out of the service's writer lock.</summary>
+    internal FfiEngineClient(string indexDir)
+    {
         var config = $$"""{"index_dir": {{System.Text.Json.JsonSerializer.Serialize(indexDir)}}}""";
         var rc = NativeEngine.fmf_engine_create(config, out _handle);
         if (rc != NativeEngine.Ok)
@@ -85,8 +91,10 @@ public sealed unsafe class FfiEngineClient : IEngineClient
 
     // The three volume calls are cheap in-proc, but the interface contract
     // is async (the pipe client crosses a process boundary) — Task.Run keeps
-    // the UI thread out of the FFI entirely.
-    public Task<IReadOnlyList<string>> ListVolumesAsync()
+    // the UI thread out of the FFI entirely. The ct goes to Task.Run: FFI
+    // calls are short and non-cancellable mid-flight, so cancellation takes
+    // effect at scheduling time (a pre-cancelled ct never crosses the FFI).
+    public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
     {
         var handle = _handle;
         return Task.Run<IReadOnlyList<string>>(() =>
@@ -103,7 +111,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                 result.Add(LabelOf(buf[i]));
             }
             return result;
-        });
+        }, ct);
     }
 
     private static string LabelOf(in NativeEngine.FmfVolumeStatus s)
@@ -119,7 +127,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         }
     }
 
-    public Task StartIndexingAsync(IReadOnlyList<string> volumes)
+    public Task StartIndexingAsync(IReadOnlyList<string> volumes, CancellationToken ct = default)
     {
         var handle = _handle;
         return Task.Run(() =>
@@ -150,10 +158,10 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                     }
                 }
             }
-        });
+        }, ct);
     }
 
-    public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync()
+    public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default)
     {
         var handle = _handle;
         return Task.Run<IReadOnlyList<VolumeStatus>>(() =>
@@ -171,15 +179,11 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                     LabelOf(buf[i]), (VolumeState)buf[i].State, buf[i].Entries));
             }
             return result;
-        });
+        }, ct);
     }
 
-    private static readonly System.Text.Json.JsonSerializerOptions JsonOpts = new()
-    {
-        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower,
-    };
-
-    public Task<SearchOutcome> SearchAsync(string query, SearchOptions options)
+    public Task<SearchOutcome> SearchAsync(
+        string query, SearchOptions options, CancellationToken ct = default)
     {
         var handle = _handle;
         return Task.Run(() =>
@@ -209,13 +213,13 @@ public sealed unsafe class FfiEngineClient : IEngineClient
             if (traceJson is not null)
             {
                 traceData = System.Text.Json.JsonSerializer
-                    .Deserialize<QueryTraceData>(traceJson, JsonOpts);
+                    .Deserialize<QueryTraceData>(traceJson, EngineJson.SnakeCase);
             }
             return new SearchOutcome(new FfiSearchResult(result, (long)count), traceData);
-        });
+        }, ct);
     }
 
-    public Task<EngineStatsData?> GetStatsAsync()
+    public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default)
     {
         var handle = _handle;
         return Task.Run(() =>
@@ -228,8 +232,9 @@ public sealed unsafe class FfiEngineClient : IEngineClient
             }
             return json is null
                 ? null
-                : System.Text.Json.JsonSerializer.Deserialize<EngineStatsData>(json, JsonOpts);
-        });
+                : System.Text.Json.JsonSerializer
+                    .Deserialize<EngineStatsData>(json, EngineJson.SnakeCase);
+        }, ct);
     }
 
     public void Dispose()
@@ -258,7 +263,8 @@ internal sealed unsafe class FfiSearchResult(IntPtr handle, long count) : SafeHa
         return NativeEngine.fmf_result_free(this.handle) == NativeEngine.Ok;
     }
 
-    public Task<IReadOnlyList<RowData>> GetRangeAsync(long offset, int count)
+    public Task<IReadOnlyList<RowData>> GetRangeAsync(
+        long offset, int count, CancellationToken ct = default)
     {
         return Task.Run<IReadOnlyList<RowData>>(() =>
         {
@@ -295,6 +301,6 @@ internal sealed unsafe class FfiSearchResult(IntPtr handle, long count) : SafeHa
                     DangerousRelease();
                 }
             }
-        });
+        }, ct);
     }
 }

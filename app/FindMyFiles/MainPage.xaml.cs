@@ -148,11 +148,12 @@ public sealed partial class MainPage : Page
     private void CopyDiag_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         var statsJson = ViewModel.Perf.Stats is { } s
-            ? System.Text.Json.JsonSerializer.Serialize(s, new System.Text.Json.JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower,
-            })
+            ? System.Text.Json.JsonSerializer.Serialize(
+                s,
+                new System.Text.Json.JsonSerializerOptions(Engine.EngineJson.SnakeCase)
+                {
+                    WriteIndented = true,
+                })
             : "(no stats yet)";
         var dump =
             $"find-my-files diagnostics {DateTimeOffset.Now:O}\n" +

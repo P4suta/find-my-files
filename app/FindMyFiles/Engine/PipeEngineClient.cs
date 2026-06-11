@@ -24,11 +24,6 @@ public sealed class PipeEngineClient : IEngineClient
     private static readonly TimeSpan InitialBackoff = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(5);
 
-    private static readonly JsonSerializerOptions JsonOpts = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-    };
-
     private readonly string _pipeName;
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -410,24 +405,33 @@ public sealed class PipeEngineClient : IEngineClient
         var tcs = new TaskCompletionSource<(int Status, byte[] Payload)>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
+        // The caller's ct joins the client-lifetime token: either one aborts
+        // the wait. Caller cancellation surfaces as OperationCanceledException;
+        // a client-lifetime cancellation (Dispose) keeps reading as
+        // EngineUnavailableException, same as before ct plumbing existed.
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, ct);
         try
         {
             var frame = PipeProtocol.EncodeFrame(opcode, 0, id, 0, payload);
-            await _writeLock.WaitAsync(ct).ConfigureAwait(false);
+            await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false);
             try
             {
-                await stream.WriteAsync(frame, ct).ConfigureAwait(false);
+                await stream.WriteAsync(frame, linked.Token).ConfigureAwait(false);
             }
             finally
             {
                 _writeLock.Release();
             }
-            return await tcs.Task.WaitAsync(RequestTimeout, ct).ConfigureAwait(false);
+            return await tcs.Task.WaitAsync(RequestTimeout, linked.Token).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
             throw new EngineUnavailableException(
                 $"request (opcode {opcode}) timed out after {RequestTimeout.TotalSeconds:F0}s");
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new EngineUnavailableException("engine client disposed");
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException)
         {
@@ -461,49 +465,52 @@ public sealed class PipeEngineClient : IEngineClient
 
     // ── IEngineClient ───────────────────────────────────────────────────
 
-    public async Task<IReadOnlyList<string>> ListVolumesAsync()
+    public async Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
     {
-        var payload = await RequestOkAsync(PipeProtocol.Op.ListVolumes, [], "ListVolumes")
+        var payload = await RequestOkAsync(PipeProtocol.Op.ListVolumes, [], "ListVolumes", ct)
             .ConfigureAwait(false);
         return [.. PipeProtocol.DecodeVolumeStatuses(payload).Select(s => s.Label)];
     }
 
-    public async Task StartIndexingAsync(IReadOnlyList<string> volumes)
+    public async Task StartIndexingAsync(
+        IReadOnlyList<string> volumes, CancellationToken ct = default)
     {
         await RequestOkAsync(
-            PipeProtocol.Op.IndexStart, PipeProtocol.EncodeIndexStartReq(volumes), "IndexStart")
+            PipeProtocol.Op.IndexStart, PipeProtocol.EncodeIndexStartReq(volumes), "IndexStart", ct)
             .ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<VolumeStatus>> GetStatusAsync()
+    public async Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default)
     {
-        var payload = await RequestOkAsync(PipeProtocol.Op.IndexStatus, [], "IndexStatus")
+        var payload = await RequestOkAsync(PipeProtocol.Op.IndexStatus, [], "IndexStatus", ct)
             .ConfigureAwait(false);
         return PipeProtocol.DecodeVolumeStatuses(payload);
     }
 
-    public async Task<SearchOutcome> SearchAsync(string query, SearchOptions options)
+    public async Task<SearchOutcome> SearchAsync(
+        string query, SearchOptions options, CancellationToken ct = default)
     {
         var resp = await RequestOkAsync(
-            PipeProtocol.Op.Query, PipeProtocol.EncodeQueryReq(options, query), "Query")
+            PipeProtocol.Op.Query, PipeProtocol.EncodeQueryReq(options, query), "Query", ct)
             .ConfigureAwait(false);
         var (resultId, count, traceJson) = PipeProtocol.DecodeQueryResp(resp);
         QueryTraceData? trace = null;
         if (traceJson.Length > 0)
         {
-            trace = JsonSerializer.Deserialize<QueryTraceData>(traceJson, JsonOpts);
+            trace = JsonSerializer.Deserialize<QueryTraceData>(traceJson, EngineJson.SnakeCase);
         }
         return new SearchOutcome(
             new PipeSearchResult(this, resultId, (long)count, CurrentEpoch), trace);
     }
 
-    public async Task<EngineStatsData?> GetStatsAsync()
+    public async Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default)
     {
         byte[] payload;
         try
         {
             int status;
-            (status, payload) = await RequestAsync(PipeProtocol.Op.Stats, []).ConfigureAwait(false);
+            (status, payload) = await RequestAsync(PipeProtocol.Op.Stats, [], ct)
+                .ConfigureAwait(false);
             if (status != PipeProtocol.Status.Ok)
             {
                 return null; // FFI parity: stats are best-effort
@@ -514,7 +521,7 @@ public sealed class PipeEngineClient : IEngineClient
             FileLog.Warn("pipe", $"stats unavailable: {ex.Message}");
             return null;
         }
-        var stats = JsonSerializer.Deserialize<EngineStatsData>(payload, JsonOpts);
+        var stats = JsonSerializer.Deserialize<EngineStatsData>(payload, EngineJson.SnakeCase);
         if (stats is not null)
         {
             lock (_statsLock)
@@ -537,13 +544,13 @@ public sealed class PipeEngineClient : IEngineClient
     internal int CurrentEpoch => Volatile.Read(ref _epoch);
 
     internal async Task<IReadOnlyList<RowData>> FetchPageAsync(
-        ulong resultId, long offset, int count)
+        ulong resultId, long offset, int count, CancellationToken ct)
     {
         var start = Stopwatch.GetTimestamp();
         var payload = await RequestOkAsync(
             PipeProtocol.Op.ResultPage,
             PipeProtocol.EncodeResultPageReq(resultId, (ulong)offset, (uint)count),
-            "ResultPage").ConfigureAwait(false);
+            "ResultPage", ct).ConfigureAwait(false);
         var rttUs = Stopwatch.GetElapsedTime(start).TotalMicroseconds;
         lock (_statsLock)
         {
@@ -612,7 +619,8 @@ internal sealed class PipeSearchResult(
 
     public long Count { get; } = count;
 
-    public async Task<IReadOnlyList<RowData>> GetRangeAsync(long offset, int count)
+    public async Task<IReadOnlyList<RowData>> GetRangeAsync(
+        long offset, int count, CancellationToken ct = default)
     {
         if (_disposed || epoch != client.CurrentEpoch)
         {
@@ -625,7 +633,7 @@ internal sealed class PipeSearchResult(
             {
                 throw new StaleResultException(); // re-check inside the guard
             }
-            return await client.FetchPageAsync(resultId, offset, count).ConfigureAwait(false);
+            return await client.FetchPageAsync(resultId, offset, count, ct).ConfigureAwait(false);
         }
         finally
         {
