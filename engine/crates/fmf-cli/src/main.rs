@@ -145,7 +145,10 @@ fn spike(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn build_index(drive: &str) -> Result<VolumeIndex, Box<dyn std::error::Error>> {
-    let (idx, s) = fmf_core::mft::scan_volume(drive)?;
+    let (mut idx, s) = fmf_core::mft::scan_volume(drive)?;
+    // Mirror the engine (volume thread does the same): the build leaves
+    // power-of-two capacity slack that would distort every RAM number.
+    idx.shrink_to_fit();
     let per_entry = if !idx.is_empty() {
         s.peak_working_set_bytes / idx.len() as u64
     } else {
@@ -567,6 +570,17 @@ fn stats(drive: &str, trigram_estimate: bool) -> Result<(), Box<dyn std::error::
     let mut s = idx.stats(drive);
     s.add_derived_bytes(query::derived_cache_bytes(&idx));
     println!("{}", serde_json::to_string_pretty(&s)?);
+    // The B/file RAM gate reads the steady working set, not the scan peak.
+    let ws = fmf_core::mft::current_working_set();
+    eprintln!(
+        "current working set {:.1} MiB (≈{:.0} B/entry — the RAM gate figure)",
+        ws as f64 / (1024.0 * 1024.0),
+        if idx.is_empty() {
+            0.0
+        } else {
+            ws as f64 / idx.len() as f64
+        }
+    );
     if trigram_estimate {
         print_trigram_estimate(&idx);
     }

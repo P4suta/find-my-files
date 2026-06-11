@@ -283,6 +283,16 @@ pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), Mf
 
 /// Peak working set of the current process, in bytes (0 if the query fails).
 pub fn peak_working_set() -> u64 {
+    memory_counters().map_or(0, |c| c.PeakWorkingSetSize as u64)
+}
+
+/// Current working set — the steady-state number the RAM gate cares about
+/// (the peak includes transient scan buffers).
+pub fn current_working_set() -> u64 {
+    memory_counters().map_or(0, |c| c.WorkingSetSize as u64)
+}
+
+fn memory_counters() -> Option<windows_sys::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS> {
     use windows_sys::Win32::System::ProcessStatus::{
         GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
     };
@@ -296,10 +306,6 @@ pub fn peak_working_set() -> u64 {
             &mut counters,
             size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
         );
-        if ok == 0 {
-            0
-        } else {
-            counters.PeakWorkingSetSize as u64
-        }
+        (ok != 0).then_some(counters)
     }
 }
