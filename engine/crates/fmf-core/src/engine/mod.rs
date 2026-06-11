@@ -4,11 +4,16 @@
 //! layer the FFI exposes 1:1 — and the layer a v2 service would host.
 
 mod results;
+mod seams;
 mod search;
 mod volume;
+#[cfg(windows)]
+mod worker;
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, windows))]
+mod worker_tests;
 
 pub use results::{ResultSet, Row};
 
@@ -203,17 +208,11 @@ impl Engine {
     /// Begin indexing the given volumes (asynchronous; progress via events).
     pub fn index_start(self: &Arc<Self>, volumes: &[String]) {
         for label in volumes {
-            let slot = Arc::new(VolumeSlot {
-                label: label.clone(),
-                phase: Mutex::new(VolumeState::Scanning),
-                scanned: Mutex::new(0),
-                index: RwLock::new(None),
-                stop: Arc::new(AtomicBool::new(false)),
-                last_query: Mutex::new(None),
-                checkpoint: Mutex::new(None),
-                last_saved: Mutex::new(None),
-                save_lock: Mutex::new(()),
-            });
+            let store = Arc::new(seams::WinSnapshotStore::new(volume::snapshot_path(
+                &self.config.index_dir,
+                label,
+            )));
+            let slot = Arc::new(VolumeSlot::scanning(label.clone(), store));
             self.volumes.write().push(slot.clone());
             let engine = self.clone();
             let handle = std::thread::Builder::new()
@@ -283,8 +282,7 @@ impl Engine {
             if !dirty {
                 continue;
             }
-            let path = volume::snapshot_path(&self.config.index_dir, &slot.label);
-            if self.save_slot(&slot, ckpt, &path) {
+            if self.save_slot(&slot, ckpt) {
                 saved += 1;
             }
         }
@@ -321,6 +319,10 @@ impl Engine {
             })),
             last_saved: Mutex::new(None),
             save_lock: Mutex::new(()),
+            store: Arc::new(seams::WinSnapshotStore::new(volume::snapshot_path(
+                &self.config.index_dir,
+                label,
+            ))),
         });
         self.volumes.write().push(slot);
     }

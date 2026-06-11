@@ -149,7 +149,7 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     // Cache overflow (`ext_name_cache_skipped`) and failed deferred reads
     // (`deferred_name_read_failures`) are returned in ScanStats only; the
     // volume worker maps them into counters + warn at its single mapping
-    // point (engine/volume.rs).
+    // point (engine/worker.rs).
 
     // Degradations are normal in small numbers; make them visible either way.
     if stats.corrupt_records > 0 {
