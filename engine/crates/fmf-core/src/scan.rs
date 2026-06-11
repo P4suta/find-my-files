@@ -123,6 +123,38 @@ fn apply_fixup(data: &mut [u8]) -> bool {
     true
 }
 
+/// Fixed-size record store for the deferred/extension caches. These used
+/// to hold tens of thousands of individually boxed ~1KiB records per scan;
+/// the freed boxes left the Windows heap fragmented enough to show up as
+/// working-set bytes the accounting couldn't see. Records now live
+/// back-to-back in one growable allocation (large enough to come from — and
+/// return to — the OS), addressed by slot.
+struct RecordArena {
+    data: Vec<u8>,
+    record_size: usize,
+}
+
+impl RecordArena {
+    fn new(record_size: usize) -> Self {
+        RecordArena {
+            data: Vec::new(),
+            record_size,
+        }
+    }
+
+    fn push(&mut self, rec: &[u8]) -> u32 {
+        debug_assert_eq!(rec.len(), self.record_size);
+        let slot = (self.data.len() / self.record_size) as u32;
+        self.data.extend_from_slice(rec);
+        slot
+    }
+
+    fn get(&self, slot: u32) -> &[u8] {
+        let off = slot as usize * self.record_size;
+        &self.data[off..off + self.record_size]
+    }
+}
+
 /// Random access to single records for the deferred attribute-list pass.
 struct RecordReader<'a> {
     file: std::fs::File,
@@ -198,7 +230,8 @@ impl<'a> LazyRecordReader<'a> {
 /// get_best_file_name without needing the whole MFT in RAM.
 fn resolve_attr_list_name(
     base: &NtfsFile,
-    ext: &FxHashMap<u64, Box<[u8]>>,
+    ext: &FxHashMap<u64, u32>,
+    arena: &RecordArena,
     rr: &mut LazyRecordReader,
 ) -> Option<NtfsFileName> {
     let attr = base.get_attribute(NtfsAttributeType::AttributeList)?;
@@ -226,7 +259,7 @@ fn resolve_attr_list_name(
             let target = entry.reference();
             if target != base.number {
                 let picked = match ext.get(&target) {
-                    Some(bytes) => pick_name(&NtfsFile::new(target, bytes)),
+                    Some(&slot) => pick_name(&NtfsFile::new(target, arena.get(slot))),
                     None => rr
                         .read_record(target)
                         .and_then(|bytes| pick_name(&NtfsFile::new(target, bytes))),
@@ -301,11 +334,15 @@ struct ParsedBatch {
     metas: Vec<ParsedMeta>,
     name_pool: Vec<u8>,
     lower_pool: Vec<u8>,
-    deferred: Vec<(u64, Box<[u8]>)>,
+    /// Raw record bytes referenced by `deferred`/`extensions` — one pool
+    /// per batch instead of a box per record (the global RecordArena gets
+    /// them at append time).
+    rec_pool: Vec<u8>,
+    deferred: Vec<(u64, std::ops::Range<usize>)>,
     /// Extension records carrying a $FILE_NAME — the targets the deferred
     /// pass will need. Keeping them now turns that pass's random disk reads
     /// into RAM lookups (the whole $MFT just streamed through here anyway).
-    extensions: Vec<(u64, Box<[u8]>)>,
+    extensions: Vec<(u64, std::ops::Range<usize>)>,
     files: u64,
     dirs: u64,
     corrupt_records: u64,
@@ -315,6 +352,12 @@ struct ParsedBatch {
 }
 
 impl ParsedBatch {
+    fn push_record(&mut self, bytes: &[u8]) -> std::ops::Range<usize> {
+        let start = self.rec_pool.len();
+        self.rec_pool.extend_from_slice(bytes);
+        start..self.rec_pool.len()
+    }
+
     /// Encode a named record into this batch (WTF-8 pair + meta).
     fn push_named(&mut self, f: &NtfsFile, name: &NtfsFileName) {
         let name_data = name.data;
@@ -368,15 +411,16 @@ fn parse_subrange(bytes: &mut [u8], first_logical: u64, record_size: usize) -> P
         if { f.header.base_reference } & 0x0000_FFFF_FFFF_FFFF != 0 {
             out.extension_records += 1;
             if f.get_attribute(NtfsAttributeType::FileName).is_some() {
-                out.extensions
-                    .push((number, rec.to_vec().into_boxed_slice()));
+                let range = out.push_record(rec);
+                out.extensions.push((number, range));
             }
             continue;
         }
 
         let Some(name) = pick_name(&f) else {
             if f.get_attribute(NtfsAttributeType::AttributeList).is_some() {
-                out.deferred.push((number, rec.to_vec().into_boxed_slice()));
+                let range = out.push_record(rec);
+                out.deferred.push((number, range));
             } else {
                 out.skipped_no_name += 1;
             }
@@ -399,8 +443,9 @@ fn resolve_deferred(
     volume_path: &str,
     runmap: &RunMap,
     record_size: usize,
-    ext: &FxHashMap<u64, Box<[u8]>>,
-    deferred: &[(u64, Box<[u8]>)],
+    ext: &FxHashMap<u64, u32>,
+    arena: &RecordArena,
+    deferred: &[(u64, u32)],
 ) -> Vec<ParsedBatch> {
     use rayon::prelude::*;
     const DEFER_CHUNK: usize = 256;
@@ -410,9 +455,9 @@ fn resolve_deferred(
         .map(|chunk| {
             let mut out = ParsedBatch::default();
             let mut rr = LazyRecordReader::new(volume_path, runmap, record_size);
-            for (number, bytes) in chunk {
-                let f = NtfsFile::new(*number, bytes);
-                match resolve_attr_list_name(&f, ext, &mut rr) {
+            for &(number, slot) in chunk {
+                let f = NtfsFile::new(number, arena.get(slot));
+                match resolve_attr_list_name(&f, ext, arena, &mut rr) {
                     Some(name) => out.push_named(&f, &name),
                     None => out.deferred_unresolved += 1,
                 }
@@ -438,14 +483,15 @@ fn parse_chunk(chunk: &mut [u8], chunk_logical: u64, record_size: usize) -> Vec<
 fn append_batches(
     b: &mut VolumeIndexBuilder,
     stats: &mut ScanStats,
-    deferred: &mut Vec<(u64, Box<[u8]>)>,
-    extensions: &mut FxHashMap<u64, Box<[u8]>>,
+    deferred: &mut Vec<(u64, u32)>,
+    extensions: &mut FxHashMap<u64, u32>,
+    arena: &mut RecordArena,
     batches: Vec<ParsedBatch>,
 ) {
     for batch in batches {
-        for (number, bytes) in batch.extensions {
+        for (number, range) in batch.extensions {
             if extensions.len() < EXT_NAME_CACHE_CAP {
-                extensions.insert(number, bytes);
+                extensions.insert(number, arena.push(&batch.rec_pool[range]));
             } else {
                 stats.ext_name_cache_skipped += 1;
             }
@@ -472,7 +518,9 @@ fn append_batches(
         stats.extension_records += batch.extension_records;
         stats.skipped_no_name += batch.skipped_no_name;
         stats.deferred_unresolved += batch.deferred_unresolved;
-        deferred.extend(batch.deferred);
+        for (number, range) in batch.deferred {
+            deferred.push((number, arena.push(&batch.rec_pool[range])));
+        }
     }
 }
 
@@ -600,6 +648,22 @@ fn run_chunk_pipeline(
     result.map(|()| (read_time, 0))
 }
 
+/// Volume geometry + the $MFT data-run map — the bootstrap shared by the
+/// full scan and the I/O probe (record 0 → the $MFT's own data runs).
+fn mft_layout(volume_path: &str) -> Result<(usize, u64, RunMap), NtfsReaderError> {
+    let volume = Volume::new(volume_path)?;
+    let record_size = volume.file_record_size as usize;
+    let mut reader = ntfs_reader::aligned_reader::open_volume(std::path::Path::new(volume_path))
+        .map_err(NtfsReaderError::from)?;
+    let rec0 = Mft::get_record_fs(&mut reader, volume.file_record_size, volume.mft_position)?;
+    let f0 = NtfsFile::new(0, &rec0);
+    let data_attr = f0
+        .get_attribute(NtfsAttributeType::Data)
+        .ok_or_else(|| NtfsReaderError::MissingMftAttribute("Data".to_string()))?;
+    let (size, runs) = data_attr.get_nonresident_data_runs(&volume)?;
+    Ok((record_size, size, RunMap::from_data_runs(&runs)))
+}
+
 /// Full initial scan: stream the volume's $MFT and build the in-memory
 /// index. `drive` is a drive letter spec like `C:`.
 pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
@@ -611,37 +675,30 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     };
 
     let t0 = Instant::now();
-    let volume = Volume::new(&volume_path).map_err(|e| match e {
+    let (record_size, data_size, runmap) = mft_layout(&volume_path).map_err(|e| match e {
         NtfsReaderError::ElevationError => MftError::NotElevated,
         other => MftError::Ntfs(other),
     })?;
-    let record_size = volume.file_record_size as usize;
-
-    // Bootstrap: record 0 → the $MFT's own data runs.
-    let (data_size, runmap) = {
-        let mut reader =
-            ntfs_reader::aligned_reader::open_volume(std::path::Path::new(&volume_path))
-                .map_err(NtfsReaderError::from)?;
-        let rec0 = Mft::get_record_fs(&mut reader, volume.file_record_size, volume.mft_position)?;
-        let f0 = NtfsFile::new(0, &rec0);
-        let data_attr = f0
-            .get_attribute(NtfsAttributeType::Data)
-            .ok_or_else(|| NtfsReaderError::MissingMftAttribute("Data".to_string()))?;
-        let (size, runs) = data_attr.get_nonresident_data_runs(&volume)?;
-        (size, RunMap::from_data_runs(&runs))
-    };
     stats.mft_bytes = data_size;
 
     let chunks = plan_chunks(&runmap, data_size, record_size);
     let mut b = VolumeIndexBuilder::new(drive, ROOT_RECORD);
-    let mut deferred: Vec<(u64, Box<[u8]>)> = Vec::new();
-    let mut extensions: FxHashMap<u64, Box<[u8]>> = FxHashMap::default();
+    let mut deferred: Vec<(u64, u32)> = Vec::new();
+    let mut extensions: FxHashMap<u64, u32> = FxHashMap::default();
+    let mut arena = RecordArena::new(record_size);
     let mut parse_time = Duration::ZERO;
 
     let (read_time, fallbacks) = run_chunk_pipeline(&volume_path, &chunks, &mut |i, bytes| {
         let t = Instant::now();
         let batches = parse_chunk(bytes, chunks[i].logical, record_size);
-        append_batches(&mut b, &mut stats, &mut deferred, &mut extensions, batches);
+        append_batches(
+            &mut b,
+            &mut stats,
+            &mut deferred,
+            &mut extensions,
+            &mut arena,
+            batches,
+        );
         parse_time += t.elapsed();
     })
     .map_err(MftError::Ntfs)?;
@@ -656,17 +713,26 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     // followed.
     let t_deferred = Instant::now();
     stats.deferred_names = deferred.len() as u64;
-    let batches = resolve_deferred(&volume_path, &runmap, record_size, &extensions, &deferred);
+    let batches = resolve_deferred(
+        &volume_path,
+        &runmap,
+        record_size,
+        &extensions,
+        &arena,
+        &deferred,
+    );
     append_batches(
         &mut b,
         &mut stats,
         &mut Vec::new(),
         &mut FxHashMap::default(),
+        &mut RecordArena::new(record_size),
         batches,
     );
     stats.elapsed_deferred_ms = t_deferred.elapsed().as_millis() as u64;
     drop(extensions);
     drop(deferred);
+    drop(arena);
     if stats.ext_name_cache_skipped > 0 {
         tracing::warn!(
             volume = %drive,
@@ -693,6 +759,237 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     stats.elapsed_total_ms = t0.elapsed().as_millis() as u64;
     stats.peak_working_set_bytes = peak_working_set();
     Ok((idx, stats))
+}
+
+// ── I/O strategy probe (`fmf io-probe`) ─────────────────────────────────
+//
+// Measurement only: reads the exact chunk plan the scan would, parses
+// nothing, and reports throughput per strategy. Production stays on the
+// buffered pipeline until a mode earns its keep on numbers
+// (docs/RESEARCH.md records the verdicts).
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IoProbeMode {
+    /// The production strategy: buffered synchronous reads.
+    Buffered,
+    /// Buffered + FILE_FLAG_SEQUENTIAL_SCAN cache hint.
+    Seq,
+    /// FILE_FLAG_NO_BUFFERING, synchronous (no cache-manager copy).
+    NoBuf,
+    /// FILE_FLAG_NO_BUFFERING + FILE_FLAG_OVERLAPPED with `queue_depth`
+    /// reads outstanding — tests whether *sequential* multiplexing helps
+    /// (parallel random reads are known to serialize in the kernel).
+    NoBufOverlapped,
+}
+
+pub struct ProbeStats {
+    pub bytes: u64,
+    pub elapsed_ms: u64,
+    pub mb_per_s: f64,
+}
+
+const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
+const FILE_FLAG_NO_BUFFERING: u32 = 0x2000_0000;
+const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+/// NO_BUFFERING alignment unit: one page satisfies any 512/4096-sector
+/// device for offset, length and buffer-address requirements.
+const NOBUF_ALIGN: usize = 4096;
+
+/// Page-aligned read buffer (NO_BUFFERING requires aligned addresses).
+struct AlignedBuf {
+    ptr: std::ptr::NonNull<u8>,
+    layout: std::alloc::Layout,
+}
+
+impl AlignedBuf {
+    fn new(size: usize) -> Self {
+        let layout = std::alloc::Layout::from_size_align(size, NOBUF_ALIGN).unwrap();
+        // Safety: layout has non-zero size; abort on allocation failure.
+        let ptr = std::ptr::NonNull::new(unsafe { std::alloc::alloc(layout) })
+            .unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
+        AlignedBuf { ptr, layout }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // Safety: owned allocation of layout.size() bytes.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.layout.size()) }
+    }
+}
+
+impl Drop for AlignedBuf {
+    fn drop(&mut self) {
+        // Safety: same layout as the allocation.
+        unsafe { std::alloc::dealloc(self.ptr.as_ptr(), self.layout) }
+    }
+}
+
+fn open_with_flags(volume_path: &str, flags: u32) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    const FILE_SHARE_DELETE: u32 = 0x4;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(flags)
+        .open(volume_path)
+}
+
+/// Aligned (offset, length) pair covering a chunk under NO_BUFFERING.
+fn aligned_span(c: &Chunk) -> (u64, usize) {
+    let start = c.phys & !(NOBUF_ALIGN as u64 - 1);
+    let end = (c.phys + c.want as u64).next_multiple_of(NOBUF_ALIGN as u64);
+    (start, (end - start) as usize)
+}
+
+fn probe_sync(volume_path: &str, chunks: &[Chunk], flags: u32) -> std::io::Result<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = open_with_flags(volume_path, flags)?;
+    let no_buffering = flags & FILE_FLAG_NO_BUFFERING != 0;
+    let mut buf = AlignedBuf::new(SCAN_CHUNK + 2 * NOBUF_ALIGN);
+    let mut total = 0u64;
+    for c in chunks {
+        let (phys, want) = if no_buffering {
+            aligned_span(c)
+        } else {
+            (c.phys, c.want)
+        };
+        file.seek(SeekFrom::Start(phys))?;
+        file.read_exact(&mut buf.as_mut_slice()[..want])?;
+        total += want as u64;
+    }
+    Ok(total)
+}
+
+/// One overlapped read slot: its buffer, its event, its OVERLAPPED block.
+struct OvSlot {
+    buf: AlignedBuf,
+    event: windows_sys::Win32::Foundation::HANDLE,
+    ov: Box<windows_sys::Win32::System::IO::OVERLAPPED>,
+    want: usize,
+}
+
+fn probe_nobuf_overlapped(
+    volume_path: &str,
+    chunks: &[Chunk],
+    queue_depth: usize,
+) -> std::io::Result<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+    use windows_sys::Win32::Storage::FileSystem::ReadFile;
+    use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::System::Threading::CreateEventW;
+    const ERROR_IO_PENDING: u32 = 997;
+
+    let file = open_with_flags(volume_path, FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED)?;
+    let handle = file.as_raw_handle() as HANDLE;
+    let qd = queue_depth.clamp(1, 16);
+
+    let mut slots: Vec<OvSlot> = (0..qd)
+        .map(|_| {
+            // Safety: plain event creation; null on failure handled below.
+            let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+            OvSlot {
+                buf: AlignedBuf::new(SCAN_CHUNK + 2 * NOBUF_ALIGN),
+                event,
+                ov: Box::new(unsafe { std::mem::zeroed::<OVERLAPPED>() }),
+                want: 0,
+            }
+        })
+        .collect();
+    if slots.iter().any(|s| s.event.is_null()) {
+        for s in &slots {
+            if !s.event.is_null() {
+                unsafe { CloseHandle(s.event) };
+            }
+        }
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let issue = |slot: &mut OvSlot, c: &Chunk| -> std::io::Result<()> {
+        let (phys, want) = aligned_span(c);
+        slot.want = want;
+        *slot.ov = unsafe { std::mem::zeroed() };
+        slot.ov.Anonymous.Anonymous.Offset = (phys & 0xFFFF_FFFF) as u32;
+        slot.ov.Anonymous.Anonymous.OffsetHigh = (phys >> 32) as u32;
+        slot.ov.hEvent = slot.event;
+        // Safety: buffer outlives the I/O (slot waits before reuse/drop).
+        let ok = unsafe {
+            ReadFile(
+                handle,
+                slot.buf.as_mut_slice().as_mut_ptr(),
+                want as u32,
+                std::ptr::null_mut(),
+                &mut *slot.ov,
+            )
+        };
+        if ok == 0 && unsafe { GetLastError() } != ERROR_IO_PENDING {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    };
+    let wait = |slot: &mut OvSlot| -> std::io::Result<u64> {
+        let mut transferred = 0u32;
+        // Safety: the OVERLAPPED belongs to an issued read on this handle.
+        let ok = unsafe { GetOverlappedResult(handle, &*slot.ov, &mut transferred, 1) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(transferred as u64)
+    };
+
+    // Completions are awaited in issue order — chunk order is what the
+    // parse pipeline would need anyway.
+    let mut total = 0u64;
+    let result = (|| -> std::io::Result<u64> {
+        for (i, c) in chunks.iter().enumerate() {
+            let slot_idx = i % qd;
+            if i >= qd {
+                total += wait(&mut slots[slot_idx])?;
+            }
+            issue(&mut slots[slot_idx], c)?;
+        }
+        let issued = chunks.len();
+        for done in issued.saturating_sub(qd)..issued {
+            total += wait(&mut slots[done % qd])?;
+        }
+        Ok(total)
+    })();
+    for s in &slots {
+        unsafe { CloseHandle(s.event) };
+    }
+    result
+}
+
+/// Measure one $MFT read pass under `mode`. Elevation required (the same
+/// volume-handle rule as the scan).
+pub fn io_probe(
+    drive: &str,
+    mode: IoProbeMode,
+    queue_depth: usize,
+) -> Result<ProbeStats, MftError> {
+    let drive = drive.trim_end_matches(['\\', '/']);
+    let volume_path = format!(r"\\.\{drive}");
+    let (record_size, data_size, runmap) = mft_layout(&volume_path).map_err(|e| match e {
+        NtfsReaderError::ElevationError => MftError::NotElevated,
+        other => MftError::Ntfs(other),
+    })?;
+    let chunks = plan_chunks(&runmap, data_size, record_size);
+
+    let t = Instant::now();
+    let bytes = match mode {
+        IoProbeMode::Buffered => probe_sync(&volume_path, &chunks, 0),
+        IoProbeMode::Seq => probe_sync(&volume_path, &chunks, FILE_FLAG_SEQUENTIAL_SCAN),
+        IoProbeMode::NoBuf => probe_sync(&volume_path, &chunks, FILE_FLAG_NO_BUFFERING),
+        IoProbeMode::NoBufOverlapped => probe_nobuf_overlapped(&volume_path, &chunks, queue_depth),
+    }
+    .map_err(|e| MftError::Ntfs(e.into()))?;
+    let elapsed = t.elapsed();
+    Ok(ProbeStats {
+        bytes,
+        elapsed_ms: elapsed.as_millis() as u64,
+        mb_per_s: bytes as f64 / (1 << 20) as f64 / elapsed.as_secs_f64().max(1e-9),
+    })
 }
 
 #[cfg(test)]

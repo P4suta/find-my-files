@@ -54,6 +54,19 @@ enum Command {
         #[arg(long)]
         name_stats: bool,
     },
+    /// Measure $MFT read throughput per I/O strategy (elevated terminal;
+    /// reads the scan's exact chunk plan, parses nothing). Verdicts live in
+    /// docs/RESEARCH.md — production reads stay buffered until a mode wins.
+    IoProbe {
+        drive: String,
+        #[arg(long, value_enum, default_value_t = ProbeModeArg::Buffered)]
+        mode: ProbeModeArg,
+        /// Outstanding reads for nobuf-ov.
+        #[arg(long, default_value_t = 4)]
+        qd: usize,
+        #[arg(long, default_value_t = 3)]
+        runs: usize,
+    },
     /// Print versions, log locations and the in-process diagnostics ring.
     Diag,
     /// Index a volume, then tail its USN journal and apply changes live,
@@ -70,6 +83,26 @@ enum Command {
         #[arg(long, default_value_t = 0.10)]
         threshold: f64,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ProbeModeArg {
+    Buffered,
+    Seq,
+    Nobuf,
+    NobufOv,
+}
+
+impl From<ProbeModeArg> for fmf_core::scan::IoProbeMode {
+    fn from(m: ProbeModeArg) -> Self {
+        use fmf_core::scan::IoProbeMode::*;
+        match m {
+            ProbeModeArg::Buffered => Buffered,
+            ProbeModeArg::Seq => Seq,
+            ProbeModeArg::Nobuf => NoBuf,
+            ProbeModeArg::NobufOv => NoBufOverlapped,
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -104,6 +137,12 @@ fn main() {
             trigram_estimate,
             name_stats,
         } => stats(&drive, trigram_estimate, name_stats),
+        Command::IoProbe {
+            drive,
+            mode,
+            qd,
+            runs,
+        } => io_probe(&drive, mode, qd, runs),
         Command::Diag => diag(),
         Command::Watch { drive } => watch(&drive),
         Command::CriterionGate { dir, threshold } => criterion_gate(&dir, threshold),
@@ -748,6 +787,28 @@ fn print_trigram_estimate(idx: &VolumeIndex) {
         total as f64 / (1024.0 * 1024.0),
         per_entry
     );
+}
+
+fn io_probe(
+    drive: &str,
+    mode: ProbeModeArg,
+    qd: usize,
+    runs: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut rates = Vec::with_capacity(runs.max(1));
+    for run in 0..runs.max(1) {
+        let s = fmf_core::scan::io_probe(drive, mode.into(), qd)?;
+        println!(
+            "run {run}: {:>7.1} MB/s  ({:.1} MiB in {} ms, mode {mode:?}, qd {qd})",
+            s.mb_per_s,
+            s.bytes as f64 / (1 << 20) as f64,
+            s.elapsed_ms
+        );
+        rates.push(s.mb_per_s);
+    }
+    rates.sort_by(|a, b| a.total_cmp(b));
+    println!("median: {:.1} MB/s", rates[rates.len() / 2]);
+    Ok(())
 }
 
 fn diag() -> Result<(), Box<dyn std::error::Error>> {
