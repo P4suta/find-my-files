@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>find-my-files — Instant file-name search for Windows</title>
+<meta name="description" content="A FOSS take on Everything. Reads the NTFS $MFT directly, stays live via the USN journal. A Rust engine with a native WinUI 3 UI — file-name search in an instant." />
+<meta property="og:title" content="find-my-files — Instant file-name search for Windows" />
+<meta property="og:description" content="A FOSS take on Everything. Rust engine + WinUI 3. Indexing file names only is the reason it's fast." />
+<meta property="og:type" content="website" />
+<link rel="stylesheet" href="../style.css" />
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap nav">
+    <a class="brand" href="../"><span class="dot"></span> find-my-files</a>
+    <nav class="nav-links">
+      <a href="#features" class="hide-sm">Features</a>
+      <a href="#scope" class="hide-sm">Scope</a>
+      <a href="#perf" class="hide-sm">Performance</a>
+      <a class="lang" href="../">JA</a>
+      <a href="https://github.com/P4suta/find-my-files">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <!-- hero -->
+  <section class="hero">
+    <div class="wrap">
+      <span class="eyebrow">A FOSS take on Everything · Windows-only</span>
+      <h1>File-name search, instantly.</h1>
+      <p class="lead">
+        Reads the NTFS <code>$MFT</code> directly and stays live through the USN
+        journal. A Rust engine with a crisp, native WinUI 3 UI. Indexing file
+        names — and nothing else — is the whole source of the speed.
+      </p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/P4suta/find-my-files/releases">⬇ Download</a>
+        <a class="btn btn-ghost" href="https://github.com/P4suta/find-my-files">View on GitHub →</a>
+      </div>
+      <p class="note">Apache-2.0 · Windows 10/11 (NTFS)</p>
+
+      <!-- search mock -->
+      <div class="mock" aria-hidden="true">
+        <div class="mock-bar">
+          <span class="mag">🔍</span>
+          <span>report 2025</span>
+          <span class="caret"></span>
+        </div>
+        <div class="mock-row sel">
+          <span class="ic">📄</span> report-2025-Q2.xlsx
+          <span class="path">C:\Users\me\Documents\finance</span>
+        </div>
+        <div class="mock-row">
+          <span class="ic">📑</span> annual_report_2025.pdf
+          <span class="path">D:\work\reports</span>
+        </div>
+        <div class="mock-row">
+          <span class="ic">🗂</span> report-2025-draft.docx
+          <span class="path">C:\Users\me\Desktop</span>
+        </div>
+        <div class="mock-foot">
+          <span>1,284,392 files indexed</span>
+          <span>3 results · 6 ms</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- features -->
+  <section id="features">
+    <div class="wrap">
+      <h2 class="section-title">Why it's fast</h2>
+      <p class="section-sub">Not a watcher, not a crawler. It uses the structure of the filesystem itself.</p>
+      <div class="grid">
+        <div class="card">
+          <div class="ic">⚡</div>
+          <h3>Initial index from the $MFT</h3>
+          <p>Reads the NTFS Master File Table directly — every file name on a volume in seconds.</p>
+        </div>
+        <div class="card">
+          <div class="ic">🔄</div>
+          <h3>Live via the USN journal</h3>
+          <p>Change notifications come from the USN change journal. No file watchers, no rescans — updates reach the UI in about a second.</p>
+        </div>
+        <div class="card">
+          <div class="ic">🧵</div>
+          <h3>SIMD multithreaded scan</h3>
+          <p>Multithreaded, SIMD substring scan over an in-memory index. p99 ≤ 50 ms at a million files, 3+ characters.</p>
+        </div>
+        <div class="card">
+          <div class="ic">🪟</div>
+          <h3>Native WinUI 3</h3>
+          <p>Mica, a consistent dark theme, Per-Monitor V2 DPI — no blur on mixed-DPI setups.</p>
+        </div>
+        <div class="card">
+          <div class="ic">🗜</div>
+          <h3>Memory-lean by design</h3>
+          <p>Indexing only file names means ~100 MB per million files — none of the multi-GB complaints content indexing brings.</p>
+        </div>
+        <div class="card">
+          <div class="ic">🔐</div>
+          <h3>Least privilege</h3>
+          <p>MFT/USN access is split into a small Windows service. The UI runs unprivileged and talks over a locked-down, same-user-only named pipe.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- scope -->
+  <section id="scope">
+    <div class="wrap">
+      <h2 class="section-title">What it deliberately does NOT do</h2>
+      <p class="section-sub">Indexing file names only is the reason Everything is fast — and it's the core of find-my-files. Feature creep is a non-goal.</p>
+      <div class="scope">
+        <h3>Out of scope (on purpose)</h3>
+        <div class="chips">
+          <span class="chip"><span class="x">✕</span> Content search</span>
+          <span class="chip"><span class="x">✕</span> Property / tag indexing</span>
+          <span class="chip"><span class="x">✕</span> Previews</span>
+          <span class="chip"><span class="x">✕</span> FTP / HTTP servers</span>
+          <span class="chip"><span class="x">✕</span> FAT / exFAT / network drives</span>
+          <span class="chip"><span class="x">✕</span> ReFS</span>
+          <span class="chip"><span class="x">✕</span> Cross-platform</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- performance -->
+  <section id="perf">
+    <div class="wrap">
+      <h2 class="section-title">Performance targets</h2>
+      <p class="section-sub">Built on "never crash, never hang, never go silent." The numbers the final milestone must hit.</p>
+      <table class="perf">
+        <thead><tr><th>Metric</th><th>Target</th></tr></thead>
+        <tbody>
+          <tr><td class="metric">First index (real C:)</td><td><span class="num">250k ≈ 5s / 1M ≈ 60s</span></td></tr>
+          <tr><td class="metric">Search p99 (1M files, 3+ chars)</td><td><span class="num">≤ 50 ms</span></td></tr>
+          <tr><td class="metric">Change reflection (USN → UI)</td><td><span class="num">≤ 1 s</span></td></tr>
+          <tr><td class="metric">Snapshot restore → ready</td><td><span class="num">≤ 2 s</span></td></tr>
+          <tr><td class="metric">RAM (engine only, bytes/file)</td><td><span class="num">≤ 110 B</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- architecture -->
+  <section id="arch">
+    <div class="wrap">
+      <h2 class="section-title">Architecture</h2>
+      <p class="section-sub">Default is an unprivileged UI plus the service. Without the service, it falls back to an elevated in-process engine.</p>
+<pre class="arch">WinUI 3 app (C#, unprivileged) ──named pipe──▶  <b>fmf-service</b> (Rust, LocalSystem)
+   └─ IEngineClient boundary                       └─ <b>fmf-core</b>: $MFT scan, USN tailing,
+       ├─ PipeEngineClient (default)                  in-memory index, query engine
+       └─ FfiEngineClient ──P/Invoke──▶  <b>fmf_engine.dll</b> (elevated in-proc fallback)</pre>
+    </div>
+  </section>
+
+  <!-- get started -->
+  <section id="start">
+    <div class="wrap">
+      <h2 class="section-title">Get started</h2>
+      <p class="section-sub">Toolchain pinned via mise, tasks run with just.</p>
+<pre class="arch">mise install        <span style="opacity:.6"># rust + dotnet</span>
+just setup          <span style="opacity:.6"># toolchain + git hooks</span>
+just build          <span style="opacity:.6"># engine (cargo, release)</span>
+just service-install  <span style="opacity:.6"># register the service (elevated, once)</span></pre>
+      <p class="note">Prebuilt binaries are on the <a href="https://github.com/P4suta/find-my-files/releases">Releases</a> page.</p>
+    </div>
+  </section>
+</main>
+
+<footer class="site">
+  <div class="wrap foot">
+    <span>© find-my-files — Apache-2.0</span>
+    <span>
+      <a href="https://github.com/P4suta/find-my-files">GitHub</a> ·
+      <a href="https://github.com/P4suta/find-my-files/releases">Releases</a> ·
+      <a href="../">日本語</a>
+    </span>
+  </div>
+</footer>
+
+</body>
+</html>
