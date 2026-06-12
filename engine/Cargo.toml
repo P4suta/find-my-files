@@ -10,9 +10,10 @@ members = [
 ]
 
 [workspace.package]
+version = "0.1.0" # x-release-please-version
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/find-my-files/find-my-files"
+repository = "https://github.com/P4suta/find-my-files"
 
 [workspace.dependencies]
 fmf-contract = { path = "crates/fmf-contract" }

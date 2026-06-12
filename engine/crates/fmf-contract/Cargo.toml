@@ -4,7 +4,7 @@
 # fmf-service all depend on it, and tests/drift.rs assumes nothing but std.
 [package]
 name = "fmf-contract"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
