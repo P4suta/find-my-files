@@ -232,6 +232,30 @@ public sealed class SearchOrchestratorTests
     }
 
     [Fact]
+    public void FocusedSearch_RewritesTheQuery_OnlyWhileTheToggleIsOn()
+    {
+        SyncContext.RunContinuationsInline();
+        _orchestrator.FocusedExcludePaths = [@"\windows\"];
+        _orchestrator.FocusedExtensions = ["pdf"];
+        _request = new SearchRequest("report", SearchOptions.Default);
+
+        // Default off: existing behavior, the query passes through verbatim.
+        _orchestrator.Requery(RequeryOrigin.Initial);
+        Assert.Equal("report", _engine.Searches[0].Query);
+
+        // The toggle path: a flip requeries as a filter change (top reset)
+        // and the engine sees the rewritten query, not the user's text.
+        _orchestrator.FocusedSearch = true;
+        _orchestrator.Requery(RequeryOrigin.Filter);
+        Assert.Equal(@"report !path:""\windows\"" ext:pdf", _engine.Searches[1].Query);
+
+        // Off again: back to verbatim.
+        _orchestrator.FocusedSearch = false;
+        _orchestrator.Requery(RequeryOrigin.Filter);
+        Assert.Equal("report", _engine.Searches[2].Query);
+    }
+
+    [Fact]
     public void IndexChanged_RequeriesViaTheDispatcher()
     {
         SyncContext.RunContinuationsInline();

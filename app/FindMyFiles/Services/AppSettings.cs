@@ -14,6 +14,39 @@ public sealed class AppSettings
     /// "pipe", or "inproc". CLI flags override this.</summary>
     public string Engine { get; set; } = "auto";
 
+    /// <summary>絞り込みモード (focused search, ADR-0019): rewrite queries in
+    /// the UI with the two lists below before they reach the engine. On by
+    /// default — the casual user wants a handful of hits, not 10,000; the
+    /// toolbar toggle flips it per session and persists here.</summary>
+    public bool FocusedSearch { get; set; } = true;
+
+    /// <summary>Noise directories excluded in focused mode, each appended as
+    /// a quoted <c>!path:"…"</c> term. Plain substring match against the full
+    /// path (engine semantics) — no wildcards needed.</summary>
+    public string[] FocusedExcludePaths { get; set; } =
+    [
+        @"\windows\",
+        @"\program files",
+        @"\programdata\",
+        @"\$recycle.bin\",
+        @"\node_modules\",
+        @"\.git\",
+        @"\__pycache__\",
+    ];
+
+    /// <summary>Extension whitelist applied in focused mode as a single
+    /// OR-semantics <c>ext:a;b;…</c> term: documents, images, audio, video,
+    /// archives and launchables — what a person actually goes looking for.</summary>
+    public string[] FocusedExtensions { get; set; } =
+    [
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv",
+        "jpg", "jpeg", "png", "gif", "webp", "svg", "heic",
+        "mp3", "wav", "flac", "m4a",
+        "mp4", "mkv", "mov", "avi",
+        "zip", "7z", "rar",
+        "exe", "msi", "lnk",
+    ];
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,

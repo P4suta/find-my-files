@@ -34,6 +34,7 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBox
                 x:Name="SearchBox"
@@ -44,6 +45,15 @@
                 Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
             <ToggleButton
                 Grid.Column="1"
+                VerticalAlignment="Stretch"
+                AutomationProperties.AutomationId="ToggleFocused"
+                AutomationProperties.Name="絞り込み"
+                IsChecked="{x:Bind ViewModel.FocusedSearch, Mode=TwoWay}"
+                ToolTipService.ToolTip="絞り込み: よく使うファイル形式に限定し、システム領域(Windows・Program Files・node_modules など)を除外します。対象は settings.json で変更できます">
+                <FontIcon FontSize="14" Glyph="&#xE71C;" />
+            </ToggleButton>
+            <ToggleButton
+                Grid.Column="2"
                 VerticalAlignment="Stretch"
                 AutomationProperties.AutomationId="ToggleSystem"
                 AutomationProperties.Name="システム・隠しファイルを含める"

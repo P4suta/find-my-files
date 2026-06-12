@@ -23,6 +23,20 @@ public sealed class SearchOrchestrator
     private readonly IDispatcherTimer _debounce;
     private long _generation;
 
+    /// <summary>絞り込みモード: when on, the user's query is rewritten with
+    /// the two lists below (<see cref="FocusedQueryRewriter"/>) right before
+    /// it reaches the engine. Defaults to off here — product wiring
+    /// (MainViewModel) pushes the persisted settings in; a toggle flip is a
+    /// filter change, so the owner requeries with
+    /// <see cref="RequeryOrigin.Filter"/> (top reset).</summary>
+    public bool FocusedSearch { get; set; }
+
+    /// <summary>Noise paths excluded in focused mode (settings-owned).</summary>
+    public IReadOnlyList<string> FocusedExcludePaths { get; set; } = [];
+
+    /// <summary>Extension whitelist for focused mode (settings-owned).</summary>
+    public IReadOnlyList<string> FocusedExtensions { get; set; } = [];
+
     /// <summary>Stage trace of the last completed query (null when the
     /// engine produced none) — perf-panel food.</summary>
     public event Action<QueryTraceData?>? TraceCaptured;
@@ -100,9 +114,15 @@ public sealed class SearchOrchestrator
             _presenter.PresentEmpty();
             return;
         }
+        // Focused mode is a pure rewrite at the last moment — the ViewModel
+        // keeps the user's text, the engine sees the effective query, and
+        // every log/error below reports what the engine actually saw.
+        var query = FocusedSearch
+            ? FocusedQueryRewriter.Compose(request.Query, FocusedExcludePaths, FocusedExtensions)
+            : request.Query;
         try
         {
-            var outcome = await _engine.SearchAsync(request.Query, request.Options);
+            var outcome = await _engine.SearchAsync(query, request.Options);
             if (generation != Interlocked.Read(ref _generation))
             {
                 outcome.Result.Dispose(); // a newer query superseded this one
@@ -137,7 +157,7 @@ public sealed class SearchOrchestrator
             }
             else
             {
-                FileLog.Warn("query", $"result stale twice in a row for `{request.Query}`");
+                FileLog.Warn("query", $"result stale twice in a row for `{query}`");
             }
         }
         catch (QuerySyntaxException e)
@@ -148,20 +168,20 @@ public sealed class SearchOrchestrator
         {
             // The pipe supervisor is already reconnecting; its synthesized
             // IndexChanged will requery once the service is back.
-            FileLog.Warn("query", $"engine unavailable for query `{request.Query}`: {e.Message}");
+            FileLog.Warn("query", $"engine unavailable for query `{query}`: {e.Message}");
             _presenter.PresentEngineFailure();
             SearchFailed?.Invoke(e);
         }
         catch (EngineException e)
         {
-            FileLog.Error("query", $"engine error for query `{request.Query}`", e);
+            FileLog.Error("query", $"engine error for query `{query}`", e);
             _presenter.PresentEngineFailure();
             SearchFailed?.Invoke(e);
         }
         catch (Exception e)
         {
             // Last line of defense: never let a query crash the app silently.
-            FileLog.Error("query", $"unexpected failure for query `{request.Query}`", e);
+            FileLog.Error("query", $"unexpected failure for query `{query}`", e);
             SearchFailed?.Invoke(e);
         }
     }

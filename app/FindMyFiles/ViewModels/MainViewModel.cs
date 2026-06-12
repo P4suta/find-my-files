@@ -35,6 +35,12 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     public partial bool IncludeHiddenSystem { get; set; }
 
+    /// <summary>絞り込みモード (focused search, ADR-0019): the toolbar toggle.
+    /// Initialized from settings in the ctor; flips push down to the
+    /// orchestrator, persist, and requery as a filter change (top reset).</summary>
+    [ObservableProperty]
+    public partial bool FocusedSearch { get; set; }
+
     /// <summary>Status-bar badge: which engine transport is active
     /// (サービス接続 / 再接続中… / 管理者(in-proc) / fake).</summary>
     [ObservableProperty]
@@ -45,15 +51,23 @@ public sealed partial class MainViewModel : ObservableObject
     public NotificationCenter Notifications { get; }
     public PerfPanelViewModel Perf { get; }
 
-    public MainViewModel(IEngineClient engine, IDispatcher dispatcher)
+    private readonly AppSettings _settings;
+
+    public MainViewModel(IEngineClient engine, IDispatcher dispatcher, AppSettings? settings = null)
     {
         _engine = engine;
+        _settings = settings ?? AppSettings.Load();
         _engineEvents = new EngineEventMarshaler(engine, dispatcher);
         Results = new ResultsPresenter(dispatcher);
         Search = new SearchOrchestrator(engine, _engineEvents, dispatcher, Results,
             () => new SearchRequest(
                 SearchText,
                 new SearchOptions(Sort, SortDescending, FmfCase.Smart, IncludeHiddenSystem)));
+        // Focused-search wiring: the lists are settings-owned; the toggle
+        // state flows through OnFocusedSearchChanged (Search exists by now).
+        Search.FocusedExcludePaths = _settings.FocusedExcludePaths;
+        Search.FocusedExtensions = _settings.FocusedExtensions;
+        FocusedSearch = _settings.FocusedSearch;
         Notifications = new NotificationCenter(dispatcher);
         Perf = new PerfPanelViewModel(engine);
 
@@ -120,6 +134,21 @@ public sealed partial class MainViewModel : ObservableObject
 
     partial void OnIncludeHiddenSystemChanged(bool value) =>
         Search.Requery(RequeryOrigin.Filter);
+
+    /// <summary>Toggle → orchestrator + persistence + filter requery. Also
+    /// runs once from the ctor (settings=true flips the default-false
+    /// property): the save is skipped (no change) and the requery is a no-op
+    /// on the still-empty query.</summary>
+    partial void OnFocusedSearchChanged(bool value)
+    {
+        Search.FocusedSearch = value;
+        if (_settings.FocusedSearch != value)
+        {
+            _settings.FocusedSearch = value;
+            _settings.Save();
+        }
+        Search.Requery(RequeryOrigin.Filter);
+    }
 
     public void SetSort(FmfSort key)
     {
