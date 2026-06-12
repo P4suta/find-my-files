@@ -19,3 +19,12 @@ engine/crates/fmf-core/testdata/large/
 # Local-only tool overrides
 mise.local.toml
 .mise.local.toml
+
+# Claude Code local working dir (scheduled task locks, etc.)
+.claude/
+
+# Internal working notes — never publish
+CLAUDE.md
+
+# Untracked screenshot scratch
+.tmp-shots/
