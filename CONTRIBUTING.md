@@ -14,7 +14,10 @@ just setup       # toolchain + git hooks (lefthook)
 ```
 
 Do not install toolchains ad hoc — declare them in `mise.toml` and run
-`mise install`.
+`mise install`. Installing
+[cargo-binstall](https://github.com/cargo-bins/cargo-binstall) first lets the
+`cargo:` tools (mdbook, cargo-deny, cargo-llvm-cov, cargo-machete) fetch
+prebuilt binaries instead of compiling from source.
 
 ## Development loop
 

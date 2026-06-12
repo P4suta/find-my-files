@@ -16,3 +16,14 @@ just = "1"
 # site (just doc / pages.yml). cargo backend, version-pinned like samply so CI
 # and local builds match.
 "cargo:mdbook" = "0.4.40"
+# Quality-gate tooling (CI + `just cov`/`deny`/`machete`). cargo backend;
+# cargo.binstall below fetches prebuilt binaries instead of compiling from
+# source (compiling mdbook took ~2min in CI).
+"cargo:cargo-llvm-cov" = "0.6"
+"cargo:cargo-deny" = "0.16"
+"cargo:cargo-machete" = "0.7"
+
+[settings]
+# Fetch cargo: backend tools as prebuilt binaries (cargo-binstall) rather than
+# `cargo install` from source — much faster in CI and locally.
+cargo.binstall = true

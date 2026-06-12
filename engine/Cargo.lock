@@ -323,7 +323,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -383,7 +382,6 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
- "thiserror",
  "tracing",
  "windows-service",
  "windows-sys",

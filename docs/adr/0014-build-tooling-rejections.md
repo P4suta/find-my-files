@@ -17,6 +17,7 @@ rust-lld・sccache・cargo-nextestは導入しない。releaseプロファイル
 - releaseビルド時間はcodegen-units=1の分だけ延びる(許容)
 - クエリカーネルのファイル分割リファクタリングを実行性能と独立に行える
 - ビルド高速化の提案はまずこのADRを確認する(再提案防止)
+- **rust-cache(Swatinem/rust-cache = GitHub Actions cache)は本ADRの却下対象外**: sccacheと違いrustc呼び出しをラップせず、`~/.cargo`とtargetを成果物としてアーカイブ/復元するだけでincrementalコンパイルを破壊しない。CIの `CARGO_INCREMENTAL=0` もCI workflow限定でローカルのincrementalに非波及。CI高速化(並列job分割・shared-keyキャッシュ共有・dll artifact共有・PR cancel-in-progress)はこれらに該当し許容(ci.yml)
 
 ## 再検討トリガ
 

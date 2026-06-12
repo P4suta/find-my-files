@@ -216,3 +216,19 @@ doc:
 # Live-preview the design docs at http://localhost:3000
 doc-serve:
     mdbook serve docs --open
+
+# ── Quality gates (also enforced in CI) ──────────────────────────────────
+
+# Rust line coverage (cargo-llvm-cov). CI gates with --fail-under-lines.
+[working-directory: 'engine']
+cov:
+    cargo llvm-cov --workspace --summary-only
+
+# License / ban / source policy (cargo-deny). Advisories live in cargo-audit.
+[working-directory: 'engine']
+deny:
+    cargo deny check bans licenses sources
+
+# Unused dependencies (cargo-machete).
+machete:
+    cargo machete engine

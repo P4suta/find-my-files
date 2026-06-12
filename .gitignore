@@ -11,6 +11,7 @@ app/**/obj/
 dist/
 screenshots/
 test-results.json
+**/*.cobertura.xml
 
 # Generated docs (mdBook output; rustdoc lives under engine/target/)
 docs/book/

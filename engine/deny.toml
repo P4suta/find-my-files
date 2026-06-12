@@ -1,0 +1,34 @@
+# cargo-deny policy. Advisories are owned by cargo-audit.yml (weekly cron);
+# this gate runs `cargo deny check bans licenses sources` on each PR.
+# (cargo-deny 0.16.x can't parse CVSS 4.0 advisories — another reason
+# advisories live in cargo-audit, not here.)
+
+[licenses]
+# SPDX identifiers we accept. Covers the current dependency tree
+# (MIT/Apache/BSD/ISC/Unicode/Zlib/…). Add here when a new dep introduces one;
+# the `licenses` check fails loudly on anything not listed.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+  "MPL-2.0",
+  "CC0-1.0",
+  "0BSD",
+  "BSL-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
