@@ -5,81 +5,225 @@ on:
     branches: [main]
   pull_request:
 
+# Cancel superseded PR runs; never cancel main (post-merge lineage/artifacts).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_INCREMENTAL: "0" # CI-only; does not touch local incremental (ADR-0014)
+  CARGO_TERM_COLOR: always
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
 jobs:
-  # Fast, OS-agnostic hygiene that mirrors the lefthook pre-commit hooks so the
-  # same gates run in CI (where contributors don't have the hooks installed).
-  lint:
+  # Skip the heavy windows jobs on docs-only PRs (ci-required treats their
+  # `skipped` as success, so branch protection still passes).
+  changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.f.outputs.code }}
     steps:
       - uses: actions/checkout@v6
-      - name: typos
-        uses: crate-ci/typos@master # auto-reads the root _typos.toml
-      - name: setup taplo
-        uses: uncenter/setup-taplo@v2
+      - uses: dorny/paths-filter@v3
+        id: f
+        with:
+          filters: |
+            code:
+              - 'engine/**'
+              - 'app/**'
+              - 'contract/**'
+              - '.github/workflows/ci.yml'
+
+  # ── ubuntu hygiene tier: parallel, no needs, cheap fast-fail signal ──
+  hygiene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: crate-ci/typos@master # reads root _typos.toml
+      - uses: uncenter/setup-taplo@v2
         with:
           version: "0.9.3"
-      - name: taplo check
-        run: taplo check
+      - run: taplo check
+        working-directory: engine
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
         working-directory: engine
 
-  build:
-    runs-on: windows-latest
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      # Prebuilt binary (cargo install from source took minutes); advisories
+      # are owned by cargo-audit.yml, so this checks bans/licenses/sources.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.16.4
+      - run: cargo deny check bans licenses sources
+        working-directory: engine
 
+  machete:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete@0.7.0
+      - run: cargo machete engine
+
+  # The only engine crates that compile off-Windows (no ntfs-reader/windows-sys):
+  # a cheap Linux lint of the contract/proto layer.
+  contract-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
-
-      - name: rustfmt
-        run: cargo fmt --all --check
+          shared-key: engine-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy -p fmf-contract -p fmf-proto --all-targets -- -D warnings
         working-directory: engine
-      - name: clippy
+
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── windows engine tier: engine compiles once here, the app reuses the dll ──
+  engine-build-test:
+    needs: [hygiene, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          shared-key: engine-win # shared with codeql/nightly to reuse deps
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.6.24
+      - name: clippy (compiles the engine; later steps reuse it)
         run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: engine
-
-      # The contract generator is the single source for the C# bindings
-      # (ADR-0018). Regenerate and fail if the committed copy drifts — cargo
-      # test also pins this, but a discrete gate makes the failure obvious.
       - name: contract codegen
         run: cargo run -p fmf-contract --bin gen-contract
         working-directory: engine
       - name: fail on contract drift
         run: git diff --exit-code -- app/FindMyFiles/Engine/Generated/
+      - name: test + line coverage gate
+        run: cargo llvm-cov --workspace --fail-under-lines 70 --lcov --output-path engine-lcov.info
+        working-directory: engine
+      - name: doc (warnings = errors)
+        run: cargo doc --workspace --no-deps
+        working-directory: engine
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+      - name: build engine dll + service (release, for the app + artifacts)
+        run: cargo build --release -p fmf-ffi -p fmf-service
+        working-directory: engine
+      - uses: actions/upload-artifact@v7
+        with:
+          name: engine-release
+          path: |
+            engine/target/release/fmf_engine.dll
+            engine/target/release/fmf-service.exe
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rust-coverage
+          path: engine/engine-lcov.info
 
-      # Elevated tests are #[ignore]-gated and skip here; the pipe loopback
-      # suite runs for real (\\.\pipe\ needs no elevation).
-      - name: test
-        run: cargo test --workspace
-        working-directory: engine
-      - name: build engine dll
-        run: cargo build --release -p fmf-ffi
-        working-directory: engine
-      - name: build service
-        run: cargo build --release -p fmf-service
-        working-directory: engine
-
+  app:
+    needs: [engine-build-test]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      # Reuse the engine dll built upstream — the app job never invokes cargo.
+      - uses: actions/download-artifact@v5
+        with:
+          name: engine-release
+          path: engine/target/release/
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.x
-      - name: build app
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('app/**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - name: build app (SkipRustBuild — dll is prebuilt)
         run: dotnet build app/FindMyFiles -c Release -p:SkipRustBuild=true
-      - name: test app
-        run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
-
+      - name: test app + line coverage gate
+        run: >-
+          dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
+          -p:CollectCoverage=true -p:Threshold=15 -p:ThresholdType=line -p:ThresholdStat=total
       - name: pipe integration (C# client × real service, unelevated)
         run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
         env:
           FMF_PIPE_TESTS: "1"
-
       - uses: actions/upload-artifact@v7
         with:
           name: find-my-files-win-x64
           path: app/FindMyFiles/bin/Release/net10.0-windows10.0.26100.0/win-x64/
           if-no-files-found: error
-      - uses: actions/upload-artifact@v7
+
+  # Informational on PRs (ADR-0013: runner thermal noise makes a hard 10% gate
+  # flaky). Confirms the benches compile + run; the authoritative gate is local
+  # `just perf-gate`.
+  bench:
+    needs: [hygiene, changes]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 25
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          name: fmf-service-win-x64
-          path: engine/target/release/fmf-service.exe
-          if-no-files-found: error
+          workspaces: engine
+          shared-key: engine-win
+          save-if: false
+      - run: cargo bench -p fmf-core
+        working-directory: engine
+
+  # Single required status check. Transitively enforces the leaves and treats
+  # `skipped` (docs-only) as success — avoids the "Expected — Waiting" deadlock.
+  ci-required:
+    if: always()
+    needs: [hygiene, deny, machete, contract-lint, pr-title, engine-build-test, app]
+    runs-on: ubuntu-latest
+    steps:
+      - name: gate on needed job results
+        run: |
+          results='${{ join(needs.*.result, ',') }}'
+          echo "needed results: $results"
+          if echo "$results" | tr ',' '\n' | grep -qE 'failure|cancelled'; then
+            echo "::error::a required job failed or was cancelled"
+            exit 1
+          fi

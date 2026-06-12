@@ -19,6 +19,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
+          shared-key: engine-win # shared with ci.yml/codeql to reuse deps
       - name: elevated real-volume suite
         run: cargo test --workspace -- --ignored
         working-directory: engine
