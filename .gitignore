@@ -12,6 +12,9 @@ dist/
 screenshots/
 test-results.json
 
+# Generated docs (mdBook output; rustdoc lives under engine/target/)
+docs/book/
+
 # Engine runtime artifacts
 *.fmfidx
 engine/crates/fmf-core/testdata/large/

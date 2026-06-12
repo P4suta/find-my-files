@@ -201,3 +201,18 @@ release version:
     git commit -m "chore: release v{{version}}"
     git tag -s "v{{version}}" -m "v{{version}}"
     Write-Host "Tagged v{{version}} — push with: git push; git push origin v{{version}}"
+
+# ── Docs ─────────────────────────────────────────────────────────────────
+
+# Build the mdBook design docs (docs/book) + rustdoc (engine/target/doc).
+# Same outputs the pages.yml workflow publishes to GitHub Pages.
+# --document-private-items: the crates are internal (no external API surface),
+# so the docs are for maintainers — private items are the interesting part, and
+# documenting them also resolves intra-doc links to non-pub helpers.
+doc:
+    mdbook build docs
+    cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml
+
+# Live-preview the design docs at http://localhost:3000
+doc-serve:
+    mdbook serve docs --open

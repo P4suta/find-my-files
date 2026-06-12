@@ -1,6 +1,9 @@
 name: Deploy GitHub Pages
 
-# Publishes the project landing page (site/) to GitHub Pages.
+# Publishes the landing page (site/) plus generated documentation:
+#   /        — landing page (site/index.html, ja/en)
+#   /book/   — mdBook design docs rendered from docs/ (ARCHITECTURE + ADRs)
+#   /doc/    — rustdoc API reference (cargo doc)
 # Requires Settings > Pages > Source = "GitHub Actions" (set once after publish).
 
 on:
@@ -8,6 +11,8 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "docs/**"
+      - "engine/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -23,12 +28,38 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # windows-latest because rustdoc must compile the Windows-only crates
+    # (fmf-core → ntfs-reader / windows-sys, fmf-service) that fail to
+    # `cargo doc` on Linux. mdBook builds fine here too, so one job suffices.
+    runs-on: windows-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+
+      # Same pinned toolchain as local (rust 1.95 / dotnet 10 / just / mdbook).
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - name: Build mdBook design docs (docs/ -> docs/book)
+        run: mdbook build docs
+
+      - name: Build rustdoc (engine -> engine/target/doc)
+        # --document-private-items: internal crates, so docs target maintainers
+        # (and it resolves intra-doc links to non-pub helpers).
+        run: cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml
+
+      - name: Assemble site (landing + book + doc)
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse -Force docs/book site/book
+          Copy-Item -Recurse -Force engine/target/doc site/doc
+
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

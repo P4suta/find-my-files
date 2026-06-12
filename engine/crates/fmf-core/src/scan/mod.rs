@@ -9,10 +9,10 @@
 //! Two layers of overlap (entry order stays byte-for-byte identical to a
 //! sequential scan):
 //! - a dedicated I/O thread reads chunk N+1 while chunk N parses
-//!   ([`pipeline::run_chunk_pipeline`]; degrades to inline reads if the
+//!   (`pipeline::run_chunk_pipeline`; degrades to inline reads if the
 //!   thread can't start — `scan_pipeline_fallbacks`)
 //! - within a chunk, record sub-ranges parse on rayon workers that carry
-//!   the WTF-8 encoding too ([`parse::parse_chunk`]); the builder then
+//!   the WTF-8 encoding too (`parse::parse_chunk`); the builder then
 //!   appends the worker batches in chunk order, so EntryId assignment is
 //!   deterministic.
 

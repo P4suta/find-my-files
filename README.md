@@ -75,6 +75,13 @@ WinUI 3 app (C#, unprivileged) ──named pipe──▶  fmf-service (Rust, Loc
 See `docs/ARCHITECTURE.md` for the FFI contract and `docs/RESEARCH.md` for the verified
 technical groundwork (MFT/USN APIs, prior art, performance baselines).
 
+## Documentation
+
+- **[Design docs](https://p4suta.github.io/find-my-files/book/)** — architecture, ADRs, research, and the security model (rendered from `docs/` with mdBook)
+- **[API reference](https://p4suta.github.io/find-my-files/doc/fmf_core/)** — Rust crate docs (rustdoc)
+
+Both rebuild on every push to `main`; build them locally with `just doc`.
+
 ## License
 
 Apache-2.0

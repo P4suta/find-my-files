@@ -1,0 +1,28 @@
+# Summary
+
+- [アーキテクチャ](ARCHITECTURE.md)
+- [技術的裏取り（RESEARCH）](RESEARCH.md)
+- [セキュリティモデル](SECURITY.md)
+
+# 設計判断（ADR）
+
+- [ADR 索引](adr/README.md)
+  - [0001 — ファイル名のみ索引](adr/0001-filename-only-index.md)
+  - [0002 — 線形プールスイープ（trigram 不採用）](adr/0002-linear-sweep-no-trigram.md)
+  - [0003 — WTF-8 格納・長さ保存 fold](adr/0003-wtf8-length-preserving-fold.md)
+  - [0004 — fold オーバーフロー名レイアウト](adr/0004-fold-overflow-name-layout.md)
+  - [0005 — FRN 索引はソート済み順列](adr/0005-frn-index-sorted-permutation.md)
+  - [0006 — size/mtime 順列は遅延 derived cache](adr/0006-lazy-sort-permutations.md)
+  - [0007 — size 列 u32 + オーバーフロー map](adr/0007-size-u32-overflow.md)
+  - [0008 — USN バッチは挿入位置マージ](adr/0008-insertion-point-batch-merge.md)
+  - [0009 — コンパクションは順序保存リマップ](adr/0009-compaction-order-preserving-remap.md)
+  - [0010 — スナップショットは生 POD・後方互換なし](adr/0010-snapshot-raw-pod-no-compat.md)
+  - [0011 — ストリーミングスキャンパイプライン](adr/0011-scan-streaming-pipeline.md)
+  - [0012 — 既定アロケータ + RecordArena](adr/0012-default-allocator-record-arena.md)
+  - [0013 — 計測規律](adr/0013-measurement-discipline.md)
+  - [0014 — ビルドツールの却下判断](adr/0014-build-tooling-rejections.md)
+  - [0015 — WinUI 3 データ仮想化](adr/0015-winui-data-virtualization.md)
+  - [0016 — v2 サービス分離 + named pipe](adr/0016-service-split-named-pipe.md)
+  - [0017 — サービスのセキュリティモデル](adr/0017-service-security-model.md)
+  - [0018 — 契約の単一正本化（fmf-contract）](adr/0018-contract-single-source.md)
+  - [0019 — 絞り込み = UI 層クエリ書き換え](adr/0019-focused-search-query-rewrite.md)

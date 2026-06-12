@@ -12,3 +12,7 @@ just = "1"
 # terminals the engine already requires for real-volume work. cargo backend:
 # the GitHub release tags (samply-v*) don't resolve via ubi/github backends.
 "cargo:samply" = "0.13.1"
+# mdBook — renders docs/ (ARCHITECTURE + ADRs) into the published design-docs
+# site (just doc / pages.yml). cargo backend, version-pinned like samply so CI
+# and local builds match.
+"cargo:mdbook" = "0.4.40"

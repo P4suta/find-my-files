@@ -22,6 +22,7 @@ Do not install toolchains ad hoc — declare them in `mise.toml` and run
 just check         # fast type-check (no codegen)
 just verify        # fmt-check + lint + test + test-app (what pre-push runs)
 just contract-gen  # regenerate the C# bindings if you changed the contract
+just doc           # build the design docs (mdBook) + rustdoc locally
 ```
 
 `just service-dev` runs the engine service in the foreground (elevated). The
