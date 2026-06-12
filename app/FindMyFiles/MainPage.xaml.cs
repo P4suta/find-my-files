@@ -35,11 +35,33 @@ public sealed partial class MainPage : Page
         SearchBox.TextCompositionStarted += (_, _) => ViewModel.Search.NotifyCompositionStarted();
         SearchBox.TextCompositionEnded += (_, _) =>
             ViewModel.Search.NotifyCompositionEnded(ViewModel.SearchText);
+        // 空クエリ=中央の大検索バー(Empty)、入力で上へ移動して結果を出す(Results)。
+        ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         Loaded += (_, _) =>
         {
+            UpdateSearchState(useTransitions: false);
             SearchBox.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
             ViewModel.StartAsync().Forget("startup");
         };
+    }
+
+    private void OnViewModelPropertyChanged(
+        object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MainViewModel.SearchText))
+        {
+            UpdateSearchState(useTransitions: true);
+        }
+    }
+
+    /// <summary>Empty(中央の大きな検索バーのみ) ↔ Results(検索バー上＋結果)。
+    /// SearchText の空/非空で切り替える。ContentHost の RepositionThemeTransition
+    /// が検索バーの移動を、ListView の AddDeleteThemeTransition が結果の出現を
+    /// 滑らかにする(仮想化はコンテナ実体化時のみ走り、Reset とは競合しない)。</summary>
+    private void UpdateSearchState(bool useTransitions)
+    {
+        var state = string.IsNullOrEmpty(ViewModel.SearchText) ? "EmptyState" : "ResultsState";
+        Microsoft.UI.Xaml.VisualStateManager.GoToState(this, state, useTransitions);
     }
 
     private void Notification_Closed(InfoBar sender, InfoBarClosedEventArgs args)

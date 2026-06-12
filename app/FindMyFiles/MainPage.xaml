@@ -3,16 +3,15 @@
     x:Class="FindMyFiles.MainPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:conv="using:FindMyFiles.Converters"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    xmlns:conv="using:FindMyFiles.Converters"
     xmlns:svc="using:FindMyFiles.Services"
     xmlns:views="using:FindMyFiles.Views"
     xmlns:vm="using:FindMyFiles.ViewModels"
     mc:Ignorable="d">
 
-    <!-- AllowDrop: a dropped folder injects a path: filter, a dropped file
-         searches its name (drop-in only; rows are not drag-out sources). -->
+    <!--  AllowDrop: a dropped folder injects a path: filter, a dropped file searches its name (drop-in only; rows are not drag-out sources).  -->
     <Grid
         AllowDrop="True"
         DragOver="Page_DragOver"
@@ -20,208 +19,238 @@
         <Grid.KeyboardAccelerators>
             <KeyboardAccelerator Key="F12" Invoked="PerfPanel_Toggle" />
         </Grid.KeyboardAccelerators>
+
+        <!--  Empty(空クエリ): 検索バーを縦中央・結果/ステータスを畳む(Raycast/Spotlight の初期)。
+              Results(クエリ有): 検索バーを上へ・結果を表示。SearchText の空/非空で
+              code-behind が GoToState。ContentHost の Reposition で滑らかに移動する。  -->
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup x:Name="SearchStates">
+                <VisualState x:Name="EmptyState">
+                    <VisualState.Setters>
+                        <Setter Target="ContentHost.VerticalAlignment" Value="Center" />
+                        <Setter Target="ResultsArea.Visibility" Value="Collapsed" />
+                        <Setter Target="StatusBar.Visibility" Value="Collapsed" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="ResultsState" />
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="32" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- Search box: a plain TextBox on purpose (AutoSuggestBox's accept
-             semantics fight live filtering — docs/ARCHITECTURE.md). -->
-        <Grid Grid.Row="0" Margin="12,8,12,8" ColumnSpacing="8">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            <TextBox
-                x:Name="SearchBox"
-                Grid.Column="0"
-                AutomationProperties.AutomationId="SearchBox"
-                KeyDown="SearchBox_KeyDown"
-                PlaceholderText="検索  (ext:  path:  size:  dm:  regex:  |  !  &quot;&quot;)"
-                Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <ToggleButton
-                Grid.Column="1"
-                VerticalAlignment="Stretch"
-                AutomationProperties.AutomationId="ToggleFocused"
-                AutomationProperties.Name="絞り込み"
-                IsChecked="{x:Bind ViewModel.FocusedSearch, Mode=TwoWay}"
-                ToolTipService.ToolTip="絞り込み: よく使うファイル形式に限定し、システム領域(Windows・Program Files・node_modules など)を除外します。対象は settings.json で変更できます">
-                <FontIcon FontSize="14" Glyph="&#xE71C;" />
-            </ToggleButton>
-            <ToggleButton
-                Grid.Column="2"
-                VerticalAlignment="Stretch"
-                AutomationProperties.AutomationId="ToggleSystem"
-                AutomationProperties.Name="システム・隠しファイルを含める"
-                IsChecked="{x:Bind ViewModel.IncludeHiddenSystem, Mode=TwoWay}"
-                ToolTipService.ToolTip="システム・隠しファイルを含める">
-                <FontIcon FontSize="14" Glyph="&#xED25;" />
-            </ToggleButton>
+        <!--  検索バー＋結果。MaxWidth で中央寄せ(ランチャーらしい横幅制限)。  -->
+        <Grid
+            x:Name="ContentHost"
+            Grid.Row="0"
+            MaxWidth="860"
+            Margin="24,16,24,0"
+            VerticalAlignment="Top">
+            <Grid.Transitions>
+                <TransitionCollection>
+                    <RepositionThemeTransition />
+                </TransitionCollection>
+            </Grid.Transitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!--  Search box: a plain TextBox on purpose (AutoSuggestBox's accept semantics fight live filtering — docs/ARCHITECTURE.md).  -->
+            <Grid Grid.Row="0" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox
+                    x:Name="SearchBox"
+                    Grid.Column="0"
+                    AutomationProperties.AutomationId="SearchBox"
+                    KeyDown="SearchBox_KeyDown"
+                    PlaceholderText="ファイル名で検索…"
+                    Style="{StaticResource LauncherSearchBoxStyle}"
+                    Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <ToggleButton
+                    Grid.Column="1"
+                    VerticalAlignment="Stretch"
+                    AutomationProperties.AutomationId="ToggleFocused"
+                    AutomationProperties.Name="絞り込み"
+                    IsChecked="{x:Bind ViewModel.FocusedSearch, Mode=TwoWay}"
+                    ToolTipService.ToolTip="絞り込み: よく使うファイル形式に限定し、システム領域(Windows・Program Files・node_modules など)を除外します。対象は settings.json で変更できます">
+                    <FontIcon FontSize="16" Glyph="&#xE71C;" />
+                </ToggleButton>
+                <ToggleButton
+                    Grid.Column="2"
+                    VerticalAlignment="Stretch"
+                    AutomationProperties.AutomationId="ToggleSystem"
+                    AutomationProperties.Name="システム・隠しファイルを含める"
+                    IsChecked="{x:Bind ViewModel.IncludeHiddenSystem, Mode=TwoWay}"
+                    ToolTipService.ToolTip="システム・隠しファイルを含める">
+                    <FontIcon FontSize="16" Glyph="&#xED25;" />
+                </ToggleButton>
+                <DropDownButton
+                    Grid.Column="3"
+                    VerticalAlignment="Stretch"
+                    AutomationProperties.AutomationId="SortButton"
+                    AutomationProperties.Name="並べ替え"
+                    ToolTipService.ToolTip="並べ替え">
+                    <FontIcon FontSize="16" Glyph="&#xE8CB;" />
+                    <DropDownButton.Flyout>
+                        <MenuFlyout>
+                            <MenuFlyoutItem
+                                AutomationProperties.AutomationId="SortName"
+                                Click="HeaderName_Click"
+                                Text="名前" />
+                            <MenuFlyoutItem
+                                AutomationProperties.AutomationId="SortSize"
+                                Click="HeaderSize_Click"
+                                Text="サイズ" />
+                            <MenuFlyoutItem
+                                AutomationProperties.AutomationId="SortDate"
+                                Click="HeaderDate_Click"
+                                Text="更新日時" />
+                        </MenuFlyout>
+                    </DropDownButton.Flyout>
+                </DropDownButton>
+            </Grid>
+
+            <!--  結果エリア(検索バー直下)。Collapsed/Visible は VisualState 制御。  -->
+            <Grid
+                x:Name="ResultsArea"
+                Grid.Row="1"
+                Margin="0,12,0,0">
+
+                <!--  Results. ItemsPanel stays ItemsStackPanel (CLAUDE.md UI固定則).
+                      ItemsSource is bound OneTime by design: the VirtualResultList
+                      instance lives as long as the page; new results arrive via a
+                      seeded Reset, never by swapping the ItemsSource (ADR-0015).
+                      MaxHeight で見せる量を抑え、超過分は仮想化スクロールで送る。  -->
+                <ListView
+                    x:Name="ResultsList"
+                    MaxHeight="520"
+                    AutomationProperties.AutomationId="ResultsList"
+                    DoubleTapped="ResultsList_DoubleTapped"
+                    ItemsSource="{x:Bind ViewModel.Results.ResultsSource}"
+                    KeyDown="ResultsList_KeyDown"
+                    SelectionMode="Extended"
+                    ShowsScrollingPlaceholders="True">
+                    <ListView.ItemContainerTransitions>
+                        <TransitionCollection>
+                            <AddDeleteThemeTransition />
+                        </TransitionCollection>
+                    </ListView.ItemContainerTransitions>
+                    <ListView.ItemContainerStyle>
+                        <Style BasedOn="{StaticResource DefaultListViewItemStyle}" TargetType="ListViewItem">
+                            <Setter Property="MinHeight" Value="52" />
+                            <Setter Property="Padding" Value="12,6,12,6" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ResultRow">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <FontIcon
+                                    Grid.Column="0"
+                                    VerticalAlignment="Center"
+                                    FontSize="22"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Glyph="{x:Bind Glyph, Mode=OneWay}" />
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                    <TextBlock Style="{StaticResource ResultNameTextStyle}" Text="{x:Bind Name, Mode=OneWay}" />
+                                    <TextBlock
+                                        x:Phase="1"
+                                        Style="{StaticResource ResultPathTextStyle}"
+                                        Text="{x:Bind ParentPath, Mode=OneWay}" />
+                                </StackPanel>
+                                <StackPanel
+                                    Grid.Column="2"
+                                    MinWidth="96"
+                                    VerticalAlignment="Center">
+                                    <TextBlock
+                                        x:Phase="2"
+                                        HorizontalAlignment="Right"
+                                        Style="{StaticResource ResultMetaTextStyle}"
+                                        Text="{x:Bind SizeText, Mode=OneWay}" />
+                                    <TextBlock
+                                        x:Phase="2"
+                                        HorizontalAlignment="Right"
+                                        Style="{StaticResource ResultMetaTextStyle}"
+                                        Text="{x:Bind DateText, Mode=OneWay}" />
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                    <ListView.ContextFlyout>
+                        <MenuFlyout>
+                            <MenuFlyoutItem
+                                AutomationProperties.AutomationId="MnuOpen"
+                                Click="MenuOpen_Click"
+                                Text="開く" />
+                            <MenuFlyoutItem
+                                AutomationProperties.AutomationId="MnuOpenPath"
+                                Click="MenuOpenPath_Click"
+                                Text="フォルダーを開いてファイルを選択" />
+                            <MenuFlyoutItem
+                                AutomationProperties.AutomationId="MnuCopyPath"
+                                Click="MenuCopyPath_Click"
+                                Text="パスをコピー" />
+                        </MenuFlyout>
+                    </ListView.ContextFlyout>
+                </ListView>
+
+                <!--  Notification stack: the visible end of every error path.
+                      Overlays the results (same cell, top-aligned) so a
+                      notification appearing or dissolving never resizes the list.  -->
+                <ItemsControl
+                    Margin="0,0,0,0"
+                    VerticalAlignment="Top"
+                    Canvas.ZIndex="1"
+                    AutomationProperties.AutomationId="NotifyBar"
+                    ItemsSource="{x:Bind ViewModel.Notifications.Items}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="svc:AppNotification">
+                            <InfoBar
+                                Title="{x:Bind Message}"
+                                Margin="0,0,0,4"
+                                Closed="Notification_Closed"
+                                IsOpen="True"
+                                Message="{x:Bind Detail}"
+                                Severity="{x:Bind conv:UiConverters.ToInfoSeverity(Severity)}">
+                                <InfoBar.ActionButton>
+                                    <Button
+                                        Click="{x:Bind Invoke}"
+                                        Content="{x:Bind ActionLabel}"
+                                        Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ActionLabel)}" />
+                                </InfoBar.ActionButton>
+                            </InfoBar>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Grid>
         </Grid>
 
-        <!-- Column headers -->
-        <Grid Grid.Row="1" Margin="16,0,28,4">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="2*" />
-                <ColumnDefinition Width="3*" />
-                <ColumnDefinition Width="110" />
-                <ColumnDefinition Width="140" />
-            </Grid.ColumnDefinitions>
-            <Button
-                Grid.Column="0"
-                AutomationProperties.AutomationId="HeaderName"
-                Background="Transparent"
-                BorderThickness="0"
-                Click="HeaderName_Click"
-                Content="名前"
-                HorizontalAlignment="Stretch"
-                HorizontalContentAlignment="Left" />
-            <TextBlock
-                Grid.Column="1"
-                Margin="8,0,0,0"
-                VerticalAlignment="Center"
-                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                Text="パス" />
-            <Button
-                Grid.Column="2"
-                AutomationProperties.AutomationId="HeaderSize"
-                Background="Transparent"
-                BorderThickness="0"
-                Click="HeaderSize_Click"
-                Content="サイズ"
-                HorizontalAlignment="Stretch"
-                HorizontalContentAlignment="Right" />
-            <Button
-                Grid.Column="3"
-                AutomationProperties.AutomationId="HeaderDate"
-                Background="Transparent"
-                BorderThickness="0"
-                Click="HeaderDate_Click"
-                Content="更新日時"
-                HorizontalAlignment="Stretch"
-                HorizontalContentAlignment="Left" />
-        </Grid>
-
-        <!-- Results. ItemsPanel stays ItemsStackPanel (CLAUDE.md UI固定則).
-             ItemsSource is bound OneTime by design: the VirtualResultList
-             instance lives as long as the page; new results arrive via a
-             seeded Reset, never by swapping the ItemsSource (ADR-0015). -->
-        <ListView
-            x:Name="ResultsList"
-            Grid.Row="2"
-            AutomationProperties.AutomationId="ResultsList"
-            DoubleTapped="ResultsList_DoubleTapped"
-            ItemsSource="{x:Bind ViewModel.Results.ResultsSource}"
-            KeyDown="ResultsList_KeyDown"
-            SelectionMode="Extended"
-            ShowsScrollingPlaceholders="True">
-            <ListView.ItemContainerStyle>
-                <Style TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
-                    <Setter Property="MinHeight" Value="30" />
-                    <Setter Property="Padding" Value="16,2,12,2" />
-                </Style>
-            </ListView.ItemContainerStyle>
-            <ListView.ItemTemplate>
-                <DataTemplate x:DataType="vm:ResultRow">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="2*" />
-                            <ColumnDefinition Width="3*" />
-                            <ColumnDefinition Width="110" />
-                            <ColumnDefinition Width="140" />
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8">
-                            <FontIcon
-                                FontSize="14"
-                                Glyph="{x:Bind Glyph, Mode=OneWay}"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Text="{x:Bind Name, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
-                        </StackPanel>
-                        <TextBlock
-                            Grid.Column="1"
-                            x:Phase="1"
-                            Margin="8,0,0,0"
-                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            Text="{x:Bind ParentPath, Mode=OneWay}"
-                            TextTrimming="CharacterEllipsis" />
-                        <TextBlock
-                            Grid.Column="2"
-                            x:Phase="2"
-                            HorizontalAlignment="Right"
-                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            Text="{x:Bind SizeText, Mode=OneWay}" />
-                        <TextBlock
-                            Grid.Column="3"
-                            x:Phase="2"
-                            Margin="8,0,0,0"
-                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            Text="{x:Bind DateText, Mode=OneWay}" />
-                    </Grid>
-                </DataTemplate>
-            </ListView.ItemTemplate>
-            <ListView.ContextFlyout>
-                <MenuFlyout>
-                    <MenuFlyoutItem
-                        AutomationProperties.AutomationId="MnuOpen"
-                        Click="MenuOpen_Click"
-                        Text="開く" />
-                    <MenuFlyoutItem
-                        AutomationProperties.AutomationId="MnuOpenPath"
-                        Click="MenuOpenPath_Click"
-                        Text="フォルダーを開いてファイルを選択" />
-                    <MenuFlyoutItem
-                        AutomationProperties.AutomationId="MnuCopyPath"
-                        Click="MenuCopyPath_Click"
-                        Text="パスをコピー" />
-                </MenuFlyout>
-            </ListView.ContextFlyout>
-        </ListView>
-
-        <!-- Notification stack: the visible end of every error path.
-             Overlays the results (same grid cell, top-aligned) so a
-             notification appearing or dissolving never resizes the list —
-             a resizing list reads as flicker. -->
-        <ItemsControl
-            Grid.Row="2"
-            Margin="12,0,12,0"
-            VerticalAlignment="Top"
-            Canvas.ZIndex="1"
-            AutomationProperties.AutomationId="NotifyBar"
-            ItemsSource="{x:Bind ViewModel.Notifications.Items}">
-            <ItemsControl.ItemTemplate>
-                <DataTemplate x:DataType="svc:AppNotification">
-                    <InfoBar
-                        Title="{x:Bind Message}"
-                        Margin="0,0,0,4"
-                        Closed="Notification_Closed"
-                        IsOpen="True"
-                        Message="{x:Bind Detail}"
-                        Severity="{x:Bind conv:UiConverters.ToInfoSeverity(Severity)}">
-                        <InfoBar.ActionButton>
-                            <Button
-                                Click="{x:Bind Invoke}"
-                                Content="{x:Bind ActionLabel}"
-                                Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ActionLabel)}" />
-                        </InfoBar.ActionButton>
-                    </InfoBar>
-                </DataTemplate>
-            </ItemsControl.ItemTemplate>
-        </ItemsControl>
-
-        <!-- Performance panel (F12). Diagnostic chrome — the stage bar /
-             sparkline rendering lives in Views/PerfPanel code-behind. -->
+        <!--  Performance panel (F12).  -->
         <views:PerfPanel
-            Grid.Row="3"
+            Grid.Row="1"
             ViewModel="{x:Bind ViewModel.Perf}"
             Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.Perf.IsOpen), Mode=OneWay}" />
 
-        <!-- Status bar -->
-        <Grid Grid.Row="4" Padding="16,4" BorderThickness="0,1,0,0"
-              BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+        <!--  Status bar  -->
+        <Grid
+            x:Name="StatusBar"
+            Grid.Row="2"
+            Padding="16,4"
+            BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+            BorderThickness="0,1,0,0">
             <TextBlock
                 HorizontalAlignment="Left"
                 AutomationProperties.AutomationId="StatusCount"

@@ -9,6 +9,44 @@
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
             </ResourceDictionary.MergedDictionaries>
+
+            <!--  Raycast/Spotlight 風ランチャーのスタイルトークン。色は全て Fluent の ThemeResource を参照(ハードコード禁止)。  -->
+
+            <!--  大きめの中央検索ボックス  -->
+            <Style
+                x:Key="LauncherSearchBoxStyle"
+                BasedOn="{StaticResource DefaultTextBoxStyle}"
+                TargetType="TextBox">
+                <Setter Property="FontSize" Value="20" />
+                <Setter Property="MinHeight" Value="52" />
+                <Setter Property="VerticalContentAlignment" Value="Center" />
+                <Setter Property="CornerRadius" Value="{StaticResource OverlayCornerRadius}" />
+            </Style>
+
+            <!--  結果行: ファイル名(上段)  -->
+            <Style
+                x:Key="ResultNameTextStyle"
+                BasedOn="{StaticResource BodyStrongTextBlockStyle}"
+                TargetType="TextBlock">
+                <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+            </Style>
+
+            <!--  結果行: パス(下段・控えめ)  -->
+            <Style
+                x:Key="ResultPathTextStyle"
+                BasedOn="{StaticResource CaptionTextBlockStyle}"
+                TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+            </Style>
+
+            <!--  結果行: サイズ/日時(右端・最も控えめ)  -->
+            <Style
+                x:Key="ResultMetaTextStyle"
+                BasedOn="{StaticResource CaptionTextBlockStyle}"
+                TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{ThemeResource TextFillColorTertiaryBrush}" />
+            </Style>
         </ResourceDictionary>
     </Application.Resources>
 </Application>
