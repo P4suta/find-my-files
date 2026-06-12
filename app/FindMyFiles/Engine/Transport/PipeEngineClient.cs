@@ -107,8 +107,15 @@ public sealed class PipeEngineClient : IEngineClient
         using var cts = new CancellationTokenSource(timeout);
         try
         {
+            // Identification level is mandatory: the installed service's
+            // verify_client ImpersonateNamedPipeClient's us to read our SID
+            // against authorized_sids. The .NET default (None) yields an
+            // anonymous token server-side → every connection is rejected
+            // ("pipe client token rejected") — invisible to console-mode
+            // tests where authorized_sids is empty and the check is skipped.
             using var stream = new NamedPipeClientStream(
-                ".", ToShortName(pipeName), PipeDirection.InOut, PipeOptions.Asynchronous);
+                ".", ToShortName(pipeName), PipeDirection.InOut, PipeOptions.Asynchronous,
+                System.Security.Principal.TokenImpersonationLevel.Identification);
             await stream.ConnectAsync(cts.Token).ConfigureAwait(false);
             var frame = PipeProtocol.EncodeFrame(
                 PipeProtocol.Op.Hello, 0, 1, 0,
@@ -146,8 +153,12 @@ public sealed class PipeEngineClient : IEngineClient
             NamedPipeClientStream? stream = null;
             try
             {
+                // Identification level: the service impersonates us to read
+                // our SID for the authorized_sids check (see Probe). Without
+                // it the server gets an anonymous token and rejects us.
                 stream = new NamedPipeClientStream(
-                    ".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+                    ".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous,
+                    System.Security.Principal.TokenImpersonationLevel.Identification);
                 await stream.ConnectAsync(ct).ConfigureAwait(false);
                 if (_verifyServerIdentity && !PipeServerIdentity.IsServerSystem(stream.SafePipeHandle))
                 {

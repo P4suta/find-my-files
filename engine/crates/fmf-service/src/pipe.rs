@@ -75,6 +75,13 @@ impl PipeStream {
     /// Client side: opens an existing pipe (blocking I/O is fine here, but
     /// we open OVERLAPPED for symmetry with the I/O helpers).
     pub fn connect(path: &str) -> io::Result<Self> {
+        // SQOS with Identification level is mandatory: the server's
+        // verify_client ImpersonateNamedPipeClient's the connection to read
+        // the caller's SID against authorized_sids. Without SECURITY_SQOS_PRESENT
+        // the client defaults to SecurityAnonymous and the server gets an
+        // anonymous token → rejected (ERROR_PIPE_NOT_CONNECTED at the client).
+        const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
+        const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
         let h = unsafe {
             CreateFileW(
                 wide(path).as_ptr(),
@@ -82,7 +89,7 @@ impl PipeStream {
                 FILE_SHARE_NONE,
                 std::ptr::null(),
                 OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
                 std::ptr::null_mut(),
             )
         };
