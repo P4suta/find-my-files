@@ -12,6 +12,7 @@ members = [
 [workspace.package]
 version = "0.1.0" # release version — bump via 'just release'
 edition = "2024"
+rust-version = "1.95"
 license = "Apache-2.0"
 repository = "https://github.com/P4suta/find-my-files"
 
