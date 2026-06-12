@@ -67,4 +67,19 @@
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
     <PublishTrimmed>False</PublishTrimmed>
   </PropertyGroup>
+
+  <!-- The WinUI component package wires the compiled-XAML artifacts (loose
+       .xbf + the app .pri) into build output but NOT into publish — that
+       plumbing lived in the metapackage we dropped. Without it a published
+       app dies at first window with "XAML parsing failed". -->
+  <Target Name="PublishWinUIXamlArtifacts" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <_WinUIXamlArtifact Include="$(OutputPath)**\*.xbf" />
+      <_WinUIXamlArtifact Include="$(OutputPath)$(TargetName).pri" />
+      <ResolvedFileToPublish Include="@(_WinUIXamlArtifact)">
+        <RelativePath>%(RecursiveDir)%(Filename)%(Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
 </Project>
