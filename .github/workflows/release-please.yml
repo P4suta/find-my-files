@@ -28,7 +28,7 @@ jobs:
       # A PAT (or GitHub App token) — NOT the default GITHUB_TOKEN — so the
       # release PR triggers ci.yml. PRs opened by GITHUB_TOKEN do not fire
       # other workflows (loop-prevention by design).
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: rp
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
