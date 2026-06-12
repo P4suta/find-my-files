@@ -1,16 +1,21 @@
-# Reusable build/sign/publish workflow, invoked by release-please.yml once a
-# release is cut. Builds the distributable bundle (`just publish`), signs the
-# PE binaries with Azure Trusted Signing when signing secrets are present, then
-# zips + checksums + attaches to the GitHub Release.
+# Tag-driven build/sign/publish. Pushing a vX.Y.Z tag (or running this
+# workflow manually with a tag) builds the distributable bundle
+# (`just publish`), signs the PE binaries with Azure Trusted Signing when
+# signing secrets are present, then zips + checksums + attaches to a GitHub
+# Release whose notes are auto-generated from the commits since the last tag.
 #
-# Signing is non-blocking by design: until the Azure account exists the run
+# Auth: the default GITHUB_TOKEN only — no PAT, no app key, no stored secret to
+# manage. Signing is non-blocking: until the Azure account exists the run
 # publishes an UNSIGNED zip with a ::warning:: rather than failing.
 name: release
 
 on:
-  workflow_call:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
     inputs:
       tag_name:
+        description: "Tag to build the release from (e.g. v0.1.0)"
         required: true
         type: string
 
@@ -21,13 +26,15 @@ jobs:
   build:
     runs-on: windows-latest
     env:
+      # Resolve the tag from either trigger; reused for checkout, zip, release.
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
       # secrets.* cannot be referenced in `if:`; hoist presence to a job-level
       # env bool, then gate the signing steps on env.HAVE_SIGNING.
       HAVE_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.SIGNING_ENDPOINT != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag_name }}
+          ref: ${{ env.TAG }}
 
       # Provisions the pinned toolchain (rust 1.95 / dotnet 10 / just) from
       # mise.toml so the shipped artifact is built on the exact pins.
@@ -62,7 +69,7 @@ jobs:
       - name: Zip bundle
         shell: pwsh
         run: |
-          $v = '${{ inputs.tag_name }}'.TrimStart('v')
+          $v = '${{ env.TAG }}'.TrimStart('v')
           Compress-Archive -Path dist/FindMyFiles/* -DestinationPath "find-my-files-v$v-win-x64.zip"
 
       - name: Checksums
@@ -73,7 +80,8 @@ jobs:
       - name: Attach assets to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag_name }}
+          tag_name: ${{ env.TAG }}
+          generate_release_notes: true
           files: |
             find-my-files-*-win-x64.zip
             SHA256SUMS.txt

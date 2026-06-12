@@ -187,3 +187,17 @@ profile *args="bench C:":
 # cargo clean also removes them, this is the cheaper broom.
 clean-temp:
     Remove-Item -Recurse -Force engine/target/test-tmp -ErrorAction SilentlyContinue; exit 0
+
+# ── Release ──────────────────────────────────────────────────────────────
+
+# Cut a release: bump the version (Rust workspace + C# app in lockstep),
+# commit, and create a signed vX.Y.Z tag. Pushing the tag fires release.yml
+# (GITHUB_TOKEN only — no stored secret). -Raw/-NoNewline preserve LF endings.
+# Usage:  just release 0.2.0   then   git push; git push origin v0.2.0
+release version:
+    (Get-Content -Raw engine/Cargo.toml) -replace '\d+\.\d+\.\d+(?=" # release version)', '{{version}}' | Set-Content -NoNewline engine/Cargo.toml
+    (Get-Content -Raw app/FindMyFiles/FindMyFiles.csproj) -replace '\d+\.\d+\.\d+(?=</Version> <!-- release version)', '{{version}}' | Set-Content -NoNewline app/FindMyFiles/FindMyFiles.csproj
+    git add engine/Cargo.toml app/FindMyFiles/FindMyFiles.csproj
+    git commit -m "chore: release v{{version}}"
+    git tag -s "v{{version}}" -m "v{{version}}"
+    Write-Host "Tagged v{{version}} — push with: git push; git push origin v{{version}}"

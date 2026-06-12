@@ -30,17 +30,16 @@ back to an elevated in-process engine (`--engine=inproc`).
 
 ## Commit & PR conventions
 
-Releases are automated with
-[release-please](https://github.com/googleapis/release-please), which reads
-[Conventional Commits](https://www.conventionalcommits.org/):
+We use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`,
+`fix:`, `perf:`, `docs:`, `refactor:`, `test:`, `chore:`, `ci:`, `deps:`) and
+squash-merge, so the PR title becomes the commit. It keeps history readable and
+feeds the auto-generated GitHub Release notes.
 
-- `feat:` → minor bump
-- `fix:` / `perf:` → patch bump
-- `feat!:` or a `BREAKING CHANGE:` footer → major bump
-- `docs:`, `refactor:`, `test:`, `chore:`, `ci:`, `deps:` → no release on their own
-
-We squash-merge, so **the PR title must be a conventional commit** — that is the
-line release-please sees.
+Releases are cut from a tag, not a bot — no PAT or app key to manage. `just
+release X.Y.Z` bumps the version (Rust workspace + C# app in lockstep), commits,
+and creates a signed `vX.Y.Z` tag. Pushing the tag fires `release.yml`, which
+builds, optionally signs, and attaches the bundle to a GitHub Release using only
+the default `GITHUB_TOKEN`.
 
 ## Before you push
 
