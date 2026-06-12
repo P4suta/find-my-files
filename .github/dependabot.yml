@@ -1,0 +1,51 @@
+version: 2
+updates:
+  # Rust workspace (manifest + Cargo.lock live under engine/).
+  - package-ecosystem: cargo
+    directory: /engine
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      rust-deps:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+      include: scope
+
+  # C# app — one nuget entry per project directory.
+  - package-ecosystem: nuget
+    directory: /app/FindMyFiles
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      dotnet-app:
+        patterns: ["*"]
+    commit-message:
+      prefix: deps
+
+  - package-ecosystem: nuget
+    directory: /app/FindMyFiles.Tests
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      dotnet-tests:
+        patterns: ["*"]
+    commit-message:
+      prefix: deps
+
+  # The workflow actions themselves.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

@@ -1,0 +1,79 @@
+# Reusable build/sign/publish workflow, invoked by release-please.yml once a
+# release is cut. Builds the distributable bundle (`just publish`), signs the
+# PE binaries with Azure Trusted Signing when signing secrets are present, then
+# zips + checksums + attaches to the GitHub Release.
+#
+# Signing is non-blocking by design: until the Azure account exists the run
+# publishes an UNSIGNED zip with a ::warning:: rather than failing.
+name: release
+
+on:
+  workflow_call:
+    inputs:
+      tag_name:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # secrets.* cannot be referenced in `if:`; hoist presence to a job-level
+      # env bool, then gate the signing steps on env.HAVE_SIGNING.
+      HAVE_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.SIGNING_ENDPOINT != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name }}
+
+      # Provisions the pinned toolchain (rust 1.95 / dotnet 10 / just) from
+      # mise.toml so the shipped artifact is built on the exact pins.
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+
+      - name: Build distributable bundle
+        run: just publish
+
+      - name: Sign binaries (Azure Trusted Signing)
+        if: env.HAVE_SIGNING == 'true'
+        uses: azure/trusted-signing-action@v1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.SIGNING_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\dist\FindMyFiles
+          files-folder-filter: exe,dll
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Warn if unsigned
+        if: env.HAVE_SIGNING != 'true'
+        run: echo "::warning::Signing secrets absent — publishing UNSIGNED binaries (SmartScreen will warn end users)."
+
+      - name: Zip bundle
+        shell: pwsh
+        run: |
+          $v = '${{ inputs.tag_name }}'.TrimStart('v')
+          Compress-Archive -Path dist/FindMyFiles/* -DestinationPath "find-my-files-v$v-win-x64.zip"
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          (Get-FileHash find-my-files-*-win-x64.zip -Algorithm SHA256).Hash | Out-File -Encoding ascii SHA256SUMS.txt
+
+      - name: Attach assets to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name }}
+          files: |
+            find-my-files-*-win-x64.zip
+            SHA256SUMS.txt

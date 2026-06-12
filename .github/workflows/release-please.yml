@@ -1,0 +1,46 @@
+# Conventional-commit driven release automation (single shared version across
+# the Rust workspace and the C# app). On every push to main, release-please
+# maintains a "release PR" that bumps the version + CHANGELOG; merging it cuts
+# the tag + GitHub Release, which then chains into release.yml to build, sign
+# and attach the distributable bundle.
+#
+# Single version: one rust component anchored at engine/ owns
+# [workspace.package].version (all 6 crates inherit via version.workspace),
+# and an extra-file generic updater bumps app/FindMyFiles/FindMyFiles.csproj in
+# lockstep. Tag form is vX.Y.Z (include-component-in-tag: false).
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      # A PAT (or GitHub App token) — NOT the default GITHUB_TOKEN — so the
+      # release PR triggers ci.yml. PRs opened by GITHUB_TOKEN do not fire
+      # other workflows (loop-prevention by design).
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: .github/release-please-config.json
+          manifest-file: .github/.release-please-manifest.json
+
+  # Chained in the SAME run via needs + outputs, because a Release created by
+  # GITHUB_TOKEN does not fire `on: release: published`.
+  build-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    uses: ./.github/workflows/release.yml
+    with:
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit
