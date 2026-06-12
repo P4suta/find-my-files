@@ -51,6 +51,14 @@
   → sc.exe では表現できず `fmf-service install` サブコマンド一択(ロジックを単体テスト可能にする)
 - uninstall は既定でデータを残す(`--purge-data` で .fmfidx/logs/service.json を削除)。
   残置物は README と SECURITY.md に明記
+- **クライアント接続の前提(非昇格UIで実機検証)**: ①クライアントは pipe を Identification level
+  で開く(C# `TokenImpersonationLevel.Identification` / Rust `SECURITY_SQOS_PRESENT`)— 既定の
+  匿名レベルだとサーバの `ImpersonateNamedPipeClient` が匿名トークンになり、接続時SID照合が
+  認可済みユーザーすら全拒否する。②クライアント側の偽サーバ検証(脅威4)は SYSTEMトークン照合
+  ではなく SCM登録サービスのPID照合(`QueryServiceStatusEx`)で行う — 非昇格UIは SYSTEMプロセスの
+  トークンを開けず(ACCESS_DENIED)、session 0 の identity も取れない。どちらも `authorized_sids`
+  が空でトークン照合をスキップするコンソールモードのテストでは露呈せず、インストール済みサービス
+  で初めて出る死角だった
 - 「他ユーザー拒否」「リモート拒否」は開発機/CIで自動検証できない(別ユーザートークン・別マシンが
   必要)→ SDDL構築関数の構造ピン+SECURITY.md の手動チェックリストで代替。構築関数を経由しない
   pipe 作成コードパスを作らないこと(レビュー観点)

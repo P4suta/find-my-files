@@ -160,10 +160,10 @@ public sealed class PipeEngineClient : IEngineClient
                     ".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous,
                     System.Security.Principal.TokenImpersonationLevel.Identification);
                 await stream.ConnectAsync(ct).ConfigureAwait(false);
-                if (_verifyServerIdentity && !PipeServerIdentity.IsServerSystem(stream.SafePipeHandle))
+                if (_verifyServerIdentity && !PipeServerIdentity.IsServerTrusted(stream.SafePipeHandle))
                 {
                     throw new ServerIdentityException(
-                        $@"server on \\.\pipe\{_pipeName} is not running as SYSTEM "
+                        $@"server on \\.\pipe\{_pipeName} is not the registered fmf-engine service "
                         + "— refusing to connect (possible pipe squatting; SECURITY.md 脅威4)");
                 }
                 var conn = new PipeConnection(

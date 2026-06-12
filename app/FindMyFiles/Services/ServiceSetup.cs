@@ -67,6 +67,59 @@ public static partial class ServiceSetup
         }
     }
 
+    /// <summary>PID of the running fmf-engine service process, or 0 when it is
+    /// not installed/running. The client-side fake-server check (脅威4)
+    /// compares this to the pipe's server PID — an unelevated client can read
+    /// it (unlike a SYSTEM process's token), and a squatter never matches
+    /// because registering the service needs admin.</summary>
+    public static uint QueryServiceProcessId()
+    {
+        const uint ScManagerConnect = 0x0001;
+        const uint ServiceQueryStatus = 0x0004;
+        const int ScStatusProcessInfo = 0;
+        const uint ServiceRunning = 4;
+        var scm = OpenSCManager(null, null, ScManagerConnect);
+        if (scm == IntPtr.Zero)
+        {
+            return 0;
+        }
+        try
+        {
+            var svc = OpenService(scm, EngineContract.ServiceName, ServiceQueryStatus);
+            if (svc == IntPtr.Zero)
+            {
+                return 0;
+            }
+            try
+            {
+                var size = (uint)Marshal.SizeOf<ServiceStatusProcess>();
+                var buffer = Marshal.AllocHGlobal((int)size);
+                try
+                {
+                    if (!QueryServiceStatusEx(svc, ScStatusProcessInfo, buffer, size, out _))
+                    {
+                        return 0;
+                    }
+                    var status = Marshal.PtrToStructure<ServiceStatusProcess>(buffer);
+                    // dwProcessId is only meaningful while RUNNING.
+                    return status.CurrentState == ServiceRunning ? status.ProcessId : 0;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+            finally
+            {
+                CloseServiceHandle(svc);
+            }
+        }
+        finally
+        {
+            CloseServiceHandle(scm);
+        }
+    }
+
     /// <summary>fmf-service.exe next to the app (the dist bundle) or in the
     /// dev tree (engine\target\release, walking up from the bin dir).</summary>
     public static string? LocateServiceExe(string baseDir)
@@ -187,6 +240,11 @@ public static partial class ServiceSetup
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool QueryServiceStatus(IntPtr service, out ServiceStatus status);
 
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool QueryServiceStatusEx(
+        IntPtr service, int infoLevel, IntPtr buffer, uint bufSize, out uint bytesNeeded);
+
     [LibraryImport("advapi32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool CloseServiceHandle(IntPtr handle);
@@ -201,5 +259,19 @@ public static partial class ServiceSetup
         public uint ServiceSpecificExitCode;
         public uint CheckPoint;
         public uint WaitHint;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ServiceStatusProcess
+    {
+        public uint ServiceType;
+        public uint CurrentState;
+        public uint ControlsAccepted;
+        public uint Win32ExitCode;
+        public uint ServiceSpecificExitCode;
+        public uint CheckPoint;
+        public uint WaitHint;
+        public uint ProcessId;
+        public uint ServiceFlags;
     }
 }

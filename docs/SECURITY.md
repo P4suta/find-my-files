@@ -12,7 +12,7 @@ API仕様の裏取りは [RESEARCH.md](RESEARCH.md)。
 | 1 | ACL迂回の名前漏洩 — 特権インデクサが、利用者のACLでは見えないファイル名を**別ユーザー**へ露出する(Everything の ETP サーバで事件化した形) | pipe DACL を SYSTEM+利用者SIDに限定(install時捕捉のSID **+ 非昇格UIが `--owner-sid` で転送する日常ユーザーSID**。後者は `validate_user_sid` で実在ユーザー型のみ採用 — OTS昇格でも日常ユーザーを締め出さず、かつ任意SIDの混入を防ぐ)。Authenticated Users / Everyone のACEなし(既定拒否)+接続時トークン照合 |
 | 2 | リモート接続 | `PIPE_REJECT_REMOTE_CLIENTS`(+サーバ機能はやらないことリストで恒久非実装) |
 | 3 | 匿名接続 | 明示DACLに匿名ACEなし=既定拒否(NullSessionPipes の既定はポリシー依存のため当てにしない) |
-| 4 | pipe名スクワッティング / 偽サーバ | サーバ: **初回インスタンスのみ** `FILE_FLAG_FIRST_PIPE_INSTANCE`(2本目以降はフラグ無し — 初回を保持し続ける限り名前の先取りは不能)。クライアント: 既定pipe名では `GetNamedPipeServerProcessId` → SYSTEM トークン検証 |
+| 4 | pipe名スクワッティング / 偽サーバ | サーバ: **初回インスタンスのみ** `FILE_FLAG_FIRST_PIPE_INSTANCE`(2本目以降はフラグ無し — 初回を保持し続ける限り名前の先取りは不能)。クライアント: 既定pipe名では `GetNamedPipeServerProcessId` → **SCM登録の fmf-engine サービスPIDと照合**(`QueryServiceStatusEx`。非昇格UIで動く — SYSTEMプロセスのトークンは非昇格では開けず[ACCESS_DENIED]、session 0 プロセスの identity も取得不可。squatter は SCM登録[要admin]ができずPIDが一致しない) |
 | 5 | 悪意あるクライアント入力(不正フレーム・巨大len・未知opcode) | 長さ上限16MiB・検証失敗は接続切断+`pipe_malformed_frames` カウンタ。dispatcher 全体が catch_unwind 防火壁(panic は FMF_E_PANIC 応答、サービスは生存) |
 | 6 | ローカルDoS(接続洪水・ハンドル枯渇・flush連打) | pipe インスタンス上限 8(超過は接続拒否+`pipe_connections_rejected`)。結果ハンドル上限64/接続(LRU evict→STALE)。Flush は pipe に公開しない(サービス内部の定期+停止時のみ)。イベントは有界キュー+ドロップで USN スレッドを保護。なお到達できるのは認可済み同一ユーザーのみ(#1) |
 | 7 | データファイル自体の漏洩(.fmfidx は全ボリュームのファイル名を含む) | install 時に `%ProgramData%\find-my-files` へ保護DACL(SYSTEM+Administrators。logs サブディレクトリのみ利用者read)。uninstall は既定でデータ保持(残置物を案内表示)、`--purge-data` で削除 |
