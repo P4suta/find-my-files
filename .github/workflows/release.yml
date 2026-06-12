@@ -32,13 +32,13 @@ jobs:
       # env bool, then gate the signing steps on env.HAVE_SIGNING.
       HAVE_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.SIGNING_ENDPOINT != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ env.TAG }}
 
       # Provisions the pinned toolchain (rust 1.95 / dotnet 10 / just) from
       # mise.toml so the shipped artifact is built on the exact pins.
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v4
         with:
           install: true
 
@@ -47,7 +47,7 @@ jobs:
 
       - name: Sign binaries (Azure Trusted Signing)
         if: env.HAVE_SIGNING == 'true'
-        uses: azure/trusted-signing-action@v1
+        uses: azure/trusted-signing-action@v2
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -78,7 +78,7 @@ jobs:
           (Get-FileHash find-my-files-*-win-x64.zip -Algorithm SHA256).Hash | Out-File -Encoding ascii SHA256SUMS.txt
 
       - name: Attach assets to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG }}
           generate_release_notes: true
