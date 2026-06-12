@@ -64,8 +64,6 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <TextBox
                     x:Name="SearchBox"
@@ -75,48 +73,47 @@
                     PlaceholderText="ファイル名で検索…"
                     Style="{StaticResource LauncherSearchBoxStyle}"
                     Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                <ToggleButton
+                <!--  検索バーをすっきり保つため、絞り込み・隠しファイル・並べ替えは
+                      設定ボタン1つに集約して隠す(頻繁にいじらない項目)。  -->
+                <Button
                     Grid.Column="1"
                     VerticalAlignment="Stretch"
-                    AutomationProperties.AutomationId="ToggleFocused"
-                    AutomationProperties.Name="絞り込み"
-                    IsChecked="{x:Bind ViewModel.FocusedSearch, Mode=TwoWay}"
-                    ToolTipService.ToolTip="絞り込み: よく使うファイル形式に限定し、システム領域(Windows・Program Files・node_modules など)を除外します。対象は settings.json で変更できます">
-                    <FontIcon FontSize="16" Glyph="&#xE71C;" />
-                </ToggleButton>
-                <ToggleButton
-                    Grid.Column="2"
-                    VerticalAlignment="Stretch"
-                    AutomationProperties.AutomationId="ToggleSystem"
-                    AutomationProperties.Name="システム・隠しファイルを含める"
-                    IsChecked="{x:Bind ViewModel.IncludeHiddenSystem, Mode=TwoWay}"
-                    ToolTipService.ToolTip="システム・隠しファイルを含める">
-                    <FontIcon FontSize="16" Glyph="&#xED25;" />
-                </ToggleButton>
-                <DropDownButton
-                    Grid.Column="3"
-                    VerticalAlignment="Stretch"
-                    AutomationProperties.AutomationId="SortButton"
-                    AutomationProperties.Name="並べ替え"
-                    ToolTipService.ToolTip="並べ替え">
-                    <FontIcon FontSize="16" Glyph="&#xE8CB;" />
-                    <DropDownButton.Flyout>
-                        <MenuFlyout>
-                            <MenuFlyoutItem
-                                AutomationProperties.AutomationId="SortName"
-                                Click="HeaderName_Click"
-                                Text="名前" />
-                            <MenuFlyoutItem
-                                AutomationProperties.AutomationId="SortSize"
-                                Click="HeaderSize_Click"
-                                Text="サイズ" />
-                            <MenuFlyoutItem
-                                AutomationProperties.AutomationId="SortDate"
-                                Click="HeaderDate_Click"
-                                Text="更新日時" />
+                    AutomationProperties.AutomationId="OptionsButton"
+                    AutomationProperties.Name="検索オプション"
+                    ToolTipService.ToolTip="検索オプション(絞り込み・隠しファイル・並べ替え)">
+                    <FontIcon FontSize="16" Glyph="&#xE713;" />
+                    <Button.Flyout>
+                        <MenuFlyout Placement="BottomEdgeAlignedRight">
+                            <ToggleMenuFlyoutItem
+                                AutomationProperties.AutomationId="OptFocused"
+                                IsChecked="{x:Bind ViewModel.FocusedSearch, Mode=TwoWay}"
+                                Text="絞り込み(よく使う形式に限定・システム領域を除外)" />
+                            <ToggleMenuFlyoutItem
+                                AutomationProperties.AutomationId="OptSystem"
+                                IsChecked="{x:Bind ViewModel.IncludeHiddenSystem, Mode=TwoWay}"
+                                Text="システム・隠しファイルを含める" />
+                            <MenuFlyoutSeparator />
+                            <MenuFlyoutSubItem Text="並べ替え">
+                                <RadioMenuFlyoutItem
+                                    AutomationProperties.AutomationId="SortName"
+                                    Click="HeaderName_Click"
+                                    GroupName="SortOrder"
+                                    IsChecked="True"
+                                    Text="名前" />
+                                <RadioMenuFlyoutItem
+                                    AutomationProperties.AutomationId="SortSize"
+                                    Click="HeaderSize_Click"
+                                    GroupName="SortOrder"
+                                    Text="サイズ" />
+                                <RadioMenuFlyoutItem
+                                    AutomationProperties.AutomationId="SortDate"
+                                    Click="HeaderDate_Click"
+                                    GroupName="SortOrder"
+                                    Text="更新日時" />
+                            </MenuFlyoutSubItem>
                         </MenuFlyout>
-                    </DropDownButton.Flyout>
-                </DropDownButton>
+                    </Button.Flyout>
+                </Button>
             </Grid>
 
             <!--  結果エリア(検索バー直下)。Collapsed/Visible は VisualState 制御。  -->
