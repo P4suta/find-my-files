@@ -22,7 +22,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="Assets\AppIcon.ico" />
+    <!-- AppWindow.SetIcon takes a real file path, so the icon must exist
+         on disk next to the exe (publish included) — PRI embedding alone
+         is not enough. -->
+    <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
     <!-- Shared syntax fixture (ADR-0018): FakeEngineClient's query-syntax
          verdicts come from the same golden file the Rust parser tests pin,
          so the fake cannot drift from the real engine's rejections. -->
@@ -41,7 +44,11 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.1839" />
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
+    <!-- WinUI component package instead of the Microsoft.WindowsAppSDK
+         metapackage: a filename-search app needs none of the AI/ML
+         (onnxruntime, DirectML), Widgets or WebView2 payload the
+         metapackage drags into the self-contained output (~50MB). -->
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.2.1" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.3.2" />
   </ItemGroup>

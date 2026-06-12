@@ -63,6 +63,16 @@ verify: fmt-check lint test test-app
 contract-gen:
     cargo run -p fmf-contract --bin gen-contract
 
+# Clean distributable bundle in dist/FindMyFiles: published app + engine
+# binaries (fmf-service.exe / fmf.exe). WinAppSDK ships ~85 locale resource
+# dirs; everything but en-us/ja-JP is pruned (lookups fall back to neutral
+# resources when a locale dir is absent).
+publish: build
+    Remove-Item dist/FindMyFiles -Recurse -Force -ErrorAction SilentlyContinue; exit 0
+    dotnet publish app/FindMyFiles -c Release -r win-x64 -o dist/FindMyFiles
+    Get-ChildItem dist/FindMyFiles -Directory | Where-Object { $_.Name -match '^[a-z]{2,3}(-[A-Za-z0-9]+){1,3}$' -and $_.Name -notin @('en-us','ja-JP') } | Remove-Item -Recurse -Force
+    Copy-Item engine/target/release/fmf-service.exe, engine/target/release/fmf.exe dist/FindMyFiles/
+
 # ── Service (v2: fmf-service + named pipe; ADR-0016/0017) ────────────────
 
 # Console-mode service in the foreground — the dev inner loop (elevated;

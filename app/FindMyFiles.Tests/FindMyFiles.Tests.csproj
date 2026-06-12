@@ -9,6 +9,10 @@
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
     <EnableMsixTooling>false</EnableMsixTooling>
+    <!-- Mirror the app: with the WinUI component package (no metapackage),
+         every WinAppSDK consumer must choose self-contained or reference
+         the Runtime package explicitly. -->
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
   </PropertyGroup>
 
   <ItemGroup>
