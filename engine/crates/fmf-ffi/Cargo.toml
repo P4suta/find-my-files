@@ -24,3 +24,8 @@ tracing = { workspace = true }
 # Test-only feature union: exposes fmf-core's index::testutil (TestDir RAII)
 # to the contract tests without touching the production cdylib build.
 fmf-core = { workspace = true, features = ["testutil"] }
+
+[package.metadata.cargo-machete]
+# tracing is used only through fmf-core's degrade! macro expansion, which
+# cargo-machete can't see (it doesn't expand macros) — keep it.
+ignored = ["tracing"]
