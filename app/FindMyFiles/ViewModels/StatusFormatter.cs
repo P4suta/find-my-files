@@ -21,6 +21,7 @@ public static class StatusFormatter
     /// right now (client type + live connection state).</summary>
     public static string EngineMode(IEngineClient engine) => engine switch
     {
+        FakeEngineClient { IsEmpty: true } => "未接続",
         FakeEngineClient => "fake",
         FfiEngineClient => "管理者(in-proc)",
         PipeEngineClient => engine.Connection switch

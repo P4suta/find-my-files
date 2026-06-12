@@ -19,6 +19,9 @@ internal static class EngineContract
     /// <summary>Pipe name without the <c>\\.\pipe\</c> prefix.</summary>
     public const string PipeNameShort = "fmf-engine-v1";
 
+    /// <summary>SCM service name (the in-app service setup drives it).</summary>
+    public const string ServiceName = "fmf-engine";
+
     /// <summary>Status codes (frame header / FFI returns). Append-only.</summary>
     public static class Status
     {

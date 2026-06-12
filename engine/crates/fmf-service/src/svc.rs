@@ -17,7 +17,9 @@ use windows_service::{define_windows_service, service_dispatcher};
 use crate::pipe::Event;
 use crate::{config, host, server};
 
-pub const SERVICE_NAME: &str = "fmf-engine";
+// The SCM name is contract surface (the app's in-app service setup needs
+// it too — ADR-0018 radiation).
+pub use fmf_proto::SERVICE_NAME;
 
 pub struct ServeOptions {
     pub data_dir: std::path::PathBuf,

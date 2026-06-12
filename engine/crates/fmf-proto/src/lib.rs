@@ -7,5 +7,7 @@
 pub mod frame;
 pub mod messages;
 
-pub use fmf_contract::versions::{ABI_VERSION, PIPE_NAME, PIPE_NAME_SHORT, PROTOCOL_VERSION};
+pub use fmf_contract::versions::{
+    ABI_VERSION, PIPE_NAME, PIPE_NAME_SHORT, PROTOCOL_VERSION, SERVICE_NAME,
+};
 pub use fmf_contract::{codes, limits};

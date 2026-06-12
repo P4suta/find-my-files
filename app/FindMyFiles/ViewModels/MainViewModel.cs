@@ -114,6 +114,13 @@ public sealed partial class MainViewModel : ObservableObject
     /// so a pipe transport never blocks it.</summary>
     public async Task StartAsync()
     {
+        if (_engine is FakeEngineClient { IsEmpty: true })
+        {
+            // Unelevated, no service: the factory's notification explains
+            // the way out; the status line must not pretend to index.
+            StatusText = "未接続 — 通知の手順で検索サービスをセットアップしてください";
+            return;
+        }
         try
         {
             var volumes = await _engine.ListVolumesAsync();
@@ -127,7 +134,55 @@ public sealed partial class MainViewModel : ObservableObject
             Notifications.Push(new AppNotification(
                 NotifySeverity.Error, "インデックスを開始できませんでした", ex.Message));
         }
+        OfferServiceSetup();
         Search.Requery(RequeryOrigin.Initial);
+    }
+
+    /// <summary>Elevated in-proc session with the service absent or stopped →
+    /// offer the one-click setup (the GUI half ADR-0016 left to a terminal).
+    /// The usage story this completes: plain double-click → 「管理者として
+    /// 再起動」 → this button, once — then plain double-click forever.</summary>
+    private void OfferServiceSetup()
+    {
+        if (_engine is not FfiEngineClient || !ServiceSetup.IsProcessElevated())
+        {
+            return;
+        }
+        var state = ServiceSetup.QueryState();
+        if (state == EngineServiceState.Running)
+        {
+            return;
+        }
+        var exe = ServiceSetup.LocateServiceExe(AppContext.BaseDirectory);
+        if (exe is null)
+        {
+            FileLog.Warn("service-setup", "fmf-service.exe not found — setup offer suppressed");
+            return;
+        }
+        Notifications.Push(new AppNotification(
+            NotifySeverity.Warning,
+            state == EngineServiceState.NotInstalled
+                ? "管理者モードで動作中です — 検索サービスを登録できます"
+                : "検索サービスは登録済みですが停止しています",
+            "サービスを開始しておくと、次回からは通常起動(ダブルクリック)でそのまま検索できます。",
+            state == EngineServiceState.NotInstalled ? "サービスを登録して開始" : "サービスを開始",
+            () => RunServiceSetupAsync(exe).Forget("service-setup")));
+    }
+
+    private async Task RunServiceSetupAsync(string exe)
+    {
+        var (ok, transcript) = await Task.Run(() => ServiceSetup.InstallAndStart(exe));
+        FileLog.Info("service-setup", transcript);
+        Notifications.Push(ok
+            ? new AppNotification(
+                NotifySeverity.Info,
+                "検索サービスを開始しました",
+                "次回から通常起動でサービスに接続します。このウィンドウは管理者モードのまま"
+                + "使えます(サービスは、このウィンドウを閉じた後にインデックスを引き継ぎます)")
+            : new AppNotification(
+                NotifySeverity.Error,
+                "サービスのセットアップに失敗しました",
+                Truncate(transcript, 300)));
     }
 
     partial void OnSearchTextChanged(string value) => Search.NotifyTextChanged(value);

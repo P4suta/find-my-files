@@ -49,26 +49,21 @@ public static class EngineClientFactory
         }
         // ARCHITECTURE.md エンジン選択の契約: サービス不在+非昇格で in-proc を
         // 作っても MFT 読みで必ず失敗する(原因を語らない「インデックスに失敗」
-        // になる)。Fake に劣化し、理由と出口 — サービス導入(恒久)または明示の
-        // 昇格再起動 — を提示する。自動 runas ループは禁止。
-        FileLog.Warn("app", "engine: fake fallback (no service answered, not elevated)");
+        // になる)。結果ゼロの空エンジンに劣化し(デモデータは出さない — 検索
+        // アプリで偽データに実用性はない)、理由と出口 — 明示の昇格再起動 →
+        // アプリ内サービス登録 — を提示する。自動 runas ループは禁止。
+        FileLog.Warn("app", "engine: empty fallback (no service answered, not elevated)");
         Notifier.Post(
             NotifySeverity.Warning,
-            "検索サービスが見つからないため、デモデータで起動しました",
-            "実ファイルを検索するには、管理者ターミナルで一度 `just service-install` を実行して"
-            + "サービスを登録してください(以後は通常起動で動きます)。"
-            + "今すぐ試す場合は右のボタンで管理者として再起動できます。",
+            "検索サービスに接続できません",
+            "右のボタンで管理者として再起動し、表示される「サービスを登録して開始」を"
+            + "一度押してください。以後は通常起動(ダブルクリック)のまま使えます。",
             actionLabel: "管理者として再起動",
             action: () => ShellOps.RestartElevated(args));
-        return new FakeEngineClient();
+        return FakeEngineClient.CreateEmpty();
     }
 
-    private static bool IsElevated()
-    {
-        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
-        return new System.Security.Principal.WindowsPrincipal(identity)
-            .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
-    }
+    private static bool IsElevated() => ServiceSetup.IsProcessElevated();
 
     private static bool HasFlag(string[] args, string flag) =>
         args.Any(a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));

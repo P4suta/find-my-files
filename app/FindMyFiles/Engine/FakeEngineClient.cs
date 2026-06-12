@@ -33,8 +33,24 @@ public sealed class FakeEngineClient : IEngineClient
 
     private readonly List<ErrorEventData> _injectedErrors = [];
 
-    public FakeEngineClient()
+    /// <summary>Visibly empty stand-in for the unelevated no-service start —
+    /// searching demo rows has no practical value (user verdict), so the
+    /// auto-fallback shows zero results plus the setup notification instead.
+    /// The data-bearing fake stays what <c>--fake-engine</c> is for.</summary>
+    public static FakeEngineClient CreateEmpty() => new(empty: true);
+
+    /// <summary>True for the unelevated auto-fallback instance (no rows) —
+    /// the status badge says 未接続, not fake.</summary>
+    public bool IsEmpty { get; }
+
+    public FakeEngineClient(bool empty = false)
     {
+        IsEmpty = empty;
+        if (empty)
+        {
+            _rows = [];
+            return;
+        }
         var rng = new Random(42);
         string[] exts = ["txt", "rs", "cs", "dll", "png", "pdf", "log", "json"];
         string[] dirs = ["F:\\", "F:\\src\\", "F:\\docs\\", "F:\\bin\\debug\\", "F:\\photos\\2026\\"];

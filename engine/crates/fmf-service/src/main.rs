@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use clap::Parser;
+use fmf_core::diag::error_chain;
 use fmf_service::pipe::{Event, PipeStream};
 use fmf_service::svc::{EXIT_LOCKED, SERVICE_NAME, ServeOptions};
 use fmf_service::{config, security, svc};
@@ -180,26 +181,42 @@ fn install() -> Result<(), String> {
         .map_err(|e| format!("logs DACL: {e}"))?;
 
     // 4. Register: LocalSystem, delayed auto start, restart-on-crash.
-    let manager =
-        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)
-            .map_err(|e| format!("SCM open (elevated?): {e}"))?;
-    let service = manager
-        .create_service(
-            &ServiceInfo {
-                name: SERVICE_NAME.into(),
-                display_name: "find-my-files engine".into(),
-                service_type: ServiceType::OWN_PROCESS,
-                start_type: ServiceStartType::AutoStart,
-                error_control: ServiceErrorControl::Normal,
-                executable_path: std::env::current_exe().map_err(|e| e.to_string())?,
-                launch_arguments: vec!["service-entry".into()],
-                dependencies: vec![],
-                account_name: None, // LocalSystem
-                account_password: None,
-            },
-            ServiceAccess::CHANGE_CONFIG | ServiceAccess::START,
-        )
-        .map_err(|e| format!("create_service: {e}"))?;
+    let manager = ServiceManager::local_computer(
+        None::<&str>,
+        ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+    )
+    .map_err(|e| format!("SCM open (elevated?): {}", error_chain(&e)))?;
+    let service = match manager.create_service(
+        &ServiceInfo {
+            name: SERVICE_NAME.into(),
+            display_name: "find-my-files engine".into(),
+            service_type: ServiceType::OWN_PROCESS,
+            start_type: ServiceStartType::AutoStart,
+            error_control: ServiceErrorControl::Normal,
+            executable_path: std::env::current_exe().map_err(|e| e.to_string())?,
+            launch_arguments: vec!["service-entry".into()],
+            dependencies: vec![],
+            account_name: None, // LocalSystem
+            account_password: None,
+        },
+        ServiceAccess::CHANGE_CONFIG | ServiceAccess::START,
+    ) {
+        Ok(s) => s,
+        // ERROR_SERVICE_EXISTS(1073): install is an idempotent ritual —
+        // steps 1–3 already refreshed the SID/config/DACLs, so refresh the
+        // registration's config too instead of failing with a cryptic
+        // wrapper error (the original sin: "IO error in winapi call").
+        Err(e) if raw_os_error(&e) == Some(1073) => {
+            println!("'{SERVICE_NAME}' is already installed — refreshing its configuration");
+            manager
+                .open_service(
+                    SERVICE_NAME,
+                    ServiceAccess::CHANGE_CONFIG | ServiceAccess::START,
+                )
+                .map_err(|e| format!("open existing service: {}", error_chain(&e)))?
+        }
+        Err(e) => return Err(format!("create_service: {}", error_chain(&e))),
+    };
     service
         .set_delayed_auto_start(true)
         .map_err(|e| format!("delayed start: {e}"))?;
@@ -283,13 +300,28 @@ fn start_service() -> Result<(), String> {
     use windows_service::service::ServiceAccess;
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("SCM open: {}", error_chain(&e)))?;
     let service = manager
         .open_service(SERVICE_NAME, ServiceAccess::START)
-        .map_err(|e| e.to_string())?;
-    service.start(&[] as &[&str]).map_err(|e| e.to_string())?;
+        .map_err(|e| format!("open service (installed?): {}", error_chain(&e)))?;
+    match service.start(&[] as &[&str]) {
+        Ok(()) => {}
+        // ERROR_SERVICE_ALREADY_RUNNING(1056): starting is idempotent too.
+        Err(e) if raw_os_error(&e) == Some(1056) => {
+            println!("'{SERVICE_NAME}' is already running");
+            return Ok(());
+        }
+        Err(e) => return Err(format!("start: {}", error_chain(&e))),
+    }
     println!("started '{SERVICE_NAME}'");
     Ok(())
+}
+
+/// The OS error behind a windows-service wrapper error, when there is one
+/// (the crate's Display hides it — "IO error in winapi call").
+fn raw_os_error(e: &windows_service::Error) -> Option<i32> {
+    use std::error::Error as _;
+    e.source()?.downcast_ref::<std::io::Error>()?.raw_os_error()
 }
 
 fn stop_service() -> Result<(), String> {

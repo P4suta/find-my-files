@@ -67,6 +67,12 @@ fn render() -> String {
         versions::PIPE_NAME_SHORT
     ));
     w("");
+    w("    /// <summary>SCM service name (the in-app service setup drives it).</summary>");
+    w(&format!(
+        "    public const string ServiceName = \"{}\";",
+        versions::SERVICE_NAME
+    ));
+    w("");
     w("    /// <summary>Status codes (frame header / FFI returns). Append-only.</summary>");
     w("    public static class Status");
     w("    {");

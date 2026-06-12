@@ -9,6 +9,9 @@ pub const PIPE_NAME: &str = r"\\.\pipe\fmf-engine-v1";
 /// Short name (C# `NamedPipeClientStream` takes the name without the
 /// `\\.\pipe\` prefix; gen-contract radiates this one).
 pub const PIPE_NAME_SHORT: &str = "fmf-engine-v1";
+/// SCM service name — deployment surface shared by fmf-service's
+/// lifecycle subcommands and the app's in-app service setup.
+pub const SERVICE_NAME: &str = "fmf-engine";
 
 #[cfg(test)]
 mod tests {
