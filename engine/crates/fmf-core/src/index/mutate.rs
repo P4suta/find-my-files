@@ -112,7 +112,7 @@ impl VolumeIndex {
     }
 
     /// Merge entries `first_new..len` (already appended, unsorted) into the
-    /// name permutation (in place — see [`merge_sorted_tail`]), then bump
+    /// name permutation (in place — see `merge_sorted_tail`), then bump
     /// the content generation. Call once per USN batch. The lazy size/mtime
     /// permutation caches catch up on their next sorted query (the
     /// generation bump is their invalidation signal).
