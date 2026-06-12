@@ -125,8 +125,11 @@ public sealed partial class MainViewModel : ObservableObject
         try
         {
             var volumes = await _engine.ListVolumesAsync();
-            StatusText = StatusFormatter.IndexingStarted(volumes);
             await _engine.StartIndexingAsync(volumes);
+            // 起動時点の実状態を反映(pipe では接続前にサービスが索引済みのことが
+            // ある)。無条件「作成中」をやめ、既Readyなら「準備完了」に。以後の
+            // Scanning→Ready 遷移は OnVolumeUpdated が拾う。
+            StatusText = StatusFormatter.Overall(await _engine.GetStatusAsync(), volumes);
         }
         catch (Exception ex)
         {

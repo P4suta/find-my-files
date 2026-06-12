@@ -37,15 +37,45 @@ public sealed class StatusFormatterTests
     }
 
     [Fact]
-    public void IndexingStarted_NoVolumes_ReportsNoneFound()
+    public void Overall_NoStatusNoDrives_ReportsNoneFound()
     {
-        Assert.Equal("NTFS固定ドライブが見つかりません", StatusFormatter.IndexingStarted([]));
+        Assert.Equal("NTFS固定ドライブが見つかりません", StatusFormatter.Overall([], []));
     }
 
     [Fact]
-    public void IndexingStarted_MultipleVolumes_ListsThem()
+    public void Overall_NoStatusButRequested_ReportsIndexing()
     {
-        Assert.Equal("インデックス作成中: C:, D:", StatusFormatter.IndexingStarted(["C:", "D:"]));
+        // The engine hasn't surfaced status yet, but we asked to index them.
+        Assert.Equal("インデックス作成中: C:, D:", StatusFormatter.Overall([], ["C:", "D:"]));
+    }
+
+    [Fact]
+    public void Overall_AllReady_ReportsReadyWithTotal()
+    {
+        VolumeStatus[] vols =
+        [
+            new("C:", VolumeState.Ready, 1000),
+            new("D:", VolumeState.Ready, 234),
+        ];
+        Assert.Equal("準備完了 — 1,234 件", StatusFormatter.Overall(vols, ["C:", "D:"]));
+    }
+
+    [Fact]
+    public void Overall_SomeScanning_ListsOnlyPendingVolumes()
+    {
+        VolumeStatus[] vols =
+        [
+            new("C:", VolumeState.Ready, 1000),
+            new("D:", VolumeState.Scanning, 0),
+        ];
+        Assert.Equal("インデックス作成中: D:", StatusFormatter.Overall(vols, ["C:", "D:"]));
+    }
+
+    [Fact]
+    public void Overall_AllFailed_ReportsFailure()
+    {
+        VolumeStatus[] vols = [new("C:", VolumeState.Failed, 0)];
+        Assert.Equal("インデックスに失敗: C:", StatusFormatter.Overall(vols, ["C:"]));
     }
 
     [Theory]
