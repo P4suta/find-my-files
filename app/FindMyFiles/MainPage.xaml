@@ -16,20 +16,18 @@
         AllowDrop="True"
         DragOver="Page_DragOver"
         Drop="Page_Drop">
-        <Grid.KeyboardAccelerators>
-            <KeyboardAccelerator Key="F12" Invoked="PerfPanel_Toggle" />
-        </Grid.KeyboardAccelerators>
 
-        <!--  Empty(空クエリ): 検索バーを縦中央・結果/ステータスを畳む(Raycast/Spotlight の初期)。
-              Results(クエリ有): 検索バーを上へ・結果を表示。SearchText の空/非空で
-              code-behind が GoToState。ContentHost の Reposition で滑らかに移動する。  -->
+        <!--  Empty(空クエリ): 検索行を領域いっぱい(*)にして検索バーを縦中央に、結果行は畳む
+              (Raycast/Spotlight の初期画面)。Results(クエリ有): 検索行は Auto(上固定)・結果行(*)。
+              状態(件数/エンジン等)と診断は常設をやめ設定(歯車)に集約した。  -->
         <VisualStateManager.VisualStateGroups>
             <VisualStateGroup x:Name="SearchStates">
                 <VisualState x:Name="EmptyState">
                     <VisualState.Setters>
-                        <Setter Target="ContentHost.VerticalAlignment" Value="Center" />
-                        <Setter Target="ResultsArea.Visibility" Value="Collapsed" />
-                        <Setter Target="StatusBar.Visibility" Value="Collapsed" />
+                        <!--  検索バーを縦中央へ: SearchRow を * に、結果行は畳む。行高は VisualState で
+                              明示制御(Visibility=Collapsed だと Auto 行が復帰時に再計算されない罠を回避)。  -->
+                        <Setter Target="SearchRow.Height" Value="*" />
+                        <Setter Target="ResultsRow.Height" Value="0" />
                     </VisualState.Setters>
                 </VisualState>
                 <VisualState x:Name="ResultsState" />
@@ -37,235 +35,237 @@
         </VisualStateManager.VisualStateGroups>
 
         <Grid.RowDefinitions>
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
+            <RowDefinition x:Name="SearchRow" Height="Auto" />
+            <!--  結果(*)は検索バー直下から画面下端まで使う(フッター撤去済み・衝突相手なし)。  -->
+            <RowDefinition x:Name="ResultsRow" Height="*" />
+            <!--  診断パネル。既定は畳む(0)・開くと最下部に出る。  -->
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!--  検索バー＋結果。MaxWidth で中央寄せ(ランチャーらしい横幅制限)。  -->
+        <!--  検索バー(Row 0)。Empty では行が * で縦中央、Results では Auto で上。
+              位置変化は RepositionThemeTransition で滑らかに。  -->
         <Grid
-            x:Name="ContentHost"
             Grid.Row="0"
             MaxWidth="860"
             Margin="24,16,24,0"
-            VerticalAlignment="Top">
+            VerticalAlignment="Center"
+            ColumnSpacing="8">
             <Grid.Transitions>
                 <TransitionCollection>
                     <RepositionThemeTransition />
                 </TransitionCollection>
             </Grid.Transitions>
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
-
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
             <!--  Search box: a plain TextBox on purpose (AutoSuggestBox's accept semantics fight live filtering — docs/ARCHITECTURE.md).  -->
-            <Grid Grid.Row="0" ColumnSpacing="8">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBox
-                    x:Name="SearchBox"
-                    Grid.Column="0"
-                    AutomationProperties.AutomationId="SearchBox"
-                    KeyDown="SearchBox_KeyDown"
-                    PlaceholderText="ファイル名で検索…"
-                    Style="{StaticResource LauncherSearchBoxStyle}"
-                    Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                <!--  検索バーをすっきり保つため、絞り込み・隠しファイル・並べ替えは
-                      設定ボタン1つに集約して隠す(頻繁にいじらない項目)。  -->
-                <Button
-                    Grid.Column="1"
-                    VerticalAlignment="Stretch"
-                    AutomationProperties.AutomationId="OptionsButton"
-                    AutomationProperties.Name="検索オプション"
-                    ToolTipService.ToolTip="検索オプション(絞り込み・隠しファイル・並べ替え)">
-                    <FontIcon FontSize="16" Glyph="&#xE713;" />
-                    <Button.Flyout>
-                        <MenuFlyout Placement="BottomEdgeAlignedRight">
-                            <ToggleMenuFlyoutItem
-                                AutomationProperties.AutomationId="OptFocused"
-                                IsChecked="{x:Bind ViewModel.FocusedSearch, Mode=TwoWay}"
-                                Text="絞り込み(よく使う形式に限定・システム領域を除外)" />
-                            <ToggleMenuFlyoutItem
-                                AutomationProperties.AutomationId="OptSystem"
-                                IsChecked="{x:Bind ViewModel.IncludeHiddenSystem, Mode=TwoWay}"
-                                Text="システム・隠しファイルを含める" />
-                            <MenuFlyoutSeparator />
-                            <MenuFlyoutSubItem Text="並べ替え">
-                                <RadioMenuFlyoutItem
-                                    AutomationProperties.AutomationId="SortName"
-                                    Click="HeaderName_Click"
-                                    GroupName="SortOrder"
-                                    IsChecked="True"
-                                    Text="名前" />
-                                <RadioMenuFlyoutItem
-                                    AutomationProperties.AutomationId="SortSize"
-                                    Click="HeaderSize_Click"
-                                    GroupName="SortOrder"
-                                    Text="サイズ" />
-                                <RadioMenuFlyoutItem
-                                    AutomationProperties.AutomationId="SortDate"
-                                    Click="HeaderDate_Click"
-                                    GroupName="SortOrder"
-                                    Text="更新日時" />
-                            </MenuFlyoutSubItem>
-                        </MenuFlyout>
-                    </Button.Flyout>
-                </Button>
-            </Grid>
-
-            <!--  結果エリア(検索バー直下)。Collapsed/Visible は VisualState 制御。  -->
-            <Grid
-                x:Name="ResultsArea"
-                Grid.Row="1"
-                Margin="0,12,0,0">
-
-                <!--  Results. ItemsPanel stays ItemsStackPanel (CLAUDE.md UI固定則).
-                      ItemsSource is bound OneTime by design: the VirtualResultList
-                      instance lives as long as the page; new results arrive via a
-                      seeded Reset, never by swapping the ItemsSource (ADR-0015).
-                      MaxHeight で見せる量を抑え、超過分は仮想化スクロールで送る。  -->
-                <ListView
-                    x:Name="ResultsList"
-                    MaxHeight="520"
-                    AutomationProperties.AutomationId="ResultsList"
-                    DoubleTapped="ResultsList_DoubleTapped"
-                    ItemsSource="{x:Bind ViewModel.Results.ResultsSource}"
-                    KeyDown="ResultsList_KeyDown"
-                    SelectionMode="Extended"
-                    ShowsScrollingPlaceholders="True">
-                    <ListView.ItemContainerTransitions>
-                        <TransitionCollection>
-                            <AddDeleteThemeTransition />
-                        </TransitionCollection>
-                    </ListView.ItemContainerTransitions>
-                    <ListView.ItemContainerStyle>
-                        <Style BasedOn="{StaticResource DefaultListViewItemStyle}" TargetType="ListViewItem">
-                            <Setter Property="MinHeight" Value="52" />
-                            <Setter Property="Padding" Value="12,6,12,6" />
-                        </Style>
-                    </ListView.ItemContainerStyle>
-                    <ListView.ItemTemplate>
-                        <DataTemplate x:DataType="vm:ResultRow">
-                            <Grid ColumnSpacing="12">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto" />
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <FontIcon
-                                    Grid.Column="0"
-                                    VerticalAlignment="Center"
-                                    FontSize="22"
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Glyph="{x:Bind Glyph, Mode=OneWay}" />
-                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                    <TextBlock Style="{StaticResource ResultNameTextStyle}" Text="{x:Bind Name, Mode=OneWay}" />
-                                    <TextBlock
-                                        x:Phase="1"
-                                        Style="{StaticResource ResultPathTextStyle}"
-                                        Text="{x:Bind ParentPath, Mode=OneWay}" />
-                                </StackPanel>
-                                <StackPanel
-                                    Grid.Column="2"
-                                    MinWidth="96"
-                                    VerticalAlignment="Center">
-                                    <TextBlock
-                                        x:Phase="2"
-                                        HorizontalAlignment="Right"
-                                        Style="{StaticResource ResultMetaTextStyle}"
-                                        Text="{x:Bind SizeText, Mode=OneWay}" />
-                                    <TextBlock
-                                        x:Phase="2"
-                                        HorizontalAlignment="Right"
-                                        Style="{StaticResource ResultMetaTextStyle}"
-                                        Text="{x:Bind DateText, Mode=OneWay}" />
-                                </StackPanel>
-                            </Grid>
-                        </DataTemplate>
-                    </ListView.ItemTemplate>
-                    <ListView.ContextFlyout>
-                        <MenuFlyout>
+            <TextBox
+                x:Name="SearchBox"
+                Grid.Column="0"
+                AutomationProperties.AutomationId="SearchBox"
+                KeyDown="SearchBox_KeyDown"
+                PlaceholderText="ファイル名で検索…"
+                Style="{StaticResource LauncherSearchBoxStyle}"
+                Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}">
+                <!--  フォーカス時の青い2pxアクセント下線を消す(Google 風に常時1pxの丸枠だけ)。
+                      TextBox テンプレートが Focused 状態でこの2リソースを使うので、この TextBox
+                      スコープだけで上書き(他の TextBox には波及させない)。  -->
+                <TextBox.Resources>
+                    <Thickness x:Key="TextControlBorderThemeThicknessFocused">1</Thickness>
+                    <StaticResource x:Key="TextControlBorderBrushFocused" ResourceKey="ControlStrokeColorDefaultBrush" />
+                </TextBox.Resources>
+            </TextBox>
+            <!--  検索バーをすっきり保つため、絞り込み・隠しファイル・並べ替え・状態表示・診断は
+                  すべて設定ボタン1つに集約(常設フッターは廃止)。  -->
+            <Button
+                Grid.Column="1"
+                Width="56"
+                Height="56"
+                Padding="0"
+                VerticalAlignment="Center"
+                AutomationProperties.AutomationId="OptionsButton"
+                AutomationProperties.Name="設定・状態・診断"
+                CornerRadius="28"
+                ToolTipService.ToolTip="設定・状態・診断(絞り込み/隠しファイル/並べ替え/件数/エンジン/診断)">
+                <FontIcon FontSize="16" Glyph="&#xE713;" />
+                <Button.Flyout>
+                    <MenuFlyout Placement="BottomEdgeAlignedRight">
+                        <ToggleMenuFlyoutItem
+                            AutomationProperties.AutomationId="OptFocused"
+                            IsChecked="{x:Bind ViewModel.FocusedSearch, Mode=TwoWay}"
+                            Text="絞り込み(よく使う形式に限定・システム領域を除外)" />
+                        <ToggleMenuFlyoutItem
+                            AutomationProperties.AutomationId="OptSystem"
+                            IsChecked="{x:Bind ViewModel.IncludeHiddenSystem, Mode=TwoWay}"
+                            Text="システム・隠しファイルを含める" />
+                        <MenuFlyoutSeparator />
+                        <MenuFlyoutSubItem Text="並べ替え">
+                            <RadioMenuFlyoutItem
+                                AutomationProperties.AutomationId="SortName"
+                                Click="HeaderName_Click"
+                                GroupName="SortOrder"
+                                IsChecked="True"
+                                Text="名前" />
+                            <RadioMenuFlyoutItem
+                                AutomationProperties.AutomationId="SortSize"
+                                Click="HeaderSize_Click"
+                                GroupName="SortOrder"
+                                Text="サイズ" />
+                            <RadioMenuFlyoutItem
+                                AutomationProperties.AutomationId="SortDate"
+                                Click="HeaderDate_Click"
+                                GroupName="SortOrder"
+                                Text="更新日時" />
+                        </MenuFlyoutSubItem>
+                        <MenuFlyoutSeparator />
+                        <!--  状態(旧フッター)はサブ項目に押し込み、オプションと同列にしない(情報なので無効表示)。  -->
+                        <MenuFlyoutSubItem AutomationProperties.AutomationId="StatusMenu" Text="状態">
                             <MenuFlyoutItem
-                                AutomationProperties.AutomationId="MnuOpen"
-                                Click="MenuOpen_Click"
-                                Text="開く" />
+                                AutomationProperties.AutomationId="StatusState"
+                                IsEnabled="False"
+                                Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" />
                             <MenuFlyoutItem
-                                AutomationProperties.AutomationId="MnuOpenPath"
-                                Click="MenuOpenPath_Click"
-                                Text="フォルダーを開いてファイルを選択" />
+                                AutomationProperties.AutomationId="StatusCount"
+                                IsEnabled="False"
+                                Text="{x:Bind ViewModel.Results.CountText, Mode=OneWay}"
+                                Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ViewModel.Results.CountText), Mode=OneWay}" />
                             <MenuFlyoutItem
-                                AutomationProperties.AutomationId="MnuCopyPath"
-                                Click="MenuCopyPath_Click"
-                                Text="パスをコピー" />
-                        </MenuFlyout>
-                    </ListView.ContextFlyout>
-                </ListView>
-
-                <!--  Notification stack: the visible end of every error path.
-                      Overlays the results (same cell, top-aligned) so a
-                      notification appearing or dissolving never resizes the list.  -->
-                <ItemsControl
-                    Margin="0,0,0,0"
-                    VerticalAlignment="Top"
-                    Canvas.ZIndex="1"
-                    AutomationProperties.AutomationId="NotifyBar"
-                    ItemsSource="{x:Bind ViewModel.Notifications.Items}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="svc:AppNotification">
-                            <InfoBar
-                                Title="{x:Bind Message}"
-                                Margin="0,0,0,4"
-                                Closed="Notification_Closed"
-                                IsOpen="True"
-                                Message="{x:Bind Detail}"
-                                Severity="{x:Bind conv:UiConverters.ToInfoSeverity(Severity)}">
-                                <InfoBar.ActionButton>
-                                    <Button
-                                        Click="{x:Bind Invoke}"
-                                        Content="{x:Bind ActionLabel}"
-                                        Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ActionLabel)}" />
-                                </InfoBar.ActionButton>
-                            </InfoBar>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </Grid>
+                                AutomationProperties.AutomationId="EngineMode"
+                                IsEnabled="False"
+                                Text="{x:Bind ViewModel.EngineModeText, Mode=OneWay}" />
+                        </MenuFlyoutSubItem>
+                        <MenuFlyoutItem
+                            AutomationProperties.AutomationId="DiagToggle"
+                            Click="PerfPanel_MenuClick"
+                            Text="診断情報を表示/隠す" />
+                    </MenuFlyout>
+                </Button.Flyout>
+            </Button>
         </Grid>
 
-        <!--  Performance panel (F12).  -->
-        <views:PerfPanel
+        <!--  結果(Row 1・*)。MaxWidth で中央寄せ。下マージンは画面下端の余白(フッター撤去済み)。  -->
+        <Grid
+            x:Name="ResultsArea"
             Grid.Row="1"
+            MaxWidth="860"
+            Margin="24,12,24,16">
+
+            <!--  Results. ItemsPanel stays ItemsStackPanel (CLAUDE.md UI固定則).
+                  ItemsSource is bound OneTime by design: the VirtualResultList
+                  instance lives as long as the page; new results arrive via a
+                  seeded Reset, never by swapping the ItemsSource (ADR-0015).  -->
+            <!--  結果は * 行いっぱいに表示(ウィンドウ全体を使い、スクロールバーもフル丈)。
+                  仮想化は ItemsStackPanel＋IItemsRangeInfo が担う(行の高さ制約は不要)。
+                  フッターは別の Auto 行(Row 3)にあるので構造上この ListView と重なり得ない。  -->
+            <ListView
+                x:Name="ResultsList"
+                AutomationProperties.AutomationId="ResultsList"
+                DoubleTapped="ResultsList_DoubleTapped"
+                ItemsSource="{x:Bind ViewModel.Results.ResultsSource}"
+                KeyDown="ResultsList_KeyDown"
+                SelectionMode="Extended"
+                ShowsScrollingPlaceholders="True">
+                <ListView.ItemContainerTransitions>
+                    <TransitionCollection>
+                        <AddDeleteThemeTransition />
+                    </TransitionCollection>
+                </ListView.ItemContainerTransitions>
+                <ListView.ItemContainerStyle>
+                    <Style BasedOn="{StaticResource DefaultListViewItemStyle}" TargetType="ListViewItem">
+                        <Setter Property="MinHeight" Value="52" />
+                        <Setter Property="Padding" Value="12,6,12,6" />
+                    </Style>
+                </ListView.ItemContainerStyle>
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="vm:ResultRow">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <FontIcon
+                                Grid.Column="0"
+                                VerticalAlignment="Center"
+                                FontSize="22"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Glyph="{x:Bind Glyph, Mode=OneWay}" />
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock Style="{StaticResource ResultNameTextStyle}" Text="{x:Bind Name, Mode=OneWay}" />
+                                <TextBlock
+                                    x:Phase="1"
+                                    Style="{StaticResource ResultPathTextStyle}"
+                                    Text="{x:Bind ParentPath, Mode=OneWay}" />
+                            </StackPanel>
+                            <StackPanel
+                                Grid.Column="2"
+                                MinWidth="96"
+                                VerticalAlignment="Center">
+                                <TextBlock
+                                    x:Phase="2"
+                                    HorizontalAlignment="Right"
+                                    Style="{StaticResource ResultMetaTextStyle}"
+                                    Text="{x:Bind SizeText, Mode=OneWay}" />
+                                <TextBlock
+                                    x:Phase="2"
+                                    HorizontalAlignment="Right"
+                                    Style="{StaticResource ResultMetaTextStyle}"
+                                    Text="{x:Bind DateText, Mode=OneWay}" />
+                            </StackPanel>
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+                <ListView.ContextFlyout>
+                    <MenuFlyout>
+                        <MenuFlyoutItem
+                            AutomationProperties.AutomationId="MnuOpen"
+                            Click="MenuOpen_Click"
+                            Text="開く" />
+                        <MenuFlyoutItem
+                            AutomationProperties.AutomationId="MnuOpenPath"
+                            Click="MenuOpenPath_Click"
+                            Text="フォルダーを開いてファイルを選択" />
+                        <MenuFlyoutItem
+                            AutomationProperties.AutomationId="MnuCopyPath"
+                            Click="MenuCopyPath_Click"
+                            Text="パスをコピー" />
+                    </MenuFlyout>
+                </ListView.ContextFlyout>
+            </ListView>
+
+            <!--  Notification stack: overlays the results (top-aligned) so a
+                  notification appearing/dissolving never resizes the list.  -->
+            <ItemsControl
+                VerticalAlignment="Top"
+                Canvas.ZIndex="1"
+                AutomationProperties.AutomationId="NotifyBar"
+                ItemsSource="{x:Bind ViewModel.Notifications.Items}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="svc:AppNotification">
+                        <InfoBar
+                            Title="{x:Bind Message}"
+                            Margin="0,0,0,4"
+                            Closed="Notification_Closed"
+                            IsOpen="True"
+                            Message="{x:Bind Detail}"
+                            Severity="{x:Bind conv:UiConverters.ToInfoSeverity(Severity)}">
+                            <InfoBar.ActionButton>
+                                <Button
+                                    Click="{x:Bind Invoke}"
+                                    Content="{x:Bind ActionLabel}"
+                                    Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ActionLabel)}" />
+                            </InfoBar.ActionButton>
+                        </InfoBar>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </Grid>
+
+        <!--  Performance panel(設定→診断 で開閉)。最下部(Row 2)に出る。  -->
+        <views:PerfPanel
+            Grid.Row="2"
             ViewModel="{x:Bind ViewModel.Perf}"
             Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.Perf.IsOpen), Mode=OneWay}" />
-
-        <!--  Status bar  -->
-        <Grid
-            x:Name="StatusBar"
-            Grid.Row="2"
-            Padding="16,4"
-            BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
-            BorderThickness="0,1,0,0">
-            <TextBlock
-                HorizontalAlignment="Left"
-                AutomationProperties.AutomationId="StatusCount"
-                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                Text="{x:Bind ViewModel.Results.CountText, Mode=OneWay}" />
-            <StackPanel
-                HorizontalAlignment="Right"
-                Orientation="Horizontal"
-                Spacing="12">
-                <TextBlock
-                    AutomationProperties.AutomationId="StatusState"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                    Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" />
-                <TextBlock
-                    AutomationProperties.AutomationId="EngineMode"
-                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                    Text="{x:Bind ViewModel.EngineModeText, Mode=OneWay}" />
-            </StackPanel>
-        </Grid>
     </Grid>
 </Page>

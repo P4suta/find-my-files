@@ -72,13 +72,9 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void PerfPanel_Toggle(
-        Microsoft.UI.Xaml.Input.KeyboardAccelerator sender,
-        Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
-    {
+    // 設定(歯車)フライアウト → 「診断情報を表示/隠す」で診断パネルを開閉。
+    private void PerfPanel_MenuClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         ViewModel.Perf.Toggle();
-        args.Handled = true;
-    }
 
     // ── Drag & drop: folder → path: filter, file → name search ──────────
 

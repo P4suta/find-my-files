@@ -246,7 +246,7 @@ public sealed partial class MainViewModel : ObservableObject
             Notifications.Push(new AppNotification(
                 NotifySeverity.Error,
                 $"{s.Label} のインデックスに失敗しました",
-                "詳細は F12 パネルまたは engine.log を参照"));
+                "詳細は 設定→診断 パネルまたは engine.log を参照"));
         }
         if (s.State == VolumeState.Ready)
         {

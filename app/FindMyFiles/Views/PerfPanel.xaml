@@ -8,10 +8,13 @@
     mc:Ignorable="d">
 
     <!-- Performance panel (F12). Rendering of the stage bar / sparkline
-         happens in code-behind — it is diagnostic chrome, not app data. -->
+         happens in code-behind — it is diagnostic chrome, not app data.
+         Solid (non-acrylic) background so the dense diagnostic text stays
+         legible — over the window Acrylic it was washing out. -->
     <Border
         Padding="16,8"
         AutomationProperties.AutomationId="PerfPanel"
+        Background="{ThemeResource SolidBackgroundFillColorBaseAltBrush}"
         BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
         BorderThickness="0,1,0,0">
         <Grid ColumnSpacing="24">
