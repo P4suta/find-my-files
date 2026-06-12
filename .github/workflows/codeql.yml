@@ -1,0 +1,50 @@
+# Static analysis for the C# app. Rust is not a CodeQL-supported language
+# (cargo-audit.yml covers the engine's dependency advisories instead).
+#
+# build-mode: manual because the WinUI app is self-contained and its csproj
+# references fmf_engine.dll — autobuild can't infer that. We build the engine
+# DLL first (the C# build copies it), then run the C# build CodeQL traces.
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions:
+  security-events: write
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      # fmf_engine.dll must exist before the C# build (the csproj copies it).
+      - name: build engine dll
+        run: cargo build --release -p fmf-ffi
+        working-directory: engine
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+          build-mode: manual
+
+      - name: build for CodeQL
+        run: dotnet build app/FindMyFiles -c Release -p:SkipRustBuild=true
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:csharp"
