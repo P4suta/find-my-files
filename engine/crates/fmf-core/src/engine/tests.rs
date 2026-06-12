@@ -61,6 +61,23 @@ fn query_merges_volumes_in_name_order() {
 }
 
 #[test]
+fn index_start_skips_an_already_indexed_volume() {
+    let (_dir, e) = test_engine();
+    e.insert_ready_volume("C:", vol("C:", &[("alpha.txt", 10)]));
+    assert_eq!(e.status().len(), 1);
+    // A reconnecting client re-sends IndexStart for C: on every connect, and
+    // the service also calls it at startup — it must be a no-op, not a second
+    // slot. Duplicate slots make every query return C:'s rows once per copy
+    // (the "each result appears N times" bug).
+    e.index_start(&["C:".to_string()]);
+    assert_eq!(
+        e.status().len(),
+        1,
+        "index_start of an already-indexed volume must not add a duplicate slot"
+    );
+}
+
+#[test]
 fn paging_is_a_slice_and_size_sort_descends() {
     let (_dir, e) = engine_with_two_volumes();
     let opt = QueryOptions {

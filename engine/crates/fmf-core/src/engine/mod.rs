@@ -206,14 +206,28 @@ impl Engine {
     }
 
     /// Begin indexing the given volumes (asynchronous; progress via events).
+    /// Idempotent per volume label: clients re-send IndexStart on every
+    /// (re)connect and the service also calls this at startup, so a volume
+    /// already being indexed is skipped. A duplicate slot would make every
+    /// query return that volume's rows once per copy (search merges all Ready
+    /// slots) — the source of the "each result appears N times" bug.
     pub fn index_start(self: &Arc<Self>, volumes: &[String]) {
         for label in volumes {
-            let store = Arc::new(seams::WinSnapshotStore::new(volume::snapshot_path(
-                &self.config.index_dir,
-                label,
-            )));
-            let slot = Arc::new(VolumeSlot::scanning(label.clone(), store));
-            self.volumes.write().push(slot.clone());
+            // Decide-and-insert under one write lock so a concurrent
+            // index_start of the same label can't slip a second slot in.
+            let slot = {
+                let mut vols = self.volumes.write();
+                if vols.iter().any(|s| s.label == *label) {
+                    continue;
+                }
+                let store = Arc::new(seams::WinSnapshotStore::new(volume::snapshot_path(
+                    &self.config.index_dir,
+                    label,
+                )));
+                let slot = Arc::new(VolumeSlot::scanning(label.clone(), store));
+                vols.push(slot.clone());
+                slot
+            };
             let engine = self.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("fmf-vol-{label}"))
