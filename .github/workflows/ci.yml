@@ -142,8 +142,8 @@ jobs:
         working-directory: engine
         env:
           RUSTDOCFLAGS: "-D warnings"
-      - name: build engine dll + service (release, for the app + artifacts)
-        run: cargo build --release -p fmf-ffi -p fmf-service
+      - name: build engine dll + service + cli (release, for the app + artifacts)
+        run: cargo build --release -p fmf-ffi -p fmf-service -p fmf-cli
         working-directory: engine
       - uses: actions/upload-artifact@v7
         with:
@@ -151,6 +151,7 @@ jobs:
           path: |
             engine/target/release/fmf_engine.dll
             engine/target/release/fmf-service.exe
+            engine/target/release/fmf.exe
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
         with:
@@ -171,13 +172,20 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.x
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - uses: actions/cache@v4
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('app/**/*.csproj') }}
           restore-keys: nuget-${{ runner.os }}-
-      - name: build app (SkipRustBuild — dll is prebuilt)
-        run: dotnet build app/FindMyFiles -c Release -p:SkipRustBuild=true
+      # Publish (not bare `dotnet build`): only the publish output is a runnable
+      # bundle — the WinUI component package wires WinRT.Runtime.dll, the native
+      # helpers and compiled XAML in at publish time. Reuses the same just recipe
+      # as release.yml; skip_rust=true since the engine dll/exe are prebuilt above.
+      - name: publish app (SkipRustBuild — engine binaries are prebuilt)
+        run: just publish-app true
       - name: test app + line coverage gate
         run: >-
           dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
@@ -186,10 +194,18 @@ jobs:
         run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
         env:
           FMF_PIPE_TESTS: "1"
+      # Guard: a missing WinRT.Runtime.dll means the publish path silently
+      # regressed to a non-runnable bundle (the exact failure this job fixes).
+      - name: verify bundle is runnable
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/FindMyFiles/WinRT.Runtime.dll)) {
+            throw "dist/FindMyFiles is missing WinRT.Runtime.dll — bundle would not launch"
+          }
       - uses: actions/upload-artifact@v7
         with:
           name: find-my-files-win-x64
-          path: app/FindMyFiles/bin/Release/net10.0-windows10.0.26100.0/win-x64/
+          path: dist/FindMyFiles/
           if-no-files-found: error
 
   # Informational on PRs (ADR-0013: runner thermal noise makes a hard 10% gate

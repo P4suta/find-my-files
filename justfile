@@ -63,15 +63,23 @@ verify: fmt-check lint test test-app
 contract-gen:
     cargo run -p fmf-contract --bin gen-contract
 
-# Clean distributable bundle in dist/FindMyFiles: published app + engine
-# binaries (fmf-service.exe / fmf.exe). WinAppSDK ships ~85 locale resource
-# dirs; everything but en-us/ja-JP is pruned (lookups fall back to neutral
-# resources when a locale dir is absent).
-publish: build
+# Assemble the distributable bundle in dist/FindMyFiles: PUBLISHED app (not a
+# bare `dotnet build` — the WinUI component package only wires WinRT.Runtime.dll,
+# the WinAppSDK native helpers and the compiled XAML into the *publish* output)
+# plus the engine binaries (fmf-service.exe / fmf.exe). WinAppSDK ships ~85
+# locale resource dirs; everything but en-us/ja-JP is pruned (lookups fall back
+# to neutral resources when a locale dir is absent). skip_rust=true skips the
+# in-build cargo step — for CI, where the engine binaries are prebuilt and
+# downloaded into engine/target/release/ before this runs.
+publish-app skip_rust="false":
     Remove-Item dist/FindMyFiles -Recurse -Force -ErrorAction SilentlyContinue; exit 0
-    dotnet publish app/FindMyFiles -c Release -r win-x64 -o dist/FindMyFiles
+    dotnet publish app/FindMyFiles -c Release -r win-x64 -o dist/FindMyFiles -p:SkipRustBuild={{skip_rust}}
     Get-ChildItem dist/FindMyFiles -Directory | Where-Object { $_.Name -match '^[a-z]{2,3}(-[A-Za-z0-9]+){1,3}$' -and $_.Name -notin @('en-us','ja-JP') } | Remove-Item -Recurse -Force
     Copy-Item engine/target/release/fmf-service.exe, engine/target/release/fmf.exe dist/FindMyFiles/
+
+# Local/release publish: build the engine first, then publish (rust is already
+# built, so the in-build cargo step is skipped).
+publish: build (publish-app "true")
 
 # ── Service (v2: fmf-service + named pipe; ADR-0016/0017) ────────────────
 
