@@ -2,3 +2,9 @@
 [default.extend-words]
 # Deliberate test fragment for boundary-spanning pool-scan checks.
 ba = "ba"
+
+[files]
+# Generated output — mdBook's bundled JS/CSS (elasticlunr, highlight.js) and
+# rustdoc trip typos. .gitignore keeps them out of git; this keeps them out of
+# the spell-check too (it scans the working tree, not just tracked files).
+extend-exclude = ["docs/book/", "engine/target/"]
