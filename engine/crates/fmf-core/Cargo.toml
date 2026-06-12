@@ -28,7 +28,7 @@ serde = { workspace = true }
 testutil = []
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 # Golden JSON-shape pins (tests/golden_json.rs) — the serde output consumed
 # by the C# side is contract surface (ADR-0018).
 serde_json = { workspace = true }
