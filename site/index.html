@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>find-my-files — Windows 専用の爆速ファイル名検索</title>
-<meta name="description" content="FOSS版Everything。NTFSの$MFTを直読みし、USNジャーナルでリアルタイム更新。RustエンジンとネイティブなWinUI 3 UIで、ファイル名検索を一瞬で。" />
-<meta property="og:title" content="find-my-files — Windows 専用の爆速ファイル名検索" />
-<meta property="og:description" content="FOSS版Everything。Rustエンジン + WinUI 3。ファイル名だけを索引する割り切りが速度の源泉。" />
+<title>find-my-files — Windows 専用のファイル名検索</title>
+<meta name="description" content="NTFS の $MFT を直読みし、USN ジャーナルで更新を反映する Rust + WinUI 3 のファイル名検索。ファイル名のみを索引する。" />
+<meta property="og:title" content="find-my-files — Windows 専用のファイル名検索" />
+<meta property="og:description" content="NTFS の $MFT を直読みする Rust + WinUI 3 のファイル名検索。ファイル名のみを索引する。" />
 <meta property="og:type" content="website" />
 <link rel="stylesheet" href="style.css" />
 </head>
@@ -14,127 +14,69 @@
 
 <header class="site">
   <div class="wrap nav">
-    <a class="brand" href="./"><span class="dot"></span> find-my-files</a>
+    <a class="brand" href="./">find-my-files</a>
     <nav class="nav-links">
-      <a href="#features" class="hide-sm">特徴</a>
-      <a href="#scope" class="hide-sm">設計方針</a>
-      <a href="#perf" class="hide-sm">性能</a>
-      <a href="./book/" class="hide-sm">ドキュメント</a>
-      <a class="lang" href="./en/">EN</a>
+      <a href="#features">仕組み</a>
+      <a href="#scope">スコープ</a>
+      <a href="#perf">性能</a>
+      <a href="./book/">ドキュメント</a>
+      <a href="./en/">EN</a>
       <a href="https://github.com/P4suta/find-my-files">GitHub</a>
     </nav>
   </div>
 </header>
 
 <main>
-  <!-- hero -->
   <section class="hero">
     <div class="wrap">
-      <span class="eyebrow">FOSS版 Everything · Windows 専用</span>
-      <h1>ファイル名検索を、一瞬で。</h1>
+      <h1>find-my-files</h1>
       <p class="lead">
-        NTFSの <code>$MFT</code> を直接読み、USNジャーナルでリアルタイム更新。
-        Rustエンジンと、にじまないネイティブ WinUI 3 UI。
-        ファイル名だけを索引する割り切りが、速度の源泉です。
+        Windows 専用のファイル名検索。NTFS の <code>$MFT</code> を直接読み、
+        USN ジャーナルで更新を反映する。Rust エンジンと WinUI 3 UI。
+        ファイル名のみを索引する。
       </p>
       <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/P4suta/find-my-files/releases">⬇ ダウンロード</a>
-        <a class="btn btn-ghost" href="https://github.com/P4suta/find-my-files">GitHub で見る →</a>
+        <a href="https://github.com/P4suta/find-my-files/releases">ダウンロード（Releases）</a>
+        <a href="https://github.com/P4suta/find-my-files">GitHub</a>
       </div>
       <p class="note">Apache-2.0 ライセンス · Windows 10/11 (NTFS)</p>
-
-      <!-- search mock -->
-      <div class="mock" aria-hidden="true">
-        <div class="mock-bar">
-          <span class="mag">🔍</span>
-          <span>report 2025</span>
-          <span class="caret"></span>
-        </div>
-        <div class="mock-row sel">
-          <span class="ic">📄</span> report-2025-Q2.xlsx
-          <span class="path">C:\Users\me\Documents\finance</span>
-        </div>
-        <div class="mock-row">
-          <span class="ic">📑</span> annual_report_2025.pdf
-          <span class="path">D:\work\reports</span>
-        </div>
-        <div class="mock-row">
-          <span class="ic">🗂</span> report-2025-draft.docx
-          <span class="path">C:\Users\me\Desktop</span>
-        </div>
-        <div class="mock-foot">
-          <span>1,284,392 件を索引済み</span>
-          <span>3 件 · 6 ms</span>
-        </div>
-      </div>
     </div>
   </section>
 
-  <!-- features -->
   <section id="features">
     <div class="wrap">
-      <h2 class="section-title">なぜ速いのか</h2>
-      <p class="section-sub">監視ツールでもクロールでもありません。ファイルシステムそのものの構造を直接使います。</p>
-      <div class="grid">
-        <div class="card">
-          <div class="ic">⚡</div>
-          <h3>$MFT 直読みで初回索引</h3>
-          <p>NTFS の Master File Table を直接読み、1ボリュームあたり数秒で全ファイル名を取り込みます。</p>
-        </div>
-        <div class="card">
-          <div class="ic">🔄</div>
-          <h3>USN ジャーナルで即時反映</h3>
-          <p>変更通知は USN チェンジジャーナルから。ファイル監視も再スキャンも不要で、変更が UI に約1秒で届きます。</p>
-        </div>
-        <div class="card">
-          <div class="ic">🧵</div>
-          <h3>SIMD マルチスレッド検索</h3>
-          <p>インメモリ索引上をマルチスレッド + SIMD で部分一致走査。100万件・3文字以上で p99 ≤ 50ms。</p>
-        </div>
-        <div class="card">
-          <div class="ic">🪟</div>
-          <h3>ネイティブ WinUI 3</h3>
-          <p>Mica、一貫したダークテーマ、Per-Monitor V2 DPI。混在DPI環境でもにじみません。</p>
-        </div>
-        <div class="card">
-          <div class="ic">🗜</div>
-          <h3>省メモリ設計</h3>
-          <p>ファイル名だけを索引するから、100万件で約100MB。content索引が生んだ「メモリ8GB級」の苦情とは無縁です。</p>
-        </div>
-        <div class="card">
-          <div class="ic">🔐</div>
-          <h3>権限を最小化</h3>
-          <p>MFT/USN 読み取りの特権は小さな Windows サービスに分離。UI は非特権で、施錠された名前付きパイプ(同一ユーザー限定)で通信します。</p>
-        </div>
-      </div>
+      <h2>仕組み</h2>
+      <ul class="list">
+        <li><strong>$MFT 直読みによる初回インデックス</strong> — NTFS の Master File Table を直接読み、1ボリュームあたり数秒で全ファイル名を取り込む。</li>
+        <li><strong>USN ジャーナルによる更新</strong> — 変更通知は USN チェンジジャーナルから取得。ファイル監視・再スキャンは不要で、変更は約1秒で UI に届く。</li>
+        <li><strong>マルチスレッド検索</strong> — インメモリ索引上を部分一致で走査。100万件・3文字以上で p99 ≤ 50ms。</li>
+        <li><strong>ネイティブ WinUI 3</strong> — Mica、ダークテーマ、Per-Monitor V2 DPI。</li>
+        <li><strong>省メモリ</strong> — ファイル名のみを索引するため、100万件で約100MB。</li>
+        <li><strong>権限分離</strong> — MFT/USN 読み取りの特権は Windows サービスに分離。UI は非特権で、同一ユーザー限定の名前付きパイプで通信する。</li>
+      </ul>
     </div>
   </section>
 
-  <!-- scope -->
   <section id="scope">
     <div class="wrap">
-      <h2 class="section-title">あえて、やらないこと</h2>
-      <p class="section-sub">ファイル名だけを索引する——これが Everything が速い理由であり、find-my-files の核です。機能の盛り込みは非目標です。</p>
-      <div class="scope">
-        <h3>スコープ外（意図的に）</h3>
-        <div class="chips">
-          <span class="chip"><span class="x">✕</span> content検索</span>
-          <span class="chip"><span class="x">✕</span> プロパティ・タグ索引</span>
-          <span class="chip"><span class="x">✕</span> プレビュー</span>
-          <span class="chip"><span class="x">✕</span> FTP / HTTP サーバ</span>
-          <span class="chip"><span class="x">✕</span> FAT / exFAT / ネットワークドライブ</span>
-          <span class="chip"><span class="x">✕</span> ReFS</span>
-          <span class="chip"><span class="x">✕</span> クロスプラットフォーム</span>
-        </div>
-      </div>
+      <h2>スコープ外</h2>
+      <p class="section-sub">ファイル名のみを索引する。以下は対象外。</p>
+      <ul class="list">
+        <li>content 検索</li>
+        <li>プロパティ・タグ索引</li>
+        <li>プレビュー</li>
+        <li>FTP / HTTP サーバ</li>
+        <li>FAT / exFAT / ネットワークドライブ</li>
+        <li>ReFS</li>
+        <li>クロスプラットフォーム</li>
+      </ul>
     </div>
   </section>
 
-  <!-- performance -->
   <section id="perf">
     <div class="wrap">
-      <h2 class="section-title">性能の合格ライン</h2>
-      <p class="section-sub">「落ちない・固まらない・黙らない」を前提に、最終マイルストーンで満たす数値目標。</p>
+      <h2>性能目標</h2>
+      <p class="section-sub">最終マイルストーンで満たす数値目標。</p>
       <table class="perf">
         <thead><tr><th>指標</th><th>目標</th></tr></thead>
         <tbody>
@@ -148,11 +90,10 @@
     </div>
   </section>
 
-  <!-- architecture -->
   <section id="arch">
     <div class="wrap">
-      <h2 class="section-title">アーキテクチャ</h2>
-      <p class="section-sub">既定は非特権UI + サービス。サービス未導入時は昇格in-procフォールバック。</p>
+      <h2>アーキテクチャ</h2>
+      <p class="section-sub">既定は非特権 UI + サービス。サービス未導入時は昇格 in-proc フォールバック。</p>
 <pre class="arch">WinUI 3 app（C#・非特権） ──named pipe──▶  <b>fmf-service</b>（Rust・LocalSystem）
    └─ IEngineClient 境界                       └─ <b>fmf-core</b>: $MFT走査・USN tailing・
        ├─ PipeEngineClient（既定）                  インメモリ索引・クエリエンジン
@@ -160,15 +101,14 @@
     </div>
   </section>
 
-  <!-- get started -->
   <section id="start">
     <div class="wrap">
-      <h2 class="section-title">はじめる</h2>
+      <h2>はじめる</h2>
       <p class="section-sub">ツールチェーンは mise で固定、タスクは just。</p>
-<pre class="arch">mise install        <span style="opacity:.6"># rust + dotnet</span>
-just setup          <span style="opacity:.6"># toolchain + git hooks</span>
-just build          <span style="opacity:.6"># エンジン（cargo, release）</span>
-just service-install  <span style="opacity:.6"># サービス登録（昇格・一度だけ）</span></pre>
+<pre class="arch">mise install        <span class="dim"># rust + dotnet</span>
+just setup          <span class="dim"># toolchain + git hooks</span>
+just build          <span class="dim"># エンジン（cargo, release）</span>
+just service-install  <span class="dim"># サービス登録（昇格・一度だけ）</span></pre>
       <p class="note">ビルド済みバイナリは <a href="https://github.com/P4suta/find-my-files/releases">Releases</a> から。</p>
     </div>
   </section>
