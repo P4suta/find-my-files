@@ -32,4 +32,27 @@ public sealed class ServiceSetupTests
             root.Delete(recursive: true);
         }
     }
+
+    [Theory]
+    [InlineData("S-1-5-21-1654600493-3733564142-2704359447-1001", true)]
+    [InlineData("S-1-5-18", true)] // well-formed (validate_user_sid rejects it server-side)
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    [InlineData("not-a-sid", false)]
+    [InlineData("S-1-5-21-1; rm -rf", false)] // ; and space — injection attempt
+    [InlineData("S-1-5-21-1 --owner-sid=evil", false)] // space would split into args
+    [InlineData("S-1-5-21-１", false)] // full-width digit is not ASCII
+    public void IsValidSid_AcceptsWellFormed_RejectsInjection(string? input, bool expected)
+    {
+        Assert.Equal(expected, ServiceSetup.IsValidSid(input));
+    }
+
+    [Fact]
+    public void CurrentUserSid_ReturnsForwardableSid()
+    {
+        var sid = ServiceSetup.CurrentUserSid();
+        Assert.NotNull(sid);
+        Assert.StartsWith("S-1-", sid);
+        Assert.True(ServiceSetup.IsValidSid(sid), "own SID must survive the injection guard");
+    }
 }

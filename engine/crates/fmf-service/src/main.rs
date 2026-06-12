@@ -35,7 +35,14 @@ enum Cli {
     },
     /// Register the Windows service (elevated; captures your SID, hardens
     /// the data dir, sets delayed start + crash recovery + preshutdown).
-    Install,
+    Install {
+        /// Also authorize this user SID on the pipe. The unelevated app
+        /// forwards the daily user's SID here so OTS elevation (install runs
+        /// as a *different* admin account) does not lock that user out of its
+        /// own service (docs/SECURITY.md 脅威1). Validated before trusting.
+        #[arg(long)]
+        owner_sid: Option<String>,
+    },
     /// Deregister the service. Data (index snapshots = every file name,
     /// logs, service.json) is kept unless --purge-data.
     Uninstall {
@@ -46,6 +53,10 @@ enum Cli {
     Start,
     /// Stop the installed service.
     Stop,
+    /// Stop (if running) then start, so a rewritten service.json — e.g. a
+    /// freshly added authorized SID — takes effect. The service reads its
+    /// config only at startup, so an in-place `install` alone does not apply.
+    Restart,
     /// SCM state + a live pipe handshake ping.
     Status,
     /// (internal) SCM entry point — launched by the service controller.
@@ -65,10 +76,11 @@ fn main() -> std::process::ExitCode {
             no_index,
         } => return run_console(pipe_name, data_dir, debug_faults, no_index),
         Cli::ServiceEntry => svc::dispatch().is_ok(),
-        Cli::Install => report(install()),
+        Cli::Install { owner_sid } => report(install(owner_sid)),
         Cli::Uninstall { purge_data } => report(uninstall(purge_data)),
         Cli::Start => report(start_service()),
         Cli::Stop => report(stop_service()),
+        Cli::Restart => report(restart_service()),
         Cli::Status => report(status()),
     };
     if ok {
@@ -150,7 +162,7 @@ fn install_ctrl_c() {
 
 // ── Lifecycle subcommands ───────────────────────────────────────────────
 
-fn install() -> Result<(), String> {
+fn install(owner_sid: Option<String>) -> Result<(), String> {
     use windows_service::service::{
         ServiceAccess, ServiceAction, ServiceActionType, ServiceErrorControl,
         ServiceFailureActions, ServiceInfo, ServiceStartType, ServiceType,
@@ -170,15 +182,44 @@ fn install() -> Result<(), String> {
     if !cfg.authorized_sids.contains(&sid) {
         cfg.authorized_sids.push(sid.clone());
     }
+    // A forwarded owner SID (OTS elevation runs install as a *different* admin
+    // than the daily user, so step 1 alone would authorize only that admin) —
+    // vet it as a real user account before trusting it onto the allowlist.
+    let owner_sid = owner_sid.filter(|owner| owner != &sid).filter(|owner| {
+        match security::validate_user_sid(owner) {
+            Ok(true) => true,
+            Ok(false) => {
+                println!("--owner-sid {owner} is not a real user account — ignored");
+                false
+            }
+            Err(e) => {
+                println!("--owner-sid {owner} validation failed ({e}) — ignored");
+                false
+            }
+        }
+    });
+    if let Some(owner) = &owner_sid
+        && !cfg.authorized_sids.contains(owner)
+    {
+        cfg.authorized_sids.push(owner.clone());
+    }
     cfg.save(&cfg_path)
         .map_err(|e| format!("service.json: {e}"))?;
 
     // 3. Harden the tree: snapshots are machine-wide file listings
-    //    (SECURITY.md 脅威7); logs keep user read for the F12 copy path.
+    //    (SECURITY.md 脅威7); logs keep user read for the F12 copy path —
+    //    for the installing admin and the forwarded owner alike.
     security::set_dir_dacl(&data_dir, &security::data_dir_sddl())
         .map_err(|e| format!("data dir DACL: {e}"))?;
-    security::set_dir_dacl(&data_dir.join("logs"), &security::logs_dir_sddl(&sid))
-        .map_err(|e| format!("logs DACL: {e}"))?;
+    let mut log_readers = vec![sid.as_str()];
+    if let Some(owner) = &owner_sid {
+        log_readers.push(owner.as_str());
+    }
+    security::set_dir_dacl(
+        &data_dir.join("logs"),
+        &security::logs_dir_sddl(&log_readers),
+    )
+    .map_err(|e| format!("logs DACL: {e}"))?;
 
     // 4. Register: LocalSystem, delayed auto start, restart-on-crash.
     let manager = ServiceManager::local_computer(
@@ -244,6 +285,9 @@ fn install() -> Result<(), String> {
 
     println!("installed '{SERVICE_NAME}' (LocalSystem, delayed auto start)");
     println!("authorized SID: {sid}");
+    if let Some(owner) = &owner_sid {
+        println!("authorized SID (forwarded owner): {owner}");
+    }
     println!("start it with: fmf-service start  (or `just service-start`)");
     Ok(())
 }
@@ -315,6 +359,18 @@ fn start_service() -> Result<(), String> {
     }
     println!("started '{SERVICE_NAME}'");
     Ok(())
+}
+
+/// Stop (if running) then start, so the service re-reads service.json — the
+/// authorized-SID list is consulted only at startup, so a fresh `install`
+/// that adds a SID does nothing for a running instance until this runs.
+fn restart_service() -> Result<(), String> {
+    match stop_service() {
+        Ok(()) => {}
+        // Already stopped / not installed → nothing to stop; press on to start.
+        Err(e) => println!("restart: stop skipped ({e})"),
+    }
+    start_service()
 }
 
 /// The OS error behind a windows-service wrapper error, when there is one

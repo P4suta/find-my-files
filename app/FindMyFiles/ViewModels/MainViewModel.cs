@@ -1,4 +1,5 @@
 using CommunityToolkit.Mvvm.ComponentModel;
+using FindMyFiles;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
 
@@ -144,12 +145,10 @@ public sealed partial class MainViewModel : ObservableObject
     /// 再起動」 → this button, once — then plain double-click forever.</summary>
     private void OfferServiceSetup()
     {
-        if (_engine is not FfiEngineClient || !ServiceSetup.IsProcessElevated())
-        {
-            return;
-        }
-        var state = ServiceSetup.QueryState();
-        if (state == EngineServiceState.Running)
+        // On the pipe → the service already accepts us. Not elevated → can't
+        // install/restart anyway (the factory already pointed the way out).
+        // Either way there is nothing to offer.
+        if (_engine is PipeEngineClient || !ServiceSetup.IsProcessElevated())
         {
             return;
         }
@@ -157,6 +156,22 @@ public sealed partial class MainViewModel : ObservableObject
         if (exe is null)
         {
             FileLog.Warn("service-setup", "fmf-service.exe not found — setup offer suppressed");
+            return;
+        }
+        var state = ServiceSetup.QueryState();
+        if (state == EngineServiceState.Running)
+        {
+            // Elevated, yet not on the pipe → the running service rejected
+            // this user (a stale authorized-SID list baked in at its startup).
+            // Re-register: install appends our SID (plus any forwarded owner)
+            // and restart applies it — the recovery path out of the lockout.
+            Notifications.Push(new AppNotification(
+                NotifySeverity.Warning,
+                "このユーザーを検索サービスに登録し直します",
+                "「登録し直す」を押すとあなたのアカウントが接続を許可され、サービスが"
+                + "再起動して反映されます。以後は通常起動でそのまま検索できます。",
+                "登録し直す",
+                () => RunServiceSetupAsync(exe).Forget("service-setup")));
             return;
         }
         Notifications.Push(new AppNotification(
@@ -171,14 +186,15 @@ public sealed partial class MainViewModel : ObservableObject
 
     private async Task RunServiceSetupAsync(string exe)
     {
-        var (ok, transcript) = await Task.Run(() => ServiceSetup.InstallAndStart(exe));
+        var (ok, transcript) = await Task.Run(
+            () => ServiceSetup.InstallAndRestart(exe, App.SetupOwnerSid));
         FileLog.Info("service-setup", transcript);
         Notifications.Push(ok
             ? new AppNotification(
                 NotifySeverity.Info,
-                "検索サービスを開始しました",
-                "次回から通常起動でサービスに接続します。このウィンドウは管理者モードのまま"
-                + "使えます(サービスは、このウィンドウを閉じた後にインデックスを引き継ぎます)")
+                "検索サービスを設定しました",
+                "サービスが最新の許可設定で再起動しました。次回からは通常起動"
+                + "(ダブルクリック)でそのまま検索できます。")
             : new AppNotification(
                 NotifySeverity.Error,
                 "サービスのセットアップに失敗しました",

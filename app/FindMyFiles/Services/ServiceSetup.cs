@@ -88,15 +88,21 @@ public static partial class ServiceSetup
         return null;
     }
 
-    /// <summary>install (idempotent server-side) then start. Blocking — run
+    /// <summary>install (idempotent server-side, with the daily user's SID
+    /// forwarded so OTS elevation doesn't lock them out) then restart — not
+    /// just start — so the service re-reads its authorized-SID list. The
+    /// list is consulted only at startup, so an in-place install against a
+    /// running instance would otherwise never take effect. Blocking — run
     /// off the UI thread. The transcript feeds the failure notification and
     /// app.log, so a failure always says why.</summary>
-    public static (bool Ok, string Transcript) InstallAndStart(string serviceExe)
+    public static (bool Ok, string Transcript) InstallAndRestart(
+        string serviceExe, string? ownerSid = null)
     {
+        var installArgs = IsValidSid(ownerSid) ? $"install --owner-sid={ownerSid}" : "install";
         var log = new System.Text.StringBuilder();
-        foreach (var verb in new[] { "install", "start" })
+        foreach (var (verb, args) in new[] { ("install", installArgs), ("restart", "restart") })
         {
-            var (code, output) = RunTool(serviceExe, verb);
+            var (code, output) = RunTool(serviceExe, args);
             log.AppendLine($"fmf-service {verb} (exit {code})");
             log.AppendLine(output.Trim());
             if (code != 0)
@@ -106,6 +112,33 @@ public static partial class ServiceSetup
         }
         return (true, log.ToString());
     }
+
+    /// <summary>The current user's SID string, forwarded to
+    /// `fmf-service install --owner-sid` so OTS elevation (a *different*
+    /// admin account) does not lock this user out of the pipe (脅威1).
+    /// Null when unavailable — install then authorizes only the elevated
+    /// account.</summary>
+    public static string? CurrentUserSid()
+    {
+        try
+        {
+            using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+            return id.User?.Value;
+        }
+        catch (Exception ex)
+        {
+            FileLog.Warn("service-setup", $"current user SID query failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>A well-formed SID string (S-1-… of digits and hyphens) —
+    /// guards the value going onto the fmf-service command line against
+    /// argument injection before it is interpolated.</summary>
+    public static bool IsValidSid(string? s) =>
+        s is not null
+        && s.StartsWith("S-1-", StringComparison.Ordinal)
+        && s.All(c => char.IsAsciiLetterOrDigit(c) || c == '-');
 
     private static (int ExitCode, string Output) RunTool(string exe, string args)
     {

@@ -307,13 +307,19 @@ case_mode:u32@8(0=Smart 1=Insensitive 2=Sensitive), include_hidden_system:u32@12
 ```
 
 - `fmf-service install` が利用者SID捕捉と共に生成。IndexStart 受信で volumes を永続化。
-  初回既定は全固定NTFSボリューム
+  初回既定は全固定NTFSボリューム。**非昇格UIは自分のSIDを `--owner-sid` で転送**し、install は
+  それを `validate_user_sid`(実在ユーザー型=SidTypeUser のみ採用)で検証して `authorized_sids` に
+  追記する — OTS昇格(別の管理者アカウントで昇格)では install 自身のSIDが日常ユーザーと異なるため
+- **`authorized_sids` はサービス起動時に一度だけ読まれ、DACL構築と接続時トークン照合に焼かれる
+  (稼働中は不変)**。追加SIDを反映するには `fmf-service restart`(= stop→start)が必須 — in-place の
+  `install` だけでは既存の稼働インスタンスに効かない(古い許可リストで拒否し続ける)。アプリの
+  「サービスを登録/登録し直す」は install→restart を続けて実行する
 - ユーザー単位の `%APPDATA%\find-my-files\settings.json`(UI所有)とは所有権を分離する
 
 ## C# 側の契約
 
 - `IEngineClient`(差し替え境界): `SearchAsync(query, options) → SearchOutcome(ISearchResult, QueryTrace)` / `GetStatsAsync` / `ListVolumesAsync` / `StartIndexingAsync` / `GetStatusAsync`(**3メソッドは v2 で Task 返しに変更** — pipe 越えの同期呼び出しはUIスレッドの「固まらない」違反)/ `event IndexChanged` / `event VolumeUpdated` / `event EngineErrorOccurred` / `EngineConnectionState Connection { get; }` + `event ConnectionChanged`(InProc | Connecting | Connected | Reconnecting。Ffi/Fake は InProc 固定)。Fake/FFI/Pipe の3実装が同じ口に従う。
-- **エンジン選択**(`EngineClientFactory`): CLI `--fake-engine` / `--engine=pipe|inproc` > settings.json の `"engine"`(既定 `auto`)> auto = pipe 250ms プローブ → 成功で Pipe / 失敗かつプロセス昇格済みで Ffi / どちらも不可なら説明付き InfoBar+**空エンジン**(結果ゼロの `FakeEngineClient.CreateEmpty()`、バッジ「未接続」 — デモデータは出さない: 検索アプリで偽データに実用性はない)+「管理者として再起動」ボタン(明示操作のみ。自動 runas ループ禁止)。昇格 in-proc 起動でサービスが未登録/停止のときは、アプリ内通知の1クリック(`ServiceSetup` → `fmf-service install`+`start`。install はサービス側で冪等)でセットアップできる — 端末を一度も開かない導入経路: 通常起動 →「管理者として再起動」→「サービスを登録して開始」→ 以後ずっと通常起動。データ入りの Fake は `--fake-engine`(開発・UIテスト)専用。
+- **エンジン選択**(`EngineClientFactory`): CLI `--fake-engine` / `--engine=pipe|inproc` > settings.json の `"engine"`(既定 `auto`)> auto = pipe 250ms プローブ → 成功で Pipe / 失敗時は**サービス状態(`ServiceSetup.QueryState`)で分岐**: 稼働中(=writer.lock 保持。プローブ失敗はトークン非認可を意味する)なら**昇格していても in-proc を作らず**(FMF_E_LOCKED 衝突を確実に回避)「登録し直す」導線つき空エンジン / 不在・停止かつプロセス昇格済みで Ffi(writer.lock は空き)/ どちらも不可なら説明付き InfoBar+**空エンジン**(結果ゼロの `FakeEngineClient.CreateEmpty()`、バッジ「未接続」 — デモデータは出さない: 検索アプリで偽データに実用性はない)+「管理者として再起動」ボタン(明示操作のみ。自動 runas ループ禁止。非昇格ユーザーのSIDを `--setup-owner` で転送)。昇格 in-proc 起動でサービスが未登録/停止のときは、アプリ内通知の1クリック(`ServiceSetup` → `fmf-service install --owner-sid`+`restart`。install はサービス側で冪等、restart で新 `authorized_sids` を反映)でセットアップできる — 端末を一度も開かない導入経路: 通常起動 →「管理者として再起動」→「サービスを登録して開始」→ 以後ずっと通常起動。データ入りの Fake は `--fake-engine`(開発・UIテスト)専用。
 - **切断と再接続**(`PipeEngineClient`): 切断 = 進行中要求を `EngineUnavailableException` で即時失敗・生存 `ISearchResult` を epoch 無効化(以後 `GetRangeAsync` → `StaleResultException` = 既存の再クエリ機構が回復経路)・バックオフ(250ms→5s)で無限再接続。再接続シーケンスは「Pipe プロトコル」節が正本(`VolumeUpdated` 群は IndexStatus 応答から合成して発火)。要求には既定タイムアウト10s。
 - `SearchResultHandle : SafeHandle`。ページフェッチは `DangerousAddRef/Release` を挟み、`Dispose()` 後も in-flight フェッチ完了まで実体を解放しない。
 - ページ受領→`ResultRow` へコピー→**即 `fmf_page_free`**。

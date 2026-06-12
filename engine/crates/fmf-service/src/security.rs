@@ -103,6 +103,69 @@ pub fn current_user_sid() -> io::Result<String> {
     }
 }
 
+/// Does `sid_str` name a real *user* account on this machine? `install`
+/// uses it to vet a forwarded `--owner-sid` before trusting it onto the
+/// pipe allowlist (docs/SECURITY.md 脅威1/7): a SID that resolves to
+/// nothing — or to a group / well-known principal (SYSTEM, BUILTIN\Users…)
+/// — is refused. Malformed/unresolvable → `Ok(false)`; only API faults are
+/// `Err` (the caller logs and ignores either way — install must not die on
+/// a bad SID).
+pub fn validate_user_sid(sid_str: &str) -> io::Result<bool> {
+    use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+    use windows_sys::Win32::Security::{LookupAccountSidW, PSID, SID_NAME_USE, SidTypeUser};
+
+    let wide: Vec<u16> = sid_str.encode_utf16().chain([0]).collect();
+    let mut psid: PSID = std::ptr::null_mut();
+    if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut psid) } == 0 {
+        return Ok(false); // not even a well-formed SID string
+    }
+    // ConvertStringSidToSidW LocalAlloc's the SID — free it on every path.
+    struct LocalSid(PSID);
+    impl Drop for LocalSid {
+        fn drop(&mut self) {
+            unsafe { LocalFree(self.0.cast()) };
+        }
+    }
+    let owned = LocalSid(psid);
+
+    // First call sizes the name/domain buffers; a SID that maps to no
+    // account leaves them at zero (ERROR_NONE_MAPPED).
+    let mut name_len = 0u32;
+    let mut domain_len = 0u32;
+    let mut use_kind: SID_NAME_USE = 0;
+    unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            owned.0,
+            std::ptr::null_mut(),
+            &mut name_len,
+            std::ptr::null_mut(),
+            &mut domain_len,
+            &mut use_kind,
+        );
+    }
+    if name_len == 0 {
+        return Ok(false); // unresolvable → not a real account
+    }
+    let mut name = vec![0u16; name_len as usize];
+    let mut domain = vec![0u16; domain_len as usize];
+    let ok = unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            owned.0,
+            name.as_mut_ptr(),
+            &mut name_len,
+            domain.as_mut_ptr(),
+            &mut domain_len,
+            &mut use_kind,
+        )
+    };
+    if ok == 0 {
+        return Ok(false);
+    }
+    Ok(use_kind == SidTypeUser)
+}
+
 struct OwnedToken(HANDLE);
 
 impl Drop for OwnedToken {
@@ -132,9 +195,15 @@ pub fn data_dir_sddl() -> String {
 }
 
 /// logs/ keeps user read so the unelevated F12 "診断情報をコピー" can tail
-/// engine.log.
-pub fn logs_dir_sddl(user_sid: &str) -> String {
-    format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GR;;;{user_sid})")
+/// engine.log. Each authorized user (the installing admin *and* a forwarded
+/// owner SID under OTS elevation) gets read, so the daily user is never
+/// locked out of its own diagnostics.
+pub fn logs_dir_sddl(user_sids: &[&str]) -> String {
+    let mut s = String::from("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+    for sid in user_sids {
+        s.push_str(&format!("(A;OICI;GR;;;{sid})"));
+    }
+    s
 }
 
 /// Applies an SDDL-described protected DACL to a directory (install-time).
@@ -237,5 +306,42 @@ mod tests {
         assert!(sid.starts_with("S-1-"), "stringified SID: {sid}");
         // The full loop: a captured SID round-trips through the builder.
         PipeSecurity::from_sddl(&pipe_sddl(&[sid])).expect("captured SID is SDDL-legal");
+    }
+
+    #[test]
+    fn validate_user_sid_accepts_self() {
+        // The process's own token is a real user account.
+        let sid = current_user_sid().expect("own sid");
+        assert!(validate_user_sid(&sid).expect("validate own sid"));
+    }
+
+    #[test]
+    fn validate_user_sid_rejects_system_and_garbage() {
+        // SYSTEM resolves but is a well-known group, not a user.
+        assert!(!validate_user_sid("S-1-5-18").expect("validate SYSTEM"));
+        // A syntactically valid but unmapped local SID.
+        assert!(
+            !validate_user_sid("S-1-5-21-1111111111-2222222222-3333333333-4444")
+                .expect("validate unmapped")
+        );
+        // Not even a SID string.
+        assert!(!validate_user_sid("not-a-sid").expect("validate garbage"));
+    }
+
+    #[test]
+    fn logs_dir_sddl_grants_read_per_user() {
+        let one = logs_dir_sddl(&["S-1-5-21-1-2-3-1001"]);
+        assert!(one.contains("(A;OICI;FA;;;SY)"), "SYSTEM full control");
+        assert!(
+            one.contains("(A;OICI;FA;;;BA)"),
+            "Administrators full control"
+        );
+        assert!(
+            one.contains("(A;OICI;GR;;;S-1-5-21-1-2-3-1001)"),
+            "user read"
+        );
+        let two = logs_dir_sddl(&["S-1-1-1", "S-1-2-2"]);
+        assert!(two.contains("(A;OICI;GR;;;S-1-1-1)"));
+        assert!(two.contains("(A;OICI;GR;;;S-1-2-2)"));
     }
 }

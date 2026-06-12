@@ -24,6 +24,18 @@
   **Administrators 許可も不成立**: UACフィルタ済みトークンでは Administrators SID が
   SE_GROUP_USE_FOR_DENY_ONLY になり、許可ACEに使われない(docs/RESEARCH.md)。よって install
   実行ユーザーの個別SIDを service.json に保存し、SDDL とトークン照合の両方で使う
+- **OTS昇格(別の管理者アカウントで昇格)への対応**: 標準ユーザーが UAC で別の管理者資格情報を
+  入力すると、install 実行ユーザー(=昇格に使った管理者)≠日常ユーザーになり、日常ユーザーが
+  自分のサービスに接続できなくなる。非昇格UIが自分のSIDを `--owner-sid` で install に転送し、
+  install は `validate_user_sid`(LookupAccountSid が SidTypeUser を返すもののみ採用)で検証して
+  併記する。検証は脅威7(任意SID混入で他人が全ファイル名を読む)への防御 — install は昇格必須で
+  既に sc.exe 相当の権限だが、解決不能/非ユーザー型のSIDは黙って捨てる(install 自体は落とさない)
+- **`authorized_sids` の反映には再起動が要る**: サービスは起動時に一度だけ service.json を読み、
+  DACL構築と接続時トークン照合の両方にその値を焼く(稼働中は不変)。よって稼働インスタンスへ
+  SIDを追加するには `install`(冪等append)の後に `fmf-service restart`(stop→start)が必須 —
+  `start` 単独は ERROR_SERVICE_ALREADY_RUNNING で no-op になり、古い許可リストで拒否し続ける
+  (実機で `pipe client token rejected` 連発として現れた回帰の根因)。アプリの登録導線は
+  install→restart を続けて実行する
 - **多重防御の理由**: SDDL 文字列の構築ミスは「静かに全開放」になる事故パターン。構築関数を
   非昇格単体テストで構造ピンし、かつ接続受理時のトークン照合を独立に置く。匿名アクセスの遮断は
   明示DACL(匿名ACEなし=既定拒否)が一次防御 — NullSessionPipes の既定はマシン種別/ポリシー
