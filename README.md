@@ -4,6 +4,8 @@
 
 > Status: early development (pre-MVP). Nothing usable yet.
 
+**Project page:** [p4suta.github.io/find-my-files](https://p4suta.github.io/find-my-files/) — overview in [日本語](https://p4suta.github.io/find-my-files/) / [English](https://p4suta.github.io/find-my-files/en/)
+
 ## Why
 
 [Everything](https://www.voidtools.com/) is brilliant freeware, but it is closed source, its UI predates
