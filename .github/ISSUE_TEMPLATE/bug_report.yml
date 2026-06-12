@@ -1,0 +1,62 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Logs first help a lot:
+        `%ProgramData%\find-my-files\logs\engine.log` (engine) and
+        `%APPDATA%\find-my-files\logs\app.log` (app), plus the in-app F12
+        diagnostics panel.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did and what went wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: From the app's gear menu / About, or the release tag.
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: e.g. Windows 11 23H2 (build 22631)
+    validations:
+      required: true
+  - type: dropdown
+    id: engine-mode
+    attributes:
+      label: Engine mode
+      options:
+        - Service (fmf-service installed)
+        - In-process elevated (--engine=inproc)
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpts
+      description: From engine.log / app.log or the F12 panel.
+      render: shell
