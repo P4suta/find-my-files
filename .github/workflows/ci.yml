@@ -16,6 +16,10 @@ env:
   DOTNET_NOLOGO: "1"
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
 
+# Least privilege by default; the only job needing more (pr-title) sets its own.
+permissions:
+  contents: read
+
 jobs:
   # Skip the heavy windows jobs on docs-only PRs (ci-required treats their
   # `skipped` as success, so branch protection still passes).
@@ -106,6 +110,30 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # The xtask dev-tooling crate (build/release plumbing) is its own workspace of
+  # pure, OS-agnostic logic, so it tests on cheap ubuntu. Always runs — xtask/
+  # isn't in the `changes` filter and ci-required gates on it. Advisory scanning
+  # lives in cargo-audit.yml alongside the engine's.
+  xtask:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: xtask
+          shared-key: xtask
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt --all --check
+        working-directory: xtask
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: xtask
+      - run: cargo test
+        working-directory: xtask
+
   # ── windows engine tier: engine compiles once here, the app reuses the dll ──
   engine-build-test:
     needs: [hygiene, changes]
@@ -194,14 +222,9 @@ jobs:
         run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
         env:
           FMF_PIPE_TESTS: "1"
-      # Guard: a missing WinRT.Runtime.dll means the publish path silently
-      # regressed to a non-runnable bundle (the exact failure this job fixes).
-      - name: verify bundle is runnable
-        shell: pwsh
-        run: |
-          if (-not (Test-Path dist/FindMyFiles/WinRT.Runtime.dll)) {
-            throw "dist/FindMyFiles is missing WinRT.Runtime.dll — bundle would not launch"
-          }
+      # The bundle's runnability (WinRT.Runtime.dll + engine binaries present) is
+      # now guaranteed at the source: `just publish-app` self-verifies in xtask
+      # and fails there, so a separate guard step here is redundant.
       - uses: actions/upload-artifact@v7
         with:
           name: find-my-files-win-x64
@@ -232,14 +255,11 @@ jobs:
   # `skipped` (docs-only) as success — avoids the "Expected — Waiting" deadlock.
   ci-required:
     if: always()
-    needs: [hygiene, deny, machete, contract-lint, pr-title, engine-build-test, app]
+    needs: [hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
       - name: gate on needed job results
-        run: |
-          results='${{ join(needs.*.result, ',') }}'
-          echo "needed results: $results"
-          if echo "$results" | tr ',' '\n' | grep -qE 'failure|cancelled'; then
-            echo "::error::a required job failed or was cancelled"
-            exit 1
-          fi
+        uses: ./.github/actions/gate-results
+        with:
+          results: ${{ join(needs.*.result, ',') }}

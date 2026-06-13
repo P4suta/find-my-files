@@ -1,0 +1,37 @@
+# Dev-task runner for find-my-files (the cargo-xtask pattern).
+#
+# Deliberately its OWN single-crate workspace, NOT a member of engine/: the
+# daily loop and CI gates run `cargo {check,clippy,doc} --workspace` and
+# `cargo llvm-cov --workspace --fail-under-lines 70` against engine/, and a
+# member here would pollute the coverage denominator and lint/doc surface.
+# Invoked via `cargo run --manifest-path xtask/Cargo.toml -- <cmd>` (just hides
+# this). Holds the imperative build/release plumbing that used to live as
+# inline PowerShell in justfile / the GitHub workflows.
+[workspace]
+
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+toml_edit = "0.22"
+regex = "1"
+# deflate only — drops the bzip2/zstd C deps so xtask builds clean on the
+# ubuntu CI lane (and everywhere) without a C toolchain.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
+
+# This is build tooling, not a hot path: optimize for fast compiles, not fast
+# runtime. (The engine workspace is the opposite — see engine/Cargo.toml.)
+[profile.release]
+lto = false
+codegen-units = 16
+opt-level = 1
