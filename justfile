@@ -66,16 +66,14 @@ contract-gen:
 # Assemble the distributable bundle in dist/FindMyFiles: PUBLISHED app (not a
 # bare `dotnet build` — the WinUI component package only wires WinRT.Runtime.dll,
 # the WinAppSDK native helpers and the compiled XAML into the *publish* output)
-# plus the engine binaries (fmf-service.exe / fmf.exe). WinAppSDK ships ~85
-# locale resource dirs; everything but en-us/ja-JP is pruned (lookups fall back
-# to neutral resources when a locale dir is absent). skip_rust=true skips the
-# in-build cargo step — for CI, where the engine binaries are prebuilt and
-# downloaded into engine/target/release/ before this runs.
+# plus the engine binaries (fmf-service.exe / fmf.exe). The clean/publish/locale-
+# prune/copy/self-verify logic + the prune predicate's tests live in xtask.
+# skip_rust=true skips the in-build cargo step — for CI, where the engine
+# binaries are prebuilt and downloaded into engine/target/release/ before this
+# runs. --release: this path runs in CI uncached, and `package` (release builds)
+# wants a non-debug deflate.
 publish-app skip_rust="false":
-    Remove-Item dist/FindMyFiles -Recurse -Force -ErrorAction SilentlyContinue; exit 0
-    dotnet publish app/FindMyFiles -c Release -r win-x64 -o dist/FindMyFiles -p:SkipRustBuild={{skip_rust}}
-    Get-ChildItem dist/FindMyFiles -Directory | Where-Object { $_.Name -match '^[a-z]{2,3}(-[A-Za-z0-9]+){1,3}$' -and $_.Name -notin @('en-us','ja-JP','zh-Hans','zh-CN') } | Remove-Item -Recurse -Force
-    Copy-Item engine/target/release/fmf-service.exe, engine/target/release/fmf.exe dist/FindMyFiles/
+    cargo run --release --manifest-path xtask/Cargo.toml -- publish --skip-rust {{skip_rust}}
 
 # Local/release publish: build the engine first, then publish (rust is already
 # built, so the in-build cargo step is skipped).
@@ -194,21 +192,24 @@ profile *args="bench C:":
 # removal is best-effort, so killed test runs can leave directories behind;
 # cargo clean also removes them, this is the cheaper broom.
 clean-temp:
-    Remove-Item -Recurse -Force engine/target/test-tmp -ErrorAction SilentlyContinue; exit 0
+    cargo run --manifest-path xtask/Cargo.toml -- clean-temp
 
 # ── Release ──────────────────────────────────────────────────────────────
 
 # Cut a release: bump the version (Rust workspace + C# app in lockstep),
 # commit, and create a signed vX.Y.Z tag. Pushing the tag fires release.yml
-# (GITHUB_TOKEN only — no stored secret). -Raw/-NoNewline preserve LF endings.
+# (GITHUB_TOKEN only — no stored secret). Logic + guards (semver, existing-tag,
+# no-op) + tests live in xtask; `--dry-run` shows the diff without committing.
 # Usage:  just release 0.2.0   then   git push; git push origin v0.2.0
-release version:
-    (Get-Content -Raw engine/Cargo.toml) -replace '\d+\.\d+\.\d+(?=" # release version)', '{{version}}' | Set-Content -NoNewline engine/Cargo.toml
-    (Get-Content -Raw app/FindMyFiles/FindMyFiles.csproj) -replace '\d+\.\d+\.\d+(?=</Version> <!-- release version)', '{{version}}' | Set-Content -NoNewline app/FindMyFiles/FindMyFiles.csproj
-    git add engine/Cargo.toml app/FindMyFiles/FindMyFiles.csproj
-    git commit -m "chore: release v{{version}}"
-    git tag -s "v{{version}}" -m "v{{version}}"
-    Write-Host "Tagged v{{version}} — push with: git push; git push origin v{{version}}"
+release version *args="":
+    cargo run --manifest-path xtask/Cargo.toml -- release {{version}} {{args}}
+
+# Zip + checksum the assembled bundle for a release tag (run AFTER publish +
+# signing). Outputs find-my-files-v<version>-win-x64.zip + SHA256SUMS.txt at the
+# repo root — the assets release.yml attaches. --release: deflate wants a
+# non-debug build. Usage:  just package v0.2.0
+package tag:
+    cargo run --release --manifest-path xtask/Cargo.toml -- package {{tag}}
 
 # ── Docs ─────────────────────────────────────────────────────────────────
 
@@ -224,6 +225,11 @@ doc:
 # Live-preview the design docs at http://localhost:3000
 doc-serve:
     mdbook serve docs --open
+
+# Stage the built docs into site/ (site/book + site/doc) — the same assembly
+# pages.yml publishes. Run `just doc` first. Logic lives in xtask.
+docs-assemble:
+    cargo run --manifest-path xtask/Cargo.toml -- docs-assemble
 
 # ── Quality gates (also enforced in CI) ──────────────────────────────────
 

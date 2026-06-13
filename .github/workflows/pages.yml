@@ -54,11 +54,10 @@ jobs:
         # (and it resolves intra-doc links to non-pub helpers).
         run: cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml
 
+      # Stage book + doc into site/ next to the landing page (xtask: just
+      # docs-assemble), verifying both source trees exist first.
       - name: Assemble site (landing + book + doc)
-        shell: pwsh
-        run: |
-          Copy-Item -Recurse -Force docs/book site/book
-          Copy-Item -Recurse -Force engine/target/doc site/doc
+        run: just docs-assemble
 
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
