@@ -14,10 +14,11 @@ pre-commit:
 pre-push:
   jobs:
     # Non-blocking reminder: the perf gates need an elevated shell, so they
-    # cannot run here — nudge instead of silently skipping them.
+    # cannot run here — nudge instead of silently skipping them. (echo exits 0,
+    # so this never blocks the push.)
     - name: perf-nudge
       glob: "engine/crates/fmf-core/**"
-      run: echo "fmf-core changed — run 'just perf-gate' from an elevated shell before merging" && exit 0
+      run: echo "fmf-core changed — run 'just perf-gate' from an elevated shell before merging"
     - name: clippy
       root: engine/
       run: cargo clippy --workspace --all-targets -- -D warnings
@@ -26,3 +27,8 @@ pre-push:
       run: cargo test --workspace
     - name: test-app
       run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
+    # The xtask crate is its own workspace (engine's --workspace doesn't cover
+    # it); gate it here too, only when xtask files change.
+    - name: xtask
+      glob: "xtask/**"
+      run: cargo fmt --manifest-path xtask/Cargo.toml --all -- --check && cargo clippy --manifest-path xtask/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path xtask/Cargo.toml

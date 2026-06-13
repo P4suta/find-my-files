@@ -1,5 +1,6 @@
 # Rust
 engine/target/
+xtask/target/
 
 # .NET / WinUI
 app/**/bin/
@@ -9,12 +10,18 @@ app/**/obj/
 
 # Build artifacts & distribution
 dist/
+# Release assets produced by `just package` (xtask)
+find-my-files-*-win-x64.zip
+SHA256SUMS.txt
 screenshots/
 test-results.json
 **/*.cobertura.xml
 
 # Generated docs (mdBook output; rustdoc lives under engine/target/)
 docs/book/
+# Docs staged into the site by `just docs-assemble` (pages.yml does the same)
+site/book/
+site/doc/
 
 # Engine runtime artifacts
 *.fmfidx

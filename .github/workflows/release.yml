@@ -101,16 +101,11 @@ jobs:
         if: env.HAVE_SIGNING != 'true'
         run: echo "::warning::Signing secrets absent - publishing UNSIGNED binaries (SmartScreen will warn end users). See docs/SIGNING.md to enable."
 
-      - name: Zip bundle
-        shell: pwsh
-        run: |
-          $v = '${{ env.TAG }}'.TrimStart('v')
-          Compress-Archive -Path dist/FindMyFiles/* -DestinationPath "find-my-files-v$v-win-x64.zip"
-
-      - name: Checksums
-        shell: pwsh
-        run: |
-          (Get-FileHash find-my-files-*-win-x64.zip -Algorithm SHA256).Hash | Out-File -Encoding ascii SHA256SUMS.txt
+      # Zip + checksum the (now-signed) bundle. Runs after signing so the zip
+      # holds signed binaries. Logic + output names live in xtask (just package):
+      # find-my-files-v<version>-win-x64.zip + SHA256SUMS.txt at the repo root.
+      - name: Package (zip + checksums)
+        run: just package ${{ env.TAG }}
 
       - name: Attach assets to release
         uses: softprops/action-gh-release@v3
