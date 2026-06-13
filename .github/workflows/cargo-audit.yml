@@ -1,13 +1,21 @@
-# RustSec advisory scan over the committed engine/Cargo.lock. The scheduled
-# run catches newly-disclosed advisories even when nothing changed.
+# RustSec advisory scan over the committed lockfiles (engine + xtask). The
+# scheduled run catches newly-disclosed advisories even when nothing changed.
 name: cargo-audit
 
 on:
   push:
     branches: [main]
-    paths: ["engine/**/Cargo.toml", "engine/**/Cargo.lock"]
+    paths:
+      - "engine/**/Cargo.toml"
+      - "engine/**/Cargo.lock"
+      - "xtask/Cargo.toml"
+      - "xtask/Cargo.lock"
   pull_request:
-    paths: ["engine/**/Cargo.toml", "engine/**/Cargo.lock"]
+    paths:
+      - "engine/**/Cargo.toml"
+      - "engine/**/Cargo.lock"
+      - "xtask/Cargo.toml"
+      - "xtask/Cargo.lock"
   schedule:
     - cron: "33 4 * * 1"
 
@@ -23,6 +31,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
-      - name: cargo audit
+      - name: cargo audit (engine)
         run: cargo audit
         working-directory: engine
+      - name: cargo audit (xtask)
+        run: cargo audit
+        working-directory: xtask
