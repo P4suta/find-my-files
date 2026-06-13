@@ -16,6 +16,10 @@ env:
   DOTNET_NOLOGO: "1"
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
 
+# Least privilege by default; the only job needing more (pr-title) sets its own.
+permissions:
+  contents: read
+
 jobs:
   # Skip the heavy windows jobs on docs-only PRs (ci-required treats their
   # `skipped` as success, so branch protection still passes).

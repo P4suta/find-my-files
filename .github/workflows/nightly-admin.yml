@@ -9,6 +9,9 @@ on:
     - cron: "17 17 * * *" # 02:17 JST
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   admin-tests:
     runs-on: windows-latest
