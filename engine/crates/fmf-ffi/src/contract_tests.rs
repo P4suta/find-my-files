@@ -91,7 +91,7 @@ fn default_opts() -> FmfQueryOptions {
 
 fn json_from_blob(blob: *mut FmfBlob) -> serde_json::Value {
     assert!(!blob.is_null());
-    let b = unsafe { &*blob };
+    let b = unsafe { blob.as_ref() }.expect("blob is non-null");
     let bytes = unsafe { std::slice::from_raw_parts(b.data, b.len as usize) };
     serde_json::from_slice(bytes).expect("blob is UTF-8 JSON")
 }
@@ -131,7 +131,7 @@ fn ready_engine() -> (*mut c_void, TestDir) {
     });
     // The handle struct is crate-visible, so tests can reach the engine
     // behind the opaque pointer without an extra FFI test hook.
-    let handle = unsafe { &*h.cast::<EngineHandle>() };
+    let handle = unsafe { h.cast::<EngineHandle>().as_ref() }.expect("engine handle is non-null");
     handle.engine.insert_ready_volume("C:", b.finish());
     (h, dir)
 }
@@ -737,13 +737,13 @@ fn page_packs_rows_and_string_blob_per_contract() {
     // One contiguous block: row header array + string blob, offsets into it.
     let mut page: *mut FmfPage = ptr::null_mut();
     assert_eq!(unsafe { fmf_result_page(rh, 0, 16, &mut page) }, FMF_OK);
-    let p = unsafe { &*page };
+    let p = unsafe { page.as_ref() }.expect("page is non-null");
     assert_eq!(p.row_count, 1);
     assert!(!p.rows.is_null());
     assert!(!p.blob.is_null());
     assert_eq!(p.blob_len as usize, "alpha.txt".len() + "C:\\".len());
 
-    let row: &FmfRow = unsafe { &*p.rows };
+    let row: &FmfRow = unsafe { p.rows.as_ref() }.expect("rows pointer is non-null");
     assert_eq!(row.entry_ref >> 32, 0, "volume ordinal in the high half");
     assert_eq!(row.frn, (1 << 48) | 100);
     assert_eq!(row.size, 1234);
