@@ -3,6 +3,7 @@
 - [アーキテクチャ](ARCHITECTURE.md)
 - [技術的裏取り（RESEARCH）](RESEARCH.md)
 - [セキュリティモデル](SECURITY.md)
+- [コード署名](SIGNING.md)
 
 # 設計判断（ADR）
 
@@ -26,3 +27,4 @@
   - [0017 — サービスのセキュリティモデル](adr/0017-service-security-model.md)
   - [0018 — 契約の単一正本化（fmf-contract）](adr/0018-contract-single-source.md)
   - [0019 — 絞り込み = UI 層クエリ書き換え](adr/0019-focused-search-query-rewrite.md)
+  - [0020 — コード署名プロバイダ選定](adr/0020-code-signing-provider.md)

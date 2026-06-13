@@ -18,6 +18,12 @@ API仕様の裏取りは [RESEARCH.md](RESEARCH.md)。
 | 7 | データファイル自体の漏洩(.fmfidx は全ボリュームのファイル名を含む) | install 時に `%ProgramData%\find-my-files` へ保護DACL(SYSTEM+Administrators。logs サブディレクトリのみ利用者read)。uninstall は既定でデータ保持(残置物を案内表示)、`--purge-data` で削除 |
 | 8 | 残存リスク(受容) | 認可済みユーザーは自分のACLで見えないファイルの「名前・パス」も検索できる(ファイル名のみ索引の構造的性質。内容・ACL実体は読めない)。単一ユーザー機を主対象とし、マルチユーザー認可は ADR-0017 の再検討トリガ |
 
+## 配布物の完全性(コード署名)
+
+配布バイナリの Authenticode 署名は SSL.com eSigner(個人IV)で行う。配線は `release.yml` に休眠状態で組み込み済みで、
+証明書取得後に GitHub Secrets を入れると有効化される。取得・有効化手順は [SIGNING.md](SIGNING.md)、選定の根拠は
+[ADR-0020](adr/0020-code-signing-provider.md)。署名はタグ駆動 `release.yml` 限定(`ci.yml` の開発成果物は署名しない)。
+
 ## 手動検証チェックリスト(リリース前に1回実施し、結果と日付をここに記録)
 
 自動化できない項目(別ユーザートークン・別マシンが必要)。SDDL構築関数の構造は単体テストでピン済み。
