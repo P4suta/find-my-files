@@ -98,7 +98,7 @@ impl ResultSet {
             idx.append_parent_path(id, &mut parent_path);
             out.push(Row {
                 entry_ref: ((v as u64) << 32) | id as u64,
-                frn: idx.frn(id),
+                frn: idx.frn(id).0,
                 size: idx.size(id),
                 mtime: idx.mtime(id),
                 flags: idx_flags(idx, id),

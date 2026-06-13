@@ -8,7 +8,7 @@
 use rustc_hash::FxHashMap;
 
 use super::records::{UsnRecord, reason};
-use crate::index::{RawEntry, VolumeIndex, masked};
+use crate::index::{Frn, RawEntry, RecordNo, VolumeIndex};
 
 /// Size/mtime lookup for created/changed files. The USN record carries
 /// neither (RESEARCH.md), so the live session asks the volume; replay tests
@@ -55,11 +55,11 @@ pub fn apply_batch(
     fetch: &dyn StatFetcher,
 ) -> BatchStats {
     let mut stats = BatchStats::default();
-    let mut order: Vec<u64> = Vec::new();
-    let mut agg: FxHashMap<u64, Agg> = FxHashMap::default();
+    let mut order: Vec<RecordNo> = Vec::new();
+    let mut agg: FxHashMap<RecordNo, Agg> = FxHashMap::default();
 
     for (i, r) in records.iter().enumerate() {
-        let key = masked(r.frn);
+        let key = Frn(r.frn).record();
         match agg.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 let a = e.get_mut();
@@ -95,7 +95,7 @@ pub fn apply_batch(
                 && idx.is_dir(old)
                 && last.is_dir()
             {
-                idx.rename_dir_in_place(key, &last.name, masked(last.parent_frn));
+                idx.rename_dir_in_place(key, &last.name, Frn(last.parent_frn).record());
                 stats.created_or_renamed += 1;
                 continue;
             }
@@ -108,9 +108,8 @@ pub fn apply_batch(
             let carried = existing.map(|id| (idx.size(id), idx.mtime(id)));
             let (size, mtime) = fetched.or(carried).unwrap_or((0, 0));
             idx.upsert(&RawEntry {
-                record: key,
-                parent_record: last.parent_frn,
-                frn: last.frn,
+                parent_frn: Frn(last.parent_frn),
+                frn: Frn(last.frn),
                 name_utf16: &last.name,
                 is_dir: last.is_dir(),
                 is_reparse: last.is_reparse(),
@@ -163,9 +162,8 @@ mod tests {
         let docs: Vec<u16> = "docs".encode_utf16().collect();
         let note: Vec<u16> = "note.txt".encode_utf16().collect();
         b.push(RawEntry {
-            record: 10,
-            parent_record: 5,
-            frn: (1 << 48) | 0x0A,
+            parent_frn: Frn(5),
+            frn: Frn((1 << 48) | 0x0A),
             name_utf16: &docs,
             is_dir: true,
             is_reparse: false,
@@ -175,9 +173,8 @@ mod tests {
             mtime: 0,
         });
         b.push(RawEntry {
-            record: 11,
-            parent_record: 10,
-            frn: (1 << 48) | 0x0B,
+            parent_frn: Frn(10),
+            frn: Frn((1 << 48) | 0x0B),
             name_utf16: &note,
             is_dir: false,
             is_reparse: false,

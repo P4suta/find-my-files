@@ -1,13 +1,13 @@
 use parking_lot::Mutex;
 
 use super::frn::FrnIndex;
-use super::{EncodedEntry, EntryId, NO_PARENT, RawEntry, SortKey, VolumeIndex, masked};
+use super::{EncodedEntry, EntryId, Frn, NO_PARENT, RawEntry, SortKey, VolumeIndex};
 
 /// Two-pass builder for the initial scan: collect everything, then resolve
 /// parents and sort the permutations (scan order ≠ parent-before-child).
 pub struct VolumeIndexBuilder {
     idx: VolumeIndex,
-    parent_records: Vec<u64>,
+    parent_frns: Vec<Frn>,
 }
 
 /// Stage timings of [`VolumeIndexBuilder::finish_timed`], in milliseconds.
@@ -50,9 +50,8 @@ impl VolumeIndexBuilder {
         // them all in one parallel pass once the FRN index exists.
         let root = idx.push_raw(
             &RawEntry {
-                record: root_record,
-                parent_record: u64::MAX, // resolves to nothing → NO_PARENT below
-                frn: root_record,
+                parent_frn: Frn(u64::MAX), // resolves to nothing → NO_PARENT below
+                frn: Frn(root_record),
                 name_utf16: &units,
                 is_dir: true,
                 is_reparse: false,
@@ -67,22 +66,22 @@ impl VolumeIndexBuilder {
         idx.parent[root as usize] = NO_PARENT;
         Self {
             idx,
-            parent_records: vec![u64::MAX],
+            parent_frns: vec![Frn(u64::MAX)],
         }
     }
 
     pub fn push(&mut self, e: RawEntry) {
         let id = self.idx.push_raw(&e, VolumeIndex::ROOT);
-        self.parent_records.push(e.parent_record);
-        debug_assert_eq!(self.parent_records.len(), id as usize + 1);
+        self.parent_frns.push(e.parent_frn);
+        debug_assert_eq!(self.parent_frns.len(), id as usize + 1);
     }
 
     /// Append an entry whose name was WTF-8 encoded off-thread (parallel
     /// scan workers). Identical semantics to [`Self::push`].
     pub fn push_encoded(&mut self, e: EncodedEntry) {
         let id = self.idx.push_encoded(&e, VolumeIndex::ROOT);
-        self.parent_records.push(e.parent_record);
-        debug_assert_eq!(self.parent_records.len(), id as usize + 1);
+        self.parent_frns.push(e.parent_frn);
+        debug_assert_eq!(self.parent_frns.len(), id as usize + 1);
     }
 
     pub const fn len(&self) -> usize {
@@ -116,14 +115,14 @@ impl VolumeIndexBuilder {
                 flag,
                 ..
             } = &mut self.idx;
-            let records = &self.parent_records;
+            let parent_frns = &self.parent_frns;
             parent
                 .par_iter_mut()
                 .enumerate()
                 .skip(1) // the root keeps NO_PARENT
                 .for_each(|(i, p)| {
                     *p = frn_index
-                        .lookup(masked(records[i]), frn, flag)
+                        .lookup(parent_frns[i].record(), frn, flag)
                         .unwrap_or(VolumeIndex::ROOT);
                 });
         }

@@ -1,6 +1,6 @@
 use super::*;
 use crate::index::testutil::TestDir;
-use crate::index::{RawEntry, SortKey, VolumeIndexBuilder};
+use crate::index::{Frn, RawEntry, SortKey, VolumeIndexBuilder};
 use crate::query::QueryOptions;
 
 fn vol(label: &str, names: &[(&str, u64)]) -> VolumeIndex {
@@ -8,9 +8,8 @@ fn vol(label: &str, names: &[(&str, u64)]) -> VolumeIndex {
     for (i, (name, size)) in names.iter().enumerate() {
         let units: Vec<u16> = name.encode_utf16().collect();
         b.push(RawEntry {
-            record: 100 + i as u64,
-            parent_record: 5,
-            frn: (1 << 48) | (100 + i as u64),
+            parent_frn: Frn(5),
+            frn: Frn((1 << 48) | (100 + i as u64)),
             name_utf16: &units,
             is_dir: false,
             is_reparse: false,
@@ -229,9 +228,8 @@ fn idle_requery_of_identical_results_reports_unchanged() {
         let first_new = idx.len() as u32;
         let units: Vec<u16> = "epsilon.txt".encode_utf16().collect();
         idx.upsert(&RawEntry {
-            record: 999,
-            parent_record: 5,
-            frn: (1 << 48) | 0x3E7,
+            parent_frn: Frn(5),
+            frn: Frn((1 << 48) | 0x3E7),
             name_utf16: &units,
             is_dir: false,
             is_reparse: false,

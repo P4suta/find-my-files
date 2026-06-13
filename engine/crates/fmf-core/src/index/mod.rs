@@ -45,11 +45,40 @@ pub mod flags {
     pub const EXCLUDED: u8 = 32;
 }
 
-/// Mask an NTFS file reference number down to the record number (low 48 bits).
-#[inline]
-#[must_use]
-pub const fn masked(record_or_frn: u64) -> u64 {
-    record_or_frn & 0x0000_FFFF_FFFF_FFFF
+/// A full 64-bit NTFS file reference number: `(sequence << 48) | record`.
+///
+/// The identity that survives a rename (the FRN is kept); NTFS reuses the
+/// low-48-bit record number, and the sequence distinguishes generations.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[repr(transparent)]
+pub struct Frn(pub u64);
+
+/// An MFT record number — an [`Frn`]'s low 48 bits.
+///
+/// The index's lookup key: liveness (not the sequence) resolves NTFS record
+/// reuse, so the key is just the record number.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+#[repr(transparent)]
+pub struct RecordNo(pub u64);
+
+impl Frn {
+    /// The record number this reference points at — its low 48 bits.
+    #[inline]
+    #[must_use]
+    pub const fn record(self) -> RecordNo {
+        RecordNo(self.0 & 0x0000_FFFF_FFFF_FFFF)
+    }
+}
+
+impl From<u64> for RecordNo {
+    /// Wrap a value already known to be a record number — the ergonomic
+    /// entry point for name lookups ([`VolumeIndex::entry_by_record`]) and
+    /// test fixtures. Derive one from a full reference with [`Frn::record`],
+    /// never by truncating a raw `u64` here.
+    #[inline]
+    fn from(record: u64) -> Self {
+        Self(record)
+    }
 }
 
 /// `reserve_exact` with a `len/64` floor, for merge-only arrays that grow a
@@ -102,10 +131,11 @@ pub(crate) fn merge_sorted_tail(
 /// One record produced by an initial-scan source (raw $MFT today, `ReFS`
 /// enumeration in the future).
 pub struct RawEntry<'a> {
-    pub record: u64,
-    pub parent_record: u64,
-    /// Full FRN including the sequence value.
-    pub frn: u64,
+    /// The parent directory's full reference — its `.record()` resolves the
+    /// parent (an unknown parent attaches the entry to the root).
+    pub parent_frn: Frn,
+    /// This entry's full reference; its `.record()` is the identity key.
+    pub frn: Frn,
     pub name_utf16: &'a [u16],
     pub is_dir: bool,
     pub is_reparse: bool,
@@ -122,9 +152,8 @@ pub struct RawEntry<'a> {
 /// memcpys. `name_wtf8`/`lower_wtf8` must come from
 /// [`crate::wtf8::push_wtf8_pair`] (equal lengths, shared offsets).
 pub struct EncodedEntry<'a> {
-    pub record: u64,
-    pub parent_record: u64,
-    pub frn: u64,
+    pub parent_frn: Frn,
+    pub frn: Frn,
     pub name_wtf8: &'a [u8],
     pub lower_wtf8: &'a [u8],
     pub is_dir: bool,

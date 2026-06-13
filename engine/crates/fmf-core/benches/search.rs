@@ -5,7 +5,7 @@
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use fmf_core::engine::{Engine, EngineConfig};
-use fmf_core::index::{RawEntry, SortKey, VolumeIndex, VolumeIndexBuilder};
+use fmf_core::index::{Frn, RawEntry, SortKey, VolumeIndex, VolumeIndexBuilder};
 use fmf_core::query::{self, CaseMode, QueryOptions, UtcResolver};
 
 /// Deterministic xorshift so every run sees identical data.
@@ -112,9 +112,8 @@ fn build_synthetic() -> VolumeIndex {
         tally(&dir_name);
         let units: Vec<u16> = dir_name.encode_utf16().collect();
         b.push(RawEntry {
-            record: dir_record,
-            parent_record: 5,
-            frn: (1 << 48) | dir_record,
+            parent_frn: Frn(5),
+            frn: Frn((1 << 48) | dir_record),
             name_utf16: &units,
             is_dir: true,
             is_reparse: false,
@@ -151,9 +150,8 @@ fn build_synthetic() -> VolumeIndex {
             };
             let units: Vec<u16> = name.encode_utf16().collect();
             b.push(RawEntry {
-                record,
-                parent_record: dir_record,
-                frn: (1 << 48) | record,
+                parent_frn: Frn(dir_record),
+                frn: Frn((1 << 48) | record),
                 name_utf16: &units,
                 is_dir: false,
                 is_reparse: false,
@@ -390,9 +388,8 @@ fn bench_post_usn(c: &mut Criterion) {
                 for k in 0..700u64 {
                     let rec = 50_000_000 + n * 700 + k;
                     i.upsert(&RawEntry {
-                        record: rec,
-                        parent_record: 100, // the "windows" dir
-                        frn: (1 << 48) | rec,
+                        parent_frn: Frn(100), // the "windows" dir
+                        frn: Frn((1 << 48) | rec),
                         name_utf16: &names[(k % 16) as usize],
                         is_dir: false,
                         is_reparse: false,

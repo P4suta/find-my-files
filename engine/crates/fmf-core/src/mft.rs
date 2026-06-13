@@ -11,7 +11,7 @@ use ntfs_reader::mft::Mft;
 use ntfs_reader::volume::Volume;
 use thiserror::Error;
 
-use crate::index::{RawEntry, VolumeIndex, VolumeIndexBuilder};
+use crate::index::{Frn, RawEntry, VolumeIndex, VolumeIndexBuilder};
 
 // The production scanner (and the ScanStats both scanners fill) lives in
 // crate::scan; re-exported here so callers keep one import path.
@@ -201,7 +201,7 @@ pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), Mf
         // Copy fields out of the packed structs before borrowing.
         let name_data = name.data;
         let name_len = name.header.name_length as usize;
-        let parent_record = name.header.parent_directory_reference;
+        let parent_frn = name.header.parent_directory_reference;
 
         let mut size = 0u64;
         let mut mtime = 0i64;
@@ -235,9 +235,8 @@ pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), Mf
             stats.files += 1;
         }
         b.push(RawEntry {
-            record: file.number,
-            parent_record,
-            frn: file.reference_number(),
+            parent_frn: Frn(parent_frn),
+            frn: Frn(file.reference_number()),
             name_utf16: &name_data[..name_len],
             is_dir: file.is_directory(),
             is_reparse,

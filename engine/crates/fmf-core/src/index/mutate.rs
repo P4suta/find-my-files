@@ -2,7 +2,8 @@ use crate::wtf8;
 
 use super::core::SortColumns;
 use super::{
-    EncodedEntry, EntryId, NO_PARENT, RawEntry, SortKey, VolumeIndex, flags, merge_sorted_tail,
+    EncodedEntry, EntryId, Frn, NO_PARENT, RawEntry, RecordNo, SortKey, VolumeIndex, flags,
+    merge_sorted_tail,
 };
 
 impl VolumeIndex {
@@ -24,20 +25,22 @@ impl VolumeIndex {
     /// Returns the new id. Caller must finish the batch with
     /// [`Self::merge_new_into_permutations`].
     pub fn upsert(&mut self, e: &RawEntry) -> EntryId {
-        if let Some(old) = self.entry_by_record(e.record) {
+        if let Some(old) = self.entry_by_record(e.frn.record()) {
             self.flag[old as usize] |= flags::TOMBSTONE;
             self.tombstones += 1;
             self.dead_name_bytes += self.owned_name_bytes(old);
         }
         // Parents are already live on the USN path; unknown ones attach to
         // root (orphan records do occur in real MFTs).
-        let parent = self.entry_by_record(e.parent_record).unwrap_or(Self::ROOT);
+        let parent = self
+            .entry_by_record(e.parent_frn.record())
+            .unwrap_or(Self::ROOT);
         self.push_raw(e, parent)
     }
 
     /// Tombstoning is the whole deletion: the FRN index never finds dead
     /// entries (liveness filter), so there is nothing to unmap.
-    pub fn delete(&mut self, record: u64) -> Option<EntryId> {
+    pub fn delete(&mut self, record: impl Into<RecordNo>) -> Option<EntryId> {
         let id = self.entry_by_record(record)?;
         self.flag[id as usize] |= flags::TOMBSTONE;
         self.tombstones += 1;
@@ -48,7 +51,11 @@ impl VolumeIndex {
     /// Move `record` under a new parent. Cheap: no permutation depends on
     /// the path, and child paths rebuild lazily. A corrupt record naming
     /// itself as parent keeps its current parent (no self-cycles).
-    pub fn reparent(&mut self, record: u64, new_parent_record: u64) -> Option<EntryId> {
+    pub fn reparent(
+        &mut self,
+        record: impl Into<RecordNo>,
+        new_parent_record: impl Into<RecordNo>,
+    ) -> Option<EntryId> {
         let id = self.entry_by_record(record)?;
         let parent = self
             .entry_by_record(new_parent_record)
@@ -70,9 +77,9 @@ impl VolumeIndex {
     /// are rare enough that this beats invalidating every child.
     pub fn rename_dir_in_place(
         &mut self,
-        record: u64,
+        record: impl Into<RecordNo>,
         name_utf16: &[u16],
-        new_parent_record: u64,
+        new_parent_record: impl Into<RecordNo>,
     ) -> Option<EntryId> {
         let id = self.entry_by_record(record)?;
         let pos = self.perm_name.iter().position(|&x| x == id)?;
@@ -104,7 +111,12 @@ impl VolumeIndex {
     }
 
     /// Update size/mtime in place (`USN_REASON_DATA`_* without a name change).
-    pub fn update_stat(&mut self, record: u64, size: u64, mtime: i64) -> Option<EntryId> {
+    pub fn update_stat(
+        &mut self,
+        record: impl Into<RecordNo>,
+        size: u64,
+        mtime: i64,
+    ) -> Option<EntryId> {
         let id = self.entry_by_record(record)?;
         self.set_size(id, size);
         self.mtime[id as usize] = mtime;
@@ -224,7 +236,7 @@ impl VolumeIndex {
         off: usize,
         orig_off: u32,
         parent: EntryId,
-        frn: u64,
+        frn: Frn,
         size: u64,
         mtime: i64,
         is_dir: bool,
@@ -243,7 +255,7 @@ impl VolumeIndex {
         self.parent.push(parent);
         self.push_size(size);
         self.mtime.push(mtime);
-        self.frn.push(frn);
+        self.frn.push(frn.0);
         let mut f = 0u8;
         if is_dir {
             f |= flags::IS_DIR;
@@ -287,7 +299,7 @@ impl VolumeIndex {
     /// EXCLUDED bit.
     pub fn update_attrs(
         &mut self,
-        record: u64,
+        record: impl Into<RecordNo>,
         is_hidden: bool,
         is_system: bool,
     ) -> Option<EntryId> {

@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{RawEntry, VolumeIndex, VolumeIndexBuilder};
+use super::{Frn, RawEntry, VolumeIndex, VolumeIndexBuilder};
 
 /// RAII per-test directory: `{workspace target}/test-tmp/fmf-<pid>-<seq>`,
 /// created by [`TestDir::new`], removed (best-effort) on drop.
@@ -81,9 +81,8 @@ pub const fn raw(
     mtime: i64,
 ) -> RawEntry<'_> {
     RawEntry {
-        record,
-        parent_record: parent,
-        frn: (1u64 << 48) | record,
+        parent_frn: Frn(parent),
+        frn: Frn((1u64 << 48) | record),
         name_utf16: name,
         is_dir,
         is_reparse: false,
@@ -122,9 +121,8 @@ pub const fn raw_attr(
     is_system: bool,
 ) -> RawEntry<'_> {
     RawEntry {
-        record,
-        parent_record: parent,
-        frn: (1u64 << 48) | record,
+        parent_frn: Frn(parent),
+        frn: Frn((1u64 << 48) | record),
         name_utf16: name,
         is_dir,
         is_reparse: false,

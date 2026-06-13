@@ -170,7 +170,7 @@ fn print_trigram_estimate(idx: &VolumeIndex) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fmf_core::index::{RawEntry, VolumeIndexBuilder};
+    use fmf_core::index::{Frn, RawEntry, VolumeIndexBuilder};
 
     #[test]
     fn name_stats_counts_fold_dup_lengths_and_big_sizes() {
@@ -187,9 +187,8 @@ mod tests {
         for (i, (name, size)) in entries.iter().enumerate() {
             let units: Vec<u16> = name.encode_utf16().collect();
             b.push(RawEntry {
-                record: 100 + i as u64,
-                parent_record: 5,
-                frn: 100 + i as u64,
+                parent_frn: Frn(5),
+                frn: Frn(100 + i as u64),
                 name_utf16: &units,
                 is_dir: false,
                 is_reparse: false,
@@ -202,9 +201,8 @@ mod tests {
         // "A" + lone high surrogate: legal NTFS, must count as differing
         // (the 'A' folds) without tripping the WTF-8 handling.
         b.push(RawEntry {
-            record: 200,
-            parent_record: 5,
-            frn: 200,
+            parent_frn: Frn(5),
+            frn: Frn(200),
             name_utf16: &[0x0041, 0xD800],
             is_dir: false,
             is_reparse: false,

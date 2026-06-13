@@ -99,15 +99,14 @@ fn json_from_blob(blob: *mut FmfBlob) -> serde_json::Value {
 /// Engine with one injected Ready volume ("C:", two files) — the unelevated
 /// stand-in for a real MFT scan.
 fn ready_engine() -> (*mut c_void, TestDir) {
-    use fmf_core::index::{RawEntry, VolumeIndexBuilder};
+    use fmf_core::index::{Frn, RawEntry, VolumeIndexBuilder};
 
     let (h, dir) = create_engine();
     let mut b = VolumeIndexBuilder::new("C:", 5);
     let alpha: Vec<u16> = "alpha.txt".encode_utf16().collect();
     b.push(RawEntry {
-        record: 100,
-        parent_record: 5,
-        frn: (1 << 48) | 0x64,
+        parent_frn: Frn(5),
+        frn: Frn((1 << 48) | 0x64),
         name_utf16: &alpha,
         is_dir: false,
         is_reparse: false,
@@ -118,9 +117,8 @@ fn ready_engine() -> (*mut c_void, TestDir) {
     });
     let beta: Vec<u16> = "beta.log".encode_utf16().collect();
     b.push(RawEntry {
-        record: 101,
-        parent_record: 5,
-        frn: (1 << 48) | 0x65,
+        parent_frn: Frn(5),
+        frn: Frn((1 << 48) | 0x65),
         name_utf16: &beta,
         is_dir: false,
         is_reparse: false,
