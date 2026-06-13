@@ -14,7 +14,7 @@ use super::{EntryId, VolumeIndex, flags};
 // than load with wrong semantics (ADR-0010, no backward compatibility).
 const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX04";
 
-fn pod_bytes<T: Copy>(v: &[T]) -> &[u8] {
+const fn pod_bytes<T: Copy>(v: &[T]) -> &[u8] {
     // Safety: T is a plain-old-data column type (u8/u16/u32/u64/i64).
     unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), std::mem::size_of_val(v)) }
 }
@@ -68,6 +68,10 @@ fn read_vec<T: Copy, R: std::io::Read>(
 
 impl VolumeIndex {
     /// Serialize the index plus the USN checkpoint (`journal_id`, `next_usn`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any I/O error from writing to `w`.
     pub fn write_snapshot<W: std::io::Write>(
         &self,
         w: &mut W,
@@ -105,9 +109,21 @@ impl VolumeIndex {
         w.write_all(&h.digest().to_le_bytes())
     }
 
-    /// Load a snapshot; returns the index and the persisted (journal_id,
-    /// next_usn) checkpoint. Any structural or checksum mismatch is an error
+    /// Load a snapshot; returns the index and the persisted (`journal_id`,
+    /// `next_usn`) checkpoint. Any structural or checksum mismatch is an error
     /// — callers fall back to a full rescan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`std::io::Error`]: any underlying read error, or
+    /// `InvalidData` on a bad magic, checksum mismatch, or any structural
+    /// inconsistency in the (untrusted) stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics only on an internal invariant violation: the fixed-size header
+    /// conversions assume the 32-byte header buffer, which is always read in
+    /// full before they run.
     pub fn read_snapshot<R: std::io::Read>(r: &mut R) -> std::io::Result<(Self, u64, i64)> {
         use std::io::{Error, ErrorKind};
         let bad = |m: &str| Error::new(ErrorKind::InvalidData, m.to_string());
@@ -244,12 +260,19 @@ impl VolumeIndex {
     }
 
     /// Atomic save: write to `<path>.tmp`, then rename over the target.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any I/O error from creating the parent directory, writing
+    /// the temporary file, or renaming it over the target.
     pub fn save_to(
         &self,
         path: &std::path::Path,
         journal_id: u64,
         next_usn: i64,
     ) -> std::io::Result<()> {
+        use std::io::Write;
+
         let tmp = path.with_extension("fmfidx.tmp");
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -257,12 +280,17 @@ impl VolumeIndex {
         {
             let mut w = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
             self.write_snapshot(&mut w, journal_id, next_usn)?;
-            use std::io::Write;
             w.flush()?;
         }
         std::fs::rename(&tmp, path)
     }
 
+    /// Open `path` and load the snapshot it holds.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any I/O error from opening the file, or any error from
+    /// [`Self::read_snapshot`] (a corrupt or incompatible snapshot).
     pub fn load_from(path: &std::path::Path) -> std::io::Result<(Self, u64, i64)> {
         let mut r = std::io::BufReader::new(std::fs::File::open(path)?);
         Self::read_snapshot(&mut r)
@@ -377,9 +405,9 @@ mod tests {
     }
 
     /// Section byte sizes for a structurally valid count=1 snapshot, in
-    /// read order: lower_pool, orig_pool (empty), orig_off (sentinel),
-    /// name_off, name_len, parent, size_lo, size-overflow ids/sizes
-    /// (empty), mtime, frn, flag, perm_name.
+    /// read order: `lower_pool`, `orig_pool` (empty), `orig_off` (sentinel),
+    /// `name_off`, `name_len`, parent, `size_lo`, size-overflow ids/sizes
+    /// (empty), mtime, frn, flag, `perm_name`.
     fn valid_sections() -> Vec<Vec<u8>> {
         vec![
             b"a".to_vec(),                   // lower_pool
@@ -398,7 +426,7 @@ mod tests {
         ]
     }
 
-    /// `unwrap_err` needs `Debug` on the Ok side; VolumeIndex has none.
+    /// `unwrap_err` needs `Debug` on the Ok side; `VolumeIndex` has none.
     fn expect_load_err(buf: &[u8]) -> std::io::Error {
         match VolumeIndex::read_snapshot(&mut &*buf) {
             Ok(_) => panic!("corrupted snapshot must not load"),

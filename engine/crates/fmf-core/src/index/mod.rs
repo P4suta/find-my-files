@@ -6,7 +6,7 @@
 //! - create  → append entry + merge into permutations
 //! - delete  → tombstone flag only
 //! - rename  → files: tombstone old + append new entry (same FRN);
-//!   dirs: in-place (children point at the EntryId), repositioned in perm_name
+//!   dirs: in-place (children point at the `EntryId`), repositioned in `perm_name`
 //! - move    → rewrite `parent` only (no permutation depends on the path)
 //!
 //! Tombstones accumulate until compaction (M2), which bumps
@@ -32,20 +32,23 @@ pub mod flags {
     pub const IS_DIR: u8 = 1;
     pub const TOMBSTONE: u8 = 2;
     pub const REPARSE: u8 = 4;
-    /// Raw FILE_ATTRIBUTE_HIDDEN.
+    /// Raw `FILE_ATTRIBUTE_HIDDEN`.
     pub const HIDDEN: u8 = 8;
-    /// Raw FILE_ATTRIBUTE_SYSTEM.
+    /// Raw `FILE_ATTRIBUTE_SYSTEM`.
     pub const SYSTEM: u8 = 16;
-    /// Computed: this entry or any ancestor carries HIDDEN|SYSTEM. Queries
-    /// skip these by default (toggleable). Kept in sync on insert/move; a
-    /// subtree moved out of an excluded branch keeps stale bits until the
-    /// next full rescan (same accepted-limitation class as dir renames).
+    /// Computed: this entry or any ancestor carries HIDDEN|SYSTEM.
+    ///
+    /// Queries skip these by default (toggleable). Kept in sync on
+    /// insert/move; a subtree moved out of an excluded branch keeps stale
+    /// bits until the next full rescan (same accepted-limitation class as dir
+    /// renames).
     pub const EXCLUDED: u8 = 32;
 }
 
 /// Mask an NTFS file reference number down to the record number (low 48 bits).
 #[inline]
-pub fn masked(record_or_frn: u64) -> u64 {
+#[must_use]
+pub const fn masked(record_or_frn: u64) -> u64 {
     record_or_frn & 0x0000_FFFF_FFFF_FFFF
 }
 
@@ -96,7 +99,7 @@ pub(crate) fn merge_sorted_tail(
     debug_assert_eq!(k, hi, "merge cursors must close");
 }
 
-/// One record produced by an initial-scan source (raw $MFT today, ReFS
+/// One record produced by an initial-scan source (raw $MFT today, `ReFS`
 /// enumeration in the future).
 pub struct RawEntry<'a> {
     pub record: u64,
@@ -113,10 +116,11 @@ pub struct RawEntry<'a> {
     pub mtime: i64,
 }
 
-/// A [`RawEntry`] whose name is already WTF-8 encoded — parallel scan
-/// workers encode off the builder thread, the builder just memcpys.
-/// `name_wtf8`/`lower_wtf8` must come from [`crate::wtf8::push_wtf8_pair`]
-/// (equal lengths, shared offsets).
+/// A [`RawEntry`] whose name is already WTF-8 encoded.
+///
+/// Parallel scan workers encode off the builder thread, the builder just
+/// memcpys. `name_wtf8`/`lower_wtf8` must come from
+/// [`crate::wtf8::push_wtf8_pair`] (equal lengths, shared offsets).
 pub struct EncodedEntry<'a> {
     pub record: u64,
     pub parent_record: u64,

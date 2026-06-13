@@ -58,6 +58,13 @@ pub struct SearchMetrics {
 
 // ── Search ──────────────────────────────────────────────────────────────
 
+/// Execute a compiled query against one volume index.
+///
+/// # Panics
+///
+/// Panics if a pool-scanning driver runs without its offset table — an
+/// invariant guaranteed here, since the table is built whenever any group
+/// needs it.
 pub fn search(
     idx: &VolumeIndex,
     q: &CompiledQuery,
@@ -308,6 +315,10 @@ fn materialize_filtered(
     opt: &QueryOptions,
     keep: impl Fn(EntryId) -> bool + Sync,
 ) -> Vec<EntryId> {
+    // Fine-grained chunks: at 2^17 a 1M-entry walk only fans out 8 ways and
+    // the walk becomes the latency floor for every query.
+    const MAT_CHUNK: usize = 1 << 14;
+
     let size_perm;
     let mtime_perm;
     let perm: &[EntryId] = match opt.sort {
@@ -321,9 +332,6 @@ fn materialize_filtered(
             &mtime_perm.0.ids
         }
     };
-    // Fine-grained chunks: at 2^17 a 1M-entry walk only fans out 8 ways and
-    // the walk becomes the latency floor for every query.
-    const MAT_CHUNK: usize = 1 << 14;
     let chunks: Vec<Vec<EntryId>> = perm
         .par_chunks(MAT_CHUNK)
         .map(|chunk| chunk.iter().copied().filter(|&id| keep(id)).collect())
@@ -567,6 +575,8 @@ mod tests {
     /// post-rename stale pool gaps.
     #[test]
     fn pool_scan_matches_naive_oracle() {
+        use std::fmt::Write as _;
+
         struct Rng(u64);
         impl Rng {
             fn next(&mut self) -> u64 {
@@ -598,10 +608,10 @@ mod tests {
         let mut names_made: Vec<String> = Vec::new();
         for i in 0..500u64 {
             let mut name = String::new();
-            for _ in 0..(1 + rng.next() % 4) {
+            for _ in 0..=(rng.next() % 4) {
                 name.push_str(fragments[(rng.next() % fragments.len() as u64) as usize]);
             }
-            name.push_str(&format!("_{i}"));
+            write!(name, "_{i}").unwrap();
             let units: Vec<u16> = name.encode_utf16().collect();
             b.push(RawEntry {
                 record: 100 + i,

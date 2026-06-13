@@ -1,7 +1,9 @@
 //! Fault injection for the pipe path, gated behind `--debug-faults` and off
-//! by default (an installed service never enables it). Mirrors the fake
-//! engine's `!!` queries so the failure pipeline can be exercised E2E:
-//! `!!panic` (dispatch panic → FMF_E_PANIC, connection survives),
+//! by default (an installed service never enables it).
+//!
+//! Mirrors the fake engine's `!!` queries so the failure pipeline can be
+//! exercised E2E:
+//! `!!panic` (dispatch panic → `FMF_E_PANIC`, connection survives),
 //! `!!drop` (abrupt disconnect → reconnect path), `!!lag` (page responses
 //! +250ms → flicker-free publish path under RTT stress).
 
@@ -16,6 +18,7 @@ pub struct Faults {
 }
 
 impl Faults {
+    #[must_use]
     pub fn new(enabled: bool) -> Self {
         Self {
             enabled,
@@ -23,12 +26,19 @@ impl Faults {
         }
     }
 
+    #[must_use]
     pub fn uptime_ms(&self) -> u64 {
         self.started.elapsed().as_millis() as u64
     }
 
     /// Intercepts `!!panic` / `!!drop` query texts. `!!lag` is not
     /// intercepted — the query runs normally and the *pages* lag.
+    ///
+    /// # Panics
+    /// Deliberately panics when faults are enabled and `text` is `!!panic` —
+    /// the injected fault that exercises the `catch_unwind` → `FMF_E_PANIC`
+    /// firewall.
+    #[must_use]
     pub fn on_query(&self, text: &str) -> Option<Outcome> {
         if !self.enabled {
             return None;
@@ -40,6 +50,7 @@ impl Faults {
         }
     }
 
+    #[must_use]
     pub fn lag_marker(&self, text: &str) -> bool {
         self.enabled && text == "!!lag"
     }

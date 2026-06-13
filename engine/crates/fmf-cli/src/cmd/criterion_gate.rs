@@ -48,8 +48,10 @@ pub fn criterion_gate(
             .parent()
             .and_then(|p| p.parent())
             .and_then(|p| p.strip_prefix(dir).ok())
-            .map(|p| p.display().to_string().replace('\\', "/"))
-            .unwrap_or_else(|| path.display().to_string());
+            .map_or_else(
+                || path.display().to_string(),
+                |p| p.display().to_string().replace('\\', "/"),
+            );
         if median > threshold {
             eprintln!("REGRESSION {name} median {:+.1}%", median * 100.0);
             regressed = true;

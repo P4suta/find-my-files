@@ -4,7 +4,6 @@ using Microsoft.UI.Xaml.Data;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
-using Windows.Foundation.Collections;
 
 namespace FindMyFiles.Virtualization;
 
@@ -13,6 +12,9 @@ namespace FindMyFiles.Virtualization;
 /// <see cref="VirtualResultList.Reassign"/>, so the viewport is filled the
 /// instant a new result is published — never a placeholder flash.
 /// </summary>
+/// <param name="Page">Page index (row index ÷ <see cref="VirtualResultList.PageSize"/>)
+/// these rows belong to.</param>
+/// <param name="Rows">The page's rows in slot order, as fetched from the engine.</param>
 public readonly record struct PageSeed(long Page, IReadOnlyList<RowData> Rows);
 
 /// <summary>
@@ -37,6 +39,10 @@ public readonly record struct PageSeed(long Page, IReadOnlyList<RowData> Rows);
 /// evicted pages or transient enumeration answer absent. Mutating entry
 /// points enforce the UI thread (always, not just in Debug).
 /// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage(
+    "Design",
+    "CA1010:Generic interface should also be implemented",
+    Justification = "WinUI data virtualization requires the non-generic IList surface (microsoft-ui-xaml#1809); generic-only does not virtualize")]
 public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsRangeInfo
 {
     internal const int PageSize = 64;
@@ -63,11 +69,19 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// <summary>Raised (Reset) on the UI thread by <see cref="Reassign"/>.</summary>
     public event NotifyCollectionChangedEventHandler? CollectionChanged;
 
+    /// <summary>
+    /// Bind the list to <paramref name="dispatcher"/>, the UI-thread gate every
+    /// mutation is checked against (<see cref="EnsureUiThread"/>) and the queue
+    /// background fetch completions marshal back through.
+    /// </summary>
     public VirtualResultList(IDispatcher dispatcher)
     {
         _dispatcher = dispatcher;
     }
 
+    /// <summary>Row count of the published result, clamped to
+    /// <see cref="int.MaxValue"/> — the fixed size the ListView virtualizes
+    /// against. Out-of-range indexers throw rather than fetch.</summary>
     public int Count { get; private set; }
 
     /// <summary>
@@ -185,6 +199,18 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         _loaded.Add(seed.Page);
     }
 
+    /// <summary>
+    /// Hands out the stable <see cref="ResultRow"/> instance for
+    /// <paramref name="index"/> (creating the placeholder page on demand) —
+    /// it never fetches, so realization stays cheap; arriving data fills these
+    /// same instances in place. The setter is unsupported (read-only list).
+    /// </summary>
+    /// <param name="index">Zero-based row index; must be inside
+    /// <see cref="Count"/> or it throws (an out-of-range slot is never
+    /// fabricated into the LRU — ADR-0015).</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/>
+    /// is negative or ≥ <see cref="Count"/>.</exception>
+    /// <exception cref="NotSupportedException">On set.</exception>
     public object? this[int index]
     {
         get
@@ -218,6 +244,15 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         return rows;
     }
 
+    /// <summary>
+    /// ListView callback whenever the realized viewport moves; records the
+    /// range and kicks page fetches. Delegates to the WinRT-free
+    /// <see cref="NotifyVisibleRange"/> seam; <paramref name="trackedItems"/>
+    /// (the pinned/selected items) is unused — only the visible window drives
+    /// prefetch.
+    /// </summary>
+    /// <param name="visibleRange">First/last realized item indexes.</param>
+    /// <param name="trackedItems">Items the host asked to keep tracked; ignored.</param>
     public void RangesChanged(ItemIndexRange visibleRange, IReadOnlyList<ItemIndexRange> trackedItems) =>
         NotifyVisibleRange(visibleRange.FirstIndex, visibleRange.LastIndex);
 
@@ -354,27 +389,61 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         }
     }
 
+    /// <summary>
+    /// Tear the list down at page end: cancel in-flight fetches, dispose the
+    /// fetch token source, and dispose the owned result. Idempotent in effect —
+    /// the <c>_disposed</c> guard makes any late fetch continuation bail before
+    /// it touches the now-freed source.
+    /// </summary>
     public void Dispose()
     {
         _disposed = true;
-        _fetchCts.Cancel(); // CTS stays undisposed: in-flight fetches still observe it
+        // Cancel first so in-flight fetches stop, then dispose: _disposed is
+        // already set, so EnsureRange won't read the token again and queued
+        // continuations bail on the _disposed guard — nothing observes the
+        // source after this point.
+        _fetchCts.Cancel();
+        _fetchCts.Dispose();
         _result?.Dispose();
     }
 
     // ── IList boilerplate (read-only) ───────────────────────────────────
+
+    /// <inheritdoc/>
     public bool IsFixedSize => true;
+
+    /// <inheritdoc/>
     public bool IsReadOnly => true;
+
+    /// <inheritdoc/>
     public bool IsSynchronized => false;
+
+    /// <inheritdoc/>
     public object SyncRoot => this;
+
+    /// <inheritdoc/>
+    /// <exception cref="NotSupportedException">Always — the list is read-only.</exception>
     public int Add(object? value) => throw new NotSupportedException();
+
+    /// <inheritdoc/>
+    /// <exception cref="NotSupportedException">Always — the list is read-only.</exception>
     public void Clear() => throw new NotSupportedException();
 
-    // After a Reset the ListView re-locates its selected/focused item
-    // through Contains/IndexOf. Answer only for rows whose slot still holds
-    // that exact instance — vouching for a row of a previous result sends
-    // XAML to GetAt(staleIndex) and crashes (ADR-0015).
+    /// <summary>
+    /// True only for a row whose slot still holds that exact instance. After a
+    /// Reset the ListView re-locates its selected/focused item through
+    /// Contains/IndexOf; vouching for a row of a previous result would send XAML
+    /// to GetAt(staleIndex) and crash (ADR-0015), so membership is never faked.
+    /// </summary>
     public bool Contains(object? value) => IndexOf(value) >= 0;
 
+    /// <summary>
+    /// Index of <paramref name="value"/>, or -1, under the same membership
+    /// invariant as <see cref="Contains"/>: a <see cref="ResultRow"/> matches
+    /// only when its <see cref="ResultRow.Index"/> is inside <see cref="Count"/>
+    /// AND the current page cache holds that exact instance in that slot. Rows
+    /// from previous results or evicted pages answer absent.
+    /// </summary>
     public int IndexOf(object? value)
     {
         if (value is not ResultRow r || r.Index >= Count)
@@ -386,8 +455,16 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
             ? (int)r.Index
             : -1;
     }
+    /// <inheritdoc/>
+    /// <exception cref="NotSupportedException">Always — the list is read-only.</exception>
     public void Insert(int index, object? value) => throw new NotSupportedException();
+
+    /// <inheritdoc/>
+    /// <exception cref="NotSupportedException">Always — the list is read-only.</exception>
     public void Remove(object? value) => throw new NotSupportedException();
+
+    /// <inheritdoc/>
+    /// <exception cref="NotSupportedException">Always — the list is read-only.</exception>
     public void RemoveAt(int index) => throw new NotSupportedException();
 
     /// <summary>Read surface stays landmine-free: copy what is cached, hand

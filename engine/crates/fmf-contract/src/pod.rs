@@ -1,7 +1,9 @@
 //! `#[repr(C)]` POD types shared by the FFI (by layout) and the pipe wire
-//! (by explicit little-endian serialization in fmf-proto). The `const`
+//! (by explicit little-endian serialization in fmf-proto).
+//!
+//! The `const`
 //! blocks pin every size and offset at `cargo check` time — the same pins
-//! fmf-ffi's contract_tests re-assert at run time as an independent
+//! fmf-ffi's `contract_tests` re-assert at run time as an independent
 //! tripwire, and gen-contract radiates to C# `[FieldOffset]` values.
 
 use core::mem::{align_of, offset_of, size_of};
@@ -47,10 +49,12 @@ const _: () = {
 #[repr(C)]
 pub struct FmfPage {
     pub row_count: u32,
+    #[expect(clippy::pub_underscore_fields, reason = "C ABI padding/reserved field")]
     pub _pad: u32,
     pub rows: *const FmfRow,
     pub blob: *const u8,
     pub blob_len: u32,
+    #[expect(clippy::pub_underscore_fields, reason = "C ABI padding/reserved field")]
     pub _pad2: u32,
 }
 
@@ -69,6 +73,7 @@ const _: () = {
 pub struct FmfBlob {
     pub data: *const u8,
     pub len: u32,
+    #[expect(clippy::pub_underscore_fields, reason = "C ABI padding/reserved field")]
     pub _pad: u32,
 }
 
@@ -87,6 +92,7 @@ const _: () = {
 pub struct FmfEvent {
     /// [`crate::events::EventKind`] as u32.
     pub kind: u32,
+    #[expect(clippy::pub_underscore_fields, reason = "C ABI padding/reserved field")]
     pub _pad: u32,
     pub entries: u64,
     pub volume: [u8; 16],
@@ -95,6 +101,7 @@ pub struct FmfEvent {
 impl FmfEvent {
     pub const LEN: usize = size_of::<Self>();
 
+    #[must_use]
     pub fn new(kind: u32, entries: u64, volume: &str) -> Self {
         Self {
             kind,
@@ -104,6 +111,7 @@ impl FmfEvent {
         }
     }
 
+    #[must_use]
     pub fn volume_str(&self) -> &str {
         volume::decode_label(&self.volume)
     }
@@ -149,6 +157,7 @@ const _: () = {
 pub struct FmfVolumeStatus {
     pub label: [u8; 16],
     pub state: u32,
+    #[expect(clippy::pub_underscore_fields, reason = "C ABI padding/reserved field")]
     pub _pad: u32,
     pub entries: u64,
 }
@@ -162,7 +171,7 @@ const _: () = {
 };
 
 /// 16-byte little-endian pipe frame header. `to_bytes`/`from_bytes` are
-/// pure byte conversions — the MAX_PAYLOAD_LEN *policy* lives in
+/// pure byte conversions — the `MAX_PAYLOAD_LEN` *policy* lives in
 /// fmf-proto's `decode_header`/`read_frame`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +189,7 @@ pub struct FrameHeader {
 impl FrameHeader {
     pub const LEN: usize = size_of::<Self>();
 
+    #[must_use]
     pub fn to_bytes(self) -> [u8; Self::LEN] {
         let mut b = [0u8; Self::LEN];
         b[0..4].copy_from_slice(&self.len.to_le_bytes());
@@ -190,7 +200,8 @@ impl FrameHeader {
         b
     }
 
-    pub fn from_bytes(b: &[u8; Self::LEN]) -> Self {
+    #[must_use]
+    pub const fn from_bytes(b: &[u8; Self::LEN]) -> Self {
         Self {
             len: u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
             opcode: u16::from_le_bytes([b[4], b[5]]),

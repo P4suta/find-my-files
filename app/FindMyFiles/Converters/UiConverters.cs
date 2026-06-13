@@ -10,9 +10,13 @@ namespace FindMyFiles.Converters;
 /// </summary>
 public static class UiConverters
 {
+    /// <summary><c>true</c> を <c>Visible</c>、<c>false</c> を <c>Collapsed</c> に写像する
+    /// (反転が要る箇所はバインド側で否定する)。</summary>
     public static Visibility BoolToVis(bool value) =>
         value ? Visibility.Visible : Visibility.Collapsed;
 
+    /// <summary>文字列が非 null かつ非空なら <c>Visible</c>、それ以外は <c>Collapsed</c>。
+    /// 値がある時だけ要素を見せる(例: エラーテキスト)用途。</summary>
     public static Visibility VisibleIfNotEmpty(string? value) =>
         string.IsNullOrEmpty(value) ? Visibility.Collapsed : Visibility.Visible;
 

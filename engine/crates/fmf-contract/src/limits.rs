@@ -13,6 +13,6 @@ pub const MAX_RESULTS_PER_CONN: usize = 64;
 /// (counted + warned — a slow reader never blocks volume threads).
 pub const EVENT_QUEUE_CAP: usize = 256;
 
-/// The client's page-fetch granularity (rows per ResultPage request and the
+/// The client's page-fetch granularity (rows per `ResultPage` request and the
 /// UI virtualization page size). The wire itself accepts any count.
 pub const PAGE_ROWS: u32 = 64;

@@ -32,7 +32,7 @@ pub(super) struct VolumeQueryCache {
 
 /// USN position paired with the index state, shared with `Engine::flush`.
 /// The tailing thread owns the journal handle; "save now" from another
-/// thread needs (journal_id, next_usn) without touching it. Updated *after*
+/// thread needs (`journal_id`, `next_usn`) without touching it. Updated *after*
 /// a batch is applied, so a concurrent flush that reads the checkpoint
 /// first always saves checkpoint ≤ index — the USN replay on load covers
 /// the gap (re-applying records is idempotent; skipping them would not be).
@@ -102,6 +102,7 @@ impl VolumeSlot {
 impl Engine {
     /// Fixed NTFS volumes ("C:", "D:", …).
     #[cfg(windows)]
+    #[must_use]
     pub fn list_ntfs_volumes() -> Vec<String> {
         use windows_sys::Win32::Storage::FileSystem::{
             GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,

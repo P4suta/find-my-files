@@ -41,7 +41,7 @@ use crate::{
 // ── helpers ─────────────────────────────────────────────────────────────
 
 /// Creates an engine against a fresh [`TestDir`] — no volume is touched, so
-/// this needs no elevation (Engine::new only builds in-memory state). The
+/// this needs no elevation (`Engine::new` only builds in-memory state). The
 /// guard is returned because it must outlive the engine handle: callers
 /// bind it (`let (h, _dir) = …`) and call `destroy` before scope end.
 fn create_engine() -> (*mut c_void, TestDir) {
@@ -54,7 +54,7 @@ fn create_engine() -> (*mut c_void, TestDir) {
     .to_string();
     let cfg = CString::new(cfg).unwrap();
     let mut h: *mut c_void = ptr::null_mut();
-    let rc = unsafe { fmf_engine_create(cfg.as_ptr(), &mut h) };
+    let rc = unsafe { fmf_engine_create(cfg.as_ptr(), &raw mut h) };
     assert_eq!(
         rc,
         FMF_OK,
@@ -74,7 +74,7 @@ fn read_last_error() -> String {
     let mut buf = [0u8; 1024];
     let mut len: u32 = buf.len() as u32;
     assert_eq!(
-        unsafe { fmf_last_error(buf.as_mut_ptr(), &mut len) },
+        unsafe { fmf_last_error(buf.as_mut_ptr(), &raw mut len) },
         FMF_OK
     );
     String::from_utf8(buf[..len as usize].to_vec()).expect("last_error is UTF-8")
@@ -107,7 +107,7 @@ fn ready_engine() -> (*mut c_void, TestDir) {
     b.push(RawEntry {
         record: 100,
         parent_record: 5,
-        frn: (1 << 48) | 100,
+        frn: (1 << 48) | 0x64,
         name_utf16: &alpha,
         is_dir: false,
         is_reparse: false,
@@ -120,7 +120,7 @@ fn ready_engine() -> (*mut c_void, TestDir) {
     b.push(RawEntry {
         record: 101,
         parent_record: 5,
-        frn: (1 << 48) | 101,
+        frn: (1 << 48) | 0x65,
         name_utf16: &beta,
         is_dir: false,
         is_reparse: false,
@@ -293,7 +293,7 @@ fn fmf_blob_layout_pinned() {
 fn engine_create_rejects_bad_args() {
     let mut out: *mut c_void = ptr::null_mut();
     assert_eq!(
-        unsafe { fmf_engine_create(ptr::null(), &mut out) },
+        unsafe { fmf_engine_create(ptr::null(), &raw mut out) },
         FMF_E_INVALID_ARG
     );
     assert_eq!(
@@ -302,16 +302,16 @@ fn engine_create_rejects_bad_args() {
     );
     let bad_utf8: [u8; 2] = [0xFF, 0x00];
     assert_eq!(
-        unsafe { fmf_engine_create(bad_utf8.as_ptr().cast::<c_char>(), &mut out) },
+        unsafe { fmf_engine_create(bad_utf8.as_ptr().cast::<c_char>(), &raw mut out) },
         FMF_E_INVALID_ARG
     );
     assert_eq!(
-        unsafe { fmf_engine_create(c"not json".as_ptr(), &mut out) },
+        unsafe { fmf_engine_create(c"not json".as_ptr(), &raw mut out) },
         FMF_E_INVALID_ARG
     );
     // index_dir is a required config key.
     assert_eq!(
-        unsafe { fmf_engine_create(c"{}".as_ptr(), &mut out) },
+        unsafe { fmf_engine_create(c"{}".as_ptr(), &raw mut out) },
         FMF_E_INVALID_ARG
     );
     assert!(read_last_error().contains("index_dir"));
@@ -355,13 +355,13 @@ fn second_engine_on_same_index_dir_reports_locked() {
 
     let mut first: *mut c_void = ptr::null_mut();
     assert_eq!(
-        unsafe { fmf_engine_create(cfg.as_ptr(), &mut first) },
+        unsafe { fmf_engine_create(cfg.as_ptr(), &raw mut first) },
         FMF_OK
     );
 
     let mut second: *mut c_void = ptr::null_mut();
     assert_eq!(
-        unsafe { fmf_engine_create(cfg.as_ptr(), &mut second) },
+        unsafe { fmf_engine_create(cfg.as_ptr(), &raw mut second) },
         FMF_E_LOCKED
     );
     assert!(second.is_null(), "no handle on a locked dir");
@@ -375,7 +375,7 @@ fn second_engine_on_same_index_dir_reports_locked() {
     // The lock dies with the engine — the dir is usable again.
     let mut third: *mut c_void = ptr::null_mut();
     assert_eq!(
-        unsafe { fmf_engine_create(cfg.as_ptr(), &mut third) },
+        unsafe { fmf_engine_create(cfg.as_ptr(), &raw mut third) },
         FMF_OK
     );
     destroy(third);
@@ -411,7 +411,7 @@ fn list_volumes_requires_count_only() {
     // validation is ever added, update this pin and ARCHITECTURE.md together.
     let mut count = u32::MAX;
     assert_eq!(
-        unsafe { fmf_list_volumes(ptr::null_mut(), ptr::null_mut(), 0, &mut count) },
+        unsafe { fmf_list_volumes(ptr::null_mut(), ptr::null_mut(), 0, &raw mut count) },
         FMF_OK
     );
     assert_ne!(count, u32::MAX, "count must be written");
@@ -444,7 +444,7 @@ fn index_start_null_matrix() {
 fn index_status_null_matrix() {
     let mut count = u32::MAX;
     assert_eq!(
-        unsafe { fmf_index_status(ptr::null_mut(), ptr::null_mut(), 0, &mut count) },
+        unsafe { fmf_index_status(ptr::null_mut(), ptr::null_mut(), 0, &raw mut count) },
         FMF_E_INVALID_ARG
     );
     let (h, _dir) = create_engine();
@@ -454,7 +454,7 @@ fn index_status_null_matrix() {
     );
     // count alone (buf = NULL) is the size-probe pattern.
     assert_eq!(
-        unsafe { fmf_index_status(h, ptr::null_mut(), 0, &mut count) },
+        unsafe { fmf_index_status(h, ptr::null_mut(), 0, &raw mut count) },
         FMF_OK
     );
     assert_eq!(count, 0, "no volumes were registered");
@@ -474,16 +474,25 @@ fn query_null_matrix() {
             fmf_query(
                 ptr::null_mut(),
                 q.as_ptr(),
-                &opts,
-                &mut rh,
-                &mut count,
+                &raw const opts,
+                &raw mut rh,
+                &raw mut count,
                 ptr::null_mut(),
             )
         },
         FMF_E_INVALID_ARG
     );
     assert_eq!(
-        unsafe { fmf_query(h, ptr::null(), &opts, &mut rh, &mut count, ptr::null_mut()) },
+        unsafe {
+            fmf_query(
+                h,
+                ptr::null(),
+                &raw const opts,
+                &raw mut rh,
+                &raw mut count,
+                ptr::null_mut(),
+            )
+        },
         FMF_E_INVALID_ARG
     );
     assert_eq!(
@@ -492,8 +501,8 @@ fn query_null_matrix() {
                 h,
                 q.as_ptr(),
                 ptr::null(),
-                &mut rh,
-                &mut count,
+                &raw mut rh,
+                &raw mut count,
                 ptr::null_mut(),
             )
         },
@@ -504,9 +513,9 @@ fn query_null_matrix() {
             fmf_query(
                 h,
                 q.as_ptr(),
-                &opts,
+                &raw const opts,
                 ptr::null_mut(),
-                &mut count,
+                &raw mut count,
                 ptr::null_mut(),
             )
         },
@@ -517,8 +526,8 @@ fn query_null_matrix() {
             fmf_query(
                 h,
                 q.as_ptr(),
-                &opts,
-                &mut rh,
+                &raw const opts,
+                &raw mut rh,
                 ptr::null_mut(),
                 ptr::null_mut(),
             )
@@ -532,9 +541,9 @@ fn query_null_matrix() {
             fmf_query(
                 h,
                 bad_utf8.as_ptr().cast::<c_char>(),
-                &opts,
-                &mut rh,
-                &mut count,
+                &raw const opts,
+                &raw mut rh,
+                &raw mut count,
                 ptr::null_mut(),
             )
         },
@@ -548,7 +557,7 @@ fn query_null_matrix() {
 fn engine_stats_null_matrix_and_json_roundtrip() {
     let mut blob: *mut FmfBlob = ptr::null_mut();
     assert_eq!(
-        unsafe { fmf_engine_stats(ptr::null_mut(), &mut blob) },
+        unsafe { fmf_engine_stats(ptr::null_mut(), &raw mut blob) },
         FMF_E_INVALID_ARG
     );
     let (h, _dir) = create_engine();
@@ -556,7 +565,7 @@ fn engine_stats_null_matrix_and_json_roundtrip() {
         unsafe { fmf_engine_stats(h, ptr::null_mut()) },
         FMF_E_INVALID_ARG
     );
-    assert_eq!(unsafe { fmf_engine_stats(h, &mut blob) }, FMF_OK);
+    assert_eq!(unsafe { fmf_engine_stats(h, &raw mut blob) }, FMF_OK);
     // Contract: engine-allocated UTF-8 JSON, released with fmf_blob_free.
     assert!(json_from_blob(blob).is_object());
     assert_eq!(unsafe { fmf_blob_free(blob) }, FMF_OK);
@@ -580,7 +589,7 @@ fn last_error_truncation_roundtrip() {
     // "null string argument" is the known message for a null config.
     let mut out: *mut c_void = ptr::null_mut();
     assert_eq!(
-        unsafe { fmf_engine_create(ptr::null(), &mut out) },
+        unsafe { fmf_engine_create(ptr::null(), &raw mut out) },
         FMF_E_INVALID_ARG
     );
 
@@ -589,7 +598,7 @@ fn last_error_truncation_roundtrip() {
     let mut buf = [0xAAu8; 64];
     let mut len: u32 = buf.len() as u32;
     assert_eq!(
-        unsafe { fmf_last_error(buf.as_mut_ptr(), &mut len) },
+        unsafe { fmf_last_error(buf.as_mut_ptr(), &raw mut len) },
         FMF_OK
     );
     let full = std::str::from_utf8(&buf[..len as usize])
@@ -602,7 +611,7 @@ fn last_error_truncation_roundtrip() {
     let mut small = [0xAAu8; 8];
     let mut slen: u32 = small.len() as u32;
     assert_eq!(
-        unsafe { fmf_last_error(small.as_mut_ptr(), &mut slen) },
+        unsafe { fmf_last_error(small.as_mut_ptr(), &raw mut slen) },
         FMF_OK
     );
     assert_eq!(slen, 7);
@@ -613,7 +622,7 @@ fn last_error_truncation_roundtrip() {
     let mut one = [0xAAu8; 1];
     let mut olen: u32 = 1;
     assert_eq!(
-        unsafe { fmf_last_error(one.as_mut_ptr(), &mut olen) },
+        unsafe { fmf_last_error(one.as_mut_ptr(), &raw mut olen) },
         FMF_OK
     );
     assert_eq!(olen, 0);
@@ -623,7 +632,7 @@ fn last_error_truncation_roundtrip() {
     let mut zero = [0xAAu8; 4];
     let mut zlen: u32 = 0;
     assert_eq!(
-        unsafe { fmf_last_error(zero.as_mut_ptr(), &mut zlen) },
+        unsafe { fmf_last_error(zero.as_mut_ptr(), &raw mut zlen) },
         FMF_OK
     );
     assert_eq!(zlen, 0);
@@ -632,7 +641,7 @@ fn last_error_truncation_roundtrip() {
     // Size probe: NULL buffer + huge capacity reports the payload length.
     let mut probe: u32 = u32::MAX;
     assert_eq!(
-        unsafe { fmf_last_error(ptr::null_mut(), &mut probe) },
+        unsafe { fmf_last_error(ptr::null_mut(), &raw mut probe) },
         FMF_OK
     );
     assert_eq!(probe as usize, full.len());
@@ -650,7 +659,16 @@ fn query_syntax_error_reports_cause_chain() {
     // Parse-stage error: unclosed quote.
     let q = CString::new("\"abc").unwrap();
     assert_eq!(
-        unsafe { fmf_query(h, q.as_ptr(), &opts, &mut rh, &mut count, ptr::null_mut()) },
+        unsafe {
+            fmf_query(
+                h,
+                q.as_ptr(),
+                &raw const opts,
+                &raw mut rh,
+                &raw mut count,
+                ptr::null_mut(),
+            )
+        },
         FMF_E_QUERY_SYNTAX
     );
     assert!(rh.is_null(), "no result handle on syntax error");
@@ -662,7 +680,16 @@ fn query_syntax_error_reports_cause_chain() {
     // Parse-stage error: bad size filter value.
     let q = CString::new("size:abc").unwrap();
     assert_eq!(
-        unsafe { fmf_query(h, q.as_ptr(), &opts, &mut rh, &mut count, ptr::null_mut()) },
+        unsafe {
+            fmf_query(
+                h,
+                q.as_ptr(),
+                &raw const opts,
+                &raw mut rh,
+                &raw mut count,
+                ptr::null_mut(),
+            )
+        },
         FMF_E_QUERY_SYNTAX
     );
     assert!(read_last_error().contains("invalid size filter"));
@@ -670,7 +697,16 @@ fn query_syntax_error_reports_cause_chain() {
     // Compile-stage error (bad regex) maps to the same code.
     let q = CString::new("regex:[").unwrap();
     assert_eq!(
-        unsafe { fmf_query(h, q.as_ptr(), &opts, &mut rh, &mut count, ptr::null_mut()) },
+        unsafe {
+            fmf_query(
+                h,
+                q.as_ptr(),
+                &raw const opts,
+                &raw mut rh,
+                &raw mut count,
+                ptr::null_mut(),
+            )
+        },
         FMF_E_QUERY_SYNTAX
     );
     let msg = read_last_error();
@@ -690,7 +726,16 @@ fn valid_query_on_volumeless_engine_succeeds_empty() {
     let mut rh: *mut c_void = ptr::null_mut();
     let mut count: u64 = u64::MAX;
     assert_eq!(
-        unsafe { fmf_query(h, q.as_ptr(), &opts, &mut rh, &mut count, ptr::null_mut()) },
+        unsafe {
+            fmf_query(
+                h,
+                q.as_ptr(),
+                &raw const opts,
+                &raw mut rh,
+                &raw mut count,
+                ptr::null_mut(),
+            )
+        },
         FMF_OK
     );
     assert_eq!(count, 0);
@@ -699,14 +744,14 @@ fn valid_query_on_volumeless_engine_succeeds_empty() {
     let mut page: *mut FmfPage = ptr::null_mut();
     // result_page null matrix needs a live handle, so it lives here.
     assert_eq!(
-        unsafe { fmf_result_page(ptr::null_mut(), 0, 1, &mut page) },
+        unsafe { fmf_result_page(ptr::null_mut(), 0, 1, &raw mut page) },
         FMF_E_INVALID_ARG
     );
     assert_eq!(
         unsafe { fmf_result_page(rh, 0, 1, ptr::null_mut()) },
         FMF_E_INVALID_ARG
     );
-    assert_eq!(unsafe { fmf_result_page(rh, 0, 16, &mut page) }, FMF_OK);
+    assert_eq!(unsafe { fmf_result_page(rh, 0, 16, &raw mut page) }, FMF_OK);
     assert_eq!(unsafe { (*page).row_count }, 0);
     assert_eq!(unsafe { fmf_page_free(page) }, FMF_OK);
     assert_eq!(unsafe { fmf_result_free(rh) }, FMF_OK);
@@ -724,7 +769,16 @@ fn page_packs_rows_and_string_blob_per_contract() {
     let mut count: u64 = 0;
     let mut trace: *mut FmfBlob = ptr::null_mut();
     assert_eq!(
-        unsafe { fmf_query(h, q.as_ptr(), &opts, &mut rh, &mut count, &mut trace) },
+        unsafe {
+            fmf_query(
+                h,
+                q.as_ptr(),
+                &raw const opts,
+                &raw mut rh,
+                &raw mut count,
+                &raw mut trace,
+            )
+        },
         FMF_OK
     );
     assert_eq!(count, 1);
@@ -736,7 +790,7 @@ fn page_packs_rows_and_string_blob_per_contract() {
 
     // One contiguous block: row header array + string blob, offsets into it.
     let mut page: *mut FmfPage = ptr::null_mut();
-    assert_eq!(unsafe { fmf_result_page(rh, 0, 16, &mut page) }, FMF_OK);
+    assert_eq!(unsafe { fmf_result_page(rh, 0, 16, &raw mut page) }, FMF_OK);
     let p = unsafe { page.as_ref() }.expect("page is non-null");
     assert_eq!(p.row_count, 1);
     assert!(!p.rows.is_null());
@@ -745,7 +799,7 @@ fn page_packs_rows_and_string_blob_per_contract() {
 
     let row: &FmfRow = unsafe { p.rows.as_ref() }.expect("rows pointer is non-null");
     assert_eq!(row.entry_ref >> 32, 0, "volume ordinal in the high half");
-    assert_eq!(row.frn, (1 << 48) | 100);
+    assert_eq!(row.frn, (1 << 48) | 0x64);
     assert_eq!(row.size, 1234);
     assert_eq!(row.mtime, 777);
     let name = unsafe {
@@ -763,7 +817,10 @@ fn page_packs_rows_and_string_blob_per_contract() {
 
     // Out-of-range offsets page as empty, not as an error.
     let mut tail: *mut FmfPage = ptr::null_mut();
-    assert_eq!(unsafe { fmf_result_page(rh, 999, 16, &mut tail) }, FMF_OK);
+    assert_eq!(
+        unsafe { fmf_result_page(rh, 999, 16, &raw mut tail) },
+        FMF_OK
+    );
     assert_eq!(unsafe { (*tail).row_count }, 0);
     assert_eq!(unsafe { fmf_page_free(tail) }, FMF_OK);
 

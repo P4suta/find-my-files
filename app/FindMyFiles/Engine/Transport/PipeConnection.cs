@@ -17,6 +17,12 @@ namespace FindMyFiles.Engine;
 internal sealed class PipeConnection : IDisposable
 {
     private readonly NamedPipeClientStream _stream;
+    // CA2213 false positive: SemaphoreSlim only owns a disposable handle if its
+    // AvailableWaitHandle is accessed — it never is here (only WaitAsync/Release).
+    // Disposing it would also break the write-after-dispose normalization below
+    // (a disposed semaphore throws ObjectDisposedException from WaitAsync, bypassing
+    // the EngineUnavailableException translation PipeConnectionTests pins).
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2213:Disposable fields should be disposed", Justification = "SemaphoreSlim allocates no handle unless AvailableWaitHandle is used (it is not); disposing it breaks write-after-dispose normalization")]
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly Action<byte[]> _onEvent;
     private readonly Action<uint, int, byte[]> _onResponse;

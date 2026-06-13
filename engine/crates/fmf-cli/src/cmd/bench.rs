@@ -94,6 +94,10 @@ pub fn bench(
     }
 
     if let Some(path) = baseline {
+        // Tail latency and restore are gated on *absolute* acceptance
+        // budgets, never relative (ADR-0013).
+        const P99_BUDGET_US: u64 = 50_000;
+        const RESTORE_BUDGET_MS: u64 = 1_000;
         let old: BenchReport = serde_json::from_str(&std::fs::read_to_string(path)?)?;
         // Entry-count drift past ±10% invalidates the baseline (ADR-0013).
         if report.entries.abs_diff(old.entries) > old.entries / 10 {
@@ -107,10 +111,6 @@ pub fn bench(
         // Coarse smoke alarm: relative p50 gate at +50%; the fine-grained
         // per-change gate is `just bench-micro-check` (ADR-0013).
         let gate = |new: u64, old: u64, floor: u64| new > (old.max(floor) * 3) / 2;
-        // Tail latency and restore are gated on *absolute* acceptance
-        // budgets, never relative (ADR-0013).
-        const P99_BUDGET_US: u64 = 50_000;
-        const RESTORE_BUDGET_MS: u64 = 1_000;
         for qb in &report.queries {
             let Some(prev) = old.queries.iter().find(|p| p.query == qb.query) else {
                 continue;

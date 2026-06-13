@@ -7,6 +7,18 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Same maximal analyzer/style strictness as the app (convention
+         hardening); test-specific noise is relaxed in .editorconfig. -->
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <AnalysisMode>All</AnalysisMode>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <CodeAnalysisTreatWarningsAsErrors>true</CodeAnalysisTreatWarningsAsErrors>
+    <!-- Doc file so IDE0005 works; test members need no XML docs (CS1591), and the
+         WinAppSDK bootstrap type duplication across app+test is benign (CS0436). -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS0436</NoWarn>
     <IsPackable>false</IsPackable>
     <EnableMsixTooling>false</EnableMsixTooling>
     <!-- See the app csproj: lets non-Windows CI restore the Windows TFM. -->
@@ -24,6 +36,11 @@
     <!-- Coverage gate: `dotnet test /p:CollectCoverage=true /p:Threshold=N`
          exits non-zero below the line-coverage bar (CI app job). -->
     <PackageReference Include="coverlet.msbuild" Version="6.0.4">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!-- Match the app's extra analyzers. Floating 4.* — pin after restore. -->
+    <PackageReference Include="Roslynator.Analyzers" Version="4.*">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>

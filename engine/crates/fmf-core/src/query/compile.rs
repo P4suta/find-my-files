@@ -72,25 +72,25 @@ pub(super) enum Matcher {
 }
 
 impl Matcher {
-    fn cost(&self) -> u8 {
+    const fn cost(&self) -> u8 {
         match self {
-            Matcher::True | Matcher::Size { .. } | Matcher::Mtime { .. } | Matcher::IsDir(_) => 0,
-            Matcher::Ext { .. } | Matcher::NamePrefix { .. } | Matcher::NameSuffix { .. } => 1,
-            Matcher::NameSub { .. } => 2,
-            Matcher::NameRegex { .. } => 3,
-            Matcher::PathSub { .. } => 4,
-            Matcher::PathRegex { .. } => 5,
+            Self::True | Self::Size { .. } | Self::Mtime { .. } | Self::IsDir(_) => 0,
+            Self::Ext { .. } | Self::NamePrefix { .. } | Self::NameSuffix { .. } => 1,
+            Self::NameSub { .. } => 2,
+            Self::NameRegex { .. } => 3,
+            Self::PathSub { .. } => 4,
+            Self::PathRegex { .. } => 5,
         }
     }
 
-    fn needs_folded_path(&self) -> bool {
-        matches!(self, Matcher::PathSub { folded: true, .. })
+    const fn needs_folded_path(&self) -> bool {
+        matches!(self, Self::PathSub { folded: true, .. })
     }
 
-    fn needs_orig_path(&self) -> bool {
+    const fn needs_orig_path(&self) -> bool {
         matches!(
             self,
-            Matcher::PathSub { folded: false, .. } | Matcher::PathRegex { .. }
+            Self::PathSub { folded: false, .. } | Self::PathRegex { .. }
         )
     }
 }
@@ -132,13 +132,13 @@ pub(super) enum Driver {
 }
 
 impl Driver {
-    pub(super) fn label(&self) -> &'static str {
+    pub(super) const fn label(&self) -> &'static str {
         match self {
-            Driver::FullScan => "full-scan",
-            Driver::MatchAll => "match-all",
-            Driver::Sub { .. } => "pool-scan",
-            Driver::Prefix { .. } => "prefix",
-            Driver::Suffixes { .. } => "suffix",
+            Self::FullScan => "full-scan",
+            Self::MatchAll => "match-all",
+            Self::Sub { .. } => "pool-scan",
+            Self::Prefix { .. } => "prefix",
+            Self::Suffixes { .. } => "suffix",
         }
     }
 }
@@ -150,7 +150,7 @@ pub(super) struct CompiledGroup {
     pub terms: Vec<CTerm>,
     /// The term the driver was built from (None for FullScan/MatchAll).
     /// The sweep never reads it — it exists so cached-query refinement can
-    /// re-evaluate the *complete* group per candidate (exec::refine), so
+    /// re-evaluate the *complete* group per candidate (`exec::refine`), so
     /// subsumption sees every condition (subsume.rs), and so the exec can
     /// verify it per candidate when the sweep was a superset (below).
     pub driver_term: Option<CTerm>,
@@ -436,6 +436,12 @@ fn driver_for(t: &CTerm) -> (Driver, bool) {
     }
 }
 
+/// Compile a parsed [`Ast`] into an executable [`CompiledQuery`].
+///
+/// # Errors
+///
+/// Returns [`CompileError::Regex`] if a `regex:`/`path:`-regex term fails to
+/// compile.
 pub fn compile(
     ast: &Ast,
     case: CaseMode,
@@ -499,7 +505,8 @@ pub fn compile(
 }
 
 impl CompiledQuery {
-    /// Human-readable driver summary for QueryTrace.
+    /// Human-readable driver summary for `QueryTrace`.
+    #[must_use]
     pub fn driver_label(&self) -> String {
         let mut labels: Vec<&str> = self.groups.iter().map(|g| g.driver.label()).collect();
         labels.dedup();

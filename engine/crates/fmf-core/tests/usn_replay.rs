@@ -1,7 +1,7 @@
-//! USN replay integration tests (CLAUDE.md: USNロジックはfixtureリプレイで
-//! テストする). Synthetic USN_RECORD_V2 buffers are built byte-by-byte from
+//! USN replay integration tests (CLAUDE.md: `USNロジックはfixtureリプレイで`
+//! テストする). Synthetic `USN_RECORD_V2` buffers are built byte-by-byte from
 //! the documented winioctl.h layout (docs/RESEARCH.md →
-//! https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-usn_record_v2)
+//! <https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-usn_record_v2>)
 //! — independently of `records::encode_buffer` — then run through the full
 //! non-OS pipeline: raw bytes → `parse_buffer` → `apply_batch` → index.
 //!
@@ -16,7 +16,7 @@ use fmf_core::usn::records::{
 };
 use fmf_core::usn::{StatFetcher, UsnRecord, apply_batch, parse_buffer, reason};
 
-/// FILE_ATTRIBUTE_ARCHIVE — the "plain file" attribute value.
+/// `FILE_ATTRIBUTE_ARCHIVE` — the "plain file" attribute value.
 const ARCHIVE: u32 = 0x20;
 
 // ── Synthetic USN_RECORD_V2 builder ─────────────────────────────────────
@@ -37,7 +37,7 @@ const ARCHIVE: u32 = 0x20;
 //   offset 58  WORD      FileNameOffset (60)
 //   offset 60  WCHAR[]   FileName       (UTF-16LE, not NUL-terminated)
 
-/// offsetof(USN_RECORD_V2, FileName).
+/// `offsetof(USN_RECORD_V2`, `FileName`).
 const NAME_OFFSET: usize = 60;
 
 /// Specification of one synthetic record; every field the parser consumes is
@@ -79,7 +79,7 @@ fn encode_record_v2(out: &mut Vec<u8>, spec: &RecSpec) {
     }
 }
 
-/// Full FSCTL_READ_USN_JOURNAL output buffer: leading u64 (next USN to
+/// Full `FSCTL_READ_USN_JOURNAL` output buffer: leading u64 (next USN to
 /// resume from) followed by 8-byte-aligned records.
 fn usn_buffer(next_usn: u64, specs: &[RecSpec]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -93,7 +93,7 @@ fn usn_buffer(next_usn: u64, specs: &[RecSpec]) -> Vec<u8> {
 // ── Replay helpers ───────────────────────────────────────────────────────
 
 /// Full FRN for a record number: sequence 1 in the top 16 bits.
-fn frn(record: u64) -> u64 {
+const fn frn(record: u64) -> u64 {
     (1 << 48) | record
 }
 

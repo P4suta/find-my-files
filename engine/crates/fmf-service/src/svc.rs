@@ -1,7 +1,9 @@
 //! The serve core (shared by console `run` and the SCM entry) and the SCM
-//! plumbing. Stop sources — Ctrl+C, SERVICE_CONTROL_STOP, PRESHUTDOWN — all
-//! funnel into one (AtomicBool, Event) pair; teardown is always
-//! stop-accepting → flush → shutdown (docs/ARCHITECTURE.md, ADR-0016).
+//! plumbing.
+//!
+//! Stop sources — Ctrl+C, `SERVICE_CONTROL_STOP`, PRESHUTDOWN — all funnel
+//! into one (`AtomicBool`, Event) pair; teardown is always stop-accepting →
+//! flush → shutdown (docs/ARCHITECTURE.md, ADR-0016).
 
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -28,12 +30,17 @@ pub struct ServeOptions {
     pub no_index: bool,
 }
 
-/// Exit code reported when the writer lock never came free — visible in the
-/// event log, but a clean SERVICE_STOPPED so the SCM does not crash-loop us
-/// against the lock holder (docs/ARCHITECTURE.md §単一書き手の排他).
+/// Exit code reported when the writer lock never came free.
+///
+/// Visible in the event log, but a clean `SERVICE_STOPPED` so the SCM does not
+/// crash-loop us against the lock holder (docs/ARCHITECTURE.md §単一書き手の排他).
 pub const EXIT_LOCKED: u32 = 7;
 
 /// Brings the engine + pipe server up, parks until `stop`, tears down.
+///
+/// # Errors
+/// Returns a process exit code on startup failure: [`EXIT_LOCKED`] when the
+/// writer lock never freed, or `1` for any other engine/pipe bring-up error.
 pub fn serve(
     opts: &ServeOptions,
     stop: &Arc<AtomicBool>,
@@ -54,7 +61,7 @@ pub fn serve(
         let volumes = if cfg.volumes.is_empty() {
             fmf_core::engine::Engine::list_ntfs_volumes()
         } else {
-            cfg.volumes.clone()
+            cfg.volumes
         };
         tracing::info!(?volumes, "indexing");
         engine.index_start(&volumes);
@@ -186,6 +193,10 @@ fn service_main(_args: Vec<OsString>) {
 }
 
 /// Blocks for the service lifetime; fails fast when not launched by the SCM.
+///
+/// # Errors
+/// Returns the `windows_service` error when the SCM dispatcher cannot start
+/// (e.g. the process was launched directly rather than by the SCM).
 pub fn dispatch() -> windows_service::Result<()> {
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)
 }

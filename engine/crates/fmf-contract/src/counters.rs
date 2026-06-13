@@ -1,10 +1,12 @@
-//! Degradation-counter names — the snake_case keys of
-//! `MetricsSnapshot.counters` in the stats JSON. This JSON shape is contract
-//! surface (the C# CountersData is generated from this list, and fmf-core's
-//! golden_json test pins its CountersSnapshot serde keys against it), so the
+//! Degradation-counter names — the `snake_case` keys of
+//! `MetricsSnapshot.counters` in the stats JSON.
+//!
+//! This JSON shape is contract
+//! surface (the C# `CountersData` is generated from this list, and fmf-core's
+//! `golden_json` test pins its `CountersSnapshot` serde keys against it), so the
 //! list lives here even though the counters themselves are engine-internal.
 //! Append new counters at the end; never rename (F12 history and the golden
-//! stats_snapshot.json key on them).
+//! `stats_snapshot.json` key on them).
 
 pub const COUNTER_NAMES: &[&str] = &[
     "stat_fetch_failures",

@@ -1,8 +1,10 @@
 //! Pipe DACL and token checks (docs/SECURITY.md の4層防御の①と④、判断は
-//! ADR-0017). The SDDL string is built by one pure, unit-pinned function —
-//! a hand-rolled SDDL elsewhere is exactly the "silently wide open"
-//! accident the pin exists to prevent. Never create a pipe without going
-//! through `pipe_security_attributes`.
+//! ADR-0017).
+//!
+//! The SDDL string is built by one pure, unit-pinned function — a hand-rolled
+//! SDDL elsewhere is exactly the "silently wide open" accident the pin exists
+//! to prevent. Never create a pipe without going through
+//! `pipe_security_attributes`.
 
 use std::io;
 
@@ -21,19 +23,23 @@ fn last_error() -> io::Error {
 
 /// `D:P(A;;GA;;;SY)(A;;GRGW;;;<sid>)…` — SYSTEM gets full control, each
 /// authorized SID read+write, nobody else (protected DACL, no inheritance,
-/// no Everyone/anonymous ACE → default deny). Administrators is deliberately
-/// absent: a UAC-filtered token carries it deny-only and would not gain
-/// access anyway (docs/RESEARCH.md).
+/// no Everyone/anonymous ACE → default deny).
+///
+/// Administrators is deliberately absent: a UAC-filtered token carries it
+/// deny-only and would not gain access anyway (docs/RESEARCH.md).
+#[must_use]
 pub fn pipe_sddl(authorized_sids: &[String]) -> String {
     let mut s = String::from("D:P(A;;GA;;;SY)");
     for sid in authorized_sids {
-        s.push_str(&format!("(A;;GRGW;;;{sid})"));
+        s.push_str("(A;;GRGW;;;");
+        s.push_str(sid);
+        s.push(')');
     }
     s
 }
 
-/// Owns the security descriptor LocalAlloc'd by the SDDL conversion; the
-/// SECURITY_ATTRIBUTES it hands out stays valid for its lifetime.
+/// Owns the security descriptor `LocalAlloc`'d by the SDDL conversion; the
+/// `SECURITY_ATTRIBUTES` it hands out stays valid for its lifetime.
 pub struct PipeSecurity {
     descriptor: *mut core::ffi::c_void,
 }
@@ -43,6 +49,9 @@ unsafe impl Send for PipeSecurity {}
 unsafe impl Sync for PipeSecurity {}
 
 impl PipeSecurity {
+    /// # Errors
+    /// Returns the OS error if the SDDL string fails to convert to a security
+    /// descriptor (`ConvertStringSecurityDescriptorToSecurityDescriptorW`).
     pub fn from_sddl(sddl: &str) -> io::Result<Self> {
         let wide: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
         let mut descriptor: *mut core::ffi::c_void = std::ptr::null_mut();
@@ -50,7 +59,7 @@ impl PipeSecurity {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 wide.as_ptr(),
                 SDDL_REVISION_1,
-                (&mut descriptor as *mut *mut core::ffi::c_void).cast(),
+                (&raw mut descriptor).cast(),
                 std::ptr::null_mut(),
             )
         };
@@ -60,7 +69,8 @@ impl PipeSecurity {
         Ok(Self { descriptor })
     }
 
-    pub fn attributes(&self) -> SECURITY_ATTRIBUTES {
+    #[must_use]
+    pub const fn attributes(&self) -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES {
             nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: self.descriptor,
@@ -77,54 +87,66 @@ impl Drop for PipeSecurity {
 
 /// The current process token's user SID as a string ("S-1-5-21-…") —
 /// `install` captures the installing user this way (docs/SECURITY.md 脅威1).
+///
+/// # Errors
+/// Returns the OS error if opening the process token, querying its user, or
+/// stringifying the SID fails.
 pub fn current_user_sid() -> io::Result<String> {
     unsafe {
         let mut token: HANDLE = std::ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) == 0 {
             return Err(last_error());
         }
         let token = OwnedToken(token);
 
         let mut needed = 0u32;
-        GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &raw mut needed);
         let mut buf = vec![0u8; needed as usize];
         if GetTokenInformation(
             token.0,
             TokenUser,
             buf.as_mut_ptr().cast(),
             needed,
-            &mut needed,
+            &raw mut needed,
         ) == 0
         {
             return Err(last_error());
         }
-        let user = &*buf.as_ptr().cast::<TOKEN_USER>();
+        // TOKEN_USER's first field is a PSID (pointer, 8-byte aligned), but the
+        // Vec<u8> backing `buf` is only byte-aligned — forming a `&TOKEN_USER` to it
+        // would be a misaligned reference (UB). Read the value out unaligned instead;
+        // its `Sid` still points into `buf`, which outlives this use.
+        let user = std::ptr::read_unaligned(buf.as_ptr().cast::<TOKEN_USER>());
         sid_to_string(user.User.Sid)
     }
 }
 
-/// Does `sid_str` name a real *user* account on this machine? `install`
-/// uses it to vet a forwarded `--owner-sid` before trusting it onto the
-/// pipe allowlist (docs/SECURITY.md 脅威1/7): a SID that resolves to
+/// Does `sid_str` name a real *user* account on this machine?
+///
+/// `install` uses it to vet a forwarded `--owner-sid` before trusting it onto
+/// the pipe allowlist (docs/SECURITY.md 脅威1/7): a SID that resolves to
 /// nothing — or to a group / well-known principal (SYSTEM, BUILTIN\Users…)
-/// — is refused. Malformed/unresolvable → `Ok(false)`; only API faults are
-/// `Err` (the caller logs and ignores either way — install must not die on
-/// a bad SID).
+/// — is refused. Malformed/unresolvable → `Ok(false)`.
+///
+/// # Errors
+/// Only genuine API faults are `Err` (the caller logs and ignores either way
+/// — install must not die on a bad SID).
 pub fn validate_user_sid(sid_str: &str) -> io::Result<bool> {
     use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
     use windows_sys::Win32::Security::{LookupAccountSidW, PSID, SID_NAME_USE, SidTypeUser};
 
-    let wide: Vec<u16> = sid_str.encode_utf16().chain([0]).collect();
-    let mut psid: PSID = std::ptr::null_mut();
-    if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut psid) } == 0 {
-        return Ok(false); // not even a well-formed SID string
-    }
     // ConvertStringSidToSidW LocalAlloc's the SID — free it on every path.
     struct LocalSid(PSID);
     impl Drop for LocalSid {
         fn drop(&mut self) {
             unsafe { LocalFree(self.0.cast()) };
         }
+    }
+
+    let wide: Vec<u16> = sid_str.encode_utf16().chain([0]).collect();
+    let mut psid: PSID = std::ptr::null_mut();
+    if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &raw mut psid) } == 0 {
+        return Ok(false); // not even a well-formed SID string
     }
     let owned = LocalSid(psid);
 
@@ -138,10 +160,10 @@ pub fn validate_user_sid(sid_str: &str) -> io::Result<bool> {
             std::ptr::null(),
             owned.0,
             std::ptr::null_mut(),
-            &mut name_len,
+            &raw mut name_len,
             std::ptr::null_mut(),
-            &mut domain_len,
-            &mut use_kind,
+            &raw mut domain_len,
+            &raw mut use_kind,
         );
     }
     if name_len == 0 {
@@ -154,10 +176,10 @@ pub fn validate_user_sid(sid_str: &str) -> io::Result<bool> {
             std::ptr::null(),
             owned.0,
             name.as_mut_ptr(),
-            &mut name_len,
+            &raw mut name_len,
             domain.as_mut_ptr(),
-            &mut domain_len,
-            &mut use_kind,
+            &raw mut domain_len,
+            &raw mut use_kind,
         )
     };
     if ok == 0 {
@@ -176,7 +198,7 @@ impl Drop for OwnedToken {
 
 unsafe fn sid_to_string(sid: windows_sys::Win32::Security::PSID) -> io::Result<String> {
     let mut out: *mut u16 = std::ptr::null_mut();
-    if unsafe { ConvertSidToStringSidW(sid, &mut out) } == 0 {
+    if unsafe { ConvertSidToStringSidW(sid, &raw mut out) } == 0 {
         return Err(last_error());
     }
     let mut len = 0;
@@ -190,23 +212,33 @@ unsafe fn sid_to_string(sid: windows_sys::Win32::Security::PSID) -> io::Result<S
 
 /// Protected DACL for the data root: SYSTEM + Administrators only. The
 /// snapshots inside hold every file name on the machine (SECURITY.md 脅威7).
+#[must_use]
 pub fn data_dir_sddl() -> String {
     "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string()
 }
 
 /// logs/ keeps user read so the unelevated F12 "診断情報をコピー" can tail
-/// engine.log. Each authorized user (the installing admin *and* a forwarded
-/// owner SID under OTS elevation) gets read, so the daily user is never
-/// locked out of its own diagnostics.
+/// engine.log.
+///
+/// Each authorized user (the installing admin *and* a forwarded owner SID
+/// under OTS elevation) gets read, so the daily user is never locked out of
+/// its own diagnostics.
+#[must_use]
 pub fn logs_dir_sddl(user_sids: &[&str]) -> String {
     let mut s = String::from("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
     for sid in user_sids {
-        s.push_str(&format!("(A;OICI;GR;;;{sid})"));
+        s.push_str("(A;OICI;GR;;;");
+        s.push_str(sid);
+        s.push(')');
     }
     s
 }
 
 /// Applies an SDDL-described protected DACL to a directory (install-time).
+///
+/// # Errors
+/// Returns the OS error if the SDDL fails to convert or `SetFileSecurityW`
+/// fails.
 pub fn set_dir_dacl(path: &std::path::Path, sddl: &str) -> io::Result<()> {
     use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, SetFileSecurityW};
 
@@ -227,6 +259,10 @@ pub fn set_dir_dacl(path: &std::path::Path, sddl: &str) -> io::Result<()> {
 /// Connect-time token check — defense in depth behind the DACL (a DACL
 /// construction bug must not become full exposure). Empty `authorized` =
 /// check disabled (console/test mode).
+///
+/// # Errors
+/// Returns the OS error if impersonating the pipe client or reading its token
+/// fails. A successfully read token that is not authorized returns `Ok(false)`.
 pub fn verify_client(pipe: &crate::pipe::PipeStream, authorized: &[String]) -> io::Result<bool> {
     use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
     use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
@@ -243,24 +279,27 @@ pub fn verify_client(pipe: &crate::pipe::PipeStream, authorized: &[String]) -> i
     let result = (|| {
         unsafe {
             let mut token: HANDLE = std::ptr::null_mut();
-            if OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) == 0 {
+            if OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &raw mut token) == 0 {
                 return Err(last_error());
             }
             let token = OwnedToken(token);
             let mut needed = 0u32;
-            GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+            GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &raw mut needed);
             let mut buf = vec![0u8; needed as usize];
             if GetTokenInformation(
                 token.0,
                 TokenUser,
                 buf.as_mut_ptr().cast(),
                 needed,
-                &mut needed,
+                &raw mut needed,
             ) == 0
             {
                 return Err(last_error());
             }
-            let user = &*buf.as_ptr().cast::<TOKEN_USER>();
+            // See current_user_sid: read TOKEN_USER out unaligned (its leading PSID
+            // wants 8-byte alignment; the Vec<u8> is byte-aligned) so we never form a
+            // misaligned reference. `buf` outlives the Sid read below.
+            let user = std::ptr::read_unaligned(buf.as_ptr().cast::<TOKEN_USER>());
             let sid = sid_to_string(user.User.Sid)?;
             Ok(sid == "S-1-5-18" /* SYSTEM (self-connections) */
                 || authorized.iter().any(|a| a == &sid))

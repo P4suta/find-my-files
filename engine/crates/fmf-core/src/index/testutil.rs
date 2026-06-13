@@ -1,4 +1,5 @@
 //! Test fixtures: the RAII test directory and sample-index builders.
+//!
 //! `feature = "testutil"` exposes this module to the other workspace
 //! crates' test suites (dev-dependencies only — production builds never
 //! compile it).
@@ -25,20 +26,28 @@ pub struct TestDir {
 }
 
 impl TestDir {
+    /// Create a fresh per-test directory under the workspace `target/`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the directory cannot be created.
+    #[must_use]
     pub fn new() -> Self {
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let target = std::env::var_os("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+        let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+            || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            PathBuf::from,
+        );
         let path = target.join("test-tmp").join(format!(
             "fmf-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&path).expect("create test dir");
-        TestDir { path }
+        Self { path }
     }
 
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -62,14 +71,15 @@ impl Drop for TestDir {
     }
 }
 
-pub fn raw<'a>(
+#[must_use]
+pub const fn raw(
     record: u64,
     parent: u64,
-    name: &'a [u16],
+    name: &[u16],
     is_dir: bool,
     size: u64,
     mtime: i64,
-) -> RawEntry<'a> {
+) -> RawEntry<'_> {
     RawEntry {
         record,
         parent_record: parent,
@@ -84,11 +94,13 @@ pub fn raw<'a>(
     }
 }
 
+#[must_use]
 pub fn u16s(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
 /// C:\ ├─ docs\ ├─ note.txt   docs comes *after* its child in scan order.
+#[must_use]
 pub fn build_sample() -> VolumeIndex {
     let mut b = VolumeIndexBuilder::new("C:", 5);
     let note = u16s("Note.TXT");
@@ -100,14 +112,15 @@ pub fn build_sample() -> VolumeIndex {
     b.finish()
 }
 
-pub fn raw_attr<'a>(
+#[must_use]
+pub const fn raw_attr(
     record: u64,
     parent: u64,
-    name: &'a [u16],
+    name: &[u16],
     is_dir: bool,
     is_hidden: bool,
     is_system: bool,
-) -> RawEntry<'a> {
+) -> RawEntry<'_> {
     RawEntry {
         record,
         parent_record: parent,

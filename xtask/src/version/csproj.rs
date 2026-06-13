@@ -1,10 +1,10 @@
 //! Bump `<Version>` in FindMyFiles.csproj.
 //!
-//! XML, so toml_edit can't help; we anchor a regex on the same `<!-- release
+//! XML, so `toml_edit` can't help; we anchor a regex on the same `<!-- release
 //! version` marker comment the file already carries and require EXACTLY ONE
 //! match. That single-match guard is the whole point — it turns a silent no-op
 //! (marker moved/renamed) or a multi-replace into a hard error, the failure
-//! mode the old `-replace` could hit silently. PackageReference `Version="…"`
+//! mode the old `-replace` could hit silently. `PackageReference` `Version="…"`
 //! attributes use a different syntax and never match.
 
 use anyhow::{bail, Result};

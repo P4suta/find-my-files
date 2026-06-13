@@ -19,10 +19,16 @@ namespace FindMyFiles;
 /// </summary>
 public sealed partial class MainPage : Page
 {
+    /// <summary>ページの ViewModel グラフのルート。`x:Bind` の唯一のバインド元で、
+    /// 検索・結果・通知・診断パネルの各サブ ViewModel を束ねる。</summary>
     public MainViewModel ViewModel { get; }
 
     private readonly ResultsViewportManager _viewport;
 
+    /// <summary>ViewModel グラフを生成し、ビューのイベント(IME 合成・ドラッグ&amp;ドロップ・
+    /// キーボード・ソートヘッダ)を ViewModel と <see cref="ResultsViewportManager"/> へ
+    /// 配線する。ローカライズ済みのツールチップ/自動化名はここでコード設定し、言語ラジオは
+    /// 永続設定を反映する。最後に空/結果のビジュアルステートを初期化して `StartAsync` を起動。</summary>
     public MainPage()
     {
         ViewModel = new MainViewModel(
@@ -151,7 +157,7 @@ public sealed partial class MainPage : Page
                 return;
             }
             var items = await e.DataView.GetStorageItemsAsync();
-            var item = items.FirstOrDefault();
+            var item = items.Count > 0 ? items[0] : null;
             if (item is null)
             {
                 return;

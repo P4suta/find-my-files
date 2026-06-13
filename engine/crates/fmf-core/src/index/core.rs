@@ -20,7 +20,7 @@ pub struct VolumeIndex {
     pub(super) name_off: Vec<u32>,
     pub(super) name_len: Vec<u16>,
     pub(super) parent: Vec<EntryId>,
-    /// File sizes < u32::MAX, 4 bytes per entry; u32::MAX is the sentinel
+    /// File sizes < `u32::MAX`, 4 bytes per entry; `u32::MAX` is the sentinel
     /// for the overflow map (≥4GiB files, ADR-0007). Read through
     /// [`VolumeIndex::size`].
     pub(super) size_lo: Vec<u32>,
@@ -31,7 +31,7 @@ pub struct VolumeIndex {
     pub(super) frn_index: FrnIndex,
     /// The one always-maintained permutation: name order is the default
     /// sort and the merge target of every USN batch. Size/mtime orders are
-    /// lazily derived caches (query::memo::{SizePerm, MtimePerm}) — built on
+    /// lazily derived caches (`query::memo::{SizePerm`, `MtimePerm`}) — built on
     /// the first sorted query, extended per generation, never persisted.
     pub(super) perm_name: Vec<EntryId>,
     pub(super) content_generation: u64,
@@ -67,15 +67,15 @@ pub(super) struct DerivedCache {
 }
 
 impl VolumeIndex {
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.name_off.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    pub fn live_len(&self) -> usize {
+    pub const fn live_len(&self) -> usize {
         self.len() - self.tombstones as usize
     }
 
@@ -197,15 +197,15 @@ impl VolumeIndex {
         &self.lower_pool
     }
 
-    pub fn content_generation(&self) -> u64 {
+    pub const fn content_generation(&self) -> u64 {
         self.content_generation
     }
 
-    pub fn structural_generation(&self) -> u64 {
+    pub const fn structural_generation(&self) -> u64 {
         self.structural_generation
     }
 
-    pub(crate) fn dir_topology_generation(&self) -> u64 {
+    pub(crate) const fn dir_topology_generation(&self) -> u64 {
         self.dir_topology_generation
     }
 
@@ -213,7 +213,7 @@ impl VolumeIndex {
     /// index replacing one whose generation was `prev` must read as strictly
     /// newer, so open result handles go hard-stale (docs/ARCHITECTURE.md,
     /// generation 2層). Compaction (M2) will reuse this.
-    pub(crate) fn bump_structural_from(&mut self, prev: u64) {
+    pub(crate) const fn bump_structural_from(&mut self, prev: u64) {
         self.structural_generation = prev + 1;
     }
 
@@ -444,7 +444,7 @@ pub(super) struct SortColumns<'a> {
 }
 
 impl<'a> SortColumns<'a> {
-    pub(super) fn new(
+    pub(super) const fn new(
         lower_pool: &'a [u8],
         name_off: &'a [u32],
         name_len: &'a [u16],

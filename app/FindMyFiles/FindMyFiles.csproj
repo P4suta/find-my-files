@@ -29,6 +29,19 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Maximal analyzer/style strictness (convention hardening). All .NET
+         analyzer rules on, code style enforced in build, every warning an
+         error. Security rules (CA2100/CA3006/CA5xxx) are pinned to error in
+         .editorconfig; generated WinUI XAML code is exempted there. -->
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <AnalysisMode>All</AnalysisMode>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <CodeAnalysisTreatWarningsAsErrors>true</CodeAnalysisTreatWarningsAsErrors>
+    <!-- Generate the XML doc file so IDE0005 (unused usings) is enforced in the
+         build; this also turns on CS1591 — every public member carries an XML doc. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -61,6 +74,14 @@
     <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.2.1" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.3.2" />
+    <!-- Extra build-time analyzers (convention hardening). Floating 4.* so a
+         missing exact pin can't break restore offline — pin to the resolved
+         version after the next `dotnet restore`. Analyzer-only: PrivateAssets=all
+         keeps it out of the published output. -->
+    <PackageReference Include="Roslynator.Analyzers" Version="4.*">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
 
   <!-- Rust engine: build (skippable via /p:SkipRustBuild=true) and bundle

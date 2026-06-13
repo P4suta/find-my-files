@@ -1,11 +1,10 @@
-//! `xtask clean-temp` — sweep leftover TestDir fixtures (engine/target/test-tmp).
+//! `xtask clean-temp` — sweep leftover `TestDir` fixtures (engine/target/test-tmp).
 //! Their Drop-time removal is best-effort, so a killed test run can leave dirs
 //! behind; this is the cheaper broom than `cargo clean`.
 
 use crate::{fsx, paths};
-use anyhow::Result;
 
-pub fn run() -> Result<()> {
+pub fn run() {
     let tmp = paths::repo_root()
         .join("engine")
         .join("target")
@@ -16,5 +15,4 @@ pub fn run() -> Result<()> {
         Ok(()) => println!("clean-temp: swept {}", tmp.display()),
         Err(e) => eprintln!("warning: could not fully sweep {} ({e})", tmp.display()),
     }
-    Ok(())
 }

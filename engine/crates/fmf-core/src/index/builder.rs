@@ -22,6 +22,7 @@ pub struct FinishTimings {
 impl VolumeIndexBuilder {
     /// `volume_label` is the root display name, e.g. `C:`.
     /// `root_record` is the MFT record number of the root directory (5 on NTFS).
+    #[must_use]
     pub fn new(volume_label: &str, root_record: u64) -> Self {
         let mut idx = VolumeIndex {
             lower_pool: Vec::new(),
@@ -84,11 +85,11 @@ impl VolumeIndexBuilder {
         debug_assert_eq!(self.parent_records.len(), id as usize + 1);
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.idx.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.idx.is_empty()
     }
 

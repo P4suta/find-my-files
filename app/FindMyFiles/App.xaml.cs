@@ -4,10 +4,20 @@ using FindMyFiles.Services;
 
 namespace FindMyFiles;
 
+/// <summary>
+/// アプリのエントリポイント兼プロセス全体の合流点。`OnLaunched` でエンジン境界
+/// (<see cref="EngineClient"/>)を解決し、唯一の <see cref="MainWindow"/> を立てる。
+/// 致命的初期化失敗時は `FakeEngineClient` へフォールバックして「黙って落ちる」を避ける。
+/// </summary>
 public partial class App : Application
 {
+    /// <summary>唯一のトップレベルウィンドウ。`OnLaunched` で生成され、`WinRT.Interop`
+    /// 経由の HWND 取得(<see cref="WindowHandle"/>)の起点になる。</summary>
     public static Window Window { get; private set; } = null!;
 
+    /// <summary>UI スレッドの <c>DispatcherQueue</c>(`OnLaunched` 内でキャッシュ)。
+    /// バックグラウンドからの UI マーシャリングはこれ経由の <c>TryEnqueue</c> で行う
+    /// (UI固定則: UIスレッドでキャッシュしてから使う)。</summary>
     public static Microsoft.UI.Dispatching.DispatcherQueue DispatcherQueue { get; private set; } = null!;
 
     /// <summary>
@@ -16,9 +26,14 @@ public partial class App : Application
     /// </summary>
     public static IEngineClient EngineClient { get; private set; } = null!;
 
+    /// <summary>メインウィンドウの Win32 HWND。ファイルピッカー等、ウィンドウを
+    /// 親に取る WinRT API の初期化に渡す(unpackaged WinUI 3 の作法)。</summary>
     public static nint WindowHandle =>
         WinRT.Interop.WindowNative.GetWindowHandle(Window);
 
+    /// <summary>言語上書きの適用 → `InitializeComponent` → <c>ExceptionPolicy.Install</c>
+    /// の順で初期化する。言語適用は最初の XAML ロードで `x:Uid`/`ResourceLoader` が
+    /// 正しい言語に解決されるよう `InitializeComponent` より前に行う必要がある。</summary>
     public App()
     {
         // Must run before InitializeComponent so x:Uid / ResourceLoader resolve
@@ -51,6 +66,7 @@ public partial class App : Application
         }
     }
 
+    /// <inheritdoc/>
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         FileLog.Info("app", $"launch v{typeof(App).Assembly.GetName().Version} "

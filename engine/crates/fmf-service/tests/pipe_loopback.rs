@@ -26,6 +26,11 @@ fn unique_name(tag: &str) -> String {
     )
 }
 
+// NTFS FRN layout: sequence number in the high 16 bits, record number low.
+const fn frn(seq: u64, record: u64) -> u64 {
+    (seq << 48) | record
+}
+
 fn test_engine() -> (TestDir, Arc<Engine>) {
     let dir = TestDir::new();
     let e = Engine::new(EngineConfig {
@@ -37,7 +42,7 @@ fn test_engine() -> (TestDir, Arc<Engine>) {
     b.push(RawEntry {
         record: 100,
         parent_record: 5,
-        frn: (1 << 48) | 100,
+        frn: frn(1, 100),
         name_utf16: &alpha,
         is_dir: false,
         is_reparse: false,
@@ -50,7 +55,7 @@ fn test_engine() -> (TestDir, Arc<Engine>) {
     b.push(RawEntry {
         record: 101,
         parent_record: 5,
-        frn: (1 << 48) | 101,
+        frn: frn(1, 101),
         name_utf16: &beta,
         is_dir: false,
         is_reparse: false,
@@ -226,7 +231,7 @@ fn hello_query_page_free_roundtrip() {
     assert_eq!(page.rows.len(), 1);
     let row = page.rows[0];
     assert_eq!(row.entry_ref >> 32, 0, "volume ordinal in the high half");
-    assert_eq!(row.frn, (1 << 48) | 100);
+    assert_eq!(row.frn, frn(1, 100));
     assert_eq!(row.size, 1234);
     assert_eq!(row.mtime, 777);
     let name = &page.blob[row.name_off as usize..row.name_off as usize + row.name_len as usize];
@@ -287,6 +292,8 @@ fn request_before_hello_drops_the_connection() {
 
 #[test]
 fn oversized_frame_disconnects_and_counts() {
+    use std::io::Write;
+
     let hx = start("oversize", false);
     let mut c = Client::hello(&hx.pipe_name);
     // Hand-built header announcing a payload over the cap (write_frame
@@ -294,7 +301,6 @@ fn oversized_frame_disconnects_and_counts() {
     let mut raw = [0u8; 16];
     raw[0..4].copy_from_slice(&(fmf_proto::frame::MAX_PAYLOAD_LEN + 1).to_le_bytes());
     raw[4..6].copy_from_slice(&opcode::QUERY.to_le_bytes());
-    use std::io::Write;
     c.stream.write_all(&raw).unwrap();
     assert!(read_frame(&mut c.stream).is_err(), "connection must die");
 
@@ -325,7 +331,11 @@ fn subscribe_receives_engine_events() {
     let ev = messages::decode_event(&body).unwrap();
     assert_eq!(ev.kind, 5, "VolumeFailed");
     assert_eq!(ev.volume_str(), "?:");
-    assert_eq!(eh.opcode as u32, ev.kind, "opcode mirrors the event kind");
+    assert_eq!(
+        u32::from(eh.opcode),
+        ev.kind,
+        "opcode mirrors the event kind"
+    );
 
     // Unsubscribe is idempotent bookkeeping — the connection still serves.
     let (h, _) = c.request(opcode::UNSUBSCRIBE, &[]);

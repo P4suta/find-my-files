@@ -13,7 +13,7 @@
 //!   thread can't start — `scan_pipeline_fallbacks`)
 //! - within a chunk, record sub-ranges parse on rayon workers that carry
 //!   the WTF-8 encoding too (`parse::parse_chunk`); the builder then
-//!   appends the worker batches in chunk order, so EntryId assignment is
+//!   appends the worker batches in chunk order, so `EntryId` assignment is
 //!   deterministic.
 
 mod deferred;
@@ -48,7 +48,7 @@ pub struct ScanStats {
     pub elapsed_mft_load_ms: u64,
     /// Accumulated record-parse time (fixup + attribute walk + WTF-8).
     pub elapsed_parse_ms: u64,
-    /// Deferred $ATTRIBUTE_LIST name resolution.
+    /// Deferred $`ATTRIBUTE_LIST` name resolution.
     pub elapsed_deferred_ms: u64,
     /// Records whose name needed the deferred pass at all.
     pub deferred_names: u64,
@@ -65,12 +65,12 @@ pub struct ScanStats {
     pub peak_working_set_bytes: u64,
     /// Raw $MFT size — the bytes the initial scan reads.
     pub mft_bytes: u64,
-    /// Extension records (base_reference != 0) — parts of other files,
+    /// Extension records (`base_reference` != 0) — parts of other files,
     /// correctly not indexed standalone.
     pub extension_records: u64,
     /// Records failing signature/fixup validation.
     pub corrupt_records: u64,
-    /// Deferred $ATTRIBUTE_LIST records whose name never resolved.
+    /// Deferred $`ATTRIBUTE_LIST` records whose name never resolved.
     pub deferred_unresolved: u64,
     /// Name-bearing extension records past the in-RAM cache cap (those
     /// targets fall back to disk reads in the deferred pass).
@@ -82,6 +82,12 @@ pub struct ScanStats {
 
 /// Full initial scan: stream the volume's $MFT and build the in-memory
 /// index. `drive` is a drive letter spec like `C:`.
+///
+/// # Errors
+///
+/// Returns [`MftError::NotElevated`] when the process lacks the privileges to
+/// open the raw volume, or [`MftError::Ntfs`] if opening the volume or
+/// reading the $MFT fails.
 pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     let drive = drive.trim_end_matches(['\\', '/']);
     let volume_path = format!(r"\\.\{drive}");
@@ -176,10 +182,10 @@ mod tests {
     use super::*;
 
     /// Equivalence gate against the whole-load reference path. Run from an
-    /// elevated shell: FMF_ADMIN_TESTS=1 cargo test -- --ignored streaming
+    /// elevated shell: `FMF_ADMIN_TESTS=1` cargo test -- --ignored streaming
     /// The volume is live, so a small drift tolerance is allowed.
     #[test]
-    #[ignore]
+    #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
     fn streaming_scan_matches_reference() {
         if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
             eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
@@ -224,6 +230,8 @@ mod tests {
             if old_idx.name(o) == new_idx.name(n) {
                 matched += 1;
             } else {
+                use std::os::windows::ffi::OsStringExt;
+
                 // The resolvers legitimately disagree on attribute-list
                 // names: get_best_file_name returns the *first* $FILE_NAME
                 // of a target record (often the DOS 8.3 short name) and the
@@ -235,7 +243,6 @@ mod tests {
                 new_idx.append_path(n, &mut p);
                 let mut units = Vec::new();
                 crate::wtf8::wtf8_to_utf16(&p, &mut units);
-                use std::os::windows::ffi::OsStringExt;
                 let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&units));
                 if std::fs::symlink_metadata(&path).is_ok() {
                     matched += 1;

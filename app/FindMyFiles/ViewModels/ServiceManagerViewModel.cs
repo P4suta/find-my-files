@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using CommunityToolkit.Mvvm.ComponentModel;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
@@ -18,9 +19,13 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     /// disables every action and the state line says why.</summary>
     private readonly string? _exe;
 
+    /// <summary>The read-only SCM state line (未登録 / 停止 / 実行中 (PID …) /
+    /// ツール未検出). Recomputed by <see cref="Refresh"/>.</summary>
     [ObservableProperty]
     public partial string StateText { get; set; } = Loc.Get("Svc_StateChecking");
 
+    /// <summary>InfoBar text for the last action's outcome; empty means no
+    /// result bar (<see cref="HasResult"/>). Severity is <see cref="ResultSeverity"/>.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasResult))]
     public partial string ResultText { get; set; } = string.Empty;
@@ -29,10 +34,14 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     [ObservableProperty]
     public partial NotifySeverity ResultSeverity { get; set; } = NotifySeverity.Info;
 
+    /// <summary>An elevated action is in flight — greys the action row
+    /// (<see cref="NotBusy"/>) so two UAC verbs can't overlap.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(NotBusy))]
     public partial bool Busy { get; set; }
 
+    /// <summary>削除 checkbox: also wipe <c>%ProgramData%\find-my-files</c>
+    /// (index + service.json) on uninstall, vs leaving the data in place.</summary>
     [ObservableProperty]
     public partial bool PurgeData { get; set; }
 
@@ -43,12 +52,16 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     public partial bool NeedsAppRestart { get; set; }
 
     // ── State, for the header icon + section visibility (set in Refresh) ──
+
+    /// <summary>Service installed and running — drives the header「実行中」icon.</summary>
     [ObservableProperty]
     public partial bool IsRunning { get; set; }
 
+    /// <summary>Service installed but stopped.</summary>
     [ObservableProperty]
     public partial bool IsStopped { get; set; }
 
+    /// <summary>Service not installed at all — shows the 登録 prompt.</summary>
     [ObservableProperty]
     public partial bool IsNotInstalled { get; set; }
 
@@ -57,15 +70,20 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     public partial bool IsInstalled { get; set; }
 
     // ── Which lifecycle buttons apply (set in Refresh) ──
+
+    /// <summary>開始 applies — service is installed and Stopped.</summary>
     [ObservableProperty]
     public partial bool CanStart { get; set; }
 
+    /// <summary>停止 applies — service is Running.</summary>
     [ObservableProperty]
     public partial bool CanStop { get; set; }
 
+    /// <summary>再起動 applies — service is Running.</summary>
     [ObservableProperty]
     public partial bool CanRestart { get; set; }
 
+    /// <summary>削除 applies — service is installed (Stopped or Running).</summary>
     [ObservableProperty]
     public partial bool CanUninstall { get; set; }
 
@@ -78,8 +96,12 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     /// greys the whole row (visibility is still driven by the Is*/Can* flags).</summary>
     public bool NotBusy => !Busy;
 
+    /// <summary>Whether the result InfoBar has anything to show
+    /// (<see cref="ResultText"/> non-empty).</summary>
     public bool HasResult => !string.IsNullOrEmpty(ResultText);
 
+    /// <summary>Locates <c>fmf-service.exe</c> once (bundle or dev tree); the
+    /// dialog should call <see cref="Refresh"/> on open to fill the state line.</summary>
     public ServiceManagerViewModel()
     {
         _exe = ServiceSetup.LocateServiceExe(AppContext.BaseDirectory);
@@ -120,10 +142,13 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
         return pid != 0 ? Loc.Get("Svc_StateRunningPid", pid) : Loc.Get("Svc_StateRunning");
     }
 
+    /// <summary>Start the stopped service (one elevated <c>start</c> verb).</summary>
     public Task StartAsync() => RunAsync("start", Loc.Get("Svc_Started"));
 
+    /// <summary>Stop the running service (one elevated <c>stop</c> verb).</summary>
     public Task StopAsync() => RunAsync("stop", Loc.Get("Svc_Stopped"));
 
+    /// <summary>Restart the running service (one elevated <c>restart</c> verb).</summary>
     public Task RestartAsync() => RunAsync("restart", Loc.Get("Svc_Restarted"));
 
     /// <summary>install (idempotent) + restart in one elevated step (the
@@ -138,11 +163,14 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
         return RunAsync(args, Loc.Get("Svc_Registered"));
     }
 
+    /// <summary>Uninstall the service (one elevated <c>uninstall</c> verb),
+    /// adding <c>--purge-data</c> when <see cref="PurgeData"/> is set.</summary>
     public Task UninstallAsync() =>
         RunAsync(PurgeData ? "uninstall --purge-data" : "uninstall", Loc.Get("Svc_Uninstalled"));
 
     /// <summary>Plain (unelevated) relaunch so the fresh instance connects to
     /// the now-running service over the pipe.</summary>
+    [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "x:Bind event/command target must remain an instance method")]
     public void RestartApp() => ShellOps.Relaunch();
 
     private async Task RunAsync(string args, string okText)

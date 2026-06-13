@@ -14,7 +14,7 @@ use crate::wtf8;
 
 /// True when every entry matching `next` (under `next_opt`) is guaranteed to
 /// be present in `prev`'s materialized ids, in the right order.
-pub(crate) fn subsumes(
+pub fn subsumes(
     prev: &CompiledQuery,
     prev_opt: &QueryOptions,
     next: &CompiledQuery,
@@ -69,11 +69,11 @@ pub(crate) fn subsumes(
 /// per code point, so a name matching `n` at offset i guarantees the lower
 /// pool holds `fold(n)` at i. The reverse (folded match → original bytes)
 /// does not hold.
-fn bridge_needle<'a>(
-    n_bytes: &'a [u8],
+fn bridge_needle(
+    n_bytes: &[u8],
     n_folded: bool,
     p_folded: bool,
-) -> Option<std::borrow::Cow<'a, [u8]>> {
+) -> Option<std::borrow::Cow<'_, [u8]>> {
     match (n_folded, p_folded) {
         (true, true) | (false, false) => Some(std::borrow::Cow::Borrowed(n_bytes)),
         (false, true) => std::str::from_utf8(n_bytes)
@@ -85,7 +85,7 @@ fn bridge_needle<'a>(
 
 /// Does a positive match of `n` guarantee a positive match of `p`?
 fn implies(n: &Matcher, p: &Matcher) -> bool {
-    use Matcher::*;
+    use Matcher::{Ext, IsDir, Mtime, NamePrefix, NameSub, NameSuffix, Size, True};
     match (n, p) {
         // Anything implies the always-true matcher.
         (_, True) => true,
@@ -104,14 +104,7 @@ fn implies(n: &Matcher, p: &Matcher) -> bool {
             .is_some_and(|n| memchr::memmem::find(&n, pf.needle()).is_some()),
         // A prefix/suffix match still means "the name contains these bytes".
         (
-            NamePrefix { bytes, folded: nfo },
-            NameSub {
-                finder: pf,
-                folded: pfo,
-            },
-        )
-        | (
-            NameSuffix { bytes, folded: nfo },
+            NamePrefix { bytes, folded: nfo } | NameSuffix { bytes, folded: nfo },
             NameSub {
                 finder: pf,
                 folded: pfo,
@@ -172,7 +165,10 @@ fn implies(n: &Matcher, p: &Matcher) -> bool {
 
 /// Structural equality of two compiled matchers.
 fn matcher_eq(a: &Matcher, b: &Matcher) -> bool {
-    use Matcher::*;
+    use Matcher::{
+        Ext, IsDir, Mtime, NamePrefix, NameRegex, NameSub, NameSuffix, PathRegex, PathSub, Size,
+        True,
+    };
     match (a, b) {
         (True, True) => true,
         (
@@ -181,6 +177,16 @@ fn matcher_eq(a: &Matcher, b: &Matcher) -> bool {
                 folded: ca,
             },
             NameSub {
+                finder: fb,
+                folded: cb,
+            },
+        )
+        | (
+            PathSub {
+                finder: fa,
+                folded: ca,
+            },
+            PathSub {
                 finder: fb,
                 folded: cb,
             },
@@ -205,16 +211,6 @@ fn matcher_eq(a: &Matcher, b: &Matcher) -> bool {
                 folded: cb,
             },
         ) => ca == cb && ba == bb,
-        (
-            PathSub {
-                finder: fa,
-                folded: ca,
-            },
-            PathSub {
-                finder: fb,
-                folded: cb,
-            },
-        ) => ca == cb && fa.needle() == fb.needle(),
         (NameRegex { re: ra }, NameRegex { re: rb })
         | (PathRegex { re: ra }, PathRegex { re: rb }) => ra.as_str() == rb.as_str(),
         (Ext { exts: ea }, Ext { exts: eb }) => ea == eb,

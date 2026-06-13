@@ -24,6 +24,18 @@ impl Engine {
     /// unchanged, the candidate set is the previous hits instead of the
     /// whole index (`query::refine`) — typing one more letter costs
     /// O(previous hits), not O(index).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::Parse`] if `text` is not a valid query, or
+    /// [`EngineError::Compile`] if a valid query fails to compile (e.g. a bad
+    /// regex term).
+    ///
+    /// # Panics
+    ///
+    /// Panics if a `Ready` volume's index is absent during the k-way merge —
+    /// an invariant the volume thread upholds (a Ready slot always holds an
+    /// index).
     pub fn query(
         &self,
         text: &str,

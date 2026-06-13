@@ -141,7 +141,7 @@ mod tests {
     use super::*;
     use crate::index::testutil::TestDir;
 
-    /// Pins plan_chunks arithmetic: record alignment, sparse-hole
+    /// Pins `plan_chunks` arithmetic: record alignment, sparse-hole
     /// skipping, full logical coverage in order.
     #[test]
     fn plan_chunks_is_record_aligned_and_ordered() {

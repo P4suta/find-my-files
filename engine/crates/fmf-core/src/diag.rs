@@ -1,7 +1,9 @@
-//! Process-wide diagnostics: every WARN+ tracing event and every panic ends
-//! up in (a) the rolling log file, (b) a global ring buffer surfaced through
-//! MetricsSnapshot → the F12 panel and `fmf stats`, and (c) any registered
-//! sinks (the FFI forwards them as ENGINE_ERROR events to the UI).
+//! Process-wide diagnostics: capture every WARN+ tracing event and panic.
+//!
+//! Each one ends up in (a) the rolling log file, (b) a global ring buffer
+//! surfaced through `MetricsSnapshot` → the F12 panel and `fmf stats`, and
+//! (c) any registered sinks (the FFI forwards them as `ENGINE_ERROR` events
+//! to the UI).
 //! 「落ちない・固まらない・黙らない」の「黙らない」を担う層。
 
 use std::collections::VecDeque;
@@ -22,11 +24,12 @@ pub enum Severity {
 
 impl Severity {
     /// Numeric form carried in the POD FFI event payload.
-    pub fn as_u64(self) -> u64 {
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
         match self {
-            Severity::Warn => 1,
-            Severity::Error => 2,
-            Severity::Panic => 3,
+            Self::Warn => 1,
+            Self::Error => 2,
+            Self::Panic => 3,
         }
     }
 }
@@ -166,13 +169,13 @@ pub fn install_panic_hook() {
             let payload = info
                 .payload()
                 .downcast_ref::<&str>()
-                .map(|s| s.to_string())
+                .map(ToString::to_string)
                 .or_else(|| info.payload().downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "<non-string panic payload>".to_string());
-            let location = info
-                .location()
-                .map(|l| format!("{}:{}", l.file(), l.line()))
-                .unwrap_or_else(|| "<unknown>".to_string());
+            let location = info.location().map_or_else(
+                || "<unknown>".to_string(),
+                |l| format!("{}:{}", l.file(), l.line()),
+            );
             let backtrace = std::backtrace::Backtrace::force_capture();
             tracing::error!(
                 target: "panic",
@@ -183,11 +186,13 @@ pub fn install_panic_hook() {
     });
 }
 
-/// Resolves the engine log directory: an explicit override (config key,
-/// CLI flag) wins; the machine-wide default is `%ProgramData%\find-my-files\logs`.
-/// The one implementation of this rule — every entry point (FFI, service,
-/// CLI) resolves through here (ADR-0018; the rule's prose lives in
-/// docs/ARCHITECTURE.md).
+/// Resolves the engine log directory.
+///
+/// An explicit override (config key, CLI flag) wins; the machine-wide default
+/// is `%ProgramData%\find-my-files\logs`. The one implementation of this rule
+/// — every entry point (FFI, service, CLI) resolves through here (ADR-0018;
+/// the rule's prose lives in docs/ARCHITECTURE.md).
+#[must_use]
 pub fn resolve_log_dir(explicit: Option<std::path::PathBuf>) -> std::path::PathBuf {
     explicit.unwrap_or_else(|| {
         let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
@@ -205,10 +210,12 @@ pub fn init_diag(log_dir: Option<&std::path::Path>, level: &str) {
     install_panic_hook();
 }
 
-/// Full error cause chain as one line — the single implementation behind
-/// the FFI `fmf_last_error` detail and the pipe error-response payload.
-/// Capped at 4 KiB (a pathological chain of nested I/O errors must not
-/// balloon a frame); the cap is part of the contract's error-detail spec.
+/// Full error cause chain as one line.
+///
+/// The single implementation behind the FFI `fmf_last_error` detail and the
+/// pipe error-response payload. Capped at 4 KiB (a pathological chain of
+/// nested I/O errors must not balloon a frame); the cap is part of the
+/// contract's error-detail spec.
 pub fn error_chain(e: &dyn std::error::Error) -> String {
     const CAP: usize = 4096;
     let mut s = e.to_string();
@@ -244,9 +251,11 @@ macro_rules! degrade {
 
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
-/// Initialize process-wide logging once. `log_dir = Some(..)` writes a daily
-/// rolling `engine.log`; `None` writes to stderr (CLI). The `FMF_LOG` env
-/// var overrides `level`. Safe to call repeatedly — later calls no-op.
+/// Initialize process-wide logging once.
+///
+/// `log_dir = Some(..)` writes a daily rolling `engine.log`; `None` writes to
+/// stderr (CLI). The `FMF_LOG` env var overrides `level`. Safe to call
+/// repeatedly — later calls no-op.
 pub fn init_logging(log_dir: Option<&std::path::Path>, level: &str) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;

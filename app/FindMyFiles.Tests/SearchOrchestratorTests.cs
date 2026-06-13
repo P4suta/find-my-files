@@ -80,7 +80,7 @@ public sealed class SearchOrchestratorTests
         _request = new SearchRequest(string.Empty, SearchOptions.Default);
         var resetsBeforeClear = resets;
         _orchestrator.NotifyTextChanged(string.Empty);
-        Assert.Equal(0, _presenter.ResultsSource.Count);
+        Assert.Empty(_presenter.ResultsSource);
         Assert.Equal(string.Empty, _presenter.CountText);
         Assert.Equal(resetsBeforeClear + 1, resets); // exactly one clearing Reset
         Assert.Single(_engine.Searches); // still only the "a" search
@@ -197,7 +197,7 @@ public sealed class SearchOrchestratorTests
         _request = new SearchRequest(string.Empty, SearchOptions.Default);
         _orchestrator.NotifyTextChanged(string.Empty);
 
-        Assert.Equal(0, _presenter.ResultsSource.Count); // …cleared instantly
+        Assert.Empty(_presenter.ResultsSource); // …cleared instantly
         Assert.False(Debounce.IsStarted); // the pending typing requery was cancelled
         Assert.Single(_engine.Searches); // and the empty query never hit the engine
 

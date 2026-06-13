@@ -5,6 +5,8 @@ namespace FindMyFiles.ViewModels;
 
 /// <summary>Snapshot of what to search — the ViewModel stays the single
 /// source of truth for the UI state; the orchestrator only pulls it.</summary>
+/// <param name="Query">Raw user query text (before any focused-mode rewrite).</param>
+/// <param name="Options">Sort, case and hidden/system flags for this search.</param>
 public readonly record struct SearchRequest(string Query, SearchOptions Options);
 
 /// <summary>
@@ -45,6 +47,15 @@ public sealed class SearchOrchestrator
     /// to the presenter as count text).</summary>
     public event Action<Exception>? SearchFailed;
 
+    /// <summary>Wires the orchestrator to its collaborators and subscribes the
+    /// auto-requery triggers (stale results, index changes).</summary>
+    /// <param name="engine">Engine the queries are issued against.</param>
+    /// <param name="engineEvents">UI-thread-marshaled engine events; its
+    /// <c>IndexChanged</c> drives an automatic requery.</param>
+    /// <param name="dispatcher">UI dispatcher — used to create the debounce timer.</param>
+    /// <param name="presenter">Sink that publishes results and stale signals.</param>
+    /// <param name="request">Pull of the current UI state at query time (the
+    /// ViewModel stays the source of truth).</param>
     public SearchOrchestrator(
         IEngineClient engine,
         EngineEventMarshaler engineEvents,
@@ -66,6 +77,9 @@ public sealed class SearchOrchestrator
 
     private bool _composing;
 
+    /// <summary>Search box text changed: debounce a normal edit (50ms),
+    /// requery immediately on a clear (so emptying feels instant), and ignore
+    /// edits while an IME composition is in flight.</summary>
     public void NotifyTextChanged(string value)
     {
         if (_composing)
@@ -99,6 +113,10 @@ public sealed class SearchOrchestrator
         NotifyTextChanged(value);
     }
 
+    /// <summary>Fire-and-forget a query for the current UI state, bumping the
+    /// generation so any in-flight older response is discarded.
+    /// <paramref name="origin"/> records why (and lets the presenter decide
+    /// whether to preserve scroll/selection).</summary>
     public void Requery(RequeryOrigin origin) =>
         RunQueryAsync(origin).Forget($"query.{origin}");
 

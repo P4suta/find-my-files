@@ -15,12 +15,17 @@ public sealed partial class PerfPanelViewModel : ObservableObject
     private readonly IEngineClient _engine;
     private readonly List<ulong> _recentTotalsUs = [];
 
+    /// <summary>Whether the F12 panel is showing (toggled by <see cref="Toggle"/>).</summary>
     [ObservableProperty]
     public partial bool IsOpen { get; set; }
 
+    /// <summary>Stage breakdown of the most recent query, or null when the
+    /// engine emitted no trace (e.g. an empty query). Fed by <see cref="RecordTrace"/>.</summary>
     [ObservableProperty]
     public partial QueryTraceData? LastTrace { get; set; }
 
+    /// <summary>Last engine stats snapshot (counters, RAM, recent errors), or
+    /// null before the first <see cref="RefreshStatsAsync"/>.</summary>
     [ObservableProperty]
     public partial EngineStatsData? Stats { get; set; }
 
@@ -35,13 +40,19 @@ public sealed partial class PerfPanelViewModel : ObservableObject
     /// <summary>Raised on the UI thread whenever trace/stats data moved.</summary>
     public event Action? PerfDataChanged;
 
+    /// <summary>Binds the panel to <paramref name="engine"/> — the source of
+    /// both the stats snapshot and the transport label.</summary>
     public PerfPanelViewModel(IEngineClient engine)
     {
         _engine = engine;
     }
 
+    /// <summary>Flip the panel's visibility (the F12 shortcut / debug menu).</summary>
     public void Toggle() => IsOpen = !IsOpen;
 
+    /// <summary>Pull a fresh <see cref="Stats"/> snapshot from the engine and
+    /// raise <see cref="PerfDataChanged"/>. Awaitable so a pipe round-trip
+    /// doesn't block the caller.</summary>
     public async Task RefreshStatsAsync()
     {
         Stats = await _engine.GetStatsAsync();

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Windows.ApplicationModel.DataTransfer;
 
@@ -9,7 +10,7 @@ namespace FindMyFiles.Services;
 /// user instead of crashing. Targets launch via explorer.exe to shed the
 /// process's elevation (CLAUDE.md UI固定則).
 /// </summary>
-public static class ShellOps
+public static partial class ShellOps
 {
     /// <summary>Full path to explorer.exe (<c>%WINDIR%\explorer.exe</c>).
     /// Launching by bare name under <c>UseShellExecute=false</c> lets
@@ -18,27 +19,55 @@ public static class ShellOps
     private static readonly string ExplorerPath =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
 
-    public static void Open(string fullPath)
+    /// <summary>Open a file or folder with its default handler via
+    /// explorer.exe, shedding the app's elevation. Failures notify the user
+    /// (with a Win32-specific hint) rather than throwing.</summary>
+    /// <param name="fullPath">Absolute path to open; treated as data, never as
+    /// a command line (see <see cref="BuildOpenStartInfo"/>).</param>
+    public static void Open(string fullPath) =>
+        Run(Loc.Get("Shell_OpenFailed"), fullPath, () => Process.Start(BuildOpenStartInfo(fullPath)));
+
+    /// <summary>Builds the explorer.exe invocation for "open". Kept internal and
+    /// pure so the argument-safety contract is unit-testable without launching a
+    /// process: <paramref name="fullPath"/> is attacker-influenced (the engine
+    /// scans the raw MFT, which carries NTFS names the Win32 layer would reject —
+    /// including the double quote), so it must travel as a single
+    /// <see cref="ProcessStartInfo.ArgumentList"/> element, never concatenated
+    /// into the <see cref="ProcessStartInfo.Arguments"/> command line where a quote
+    /// could break out and inject explorer switches.</summary>
+    internal static ProcessStartInfo BuildOpenStartInfo(string fullPath)
     {
-        Run(Loc.Get("Shell_OpenFailed"), fullPath, () =>
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = ExplorerPath,
-                Arguments = $"\"{fullPath}\"",
-                UseShellExecute = false,
-            }));
+        var psi = new ProcessStartInfo { FileName = ExplorerPath, UseShellExecute = false };
+        psi.ArgumentList.Add(fullPath);
+        return psi;
     }
 
-    public static void Reveal(string fullPath)
-    {
+    /// <summary>Reveal a file in Explorer with it selected, via the shell API
+    /// (<c>SHParseDisplayName</c> + <c>SHOpenFolderAndSelectItems</c>) so a
+    /// quote in an MFT-sourced name cannot inject explorer switches. Failures
+    /// notify rather than throw.</summary>
+    /// <param name="fullPath">Absolute path to reveal and select.</param>
+    public static void Reveal(string fullPath) =>
         Run(Loc.Get("Shell_RevealFailed"), fullPath, () =>
-            Process.Start(new ProcessStartInfo
+        {
+            // Reveal-and-select through the shell API, not `explorer.exe /select,<path>`:
+            // explorer's switch parser needs a literal quoted path and honours no
+            // escaping, so ArgumentList cannot express it and a '"' in a name (the MFT
+            // scan surfaces raw NTFS names) could break out of the quotes and inject
+            // explorer switches. SHParseDisplayName takes the path as data, never a
+            // command line — injection is impossible by construction, and a missing
+            // path simply yields a failing HRESULT that Run() reports.
+            Marshal.ThrowExceptionForHR(
+                SHParseDisplayName(fullPath, IntPtr.Zero, out var pidl, 0, out _));
+            try
             {
-                FileName = ExplorerPath,
-                Arguments = $"/select,\"{fullPath}\"",
-                UseShellExecute = false,
-            }));
-    }
+                Marshal.ThrowExceptionForHR(SHOpenFolderAndSelectItems(pidl, 0, null, 0));
+            }
+            finally
+            {
+                Marshal.FreeCoTaskMem(pidl);
+            }
+        });
 
     /// <summary>Relaunch this app (unelevated — no runas) and exit, used right
     /// after an in-app service registration so the fresh instance picks up the
@@ -59,6 +88,12 @@ public static class ShellOps
         });
     }
 
+    /// <summary>Put <paramref name="text"/> on the clipboard. A failure is
+    /// logged and surfaced as a warning notification (clipboard access can be
+    /// transiently denied by other apps).</summary>
+    /// <param name="text">The content to copy.</param>
+    /// <param name="what">Short label for what is being copied, used in the
+    /// failure log/notification (e.g. "path", "diagnostics").</param>
     public static void CopyText(string text, string what)
     {
         try
@@ -100,4 +135,17 @@ public static class ShellOps
             1223 => Loc.Get("Shell_HintCancelled"),          // ERROR_CANCELLED
             _ => Loc.Get("Shell_HintMovedRecently"),
         };
+
+    // Reveal selects an item via the shell instead of an explorer.exe command line
+    // (see Reveal). Pinned to System32 — the same binary-planting defence the
+    // ExplorerPath constant applies to explorer.exe.
+    [LibraryImport("shell32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial int SHParseDisplayName(
+        string name, IntPtr bindingContext, out IntPtr pidl, uint sfgaoIn, out uint psfgaoOut);
+
+    [LibraryImport("shell32.dll")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial int SHOpenFolderAndSelectItems(
+        IntPtr pidlFolder, uint cidl, IntPtr[]? apidl, uint dwFlags);
 }

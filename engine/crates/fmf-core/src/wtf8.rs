@@ -34,7 +34,7 @@ fn push_code_point(cp: u32, out: &mut Vec<u8>) {
 }
 
 #[inline]
-fn utf8_len(cp: u32) -> usize {
+const fn utf8_len(cp: u32) -> usize {
     match cp {
         0..0x80 => 1,
         0x80..0x800 => 2,
@@ -93,6 +93,7 @@ pub fn fold_str(s: &str) -> String {
 
 /// True if folding would change `s` — i.e. the needle benefits from the
 /// case-insensitive pool at all.
+#[must_use]
 pub fn has_uppercase(s: &str) -> bool {
     s.chars().any(|c| fold_char(c) != c)
 }

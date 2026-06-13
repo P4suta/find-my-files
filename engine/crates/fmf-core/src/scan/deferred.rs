@@ -1,4 +1,4 @@
-//! Deferred $ATTRIBUTE_LIST name resolution (ADR-0011): name-bearing
+//! Deferred $`ATTRIBUTE_LIST` name resolution (ADR-0011): name-bearing
 //! extension records are cached in RAM while the $MFT streams through, so
 //! this pass resolves names without disk reads; anything missing (cache
 //! cap, torn records) falls back to a targeted read of the live volume.
@@ -60,7 +60,7 @@ struct LazyRecordReader<'a> {
 }
 
 impl<'a> LazyRecordReader<'a> {
-    fn new(volume_path: &'a str, map: &'a RunMap, record_size: usize) -> Self {
+    const fn new(volume_path: &'a str, map: &'a RunMap, record_size: usize) -> Self {
         LazyRecordReader {
             volume_path,
             map,
@@ -100,11 +100,11 @@ impl<'a> LazyRecordReader<'a> {
     }
 }
 
-/// Resolve the display name of a record whose $FILE_NAME lives in extension
-/// records (resident $ATTRIBUTE_LIST → referenced records). Targets come
+/// Resolve the display name of a record whose $`FILE_NAME` lives in extension
+/// records (resident $`ATTRIBUTE_LIST` → referenced records). Targets come
 /// from the streamed extension-record cache; anything missing (cache cap,
 /// torn records) falls back to a targeted disk read. Mirrors ntfs-reader's
-/// get_best_file_name without needing the whole MFT in RAM.
+/// `get_best_file_name` without needing the whole MFT in RAM.
 fn resolve_attr_list_name(
     base: &NtfsFile,
     ext: &FxHashMap<u64, u32>,
@@ -127,7 +127,13 @@ fn resolve_attr_list_name(
     let mut best: Option<NtfsFileName> = None;
     let mut off = 0usize;
     while off + size_of::<NtfsAttributeListEntry>() <= list.len() {
-        let entry = unsafe { &*(list.as_ptr().add(off) as *const NtfsAttributeListEntry) };
+        // `list` is a &[u8] and an entry sits at an arbitrary byte offset, so the
+        // address is not guaranteed aligned for NtfsAttributeListEntry — read it
+        // out unaligned instead of forming a misaligned reference (UB). The loop
+        // guard above keeps the read within `list`.
+        let entry = unsafe {
+            std::ptr::read_unaligned(list.as_ptr().add(off).cast::<NtfsAttributeListEntry>())
+        };
         let len = entry.length as usize;
         if len < size_of::<NtfsAttributeListEntry>() || off + len > list.len() {
             break;
@@ -159,10 +165,10 @@ fn resolve_attr_list_name(
     best
 }
 
-/// Resolve deferred $ATTRIBUTE_LIST names in parallel — almost entirely
+/// Resolve deferred $`ATTRIBUTE_LIST` names in parallel — almost entirely
 /// from RAM: every target is an extension record and the whole $MFT just
 /// streamed through the pipeline, so `ext` already holds the bytes
-/// (ADR-0011). Chunk order is preserved, so EntryId assignment matches a
+/// (ADR-0011). Chunk order is preserved, so `EntryId` assignment matches a
 /// serial loop.
 pub(super) fn resolve_deferred(
     volume_path: &str,

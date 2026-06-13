@@ -2,7 +2,7 @@
 //! dist/FindMyFiles.
 //!
 //! Publishes the app (not a bare `dotnet build` — only the publish output wires
-//! WinRT.Runtime.dll, the WinAppSDK native helpers and the compiled XAML into a
+//! WinRT.Runtime.dll, the `WinAppSDK` native helpers and the compiled XAML into a
 //! runnable bundle), prunes the locale dirs the app doesn't ship, copies the
 //! engine binaries, then SELF-VERIFIES the result. The self-check is what lets
 //! us drop ci.yml's separate "verify bundle is runnable" step: the producer of
@@ -18,7 +18,7 @@ use std::fs;
 /// Engine binaries copied in alongside the published app.
 const ENGINE_BINS: &[&str] = &["fmf-service.exe", "fmf.exe"];
 
-/// Files whose presence means the bundle can actually launch. fmf_engine.dll
+/// Files whose presence means the bundle can actually launch. `fmf_engine.dll`
 /// arrives via the csproj `<None Include>`; the two exes are copied below.
 const REQUIRED: &[&str] = &[
     "WinRT.Runtime.dll",
@@ -71,7 +71,7 @@ pub fn run(skip_rust: bool) -> Result<()> {
     Ok(())
 }
 
-/// Remove WinAppSDK locale dirs the app doesn't ship (lookups fall back to the
+/// Remove `WinAppSDK` locale dirs the app doesn't ship (lookups fall back to the
 /// neutral resources). Collect first, then delete — don't mutate the directory
 /// mid-enumeration.
 fn prune_locales(dist: &std::path::Path) -> Result<()> {
@@ -96,9 +96,9 @@ fn copy_engine_bins(root: &std::path::Path, dist: &std::path::Path) -> Result<()
     let release = root.join("engine").join("target").join("release");
     for bin in ENGINE_BINS {
         let src = release.join(bin);
-        let dst = dist.join(bin);
-        fs::copy(&src, &dst)
-            .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+        let target = dist.join(bin);
+        fs::copy(&src, &target)
+            .with_context(|| format!("copy {} -> {}", src.display(), target.display()))?;
     }
     Ok(())
 }

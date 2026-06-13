@@ -86,7 +86,7 @@ impl Drop for TempSnapshotGuard {
 
 /// Save the freshly built index to a temp snapshot and measure restores.
 /// Page-cache-warm by design: reproducible CPU-bound numbers for the
-/// restore→ready gate's deserialization + frn_map rebuild share.
+/// restore→ready gate's deserialization + `frn_map` rebuild share.
 pub fn bench_restore(idx: &VolumeIndex) -> Result<RestoreBench, Box<dyn std::error::Error>> {
     const RUNS: usize = 10;
     let temp = std::env::temp_dir().join(format!("fmf-bench-{}.fmfidx", std::process::id()));

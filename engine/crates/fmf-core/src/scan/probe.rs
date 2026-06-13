@@ -16,11 +16,11 @@ use super::volume_io::mft_layout;
 pub enum IoProbeMode {
     /// The production strategy: buffered synchronous reads.
     Buffered,
-    /// Buffered + FILE_FLAG_SEQUENTIAL_SCAN cache hint.
+    /// Buffered + `FILE_FLAG_SEQUENTIAL_SCAN` cache hint.
     Seq,
-    /// FILE_FLAG_NO_BUFFERING, synchronous (no cache-manager copy).
+    /// `FILE_FLAG_NO_BUFFERING`, synchronous (no cache-manager copy).
     NoBuf,
-    /// FILE_FLAG_NO_BUFFERING + FILE_FLAG_OVERLAPPED with `queue_depth`
+    /// `FILE_FLAG_NO_BUFFERING` + `FILE_FLAG_OVERLAPPED` with `queue_depth`
     /// reads outstanding — tests whether *sequential* multiplexing helps
     /// (parallel random reads are known to serialize in the kernel).
     NoBufOverlapped,
@@ -35,11 +35,11 @@ pub struct ProbeStats {
 const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 const FILE_FLAG_NO_BUFFERING: u32 = 0x2000_0000;
 const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
-/// NO_BUFFERING alignment unit: one page satisfies any 512/4096-sector
+/// `NO_BUFFERING` alignment unit: one page satisfies any 512/4096-sector
 /// device for offset, length and buffer-address requirements.
 const NOBUF_ALIGN: usize = 4096;
 
-/// Page-aligned read buffer (NO_BUFFERING requires aligned addresses).
+/// Page-aligned read buffer (`NO_BUFFERING` requires aligned addresses).
 struct AlignedBuf {
     ptr: std::ptr::NonNull<u8>,
     layout: std::alloc::Layout,
@@ -51,10 +51,10 @@ impl AlignedBuf {
         // Safety: layout has non-zero size; abort on allocation failure.
         let ptr = std::ptr::NonNull::new(unsafe { std::alloc::alloc(layout) })
             .unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
-        AlignedBuf { ptr, layout }
+        Self { ptr, layout }
     }
 
-    fn as_mut_slice(&mut self) -> &mut [u8] {
+    const fn as_mut_slice(&mut self) -> &mut [u8] {
         // Safety: owned allocation of layout.size() bytes.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.layout.size()) }
     }
@@ -79,8 +79,8 @@ fn open_with_flags(volume_path: &str, flags: u32) -> std::io::Result<std::fs::Fi
         .open(volume_path)
 }
 
-/// Aligned (offset, length) pair covering a chunk under NO_BUFFERING.
-fn aligned_span(c: &Chunk) -> (u64, usize) {
+/// Aligned (offset, length) pair covering a chunk under `NO_BUFFERING`.
+const fn aligned_span(c: &Chunk) -> (u64, usize) {
     let start = c.phys & !(NOBUF_ALIGN as u64 - 1);
     let end = (c.phys + c.want as u64).next_multiple_of(NOBUF_ALIGN as u64);
     (start, (end - start) as usize)
@@ -164,7 +164,7 @@ fn probe_nobuf_overlapped(
                 slot.buf.as_mut_slice().as_mut_ptr(),
                 want as u32,
                 std::ptr::null_mut(),
-                &mut *slot.ov,
+                &raw mut *slot.ov,
             )
         };
         if ok == 0 && unsafe { GetLastError() } != ERROR_IO_PENDING {
@@ -175,7 +175,8 @@ fn probe_nobuf_overlapped(
     let wait = |slot: &mut OvSlot| -> std::io::Result<u64> {
         let mut transferred = 0u32;
         // Safety: the OVERLAPPED belongs to an issued read on this handle.
-        let ok = unsafe { GetOverlappedResult(handle, &*slot.ov, &mut transferred, 1) };
+        let ok =
+            unsafe { GetOverlappedResult(handle, &raw const *slot.ov, &raw mut transferred, 1) };
         if ok == 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -207,6 +208,12 @@ fn probe_nobuf_overlapped(
 
 /// Measure one $MFT read pass under `mode`. Elevation required (the same
 /// volume-handle rule as the scan).
+///
+/// # Errors
+///
+/// Returns [`MftError::NotElevated`] when the process lacks the privileges to
+/// open the raw volume, or [`MftError::Ntfs`] if reading the $MFT layout or
+/// the measured read pass fails.
 pub fn io_probe(
     drive: &str,
     mode: IoProbeMode,

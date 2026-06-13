@@ -16,7 +16,7 @@ pub(super) struct EvalCtx {
 
 impl EvalCtx {
     #[inline]
-    fn reset(&mut self) {
+    const fn reset(&mut self) {
         self.lower_built = false;
         self.orig_built = false;
     }

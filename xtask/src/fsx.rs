@@ -2,7 +2,7 @@
 //!
 //! `std::fs::remove_dir_all` fails on Windows the moment it hits a read-only
 //! file (the OS refuses to delete one), and published bundles are full of them
-//! (ReadyToRun DLLs, PreserveNewest copies). This clears the read-only
+//! (`ReadyToRun` DLLs, `PreserveNewest` copies). This clears the read-only
 //! attribute and retries — matching `Remove-Item -Recurse -Force`.
 
 use std::fs;

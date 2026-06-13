@@ -64,7 +64,7 @@ impl VolumeIndex {
     }
 
     /// Rename/move a *directory* in place. Directories must keep their
-    /// EntryId stable — children's `parent` fields point at it — so instead
+    /// `EntryId` stable — children's `parent` fields point at it — so instead
     /// of tombstone+new (the file path), the name is swapped and the entry is
     /// repositioned inside `perm_name`. O(len) per rename; directory renames
     /// are rare enough that this beats invalidating every child.
@@ -103,7 +103,7 @@ impl VolumeIndex {
         Some(id)
     }
 
-    /// Update size/mtime in place (USN_REASON_DATA_* without a name change).
+    /// Update size/mtime in place (`USN_REASON_DATA`_* without a name change).
     pub fn update_stat(&mut self, record: u64, size: u64, mtime: i64) -> Option<EntryId> {
         let id = self.entry_by_record(record)?;
         self.set_size(id, size);
@@ -119,7 +119,7 @@ impl VolumeIndex {
     pub fn merge_new_into_permutations(&mut self, first_new: EntryId) {
         // The FRN index rides the same batch boundary (its own watermark).
         {
-            let VolumeIndex {
+            let Self {
                 frn_index,
                 frn,
                 flag,
@@ -132,7 +132,7 @@ impl VolumeIndex {
             // Split the borrow: the `&mut` permutation alongside the shared
             // key columns, comparing through the same SortColumns order
             // that built it.
-            let VolumeIndex { perm_name, .. } = self;
+            let Self { perm_name, .. } = self;
             let cols = SortColumns::new(
                 &self.lower_pool,
                 &self.name_off,
@@ -283,7 +283,7 @@ impl VolumeIndex {
         }
     }
 
-    /// Update raw attribute bits (USN BASIC_INFO_CHANGE) and the derived
+    /// Update raw attribute bits (USN `BASIC_INFO_CHANGE`) and the derived
     /// EXCLUDED bit.
     pub fn update_attrs(
         &mut self,
@@ -376,7 +376,7 @@ mod tests {
         assert!(idx.is_excluded(id));
     }
 
-    /// perm_name must stay a sorted permutation of every entry id.
+    /// `perm_name` must stay a sorted permutation of every entry id.
     fn assert_perm_name_sorted(idx: &VolumeIndex) {
         let perm = idx.name_permutation();
         assert_eq!(perm.len(), idx.len(), "perm_name must cover every entry");
@@ -535,7 +535,7 @@ mod tests {
     }
 
     /// Random create/rename/delete/stat batches through the in-place merge:
-    /// every permutation stays a complete permutation, perm_name stays
+    /// every permutation stays a complete permutation, `perm_name` stays
     /// strictly sorted (names are never mutated in place), and every record
     /// resolves per a side model — both mid-batch (tail scan) and after the
     /// merge (sorted lookup).
@@ -561,7 +561,7 @@ mod tests {
 
         for _ in 0..100 {
             let first_new = idx.len() as u32;
-            for _ in 0..(1 + rng.next() % 8) {
+            for _ in 0..=(rng.next() % 8) {
                 let record = 100 + rng.next() % 30;
                 match rng.next() % 4 {
                     0 | 1 => {
@@ -612,7 +612,7 @@ mod tests {
         }
     }
 
-    /// name() must return the exact WTF-8 input bytes through every write
+    /// `name()` must return the exact WTF-8 input bytes through every write
     /// path and a snapshot roundtrip — the fold-overflow layout (originals
     /// stored only where they differ) must be invisible to readers.
     #[test]
@@ -706,7 +706,7 @@ mod tests {
         assert_eq!(idx.size(id), u64::MAX);
     }
 
-    /// dead_name_bytes follows every pool-garbage source — the folded copy
+    /// `dead_name_bytes` follows every pool-garbage source — the folded copy
     /// always, the original copy when one existed ("Note.TXT" does, the
     /// all-lowercase names don't); snapshot restore recomputes the
     /// tombstone share (rename gaps are a lost lower bound).

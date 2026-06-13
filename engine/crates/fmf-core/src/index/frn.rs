@@ -1,4 +1,4 @@
-//! Record-number → EntryId lookup as a sorted permutation (ADR-0005): one
+//! Record-number → `EntryId` lookup as a sorted permutation (ADR-0005): one
 //! id array maintained merge-only, exactly like the sort permutations.
 //! Appends collect in an unmerged tail that lookups scan linearly, and the
 //! end-of-batch merge folds them in sorted order. The keys are the `frn`
@@ -17,7 +17,7 @@ use super::{EntryId, flags, masked};
 
 #[derive(Default)]
 pub(super) struct FrnIndex {
-    /// EntryIds ordered by (masked record number, id). Appended entries
+    /// `EntryIds` ordered by (masked record number, id). Appended entries
     /// always carry the largest ids, so equal keys read old-before-new.
     ids: Vec<EntryId>,
     /// Entries `[0, covers)` are represented; later ids are found by the
@@ -39,7 +39,7 @@ impl FrnIndex {
             .map(|id| (masked(frn[id as usize]), id))
             .collect();
         pairs.par_sort_unstable();
-        FrnIndex {
+        Self {
             ids: pairs.iter().map(|p| p.1).collect(),
             covers: frn.len() as u32,
         }
@@ -108,13 +108,13 @@ impl FrnIndex {
     /// Keys (masked record numbers) are copied unchanged by the caller and
     /// the remap preserves relative id order, so the (key, id) order — and
     /// with it lookup's binary search — survives without a re-sort.
-    pub(super) fn compact(&self, remap: &[EntryId], new_len: u32) -> FrnIndex {
+    pub(super) fn compact(&self, remap: &[EntryId], new_len: u32) -> Self {
         debug_assert_eq!(
             self.covers as usize,
             remap.len(),
             "compact at a batch boundary only (unmerged tail would be lost)"
         );
-        FrnIndex {
+        Self {
             ids: self
                 .ids
                 .iter()
@@ -127,7 +127,7 @@ impl FrnIndex {
         }
     }
 
-    pub(super) fn bytes(&self) -> u64 {
+    pub(super) const fn bytes(&self) -> u64 {
         (self.ids.capacity() * 4) as u64
     }
 
@@ -195,7 +195,7 @@ mod tests {
 
         for _ in 0..100 {
             let first_new = idx.len() as u32;
-            for _ in 0..(1 + rng() % 8) {
+            for _ in 0..=(rng() % 8) {
                 let record = 100 + rng() % 40;
                 if rng() % 3 < 2 {
                     let name = u16s(&format!("f{}.txt", rng() % 1000));

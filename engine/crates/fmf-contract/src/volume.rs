@@ -4,6 +4,7 @@
 
 /// Zero-padded UTF-8, capped at 15 bytes (the last byte stays NUL so the C
 /// side can treat the field as NUL-terminated).
+#[must_use]
 pub fn encode_label(label: &str) -> [u8; 16] {
     let mut out = [0u8; 16];
     let bytes = label.as_bytes();
@@ -14,6 +15,7 @@ pub fn encode_label(label: &str) -> [u8; 16] {
 
 /// Reads up to the first NUL; non-UTF-8 content decodes as "" (defensive —
 /// well-formed peers never produce it).
+#[must_use]
 pub fn decode_label(bytes: &[u8; 16]) -> &str {
     let len = bytes.iter().position(|&b| b == 0).unwrap_or(16);
     core::str::from_utf8(&bytes[..len]).unwrap_or("")

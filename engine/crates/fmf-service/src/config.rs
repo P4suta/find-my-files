@@ -28,6 +28,7 @@ impl Default for ServiceConfig {
     }
 }
 
+#[must_use]
 pub fn default_data_dir() -> PathBuf {
     let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
     Path::new(&base).join("find-my-files")
@@ -53,6 +54,13 @@ impl ServiceConfig {
         }
     }
 
+    /// # Errors
+    /// Propagates the I/O error from creating the parent directory or writing
+    /// the file.
+    ///
+    /// # Panics
+    /// Panics if serializing the config to JSON fails — unreachable for this
+    /// plain `#[derive(Serialize)]` struct.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;

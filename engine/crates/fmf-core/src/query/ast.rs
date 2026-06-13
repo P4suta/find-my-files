@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use super::dates::Civil;
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
     #[error("unclosed quote")]
     UnclosedQuote,
@@ -42,7 +42,7 @@ pub enum Term {
     },
     /// `folder:` / `file:`.
     IsDir(bool),
-    Not(Box<Term>),
+    Not(Box<Self>),
 }
 
 /// OR of AND groups: `a b | c` → `[[a, b], [c]]`.
@@ -51,6 +51,17 @@ pub struct Ast {
     pub groups: Vec<Vec<Term>>,
 }
 
+/// Tokenize and parse query text into an [`Ast`].
+///
+/// # Errors
+///
+/// Returns a [`ParseError`] for malformed input: an unclosed quote, or an
+/// invalid `size:`/date filter, or a term that cannot be negated.
+///
+/// # Panics
+///
+/// Does not panic: `groups` is seeded with one group and only grows, so the
+/// `last_mut` access always succeeds.
 pub fn parse(input: &str) -> Result<Ast, ParseError> {
     let mut groups: Vec<Vec<Term>> = vec![Vec::new()];
     let mut rest = input;
@@ -273,7 +284,7 @@ fn parse_date_range(v: &str) -> Option<(Option<Civil>, Option<Civil>)> {
     Some((Some(s), Some(e)))
 }
 
-/// One date period → [start, end_exclusive).
+/// One date period → [start, `end_exclusive`).
 fn parse_date_period(v: &str) -> Option<(Civil, Civil)> {
     let parts: Vec<&str> = v.trim().split(['-', '/']).collect();
     let nums: Vec<u32> = parts
@@ -282,33 +293,35 @@ fn parse_date_period(v: &str) -> Option<(Civil, Civil)> {
         .collect::<Option<_>>()?;
     match nums.as_slice() {
         [y] => {
-            let s = Civil {
+            let start = Civil {
                 y: *y as i32,
                 m: 1,
                 d: 1,
             };
-            let e = Civil {
+            let end = Civil {
                 y: *y as i32 + 1,
                 m: 1,
                 d: 1,
             };
-            (s.is_valid() && e.is_valid()).then_some((s, e))
+            (start.is_valid() && end.is_valid()).then_some((start, end))
         }
         [y, m] => {
-            let s = Civil {
+            let start = Civil {
                 y: *y as i32,
                 m: *m,
                 d: 1,
             };
-            s.is_valid().then_some((s, s.first_of_next_month()))
+            start
+                .is_valid()
+                .then_some((start, start.first_of_next_month()))
         }
         [y, m, d] => {
-            let s = Civil {
+            let start = Civil {
                 y: *y as i32,
                 m: *m,
                 d: *d,
             };
-            s.is_valid().then_some((s, s.next_day()))
+            start.is_valid().then_some((start, start.next_day()))
         }
         _ => None,
     }

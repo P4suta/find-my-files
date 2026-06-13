@@ -1,7 +1,8 @@
 //! Opcode → Engine mapping (docs/ARCHITECTURE.md「Pipe プロトコル」
-//! §オペコード表 — the canonical table; this is its server half). Every
-//! request runs inside a catch_unwind firewall: a panic answers FMF_E_PANIC
-//! and the connection survives, mirroring the FFI `guard`.
+//! §オペコード表 — the canonical table; this is its server half).
+//!
+//! Every request runs inside a `catch_unwind` firewall: a panic answers
+//! `FMF_E_PANIC` and the connection survives, mirroring the FFI `guard`.
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -32,14 +33,14 @@ pub struct Connection {
     next_result_id: AtomicU64,
     use_clock: AtomicU64,
     pub hello_done: AtomicBool,
-    /// Live-connection count shared with the accept loop (ServiceInfo
+    /// Live-connection count shared with the accept loop (`ServiceInfo`
     /// reports it; the server owns increment/decrement).
     active_connections: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// What the worker should do after answering (or instead of answering).
 pub enum Outcome {
-    /// Send (status, payload) back with FLAG_RESPONSE.
+    /// Send (status, payload) back with `FLAG_RESPONSE`.
     Reply(i32, Vec<u8>),
     /// Subscribe/Unsubscribe handled by the caller (owns the queue), then
     /// reply OK with an empty payload.
@@ -125,7 +126,7 @@ impl Connection {
                         entries: 0,
                     })
                     .collect();
-                self.reply_json("ListVolumes", &vols)
+                Self::reply_json("ListVolumes", &vols)
             }
             opcode::INDEX_START => {
                 match messages::decode_json::<messages::IndexStartReq>("IndexStart", payload) {
@@ -154,7 +155,7 @@ impl Connection {
                         entries,
                     })
                     .collect();
-                self.reply_json("IndexStatus", &status)
+                Self::reply_json("IndexStatus", &status)
             }
             opcode::QUERY => self.query(payload),
             opcode::RESULT_PAGE => self.result_page(payload),
@@ -165,12 +166,12 @@ impl Connection {
                 }
                 Err(_) => Outcome::Drop,
             },
-            opcode::STATS => self.reply_json("Stats", &self.engine.metrics_snapshot()),
+            opcode::STATS => Self::reply_json("Stats", &self.engine.metrics_snapshot()),
             opcode::FLUSH_RESERVED => Outcome::Reply(
                 codes::INVALID_ARG,
                 b"Flush is reserved and unimplemented on the pipe (ARCHITECTURE.md op 11)".to_vec(),
             ),
-            opcode::SERVICE_INFO => self.reply_json(
+            opcode::SERVICE_INFO => Self::reply_json(
                 "ServiceInfo",
                 &messages::ServiceInfoResp {
                     uptime_ms: self.faults.uptime_ms(),
@@ -182,7 +183,7 @@ impl Connection {
         }
     }
 
-    fn reply_json<T: serde::Serialize>(&self, what: &'static str, v: &T) -> Outcome {
+    fn reply_json<T: serde::Serialize>(what: &'static str, v: &T) -> Outcome {
         match messages::encode_json(what, v) {
             Ok(bytes) => Outcome::Reply(codes::OK, bytes),
             Err(e) => Outcome::Reply(codes::IO, e.to_string().into_bytes()),

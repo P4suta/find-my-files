@@ -63,8 +63,8 @@ struct NameStats {
     unique_folded_ratio: f64,
     /// WTF-8 byte lengths (identical for both pools by the fold rule).
     name_len: NameLenStats,
-    /// Sizes that cannot live in a u32 column (≥ u32::MAX, sentinel
-    /// included) — go/no-go input for the size_lo+overflow layout.
+    /// Sizes that cannot live in a u32 column (≥ `u32::MAX`, sentinel
+    /// included) — go/no-go input for the `size_lo+overflow` layout.
     size_ge_4gib: u64,
     size_ge_4gib_ratio: f64,
     /// Projected B/entry savings of dropping the original-name pool for
@@ -95,7 +95,7 @@ fn compute_name_stats(idx: &VolumeIndex) -> NameStats {
         lens.push(name.len() as u16);
         uniq.insert(name);
         uniq_folded.insert(idx.lower_name(id));
-        if idx.size(id) >= u32::MAX as u64 {
+        if idx.size(id) >= u64::from(u32::MAX) {
             size_ge_4gib += 1;
         }
     }
@@ -128,7 +128,7 @@ fn compute_name_stats(idx: &VolumeIndex) -> NameStats {
         // scheme (ii): orig_off u32 column for every entry.
         predicted_savings_full_column: f * mean - 4.0,
         // scheme (i): sorted (id, off) pairs for differing entries only.
-        predicted_savings_sorted_pairs: f * mean - 8.0 * (1.0 - f),
+        predicted_savings_sorted_pairs: 8.0f64.mul_add(-(1.0 - f), f * mean),
     }
 }
 

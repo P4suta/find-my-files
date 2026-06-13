@@ -12,17 +12,16 @@ pub(crate) fn set_error(msg: impl Into<String>) {
     LAST_ERROR.with(|e| *e.borrow_mut() = msg.into());
 }
 
-/// Full cause chain — fmf-core::diag owns the single implementation
+/// Full cause chain — `fmf-core::diag` owns the single implementation
 /// (4 KiB cap included; shared with the pipe error responses — ADR-0018).
 pub(crate) use fmf_core::diag::error_chain;
 
 pub(crate) fn guard<F: FnOnce() -> i32>(f: F) -> i32 {
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(code) => code,
-        Err(_) => {
-            set_error("panic inside fmf_engine");
-            FMF_E_PANIC
-        }
+    if let Ok(code) = catch_unwind(AssertUnwindSafe(f)) {
+        code
+    } else {
+        set_error("panic inside fmf_engine");
+        FMF_E_PANIC
     }
 }
 

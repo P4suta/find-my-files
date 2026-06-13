@@ -49,9 +49,10 @@ jobs:
       - uses: crate-ci/typos@master # reads root _typos.toml
       - uses: uncenter/setup-taplo@v2
         with:
-          version: "0.9.3"
-      - run: taplo check
-        working-directory: engine
+          version: "0.10.0"
+      # fmt --check from the repo root enforces TOML *formatting* (taplo.toml),
+      # not just validity, across every crate + the root configs.
+      - run: taplo fmt --check
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

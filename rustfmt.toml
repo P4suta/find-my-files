@@ -1,0 +1,9 @@
+# Rust formatting policy. Stable options only — the toolchain is pinned to stable
+# in mise.toml, so nightly-gated niceties (imports_granularity, group_imports,
+# wrap_comments, normalize_comments, …) are intentionally omitted rather than
+# silently ignored. Applies to BOTH the engine workspace and the xtask workspace
+# (rustfmt searches upward from each file); `cargo fmt` passes each crate's own
+# edition, so none is hard-coded here.
+max_width = 100
+use_field_init_shorthand = true
+use_try_shorthand = true

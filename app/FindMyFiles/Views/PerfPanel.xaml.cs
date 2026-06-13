@@ -18,6 +18,8 @@ namespace FindMyFiles.Views;
 /// </summary>
 public sealed partial class PerfPanel : UserControl
 {
+    /// <summary><see cref="ViewModel"/> のバッキング用 <c>DependencyProperty</c>。
+    /// 値の差し替え時に `PerfDataChanged`/`PropertyChanged` の購読を旧→新へ張り替える。</summary>
     public static readonly DependencyProperty ViewModelProperty =
         DependencyProperty.Register(
             nameof(ViewModel),
@@ -25,6 +27,8 @@ public sealed partial class PerfPanel : UserControl
             typeof(PerfPanel),
             new PropertyMetadata(null, (d, e) => ((PerfPanel)d).OnViewModelChanged(e)));
 
+    /// <summary>ホストが `x:Bind` で供給する診断 ViewModel。トレース/統計の更新通知元で、
+    /// パネルを開いている間だけ 1 Hz の統計ポーリングを駆動する。</summary>
     public PerfPanelViewModel? ViewModel
     {
         get => (PerfPanelViewModel?)GetValue(ViewModelProperty);
@@ -33,6 +37,8 @@ public sealed partial class PerfPanel : UserControl
 
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _statsTimer;
 
+    /// <summary>1 Hz の統計ポーリングタイマーを構築する(`ViewModel.IsOpen` が真の間だけ
+    /// 走らせる)。タイマー自体はここでは開始せず、開閉に応じて起動/停止する。</summary>
     public PerfPanel()
     {
         InitializeComponent();
@@ -84,12 +90,7 @@ public sealed partial class PerfPanel : UserControl
     private void CopyDiag_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         var statsJson = ViewModel?.Stats is { } s
-            ? System.Text.Json.JsonSerializer.Serialize(
-                s,
-                new System.Text.Json.JsonSerializerOptions(Engine.EngineJson.SnakeCase)
-                {
-                    WriteIndented = true,
-                })
+            ? System.Text.Json.JsonSerializer.Serialize(s, DiagJsonOptions)
             : "(no stats yet)";
         var dump =
             $"find-my-files diagnostics {DateTimeOffset.Now:O}\n" +
@@ -211,13 +212,19 @@ public sealed partial class PerfPanel : UserControl
         }
     }
 
+    private static readonly System.Text.Json.JsonSerializerOptions DiagJsonOptions =
+        new(Engine.EngineJson.SnakeCase)
+        {
+            WriteIndented = true,
+        };
+
     private static readonly System.Reflection.PropertyInfo[] CounterProps =
         [.. typeof(CountersData).GetProperties()
             .Where(p => p.PropertyType == typeof(ulong))];
 
     private static string FirstLine(string s)
     {
-        var i = s.IndexOf('\n');
+        var i = s.IndexOf('\n', StringComparison.Ordinal);
         var line = i < 0 ? s : s[..i];
         return line.Length > 120 ? line[..120] + "…" : line;
     }

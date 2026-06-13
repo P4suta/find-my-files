@@ -7,11 +7,16 @@ namespace FindMyFiles.ViewModels;
 /// <see cref="Loc"/> (Strings/&lt;lang&gt;/Resources.resw).</summary>
 public static class StatusFormatter
 {
+    /// <summary>Result-count line: "<paramref name="hits"/> 件" plus the
+    /// elapsed query time (ms) when a <paramref name="trace"/> is present
+    /// (<see cref="QueryTraceData.TotalUs"/> → ms), the bare count otherwise.</summary>
     public static string Count(QueryTraceData? trace, long hits) =>
         trace is { } t
             ? Loc.Get("Status_CountWithTime", t.TotalUs / 1000.0, hits)
             : Loc.Get("Status_Count", hits);
 
+    /// <summary>Status line for a rejected query — the engine's syntax-error
+    /// <paramref name="message"/> behind a localized prefix.</summary>
     public static string QueryError(string message) => Loc.Get("Status_QueryErrorPrefix", message);
 
     /// <summary>Startup/refresh snapshot of the overall index state — reflects

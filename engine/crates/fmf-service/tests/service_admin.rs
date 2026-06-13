@@ -1,6 +1,6 @@
 //! Elevated end-to-end: a real fmf-service child process over a real C:
 //! scan — durability (periodic flush survives a kill) and snapshot restore.
-//! Gated like every real-volume test: `#[ignore]` + FMF_ADMIN_TESTS=1
+//! Gated like every real-volume test: `#[ignore]` + `FMF_ADMIN_TESTS=1`
 //! (`just test-admin`, elevated).
 
 use std::io::Write as _;
@@ -91,7 +91,7 @@ fn hello(s: &mut PipeStream, id: u32) {
     assert_eq!(h.status, codes::OK);
 }
 
-/// Polls IndexStatus until C: is Ready; returns the entry count.
+/// Polls `IndexStatus` until C: is Ready; returns the entry count.
 fn wait_ready(s: &mut PipeStream, next_id: &mut u32, deadline: Duration) -> u64 {
     let begin = Instant::now();
     loop {
@@ -115,7 +115,7 @@ fn wait_ready(s: &mut PipeStream, next_id: &mut u32, deadline: Duration) -> u64 
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires elevation + a real C: scan; gated by FMF_ADMIN_TESTS=1 (just test-admin)"]
 fn service_e2e_flush_survives_kill_and_restores() {
     if !admin_gate() {
         return;
@@ -134,7 +134,7 @@ fn service_e2e_flush_survives_kill_and_restores() {
     let mut s = connect_with_retry(&pipe_name, Duration::from_secs(30));
     let mut id = 0u32;
     hello(&mut s, 0);
-    let entries = wait_ready(&mut s, &mut id, Duration::from_secs(600));
+    let entries = wait_ready(&mut s, &mut id, Duration::from_mins(10));
     assert!(entries > 10_000, "suspiciously small C: index: {entries}");
 
     id += 1;
@@ -153,7 +153,7 @@ fn service_e2e_flush_survives_kill_and_restores() {
     let begin = Instant::now();
     while !snapshot.exists() {
         assert!(
-            begin.elapsed() < Duration::from_secs(60),
+            begin.elapsed() < Duration::from_mins(1),
             "periodic flush never wrote {}",
             snapshot.display()
         );
@@ -168,7 +168,7 @@ fn service_e2e_flush_survives_kill_and_restores() {
     let mut id2 = 0u32;
     hello(&mut s2, 0);
     let restore_begin = Instant::now();
-    let restored = wait_ready(&mut s2, &mut id2, Duration::from_secs(60));
+    let restored = wait_ready(&mut s2, &mut id2, Duration::from_mins(1));
     let ready_in = restore_begin.elapsed();
     assert!(restored > 10_000);
     // The M2 gate is restore→ready ≤2s engine-side; over a child process +
