@@ -9,7 +9,9 @@ pre-commit:
       run: cargo fmt --all -- --check
     - name: taplo
       glob: "*.toml"
-      run: taplo check
+      # fmt --check (not plain `check`): enforce TOML *formatting*, not just
+      # validity, repo-wide via taplo.toml.
+      run: taplo fmt --check
 
 pre-push:
   jobs:
@@ -28,7 +30,14 @@ pre-push:
     - name: test-app
       run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
     # The xtask crate is its own workspace (engine's --workspace doesn't cover
-    # it); gate it here too, only when xtask files change.
-    - name: xtask
+    # it); gate it here too, only when xtask files change. One command per job
+    # (no `&&` chaining) so the hook never depends on which shell runs it.
+    - name: xtask-fmt
       glob: "xtask/**"
-      run: cargo fmt --manifest-path xtask/Cargo.toml --all -- --check && cargo clippy --manifest-path xtask/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path xtask/Cargo.toml
+      run: cargo fmt --manifest-path xtask/Cargo.toml --all -- --check
+    - name: xtask-clippy
+      glob: "xtask/**"
+      run: cargo clippy --manifest-path xtask/Cargo.toml --all-targets -- -D warnings
+    - name: xtask-test
+      glob: "xtask/**"
+      run: cargo test --manifest-path xtask/Cargo.toml

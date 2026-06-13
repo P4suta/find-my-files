@@ -23,6 +23,12 @@ public sealed class ResultsViewportManager
     private ScrollViewer? _scroller;
     private ulong? _lastSelectedEntryRef;
 
+    /// <summary>
+    /// Wrap the results <paramref name="list"/> and start tracking its
+    /// selection so the last real (non-placeholder) row's engine identity
+    /// (<see cref="ResultRow.EntryRef"/>) can be re-found and reselected after a
+    /// position-preserving requery's Reset clears the ListView selection.
+    /// </summary>
     public ResultsViewportManager(ListView list)
     {
         _list = list;
@@ -76,15 +82,25 @@ public sealed class ResultsViewportManager
 
     // ── Selection-driven row actions (keyboard, double-click, menu) ─────
 
+    /// <summary>The currently selected row, or <c>null</c> if nothing (or a
+    /// non-row) is selected.</summary>
     public ResultRow? SelectedRow() => _list.SelectedItem as ResultRow;
 
+    /// <summary>The selected row, falling back to the top row — what Enter from
+    /// the search box opens when the user never moved into the list.</summary>
     public ResultRow? SelectedOrTopRow() =>
         SelectedRow() ?? (_list.Items.Count > 0 ? _list.Items[0] as ResultRow : null);
 
+    /// <summary>Open the selected row's file via the shell (no-op if nothing or
+    /// a placeholder is selected).</summary>
     public void OpenSelected() => Open(SelectedRow());
 
+    /// <summary>Open the selected row, or the top row when none is selected
+    /// (Enter from the search box).</summary>
     public void OpenSelectedOrTop() => Open(SelectedOrTopRow());
 
+    /// <summary>Reveal the selected row's file in Explorer (selected in its
+    /// folder); no-op for an empty or placeholder selection.</summary>
     public void RevealSelected()
     {
         if (SelectedRow() is { IsPlaceholder: false } row)
@@ -93,6 +109,8 @@ public sealed class ResultsViewportManager
         }
     }
 
+    /// <summary>Copy the full paths of all real selected rows to the clipboard,
+    /// CRLF-separated; no-op when the selection holds no real rows.</summary>
     public void CopySelectedPaths()
     {
         var paths = CopyablePaths(_list.SelectedItems);

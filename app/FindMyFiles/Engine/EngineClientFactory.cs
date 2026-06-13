@@ -12,6 +12,13 @@ public static class EngineClientFactory
 {
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>起動時に一度だけ呼び、上記の優先順位でエンジン実装を 1 つ
+    /// 解決して返す。サービス不在+非昇格など in-proc が使えない状況では
+    /// 空エンジン(<see cref="FakeEngineClient.CreateEmpty"/>)に劣化させ、
+    /// UI を setup 画面に誘導する(自動 runas はしない)。</summary>
+    /// <param name="args">プロセスのコマンドライン引数(`--fake-engine` /
+    /// `--engine=` / `--pipe-name=` を見る)。</param>
+    /// <returns>選択された <see cref="IEngineClient"/> 実装の単一インスタンス。</returns>
     public static IEngineClient Resolve(string[] args)
     {
         if (HasFlag(args, "--fake-engine"))
@@ -21,21 +28,21 @@ public static class EngineClientFactory
         }
         var pipeName = OptionValue(args, "--pipe-name=") ?? PipeProtocol.DefaultPipeName;
         var mode = OptionValue(args, "--engine=") ?? AppSettings.Load().Engine;
-        switch (mode.ToLowerInvariant())
+        if (string.Equals(mode, "pipe", StringComparison.OrdinalIgnoreCase))
         {
-            case "pipe":
-                FileLog.Info("app", $"engine: pipe ({pipeName})");
-                return new PipeEngineClient(pipeName);
-            case "inproc":
-                FileLog.Info("app", "engine: in-proc FFI (explicit)");
-                return new FfiEngineClient();
-            case "auto":
-                break;
-            default:
-                FileLog.Warn(
-                    "app",
-                    $"unknown engine mode `{mode}` (allowed: pipe | inproc | auto) — using auto");
-                break;
+            FileLog.Info("app", $"engine: pipe ({pipeName})");
+            return new PipeEngineClient(pipeName);
+        }
+        if (string.Equals(mode, "inproc", StringComparison.OrdinalIgnoreCase))
+        {
+            FileLog.Info("app", "engine: in-proc FFI (explicit)");
+            return new FfiEngineClient();
+        }
+        if (!string.Equals(mode, "auto", StringComparison.OrdinalIgnoreCase))
+        {
+            FileLog.Warn(
+                "app",
+                $"unknown engine mode `{mode}` (allowed: pipe | inproc | auto) — using auto");
         }
         if (PipeEngineClient.Probe(pipeName, ProbeTimeout))
         {

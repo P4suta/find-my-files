@@ -1,6 +1,8 @@
 //! Live USN-journal session: volume handle, FSCTL wrappers, blocking reads
-//! and the per-file stat fetcher. This is the only OS-facing part of the
-//! `usn` module — everything above it works on parsed records.
+//! and the per-file stat fetcher.
+//!
+//! This is the only OS-facing part of the `usn` module — everything above it
+//! works on parsed records.
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -90,6 +92,11 @@ impl UsnJournal {
     /// Open the journal for tailing. Creates it when missing (requires
     /// elevation, which the whole scan path already needs). `start_usn` is
     /// the persisted checkpoint; pass `None` to start at the current end.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsnError::OpenVolume`] if the volume handle cannot be opened,
+    /// or [`UsnError::Fsctl`] if creating or querying the journal fails.
     pub fn open(drive: &str, start_usn: Option<i64>) -> Result<Self, UsnError> {
         let handle = open_volume_handle(drive)?;
         let data = Self::query_or_create(&handle)?;
@@ -105,10 +112,17 @@ impl UsnJournal {
     }
 
     /// True if the persisted checkpoint is still replayable from this journal.
-    pub fn checkpoint_valid(&self, persisted_journal_id: u64, data_first_usn: i64) -> bool {
+    #[must_use]
+    pub const fn checkpoint_valid(&self, persisted_journal_id: u64, data_first_usn: i64) -> bool {
         self.journal_id == persisted_journal_id && self.next_usn >= data_first_usn
     }
 
+    /// Query the live journal metadata (id and retained USN range).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsnError::Fsctl`] if the `FSCTL_QUERY_USN_JOURNAL` call fails
+    /// (including a journal that is no longer active).
     pub fn query(&self) -> Result<USN_JOURNAL_DATA_V0, UsnError> {
         Self::query_raw(&self.handle).map_err(|e| match e {
             QueryErr::Gone => UsnError::Fsctl(ERROR_JOURNAL_NOT_ACTIVE),
@@ -130,11 +144,11 @@ impl UsnJournal {
                     let ok = DeviceIoControl(
                         raw(handle),
                         FSCTL_CREATE_USN_JOURNAL,
-                        (&create as *const CREATE_USN_JOURNAL_DATA).cast(),
+                        (&raw const create).cast(),
                         size_of::<CREATE_USN_JOURNAL_DATA>() as u32,
                         std::ptr::null_mut(),
                         0,
-                        &mut returned,
+                        &raw mut returned,
                         std::ptr::null_mut(),
                     );
                     if ok == 0 {
@@ -159,16 +173,15 @@ impl UsnJournal {
                 FSCTL_QUERY_USN_JOURNAL,
                 std::ptr::null(),
                 0,
-                (&mut data as *mut USN_JOURNAL_DATA_V0).cast(),
+                (&raw mut data).cast(),
                 size_of::<USN_JOURNAL_DATA_V0>() as u32,
-                &mut returned,
+                &raw mut returned,
                 std::ptr::null_mut(),
             );
             if ok == 0 {
                 let code = GetLastError();
                 return Err(match code {
-                    ERROR_JOURNAL_NOT_ACTIVE => QueryErr::Gone,
-                    ERROR_JOURNAL_DELETE_IN_PROGRESS => QueryErr::Gone,
+                    ERROR_JOURNAL_NOT_ACTIVE | ERROR_JOURNAL_DELETE_IN_PROGRESS => QueryErr::Gone,
                     other => QueryErr::Os(other),
                 });
             }
@@ -178,6 +191,12 @@ impl UsnJournal {
 
     /// Blocking read: returns once at least one record is available (or the
     /// journal became invalid). Advances `next_usn` past the returned batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsnError::Fsctl`] if the `FSCTL_READ_USN_JOURNAL` call fails
+    /// for a reason other than a recoverable journal-gone condition (those
+    /// are reported through [`ReadOutcome`]).
     pub fn read_blocking(&mut self, buf: &mut Vec<u8>) -> Result<ReadOutcome, UsnError> {
         const BUF: usize = 1 << 16;
         buf.resize(BUF, 0);
@@ -194,11 +213,11 @@ impl UsnJournal {
             let ok = DeviceIoControl(
                 raw(&self.handle),
                 FSCTL_READ_USN_JOURNAL,
-                (&input as *const READ_USN_JOURNAL_DATA_V0).cast(),
+                (&raw const input).cast(),
                 size_of::<READ_USN_JOURNAL_DATA_V0>() as u32,
                 buf.as_mut_ptr().cast(),
                 BUF as u32,
-                &mut returned,
+                &raw mut returned,
                 std::ptr::null_mut(),
             );
             if ok == 0 {
@@ -241,6 +260,11 @@ pub struct VolumeStatFetcher {
 }
 
 impl VolumeStatFetcher {
+    /// Open a read-only volume handle for per-file stat lookups by FRN.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsnError::OpenVolume`] if the volume handle cannot be opened.
     pub fn open(drive: &str) -> Result<Self, UsnError> {
         Ok(Self {
             handle: open_volume_handle(drive)?,
@@ -273,7 +297,7 @@ impl StatFetcher for VolumeStatFetcher {
             desc.Anonymous.FileId = frn as i64;
             let h = OpenFileById(
                 raw(&self.handle),
-                &desc,
+                &raw const desc,
                 0, // attributes-only access
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 std::ptr::null(),
@@ -285,7 +309,7 @@ impl StatFetcher for VolumeStatFetcher {
             }
             let h = OwnedHandle::from_raw_handle(h as RawHandle);
             let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
-            if GetFileInformationByHandle(raw(&h), &mut info) == 0 {
+            if GetFileInformationByHandle(raw(&h), &raw mut info) == 0 {
                 self.note_failure(frn, "GetFileInformationByHandle");
                 return None;
             }
@@ -303,9 +327,9 @@ mod tests {
 
     /// Live smoke for the OS-facing session: open the C: journal, query it,
     /// and complete one blocking read. Run from an elevated shell:
-    /// FMF_ADMIN_TESTS=1 cargo test -p fmf-core -- --ignored usn_journal
+    /// `FMF_ADMIN_TESTS=1` cargo test -p fmf-core -- --ignored `usn_journal`
     #[test]
-    #[ignore]
+    #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
     fn usn_journal_live_open_query_and_one_read() {
         if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
             eprintln!("FMF_ADMIN_TESTS != 1 — skipping");

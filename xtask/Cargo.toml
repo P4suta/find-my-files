@@ -15,6 +15,36 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+# Mirrors the engine workspace's maximal lint policy (engine/Cargo.toml). xtask
+# is a separate workspace, so the policy is restated here. publish=false build
+# tooling: the cargo-group metadata lints get justified allows during triage.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# Same justified exemptions as the engine workspace (see engine/Cargo.toml for the
+# reasoning). Everything else stays deny and is fixed in code.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+too_many_lines = "allow"
+needless_pass_by_value = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+module_name_repetitions = "allow"
+used_underscore_binding = "allow"
+significant_drop_tightening = "allow"
+significant_drop_in_scrutinee = "allow"
+option_if_let_else = "allow"
+cargo_common_metadata = "allow"
+multiple_crate_versions = "allow"
+
 [[bin]]
 name = "xtask"
 path = "src/main.rs"

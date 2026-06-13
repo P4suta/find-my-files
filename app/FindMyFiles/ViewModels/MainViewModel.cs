@@ -1,5 +1,4 @@
 using CommunityToolkit.Mvvm.ComponentModel;
-using FindMyFiles;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
 
@@ -13,7 +12,7 @@ namespace FindMyFiles.ViewModels;
 /// <see cref="NotificationCenter"/> (InfoBar stack) and
 /// <see cref="PerfPanelViewModel"/> (F12).
 /// </summary>
-public sealed partial class MainViewModel : ObservableObject
+public sealed partial class MainViewModel : ObservableObject, IDisposable
 {
     private readonly IEngineClient _engine;
 
@@ -21,18 +20,27 @@ public sealed partial class MainViewModel : ObservableObject
     /// every handler below already runs dispatched.</summary>
     private readonly EngineEventMarshaler _engineEvents;
 
+    /// <summary>The search box text (two-way). Changes flow to the
+    /// orchestrator's debounce via <c>OnSearchTextChanged</c>.</summary>
     [ObservableProperty]
     public partial string SearchText { get; set; } = string.Empty;
 
+    /// <summary>The status-bar line — index progress, result count, or an
+    /// error summary, all already localized (<see cref="StatusFormatter"/>).</summary>
     [ObservableProperty]
     public partial string StatusText { get; set; } = Loc.Get("Status_Preparing");
 
+    /// <summary>Active sort column (name/size/mtime); changing it via
+    /// <see cref="SetSort"/> requeries with <see cref="RequeryOrigin.Sort"/>.</summary>
     [ObservableProperty]
     public partial FmfSort Sort { get; set; } = FmfSort.Name;
 
+    /// <summary>Sort direction for <see cref="Sort"/> — descending when true.</summary>
     [ObservableProperty]
     public partial bool SortDescending { get; set; }
 
+    /// <summary>Include hidden/system files in results; flipping it is a filter
+    /// change (requery with <see cref="RequeryOrigin.Filter"/>, top reset).</summary>
     [ObservableProperty]
     public partial bool IncludeHiddenSystem { get; set; }
 
@@ -50,6 +58,8 @@ public sealed partial class MainViewModel : ObservableObject
     /// chosen once; registering relaunches), so x:Bind OneTime is enough.</summary>
     public bool IsDisconnected => _engine is FakeEngineClient { IsEmpty: true };
 
+    /// <summary>Inverse of <see cref="IsDisconnected"/> — true when the search
+    /// UI (box + result list) should be shown instead of the setup screen.</summary>
     public bool IsReady => !IsDisconnected;
 
     /// <summary>Setup screen progress text ("管理者の許可を待っています…" etc.);
@@ -57,19 +67,43 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     public partial string SetupStatus { get; set; } = string.Empty;
 
+    /// <summary>The setup screen's one-click action (<see cref="EnableSearchAsync"/>)
+    /// is running — disables the button (<see cref="SetupNotBusy"/>) so it can't
+    /// be re-triggered while a UAC prompt is up.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SetupNotBusy))]
     public partial bool SetupBusy { get; set; }
 
+    /// <summary>Inverse of <see cref="SetupBusy"/> — gates the setup button's
+    /// enabled state.</summary>
     public bool SetupNotBusy => !SetupBusy;
 
+    /// <summary>How results land in the virtualized list (publish / refresh
+    /// in place / empty) — the seam the orchestrator hands outcomes to.</summary>
     public ResultsPresenter Results { get; }
+
+    /// <summary>Decides when and what to search (debounce, generation,
+    /// requery triggers); the page forwards box edits and toggles to it.</summary>
     public SearchOrchestrator Search { get; }
+
+    /// <summary>The InfoBar stack — failures and transient notices are pushed
+    /// here.</summary>
     public NotificationCenter Notifications { get; }
+
+    /// <summary>State behind the F12 performance panel (last trace, stats,
+    /// latency history).</summary>
     public PerfPanelViewModel Perf { get; }
 
     private readonly AppSettings _settings;
 
+    /// <summary>Builds the focused components, restores focused-search settings,
+    /// and subscribes the engine events (volume updates, errors, connection
+    /// changes). Call <see cref="StartAsync"/> afterwards to begin indexing.</summary>
+    /// <param name="engine">The engine client (Fake / Ffi / Pipe) this page drives.</param>
+    /// <param name="dispatcher">UI dispatcher used to marshal engine callbacks
+    /// and back timers.</param>
+    /// <param name="settings">App settings to read/persist; loaded from disk
+    /// when null.</param>
     public MainViewModel(IEngineClient engine, IDispatcher dispatcher, AppSettings? settings = null)
     {
         _engine = engine;
@@ -213,6 +247,9 @@ public sealed partial class MainViewModel : ObservableObject
         Search.Requery(RequeryOrigin.Filter);
     }
 
+    /// <summary>Column-header click: re-clicking the active <see cref="Sort"/>
+    /// column toggles <see cref="SortDescending"/>, a new column switches to it
+    /// ascending. Either way requeries with <see cref="RequeryOrigin.Sort"/>.</summary>
     public void SetSort(FmfSort key)
     {
         if (Sort == key)
@@ -294,4 +331,8 @@ public sealed partial class MainViewModel : ObservableObject
 
     private static string Truncate(string s, int max) =>
         s.Length <= max ? s : s[..max] + "…";
+
+    /// <summary>Unsubscribe the engine-event marshaler — the one owned
+    /// disposable — so its handlers stop holding this view model rooted.</summary>
+    public void Dispose() => _engineEvents.Dispose();
 }

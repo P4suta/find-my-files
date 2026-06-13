@@ -10,11 +10,15 @@ use std::time::Duration;
 use fmf_core::engine::{Engine, EngineConfig, EngineCreateError};
 
 const FIRST_DELAY: Duration = Duration::from_secs(5);
-const MAX_DELAY: Duration = Duration::from_secs(60);
+const MAX_DELAY: Duration = Duration::from_mins(1);
 
 /// Retries on `Locked` until success, a non-lock error, `stop`, or
 /// `max_attempts`. Exhaustion returns the `Locked` error — the caller exits
 /// honestly (no SCM crash-loop; P4 wires the exit code).
+///
+/// # Errors
+/// Returns the [`EngineCreateError`]: a non-`Locked` error immediately, or the
+/// last `Locked` error once `max_attempts` is reached or `stop` is set.
 pub fn create_engine_with_retry(
     index_dir: PathBuf,
     stop: &AtomicBool,

@@ -15,19 +15,19 @@ pub struct Civil {
 }
 
 impl Civil {
-    pub fn next_day(self) -> Civil {
+    pub const fn next_day(self) -> Self {
         civil_from_days(days_from_civil(self) + 1)
     }
 
-    pub fn first_of_next_month(self) -> Civil {
+    pub const fn first_of_next_month(self) -> Self {
         if self.m == 12 {
-            Civil {
+            Self {
                 y: self.y + 1,
                 m: 1,
                 d: 1,
             }
         } else {
-            Civil {
+            Self {
                 y: self.y,
                 m: self.m + 1,
                 d: 1,
@@ -43,7 +43,7 @@ impl Civil {
     }
 }
 
-fn days_in_month(y: i32, m: u32) -> u32 {
+const fn days_in_month(y: i32, m: u32) -> u32 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -58,8 +58,8 @@ fn days_in_month(y: i32, m: u32) -> u32 {
     }
 }
 
-/// Days since 1970-01-01 (Howard Hinnant's days_from_civil).
-pub fn days_from_civil(c: Civil) -> i64 {
+/// Days since 1970-01-01 (Howard Hinnant's `days_from_civil`).
+pub const fn days_from_civil(c: Civil) -> i64 {
     let y = if c.m <= 2 { c.y - 1 } else { c.y } as i64;
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -69,7 +69,7 @@ pub fn days_from_civil(c: Civil) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-pub fn civil_from_days(days: i64) -> Civil {
+pub const fn civil_from_days(days: i64) -> Civil {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -125,8 +125,9 @@ impl DateResolver for WindowsLocalResolver {
             };
             let mut utc: SYSTEMTIME = std::mem::zeroed();
             let mut ft: FILETIME = std::mem::zeroed();
-            if TzSpecificLocalTimeToSystemTime(std::ptr::null(), &local, &mut utc) != 0
-                && SystemTimeToFileTime(&utc, &mut ft) != 0
+            if TzSpecificLocalTimeToSystemTime(std::ptr::null(), &raw const local, &raw mut utc)
+                != 0
+                && SystemTimeToFileTime(&raw const utc, &raw mut ft) != 0
             {
                 ((ft.dwHighDateTime as i64) << 32) | ft.dwLowDateTime as i64
             } else {

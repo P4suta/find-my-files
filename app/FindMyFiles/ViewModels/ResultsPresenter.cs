@@ -13,18 +13,43 @@ namespace FindMyFiles.ViewModels;
 /// </summary>
 public enum RequeryOrigin
 {
+    /// <summary>First query of the session — reset (top of list).</summary>
     Initial,
+
+    /// <summary>The user edited the search box — reset.</summary>
     Typing,
+
+    /// <summary>The search box was cleared — reset.</summary>
     Clear,
+
+    /// <summary>The sort column/direction changed — reset.</summary>
     Sort,
+
+    /// <summary>A result filter changed — reset.</summary>
     Filter,
+
+    /// <summary>The on-disk index changed (USN-driven refresh) — preserves the
+    /// viewport.</summary>
     IndexChanged,
+
+    /// <summary>A volume finished indexing and joined the results — preserves
+    /// the viewport.</summary>
     VolumeReady,
+
+    /// <summary>The held result went stale and was re-issued — preserves the
+    /// viewport.</summary>
     Stale,
 }
 
+/// <summary>Helpers over <see cref="RequeryOrigin"/>.</summary>
 public static class RequeryOriginExtensions
 {
+    /// <summary>
+    /// True for origins that restore the previous viewport instead of scrolling
+    /// to the top (<see cref="RequeryOrigin.IndexChanged"/>,
+    /// <see cref="RequeryOrigin.VolumeReady"/>, <see cref="RequeryOrigin.Stale"/>) —
+    /// the background refreshes the user did not initiate.
+    /// </summary>
     public static bool PreservesPosition(this RequeryOrigin origin) =>
         origin is RequeryOrigin.IndexChanged or RequeryOrigin.VolumeReady or RequeryOrigin.Stale;
 }
@@ -35,6 +60,15 @@ public static class RequeryOriginExtensions
 /// <see cref="RestoreIndex"/>. The seeded index window is where a previously
 /// selected row may be re-found.
 /// </summary>
+/// <param name="Origin">Why the requery ran — decides reset vs. position
+/// restore.</param>
+/// <param name="RestoreIndex">First visible row index to scroll back to for a
+/// position-preserving origin; <c>null</c> for reset origins (scroll to top).</param>
+/// <param name="FirstSeededIndex">First row index that was prefetched and is
+/// thus realizable without a fetch — lower bound of the selection re-find
+/// window.</param>
+/// <param name="LastSeededIndex">Last prefetched row index — upper bound of the
+/// selection re-find window.</param>
 public readonly record struct ResultsPublication(
     RequeryOrigin Origin,
     int? RestoreIndex,
@@ -55,6 +89,9 @@ public sealed partial class ResultsPresenter : ObservableObject
     /// <summary>Lifetime-single ItemsSource — bind with x:Bind OneTime.</summary>
     public VirtualResultList ResultsSource { get; }
 
+    /// <summary>Status-bar text describing the published result — hit count
+    /// (and query time when a trace is present), a query-error message, or
+    /// empty. Bound one-way to the status bar.</summary>
     [ObservableProperty]
     public partial string CountText { get; set; } = string.Empty;
 
@@ -67,6 +104,11 @@ public sealed partial class ResultsPresenter : ObservableObject
     /// Starts true: the list is born empty.</summary>
     private bool _emptyPresented = true;
 
+    /// <summary>
+    /// Create the presenter and its lifetime-single
+    /// <see cref="VirtualResultList"/>, both bound to <paramref name="dispatcher"/>
+    /// (the UI thread that publishes and fetches run on).
+    /// </summary>
     public ResultsPresenter(IDispatcher dispatcher)
     {
         _dispatcher = dispatcher;

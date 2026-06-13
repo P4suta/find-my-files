@@ -51,7 +51,7 @@ pub unsafe extern "C" fn fmf_set_event_callback(
                     .set_event_sink(Some(Arc::new(move |ev: &EngineEvent| {
                         // EngineEvent::to_wire is the single kind mapping.
                         let payload = ev.to_wire();
-                        unsafe { (sink.cb)(&payload, sink.user) };
+                        unsafe { (sink.cb)(&raw const payload, sink.user) };
                     })));
                 *handle._sink_keepalive.lock() = Some(keep);
             }

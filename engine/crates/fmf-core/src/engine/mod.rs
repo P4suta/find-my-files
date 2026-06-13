@@ -1,7 +1,9 @@
-//! Multi-volume engine assembly: owns one `VolumeIndex` per NTFS volume,
-//! drives initial scans and USN tailing threads, and answers queries with a
-//! k-way-merged, sort-ordered result set (docs/ARCHITECTURE.md). This is the
-//! layer the FFI exposes 1:1 — and the layer a v2 service would host.
+//! Multi-volume engine assembly.
+//!
+//! Owns one `VolumeIndex` per NTFS volume, drives initial scans and USN
+//! tailing threads, and answers queries with a k-way-merged, sort-ordered
+//! result set (docs/ARCHITECTURE.md). This is the layer the FFI exposes 1:1
+//! — and the layer a v2 service would host.
 
 mod results;
 mod seams;
@@ -70,9 +72,10 @@ pub enum EngineEvent {
 }
 
 impl EngineEvent {
-    /// The single EngineEvent → contract POD mapping — the FFI callback and
+    /// The single `EngineEvent` → contract POD mapping — the FFI callback and
     /// the pipe event push both consume this (ADR-0018: no per-boundary
     /// kind tables).
+    #[must_use]
     pub fn to_wire(&self) -> fmf_contract::pod::FmfEvent {
         use fmf_contract::events::EventKind;
         let (kind, volume, entries) = match self {
@@ -128,6 +131,14 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Create the engine and acquire the single-writer lock on the index
+    /// directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineCreateError::Io`] if the index directory cannot be
+    /// created, or [`EngineCreateError::Locked`] if another engine process
+    /// already holds the writer lock (`FMF_E_LOCKED`).
     pub fn new(config: EngineConfig) -> Result<Arc<Self>, EngineCreateError> {
         std::fs::create_dir_all(&config.index_dir)?;
         #[cfg(windows)]
@@ -206,11 +217,15 @@ impl Engine {
     }
 
     /// Begin indexing the given volumes (asynchronous; progress via events).
-    /// Idempotent per volume label: clients re-send IndexStart on every
+    /// Idempotent per volume label: clients re-send `IndexStart` on every
     /// (re)connect and the service also calls this at startup, so a volume
     /// already being indexed is skipped. A duplicate slot would make every
     /// query return that volume's rows once per copy (search merges all Ready
     /// slots) — the source of the "each result appears N times" bug.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a volume worker thread cannot be spawned.
     pub fn index_start(self: &Arc<Self>, volumes: &[String]) {
         for label in volumes {
             // Trust boundary: `volumes` reaches us unvalidated — over the pipe
@@ -262,7 +277,7 @@ impl Engine {
             .collect()
     }
 
-    pub fn metrics(&self) -> &MetricsHub {
+    pub const fn metrics(&self) -> &MetricsHub {
         &self.metrics
     }
 
@@ -364,6 +379,10 @@ impl Engine {
 
     /// Test/dev helper: swap a rebuilt index into an existing Ready volume —
     /// the same structural replacement a journal-gone full rescan performs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no volume with the given `label` exists.
     pub fn replace_ready_volume(&self, label: &str, idx: VolumeIndex) {
         let volumes = self.volumes.read();
         let slot = volumes

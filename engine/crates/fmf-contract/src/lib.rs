@@ -17,7 +17,7 @@
 //! - エラーコード表            → [`codes`]
 //! - Pipe オペコード表          → [`opcodes`]
 //! - イベント(FFI kind 1..=6) → [`events`]
-//! - FmfQueryOptions の列挙値   → [`options`]
+//! - `FmfQueryOptions` の列挙値   → [`options`]
 //! - POD レイアウト(FmfRow 等) → [`pod`]
 //! - ボリュームラベル 16B 詰め  → [`volume`]
 //! - ABI/プロトコル版数・pipe名 → [`versions`]

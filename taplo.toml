@@ -1,0 +1,11 @@
+# TOML formatting policy (taplo), enforced repo-wide via `taplo fmt --check`
+# (see justfile / lefthook / CI). Validity alone (`taplo check`) is not enough —
+# formatting is part of the convention.
+[formatting]
+align_comments = false # keep trailing comments one space after the value
+column_width = 100
+indent_string = "  " # two spaces — matches the existing Cargo.toml style
+reorder_keys = false # key order is semantically meaningful (Cargo.toml)
+reorder_arrays = false
+array_auto_collapse = false # keep intentionally-multiline arrays expanded
+# (e.g. windows-sys features, workspace members)

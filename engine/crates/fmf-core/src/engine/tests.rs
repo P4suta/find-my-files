@@ -101,10 +101,10 @@ fn volume_label_validation_is_exactly_letter_colon() {
 
 /// `IndexStart` arrives unvalidated over the pipe. A request carrying only
 /// malformed labels must create no slots and (crucially) spawn no volume
-/// threads — the DoS / `snapshot_path` traversal guard. Valid-label
-/// acceptance is covered by the pure-function test above (calling index_start
+/// threads — the `DoS` / `snapshot_path` traversal guard. Valid-label
+/// acceptance is covered by the pure-function test above (calling `index_start`
 /// with a real "C:" here would spawn the admin-only worker — see the #[ignore]
-/// engine_e2e test).
+/// `engine_e2e` test).
 #[test]
 fn index_start_rejects_malformed_volume_labels() {
     let (_dir, e) = test_engine();
@@ -231,7 +231,7 @@ fn idle_requery_of_identical_results_reports_unchanged() {
         idx.upsert(&RawEntry {
             record: 999,
             parent_record: 5,
-            frn: (1 << 48) | 999,
+            frn: (1 << 48) | 0x3E7,
             name_utf16: &units,
             is_dir: false,
             is_reparse: false,
@@ -264,9 +264,9 @@ fn status_reports_ready_volumes() {
     );
 }
 
-/// Real-volume E2E: index_start → VolumeReady → query → snapshot save on
-/// shutdown → load_from restores the same entry count. Run from an elevated
-/// shell: FMF_ADMIN_TESTS=1 cargo test -p fmf-core -- --ignored engine_e2e
+/// Real-volume E2E: `index_start` → `VolumeReady` → query → snapshot save on
+/// shutdown → `load_from` restores the same entry count. Run from an elevated
+/// shell: `FMF_ADMIN_TESTS=1` cargo test -p fmf-core -- --ignored `engine_e2e`
 #[cfg(windows)]
 #[test]
 fn flush_saves_dirty_volumes_and_skips_clean_ones() {
@@ -304,14 +304,15 @@ fn second_engine_on_same_index_dir_is_locked() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
 fn engine_e2e_scan_query_snapshot_restore() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
         eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
         return;
     }
-    use std::sync::mpsc;
-    use std::time::Duration;
 
     // Fresh per-run index dir → guaranteed full-scan path (no stale snapshot).
     let dir = TestDir::new();
@@ -327,10 +328,10 @@ fn engine_e2e_scan_query_snapshot_restore() {
     e.index_start(&["C:".to_string()]);
 
     let ready_entries = loop {
-        match rx.recv_timeout(Duration::from_secs(600)) {
+        match rx.recv_timeout(Duration::from_mins(10)) {
             Ok(EngineEvent::VolumeReady { entries, .. }) => break entries,
             Ok(EngineEvent::VolumeFailed { message, .. }) => panic!("volume failed: {message}"),
-            Ok(_) => continue, // Progress / IndexChanged / EngineError
+            Ok(_) => {} // Progress / IndexChanged / EngineError
             Err(err) => panic!("no VolumeReady within timeout: {err}"),
         }
     };

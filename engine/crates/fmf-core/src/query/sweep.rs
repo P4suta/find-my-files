@@ -155,7 +155,7 @@ mod tests {
         }
     }
 
-    /// driver_candidates over a fresh table, id-sorted for stable assertions.
+    /// `driver_candidates` over a fresh table, id-sorted for stable assertions.
     fn run(idx: &VolumeIndex, driver: &Driver, skip_excluded: bool) -> Vec<EntryId> {
         let table = OffsetTable::build(idx);
         let mut ids = driver_candidates(idx, &table, driver, skip_excluded);

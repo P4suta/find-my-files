@@ -10,14 +10,18 @@ namespace FindMyFiles.Views;
 /// Wiring only: the gear menu's「サービスの管理…」dialog. State and the
 /// elevated mutations live in <see cref="ServiceManagerViewModel"/>; the
 /// buttons fire-and-forget its async actions through the sanctioned
-/// <see cref="TaskExtensions.Forget"/> funnel (CLAUDE.md規約).
+/// <see cref="FindMyFiles.Services.TaskExtensions.Forget"/> funnel (CLAUDE.md規約).
 /// </summary>
 public sealed partial class ServiceManagerDialog : ContentDialog
 {
     private static bool _open;
 
+    /// <summary>サービスの状態と昇格を要する操作(登録/削除/開始/停止/再起動)を担う
+    /// ViewModel。各ボタンはこのインスタンスの async アクションを `Forget` で発火する。</summary>
     public ServiceManagerViewModel VM { get; }
 
+    /// <summary>ViewModel を生成して初回の状態 `Refresh` を走らせる。公開入口は
+    /// <see cref="OpenAsync"/> のみで、コンストラクタの直接呼び出しは想定しない。</summary>
     public ServiceManagerDialog()
     {
         VM = new ServiceManagerViewModel();

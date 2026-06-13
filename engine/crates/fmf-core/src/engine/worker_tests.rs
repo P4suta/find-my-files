@@ -2,7 +2,7 @@
 //! paths (ADR-0018, S4b). Scripted fakes stand in for the two OS seams
 //! (`SnapshotStore`, `JournalSource`); events come through the real
 //! `set_event_sink`, counters through the real per-engine `MetricsHub` —
-//! only the OS edge is faked. The elevated FMF_ADMIN_TESTS suite remains
+//! only the OS edge is faked. The elevated `FMF_ADMIN_TESTS` suite remains
 //! the second defense layer on real volumes and is untouched.
 //!
 //! Not covered here (by design — the 2-trait cap excludes the $MFT scan
@@ -126,10 +126,10 @@ fn compact_recheck_table() {
 // ── Scripted fakes for the two seams ────────────────────────────────────
 
 enum LoadScript {
-    /// A loadable snapshot with its persisted (journal_id, next_usn).
+    /// A loadable snapshot with its persisted (`journal_id`, `next_usn`).
     /// Boxed: a `VolumeIndex` dwarfs the other variant (clippy).
     Found(Box<VolumeIndex>, u64, i64),
-    /// Corrupt/unreadable file (anything but NotFound).
+    /// Corrupt/unreadable file (anything but `NotFound`).
     Corrupt,
 }
 
@@ -137,7 +137,7 @@ struct FakeStore {
     loads: Mutex<VecDeque<LoadScript>>,
     fail_saves: bool,
     save_attempts: AtomicU64,
-    /// (journal_id, next_usn) of every *successful* save.
+    /// (`journal_id`, `next_usn`) of every *successful* save.
     saved: Mutex<Vec<(u64, i64)>>,
     removed: AtomicU64,
 }
@@ -218,8 +218,8 @@ struct FakeJournal {
 }
 
 impl FakeJournal {
-    fn new(opens: Vec<Incarnation>, stat_ok: bool, query_calls: Arc<AtomicU64>) -> Box<Self> {
-        Box::new(Self {
+    fn new(opens: Vec<Incarnation>, stat_ok: bool, query_calls: Arc<AtomicU64>) -> Self {
+        Self {
             opens: opens.into(),
             journal_id: 0,
             next_usn: 0,
@@ -227,7 +227,7 @@ impl FakeJournal {
             reads: VecDeque::new(),
             stat_ok,
             query_calls,
-        })
+        }
     }
 }
 
@@ -365,7 +365,7 @@ fn usn_create(frn_low: u64, name: &str) -> UsnRecord {
 }
 
 /// Lifecycle events of one volume, in arrival order, until `until` matches
-/// (inclusive). EngineError (global diag forwarding — other tests' WARNs
+/// (inclusive). `EngineError` (global diag forwarding — other tests' WARNs
 /// land here too) and Progress are excluded from ordering assertions.
 fn lifecycle_until(
     rx: &mpsc::Receiver<EngineEvent>,
@@ -447,7 +447,7 @@ fn corrupt_snapshot_counts_and_degrades_to_full_scan() {
         true,
         query_calls.clone(),
     );
-    e.spawn_worker_with_seams(label, store.clone(), journal);
+    e.spawn_worker_with_seams(label, store, Box::new(journal));
 
     let events = lifecycle_until(&rx, label, |ev| {
         matches!(ev, EngineEvent::VolumeFailed { .. })
@@ -472,7 +472,7 @@ fn corrupt_snapshot_counts_and_degrades_to_full_scan() {
     e.shutdown();
 }
 
-/// Journal-gone while tailing → RescanStarted → re-establish → Ready. The
+/// Journal-gone while tailing → `RescanStarted` → re-establish → Ready. The
 /// re-establish completes via the restore path (scan execution is outside
 /// the seams), which converges on the same install → checkpoint → Ready
 /// tail; the phase walk, the event order, the checkpoint invalidation, the
@@ -519,7 +519,7 @@ fn journal_gone_rescans_and_returns_to_ready() {
         true,
         Arc::new(AtomicU64::new(0)),
     );
-    e.spawn_worker_with_seams(label, store.clone(), journal);
+    e.spawn_worker_with_seams(label, store.clone(), Box::new(journal));
 
     // A result handle opened on the first incarnation must go hard-stale
     // after the rescan installs the rebuilt index.
@@ -601,7 +601,7 @@ fn save_failure_is_counted_and_engine_survives() {
         true,
         Arc::new(AtomicU64::new(0)),
     );
-    e.spawn_worker_with_seams(label, store.clone(), journal);
+    e.spawn_worker_with_seams(label, store.clone(), Box::new(journal));
     lifecycle_until(&rx, label, |ev| {
         matches!(ev, EngineEvent::VolumeReady { .. })
     });
@@ -651,7 +651,7 @@ fn stat_fetch_failure_storm_counts_and_batches_still_apply() {
         )],
         false,
     );
-    let storm = vec![
+    let storm_batch = vec![
         usn_create(200, "new0.txt"),
         usn_create(201, "new1.txt"),
         usn_create(202, "new2.txt"),
@@ -665,12 +665,12 @@ fn stat_fetch_failure_storm_counts_and_batches_still_apply() {
                 journal_id: 7,
                 first_usn: 10,
             }),
-            reads: vec![FakeRead::Batch(storm), FakeRead::Batch(late)],
+            reads: vec![FakeRead::Batch(storm_batch), FakeRead::Batch(late)],
         }],
         false, // every stat lookup fails
         Arc::new(AtomicU64::new(0)),
     );
-    e.spawn_worker_with_seams(label, store.clone(), journal);
+    e.spawn_worker_with_seams(label, store, Box::new(journal));
     lifecycle_until(&rx, label, |ev| {
         matches!(ev, EngineEvent::VolumeReady { .. })
     });

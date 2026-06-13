@@ -64,7 +64,10 @@ fn main() -> Result<()> {
         Commands::Release { version, dry_run } => release::run(&version, dry_run),
         Commands::Publish { skip_rust } => publish::run(skip_rust),
         Commands::Package { tag } => package::run(&tag),
-        Commands::CleanTemp => clean::run(),
+        Commands::CleanTemp => {
+            clean::run();
+            Ok(())
+        }
         Commands::DocsAssemble => docs::run(),
     }
 }

@@ -26,19 +26,26 @@ pub struct ResultSet {
 }
 
 impl ResultSet {
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.rows.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
 
     /// Builds the shared page representation — 48-byte contract rows plus
     /// one string blob, offsets blob-relative — the single implementation
-    /// behind both the FFI `FmfPage` and the pipe ResultPage payload
+    /// behind both the FFI `FmfPage` and the pipe `ResultPage` payload
     /// (ADR-0018). Blob layout: per row, name bytes then parent bytes, in
     /// row order (the canonical layout the golden corpus pins).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::Stale`] if the underlying index changed since
+    /// this result set was produced (the handle is stale).
     pub fn fill_page(
         &self,
         offset: usize,
@@ -67,6 +74,12 @@ impl ResultSet {
         Ok((rows, blob))
     }
 
+    /// Materialize `[offset, offset + count)` of the result into owned rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::Stale`] if any backing volume index changed
+    /// since this result set was produced (the handle is stale).
     pub fn page(&self, offset: usize, count: usize) -> Result<Vec<Row>, EngineError> {
         let end = (offset.saturating_add(count)).min(self.rows.len());
         let start = offset.min(end);

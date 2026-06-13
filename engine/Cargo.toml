@@ -16,6 +16,55 @@ rust-version = "1.95"
 license = "Apache-2.0"
 repository = "https://github.com/P4suta/find-my-files"
 
+# Maximal lint policy — the single source of truth; every member opts in with
+# `[lints] workspace = true`. Security-hardening intent (this session's north
+# star): the clippy groups below activate cast_ptr_alignment, ptr_as_ptr,
+# cast_possible_truncation, cast_sign_loss, etc. that guard the FFI and on-disk
+# parsing surfaces. Groups sit at priority -1 so a justified per-lint `allow`
+# (priority 0) wins; every such re-allow MUST carry a `reason = "…"`.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+
+# ── Justified exemptions (priority 0 overrides the groups). EVERYTHING not listed
+#    here stays deny and is fixed in code, not suppressed. Each group has a reason.
+#
+# Numeric `as` casts are deliberate, not accidents: the index packs FRNs / offsets
+# / lengths into u32 to hit the ≤110 B/file RAM target (the project's core perf
+# goal), and int↔float casts feed ratios/metrics. Trust-boundary truncations are
+# validated in code (MAX_PAYLOAD_LEN, record_length, volume-label checks); forcing
+# try_from would only add panic paths, against the "落ちない" principle. Pointer /
+# alignment casts (cast_ptr_alignment, ptr_as_ptr, …) deliberately stay DENY.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+# Structural / API-shape lints: "fixing" means a redesign, not a mechanical edit,
+# with no correctness or security gain.
+too_many_lines = "allow"
+needless_pass_by_value = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+module_name_repetitions = "allow"
+# RAII keep-alive fields are intentionally `_`-prefixed (held only for Drop);
+# dropping the prefix would trip dead_code instead.
+used_underscore_binding = "allow"
+# nursery, false-positive-prone here: the flagged lock scopes are deliberate and
+# the alternatives read worse. Revisit if these stabilize out of nursery.
+significant_drop_tightening = "allow"
+significant_drop_in_scrutinee = "allow"
+option_if_let_else = "allow"
+# cargo: internal workspace crates are never published to a registry, so registry
+# metadata is intentionally absent; transitive duplicate versions are not ours.
+cargo_common_metadata = "allow"
+multiple_crate_versions = "allow"
+
 [workspace.dependencies]
 fmf-contract = { path = "crates/fmf-contract" }
 fmf-core = { path = "crates/fmf-core" }

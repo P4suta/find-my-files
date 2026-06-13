@@ -1,8 +1,10 @@
 //! Overlapped named-pipe I/O behind blocking `Read`/`Write` so the frame
-//! codec (fmf-proto) works unchanged. The pipe is created OVERLAPPED solely
-//! so the accept loop can wait on (connect, stop) at once; data I/O issues
-//! an overlapped op and immediately waits on its per-call event — blocking
-//! semantics, cancel-safe via `CloseHandle` (pending ops fail, threads exit).
+//! codec (fmf-proto) works unchanged.
+//!
+//! The pipe is created OVERLAPPED solely so the accept loop can wait on
+//! (connect, stop) at once; data I/O issues an overlapped op and immediately
+//! waits on its per-call event — blocking semantics, cancel-safe via
+//! `CloseHandle` (pending ops fail, threads exit).
 
 use std::io::{self, Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
@@ -41,6 +43,8 @@ fn wide(s: &str) -> Vec<u16> {
 pub struct Event(OwnedHandle);
 
 impl Event {
+    /// # Errors
+    /// Returns the OS error if `CreateEventW` fails.
     pub fn new() -> io::Result<Self> {
         let h = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
         if h.is_null() {
@@ -74,6 +78,10 @@ impl PipeStream {
 
     /// Client side: opens an existing pipe (blocking I/O is fine here, but
     /// we open OVERLAPPED for symmetry with the I/O helpers).
+    ///
+    /// # Errors
+    /// Returns the OS error if `CreateFileW` fails (e.g. the pipe does not
+    /// exist or the caller is not authorized).
     pub fn connect(path: &str) -> io::Result<Self> {
         // SQOS with Identification level is mandatory: the server's
         // verify_client ImpersonateNamedPipeClient's the connection to read
@@ -115,7 +123,7 @@ impl PipeStream {
         let ev = Event::new()?;
         let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
         ov.hEvent = ev.raw();
-        let ok = start(&mut ov);
+        let ok = start(&raw mut ov);
         if ok == 0 {
             let err = unsafe { GetLastError() };
             if err == ERROR_BROKEN_PIPE {
@@ -127,7 +135,7 @@ impl PipeStream {
             unsafe { WaitForSingleObject(ov.hEvent, INFINITE) };
         }
         let mut transferred: u32 = 0;
-        let ok = unsafe { GetOverlappedResult(self.raw(), &ov, &mut transferred, 1) };
+        let ok = unsafe { GetOverlappedResult(self.raw(), &raw const ov, &raw mut transferred, 1) };
         if ok == 0 {
             let err = unsafe { GetLastError() };
             if err == ERROR_BROKEN_PIPE {
@@ -180,7 +188,7 @@ pub struct PipeListener {
     path_w: Vec<u16>,
     instances: u32,
     first_created: bool,
-    /// Explicit descriptor (security::PipeSecurity). None = process default
+    /// Explicit descriptor (`security::PipeSecurity`). None = process default
     /// (console/test mode only — the installed service always sets one).
     security: Option<crate::security::PipeSecurity>,
 }
@@ -191,6 +199,7 @@ pub enum Accepted {
 }
 
 impl PipeListener {
+    #[must_use]
     pub fn new(
         path: &str,
         instances: u32,
@@ -205,16 +214,23 @@ impl PipeListener {
     }
 
     /// Creates the next server instance and waits for a client or the stop
-    /// event. The first instance carries FILE_FLAG_FIRST_PIPE_INSTANCE —
+    /// event. The first instance carries `FILE_FLAG_FIRST_PIPE_INSTANCE` —
     /// and only the first (a second flagged instance would fail against our
     /// own; docs/SECURITY.md 脅威4).
+    ///
+    /// # Errors
+    /// Returns the OS error if `CreateNamedPipeW`, the stop-event creation, or
+    /// the connect wait fails.
     pub fn accept(&mut self, stop: &Event) -> io::Result<Accepted> {
         let first_flag = if self.first_created {
             0
         } else {
             FILE_FLAG_FIRST_PIPE_INSTANCE
         };
-        let attrs = self.security.as_ref().map(|s| s.attributes());
+        let attrs = self
+            .security
+            .as_ref()
+            .map(super::security::PipeSecurity::attributes);
         let h = unsafe {
             CreateNamedPipeW(
                 self.path_w.as_ptr(),
@@ -226,7 +242,7 @@ impl PipeListener {
                 0,
                 attrs
                     .as_ref()
-                    .map_or(std::ptr::null(), |a| a as *const SECURITY_ATTRIBUTES),
+                    .map_or(std::ptr::null(), std::ptr::from_ref::<SECURITY_ATTRIBUTES>),
             )
         };
         if h == INVALID_HANDLE_VALUE {
@@ -240,7 +256,7 @@ impl PipeListener {
         let ev = Event::new()?;
         let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
         ov.hEvent = ev.raw();
-        let ok = unsafe { ConnectNamedPipe(h, &mut ov) };
+        let ok = unsafe { ConnectNamedPipe(h, &raw mut ov) };
         if ok == 0 {
             match unsafe { GetLastError() } {
                 ERROR_PIPE_CONNECTED => return Ok(Accepted::Connection(stream)),
@@ -258,7 +274,7 @@ impl PipeListener {
                 return Ok(Accepted::Stopped);
             }
             let mut transferred = 0u32;
-            let ok = unsafe { GetOverlappedResult(h, &ov, &mut transferred, 0) };
+            let ok = unsafe { GetOverlappedResult(h, &raw const ov, &raw mut transferred, 0) };
             if ok == 0 {
                 return Err(last_error());
             }

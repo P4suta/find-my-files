@@ -48,13 +48,28 @@ public sealed class PipeEngineClient : IEngineClient
     /// <summary>Per-request deadline; a breach means the transport is gone.</summary>
     internal TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
+    /// <inheritdoc/>
     public event Action<string>? IndexChanged;
+
+    /// <inheritdoc/>
     public event Action<VolumeStatus>? VolumeUpdated;
+
+    /// <inheritdoc/>
     public event Action<int>? EngineErrorOccurred;
+
+    /// <inheritdoc/>
     public event Action<EngineConnectionState>? ConnectionChanged;
 
+    /// <inheritdoc/>
     public EngineConnectionState Connection => _connectionState;
 
+    /// <summary>Connects to the fmf-service named pipe and starts the
+    /// supervisor loop immediately. <paramref name="pipeName"/> defaults to
+    /// <see cref="PipeProtocol.DefaultPipeName"/>; only that default name has
+    /// its server identity verified (SECURITY.md 脅威4) — a custom name
+    /// (tests) skips the SYSTEM check.</summary>
+    /// <param name="pipeName">Pipe to connect to, as either the short name or
+    /// the full <c>\\.\pipe\…</c> path.</param>
     public PipeEngineClient(string pipeName = PipeProtocol.DefaultPipeName)
         : this(pipeName, autoStart: true)
     {
@@ -166,8 +181,10 @@ public sealed class PipeEngineClient : IEngineClient
                         $@"server on \\.\pipe\{_pipeName} is not the registered fmf-engine service "
                         + "— refusing to connect (possible pipe squatting; SECURITY.md 脅威4)");
                 }
+#pragma warning disable CA2000 // owned by the client: stored and disposed on teardown/reconnect
                 var conn = new PipeConnection(
                     stream, Interlocked.Increment(ref _epochSeq), DispatchEvent, OnResponse, ct);
+#pragma warning restore CA2000
                 stream = null; // owned by conn from here on
                 Volatile.Write(ref _connection, conn);
                 await HandshakeAsync(ct).ConfigureAwait(false);
@@ -348,7 +365,7 @@ public sealed class PipeEngineClient : IEngineClient
         }
     }
 
-    private static void SafeDispose(IDisposable? d)
+    private static void SafeDispose(NamedPipeClientStream? d)
     {
         try
         {
@@ -433,6 +450,7 @@ public sealed class PipeEngineClient : IEngineClient
 
     // ── IEngineClient ───────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
     {
         var payload = await RequestOkAsync(PipeProtocol.Op.ListVolumes, [], "ListVolumes", ct)
@@ -440,6 +458,7 @@ public sealed class PipeEngineClient : IEngineClient
         return [.. PipeProtocol.DecodeVolumeStatuses(payload).Select(s => s.Label)];
     }
 
+    /// <inheritdoc/>
     public async Task StartIndexingAsync(
         IReadOnlyList<string> volumes, CancellationToken ct = default)
     {
@@ -448,6 +467,7 @@ public sealed class PipeEngineClient : IEngineClient
             .ConfigureAwait(false);
     }
 
+    /// <inheritdoc/>
     public async Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default)
     {
         var payload = await RequestOkAsync(PipeProtocol.Op.IndexStatus, [], "IndexStatus", ct)
@@ -455,6 +475,7 @@ public sealed class PipeEngineClient : IEngineClient
         return PipeProtocol.DecodeVolumeStatuses(payload);
     }
 
+    /// <inheritdoc/>
     public async Task<SearchOutcome> SearchAsync(
         string query, SearchOptions options, CancellationToken ct = default)
     {
@@ -467,10 +488,13 @@ public sealed class PipeEngineClient : IEngineClient
         {
             trace = JsonSerializer.Deserialize<QueryTraceData>(traceJson, EngineJson.SnakeCase);
         }
+#pragma warning disable CA2000 // ownership transferred to the caller, disposed by the caller / on epoch change
         return new SearchOutcome(
             new PipeSearchResult(this, resultId, (long)count, CurrentEpoch), trace);
+#pragma warning restore CA2000
     }
 
+    /// <inheritdoc/>
     public async Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default)
     {
         byte[] payload;
@@ -555,6 +579,7 @@ public sealed class PipeEngineClient : IEngineClient
         }
     }
 
+    /// <inheritdoc/>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -562,10 +587,26 @@ public sealed class PipeEngineClient : IEngineClient
             return;
         }
         // Stop the supervisor and break the connection; never block shutdown
-        // on the background task. The CTS stays undisposed on purpose — the
-        // supervisor may still observe the token after we return.
+        // on the background task.
         _cts.Cancel();
         TearDownConnection();
+        // The supervisor may still observe the token after we return, so the
+        // CTS is disposed only once that background task has actually exited
+        // (or immediately if it never started) — never on the Dispose thread.
+        var supervisor = _supervisor;
+        if (supervisor is null)
+        {
+            _cts.Dispose();
+        }
+        else
+        {
+            supervisor.ContinueWith(
+                static (_, state) => ((CancellationTokenSource)state!).Dispose(),
+                _cts,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default).Forget("pipe.dispose");
+        }
     }
 
     /// <summary>Conditions a reconnect can never cure — the supervisor stops

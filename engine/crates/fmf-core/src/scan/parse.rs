@@ -1,6 +1,6 @@
 //! Parallel chunk parsing (ADR-0011): record sub-ranges of one chunk fan
 //! out across rayon workers, each producing a [`ParsedBatch`]; the builder
-//! appends the batches in chunk order, so EntryId assignment is
+//! appends the batches in chunk order, so `EntryId` assignment is
 //! deterministic.
 
 use ntfs_reader::api::{FIRST_NORMAL_RECORD, NtfsAttributeType, NtfsFileName};
@@ -31,8 +31,8 @@ pub(super) struct RecordArena {
 }
 
 impl RecordArena {
-    pub(super) fn new(record_size: usize) -> Self {
-        RecordArena {
+    pub(super) const fn new(record_size: usize) -> Self {
+        Self {
             data: Vec::new(),
             record_size,
         }
@@ -51,7 +51,7 @@ impl RecordArena {
     }
 }
 
-/// $STANDARD_INFORMATION + $DATA extract shared by every parse path.
+/// $`STANDARD_INFORMATION` + $DATA extract shared by every parse path.
 #[derive(Default, Clone, Copy)]
 struct RecordAttrs {
     size: u64,
@@ -102,11 +102,11 @@ pub(super) struct ParsedBatch {
     name_pool: Vec<u8>,
     lower_pool: Vec<u8>,
     /// Raw record bytes referenced by `deferred`/`extensions` — one pool
-    /// per batch instead of a box per record (the global RecordArena gets
+    /// per batch instead of a box per record (the global `RecordArena` gets
     /// them at append time).
     rec_pool: Vec<u8>,
     deferred: Vec<(u64, std::ops::Range<usize>)>,
-    /// Extension records carrying a $FILE_NAME — the targets the deferred
+    /// Extension records carrying a $`FILE_NAME` — the targets the deferred
     /// pass will need. Keeping them now turns that pass's random disk reads
     /// into RAM lookups (the whole $MFT just streamed through here anyway).
     extensions: Vec<(u64, std::ops::Range<usize>)>,
@@ -116,7 +116,7 @@ pub(super) struct ParsedBatch {
     extension_records: u64,
     skipped_no_name: u64,
     pub(super) deferred_unresolved: u64,
-    /// Deferred-pass disk reads that failed (LazyRecordReader) — folded
+    /// Deferred-pass disk reads that failed (`LazyRecordReader`) — folded
     /// into `ScanStats::deferred_name_read_failures` at append time.
     pub(super) deferred_name_read_failures: u64,
 }
@@ -203,7 +203,7 @@ fn parse_subrange(bytes: &mut [u8], first_logical: u64, record_size: usize) -> P
 
 /// Fan a chunk's record sub-ranges across rayon workers. The returned
 /// batches are in sub-range order, so appending them sequentially yields
-/// the same EntryId assignment as a fully sequential parse.
+/// the same `EntryId` assignment as a fully sequential parse.
 pub(super) fn parse_chunk(
     chunk: &mut [u8],
     chunk_logical: u64,

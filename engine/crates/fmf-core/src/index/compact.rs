@@ -18,7 +18,7 @@ use super::{EntryId, NO_PARENT, VolumeIndex};
 
 /// Below this size the garbage can't be worth a rebuild.
 const COMPACT_MIN_ENTRIES: usize = 100_000;
-/// Tombstone share that triggers compaction (matches the OffsetTable's
+/// Tombstone share that triggers compaction (matches the `OffsetTable`'s
 /// stale-rebuild instinct: past ~1/8 dead weight, rebuilding wins).
 const COMPACT_TOMBSTONE_RATIO: f64 = 0.125;
 /// Reclaimable pool bytes that trigger compaction regardless of ratio.
@@ -45,7 +45,8 @@ impl VolumeIndex {
     ///
     /// Call only at a batch boundary (the FRN index must cover every entry —
     /// `merge_new_into_permutations` just ran).
-    pub fn compacted(&self) -> VolumeIndex {
+    #[must_use]
+    pub fn compacted(&self) -> Self {
         let n = self.len();
         // Old → new id; NO_PARENT marks the dead.
         let mut remap: Vec<EntryId> = vec![NO_PARENT; n];
@@ -57,11 +58,11 @@ impl VolumeIndex {
             }
         }
         debug_assert!(
-            self.is_live(VolumeIndex::ROOT),
+            self.is_live(Self::ROOT),
             "the root entry is never tombstoned"
         );
 
-        let mut out = VolumeIndex {
+        let mut out = Self {
             lower_pool: Vec::with_capacity(self.lower_pool.len()),
             orig_pool: Vec::with_capacity(self.orig_pool.len()),
             orig_off: Vec::with_capacity(live as usize),
@@ -102,7 +103,7 @@ impl VolumeIndex {
                 NO_PARENT // the root
             } else {
                 match remap[p as usize] {
-                    NO_PARENT => VolumeIndex::ROOT, // orphaned by a dead dir
+                    NO_PARENT => Self::ROOT, // orphaned by a dead dir
                     new_p => new_p,
                 }
             });
@@ -170,7 +171,11 @@ mod tests {
         let c = idx.compacted();
         assert_eq!(c.len(), live_before);
         assert_eq!(c.live_len(), live_before);
-        assert_eq!(c.tombstone_ratio(), 0.0);
+        // After compaction tombstones == 0, so the ratio is exactly 0.0.
+        #[expect(clippy::float_cmp, reason = "0 tombstones yields an exact 0.0 ratio")]
+        {
+            assert_eq!(c.tombstone_ratio(), 0.0);
+        }
         assert_eq!(c.stats("C:").dead_name_bytes, 0);
         // Pools shrank: the storm's abandoned bytes are gone.
         assert!(c.stats("C:").lower_pool_bytes < idx.stats("C:").lower_pool_bytes);
@@ -205,7 +210,7 @@ mod tests {
         assert_eq!(loaded.len(), c.len());
     }
 
-    /// Children of a tombstoned directory attach to the root (push_raw's
+    /// Children of a tombstoned directory attach to the root (`push_raw`'s
     /// orphan policy) instead of dangling.
     #[test]
     fn compaction_reattaches_orphans_of_dead_dirs() {

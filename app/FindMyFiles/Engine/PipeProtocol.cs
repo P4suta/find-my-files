@@ -72,6 +72,8 @@ internal static class PipeProtocol
         BinaryPrimitives.WriteInt32LittleEndian(dest[12..], h.StatusCode);
     }
 
+    /// <summary>Decodes a <see cref="FrameHeader"/> from the first bytes of a
+    /// frame on the wire (the inverse of the header writer above).</summary>
     /// <exception cref="InvalidDataException">announced payload over the cap
     /// — the connection has no resync point and must be dropped</exception>
     public static FrameHeader ReadHeader(ReadOnlySpan<byte> src)

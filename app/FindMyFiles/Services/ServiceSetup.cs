@@ -4,10 +4,20 @@ using FindMyFiles.Engine;
 
 namespace FindMyFiles.Services;
 
+/// <summary>SCM registration/run state of the fmf-engine service, as seen by
+/// the unelevated UI via <see cref="ServiceSetup.QueryState"/> — drives whether
+/// the app offers to install, start, or nothing at all.</summary>
 public enum EngineServiceState
 {
+    /// <summary>No <see cref="EngineContract.ServiceName"/> entry in the SCM
+    /// (or the SCM is unreachable) — the UI offers a one-time install.</summary>
     NotInstalled,
+
+    /// <summary>Registered but not running — the UI offers to start it.</summary>
     Stopped,
+
+    /// <summary>Running (or on its way up: START/CONTINUE_PENDING) — no offer
+    /// needed; the pipe transport can connect.</summary>
     Running,
 }
 
@@ -17,11 +27,24 @@ public enum EngineServiceState
 /// is distinguished from a genuine failure so the UI can say so.</summary>
 public enum ServiceActionOutcome
 {
+    /// <summary>The elevated action exited 0 — the verb succeeded.</summary>
     Ok,
+
+    /// <summary>The action ran but exited non-zero (or could not be
+    /// launched/timed out) — a genuine failure to surface to the user.</summary>
     Failed,
+
+    /// <summary>The user dismissed the UAC prompt (ERROR_CANCELLED 1223) — not
+    /// a failure, so the UI says "cancelled" rather than "error".</summary>
     Cancelled,
 }
 
+/// <summary>Result of one <see cref="ServiceSetup.RunElevated"/> call: the
+/// classified <paramref name="Outcome"/> plus the raw process
+/// <paramref name="ExitCode"/> (-1 when the process never produced one).</summary>
+/// <param name="Outcome">Success / failure / user-cancelled classification.</param>
+/// <param name="ExitCode">fmf-service.exe exit code, or -1 if it could not be
+/// launched, timed out, or the UAC prompt was declined.</param>
 public readonly record struct ServiceActionResult(ServiceActionOutcome Outcome, int ExitCode);
 
 /// <summary>
@@ -33,6 +56,9 @@ public readonly record struct ServiceActionResult(ServiceActionOutcome Outcome, 
 /// </summary>
 public static partial class ServiceSetup
 {
+    /// <summary>True when *this* process is already running with an
+    /// Administrator token — the in-proc engine path needs it, and when set the
+    /// in-app install/start verbs can skip their own UAC prompt.</summary>
     public static bool IsProcessElevated()
     {
         using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();

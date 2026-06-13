@@ -4,7 +4,7 @@
 //! (ADR-0018). Re-capture only via `FMF_BLESS=1` (intentional change).
 //!
 //! Also pins `invalid_queries.json`: the shared fixture of query strings
-//! the real parser/compiler rejects. The C# FakeEngineClient will use the
+//! the real parser/compiler rejects. The C# `FakeEngineClient` will use the
 //! same file for its syntax verdicts (S5a) — pinning here keeps the fake's
 //! idea of "invalid" from drifting away from the real engine's.
 
@@ -108,7 +108,7 @@ fn invalid_queries_are_rejected_by_the_real_parser() {
     }
 }
 
-/// One fully-populated QueryTrace — every field set to a distinct value so
+/// One fully-populated `QueryTrace` — every field set to a distinct value so
 /// a dropped or renamed serde key cannot hide.
 fn sample_trace() -> QueryTrace {
     QueryTrace {
@@ -136,9 +136,9 @@ fn query_trace_json_shape_is_pinned() {
     check_file("query_trace.json", &bytes);
 }
 
-/// CountersSnapshot's serde keys must equal the contract's counter-name
+/// `CountersSnapshot`'s serde keys must equal the contract's counter-name
 /// registry — the registry is what gen-contract radiates into the C#
-/// CountersData, so a counter added here without a registry entry would
+/// `CountersData`, so a counter added here without a registry entry would
 /// silently vanish from the F12 panel (ADR-0018).
 #[test]
 fn counter_names_match_the_contract_registry() {
@@ -149,7 +149,7 @@ fn counter_names_match_the_contract_registry() {
         .as_object()
         .unwrap()
         .keys()
-        .map(|k| k.as_str())
+        .map(std::string::String::as_str)
         .collect();
     keys.sort_unstable();
     let mut registry: Vec<&str> = fmf_contract::counters::COUNTER_NAMES.to_vec();

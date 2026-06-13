@@ -11,7 +11,7 @@ use fmf_core::query::{self, CaseMode, QueryOptions, UtcResolver};
 /// Deterministic xorshift so every run sees identical data.
 struct Rng(u64);
 impl Rng {
-    fn next(&mut self) -> u64 {
+    const fn next(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x << 13;
         x ^= x >> 7;
@@ -214,7 +214,7 @@ fn bench_queries(c: &mut Criterion) {
             b.iter(|| {
                 let (r, _) = query::search(&idx, &compiled, &opt);
                 std::hint::black_box(r.ids.len())
-            })
+            });
         });
     }
     // Sensitive mode exercises the original-name path of the fold-overflow
@@ -229,7 +229,7 @@ fn bench_queries(c: &mut Criterion) {
         b.iter(|| {
             let (r, _) = query::search(&idx, &q, &sensitive);
             std::hint::black_box(r.ids.len())
-        })
+        });
     });
     g.finish();
 
@@ -238,14 +238,14 @@ fn bench_queries(c: &mut Criterion) {
         b.iter(|| {
             let ast = query::parse("report ext:dll size:>1mb !backup").unwrap();
             std::hint::black_box(query::compile(&ast, opt.case, &UtcResolver).unwrap())
-        })
+        });
     });
 }
 
 /// One keystroke through the engine's incremental query cache: `setup`
 /// seeds the per-volume cache, `routine` runs the next keystroke. The
 /// refine/cold pairs share the routine query, so the delta is purely the
-/// cache path (engine/search.rs + query/subsume.rs + exec::refine).
+/// cache path (engine/search.rs + query/subsume.rs + `exec::refine`).
 fn bench_typing(c: &mut Criterion) {
     // Unique dir: the engine's writer lock would collide with any other
     // engine on the shared temp dir (setup cost, outside all measurements).
@@ -291,7 +291,7 @@ fn bench_typing(c: &mut Criterion) {
                     std::hint::black_box((r.len(), t.cache.len()))
                 },
                 BatchSize::PerIteration,
-            )
+            );
         });
     }
     g.finish();
@@ -307,10 +307,10 @@ fn bench_post_usn(c: &mut Criterion) {
     let ast = query::parse("win").unwrap();
     let compiled = query::compile(&ast, opt.case, &UtcResolver).unwrap();
 
-    let mut g = c.benchmark_group("post_usn");
-    g.sample_size(20);
-    g.measurement_time(std::time::Duration::from_secs(4));
-    g.bench_function("first_query_win", |b| {
+    let mut group = c.benchmark_group("post_usn");
+    group.sample_size(20);
+    group.measurement_time(std::time::Duration::from_secs(4));
+    group.bench_function("first_query_win", |b| {
         b.iter_batched(
             || {
                 let mut i = idx.borrow_mut();
@@ -323,12 +323,12 @@ fn bench_post_usn(c: &mut Criterion) {
                 std::hint::black_box((r.ids.len(), m.memo_us))
             },
             BatchSize::PerIteration,
-        )
+        );
     });
     // First *path* query: pays the lazily built dir-path memo on top.
     let path_ast = query::parse("path:windows report").unwrap();
     let path_q = query::compile(&path_ast, opt.case, &UtcResolver).unwrap();
-    g.bench_function("first_query_path", |b| {
+    group.bench_function("first_query_path", |b| {
         b.iter_batched(
             || {
                 let mut i = idx.borrow_mut();
@@ -341,7 +341,7 @@ fn bench_post_usn(c: &mut Criterion) {
                 std::hint::black_box((r.ids.len(), m.memo_us))
             },
             BatchSize::PerIteration,
-        )
+        );
     });
     // First size-sorted query after a generation bump: the lazy size
     // permutation's steady extend path (ADR-0006). Its one-time cold build
@@ -352,7 +352,7 @@ fn bench_post_usn(c: &mut Criterion) {
     };
     let empty_ast = query::parse("").unwrap();
     let empty_q = query::compile(&empty_ast, size_opt.case, &UtcResolver).unwrap();
-    g.bench_function("first_query_sorted_size", |b| {
+    group.bench_function("first_query_sorted_size", |b| {
         b.iter_batched(
             || {
                 let mut i = idx.borrow_mut();
@@ -365,7 +365,7 @@ fn bench_post_usn(c: &mut Criterion) {
                 std::hint::black_box((r.ids.len(), m.memo_us))
             },
             BatchSize::PerIteration,
-        )
+        );
     });
     // A real (non-empty) batch: 700 creates + 300 deletes, then the one
     // permutation/FRN merge per batch (ADR-0008). Runs on its own index
@@ -377,7 +377,7 @@ fn bench_post_usn(c: &mut Criterion) {
         .map(|i| format!("usn_new_{i:02}.tmp").encode_utf16().collect())
         .collect();
     let iter_no = std::cell::Cell::new(0u64);
-    g.bench_function("apply_batch_1k", |b| {
+    group.bench_function("apply_batch_1k", |b| {
         b.iter_batched(
             || {
                 let n = iter_no.get();
@@ -411,12 +411,12 @@ fn bench_post_usn(c: &mut Criterion) {
                 std::hint::black_box(i.len());
             },
             BatchSize::PerIteration,
-        )
+        );
     });
-    g.finish();
+    group.finish();
 }
 
-/// Snapshot restore (deserialize + checksum + frn_map rebuild) on the
+/// Snapshot restore (deserialize + checksum + `frn_map` rebuild) on the
 /// synthetic 1M index — the unelevated proxy for the restore→ready ≤2s
 /// gate's CPU-bound share (page-cache warm by design).
 fn bench_snapshot(c: &mut Criterion) {
@@ -431,7 +431,7 @@ fn bench_snapshot(c: &mut Criterion) {
         b.iter(|| {
             let (loaded, _, _) = VolumeIndex::load_from(&path).unwrap();
             std::hint::black_box(loaded.len())
-        })
+        });
     });
     g.finish();
     let _ = std::fs::remove_file(&path);

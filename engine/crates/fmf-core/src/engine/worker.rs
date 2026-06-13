@@ -8,7 +8,7 @@
 //!
 //! The full $MFT scan itself is deliberately *not* behind a seam (the
 //! 2-trait cap): its execution stays real-volume territory, covered by the
-//! FMF_ADMIN_TESTS layer.
+//! `FMF_ADMIN_TESTS` layer.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -21,7 +21,7 @@ use super::seams::{JournalSource, JournalView, WinJournalSource};
 use super::volume::{JournalCheckpoint, VolumeSlot};
 use super::{Engine, EngineEvent, VolumeState};
 
-/// Engine-side debounce for IndexChanged — the only throttle in the whole
+/// Engine-side debounce for `IndexChanged` — the only throttle in the whole
 /// change path (docs/ARCHITECTURE.md 遅延予算).
 const INDEX_CHANGED_DEBOUNCE: Duration = Duration::from_millis(200);
 
@@ -48,7 +48,7 @@ pub(super) enum FullScanReason {
     /// live journal: the journal id changed, or the persisted cursor was
     /// already purged (`next_usn < first_usn`).
     CheckpointStale,
-    /// FSCTL_QUERY_USN_JOURNAL failed, so the checkpoint cannot be
+    /// `FSCTL_QUERY_USN_JOURNAL` failed, so the checkpoint cannot be
     /// validated and must not be trusted. Silent by design (pre-seam
     /// behavior): a journal this broken fails the next open/read loudly.
     JournalQueryFailed,
@@ -58,7 +58,7 @@ pub(super) enum FullScanReason {
 /// full scan. The load result carries only the persisted checkpoint; the
 /// index itself never enters the decision.
 ///
-/// `journal` is `None` when FSCTL_QUERY failed *or* was skipped because
+/// `journal` is `None` when `FSCTL_QUERY` failed *or* was skipped because
 /// the load already failed (the worker never queries in that case — a
 /// failed load must not spend an FSCTL). The load arm is matched first,
 /// so the two `None` meanings cannot mix.
@@ -184,7 +184,7 @@ impl Engine {
             if let Err(e) = journal.open() {
                 *slot.phase.lock() = VolumeState::Failed;
                 self.emit(EngineEvent::VolumeFailed {
-                    volume: label.clone(),
+                    volume: label,
                     message: e.to_string(),
                 });
                 return;
@@ -352,14 +352,17 @@ impl Engine {
                 Ok(f) => f,
                 Err(e) => {
                     self.emit(EngineEvent::VolumeFailed {
-                        volume: label.clone(),
+                        volume: label,
                         message: e.to_string(),
                     });
                     return;
                 }
             };
             let mut buf = Vec::new();
-            let mut last_emit = Instant::now() - INDEX_CHANGED_DEBOUNCE;
+            // None = "never emitted" → the first change emits immediately. Avoids
+            // `Instant - DEBOUNCE` and `checked_sub(..).unwrap()`, both of which
+            // panic at boot when uptime < DEBOUNCE.
+            let mut last_emit: Option<Instant> = None;
             loop {
                 if slot.stop.load(Ordering::Relaxed) {
                     self.save_slot(
@@ -414,8 +417,8 @@ impl Engine {
                             next_usn: journal.next_usn(),
                         });
                         self.maybe_compact(&slot);
-                        if last_emit.elapsed() >= INDEX_CHANGED_DEBOUNCE {
-                            last_emit = Instant::now();
+                        if last_emit.is_none_or(|t| t.elapsed() >= INDEX_CHANGED_DEBOUNCE) {
+                            last_emit = Some(Instant::now());
                             self.emit(EngineEvent::IndexChanged {
                                 volume: label.clone(),
                             });
@@ -437,7 +440,7 @@ impl Engine {
                     TailStep::Fail(e) => {
                         *slot.phase.lock() = VolumeState::Failed;
                         self.emit(EngineEvent::VolumeFailed {
-                            volume: label.clone(),
+                            volume: label,
                             message: e.to_string(),
                         });
                         return;
@@ -474,7 +477,9 @@ impl Engine {
         // Generation recheck between copy and swap — pure half in
         // `compact_recheck` (see its doc for the single-writer invariant).
         let guard = slot.index.read();
-        let current = guard.as_ref().map(|i| i.content_generation());
+        let current = guard
+            .as_ref()
+            .map(crate::index::VolumeIndex::content_generation);
         drop(guard);
         if compact_recheck(compacted.1, current) == CompactionVerdict::Abort {
             Counters::bump(&self.metrics.counters.compaction_aborts);

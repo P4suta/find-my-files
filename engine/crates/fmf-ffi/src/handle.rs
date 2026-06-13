@@ -16,13 +16,13 @@ pub(crate) struct EngineHandle {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fmf_abi_version() -> u32 {
+pub const extern "C" fn fmf_abi_version() -> u32 {
     fmf_contract::versions::ABI_VERSION
 }
 
 // ── Lifecycle ───────────────────────────────────────────────────────────
 
-/// config_json: {"index_dir": "C:\\ProgramData\\find-my-files\\index"}
+/// `config_json`: {"`index_dir"`: "C:\\`ProgramData`\\find-my-files\\index"}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_engine_create(
     config_json: *const c_char,
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn fmf_engine_create(
     })
 }
 
-/// Saves every Ready, dirty volume now (docs/ARCHITECTURE.md fmf_flush).
+/// Saves every Ready, dirty volume now (docs/ARCHITECTURE.md `fmf_flush`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_flush(h: *mut c_void) -> i32 {
     guard(|| {

@@ -1,7 +1,8 @@
-//! 16-byte little-endian frame header + length-prefixed payload
+//! 16-byte little-endian frame header + length-prefixed payload.
+//!
 //! (docs/ARCHITECTURE.md「Pipe プロトコル」§フレーム). The header type and
 //! its byte conversion live in `fmf_contract::pod`; this module adds the
-//! stream I/O and the MAX_PAYLOAD_LEN policy.
+//! stream I/O and the `MAX_PAYLOAD_LEN` policy.
 
 use std::io::{Read, Write};
 
@@ -24,7 +25,12 @@ pub enum FrameError {
 /// Decodes a header and enforces the payload cap. A header announcing more
 /// is a protocol violation: the connection is torn down (counted by the
 /// server).
-pub fn decode_header(b: &[u8; HEADER_LEN]) -> Result<FrameHeader, FrameError> {
+///
+/// # Errors
+///
+/// Returns [`FrameError::TooLong`] when the header's `len` exceeds
+/// [`MAX_PAYLOAD_LEN`].
+pub const fn decode_header(b: &[u8; HEADER_LEN]) -> Result<FrameHeader, FrameError> {
     let h = FrameHeader::from_bytes(b);
     if h.len > MAX_PAYLOAD_LEN {
         return Err(FrameError::TooLong(h.len));
@@ -34,12 +40,17 @@ pub fn decode_header(b: &[u8; HEADER_LEN]) -> Result<FrameHeader, FrameError> {
 
 /// Writes header + payload as one frame. `header.len` is taken from
 /// `payload`, not the caller (a mismatch cannot be expressed).
+///
+/// # Errors
+///
+/// Returns [`FrameError::TooLong`] when `payload` exceeds [`MAX_PAYLOAD_LEN`],
+/// or [`FrameError::Io`] if the underlying writer fails.
 pub fn write_frame(
     w: &mut impl Write,
     mut header: FrameHeader,
     payload: &[u8],
 ) -> Result<(), FrameError> {
-    if payload.len() as u64 > MAX_PAYLOAD_LEN as u64 {
+    if payload.len() as u64 > u64::from(MAX_PAYLOAD_LEN) {
         return Err(FrameError::TooLong(payload.len() as u32));
     }
     header.len = payload.len() as u32;
@@ -51,6 +62,12 @@ pub fn write_frame(
 /// Reads exactly one frame. Errors leave the stream in an undefined
 /// position — the caller must drop the connection (byte-mode pipes have no
 /// resync point).
+///
+/// # Errors
+///
+/// Returns [`FrameError::TooLong`] if the header announces a payload over
+/// [`MAX_PAYLOAD_LEN`], or [`FrameError::Io`] if the reader fails or the
+/// stream ends before the full header and payload arrive.
 pub fn read_frame(r: &mut impl Read) -> Result<(FrameHeader, Vec<u8>), FrameError> {
     let mut hb = [0u8; HEADER_LEN];
     r.read_exact(&mut hb)?;

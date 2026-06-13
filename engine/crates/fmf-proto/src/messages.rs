@@ -1,6 +1,8 @@
-//! Payload codecs. Binary payloads are little-endian, padding free,
+//! Payload codecs.
+//!
+//! Binary payloads are little-endian, padding free,
 //! concatenated in documented order; cold-path payloads are UTF-8 JSON with
-//! snake_case fields (docs/ARCHITECTURE.md「Pipe プロトコル」§オペコード表
+//! `snake_case` fields (docs/ARCHITECTURE.md「Pipe プロトコル」§オペコード表
 //! — the canonical table). The types themselves come from `fmf_contract`;
 //! only the byte logic lives here.
 
@@ -39,7 +41,11 @@ fn u64_at(b: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(b[off..off + 8].try_into().unwrap())
 }
 
-fn check_len(what: &'static str, b: &[u8], expected: usize) -> Result<(), WireError> {
+fn bytes16_at(b: &[u8], off: usize) -> [u8; 16] {
+    b[off..off + 16].try_into().unwrap()
+}
+
+const fn check_len(what: &'static str, b: &[u8], expected: usize) -> Result<(), WireError> {
     if b.len() != expected {
         return Err(WireError::Length {
             what,
@@ -60,10 +66,14 @@ pub struct HelloReq {
 impl HelloReq {
     pub const LEN: usize = 4;
 
+    #[must_use]
     pub fn encode(self) -> Vec<u8> {
         self.protocol_version.to_le_bytes().to_vec()
     }
 
+    /// # Errors
+    ///
+    /// Returns [`WireError::Length`] if `b` is not exactly [`Self::LEN`] bytes.
     pub fn decode(b: &[u8]) -> Result<Self, WireError> {
         check_len("HelloReq", b, Self::LEN)?;
         Ok(Self {
@@ -82,6 +92,7 @@ pub struct HelloResp {
 impl HelloResp {
     pub const LEN: usize = 12;
 
+    #[must_use]
     pub fn encode(self) -> Vec<u8> {
         let mut v = Vec::with_capacity(Self::LEN);
         v.extend_from_slice(&self.protocol_version.to_le_bytes());
@@ -90,6 +101,9 @@ impl HelloResp {
         v
     }
 
+    /// # Errors
+    ///
+    /// Returns [`WireError::Length`] if `b` is not exactly [`Self::LEN`] bytes.
     pub fn decode(b: &[u8]) -> Result<Self, WireError> {
         check_len("HelloResp", b, Self::LEN)?;
         Ok(Self {
@@ -102,6 +116,7 @@ impl HelloResp {
 
 // ── Query (op 7, binary options + UTF-8 text) ───────────────────────────
 
+#[must_use]
 pub fn encode_query_req(opt: FmfQueryOptions, text: &str) -> Vec<u8> {
     let mut v = Vec::with_capacity(FmfQueryOptions::LEN + text.len());
     v.extend_from_slice(&opt.sort.to_le_bytes());
@@ -112,6 +127,11 @@ pub fn encode_query_req(opt: FmfQueryOptions, text: &str) -> Vec<u8> {
     v
 }
 
+/// # Errors
+///
+/// Returns [`WireError::Length`] if `b` is shorter than the fixed options
+/// header, or [`WireError::Utf8`] if the trailing query text is not valid
+/// UTF-8.
 pub fn decode_query_req(b: &[u8]) -> Result<(FmfQueryOptions, &str), WireError> {
     if b.len() < FmfQueryOptions::LEN {
         return Err(WireError::Length {
@@ -131,7 +151,7 @@ pub fn decode_query_req(b: &[u8]) -> Result<(FmfQueryOptions, &str), WireError> 
     Ok((opt, text))
 }
 
-/// Query response head; the QueryTrace JSON follows it verbatim.
+/// Query response head; the `QueryTrace` JSON follows it verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryRespHead {
     pub result_id: u64,
@@ -141,6 +161,7 @@ pub struct QueryRespHead {
 impl QueryRespHead {
     pub const LEN: usize = 16;
 
+    #[must_use]
     pub fn encode_with_trace(self, trace_json: &[u8]) -> Vec<u8> {
         let mut v = Vec::with_capacity(Self::LEN + trace_json.len());
         v.extend_from_slice(&self.result_id.to_le_bytes());
@@ -149,6 +170,9 @@ impl QueryRespHead {
         v
     }
 
+    /// # Errors
+    ///
+    /// Returns [`WireError::Length`] if `b` is shorter than [`Self::LEN`].
     pub fn decode(b: &[u8]) -> Result<(Self, &[u8]), WireError> {
         if b.len() < Self::LEN {
             return Err(WireError::Length {
@@ -179,6 +203,7 @@ pub struct ResultPageReq {
 impl ResultPageReq {
     pub const LEN: usize = 20;
 
+    #[must_use]
     pub fn encode(self) -> Vec<u8> {
         let mut v = Vec::with_capacity(Self::LEN);
         v.extend_from_slice(&self.result_id.to_le_bytes());
@@ -187,6 +212,9 @@ impl ResultPageReq {
         v
     }
 
+    /// # Errors
+    ///
+    /// Returns [`WireError::Length`] if `b` is not exactly [`Self::LEN`] bytes.
     pub fn decode(b: &[u8]) -> Result<Self, WireError> {
         check_len("ResultPageReq", b, Self::LEN)?;
         Ok(Self {
@@ -225,13 +253,14 @@ fn read_row_at(b: &[u8], off: usize) -> FmfRow {
     }
 }
 
-/// Decoded view of a ResultPage response payload:
-/// `{row_count:u32, blob_len:u32}` → rows (48 B × row_count) → blob.
+/// Decoded view of a `ResultPage` response payload:
+/// `{row_count:u32, blob_len:u32}` → rows (48 B × `row_count`) → blob.
 pub struct PageView<'a> {
     pub rows: Vec<FmfRow>,
     pub blob: &'a [u8],
 }
 
+#[must_use]
 pub fn encode_page(rows: &[FmfRow], blob: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(8 + rows.len() * FmfRow::LEN + blob.len());
     v.extend_from_slice(&(rows.len() as u32).to_le_bytes());
@@ -243,6 +272,10 @@ pub fn encode_page(rows: &[FmfRow], blob: &[u8]) -> Vec<u8> {
     v
 }
 
+/// # Errors
+///
+/// Returns [`WireError::Length`] if `b` is shorter than the 8-byte count
+/// header or if its `row_count`/`blob_len` do not match the payload length.
 pub fn decode_page(b: &[u8]) -> Result<PageView<'_>, WireError> {
     if b.len() < 8 {
         return Err(WireError::Length {
@@ -269,10 +302,14 @@ pub fn decode_page(b: &[u8]) -> Result<PageView<'_>, WireError> {
 
 // ── ResultFree (op 9, binary) ───────────────────────────────────────────
 
+#[must_use]
 pub fn encode_result_free(result_id: u64) -> Vec<u8> {
     result_id.to_le_bytes().to_vec()
 }
 
+/// # Errors
+///
+/// Returns [`WireError::Length`] if `b` is not exactly 8 bytes.
 pub fn decode_result_free(b: &[u8]) -> Result<u64, WireError> {
     check_len("ResultFree", b, 8)?;
     Ok(u64_at(b, 0))
@@ -282,6 +319,7 @@ pub fn decode_result_free(b: &[u8]) -> Result<u64, WireError> {
 
 /// Body is the FFI `FmfEvent` POD (32 bytes), serialized explicitly:
 /// `{kind:u32, _pad:u32(0), entries:u64, volume:[u8;16]}`.
+#[must_use]
 pub fn encode_event(ev: &FmfEvent) -> Vec<u8> {
     let mut v = Vec::with_capacity(FmfEvent::LEN);
     v.extend_from_slice(&ev.kind.to_le_bytes());
@@ -291,13 +329,16 @@ pub fn encode_event(ev: &FmfEvent) -> Vec<u8> {
     v
 }
 
+/// # Errors
+///
+/// Returns [`WireError::Length`] if `b` is not exactly [`FmfEvent::LEN`] bytes.
 pub fn decode_event(b: &[u8]) -> Result<FmfEvent, WireError> {
     check_len("Event", b, FmfEvent::LEN)?;
     Ok(FmfEvent {
         kind: u32_at(b, 0),
         _pad: 0,
         entries: u64_at(b, 8),
-        volume: b[16..32].try_into().unwrap(),
+        volume: bytes16_at(b, 16),
     })
 }
 
@@ -325,10 +366,16 @@ pub struct ServiceInfoResp {
     pub version: String,
 }
 
+/// # Errors
+///
+/// Returns [`WireError::Json`] if `serde_json` fails to serialize `v`.
 pub fn encode_json<T: Serialize>(what: &'static str, v: &T) -> Result<Vec<u8>, WireError> {
     serde_json::to_vec(v).map_err(|source| WireError::Json { what, source })
 }
 
+/// # Errors
+///
+/// Returns [`WireError::Json`] if `b` is not valid JSON for `T`.
 pub fn decode_json<'a, T: Deserialize<'a>>(
     what: &'static str,
     b: &'a [u8],
@@ -393,7 +440,7 @@ mod tests {
     fn page_roundtrip_pins_the_48_byte_row() {
         let row = FmfRow {
             entry_ref: 1,
-            frn: (1 << 48) | 100,
+            frn: (1 << 48) | 0x64,
             size: 1234,
             mtime: -5,
             name_off: 0,

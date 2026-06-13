@@ -1,8 +1,9 @@
-//! Pipe server: accept loop (2-wait on connect/stop) + per-connection
-//! threads. One reader decodes frames into a small queue, two workers
-//! dispatch out-of-order (a page fetch never queues behind a slow query),
-//! all frame writes — responses and event pushes — serialize on one mutex
-//! so frames can't interleave mid-stream.
+//! Pipe server: accept loop (2-wait on connect/stop) + per-connection threads.
+//!
+//! One reader decodes frames into a small queue, two workers dispatch
+//! out-of-order (a page fetch never queues behind a slow query), all frame
+//! writes — responses and event pushes — serialize on one mutex so frames
+//! can't interleave mid-stream.
 
 use std::io;
 use std::sync::Arc;
@@ -36,6 +37,11 @@ pub struct Server {
 }
 
 impl Server {
+    /// # Errors
+    /// Returns the OS error if the stop event cannot be created.
+    ///
+    /// # Panics
+    /// Panics if the accept thread fails to spawn.
     pub fn start(engine: Arc<Engine>, opts: ServerOptions) -> io::Result<Arc<Self>> {
         let stop = Arc::new(Event::new()?);
         let broadcaster = Broadcaster::install(&engine);
@@ -96,14 +102,15 @@ fn accept_loop(
             Ok(Accepted::Stopped) => return,
             Ok(Accepted::Connection(stream)) => {
                 // Defense in depth behind the DACL: verify the client token.
-                match crate::security::verify_client(&stream, &opts.authorized_sids) {
-                    Ok(true) => {}
-                    Ok(false) | Err(_) => {
-                        Counters::bump(&engine.metrics().counters.pipe_connections_rejected);
-                        tracing::warn!("pipe client token rejected");
-                        stream.disconnect();
-                        continue;
-                    }
+                if matches!(
+                    crate::security::verify_client(&stream, &opts.authorized_sids),
+                    Ok(true)
+                ) {
+                } else {
+                    Counters::bump(&engine.metrics().counters.pipe_connections_rejected);
+                    tracing::warn!("pipe client token rejected");
+                    stream.disconnect();
+                    continue;
                 }
                 let engine = engine.clone();
                 let broadcaster = broadcaster.clone();
@@ -132,7 +139,6 @@ fn run_connection(
     faults: Faults,
     active: Arc<std::sync::atomic::AtomicUsize>,
 ) {
-    active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Decrement on every exit path (including panics) — the count must
     // never drift from the number of live connection threads.
     struct ActiveGuard(Arc<std::sync::atomic::AtomicUsize>);
@@ -141,6 +147,8 @@ fn run_connection(
             self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
+
+    active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _guard = ActiveGuard(active.clone());
 
     let conn = Arc::new(Connection::new(engine.clone(), faults, active));

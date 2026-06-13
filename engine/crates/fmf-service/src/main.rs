@@ -29,7 +29,7 @@ enum Cli {
         /// Enable !!panic / !!drop / !!lag fault injection (never on by default).
         #[arg(long)]
         debug_faults: bool,
-        /// Skip the startup index_start (unelevated pipe-surface debugging).
+        /// Skip the startup `index_start` (unelevated pipe-surface debugging).
         #[arg(long)]
         no_index: bool,
     },
@@ -273,7 +273,7 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
     service
         .update_failure_actions(ServiceFailureActions {
             reset_period: windows_service::service::ServiceFailureResetPeriod::After(
-                Duration::from_secs(86_400),
+                Duration::from_hours(24),
             ),
             reboot_msg: None,
             command: None,
@@ -290,7 +290,7 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
     // 5. Raw config2: strip privileges, stretch the preshutdown window
     //    (modern default is only 10s — docs/RESEARCH.md).
     set_required_privileges(&["SeChangeNotifyPrivilege"])?;
-    set_preshutdown_timeout(Duration::from_secs(180))?;
+    set_preshutdown_timeout(Duration::from_mins(3))?;
 
     println!("installed '{SERVICE_NAME}' (LocalSystem, delayed auto start)");
     println!("authorized SID: {sid}");
@@ -305,7 +305,7 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
 /// unelevated app's「登録 / 登録し直す」button is a single UAC prompt. The
 /// authorized-SID list is read only at service startup, so the restart is
 /// what actually applies a freshly installed SID — the same install+restart
-/// pairing the in-app InstallAndRestart does, moved server-side. Covers both
+/// pairing the in-app `InstallAndRestart` does, moved server-side. Covers both
 /// first install (service stopped → restart just starts it) and re-register
 /// (service running → restart re-reads service.json).
 fn setup(owner_sid: Option<String>) -> Result<(), String> {
@@ -428,6 +428,10 @@ fn stop_service() -> Result<(), String> {
     Err("service did not stop within 20s".into())
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "uniform Result<(), String> shape so every subcommand flows through report()"
+)]
 fn status() -> Result<(), String> {
     use windows_service::service::ServiceAccess;
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -487,12 +491,12 @@ fn set_required_privileges(privs: &[&str]) -> Result<(), String> {
     }
     multi.push(0);
     let info = SERVICE_REQUIRED_PRIVILEGES_INFOW {
-        pmszRequiredPrivileges: multi.as_ptr() as *mut u16,
+        pmszRequiredPrivileges: multi.as_ptr().cast_mut(),
     };
     change_config2(
         SERVICE_CHANGE_CONFIG,
         SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
-        (&info as *const SERVICE_REQUIRED_PRIVILEGES_INFOW).cast(),
+        (&raw const info).cast(),
     )
     .map_err(|e| format!("required privileges: {e}"))
 }
@@ -507,7 +511,7 @@ fn set_preshutdown_timeout(timeout: Duration) -> Result<(), String> {
     change_config2(
         SERVICE_CHANGE_CONFIG,
         SERVICE_CONFIG_PRESHUTDOWN_INFO,
-        (&info as *const SERVICE_PRESHUTDOWN_INFO).cast(),
+        (&raw const info).cast(),
     )
     .map_err(|e| format!("preshutdown timeout: {e}"))
 }
@@ -529,7 +533,7 @@ fn change_config2(access: u32, level: u32, info: *const core::ffi::c_void) -> st
             CloseServiceHandle(scm);
             return Err(e);
         }
-        let ok = ChangeServiceConfig2W(svc, level, info as *mut core::ffi::c_void);
+        let ok = ChangeServiceConfig2W(svc, level, info.cast_mut());
         let err = GetLastError();
         CloseServiceHandle(svc);
         CloseServiceHandle(scm);

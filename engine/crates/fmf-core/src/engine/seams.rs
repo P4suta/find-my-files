@@ -18,7 +18,7 @@ use crate::index::VolumeIndex;
 use crate::usn::{ReadOutcome, StatFetcher, UsnError, UsnJournal, VolumeStatFetcher};
 
 /// Snapshot persistence for one volume (`{index_dir}\{letter}.fmfidx`).
-pub(crate) trait SnapshotStore: Send + Sync {
+pub trait SnapshotStore: Send + Sync {
     /// Load the persisted snapshot: the rebuilt index plus the journal
     /// checkpoint (`journal_id`, `next_usn`) it was saved with.
     /// `ErrorKind::NotFound` means "first run" (not a failure); any other
@@ -41,12 +41,12 @@ pub(crate) trait SnapshotStore: Send + Sync {
 
 /// Production store: thin wrapper over `VolumeIndex::{load_from, save_to}`
 /// plus `fs::{metadata, remove_file}` on the volume's snapshot path.
-pub(crate) struct WinSnapshotStore {
+pub struct WinSnapshotStore {
     path: PathBuf,
 }
 
 impl WinSnapshotStore {
-    pub(crate) fn new(path: PathBuf) -> Self {
+    pub(crate) const fn new(path: PathBuf) -> Self {
         Self { path }
     }
 }
@@ -74,10 +74,10 @@ impl SnapshotStore for WinSnapshotStore {
     }
 }
 
-/// What checkpoint validation needs from FSCTL_QUERY_USN_JOURNAL.
+/// What checkpoint validation needs from `FSCTL_QUERY_USN_JOURNAL`.
 #[cfg(windows)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct JournalView {
+pub struct JournalView {
     pub(crate) journal_id: u64,
     /// Oldest USN still retained — a persisted cursor older than this has
     /// lost records and cannot be replayed.
@@ -89,7 +89,7 @@ pub(crate) struct JournalView {
 /// worker guarantees this; implementations may panic otherwise — the
 /// worker's panic firewall turns that into a visible `VolumeFailed`).
 #[cfg(windows)]
-pub(crate) trait JournalSource: Send {
+pub trait JournalSource: Send {
     /// (Re)open the journal, creating it when missing. Positions the
     /// cursor at the journal's current end. Called once per establish
     /// cycle: at start and after every journal-gone rescan.
@@ -119,21 +119,21 @@ pub(crate) trait JournalSource: Send {
 /// Production journal: thin wrapper over `usn::session::UsnJournal` /
 /// `VolumeStatFetcher` for one drive label.
 #[cfg(windows)]
-pub(crate) struct WinJournalSource {
+pub struct WinJournalSource {
     label: String,
     session: Option<UsnJournal>,
 }
 
 #[cfg(windows)]
 impl WinJournalSource {
-    pub(crate) fn new(label: String) -> Self {
+    pub(crate) const fn new(label: String) -> Self {
         Self {
             label,
             session: None,
         }
     }
 
-    fn session(&self) -> &UsnJournal {
+    const fn session(&self) -> &UsnJournal {
         self.session.as_ref().expect("journal used before open")
     }
 }

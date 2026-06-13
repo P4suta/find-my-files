@@ -40,17 +40,18 @@ pub struct SpikeStats {
     pub files: u64,
     pub dirs: u64,
     pub reparse_points: u64,
-    /// Records where the base record holds no usable $FILE_NAME (needs
+    /// Records where the base record holds no usable $`FILE_NAME` (needs
     /// attribute-list handling in M0).
     pub no_name_in_base_record: u64,
     pub name_utf16_units_total: u64,
     pub max_name_utf16_units: u64,
-    /// Sanity check that reference_number() carries a sequence value.
+    /// Sanity check that `reference_number()` carries a sequence value.
     pub frn_sequence_nonzero: u64,
     pub peak_working_set_bytes: u64,
 }
 
 impl SpikeStats {
+    #[must_use]
     pub fn avg_name_utf16_units(&self) -> f64 {
         let named = (self.files + self.dirs).max(1);
         self.name_utf16_units_total as f64 / named as f64
@@ -80,6 +81,12 @@ pub(crate) fn pick_name(file: &NtfsFile) -> Option<NtfsFileName> {
 
 /// Scan one volume's $MFT end to end and report measurements.
 /// `drive` is a drive letter spec like `C:`.
+///
+/// # Errors
+///
+/// Returns [`MftError::NotElevated`] when the process lacks the privileges to
+/// open the raw volume, or [`MftError::Ntfs`] if opening the volume or
+/// reading the $MFT fails.
 pub fn spike_scan(drive: &str) -> Result<SpikeStats, MftError> {
     let volume_path = format!(r"\\.\{}", drive.trim_end_matches(['\\', '/']));
     let mut stats = SpikeStats {
@@ -144,8 +151,18 @@ pub fn spike_scan(drive: &str) -> Result<SpikeStats, MftError> {
 
 /// Full initial scan: read the volume's $MFT and build the in-memory index.
 /// `drive` is a drive letter spec like `C:`.
+///
+/// # Errors
+///
+/// Returns [`MftError::NotElevated`] when the process lacks the privileges to
+/// open the raw volume, or [`MftError::Ntfs`] if opening the volume or
+/// reading the $MFT fails.
 pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     use ntfs_reader::api::ROOT_RECORD;
+
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
     let drive = drive.trim_end_matches(['\\', '/']);
     let volume_path = format!(r"\\.\{drive}");
@@ -163,10 +180,6 @@ pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), Mf
     let mft = Mft::new(volume)?;
     stats.elapsed_mft_load_ms = t1.elapsed().as_millis() as u64;
     stats.mft_bytes = mft.data.len() as u64;
-
-    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
     let mut b = VolumeIndexBuilder::new(drive, ROOT_RECORD);
     for file in mft.files() {
@@ -242,12 +255,14 @@ pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), Mf
 }
 
 /// Peak working set of the current process, in bytes (0 if the query fails).
+#[must_use]
 pub fn peak_working_set() -> u64 {
     memory_counters().map_or(0, |c| c.PeakWorkingSetSize as u64)
 }
 
 /// Current working set — the steady-state number the RAM gate cares about
 /// (the peak includes transient scan buffers).
+#[must_use]
 pub fn current_working_set() -> u64 {
     memory_counters().map_or(0, |c| c.WorkingSetSize as u64)
 }
@@ -263,7 +278,7 @@ fn memory_counters() -> Option<windows_sys::Win32::System::ProcessStatus::PROCES
         counters.cb = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
         let ok = GetProcessMemoryInfo(
             GetCurrentProcess(),
-            &mut counters,
+            &raw mut counters,
             size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
         );
         (ok != 0).then_some(counters)

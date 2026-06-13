@@ -7,12 +7,17 @@ namespace FindMyFiles.Services;
 /// cached <see cref="DispatcherQueue"/> (CLAUDE.md UI固定則 — cache on the UI
 /// thread, TryEnqueue from background threads).
 /// </summary>
+/// <param name="queue">The UI thread's <see cref="DispatcherQueue"/>, captured
+/// once on that thread at construction.</param>
 public sealed class DispatcherQueueDispatcher(DispatcherQueue queue) : IDispatcher
 {
+    /// <inheritdoc/>
     public bool HasThreadAccess => queue.HasThreadAccess;
 
+    /// <inheritdoc/>
     public bool TryEnqueue(Action action) => queue.TryEnqueue(() => action());
 
+    /// <inheritdoc/>
     public IDispatcherTimer CreateOneShotTimer(TimeSpan interval, Action tick)
     {
         var timer = queue.CreateTimer();

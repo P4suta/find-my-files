@@ -1,6 +1,6 @@
 //! Golden corpus pin: every representative frame the protocol can carry,
 //! captured byte-for-byte in `contract/golden/` (repo root). The C# suite
-//! (GoldenCorpusTests) pins the very same files — this is the "Rust/C# 両
+//! (`GoldenCorpusTests`) pins the very same files — this is the "Rust/C# 両
 //! テストが同一ゴールデンバイトをピンする" rule made real (ADR-0018).
 //!
 //! Re-capture (bless) is an explicit ritual for intentional contract
@@ -59,6 +59,10 @@ fn corpus() -> Vec<Case> {
     };
 
     // ── Hello (op 1) ────────────────────────────────────────────────────
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "golden manifest descriptor text, never a format string"
+    )]
     case(
         "hello_req.bin",
         "op1 request: HelloReq{protocol_version:1}",
@@ -278,7 +282,7 @@ fn corpus() -> Vec<Case> {
         push_row(
             b"alpha.txt",
             b"C:\\",
-            (1 << 48) | 100,
+            (1 << 48) | 0x64,
             1234,
             133_500_000_000_000_000,
             0,
@@ -286,14 +290,14 @@ fn corpus() -> Vec<Case> {
         push_row(
             "省察.txt".as_bytes(),
             "C:\\メモ\\".as_bytes(),
-            (2 << 48) | 200,
+            (2 << 48) | 0xC8,
             0x1_0000_0001, // > u32::MAX — pins the u64 size column on the wire
             -5,            // pins i64 signedness
             0,
         );
         let mut surrogate_name = vec![0xED, 0xA0, 0x80]; // unpaired U+D800, WTF-8
         surrogate_name.extend_from_slice(b"tail.dat");
-        push_row(&surrogate_name, b"C:\\", (3 << 48) | 300, 0, 0, 1);
+        push_row(&surrogate_name, b"C:\\", (3 << 48) | 0x12C, 0, 0, 1);
         case(
             "result_page_resp_rows.bin",
             "op8 response: 3 rows (ASCII / multi-byte / WTF-8 unpaired surrogate), \
@@ -309,6 +313,10 @@ fn corpus() -> Vec<Case> {
     }
 
     // ── ResultFree (op 9) ───────────────────────────────────────────────
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "golden manifest descriptor text, never a format string"
+    )]
     case(
         "result_free_req.bin",
         "op9 request: {result_id:1}",

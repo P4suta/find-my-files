@@ -25,10 +25,10 @@ fn build_index(drive: &str) -> Result<VolumeIndex, Box<dyn std::error::Error>> {
     // Mirror the engine (volume thread does the same): the build leaves
     // power-of-two capacity slack that would distort every RAM number.
     idx.shrink_to_fit();
-    let per_entry = if !idx.is_empty() {
-        s.peak_working_set_bytes / idx.len() as u64
-    } else {
+    let per_entry = if idx.is_empty() {
         0
+    } else {
+        s.peak_working_set_bytes / idx.len() as u64
     };
     eprintln!(
         "indexed {} entries ({} files, {} dirs, {} skipped) in {} ms ($MFT read {} ms, parse {} ms, deferred {} names {} ms, build {} ms, sort {} ms — read/parse overlap)",

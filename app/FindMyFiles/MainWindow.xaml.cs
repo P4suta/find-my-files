@@ -6,6 +6,8 @@ namespace FindMyFiles;
 /// MainPage.</summary>
 public sealed partial class MainWindow : Window
 {
+    /// <summary>タイトルバーをコンテンツへ拡張し、ウィンドウアイコンを設定したうえで
+    /// ルート Frame を <see cref="MainPage"/> へナビゲートする。</summary>
     public MainWindow()
     {
         InitializeComponent();

@@ -16,11 +16,22 @@ public sealed class FakeEngineClient : IEngineClient
 {
     private const int EntryCount = 100_000;
     private readonly List<RowData> _rows;
-    private readonly IReadOnlySet<string> _invalidQueries = LoadInvalidQueries();
+    private readonly HashSet<string> _invalidQueries = LoadInvalidQueries();
     private int _epoch;
 
+    /// <inheritdoc/>
+    /// <remarks>The fake never indexes, so this never fires (empty
+    /// accessors).</remarks>
     public event Action<string>? IndexChanged { add { } remove { } }
+
+    /// <inheritdoc/>
+    /// <remarks>Volume state is fixed (one Ready volume), so this never fires
+    /// (empty accessors).</remarks>
     public event Action<VolumeStatus>? VolumeUpdated { add { } remove { } }
+
+    /// <inheritdoc/>
+    /// <remarks>In-proc has no transport, so this never fires (empty
+    /// accessors).</remarks>
     public event Action<EngineConnectionState>? ConnectionChanged { add { } remove { } }
 
     /// <summary>In-proc: no transport, no state transitions.</summary>
@@ -28,6 +39,9 @@ public sealed class FakeEngineClient : IEngineClient
     // Only the DEBUG-only fault injection raises this; Release builds keep
     // the member to satisfy IEngineClient.
 #pragma warning disable CS0067
+    /// <inheritdoc/>
+    /// <remarks>Only the DEBUG <c>!!warn</c> fault injection raises this; in
+    /// Release builds it never fires.</remarks>
     public event Action<int>? EngineErrorOccurred;
 #pragma warning restore CS0067
 
@@ -43,6 +57,13 @@ public sealed class FakeEngineClient : IEngineClient
     /// the status badge says 未接続, not fake.</summary>
     public bool IsEmpty { get; }
 
+    /// <summary>Builds the fake. The default (<paramref name="empty"/> false)
+    /// generates the deterministic 100k-row dataset that backs
+    /// <c>--fake-engine</c>; <see cref="CreateEmpty"/> passes
+    /// <paramref name="empty"/> true for the unelevated no-service
+    /// stand-in.</summary>
+    /// <param name="empty">When true, no rows are generated (the 未接続
+    /// auto-fallback); when false, the seeded demo dataset is built.</param>
     public FakeEngineClient(bool empty = false)
     {
         IsEmpty = empty;
@@ -51,6 +72,8 @@ public sealed class FakeEngineClient : IEngineClient
             _rows = [];
             return;
         }
+        // fake/demo sample-data generation, never security-sensitive — System.Random is intentional
+#pragma warning disable CA5394
         var rng = new Random(42);
         string[] exts = ["txt", "rs", "cs", "dll", "png", "pdf", "log", "json"];
         string[] dirs = ["F:\\", "F:\\src\\", "F:\\docs\\", "F:\\bin\\debug\\", "F:\\photos\\2026\\"];
@@ -76,12 +99,13 @@ public sealed class FakeEngineClient : IEngineClient
                 Name: name,
                 ParentPath: dirs[rng.Next(dirs.Length)]));
         }
+#pragma warning restore CA5394
     }
 
     /// <summary>The shared syntax fixture: queries the real engine rejects.
     /// A missing/corrupt file degrades to accept-everything — loudly, never
     /// fatally (the fake must keep working in stripped-down test hosts).</summary>
-    private static IReadOnlySet<string> LoadInvalidQueries()
+    private static HashSet<string> LoadInvalidQueries()
     {
         var path = Path.Combine(AppContext.BaseDirectory, "golden", "invalid_queries.json");
         try
@@ -105,18 +129,22 @@ public sealed class FakeEngineClient : IEngineClient
     /// exactly like a real index rebuild (UI Stale→requery recovery).</summary>
     public void BumpEpoch() => Interlocked.Increment(ref _epoch);
 
+    /// <inheritdoc/>
     public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<string>>(["F:"]);
 
+    /// <inheritdoc/>
     public Task StartIndexingAsync(
         IReadOnlyList<string> volumes, CancellationToken ct = default) => Task.CompletedTask;
 
+    /// <inheritdoc/>
     public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<VolumeStatus>>(
             [new("F:", VolumeState.Ready, (ulong)_rows.Count)]);
 
     private readonly List<QueryTraceData> _traces = [];
 
+    /// <inheritdoc/>
     public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default)
     {
         var stats = new EngineStatsData
@@ -140,6 +168,8 @@ public sealed class FakeEngineClient : IEngineClient
         return Task.FromResult<EngineStatsData?>(stats);
     }
 
+    /// <inheritdoc/>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2000:_", Justification = "ownership transferred to the caller (ISearchResult), disposed by the caller / on epoch change")]
     public Task<SearchOutcome> SearchAsync(
         string query, SearchOptions options, CancellationToken ct = default)
     {
@@ -219,6 +249,7 @@ public sealed class FakeEngineClient : IEngineClient
             new FakeResult(this, Volatile.Read(ref _epoch), list, pageLag), trace));
     }
 
+    /// <inheritdoc/>
     public void Dispose() { }
 
     private sealed class FakeResult(

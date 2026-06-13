@@ -25,15 +25,25 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     private IntPtr _handle;
     private GCHandle _self;
 
+    /// <inheritdoc/>
     public event Action<string>? IndexChanged;
+
+    /// <inheritdoc/>
     public event Action<VolumeStatus>? VolumeUpdated;
+
+    /// <inheritdoc/>
     public event Action<int>? EngineErrorOccurred;
 
     /// <summary>In-proc: no transport, no state transitions.</summary>
     public EngineConnectionState Connection => EngineConnectionState.InProc;
 
+    /// <inheritdoc/>
+    /// <remarks>In-proc has no transport, so this never fires; the
+    /// add/remove accessors are empty.</remarks>
     public event Action<EngineConnectionState>? ConnectionChanged { add { } remove { } }
 
+    /// <summary>Creates the in-proc engine over the default machine index at
+    /// <c>%ProgramData%\find-my-files\index</c>.</summary>
     public FfiEngineClient()
         : this(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -114,6 +124,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     // the UI thread out of the FFI entirely. The ct goes to Task.Run: FFI
     // calls are short and non-cancellable mid-flight, so cancellation takes
     // effect at scheduling time (a pre-cancelled ct never crosses the FFI).
+    /// <inheritdoc/>
     public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
     {
         var handle = _handle;
@@ -134,7 +145,9 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         }, ct);
     }
 
+#pragma warning disable RCS1242 // `in` is required to pin the fixed-size Label buffer via `fixed` below; FmfVolumeStatus is a generated marshaling struct, never mutated here
     private static string LabelOf(in NativeEngine.FmfVolumeStatus s)
+#pragma warning restore RCS1242
     {
         fixed (byte* p = s.Label)
         {
@@ -147,6 +160,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         }
     }
 
+    /// <inheritdoc/>
     public Task StartIndexingAsync(IReadOnlyList<string> volumes, CancellationToken ct = default)
     {
         var handle = _handle;
@@ -181,6 +195,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         }, ct);
     }
 
+    /// <inheritdoc/>
     public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default)
     {
         var handle = _handle;
@@ -202,6 +217,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         }, ct);
     }
 
+    /// <inheritdoc/>
     public Task<SearchOutcome> SearchAsync(
         string query, SearchOptions options, CancellationToken ct = default)
     {
@@ -221,8 +237,12 @@ public sealed unsafe class FfiEngineClient : IEngineClient
             string? traceJson;
             unsafe
             {
+                // in matches the P/Invoke const-pointer ABI for FmfQueryOptions;
+                // one-shot, never mutated.
+#pragma warning disable RCS1242 // in matches the P/Invoke const-pointer ABI for FmfQueryOptions; one-shot, never mutated
                 rc = NativeEngine.fmf_query(
                     handle, query, in native, out result, out count, out var trace);
+#pragma warning restore RCS1242
                 traceJson = rc == NativeEngine.Ok ? NativeEngine.TakeBlob(trace) : null;
             }
             if (rc != NativeEngine.Ok)
@@ -239,6 +259,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         }, ct);
     }
 
+    /// <inheritdoc/>
     public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default)
     {
         var handle = _handle;
@@ -257,6 +278,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         }, ct);
     }
 
+    /// <inheritdoc/>
     public void Dispose()
     {
         // Advance the generation FIRST: a native callback already in flight
@@ -265,8 +287,10 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         Volatile.Write(ref _liveGeneration, Interlocked.Increment(ref s_generation));
         if (_handle != IntPtr.Zero)
         {
-            NativeEngine.fmf_set_event_callback(_handle, null, IntPtr.Zero);
-            NativeEngine.fmf_engine_destroy(_handle); // joins engine threads
+            // Teardown return codes are intentionally ignored — there is no
+            // recovery action during dispose.
+            _ = NativeEngine.fmf_set_event_callback(_handle, null, IntPtr.Zero);
+            _ = NativeEngine.fmf_engine_destroy(_handle); // joins engine threads
             _handle = IntPtr.Zero;
         }
         // Freed last: fmf_engine_destroy joined the threads that could still
@@ -317,7 +341,8 @@ internal sealed unsafe class FfiSearchResult(IntPtr handle, long count) : SafeHa
                 }
                 finally
                 {
-                    NativeEngine.fmf_page_free(page);
+                    // Free path: the return code carries no recovery action.
+                    _ = NativeEngine.fmf_page_free(page);
                 }
             }
             finally

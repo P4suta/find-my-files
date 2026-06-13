@@ -34,7 +34,7 @@ impl OffsetTable {
             .map(|id| (idx.name_off_of(id), id))
             .collect();
         pairs.par_sort_unstable();
-        OffsetTable {
+        Self {
             offs: pairs.iter().map(|p| p.0).collect(),
             ids: pairs.iter().map(|p| p.1).collect(),
             covers_entries: idx.len() as u32,
@@ -49,7 +49,7 @@ impl OffsetTable {
     /// Appended entries arrive in offset order by construction; in-place
     /// renamed dirs (their `name_off` jumped past the watermark) are merged
     /// in and their old pairs left behind as stale.
-    pub(super) fn extend_from(idx: &VolumeIndex, prev: std::sync::Arc<OffsetTable>) -> Self {
+    pub(super) fn extend_from(idx: &VolumeIndex, prev: std::sync::Arc<Self>) -> Self {
         let n = idx.len() as u32;
         let pool_len = idx.lower_pool_bytes().len() as u32;
         // Entries and pool are append-only within a structural generation —
@@ -115,7 +115,7 @@ impl OffsetTable {
         }
         debug_assert!(offs.is_sorted());
 
-        OffsetTable {
+        Self {
             offs,
             ids,
             covers_entries: n,
@@ -124,7 +124,7 @@ impl OffsetTable {
         }
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(super) const fn len(&self) -> usize {
         self.offs.len()
     }
 }
@@ -201,16 +201,16 @@ impl From<MtimePerm> for SortPerm {
 }
 
 impl SortPerm {
-    fn build(idx: &VolumeIndex, key: SortKey) -> SortPerm {
+    fn build(idx: &VolumeIndex, key: SortKey) -> Self {
         let mut ids: Vec<EntryId> = (0..idx.len() as u32).collect();
         ids.par_sort_unstable_by(|&a, &b| idx.cmp_by(key, a, b));
-        SortPerm {
+        Self {
             ids,
             covers: idx.len() as u32,
         }
     }
 
-    fn extend(idx: &VolumeIndex, mut perm: SortPerm, key: SortKey) -> SortPerm {
+    fn extend(idx: &VolumeIndex, mut perm: Self, key: SortKey) -> Self {
         let n = idx.len() as u32;
         // Entries are append-only within a structural generation — a
         // regressed watermark means the cache got crossed with a different
@@ -323,7 +323,7 @@ impl DirPathsPool {
     /// root), so one increasing-id pass resolves every prefix. Falls back
     /// to a full build when a dir was renamed/moved (paths of arbitrary
     /// descendants changed) — the normal policy switch, not a degradation.
-    fn extend(idx: &VolumeIndex, mut pool: DirPathsPool, folded: bool) -> DirPathsPool {
+    fn extend(idx: &VolumeIndex, mut pool: Self, folded: bool) -> Self {
         let n = idx.len();
         if pool.topo_generation != idx.dir_topology_generation() || pool.covers_entries > n {
             return Self::build(idx, folded);
@@ -350,9 +350,9 @@ impl DirPathsPool {
 
     /// Level-order parallel build: a directory's path depends only on its
     /// parent's (one level up), so each depth level fans out across cores.
-    fn build(idx: &VolumeIndex, folded: bool) -> DirPathsPool {
+    fn build(idx: &VolumeIndex, folded: bool) -> Self {
         let n = idx.len();
-        let mut memo = DirPathsPool {
+        let mut memo = Self {
             paths: vec![None; n],
             covers_entries: n,
             topo_generation: idx.dir_topology_generation(),
@@ -524,7 +524,7 @@ mod tests {
     use crate::index::testutil::{build_sample, raw, u16s};
 
     /// 60-deep dir chain (well inside both the memo's 4096 and
-    /// append_parent_path's 128 depth bounds) plus a multibyte dir and files.
+    /// `append_parent_path`'s 128 depth bounds) plus a multibyte dir and files.
     fn deep_index() -> VolumeIndex {
         let mut b = VolumeIndexBuilder::new("C:", 5);
         for i in 0..60u64 {

@@ -1,9 +1,9 @@
-//! Pure USN_RECORD_V2 buffer parsing — no OS calls, so the whole layer is
+//! Pure `USN_RECORD_V2` buffer parsing — no OS calls, so the whole layer is
 //! testable from raw byte fixtures (docs/ARCHITECTURE.md, CLAUDE.md 昇格規約).
 //!
-//! Buffer layout returned by FSCTL_READ_USN_JOURNAL / FSCTL_ENUM_USN_DATA:
+//! Buffer layout returned by `FSCTL_READ_USN_JOURNAL` / `FSCTL_ENUM_USN_DATA`:
 //! a leading u64 (the next USN / next FRN to resume from), then a sequence of
-//! USN_RECORD_V2 structures, each RecordLength bytes, 8-byte aligned.
+//! `USN_RECORD_V2` structures, each `RecordLength` bytes, 8-byte aligned.
 
 /// Reason flags we act on (winioctl.h).
 pub mod reason {
@@ -25,7 +25,7 @@ pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 /// One decoded journal record.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsnRecord {
     pub usn: i64,
     /// Full 64-bit FRN (with sequence).
@@ -39,16 +39,20 @@ pub struct UsnRecord {
 }
 
 impl UsnRecord {
-    pub fn is_dir(&self) -> bool {
+    #[must_use]
+    pub const fn is_dir(&self) -> bool {
         self.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
     }
-    pub fn is_reparse(&self) -> bool {
+    #[must_use]
+    pub const fn is_reparse(&self) -> bool {
         self.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
-    pub fn is_hidden(&self) -> bool {
+    #[must_use]
+    pub const fn is_hidden(&self) -> bool {
         self.attributes & FILE_ATTRIBUTE_HIDDEN != 0
     }
-    pub fn is_system(&self) -> bool {
+    #[must_use]
+    pub const fn is_system(&self) -> bool {
         self.attributes & FILE_ATTRIBUTE_SYSTEM != 0
     }
 }
@@ -66,10 +70,12 @@ fn u64_at(b: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(b[off..off + 8].try_into().unwrap())
 }
 
-/// Parse a raw FSCTL output buffer. Returns the leading "next" cursor
-/// value, the decoded records, and whether trailing bytes had to be dropped
-/// (malformed/truncated input — callers surface this as a counter+warning
-/// instead of letting it vanish).
+/// Parse a raw FSCTL output buffer.
+///
+/// Returns the leading "next" cursor value, the decoded records, and whether
+/// trailing bytes had to be dropped (malformed/truncated input — callers
+/// surface this as a counter+warning instead of letting it vanish).
+#[must_use]
 pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>, bool) {
     let mut records = Vec::new();
     let mut truncated = false;
@@ -122,6 +128,7 @@ pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>, bool) {
 
 /// Serialize records into the FSCTL wire format — used to build test
 /// fixtures and replay files (`fmf capture-usn`).
+#[must_use]
 pub fn encode_buffer(next: u64, records: &[UsnRecord]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&next.to_le_bytes());

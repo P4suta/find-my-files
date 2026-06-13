@@ -1,7 +1,8 @@
 //! USN change-journal tailing: pure record parsing (`records`), per-FRN
 //! reduction + index application (`apply`), and the OS-facing session
-//! (`session`, Windows only). See docs/ARCHITECTURE.md for the threading
-//! model and fallback rules.
+//! (`session`, Windows only).
+//!
+//! See docs/ARCHITECTURE.md for the threading model and fallback rules.
 
 pub mod apply;
 pub mod records;

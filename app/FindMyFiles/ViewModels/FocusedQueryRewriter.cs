@@ -46,7 +46,7 @@ public static class FocusedQueryRewriter
             // occurrences over-match, which only skips a suffix — the user's
             // terms always win). Both flags are decided before any append:
             // the exclude suffix itself contains path:.
-            var hasLocation = ContainsIgnoreCase(group, "path:") || group.Contains('\\');
+            var hasLocation = ContainsIgnoreCase(group, "path:") || group.Contains('\\', StringComparison.Ordinal);
             var hasTypeFilter =
                 ContainsIgnoreCase(group, "ext:") || ContainsIgnoreCase(group, "regex:");
             if (!hasLocation)
@@ -101,7 +101,7 @@ public static class FocusedQueryRewriter
             }
             // A quote inside the value cannot be escaped in the query
             // language — it would silently change the whole query's meaning.
-            if (p.Contains('"'))
+            if (p.Contains('"', StringComparison.Ordinal))
             {
                 WarnOnce("focused", $"exclude path with a quote ignored: {p}");
                 continue;

@@ -1,7 +1,9 @@
 //! Reduce a journal batch to per-FRN final operations and apply them to the
-//! index. Reason flags are aggregated per FRN first (a rename storm touching
-//! one file collapses to a single upsert — docs/ARCHITECTURE.md), then ops
-//! run in first-touch order so that `mkdir a; touch a\b` resolves parents.
+//! index.
+//!
+//! Reason flags are aggregated per FRN first (a rename storm touching one
+//! file collapses to a single upsert — docs/ARCHITECTURE.md), then ops run in
+//! first-touch order so that `mkdir a; touch a\b` resolves parents.
 
 use rustc_hash::FxHashMap;
 
@@ -23,7 +25,7 @@ impl StatFetcher for NullStatFetcher {
     }
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct BatchStats {
     pub created_or_renamed: u32,
     pub deleted: u32,
@@ -163,7 +165,7 @@ mod tests {
         b.push(RawEntry {
             record: 10,
             parent_record: 5,
-            frn: (1 << 48) | 10,
+            frn: (1 << 48) | 0x0A,
             name_utf16: &docs,
             is_dir: true,
             is_reparse: false,
@@ -175,7 +177,7 @@ mod tests {
         b.push(RawEntry {
             record: 11,
             parent_record: 10,
-            frn: (1 << 48) | 11,
+            frn: (1 << 48) | 0x0B,
             name_utf16: &note,
             is_dir: false,
             is_reparse: false,

@@ -19,6 +19,7 @@ internal static partial class NativeEngine
 
     /// <summary>Marshaled sizes must equal the contract's — catches a stale
     /// Generated file at first touch, before any P/Invoke crosses.</summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1065:_", Justification = "deliberate fail-fast ABI tripwire: a TypeInitializationException at load is the intended failure when the marshaled layout drifts from the contract")]
     static NativeEngine()
     {
         if (Marshal.SizeOf<FmfRow>() != EngineContract.RowSize
@@ -92,7 +93,7 @@ internal static partial class NativeEngine
         }
         finally
         {
-            fmf_blob_free(blob);
+            _ = fmf_blob_free(blob);
         }
     }
 

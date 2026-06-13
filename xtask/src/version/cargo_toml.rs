@@ -1,6 +1,6 @@
 //! Bump `[workspace.package] version` in engine/Cargo.toml.
 //!
-//! Uses toml_edit and reaches the value by key path, so it no longer depends on
+//! Uses `toml_edit` and reaches the value by key path, so it no longer depends on
 //! the `# release version` line comment the way the old regex did — and it
 //! preserves that comment (and all surrounding formatting) by reattaching the
 //! original value decor.

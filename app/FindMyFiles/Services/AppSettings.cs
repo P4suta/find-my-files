@@ -58,10 +58,15 @@ public sealed class AppSettings
         WriteIndented = true,
     };
 
+    /// <summary>Absolute path to the user-scope settings file
+    /// (<c>%APPDATA%\find-my-files\settings.json</c>).</summary>
     public static string SettingsPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "find-my-files", "settings.json");
 
+    /// <summary>Load settings from <see cref="SettingsPath"/>, falling back to
+    /// defaults (and quarantining the file) if it is missing or corrupt.</summary>
+    /// <returns>The loaded settings, or a fresh default instance.</returns>
     public static AppSettings Load() => LoadFrom(SettingsPath);
 
     internal static AppSettings LoadFrom(string path)
@@ -95,6 +100,9 @@ public sealed class AppSettings
         }
     }
 
+    /// <summary>Persist the current settings to <see cref="SettingsPath"/>
+    /// (snake_case JSON, indented). Best-effort: a write failure is logged, not
+    /// thrown.</summary>
     public void Save() => SaveTo(SettingsPath);
 
     internal void SaveTo(string path)

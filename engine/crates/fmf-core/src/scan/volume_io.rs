@@ -29,7 +29,7 @@ impl RunMap {
                 DataRun::Sparse { length } => logical += length,
             }
         }
-        RunMap { runs: v }
+        Self { runs: v }
     }
 
     /// Physical offset and remaining contiguous bytes at `logical`.

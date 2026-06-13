@@ -22,13 +22,28 @@ public sealed class EngineEventMarshaler : IDisposable
     private readonly Action<int> _onEngineErrorOccurred;
     private readonly Action<EngineConnectionState> _onConnectionChanged;
 
-    /// <summary>Re-raised on the UI thread. Same payloads, same relative
-    /// order as the engine fired them (TryEnqueue is FIFO).</summary>
+    /// <summary>UI スレッドで再発火する <see cref="IEngineClient.IndexChanged"/>。
+    /// payload も engine が発火した相対順序もそのまま(TryEnqueue は FIFO)。</summary>
     public event Action<string>? IndexChanged;
+
+    /// <summary>UI スレッドで再発火する <see cref="IEngineClient.VolumeUpdated"/>
+    /// (同 payload・同順序)。</summary>
     public event Action<VolumeStatus>? VolumeUpdated;
+
+    /// <summary>UI スレッドで再発火する
+    /// <see cref="IEngineClient.EngineErrorOccurred"/>(同 severity・同順序)。</summary>
     public event Action<int>? EngineErrorOccurred;
+
+    /// <summary>UI スレッドで再発火する
+    /// <see cref="IEngineClient.ConnectionChanged"/>(同 payload・同順序)。</summary>
     public event Action<EngineConnectionState>? ConnectionChanged;
 
+    /// <summary><paramref name="engine"/> の 4 つのイベントを購読し、各 payload を
+    /// <paramref name="dispatcher"/> 経由で UI スレッドへ marshal して、本クラスの
+    /// 同名イベントとして再発火するよう結線する。upstream delegate はフィールドに
+    /// 保持され(購読寿命=GC ルート)、<see cref="Dispose"/> で解除される。</summary>
+    /// <param name="engine">購読元のエンジンクライアント。</param>
+    /// <param name="dispatcher">UI スレッドへの marshal 先。</param>
     public EngineEventMarshaler(IEngineClient engine, IDispatcher dispatcher)
     {
         _engine = engine;
@@ -42,6 +57,8 @@ public sealed class EngineEventMarshaler : IDisposable
         engine.ConnectionChanged += _onConnectionChanged;
     }
 
+    /// <summary>4 つの upstream 購読をすべて解除する(以降このマーシャラは
+    /// イベントを再発火しない)。</summary>
     public void Dispose()
     {
         _engine.IndexChanged -= _onIndexChanged;

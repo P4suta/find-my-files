@@ -1,8 +1,9 @@
 //! Engine observability: per-operation traces, ring buffers of recent
-//! activity, and log2-bucket latency histograms. Everything here is cheap
-//! enough to stay on in production — an `Instant` pair and a few integer
-//! adds per operation (no allocation on the hot path beyond the trace
-//! struct itself).
+//! activity, and log2-bucket latency histograms.
+//!
+//! Everything here is cheap enough to stay on in production — an `Instant`
+//! pair and a few integer adds per operation (no allocation on the hot path
+//! beyond the trace struct itself).
 
 use std::collections::VecDeque;
 
@@ -51,7 +52,7 @@ pub struct ScanTrace {
     pub read_ms: u64,
     pub mb_per_s: f64,
     pub parse_ms: u64,
-    /// Deferred $ATTRIBUTE_LIST name resolution.
+    /// Deferred $`ATTRIBUTE_LIST` name resolution.
     pub deferred_ms: u64,
     pub build_ms: u64,
     pub sort_ms: u64,
@@ -130,6 +131,7 @@ pub struct Histogram {
 }
 
 impl Histogram {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             buckets: vec![0; 32],
@@ -146,6 +148,7 @@ impl Histogram {
     }
 
     /// Approximate percentile (upper bound of the containing bucket).
+    #[must_use]
     pub fn percentile_us(&self, p: f64) -> u64 {
         if self.count == 0 {
             return 0;
@@ -195,7 +198,7 @@ pub struct Counters {
     /// Pipe server: a result handle was LRU-evicted at the per-connection
     /// cap; its next page fetch answers STALE("evicted").
     pub pipe_results_evicted: std::sync::atomic::AtomicU64,
-    /// QueryTrace JSON serialization failed; the response carried an empty
+    /// `QueryTrace` JSON serialization failed; the response carried an empty
     /// trace (the query itself succeeded).
     pub trace_serialize_failures: std::sync::atomic::AtomicU64,
 }
@@ -302,6 +305,7 @@ pub struct MetricsHub {
 }
 
 impl MetricsHub {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             histogram: Mutex::new(Histogram::new()),
@@ -362,6 +366,7 @@ impl MetricsHub {
 pub struct Stage(std::time::Instant);
 
 impl Stage {
+    #[must_use]
     pub fn start() -> Self {
         Self(std::time::Instant::now())
     }
@@ -373,6 +378,7 @@ impl Stage {
         us
     }
 
+    #[must_use]
     pub fn elapsed_us(&self) -> u64 {
         self.0.elapsed().as_micros() as u64
     }

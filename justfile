@@ -37,22 +37,26 @@ test-app:
 # Elevation-gated #[ignore] tests: real-volume MFT/USN (elevated)
 [working-directory: 'engine']
 test-admin:
-    $env:FMF_ADMIN_TESTS='1'; cargo test --workspace -- --ignored
+    cargo test --workspace --config 'env.FMF_ADMIN_TESTS="1"' -- --ignored
 
 [working-directory: 'engine']
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
     typos
 
-[working-directory: 'engine']
+# Format Rust (engine + xtask workspaces) and all TOML (repo-wide, taplo.toml).
 fmt:
-    cargo fmt --all
+    cargo fmt --manifest-path engine/Cargo.toml --all
+    cargo fmt --manifest-path xtask/Cargo.toml --all
     taplo fmt
 
-[working-directory: 'engine']
+# Verify Rust + TOML formatting. C# style/format/analyzers are enforced by the
+# build itself (EnforceCodeStyleInBuild + AnalysisMode=All + warnings-as-errors),
+# exercised by `test-app` — so `verify` below also covers C#.
 fmt-check:
-    cargo fmt --all -- --check
-    taplo check
+    cargo fmt --manifest-path engine/Cargo.toml --all -- --check
+    cargo fmt --manifest-path xtask/Cargo.toml --all -- --check
+    taplo fmt --check
 
 # Everything the pre-push hook checks, in one shot
 verify: fmt-check lint test test-app
@@ -117,7 +121,7 @@ service-status:
 
 # C# client × real fmf-service integration (FMF_PIPE_TESTS gate; no elevation)
 test-pipe: service-build
-    $env:FMF_PIPE_TESTS='1'; dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
+    dotnet test app/FindMyFiles.Tests --settings app/FindMyFiles.Tests/pipe.runsettings -p:SkipRustBuild=true
 
 # ── Benchmarks & gates (discipline: ADR-0013, engine/benches/README.md) ──
 
