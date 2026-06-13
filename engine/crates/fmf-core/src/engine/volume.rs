@@ -176,3 +176,15 @@ pub(super) fn snapshot_path(index_dir: &std::path::Path, label: &str) -> std::pa
         label.trim_end_matches(':').to_ascii_lowercase()
     ))
 }
+
+/// A drive label is exactly one ASCII letter followed by `':'` ("C:", "d:") —
+/// the shape `list_ntfs_volumes` produces and `snapshot_path` expects. This is
+/// the trust boundary for [`Engine::index_start`](super::Engine::index_start):
+/// validating here bounds the set of distinct labels to a small finite set (so
+/// a hostile caller can't spawn unbounded volume threads) and stops a label
+/// bearing `..\` or path separators from steering `snapshot_path` outside the
+/// index directory.
+pub(super) fn is_valid_volume_label(label: &str) -> bool {
+    let b = label.as_bytes();
+    b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}

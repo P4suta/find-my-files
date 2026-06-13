@@ -78,6 +78,52 @@ fn index_start_skips_an_already_indexed_volume() {
 }
 
 #[test]
+fn volume_label_validation_is_exactly_letter_colon() {
+    use super::volume::is_valid_volume_label;
+    for good in ["C:", "c:", "D:", "z:", "A:"] {
+        assert!(is_valid_volume_label(good), "{good:?} should be valid");
+    }
+    for bad in [
+        "",                  // empty
+        "C",                 // missing colon
+        ":",                 // missing letter
+        "1:",                // not a letter
+        "CC:",               // two letters
+        "C:\\",              // trailing separator
+        "C:\\x",             // path under the volume
+        "..\\evil",          // traversal
+        "C:..\\..\\windows", // colon present but escapes
+        "\\\\?\\C:",         // device path prefix
+    ] {
+        assert!(!is_valid_volume_label(bad), "{bad:?} should be rejected");
+    }
+}
+
+/// `IndexStart` arrives unvalidated over the pipe. A request carrying only
+/// malformed labels must create no slots and (crucially) spawn no volume
+/// threads — the DoS / `snapshot_path` traversal guard. Valid-label
+/// acceptance is covered by the pure-function test above (calling index_start
+/// with a real "C:" here would spawn the admin-only worker — see the #[ignore]
+/// engine_e2e test).
+#[test]
+fn index_start_rejects_malformed_volume_labels() {
+    let (_dir, e) = test_engine();
+    e.index_start(&[
+        "..\\evil".to_string(),
+        "C:\\windows".to_string(),
+        "C".to_string(),
+        String::new(),
+        "CC:".to_string(),
+        "1:".to_string(),
+    ]);
+    assert_eq!(
+        e.status().len(),
+        0,
+        "malformed labels must not create volume slots"
+    );
+}
+
+#[test]
 fn paging_is_a_slice_and_size_sort_descends() {
     let (_dir, e) = engine_with_two_volumes();
     let opt = QueryOptions {

@@ -77,6 +77,12 @@ struct PageOwned {
     blob: Vec<u8>,
 }
 
+// The handle handed to C# is a `*mut FmfPage` that actually points at a boxed
+// `PageOwned` (see `fmf_result_page`/`fmf_page_free`); the cast is sound only
+// while `page` sits at offset 0. Pin it at compile time so a future field
+// reorder breaks the build instead of dangling a caller's pointer.
+const _: () = assert!(std::mem::offset_of!(PageOwned, page) == 0);
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_result_page(
     r: *mut c_void,

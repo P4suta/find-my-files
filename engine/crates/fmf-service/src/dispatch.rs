@@ -133,7 +133,13 @@ impl Connection {
                         self.engine.index_start(&req.volumes);
                         Outcome::Reply(codes::OK, Vec::new())
                     }
-                    Err(e) => Outcome::Reply(codes::INVALID_ARG, e.to_string().into_bytes()),
+                    // The serde detail (field names, byte offsets) is internal
+                    // shape — log it for F12/engine.log, hand the client a
+                    // generic verdict rather than echoing our payload layout.
+                    Err(e) => {
+                        tracing::warn!(error = %e, "IndexStart payload rejected");
+                        Outcome::Reply(codes::INVALID_ARG, b"malformed IndexStart payload".to_vec())
+                    }
                 }
             }
             opcode::INDEX_STATUS => {

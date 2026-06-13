@@ -213,6 +213,23 @@ impl Engine {
     /// slots) — the source of the "each result appears N times" bug.
     pub fn index_start(self: &Arc<Self>, volumes: &[String]) {
         for label in volumes {
+            // Trust boundary: `volumes` reaches us unvalidated — over the pipe
+            // (IndexStart op), through the FFI, and from service startup. A
+            // label must be exactly "<letter>:"; reject anything else here, the
+            // one chokepoint every caller funnels through, so a hostile request
+            // can neither spawn unbounded volume threads nor steer
+            // `snapshot_path` outside the index dir with a `..\` label. Report
+            // it as VolumeFailed — the same way the worker surfaces a volume it
+            // can't open — so the client still gets feedback (黙らない) and we
+            // never reach the slot/thread/`snapshot_path` path with garbage.
+            if !volume::is_valid_volume_label(label) {
+                tracing::warn!(label = %label, "index_start: rejecting malformed volume label");
+                self.emit(EngineEvent::VolumeFailed {
+                    volume: label.clone(),
+                    message: "malformed volume label (expected \"<letter>:\")".to_string(),
+                });
+                continue;
+            }
             // Decide-and-insert under one write lock so a concurrent
             // index_start of the same label can't slip a second slot in.
             let slot = {

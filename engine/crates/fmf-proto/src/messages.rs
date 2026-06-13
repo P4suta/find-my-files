@@ -253,6 +253,9 @@ pub fn decode_page(b: &[u8]) -> Result<PageView<'_>, WireError> {
     }
     let row_count = u32_at(b, 0) as usize;
     let blob_len = u32_at(b, 4) as usize;
+    // row_count/blob_len are u32, so `row_count * FmfRow::LEN + blob_len` cannot
+    // overflow usize on a 64-bit target; the exact-length check below (and the
+    // 16 MiB frame cap upstream) reject any header that lies about its length.
     let expected = 8 + row_count * FmfRow::LEN + blob_len;
     check_len("PageResp", b, expected)?;
     let rows = (0..row_count)
