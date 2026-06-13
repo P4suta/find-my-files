@@ -1,12 +1,14 @@
-# Tag-driven build/sign/publish. Pushing a vX.Y.Z tag (or running this
-# workflow manually with a tag) builds the distributable bundle
-# (`just publish`), signs the PE binaries with Azure Trusted Signing when
+# Tag-driven build/sign/publish. Pushing a vX.Y.Z tag (or running this workflow
+# manually with a tag) builds the distributable bundle (`just publish`),
+# Authenticode-signs our own PE binaries with SSL.com eSigner (cloud HSM) when
 # signing secrets are present, then zips + checksums + attaches to a GitHub
 # Release whose notes are auto-generated from the commits since the last tag.
 #
-# Auth: the default GITHUB_TOKEN only — no PAT, no app key, no stored secret to
-# manage. Signing is non-blocking: until the Azure account exists the run
-# publishes an UNSIGNED zip with a ::warning:: rather than failing.
+# Auth: the default GITHUB_TOKEN for the release; SSL.com eSigner via four repo
+# secrets (ES_USERNAME / ES_PASSWORD / CREDENTIAL_ID / ES_TOTP_SECRET). Signing
+# is non-blocking: until those secrets exist the run publishes an UNSIGNED zip
+# with a ::warning:: rather than failing. Setup + rationale live in
+# docs/SIGNING.md and docs/adr/0020-code-signing-provider.md.
 name: release
 
 on:
@@ -30,7 +32,7 @@ jobs:
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
       # secrets.* cannot be referenced in `if:`; hoist presence to a job-level
       # env bool, then gate the signing steps on env.HAVE_SIGNING.
-      HAVE_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.SIGNING_ENDPOINT != '' }}
+      HAVE_SIGNING: ${{ secrets.ES_USERNAME != '' && secrets.CREDENTIAL_ID != '' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -45,26 +47,59 @@ jobs:
       - name: Build distributable bundle
         run: just publish
 
-      - name: Sign binaries (Azure Trusted Signing)
+      # Authenticode-sign only our own PE binaries: FindMyFiles.exe is the one
+      # SmartScreen judges, the rest are our Rust binaries. The bundled .NET /
+      # WindowsAppSDK runtime DLLs are already Microsoft-signed - re-signing them
+      # would waste eSigner quota and claim authorship we don't have. So we stage
+      # just our four files, batch-sign them with a single OTP, copy them back,
+      # then hard-verify. eSigner is cloud HSM-backed: no token reaches the runner;
+      # the TOTP secret drives unattended auth.
+      - name: Stage first-party binaries for signing
         if: env.HAVE_SIGNING == 'true'
-        uses: azure/trusted-signing-action@v2
+        shell: pwsh
+        run: |
+          $bins = 'FindMyFiles.exe', 'fmf.exe', 'fmf-service.exe', 'fmf_engine.dll'
+          New-Item -ItemType Directory -Force sign-stage | Out-Null
+          $bins | ForEach-Object { Copy-Item "dist/FindMyFiles/$_" sign-stage/ }
+
+      - name: Sign staged binaries (SSL.com eSigner)
+        if: env.HAVE_SIGNING == 'true'
+        uses: SSLcom/esigner-codesign@v1.3.2
         with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ secrets.SIGNING_ENDPOINT }}
-          signing-account-name: ${{ secrets.SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ secrets.SIGNING_PROFILE_NAME }}
-          files-folder: ${{ github.workspace }}\dist\FindMyFiles
-          files-folder-filter: exe,dll
-          files-folder-recurse: true
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
+          command: batch_sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          dir_path: ${{ github.workspace }}\sign-stage
+          override: "true"
+          environment_name: PROD
+
+      - name: Copy signed binaries back into the bundle
+        if: env.HAVE_SIGNING == 'true'
+        shell: pwsh
+        run: Copy-Item sign-stage/* dist/FindMyFiles/ -Force
+
+      # Never ship a "signed" build that is silently unsigned: once signing was
+      # requested, fail the release if any of our binaries lacks a valid
+      # Authenticode signature (e.g. batch_sign wrote elsewhere and copy-back
+      # picked up the unsigned originals).
+      - name: Verify signatures
+        if: env.HAVE_SIGNING == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($f in 'FindMyFiles.exe', 'fmf.exe', 'fmf-service.exe', 'fmf_engine.dll') {
+            $sig = Get-AuthenticodeSignature "dist/FindMyFiles/$f"
+            if ($sig.Status -ne 'Valid') {
+              throw "Authenticode check failed for $f - status: $($sig.Status)"
+            }
+            Write-Host "signed: $f - $($sig.SignerCertificate.Subject)"
+          }
 
       - name: Warn if unsigned
         if: env.HAVE_SIGNING != 'true'
-        run: echo "::warning::Signing secrets absent — publishing UNSIGNED binaries (SmartScreen will warn end users)."
+        run: echo "::warning::Signing secrets absent - publishing UNSIGNED binaries (SmartScreen will warn end users). See docs/SIGNING.md to enable."
 
       # Zip + checksum the (now-signed) bundle. Runs after signing so the zip
       # holds signed binaries. Logic + output names live in xtask (just package):
