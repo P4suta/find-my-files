@@ -11,12 +11,19 @@ namespace FindMyFiles.Services;
 /// </summary>
 public static class ShellOps
 {
+    /// <summary>Full path to explorer.exe (<c>%WINDIR%\explorer.exe</c>).
+    /// Launching by bare name under <c>UseShellExecute=false</c> lets
+    /// CreateProcess search the current directory first — a binary-planting
+    /// vector. Pin it to the Windows directory.</summary>
+    private static readonly string ExplorerPath =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+
     public static void Open(string fullPath)
     {
         Run("開けませんでした", fullPath, () =>
             Process.Start(new ProcessStartInfo
             {
-                FileName = "explorer.exe",
+                FileName = ExplorerPath,
                 Arguments = $"\"{fullPath}\"",
                 UseShellExecute = false,
             }));
@@ -27,7 +34,7 @@ public static class ShellOps
         Run("フォルダーを開けませんでした", fullPath, () =>
             Process.Start(new ProcessStartInfo
             {
-                FileName = "explorer.exe",
+                FileName = ExplorerPath,
                 Arguments = $"/select,\"{fullPath}\"",
                 UseShellExecute = false,
             }));
