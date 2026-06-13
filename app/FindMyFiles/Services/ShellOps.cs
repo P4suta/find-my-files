@@ -20,7 +20,7 @@ public static class ShellOps
 
     public static void Open(string fullPath)
     {
-        Run("開けませんでした", fullPath, () =>
+        Run(Loc.Get("Shell_OpenFailed"), fullPath, () =>
             Process.Start(new ProcessStartInfo
             {
                 FileName = ExplorerPath,
@@ -31,7 +31,7 @@ public static class ShellOps
 
     public static void Reveal(string fullPath)
     {
-        Run("フォルダーを開けませんでした", fullPath, () =>
+        Run(Loc.Get("Shell_RevealFailed"), fullPath, () =>
             Process.Start(new ProcessStartInfo
             {
                 FileName = ExplorerPath,
@@ -40,22 +40,21 @@ public static class ShellOps
             }));
     }
 
-    /// <summary>Relaunch this app elevated and exit — strictly user-initiated
-    /// (the「管理者として再起動」button; automatic runas loops are forbidden
-    /// by the ARCHITECTURE.md engine-selection contract). A declined UAC
-    /// prompt notifies and leaves the current instance running.</summary>
-    public static void RestartElevated(IEnumerable<string> args)
+    /// <summary>Relaunch this app (unelevated — no runas) and exit, used right
+    /// after an in-app service registration so the fresh instance picks up the
+    /// now-running service over the pipe (the engine transport is chosen once,
+    /// at startup). Strictly user-initiated (the「アプリを再起動」button). A
+    /// failed launch notifies and leaves the current instance running.</summary>
+    public static void Relaunch()
     {
-        Run("管理者として再起動できませんでした", "FindMyFiles", () =>
+        Run(Loc.Get("Shell_RelaunchFailed"), "FindMyFiles", () =>
         {
             Process.Start(new ProcessStartInfo
             {
                 FileName = Environment.ProcessPath!,
-                Arguments = string.Join(" ", args.Select(a => $"\"{a}\"")),
                 UseShellExecute = true,
-                Verb = "runas",
             });
-            // Only reached when the elevated instance actually launched.
+            // Only reached when the new instance actually launched.
             Application.Current.Exit();
         });
     }
@@ -71,7 +70,7 @@ public static class ShellOps
         catch (Exception ex)
         {
             FileLog.Warn("shell", $"clipboard copy failed ({what})", ex);
-            Notifier.Post(NotifySeverity.Warning, "クリップボードへのコピーに失敗しました", ex.Message);
+            Notifier.Post(NotifySeverity.Warning, Loc.Get("Shell_ClipboardFailed"), ex.Message);
         }
     }
 
@@ -96,9 +95,9 @@ public static class ShellOps
     private static string Hint(Exception ex) =>
         (ex as System.ComponentModel.Win32Exception)?.NativeErrorCode switch
         {
-            2 or 3 => "ファイルが移動・削除された可能性があります",     // FILE/PATH_NOT_FOUND
-            5 => "アクセスが拒否されました — 権限を確認してください",   // ACCESS_DENIED
-            1223 => "UAC で操作が取り消されました",                     // ERROR_CANCELLED
-            _ => "ファイルが移動・削除された直後の可能性があります",
+            2 or 3 => Loc.Get("Shell_HintMoved"),            // FILE/PATH_NOT_FOUND
+            5 => Loc.Get("Shell_HintAccessDenied"),          // ACCESS_DENIED
+            1223 => Loc.Get("Shell_HintCancelled"),          // ERROR_CANCELLED
+            _ => Loc.Get("Shell_HintMovedRecently"),
         };
 }

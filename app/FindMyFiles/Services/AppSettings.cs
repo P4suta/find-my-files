@@ -14,6 +14,11 @@ public sealed class AppSettings
     /// "pipe", or "inproc". CLI flags override this.</summary>
     public string Engine { get; set; } = "auto";
 
+    /// <summary>UI language: "auto" (follow the OS), "ja", "en", or "zh-Hans".
+    /// Applied via PrimaryLanguageOverride in the App ctor; the gear menu's
+    /// switcher persists it here and relaunches to take effect.</summary>
+    public string Language { get; set; } = "auto";
+
     /// <summary>絞り込みモード (focused search, ADR-0019): rewrite queries in
     /// the UI with the two lists below before they reach the engine. On by
     /// default — the casual user wants a handful of hits, not 10,000; the

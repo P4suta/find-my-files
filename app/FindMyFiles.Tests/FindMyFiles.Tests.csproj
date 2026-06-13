@@ -36,6 +36,11 @@
     <Content Include="..\..\contract\golden\**"
              Link="golden\%(RecursiveDir)%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest" />
+    <!-- The en-US resource values, so the Loc test fixture resolves keys
+         without a PRI in the (non-WinUI) test host. -->
+    <Content Include="..\FindMyFiles\Strings\en-US\Resources.resw"
+             Link="Strings.en-US.resw"
+             CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

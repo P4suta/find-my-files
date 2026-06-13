@@ -177,10 +177,11 @@ public sealed partial class PerfPanel : UserControl
         if (stats is not null)
         {
             HistText.Text = $"p50 {stats.P50Us / 1000.0:F2}ms   p99 {stats.P99Us / 1000.0:F2}ms";
-            TransportText.Text = stats.Transport is { } tr
-                ? $"Transport: {tr.State} / reconnects {tr.Reconnects}"
-                    + $" / page RTT EWMA {tr.PageRttEwmaUs:F0}µs / server pid {tr.ServerPid}"
-                : string.Empty;
+            TransportText.Text = $"Engine: {vm.EngineMode}"
+                + (stats.Transport is { } tr
+                    ? $"\nTransport: {tr.State} / reconnects {tr.Reconnects}"
+                        + $" / page RTT EWMA {tr.PageRttEwmaUs:F0}µs / server pid {tr.ServerPid}"
+                    : string.Empty);
             VolumesText.Text = string.Join("\n", stats.Indexes.Select(v =>
                 $"{v.Volume}  {v.LiveEntries:N0} 件  {v.TotalBytes / (1024.0 * 1024.0):F0} MB" +
                 $"  ({v.BytesPerEntry:F0} B/件)  gen {v.ContentGeneration}"));

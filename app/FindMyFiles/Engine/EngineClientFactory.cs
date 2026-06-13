@@ -55,13 +55,8 @@ public static class EngineClientFactory
             // this user's SID is applied and the service restarted.
             FileLog.Warn(
                 "app", "engine: service running but unreachable (token rejected) — empty fallback");
-            Notifier.Post(
-                NotifySeverity.Warning,
-                "検索サービスは稼働中ですが、接続を許可されていません",
-                "「管理者として再起動」してアプリ内の「サービスを登録し直す」を一度押すと、"
-                + "このユーザーが接続できるようになります。",
-                actionLabel: "管理者として再起動",
-                action: () => ShellOps.RestartElevated(ElevationArgs(args)));
+            // The setup screen (MainViewModel.IsDisconnected) owns the recovery
+            // path (one-click 登録し直す); no separate notification.
             return FakeEngineClient.CreateEmpty();
         }
 
@@ -74,31 +69,14 @@ public static class EngineClientFactory
         // ARCHITECTURE.md エンジン選択の契約: サービス不在+非昇格で in-proc を
         // 作っても MFT 読みで必ず失敗する(原因を語らない「インデックスに失敗」
         // になる)。結果ゼロの空エンジンに劣化し(デモデータは出さない — 検索
-        // アプリで偽データに実用性はない)、理由と出口 — 明示の昇格再起動 →
-        // アプリ内サービス登録 — を提示する。自動 runas ループは禁止。
+        // アプリで偽データに実用性はない)、UI はこの空エンジンを検知して
+        // セットアップ画面(MainViewModel.IsDisconnected)に切り替え、ワンクリック
+        // 登録(操作ごとに UAC、アプリは非昇格のまま)を提示する。自動 runas 禁止。
         FileLog.Warn("app", "engine: empty fallback (no service answered, not elevated)");
-        Notifier.Post(
-            NotifySeverity.Warning,
-            "検索サービスに接続できません",
-            "右のボタンで管理者として再起動し、表示される「サービスを登録して開始」を"
-            + "一度押してください。以後は通常起動(ダブルクリック)のまま使えます。",
-            actionLabel: "管理者として再起動",
-            action: () => ShellOps.RestartElevated(ElevationArgs(args)));
         return FakeEngineClient.CreateEmpty();
     }
 
     private static bool IsElevated() => ServiceSetup.IsProcessElevated();
-
-    /// <summary>The current args plus <c>--setup-owner=&lt;sid&gt;</c> (when
-    /// resolvable) so the elevated relaunch can forward this user's SID to
-    /// <c>fmf-service install</c> — under OTS elevation the elevated process
-    /// runs as a different admin and would otherwise authorize only that
-    /// account (ARCHITECTURE.md 脅威1).</summary>
-    private static string[] ElevationArgs(string[] args)
-    {
-        var sid = ServiceSetup.CurrentUserSid();
-        return ServiceSetup.IsValidSid(sid) ? [.. args, $"--setup-owner={sid}"] : args;
-    }
 
     private static bool HasFlag(string[] args, string flag) =>
         args.Any(a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));

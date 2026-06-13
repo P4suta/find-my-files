@@ -74,9 +74,9 @@
                     FontSize="11"
                     Foreground="{ThemeResource SystemFillColorCautionBrush}" />
                 <Button
+                    x:Uid="CopyDiag"
                     AutomationProperties.AutomationId="CopyDiag"
                     Click="CopyDiag_Click"
-                    Content="診断情報をコピー"
                     FontSize="11" />
             </StackPanel>
         </Grid>

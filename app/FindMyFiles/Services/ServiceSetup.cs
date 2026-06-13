@@ -11,6 +11,19 @@ public enum EngineServiceState
     Running,
 }
 
+/// <summary>Verdict of one elevated lifecycle action (<see
+/// cref="ServiceSetup.RunElevated"/>). Output is unreadable under
+/// ShellExecute, so the exit code is the only signal; a declined UAC prompt
+/// is distinguished from a genuine failure so the UI can say so.</summary>
+public enum ServiceActionOutcome
+{
+    Ok,
+    Failed,
+    Cancelled,
+}
+
+public readonly record struct ServiceActionResult(ServiceActionOutcome Outcome, int ExitCode);
+
 /// <summary>
 /// In-app service setup — the GUI half ADR-0016 left to a terminal: detects
 /// the fmf-engine SCM registration (read-only, works unelevated) and drives
@@ -141,29 +154,49 @@ public static partial class ServiceSetup
         return null;
     }
 
-    /// <summary>install (idempotent server-side, with the daily user's SID
-    /// forwarded so OTS elevation doesn't lock them out) then restart — not
-    /// just start — so the service re-reads its authorized-SID list. The
-    /// list is consulted only at startup, so an in-place install against a
-    /// running instance would otherwise never take effect. Blocking — run
-    /// off the UI thread. The transcript feeds the failure notification and
-    /// app.log, so a failure always says why.</summary>
-    public static (bool Ok, string Transcript) InstallAndRestart(
-        string serviceExe, string? ownerSid = null)
+    /// <summary>Run one fmf-service lifecycle verb elevated via a per-action
+    /// UAC prompt (Verb=runas) — the in-app service manager, where the app
+    /// itself stays asInvoker. Output can't be captured under ShellExecute,
+    /// so the verdict is the exit code; a declined prompt (ERROR_CANCELLED
+    /// 1223) is reported distinctly. <paramref name="args"/> is built from
+    /// fixed verbs plus SID-validated flags, never raw user text. Blocking —
+    /// call off the UI thread.</summary>
+    public static ServiceActionResult RunElevated(string exe, string args)
     {
-        var installArgs = IsValidSid(ownerSid) ? $"install --owner-sid={ownerSid}" : "install";
-        var log = new System.Text.StringBuilder();
-        foreach (var (verb, args) in new[] { ("install", installArgs), ("restart", "restart") })
+        try
         {
-            var (code, output) = RunTool(serviceExe, args);
-            log.AppendLine($"fmf-service {verb} (exit {code})");
-            log.AppendLine(output.Trim());
-            if (code != 0)
+            using var p = Process.Start(new ProcessStartInfo
             {
-                return (false, log.ToString());
+                FileName = exe,
+                Arguments = args,
+                UseShellExecute = true, // required for the runas verb
+                Verb = "runas", // elevate just this action; the app stays asInvoker
+                // A console exe under ShellExecute ignores CreateNoWindow; hide
+                // the window so the verb doesn't flash a console.
+                WindowStyle = ProcessWindowStyle.Hidden,
+            });
+            if (p is null)
+            {
+                return new ServiceActionResult(ServiceActionOutcome.Failed, -1);
             }
+            if (!p.WaitForExit(60_000))
+            {
+                return new ServiceActionResult(ServiceActionOutcome.Failed, -1);
+            }
+            return new ServiceActionResult(
+                p.ExitCode == 0 ? ServiceActionOutcome.Ok : ServiceActionOutcome.Failed,
+                p.ExitCode);
         }
-        return (true, log.ToString());
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            // ERROR_CANCELLED — the user dismissed the UAC prompt.
+            return new ServiceActionResult(ServiceActionOutcome.Cancelled, -1);
+        }
+        catch (Exception ex)
+        {
+            FileLog.Warn("service-setup", $"elevated `{args}` failed: {ex.Message}");
+            return new ServiceActionResult(ServiceActionOutcome.Failed, -1);
+        }
     }
 
     /// <summary>The current user's SID string, forwarded to
@@ -192,41 +225,6 @@ public static partial class ServiceSetup
         s is not null
         && s.StartsWith("S-1-", StringComparison.Ordinal)
         && s.All(c => char.IsAsciiLetterOrDigit(c) || c == '-');
-
-    private static (int ExitCode, string Output) RunTool(string exe, string args)
-    {
-        try
-        {
-            using var p = Process.Start(new ProcessStartInfo
-            {
-                FileName = exe,
-                Arguments = args,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            })!;
-            var stdout = p.StandardOutput.ReadToEnd();
-            var stderr = p.StandardError.ReadToEnd();
-            if (!p.WaitForExit(60_000))
-            {
-                try
-                {
-                    p.Kill();
-                }
-                catch
-                {
-                    // already gone — the timeout verdict stands either way
-                }
-                return (-1, "timed out after 60s");
-            }
-            return (p.ExitCode, stdout + stderr);
-        }
-        catch (Exception ex)
-        {
-            return (-1, ex.Message);
-        }
-    }
 
     [LibraryImport("advapi32.dll", EntryPoint = "OpenSCManagerW",
         StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]

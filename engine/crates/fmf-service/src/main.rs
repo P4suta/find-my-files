@@ -43,6 +43,14 @@ enum Cli {
         #[arg(long)]
         owner_sid: Option<String>,
     },
+    /// Install (idempotent) then restart, in one elevated step — the
+    /// unelevated app's per-action-UAC「登録 / 登録し直す」button. Equivalent
+    /// to `install [--owner-sid] && restart`, so the freshly written
+    /// authorized-SID list takes effect without a second UAC prompt.
+    Setup {
+        #[arg(long)]
+        owner_sid: Option<String>,
+    },
     /// Deregister the service. Data (index snapshots = every file name,
     /// logs, service.json) is kept unless --purge-data.
     Uninstall {
@@ -77,6 +85,7 @@ fn main() -> std::process::ExitCode {
         } => return run_console(pipe_name, data_dir, debug_faults, no_index),
         Cli::ServiceEntry => svc::dispatch().is_ok(),
         Cli::Install { owner_sid } => report(install(owner_sid)),
+        Cli::Setup { owner_sid } => report(setup(owner_sid)),
         Cli::Uninstall { purge_data } => report(uninstall(purge_data)),
         Cli::Start => report(start_service()),
         Cli::Stop => report(stop_service()),
@@ -290,6 +299,18 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
     }
     println!("start it with: fmf-service start  (or `just service-start`)");
     Ok(())
+}
+
+/// `install` (idempotent) then `restart` in one elevated process, so the
+/// unelevated app's「登録 / 登録し直す」button is a single UAC prompt. The
+/// authorized-SID list is read only at service startup, so the restart is
+/// what actually applies a freshly installed SID — the same install+restart
+/// pairing the in-app InstallAndRestart does, moved server-side. Covers both
+/// first install (service stopped → restart just starts it) and re-register
+/// (service running → restart re-reads service.json).
+fn setup(owner_sid: Option<String>) -> Result<(), String> {
+    install(owner_sid)?;
+    restart_service()
 }
 
 fn uninstall(purge_data: bool) -> Result<(), String> {

@@ -17,36 +17,38 @@ public sealed class StatusFormatterTests
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
     }
 
+    // Assertions are against the en-US resource values (LocTestInit pins them).
+
     [Fact]
     public void Count_WithTrace_ShowsMillisecondsAndHits()
     {
         var trace = new QueryTraceData { TotalUs = 12_345 };
-        Assert.Equal("12.3 ms · 1,234 件", StatusFormatter.Count(trace, 1234));
+        Assert.Equal("12.3 ms · 1,234 items", StatusFormatter.Count(trace, 1234));
     }
 
     [Fact]
     public void Count_WithoutTrace_ShowsHitsOnly()
     {
-        Assert.Equal("1,000,000 件", StatusFormatter.Count(null, 1_000_000));
+        Assert.Equal("1,000,000 items", StatusFormatter.Count(null, 1_000_000));
     }
 
     [Fact]
     public void QueryError_PrefixesTheMessage()
     {
-        Assert.Equal("クエリエラー: unbalanced quote", StatusFormatter.QueryError("unbalanced quote"));
+        Assert.Equal("Query error: unbalanced quote", StatusFormatter.QueryError("unbalanced quote"));
     }
 
     [Fact]
     public void Overall_NoStatusNoDrives_ReportsNoneFound()
     {
-        Assert.Equal("NTFS固定ドライブが見つかりません", StatusFormatter.Overall([], []));
+        Assert.Equal("No fixed NTFS drives found", StatusFormatter.Overall([], []));
     }
 
     [Fact]
     public void Overall_NoStatusButRequested_ReportsIndexing()
     {
         // The engine hasn't surfaced status yet, but we asked to index them.
-        Assert.Equal("インデックス作成中: C:, D:", StatusFormatter.Overall([], ["C:", "D:"]));
+        Assert.Equal("Indexing: C:, D:", StatusFormatter.Overall([], ["C:", "D:"]));
     }
 
     [Fact]
@@ -57,7 +59,7 @@ public sealed class StatusFormatterTests
             new("C:", VolumeState.Ready, 1000),
             new("D:", VolumeState.Ready, 234),
         ];
-        Assert.Equal("準備完了 — 1,234 件", StatusFormatter.Overall(vols, ["C:", "D:"]));
+        Assert.Equal("Ready — 1,234 items", StatusFormatter.Overall(vols, ["C:", "D:"]));
     }
 
     [Fact]
@@ -68,39 +70,39 @@ public sealed class StatusFormatterTests
             new("C:", VolumeState.Ready, 1000),
             new("D:", VolumeState.Scanning, 0),
         ];
-        Assert.Equal("インデックス作成中: D:", StatusFormatter.Overall(vols, ["C:", "D:"]));
+        Assert.Equal("Indexing: D:", StatusFormatter.Overall(vols, ["C:", "D:"]));
     }
 
     [Fact]
     public void Overall_AllFailed_ReportsFailure()
     {
         VolumeStatus[] vols = [new("C:", VolumeState.Failed, 0)];
-        Assert.Equal("インデックスに失敗: C:", StatusFormatter.Overall(vols, ["C:"]));
+        Assert.Equal("Indexing failed: C:", StatusFormatter.Overall(vols, ["C:"]));
     }
 
     [Theory]
-    [InlineData(VolumeState.Scanning, "C: をインデックス中… 1,000 件")]
-    [InlineData(VolumeState.Ready, "C: 準備完了 — 1,000 件")]
-    [InlineData(VolumeState.Rescanning, "C: を再スキャン中…")]
-    [InlineData(VolumeState.Failed, "C: のインデックスに失敗")]
+    [InlineData(VolumeState.Scanning, "C: indexing… 1,000 items")]
+    [InlineData(VolumeState.Ready, "C: ready — 1,000 items")]
+    [InlineData(VolumeState.Rescanning, "C: rescanning…")]
+    [InlineData(VolumeState.Failed, "C: indexing failed")]
     public void Volume_KnownStates_FormatTheStatusLine(VolumeState state, string expected)
     {
         var status = new VolumeStatus("C:", state, 1000);
-        Assert.Equal(expected, StatusFormatter.Volume(status, "前のテキスト"));
+        Assert.Equal(expected, StatusFormatter.Volume(status, "prev"));
     }
 
     [Fact]
     public void Volume_UnknownState_FallsBackToTheCurrentText()
     {
         var status = new VolumeStatus("C:", (VolumeState)99, 0);
-        Assert.Equal("前のテキスト", StatusFormatter.Volume(status, "前のテキスト"));
+        Assert.Equal("prev", StatusFormatter.Volume(status, "prev"));
     }
 
     [Fact]
-    public void EngineMode_FakeClient_SaysFake()
+    public void EngineMode_FakeClient_SaysDemo()
     {
         using var fake = new FakeEngineClient();
-        Assert.Equal("fake", StatusFormatter.EngineMode(fake));
+        Assert.Equal("demo", StatusFormatter.EngineMode(fake));
     }
 
     [Fact]
@@ -108,7 +110,7 @@ public sealed class StatusFormatterTests
     {
         using var pipe = new PipeEngineClient(
             "fmf-test-mode-" + Guid.NewGuid().ToString("N"), autoStart: false);
-        Assert.Equal("接続中…", StatusFormatter.EngineMode(pipe));
+        Assert.Equal("connecting…", StatusFormatter.EngineMode(pipe));
     }
 
     [Fact]
@@ -118,7 +120,7 @@ public sealed class StatusFormatterTests
         using var client = new PipeEngineClient(server.PipeName);
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected, "connected");
-        Assert.Equal("サービス接続", StatusFormatter.EngineMode(client));
+        Assert.Equal("service connected", StatusFormatter.EngineMode(client));
     }
 
     [Fact]
