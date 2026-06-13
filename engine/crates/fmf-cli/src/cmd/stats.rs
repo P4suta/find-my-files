@@ -128,7 +128,7 @@ fn compute_name_stats(idx: &VolumeIndex) -> NameStats {
         // scheme (ii): orig_off u32 column for every entry.
         predicted_savings_full_column: f * mean - 4.0,
         // scheme (i): sorted (id, off) pairs for differing entries only.
-        predicted_savings_sorted_pairs: f * mean - 8.0 * (1.0 - f),
+        predicted_savings_sorted_pairs: 8.0f64.mul_add(-(1.0 - f), f * mean),
     }
 }
 
