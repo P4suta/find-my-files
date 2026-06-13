@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="metadata">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" />
+              </xsd:sequence>
+              <xsd:attribute name="name" use="required" type="xsd:string" />
+              <xsd:attribute name="type" type="xsd:string" />
+              <xsd:attribute name="mimetype" type="xsd:string" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="assembly">
+            <xsd:complexType>
+              <xsd:attribute name="alias" type="xsd:string" />
+              <xsd:attribute name="name" type="xsd:string" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" msdata:Ordinal="1" />
+              <xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" />
+              <xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="resheader">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- ===== XAML (x:Uid) ===== -->
+  <data name="SearchBox.PlaceholderText" xml:space="preserve"><value>ファイル名で検索…</value></data>
+  <data name="OptFocused.Text" xml:space="preserve"><value>絞り込み(よく使う形式に限定・システム領域を除外)</value></data>
+  <data name="OptSystem.Text" xml:space="preserve"><value>システム・隠しファイルを含める</value></data>
+  <data name="SortHeaderItem.Text" xml:space="preserve"><value>並べ替え</value></data>
+  <data name="SortName.Text" xml:space="preserve"><value>名前</value></data>
+  <data name="SortSize.Text" xml:space="preserve"><value>サイズ</value></data>
+  <data name="SortDate.Text" xml:space="preserve"><value>更新日時</value></data>
+  <data name="StatusMenuItem.Text" xml:space="preserve"><value>状態</value></data>
+  <data name="DiagToggle.Text" xml:space="preserve"><value>診断情報を表示/隠す</value></data>
+  <data name="ServiceManageMenu.Text" xml:space="preserve"><value>サービスの管理…</value></data>
+  <data name="LangMenu.Text" xml:space="preserve"><value>言語</value></data>
+  <data name="LangSystem.Text" xml:space="preserve"><value>システム既定</value></data>
+  <data name="MnuOpen.Text" xml:space="preserve"><value>開く</value></data>
+  <data name="MnuOpenPath.Text" xml:space="preserve"><value>フォルダーを開いてファイルを選択</value></data>
+  <data name="MnuCopyPath.Text" xml:space="preserve"><value>パスをコピー</value></data>
+  <data name="SetupTitle.Text" xml:space="preserve"><value>ファイル検索をはじめましょう</value></data>
+  <data name="SetupBody.Text" xml:space="preserve"><value>高速にファイル名を検索できるよう、最初に一度だけ準備します。管理者の許可を求められます。</value></data>
+  <data name="EnableSearch.Content" xml:space="preserve"><value>検索を有効にする</value></data>
+  <data name="SvcDialog.Title" xml:space="preserve"><value>サービスの管理</value></data>
+  <data name="SvcDialog.CloseButtonText" xml:space="preserve"><value>閉じる</value></data>
+  <data name="SvcSubtitle.Text" xml:space="preserve"><value>fmf-engine(ファイル名検索サービス)</value></data>
+  <data name="SvcGroupRunning.Text" xml:space="preserve"><value>稼働</value></data>
+  <data name="SvcGroupRegister.Text" xml:space="preserve"><value>登録</value></data>
+  <data name="SvcGroupDelete.Text" xml:space="preserve"><value>削除</value></data>
+  <data name="SvcStart.Content" xml:space="preserve"><value>開始</value></data>
+  <data name="SvcStop.Content" xml:space="preserve"><value>停止</value></data>
+  <data name="SvcRestart.Content" xml:space="preserve"><value>再起動</value></data>
+  <data name="SvcRegister.Content" xml:space="preserve"><value>登録して開始</value></data>
+  <data name="SvcReregister.Content" xml:space="preserve"><value>登録し直す</value></data>
+  <data name="SvcUninstall.Content" xml:space="preserve"><value>解除</value></data>
+  <data name="SvcPurgeData.Content" xml:space="preserve"><value>索引・ログも削除</value></data>
+  <data name="SvcRestartApp.Content" xml:space="preserve"><value>アプリを再起動</value></data>
+  <data name="CopyDiag.Content" xml:space="preserve"><value>診断情報をコピー</value></data>
+
+  <!-- ===== Code (Loc.Get) ===== -->
+  <data name="OptionsButton_ToolTip" xml:space="preserve"><value>設定・状態・診断(絞り込み/隠しファイル/並べ替え/件数/エンジン/診断)</value></data>
+  <data name="OptionsButton_Name" xml:space="preserve"><value>設定・状態・診断</value></data>
+
+  <data name="Status_Preparing" xml:space="preserve"><value>準備中…</value></data>
+  <data name="Status_CountWithTime" xml:space="preserve"><value>{0:F1} ms · {1:N0} 件</value></data>
+  <data name="Status_Count" xml:space="preserve"><value>{0:N0} 件</value></data>
+  <data name="Status_QueryErrorPrefix" xml:space="preserve"><value>クエリエラー: {0}</value></data>
+  <data name="Status_NoNtfsDrives" xml:space="preserve"><value>NTFS固定ドライブが見つかりません</value></data>
+  <data name="Status_Indexing" xml:space="preserve"><value>インデックス作成中: {0}</value></data>
+  <data name="Status_IndexFailed" xml:space="preserve"><value>インデックスに失敗: {0}</value></data>
+  <data name="Status_Ready" xml:space="preserve"><value>準備完了 — {0:N0} 件</value></data>
+  <data name="Status_ServiceUnregistered" xml:space="preserve"><value>検索サービスが未登録です</value></data>
+  <data name="Status_IndexStartFailed" xml:space="preserve"><value>インデックス開始に失敗しました</value></data>
+
+  <data name="Volume_Indexing" xml:space="preserve"><value>{0} をインデックス中… {1:N0} 件</value></data>
+  <data name="Volume_Ready" xml:space="preserve"><value>{0} 準備完了 — {1:N0} 件</value></data>
+  <data name="Volume_Rescanning" xml:space="preserve"><value>{0} を再スキャン中…</value></data>
+  <data name="Volume_Failed" xml:space="preserve"><value>{0} のインデックスに失敗</value></data>
+
+  <data name="EngineMode_Disconnected" xml:space="preserve"><value>未接続</value></data>
+  <data name="EngineMode_Fake" xml:space="preserve"><value>デモ</value></data>
+  <data name="EngineMode_Admin" xml:space="preserve"><value>管理者(in-proc)</value></data>
+  <data name="EngineMode_Connected" xml:space="preserve"><value>サービス接続</value></data>
+  <data name="EngineMode_Reconnecting" xml:space="preserve"><value>再接続中…</value></data>
+  <data name="EngineMode_Connecting" xml:space="preserve"><value>接続中…</value></data>
+
+  <data name="Notify_ReconnectingTitle" xml:space="preserve"><value>エンジンサービスに再接続しています…</value></data>
+  <data name="Notify_ReconnectingBody" xml:space="preserve"><value>接続が回復すると結果は自動的に更新されます</value></data>
+  <data name="Notify_IndexStartFailedTitle" xml:space="preserve"><value>インデックスを開始できませんでした</value></data>
+  <data name="Notify_VolumeIndexFailedTitle" xml:space="preserve"><value>{0} のインデックスに失敗しました</value></data>
+  <data name="Notify_VolumeIndexFailedBody" xml:space="preserve"><value>詳細は 設定→診断 パネルまたは engine.log を参照</value></data>
+  <data name="Notify_SearchFailedTitle" xml:space="preserve"><value>検索に失敗しました</value></data>
+  <data name="Notify_SearchUnexpectedTitle" xml:space="preserve"><value>検索中に予期しないエラーが発生しました</value></data>
+  <data name="Notify_EnginePanicTitle" xml:space="preserve"><value>エンジン内部でパニックが発生しました</value></data>
+  <data name="Notify_EngineErrorTitle" xml:space="preserve"><value>エンジンでエラーが発生しました</value></data>
+
+  <data name="Setup_WaitingForPermission" xml:space="preserve"><value>管理者の許可を待っています…</value></data>
+  <data name="Setup_Connecting" xml:space="preserve"><value>サービスに接続しています…</value></data>
+  <data name="Setup_ConnectCheckFailed" xml:space="preserve"><value>接続を確認できませんでした。もう一度お試しください。</value></data>
+  <data name="Setup_Failed" xml:space="preserve"><value>セットアップに失敗しました。もう一度お試しください。</value></data>
+
+  <data name="Svc_StateChecking" xml:space="preserve"><value>確認中…</value></data>
+  <data name="Svc_ExeNotFound" xml:space="preserve"><value>fmf-service.exe が見つかりません</value></data>
+  <data name="Svc_StateUnregistered" xml:space="preserve"><value>未登録</value></data>
+  <data name="Svc_StateStopped" xml:space="preserve"><value>停止中</value></data>
+  <data name="Svc_StateRunningPid" xml:space="preserve"><value>実行中 (PID {0})</value></data>
+  <data name="Svc_StateRunning" xml:space="preserve"><value>実行中</value></data>
+  <data name="Svc_Started" xml:space="preserve"><value>サービスを開始しました</value></data>
+  <data name="Svc_Stopped" xml:space="preserve"><value>サービスを停止しました</value></data>
+  <data name="Svc_Restarted" xml:space="preserve"><value>サービスを再起動しました</value></data>
+  <data name="Svc_Registered" xml:space="preserve"><value>サービスを登録しました</value></data>
+  <data name="Svc_Uninstalled" xml:space="preserve"><value>サービスを解除しました</value></data>
+  <data name="Svc_Cancelled" xml:space="preserve"><value>UAC で取り消されました</value></data>
+  <data name="Svc_Failed" xml:space="preserve"><value>失敗しました(終了コード {0})。管理者ターミナルで `fmf-service {1}` を実行すると原因を確認できます</value></data>
+  <data name="Svc_RegisteredNotConfirmed" xml:space="preserve"><value>登録しましたが、まだ接続を確認できません。「アプリを再起動」を押すか、しばらくして再度お試しください。</value></data>
+  <data name="Svc_OpenFailed" xml:space="preserve"><value>サービス管理を開けませんでした</value></data>
+
+  <data name="Shell_OpenFailed" xml:space="preserve"><value>開けませんでした</value></data>
+  <data name="Shell_RevealFailed" xml:space="preserve"><value>フォルダーを開けませんでした</value></data>
+  <data name="Shell_RelaunchFailed" xml:space="preserve"><value>再起動できませんでした</value></data>
+  <data name="Shell_ClipboardFailed" xml:space="preserve"><value>クリップボードへのコピーに失敗しました</value></data>
+  <data name="Shell_HintMoved" xml:space="preserve"><value>ファイルが移動・削除された可能性があります</value></data>
+  <data name="Shell_HintAccessDenied" xml:space="preserve"><value>アクセスが拒否されました — 権限を確認してください</value></data>
+  <data name="Shell_HintCancelled" xml:space="preserve"><value>UAC で操作が取り消されました</value></data>
+  <data name="Shell_HintMovedRecently" xml:space="preserve"><value>ファイルが移動・削除された直後の可能性があります</value></data>
+
+  <data name="App_LockedTitle" xml:space="preserve"><value>検索サービスが稼働中のため in-proc エンジンを使えません</value></data>
+  <data name="App_LockedBody" xml:space="preserve"><value>通常起動でサービスに接続できます。in-proc を使う場合は先にサービスを停止してください(`just service-stop`)。</value></data>
+  <data name="App_EngineInitFailedTitle" xml:space="preserve"><value>検索エンジンの初期化に失敗しました(フォールバック動作中)</value></data>
+  <data name="App_EngineInitFailedBody" xml:space="preserve"><value>{0}
+fmf-service が未起動か、インデックスを他のエンジンがロックしている可能性があります(詳細は engine.log)。</value></data>
+
+  <data name="Crash_UnexpectedTitle" xml:space="preserve"><value>予期しないエラーが発生しました</value></data>
+  <data name="Crash_BackgroundTitle" xml:space="preserve"><value>バックグラウンド処理でエラーが発生しました</value></data>
+  <data name="Crash_PreviousTitle" xml:space="preserve"><value>前回、アプリが異常終了しました</value></data>
+  <data name="Crash_PreviousBody" xml:space="preserve"><value>詳細: {0}
+{1}</value></data>
+  <data name="Crash_InternalArea" xml:space="preserve"><value>内部エラーが発生しました({0})</value></data>
+
+  <data name="Drag_AddAsCondition" xml:space="preserve"><value>検索条件として追加</value></data>
+
+  <data name="Err_QuerySyntax" xml:space="preserve"><value>クエリの構文エラー</value></data>
+  <data name="Err_Stale" xml:space="preserve"><value>結果が更新されました。再試行します</value></data>
+  <data name="Err_NotAdmin" xml:space="preserve"><value>管理者権限が必要です</value></data>
+  <data name="Err_Locked" xml:space="preserve"><value>インデックスを他のエンジンがロックしています</value></data>
+  <data name="Err_Io" xml:space="preserve"><value>入出力エラー</value></data>
+  <data name="Err_Panic" xml:space="preserve"><value>エンジンでパニックが発生しました</value></data>
+  <data name="Err_Volume" xml:space="preserve"><value>ボリュームエラー</value></data>
+  <data name="Err_Generic" xml:space="preserve"><value>エンジンエラー</value></data>
+</root>

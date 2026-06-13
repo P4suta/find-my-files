@@ -6,6 +6,11 @@
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>FindMyFiles</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- i18n: resources live in Strings/{en-US,ja-JP,zh-Hans}/Resources.resw,
+         merged into FindMyFiles.pri. en-US is the fallback language. The UI
+         language follows the OS unless overridden (settings.json + the gear
+         menu's language switcher set PrimaryLanguageOverride at startup). -->
+    <DefaultLanguage>en-US</DefaultLanguage>
     <!-- Unpackaged + self-contained by design: the engine service install
          needs a non-MSIX story anyway, and packaging is a separate
          milestone (ADR-0016). Deliberate deviation from the winui skill

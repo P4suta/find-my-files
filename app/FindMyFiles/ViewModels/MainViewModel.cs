@@ -25,7 +25,7 @@ public sealed partial class MainViewModel : ObservableObject
     public partial string SearchText { get; set; } = string.Empty;
 
     [ObservableProperty]
-    public partial string StatusText { get; set; } = "準備中…";
+    public partial string StatusText { get; set; } = Loc.Get("Status_Preparing");
 
     [ObservableProperty]
     public partial FmfSort Sort { get; set; } = FmfSort.Name;
@@ -42,10 +42,26 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     public partial bool FocusedSearch { get; set; }
 
-    /// <summary>Status-bar badge: which engine transport is active
-    /// (サービス接続 / 再接続中… / 管理者(in-proc) / fake).</summary>
+    // ── Disconnected setup screen (empty fake engine: no service yet) ──
+
+    /// <summary>True when the engine is the empty fake (unelevated, no service)
+    /// — the page shows the setup screen instead of a search box that can only
+    /// return zero rows. Fixed for this instance's lifetime (the transport is
+    /// chosen once; registering relaunches), so x:Bind OneTime is enough.</summary>
+    public bool IsDisconnected => _engine is FakeEngineClient { IsEmpty: true };
+
+    public bool IsReady => !IsDisconnected;
+
+    /// <summary>Setup screen progress text ("管理者の許可を待っています…" etc.);
+    /// empty hides the progress row.</summary>
     [ObservableProperty]
-    public partial string EngineModeText { get; set; } = string.Empty;
+    public partial string SetupStatus { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SetupNotBusy))]
+    public partial bool SetupBusy { get; set; }
+
+    public bool SetupNotBusy => !SetupBusy;
 
     public ResultsPresenter Results { get; }
     public SearchOrchestrator Search { get; }
@@ -79,7 +95,6 @@ public sealed partial class MainViewModel : ObservableObject
         _engineEvents.EngineErrorOccurred += severity =>
             HandleEngineErrorAsync(severity).Forget("engine.error");
         _engineEvents.ConnectionChanged += OnConnectionChanged;
-        EngineModeText = StatusFormatter.EngineMode(_engine);
 
         Notifications.AttachToNotifier();
     }
@@ -91,15 +106,14 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void OnConnectionChanged(EngineConnectionState state)
     {
-        EngineModeText = StatusFormatter.EngineMode(_engine);
         if (state == EngineConnectionState.Reconnecting)
         {
             if (_reconnectBanner is null)
             {
                 _reconnectBanner = new AppNotification(
                     NotifySeverity.Warning,
-                    "エンジンサービスに再接続しています…",
-                    "接続が回復すると結果は自動的に更新されます");
+                    Loc.Get("Notify_ReconnectingTitle"),
+                    Loc.Get("Notify_ReconnectingBody"));
                 Notifications.Push(_reconnectBanner);
             }
         }
@@ -117,9 +131,9 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (_engine is FakeEngineClient { IsEmpty: true })
         {
-            // Unelevated, no service: the factory's notification explains
-            // the way out; the status line must not pretend to index.
-            StatusText = "未接続 — 通知の手順で検索サービスをセットアップしてください";
+            // Unelevated, no service → the page shows the setup screen
+            // (IsDisconnected); don't pretend to index.
+            StatusText = Loc.Get("Status_ServiceUnregistered");
             return;
         }
         try
@@ -134,74 +148,49 @@ public sealed partial class MainViewModel : ObservableObject
         catch (Exception ex)
         {
             FileLog.Error("engine", "startup indexing failed", ex);
-            StatusText = "インデックス開始に失敗しました";
+            StatusText = Loc.Get("Status_IndexStartFailed");
             Notifications.Push(new AppNotification(
-                NotifySeverity.Error, "インデックスを開始できませんでした", ex.Message));
+                NotifySeverity.Error, Loc.Get("Notify_IndexStartFailedTitle"), ex.Message));
         }
-        OfferServiceSetup();
         Search.Requery(RequeryOrigin.Initial);
     }
 
-    /// <summary>Elevated in-proc session with the service absent or stopped →
-    /// offer the one-click setup (the GUI half ADR-0016 left to a terminal).
-    /// The usage story this completes: plain double-click → 「管理者として
-    /// 再起動」 → this button, once — then plain double-click forever.</summary>
-    private void OfferServiceSetup()
+    /// <summary>Setup screen's one-click action: register the service elevated,
+    /// then (on success) wait for its pipe and relaunch — so a first-time user
+    /// goes from the setup screen to a working search box in one click. The app
+    /// stays unelevated; only fmf-service is elevated (per-action UAC).</summary>
+    public async Task EnableSearchAsync()
     {
-        // On the pipe → the service already accepts us. Not elevated → can't
-        // install/restart anyway (the factory already pointed the way out).
-        // Either way there is nothing to offer.
-        if (_engine is PipeEngineClient || !ServiceSetup.IsProcessElevated())
+        if (SetupBusy)
         {
             return;
         }
-        var exe = ServiceSetup.LocateServiceExe(AppContext.BaseDirectory);
-        if (exe is null)
+        SetupBusy = true;
+        SetupStatus = Loc.Get("Setup_WaitingForPermission");
+        try
         {
-            FileLog.Warn("service-setup", "fmf-service.exe not found — setup offer suppressed");
-            return;
+            switch (await ServiceProvisioner.RegisterAsync())
+            {
+                case ServiceActionOutcome.Ok:
+                    SetupStatus = Loc.Get("Setup_Connecting");
+                    // On success this process relaunches and never returns here.
+                    if (!await ServiceProvisioner.WaitForServiceThenRelaunchAsync())
+                    {
+                        SetupStatus = Loc.Get("Setup_ConnectCheckFailed");
+                    }
+                    break;
+                case ServiceActionOutcome.Cancelled:
+                    SetupStatus = string.Empty;
+                    break;
+                default:
+                    SetupStatus = Loc.Get("Setup_Failed");
+                    break;
+            }
         }
-        var state = ServiceSetup.QueryState();
-        if (state == EngineServiceState.Running)
+        finally
         {
-            // Elevated, yet not on the pipe → the running service rejected
-            // this user (a stale authorized-SID list baked in at its startup).
-            // Re-register: install appends our SID (plus any forwarded owner)
-            // and restart applies it — the recovery path out of the lockout.
-            Notifications.Push(new AppNotification(
-                NotifySeverity.Warning,
-                "このユーザーを検索サービスに登録し直します",
-                "「登録し直す」を押すとあなたのアカウントが接続を許可され、サービスが"
-                + "再起動して反映されます。以後は通常起動でそのまま検索できます。",
-                "登録し直す",
-                () => RunServiceSetupAsync(exe).Forget("service-setup")));
-            return;
+            SetupBusy = false;
         }
-        Notifications.Push(new AppNotification(
-            NotifySeverity.Warning,
-            state == EngineServiceState.NotInstalled
-                ? "管理者モードで動作中です — 検索サービスを登録できます"
-                : "検索サービスは登録済みですが停止しています",
-            "サービスを開始しておくと、次回からは通常起動(ダブルクリック)でそのまま検索できます。",
-            state == EngineServiceState.NotInstalled ? "サービスを登録して開始" : "サービスを開始",
-            () => RunServiceSetupAsync(exe).Forget("service-setup")));
-    }
-
-    private async Task RunServiceSetupAsync(string exe)
-    {
-        var (ok, transcript) = await Task.Run(
-            () => ServiceSetup.InstallAndRestart(exe, App.SetupOwnerSid));
-        FileLog.Info("service-setup", transcript);
-        Notifications.Push(ok
-            ? new AppNotification(
-                NotifySeverity.Info,
-                "検索サービスを設定しました",
-                "サービスが最新の許可設定で再起動しました。次回からは通常起動"
-                + "(ダブルクリック)でそのまま検索できます。")
-            : new AppNotification(
-                NotifySeverity.Error,
-                "サービスのセットアップに失敗しました",
-                Truncate(transcript, 300)));
     }
 
     partial void OnSearchTextChanged(string value) => Search.NotifyTextChanged(value);
@@ -245,8 +234,8 @@ public sealed partial class MainViewModel : ObservableObject
         {
             Notifications.Push(new AppNotification(
                 NotifySeverity.Error,
-                $"{s.Label} のインデックスに失敗しました",
-                "詳細は 設定→診断 パネルまたは engine.log を参照"));
+                Loc.Get("Notify_VolumeIndexFailedTitle", s.Label),
+                Loc.Get("Notify_VolumeIndexFailedBody")));
         }
         if (s.State == VolumeState.Ready)
         {
@@ -260,11 +249,34 @@ public sealed partial class MainViewModel : ObservableObject
         {
             return; // the persistent reconnect banner already explains this
         }
+        // Service-side errors are localized by status code here (the app absorbs
+        // the service's English detail, which is appended for diagnostics).
+        var known = e is EngineException or QuerySyntaxException or StaleResultException;
         Notifications.Push(new AppNotification(
             NotifySeverity.Error,
-            e is EngineException ? "検索に失敗しました" : "検索中に予期しないエラーが発生しました",
-            e.Message));
+            known ? Loc.Get("Notify_SearchFailedTitle") : Loc.Get("Notify_SearchUnexpectedTitle"),
+            known ? $"{EngineErrorText(e)}\n{e.Message}" : e.Message));
     }
+
+    /// <summary>Localize a service/engine error by type or FMF_E_* code — the
+    /// app-side absorption of the service's English-only error surface.</summary>
+    private static string EngineErrorText(Exception e) => e switch
+    {
+        QuerySyntaxException => Loc.Get("Err_QuerySyntax"),
+        StaleResultException => Loc.Get("Err_Stale"),
+        EngineException { Code: var c } => c switch
+        {
+            2 => Loc.Get("Err_Stale"),
+            3 => Loc.Get("Err_NotAdmin"),
+            4 => Loc.Get("Err_Volume"),
+            5 => Loc.Get("Err_QuerySyntax"),
+            6 => Loc.Get("Err_Io"),
+            7 => Loc.Get("Err_Locked"),
+            99 => Loc.Get("Err_Panic"),
+            _ => Loc.Get("Err_Generic"),
+        },
+        _ => Loc.Get("Err_Generic"),
+    };
 
     /// <summary>Engine diagnostics: pull the detail text behind the POD event.</summary>
     private async Task HandleEngineErrorAsync(int severity)
@@ -275,7 +287,7 @@ public sealed partial class MainViewModel : ObservableObject
             var last = Perf.Stats?.RecentErrors.LastOrDefault();
             Notifications.Push(new AppNotification(
                 NotifySeverity.Error,
-                severity >= 3 ? "エンジン内部でパニックが発生しました" : "エンジンでエラーが発生しました",
+                severity >= 3 ? Loc.Get("Notify_EnginePanicTitle") : Loc.Get("Notify_EngineErrorTitle"),
                 last is null ? null : $"[{last.Area}] {Truncate(last.Message, 200)}"));
         }
     }

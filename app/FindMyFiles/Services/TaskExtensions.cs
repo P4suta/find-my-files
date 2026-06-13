@@ -18,7 +18,7 @@ public static class TaskExtensions
             FileLog.Error(area, "background task failed", ex);
             Notifier.Post(
                 NotifySeverity.Error,
-                $"内部エラーが発生しました({area})",
+                Loc.Get("Crash_InternalArea", area),
                 ex.Message);
         }
     }

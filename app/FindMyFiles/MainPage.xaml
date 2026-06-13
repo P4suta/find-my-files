@@ -35,6 +35,9 @@
         </VisualStateManager.VisualStateGroups>
 
         <Grid.RowDefinitions>
+            <!--  通知バナー(Auto・常時表示)。EmptyState で潰れる ResultsRow から
+                  独立させ、起動直後(空クエリ)でも警告が見えるようにする。  -->
+            <RowDefinition Height="Auto" />
             <RowDefinition x:Name="SearchRow" Height="Auto" />
             <!--  結果(*)は検索バー直下から画面下端まで使う(フッター撤去済み・衝突相手なし)。  -->
             <RowDefinition x:Name="ResultsRow" Height="*" />
@@ -42,14 +45,44 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!--  検索バー(Row 0)。Empty では行が * で縦中央、Results では Auto で上。
-              位置変化は RepositionThemeTransition で滑らかに。  -->
-        <Grid
+        <!--  通知バナー(Row 0)。検索バーと横位置(MaxWidth/Margin)を揃える。
+              専用行なので結果リストとは重ならず、EmptyState でも表示される。  -->
+        <ItemsControl
             Grid.Row="0"
             MaxWidth="860"
             Margin="24,16,24,0"
+            AutomationProperties.AutomationId="NotifyBar"
+            ItemsSource="{x:Bind ViewModel.Notifications.Items}"
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady)}">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="svc:AppNotification">
+                    <InfoBar
+                        Title="{x:Bind Message}"
+                        Margin="0,0,0,4"
+                        Closed="Notification_Closed"
+                        IsOpen="True"
+                        Message="{x:Bind Detail}"
+                        Severity="{x:Bind conv:UiConverters.ToInfoSeverity(Severity)}">
+                        <InfoBar.ActionButton>
+                            <Button
+                                Click="{x:Bind Invoke}"
+                                Content="{x:Bind ActionLabel}"
+                                Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ActionLabel)}" />
+                        </InfoBar.ActionButton>
+                    </InfoBar>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <!--  検索バー(Row 0)。Empty では行が * で縦中央、Results では Auto で上。
+              位置変化は RepositionThemeTransition で滑らかに。  -->
+        <Grid
+            Grid.Row="1"
+            MaxWidth="860"
+            Margin="24,16,24,0"
             VerticalAlignment="Center"
-            ColumnSpacing="8">
+            ColumnSpacing="8"
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady)}">
             <Grid.Transitions>
                 <TransitionCollection>
                     <RepositionThemeTransition />
@@ -62,10 +95,10 @@
             <!--  Search box: a plain TextBox on purpose (AutoSuggestBox's accept semantics fight live filtering — docs/ARCHITECTURE.md).  -->
             <TextBox
                 x:Name="SearchBox"
+                x:Uid="SearchBox"
                 Grid.Column="0"
                 AutomationProperties.AutomationId="SearchBox"
                 KeyDown="SearchBox_KeyDown"
-                PlaceholderText="ファイル名で検索…"
                 Style="{StaticResource LauncherSearchBoxStyle}"
                 Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}">
                 <!--  フォーカス時の青い2pxアクセント下線を消す(Google 風に常時1pxの丸枠だけ)。
@@ -79,48 +112,47 @@
             <!--  検索バーをすっきり保つため、絞り込み・隠しファイル・並べ替え・状態表示・診断は
                   すべて設定ボタン1つに集約(常設フッターは廃止)。  -->
             <Button
+                x:Name="OptionsButton"
                 Grid.Column="1"
                 Width="56"
                 Height="56"
                 Padding="0"
                 VerticalAlignment="Center"
                 AutomationProperties.AutomationId="OptionsButton"
-                AutomationProperties.Name="設定・状態・診断"
-                CornerRadius="28"
-                ToolTipService.ToolTip="設定・状態・診断(絞り込み/隠しファイル/並べ替え/件数/エンジン/診断)">
+                CornerRadius="28">
                 <FontIcon FontSize="16" Glyph="&#xE713;" />
                 <Button.Flyout>
                     <MenuFlyout Placement="BottomEdgeAlignedRight">
                         <ToggleMenuFlyoutItem
+                            x:Uid="OptFocused"
                             AutomationProperties.AutomationId="OptFocused"
-                            IsChecked="{x:Bind ViewModel.FocusedSearch, Mode=TwoWay}"
-                            Text="絞り込み(よく使う形式に限定・システム領域を除外)" />
+                            IsChecked="{x:Bind ViewModel.FocusedSearch, Mode=TwoWay}" />
                         <ToggleMenuFlyoutItem
+                            x:Uid="OptSystem"
                             AutomationProperties.AutomationId="OptSystem"
-                            IsChecked="{x:Bind ViewModel.IncludeHiddenSystem, Mode=TwoWay}"
-                            Text="システム・隠しファイルを含める" />
+                            IsChecked="{x:Bind ViewModel.IncludeHiddenSystem, Mode=TwoWay}" />
                         <MenuFlyoutSeparator />
-                        <MenuFlyoutSubItem Text="並べ替え">
+                        <MenuFlyoutSubItem x:Uid="SortHeaderItem">
                             <RadioMenuFlyoutItem
+                                x:Uid="SortName"
                                 AutomationProperties.AutomationId="SortName"
                                 Click="HeaderName_Click"
                                 GroupName="SortOrder"
-                                IsChecked="True"
-                                Text="名前" />
+                                IsChecked="True" />
                             <RadioMenuFlyoutItem
+                                x:Uid="SortSize"
                                 AutomationProperties.AutomationId="SortSize"
                                 Click="HeaderSize_Click"
-                                GroupName="SortOrder"
-                                Text="サイズ" />
+                                GroupName="SortOrder" />
                             <RadioMenuFlyoutItem
+                                x:Uid="SortDate"
                                 AutomationProperties.AutomationId="SortDate"
                                 Click="HeaderDate_Click"
-                                GroupName="SortOrder"
-                                Text="更新日時" />
+                                GroupName="SortOrder" />
                         </MenuFlyoutSubItem>
                         <MenuFlyoutSeparator />
                         <!--  状態(旧フッター)はサブ項目に押し込み、オプションと同列にしない(情報なので無効表示)。  -->
-                        <MenuFlyoutSubItem AutomationProperties.AutomationId="StatusMenu" Text="状態">
+                        <MenuFlyoutSubItem x:Uid="StatusMenuItem" AutomationProperties.AutomationId="StatusMenu">
                             <MenuFlyoutItem
                                 AutomationProperties.AutomationId="StatusState"
                                 IsEnabled="False"
@@ -130,15 +162,46 @@
                                 IsEnabled="False"
                                 Text="{x:Bind ViewModel.Results.CountText, Mode=OneWay}"
                                 Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ViewModel.Results.CountText), Mode=OneWay}" />
-                            <MenuFlyoutItem
-                                AutomationProperties.AutomationId="EngineMode"
-                                IsEnabled="False"
-                                Text="{x:Bind ViewModel.EngineModeText, Mode=OneWay}" />
+                        </MenuFlyoutSubItem>
+                        <MenuFlyoutSubItem x:Uid="LangMenu" AutomationProperties.AutomationId="LangMenu">
+                            <RadioMenuFlyoutItem
+                                x:Name="LangAuto"
+                                x:Uid="LangSystem"
+                                AutomationProperties.AutomationId="LangSystem"
+                                Click="Language_Click"
+                                GroupName="UiLanguage"
+                                Tag="auto" />
+                            <RadioMenuFlyoutItem
+                                x:Name="LangJa"
+                                AutomationProperties.AutomationId="LangJa"
+                                Click="Language_Click"
+                                GroupName="UiLanguage"
+                                Tag="ja"
+                                Text="日本語" />
+                            <RadioMenuFlyoutItem
+                                x:Name="LangEn"
+                                AutomationProperties.AutomationId="LangEn"
+                                Click="Language_Click"
+                                GroupName="UiLanguage"
+                                Tag="en"
+                                Text="English" />
+                            <RadioMenuFlyoutItem
+                                x:Name="LangZh"
+                                AutomationProperties.AutomationId="LangZh"
+                                Click="Language_Click"
+                                GroupName="UiLanguage"
+                                Tag="zh-Hans"
+                                Text="简体中文" />
                         </MenuFlyoutSubItem>
                         <MenuFlyoutItem
+                            x:Uid="DiagToggle"
                             AutomationProperties.AutomationId="DiagToggle"
-                            Click="PerfPanel_MenuClick"
-                            Text="診断情報を表示/隠す" />
+                            Click="PerfPanel_MenuClick" />
+                        <MenuFlyoutSeparator />
+                        <MenuFlyoutItem
+                            x:Uid="ServiceManageMenu"
+                            AutomationProperties.AutomationId="ServiceManageMenu"
+                            Click="ServiceManager_MenuClick" />
                     </MenuFlyout>
                 </Button.Flyout>
             </Button>
@@ -147,9 +210,10 @@
         <!--  結果(Row 1・*)。MaxWidth で中央寄せ。下マージンは画面下端の余白(フッター撤去済み)。  -->
         <Grid
             x:Name="ResultsArea"
-            Grid.Row="1"
+            Grid.Row="2"
             MaxWidth="860"
-            Margin="24,12,24,16">
+            Margin="24,12,24,16"
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady)}">
 
             <!--  Results. ItemsPanel stays ItemsStackPanel (CLAUDE.md UI固定則).
                   ItemsSource is bound OneTime by design: the VirtualResultList
@@ -219,53 +283,77 @@
                 <ListView.ContextFlyout>
                     <MenuFlyout>
                         <MenuFlyoutItem
+                            x:Uid="MnuOpen"
                             AutomationProperties.AutomationId="MnuOpen"
-                            Click="MenuOpen_Click"
-                            Text="開く" />
+                            Click="MenuOpen_Click" />
                         <MenuFlyoutItem
+                            x:Uid="MnuOpenPath"
                             AutomationProperties.AutomationId="MnuOpenPath"
-                            Click="MenuOpenPath_Click"
-                            Text="フォルダーを開いてファイルを選択" />
+                            Click="MenuOpenPath_Click" />
                         <MenuFlyoutItem
+                            x:Uid="MnuCopyPath"
                             AutomationProperties.AutomationId="MnuCopyPath"
-                            Click="MenuCopyPath_Click"
-                            Text="パスをコピー" />
+                            Click="MenuCopyPath_Click" />
                     </MenuFlyout>
                 </ListView.ContextFlyout>
             </ListView>
-
-            <!--  Notification stack: overlays the results (top-aligned) so a
-                  notification appearing/dissolving never resizes the list.  -->
-            <ItemsControl
-                VerticalAlignment="Top"
-                Canvas.ZIndex="1"
-                AutomationProperties.AutomationId="NotifyBar"
-                ItemsSource="{x:Bind ViewModel.Notifications.Items}">
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate x:DataType="svc:AppNotification">
-                        <InfoBar
-                            Title="{x:Bind Message}"
-                            Margin="0,0,0,4"
-                            Closed="Notification_Closed"
-                            IsOpen="True"
-                            Message="{x:Bind Detail}"
-                            Severity="{x:Bind conv:UiConverters.ToInfoSeverity(Severity)}">
-                            <InfoBar.ActionButton>
-                                <Button
-                                    Click="{x:Bind Invoke}"
-                                    Content="{x:Bind ActionLabel}"
-                                    Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ActionLabel)}" />
-                            </InfoBar.ActionButton>
-                        </InfoBar>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
         </Grid>
 
-        <!--  Performance panel(設定→診断 で開閉)。最下部(Row 2)に出る。  -->
+        <!--  Performance panel(設定→診断 で開閉)。最下部(Row 3)に出る。  -->
         <views:PerfPanel
-            Grid.Row="2"
+            Grid.Row="3"
             ViewModel="{x:Bind ViewModel.Perf}"
             Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.Perf.IsOpen), Mode=OneWay}" />
+
+        <!--  未接続(空エンジン)時のセットアップ画面。検索バー等は IsReady で畳まれ、
+              これが画面中央に出る。主ボタンはワンクリックで登録→自動再起動。
+              IsDisconnected は起動時固定なので OneTime。  -->
+        <StackPanel
+            Grid.Row="0"
+            Grid.RowSpan="4"
+            MaxWidth="420"
+            Padding="24"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Spacing="16"
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsDisconnected)}">
+            <FontIcon
+                HorizontalAlignment="Center"
+                FontSize="44"
+                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                Glyph="&#xE721;" />
+            <TextBlock
+                x:Uid="SetupTitle"
+                HorizontalAlignment="Center"
+                Style="{ThemeResource SubtitleTextBlockStyle}"
+                TextAlignment="Center" />
+            <TextBlock
+                x:Uid="SetupBody"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                TextAlignment="Center"
+                TextWrapping="Wrap" />
+            <Button
+                x:Name="EnableSearchButton"
+                x:Uid="EnableSearch"
+                HorizontalAlignment="Center"
+                AutomationProperties.AutomationId="EnableSearch"
+                Click="EnableSearch_Click"
+                IsEnabled="{x:Bind ViewModel.SetupNotBusy, Mode=OneWay}"
+                Style="{StaticResource AccentButtonStyle}" />
+            <StackPanel
+                HorizontalAlignment="Center"
+                Orientation="Horizontal"
+                Spacing="8"
+                Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ViewModel.SetupStatus), Mode=OneWay}">
+                <ProgressRing
+                    Width="16"
+                    Height="16"
+                    IsActive="{x:Bind ViewModel.SetupBusy, Mode=OneWay}" />
+                <TextBlock
+                    VerticalAlignment="Center"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="{x:Bind ViewModel.SetupStatus, Mode=OneWay}" />
+            </StackPanel>
+        </StackPanel>
     </Grid>
 </Page>

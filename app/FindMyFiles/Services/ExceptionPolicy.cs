@@ -57,7 +57,7 @@ public sealed class ExceptionPolicy
             e.Handled = true;
             Notifier.Post(
                 NotifySeverity.Error,
-                "予期しないエラーが発生しました",
+                Loc.Get("Crash_UnexpectedTitle"),
                 e.Exception?.Message);
         }
         else
@@ -80,7 +80,7 @@ public sealed class ExceptionPolicy
         e.SetObserved();
         Notifier.Post(
             NotifySeverity.Error,
-            "バックグラウンド処理でエラーが発生しました",
+            Loc.Get("Crash_BackgroundTitle"),
             e.Exception.InnerException?.Message ?? e.Exception.Message);
     }
 
@@ -93,8 +93,8 @@ public sealed class ExceptionPolicy
             FileLog.Warn("app", "previous run crashed");
             Notifier.Post(
                 NotifySeverity.Warning,
-                "前回、アプリが異常終了しました",
-                $"詳細: {FileLog.LogPath}\n{marker.Split('\n').FirstOrDefault()}");
+                Loc.Get("Crash_PreviousTitle"),
+                Loc.Get("Crash_PreviousBody", FileLog.LogPath, marker.Split('\n').FirstOrDefault() ?? string.Empty));
         }
     }
 }

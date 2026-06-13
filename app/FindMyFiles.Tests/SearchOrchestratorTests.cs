@@ -41,7 +41,7 @@ public sealed class SearchOrchestratorTests
         var newer = _engine.Searches[1].CompleteWith(Rows.Many(5, "new"));
         Assert.Equal(5, _presenter.ResultsSource.Count);
         Assert.Single(publications);
-        Assert.Equal("5 件", _presenter.CountText);
+        Assert.Equal("5 items", _presenter.CountText);
 
         // …then the superseded result arrives late: disposed, screen untouched.
         var older = _engine.Searches[0].CompleteWith(Rows.Many(3, "old"));
@@ -146,7 +146,7 @@ public sealed class SearchOrchestratorTests
         _request = new SearchRequest("\"broken", SearchOptions.Default);
         _orchestrator.Requery(RequeryOrigin.Typing);
 
-        Assert.Equal("クエリエラー: unbalanced quote", _presenter.CountText);
+        Assert.Equal("Query error: unbalanced quote", _presenter.CountText);
         Assert.Empty(failures);
     }
 

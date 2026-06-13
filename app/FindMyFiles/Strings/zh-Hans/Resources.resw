@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="metadata">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" />
+              </xsd:sequence>
+              <xsd:attribute name="name" use="required" type="xsd:string" />
+              <xsd:attribute name="type" type="xsd:string" />
+              <xsd:attribute name="mimetype" type="xsd:string" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="assembly">
+            <xsd:complexType>
+              <xsd:attribute name="alias" type="xsd:string" />
+              <xsd:attribute name="name" type="xsd:string" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" msdata:Ordinal="1" />
+              <xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" />
+              <xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="resheader">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- ===== XAML (x:Uid) ===== -->
+  <data name="SearchBox.PlaceholderText" xml:space="preserve"><value>按文件名搜索…</value></data>
+  <data name="OptFocused.Text" xml:space="preserve"><value>精简(仅常用格式，排除系统区域)</value></data>
+  <data name="OptSystem.Text" xml:space="preserve"><value>包含系统和隐藏文件</value></data>
+  <data name="SortHeaderItem.Text" xml:space="preserve"><value>排序方式</value></data>
+  <data name="SortName.Text" xml:space="preserve"><value>名称</value></data>
+  <data name="SortSize.Text" xml:space="preserve"><value>大小</value></data>
+  <data name="SortDate.Text" xml:space="preserve"><value>修改日期</value></data>
+  <data name="StatusMenuItem.Text" xml:space="preserve"><value>状态</value></data>
+  <data name="DiagToggle.Text" xml:space="preserve"><value>显示/隐藏诊断信息</value></data>
+  <data name="ServiceManageMenu.Text" xml:space="preserve"><value>管理服务…</value></data>
+  <data name="LangMenu.Text" xml:space="preserve"><value>语言</value></data>
+  <data name="LangSystem.Text" xml:space="preserve"><value>系统默认</value></data>
+  <data name="MnuOpen.Text" xml:space="preserve"><value>打开</value></data>
+  <data name="MnuOpenPath.Text" xml:space="preserve"><value>打开文件夹并选中文件</value></data>
+  <data name="MnuCopyPath.Text" xml:space="preserve"><value>复制路径</value></data>
+  <data name="SetupTitle.Text" xml:space="preserve"><value>开始设置文件搜索</value></data>
+  <data name="SetupBody.Text" xml:space="preserve"><value>为了快速搜索文件名，需要先进行一次设置。系统会请求管理员权限。</value></data>
+  <data name="EnableSearch.Content" xml:space="preserve"><value>启用搜索</value></data>
+  <data name="SvcDialog.Title" xml:space="preserve"><value>管理服务</value></data>
+  <data name="SvcDialog.CloseButtonText" xml:space="preserve"><value>关闭</value></data>
+  <data name="SvcSubtitle.Text" xml:space="preserve"><value>fmf-engine(文件名搜索服务)</value></data>
+  <data name="SvcGroupRunning.Text" xml:space="preserve"><value>运行</value></data>
+  <data name="SvcGroupRegister.Text" xml:space="preserve"><value>注册</value></data>
+  <data name="SvcGroupDelete.Text" xml:space="preserve"><value>删除</value></data>
+  <data name="SvcStart.Content" xml:space="preserve"><value>启动</value></data>
+  <data name="SvcStop.Content" xml:space="preserve"><value>停止</value></data>
+  <data name="SvcRestart.Content" xml:space="preserve"><value>重启</value></data>
+  <data name="SvcRegister.Content" xml:space="preserve"><value>注册并启动</value></data>
+  <data name="SvcReregister.Content" xml:space="preserve"><value>重新注册</value></data>
+  <data name="SvcUninstall.Content" xml:space="preserve"><value>卸载</value></data>
+  <data name="SvcPurgeData.Content" xml:space="preserve"><value>同时删除索引和日志</value></data>
+  <data name="SvcRestartApp.Content" xml:space="preserve"><value>重启应用</value></data>
+  <data name="CopyDiag.Content" xml:space="preserve"><value>复制诊断信息</value></data>
+
+  <!-- ===== Code (Loc.Get) ===== -->
+  <data name="OptionsButton_ToolTip" xml:space="preserve"><value>设置、状态、诊断(精简/隐藏文件/排序/数量/引擎/诊断)</value></data>
+  <data name="OptionsButton_Name" xml:space="preserve"><value>设置、状态、诊断</value></data>
+
+  <data name="Status_Preparing" xml:space="preserve"><value>正在准备…</value></data>
+  <data name="Status_CountWithTime" xml:space="preserve"><value>{0:F1} ms · {1:N0} 项</value></data>
+  <data name="Status_Count" xml:space="preserve"><value>{0:N0} 项</value></data>
+  <data name="Status_QueryErrorPrefix" xml:space="preserve"><value>查询错误：{0}</value></data>
+  <data name="Status_NoNtfsDrives" xml:space="preserve"><value>未找到 NTFS 固定驱动器</value></data>
+  <data name="Status_Indexing" xml:space="preserve"><value>正在建立索引：{0}</value></data>
+  <data name="Status_IndexFailed" xml:space="preserve"><value>建立索引失败：{0}</value></data>
+  <data name="Status_Ready" xml:space="preserve"><value>就绪 — {0:N0} 项</value></data>
+  <data name="Status_ServiceUnregistered" xml:space="preserve"><value>搜索服务尚未注册</value></data>
+  <data name="Status_IndexStartFailed" xml:space="preserve"><value>启动索引失败</value></data>
+
+  <data name="Volume_Indexing" xml:space="preserve"><value>{0} 正在建立索引… {1:N0} 项</value></data>
+  <data name="Volume_Ready" xml:space="preserve"><value>{0} 就绪 — {1:N0} 项</value></data>
+  <data name="Volume_Rescanning" xml:space="preserve"><value>{0} 正在重新扫描…</value></data>
+  <data name="Volume_Failed" xml:space="preserve"><value>{0} 建立索引失败</value></data>
+
+  <data name="EngineMode_Disconnected" xml:space="preserve"><value>未连接</value></data>
+  <data name="EngineMode_Fake" xml:space="preserve"><value>演示</value></data>
+  <data name="EngineMode_Admin" xml:space="preserve"><value>管理员(进程内)</value></data>
+  <data name="EngineMode_Connected" xml:space="preserve"><value>已连接服务</value></data>
+  <data name="EngineMode_Reconnecting" xml:space="preserve"><value>正在重新连接…</value></data>
+  <data name="EngineMode_Connecting" xml:space="preserve"><value>正在连接…</value></data>
+
+  <data name="Notify_ReconnectingTitle" xml:space="preserve"><value>正在重新连接到引擎服务…</value></data>
+  <data name="Notify_ReconnectingBody" xml:space="preserve"><value>连接恢复后结果会自动更新</value></data>
+  <data name="Notify_IndexStartFailedTitle" xml:space="preserve"><value>无法启动索引</value></data>
+  <data name="Notify_VolumeIndexFailedTitle" xml:space="preserve"><value>无法为 {0} 建立索引</value></data>
+  <data name="Notify_VolumeIndexFailedBody" xml:space="preserve"><value>详情请见 设置→诊断 面板或 engine.log</value></data>
+  <data name="Notify_SearchFailedTitle" xml:space="preserve"><value>搜索失败</value></data>
+  <data name="Notify_SearchUnexpectedTitle" xml:space="preserve"><value>搜索时发生意外错误</value></data>
+  <data name="Notify_EnginePanicTitle" xml:space="preserve"><value>引擎内部发生严重错误</value></data>
+  <data name="Notify_EngineErrorTitle" xml:space="preserve"><value>引擎发生错误</value></data>
+
+  <data name="Setup_WaitingForPermission" xml:space="preserve"><value>正在等待管理员授权…</value></data>
+  <data name="Setup_Connecting" xml:space="preserve"><value>正在连接服务…</value></data>
+  <data name="Setup_ConnectCheckFailed" xml:space="preserve"><value>无法确认连接，请重试。</value></data>
+  <data name="Setup_Failed" xml:space="preserve"><value>设置失败，请重试。</value></data>
+
+  <data name="Svc_StateChecking" xml:space="preserve"><value>正在检查…</value></data>
+  <data name="Svc_ExeNotFound" xml:space="preserve"><value>未找到 fmf-service.exe</value></data>
+  <data name="Svc_StateUnregistered" xml:space="preserve"><value>未注册</value></data>
+  <data name="Svc_StateStopped" xml:space="preserve"><value>已停止</value></data>
+  <data name="Svc_StateRunningPid" xml:space="preserve"><value>运行中 (PID {0})</value></data>
+  <data name="Svc_StateRunning" xml:space="preserve"><value>运行中</value></data>
+  <data name="Svc_Started" xml:space="preserve"><value>服务已启动</value></data>
+  <data name="Svc_Stopped" xml:space="preserve"><value>服务已停止</value></data>
+  <data name="Svc_Restarted" xml:space="preserve"><value>服务已重启</value></data>
+  <data name="Svc_Registered" xml:space="preserve"><value>服务已注册</value></data>
+  <data name="Svc_Uninstalled" xml:space="preserve"><value>服务已卸载</value></data>
+  <data name="Svc_Cancelled" xml:space="preserve"><value>已在 UAC 提示处取消</value></data>
+  <data name="Svc_Failed" xml:space="preserve"><value>失败(退出代码 {0})。在管理员终端运行 `fmf-service {1}` 可查看原因</value></data>
+  <data name="Svc_RegisteredNotConfirmed" xml:space="preserve"><value>已注册，但尚未确认连接。请按“重启应用”，或稍后重试。</value></data>
+  <data name="Svc_OpenFailed" xml:space="preserve"><value>无法打开服务管理</value></data>
+
+  <data name="Shell_OpenFailed" xml:space="preserve"><value>无法打开</value></data>
+  <data name="Shell_RevealFailed" xml:space="preserve"><value>无法打开文件夹</value></data>
+  <data name="Shell_RelaunchFailed" xml:space="preserve"><value>无法重启</value></data>
+  <data name="Shell_ClipboardFailed" xml:space="preserve"><value>复制到剪贴板失败</value></data>
+  <data name="Shell_HintMoved" xml:space="preserve"><value>文件可能已被移动或删除</value></data>
+  <data name="Shell_HintAccessDenied" xml:space="preserve"><value>访问被拒绝 — 请检查权限</value></data>
+  <data name="Shell_HintCancelled" xml:space="preserve"><value>操作已在 UAC 中取消</value></data>
+  <data name="Shell_HintMovedRecently" xml:space="preserve"><value>文件可能刚刚被移动或删除</value></data>
+
+  <data name="App_LockedTitle" xml:space="preserve"><value>搜索服务正在运行，无法使用进程内引擎</value></data>
+  <data name="App_LockedBody" xml:space="preserve"><value>正常启动即可连接服务。若要使用进程内引擎，请先停止服务(`just service-stop`)。</value></data>
+  <data name="App_EngineInitFailedTitle" xml:space="preserve"><value>搜索引擎初始化失败(正在以回退模式运行)</value></data>
+  <data name="App_EngineInitFailedBody" xml:space="preserve"><value>{0}
+fmf-service 可能未运行，或索引被其他引擎锁定(详见 engine.log)。</value></data>
+
+  <data name="Crash_UnexpectedTitle" xml:space="preserve"><value>发生意外错误</value></data>
+  <data name="Crash_BackgroundTitle" xml:space="preserve"><value>后台任务失败</value></data>
+  <data name="Crash_PreviousTitle" xml:space="preserve"><value>应用上次异常退出</value></data>
+  <data name="Crash_PreviousBody" xml:space="preserve"><value>详情：{0}
+{1}</value></data>
+  <data name="Crash_InternalArea" xml:space="preserve"><value>发生内部错误({0})</value></data>
+
+  <data name="Drag_AddAsCondition" xml:space="preserve"><value>添加为搜索条件</value></data>
+
+  <data name="Err_QuerySyntax" xml:space="preserve"><value>查询语法错误</value></data>
+  <data name="Err_Stale" xml:space="preserve"><value>结果已更新，正在重试</value></data>
+  <data name="Err_NotAdmin" xml:space="preserve"><value>需要管理员权限</value></data>
+  <data name="Err_Locked" xml:space="preserve"><value>索引被其他引擎锁定</value></data>
+  <data name="Err_Io" xml:space="preserve"><value>输入/输出错误</value></data>
+  <data name="Err_Panic" xml:space="preserve"><value>引擎发生严重错误</value></data>
+  <data name="Err_Volume" xml:space="preserve"><value>卷错误</value></data>
+  <data name="Err_Generic" xml:space="preserve"><value>引擎错误</value></data>
+</root>

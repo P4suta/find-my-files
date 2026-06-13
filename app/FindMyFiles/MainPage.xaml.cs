@@ -28,6 +28,19 @@ public sealed partial class MainPage : Page
         ViewModel = new MainViewModel(
             App.EngineClient, new DispatcherQueueDispatcher(App.DispatcherQueue));
         InitializeComponent();
+        // Attached properties (tooltip / accessibility name) localize in code —
+        // simpler than the x:Uid attached-property resw syntax.
+        ToolTipService.SetToolTip(OptionsButton, Loc.Get("OptionsButton_ToolTip"));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            OptionsButton, Loc.Get("OptionsButton_Name"));
+        // Reflect the persisted UI language in the switcher's radio group.
+        (AppSettings.Load().Language switch
+        {
+            "ja" => LangJa,
+            "en" => LangEn,
+            "zh-Hans" => LangZh,
+            _ => LangAuto,
+        }).IsChecked = true;
         _viewport = new ResultsViewportManager(ResultsList);
         ViewModel.Results.ResultsPublished += _viewport.OnResultsPublished;
         // IME: half-composed text (romaji fragments, candidate strings)
@@ -40,7 +53,15 @@ public sealed partial class MainPage : Page
         Loaded += (_, _) =>
         {
             UpdateSearchState(useTransitions: false);
-            SearchBox.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
+            // Disconnected → the search box is collapsed; focus the setup CTA.
+            if (ViewModel.IsReady)
+            {
+                SearchBox.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
+            }
+            else
+            {
+                EnableSearchButton.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
+            }
             ViewModel.StartAsync().Forget("startup");
         };
     }
@@ -76,6 +97,33 @@ public sealed partial class MainPage : Page
     private void PerfPanel_MenuClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         ViewModel.Perf.Toggle();
 
+    // 設定(歯車)フライアウト →「サービスの管理…」。共通入口(同時1枚ガード+
+    // 失敗時通知を内包)を呼ぶ。
+    private void ServiceManager_MenuClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        Views.ServiceManagerDialog.OpenAsync().Forget("service-ui");
+
+    // 未接続セットアップ画面の主ボタン → ワンクリックで登録→自動再起動。
+    private void EnableSearch_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        ViewModel.EnableSearchAsync().Forget("service-ui");
+
+    // 言語切替: settings.json に永続化してアプリを再起動(App ctor が
+    // PrimaryLanguageOverride を適用)。Tag は "auto"/"ja"/"en"/"zh-Hans"。
+    private void Language_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (sender is not MenuFlyoutItemBase { Tag: string lang })
+        {
+            return;
+        }
+        var settings = AppSettings.Load();
+        if (settings.Language == lang)
+        {
+            return;
+        }
+        settings.Language = lang;
+        settings.Save();
+        ShellOps.Relaunch();
+    }
+
     // ── Drag & drop: folder → path: filter, file → name search ──────────
 
     private void Page_DragOver(object sender, Microsoft.UI.Xaml.DragEventArgs e)
@@ -85,7 +133,7 @@ public sealed partial class MainPage : Page
             e.AcceptedOperation = DataPackageOperation.Link;
             if (e.DragUIOverride is { } ui)
             {
-                ui.Caption = "検索条件として追加";
+                ui.Caption = Loc.Get("Drag_AddAsCondition");
             }
         }
     }

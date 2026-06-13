@@ -27,6 +27,11 @@ public sealed partial class PerfPanelViewModel : ObservableObject
     /// <summary>Latencies of the most recent queries (µs, oldest first).</summary>
     public IReadOnlyList<ulong> RecentTotalsUs => _recentTotalsUs;
 
+    /// <summary>Engine transport label for the F12 panel — moved off the gear
+    /// menu, where its internal terms (fake / in-proc) confused end users; F12
+    /// is diagnostic, so the precise vocabulary stays here.</summary>
+    public string EngineMode => StatusFormatter.EngineMode(_engine);
+
     /// <summary>Raised on the UI thread whenever trace/stats data moved.</summary>
     public event Action? PerfDataChanged;
 

@@ -16,21 +16,39 @@ public partial class App : Application
     /// </summary>
     public static IEngineClient EngineClient { get; private set; } = null!;
 
-    /// <summary>The daily user's SID, forwarded from the unelevated instance
-    /// via --setup-owner so the in-app service registration authorizes it on
-    /// the pipe even under OTS elevation. Null on a normal launch.</summary>
-    public static string? SetupOwnerSid { get; private set; }
-
     public static nint WindowHandle =>
         WinRT.Interop.WindowNative.GetWindowHandle(Window);
 
     public App()
     {
+        // Must run before InitializeComponent so x:Uid / ResourceLoader resolve
+        // to the chosen language from the first XAML load.
+        ApplyLanguageOverride();
+
         InitializeComponent();
 
         // 「落ちない・固まらない・黙らない」: suppression rules, crash markers
         // and log routing are documented in one place — ExceptionPolicy.
         ExceptionPolicy.Install(this);
+    }
+
+    /// <summary>Apply the persisted UI language. "auto" (the default) follows
+    /// the OS display language; anything else overrides it. Unpackaged apps use
+    /// the WinAppSDK ApplicationLanguages (the UWP one needs package identity).</summary>
+    private static void ApplyLanguageOverride()
+    {
+        try
+        {
+            var lang = AppSettings.Load().Language;
+            if (!string.IsNullOrEmpty(lang) && lang != "auto")
+            {
+                Microsoft.Windows.Globalization.ApplicationLanguages.PrimaryLanguageOverride = lang;
+            }
+        }
+        catch (Exception ex)
+        {
+            FileLog.Warn("i18n", $"language override failed: {ex.Message}");
+        }
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
@@ -39,7 +57,6 @@ public partial class App : Application
             + $"os={Environment.OSVersion.VersionString}");
 
         var cmdLine = Environment.GetCommandLineArgs();
-        SetupOwnerSid = ParseSetupOwner(cmdLine);
 
         try
         {
@@ -54,9 +71,8 @@ public partial class App : Application
             FileLog.Error("app", "engine init: index locked by the running service", ex);
             Notifier.Post(
                 NotifySeverity.Error,
-                "検索サービスが稼働中のため in-proc エンジンを使えません",
-                "通常起動でサービスに接続できます。in-proc を使う場合は先に"
-                + "サービスを停止してください(`just service-stop`)。");
+                Loc.Get("App_LockedTitle"),
+                Loc.Get("App_LockedBody"));
             EngineClient = new FakeEngineClient();
         }
         catch (Exception ex)
@@ -67,9 +83,8 @@ public partial class App : Application
             FileLog.Error("app", "engine initialization failed; falling back to fake", ex);
             Notifier.Post(
                 NotifySeverity.Error,
-                "検索エンジンの初期化に失敗しました(フォールバック動作中)",
-                $"{ex.Message}\nfmf-service が未起動か、インデックスを他のエンジンが"
-                + "ロックしている可能性があります(詳細は engine.log)。");
+                Loc.Get("App_EngineInitFailedTitle"),
+                Loc.Get("App_EngineInitFailedBody", ex.Message));
             EngineClient = new FakeEngineClient();
         }
 
@@ -89,18 +104,5 @@ public partial class App : Application
             }
         };
         Window.Activate();
-    }
-
-    /// <summary>Extract and validate --setup-owner=&lt;sid&gt; (forwarded by
-    /// the unelevated instance on elevation) — see
-    /// <see cref="ServiceSetup.CurrentUserSid"/> and
-    /// <see cref="SetupOwnerSid"/>.</summary>
-    private static string? ParseSetupOwner(string[] args)
-    {
-        const string prefix = "--setup-owner=";
-        var raw = args
-            .FirstOrDefault(a => a.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            ?[prefix.Length..];
-        return ServiceSetup.IsValidSid(raw) ? raw : null;
     }
 }

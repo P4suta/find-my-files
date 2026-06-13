@@ -74,7 +74,7 @@ contract-gen:
 publish-app skip_rust="false":
     Remove-Item dist/FindMyFiles -Recurse -Force -ErrorAction SilentlyContinue; exit 0
     dotnet publish app/FindMyFiles -c Release -r win-x64 -o dist/FindMyFiles -p:SkipRustBuild={{skip_rust}}
-    Get-ChildItem dist/FindMyFiles -Directory | Where-Object { $_.Name -match '^[a-z]{2,3}(-[A-Za-z0-9]+){1,3}$' -and $_.Name -notin @('en-us','ja-JP') } | Remove-Item -Recurse -Force
+    Get-ChildItem dist/FindMyFiles -Directory | Where-Object { $_.Name -match '^[a-z]{2,3}(-[A-Za-z0-9]+){1,3}$' -and $_.Name -notin @('en-us','ja-JP','zh-Hans','zh-CN') } | Remove-Item -Recurse -Force
     Copy-Item engine/target/release/fmf-service.exe, engine/target/release/fmf.exe dist/FindMyFiles/
 
 # Local/release publish: build the engine first, then publish (rust is already
