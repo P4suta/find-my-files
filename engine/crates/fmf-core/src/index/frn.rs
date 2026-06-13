@@ -13,7 +13,7 @@
 
 use rayon::prelude::*;
 
-use super::{EntryId, flags, masked};
+use super::{EntryId, Frn, RecordNo, flags};
 
 #[derive(Default)]
 pub(super) struct FrnIndex {
@@ -34,9 +34,9 @@ impl FrnIndex {
     /// Build from scratch over every live entry (initial scan finish,
     /// snapshot restore).
     pub(super) fn build(frn: &[u64], flag: &[u8]) -> Self {
-        let mut pairs: Vec<(u64, EntryId)> = (0..frn.len() as u32)
+        let mut pairs: Vec<(RecordNo, EntryId)> = (0..frn.len() as u32)
             .filter(|&id| is_live(flag, id))
-            .map(|id| (masked(frn[id as usize]), id))
+            .map(|id| (Frn(frn[id as usize]).record(), id))
             .collect();
         pairs.par_sort_unstable();
         Self {
@@ -45,16 +45,16 @@ impl FrnIndex {
         }
     }
 
-    /// The live entry for `key` (a masked record number), if any.
-    pub(super) fn lookup(&self, key: u64, frn: &[u64], flag: &[u8]) -> Option<EntryId> {
+    /// The live entry for `key` (a record number), if any.
+    pub(super) fn lookup(&self, key: RecordNo, frn: &[u64], flag: &[u8]) -> Option<EntryId> {
         // Unmerged tail first, newest first: within a batch the latest
         // upsert for a record is the live one.
         for id in (self.covers..frn.len() as u32).rev() {
-            if masked(frn[id as usize]) == key && is_live(flag, id) {
+            if Frn(frn[id as usize]).record() == key && is_live(flag, id) {
                 return Some(id);
             }
         }
-        let key_of = |id: EntryId| masked(frn[id as usize]);
+        let key_of = |id: EntryId| Frn(frn[id as usize]).record();
         let start = self.ids.partition_point(|&id| key_of(id) < key);
         for &id in &self.ids[start..] {
             if key_of(id) != key {
@@ -76,9 +76,9 @@ impl FrnIndex {
     /// that order anyway (at most one live pair per key).
     pub(super) fn merge_appended(&mut self, frn: &[u64], flag: &[u8]) {
         let n = frn.len() as u32;
-        let mut batch: Vec<(u64, EntryId)> = (self.covers..n)
+        let mut batch: Vec<(RecordNo, EntryId)> = (self.covers..n)
             .filter(|&id| is_live(flag, id))
-            .map(|id| (masked(frn[id as usize]), id))
+            .map(|id| (Frn(frn[id as usize]).record(), id))
             .collect();
         self.covers = n;
         if batch.is_empty() {
@@ -89,7 +89,7 @@ impl FrnIndex {
         let old = self.ids.len();
         super::reserve_bounded(&mut self.ids, batch.len());
         self.ids.resize(old + batch.len(), 0);
-        let key_of = |id: EntryId| masked(frn[id as usize]);
+        let key_of = |id: EntryId| Frn(frn[id as usize]).record();
         let mut hi = old; // unmoved prefix of the old array (exclusive end)
         let mut k = old + batch.len(); // write cursor (exclusive end)
         for j in (0..batch.len()).rev() {
@@ -139,15 +139,15 @@ impl FrnIndex {
 #[cfg(test)]
 mod tests {
     use super::EntryId;
-    use crate::index::masked;
+    use crate::index::RecordNo;
     use crate::index::testutil::{build_sample, raw, u16s};
 
     /// Reference implementation (forward full merge): equal keys take the
     /// old pair first.
     fn forward_merge_reference(
-        keys: &mut Vec<u64>,
+        keys: &mut Vec<RecordNo>,
         ids: &mut Vec<EntryId>,
-        batch: &[(u64, EntryId)],
+        batch: &[(RecordNo, EntryId)],
     ) {
         let mut nk = Vec::with_capacity(keys.len() + batch.len());
         let mut ni = Vec::with_capacity(ids.len() + batch.len());
@@ -184,7 +184,7 @@ mod tests {
     fn in_place_merge_is_byte_identical_to_the_forward_reference() {
         let mut idx = build_sample();
         let mut ref_ids = idx.frn_index.ids.clone();
-        let mut ref_keys: Vec<u64> = ref_ids.iter().map(|&id| masked(idx.frn(id))).collect();
+        let mut ref_keys: Vec<RecordNo> = ref_ids.iter().map(|&id| idx.frn(id).record()).collect();
         let mut state = 0x1234_5678_9ABC_DEF0u64;
         let mut rng = move || {
             state ^= state << 13;
@@ -205,20 +205,20 @@ mod tests {
                 }
             }
             // Mirror merge_appended's batch input exactly (live tail only).
-            let mut batch: Vec<(u64, EntryId)> = (first_new..idx.len() as u32)
+            let mut batch: Vec<(RecordNo, EntryId)> = (first_new..idx.len() as u32)
                 .filter(|&id| idx.is_live(id))
-                .map(|id| (masked(idx.frn(id)), id))
+                .map(|id| (idx.frn(id).record(), id))
                 .collect();
             batch.sort_unstable();
             forward_merge_reference(&mut ref_keys, &mut ref_ids, &batch);
 
             idx.merge_new_into_permutations(first_new);
             assert_eq!(idx.frn_index.ids, ref_ids);
-            let derived_keys: Vec<u64> = idx
+            let derived_keys: Vec<RecordNo> = idx
                 .frn_index
                 .ids
                 .iter()
-                .map(|&id| masked(idx.frn(id)))
+                .map(|&id| idx.frn(id).record())
                 .collect();
             assert_eq!(derived_keys, ref_keys);
         }

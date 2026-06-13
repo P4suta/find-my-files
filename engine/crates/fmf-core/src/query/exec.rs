@@ -121,18 +121,10 @@ pub fn search(
 
     for group in &q.groups {
         match &group.driver {
-            Driver::MatchAll => {
-                // No terms in this OR-branch → every live entry matches.
-                full_scan_group(
-                    idx,
-                    &memo,
-                    &group.terms,
-                    skip_excluded,
-                    &mut bitmap,
-                    &mut metrics,
-                );
-            }
-            Driver::FullScan => {
+            // MatchAll: no terms in this OR-branch → every live entry matches.
+            // FullScan: a group with no usable literal driver. Both evaluate
+            // the residuals (if any) over every live entry.
+            Driver::MatchAll | Driver::FullScan => {
                 full_scan_group(
                     idx,
                     &memo,
@@ -355,7 +347,7 @@ mod tests {
     use super::super::dates::UtcResolver;
     use super::super::{CaseMode, QueryOptions, compile, parse};
     use super::*;
-    use crate::index::{RawEntry, SortKey, VolumeIndexBuilder};
+    use crate::index::{Frn, RawEntry, SortKey, VolumeIndexBuilder};
 
     fn run(idx: &VolumeIndex, query: &str, opt: QueryOptions) -> Vec<String> {
         let ast = parse(query).unwrap();
@@ -388,9 +380,8 @@ mod tests {
         for (name, rec, parent, is_dir, size, mtime) in entries {
             let units: Vec<u16> = name.encode_utf16().collect();
             b.push(RawEntry {
-                record: *rec,
-                parent_record: *parent,
-                frn: (1 << 48) | rec,
+                parent_frn: Frn(*parent),
+                frn: Frn((1 << 48) | rec),
                 name_utf16: &units,
                 is_dir: *is_dir,
                 is_reparse: false,
@@ -537,9 +528,8 @@ mod tests {
         let (bin, ghost, vis) = (mk("$Recycle.Bin"), mk("ghost.txt"), mk("visible.txt"));
         let mut push = |rec: u64, parent: u64, name: &[u16], is_dir, is_system| {
             b.push(RawEntry {
-                record: rec,
-                parent_record: parent,
-                frn: (1 << 48) | rec,
+                parent_frn: Frn(parent),
+                frn: Frn((1 << 48) | rec),
                 name_utf16: name,
                 is_dir,
                 is_reparse: false,
@@ -614,9 +604,8 @@ mod tests {
             write!(name, "_{i}").unwrap();
             let units: Vec<u16> = name.encode_utf16().collect();
             b.push(RawEntry {
-                record: 100 + i,
-                parent_record: 5,
-                frn: (1 << 48) | (100 + i),
+                parent_frn: Frn(5),
+                frn: Frn((1 << 48) | (100 + i)),
                 name_utf16: &units,
                 is_dir: false,
                 is_reparse: false,
@@ -634,9 +623,8 @@ mod tests {
             let units: Vec<u16> = new_name.encode_utf16().collect();
             let first_new = idx.len() as u32;
             idx.upsert(&RawEntry {
-                record: 100 + i,
-                parent_record: 5,
-                frn: (1 << 48) | (100 + i),
+                parent_frn: Frn(5),
+                frn: Frn((1 << 48) | (100 + i)),
                 name_utf16: &units,
                 is_dir: false,
                 is_reparse: false,

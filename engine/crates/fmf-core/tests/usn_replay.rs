@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use fmf_core::index::{RawEntry, VolumeIndex, VolumeIndexBuilder};
+use fmf_core::index::{Frn, RawEntry, VolumeIndex, VolumeIndexBuilder};
 use fmf_core::usn::records::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM, encode_buffer,
 };
@@ -132,9 +132,8 @@ fn base_index() -> VolumeIndex {
     let mut push = |record: u64, parent: u64, name: &str, is_dir: bool, size: u64, mtime: i64| {
         let units: Vec<u16> = name.encode_utf16().collect();
         b.push(RawEntry {
-            record,
-            parent_record: parent,
-            frn: frn(record),
+            parent_frn: Frn(parent),
+            frn: Frn(frn(record)),
             name_utf16: &units,
             is_dir,
             is_reparse: false,

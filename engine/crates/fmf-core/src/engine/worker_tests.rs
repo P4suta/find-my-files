@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use crate::index::testutil::TestDir;
-use crate::index::{RawEntry, VolumeIndex, VolumeIndexBuilder};
+use crate::index::{Frn, RawEntry, VolumeIndex, VolumeIndexBuilder};
 use crate::query::QueryOptions;
 use crate::usn::records::reason;
 use crate::usn::{JournalGone, ReadOutcome, StatFetcher, UsnError, UsnRecord};
@@ -338,9 +338,8 @@ fn vol(label: &str, names: &[&str]) -> VolumeIndex {
     for (i, name) in names.iter().enumerate() {
         let units: Vec<u16> = name.encode_utf16().collect();
         b.push(RawEntry {
-            record: 100 + i as u64,
-            parent_record: 5,
-            frn: (1 << 48) | (100 + i as u64),
+            parent_frn: Frn(5),
+            frn: Frn((1 << 48) | (100 + i as u64)),
             name_utf16: &units,
             is_dir: false,
             is_reparse: false,

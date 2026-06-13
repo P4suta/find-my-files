@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fmf_core::engine::{Engine, EngineConfig};
 use fmf_core::index::testutil::TestDir;
-use fmf_core::index::{RawEntry, VolumeIndexBuilder};
+use fmf_core::index::{Frn, RawEntry, VolumeIndexBuilder};
 use fmf_proto::frame::{FLAG_EVENT, FLAG_RESPONSE, FrameHeader, read_frame, write_frame};
 use fmf_proto::messages::{self, opcode};
 use fmf_proto::{PROTOCOL_VERSION, codes};
@@ -40,9 +40,8 @@ fn test_engine() -> (TestDir, Arc<Engine>) {
     let mut b = VolumeIndexBuilder::new("C:", 5);
     let alpha: Vec<u16> = "alpha.txt".encode_utf16().collect();
     b.push(RawEntry {
-        record: 100,
-        parent_record: 5,
-        frn: frn(1, 100),
+        parent_frn: Frn(5),
+        frn: Frn(frn(1, 100)),
         name_utf16: &alpha,
         is_dir: false,
         is_reparse: false,
@@ -53,9 +52,8 @@ fn test_engine() -> (TestDir, Arc<Engine>) {
     });
     let beta: Vec<u16> = "beta.log".encode_utf16().collect();
     b.push(RawEntry {
-        record: 101,
-        parent_record: 5,
-        frn: frn(1, 101),
+        parent_frn: Frn(5),
+        frn: Frn(frn(1, 101)),
         name_utf16: &beta,
         is_dir: false,
         is_reparse: false,

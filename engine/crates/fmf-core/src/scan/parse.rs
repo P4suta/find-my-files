@@ -7,7 +7,7 @@ use ntfs_reader::api::{FIRST_NORMAL_RECORD, NtfsAttributeType, NtfsFileName};
 use ntfs_reader::file::NtfsFile;
 use rustc_hash::FxHashMap;
 
-use crate::index::{EncodedEntry, VolumeIndexBuilder};
+use crate::index::{EncodedEntry, Frn, VolumeIndexBuilder};
 use crate::mft::pick_name;
 use crate::wtf8;
 
@@ -86,8 +86,9 @@ fn extract_attrs(f: &NtfsFile) -> RecordAttrs {
 
 /// One entry parsed by a worker; the name lives in its batch's pools.
 struct ParsedMeta {
-    record: u64,
-    parent_record: u64,
+    /// Raw OS values (the parse layer stays in `u64`); wrapped into [`Frn`]
+    /// when the entry crosses into the index in `append_batches`.
+    parent_frn: u64,
     frn: u64,
     name_off: u32,
     name_len: u32,
@@ -145,8 +146,7 @@ impl ParsedBatch {
             &mut self.lower_pool,
         );
         self.metas.push(ParsedMeta {
-            record: f.number,
-            parent_record: name.header.parent_directory_reference,
+            parent_frn: name.header.parent_directory_reference,
             frn: f.reference_number(),
             name_off,
             name_len: self.name_pool.len() as u32 - name_off,
@@ -237,9 +237,8 @@ pub(super) fn append_batches(
         for m in &batch.metas {
             let range = m.name_off as usize..(m.name_off + m.name_len) as usize;
             b.push_encoded(EncodedEntry {
-                record: m.record,
-                parent_record: m.parent_record,
-                frn: m.frn,
+                parent_frn: Frn(m.parent_frn),
+                frn: Frn(m.frn),
                 name_wtf8: &batch.name_pool[range.clone()],
                 lower_wtf8: &batch.lower_pool[range],
                 is_dir: m.is_dir,

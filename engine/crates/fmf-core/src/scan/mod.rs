@@ -216,7 +216,7 @@ mod tests {
         let mut size_matched = 0u64;
         let mut mismatches: Vec<String> = Vec::new();
         for sample in (0..old_idx.len() as u32).step_by(997) {
-            let old_rec = crate::index::masked(old_idx.frn(sample));
+            let old_rec = old_idx.frn(sample).record();
             let (Some(o), Some(n)) = (
                 old_idx.entry_by_record(old_rec),
                 new_idx.entry_by_record(old_rec),
@@ -248,7 +248,8 @@ mod tests {
                     matched += 1;
                 } else if mismatches.len() < 16 {
                     mismatches.push(format!(
-                        "record {old_rec}: reference `{}` vs streaming `{}` (path gone: {})",
+                        "record {}: reference `{}` vs streaming `{}` (path gone: {})",
+                        old_rec.0,
                         String::from_utf8_lossy(old_idx.name(o)),
                         String::from_utf8_lossy(new_idx.name(n)),
                         path.display(),

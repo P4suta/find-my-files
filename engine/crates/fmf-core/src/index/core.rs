@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
 use super::frn::FrnIndex;
-use super::{EntryId, NO_PARENT, SortKey, flags, masked};
+use super::{EntryId, Frn, NO_PARENT, RecordNo, SortKey, flags};
 
 pub struct VolumeIndex {
     /// The one contiguous, sweepable pool: every entry's *folded* name at
@@ -66,6 +66,34 @@ pub(super) struct DerivedCache {
     prev: DerivedMap,
 }
 
+// ── Shared column accessors ──────────────────────────────────────────────
+// `VolumeIndex` owns its columns; `SortColumns` borrows them so permutation
+// maintenance can hold the `&mut` perm array alongside the keys. Both read an
+// entry's folded name and size identically — these free functions are the one
+// definition each delegates to, so the pair can never drift (the same hazard
+// `SortColumns`'s own doc cites for `cmp_by`).
+
+/// Folded name bytes of `id`, from a name pool and its offset/length columns.
+#[inline]
+fn pool_lower_name<'a>(
+    lower_pool: &'a [u8],
+    name_off: &[u32],
+    name_len: &[u16],
+    id: EntryId,
+) -> &'a [u8] {
+    let off = name_off[id as usize] as usize;
+    &lower_pool[off..off + name_len[id as usize] as usize]
+}
+
+/// Size of `id` read through the u32 column + overflow map (ADR-0007).
+#[inline]
+fn column_size(size_lo: &[u32], size_ovf: &FxHashMap<EntryId, u64>, id: EntryId) -> u64 {
+    match size_lo[id as usize] {
+        u32::MAX => size_ovf[&id],
+        v => v as u64,
+    }
+}
+
 impl VolumeIndex {
     pub const fn len(&self) -> usize {
         self.name_off.len()
@@ -95,8 +123,7 @@ impl VolumeIndex {
 
     #[inline]
     pub fn lower_name(&self, id: EntryId) -> &[u8] {
-        let off = self.name_off[id as usize] as usize;
-        &self.lower_pool[off..off + self.name_len[id as usize] as usize]
+        pool_lower_name(&self.lower_pool, &self.name_off, &self.name_len, id)
     }
 
     #[inline]
@@ -122,10 +149,7 @@ impl VolumeIndex {
 
     #[inline]
     pub fn size(&self, id: EntryId) -> u64 {
-        match self.size_lo[id as usize] {
-            u32::MAX => self.size_ovf[&id],
-            v => v as u64,
-        }
+        column_size(&self.size_lo, &self.size_ovf, id)
     }
 
     /// The single write path for sizes — keeps the column and the overflow
@@ -163,13 +187,15 @@ impl VolumeIndex {
     }
 
     #[inline]
-    pub fn frn(&self, id: EntryId) -> u64 {
-        self.frn[id as usize]
+    pub fn frn(&self, id: EntryId) -> Frn {
+        Frn(self.frn[id as usize])
     }
 
-    pub fn entry_by_record(&self, record_or_frn: u64) -> Option<EntryId> {
-        self.frn_index
-            .lookup(masked(record_or_frn), &self.frn, &self.flag)
+    /// The live entry for a record number, if any. Pass a [`RecordNo`] (or a
+    /// raw record-number `u64`); derive one from a full reference with
+    /// [`Frn::record`] — the type stops a full FRN being mistaken for a key.
+    pub fn entry_by_record(&self, record: impl Into<RecordNo>) -> Option<EntryId> {
+        self.frn_index.lookup(record.into(), &self.frn, &self.flag)
     }
 
     // Raw pool access for the pool-scan query kernel (same crate only).
@@ -464,16 +490,12 @@ impl<'a> SortColumns<'a> {
 
     #[inline]
     fn lower_name(&self, id: EntryId) -> &[u8] {
-        let off = self.name_off[id as usize] as usize;
-        &self.lower_pool[off..off + self.name_len[id as usize] as usize]
+        pool_lower_name(self.lower_pool, self.name_off, self.name_len, id)
     }
 
     #[inline]
     fn size_of(&self, id: EntryId) -> u64 {
-        match self.size_lo[id as usize] {
-            u32::MAX => self.size_ovf[&id],
-            v => v as u64,
-        }
+        column_size(self.size_lo, self.size_ovf, id)
     }
 
     /// Strict total order (id tie-break): no two distinct ids compare equal,
