@@ -9,13 +9,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{Frn, RawEntry, VolumeIndex, VolumeIndexBuilder};
 
-/// RAII per-test directory: `{workspace target}/test-tmp/fmf-<pid>-<seq>`,
+/// RAII per-test directory: `{build/engine}/test-tmp/fmf-<pid>-<seq>`,
 /// created by [`TestDir::new`], removed (best-effort) on drop.
 ///
 /// Per-call uniqueness matters: the engine's writer lock turns a shared
 /// index dir into a cross-test collision under the parallel test runner.
-/// The dir lives under the workspace `target/` — not %TEMP% — so whatever
-/// a killed test run leaves behind is swept by `cargo clean` or
+/// The dir lives under the build output tree (`build/engine`) — not %TEMP% —
+/// so whatever a killed test run leaves behind is swept by `cargo clean` or
 /// `just clean-temp`.
 ///
 /// Hold the guard for the whole test (`let (_dir, e) = …`): it must drop
@@ -26,7 +26,7 @@ pub struct TestDir {
 }
 
 impl TestDir {
-    /// Create a fresh per-test directory under the workspace `target/`.
+    /// Create a fresh per-test directory under the build output tree.
     ///
     /// # Panics
     ///
@@ -34,8 +34,13 @@ impl TestDir {
     #[must_use]
     pub fn new() -> Self {
         static SEQ: AtomicU64 = AtomicU64::new(0);
+        // The build output tree is build/engine at the repo root, not
+        // engine/target (ADR-0021); `.cargo/config.toml`'s target-dir does not
+        // export CARGO_TARGET_DIR, so the fallback hard-codes that location —
+        // from this crate's manifest dir (engine/crates/fmf-core), ../../../
+        // is the repo root.
         let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-            || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../build/engine"),
             PathBuf::from,
         );
         let path = target.join("test-tmp").join(format!(

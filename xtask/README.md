@@ -11,8 +11,8 @@ workflows, rewritten as plain, unit-tested Rust.
 |---|---|---|
 | `release <ver> [--dry-run]` | `just release <ver>` | Bump the version (Rust workspace + C# app in lockstep), commit, signed tag. Guards: semver, existing-tag, no-op. |
 | `publish [--skip-rust <bool>]` | `just publish` / `just publish-app <skip>` | Clean → `dotnet publish` → prune unshipped locale dirs → copy engine binaries → **self-verify** the bundle is runnable. |
-| `package <tag>` | `just package <tag>` | Zip + SHA256 the bundle into `find-my-files-v<ver>-win-x64.zip` + `SHA256SUMS.txt`. Run after signing. |
-| `clean-temp` | `just clean-temp` | Sweep leftover test fixtures (`engine/target/test-tmp`). |
+| `package <tag>` | `just package <tag>` | Zip + SHA256 the bundle into `build/package/find-my-files-v<ver>-win-x64.zip` + `SHA256SUMS.txt`. Run after signing. |
+| `clean-temp` | `just clean-temp` | Sweep leftover test fixtures (`build/engine/test-tmp`). |
 
 ## Why a separate workspace
 

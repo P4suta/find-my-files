@@ -129,21 +129,21 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>Resolve engine/target/release/fmf-service.exe by walking up
+    /// <summary>Resolve build/engine/release/fmf-service.exe by walking up
     /// from the test assembly (repo-relative; built by `just service-build`).</summary>
     private static string FindServiceExe()
     {
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
         {
             var candidate = Path.Combine(
-                dir.FullName, "engine", "target", "release", "fmf-service.exe");
+                dir.FullName, "build", "engine", "release", "fmf-service.exe");
             if (File.Exists(candidate))
             {
                 return candidate;
             }
         }
         throw new FileNotFoundException(
-            "engine/target/release/fmf-service.exe not found above "
+            "build/engine/release/fmf-service.exe not found above "
             + $"{AppContext.BaseDirectory} — run `just service-build` first");
     }
 

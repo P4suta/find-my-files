@@ -20,3 +20,4 @@
 - [0018](0018-contract-single-source.md) — 契約の単一正本化(fmf-contract)+捕獲先行ゴールデンコーパス、シーム2本上限
 - [0019](0019-focused-search-query-rewrite.md) — 絞り込みモード=UI層クエリ書き換え(ext:+!path:)、エンジン内ビット・ランキングは却下
 - [0020](0020-code-signing-provider.md) — コード署名=SSL.com eSigner/個人IV、Azure(日本個人不可)・EV(SmartScreen即時信頼喪失)は却下
+- [0021](0021-build-output-layout.md) — ビルド出力を単一 build/ に集約(per-workspace .cargo/config.toml、C# bin は BaseOutputPath・obj は据え置き)

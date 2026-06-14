@@ -64,8 +64,8 @@ Authenticode 署名するための手順書。判断の経緯と却下案は [AD
    「Verify signatures」が4ファイルとも `signed: ... - CN=<あなたの名前>` を出して green になることを確認。
 8. **ローカル確認**: Release の zip を展開し、Windows で:
    ```powershell
-   signtool verify /pa /v dist\FindMyFiles\FindMyFiles.exe   # → Successfully verified
-   Get-AuthenticodeSignature dist\FindMyFiles\FindMyFiles.exe # → Status: Valid
+   signtool verify /pa /v build\dist\FindMyFiles\FindMyFiles.exe   # → Successfully verified
+   Get-AuthenticodeSignature build\dist\FindMyFiles\FindMyFiles.exe # → Status: Valid
    ```
    `FindMyFiles.exe` のプロパティ →「デジタル署名」タブに自分の名前とタイムスタンプが出る。
 

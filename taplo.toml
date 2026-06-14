@@ -1,6 +1,12 @@
 # TOML formatting policy (taplo), enforced repo-wide via `taplo fmt --check`
 # (see justfile / lefthook / CI). Validity alone (`taplo check`) is not enough —
 # formatting is part of the convention.
+
+# Generated output (mdBook/rustdoc copies, etc.) lives under build/ (ADR-0021).
+# taplo doesn't honor .gitignore, so exclude it explicitly — mirrors the
+# build/ exclude in _typos.toml. Keeps `taplo fmt`/`--check` off generated TOML.
+exclude = ["build/**"]
+
 [formatting]
 align_comments = false # keep trailing comments one space after the value
 column_width = 100

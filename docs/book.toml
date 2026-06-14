@@ -4,6 +4,12 @@ authors = ["Yasunobu"]
 language = "ja"
 src = "."
 
+# Render under the repo-root build/ tree, not docs/book (ADR-0021): every build
+# artifact lives in one place. Relative to this book's root (docs/), so
+# ../build/docs-book resolves to <repo>/build/docs-book.
+[build]
+build-dir = "../build/docs-book"
+
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"

@@ -1,0 +1,10 @@
+# Build output lives under the repo-root build/ tree, not engine/target/, so all
+# artifacts (cargo, dotnet, dist, packages) sit in one place (ADR-0021). This is
+# the engine workspace's target-dir only — the xtask workspace has its own under
+# build/xtask to keep the two-workspace separation (CLAUDE.md / ADR-0018).
+#
+# The path is relative to this config file's parent's parent (the directory that
+# contains the .cargo/ dir = engine/), so ../build/engine resolves to
+# <repo>/build/engine. NOT a toolchain pin — toolchains stay in mise.toml.
+[build]
+target-dir = "../build/engine"

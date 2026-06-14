@@ -6,6 +6,11 @@
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>FindMyFiles</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Build output goes under the repo-root build/ tree, not app/FindMyFiles/bin
+         (ADR-0021): one place for every artifact. Only bin moves — obj stays put
+         because relocating BaseIntermediateOutputPath needs a Directory.Build.props,
+         which CLAUDE.md forbids (it would shadow winapp run's analyzer injection). -->
+    <BaseOutputPath>..\..\build\app\FindMyFiles\</BaseOutputPath>
     <!-- i18n: resources live in Strings/{en-US,ja-JP,zh-Hans}/Resources.resw,
          merged into FindMyFiles.pri. en-US is the fallback language. The UI
          language follows the OS unless overridden (settings.json + the gear
@@ -102,7 +107,7 @@
     <Exec Command="cargo build --release -p fmf-ffi" WorkingDirectory="$(MSBuildThisFileDirectory)..\..\engine" />
   </Target>
   <ItemGroup>
-    <None Include="..\..\engine\target\release\fmf_engine.dll" Link="fmf_engine.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\build\engine\release\fmf_engine.dll" Link="fmf_engine.dll" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <PropertyGroup>

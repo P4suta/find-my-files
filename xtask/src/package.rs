@@ -2,9 +2,9 @@
 //!
 //! Replaces release.yml's `Compress-Archive` + `Get-FileHash` steps. Runs
 //! AFTER the signing step (which signs the PE files in dist/), so the zip
-//! contains the signed binaries. Output names/format are unchanged so
-//! release.yml's `action-gh-release` glob still matches:
-//!   find-my-files-v<version>-win-x64.zip   (contents = dist/FindMyFiles/*)
+//! contains the signed binaries. Both land in build/package/ (ADR-0021) —
+//! release.yml's `action-gh-release` glob points there:
+//!   find-my-files-v<version>-win-x64.zip   (contents = build/dist/FindMyFiles/*)
 //!   SHA256SUMS.txt                          (uppercase hash, one line)
 
 use crate::{checksum, fsx, paths, semver};
@@ -19,7 +19,6 @@ pub fn run(tag: &str) -> Result<()> {
     let version = semver::strip_tag_v(tag);
     semver::validate(version)?;
 
-    let root = paths::repo_root();
     let dist = paths::dist_dir();
     if !dist.exists() {
         bail!(
@@ -28,13 +27,16 @@ pub fn run(tag: &str) -> Result<()> {
         );
     }
 
+    let pkg = paths::package_dir();
+    fs::create_dir_all(&pkg).with_context(|| format!("create {}", pkg.display()))?;
+
     let zip_name = format!("find-my-files-v{version}-win-x64.zip");
-    let zip_path = root.join(&zip_name);
+    let zip_path = pkg.join(&zip_name);
     write_zip(&dist, &zip_path)?;
 
     let bytes = fs::read(&zip_path).with_context(|| format!("read {}", zip_path.display()))?;
     let hash = checksum::sha256_upper_hex(&bytes);
-    let sums_path = root.join("SHA256SUMS.txt");
+    let sums_path = pkg.join("SHA256SUMS.txt");
     fs::write(&sums_path, checksum::sha256sums_body(&hash))
         .with_context(|| format!("write {}", sums_path.display()))?;
 

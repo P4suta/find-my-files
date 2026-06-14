@@ -1,0 +1,5 @@
+# See engine/.cargo/config.toml. xtask is a separate workspace (CLAUDE.md /
+# ADR-0018), so it gets its OWN target-dir under the shared build/ tree —
+# build/xtask, distinct from build/engine — never a shared target.
+[build]
+target-dir = "../build/xtask"
