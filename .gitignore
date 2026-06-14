@@ -34,6 +34,10 @@ engine/crates/fmf-core/testdata/large/
 mise.local.toml
 .mise.local.toml
 
+# npm deps pulled into the tree by the actionlint action (CI hygiene job);
+# never committed, but keep an accidental local `act`/action run out of git.
+node_modules/
+
 # Claude Code local working dir (scheduled task locks, etc.)
 .claude/
 
