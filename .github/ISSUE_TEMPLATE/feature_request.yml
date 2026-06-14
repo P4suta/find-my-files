@@ -8,7 +8,7 @@ body:
         ## Before you file
 
         find-my-files is deliberately **file-name search only** — that focus is
-        the reason it stays as fast as Everything. The following are explicitly
+        the reason it stays fast. The following are explicitly
         **out of scope**, and such requests will be closed:
 
         - Content / property / tag indexing

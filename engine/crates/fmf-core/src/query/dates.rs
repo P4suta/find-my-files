@@ -1,7 +1,7 @@
 //! Civil-date ↔ FILETIME conversion for `dm:` filters.
 //!
-//! `dm:` bounds are interpreted in the *local* time zone (Everything does the
-//! same, docs/ARCHITECTURE.md C-4). The conversion is injected via
+//! `dm:` bounds are interpreted in the *local* time zone
+//! (docs/ARCHITECTURE.md C-4). The conversion is injected via
 //! [`DateResolver`] so the parser/compiler stay pure and tests can use UTC.
 
 pub const FILETIME_UNIX_EPOCH: i64 = 116_444_736_000_000_000;

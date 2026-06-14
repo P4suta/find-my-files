@@ -17,10 +17,10 @@
 - **LocalSystem 採用 / 専用低権限アカウント+SeBackupPrivilege 却下**: 裏取りできた事実は
   「ボリュームハンドル(\\.\C:)のオープンは管理者必須」まで。SeBackupPrivilege が生ボリューム
   読みを通すという文書化された保証は存在しない(docs/RESEARCH.md — 通常ファイルのACLバイパスに
-  ついての記述のみ)。未検証の権限構成に賭けず、検証済みの SYSTEM(Everything Service と同方式)+
+  ついての記述のみ)。未検証の権限構成に賭けず、検証済みの SYSTEM+
   特権剥奪+ネットワーク機能ゼロ+pipe面の最小オペコードで攻撃面を絞る
 - **利用者SID名指し / Authenticated Users 却下**: Authenticated Users RW はマルチユーザー機で
-  他ユーザーが全ファイル名を検索できる(ACL迂回の名前漏洩 = Everything ETP 事件型)。
+  他ユーザーが全ファイル名を検索できる(ACL迂回の名前漏洩)。
   **Administrators 許可も不成立**: UACフィルタ済みトークンでは Administrators SID が
   SE_GROUP_USE_FOR_DENY_ONLY になり、許可ACEに使われない(docs/RESEARCH.md)。よって install
   実行ユーザーの個別SIDを service.json に保存し、SDDL とトークン照合の両方で使う

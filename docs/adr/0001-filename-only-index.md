@@ -9,8 +9,8 @@
 ## 根拠
 
 - 速度とRAMの源泉は「ファイル名だけを索引する」割り切り。RAMゲートはエンジン単体 ≤110B/ファイル(M2)で、content索引とは桁が両立しない
-- Everything 1.5はcontent索引でメモリ8GB級の苦情を生んだ(CLAUDE.md やらないことリスト)
-- Everything公式FAQの基準値: 100万ファイル ≈ 100MB RAM(≈100バイト/ファイル)。本家自身がcontent:を「extremely slow」と明記
+- content索引はRAMが桁違いに膨らむ(8GB級になり得る)
+- ファイル名のみ索引の到達水準は ≈100B/ファイル(≤110B のRAMゲートはこれを踏まえた目標)
 - 検索構文の実利用はsubstring・`ext:`・`path:`・`size:`・`dm:`が中心で、content:/regex:はニッチ(docs/RESEARCH.md)
 
 ## 影響
