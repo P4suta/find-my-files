@@ -32,12 +32,16 @@ pre-push:
     # The xtask crate is its own workspace (engine's --workspace doesn't cover
     # it); gate it here too, only when xtask files change. One command per job
     # (no `&&` chaining) so the hook never depends on which shell runs it.
+    # --target-dir build/xtask: these run from the repo root via --manifest-path,
+    # and cargo discovers .cargo/config.toml from the CWD (not the manifest), so
+    # the config's target-dir doesn't apply — route output to build/xtask
+    # explicitly so the hook doesn't resurrect xtask/target (ADR-0021).
     - name: xtask-fmt
       glob: "xtask/**"
       run: cargo fmt --manifest-path xtask/Cargo.toml --all -- --check
     - name: xtask-clippy
       glob: "xtask/**"
-      run: cargo clippy --manifest-path xtask/Cargo.toml --all-targets -- -D warnings
+      run: cargo clippy --manifest-path xtask/Cargo.toml --all-targets --target-dir build/xtask -- -D warnings
     - name: xtask-test
       glob: "xtask/**"
-      run: cargo test --manifest-path xtask/Cargo.toml
+      run: cargo test --manifest-path xtask/Cargo.toml --target-dir build/xtask
