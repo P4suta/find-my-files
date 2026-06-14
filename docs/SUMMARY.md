@@ -4,6 +4,7 @@
 - [技術的裏取り（RESEARCH）](RESEARCH.md)
 - [セキュリティモデル](SECURITY.md)
 - [コード署名](SIGNING.md)
+- [サプライチェーンと来歴](SUPPLY_CHAIN.md)
 
 # 設計判断（ADR）
 
