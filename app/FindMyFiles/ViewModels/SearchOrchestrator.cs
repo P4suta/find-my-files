@@ -1,4 +1,5 @@
 using FindMyFiles.Engine;
+using FindMyFiles.Highlighting;
 using FindMyFiles.Services;
 
 namespace FindMyFiles.ViewModels;
@@ -138,6 +139,9 @@ public sealed class SearchOrchestrator
         var query = FocusedSearch
             ? FocusedQueryRewriter.Compose(request.Query, FocusedExcludePaths, FocusedExtensions)
             : request.Query;
+        // Highlight the user's raw words, not the focused-mode rewrite: the
+        // appended !path:/ext: filters are not what the user typed.
+        var highlighter = MatchHighlighter.Compile(request.Query);
         try
         {
             var outcome = await _engine.SearchAsync(query, request.Options);
@@ -155,6 +159,7 @@ public sealed class SearchOrchestrator
                     outcome.Result,
                     outcome.Trace,
                     origin,
+                    highlighter,
                     () => generation == Interlocked.Read(ref _generation));
                 return;
             }
@@ -162,6 +167,7 @@ public sealed class SearchOrchestrator
                 outcome.Result,
                 outcome.Trace,
                 origin,
+                highlighter,
                 () => generation == Interlocked.Read(ref _generation));
         }
         catch (StaleResultException)

@@ -1,4 +1,5 @@
 using System.Globalization;
+using FindMyFiles.Highlighting;
 using FindMyFiles.Tests.TestDoubles;
 using FindMyFiles.ViewModels;
 using Xunit;
@@ -72,5 +73,51 @@ public sealed class ResultRowTests
         Assert.Equal("name.txt", row.Name);
         Assert.Equal(data.ParentPath, row.ParentPath);
         Assert.Equal(data.FullPath, row.FullPath);
+    }
+
+    [Fact]
+    public void Fill_WithHighlighter_PopulatesNameRanges()
+    {
+        var row = ResultRow.CreatePlaceholder(0);
+        row.Fill(Rows.File(1, "report.txt"), MatchHighlighter.Compile("rep"));
+        Assert.Equal([new HighlightRange(0, 3)], row.NameRanges);
+        Assert.Empty(row.PathRanges);
+    }
+
+    [Fact]
+    public void Fill_NoHighlighter_LeavesRangesEmpty()
+    {
+        var row = ResultRow.CreatePlaceholder(0);
+        row.Fill(Rows.File(1, "report.txt"));
+        Assert.Empty(row.NameRanges);
+        Assert.Empty(row.PathRanges);
+    }
+
+    [Fact]
+    public void Fill_PathTerm_SplitsHighlightAtBoundary()
+    {
+        var row = ResultRow.CreatePlaceholder(0);
+        // ParentPath "F:\t\" + Name "report.txt"; the path term spans the boundary.
+        row.Fill(Rows.File(1, "report.txt"), MatchHighlighter.Compile(@"t\report"));
+        Assert.Equal([new HighlightRange(3, 2)], row.PathRanges); // "t\" in the parent
+        Assert.Equal([new HighlightRange(0, 6)], row.NameRanges); // "report" in the name
+    }
+
+    [Fact]
+    public void Fill_SameQueryRefill_DoesNotRenotifyRanges()
+    {
+        var row = ResultRow.CreatePlaceholder(0);
+        var hl = MatchHighlighter.Compile("rep");
+        row.Fill(Rows.File(1, "report.txt"), hl);
+        var nameChanges = 0;
+        row.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(ResultRow.NameRanges))
+            {
+                nameChanges++;
+            }
+        };
+        row.Fill(Rows.File(1, "report.txt"), hl); // identical query+name → identical ranges
+        Assert.Equal(0, nameChanges); // no re-notification → RefreshInPlace repaints nothing
     }
 }

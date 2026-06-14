@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Specialized;
 using Microsoft.UI.Xaml.Data;
 using FindMyFiles.Engine;
+using FindMyFiles.Highlighting;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
 
@@ -54,6 +55,12 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     private readonly HashSet<long> _loaded = [];
     private readonly HashSet<long> _inFlight = [];
     private ISearchResult? _result;
+
+    // The active query's compiled highlighter, applied to every row filled
+    // through this list (seeds + background fetches). Swapped atomically with
+    // the result in Reassign/RefreshInPlace so rows always match the query
+    // they are shown under.
+    private CompiledHighlighter _highlighter = CompiledHighlighter.Empty;
     private int _epoch;
 
     // Per-epoch cancellation, second line of defense behind the epoch check:
@@ -102,9 +109,11 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// <paramref name="result"/> transfers to this list (it is disposed by
     /// the next Reassign/RefreshInPlace or by <see cref="Dispose"/>).
     /// </summary>
-    public void Reassign(ISearchResult? result, IReadOnlyList<PageSeed> seeds)
+    public void Reassign(
+        ISearchResult? result, IReadOnlyList<PageSeed> seeds, CompiledHighlighter? highlighter = null)
     {
         EnsureUiThread(nameof(Reassign));
+        _highlighter = highlighter ?? CompiledHighlighter.Empty;
         _epoch++;
         _fetchCts.Cancel();
         _fetchCts = new CancellationTokenSource();
@@ -142,7 +151,8 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// <paramref name="result"/> transfers to this list. In-flight fetches
     /// of the previous epoch are cancelled here too.
     /// </summary>
-    public void RefreshInPlace(ISearchResult result, IReadOnlyList<PageSeed> seeds)
+    public void RefreshInPlace(
+        ISearchResult result, IReadOnlyList<PageSeed> seeds, CompiledHighlighter? highlighter = null)
     {
         EnsureUiThread(nameof(RefreshInPlace));
         if ((int)Math.Min(result.Count, int.MaxValue) != Count)
@@ -154,9 +164,10 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
             FileLog.Warn(
                 "virtualization",
                 $"RefreshInPlace count mismatch ({result.Count} vs {Count}) — falling back to Reassign");
-            Reassign(result, seeds);
+            Reassign(result, seeds, highlighter);
             return;
         }
+        _highlighter = highlighter ?? CompiledHighlighter.Empty;
         _epoch++;
         _fetchCts.Cancel();
         _fetchCts = new CancellationTokenSource();
@@ -194,7 +205,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         var rows = GetOrCreatePage(seed.Page);
         for (var i = 0; i < seed.Rows.Count && i < rows.Length; i++)
         {
-            rows[i].Fill(seed.Rows[i]);
+            rows[i].Fill(seed.Rows[i], _highlighter);
         }
         _loaded.Add(seed.Page);
     }
@@ -312,7 +323,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
                 var rows = GetOrCreatePage(page);
                 for (var i = 0; i < data.Count && i < rows.Length; i++)
                 {
-                    rows[i].Fill(data[i]);
+                    rows[i].Fill(data[i], _highlighter);
                 }
                 _loaded.Add(page);
             });

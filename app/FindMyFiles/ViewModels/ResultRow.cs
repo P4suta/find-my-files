@@ -1,6 +1,7 @@
 using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
 using FindMyFiles.Engine;
+using FindMyFiles.Highlighting;
 
 namespace FindMyFiles.ViewModels;
 
@@ -11,6 +12,11 @@ namespace FindMyFiles.ViewModels;
 /// </summary>
 public sealed partial class ResultRow : ObservableObject
 {
+    /// <summary>Shared empty range list: every un-highlighted row points here,
+    /// so an equal-empty refill compares reference-equal and notifies nothing
+    /// (keeps a same-query RefreshInPlace from repainting).</summary>
+    private static readonly IReadOnlyList<HighlightRange> NoRanges = [];
+
     /// <summary>Absolute position of this row in the full result set — the
     /// virtualized list's stable key, set once at placeholder creation and
     /// never changed (the same instance is refilled when its page lands).</summary>
@@ -38,6 +44,17 @@ public sealed partial class ResultRow : ObservableObject
     [ObservableProperty]
     public partial string Glyph { get; set; } = ""; // Page
 
+    /// <summary>Ranges of <see cref="Name"/> the query matched, for the name
+    /// TextBlock's highlight; empty when nothing matches. Filled together with
+    /// <see cref="Name"/> so the text and its emphasis never disagree.</summary>
+    [ObservableProperty]
+    public partial IReadOnlyList<HighlightRange> NameRanges { get; set; } = NoRanges;
+
+    /// <summary>Ranges of <see cref="ParentPath"/> a path term matched (a query
+    /// term containing <c>\</c> or <c>path:</c>); empty otherwise.</summary>
+    [ObservableProperty]
+    public partial IReadOnlyList<HighlightRange> PathRanges { get; set; } = NoRanges;
+
     /// <summary>Absolute path (<c>ParentPath + Name</c>) — what 「開く」/コピー act on.
     /// Empty until <see cref="Fill"/>.</summary>
     public string FullPath { get; private set; } = string.Empty;
@@ -59,7 +76,7 @@ public sealed partial class ResultRow : ObservableObject
     /// page hit: copies identity (<see cref="EntryRef"/>, <see cref="FullPath"/>),
     /// formats size/date for display, picks the type glyph, and clears
     /// <see cref="IsPlaceholder"/>. In place — the bound instance is reused.</summary>
-    public void Fill(RowData data)
+    public void Fill(RowData data, CompiledHighlighter? highlighter = null)
     {
         EntryRef = data.EntryRef;
         FullPath = data.FullPath;
@@ -71,6 +88,89 @@ public sealed partial class ResultRow : ObservableObject
             ? DateTimeOffset.FromFileTime(data.Mtime).ToLocalTime().ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture)
             : string.Empty;
         Glyph = data.IsDirectory ? "" : ""; // Folder : Page
+        ApplyHighlight(highlighter, data);
+    }
+
+    /// <summary>Compute this row's name/path highlight ranges for the active
+    /// query. Path terms match the full path and are split at the parent/name
+    /// boundary so each TextBlock gets only its own slice. Ranges are assigned
+    /// only when they change, so a same-query RefreshInPlace refill (identical
+    /// ranges) raises no notification and repaints nothing.</summary>
+    private void ApplyHighlight(CompiledHighlighter? highlighter, RowData data)
+    {
+        if (highlighter is null || highlighter.IsEmpty)
+        {
+            AssignRanges(NoRanges, NoRanges);
+            return;
+        }
+        var nameHits = new List<HighlightRange>(highlighter.Ranges(data.Name, HighlightField.Name));
+        var parentHits = new List<HighlightRange>();
+        var boundary = data.ParentPath.Length;
+        foreach (var r in highlighter.Ranges(data.FullPath, HighlightField.Path))
+        {
+            SplitAtBoundary(r, boundary, parentHits, nameHits);
+        }
+        AssignRanges(
+            ToShared(CompiledHighlighter.MergeRanges(nameHits)),
+            ToShared(CompiledHighlighter.MergeRanges(parentHits)));
+    }
+
+    /// <summary>Assign the computed ranges, but only when they differ from the
+    /// current ones — equal ranges keep the existing reference so the
+    /// ObservableProperty setter stays silent (RefreshInPlace anti-flicker).</summary>
+    private void AssignRanges(IReadOnlyList<HighlightRange> name, IReadOnlyList<HighlightRange> path)
+    {
+        if (!RangesEqual(NameRanges, name))
+        {
+            NameRanges = name;
+        }
+        if (!RangesEqual(PathRanges, path))
+        {
+            PathRanges = path;
+        }
+    }
+
+    /// <summary>Split a full-path match at the parent/name boundary: the slice
+    /// before <paramref name="boundary"/> highlights the parent path, the slice
+    /// after highlights the name (re-based to name-local coordinates). A match
+    /// straddling the separator lands in both.</summary>
+    private static void SplitAtBoundary(
+        HighlightRange r, int boundary, List<HighlightRange> parent, List<HighlightRange> name)
+    {
+        var end = r.Start + r.Length;
+        if (r.Start < boundary)
+        {
+            var leftEnd = Math.Min(end, boundary);
+            parent.Add(new HighlightRange(r.Start, leftEnd - r.Start));
+        }
+        if (end > boundary)
+        {
+            var rightStart = Math.Max(r.Start, boundary);
+            name.Add(new HighlightRange(rightStart - boundary, end - rightStart));
+        }
+    }
+
+    private static IReadOnlyList<HighlightRange> ToShared(List<HighlightRange> list) =>
+        list.Count == 0 ? NoRanges : list;
+
+    private static bool RangesEqual(IReadOnlyList<HighlightRange> a, IReadOnlyList<HighlightRange> b)
+    {
+        if (ReferenceEquals(a, b))
+        {
+            return true;
+        }
+        if (a.Count != b.Count)
+        {
+            return false;
+        }
+        for (var i = 0; i < a.Count; i++)
+        {
+            if (a[i] != b[i])
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static string FormatSize(ulong bytes) => bytes switch

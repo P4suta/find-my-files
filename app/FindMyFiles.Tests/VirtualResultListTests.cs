@@ -1,5 +1,6 @@
 using System.Collections.Specialized;
 using FindMyFiles.Engine;
+using FindMyFiles.Highlighting;
 using FindMyFiles.Tests.TestDoubles;
 using FindMyFiles.ViewModels;
 using FindMyFiles.Virtualization;
@@ -37,6 +38,15 @@ public sealed class VirtualResultListTests
         Assert.False(Row(9).IsPlaceholder);
         Assert.Equal(rows[0].Name, Row(0).Name); // …with the right data
         Assert.Equal(rows[9].Name, Row(9).Name);
+    }
+
+    [Fact]
+    public void Reassign_WithHighlighter_FillsRowNameRanges()
+    {
+        var rows = Rows.Many(10, "report"); // "report_000000.txt" …
+        _list.Reassign(
+            new StubSearchResult(rows), SeedPage0(rows), MatchHighlighter.Compile("rep"));
+        Assert.Equal([new HighlightRange(0, 3)], Row(0).NameRanges); // "rep" at the start
     }
 
     [Fact]
