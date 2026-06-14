@@ -5,6 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:conv="using:FindMyFiles.Converters"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:hl="using:FindMyFiles.Highlighting"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:svc="using:FindMyFiles.Services"
     xmlns:views="using:FindMyFiles.Views"
@@ -256,11 +257,15 @@
                                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                 Glyph="{x:Bind Glyph, Mode=OneWay}" />
                             <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                <TextBlock Style="{StaticResource ResultNameTextStyle}" Text="{x:Bind Name, Mode=OneWay}" />
+                                <TextBlock
+                                    Style="{StaticResource ResultNameTextStyle}"
+                                    hl:HighlightText.Source="{x:Bind Name, Mode=OneWay}"
+                                    hl:HighlightText.Ranges="{x:Bind NameRanges, Mode=OneWay}" />
                                 <TextBlock
                                     x:Phase="1"
                                     Style="{StaticResource ResultPathTextStyle}"
-                                    Text="{x:Bind ParentPath, Mode=OneWay}" />
+                                    hl:HighlightText.Source="{x:Bind ParentPath, Mode=OneWay}"
+                                    hl:HighlightText.Ranges="{x:Bind PathRanges, Mode=OneWay}" />
                             </StackPanel>
                             <StackPanel
                                 Grid.Column="2"

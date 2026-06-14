@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using CommunityToolkit.Mvvm.ComponentModel;
 using FindMyFiles.Engine;
+using FindMyFiles.Highlighting;
 using FindMyFiles.Services;
 using FindMyFiles.Virtualization;
 
@@ -123,7 +124,7 @@ public sealed partial class ResultsPresenter : ObservableObject
             return;
         }
         _emptyPresented = true;
-        ResultsSource.Reassign(null, []);
+        ResultsSource.Reassign(null, [], CompiledHighlighter.Empty);
         CountText = string.Empty;
     }
 
@@ -142,6 +143,7 @@ public sealed partial class ResultsPresenter : ObservableObject
         ISearchResult result,
         QueryTraceData? trace,
         RequeryOrigin origin,
+        CompiledHighlighter highlighter,
         Func<bool> isCurrent)
     {
         Debug.Assert(_dispatcher.HasThreadAccess, "PublishAsync must start on the UI thread");
@@ -174,7 +176,7 @@ public sealed partial class ResultsPresenter : ObservableObject
         }
 
         _emptyPresented = false;
-        ResultsSource.Reassign(result, seeds);
+        ResultsSource.Reassign(result, seeds, highlighter);
         CountText = StatusFormatter.Count(trace, result.Count);
         ResultsPublished?.Invoke(new ResultsPublication(origin, restoreIndex, firstIndex, lastIndex));
     }
@@ -191,6 +193,7 @@ public sealed partial class ResultsPresenter : ObservableObject
         ISearchResult result,
         QueryTraceData? trace,
         RequeryOrigin origin,
+        CompiledHighlighter highlighter,
         Func<bool> isCurrent)
     {
         Debug.Assert(_dispatcher.HasThreadAccess, "RefreshInPlaceAsync must start on the UI thread");
@@ -198,7 +201,7 @@ public sealed partial class ResultsPresenter : ObservableObject
         var count = (int)Math.Min(result.Count, int.MaxValue);
         if (count != ResultsSource.Count)
         {
-            await PublishAsync(result, trace, origin, isCurrent);
+            await PublishAsync(result, trace, origin, highlighter, isCurrent);
             return;
         }
 
@@ -228,7 +231,7 @@ public sealed partial class ResultsPresenter : ObservableObject
             return;
         }
 
-        ResultsSource.RefreshInPlace(result, seeds);
+        ResultsSource.RefreshInPlace(result, seeds, highlighter);
     }
 
     /// <summary>Show a query problem without touching the published results.</summary>
