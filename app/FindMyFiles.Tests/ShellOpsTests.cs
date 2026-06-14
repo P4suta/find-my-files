@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using FindMyFiles.Services;
 using Xunit;
 
@@ -32,5 +33,32 @@ public sealed class ShellOpsTests
         // De-elevation contract (CLAUDE.md UI固定則): targets open through
         // %WINDIR%\explorer.exe, pinned by full path against binary planting.
         Assert.EndsWith(@"\explorer.exe", psi.FileName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class RecordingRunner : IProcessRunner
+    {
+        internal ProcessStartInfo? Started { get; private set; }
+        internal int Calls { get; private set; }
+
+        public void Start(ProcessStartInfo psi)
+        {
+            Calls++;
+            Started = psi;
+        }
+    }
+
+    [Fact]
+    public void OpenWith_drives_the_runner_with_the_path_as_one_verbatim_argument()
+    {
+        // "Open" used to call Process.Start directly, so nothing verified that the
+        // built start info ever reached a launch. Drive a fake runner and assert it.
+        var runner = new RecordingRunner();
+
+        ShellOps.OpenWith(runner, "C:\\dir\\name with \" quote.txt");
+
+        Assert.Equal(1, runner.Calls);
+        Assert.NotNull(runner.Started);
+        Assert.Single(runner.Started!.ArgumentList);
+        Assert.Equal("C:\\dir\\name with \" quote.txt", runner.Started.ArgumentList[0]);
     }
 }

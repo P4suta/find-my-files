@@ -24,8 +24,15 @@ public static partial class ShellOps
     /// (with a Win32-specific hint) rather than throwing.</summary>
     /// <param name="fullPath">Absolute path to open; treated as data, never as
     /// a command line (see <see cref="BuildOpenStartInfo"/>).</param>
-    public static void Open(string fullPath) =>
-        Run(Loc.Get("Shell_OpenFailed"), fullPath, () => Process.Start(BuildOpenStartInfo(fullPath)));
+    public static void Open(string fullPath) => OpenWith(RealProcessRunner.Instance, fullPath);
+
+    /// <summary>"Open" core, parameterised over the process runner so the launch
+    /// (not just <see cref="BuildOpenStartInfo"/>'s arguments) is unit-testable.
+    /// Failures notify rather than throw, via <see cref="Run"/>.</summary>
+    /// <param name="runner">Process launcher (real or a test fake).</param>
+    /// <param name="fullPath">Absolute path to open.</param>
+    internal static void OpenWith(IProcessRunner runner, string fullPath) =>
+        Run(Loc.Get("Shell_OpenFailed"), fullPath, () => runner.Start(BuildOpenStartInfo(fullPath)));
 
     /// <summary>Builds the explorer.exe invocation for "open". Kept internal and
     /// pure so the argument-safety contract is unit-testable without launching a
@@ -43,31 +50,88 @@ public static partial class ShellOps
     }
 
     /// <summary>Reveal a file in Explorer with it selected, via the shell API
-    /// (<c>SHParseDisplayName</c> + <c>SHOpenFolderAndSelectItems</c>) so a
-    /// quote in an MFT-sourced name cannot inject explorer switches. Failures
-    /// notify rather than throw.</summary>
+    /// (<c>SHParseDisplayName</c> + <c>SHOpenFolderAndSelectItems</c>) — never
+    /// <c>explorer.exe /select,&lt;path&gt;</c>, whose switch parser needs a literal
+    /// quoted path it does not escape, so a '"' in an MFT-sourced name could inject
+    /// switches. Runs on a dedicated STA thread with COM initialised: on the WinUI
+    /// UI thread (an ASTA) <c>SHOpenFolderAndSelectItems</c> returns <c>S_OK</c> but
+    /// opens nothing. Failures notify off-thread (<see cref="Notifier"/>/
+    /// <see cref="FileLog"/> are thread-safe; the ViewModel marshals the InfoBar to
+    /// the UI).</summary>
     /// <param name="fullPath">Absolute path to reveal and select.</param>
-    public static void Reveal(string fullPath) =>
-        Run(Loc.Get("Shell_RevealFailed"), fullPath, () =>
+    public static void Reveal(string fullPath)
+    {
+        // Resolve the localized message on the UI thread, then hand off.
+        string failureMessage = Loc.Get("Shell_RevealFailed");
+        var thread = new Thread(() => RevealOnSta(failureMessage, fullPath)) { IsBackground = true };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+    }
+
+    /// <summary>STA-thread body: initialise COM, reveal, report any failure, and
+    /// balance the COM init. Never lets an exception escape the thread (an
+    /// unhandled one would tear down the process).</summary>
+    /// <param name="failureMessage">Pre-resolved headline for a failure notification.</param>
+    /// <param name="fullPath">Absolute path to reveal and select.</param>
+    private static void RevealOnSta(string failureMessage, string fullPath)
+    {
+        int coHr = CoInitializeEx(IntPtr.Zero, COINIT_APARTMENTTHREADED);
+        try
         {
-            // Reveal-and-select through the shell API, not `explorer.exe /select,<path>`:
-            // explorer's switch parser needs a literal quoted path and honours no
-            // escaping, so ArgumentList cannot express it and a '"' in a name (the MFT
-            // scan surfaces raw NTFS names) could break out of the quotes and inject
-            // explorer switches. SHParseDisplayName takes the path as data, never a
-            // command line — injection is impossible by construction, and a missing
-            // path simply yields a failing HRESULT that Run() reports.
-            Marshal.ThrowExceptionForHR(
-                SHParseDisplayName(fullPath, IntPtr.Zero, out var pidl, 0, out _));
-            try
+            if (DoReveal(RealRevealApi.Instance, fullPath) is { } failure)
             {
-                Marshal.ThrowExceptionForHR(SHOpenFolderAndSelectItems(pidl, 0, null, 0));
+                ReportFailure(failureMessage, fullPath, failure);
             }
-            finally
+        }
+        catch (Exception ex)
+        {
+            ReportFailure(failureMessage, fullPath, ex);
+        }
+        finally
+        {
+            if (coHr >= 0)
             {
-                Marshal.FreeCoTaskMem(pidl);
+                CoUninitialize();
             }
-        });
+        }
+    }
+
+    /// <summary>Reveal-and-select orchestration, factored out so the HRESULT
+    /// handling is unit-testable with a fake <see cref="IRevealApi"/>. Returns the
+    /// failure to report, or <see langword="null"/> on success. Treats <em>any</em>
+    /// non-<c>S_OK</c> HRESULT as failure — including non-negative ones like
+    /// <c>S_FALSE</c> that <see cref="Marshal.ThrowExceptionForHR(int)"/> ignores;
+    /// that silent-success gap is what shipped "reveal" broken. The PIDL is always
+    /// freed once parsing succeeds.</summary>
+    /// <param name="api">Shell calls (real or a test fake).</param>
+    /// <param name="fullPath">Absolute path to reveal and select.</param>
+    /// <returns>The failure exception, or <see langword="null"/> on success.</returns>
+    internal static Exception? DoReveal(IRevealApi api, string fullPath)
+    {
+        int hr = api.ParseDisplayName(fullPath, out var pidl);
+        if (hr != 0)
+        {
+            return Marshal.GetExceptionForHR(hr) ?? RevealHrException(hr);
+        }
+
+        try
+        {
+            hr = api.OpenFolderAndSelectItems(pidl);
+            return hr == 0 ? null : (Marshal.GetExceptionForHR(hr) ?? RevealHrException(hr));
+        }
+        finally
+        {
+            api.FreePidl(pidl);
+        }
+    }
+
+    /// <summary>Exception for a non-negative HRESULT (e.g. <c>S_FALSE</c>) that
+    /// <see cref="Marshal.GetExceptionForHR(int)"/> maps to <see langword="null"/>
+    /// because its severity bit is clear — yet no window was shown.</summary>
+    /// <param name="hr">The offending HRESULT.</param>
+    /// <returns>A diagnostic exception carrying the HRESULT.</returns>
+    private static InvalidOperationException RevealHrException(int hr) =>
+        new($"reveal failed (SHOpenFolderAndSelectItems returned 0x{hr:X8})");
 
     /// <summary>Relaunch this app (unelevated — no runas) and exit, used right
     /// after an in-app service registration so the fresh instance picks up the
@@ -117,12 +181,24 @@ public static partial class ShellOps
         }
         catch (Exception ex)
         {
-            FileLog.Warn("shell", $"shell op failed for {path}", ex);
-            Notifier.Post(
-                NotifySeverity.Warning,
-                $"{failureMessage}: {Path.GetFileName(path)}",
-                $"{ex.Message}({Hint(ex)})");
+            ReportFailure(failureMessage, path, ex);
         }
+    }
+
+    /// <summary>Log a shell-op failure and surface it as a warning notification
+    /// (with a Win32-specific hint). Thread-safe — callable from the reveal STA
+    /// thread as well as <see cref="Run"/> (<see cref="FileLog"/>/
+    /// <see cref="Notifier"/> post from any thread).</summary>
+    /// <param name="failureMessage">Localized headline.</param>
+    /// <param name="path">Path the operation acted on (for the log + file name).</param>
+    /// <param name="ex">The failure.</param>
+    private static void ReportFailure(string failureMessage, string path, Exception ex)
+    {
+        FileLog.Warn("shell", $"shell op failed for {path}", ex);
+        Notifier.Post(
+            NotifySeverity.Warning,
+            $"{failureMessage}: {Path.GetFileName(path)}",
+            $"{ex.Message}({Hint(ex)})");
     }
 
     /// <summary>Win32-error-specific hint — "access denied" must not read
@@ -136,16 +212,16 @@ public static partial class ShellOps
             _ => Loc.Get("Shell_HintMovedRecently"),
         };
 
-    // Reveal selects an item via the shell instead of an explorer.exe command line
-    // (see Reveal). Pinned to System32 — the same binary-planting defence the
-    // ExplorerPath constant applies to explorer.exe.
-    [LibraryImport("shell32.dll", StringMarshalling = StringMarshalling.Utf16)]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    private static partial int SHParseDisplayName(
-        string name, IntPtr bindingContext, out IntPtr pidl, uint sfgaoIn, out uint psfgaoOut);
+    /// <summary><c>COINIT_APARTMENTTHREADED</c> — reveal runs on a dedicated STA.</summary>
+    private const uint COINIT_APARTMENTTHREADED = 0x2;
 
-    [LibraryImport("shell32.dll")]
+    // COM init for the reveal STA thread (SHOpenFolderAndSelectItems needs an
+    // initialised STA). Pinned to System32 like the other shell imports.
+    [LibraryImport("ole32.dll")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    private static partial int SHOpenFolderAndSelectItems(
-        IntPtr pidlFolder, uint cidl, IntPtr[]? apidl, uint dwFlags);
+    private static partial int CoInitializeEx(IntPtr reserved, uint coInit);
+
+    [LibraryImport("ole32.dll")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial void CoUninitialize();
 }
