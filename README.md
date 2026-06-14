@@ -2,6 +2,8 @@
 
 **Instant file-name search for Windows — a FOSS take on Everything, built with a Rust engine and a native WinUI 3 UI.**
 
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/P4suta/find-my-files/badge)](https://scorecard.dev/viewer/?uri=github.com/P4suta/find-my-files)
+
 > Status: early development (pre-MVP). Nothing usable yet.
 
 **Project page:** [p4suta.github.io/find-my-files](https://p4suta.github.io/find-my-files/) — overview in [日本語](https://p4suta.github.io/find-my-files/) / [English](https://p4suta.github.io/find-my-files/en/)

@@ -42,6 +42,17 @@
     <!-- Generate the XML doc file so IDE0005 (unused usings) is enforced in the
          build; this also turns on CS1591 — every public member carries an XML doc. -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Supply-chain reproducibility (public-release hardening). Pin the
+         transitive NuGet graph to packages.lock.json so CI restores are
+         byte-for-byte and Dependabot diffs are reviewable. ContinuousIntegrationBuild
+         normalizes the source paths embedded in the PE/PDB so two checkouts in
+         different directories yield identical binaries — the missing half of a
+         reproducible build that pairs with the release provenance attestation
+         (<Deterministic> is already the SDK default, so it is not set here).
+         CI-gated: local builds keep absolute paths so the debugger maps to the
+         worktree. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
 
   <ItemGroup>

@@ -13,6 +13,9 @@ dist/
 # Release assets produced by `just package` (xtask)
 find-my-files-*-win-x64.zip
 SHA256SUMS.txt
+# SBOMs generated at release time (release.yml), uploaded as release assets
+*.cdx.json
+sbom-app/
 screenshots/
 test-results.json
 **/*.cobertura.xml

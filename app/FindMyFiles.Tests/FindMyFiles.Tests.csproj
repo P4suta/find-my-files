@@ -21,6 +21,9 @@
     <NoWarn>$(NoWarn);CS1591;CS0436</NoWarn>
     <IsPackable>false</IsPackable>
     <EnableMsixTooling>false</EnableMsixTooling>
+    <!-- Pin the transitive NuGet graph (packages.lock.json), like the app, so
+         CI restores are reproducible and dependency bumps are reviewable. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <!-- See the app csproj: lets non-Windows CI restore the Windows TFM. -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <!-- Mirror the app: with the WinUI component package (no metapackage),
