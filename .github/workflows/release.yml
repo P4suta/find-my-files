@@ -3,6 +3,9 @@
 # Authenticode-signs our own PE binaries with SSL.com eSigner (cloud HSM) when
 # signing secrets are present, then zips + checksums + attaches to a GitHub
 # Release whose notes are auto-generated from the commits since the last tag.
+# It also emits CycloneDX SBOMs (engine + app) and keyless build-provenance +
+# SBOM attestations (Sigstore via the OIDC GITHUB_TOKEN - no stored secrets);
+# verify a download with `gh attestation verify <zip> --repo P4suta/find-my-files`.
 #
 # Auth: the default GITHUB_TOKEN for the release; SSL.com eSigner via four repo
 # secrets (ES_USERNAME / ES_PASSWORD / CREDENTIAL_ID / ES_TOTP_SECRET). Signing
@@ -22,7 +25,9 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: write # create the GitHub Release + upload assets
+  id-token: write # OIDC token for keyless Sigstore signing (attestations)
+  attestations: write # write build-provenance + SBOM attestations
 
 jobs:
   build:
@@ -34,18 +39,43 @@ jobs:
       # env bool, then gate the signing steps on env.HAVE_SIGNING.
       HAVE_SIGNING: ${{ secrets.ES_USERNAME != '' && secrets.CREDENTIAL_ID != '' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ env.TAG }}
 
       # Provisions the pinned toolchain (rust 1.95 / dotnet 10 / just) from
       # mise.toml so the shipped artifact is built on the exact pins.
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
         with:
           install: true
 
+      # SBOM tooling (release-only; deliberately not in mise.toml's dev loop).
+      # cargo-sbom emits one CycloneDX doc for the whole engine workspace; the
+      # CycloneDX dotnet tool covers the app's NuGet graph. Both version-pinned.
+      # Append the dotnet global-tool dir to PATH for the later SBOM step.
+      - name: Install SBOM tools
+        shell: pwsh
+        run: |
+          cargo install cargo-sbom --locked --version 0.10.0
+          dotnet tool install --global CycloneDX --version 6.2.0
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
       - name: Build distributable bundle
         run: just publish
+
+      # SBOMs (CycloneDX 1.6 JSON), generated after the build so the resolved
+      # graphs match what shipped. The Rust step uses bash because pwsh's `>`
+      # would emit UTF-16. Attached to the release + attested below.
+      - name: Generate Rust SBOM (CycloneDX)
+        working-directory: engine
+        shell: bash
+        run: cargo sbom --output-format cyclone_dx_json_1_6 > fmf-engine.cdx.json
+
+      - name: Generate C# SBOM (CycloneDX)
+        run: >-
+          dotnet CycloneDX app/FindMyFiles/FindMyFiles.csproj
+          --output sbom-app --filename app.cdx.json
+          --output-format Json --spec-version 1.6 --runtime win-x64
 
       # Authenticode-sign only our own PE binaries: FindMyFiles.exe is the one
       # SmartScreen judges, the rest are our Rust binaries. The bundled .NET /
@@ -64,7 +94,7 @@ jobs:
 
       - name: Sign staged binaries (SSL.com eSigner)
         if: env.HAVE_SIGNING == 'true'
-        uses: SSLcom/esigner-codesign@v1.3.2
+        uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
         with:
           command: batch_sign
           username: ${{ secrets.ES_USERNAME }}
@@ -107,11 +137,36 @@ jobs:
       - name: Package (zip + checksums)
         run: just package ${{ env.TAG }}
 
+      # Build provenance + SBOM attestations for the published artifacts. Keyless
+      # via the workflow's OIDC token (no stored secrets). After packaging so the
+      # attested zip is final (holds the signed binaries when signing ran).
+      # Verify: gh attestation verify <zip> --repo P4suta/find-my-files
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            find-my-files-*-win-x64.zip
+            SHA256SUMS.txt
+
+      - name: Attest Rust SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: find-my-files-*-win-x64.zip
+          sbom-path: engine/fmf-engine.cdx.json
+
+      - name: Attest C# SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: find-my-files-*-win-x64.zip
+          sbom-path: sbom-app/app.cdx.json
+
       - name: Attach assets to release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           tag_name: ${{ env.TAG }}
           generate_release_notes: true
           files: |
             find-my-files-*-win-x64.zip
             SHA256SUMS.txt
+            engine/fmf-engine.cdx.json
+            sbom-app/app.cdx.json

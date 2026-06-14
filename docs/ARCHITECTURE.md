@@ -133,6 +133,11 @@ app/FindMyFiles/
 - 文字列は UTF-8(ファイル名は **WTF-8**: 不正サロゲートを保持。C#側は専用デコードでUTF-16へ復元)。
 - ハンドルは opaque ポインタ。全関数スレッドセーフ。コールバック内からのFFI再入は禁止。
 - 全入口で `catch_unwind` → `FMF_E_PANIC`。詳細メッセージは `fmf_last_error`(スレッドローカル)。
+- **ポインタ/長さ契約(呼び出し側責務)**: C ABI 境界では Rust は配列長も確保容量も検証できない。
+  - `(buf, cap)` 出力バッファ(`fmf_list_volumes` / `fmf_index_status`): `buf` は書込可能な `FmfVolumeStatus` を **`cap` 個**指すこと。エンジンは最大 `cap` 件だけ書き、`*count` に真の総数を返す(`buf=NULL` はサイズ照会で `*count` のみ書く)。
+  - `(volumes, n)` 入力配列(`fmf_index_start`): `volumes` は **`n` 個**の有効な NUL 終端 UTF-8 `char*` を指すこと。
+  - POD ポインタ(`FmfQueryOptions*` / `FmfVolumeStatus*` / `FmfEvent*` …)は宣言どおりの `#[repr(C)]` サイズ/アラインメントを満たすこと(C# は対応する明示レイアウトでマーシャリングし、`fmf-contract` が `offset_of` のコンパイル時表明でピンする)。
+  - エンジンは全ポインタを null チェックし `cap` 上限で書き込むが、**実確保を超える長さ申告は検知できない**(未定義動作)。この契約は唯一の呼び出し元 `FfiEngineClient` が各配列とその長さを一体で構築することで保証される(`fmf-ffi` が `#![allow(clippy::missing_safety_doc)]` で関数ごとの安全注記を本節へ委譲しているのはこのため)。
 
 ```c
 // ── ライフサイクル ──

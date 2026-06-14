@@ -34,10 +34,14 @@ test:
 test-app:
     dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
 
-# Elevation-gated #[ignore] tests: real-volume MFT/USN (elevated)
+# Elevation-gated #[ignore] tests: real-volume MFT/USN (elevated).
+# Sets the gate env var the PowerShell way on ONE line (just runs each recipe line
+# in its own shell, so the assignment must share the line with cargo). `cargo
+# --config 'env.X="1"'` is NOT used: the recipe's powershell.exe strips the nested
+# quotes, leaving the bare integer 1, which cargo rejects ("expected a string").
 [working-directory: 'engine']
 test-admin:
-    cargo test --workspace --config 'env.FMF_ADMIN_TESTS="1"' -- --ignored
+    $env:FMF_ADMIN_TESTS = '1'; cargo test --workspace -- --ignored
 
 [working-directory: 'engine']
 lint:

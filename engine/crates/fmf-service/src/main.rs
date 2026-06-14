@@ -215,20 +215,27 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
     cfg.save(&cfg_path)
         .map_err(|e| format!("service.json: {e}"))?;
 
-    // 3. Harden the tree: snapshots are machine-wide file listings
-    //    (SECURITY.md 脅威7); logs keep user read for the F12 copy path —
-    //    for the installing admin and the forwarded owner alike.
-    security::set_dir_dacl(&data_dir, &security::data_dir_sddl())
-        .map_err(|e| format!("data dir DACL: {e}"))?;
+    // 3. Harden the tree (SECURITY.md 脅威7): the data root AND index/ —
+    //    machine-wide file-name snapshots — are SYSTEM+Administrators only; logs/
+    //    additionally grants the installing admin + forwarded owner read for the
+    //    F12 copy path. index/ is hardened EXPLICITLY (not via inheritance): it is
+    //    created above inheriting %ProgramData%'s Users ACE, and set_dir_dacl's
+    //    SetFileSecurityW does not re-propagate the root DACL onto an existing
+    //    child — without the explicit set the snapshot dir stays world-readable.
+    //    The (subdir, sddl) policy lives in security::data_tree_dacls (unit-pinned).
     let mut log_readers = vec![sid.as_str()];
     if let Some(owner) = &owner_sid {
         log_readers.push(owner.as_str());
     }
-    security::set_dir_dacl(
-        &data_dir.join("logs"),
-        &security::logs_dir_sddl(&log_readers),
-    )
-    .map_err(|e| format!("logs DACL: {e}"))?;
+    for (sub, sddl) in security::data_tree_dacls(&log_readers) {
+        let target = if sub.is_empty() {
+            data_dir.clone()
+        } else {
+            data_dir.join(sub)
+        };
+        let what = if sub.is_empty() { "data dir" } else { sub };
+        security::set_dir_dacl(&target, &sddl).map_err(|e| format!("{what} DACL: {e}"))?;
+    }
 
     // 4. Register: LocalSystem, delayed auto start, restart-on-crash.
     let manager = ServiceManager::local_computer(

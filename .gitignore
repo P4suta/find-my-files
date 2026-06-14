@@ -13,6 +13,9 @@ dist/
 # Release assets produced by `just package` (xtask)
 find-my-files-*-win-x64.zip
 SHA256SUMS.txt
+# SBOMs generated at release time (release.yml), uploaded as release assets
+*.cdx.json
+sbom-app/
 screenshots/
 test-results.json
 **/*.cobertura.xml
@@ -30,6 +33,10 @@ engine/crates/fmf-core/testdata/large/
 # Local-only tool overrides
 mise.local.toml
 .mise.local.toml
+
+# npm deps pulled into the tree by the actionlint action (CI hygiene job);
+# never committed, but keep an accidental local `act`/action run out of git.
+node_modules/
 
 # Claude Code local working dir (scheduled task locks, etc.)
 .claude/

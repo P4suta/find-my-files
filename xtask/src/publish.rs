@@ -44,21 +44,27 @@ pub fn run(skip_rust: bool) -> Result<()> {
 
     // Publish into dist/FindMyFiles (relative to the repo root).
     let skip_arg = format!("-p:SkipRustBuild={skip_rust}");
-    cmd::run(
-        &root,
-        "dotnet",
-        &[
-            "publish",
-            "app/FindMyFiles",
-            "-c",
-            "Release",
-            "-r",
-            "win-x64",
-            "-o",
-            "dist/FindMyFiles",
-            &skip_arg,
-        ],
-    )?;
+    let mut args = vec![
+        "publish",
+        "app/FindMyFiles",
+        "-c",
+        "Release",
+        "-r",
+        "win-x64",
+        "-o",
+        "dist/FindMyFiles",
+        &skip_arg,
+    ];
+    // In CI, build the shipped bundle from the pinned dependency graph: fail the
+    // implicit restore if packages.lock.json is stale (reproducible supply
+    // chain). Locally we stay lenient — a mid-edit dependency bump shouldn't
+    // block `just publish`. The MSBuild property reaches the restore that
+    // `dotnet publish` runs (more robust than the `--locked-mode` CLI flag,
+    // which `publish` does not forward in every SDK).
+    if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+        args.push("-p:RestoreLockedMode=true");
+    }
+    cmd::run(&root, "dotnet", &args)?;
 
     prune_locales(&dist)?;
     copy_engine_bins(&root, &dist)?;
