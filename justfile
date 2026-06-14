@@ -262,3 +262,17 @@ deny:
 # Unused dependencies (cargo-machete).
 machete:
     cargo machete engine
+
+# Mutation testing (Rust, ADR-0022): which tests pass even when code is broken?
+# Slow — scope it, e.g. `just mutants -p fmf-core -f src/query/exec.rs`.
+# `just mutants --list -f <file>` enumerates mutants without running them.
+[working-directory: 'engine']
+mutants *args="":
+    cargo mutants {{args}}
+
+# Mutation testing (C#, Stryker.NET — ADR-0022). Slow on the WinUI app — scope
+# with --mutate, e.g. `just stryker --mutate "**/ShellOps.cs"`. The tool is
+# pinned in .config/dotnet-tools.json; `dotnet tool restore` provisions it.
+stryker *args="":
+    dotnet tool restore
+    dotnet stryker {{args}}

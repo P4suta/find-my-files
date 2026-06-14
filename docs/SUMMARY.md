@@ -29,3 +29,5 @@
   - [0018 — 契約の単一正本化（fmf-contract）](adr/0018-contract-single-source.md)
   - [0019 — 絞り込み = UI 層クエリ書き換え](adr/0019-focused-search-query-rewrite.md)
   - [0020 — コード署名プロバイダ選定](adr/0020-code-signing-provider.md)
+  - [0021 — ビルド出力を単一 build/ に集約](adr/0021-build-output-layout.md)
+  - [0022 — 境界はシーム + 挙動テスト必須](adr/0022-boundary-seams-behavioral-tests.md)
