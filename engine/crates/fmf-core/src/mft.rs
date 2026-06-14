@@ -58,7 +58,7 @@ impl SpikeStats {
     }
 }
 
-/// Pick the display name like Everything does: prefer Win32 / Win32+DOS
+/// Pick the display name: prefer Win32 / Win32+DOS
 /// namespaces, fall back to POSIX, ignore DOS-only short names. Unlike
 /// ntfs-reader's `get_best_file_name`, reparse-point names are kept —
 /// junctions and symlinks are indexed as plain entries.

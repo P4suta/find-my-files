@@ -448,7 +448,7 @@ mod tests {
         let idx = sample();
         let mut in_docs = names(&idx, r"docs\");
         in_docs.sort();
-        // Everything semantics: `docs\` matches entries *under* the folder.
+        // Path semantics: `docs\` matches entries *under* the folder.
         assert_eq!(in_docs, vec!["Report.PDF", "notes.txt"]);
         assert_eq!(names(&idx, r"path:src main"), vec!["main.rs"]);
     }

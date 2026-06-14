@@ -1,7 +1,7 @@
 //! Query engine: text → AST → compiled matchers → parallel scan →
 //! materialized, sort-ordered result (docs/ARCHITECTURE.md).
 //!
-//! Syntax (Everything-compatible core):
+//! Syntax (core):
 //! `space`=AND, `|`=OR (weakest), `!`=NOT, `"..."`=phrase, `*`/`?` wildcards
 //! (match the whole name), a `\` inside a term switches it to path matching,
 //! and the filters `ext:`, `path:`, `size:`, `dm:`, `regex:`, `file:`,

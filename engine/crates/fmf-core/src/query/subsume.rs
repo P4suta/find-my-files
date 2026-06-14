@@ -1,7 +1,7 @@
 //! Query subsumption: does the result set of `next` provably fit inside the
 //! result set of `prev`? When it does (and the index generation is
 //! unchanged), the engine refines the cached `prev` ids instead of scanning
-//! — the Everything-style incremental-typing fast path.
+//! — the incremental-typing fast path.
 //!
 //! Every rule here must be *sound* (false positives lose results — the one
 //! unacceptable failure mode); being incomplete merely costs a cold scan.

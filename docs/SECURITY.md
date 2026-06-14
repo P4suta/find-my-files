@@ -9,7 +9,7 @@ API仕様の裏取りは [RESEARCH.md](RESEARCH.md)。
 
 | # | 脅威 | 防御 |
 |---|---|---|
-| 1 | ACL迂回の名前漏洩 — 特権インデクサが、利用者のACLでは見えないファイル名を**別ユーザー**へ露出する(Everything の ETP サーバで事件化した形) | pipe DACL を SYSTEM+利用者SIDに限定(install時捕捉のSID **+ 非昇格UIが `--owner-sid` で転送する日常ユーザーSID**。後者は `validate_user_sid` で実在ユーザー型のみ採用 — OTS昇格でも日常ユーザーを締め出さず、かつ任意SIDの混入を防ぐ)。Authenticated Users / Everyone のACEなし(既定拒否)+接続時トークン照合 |
+| 1 | ACL迂回の名前漏洩 — 特権インデクサが、利用者のACLでは見えないファイル名を**別ユーザー**へ露出する | pipe DACL を SYSTEM+利用者SIDに限定(install時捕捉のSID **+ 非昇格UIが `--owner-sid` で転送する日常ユーザーSID**。後者は `validate_user_sid` で実在ユーザー型のみ採用 — OTS昇格でも日常ユーザーを締め出さず、かつ任意SIDの混入を防ぐ)。Authenticated Users / Everyone のACEなし(既定拒否)+接続時トークン照合 |
 | 2 | リモート接続 | `PIPE_REJECT_REMOTE_CLIENTS`(+サーバ機能はやらないことリストで恒久非実装) |
 | 3 | 匿名接続 | 明示DACLに匿名ACEなし=既定拒否(NullSessionPipes の既定はポリシー依存のため当てにしない) |
 | 4 | pipe名スクワッティング / 偽サーバ | サーバ: **初回インスタンスのみ** `FILE_FLAG_FIRST_PIPE_INSTANCE`(2本目以降はフラグ無し — 初回を保持し続ける限り名前の先取りは不能)。クライアント: 既定pipe名では `GetNamedPipeServerProcessId` → **SCM登録の fmf-engine サービスPIDと照合**(`QueryServiceStatusEx`。非昇格UIで動く — SYSTEMプロセスのトークンは非昇格では開けず[ACCESS_DENIED]、session 0 プロセスの identity も取得不可。squatter は SCM登録[要admin]ができずPIDが一致しない) |

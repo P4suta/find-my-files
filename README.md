@@ -1,6 +1,6 @@
 # find-my-files
 
-**Instant file-name search for Windows — a FOSS take on Everything, built with a Rust engine and a native WinUI 3 UI.**
+**Instant file-name search for Windows, built with a Rust engine and a native WinUI 3 UI.**
 
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/P4suta/find-my-files/badge)](https://scorecard.dev/viewer/?uri=github.com/P4suta/find-my-files)
 
@@ -8,14 +8,9 @@
 
 **Project page:** [p4suta.github.io/find-my-files](https://p4suta.github.io/find-my-files/) — overview in [日本語](https://p4suta.github.io/find-my-files/) / [English](https://p4suta.github.io/find-my-files/en/)
 
-## Why
+## What it does
 
-[Everything](https://www.voidtools.com/) is brilliant freeware, but it is closed source, its UI predates
-modern Windows (system-DPI only, partial dark theme), and its future rests on a single developer.
-Every FOSS clone so far either gave up the NTFS/MFT speed advantage for cross-platform reach, or
-stalled in the unglamorous 80% (USN journal tailing, path reconstruction, memory-lean indexing).
-
-find-my-files goes the other way: **Windows-only, file names only, as fast as Everything, genuinely FOSS.**
+**Windows-only, file names only, FOSS.**
 
 - Initial index by reading the NTFS $MFT directly (~seconds per volume)
 - Real-time updates from the USN change journal — no filesystem watchers, no rescans
@@ -26,12 +21,12 @@ find-my-files goes the other way: **Windows-only, file names only, as fast as Ev
 ## What it deliberately does NOT do
 
 Content/property indexing, tags, previews, FTP/HTTP servers, FAT/exFAT/network drives (initially).
-Indexing file names only is *the* reason Everything is fast. Feature creep is a non-goal.
+Indexing file names only is *the* reason it's fast. Feature creep is a non-goal.
 
 ## Where did the admin prompt go?
 
-Reading the NTFS Master File Table and USN journal requires elevated volume access — the same
-constraint Everything has. find-my-files splits that privilege off into a small Windows service
+Reading the NTFS Master File Table and USN journal requires elevated volume access.
+find-my-files splits that privilege off into a small Windows service
 (`fmf-engine`, LocalSystem with stripped privileges); the UI runs unprivileged and talks to it
 over a locked-down named pipe (same-user only — see `docs/SECURITY.md` for the threat model).
 
