@@ -15,8 +15,8 @@ public sealed class ServiceSetupTests
             Directory.CreateDirectory(baseDir);
             Assert.Null(ServiceSetup.LocateServiceExe(baseDir));
 
-            // Dev tree: engine\target\release above the bin dir.
-            var dev = Path.Combine(root.FullName, "engine", "target", "release");
+            // Dev tree: build\engine\release above the bin dir.
+            var dev = Path.Combine(root.FullName, "build", "engine", "release");
             Directory.CreateDirectory(dev);
             var devExe = Path.Combine(dev, "fmf-service.exe");
             File.WriteAllText(devExe, "");

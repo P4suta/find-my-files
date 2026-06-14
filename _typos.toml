@@ -9,4 +9,4 @@ ba = "ba"
 # the spell-check too (it scans the working tree, not just tracked files).
 # node_modules/: the actionlint action (hygiene job) pulls npm deps into the tree
 # before the typos step runs — vendored deps, never our code, never spell-checked.
-extend-exclude = ["docs/book/", "engine/target/", "node_modules/"]
+extend-exclude = ["build/", "node_modules/"]

@@ -46,13 +46,15 @@ jobs:
         with:
           workspaces: engine
 
-      - name: Build mdBook design docs (docs/ -> docs/book)
+      - name: Build mdBook design docs (docs/ -> build/docs-book)
         run: mdbook build docs
 
-      - name: Build rustdoc (engine -> engine/target/doc)
+      - name: Build rustdoc (engine -> build/engine/doc)
         # --document-private-items: internal crates, so docs target maintainers
-        # (and it resolves intra-doc links to non-pub helpers).
-        run: cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml
+        # (and it resolves intra-doc links to non-pub helpers). --target-dir:
+        # cargo discovers .cargo/config.toml from the CWD, not --manifest-path,
+        # so route the output to build/engine/doc explicitly (ADR-0021).
+        run: cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml --target-dir build/engine
 
       # Stage book + doc into site/ next to the landing page (xtask: just
       # docs-assemble), verifying both source trees exist first.
@@ -62,6 +64,6 @@ jobs:
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: site
+          path: build/site
       - id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

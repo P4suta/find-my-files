@@ -1,30 +1,21 @@
-# Rust
-engine/target/
-xtask/target/
+# All build output (ADR-0021): the cargo target dirs (build/engine, build/xtask),
+# the C# bin output (build/app), the publish bundle (build/dist), release packages
+# (build/package), release SBOMs (build/sbom) and the staged docs site (build/site,
+# build/docs-book) — one tree, one ignore line.
+build/
 
-# .NET / WinUI
-app/**/bin/
+# C# intermediate output stays in-tree: relocating obj needs a
+# Directory.Build.props, which CLAUDE.md forbids (ADR-0021).
 app/**/obj/
+
+# IDE / editor state
 .vs/
 *.user
 
-# Build artifacts & distribution
-dist/
-# Release assets produced by `just package` (xtask)
-find-my-files-*-win-x64.zip
-SHA256SUMS.txt
-# SBOMs generated at release time (release.yml), uploaded as release assets
-*.cdx.json
-sbom-app/
+# Test + coverage artifacts produced outside build/
 screenshots/
 test-results.json
 **/*.cobertura.xml
-
-# Generated docs (mdBook output; rustdoc lives under engine/target/)
-docs/book/
-# Docs staged into the site by `just docs-assemble` (pages.yml does the same)
-site/book/
-site/doc/
 
 # Engine runtime artifacts
 *.fmfidx

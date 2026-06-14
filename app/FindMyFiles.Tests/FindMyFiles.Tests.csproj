@@ -5,6 +5,9 @@
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Build output under the repo-root build/ tree (ADR-0021), mirroring the
+         app. bin only — obj stays (no Directory.Build.props, per CLAUDE.md). -->
+    <BaseOutputPath>..\..\build\app\FindMyFiles.Tests\</BaseOutputPath>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <!-- Same maximal analyzer/style strictness as the app (convention

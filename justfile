@@ -71,17 +71,21 @@ verify: fmt-check lint test test-app
 contract-gen:
     cargo run -p fmf-contract --bin gen-contract
 
-# Assemble the distributable bundle in dist/FindMyFiles: PUBLISHED app (not a
+# Assemble the distributable bundle in build/dist/FindMyFiles: PUBLISHED app (not a
 # bare `dotnet build` — the WinUI component package only wires WinRT.Runtime.dll,
 # the WinAppSDK native helpers and the compiled XAML into the *publish* output)
 # plus the engine binaries (fmf-service.exe / fmf.exe). The clean/publish/locale-
 # prune/copy/self-verify logic + the prune predicate's tests live in xtask.
 # skip_rust=true skips the in-build cargo step — for CI, where the engine
-# binaries are prebuilt and downloaded into engine/target/release/ before this
+# binaries are prebuilt and downloaded into build/engine/release/ before this
 # runs. --release: this path runs in CI uncached, and `package` (release builds)
 # wants a non-debug deflate.
+# working-directory xtask (not --manifest-path from root): cargo discovers
+# .cargo/config.toml from the CWD, so target-dir → build/xtask only when run
+# from inside xtask/ (ADR-0021).
+[working-directory: 'xtask']
 publish-app skip_rust="false":
-    cargo run --release --manifest-path xtask/Cargo.toml -- publish --skip-rust {{skip_rust}}
+    cargo run --release -- publish --skip-rust {{skip_rust}}
 
 # Local/release publish: build the engine first, then publish (rust is already
 # built, so the in-build cargo step is skipped).
@@ -102,26 +106,26 @@ service-build:
 # Register the Windows service: captures your SID, hardens the data-dir
 # DACLs, delayed auto start + crash recovery (elevated)
 service-install: service-build
-    engine/target/release/fmf-service.exe install
+    build/engine/release/fmf-service.exe install
 
 # Deregister; data stays unless you pass --purge-data (elevated)
 service-uninstall *args="":
-    engine/target/release/fmf-service.exe uninstall {{args}}
+    build/engine/release/fmf-service.exe uninstall {{args}}
 
 # (elevated)
 service-start:
-    engine/target/release/fmf-service.exe start
+    build/engine/release/fmf-service.exe start
 
 # (elevated)
 service-stop:
-    engine/target/release/fmf-service.exe stop
+    build/engine/release/fmf-service.exe stop
 
 # Rebuild + restart the installed service (elevated)
 service-restart: service-stop service-build service-start
 
 # SCM state + live pipe handshake (works unelevated)
 service-status:
-    engine/target/release/fmf-service.exe status
+    build/engine/release/fmf-service.exe status
 
 # C# client × real fmf-service integration (FMF_PIPE_TESTS gate; no elevation)
 test-pipe: service-build
@@ -150,7 +154,7 @@ bench-baseline drive="C:":
 bench-micro *args="":
     cargo bench -p fmf-core {{args}}
 
-# Lives in target/criterion (machine-local; gone on cargo clean).
+# Lives in build/engine/criterion (machine-local; gone on cargo clean).
 # Record the local criterion baseline — start of every optimization session
 [working-directory: 'engine']
 bench-micro-baseline:
@@ -192,15 +196,16 @@ io-probe drive="C:" mode="buffered" *args="":
 [working-directory: 'engine']
 profile *args="bench C:":
     cargo build --profile profiling -p fmf-cli
-    samply record -- ./target/profiling/fmf-cli {{args}}
+    samply record -- ../build/engine/profiling/fmf-cli {{args}}
 
 # ── Hygiene ──────────────────────────────────────────────────────────────
 
-# Sweep leftover TestDir fixtures (engine/target/test-tmp). Their Drop-time
+# Sweep leftover TestDir fixtures (build/engine/test-tmp). Their Drop-time
 # removal is best-effort, so killed test runs can leave directories behind;
 # cargo clean also removes them, this is the cheaper broom.
+[working-directory: 'xtask']
 clean-temp:
-    cargo run --manifest-path xtask/Cargo.toml -- clean-temp
+    cargo run -- clean-temp
 
 # ── Release ──────────────────────────────────────────────────────────────
 
@@ -209,35 +214,38 @@ clean-temp:
 # (GITHUB_TOKEN only — no stored secret). Logic + guards (semver, existing-tag,
 # no-op) + tests live in xtask; `--dry-run` shows the diff without committing.
 # Usage:  just release 0.2.0   then   git push; git push origin v0.2.0
+[working-directory: 'xtask']
 release version *args="":
-    cargo run --manifest-path xtask/Cargo.toml -- release {{version}} {{args}}
+    cargo run -- release {{version}} {{args}}
 
 # Zip + checksum the assembled bundle for a release tag (run AFTER publish +
-# signing). Outputs find-my-files-v<version>-win-x64.zip + SHA256SUMS.txt at the
-# repo root — the assets release.yml attaches. --release: deflate wants a
+# signing). Outputs find-my-files-v<version>-win-x64.zip + SHA256SUMS.txt under
+# build/package/ — the assets release.yml attaches. --release: deflate wants a
 # non-debug build. Usage:  just package v0.2.0
+[working-directory: 'xtask']
 package tag:
-    cargo run --release --manifest-path xtask/Cargo.toml -- package {{tag}}
+    cargo run --release -- package {{tag}}
 
 # ── Docs ─────────────────────────────────────────────────────────────────
 
-# Build the mdBook design docs (docs/book) + rustdoc (engine/target/doc).
+# Build the mdBook design docs (build/docs-book) + rustdoc (build/engine/doc).
 # Same outputs the pages.yml workflow publishes to GitHub Pages.
 # --document-private-items: the crates are internal (no external API surface),
 # so the docs are for maintainers — private items are the interesting part, and
 # documenting them also resolves intra-doc links to non-pub helpers.
 doc:
     mdbook build docs
-    cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml
+    cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml --target-dir build/engine
 
 # Live-preview the design docs at http://localhost:3000
 doc-serve:
     mdbook serve docs --open
 
-# Stage the built docs into site/ (site/book + site/doc) — the same assembly
+# Stage the built docs into build/site (build/site/book + build/site/doc) — the same assembly
 # pages.yml publishes. Run `just doc` first. Logic lives in xtask.
+[working-directory: 'xtask']
 docs-assemble:
-    cargo run --manifest-path xtask/Cargo.toml -- docs-assemble
+    cargo run -- docs-assemble
 
 # ── Quality gates (also enforced in CI) ──────────────────────────────────
 

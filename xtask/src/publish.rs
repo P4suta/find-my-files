@@ -1,5 +1,5 @@
 //! `xtask publish [--skip-rust]` — assemble the distributable bundle in
-//! dist/FindMyFiles.
+//! build/dist/FindMyFiles.
 //!
 //! Publishes the app (not a bare `dotnet build` — only the publish output wires
 //! WinRT.Runtime.dll, the `WinAppSDK` native helpers and the compiled XAML into a
@@ -9,7 +9,7 @@
 //! the bundle guarantees its own output instead of a downstream guard.
 //!
 //! `--skip-rust true` skips the in-build cargo step (CI prebuilds + downloads
-//! the engine binaries into engine/target/release/ before this runs).
+//! the engine binaries into build/engine/release/ before this runs).
 
 use crate::{cmd, fsx, locale, paths};
 use anyhow::{bail, Context, Result};
@@ -42,7 +42,10 @@ pub fn run(skip_rust: bool) -> Result<()> {
         );
     }
 
-    // Publish into dist/FindMyFiles (relative to the repo root).
+    // Publish into build/dist/FindMyFiles. Pass the absolute path so the output
+    // location is the single source in paths::dist_dir() — no string duplicated
+    // here, and independent of `cmd::run`'s working directory.
+    let dist_arg = dist.to_str().context("dist path is not valid UTF-8")?;
     let skip_arg = format!("-p:SkipRustBuild={skip_rust}");
     let mut args = vec![
         "publish",
@@ -52,7 +55,7 @@ pub fn run(skip_rust: bool) -> Result<()> {
         "-r",
         "win-x64",
         "-o",
-        "dist/FindMyFiles",
+        dist_arg,
         &skip_arg,
     ];
     // In CI, build the shipped bundle from the pinned dependency graph: fail the
@@ -67,11 +70,11 @@ pub fn run(skip_rust: bool) -> Result<()> {
     cmd::run(&root, "dotnet", &args)?;
 
     prune_locales(&dist)?;
-    copy_engine_bins(&root, &dist)?;
+    copy_engine_bins(&dist)?;
     verify_bundle(&dist)?;
 
     println!(
-        "publish: dist/FindMyFiles assembled and verified ({} required files present).",
+        "publish: build/dist/FindMyFiles assembled and verified ({} required files present).",
         REQUIRED.len()
     );
     Ok(())
@@ -98,8 +101,8 @@ fn prune_locales(dist: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_engine_bins(root: &std::path::Path, dist: &std::path::Path) -> Result<()> {
-    let release = root.join("engine").join("target").join("release");
+fn copy_engine_bins(dist: &std::path::Path) -> Result<()> {
+    let release = paths::engine_release_dir();
     for bin in ENGINE_BINS {
         let src = release.join(bin);
         let target = dist.join(bin);

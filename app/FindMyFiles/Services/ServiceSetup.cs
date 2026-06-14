@@ -160,7 +160,7 @@ public static partial class ServiceSetup
     }
 
     /// <summary>fmf-service.exe next to the app (the dist bundle) or in the
-    /// dev tree (engine\target\release, walking up from the bin dir).</summary>
+    /// dev tree (build\engine\release, walking up from the bin dir).</summary>
     public static string? LocateServiceExe(string baseDir)
     {
         var bundled = Path.Combine(baseDir, "fmf-service.exe");
@@ -171,7 +171,7 @@ public static partial class ServiceSetup
         var dir = new DirectoryInfo(baseDir);
         for (var i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
         {
-            var dev = Path.Combine(dir.FullName, "engine", "target", "release", "fmf-service.exe");
+            var dev = Path.Combine(dir.FullName, "build", "engine", "release", "fmf-service.exe");
             if (File.Exists(dev))
             {
                 return dev;
