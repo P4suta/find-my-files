@@ -234,6 +234,24 @@ pub fn logs_dir_sddl(user_sids: &[&str]) -> String {
     s
 }
 
+/// The protected DACLs `install` applies across the data tree.
+///
+/// Returned as `(subdir, sddl)` pairs (`""` = the data root). Centralized here so
+/// the 脅威7 invariant — `index/` (machine-wide file-name snapshots) is
+/// SYSTEM+Administrators only, never world-readable — is unit-pinned next to the
+/// SDDL builders, without needing an elevated install to verify it. `install`
+/// applies `index/` EXPLICITLY rather than relying on inheritance: it is created
+/// inheriting `%ProgramData%`'s Users ACE, and `set_dir_dacl`'s `SetFileSecurityW`
+/// does not re-propagate the root DACL onto an already-existing child.
+#[must_use]
+pub fn data_tree_dacls(log_readers: &[&str]) -> Vec<(&'static str, String)> {
+    vec![
+        ("", data_dir_sddl()),
+        ("index", data_dir_sddl()),
+        ("logs", logs_dir_sddl(log_readers)),
+    ]
+}
+
 /// Applies an SDDL-described protected DACL to a directory (install-time).
 ///
 /// # Errors
@@ -382,5 +400,30 @@ mod tests {
         let two = logs_dir_sddl(&["S-1-1-1", "S-1-2-2"]);
         assert!(two.contains("(A;OICI;GR;;;S-1-1-1)"));
         assert!(two.contains("(A;OICI;GR;;;S-1-2-2)"));
+    }
+
+    #[test]
+    fn data_tree_hardens_index_like_root_with_no_users() {
+        let t = data_tree_dacls(&["S-1-5-21-1-2-3-1001"]);
+        let find = |k: &str| t.iter().find(|(s, _)| *s == k).map(|(_, v)| v.clone());
+        // 脅威7: index/ — machine-wide file-name snapshots — gets the SAME
+        // protected SYSTEM+Admins-only DACL as the data root. Regressing this
+        // (e.g. dropping the explicit index/ hardening) re-exposes every file
+        // name on the machine to any local user.
+        assert_eq!(find("index").as_deref(), Some(data_dir_sddl().as_str()));
+        assert_eq!(find("").as_deref(), Some(data_dir_sddl().as_str()));
+        let index = find("index").expect("index/ must be in the hardened tree");
+        for forbidden in [";;;WD)", ";;;AU)", ";;;BU)"] {
+            assert!(
+                !index.contains(forbidden),
+                "index/ must not grant {forbidden}"
+            );
+        }
+        // logs/ additionally grants the per-user read ACE for the F12 copy path.
+        assert!(
+            find("logs")
+                .unwrap()
+                .contains("(A;OICI;GR;;;S-1-5-21-1-2-3-1001)")
+        );
     }
 }
