@@ -9,6 +9,9 @@ namespace FindMyFiles.Services;
 /// </summary>
 /// <param name="queue">The UI thread's <see cref="DispatcherQueue"/>, captured
 /// once on that thread at construction.</param>
+// UI-thread DispatcherQueue wrapper: exercised only on a live UI thread; the
+// ManualDispatcher fake stands in for tests (ADR-0022).
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class DispatcherQueueDispatcher(DispatcherQueue queue) : IDispatcher
 {
     /// <inheritdoc/>

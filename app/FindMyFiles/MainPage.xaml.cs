@@ -17,6 +17,8 @@ namespace FindMyFiles;
 /// <see cref="Views.PerfPanel"/>; converters in
 /// <see cref="Converters.UiConverters"/>.
 /// </summary>
+// View code-behind: imperative ListView/keyboard/menu wiring, not unit-tested (ADR-0022).
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed partial class MainPage : Page
 {
     /// <summary>ページの ViewModel グラフのルート。`x:Bind` の唯一のバインド元で、
