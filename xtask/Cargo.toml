@@ -57,7 +57,7 @@ regex = "1"
 # deflate only — drops the bzip2/zstd C deps so xtask builds clean on the
 # ubuntu CI lane (and everywhere) without a C toolchain.
 zip = { version = "2", default-features = false, features = ["deflate"] }
-sha2 = "0.10"
+sha2 = "0.11"
 
 # This is build tooling, not a hot path: optimize for fast compiles, not fast
 # runtime. (The engine workspace is the opposite — see engine/Cargo.toml.)
