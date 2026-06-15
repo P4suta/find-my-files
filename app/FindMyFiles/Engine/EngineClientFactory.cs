@@ -2,6 +2,25 @@ using FindMyFiles.Services;
 
 namespace FindMyFiles.Engine;
 
+/// <summary>Outcome of the auto-mode engine decision (no explicit
+/// <c>--engine</c> / settings) — which transport to construct.</summary>
+internal enum EngineChoice
+{
+    /// <summary>The service pipe answered the probe.</summary>
+    Pipe,
+
+    /// <summary>No live service and the process is elevated — in-proc FFI.</summary>
+    Ffi,
+
+    /// <summary>Service is running but rejected our token (stale authorized-SID
+    /// list) — degrade to the empty engine; the setup screen recovers.</summary>
+    EmptyServiceUnreachable,
+
+    /// <summary>No live service and not elevated — degrade to the empty engine
+    /// (no auto-runas); the setup screen offers the one-click install.</summary>
+    EmptyNotElevated,
+}
+
 /// <summary>
 /// Engine transport selection, in priority order: CLI flags (--fake-engine /
 /// --engine=pipe|inproc / --pipe-name=…) > settings.json "engine" > auto.
@@ -44,51 +63,69 @@ public static class EngineClientFactory
                 "app",
                 $"unknown engine mode `{mode}` (allowed: pipe | inproc | auto) — using auto");
         }
-        if (PipeEngineClient.Probe(pipeName, ProbeTimeout))
+        // auto (or unknown mode → auto): probe the service pipe, else fall back
+        // by service state + elevation. The decision table is unit-tested via
+        // DecideAuto without touching the SCM, the pipe, or the token.
+        var choice = DecideAuto(
+            () => PipeEngineClient.Probe(pipeName, ProbeTimeout),
+            ServiceSetup.QueryState,
+            ServiceSetup.IsProcessElevated);
+        if (choice == EngineChoice.Pipe)
         {
             FileLog.Info("app", $"engine: pipe ({pipeName}, probe succeeded)");
             return new PipeEngineClient(pipeName);
         }
-
-        // Probe failed — but "no service" and "service running yet rejecting
-        // us" need opposite responses. A running service holds the writer
-        // lock, so in-proc would die FMF_E_LOCKED (the「初期化に失敗」path);
-        // only an absent/stopped service leaves the lock free for in-proc.
-        if (ServiceSetup.QueryState() == EngineServiceState.Running)
+        if (choice == EngineChoice.Ffi)
         {
-            // Serving, but our token isn't on its authorized-SID list (a
-            // stale list baked in at service startup, or a foreign installer
-            // SID). In-proc is off the table; recovery is to re-register so
-            // this user's SID is applied and the service restarted.
-            FileLog.Warn(
-                "app", "engine: service running but unreachable (token rejected) — empty fallback");
-            // The setup screen (MainViewModel.IsDisconnected) owns the recovery
-            // path (one-click 登録し直す); no separate notification.
-            return FakeEngineClient.CreateEmpty();
-        }
-
-        // Service absent or stopped → the writer lock is free for in-proc.
-        if (IsElevated())
-        {
+            // Service absent or stopped → the writer lock is free for in-proc.
             FileLog.Info("app", "engine: in-proc FFI (no live service, process is elevated)");
             return new FfiEngineClient();
         }
-        // ARCHITECTURE.md エンジン選択の契約: サービス不在+非昇格で in-proc を
-        // 作っても MFT 読みで必ず失敗する(原因を語らない「インデックスに失敗」
-        // になる)。結果ゼロの空エンジンに劣化し(デモデータは出さない — 検索
-        // アプリで偽データに実用性はない)、UI はこの空エンジンを検知して
-        // セットアップ画面(MainViewModel.IsDisconnected)に切り替え、ワンクリック
-        // 登録(操作ごとに UAC、アプリは非昇格のまま)を提示する。自動 runas 禁止。
+        if (choice == EngineChoice.EmptyServiceUnreachable)
+        {
+            // Running, but our token isn't on its authorized-SID list (a stale
+            // list baked in at startup, or a foreign installer SID); in-proc would
+            // die FMF_E_LOCKED. The setup screen (MainViewModel.IsDisconnected)
+            // owns the recovery (re-register), so no separate notification here.
+            FileLog.Warn(
+                "app", "engine: service running but unreachable (token rejected) — empty fallback");
+            return FakeEngineClient.CreateEmpty();
+        }
+
+        // EmptyNotElevated: no live service and not elevated. In-proc would fail
+        // at the MFT read; degrade to the empty engine (no auto-runas) so the
+        // setup screen can offer the one-click install.
         FileLog.Warn("app", "engine: empty fallback (no service answered, not elevated)");
         return FakeEngineClient.CreateEmpty();
     }
 
-    private static bool IsElevated() => ServiceSetup.IsProcessElevated();
+    /// <summary>The auto-mode decision: probe the pipe, else fall back by service
+    /// state and elevation. Pure over the three injected probes so the branch
+    /// table is unit-testable. Short-circuits: a successful probe never consults
+    /// the service state or elevation; a running service never consults
+    /// elevation.</summary>
+    /// <param name="probe">Pipe probe — did a Hello round-trip succeed?</param>
+    /// <param name="serviceState">SCM state of the engine service.</param>
+    /// <param name="elevated">Whether this process is elevated.</param>
+    /// <returns>The transport to construct.</returns>
+    internal static EngineChoice DecideAuto(
+        Func<bool> probe, Func<EngineServiceState> serviceState, Func<bool> elevated)
+    {
+        if (probe())
+        {
+            return EngineChoice.Pipe;
+        }
+        if (serviceState() == EngineServiceState.Running)
+        {
+            return EngineChoice.EmptyServiceUnreachable;
+        }
+        return elevated() ? EngineChoice.Ffi : EngineChoice.EmptyNotElevated;
+    }
 
-    private static bool HasFlag(string[] args, string flag) =>
+    internal static bool HasFlag(string[] args, string flag) =>
         args.Any(a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));
 
-    private static string? OptionValue(string[] args, string prefix) =>
+    internal static string? OptionValue(string[] args, string prefix) =>
         args.FirstOrDefault(a => a.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             ?[prefix.Length..];
 }
