@@ -117,6 +117,10 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         _epoch++;
         _fetchCts.Cancel();
         _fetchCts = new CancellationTokenSource();
+        // Re-arm the page-fetch failure notice for the new result set: the
+        // once-only suppression in the fetch path is per-epoch, not per-process,
+        // so a later distinct failure still surfaces to the user.
+        _fetchFailureNotified = false;
         var old = _result;
         _result = result;
         _pages.Clear();
@@ -171,6 +175,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         _epoch++;
         _fetchCts.Cancel();
         _fetchCts = new CancellationTokenSource();
+        _fetchFailureNotified = false; // per-epoch re-arm (see Reassign)
         var old = _result;
         _result = result;
         _loaded.Clear();
