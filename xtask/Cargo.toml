@@ -52,7 +52,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-toml_edit = "0.22"
+toml_edit = "0.25"
 regex = "1"
 # deflate only — drops the bzip2/zstd C deps so xtask builds clean on the
 # ubuntu CI lane (and everywhere) without a C toolchain.
