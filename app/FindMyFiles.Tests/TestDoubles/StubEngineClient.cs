@@ -42,6 +42,10 @@ public sealed class StubEngineClient : IEngineClient
     /// <summary>When set, SearchAsync throws instead of recording a call.</summary>
     public Exception? ThrowOnSearch { get; set; }
 
+    /// <summary>When set, ListVolumesAsync faults — drives the StartAsync failure
+    /// path (status + error notification) without a real engine.</summary>
+    public Exception? ThrowOnStartup { get; set; }
+
     public event Action<string>? IndexChanged;
     public event Action<VolumeStatus>? VolumeUpdated;
     public event Action<int>? EngineErrorOccurred;
@@ -63,7 +67,9 @@ public sealed class StubEngineClient : IEngineClient
     public int IndexChangedSubscribers => IndexChanged?.GetInvocationList().Length ?? 0;
 
     public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default) =>
-        Task.FromResult<IReadOnlyList<string>>(["F:"]);
+        ThrowOnStartup is { } ex
+            ? Task.FromException<IReadOnlyList<string>>(ex)
+            : Task.FromResult<IReadOnlyList<string>>(["F:"]);
 
     public Task StartIndexingAsync(
         IReadOnlyList<string> volumes, CancellationToken ct = default) => Task.CompletedTask;

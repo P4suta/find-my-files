@@ -297,7 +297,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     /// <summary>Localize a service/engine error by type or FMF_E_* code — the
     /// app-side absorption of the service's English-only error surface.</summary>
-    private static string EngineErrorText(Exception e) => e switch
+    internal static string EngineErrorText(Exception e) => e switch
     {
         QuerySyntaxException => Loc.Get("Err_QuerySyntax"),
         StaleResultException => Loc.Get("Err_Stale"),
