@@ -1,6 +1,7 @@
 using System.Collections.Specialized;
 using FindMyFiles.Engine;
 using FindMyFiles.Highlighting;
+using FindMyFiles.Services;
 using FindMyFiles.Tests.TestDoubles;
 using FindMyFiles.ViewModels;
 using FindMyFiles.Virtualization;
@@ -104,6 +105,44 @@ public sealed class VirtualResultListTests
         // …but the epoch check dropped it: the seeded new data is untouched.
         Assert.Equal("new_000000.txt", Row(0).Name);
         Assert.Equal(10, _list.Count);
+    }
+
+    [Fact]
+    public void PageFetchFailure_NotifiesOncePerResultSet_NotOncePerProcess()
+    {
+        // A real (non-cancel/dispose) page-fetch failure tells the user once per
+        // result set, not once for the whole process: the "notified" latch is
+        // re-armed on each epoch turn, so a later distinct failure still
+        // surfaces. Regression for the latch that was never reset.
+        SyncContext.RunContinuationsInline();
+        var mine = new List<AppNotification>();
+        void Handler(AppNotification n)
+        {
+            if (n.Message == "結果の読み込みでエラーが発生しました")
+            {
+                mine.Add(n);
+            }
+        }
+
+        Notifier.Posted += Handler;
+        try
+        {
+            var boom = new InvalidOperationException("boom");
+
+            _list.Reassign(new StubSearchResult(Rows.Many(100)) { ThrowOnFetch = boom }, []);
+            _list.EnsureRange(0, 10);
+            _dispatcher.DrainQueue();
+            Assert.Single(mine); // first result set: told once
+
+            _list.Reassign(new StubSearchResult(Rows.Many(100)) { ThrowOnFetch = boom }, []);
+            _list.EnsureRange(0, 10);
+            _dispatcher.DrainQueue();
+            Assert.Equal(2, mine.Count); // re-armed: the new failure surfaces too
+        }
+        finally
+        {
+            Notifier.Posted -= Handler;
+        }
     }
 
     // The two-layer protection against fetches of a dead epoch is pinned by

@@ -210,17 +210,22 @@ internal static class PipeProtocol
         {
             throw new InvalidDataException($"PageResp payload is {payload.Length} bytes, need ≥8");
         }
-        var rowCount = (int)BinaryPrimitives.ReadUInt32LittleEndian(payload);
-        var blobLen = (int)BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
-        if (payload.Length != 8 + rowCount * RowSize + blobLen)
+        var rowCount = BinaryPrimitives.ReadUInt32LittleEndian(payload);
+        var blobLen = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
+        // Validate the declared sizes in long: the fields are u32, so
+        // `rowCount * RowSize` overflows int for a hostile/buggy frame. The 16 MiB
+        // frame cap already bounds payload.Length, so once this equality holds
+        // every offset below fits an int.
+        var expected = 8L + (long)rowCount * RowSize + blobLen;
+        if (expected != payload.Length)
         {
             throw new InvalidDataException(
-                $"PageResp payload is {payload.Length} bytes, "
-                + $"expected {8 + rowCount * RowSize + blobLen} for {rowCount} rows");
+                $"PageResp payload is {payload.Length} bytes, expected {expected} for {rowCount} rows");
         }
+        var rowBytes = (int)rowCount * RowSize;
         return PageCodec.Decode(
-            payload.Slice(8, rowCount * RowSize),
-            payload.Slice(8 + rowCount * RowSize, blobLen));
+            payload.Slice(8, rowBytes),
+            payload.Slice(8 + rowBytes, (int)blobLen));
     }
 
     public static byte[] EncodePageResp(IReadOnlyList<RowData> rows)
