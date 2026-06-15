@@ -34,12 +34,12 @@
          the Runtime package explicitly. -->
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
 
-    <!-- Coverage measures testable logic only: exclude UI code-behind (XAML
-         event/render handlers, the DispatcherQueue wrapper) and generated code.
-         They need a live UI to exercise, so counting them inflates the
-         denominator and makes the % meaningless (ADR-0022). The remaining
-         number reflects the non-UI logic the test suite can actually cover. -->
-    <ExcludeByFile>**/*.xaml.cs,**/*.g.cs,**/*.g.i.cs,**/DispatcherQueueDispatcher.cs</ExcludeByFile>
+    <!-- Coverage measures testable logic only. The UI layer (View code-behind,
+         the DispatcherQueue wrapper) is marked [ExcludeFromCodeCoverage] at the
+         class — the standard, tool-agnostic marker. Here we only drop generated
+         XAML, which carries no such attribute, so the % reflects the non-UI
+         logic the suite can actually cover (ADR-0022). -->
+    <ExcludeByFile>**/*.g.cs,**/*.g.i.cs</ExcludeByFile>
   </PropertyGroup>
 
   <ItemGroup>

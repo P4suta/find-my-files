@@ -12,6 +12,8 @@ namespace FindMyFiles.Views;
 /// buttons fire-and-forget its async actions through the sanctioned
 /// <see cref="FindMyFiles.Services.TaskExtensions.Forget"/> funnel (CLAUDE.md規約).
 /// </summary>
+// View code-behind: dialog wiring, not unit-tested (ADR-0022).
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed partial class ServiceManagerDialog : ContentDialog
 {
     private static bool _open;
