@@ -506,3 +506,35 @@ mod tests {
         assert_eq!(p("").groups, vec![Vec::<Term>::new()]);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use proptest::{prop_assert, proptest};
+
+    use super::parse;
+
+    proptest! {
+        // `parse` must never panic on ANY input — the documented
+        // "# Panics: Does not panic" contract, validated across the whole input
+        // space (a lightweight fuzz). On success the AST always has at least one
+        // group (it is seeded with one and only grows).
+        #[test]
+        fn parse_never_panics(s in ".*") {
+            if let Ok(ast) = parse(&s) {
+                prop_assert!(!ast.groups.is_empty());
+            }
+        }
+
+        // Same property, biased to the query alphabet (operators, filters,
+        // quotes, backslash) so the filter/operator parsing paths get dense
+        // coverage rather than mostly-inert random Unicode.
+        #[test]
+        fn parse_never_panics_on_query_alphabet(
+            s in "[a-zA-Z0-9 |!\"*?:;.<>=,/\\\\-]{0,40}"
+        ) {
+            if let Ok(ast) = parse(&s) {
+                prop_assert!(!ast.groups.is_empty());
+            }
+        }
+    }
+}

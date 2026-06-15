@@ -32,6 +32,10 @@ testutil = []
 
 [dev-dependencies]
 criterion = "0.8"
+# Property-based tests (ADR-0022): invariants + arbitrary-input robustness
+# (fold length-preservation, query-parser no-panic) across the whole input
+# space, not a handful of examples.
+proptest = "1"
 # Golden JSON-shape pins (tests/golden_json.rs) — the serde output consumed
 # by the C# side is contract surface (ADR-0018).
 serde_json = { workspace = true }
