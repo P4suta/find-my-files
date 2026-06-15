@@ -15,6 +15,22 @@ updates:
       prefix: deps
       include: scope
 
+  # xtask is a separate workspace with its own Cargo.lock (ADR-0018); cargo-audit
+  # scans it for advisories, but only Dependabot opens the bump PRs.
+  - package-ecosystem: cargo
+    directory: /xtask
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      xtask-deps:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+      include: scope
+
   # C# app — one nuget entry per project directory.
   - package-ecosystem: nuget
     directory: /app/FindMyFiles

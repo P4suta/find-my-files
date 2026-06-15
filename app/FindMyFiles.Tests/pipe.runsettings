@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- `just test-pipe` 専用: C#クライアント×実 fmf-service 結合ゲート(FMF_PIPE_TESTS)を
+<!-- `just test-pipe` と CI の pipe 工程用: C#クライアント×実 fmf-service 結合ゲート(FMF_PIPE_TESTS)を
      実行時テストホストに注入する。シェル固有の `$env:` を justfile から追い出すための
      受け皿(env 設定はツールネイティブな手段で表す、の dotnet 版)。test-app(hermetic)
      にはこの settings を渡さないので、env はそのときだけ効く。自動探索もされない。 -->

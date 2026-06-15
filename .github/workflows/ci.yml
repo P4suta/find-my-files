@@ -13,6 +13,9 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0" # CI-only; does not touch local incremental (ADR-0014)
   CARGO_TERM_COLOR: always
+  # Fail the build if Cargo.lock is stale rather than silently re-resolving — the
+  # Rust counterpart to the C# RestoreLockedMode gate (docs/SUPPLY_CHAIN.md).
+  CARGO_NET_LOCKED: "true"
   DOTNET_NOLOGO: "1"
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
 
@@ -221,9 +224,9 @@ jobs:
       - name: test app + coverage gate (line+branch, UI-excluded)
         run: just test-app-cov true
       - name: pipe integration (C# client × real service, unelevated)
-        run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true -p:RestoreLockedMode=true
-        env:
-          FMF_PIPE_TESTS: "1"
+        run: >-
+          dotnet test app/FindMyFiles.Tests --settings app/FindMyFiles.Tests/pipe.runsettings
+          -p:SkipRustBuild=true -p:RestoreLockedMode=true
       # The bundle's runnability (WinRT.Runtime.dll + engine binaries present) is
       # now guaranteed at the source: `just publish-app` self-verifies in xtask
       # and fails there, so a separate guard step here is redundant.
