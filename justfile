@@ -34,6 +34,14 @@ test:
 test-app:
     dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
 
+# C# unit tests + coverage gate (line+branch >=55; UI is [ExcludeFromCodeCoverage]).
+# Threshold/type/stat live in the test csproj (with ExcludeByFile), so this is just
+# -p:CollectCoverage=true and no comma-bearing prop ever reaches the shell. CI runs
+# `just test-app-cov true` (locked enforces packages.lock.json); locally the bare
+# recipe reproduces the identical gate.
+test-app-cov locked="false":
+    dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true -p:RestoreLockedMode={{locked}} -p:CollectCoverage=true
+
 # Elevation-gated #[ignore] tests: real-volume MFT/USN (elevated).
 # Sets the gate env var the PowerShell way on ONE line (just runs each recipe line
 # in its own shell, so the assignment must share the line with cargo). `cargo

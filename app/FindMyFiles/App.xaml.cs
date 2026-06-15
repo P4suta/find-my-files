@@ -9,6 +9,8 @@ namespace FindMyFiles;
 /// (<see cref="EngineClient"/>)を解決し、唯一の <see cref="MainWindow"/> を立てる。
 /// 致命的初期化失敗時は `FakeEngineClient` へフォールバックして「黙って落ちる」を避ける。
 /// </summary>
+// View/startup shell: imperative UI wiring + composition root, not unit-tested (ADR-0022).
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class App : Application
 {
     /// <summary>唯一のトップレベルウィンドウ。`OnLaunched` で生成され、`WinRT.Interop`

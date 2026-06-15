@@ -16,6 +16,8 @@ namespace FindMyFiles.Views;
 /// x:Bind; the 1 Hz stats poll runs only while the panel is open.
 /// UI thread only.
 /// </summary>
+// View code-behind: imperative F12 rendering, not unit-tested (ADR-0022).
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed partial class PerfPanel : UserControl
 {
     /// <summary><see cref="ViewModel"/> のバッキング用 <c>DependencyProperty</c>。

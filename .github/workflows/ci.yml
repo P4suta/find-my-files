@@ -218,10 +218,8 @@ jobs:
       # as release.yml; skip_rust=true since the engine dll/exe are prebuilt above.
       - name: publish app (SkipRustBuild — engine binaries are prebuilt)
         run: just publish-app true
-      - name: test app + line coverage gate
-        run: >-
-          dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true -p:RestoreLockedMode=true
-          -p:CollectCoverage=true -p:Threshold=62 -p:ThresholdType=line -p:ThresholdStat=total
+      - name: test app + coverage gate (line+branch, UI-excluded)
+        run: just test-app-cov true
       - name: pipe integration (C# client × real service, unelevated)
         run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true -p:RestoreLockedMode=true
         env:
