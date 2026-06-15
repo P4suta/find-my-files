@@ -33,6 +33,13 @@
          every WinAppSDK consumer must choose self-contained or reference
          the Runtime package explicitly. -->
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+
+    <!-- Coverage measures testable logic only: exclude UI code-behind (XAML
+         event/render handlers, the DispatcherQueue wrapper) and generated code.
+         They need a live UI to exercise, so counting them inflates the
+         denominator and makes the % meaningless (ADR-0022). The remaining
+         number reflects the non-UI logic the test suite can actually cover. -->
+    <ExcludeByFile>**/*.xaml.cs,**/*.g.cs,**/*.g.i.cs,**/DispatcherQueueDispatcher.cs</ExcludeByFile>
   </PropertyGroup>
 
   <ItemGroup>
