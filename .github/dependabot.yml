@@ -12,7 +12,7 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
     commit-message:
-      prefix: deps
+      prefix: build
       include: scope
 
   # xtask is a separate workspace with its own Cargo.lock (ADR-0018); cargo-audit
@@ -28,7 +28,7 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
     commit-message:
-      prefix: deps
+      prefix: build
       include: scope
 
   # C# app — one nuget entry per project directory.
@@ -41,7 +41,7 @@ updates:
       dotnet-app:
         patterns: ["*"]
     commit-message:
-      prefix: deps
+      prefix: build
 
   - package-ecosystem: nuget
     directory: /app/FindMyFiles.Tests
@@ -52,7 +52,7 @@ updates:
       dotnet-tests:
         patterns: ["*"]
     commit-message:
-      prefix: deps
+      prefix: build
 
   # The workflow actions themselves.
   - package-ecosystem: github-actions
