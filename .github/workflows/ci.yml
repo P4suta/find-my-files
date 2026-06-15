@@ -221,7 +221,7 @@ jobs:
       - name: test app + line coverage gate
         run: >-
           dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true -p:RestoreLockedMode=true
-          -p:CollectCoverage=true -p:Threshold=18 -p:ThresholdType=line -p:ThresholdStat=total
+          -p:CollectCoverage=true -p:Threshold=62 -p:ThresholdType=line -p:ThresholdStat=total
       - name: pipe integration (C# client × real service, unelevated)
         run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true -p:RestoreLockedMode=true
         env:
