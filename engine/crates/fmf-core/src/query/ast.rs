@@ -291,6 +291,18 @@ fn parse_date_period(v: &str) -> Option<(Civil, Civil)> {
         .iter()
         .map(|p| p.parse::<u32>().ok())
         .collect::<Option<_>>()?;
+    // Reject years outside Civil's supported range (see `Civil::is_valid`:
+    // 1601..=9999) before building any Civil. Such a year can never match, and
+    // the i32 successor/predecessor math below — `*y as i32 + 1`, the eagerly
+    // evaluated `first_of_next_month`, and `days_from_civil`'s `c.y - 1` reached
+    // via `next_day` — overflows for values near i32::MAX/MIN (e.g.
+    // `dm:2147483647`, `dm:2147483648-1-1`), which panics under the debug
+    // profile's overflow-checks. The literals mirror is_valid's range, kept in
+    // u32 so the parsed value compares without a sign-losing cast.
+    let &year = nums.first()?;
+    if !(1601..=9999).contains(&year) {
+        return None;
+    }
     match nums.as_slice() {
         [y] => {
             let start = Civil {
@@ -394,6 +406,31 @@ mod tests {
             p("ext:jpg;png,.gif").groups[0][0],
             Term::Ext(vec!["jpg".into(), "png".into(), "gif".into()])
         );
+    }
+
+    #[test]
+    fn dm_out_of_range_year_is_rejected_without_overflow() {
+        // Years near i32::MAX/MIN must not overflow the date arithmetic in
+        // parse_date_period (the debug profile's overflow-checks would panic);
+        // they are rejected as InvalidDate. Regression for `dm:2147483647`
+        // (year+1 in the [y] arm), `dm:2147483647-12` (first_of_next_month,
+        // evaluated eagerly even though the start is invalid), and
+        // `dm:2147483648-1-1` (`c.y - 1` in days_from_civil via next_day).
+        for v in [
+            "dm:2147483647",
+            "dm:2147483647-12",
+            "dm:2147483648-1-1",
+            "dm:2020..2147483647",
+            "dm:4294967295",
+            "dm:99999999",
+        ] {
+            assert!(
+                matches!(parse(v), Err(ParseError::InvalidDate(_))),
+                "{v} should be rejected as InvalidDate, not panic",
+            );
+        }
+        // A year inside the supported range still parses to an Mtime term.
+        assert!(matches!(p("dm:2024").groups[0][0], Term::Mtime { .. }));
     }
 
     #[test]
