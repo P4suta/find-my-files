@@ -226,3 +226,43 @@ mod tests {
         assert!(!has_uppercase("İ")); // unfoldable by our rule → not "uppercase" for smart case
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use proptest::collection::vec as prop_vec;
+    use proptest::prelude::any;
+    use proptest::{prop_assert_eq, proptest};
+
+    use super::{fold_str, push_wtf8_pair, wtf8_to_utf16};
+
+    proptest! {
+        // The two pools grow by the same byte count for ANY UTF-16 name — the
+        // shared-offset invariant (ADR-0003), across the whole input space.
+        #[test]
+        fn pools_same_length_for_any_units(units in prop_vec(any::<u16>(), 0usize..64)) {
+            let (mut name, mut lower) = (Vec::new(), Vec::new());
+            push_wtf8_pair(&units, &mut name, &mut lower);
+            prop_assert_eq!(name.len(), lower.len());
+        }
+
+        // The WTF-8 name output round-trips back to the original UTF-16 units
+        // (including unpaired surrogates) for ANY input.
+        #[test]
+        fn name_roundtrips_through_utf16(units in prop_vec(any::<u16>(), 0usize..64)) {
+            let (mut name, mut lower) = (Vec::new(), Vec::new());
+            push_wtf8_pair(&units, &mut name, &mut lower);
+            let mut back = Vec::new();
+            wtf8_to_utf16(&name, &mut back);
+            prop_assert_eq!(back, units);
+        }
+
+        // `fold_str` preserves byte length and is idempotent for ANY UTF-8 string.
+        #[test]
+        fn fold_str_length_preserving_and_idempotent(s in ".*") {
+            let folded = fold_str(&s);
+            prop_assert_eq!(folded.len(), s.len());
+            let twice = fold_str(&folded);
+            prop_assert_eq!(twice, folded);
+        }
+    }
+}
