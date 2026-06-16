@@ -1,27 +1,27 @@
-# ADR-0022: OS/シェル/UI 境界はテスト可能シーム + 挙動テストを必須とする
+# ADR-0022: OS/shell/UI boundaries must use testable seams + behavioral tests
 
-日付: 2026-06-15 / 状態: 採用済み
+Date: 2026-06-15 / Status: Adopted
 
-## 決定
+## Decision
 
-OS・シェル・プロセス・ファイル I/O・UI イベントに触れるコードは、**注入可能なシーム**(interface、もしくはパス/依存を引数化した `internal` コア)を経由し、その**挙動**を `dotnet test` / `cargo test` で検証するテストを伴わなければならない。純粋ヘルパや引数構築だけをテストして「実挙動は未検証」のまま出荷しない。
+Code that touches the OS, shell, processes, file I/O, or UI events must go through an **injectable seam** (an interface, or an `internal` core with paths/dependencies passed as arguments), and must come with tests that verify its **behavior** via `dotnet test` / `cargo test`. Do not ship with only pure helpers or argument construction tested while "actual behavior is unverified."
 
-正本パターン: `app/FindMyFiles/Engine/IEngineClient.cs`(Fake/Ffi/Pipe)、`Services/IDispatcher.cs`、`Services/IProcessRunner.cs` / `Services/IRevealApi.cs`、`Services/FileLog.cs` のパス引数化コア。エンジン側は `engine/crates/fmf-core/.../seams.rs`(SnapshotStore / JournalSource。シーム2本上限は ADR-0018)。
+Canonical patterns: `app/FindMyFiles/Engine/IEngineClient.cs` (Fake/Ffi/Pipe), `Services/IDispatcher.cs`, `Services/IProcessRunner.cs` / `Services/IRevealApi.cs`, the path-parameterized core of `Services/FileLog.cs`. On the engine side, `engine/crates/fmf-core/.../seams.rs` (SnapshotStore / JournalSource; the two-seam cap is ADR-0018).
 
-## 根拠
+## Rationale
 
-- **「フォルダーを開いてファイルを選択」(reveal)が初日から壊れていた**: `ShellOps.Reveal` の実挙動(`SHOpenFolderAndSelectItems`)が一度もテストされず、純粋ヘルパ `BuildOpenStartInfo` だけが緑で、CI も通り続けた。テストが品質を保証していなかった。
-- 根本原因の型: ランタイム/OS 境界が `static` + 直 P/Invoke のままだと挙動を fake で差し替えられず、挙動検証を書けない。引数/構造のテストは「通る = 壊れていない」を成立させない。
-- C# カバレッジゲートが `Threshold=15`(有名無実)だったことも未検証コードの出荷を許した。
+- **"Open folder and select file" (reveal) was broken from day one**: the actual behavior of `ShellOps.Reveal` (`SHOpenFolderAndSelectItems`) was never tested; only the pure helper `BuildOpenStartInfo` was green, and CI kept passing. The tests did not guarantee quality.
+- Root-cause type: if the runtime/OS boundary stays `static` + direct P/Invoke, behavior cannot be swapped with a fake and behavioral verification cannot be written. Argument/structure tests do not make "passes = not broken" hold.
+- The C# coverage gate being `Threshold=15` (nominal only) also allowed unverified code to ship.
 
-## 影響
+## Consequences
 
-- 新規の境界コードはレビューで「シーム + 挙動テスト」を要求する(構築だけのテストは不十分とみなす)。
-- C# の live UI 自動化は PowerShell スクリプト(`ui-tests.ps1`)前提で、このマシンは実行ポリシーで無効・運用方針でも不採用。よって **UI 隣接ロジックは ViewModel / コアに寄せて `dotnet test` で検証**する(live UI 自動化に依存しない)。
-- 形骸テスト(壊しても通る)検出に mutation testing を用いる: Rust = `just mutants`(cargo-mutants)、C# = `just stryker`(Stryker.NET)。当面は情報、段階的にゲート化。
-- C# カバレッジゲートは 15% から段階的に引き上げる(ratchet)。
+- New boundary code is required at review to have "seam + behavioral test" (construction-only tests are deemed insufficient).
+- C# live UI automation assumes a PowerShell script (`ui-tests.ps1`), which is disabled by execution policy on this machine and not adopted by operating policy. Therefore **UI-adjacent logic is pushed into ViewModels / core and verified via `dotnet test`** (no dependence on live UI automation).
+- Mutation testing is used to detect vacuous tests (those that pass even when broken): Rust = `just mutants` (cargo-mutants), C# = `just stryker` (Stryker.NET). Informational for now; gated incrementally.
+- The C# coverage gate is raised incrementally from 15% (ratchet).
 
-## 再検討トリガ
+## Re-examination triggers
 
-- live UI 自動化が PowerShell 非依存(例: FlaUI を `dotnet test` に統合)で導入可能になった場合 → UI フローの直接テストを再評価。
-- シームの増殖が設計を歪める兆候(エンジン側はシーム2本上限 = ADR-0018 を維持)。
+- If live UI automation becomes adoptable without PowerShell dependence (e.g., integrating FlaUI into `dotnet test`) → re-evaluate direct testing of UI flows.
+- Signs that seam proliferation distorts the design (the engine side keeps the two-seam cap = ADR-0018).

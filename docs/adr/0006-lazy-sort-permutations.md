@@ -1,24 +1,24 @@
-# ADR-0006: ソート順列の遅延化(常時維持はperm_nameのみ)
+# ADR-0006: Lazy sort permutations (only perm_name is always maintained)
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-常時維持・永続化するfast sort順列はperm_nameの1本のみとする。size/mtime順は派生キャッシュの遅延順列(query/memo.rs の SizePerm/MtimePerm)とする: 初回のソートクエリでpar_sort一回、以後は世代毎にperm_nameと同じ挿入位置マージで差分延長、スナップショットには入れない(非永続)。
+The only always-maintained, persisted fast-sort permutation is perm_name. size/mtime order is a derived-cache lazy permutation (SizePerm/MtimePerm in query/memo.rs): one par_sort on the first sort query, then per-generation incremental extension via the same insertion-position merge as perm_name; not included in the snapshot (non-persistent).
 
-## 根拠
+## Rationale
 
-- −8B/entry(順列2本分)+スナップショット約8MB削減。size/mtimeソートを一度も要求しないセッションが多い
-- 初回構築はpar_sort一回の ~60ms級@1M。一回限りでクエリp99ゲート(50ms)の常時経路に乗らない
-- 維持コスト削減: apply_batch_1k 6.67→1.96ms(−71.6%。マージ対象の順列が3本→1本)
-- 遅延化による劣化は first_query_sorted_size +6.5%(2.0→2.1ms、10%ゲート内)のみ
+- −8B/entry (two permutations' worth) + ~8MB snapshot reduction. Many sessions never request a size/mtime sort
+- Initial construction is one par_sort, ~60ms-class @1M. One-off, so it does not sit on the always-on path of the query p99 gate (50ms)
+- Maintenance cost reduction: apply_batch_1k 6.67→1.96ms (−71.6%; permutations to merge go 3→1)
+- The only regression from going lazy is first_query_sorted_size +6.5% (2.0→2.1ms, within the 10% gate)
 
-## 影響
+## Consequences
 
-- 初回のsize/mtime列クリックに一回限りの構築コスト(~60ms級@1M)を受け入れる
-- スナップショット復元後の初回利用で再ソート(stat更新由来のstale順も同時にリセットされる)
-- 正しさはextend oracle(lazy == fresh-sort のバイト等価)で固定。ウォーターマーク不整合はwarn+`lazy_perm_rebuild_fallbacks`カウンタ+フル再構築(黙らない)
+- The first size/mtime column click accepts a one-off construction cost (~60ms-class @1M)
+- After snapshot restore, the first use re-sorts (stale order from stat updates is also reset at the same time)
+- Correctness is pinned by an extend oracle (byte-equality of lazy == fresh-sort). Watermark inconsistency triggers warn + `lazy_perm_rebuild_fallbacks` counter + full rebuild (does not go silent)
 
-## 再検討トリガ
+## Re-examination triggers
 
-- 初回ソートクリックの実測が体感閾値(100ms級)を超える規模の単一ボリューム実需要
+- Real demand for a single volume large enough that the measured first sort-click exceeds the perceptual threshold (100ms-class)

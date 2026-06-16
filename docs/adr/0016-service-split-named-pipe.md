@@ -1,89 +1,58 @@
-# ADR-0016: v2サービス分離 — fmf-service + named pipe
+# ADR-0016: v2 service split — fmf-service + named pipe
 
-日付: 2026-06-11 / 状態: 採用済み(契約定数の複製+値ピン同期の運用のみ [ADR-0018](0018-contract-single-source.md) が supersede)
+Date: 2026-06-11 / Status: Accepted (only the duplicated contract constants + value-pin sync operation is superseded by [ADR-0018](0018-contract-single-source.md))
 
-## 決定
+## Decision
 
-エンジンを特権サービス `fmf-service`(fmf-core を直接ホスト、LocalSystem)に載せ、UIは非特権
-(asInvoker)化して named pipe で接続する。ワイヤ定義は新規 rlib `fmf-proto` に置き、
-`PipeEngineClient` が `IEngineClient` の第3実装になる。仕様の正本は docs/ARCHITECTURE.md
-「Pipe プロトコル」節。FFI(fmf_engine.dll)と in-proc 経路は当面存続する(`--engine=inproc`、
-要手動昇格)。
+Host the engine in a privileged service `fmf-service` (hosts fmf-core directly, LocalSystem), make the UI non-privileged (asInvoker), and connect over a named pipe. Wire definitions live in a new rlib `fmf-proto`, and `PipeEngineClient` becomes the third implementation of `IEngineClient`. The canonical spec is the "Pipe protocol" section of docs/ARCHITECTURE.md. The FFI (fmf_engine.dll) and in-proc paths persist for now (`--engine=inproc`, requires manual elevation).
 
-## 根拠
+## Rationale
 
-- MVPの requireAdministrator はアプリ全体を管理者で走らせる: UIPI で Explorer→ウィンドウの
-  drag & drop が死に(README既知制限)、「開く」は explorer.exe 経由の脱昇格ワークアラウンドが必要だった
-- 設計は最初からこの分離を予約済み: fmf-ffi 無ロジック則、IEngineClient 差し替え境界、
-  %ProgramData% のマシン単位インデックス、エラーコード表の「pipe プロトコルと共用」
-- 常駐サービスは「UIが起動していなくてもUSN追従でインデックスが新鮮」を実現する
+- The MVP's requireAdministrator runs the whole app as administrator: UIPI kills Explorer→window drag & drop (known limitation in README), and "open" needed an explorer.exe de-elevation workaround
+- The design reserved this split from the start: the fmf-ffi no-logic rule, the IEngineClient swap boundary, the per-machine index under %ProgramData%, and the "shared with the pipe protocol" note in the error-code table
+- A resident service achieves "the index stays fresh via USN tracking even when the UI is not running"
 
-### トランスポートの却下案
+### Rejected transports
 
-- **COM / RPC(out-of-process)**: レジストリ登録・マーシャリング定義・昇格境界の複雑さが、
-  長さ前置きフレームの named pipe に対して見合わない。ワイヤの可観測性(フレームをそのまま
-  ログ/テストにピンできる)も劣る
-- **gRPC / HTTP(localhost)**: ネットワークスタック経由は「やらないことリスト」のサーバ機能に接近し、
-  依存(tokio/tonic)が fmf-core の同期スレッド文化と衝突する。ローカルIPCに HTTP/2 は過剰
-- **共有メモリ+イベント**: ページ転送は最速だが、寿命・権限・世代管理を自前設計することになり
-  「FFI 1関数=1メッセージ」の単純な写像が失われる。pipe の往復(基準値は ARCHITECTURE.md
-  遅延予算節)で予算に対し余裕があるため不要
-- **asyncランタイム(tokio)**: 接続は高々数本。blocking I/O+スレッドが既存設計と整合。
-  依存とビルド時間だけ増える
+- COM / RPC (out-of-process) — registry registration, marshalling definitions, and elevation-boundary complexity; worse wire observability vs. a length-prefixed named pipe
+- gRPC / HTTP (localhost) — network stack drifts toward the "won't do" server features; dependency (tokio/tonic) clashes with fmf-core's synchronous threading; HTTP/2 overkill for local IPC
+- Shared memory + events — fastest page transfer, but self-designing lifetime/permissions/generation loses the "1 FFI function = 1 message" mapping; unneeded since the pipe round-trip has budget headroom (baseline in ARCHITECTURE.md latency-budget section)
+- async runtime (tokio) — at most a few connections; blocking I/O + threads fit the existing design; only adds dependency and build time
 
-### flush の公開面(3案)
+### flush exposure surface (3 options)
 
-前提として `Engine::flush()` を実体化する(VolumeSlot の共有チェックポイント+世代ペアの dirty-skip)。
-公開面は3案を比較した:
+The premise is to materialize `Engine::flush()` (VolumeSlot's shared checkpoint + generation-pair dirty-skip). Three options for the exposure surface were compared:
 
-- **①pipe オペコードとして公開** — 却下。クライアント起動の flush 連打は index.read() 保持の反復で
-  USN 適用を停止させるローカル DoS 経路(SECURITY.md 脅威6)
-- **②FFI にも置かずサービス内部関数のみ** — 却下。in-proc(--engine=inproc)経路とテストが
-  保存タイミングを再現できず、契約の写像表(FFI 1関数=1メッセージ)にも穴が開く
-- **③採用: FFI `fmf_flush` はエクスポート、pipe はオペコード11の番号予約のみ**
+- Option 1: expose as a pipe opcode — rejected. Client-driven flush spamming repeatedly holds index.read(), a local DoS path that stalls USN application (SECURITY.md threat 6)
+- Option 2: not even in FFI, service-internal function only — rejected. The in-proc (--engine=inproc) path and tests cannot reproduce save timing, and it punches a hole in the contract mapping table (1 FFI function = 1 message)
+- Option 3: adopted — FFI `fmf_flush` is exported, the pipe only reserves opcode 11 as a number
 
-保存はサービス内部の責務 — 定期(既定300s・volume間スタガ・dirtyのみ)+SCM Stop/PRESHUTDOWN 時。
-PRESHUTDOWN の既定猶予は現行 Windows では 10 秒に短縮されているため(docs/RESEARCH.md)、
-install 時に `SERVICE_PRESHUTDOWN_INFO` で明示的に延長を設定する。
+Saving is a service-internal responsibility — periodic (default 300s, staggered across volumes, dirty only) + on SCM Stop/PRESHUTDOWN. Because the PRESHUTDOWN default grace has been shortened to 10 seconds on current Windows (docs/RESEARCH.md), set an explicit extension via `SERVICE_PRESHUTDOWN_INFO` at install time.
 
-### 配布
+### Distribution
 
-MSIX/インストーラは本マイルストーンでは見送り(WindowsPackageType=None 維持)。サービス導入は
-`fmf-service install`(SID捕捉・DACL設定・特権剥奪を原子的に行うため sc.exe では代替不能)+
-justfile レシピ+README 手順で成立させる。**asInvoker への切替はサービス導入手段の成立が前提条件**
-(サービス未導入の既定挙動: 説明付き InfoBar+fake フォールバック+「管理者として再起動」ボタン)。
+MSIX/installer is deferred for this milestone (WindowsPackageType=None kept). Service deployment is established via `fmf-service install` (sc.exe cannot substitute, because SID capture, DACL setup, and privilege stripping must be done atomically) + a justfile recipe + README instructions. **Switching to asInvoker is conditioned on a working service-deployment mechanism** (default behavior when the service is not deployed: an InfoBar with explanation + fake fallback + a "Restart as administrator" button).
 
-## 影響
+## Consequences
 
-- 新規 crate 2つ(fmf-proto / fmf-service)。fmf-ffi と DLL 名 `fmf_engine` は不変更
-- IEngineClient の同期3メソッド(ListVolumes/StartIndexing/GetStatus)が Task 返しになる
-  (pipe 越え同期=UIスレッド「固まらない」違反)
-- 単一書き手不変条件がプロセス間に拡張: `{index_dir}\.writer.lock` + `FMF_E_LOCKED=7`
-- Rust/C# 両テストスイートに同一のゴールデンフレーム(バイト列)をピンし、ワイヤの漂流を
-  contract_tests と同じ流儀で固定する
-- FfiEngineClient(--engine=inproc)の削除トリガ: サービスGA後1リリースのソーク完了
-- drag-out(結果→Explorer)は本マイルストーン外の新機能として別起票(drop 方向の解消のみ実装)
+- 2 new crates (fmf-proto / fmf-service). fmf-ffi and the DLL name `fmf_engine` are unchanged
+- The 3 synchronous IEngineClient methods (ListVolumes/StartIndexing/GetStatus) become Task-returning (sync across the pipe = a violation of the UI-thread "must not freeze" rule)
+- The single-writer invariant extends across processes: `{index_dir}\.writer.lock` + `FMF_E_LOCKED=7`
+- Both the Rust and C# test suites pin identical golden frames (byte sequences), fixing wire drift the same way as contract_tests
+- Removal trigger for FfiEngineClient (--engine=inproc): completion of a one-release soak after service GA
+- drag-out (results→Explorer) is filed separately as a new feature outside this milestone (only the drop direction is resolved here)
 
-## 検証(2026-06-11 実測。数値の正本は CLAUDE.md 性能合格ラインと ARCHITECTURE.md 遅延予算節)
+## Verification (measured 2026-06-11. Canonical numbers are the CLAUDE.md performance pass-line and the ARCHITECTURE.md latency-budget section)
 
-- [x] 初回インデックス 実C: **2.31s @1,268,560件**(ゲート: 100万≈60s。`just bench-check`)。
-  サービス実バイナリ経由のE2E(`service_admin.rs`、コンソールモード子プロセス)でも実C:スキャン→
-  Ready→クエリ成立を確認
-- [x] USN→イベント **250.9ms**(ゲート1s。定期flush 10s間隔が発火する構成下で計測。内訳ほぼ全てが
-  意図したエンジン側デバウンス200ms。UI側は既存の50msデバウンス+描画が乗る)
-- [x] kill→再起動→復元 **1.25s**(プロセス起動込み。ゲート2s。エンジン単体の restore p50 は 108ms)。
-  ハードkill前の定期flushでスナップショットが残ること(耐久性)も同テストで証明
-- [x] 検索 p99 **≤5.6ms** 実C: 全クエリ(ゲート50ms)/ ResultPage 64行のループバック往復 p99 **≤5ms**
-  をテストが常時アサート(`pipe_loopback.rs::page_roundtrip_stays_inside_the_latency_budget`)
-- [x] RAM: エンジンは fmf-cli 計測と同一コード(~99B/entry、WS 119.9MiB @1.27M)。fmf-service の
-  追加分は pipe スレッドとキューのみ(イベントキュー上限 256×32B/接続)
-- [ ] SCM 登録(`fmf-service install` → start → stop → uninstall)の実機スモーク — **手動手順として残置**。
-  永続的な LocalSystem 自動起動サービスの登録はユーザー操作で行う(`just service-install`)。
-  SCM 経路のコードは windows-service crate 経由で、serve コアはコンソールE2Eと共通
-- [ ] SECURITY.md の手動検証チェックリスト(別ユーザー拒否・リモート拒否は別トークン/別マシンが必要)
+- [x] First index, real C: **2.31s @1,268,560 entries** (gate: 1M≈60s. `just bench-check`). End-to-end via the real service binary (`service_admin.rs`, console-mode child process) also confirms real-C: scan→Ready→query
+- [x] USN→event **250.9ms** (gate 1s. Measured with periodic flush at a 10s interval firing. Almost all of it is the intended engine-side 200ms debounce. The UI side adds the existing 50ms debounce + rendering)
+- [x] kill→restart→restore **1.25s** (including process startup. Gate 2s. The engine-alone restore p50 is 108ms). The same test also proves the snapshot survives (durability) via the periodic flush before the hard kill
+- [x] Search p99 **≤5.6ms** for all queries on real C: (gate 50ms) / the loopback round-trip for a 64-row ResultPage p99 **≤5ms** is constantly asserted by the test (`pipe_loopback.rs::page_roundtrip_stays_inside_the_latency_budget`)
+- [x] RAM: the engine is the same code as the fmf-cli measurement (~99B/entry, WS 119.9MiB @1.27M). The fmf-service addition is only the pipe threads and queues (event queue cap 256×32B/connection)
+- [ ] SCM registration (`fmf-service install` → start → stop → uninstall) real-machine smoke — **left as a manual procedure**. Registering the persistent LocalSystem auto-start service is done by user action (`just service-install`). The SCM-path code goes through the windows-service crate, and the serve core is shared with the console E2E
+- [ ] SECURITY.md manual verification checklist (other-user reject / remote reject need a separate token / separate machine)
 
-## 再検討トリガ
+## Re-examination triggers
 
-- pipe ページ取得 p99 が実測で 5ms を超える環境が常態化した場合(複数ページ一括取得オペコード、
-  または共有メモリページ転送を再評価)
-- マルチユーザー同時利用の実需要(`fmf-service authorize <user>` での認可SID複数登録)
+- If environments where pipe page-fetch p99 exceeds 5ms become routine (re-evaluate a multi-page batch-fetch opcode, or shared-memory page transfer)
+- Real demand for concurrent multi-user use (`fmf-service authorize <user>` to register multiple authorization SIDs)

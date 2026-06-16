@@ -1,24 +1,24 @@
-# ADR-0014: ビルドツーリングの却下記録とcodegen-units=1
+# ADR-0014: Build tooling rejection record and codegen-units=1
 
-日付: 2026-06-11 / 状態: 却下を記録(codegen-units=1は採用済み)
+Date: 2026-06-11 / Status: Rejections recorded (codegen-units=1 accepted)
 
-## 決定
+## Decision
 
-rust-lld・sccache・cargo-nextestは導入しない。releaseプロファイルは `codegen-units = 1` + `lto = "thin"` を維持する(engine/Cargo.toml)。
+Do not adopt rust-lld, sccache, or cargo-nextest. The release profile keeps `codegen-units = 1` + `lto = "thin"` (engine/Cargo.toml).
 
-## 根拠
+## Rationale
 
-- rust-lld vs MSVC link.exe の公平A/B(engineワークスペース3クレート): fmf-cliインクリメンタル 1.72s vs 1.73s、fmf-core変更後の全テストリンク 3.44s vs 3.46s — 差なし。計測ゼロ改善に非標準リンカのリスク(DLL出力・CI差異)は見合わない
-- sccacheはincrementalコンパイルを無効化するため却下。cargo-nextestはテストスイートが小さく効果なしのため却下(いずれも同日のA/B判断)
-- codegen-units=1: rustcはモジュール単位でcodegen unitを分割するため、クエリカーネルのexec/sweep/matchers/memo分割がインライン喪失で **~10%のクエリレイテンシ** を生む(同一マシン状態でのA/B実測)。1ユニットならホットパスのインラインがモジュール配置から独立する
+- Fair A/B of rust-lld vs MSVC link.exe (3 crates in the engine workspace): fmf-cli incremental 1.72s vs 1.73s, full test link after fmf-core change 3.44s vs 3.46s — no difference. Zero measured improvement does not justify the risk of a non-standard linker (DLL output, CI divergence).
+- sccache rejected because it disables incremental compilation. cargo-nextest rejected because the test suite is small and shows no benefit (both A/B decisions on the same day).
+- codegen-units=1: rustc splits codegen units per module, so splitting the query kernel into exec/sweep/matchers/memo loses inlining and produces **~10% query latency** (A/B measured in the same machine state). With 1 unit, hot-path inlining is independent of module layout.
 
-## 影響
+## Consequences
 
-- releaseビルド時間はcodegen-units=1の分だけ延びる(許容)
-- クエリカーネルのファイル分割リファクタリングを実行性能と独立に行える
-- ビルド高速化の提案はまずこのADRを確認する(再提案防止)
-- **rust-cache(Swatinem/rust-cache = GitHub Actions cache)は本ADRの却下対象外**: sccacheと違いrustc呼び出しをラップせず、`~/.cargo`とtargetを成果物としてアーカイブ/復元するだけでincrementalコンパイルを破壊しない。CIの `CARGO_INCREMENTAL=0` もCI workflow限定でローカルのincrementalに非波及。CI高速化(並列job分割・shared-keyキャッシュ共有・dll artifact共有・PR cancel-in-progress)はこれらに該当し許容(ci.yml)
+- Release build time grows by the codegen-units=1 amount (acceptable).
+- The query kernel's file-split refactoring can be done independently of runtime performance.
+- Build-speedup proposals should check this ADR first (re-proposal prevention).
+- **rust-cache (Swatinem/rust-cache = GitHub Actions cache) is not a target of this ADR's rejection**: unlike sccache it does not wrap rustc invocations; it only archives/restores `~/.cargo` and target as artifacts, so it does not break incremental compilation. CI's `CARGO_INCREMENTAL=0` is also CI-workflow-only and does not propagate to local incremental. CI speedups (parallel job split, shared-key cache sharing, dll artifact sharing, PR cancel-in-progress) fall under this and are permitted (ci.yml).
 
-## 再検討トリガ
+## Re-examination triggers
 
-- ワークスペースが育ちリンクが数十秒級になった場合のみrust-lldを再計測
+- Re-measure rust-lld only if the workspace grows and link reaches the tens-of-seconds class.

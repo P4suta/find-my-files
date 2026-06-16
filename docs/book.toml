@@ -1,7 +1,7 @@
 [book]
-title = "find-my-files — 設計ドキュメント"
+title = "find-my-files — Design Docs"
 authors = ["Yasunobu"]
-language = "ja"
+language = "en"
 src = "."
 
 # Render under the repo-root build/ tree, not docs/book (ADR-0021): every build

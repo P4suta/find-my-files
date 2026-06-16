@@ -46,10 +46,10 @@
     "template": ["default", "modern"],
     "globalMetadata": {
       "_appName": "find-my-files",
-      "_appTitle": "find-my-files — C# API リファレンス",
+      "_appTitle": "find-my-files — C# API Reference",
       "_enableSearch": true,
       "_disableContribution": true,
-      "_lang": "ja"
+      "_lang": "en"
     }
   }
 }

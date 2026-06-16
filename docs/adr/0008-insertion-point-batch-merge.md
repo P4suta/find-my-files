@@ -1,23 +1,23 @@
-# ADR-0008: USNバッチマージは挿入位置二分探索+in-placeセグメント移動
+# ADR-0008: USN batch merge via insertion-point binary search + in-place segment move
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-ソート済み構造(perm_name、FRN索引)へのUSNバッチ反映(index/mod.rs `merge_sorted_tail`)は、バッチ各要素の挿入位置を二分探索で求め、間のセグメントを `copy_within` で一回ずつ移動する。全長の要素比較・全長再アロケはしない。容量確保は `reserve_exact(max(add, len/64))`。
+Applying a USN batch to sorted structures (perm_name, FRN index; index/mod.rs `merge_sorted_tail`) finds each batch element's insertion point by binary search and moves the intervening segment once each with `copy_within`. No full-length element comparison, no full-length reallocation. Capacity is reserved with `reserve_exact(max(add, len/64))`.
 
-## 根拠
+## Rationale
 
-- バッチ ~1k 対 既存 ~1M。全長再構築方式は1バッチあたり既存全要素の比較(perm_nameでは索引中の全ファイル分の文字列比較)を払っていた
-- 実測: apply_batch_1k 54.6→2.0ms@1M(挿入位置マージで54.6→6.3ms、順列遅延化=ADR-0006込みで2.0ms)。FRN索引側も ~30MB/バッチの再アロケチャーンが消える
-- 計算量はO(batch·log n)比較+有界memmove一回、アロケなし
-- 容量の倍々政策はRAMゲートに恒久2×スラックを乗せる。len/64フロアなら全長コピーは ~1.6%成長毎に償却され、スラック上限も ~1.6%
+- Batch ~1k vs existing ~1M. The full-length rebuild approach paid, per batch, a comparison against every existing element (for perm_name, a string comparison for every file in the index)
+- Measured: apply_batch_1k 54.6→2.0ms@1M (54.6→6.3ms from the insertion-point merge; 2.0ms with permutation lazification = ADR-0006 included). The ~30MB/batch reallocation churn on the FRN index side also disappears
+- Complexity is O(batch·log n) comparisons + one bounded memmove, no allocation
+- A doubling capacity policy puts a permanent 2× slack on the RAM gate. With a len/64 floor, the full-length copy is amortized over each ~1.6% growth, and the slack ceiling is also ~1.6%
 
-## 影響
+## Impact
 
-- 既存要素は再順序されない。id tie-breakでソート結果が一意なため、旧コードとのバイト同一性をテストで固定できる(forward-merge参照とのランダムバッチ比較)
-- in-placeのstat更新はperm_size/perm_mtimeを局所的にstale-sortedのまま残す(従来通り。遅延順列=ADR-0006の管轄)
+- Existing elements are not reordered. Because the id tie-break makes the sort result unique, byte-identity with the old code can be pinned in tests (random-batch comparison against a forward-merge reference)
+- In-place stat updates leave perm_size/perm_mtime locally stale-sorted (as before; under the purview of lazy permutation = ADR-0006)
 
-## 再検討トリガ
+## Re-examination trigger
 
-- バッチ長が既存長に対して大きい運用が常態化した場合(その領域では全長マージが勝つ)
+- If usage where the batch length is large relative to the existing length becomes the norm (in that regime, full-length merge wins)

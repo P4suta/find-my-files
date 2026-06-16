@@ -1,22 +1,22 @@
-# ADR-0003: WTF-8格納と長さ保存fold
+# ADR-0003: WTF-8 storage and length-preserving fold
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-名前はWTF-8で格納する。検索用foldは「同一エンコード長になる単文字の小文字化」のみを適用する(wtf8.rs)。NFC/NFD正規化はしない。
+Names are stored as WTF-8. The search fold applies only "single-character lowercasing that keeps the same encoded length" (wtf8.rs). No NFC/NFD normalization.
 
-## 根拠
+## Rationale
 
-- NTFS名はUTF-16生列で不正(unpaired)サロゲートを含み得る。WTF-8はこれを損失なく保持できる(FFI契約: 文字列はUTF-8、ファイル名はWTF-8。C#側は専用デコードでUTF-16へ復元)
-- foldが長さ保存であることで name_off / name_len をfold済みプールと原文の両ビューで共有できる(fold-overflowレイアウト=ADR-0004の成立条件)
-- fold済みプール上のマッチ位置が原文上の同一バイト位置に対応する(アンカー位置保存)。residual検証がオフセット変換なしで成立する
+- NTFS names are raw UTF-16 sequences and may contain ill-formed (unpaired) surrogates. WTF-8 preserves these losslessly (FFI contract: strings are UTF-8, filenames are WTF-8; the C# side restores UTF-16 via a dedicated decode)
+- Because the fold is length-preserving, name_off / name_len can be shared between the folded pool view and the original-text view (the precondition for the fold-overflow layout = ADR-0004)
+- A match position in the folded pool maps to the same byte position in the original text (anchor-position preservation). Residual verification holds without offset conversion
 
-## 影響
+## Consequences
 
-- 多文字に展開する小文字化や正規化等価(NFC/NFD)は検索で吸収しない(既知制約)
-- fold規則はエンジン本体と `fmf stats --name-stats` の計測で共通(統計と実装の規則不一致を作らない)
+- Lowercasing that expands to multiple characters and normalization equivalence (NFC/NFD) are not absorbed by search (known limitation)
+- The fold rule is shared between the engine core and the `fmf stats --name-stats` measurement (no rule mismatch between statistics and implementation)
 
-## 再検討トリガ
+## Re-examination triggers
 
-- NFC/NFD不一致による実害報告が継続する場合(その場合も格納はWTF-8のまま、fold層のみ再設計)
+- If real-world harm from NFC/NFD mismatch is reported continuously (even then storage stays WTF-8; only the fold layer is redesigned)

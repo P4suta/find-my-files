@@ -1,24 +1,24 @@
-# ADR-0005: FRN索引はソート済みid順列
+# ADR-0005: FRN index is a sorted id permutation
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-FRN→EntryId索引はソート済みid順列(ids u32 = 4B/entry、index/frn.rs)のみで持つ。比較キーはfrnカラムへの間接参照で読む。lookupは未マージ尾部をnewest-firstに走査(バッチ内の最新upsertが勝つ)→本体を二分探索し、常にtombstone生存フィルタを通す。
+The FRN→EntryId index is held only as a sorted id permutation (ids u32 = 4B/entry, index/frn.rs). The comparison key is read by indirection into the frn column. lookup scans the unmerged tail newest-first (the latest upsert within a batch wins) → binary-searches the body, always passing through the tombstone liveness filter.
 
-## 根拠
+## Rationale
 
-- FxHashMap実装は ~25B/entry(16バイトslot+バケット容量パディング+制御バイト。実C: frn行 31.2MB)で名前プールに次ぐRAM最大項
-- keys u64 + ids u32 の2配列化で 12B/entry(frn行 31.2→15.1MB、WS 157→140B/entry。M0ゲート ≤150B を初通過)
-- keysは masked(frn[ids[i]]) の純冗長コピー → 削除して 4B/entry(−8B/entry、実C:で約10MB)
-- lookupが乗るのはUSN適用経路とビルダのparent解決のみで、検索ホットパスは触らない。間接参照による+1キャッシュミスは許容
-- 副産物: 復元が直列hashmap insert百万回 → 並列ソート1回になり、criterion load_1m 89.4→58.9ms(−34%)
+- An FxHashMap implementation is ~25B/entry (16-byte slot + bucket capacity padding + control bytes; real C: frn row 31.2MB), the largest RAM term after the name pool
+- Splitting into two arrays keys u64 + ids u32 gives 12B/entry (frn row 31.2→15.1MB, WS 157→140B/entry; first time under the M0 gate ≤150B)
+- keys is a pure redundant copy of masked(frn[ids[i]]) → removed to reach 4B/entry (−8B/entry, ~10MB on real C:)
+- lookup is on the critical path only for the USN apply path and the builder's parent resolution; the search hot path does not touch it. The +1 cache miss from indirection is acceptable
+- Side benefit: restore goes from a million serial hashmap inserts → one parallel sort, criterion load_1m 89.4→58.9ms (−34%)
 
-## 影響
+## Consequences
 
-- 削除はtombstoneのみでunmap不要。rename/NTFSレコード再利用は同キーの死重複を残すが、生存フィルタ下で生存は常に高々1(ランダムrename/削除ストームのforward-merge参照とのバイト同一テストで固定)
-- 初回スキャンのビルダはparent解決を遅延し finish() の並列パスで一括解決(未マージ1M尾部への都度lookupはO(n²)のため)。build_ms 13→64ms、read律速2.1sのスキャン内で不可視
+- Deletion is tombstone-only with no unmap. rename / NTFS record reuse leaves dead duplicates of the same key, but under the liveness filter live count is always at most 1 (pinned by a byte-identical test against the forward-merge reference under random rename/delete storms)
+- The first-scan builder defers parent resolution and resolves it in bulk on the parallel path of finish() (per-lookup into the unmerged 1M tail is O(n²)). build_ms 13→64ms, invisible within the read-bound 2.1s scan
 
-## 再検討トリガ
+## Re-examination triggers
 
-- 検索ホットパスがFRN lookupを要する設計変更が入った場合
+- If a design change lands where the search hot path requires an FRN lookup

@@ -1,21 +1,21 @@
-# ADR-0012: 既定アロケータ維持+スキャン一時物のRecordArena化(mimalloc却下)
+# ADR-0012: keep the default allocator + RecordArena for scan temporaries (mimalloc rejected)
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-グローバルアロケータは既定のまま差し替えない。スキャン一時物(deferred/拡張レコードキャッシュの~1KiB級レコード多数)は個別Boxをやめ、slotアドレス指定のRecordArena(scan.rs)に連続確保する。
+Do not swap out the global allocator; keep the default. Scan temporaries (the many ~1KiB records of the deferred/extension-record cache) stop using individual Boxes and are allocated contiguously into a slot-addressed RecordArena (scan.rs).
 
-## 根拠
+## Rationale
 
-- 個別Boxは解放後にヒープ断片を残し、計上に現れないWS差として残留する。RecordArena化で実C:定常WS 124.2→119.9MiB(−4.3MiB、3回計測一貫)
-- mimalloc A/B実測(fmf-cliのfeatureゲート、実C:スキャン後): 定常WS **119.9MiB → ~380MiB(+260MB)**。mimallocは解放済みセグメントを自前キャッシュに保持しOSへ返さないため、スキャン一時物がそのまま居座る。クエリp50は数%改善するがWSゲート(≤110B/entry)に対して論外 → 却下
-- RecordArenaは依存ゼロの自前実装
+- Individual Boxes leave heap fragments after free that persist as a WS delta not visible in accounting. Going to RecordArena: real-C: steady-state WS 124.2→119.9MiB (−4.3MiB, consistent across 3 measurements)
+- mimalloc A/B measured (fmf-cli feature gate, after a real-C: scan): steady-state WS **119.9MiB → ~380MiB (+260MB)**. mimalloc keeps freed segments in its own cache and does not return them to the OS, so scan temporaries sit there. Query p50 improves a few percent, but it is out of the question against the WS gate (≤110B/entry) → rejected
+- RecordArena is a homegrown implementation with zero dependencies
 
-## 影響
+## Impact
 
-- RAM測定はエンジンプロセスのWorkingSet基準(CLAUDE.md性能合格ライン)であり、アロケータのOS返却挙動が直接ゲートに乗る — 「自己計上が小さい」だけでは不十分、という前提を固定する
+- RAM measurement is on the engine process WorkingSet basis (CLAUDE.md performance pass line), so the allocator's OS-return behavior lands directly on the gate — fix the premise that "small self-accounting" alone is not enough
 
-## 再検討トリガ
+## Re-examination trigger
 
-- mimalloc側に「セグメントを即時OS返却する」設定が安定提供され、かつWSギャップ(WS実測−自己計上)が10B/entry超に拡大した場合のみ
+- Only if mimalloc gains a stably-provided "return segments to the OS immediately" setting AND the WS gap (measured WS − self-accounting) widens beyond 10B/entry

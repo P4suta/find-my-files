@@ -1,22 +1,22 @@
-# ADR-0007: size列はu32+オーバーフローmap
+# ADR-0007: size column is u32 + overflow map
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-size列はu32で持つ。4GiB以上はsentinel `u32::MAX` を置き、実値はエントリkeyのオーバーフローmapに退避する。
+Hold the size column as u32. For 4GiB and above, store sentinel `u32::MAX` and offload the real value to an overflow map keyed by entry.
 
-## 根拠
+## Rationale
 
-- 実C:実測: 4GiB超のファイルは1,268,450件中10件(0.0008%)
-- −4B/entry(u64→u32)
-- `size()` のsentinel分岐は実質コストゼロ、mapは無視できるサイズ
+- Measured on real C:: 10 of 1,268,450 files exceed 4GiB (0.0008%)
+- −4B/entry (u64→u32)
+- The sentinel branch in `size()` is effectively zero-cost; the map is negligible in size
 
-## 影響
+## Impact
 
-- スナップショット(FMFIDX04)にsize-overflowセクション(ids+sizes)が増える。ロード時に「全ペア↔sentinel対応・昇順・真にオーバーフロー」を構造検証する
-- 4GiB未満に縮んだファイルはsentinel経由で正しくu32側へ戻る
+- The snapshot (FMFIDX04) gains a size-overflow section (ids+sizes). On load, structurally validate "all pairs ↔ sentinel correspondence, ascending order, truly overflowing"
+- Files that shrink below 4GiB are correctly returned to the u32 side via the sentinel
 
-## 再検討トリガ
+## Re-examination trigger
 
-- 4GiB超の比率が数%級になるボリューム(動画アーカイブ専用機等)が主要ターゲットになった場合
+- If a volume where the share of files over 4GiB reaches the several-percent range (e.g. a dedicated video-archive machine) becomes a primary target
