@@ -133,7 +133,7 @@ pub enum EngineError {
 
 /// Why `Engine::new` refused to start. `Locked` is the cross-process arm of
 /// the single-writer invariant (FFI: `FMF_E_LOCKED`, docs/ARCHITECTURE.md
-/// Pipe プロトコル §単一書き手の排他).
+/// Pipe protocol §single-writer exclusion).
 #[derive(Debug, Error)]
 pub enum EngineCreateError {
     #[error(
@@ -283,7 +283,7 @@ impl Engine {
             // can neither spawn unbounded volume threads nor steer
             // `snapshot_path` outside the index dir with a `..\` label. Report
             // it as VolumeFailed — the same way the worker surfaces a volume it
-            // can't open — so the client still gets feedback (黙らない) and we
+            // can't open — so the client still gets feedback (don't go silent) and we
             // never reach the slot/thread/`snapshot_path` path with garbage.
             if !volume::is_valid_volume_label(label) {
                 tracing::warn!(label = %label, "index_start: rejecting malformed volume label");

@@ -69,7 +69,7 @@ public static partial class ServiceSetup
     }
 
     /// <summary>PID of the running fmf-engine service process, or 0 when it is
-    /// not installed/running. The client-side fake-server check (脅威4)
+    /// not installed/running. The client-side fake-server check (threat 4)
     /// compares this to the pipe's server PID — an unelevated client can read
     /// it (unlike a SYSTEM process's token), and a squatter never matches
     /// because registering the service needs admin.</summary>
@@ -204,7 +204,7 @@ public static partial class ServiceSetup
 
     /// <summary>The current user's SID string, forwarded to
     /// `fmf-service install --owner-sid` so OTS elevation (a *different*
-    /// admin account) does not lock this user out of the pipe (脅威1).
+    /// admin account) does not lock this user out of the pipe (threat 1).
     /// Null when unavailable — install then authorizes only the elevated
     /// account.</summary>
     /// <returns>The current user's SID string, or null when it cannot be read.</returns>

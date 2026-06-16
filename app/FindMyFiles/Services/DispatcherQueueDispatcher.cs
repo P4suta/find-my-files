@@ -4,7 +4,7 @@ namespace FindMyFiles.Services;
 
 /// <summary>
 /// Production <see cref="IDispatcher"/>: a thin wrapper over the UI thread's
-/// cached <see cref="DispatcherQueue"/> (CLAUDE.md UI固定則 — cache on the UI
+/// cached <see cref="DispatcherQueue"/> (CLAUDE.md UI rules — cache on the UI
 /// thread, TryEnqueue from background threads).
 /// </summary>
 /// <param name="queue">The UI thread's <see cref="DispatcherQueue"/>, captured

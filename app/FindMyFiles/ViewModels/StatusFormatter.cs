@@ -7,7 +7,7 @@ namespace FindMyFiles.ViewModels;
 /// <see cref="Loc"/> (Strings/&lt;lang&gt;/Resources.resw).</summary>
 public static class StatusFormatter
 {
-    /// <summary>Result-count line: "<paramref name="hits"/> 件" plus the
+    /// <summary>Result-count line: the <paramref name="hits"/> count plus the
     /// elapsed query time (ms) when a <paramref name="trace"/> is present
     /// (<see cref="QueryTraceData.TotalUs"/> → ms), the bare count otherwise.</summary>
     /// <param name="trace">Latest query trace, or null when timing is unavailable.</param>

@@ -1,5 +1,5 @@
-//! USN replay integration tests (CLAUDE.md: `USNロジックはfixtureリプレイで`
-//! テストする). Synthetic `USN_RECORD_V2` buffers are built byte-by-byte from
+//! USN replay integration tests (CLAUDE.md: USN logic is tested via fixture
+//! replay). Synthetic `USN_RECORD_V2` buffers are built byte-by-byte from
 //! the documented winioctl.h layout (docs/RESEARCH.md →
 //! <https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-usn_record_v2>)
 //! — independently of `records::encode_buffer` — then run through the full

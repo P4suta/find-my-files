@@ -8,7 +8,7 @@ namespace FindMyFiles.Services;
 /// <summary>
 /// Shell-facing operations, centralized so every failure path notifies the
 /// user instead of crashing. Targets launch via explorer.exe to shed the
-/// process's elevation (CLAUDE.md UI固定則).
+/// process's elevation (CLAUDE.md UI rules).
 /// </summary>
 public static partial class ShellOps
 {
@@ -141,7 +141,7 @@ public static partial class ShellOps
     /// <summary>Relaunch this app (unelevated — no runas) and exit, used right
     /// after an in-app service registration so the fresh instance picks up the
     /// now-running service over the pipe (the engine transport is chosen once,
-    /// at startup). Strictly user-initiated (the「アプリを再起動」button). A
+    /// at startup). Strictly user-initiated (the "restart app" button). A
     /// failed launch notifies and leaves the current instance running.</summary>
     public static void Relaunch()
     {

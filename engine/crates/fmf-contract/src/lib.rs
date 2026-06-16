@@ -14,14 +14,14 @@
 //! definition instead of pinned copies.
 //!
 //! Section map (ARCHITECTURE.md → here):
-//! - エラーコード表            → [`codes`]
-//! - Pipe オペコード表          → [`opcodes`]
-//! - イベント(FFI kind 1..=6) → [`events`]
-//! - `FmfQueryOptions` の列挙値   → [`options`]
-//! - POD レイアウト(FmfRow 等) → [`pod`]
-//! - ボリュームラベル 16B 詰め  → [`volume`]
-//! - ABI/プロトコル版数・pipe名 → [`versions`]
-//! - 上限値(16MiB・64件 等)   → [`limits`]
+//! - Error code table                  → [`codes`]
+//! - Pipe opcode table                 → [`opcodes`]
+//! - Events (FFI kind 1..=6)           → [`events`]
+//! - `FmfQueryOptions` enum values     → [`options`]
+//! - POD layout (`FmfRow` etc.)        → [`pod`]
+//! - Volume label 16B packing          → [`volume`]
+//! - ABI/protocol versions, pipe name  → [`versions`]
+//! - Limits (16MiB, 64 entries etc.)   → [`limits`]
 
 pub mod codes;
 pub mod counters;

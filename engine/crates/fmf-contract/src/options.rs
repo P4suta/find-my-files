@@ -1,6 +1,8 @@
 //! Wire enumerations of `FmfQueryOptions` and `FmfVolumeStatus.state`
-//! (docs/ARCHITECTURE.md オペコード表). These are the canonical values;
-//! fmf-core uses these enums directly (no wire↔engine mapping layer).
+//! (docs/ARCHITECTURE.md opcode table).
+//!
+//! These are the canonical values; fmf-core uses these enums directly (no
+//! wire↔engine mapping layer).
 
 /// Which result column results are ordered by (`FmfQueryOptions.sort_key`).
 #[repr(u32)]

@@ -1,5 +1,5 @@
-//! Opcode → Engine mapping (docs/ARCHITECTURE.md「Pipe プロトコル」
-//! §オペコード表 — the canonical table; this is its server half).
+//! Opcode → Engine mapping (docs/ARCHITECTURE.md "Pipe protocol"
+//! §opcode table — the canonical table; this is its server half).
 //!
 //! Every request runs inside a `catch_unwind` firewall: a panic answers
 //! `FMF_E_PANIC` and the connection survives, mirroring the FFI `guard`.
@@ -238,7 +238,7 @@ impl Connection {
                         lagged,
                     },
                 );
-                // 黙らない: a trace serialization failure is counted and
+                // don't go silent: a trace serialization failure is counted and
                 // warned; the query itself succeeded, so the client gets
                 // its result with an (explicitly) empty trace.
                 let trace_json = match serde_json::to_vec(&trace) {

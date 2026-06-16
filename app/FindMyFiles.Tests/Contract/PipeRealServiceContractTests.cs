@@ -8,7 +8,7 @@ namespace FindMyFiles.Tests.Contract;
 /// <summary>
 /// Contract run #3: <see cref="PipeEngineClient"/> against the real
 /// fmf-service, gated on FMF_PIPE_TESTS=1 (`just test-pipe` builds the
-/// service binary first; PipeIntegrationTests の流儀). The service runs
+/// service binary first; the PipeIntegrationTests convention). The service runs
 /// unelevated, --no-index, throwaway data dir and unique pipe name — partial
 /// conformance: queries parse for real (the golden syntax fixture hits the
 /// real parser) but hit 0 rows, and there is no way to force staleness from

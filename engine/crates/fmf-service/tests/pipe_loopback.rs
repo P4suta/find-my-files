@@ -1,6 +1,6 @@
 //! Unelevated loopback tests: a real named pipe (unique name per test), the
 //! real server, an injected Ready volume — no real volume, no admin. The
-//! byte-level expectations mirror docs/ARCHITECTURE.md「Pipe プロトコル」;
+//! byte-level expectations mirror docs/ARCHITECTURE.md "Pipe protocol";
 //! the C# client test suite pins the same golden frames.
 
 use std::collections::VecDeque;
@@ -302,7 +302,7 @@ fn oversized_frame_disconnects_and_counts() {
     c.stream.write_all(&raw).unwrap();
     assert!(read_frame(&mut c.stream).is_err(), "connection must die");
 
-    // The fact is on the counters (黙らない): visible over a fresh connection.
+    // The fact is on the counters (don't go silent): visible over a fresh connection.
     let mut c2 = Client::hello(&hx.pipe_name);
     let (h, body) = c2.request(opcode::STATS, &[]);
     assert_eq!(h.status, codes::OK);
@@ -405,9 +405,10 @@ fn drop_fault_severs_the_connection() {
 
 #[test]
 fn page_roundtrip_stays_inside_the_latency_budget() {
-    // 遅延予算 (ARCHITECTURE.md): ResultPage 64行 p99 ≤5ms。ループバックの
-    // RTT は通常 ~0.1-0.3ms — 5ms はサーマルドリフト下でも余裕の絶対線で、
-    // ここで破れたら設計の問題(直列化・コピー過多)を疑う。
+    // Latency budget (ARCHITECTURE.md): ResultPage 64 rows p99 <=5ms. Loopback
+    // RTT is normally ~0.1-0.3ms — 5ms is a comfortable absolute line even
+    // under thermal drift; breaking it here points to a design problem
+    // (serialization, excessive copying).
     let hx = start("latency", false);
     let mut c = Client::hello(&hx.pipe_name);
     let (_, Some((rid, _))) = c.query("alpha") else {

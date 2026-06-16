@@ -6,7 +6,7 @@ using Xunit.Abstractions;
 namespace FindMyFiles.Tests.Contract;
 
 /// <summary>
-/// The executable contract of the "same mouth" (CLAUDE.md アーキテクチャ固定則):
+/// The executable contract of the "same mouth" (CLAUDE.md architecture invariants):
 /// every <see cref="IEngineClient"/> the app can be handed must show the same
 /// observable behavior, so these facts run unchanged against all of them.
 /// Derived classes only provide the client and optional hooks:
@@ -17,7 +17,7 @@ namespace FindMyFiles.Tests.Contract;
 ///   FfiInProcContractTests           — FMF_ADMIN_TESTS=1 (loads fmf_engine.dll)
 ///
 /// Gated derivations report and return green when their environment variable
-/// is absent (PipeIntegrationTests の流儀), so plain `just test-app` stays
+/// is absent (the PipeIntegrationTests convention), so plain `just test-app` stays
 /// hermetic. A derivation that cannot provide the stale hook skips that one
 /// fact the same way.
 /// </summary>

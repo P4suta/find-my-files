@@ -4,7 +4,7 @@ using FindMyFiles.Services;
 namespace FindMyFiles.ViewModels;
 
 /// <summary>
-/// 絞り込みモード (focused search): a pure query rewrite in the UI layer —
+/// Focused search: a pure query rewrite in the UI layer —
 /// the engine is never touched (ADR-0019). Every top-level OR group of the
 /// user's query gets the configured noise-path exclusions (<c>!path:"…"</c>)
 /// and the extension whitelist (one <c>ext:a;b;…</c> term) appended, except
@@ -15,7 +15,7 @@ namespace FindMyFiles.ViewModels;
 public static class FocusedQueryRewriter
 {
     /// <summary>Values already warned about — a bad settings entry must be
-    /// said once (黙らない), not on every keystroke (2MB log rotation).</summary>
+    /// said once (don't go silent), not on every keystroke (2MB log rotation).</summary>
     private static readonly HashSet<string> WarnedValues = [];
 
     /// <summary>Rewrites <paramref name="userQuery"/> for focused mode.

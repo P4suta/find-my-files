@@ -20,8 +20,8 @@ namespace FindMyFiles.Views;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed partial class PerfPanel : UserControl
 {
-    /// <summary><see cref="ViewModel"/> のバッキング用 <c>DependencyProperty</c>。
-    /// 値の差し替え時に `PerfDataChanged`/`PropertyChanged` の購読を旧→新へ張り替える。</summary>
+    /// <summary>Backing <c>DependencyProperty</c> for <see cref="ViewModel"/>.
+    /// On value swap, re-routes `PerfDataChanged`/`PropertyChanged` subscriptions from old to new.</summary>
     public static readonly DependencyProperty ViewModelProperty =
         DependencyProperty.Register(
             nameof(ViewModel),
@@ -29,8 +29,8 @@ public sealed partial class PerfPanel : UserControl
             typeof(PerfPanel),
             new PropertyMetadata(null, (d, e) => ((PerfPanel)d).OnViewModelChanged(e)));
 
-    /// <summary>ホストが `x:Bind` で供給する診断 ViewModel。トレース/統計の更新通知元で、
-    /// パネルを開いている間だけ 1 Hz の統計ポーリングを駆動する。</summary>
+    /// <summary>Diagnostic ViewModel supplied by the host via `x:Bind`. Source of
+    /// trace/stats update notifications; drives the 1 Hz stats poll only while the panel is open.</summary>
     public PerfPanelViewModel? ViewModel
     {
         get => (PerfPanelViewModel?)GetValue(ViewModelProperty);
@@ -39,8 +39,8 @@ public sealed partial class PerfPanel : UserControl
 
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _statsTimer;
 
-    /// <summary>1 Hz の統計ポーリングタイマーを構築する(`ViewModel.IsOpen` が真の間だけ
-    /// 走らせる)。タイマー自体はここでは開始せず、開閉に応じて起動/停止する。</summary>
+    /// <summary>Builds the 1 Hz stats poll timer (runs only while `ViewModel.IsOpen` is true).
+    /// The timer is not started here; it is started/stopped on open/close.</summary>
     public PerfPanel()
     {
         InitializeComponent();
@@ -88,7 +88,7 @@ public sealed partial class PerfPanel : UserControl
 
     /// <summary>
     /// One-click bug-report payload: engine stats JSON + app log tail +
-    /// environment. The dev-side half of「黙らない」.
+    /// environment. The dev-side half of "don't go silent".
     /// </summary>
     private void CopyDiag_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {

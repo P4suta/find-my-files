@@ -1,5 +1,5 @@
-//! Pipe DACL and token checks (docs/SECURITY.md の4層防御の①と④、判断は
-//! ADR-0017).
+//! Pipe DACL and token checks (docs/SECURITY.md layers 1 and 4 of the 4-layer
+//! defense; rationale ADR-0017).
 //!
 //! The SDDL string is built by one pure, unit-pinned function — a hand-rolled
 //! SDDL elsewhere is exactly the "silently wide open" accident the pin exists
@@ -89,7 +89,7 @@ impl Drop for PipeSecurity {
 }
 
 /// The current process token's user SID as a string ("S-1-5-21-…") —
-/// `install` captures the installing user this way (docs/SECURITY.md 脅威1).
+/// `install` captures the installing user this way (docs/SECURITY.md threat 1).
 ///
 /// # Errors
 /// Returns the OS error if opening the process token, querying its user, or
@@ -127,7 +127,7 @@ pub fn current_user_sid() -> io::Result<String> {
 /// Does `sid_str` name a real *user* account on this machine?
 ///
 /// `install` uses it to vet a forwarded `--owner-sid` before trusting it onto
-/// the pipe allowlist (docs/SECURITY.md 脅威1/7): a SID that resolves to
+/// the pipe allowlist (docs/SECURITY.md threat 1/7): a SID that resolves to
 /// nothing — or to a group / well-known principal (SYSTEM, BUILTIN\Users…)
 /// — is refused. Malformed/unresolvable → `Ok(false)`.
 ///
@@ -214,13 +214,13 @@ unsafe fn sid_to_string(sid: windows_sys::Win32::Security::PSID) -> io::Result<S
 }
 
 /// Protected DACL for the data root: SYSTEM + Administrators only. The
-/// snapshots inside hold every file name on the machine (SECURITY.md 脅威7).
+/// snapshots inside hold every file name on the machine (SECURITY.md threat 7).
 #[must_use]
 pub fn data_dir_sddl() -> String {
     "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string()
 }
 
-/// logs/ keeps user read so the unelevated F12 "診断情報をコピー" can tail
+/// logs/ keeps user read so the unelevated F12 "copy diagnostics" can tail
 /// engine.log.
 ///
 /// Each authorized user (the installing admin *and* a forwarded owner SID
@@ -240,7 +240,7 @@ pub fn logs_dir_sddl(user_sids: &[&str]) -> String {
 /// The protected DACLs `install` applies across the data tree.
 ///
 /// Returned as `(subdir, sddl)` pairs (`""` = the data root). Centralized here so
-/// the 脅威7 invariant — `index/` (machine-wide file-name snapshots) is
+/// the threat 7 invariant — `index/` (machine-wide file-name snapshots) is
 /// SYSTEM+Administrators only, never world-readable — is unit-pinned next to the
 /// SDDL builders, without needing an elevated install to verify it. `install`
 /// applies `index/` EXPLICITLY rather than relying on inheritance: it is created
@@ -409,7 +409,7 @@ mod tests {
     fn data_tree_hardens_index_like_root_with_no_users() {
         let t = data_tree_dacls(&["S-1-5-21-1-2-3-1001"]);
         let find = |k: &str| t.iter().find(|(s, _)| *s == k).map(|(_, v)| v.clone());
-        // 脅威7: index/ — machine-wide file-name snapshots — gets the SAME
+        // threat 7: index/ — machine-wide file-name snapshots — gets the SAME
         // protected SYSTEM+Admins-only DACL as the data root. Regressing this
         // (e.g. dropping the explicit index/ hardening) re-exposes every file
         // name on the machine to any local user.

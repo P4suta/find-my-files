@@ -51,7 +51,7 @@ pub unsafe extern "C" fn fmf_query(
                         *out_trace = match serde_json::to_string(&trace) {
                             Ok(json) => blob_from_json(json),
                             Err(e) => {
-                                // 黙らない: counted + warned; the query itself
+                                // don't go silent: counted + warned; the query itself
                                 // succeeded, the trace is explicitly absent.
                                 fmf_core::degrade!(
                                     handle.engine.metrics().counters.trace_serialize_failures,

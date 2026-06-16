@@ -1,5 +1,5 @@
 //! Pure `USN_RECORD_V2` buffer parsing — no OS calls, so the whole layer is
-//! testable from raw byte fixtures (docs/ARCHITECTURE.md, CLAUDE.md 昇格規約).
+//! testable from raw byte fixtures (docs/ARCHITECTURE.md, CLAUDE.md elevation rules).
 //!
 //! Buffer layout returned by `FSCTL_READ_USN_JOURNAL` / `FSCTL_ENUM_USN_DATA`:
 //! a leading u64 (the next USN / next FRN to resume from), then a sequence of

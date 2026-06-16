@@ -15,14 +15,14 @@ namespace FindMyFiles.Engine;
 /// </summary>
 public interface IEngineClient : IDisposable
 {
-    /// <summary>新しい索引内容が公開された(USN 適用やスキャン進捗)。
-    /// payload はトリガとなったボリュームラベル。表示中のクエリを再評価する
-    /// 合図。engine スレッドから発火するので UI スレッドへ marshal すること
-    /// (<see cref="EngineEventMarshaler"/> が唯一の交差点)。</summary>
+    /// <summary>New index content was published (USN apply or scan progress).
+    /// The payload is the triggering volume label. The signal to re-evaluate the
+    /// displayed query. Fires from an engine thread, so marshal to the UI thread
+    /// (<see cref="EngineEventMarshaler"/> is the only crossing point).</summary>
     event Action<string>? IndexChanged;
 
-    /// <summary>1 ボリュームの状態が遷移した(`Scanning`→`Ready` 等)。最新の
-    /// <see cref="VolumeStatus"/> を払い出す。engine スレッド発火 → 要 marshal。</summary>
+    /// <summary>One volume's state transitioned (`Scanning`→`Ready` etc.). Emits
+    /// the latest <see cref="VolumeStatus"/>. Fires from an engine thread → marshal.</summary>
     event Action<VolumeStatus>? VolumeUpdated;
 
     /// <summary>
@@ -36,38 +36,39 @@ public interface IEngineClient : IDisposable
     /// Connecting/Connected/Reconnecting.</summary>
     EngineConnectionState Connection { get; }
 
-    /// <summary>現在の <see cref="Connection"/> が遷移したときに発火。in-proc
-    /// 実装は一度も発火しない(常に <see cref="EngineConnectionState.InProc"/>)。
-    /// pipe クライアントの supervisor スレッド発火 → 要 marshal。</summary>
+    /// <summary>Fires when the current <see cref="Connection"/> transitions. In-proc
+    /// implementations never fire (always <see cref="EngineConnectionState.InProc"/>).
+    /// Fires from the pipe client's supervisor thread → marshal.</summary>
     event Action<EngineConnectionState>? ConnectionChanged;
 
-    /// <summary>索引済みボリュームのラベル一覧を返す(現在エンジンが
-    /// 認識しているもの)。</summary>
+    /// <summary>Returns the labels of the indexed volumes (those the engine
+    /// currently recognizes).</summary>
     /// <param name="ct">Cooperative cancellation token.</param>
     /// <exception cref="EngineUnavailableException">service unreachable</exception>
     /// <returns>The labels of the volumes the engine currently knows about.</returns>
     Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default);
 
-    /// <summary>指定ボリュームの索引構築/再構築を開始するよう要求する
-    /// (fire-and-trigger: 進捗は <see cref="VolumeUpdated"/> /
-    /// <see cref="IndexChanged"/> で届く)。MFT 読みは昇格必須なので、実体は
-    /// サービス側で走る。</summary>
+    /// <summary>Requests that indexing/re-indexing start for the given volumes
+    /// (fire-and-trigger: progress arrives via <see cref="VolumeUpdated"/> /
+    /// <see cref="IndexChanged"/>). MFT reads require elevation, so the work runs
+    /// on the service side.</summary>
     /// <param name="volumes">Labels of the volumes to (re)index.</param>
     /// <param name="ct">Cooperative cancellation token.</param>
     /// <exception cref="EngineUnavailableException">service unreachable</exception>
     /// <returns>A task that completes once the indexing request is accepted.</returns>
     Task StartIndexingAsync(IReadOnlyList<string> volumes, CancellationToken ct = default);
 
-    /// <summary>全ボリュームの現在状態(<see cref="VolumeStatus"/>)のスナップ
-    /// ショットを返す。起動直後の初期表示や setup 画面の判定に使う。</summary>
+    /// <summary>Returns a snapshot of the current state
+    /// (<see cref="VolumeStatus"/>) of every volume. Used for the initial display
+    /// at startup and for the setup screen's decisions.</summary>
     /// <param name="ct">Cooperative cancellation token.</param>
     /// <exception cref="EngineUnavailableException">service unreachable</exception>
     /// <returns>A snapshot of the current status of every known volume.</returns>
     Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default);
 
-    /// <summary>クエリを実行し、ソート確定済みの結果ハンドル
-    /// (<see cref="SearchOutcome.Result"/>)と任意の計測トレースを返す。
-    /// ページ取得は返却された <see cref="ISearchResult"/> 経由で遅延読み。</summary>
+    /// <summary>Executes the query and returns a sort-settled result handle
+    /// (<see cref="SearchOutcome.Result"/>) plus an optional timing trace.
+    /// Pages are read lazily through the returned <see cref="ISearchResult"/>.</summary>
     /// <param name="query">The query text to execute.</param>
     /// <param name="options">Search options (sort order, flags).</param>
     /// <param name="ct">Cooperative cancellation token.</param>

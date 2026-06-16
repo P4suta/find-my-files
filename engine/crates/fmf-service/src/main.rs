@@ -39,12 +39,12 @@ enum Cli {
         /// Also authorize this user SID on the pipe. The unelevated app
         /// forwards the daily user's SID here so OTS elevation (install runs
         /// as a *different* admin account) does not lock that user out of its
-        /// own service (docs/SECURITY.md 脅威1). Validated before trusting.
+        /// own service (docs/SECURITY.md threat 1). Validated before trusting.
         #[arg(long)]
         owner_sid: Option<String>,
     },
     /// Install (idempotent) then restart, in one elevated step — the
-    /// unelevated app's per-action-UAC「登録 / 登録し直す」button. Equivalent
+    /// unelevated app's per-action-UAC "register / re-register" button. Equivalent
     /// to `install [--owner-sid] && restart`, so the freshly written
     /// authorized-SID list takes effect without a second UAC prompt.
     Setup {
@@ -215,7 +215,7 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
     cfg.save(&cfg_path)
         .map_err(|e| format!("service.json: {e}"))?;
 
-    // 3. Harden the tree (SECURITY.md 脅威7): the data root AND index/ —
+    // 3. Harden the tree (SECURITY.md threat 7): the data root AND index/ —
     //    machine-wide file-name snapshots — are SYSTEM+Administrators only; logs/
     //    additionally grants the installing admin + forwarded owner read for the
     //    F12 copy path. index/ is hardened EXPLICITLY (not via inheritance): it is
@@ -309,7 +309,7 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
 }
 
 /// `install` (idempotent) then `restart` in one elevated process, so the
-/// unelevated app's「登録 / 登録し直す」button is a single UAC prompt. The
+/// unelevated app's "register / re-register" button is a single UAC prompt. The
 /// authorized-SID list is read only at service startup, so the restart is
 /// what actually applies a freshly installed SID — the same install+restart
 /// pairing the in-app `InstallAndRestart` does, moved server-side. Covers both

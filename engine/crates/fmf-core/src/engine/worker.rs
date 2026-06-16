@@ -23,7 +23,7 @@ use super::watch::WatcherJournalSource;
 use super::{Engine, EngineEvent, VolumeState};
 
 /// Engine-side debounce for `IndexChanged` — the only throttle in the whole
-/// change path (docs/ARCHITECTURE.md 遅延予算).
+/// change path (docs/ARCHITECTURE.md latency budget).
 const INDEX_CHANGED_DEBOUNCE: Duration = Duration::from_millis(200);
 
 /// How the worker establishes a volume's index at the top of its loop.
@@ -92,7 +92,7 @@ pub(super) enum TailStep {
         truncated: bool,
     },
     /// The journal id is dead. Recovery is always a full rescan
-    /// (docs/RESEARCH.md定石): invalidate the shared checkpoint, drop the
+    /// (docs/RESEARCH.md standard practice): invalidate the shared checkpoint, drop the
     /// snapshot, announce Rescanning, restart the outer loop.
     Rescan(JournalGone),
     /// Unrecoverable read error — the volume goes Failed.
@@ -289,10 +289,11 @@ impl Engine {
                                 &self.metrics.counters.scan_pipeline_fallbacks,
                                 stats.pipeline_fallbacks,
                             );
-                            // stats→counters写像の単一点: スキャン内部は劣化を
-                            // ScanStats で返すだけで warn しない。件数加算が要る
-                            // ので degrade!(bump=+1専用)ではなく、加算と warn
-                            // を明示2行で隣接させて不可分に行う。
+                            // Single stats→counters mapping point: the scan
+                            // internals only return degradations in ScanStats,
+                            // never warn. A count add is needed, so instead of
+                            // degrade! (bump=+1 only) the add and warn sit on two
+                            // adjacent explicit lines, done indivisibly.
                             if stats.ext_name_cache_skipped > 0 {
                                 Counters::add(
                                     &self.metrics.counters.deferred_name_cache_overflow,

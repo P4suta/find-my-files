@@ -1,5 +1,5 @@
 //! Event kinds — FFI callback `FmfEvent.kind` and pipe event-push opcodes
-//! carry the same values (docs/ARCHITECTURE.md イベント節).
+//! carry the same values (docs/ARCHITECTURE.md Events section).
 
 /// `u32` on the wire and in the FFI POD.
 #[repr(u32)]

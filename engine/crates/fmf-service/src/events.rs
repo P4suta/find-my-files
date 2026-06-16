@@ -1,7 +1,7 @@
 //! Event fan-out: one engine sink → per-subscriber bounded queues.
 //!
 //! A slow or dead reader must never block the volume threads that emit events
-//! (docs/ARCHITECTURE.md「Pipe プロトコル」§イベントプッシュ): the queue is
+//! (docs/ARCHITECTURE.md "Pipe protocol" §event push): the queue is
 //! bounded at 256 and overflow drops the *oldest* event, counted and warned.
 
 use std::collections::VecDeque;

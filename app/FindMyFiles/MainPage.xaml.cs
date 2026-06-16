@@ -21,16 +21,18 @@ namespace FindMyFiles;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed partial class MainPage : Page
 {
-    /// <summary>ページの ViewModel グラフのルート。`x:Bind` の唯一のバインド元で、
-    /// 検索・結果・通知・診断パネルの各サブ ViewModel を束ねる。</summary>
+    /// <summary>Root of the page's ViewModel graph. The sole `x:Bind` source;
+    /// it ties together the search, results, notification and diagnostics-panel
+    /// sub-ViewModels.</summary>
     public MainViewModel ViewModel { get; }
 
     private readonly ResultsViewportManager _viewport;
 
-    /// <summary>ViewModel グラフを生成し、ビューのイベント(IME 合成・ドラッグ&amp;ドロップ・
-    /// キーボード・ソートヘッダ)を ViewModel と <see cref="ResultsViewportManager"/> へ
-    /// 配線する。ローカライズ済みのツールチップ/自動化名はここでコード設定し、言語ラジオは
-    /// 永続設定を反映する。最後に空/結果のビジュアルステートを初期化して `StartAsync` を起動。</summary>
+    /// <summary>Builds the ViewModel graph and wires view events (IME composition,
+    /// drag &amp; drop, keyboard, sort headers) to the ViewModel and
+    /// <see cref="ResultsViewportManager"/>. Localized tooltips/automation names
+    /// are set in code here, and the language radio reflects persisted settings.
+    /// Finally initializes the empty/results visual state and starts `StartAsync`.</summary>
     public MainPage()
     {
         ViewModel = new MainViewModel(
@@ -65,7 +67,8 @@ public sealed partial class MainPage : Page
         SearchBox.TextCompositionEnded += (_, _) =>
             ViewModel.Search.NotifyCompositionEnded(ViewModel.SearchText);
 
-        // 空クエリ=中央の大検索バー(Empty)、入力で上へ移動して結果を出す(Results)。
+        // Empty query = large centered search bar (Empty); on input it moves up
+        // and shows results (Results).
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         Loaded += (_, _) =>
         {
@@ -94,10 +97,11 @@ public sealed partial class MainPage : Page
         }
     }
 
-    /// <summary>Empty(中央の大きな検索バーのみ) ↔ Results(検索バー上＋結果)。
-    /// SearchText の空/非空で切り替える。ContentHost の RepositionThemeTransition
-    /// が検索バーの移動を、ListView の AddDeleteThemeTransition が結果の出現を
-    /// 滑らかにする(仮想化はコンテナ実体化時のみ走り、Reset とは競合しない)。</summary>
+    /// <summary>Empty (large centered search bar only) ↔ Results (search bar on
+    /// top + results). Switches on whether SearchText is empty. ContentHost's
+    /// RepositionThemeTransition smooths the search bar's move and the ListView's
+    /// AddDeleteThemeTransition smooths the results' appearance (virtualization
+    /// runs only on container realization and does not conflict with Reset).</summary>
     private void UpdateSearchState(bool useTransitions)
     {
         var state = string.IsNullOrEmpty(ViewModel.SearchText) ? "EmptyState" : "ResultsState";
@@ -112,21 +116,21 @@ public sealed partial class MainPage : Page
         }
     }
 
-    // 設定(歯車)フライアウト → 「診断情報を表示/隠す」で診断パネルを開閉。
+    // Settings (gear) flyout → "show/hide diagnostics" toggles the diagnostics panel.
     private void PerfPanel_MenuClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         ViewModel.Perf.Toggle();
 
-    // 設定(歯車)フライアウト →「サービスの管理…」。共通入口(同時1枚ガード+
-    // 失敗時通知を内包)を呼ぶ。
+    // Settings (gear) flyout → "Manage service…". Calls the shared entry point
+    // (which contains the single-dialog guard + failure notification).
     private void ServiceManager_MenuClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         Views.ServiceManagerDialog.OpenAsync().Forget("service-ui");
 
-    // 未接続セットアップ画面の主ボタン → ワンクリックで登録→自動再起動。
+    // Primary button of the disconnected setup screen → one-click register → auto relaunch.
     private void EnableSearch_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         ViewModel.EnableSearchAsync().Forget("service-ui");
 
-    // セットアップ画面のスコープ経路(管理者不要, ADR-0024): フォルダ選択→保存→
-    // relaunch で WalkInProc に入る。
+    // Setup screen scope path (no admin, ADR-0024): pick folders → save →
+    // relaunch enters WalkInProc.
     private void PickScopeFolders_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         ViewModel.PickScopeFoldersAsync().Forget("scope-ui");
 
@@ -141,8 +145,8 @@ public sealed partial class MainPage : Page
         }
     }
 
-    // 言語切替: settings.json に永続化してアプリを再起動(App ctor が
-    // PrimaryLanguageOverride を適用)。Tag は "auto"/"ja"/"en"/"zh-Hans"。
+    // Language switch: persist to settings.json and relaunch the app (App ctor
+    // applies PrimaryLanguageOverride). Tag is "auto"/"ja"/"en"/"zh-Hans".
     private void Language_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         if (sender is not MenuFlyoutItemBase { Tag: string lang })
@@ -176,7 +180,7 @@ public sealed partial class MainPage : Page
 
     /// <summary>Drop-in only (rows are not drag-out sources). Anything that
     /// goes wrong is logged and swallowed — a failed drop must never take
-    /// the app down (落ちない).</summary>
+    /// the app down (don't crash).</summary>
     private async void Page_Drop(object sender, Microsoft.UI.Xaml.DragEventArgs e)
     {
         var deferral = e.GetDeferral();

@@ -57,7 +57,7 @@ struct Pending {
 
 /// Walk `roots` (absolute base paths) and build a queryable [`VolumeIndex`].
 ///
-/// Infallible by design (落ちない): an unreadable root or directory is counted
+/// Infallible by design (don't crash): an unreadable root or directory is counted
 /// in [`ScanStats::walk_read_errors`] and skipped, never propagated. The
 /// worker maps that count to a counter + warn at its single mapping point.
 #[must_use]

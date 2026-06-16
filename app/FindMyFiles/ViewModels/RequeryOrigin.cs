@@ -3,7 +3,7 @@ namespace FindMyFiles.ViewModels;
 /// <summary>
 /// Why a requery ran. Reset origins land the user at the top of the list;
 /// position-preserving origins restore the previous viewport
-/// (docs/ARCHITECTURE.md「再クエリの2系統」).
+/// (docs/ARCHITECTURE.md "two requery families").
 /// </summary>
 public enum RequeryOrigin
 {

@@ -7,10 +7,10 @@ using Microsoft.UI.Xaml.Controls;
 namespace FindMyFiles.Views;
 
 /// <summary>
-/// Wiring only: the gear menu's「サービスの管理…」dialog. State and the
+/// Wiring only: the gear menu's "Manage service…" dialog. State and the
 /// elevated mutations live in <see cref="ServiceManagerViewModel"/>; the
 /// buttons fire-and-forget its async actions through the sanctioned
-/// <see cref="FindMyFiles.Services.TaskExtensions.Forget"/> funnel (CLAUDE.md規約).
+/// <see cref="FindMyFiles.Services.TaskExtensions.Forget"/> funnel (CLAUDE.md convention).
 /// </summary>
 // View code-behind: dialog wiring, not unit-tested (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
@@ -18,12 +18,12 @@ public sealed partial class ServiceManagerDialog : ContentDialog
 {
     private static bool _open;
 
-    /// <summary>サービスの状態と昇格を要する操作(登録/削除/開始/停止/再起動)を担う
-    /// ViewModel。各ボタンはこのインスタンスの async アクションを `Forget` で発火する。</summary>
+    /// <summary>ViewModel for service state and elevation-requiring operations
+    /// (register/uninstall/start/stop/restart). Each button fires this instance's async actions via `Forget`.</summary>
     public ServiceManagerViewModel VM { get; }
 
-    /// <summary>ViewModel を生成して初回の状態 `Refresh` を走らせる。公開入口は
-    /// <see cref="OpenAsync"/> のみで、コンストラクタの直接呼び出しは想定しない。</summary>
+    /// <summary>Creates the ViewModel and runs the initial state `Refresh`. The only public
+    /// entry point is <see cref="OpenAsync"/>; direct constructor calls are not expected.</summary>
     public ServiceManagerDialog()
     {
         VM = new ServiceManagerViewModel();

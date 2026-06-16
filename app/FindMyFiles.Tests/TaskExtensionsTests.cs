@@ -5,7 +5,7 @@ namespace FindMyFiles.Tests;
 
 /// <summary>Behavioural test for <c>TaskExtensions.Forget</c> — the only
 /// sanctioned fire-and-forget. A faulted task must surface (log + notification),
-/// never be silently dropped (the "黙らない" rule).</summary>
+/// never be silently dropped (the "don't go silent" rule).</summary>
 public sealed class TaskExtensionsTests
 {
     [Fact]

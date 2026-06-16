@@ -111,7 +111,7 @@ impl VolumeSlot {
     /// Install a freshly built index. Replacing an existing one is a
     /// structural change (journal-gone full rescan): the new index inherits
     /// the previous `structural_generation + 1` so open `ResultSet`s go
-    /// hard-stale (docs/ARCHITECTURE.md, generation 2層). A first install
+    /// hard-stale (docs/ARCHITECTURE.md, 2-layer generation). A first install
     /// (initial scan or snapshot restore) keeps the value the index was
     /// built with.
     pub(super) fn install_index(&self, mut idx: VolumeIndex) {

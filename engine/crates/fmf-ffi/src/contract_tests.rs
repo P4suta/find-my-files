@@ -200,7 +200,7 @@ fn contract_values_are_pinned_literally() {
 fn fmf_row_layout_is_48_bytes_no_padding() {
     // Contractual: "48-byte row, no internal padding", mirrored by C#
     // LayoutKind.Sequential. Note the field *order* here (the implemented
-    // ABI) differs from the prose order in ARCHITECTURE.md §ページ取得,
+    // ABI) differs from the prose order in ARCHITECTURE.md §Page fetch,
     // which would introduce padding; this layout is what C# marshals against.
     assert_eq!(size_of::<FmfRow>(), 48);
     assert_eq!(align_of::<FmfRow>(), 8);

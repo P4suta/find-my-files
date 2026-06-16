@@ -14,7 +14,7 @@ namespace FindMyFiles.Highlighting;
 /// (engine/crates/fmf-core/src/wtf8.rs). Anything the UI cannot reproduce
 /// exactly — user regex, general wildcards, negation, path wildcards — is left
 /// un-highlighted rather than guessed at: a row the engine returned is never
-/// hidden, only its emphasis is skipped (落ちない・黙らない). This guarantees
+/// hidden, only its emphasis is skipped (don't crash / don't go silent). This guarantees
 /// the UI never lights up a position the engine did not actually match.
 /// </summary>
 public sealed class CompiledHighlighter : IHighlighter

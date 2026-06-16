@@ -1,6 +1,6 @@
 namespace FindMyFiles.Engine;
 
-/// <summary>クエリ文字列の構文が不正で <see cref="IEngineClient.SearchAsync"/>
-/// がパースに失敗したことを示す。</summary>
-/// <param name="message">パーサが返した人間可読な理由。</param>
+/// <summary>The query string is syntactically malformed and
+/// <see cref="IEngineClient.SearchAsync"/> failed to parse it.</summary>
+/// <param name="message">The human-readable reason returned by the parser.</param>
 public sealed class QuerySyntaxException(string message) : Exception(message);

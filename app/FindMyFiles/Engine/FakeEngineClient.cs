@@ -61,11 +61,11 @@ public sealed class FakeEngineClient : IEngineClient
     /// searching demo rows has no practical value (user verdict), so the
     /// auto-fallback shows zero results plus the setup notification instead.
     /// The data-bearing fake stays what <c>--fake-engine</c> is for.</summary>
-    /// <returns>A rowless fake that reports 未接続 and yields no results.</returns>
+    /// <returns>A rowless fake that reports disconnected and yields no results.</returns>
     public static FakeEngineClient CreateEmpty() => new(empty: true);
 
     /// <summary>True for the unelevated auto-fallback instance (no rows) —
-    /// the status badge says 未接続, not fake.</summary>
+    /// the status badge says disconnected, not fake.</summary>
     public bool IsEmpty { get; }
 
     /// <summary>Builds the fake. The default (<paramref name="empty"/> false)
@@ -73,7 +73,7 @@ public sealed class FakeEngineClient : IEngineClient
     /// <c>--fake-engine</c>; <see cref="CreateEmpty"/> passes
     /// <paramref name="empty"/> true for the unelevated no-service
     /// stand-in.</summary>
-    /// <param name="empty">When true, no rows are generated (the 未接続
+    /// <param name="empty">When true, no rows are generated (the disconnected
     /// auto-fallback); when false, the seeded demo dataset is built.</param>
     public FakeEngineClient(bool empty = false)
     {

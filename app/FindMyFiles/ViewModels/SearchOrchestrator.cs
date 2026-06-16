@@ -20,7 +20,7 @@ public sealed class SearchOrchestrator
     private readonly IDispatcherTimer _debounce;
     private long _generation;
 
-    /// <summary>絞り込みモード: when on, the user's query is rewritten with
+    /// <summary>Focused search: when on, the user's query is rewritten with
     /// the two lists below (<see cref="FocusedQueryRewriter"/>) right before
     /// it reaches the engine. Defaults to off here — product wiring
     /// (MainViewModel) pushes the persisted settings in; a toggle flip is a

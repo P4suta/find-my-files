@@ -55,7 +55,7 @@ public sealed partial class ResultRow : ObservableObject
     [ObservableProperty]
     public partial IReadOnlyList<HighlightRange> PathRanges { get; set; } = NoRanges;
 
-    /// <summary>Absolute path (<c>ParentPath + Name</c>) — what 「開く」/コピー act on.
+    /// <summary>Absolute path (<c>ParentPath + Name</c>) — what open/copy act on.
     /// Empty until <see cref="Fill"/>.</summary>
     public string FullPath { get; private set; } = string.Empty;
 

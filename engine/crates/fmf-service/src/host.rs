@@ -1,6 +1,8 @@
-//! Engine bring-up for the service: the lock-loser path retries with
-//! backoff instead of dying (an in-proc UI may legitimately hold the index;
-//! docs/ARCHITECTURE.md「Pipe プロトコル」§単一書き手の排他).
+//! Engine bring-up for the service.
+//!
+//! The lock-loser path retries with backoff instead of dying (an in-proc UI
+//! may legitimately hold the index; docs/ARCHITECTURE.md "Pipe protocol"
+//! §single-writer exclusion).
 
 use std::path::PathBuf;
 use std::sync::Arc;

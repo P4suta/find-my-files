@@ -30,7 +30,7 @@ public sealed class ShellOpsTests
     {
         var psi = ShellOps.BuildOpenStartInfo(@"C:\x");
 
-        // De-elevation contract (CLAUDE.md UI固定則): targets open through
+        // De-elevation contract (CLAUDE.md UI invariants): targets open through
         // %WINDIR%\explorer.exe, pinned by full path against binary planting.
         Assert.EndsWith(@"\explorer.exe", psi.FileName, StringComparison.OrdinalIgnoreCase);
     }

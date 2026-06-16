@@ -1,6 +1,6 @@
 //! fmf-service — the privileged engine host: a named-pipe server over
 //! fmf-core, speaking the fmf-proto wire (canonical spec:
-//! docs/ARCHITECTURE.md「Pipe プロトコル」). Library form so the loopback
+//! docs/ARCHITECTURE.md "Pipe protocol"). Library form so the loopback
 //! integration tests drive the same server the binary runs.
 
 pub mod config;
