@@ -1,41 +1,41 @@
-# ADR-0024: 非昇格スコープ索引モード(フォルダ走査 + ReadDirectoryChangesW)
+# ADR-0024: Non-elevated scope index mode (folder walk + ReadDirectoryChangesW)
 
-日付: 2026-06-16 / 状態: 採用済み
+Date: 2026-06-16 / Status: Adopted
 
-## 決定
+## Decision
 
-管理者権限なし(asInvoker)で、ユーザーが指定したルート集合だけを索引する**スコープモード**を追加する。索引源は MFT/USN ではなく**フォルダ走査(ディレクトリ列挙)+ ReadDirectoryChangesW**。サービスを使わず UIプロセス内 in-proc で動き、索引は `%LOCALAPPDATA%\find-my-files\`(ユーザー単位・独自 `.writer.lock`)に置く。
+Add a **scope mode** that, without administrator privileges (asInvoker), indexes only a user-specified set of roots. The index source is not MFT/USN but **folder walk (directory enumeration) + ReadDirectoryChangesW**. It runs in-proc inside the UI process without a service, and the index is placed in `%LOCALAPPDATA%\find-my-files\` (per-user, its own `.writer.lock`).
 
-ADR-0018 の「シーム2本上限・追加ポート禁止」は破らない。スコープモードは既存2シームの**第2実装**として収める:
+This does not break ADR-0018's "two-seam cap, no additional ports." Scope mode fits as a **second implementation** of the existing two seams:
 
-- スナップショット作成側(シーム外のスキャン): `mft::scan_volume` の隣に `scan::walk::walk_scan` を置き、`worker.rs` の establish 地点1箇所だけ分岐する。
-- `SnapshotStore`: `WinSnapshotStore` をそのまま再利用(パスが `%LOCALAPPDATA%` になるだけ)。
-- `JournalSource`: USN の `WinJournalSource` に対し `WatcherJournalSource`(ReadDirectoryChangesW)を第2実装として追加。
+- Snapshot creation side (the scan, outside the seam): place `scan::walk::walk_scan` next to `mft::scan_volume` and branch at the single establish point in `worker.rs`.
+- `SnapshotStore`: reuse `WinSnapshotStore` as-is (only the path becomes `%LOCALAPPDATA%`).
+- `JournalSource`: add `WatcherJournalSource` (ReadDirectoryChangesW) as a second implementation alongside the USN `WinJournalSource`.
 
-これは ADR-0001 の「フォルダ走査索引はしない/ボリューム単位のみ」を**この一点に限って改訂する**(下記「ADR-0001 との関係」)。
+This **amends, for this one point only**, ADR-0001's "no folder-walk indexing / volume-granularity only" (see "Relationship to ADR-0001" below).
 
-## 根拠
+## Rationale
 
-- ターゲット(検索を多用するビジネスマン)の会社PCは IT部門が昇格を禁止する。MFT直読みも USN もサービス導入も全て管理者必須で、製品ごと締め出されていた。非昇格で実データを索引する唯一の枯れた経路がフォルダ走査 + ReadDirectoryChangesW。
-- 全C:は捨てるが、ナレッジワーカーが実際に触るルート(プロファイル / OneDrive・SharePoint同期 / マップドライブ / 案件フォルダ = 数万〜数十万件)に限れば、走査は秒で終わり、鮮度も維持できる。
-- **合成FRN で索引フォーマットを変えずに済む**: 索引のアイデンティティ鍵は `Frn::record()` = 下位48bit(`index/mod.rs`)で、生存性で NTFS レコード再利用を解決する設計。実FRNは不要。スコープモードは `frn = xxhash64(折り畳み絶対パス)` を使う。絶対パスはグローバルに一意なので下位48bitもルート跨ぎで一意になり、別途 root id を持たせる必要はない(`record()` は上位bitを捨てるため root id を上位に置いても lookup には効かない)。watcher は変更パスから同じハッシュを無状態で再計算できる。
-- マルチルートは形式変更なしで表現できる: 各ルートを ROOT の子(name = 絶対ベースパス)として push すれば、既存のパス再構成がそのまま正しい絶対パスを返す。
-- query 経路は同一 `VolumeIndex` ゆえ無変更で、p99 死守線(3文字以上で <10ms 体感)に影響しない。
+- The target (search-heavy business users) have company PCs where the IT department prohibits elevation. Direct MFT reads, USN, and service installation all require administrator, locking the product out entirely. The only mature non-elevated path to index real data is folder walk + ReadDirectoryChangesW.
+- All of C: is given up, but limited to the roots a knowledge worker actually touches (profile / OneDrive·SharePoint sync / mapped drives / project folders = tens of thousands to hundreds of thousands of entries), the walk finishes in seconds and freshness is maintained.
+- **No index-format change is needed thanks to synthetic FRN**: the index's identity key is `Frn::record()` = lower 48 bits (`index/mod.rs`), a design that resolves NTFS record reuse by liveness. Real FRNs are unnecessary. Scope mode uses `frn = xxhash64(folded absolute path)`. Absolute paths are globally unique, so the lower 48 bits are unique across roots too, with no need for a separate root id (`record()` discards the upper bits, so a root id in the upper bits would not help lookup). The watcher can recompute the same hash statelessly from the changed path.
+- Multi-root is expressible with no format change: push each root as a child of ROOT (name = absolute base path), and the existing path reconstruction returns the correct absolute path as-is.
+- The query path is the same `VolumeIndex`, so it is unchanged and does not affect the p99 hard line (<10ms perceived for 3+ characters).
 
-## 影響
+## Consequences
 
-- **改訂は最小限**: 「ファイル名のみ索引」の核は維持。content索引・プロパティ/タグ索引・プレビューは依然不採用(ADR-0001)。スコープモードでも保持するのはファイル名・サイズ・更新日時・属性のみ。
-- 合成FRN は rename でパスが変わると別IDになる。watcher は ReadDirectoryChangesW の old/new パス対を `delete(hash(old)) + create(hash(new))` に翻訳して `apply_batch` を再利用する。ディレクトリ rename は新パスの subtree 再walk(稀・bounded、dir-rename と同じ accepted-limitation 類)。
-- 下位48bit衝突は確率的(数十万件で <0.1%)。衝突は1ファイルが他を遮蔽するのみで、再walk(手動再索引/定期再walk/journal-gone 相当)で自己修復する。
-- 鮮度はネットワーク/クラウド(OneDrive placeholder)で ReadDirectoryChangesW が取りこぼしうるため、**定期再walk** を安全網にする。placeholder は列挙メタのみで索引し、絶対に hydrate しない(データ課金・性能事故の回避)。
-- 既存の昇格モード(サービス/inproc・全ボリューム)とは排他ではなく、サービス不在 & 非昇格時の選択肢。設定が無ければ従来どおり setup 画面へ誘導する。
+- **The amendment is minimal**: the "filename-only indexing" core is preserved. content index, property/tag index, and preview remain not adopted (ADR-0001). Even in scope mode, only filename, size, modified time, and attributes are kept.
+- Synthetic FRN becomes a different ID when a rename changes the path. The watcher translates ReadDirectoryChangesW old/new path pairs into `delete(hash(old)) + create(hash(new))` and reuses `apply_batch`. Directory rename triggers a subtree re-walk of the new path (rare, bounded, same accepted-limitation class as dir-rename).
+- Lower-48-bit collisions are probabilistic (<0.1% at hundreds of thousands of entries). A collision merely shadows one file by another and self-heals on re-walk (manual re-index / periodic re-walk / journal-gone equivalent).
+- Freshness: because ReadDirectoryChangesW can drop events on network/cloud (OneDrive placeholder), a **periodic re-walk** is the safety net. Placeholders are indexed with enumeration metadata only and are never hydrated (avoiding data charges and performance incidents).
+- It is not mutually exclusive with the existing elevated modes (service/inproc, all volumes); it is the option when no service is present and not elevated. If no configuration exists, the setup screen guides as before.
 
-## ADR-0001 との関係
+## Relationship to ADR-0001
 
-ADR-0001 の影響節「ボリューム単位のみ・フォルダ走査索引はしない」を本ADRが上書きする。ADR-0001 が守る本丸(ファイル名のみ索引・content索引除外・スコープクリープ防止)は不変。本ADRが許可するのは「非昇格で読めるルートをフォルダ走査で索引する」一点のみで、FTP/HTTP/ETPサーバ・FAT/exFAT・ReFS・クロスプラットフォーム化は引き続き不採用。
+This ADR overrides the consequences section of ADR-0001, "volume-granularity only / no folder-walk indexing." The heart that ADR-0001 protects (filename-only indexing, content-index exclusion, scope-creep prevention) is unchanged. What this ADR permits is only the one point of "indexing non-elevated-readable roots via folder walk"; FTP/HTTP/ETP servers, FAT/exFAT, ReFS, and cross-platform support remain not adopted.
 
-## 再検討トリガ
+## Re-examination triggers
 
-- スコープモードの cold-start(数十万件のwalk)が体感を損ねる水準まで遅い場合 → rayon 並列ルートwalk・`NtQueryDirectoryFile` バルク化を再評価(Phase 3)。
-- 下位48bit衝突が実索引で観測される頻度が無視できない場合(計測カウンタで監視)→ レコード採番方式の再設計。
-- ReadDirectoryChangesW の取りこぼしが定期再walk で吸収しきれない場合 → per-root 溢れ回復の精緻化。
+- If scope-mode cold-start (a walk of hundreds of thousands of entries) is slow to a degree that hurts the perceived experience → re-evaluate rayon parallel root walk and `NtQueryDirectoryFile` bulking (Phase 3).
+- If lower-48-bit collisions are observed in a real index at a non-negligible frequency (monitored via a measurement counter) → redesign the record numbering scheme.
+- If ReadDirectoryChangesW drops cannot be fully absorbed by periodic re-walk → refine per-root overflow recovery.

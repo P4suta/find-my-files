@@ -1,26 +1,26 @@
-# ADR-0015: WinUI 3データ仮想化(非ジェネリックIList+INCC+IItemsRangeInfo)
+# ADR-0015: WinUI 3 data virtualization (non-generic IList+INCC+IItemsRangeInfo)
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-結果リストの仮想化は非ジェネリック `IList` + `INotifyCollectionChanged` + `IItemsRangeInfo` + プレースホルダで行う(VirtualResultList)。`ISupportIncrementalLoading`、ItemsView / ItemsRepeater は使わない。ItemsPanelはItemsStackPanel固定。VirtualResultListはページと同寿命の単一インスタンス(x:Bind OneTime)とし、ItemsSourceは差し替えない。新結果は `Reassign`(プリフェッチ済みseed適用+INCC Reset 1回)で公開し、エンジンが `QueryTrace.unchanged=true`(同一クエリ・全ボリュームでID列がmemcmp一致)を返した再クエリは `RefreshInPlace`(Resetなし・可視行のin-place充填・件数テキスト不変)とする。
+Result-list virtualization uses non-generic `IList` + `INotifyCollectionChanged` + `IItemsRangeInfo` + placeholders (VirtualResultList). Do not use `ISupportIncrementalLoading`, ItemsView, or ItemsRepeater. ItemsPanel is fixed to ItemsStackPanel. VirtualResultList is a single instance with the same lifetime as the page (x:Bind OneTime), and ItemsSource is not swapped. New results are published via `Reassign` (apply prefetched seed + one INCC Reset); a re-query where the engine returns `QueryTrace.unchanged=true` (same query, ID sequence memcmp-equal across the whole volume) uses `RefreshInPlace` (no Reset, in-place fill of visible rows, count text unchanged).
 
-## 根拠
+## Rationale
 
-- 件数既知ランダムアクセスの仮想化は「非ジェネリックIList+INCC+IItemsRangeInfo+プレースホルダ」が現行WASDKのサポート明記。`IList<T>` のみでは動かない(microsoft-ui-xaml#1809)
-- `ISupportIncrementalLoading` はクラッシュ報告があり回避(microsoft-ui-xaml#6883)
-- ItemsView / ItemsRepeater は上記インターフェース非対応。ItemsPanelをItemsStackPanel以外にすると仮想化が無効化される
-- ItemsSource差し替えはListViewの仮想化状態を破棄し、ちらつきが再発する
-- Windowsはアイドルでも無音にならない(ログ・テレメトリ等のUSNバッチ)。IndexChanged起因の再クエリが200ms毎に同一結果を返すため、Reset再発行では画面が恒常的にチャーンする — unchanged時のRefreshInPlace(MVVMセッターは値変化時のみ通知)で同一画面の再描画をゼロにする
+- For random-access virtualization with a known count, "non-generic IList + INCC + IItemsRangeInfo + placeholders" is the explicitly supported path in current WASDK. `IList<T>` alone does not work (microsoft-ui-xaml#1809).
+- `ISupportIncrementalLoading` has crash reports, so avoid it (microsoft-ui-xaml#6883).
+- ItemsView / ItemsRepeater do not support the above interfaces. Setting ItemsPanel to anything other than ItemsStackPanel disables virtualization.
+- Swapping ItemsSource discards the ListView's virtualization state and reintroduces flicker.
+- Windows is never silent even when idle (USN batches from logs, telemetry, etc.). IndexChanged-driven re-queries return identical results every 200ms, so re-issuing Reset would churn the screen constantly — RefreshInPlace on unchanged (the MVVM setter notifies only on value change) brings redraw of the same screen to zero.
 
-## 影響
+## Consequences
 
-- IList在籍契約: 在籍 = 「indexがCount未満、かつ現在のページキャッシュの該当スロットがその同一インスタンス」。偽の「在籍」は `GetAt(staleIndex)` でXAML深部のクラッシュになる(実証: 結果ありの検索→全消去で `Int32.MaxValue-1` 例外が確実に再現。修正A/B: UIAストレスで旧コード4エラー→0)
-- indexerは範囲外即throw・絶対にフェッチしない(プレースホルダ返却)。列挙/CopyToはページLRU(上限4096行)を乱さない
-- Reassign/RefreshInPlaceのUIスレッド検査はRelease常時有効
-- in-place更新では値が変わったセル(伸びたファイルのsize等)だけ更新される
+- IList residency contract: residency = "index is less than Count, and the corresponding slot in the current page cache is that same instance". A false "residency" causes `GetAt(staleIndex)` to crash deep in XAML (demonstrated: search with results -> clear all reliably reproduces an `Int32.MaxValue-1` exception. Fix A/B: UIA stress went from 4 errors on the old code to 0).
+- The indexer throws immediately out of range and never fetches (returns a placeholder). Enumeration/CopyTo do not disturb the page LRU (cap 4096 rows).
+- The UI-thread check in Reassign/RefreshInPlace is always enabled in Release.
+- In-place updates only update cells whose value changed (e.g. the size of a grown file).
 
-## 再検討トリガ
+## Re-examination triggers
 
-- WASDKがItemsView系に件数既知ランダムアクセス仮想化(IItemsRangeInfo相当)を正式提供した場合
+- If WASDK officially provides known-count random-access virtualization (IItemsRangeInfo equivalent) for the ItemsView family.

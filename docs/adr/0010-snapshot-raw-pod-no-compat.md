@@ -1,24 +1,24 @@
-# ADR-0010: スナップショットは生PODダンプ+全検証、後方互換なし
+# ADR-0010: snapshot is a raw POD dump + full validation, no backward compatibility
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-永続化は自前バイナリ **FMFIDX04**: magic+UsnJournalID+最終USN+生カラム列ダンプ+xxhash64。セクションは lower_pool / orig_pool / orig_off / name_off / name_len / parent / size_lo / size-overflow ids+sizes / mtime / frn / flag / perm_name。後方互換は持たない — 版不一致・検証失敗は常にErr→フルリスキャン。
+Persistence is a homegrown binary **FMFIDX04**: magic + UsnJournalID + last USN + raw column-array dumps + xxhash64. Sections are lower_pool / orig_pool / orig_off / name_off / name_len / parent / size_lo / size-overflow ids+sizes / mtime / frn / flag / perm_name. No backward compatibility — a version mismatch or validation failure is always Err → full rescan.
 
-## 根拠
+## Rationale
 
-- 実C: 1.27M件で92.4MiB(旧形式128.6MiBから−28%)、restore p50 81ms — restore→ready ≤2sゲートに大幅余裕
-- リスキャンは2.0s(ADR-0011)で安価。マイグレーションコードの維持・テストコストに見合わない
-- ロード時はchecksumに加え全スライス境界とオーバーフロー対応の構造検証を行う(壊れた入力でpanicせずErr→リスキャン)
-- size/mtime順列とFRN索引は非永続(復元時/初回利用時の並列ソート再構築が直列ロードより速い: load_1m −34%、ADR-0005/0006)
+- Real C:: 92.4MiB for 1.27M entries (−28% from the old 128.6MiB format), restore p50 81ms — ample margin against the restore→ready ≤2s gate
+- A rescan is cheap at 2.0s (ADR-0011). Not worth the maintenance and test cost of migration code
+- On load, beyond the checksum, perform structural validation of all slice bounds and overflow correspondence (Err → rescan instead of panicking on corrupt input)
+- The size/mtime permutations and the FRN index are not persisted (parallel-sort rebuild at restore/first-use time is faster than a serial load: load_1m −34%, ADR-0005/0006)
 
-## 影響
+## Impact
 
-- フォーマット版上げのたびに各ボリューム1回のフルリスキャン(2s級、昇格必須)を受け入れる
-- structural_generationは永続化しない(復元時0)。結果ハンドルはプロセスを跨がないためプロセス内の単調性で十分
-- 書き込みはtemp→`MoveFileEx(REPLACE_EXISTING)`。失敗は snapshot_load_failures / snapshot_save_failures カウンタ
+- Accept one full rescan per volume (2s-scale, requires elevation) on each format version bump
+- structural_generation is not persisted (0 at restore). Since result handles do not cross processes, in-process monotonicity is sufficient
+- Writes are temp → `MoveFileEx(REPLACE_EXISTING)`. Failures go to the snapshot_load_failures / snapshot_save_failures counters
 
-## 再検討トリガ
+## Re-examination trigger
 
-- 初回スキャンが分単位になる規模が主要ターゲットになり、版上げ毎リスキャンの体感コストが問題化した場合
+- If a scale where the initial scan takes minutes becomes a primary target and the felt cost of a rescan per version bump becomes a problem

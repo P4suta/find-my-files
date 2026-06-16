@@ -3,15 +3,16 @@
      Regenerate with `just contract-gen`; `cargo test --workspace`
      fails on drift. -->
 
-# 契約リファレンス(生成)
+# Contract reference (generated)
 
-fmf-contract クレートの定義値から機械生成した FFI / パイプ契約のスナップショット。
-意味と安全契約の散文正本は [アーキテクチャ](ARCHITECTURE.md)、Rust API の詳細は
-rustdoc(`/doc/fmf_contract/`)を参照。数値は `offset_of!` / `size_of!` の実値。
+Machine-generated snapshot of the FFI / pipe contract from the values defined in the
+fmf-contract crate. The prose canonical source for semantics and the safety contract is
+[Architecture](ARCHITECTURE.md); for Rust API details see rustdoc
+(`/doc/fmf_contract/`). Numbers are the actual `offset_of!` / `size_of!` values.
 
-## 版数とパイプ名
+## Versions and pipe name
 
-| 項目 | 値 |
+| Item | Value |
 |---|---|
 | `ABI_VERSION` | 2 |
 | `PROTOCOL_VERSION` | 2 |
@@ -19,9 +20,9 @@ rustdoc(`/doc/fmf_contract/`)を参照。数値は `offset_of!` / `size_of!` の
 | `PIPE_NAME_SHORT` | `fmf-engine-v2` |
 | `SERVICE_NAME` | `fmf-engine` |
 
-## 状態コード(フレームヘッダ status / FFI 返り値。append-only)
+## Status codes (frame header status / FFI return values. append-only)
 
-| 名前 | 値 |
+| Name | Value |
 |---|---|
 | `OK` | 0 |
 | `INVALID_ARG` | 1 |
@@ -33,9 +34,9 @@ rustdoc(`/doc/fmf_contract/`)を参照。数値は `offset_of!` / `size_of!` の
 | `LOCKED` | 7 |
 | `PANIC` | 99 |
 
-## パイプ オペコード(イベント push は 1..=6 を kind として再利用)
+## Pipe opcodes (event pushes reuse 1..=6 as the kind)
 
-| 名前 | 値 |
+| Name | Value |
 |---|---|
 | `HELLO` | 1 |
 | `SUBSCRIBE` | 2 |
@@ -50,9 +51,9 @@ rustdoc(`/doc/fmf_contract/`)を参照。数値は `offset_of!` / `size_of!` の
 | `FLUSH_RESERVED` | 11 |
 | `SERVICE_INFO` | 12 |
 
-## イベント種別(FFI `FmfEvent.kind` = パイプ event-push opcode)
+## Event kinds (FFI `FmfEvent.kind` = pipe event-push opcode)
 
-| 種別 | 値 |
+| Kind | Value |
 |---|---|
 | `Progress` | 1 |
 | `VolumeReady` | 2 |
@@ -61,20 +62,20 @@ rustdoc(`/doc/fmf_contract/`)を参照。数値は `offset_of!` / `size_of!` の
 | `VolumeFailed` | 5 |
 | `EngineError` | 6 |
 
-## 上限値(プロトコル事実。チューナブルではない)
+## Limits (protocol facts. not tunable)
 
-| 定数 | 値 |
+| Constant | Value |
 |---|---|
 | `MAX_PAYLOAD_LEN` | 16777216 |
 | `MAX_RESULTS_PER_CONN` | 64 |
 | `EVENT_QUEUE_CAP` | 256 |
 | `PAGE_ROWS` | 64 |
 
-## POD レイアウト(`#[repr(C)]`・`offset_of!` 実値)
+## POD layouts (`#[repr(C)]`, actual `offset_of!` values)
 
-### `FrameHeader`(16 B)
+### `FrameHeader` (16 B)
 
-| フィールド | offset |
+| Field | offset |
 |---|---|
 | `len` | 0 |
 | `opcode` | 4 |
@@ -82,9 +83,9 @@ rustdoc(`/doc/fmf_contract/`)を参照。数値は `offset_of!` / `size_of!` の
 | `request_id` | 8 |
 | `status` | 12 |
 
-### `FmfRow`(48 B)
+### `FmfRow` (48 B)
 
-| フィールド | offset |
+| Field | offset |
 |---|---|
 | `entry_ref` | 0 |
 | `frn` | 8 |
@@ -96,9 +97,9 @@ rustdoc(`/doc/fmf_contract/`)を参照。数値は `offset_of!` / `size_of!` の
 | `name_len` | 44 |
 | `parent_path_len` | 46 |
 
-### `FmfQueryOptions`(20 B)
+### `FmfQueryOptions` (20 B)
 
-| フィールド | offset |
+| Field | offset |
 |---|---|
 | `sort` | 0 |
 | `desc` | 4 |
@@ -106,39 +107,39 @@ rustdoc(`/doc/fmf_contract/`)を参照。数値は `offset_of!` / `size_of!` の
 | `include_hidden_system` | 12 |
 | `regex_mode` | 16 |
 
-### `FmfPage`(32 B)
+### `FmfPage` (32 B)
 
-| フィールド | offset |
+| Field | offset |
 |---|---|
 | `row_count` | 0 |
 | `rows` | 8 |
 | `blob` | 16 |
 | `blob_len` | 24 |
 
-### `FmfEvent`(32 B)
+### `FmfEvent` (32 B)
 
-| フィールド | offset |
+| Field | offset |
 |---|---|
 | `kind` | 0 |
 | `entries` | 8 |
 | `volume` | 16 |
 
-### `FmfVolumeStatus`(32 B)
+### `FmfVolumeStatus` (32 B)
 
-| フィールド | offset |
+| Field | offset |
 |---|---|
 | `label` | 0 |
 | `state` | 16 |
 | `entries` | 24 |
 
-### `FmfBlob`(16 B)
+### `FmfBlob` (16 B)
 
-| フィールド | offset |
+| Field | offset |
 |---|---|
 | `data` | 0 |
 | `len` | 8 |
 
-## 劣化カウンタ名(stats JSON の `snake_case` キー。append-only)
+## Degradation counter names (`snake_case` keys of the stats JSON. append-only)
 
 - `stat_fetch_failures`
 - `usn_batches_truncated`

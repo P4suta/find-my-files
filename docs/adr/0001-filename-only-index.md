@@ -1,24 +1,24 @@
-# ADR-0001: ファイル名のみを索引する
+# ADR-0001: Index filenames only
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-索引はファイル名・サイズ・更新日時・属性のみを持つ。content索引、プロパティ・タグ索引、プレビューは実装しない。
+The index holds only filename, size, modified time, and attributes. No content index, no property/tag index, no preview.
 
-## 根拠
+## Rationale
 
-- 速度とRAMの源泉は「ファイル名だけを索引する」割り切り。RAMゲートはエンジン単体 ≤110B/ファイル(M2)で、content索引とは桁が両立しない
-- content索引はRAMが桁違いに膨らむ(8GB級になり得る)
-- ファイル名のみ索引の到達水準は ≈100B/ファイル(≤110B のRAMゲートはこれを踏まえた目標)
-- 検索構文の実利用はsubstring・`ext:`・`path:`・`size:`・`dm:`が中心で、content:/regex:はニッチ(docs/RESEARCH.md)
+- Speed and RAM come from the "index filenames only" tradeoff. The RAM gate is engine-only ≤110B/file (M2), which is orders of magnitude incompatible with a content index
+- A content index inflates RAM by orders of magnitude (can reach 8GB-class)
+- Filename-only indexing lands at ≈100B/file (the ≤110B RAM gate is the target derived from this)
+- Real-world search syntax usage centers on substring, `ext:`, `path:`, `size:`, `dm:`; content:/regex: are niche (docs/RESEARCH.md)
 
-## 影響
+## Consequences
 
-- ファイル内容・メタプロパティでの検索は提供しない
-- 同じスコープ固定でFTP/HTTP/ETPサーバ、FAT/exFAT/ネットワークドライブ(MVP)、ReFS(MVP)、クロスプラットフォーム化も不採用
+- No search over file contents or meta-properties
+- Under the same scope freeze, FTP/HTTP/ETP servers, FAT/exFAT/network drives (MVP), ReFS (MVP), and cross-platform support are also out of scope
 
-## 再検討トリガ
+## Re-examination triggers
 
-- 本丸(ファイル名のみ索引・content索引除外)は恒久決定(正本はCLAUDE.mdの「やらないことリスト」)
-- 例外: 「ボリューム単位のみ・フォルダ走査索引はしない」の一点は ADR-0024(非昇格スコープ索引モード)が上書きした。非昇格(会社PCで昇格禁止)ペルソナの解禁という根拠付き。「ファイル名のみ索引」の核は ADR-0024 でも不変
+- The core (filename-only index, content index excluded) is a permanent decision (canonical source: the "do-not list" in CLAUDE.md)
+- Exception: the single point "volume-level only, no folder-walk index" was overridden by ADR-0024 (non-elevated scope index mode), justified by unlocking the non-elevated (corporate PC where elevation is forbidden) persona. The "filename-only index" core stays unchanged even under ADR-0024

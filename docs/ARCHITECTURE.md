@@ -1,386 +1,386 @@
-# アーキテクチャと FFI 正本契約
+# Architecture and FFI Canonical Contract
 
-このファイルが **FFI契約の正本**。エンジン(Rust)とUI(C#)の双方はここに従う。シグネチャ変更はまずこのファイルを更新してから両側を直す。
+This file is the **canonical FFI contract** — both the engine (Rust) and UI (C#) follow it; change signatures here first, then both sides. Design judgment and rationale live in `docs/adr/`.
 
-## 全体構成
+## Overall Structure
 
 ```
 ┌────────────────────────────────────────────────────┐
-│ WinUI 3 アプリ (C#/.NET, asInvoker)                  │
-│   ViewModels ── IEngineClient (差し替え境界)          │
-│        ├─ PipeEngineClient (既定: named pipe)         │
-│        ├─ FfiEngineClient (--engine=inproc・要昇格)   │
+│ WinUI 3 app (C#/.NET, asInvoker)                     │
+│   ViewModels ── IEngineClient (swap boundary)         │
+│        ├─ PipeEngineClient (default: named pipe)      │
+│        ├─ FfiEngineClient (--engine=inproc, elevated) │
 │        └─ FakeEngineClient (--fake-engine)            │
 └───────┬──────────────────────────┬─────────────────┘
         │ named pipe               │ C ABI (in-proc)
 ┌───────▼────────────────────┐ ┌──▼──────────────────┐
-│ fmf-service (特権サービス,   │ │ fmf_engine.dll        │
-│  LocalSystem・特権最小化)    │ │  (fmf-ffi crate,      │
-│  pipeサーバ+SCM+定期flush  │ │   cdylib) 変換・       │
-│  ワイヤ定義 = fmf-proto rlib │ │  ハンドル管理・        │
-│                            │ │  catch_unwind のみ    │
+│ fmf-service (priv service,  │ │ fmf_engine.dll        │
+│  LocalSystem, least-priv)   │ │  (fmf-ffi crate,      │
+│  pipe server+SCM+flush     │ │   cdylib) conversion, │
+│  wire def = fmf-proto rlib   │ │  handle mgmt,         │
+│                            │ │  catch_unwind only    │
 ├────────────────────────────┴─┴─────────────────────┤
 │ fmf-core (rlib): VolumeIndex / query /               │
 │   mft scan (ntfs-reader) / usn tail / persist        │
 └──────────────────────────────────────────────────────┘
 ```
 
-**FFI 1関数 = pipe 1オペコード、イベントコールバック = pipe プッシュ通知**。ワイヤ仕様は本書
-「Pipe プロトコル」節が正本(設計判断は [ADR-0016](adr/0016-service-split-named-pipe.md) /
-[ADR-0017](adr/0017-service-security-model.md))。
+**1 FFI function = 1 pipe opcode, event callback = pipe push notification**. The wire spec is canonical in the
+"Pipe Protocol" section of this document (design judgment in [ADR-0016](adr/0016-service-split-named-pipe.md) /
+[ADR-0017](adr/0017-service-security-model.md)).
 
-## モジュールマップ(1ファイル=1責務)
+## Module Map (1 file = 1 responsibility)
 
-叙述順=データが流れる順(取込: mft/scan→usn→index、検索: query→engine、横断: diag/metrics)。
+Narrative order = data-flow order (ingest: mft/scan→usn→index, search: query→engine, cross-cutting: diag/metrics).
 
 ```
-fmf-contract/src/ 契約の機械可読正本(ADR-0018・依存ゼロ・ロジック禁止): codes / opcodes
+fmf-contract/src/ machine-readable canonical contract (ADR-0018, zero deps, no logic): codes / opcodes
                  / events(EventKind) / options(SortKey/CaseMode/VolumeState+from_u32)
-                 / pod(repr(C)+const レイアウトピン) / volume(label 16B詰め) / versions
-                 / limits / counters(カウンタ名簿) / bin/gen-contract(EngineContract.g.cs
-                 エミッタ) / tests/drift(生成物一致 — cargo test 内で常時)
+                 / pod(repr(C)+const layout pin) / volume(label 16B padded) / versions
+                 / limits / counters(counter roster) / bin/gen-contract(EngineContract.g.cs
+                 emitter) / tests/drift(generated-output match — always within cargo test)
 fmf-core/src/
-├─ mft.rs        $MFT レコード形式(scan が消費)
-├─ scan/         mod(scan_volume+ScanStats) / volume_io(生ボリュームopen+fixup)
-│                / pipeline(16MiB×3 read-ahead+逐次劣化) / parse(rayon並列+RecordArena)
-│                / deferred(NameCache 128Ki+LazyRecordReader — 劣化はstatsで返す)
-│                / probe(io-probe計測。本体フローから独立)
-├─ usn/          records / apply / session(ジャーナル追従)
-├─ index/        mod(型+再エクスポート+in-placeマージ) / core(VolumeIndex+読み取り+派生キャッシュ)
-│                / mutate(USNミューテーション) / snapshot(永続化、unsafe POD はここに封じ込め)
-│                / builder(2パス構築+EXCLUDED伝播) / compact(コンパクション) / frn
-│                / testutil(TestDir RAII 等。feature "testutil" で他クレートのテストへ)
-├─ query/        mod(AST/compile 公開面+wire→QueryOptions 変換) / exec(searchドライバ+materialize)
-│                / sweep(pool-sweep候補生成) / matchers(残余評価) / memo(DirPaths/OffsetTable)
-├─ engine/       mod(Engine+ライフサイクル+EngineEvent::to_wire=イベント写像の単一点)
-│                / volume(VolumeSlot+install_index+checkpoint — 状態の家)
-│                / worker(volumeスレッド+遷移判断の純関数: snapshot_decision 等 — フローの駆動)
-│                / seams(SnapshotStore+JournalSource の2traitのみ。追加ポート化禁止=ADR-0018)
-│                / worker_tests(障害経路の非昇格・決定的リプレイ)
-│                / search(ボリューム横断+k-wayマージ) / results(ResultSet+fill_page=行+blob
-│                  構築の単一実装+STALE判定) / tests
-├─ diag.rs       init_diag(全入口の唯一のブートストラップ) / resolve_log_dir / error_chain(4KiB)
-│                / degrade!(warn+カウンタ不可分) / diagリング+sink
+├─ mft.rs        $MFT record format (consumed by scan)
+├─ scan/         mod(scan_volume+ScanStats) / volume_io(raw volume open+fixup)
+│                / pipeline(16MiB×3 read-ahead+sequential degrade) / parse(rayon parallel+RecordArena)
+│                / deferred(NameCache 128Ki+LazyRecordReader — degrade returned via stats)
+│                / probe(io-probe measurement; independent of main flow)
+├─ usn/          records / apply / session(journal tailing)
+├─ index/        mod(types+re-exports+in-place merge) / core(VolumeIndex+reads+derived caches)
+│                / mutate(USN mutations) / snapshot(persistence; unsafe POD confined here)
+│                / builder(2-pass build+EXCLUDED propagation) / compact(compaction) / frn
+│                / testutil(TestDir RAII etc.; feature "testutil" for other crates' tests)
+├─ query/        mod(AST/compile surface+wire→QueryOptions conversion) / exec(search driver+materialize)
+│                / sweep(pool-sweep candidate gen) / matchers(residual eval) / memo(DirPaths/OffsetTable)
+├─ engine/       mod(Engine+lifecycle+EngineEvent::to_wire=single point of event mapping)
+│                / volume(VolumeSlot+install_index+checkpoint — home of state)
+│                / worker(volume thread+pure transition-decision fns: snapshot_decision etc. — drives flow)
+│                / seams(SnapshotStore+JournalSource, 2 traits only; no additional ports = ADR-0018)
+│                / worker_tests(non-elevated deterministic replay of failure paths)
+│                / search(cross-volume+k-way merge) / results(ResultSet+fill_page=single impl of
+│                  row+blob build+STALE check) / tests
+├─ diag.rs       init_diag(sole bootstrap for all entry points) / resolve_log_dir / error_chain(4KiB)
+│                / degrade!(warn+counter, atomic) / diag ring+sink
 ├─ metrics.rs / wtf8.rs
-fmf-ffi/src/     lib(contract再エクスポート+エクスポートピン) / error / handle / events
-                 / volumes / blob / results / contract_tests(リテラル絶対値ピン+ABIレイアウト
-                 +null・エラー経路 — 正本誤編集の独立トリップワイヤ)。clippy.toml で
-                 unwrap_or_default 禁止(黙殺のコンパイル時拒否)
-fmf-proto/src/   lib(contract再公開) / frame(16Bヘッダ+長さ前置きcodec)
-                 / messages(ペイロードcodec — 型はcontract) / tests/golden(コーパスピン)
-fmf-service/src/ lib(モジュール公開 — ループバックテストが実サーバを駆動)
-                 / pipe(overlapped I/OのRead/Write化+listener。accept は connect/停止Event の2-wait)
-                 / server(接続毎: reader+worker2+書き込みmutex) / dispatch(オペコード→Engine、
-                 catch_unwind防火壁、結果ハンドルLRU64=evictはカウンタ+warn) / events(Subscribe
-                 +有界キュー256) / config(service.json) / host(ロック敗者の5s→60sリトライ)
+fmf-ffi/src/     lib(contract re-export+export pin) / error / handle / events
+                 / volumes / blob / results / contract_tests(literal absolute-value pin+ABI layout
+                 +null/error paths — independent tripwire for canonical-source miss-edits). clippy.toml
+                 forbids unwrap_or_default (compile-time rejection of silent swallow)
+fmf-proto/src/   lib(contract re-export) / frame(16B header+length-prefixed codec)
+                 / messages(payload codec — types in contract) / tests/golden(corpus pin)
+fmf-service/src/ lib(module exposure — loopback tests drive the real server)
+                 / pipe(overlapped I/O as Read/Write+listener; accept is a 2-wait on connect/stop Event)
+                 / server(per connection: reader+2 workers+write mutex) / dispatch(opcode→Engine,
+                 catch_unwind firewall, result-handle LRU64=evict is counter+warn) / events(Subscribe
+                 +bounded queue 256) / config(service.json) / host(lock-loser 5s→60s retry)
                  / faults(--debug-faults: !!lag/!!panic/!!drop)
-                 / security(SDDL構築ピン+SID捕捉+接続時トークン照合+dir DACL)
-                 / svc(serve共通コア+SCMエントリ: Stop/PRESHUTDOWN→flush→graceful)
-                 / main(run/install/uninstall --purge-data/start/stop/status)。clippy.toml 同上
-fmf-cli/src/     main(clap定義+dispatchのみ) / cmd/{index,stats,bench,io_probe,criterion_gate,diag}
-                 / bench_support(BENCH_QUERIES+baseline JSON形状+median+TempSnapshotGuard)
+                 / security(SDDL build pin+SID capture+connect-time token check+dir DACL)
+                 / svc(common serve core+SCM entry: Stop/PRESHUTDOWN→flush→graceful)
+                 / main(run/install/uninstall --purge-data/start/stop/status). clippy.toml same as above
+fmf-cli/src/     main(clap defs+dispatch only) / cmd/{index,stats,bench,io_probe,criterion_gate,diag}
+                 / bench_support(BENCH_QUERIES+baseline JSON shape+median+TempSnapshotGuard)
 app/FindMyFiles/
-├─ Engine/       IEngineClient(境界 — interface+例外型のみ。全asyncに CancellationToken)
-│                / EngineTypes(DTO群 — goldenの実形状と同期) / EngineJson(snake_case設定の唯一の定義)
-│                / Generated/EngineContract.g.cs(gen-contract生成・手編集禁止)
-│                / EngineEventMarshaler(イベント→IDispatcher越境の唯一の点)
-│                / FakeEngineClient(契約適合: invalid_queries.json共有+BumpEpoch)
-│                / PipeProtocol(codec — 定数はGenerated参照) / PageCodec(行デコード — 同)
-│                / NativeEngine(P/Invokeシグネチャ+生成構造体の片割れ+起動時SizeOfアサート)
-│                / EngineClientFactory(CLI>settings>auto の選択)
-│                / Transport/ PipeEngineClient(監督+多重化のみ) / PipeConnection(1接続の
-│                  所有単位 — 切断レースの構造的解消) / PipeSearchResult / PipeServerIdentity
-│                  / FfiEngineClient(世代カウンタ防御つきコールバック)
-├─ ViewModels/   MainViewModel(合成ルート) / SearchOrchestrator / ResultsPresenter
+├─ Engine/       IEngineClient(boundary — interface+exception types only; CancellationToken on all async)
+│                / EngineTypes(DTOs — synced with golden's actual shape) / EngineJson(sole definition of snake_case settings)
+│                / Generated/EngineContract.g.cs(gen-contract generated; no hand-editing)
+│                / EngineEventMarshaler(sole point of event→IDispatcher crossing)
+│                / FakeEngineClient(contract-conformant: shares invalid_queries.json+BumpEpoch)
+│                / PipeProtocol(codec — constants reference Generated) / PageCodec(row decode — same)
+│                / NativeEngine(P/Invoke signatures+the other half of generated structs+startup SizeOf assert)
+│                / EngineClientFactory(CLI>settings>auto selection)
+│                / Transport/ PipeEngineClient(supervision+multiplexing only) / PipeConnection(ownership
+│                  unit of a single connection — structural resolution of disconnect races) / PipeSearchResult / PipeServerIdentity
+│                  / FfiEngineClient(callback guarded by generation counter)
+├─ ViewModels/   MainViewModel(composition root) / SearchOrchestrator / ResultsPresenter
 │                / NotificationCenter / PerfPanelViewModel / StatusFormatter / ResultRow
-├─ Views/        PerfPanel(F12パネルのカスタムコントロール)
-├─ Controls/     ResultsViewportManager(viewport退避/復元・選択復元 — UIスレッド専用)
-├─ Converters/   UiConverters(x:Bind 静的純関数)
-├─ Virtualization/ VirtualResultList(生涯単一+Reassign/epoch+per-epoch ct=二重防御)
-├─ Services/     IDispatcher(テストシーム) / DispatcherQueueDispatcher / Notifier / FileLog / ShellOps
-│                / ExceptionPolicy(3種ハンドラ+クラッシュマーカーの単一の家)
-│                / AppSettings(%APPDATA%\settings.json: engineモード等。破損はwarn+既定値+.bad退避)
-└─ FindMyFiles.Tests/  xUnit(ManualDispatcher fake で決定的にUIスレッド模倣)
-                 / Contract/(EngineClientContractTests 抽象スイート×4派生
-                   + GoldenCorpusTests=両言語同一バイトピン)
+├─ Views/        PerfPanel(custom control for the F12 panel)
+├─ Controls/     ResultsViewportManager(viewport save/restore, selection restore — UI thread only)
+├─ Converters/   UiConverters(x:Bind static pure functions)
+├─ Virtualization/ VirtualResultList(single lifetime+Reassign/epoch+per-epoch ct=double defense)
+├─ Services/     IDispatcher(test seam) / DispatcherQueueDispatcher / Notifier / FileLog / ShellOps
+│                / ExceptionPolicy(3 handlers+single home of crash marker)
+│                / AppSettings(%APPDATA%\settings.json: engine mode etc.; corruption→warn+default+.bad save-aside)
+└─ FindMyFiles.Tests/  xUnit(ManualDispatcher fake deterministically mimics the UI thread)
+                 / Contract/(EngineClientContractTests abstract suite×4 derivations
+                   + GoldenCorpusTests=identical byte pin across both languages)
 ```
 
-新フィールド・新メソッドの可視性は「その責務のディレクトリ内」を既定とする(`pub(super)`)。crate 外公開は mod.rs の `pub use` 経由のみ。
+Default visibility for new fields/methods is "within that responsibility's directory" (`pub(super)`). Exposure outside the crate is only via `pub use` in mod.rs.
 
-## エンジン内部の要点
+## Engine Internals Key Points
 
-現在の構造のみ記す。判断理由・実測根拠・却下案は `docs/adr/` 参照。
+Only the current structure is described here. For decision rationale, measured evidence, and rejected alternatives, see `docs/adr/`.
 
-- **VolumeIndex(ボリューム毎、struct-of-arrays)**: 名前は fold-overflow レイアウト([ADR-0004](adr/0004-fold-overflow-name-layout.md)) — スイープ対象は fold 済み `lower_pool` 1本、原文は差分時のみ `orig_pool`+`orig_off`(`u32::MAX`=fold同一)。fold は長さ保存([ADR-0003](adr/0003-wtf8-length-preserving-fold.md))。size は u32 カラム+オーバーフロー map([ADR-0007](adr/0007-size-u32-overflow.md))。FRN→EntryId はソート済み id 順列、キーは frn カラム間接参照([ADR-0005](adr/0005-frn-index-sorted-permutation.md))。常時維持のソート順列は name のみ、size/mtime 順は遅延 derived([ADR-0006](adr/0006-lazy-sort-permutations.md))。パス文字列は保持せず親チェーンで遅延構築。削除は tombstone、閾値超でコンパクション。
-- **USNバッチのソート構造維持**: 挿入位置二分探索+in-place セグメント移動(`index/mod.rs merge_sorted_tail`、[ADR-0008](adr/0008-insertion-point-batch-merge.md))。
-- **コンパクション**: volume スレッドがバッチ適用毎に判定(`len≥100k && (tombstone>12.5% || dead_name_bytes>32MiB)`)。旧id昇順リマップで perm/FRN索引は再ソートなし([ADR-0009](adr/0009-compaction-order-preserving-remap.md))。read guard 下でコピー構築→`install_index` で swap+structural bump→開いている結果ハンドルはハードSTALE。死んだ dir の子は root へ(push_raw の orphan 方針)。
-- **FRN索引のlookup意味論**: 未マージ尾部(新しい順)→二分探索。常に tombstone 生存フィルタ(同キー複数ペアでも生存は高々1)。初回スキャンは parent 解決を `finish()` の並列パスへ遅延。
-- **既定除外(EXCLUDED)**: H/S 生属性+計算済み EXCLUDED ビット(自分または祖先が H|S)。クエリは既定でスキップ(`include_hidden_system` で解除)。継承はスキャン finish 時に O(n) 伝播、USN 挿入/移動時に親から再計算。制限: 除外ブランチからの subtree 移動は次回リスキャンまで陳腐化。
-- **generation 2層**: `content_generation` は USN バッチ毎++(既存結果ハンドルは読み出し継続可)。`structural_generation` はコンパクション/フルリスキャン時のみ++(既存ハンドルはハードSTALE=`FMF_E_STALE`)。差し替えは必ず `VolumeSlot::install_index` 経由(旧値+1 を引き継ぐ。初回/スナップショット復元は bump しない)。スナップショットには非永続(プロセス内単調性で十分)。
-- **クエリ時マテリアライズ**: ボリューム毎に順列を1パスフィルタ→ソート順確定済み連続配列+マルチボリューム k-way マージ(単一ボリュームは直コピー)。以後のページ取得は O(1) スライス。列クリック=別ソートで再発行。
-- **インクリメンタル検索(クエリキャッシュ)**: `VolumeSlot::last_query` が直前の(compiled, options, 両generation, ids)を保持。`query/subsume.rs` の保守的包含規則(同一ソート・単一ANDグループ・needle包含/範囲縮小/フィルタ追加のみ。fold橋渡しは orig→folded 方向のみ)で証明可能に絞り込める場合、`query::refine` が前回 ids を完全評価でフィルタ — O(前回ヒット数)。正しさは oracle テスト(refine==fresh)、キルスイッチ `FMF_QUERY_CACHE=0`、観測 `QueryTrace.cache`。
-- **ロック**: `parking_lot::RwLock`。検索=read、USNバッチ適用=write。index の書き手は volume スレッド1本。
-- **スレッド**: 初回スキャン=ボリューム毎1スレッド。USN追従=ボリューム毎1スレッド(ブロッキング読み→吸い尽くし→バッチ適用)。停止は `CancelSynchronousIo`。
-- **初回スキャン**: $MFT を16MiBチャンクでストリーミング読み(read-ahead スレッド1本+バッファ3本、起動失敗は逐次読みに劣化+カウンタ)、チャンク内は1MiBサブレンジで rayon 並列パース。チャンク順追記で EntryId 割当は逐次版と決定的一致(等価性ゲート=admin test)。deferred($ATTRIBUTE_LIST)名前は拡張レコードの RAM キャッシュから解決([ADR-0011](adr/0011-scan-streaming-pipeline.md))。
-- **検索実行**: クエリ→AST→`CompiledTerm` 列(コスト順、AND短絡)。rayon 64kチャンク並列。スイープは常に lower_pool。大文字 needle / Sensitive は fold needle のスーパーセットスイープ+原文 residual 検証、residual は fold 同一エントリを O(1) で解決([ADR-0004](adr/0004-fold-overflow-name-layout.md))。`dm:` はローカルTZ。NFC/NFD 正規化はしない(既知制約)。trigram 索引は不採用([ADR-0002](adr/0002-linear-sweep-no-trigram.md))。
-- **派生キャッシュ(OffsetTable/DirPaths/SizePerm/MtimePerm)**: content_generation 毎に世代管理、可能な限り前世代から差分延長(OffsetTable は stale 比 n/8 超でフル再構築、ウォーターマーク不整合は warn+カウンタ+再構築)。DirPaths は初回 path クエリで遅延構築、fold/orig 別スロット、dir-topology 世代が不変な限り差分延長。バイト数は `IndexStats.derived_cache_bytes` で B/entry ゲートに計上。
-- **永続化**: `{index_dir}\{drive-letter}.fmfidx`(例 `c.fmfidx`)、形式 FMFIDX04([ADR-0010](adr/0010-snapshot-raw-pod-no-compat.md))。temp→`MoveFileEx(REPLACE_EXISTING)`。起動時: ロード→検証→USN再生→ライブ追従。失敗は常にフルリスキャンへ。
+- **VolumeIndex (per volume, struct-of-arrays)**: names use the fold-overflow layout ([ADR-0004](adr/0004-fold-overflow-name-layout.md)) — the sweep target is the single folded `lower_pool`; the original is kept only on a mismatch via `orig_pool`+`orig_off` (`u32::MAX`=identical to fold). Fold is length-preserving ([ADR-0003](adr/0003-wtf8-length-preserving-fold.md)). Size is a u32 column+overflow map ([ADR-0007](adr/0007-size-u32-overflow.md)). FRN→EntryId is a sorted id permutation, keyed by indirection through the frn column ([ADR-0005](adr/0005-frn-index-sorted-permutation.md)). The only always-maintained sort permutation is name; size/mtime order is lazily derived ([ADR-0006](adr/0006-lazy-sort-permutations.md)). Path strings are not retained but lazily built via the parent chain. Deletions are tombstoned; compaction runs above a threshold.
+- **Maintaining sort structure on USN batches**: binary search for the insertion point+in-place segment move (`index/mod.rs merge_sorted_tail`, [ADR-0008](adr/0008-insertion-point-batch-merge.md)).
+- **Compaction**: the volume thread decides per batch apply (`len≥100k && (tombstone>12.5% || dead_name_bytes>32MiB)`). An ascending old-id remap means the perm/FRN indexes need no re-sort ([ADR-0009](adr/0009-compaction-order-preserving-remap.md)). A copy is built under a read guard→`install_index` swaps it+structural bump→open result handles become hard STALE. Children of a dead dir go to root (push_raw's orphan policy).
+- **FRN index lookup semantics**: unmerged tail (newest first)→binary search. Always tombstone-survivor filtered (even with multiple pairs for the same key, at most one survives). The initial scan defers parent resolution to the parallel pass in `finish()`.
+- **Default exclusion (EXCLUDED)**: raw H/S attributes+a computed EXCLUDED bit (self or an ancestor is H|S). Queries skip these by default (lifted via `include_hidden_system`). Inheritance is propagated O(n) at scan finish, and recomputed from the parent on USN insert/move. Limitation: a subtree move out of an excluded branch is stale until the next rescan.
+- **2-layer generation**: `content_generation` increments per USN batch (existing result handles can keep reading). `structural_generation` increments only on compaction/full rescan (existing handles become hard STALE=`FMF_E_STALE`). Replacement always goes through `VolumeSlot::install_index` (inheriting old+1; initial/snapshot restore does not bump). Not persisted in the snapshot (in-process monotonicity is enough).
+- **Query-time materialize**: per volume, one-pass-filter the permutation→a sort-order-finalized contiguous array+multi-volume k-way merge (single volume is a direct copy). Subsequent page fetches are O(1) slices. A column click=re-issue with a different sort.
+- **Incremental search (query cache)**: `VolumeSlot::last_query` holds the previous (compiled, options, both generations, ids). When the conservative subsumption rules in `query/subsume.rs` (same sort, single AND group, needle containment/range narrowing/filter addition only; fold bridging is orig→folded direction only) provably narrow the result, `query::refine` filters the previous ids via full evaluation — O(previous hit count). Correctness via oracle test (refine==fresh), kill switch `FMF_QUERY_CACHE=0`, observed in `QueryTrace.cache`.
+- **Locking**: `parking_lot::RwLock`. Search=read, USN batch apply=write. The index has a single writer: one volume thread.
+- **Threads**: initial scan=1 thread per volume. USN tailing=1 thread per volume (blocking read→drain→batch apply). Stop via `CancelSynchronousIo`.
+- **Initial scan**: $MFT is streamed in 16MiB chunks (1 read-ahead thread+3 buffers; startup failure degrades to sequential read+counter); within a chunk, rayon parses 1MiB subranges in parallel. Chunk-order append makes EntryId assignment deterministically match the sequential version (equivalence gate=admin test). Deferred ($ATTRIBUTE_LIST) names are resolved from a RAM cache of extension records ([ADR-0011](adr/0011-scan-streaming-pipeline.md)).
+- **Search execution**: query→AST→`CompiledTerm` sequence (cost order, AND short-circuit). rayon parallel over 64k chunks. The sweep is always on lower_pool. An uppercase needle / Sensitive does a superset sweep of the fold needle+original residual verification, resolving the fold-identical entry O(1) ([ADR-0004](adr/0004-fold-overflow-name-layout.md)). `dm:` is local TZ. No NFC/NFD normalization (known limitation). Trigram index not adopted ([ADR-0002](adr/0002-linear-sweep-no-trigram.md)).
+- **Derived caches (OffsetTable/DirPaths/SizePerm/MtimePerm)**: generation-managed per content_generation, extended incrementally from the previous generation where possible (OffsetTable fully rebuilds above a stale ratio of n/8; watermark mismatch→warn+counter+rebuild). DirPaths is lazily built on the first path query, with separate fold/orig slots, extended incrementally as long as the dir-topology generation is unchanged. Byte counts are charged to the B/entry gate via `IndexStats.derived_cache_bytes`.
+- **Persistence**: `{index_dir}\{drive-letter}.fmfidx` (e.g. `c.fmfidx`), format FMFIDX04 ([ADR-0010](adr/0010-snapshot-raw-pod-no-compat.md)). temp→`MoveFileEx(REPLACE_EXISTING)`. On startup: load→verify→USN replay→live tail. Failure always falls back to a full rescan.
 
-## FFI 契約(C ABI)
+## FFI Contract (C ABI)
 
-共通規約:
-- DLL名 **`fmf_engine`**。全関数は `int32_t` ステータス(`FMF_OK=0`)+出力引数。
-- 文字列は UTF-8(ファイル名は **WTF-8**: 不正サロゲートを保持。C#側は専用デコードでUTF-16へ復元)。
-- ハンドルは opaque ポインタ。全関数スレッドセーフ。コールバック内からのFFI再入は禁止。
-- 全入口で `catch_unwind` → `FMF_E_PANIC`。詳細メッセージは `fmf_last_error`(スレッドローカル)。
-- **ポインタ/長さ契約(呼び出し側責務)**: C ABI 境界では Rust は配列長も確保容量も検証できない。
-  - `(buf, cap)` 出力バッファ(`fmf_list_volumes` / `fmf_index_status`): `buf` は書込可能な `FmfVolumeStatus` を **`cap` 個**指すこと。エンジンは最大 `cap` 件だけ書き、`*count` に真の総数を返す(`buf=NULL` はサイズ照会で `*count` のみ書く)。
-  - `(volumes, n)` 入力配列(`fmf_index_start`): `volumes` は **`n` 個**の有効な NUL 終端 UTF-8 `char*` を指すこと。
-  - POD ポインタ(`FmfQueryOptions*` / `FmfVolumeStatus*` / `FmfEvent*` …)は宣言どおりの `#[repr(C)]` サイズ/アラインメントを満たすこと(C# は対応する明示レイアウトでマーシャリングし、`fmf-contract` が `offset_of` のコンパイル時表明でピンする)。
-  - エンジンは全ポインタを null チェックし `cap` 上限で書き込むが、**実確保を超える長さ申告は検知できない**(未定義動作)。この契約は唯一の呼び出し元 `FfiEngineClient` が各配列とその長さを一体で構築することで保証される(`fmf-ffi` が `#![allow(clippy::missing_safety_doc)]` で関数ごとの安全注記を本節へ委譲しているのはこのため)。
+Common conventions:
+- DLL name **`fmf_engine`**. All functions return an `int32_t` status (`FMF_OK=0`)+output args.
+- Strings are UTF-8 (file names are **WTF-8**: invalid surrogates preserved; the C# side restores UTF-16 via a dedicated decode).
+- Handles are opaque pointers. All functions are thread-safe. FFI re-entry from within a callback is forbidden.
+- `catch_unwind` at every entry → `FMF_E_PANIC`. The detail message is in `fmf_last_error` (thread-local).
+- **Pointer/length contract (caller's responsibility)**: at the C ABI boundary, Rust cannot validate array length or allocated capacity.
+  - `(buf, cap)` output buffer (`fmf_list_volumes` / `fmf_index_status`): `buf` must point to **`cap`** writable `FmfVolumeStatus`. The engine writes at most `cap` entries and returns the true total in `*count` (`buf=NULL` is a size query that writes only `*count`).
+  - `(volumes, n)` input array (`fmf_index_start`): `volumes` must point to **`n`** valid NUL-terminated UTF-8 `char*`.
+  - POD pointers (`FmfQueryOptions*` / `FmfVolumeStatus*` / `FmfEvent*` …) must satisfy the declared `#[repr(C)]` size/alignment (C# marshals with the corresponding explicit layout, and `fmf-contract` pins it with compile-time `offset_of` assertions).
+  - The engine null-checks every pointer and writes up to the `cap` limit, but **cannot detect a length claim exceeding the actual allocation** (undefined behavior). This contract is guaranteed by the sole caller, `FfiEngineClient`, constructing each array together with its length as a unit (this is why `fmf-ffi` uses `#![allow(clippy::missing_safety_doc)]` to delegate per-function safety notes to this section).
 
 ```c
-// ── ライフサイクル ──
-uint32_t fmf_abi_version(void);                         // 現在 1。C#側が起動時に照合
-// config_json: { "index_dir": "...", "log_dir": "...", "log_level": "info" } (必須キー)
+// ── lifecycle ──
+uint32_t fmf_abi_version(void);                         // currently 1; C# side checks at startup
+// config_json: { "index_dir": "...", "log_dir": "...", "log_level": "info" } (required keys)
 int32_t fmf_engine_create(const char* config_json, FmfEngineHandle* out);
-int32_t fmf_engine_destroy(FmfEngineHandle h);          // 内部スレッドjoin+保存(明示保存は fmf_flush)
+int32_t fmf_engine_destroy(FmfEngineHandle h);          // joins internal threads+saves (explicit save is fmf_flush)
 
-// ── イベント(エンジン内部スレッドから発火。受け側がDispatcherQueueへマーシャリング) ──
+// ── events (fired from internal engine threads; receiver marshals to DispatcherQueue) ──
 // kind: 1=Progress(volume, scanned) / 2=VolumeReady(volume, entries)
-//       / 3=IndexChanged(エンジン側200msデバウンス、唯一のスロットル)
+//       / 3=IndexChanged(200ms engine-side debounce, the only throttle)
 //       / 4=RescanStarted(volume) / 5=VolumeFailed(volume) / 6=EngineError(severity)
 typedef void (*FmfEventCb)(const FmfEvent* ev /*POD*/, void* user);
-int32_t fmf_set_event_callback(FmfEngineHandle h, FmfEventCb cb, void* user); // cb=NULLで解除
+int32_t fmf_set_event_callback(FmfEngineHandle h, FmfEventCb cb, void* user); // cb=NULL to clear
 
-// ── ボリュームと索引 ──
+// ── volumes and index ──
 int32_t fmf_list_volumes(FmfEngineHandle h, FmfVolumeStatus* buf, uint32_t cap, uint32_t* count);
-int32_t fmf_index_start(FmfEngineHandle h, const char* const* volumes, uint32_t n); // 明示開始・非同期。要素はドライブラベル "C:"
+int32_t fmf_index_start(FmfEngineHandle h, const char* const* volumes, uint32_t n); // explicit start, async; elements are drive labels "C:"
 int32_t fmf_index_status(FmfEngineHandle h, FmfVolumeStatus* buf, uint32_t cap, uint32_t* count);
 // FmfVolumeStatus.state: Scanning / Ready / Rescanning / Failed
-// クエリは常に「Ready なボリュームのみ」を対象に成功する(UIはstateで部分結果InfoBarを判定)
+// queries always succeed over "Ready volumes only" (UI judges the partial-result InfoBar by state)
 
-// ── クエリ(同期・高速。ソートはクエリ時に確定) ──
+// ── query (synchronous, fast; sort finalized at query time) ──
 // options: { sort: Name|Size|Mtime, dir: Asc|Desc, case_mode: Smart|Insensitive|Sensitive,
-//            include_hidden_system: bool(既定false=H/S属性とその配下を除外),
-//            regex_mode: u32(bit0=クエリ全体を1本のregexとして解釈, bit1=scope 0=名前/1=フルパス) }
+//            include_hidden_system: bool (default false = exclude H/S attributes and their descendants),
+//            regex_mode: u32 (bit0=interpret the whole query as one regex, bit1=scope 0=name/1=full path) }
 int32_t fmf_query(FmfEngineHandle h, const char* query_utf8,
                   const FmfQueryOptions* options, FmfResultHandle* out, uint64_t* out_count,
-                  FmfBlob** out_trace /* nullable: QueryTraceのJSON */);
+                  FmfBlob** out_trace /* nullable: QueryTrace JSON */);
 
-// ── 可観測性(JSONブロブ。FmfPageと同じ「エンジン確保+free」パターン) ──
+// ── observability (JSON blob; same "engine allocates+free" pattern as FmfPage) ──
 // FmfBlob { data: *const u8, len: u32 } — UTF-8 JSON
-int32_t fmf_engine_stats(FmfEngineHandle h, FmfBlob** out); // MetricsSnapshot(直近トレース・ヒストグラム・USNフィード・カラム別メモリ)
+int32_t fmf_engine_stats(FmfEngineHandle h, FmfBlob** out); // MetricsSnapshot (recent trace, histograms, USN feed, per-column memory)
 int32_t fmf_blob_free(FmfBlob*);
-// ── ページ取得: エンジン確保の連続ブロック(行ヘッダ配列+文字列blob)。P/Invoke 1回・コピー1回 ──
-// FmfRow(48バイト・パディング無し。fmf-ffi の contract_tests が size/offset を固定):
+// ── page fetch: an engine-allocated contiguous block (row-header array+string blob). 1 P/Invoke, 1 copy ──
+// FmfRow (48 bytes, no padding; fmf-ffi's contract_tests fix size/offset):
 //   { entry_ref u64, frn u64, size u64, mtime i64,
-//     name_off u32, parent_path_off u32, flags u32, name_len u16, parent_path_len u16 } + 末尾blob
-// 戻り FMF_E_STALE = structural_generation 不一致。UIは同一クエリを再発行
+//     name_off u32, parent_path_off u32, flags u32, name_len u16, parent_path_len u16 } + trailing blob
+// returns FMF_E_STALE = structural_generation mismatch. UI re-issues the same query
 int32_t fmf_result_page(FmfResultHandle r, uint64_t offset, uint32_t count, FmfPage** out);
 int32_t fmf_page_free(FmfPage* p);
 int32_t fmf_result_free(FmfResultHandle r);
 
-// ── 診断 ──
-// len は in/out: in=バッファ容量、out=書いた長さ(NUL含まず)。容量不足は黙って切り詰め
-// (常にNUL終端)。buf=NULL は必要サイズの照会。
+// ── diagnostics ──
+// len is in/out: in=buffer capacity, out=length written (excluding NUL). Insufficient capacity is silently
+// truncated (always NUL-terminated). buf=NULL queries the required size.
 int32_t fmf_last_error(char* buf, uint32_t* len);
 ```
 
-エラーコード表(pipeプロトコルと共用。**追記のみ・再番号禁止** — contract_tests が値をピンする): `FMF_OK=0, FMF_E_INVALID_ARG=1, FMF_E_STALE=2, FMF_E_NOT_ADMIN=3, FMF_E_VOLUME=4, FMF_E_QUERY_SYNTAX=5, FMF_E_IO=6, FMF_E_LOCKED=7, FMF_E_PANIC=99`。
-`FMF_E_LOCKED` = index_dir の writer lock を他プロセスが保持(単一書き手不変条件のプロセス間強制。「Pipe プロトコル」節参照)。
+Error code table (shared with the pipe protocol. **Append-only, no renumbering** — contract_tests pin the values): `FMF_OK=0, FMF_E_INVALID_ARG=1, FMF_E_STALE=2, FMF_E_NOT_ADMIN=3, FMF_E_VOLUME=4, FMF_E_QUERY_SYNTAX=5, FMF_E_IO=6, FMF_E_LOCKED=7, FMF_E_PANIC=99`.
+`FMF_E_LOCKED` = another process holds the index_dir writer lock (cross-process enforcement of the single-writer invariant; see the "Pipe Protocol" section).
 
 ```c
-// ── 明示保存(v2で実体化) ──
-// 全Ready volumeのうちdirty(前回保存からcontent_generationが進んだ)なもののみ
-// スナップショット保存。サービスが定期+停止時に内部で呼ぶ。pipeには公開しない
-// (オペコード11は番号予約のみ — クライアント起動のflush連打はUSN適用を止めるDoS経路)。
+// ── explicit save (materialized in v2) ──
+// Snapshot-saves only Ready volumes that are dirty (content_generation advanced since the last save).
+// The service calls this internally on a schedule+at stop. Not exposed on the pipe
+// (opcode 11 is a number reservation only — client-driven flush spamming is a DoS path that stops USN apply).
 int32_t fmf_flush(FmfEngineHandle h);
 ```
 
-**意図的に入れないもの**: `fmf_entry_full_path`(行が name+parent_path を持つので不要)/ クエリキャンセル(クエリは数十ms想定。UIは世代カウンタで古い結果を捨てる。重くなったら `fmf_query_cancel` を追加する余地のみ残す)。
+**Intentionally not included**: `fmf_entry_full_path` (unnecessary since a row carries name+parent_path) / query cancel (queries are expected to take tens of ms; the UI drops stale results via the generation counter; only the room to add `fmf_query_cancel` if it ever gets heavy is left).
 
-## Pipe プロトコル(v2 サービス分離)
+## Pipe Protocol (v2 service split)
 
-`fmf-service`(特権サービス)と非特権UIの間のワイヤ仕様。本節が正本。機械可読な定義
-(エラーコード・オペコード・イベント種・POD・上限値・版数)は依存ゼロの leaf クレート
-**`fmf-contract`** が単一正本として持ち、`fmf-proto`(エンコード/デコードの実装)・
-`fmf-ffi`・`fmf-service` はそこから放射される([ADR-0018](adr/0018-contract-single-source.md)。
-かつての「cdylib は依存できないため定数を複製」は Cargo の事実誤認だった — 不可能なのは
-cdylib **に**依存する方向のみ)。fmf-ffi の contract_tests はリテラル絶対値ピンとして残り、
-正本そのものの誤編集を検出する独立トリップワイヤを務める。
+The wire spec between `fmf-service` (privileged service) and the non-privileged UI. This section is canonical. The machine-readable
+definitions (error codes, opcodes, event kinds, POD, limits, version numbers) are held as the single canonical source by the
+zero-dependency leaf crate **`fmf-contract`**, and `fmf-proto` (the encode/decode implementation),
+`fmf-ffi`, and `fmf-service` radiate from it ([ADR-0018](adr/0018-contract-single-source.md);
+the former claim "a cdylib cannot be depended on, so constants must be duplicated" was a factual error about Cargo — the only
+impossible direction is depending **on** a cdylib). fmf-ffi's contract_tests remain as literal absolute-value pins,
+serving as an independent tripwire that detects miss-edits of the canonical source itself.
 
-### トランスポート
+### Transport
 
-- pipe名: `\\.\pipe\fmf-engine-v2`(プロトコル版数を名前に含む。非互換変更は名前ごと上げる — v1→v2 は `FmfQueryOptions` の `regex_mode` 追加で 16→20B になった非互換変更。ADR-0023)
-- バイトモード(`PIPE_TYPE_BYTE`)+長さ前置きフレーミング(メッセージモードは使わない)
-- 作成フラグ: **初回インスタンスのみ** `FILE_FLAG_FIRST_PIPE_INSTANCE`(名前の先取りを検知。
-  2本目以降は同一SDDLでフラグ無し — サーバが初回インスタンスを保持する限りスクワッティング不能)
-  + 全インスタンスに `PIPE_REJECT_REMOTE_CLIENTS`。インスタンス上限 8(超過は接続拒否+
-  `pipe_connections_rejected` カウンタ)
-- DACL: 明示SDDL `D:P(A;;GA;;;SY)(A;;GRGW;;;<利用者SID>)` — SYSTEM と install 時に捕捉した利用者SIDのみ。
-  Authenticated Users は不採用(マルチユーザー機での名前漏洩)。Administrators 許可も不成立
-  (UACフィルタ済みトークンでは deny-only になり非昇格UIが接続できない)。多重防御として
-  接続受理時にクライアントトークンを `service.json` の `authorized_sids` と照合する
-  (`ImpersonateNamedPipeClient` でクライアントSIDを読む)
-- **クライアントは識別レベルで pipe を開く**(C# `TokenImpersonationLevel.Identification` /
-  Rust `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`)。既定の匿名レベルのままだとサーバの
-  `ImpersonateNamedPipeClient` が匿名トークンしか得られず、上の SID 照合が**認可済みユーザーの
-  接続すら全拒否**する(`pipe client token rejected`)。この罠は `authorized_sids` が空で照合を
-  スキップするコンソールモードのテストでは露呈しない — インストール済みサービスで初めて出る
-- クライアント側検証: 既定pipe名のとき `GetNamedPipeServerProcessId` → **SCM登録の fmf-engine
-  サービスPID**(`QueryServiceStatusEx`)と照合(偽サーバ対策)。非昇格UIで動く — SYSTEMプロセスの
-  トークンは非昇格では開けず(ACCESS_DENIED)、session 0 の identity も取得できないので、SYSTEM
-  トークン照合は使えない。squatter は SCM登録(要admin)ができずPIDが一致しない。`--pipe-name`
-  指定時(テスト)は検証をスキップ
+- pipe name: `\\.\pipe\fmf-engine-v2` (the protocol version is in the name; an incompatible change bumps the whole name — v1→v2 was the incompatible change of adding `regex_mode` to `FmfQueryOptions`, growing it 16→20B. ADR-0023)
+- byte mode (`PIPE_TYPE_BYTE`)+length-prefixed framing (message mode not used)
+- creation flags: `FILE_FLAG_FIRST_PIPE_INSTANCE` on the **first instance only** (detects name pre-emption;
+  the 2nd and later instances use the same SDDL with no flag — squatting is impossible as long as the server holds the first instance)
+  + `PIPE_REJECT_REMOTE_CLIENTS` on all instances. Instance limit 8 (excess is connection-rejected+
+  `pipe_connections_rejected` counter)
+- DACL: explicit SDDL `D:P(A;;GA;;;SY)(A;;GRGW;;;<user SID>)` — only SYSTEM and the user SID captured at install.
+  Authenticated Users not adopted (name leak on multi-user machines). Allowing Administrators also fails
+  (a UAC-filtered token becomes deny-only, so the non-elevated UI cannot connect). As defense in depth,
+  on connection accept the client token is checked against `authorized_sids` in `service.json`
+  (`ImpersonateNamedPipeClient` reads the client SID)
+- **The client opens the pipe at identification level** (C# `TokenImpersonationLevel.Identification` /
+  Rust `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`). Left at the default anonymous level, the server's
+  `ImpersonateNamedPipeClient` only gets an anonymous token, and the SID check above **rejects even an
+  authorized user's connection** (`pipe client token rejected`). This trap is not exposed by console-mode tests
+  that skip the check because `authorized_sids` is empty — it only shows up with an installed service
+- client-side verification: for the default pipe name, `GetNamedPipeServerProcessId` → checked against the
+  **PID of the SCM-registered fmf-engine service** (`QueryServiceStatusEx`) (anti-fake-server). Works in the non-elevated UI — a SYSTEM process's
+  token cannot be opened non-elevated (ACCESS_DENIED), and the session 0 identity is unobtainable, so SYSTEM
+  token checking cannot be used. A squatter cannot do SCM registration (admin required), so the PID will not match. When `--pipe-name`
+  is specified (tests), verification is skipped
 
-### フレーム(16バイトLEヘッダ+ペイロード)
+### Frame (16-byte LE header+payload)
 
 ```c
 struct FrameHeader {            // 16 bytes, little-endian
-    uint32_t len;               // ペイロード長(ヘッダ含まず)。上限 16 MiB
-    uint16_t opcode;            // 下表
+    uint32_t len;               // payload length (excluding header). limit 16 MiB
+    uint16_t opcode;            // see table below
     uint16_t flags;             // bit0=response, bit1=event push
-    uint32_t request_id;        // リクエスト/レスポンス相関。event push は 0
-    int32_t  status;            // レスポンスのみ有効。エラーコード表(FFIと共用)
+    uint32_t request_id;        // request/response correlation. event push is 0
+    int32_t  status;            // valid only on responses. error code table (shared with FFI)
 };
 ```
 
-- 不正フレーム(未知opcode・len超過・切詰め)= 接続切断+`pipe_malformed_frames` カウンタ+warn
-- エラー応答(status != 0)はペイロードに UTF-8 詳細を同梱(`fmf_last_error` の写像 —
-  スレッドローカルの pull は pipe には存在しない)
-- リクエストは request_id で多重化(out-of-order 完了可)
+- malformed frame (unknown opcode, len overflow, truncation) = disconnect+`pipe_malformed_frames` counter+warn
+- an error response (status != 0) carries UTF-8 detail in the payload (the mapping of `fmf_last_error` —
+  thread-local pull does not exist on the pipe)
+- requests are multiplexed by request_id (out-of-order completion allowed)
 
-### オペコード表(FFI関数との対応)
+### Opcode table (correspondence to FFI functions)
 
-ペイロード表記の凡例: 型注釈つき `{}` = **リトルエンディアン・パディング無しのPODバイト列**。
-「JSON」= UTF-8 JSON、**フィールド名は snake_case(serde 既定)**。POD+可変長データは記載順に
-隙間なく連結。ボリューム識別子は全箇所で**ドライブラベル文字列 `"C:"`**(GUIDは使わない)。
-バイナリ・JSON とも代表メッセージは Rust/C# 両スイートで同一の**ゴールデンフレーム**(バイト列)
-としてピンする。正本コーパスは **`contract/golden/`**(リポジトリルート): fmf-proto
-`tests/golden.rs` と fmf-core `tests/golden_json.rs` が捕獲・ピンし、C# は
-`GoldenCorpusTests` が同一ファイルを独立に decode→re-encode してピンする。再捕獲は
-`FMF_BLESS=1` を付けた明示実行のみ(意図的な契約変更の儀式 — [ADR-0018](adr/0018-contract-single-source.md))。
+Payload-notation legend: a type-annotated `{}` = **little-endian, no-padding POD byte sequence**.
+"JSON" = UTF-8 JSON, **field names are snake_case (serde default)**. POD+variable-length data are concatenated
+with no gaps in the listed order. The volume identifier is everywhere a **drive-label string `"C:"`** (GUIDs not used).
+For both binary and JSON, the representative messages are pinned as identical **golden frames** (byte sequences)
+in both the Rust and C# suites. The canonical corpus is **`contract/golden/`** (repository root): fmf-proto
+`tests/golden.rs` and fmf-core `tests/golden_json.rs` capture and pin them, and on the C# side
+`GoldenCorpusTests` independently decode→re-encode the same files and pin them. Re-capture is only an explicit
+run with `FMF_BLESS=1` (the ritual for an intentional contract change — [ADR-0018](adr/0018-contract-single-source.md)).
 
-| op | 名前 | FFI対応 | ペイロード(req → resp) |
+| op | name | FFI mapping | payload (req → resp) |
 |---|---|---|---|
-| 1 | Hello | `fmf_abi_version` | `{protocol_version:u32}` → `{protocol_version:u32, abi_version:u32, server_pid:u32}`(版不一致は INVALID_ARG+切断) |
-| 2 | Subscribe | `fmf_set_event_callback(cb≠NULL)` | 空 → 空。以後この接続にイベントをプッシュ |
-| 3 | Unsubscribe | `fmf_set_event_callback(NULL)` | 空 → 空 |
-| 4 | ListVolumes | `fmf_list_volumes` | 空 → JSON `[{"volume":"C:","state":0,"entries":0}]`(state は FmfVolumeStatus.state と同値) |
-| 5 | IndexStart | `fmf_index_start` | JSON `{"volumes":["C:"]}` → 空(service.json へ永続化) |
-| 6 | IndexStatus | `fmf_index_status` | 空 → JSON(ListVolumes と同形) |
-| 7 | Query | `fmf_query` | `FmfQueryOptions`(下記20B POD)+UTF-8クエリ文字列(長さはフレーム len から導出・NUL終端なし) → `{result_id:u64, count:u64}`+QueryTrace JSON |
-| 8 | ResultPage | `fmf_result_page` | `{result_id:u64, offset:u64, count:u32}` → `{row_count:u32, blob_len:u32}` → `FmfRow`(48B)× row_count(密配置) → 文字列blob(blob_len バイト・WTF-8)。`name_off`/`parent_path_off` は **blob 先頭基準**のバイトオフセット(FFI の FmfPage と同一レイアウト) |
-| 9 | ResultFree | `fmf_result_free` | `{result_id:u64}` → 空 |
-| 10 | Stats | `fmf_engine_stats` | 空 → MetricsSnapshot JSON(FFIと同一形状・snake_case) |
-| 11 | (Flush 予約) | `fmf_flush` | **番号予約のみ・実装しない** — クライアント起動の flush 連打は index.read() 保持の反復で USN 適用を止めるローカル DoS 経路。保存はサービス内部の責務 |
-| 12 | ServiceInfo | (サービス固有) | 空 → JSON `{uptime_ms, connections, version}` |
+| 1 | Hello | `fmf_abi_version` | `{protocol_version:u32}` → `{protocol_version:u32, abi_version:u32, server_pid:u32}` (version mismatch is INVALID_ARG+disconnect) |
+| 2 | Subscribe | `fmf_set_event_callback(cb≠NULL)` | empty → empty. events pushed to this connection thereafter |
+| 3 | Unsubscribe | `fmf_set_event_callback(NULL)` | empty → empty |
+| 4 | ListVolumes | `fmf_list_volumes` | empty → JSON `[{"volume":"C:","state":0,"entries":0}]` (state equals FmfVolumeStatus.state) |
+| 5 | IndexStart | `fmf_index_start` | JSON `{"volumes":["C:"]}` → empty (persisted to service.json) |
+| 6 | IndexStatus | `fmf_index_status` | empty → JSON (same shape as ListVolumes) |
+| 7 | Query | `fmf_query` | `FmfQueryOptions` (20B POD below)+UTF-8 query string (length derived from frame len, no NUL terminator) → `{result_id:u64, count:u64}`+QueryTrace JSON |
+| 8 | ResultPage | `fmf_result_page` | `{result_id:u64, offset:u64, count:u32}` → `{row_count:u32, blob_len:u32}` → `FmfRow` (48B)× row_count (densely packed) → string blob (blob_len bytes, WTF-8). `name_off`/`parent_path_off` are byte offsets **relative to the start of the blob** (same layout as the FFI FmfPage) |
+| 9 | ResultFree | `fmf_result_free` | `{result_id:u64}` → empty |
+| 10 | Stats | `fmf_engine_stats` | empty → MetricsSnapshot JSON (same shape as FFI, snake_case) |
+| 11 | (Flush reserved) | `fmf_flush` | **number reserved only, not implemented** — client-driven flush spamming is a local DoS path that stops USN apply by repeatedly holding index.read(). Saving is the service's internal responsibility |
+| 12 | ServiceInfo | (service-specific) | empty → JSON `{uptime_ms, connections, version}` |
 
-`FmfQueryOptions`(20B・パディング無し・LE — FmfRow と同様に contract test でピン):
+`FmfQueryOptions` (20B, no padding, LE — pinned by a contract test like FmfRow):
 `{ sort:u32@0(0=Name 1=Size 2=Mtime), desc:u32@4(0=Asc 1=Desc),
 case_mode:u32@8(0=Smart 1=Insensitive 2=Sensitive), include_hidden_system:u32@12(0/1),
-regex_mode:u32@16(bit0=クエリ全体を1本のregex扱い, bit1=scope 0=名前/1=フルパス, 上位bitは予約0) }`
+regex_mode:u32@16(bit0=treat the whole query as one regex, bit1=scope 0=name/1=full path, high bits reserved 0) }`
 
-写像の例外(C ABI 固有で pipe に存在しないもの): `fmf_engine_create`/`fmf_engine_destroy`
-(接続確立/切断とサービス寿命に吸収)、`fmf_page_free`/`fmf_blob_free`(フレーム受信で所有権が
-クライアントへ移る)、`fmf_last_error`(エラー応答のインライン詳細)。
+Mapping exceptions (C ABI specific, not present on the pipe): `fmf_engine_create`/`fmf_engine_destroy`
+(absorbed into connection establish/disconnect and service lifetime), `fmf_page_free`/`fmf_blob_free` (ownership moves
+to the client on frame receipt), `fmf_last_error` (inline detail in error responses).
 
-### イベントプッシュ
+### Event push
 
-- Subscribe 済み接続へ `flags=event, request_id=0, opcode=イベント種`(FFI の kind 1〜6 と同値)で
-  `FmfEvent` 相当 POD `{kind:u32, _pad:u32, entries:u64, volume:[u8;16]}` をプッシュ。
-  `volume` は **UTF-8 ドライブラベル("C:")の 0x00 詰め**(GUIDではない)
-- 接続毎に有界キュー(256)+専用 writer スレッド。満杯は最古をドロップ+`pipe_events_dropped`
-  カウンタ+warn — 遅い/読まないクライアントが volume スレッドを絶対にブロックしない(固まらない)。
-  ドロップは IndexChanged 系なら次回再クエリで自己回復する
-- イベントフレームは opcode にイベント種(1〜6)を載せるため要求オペコードと番号が重なる —
-  **必ず flags の event ビットで先に弁別する**こと(opcode 単独で dispatch しない)
-- クライアントの(再)接続シーケンスは固定(本節が正本): **Hello → Subscribe → IndexStatus →
-  IndexChanged 強制発火**。最後の IndexChanged は**クライアントがローカルで合成する**
-  (サーバは送信しない)— 切断中に取り逃した変更を再クエリで取り込むため
+- To a Subscribed connection, push `flags=event, request_id=0, opcode=event kind` (equal to FFI kind 1–6) with the
+  `FmfEvent`-equivalent POD `{kind:u32, _pad:u32, entries:u64, volume:[u8;16]}`.
+  `volume` is a **UTF-8 drive label ("C:") 0x00-padded** (not a GUID)
+- per connection a bounded queue (256)+a dedicated writer thread. When full, drop the oldest+`pipe_events_dropped`
+  counter+warn — a slow/non-reading client never blocks the volume thread (never hangs).
+  A dropped IndexChanged-class event self-heals on the next re-query
+- because an event frame carries the event kind (1–6) in opcode, its number overlaps with request opcodes —
+  **always discriminate first by the event bit in flags** (do not dispatch on opcode alone)
+- the client's (re)connect sequence is fixed (this section is canonical): **Hello → Subscribe → IndexStatus →
+  forced IndexChanged fire**. The last IndexChanged is **synthesized locally by the client**
+  (the server does not send it) — to pick up, via re-query, changes missed while disconnected
 
-### 結果ハンドル(result_id)の寿命
+### Result handle (result_id) lifetime
 
-- サーバは接続毎レジストリで `ResultSet` を保持。`ResultFree` か切断で解放
-- 上限 64/接続。超過は**最終アクセスが最古のもの(LRU)** を evict し、以後その result_id への
-  ResultPage は `FMF_E_STALE`(detail に "evicted" を含め、構造的世代交代と弁別可能にする)。
-  クライアントは既存の STALE→再クエリ経路で回復する
+- the server holds `ResultSet`s in a per-connection registry. Freed by `ResultFree` or disconnect
+- limit 64/connection. On excess, **evict the least-recently-accessed (LRU)**, and a subsequent
+  ResultPage for that result_id returns `FMF_E_STALE` (detail includes "evicted" to make it distinguishable from a structural generation change).
+  the client recovers via the existing STALE→re-query path
 
-### 単一書き手の排他(プロセス間)
+### Single-writer exclusion (cross-process)
 
-- `Engine::new` は `{index_dir}\.writer.lock` を共有モード0で開き生存期間中保持。失敗は
-  `FMF_E_LOCKED`。OSハンドル消滅で自動解放されるため stale ロックは発生しない
-- サービスが負けた側(in-proc UI が先行): バックオフ付きリトライ(5s→60s上限)+保持プロセス pid を
-  ログ。SCM の障害回復(再起動)ループを誘発しない終了コードで停止する
-- UI が負けた側(サービス稼働中に `--engine=inproc`): 説明付き InfoBar(「サービス稼働中。
-  in-proc を使うには `just service-stop`」)
+- `Engine::new` opens `{index_dir}\.writer.lock` in share-mode 0 and holds it for its lifetime. Failure is
+  `FMF_E_LOCKED`. It auto-releases when the OS handle vanishes, so a stale lock never occurs
+- the service as the loser (in-proc UI got there first): backoff retry (5s→60s cap)+logs the holding process pid.
+  Stops with an exit code that does not trigger an SCM failure-recovery (restart) loop
+- the UI as the loser (`--engine=inproc` while the service is running): an explanatory InfoBar ("Service is running.
+  To use in-proc, run `just service-stop`")
 
-### マシン単位設定 `%ProgramData%\find-my-files\service.json`(サービス所有)
+### Per-machine settings `%ProgramData%\find-my-files\service.json` (service-owned)
 
 ```json
 { "volumes": ["C:"], "log_level": "info", "flush_interval_secs": 300, "authorized_sids": ["S-1-5-21-…"] }
 ```
 
-- `fmf-service install` が利用者SID捕捉と共に生成。IndexStart 受信で volumes を永続化。
-  初回既定は全固定NTFSボリューム。**非昇格UIは自分のSIDを `--owner-sid` で転送**し、install は
-  それを `validate_user_sid`(実在ユーザー型=SidTypeUser のみ採用)で検証して `authorized_sids` に
-  追記する — OTS昇格(別の管理者アカウントで昇格)では install 自身のSIDが日常ユーザーと異なるため
-- **`authorized_sids` はサービス起動時に一度だけ読まれ、DACL構築と接続時トークン照合に焼かれる
-  (稼働中は不変)**。追加SIDを反映するには `fmf-service restart`(= stop→start)が必須 — in-place の
-  `install` だけでは既存の稼働インスタンスに効かない(古い許可リストで拒否し続ける)。アプリの
-  「サービスを登録/登録し直す」は install→restart を続けて実行する
-- ユーザー単位の `%APPDATA%\find-my-files\settings.json`(UI所有)とは所有権を分離する
+- `fmf-service install` creates it together with capturing the user SID. IndexStart receipt persists volumes.
+  The initial default is all fixed NTFS volumes. **The non-elevated UI forwards its own SID via `--owner-sid`**, and install
+  validates it with `validate_user_sid` (accepts only the real user type=SidTypeUser) before appending it to `authorized_sids`
+  — because under OTS elevation (elevating with a different admin account) install's own SID differs from the everyday user's
+- **`authorized_sids` is read exactly once at service start and baked into DACL construction and connect-time token checking
+  (immutable while running)**. Reflecting an added SID requires `fmf-service restart` (= stop→start) — an in-place
+  `install` alone does not affect a running instance (it keeps rejecting with the old allow list). The app's
+  "register/re-register the service" runs install→restart in sequence
+- ownership is separated from the per-user `%APPDATA%\find-my-files\settings.json` (UI-owned)
 
-## C# 側の契約
+## C# Side Contract
 
-- `IEngineClient`(差し替え境界): `SearchAsync(query, options) → SearchOutcome(ISearchResult, QueryTrace)` / `GetStatsAsync` / `ListVolumesAsync` / `StartIndexingAsync` / `GetStatusAsync`(**3メソッドは v2 で Task 返しに変更** — pipe 越えの同期呼び出しはUIスレッドの「固まらない」違反)/ `event IndexChanged` / `event VolumeUpdated` / `event EngineErrorOccurred` / `EngineConnectionState Connection { get; }` + `event ConnectionChanged`(InProc | Connecting | Connected | Reconnecting。Ffi/Fake は InProc 固定)。Fake/FFI/Pipe の3実装が同じ口に従う。
-- **エンジン選択**(`EngineClientFactory`): CLI `--fake-engine` / `--engine=pipe|inproc` > settings.json の `"engine"`(既定 `auto`)> auto = pipe 250ms プローブ → 成功で Pipe / 失敗時は**サービス状態(`ServiceSetup.QueryState`)で分岐**: 稼働中(=writer.lock 保持。プローブ失敗はトークン非認可を意味する)なら**昇格していても in-proc を作らず**(FMF_E_LOCKED 衝突を確実に回避)「登録し直す」導線つき空エンジン / 不在・停止かつプロセス昇格済みで Ffi(writer.lock は空き)/ どちらも不可なら説明付き InfoBar+**空エンジン**(結果ゼロの `FakeEngineClient.CreateEmpty()`、バッジ「未接続」 — デモデータは出さない: 検索アプリで偽データに実用性はない)+「管理者として再起動」ボタン(明示操作のみ。自動 runas ループ禁止。非昇格ユーザーのSIDを `--setup-owner` で転送)。昇格 in-proc 起動でサービスが未登録/停止のときは、アプリ内通知の1クリック(`ServiceSetup` → `fmf-service install --owner-sid`+`restart`。install はサービス側で冪等、restart で新 `authorized_sids` を反映)でセットアップできる — 端末を一度も開かない導入経路: 通常起動 →「管理者として再起動」→「サービスを登録して開始」→ 以後ずっと通常起動。データ入りの Fake は `--fake-engine`(開発・UIテスト)専用。
-- **切断と再接続**(`PipeEngineClient`): 切断 = 進行中要求を `EngineUnavailableException` で即時失敗・生存 `ISearchResult` を epoch 無効化(以後 `GetRangeAsync` → `StaleResultException` = 既存の再クエリ機構が回復経路)・バックオフ(250ms→5s)で無限再接続。再接続シーケンスは「Pipe プロトコル」節が正本(`VolumeUpdated` 群は IndexStatus 応答から合成して発火)。要求には既定タイムアウト10s。
-- `SearchResultHandle : SafeHandle`。ページフェッチは `DangerousAddRef/Release` を挟み、`Dispose()` 後も in-flight フェッチ完了まで実体を解放しない。
-- ページ受領→`ResultRow` へコピー→**即 `fmf_page_free`**。
-- コールバック delegate はクライアントのフィールドに保持(GC回収防止)。受領後 `DispatcherQueue.TryEnqueue` でUIへ。
-- **検索パイプラインの責務分割**(MainViewModel は合成ルートのみ):
-  - `SearchOrchestrator` — いつ・何を検索するか: 50msデバウンス(クリアは即時)、generationカウンタによる陳腐結果のDispose、`RequeryOrigin` 分類、Stale有界リトライ(1回)、例外分類。**空クエリはエンジンに投げない**(空欄に返すべき結果はない、というプロダクト規則。match-all列挙はUSNティック毎にIDが動くため起動画面が永遠に再描画される)— `PresentEmpty`(冪等)で空画面。**IME変換中はクエリ保留**(`TextCompositionStarted/Ended`、確定文字列だけが通常デバウンスで流れる)。**絞り込みモード**(focused search)= エンジンに渡す直前の純粋なクエリ書き換え(`FocusedQueryRewriter`: 各ORグループに `!path:` 除外と `ext:` ホワイトリスト1項を付加。`ext:`/`regex:` 明示グループには ext を、`path:`/`\` 含有グループには除外を付加しない)— エンジン非接触、設定は settings.json、ADR-0019。
-  - `ResultsPresenter` — 結果の提示: 公開**前**に可視範囲ページをプリフェッチし、`VirtualResultList.Reassign` で原子的に公開(旧結果は新結果が揃うまで画面に残る=空白フレームゼロ)。件数テキストと viewport 配置イベント。
-- 再クエリの2系統(`RequeryOrigin` が分類): **タイプ/クリア/ソート/フィルタ起因=先頭リセット** / **IndexChanged/VolumeReady/Stale起因=先頭可視インデックスを退避→復元、選択はseed内EntryRef一致時のみベストエフォート復元**。
-- `VirtualResultList`(非ジェネリックIList+INCC+IItemsRangeInfo): **ページと同寿命の単一インスタンス**(ItemsSource は x:Bind OneTime — 差し替えるとListViewの仮想化状態が破棄されてちらつく)。新結果は `Reassign(result, seeds)` = epoch++ → ページキャッシュ破棄 → seed適用 → **INCC Reset を1回発行**(UIスレッド限定)。**同一結果の再クエリ**(エンジンが`QueryTrace.unchanged`で保証: 同一テキスト+オプションかつ全ボリュームでID列がmemcmp一致)は `RefreshInPlace` = epoch++ → ハンドル差し替え → 可視seedを既存行インスタンスにin-place充填(MVVMセッターは値変化時のみ通知)→ **Resetなし・件数テキスト不変** — アイドルのUSNトラフィック(ログ・テレメトリ等)が200ms毎に引き起こす再クエリで画面が再描画されない。in-place更新されたsize/mtimeは値が変わったセルだけ更新される。indexer は絶対にフェッチせずプレースホルダ返却(**範囲外は即throw** — 負indexや偽ページ捏造をしない)。`RangesChanged` で可視範囲±1ページを64行単位バックグラウンドフェッチ→既存 ResultRow のプロパティ充填。旧epochのフェッチ完了は黙って破棄。ページLRU上限4096行。ハードSTALE受領→`BecameStale`(epoch一致時のみ)→ Orchestrator が再クエリ。
-- **IList契約の不変条件(在籍を偽って肯定しない)**: XAMLはWinRTアダプタ経由で `Contains`/`IndexOf`/`GetAt` の答えを盲信する。偽の「不在」はコンテナ再実体化で済むが、偽の「在籍」は `GetAt(staleIndex)` でXAML深部のクラッシュになる(実証済み: 結果ありの検索→全消去で確実に再現した `Int32.MaxValue-1` 例外の根)。在籍の定義=「indexがCount未満 かつ 現在のページキャッシュの該当スロットがその同一インスタンス」。旧結果の行・LRU追い出し済みページの行・列挙用の一時行は常に不在と答える。列挙/CopyToは仮想化状態(LRU)を乱さない。変異系(Reassign/RefreshInPlace)のUIスレッド検査はRelease常時有効。
+- `IEngineClient` (swap boundary): `SearchAsync(query, options) → SearchOutcome(ISearchResult, QueryTrace)` / `GetStatsAsync` / `ListVolumesAsync` / `StartIndexingAsync` / `GetStatusAsync` (**3 methods changed to return Task in v2** — a synchronous call across the pipe is a "never hang" violation on the UI thread) / `event IndexChanged` / `event VolumeUpdated` / `event EngineErrorOccurred` / `EngineConnectionState Connection { get; }` + `event ConnectionChanged` (InProc | Connecting | Connected | Reconnecting; Ffi/Fake are fixed to InProc). The 3 implementations Fake/FFI/Pipe follow the same interface.
+- **Engine selection** (`EngineClientFactory`): CLI `--fake-engine` / `--engine=pipe|inproc` > settings.json `"engine"` (default `auto`) > auto = pipe 250ms probe → success uses Pipe / on failure **branch on service state (`ServiceSetup.QueryState`)**: if running (=holds writer.lock; a probe failure means the token is unauthorized) then **do not create in-proc even when elevated** (reliably avoids an FMF_E_LOCKED collision), an empty engine with a "re-register" affordance / if absent/stopped and the process is elevated, Ffi (writer.lock is free) / if neither is possible, an explanatory InfoBar+**empty engine** (zero-result `FakeEngineClient.CreateEmpty()`, badge "not connected" — no demo data: fake data has no practical use in a search app)+a "Restart as administrator" button (explicit action only; no automatic runas loop; forwards the non-elevated user's SID via `--setup-owner`). When started elevated in-proc with the service unregistered/stopped, you can set it up with one click in an in-app notification (`ServiceSetup` → `fmf-service install --owner-sid`+`restart`; install is idempotent on the service side, restart reflects the new `authorized_sids`) — an onboarding path that never opens a terminal: normal start → "Restart as administrator" → "Register and start the service" → normal start forever after. The Fake with data is `--fake-engine` (development/UI test) only.
+- **Disconnect and reconnect** (`PipeEngineClient`): disconnect = fail in-flight requests immediately with `EngineUnavailableException`, epoch-invalidate surviving `ISearchResult`s (afterwards `GetRangeAsync` → `StaleResultException` = the existing re-query mechanism is the recovery path), reconnect indefinitely with backoff (250ms→5s). The reconnect sequence is canonical in the "Pipe Protocol" section (`VolumeUpdated` events are synthesized and fired from the IndexStatus response). Requests have a default timeout of 10s.
+- `SearchResultHandle : SafeHandle`. Page fetches bracket `DangerousAddRef/Release`, and do not release the underlying object even after `Dispose()` until in-flight fetches complete.
+- page received→copy to `ResultRow`→**immediately `fmf_page_free`**.
+- the callback delegate is held in a client field (prevents GC reclamation). After receipt, to the UI via `DispatcherQueue.TryEnqueue`.
+- **Search pipeline responsibility split** (MainViewModel is the composition root only):
+  - `SearchOrchestrator` — when and what to search: 50ms debounce (clear is immediate), Dispose of stale results via the generation counter, `RequeryOrigin` classification, bounded Stale retry (1×), exception classification. **An empty query is not sent to the engine** (the product rule that an empty field has no results to return; a match-all enumeration would have its IDs shift every USN tick, so the start screen would redraw forever) — empty screen via `PresentEmpty` (idempotent). **During IME composition the query is held** (`TextCompositionStarted/Ended`; only the committed string flows through the normal debounce). **Focused mode** (focused search) = a pure query rewrite just before passing to the engine (`FocusedQueryRewriter`: add a `!path:` exclusion and one `ext:` whitelist item to each OR group; do not add ext to an explicit `ext:`/`regex:` group, nor an exclusion to a group containing `path:`/`\`) — does not touch the engine; settings in settings.json, ADR-0019.
+  - `ResultsPresenter` — presenting results: prefetch the visible-range page **before** publishing, then publish atomically via `VirtualResultList.Reassign` (the old results stay on screen until the new ones are ready=zero blank frames). Count text and viewport placement events.
+- two re-query families (`RequeryOrigin` classifies): **type/clear/sort/filter-originated=reset to top** / **IndexChanged/VolumeReady/Stale-originated=save the top visible index→restore, and selection restored best-effort only when an EntryRef in the seed matches**.
+- `VirtualResultList` (non-generic IList+INCC+IItemsRangeInfo): **a single instance with the same lifetime as the page** (ItemsSource is x:Bind OneTime — replacing it discards the ListView virtualization state and causes flicker). New results are `Reassign(result, seeds)` = epoch++ → discard the page cache → apply seeds → **emit INCC Reset once** (UI thread only). **A re-query of the same result** (guaranteed by the engine via `QueryTrace.unchanged`: same text+options and the ID sequence memcmp-matches on every volume) is `RefreshInPlace` = epoch++ → swap the handle → in-place fill the visible seed into existing row instances (the MVVM setter notifies only on value change) → **no Reset, count text unchanged** — the screen does not redraw on the re-query that idle USN traffic (logs, telemetry, etc.) triggers every 200ms. In-place updated size/mtime update only the cells whose value changed. The indexer never fetches and returns a placeholder (**out of range throws immediately** — no negative index, no fabricated fake page). On `RangesChanged`, background-fetch the visible range ±1 page in 64-row units→fill properties of existing ResultRows. Completion of an old-epoch fetch is silently discarded. Page LRU limit 4096 rows. Hard STALE receipt→`BecameStale` (only on epoch match)→ the Orchestrator re-queries.
+- **IList contract invariant (do not falsely affirm membership)**: XAML blindly trusts the answers of `Contains`/`IndexOf`/`GetAt` via the WinRT adapter. A false "absent" is fixed by container re-realization, but a false "present" causes a crash deep in XAML at `GetAt(staleIndex)` (proven: the root of the `Int32.MaxValue-1` exception that reliably reproduced on search-with-results→clear-all). Membership is defined as "index is below Count AND the corresponding slot in the current page cache is that same instance". A row of an old result, a row of an LRU-evicted page, and a temporary row for enumeration always answer absent. Enumeration/CopyTo do not disturb the virtualization state (LRU). The UI-thread check of the mutation family (Reassign/RefreshInPlace) is always active in Release.
 
-## エラーハンドリングと診断(原則:「落ちない・固まらない・黙らない」)
+## Error Handling and Diagnostics (principle: "never crash, never hang, never go silent")
 
-全異常は3経路に必ず届く: **①ログファイル ②diagリング(=F12パネル/fmf statsに自動表示) ③UIのInfoBar**。テレメトリ送信はしない(ローカルのみ)。
+Every anomaly always reaches 3 paths: **(1) the log file (2) the diag ring (=auto-displayed in the F12 panel/fmf stats) (3) the UI InfoBar**. No telemetry is sent (local only).
 
-- **ログ**: エンジン=`%ProgramData%\find-my-files\logs\engine.log`(日次ローテーション、`FMF_LOG`環境変数でフィルタ)、アプリ=`%APPDATA%\find-my-files\logs\app.log`(2MBで1世代ローテーション)
-- **diagリング**(fmf-core::diag): WARN以上のtracingイベント+panic(バックトレース付き)を直近128件保持。`MetricsSnapshot.recent_errors`に常時含まれる
-- **panic**: グローバルフックで捕捉→ログ+リング。volume threadは`catch_unwind`の防火壁付きで、panicしてもUIには必ず`VolumeFailed`が届く(無言のハングは起きない)
-- **イベント種6 `FMF_EVENT_ENGINE_ERROR`**: diagイベント発生のPOD通知(entries=severity 1=warn/2=error/3=panic)。詳細テキストはstats JSONからpull(push通知+pull詳細)
-- **劣化の記録規約(ADR-0018)**: 劣化パスは `fmf_core::degrade!`(tracing::warn!+カウンタ増分を**不可分**に行う唯一の手段。`rg degrade!` = 劣化パス全列挙)。スキャン内部のバッチ経路だけは例外で、劣化を `ScanStats` フィールドで返し worker 層の1箇所で counters+warn へ写像する(ホットパスにマクロを散らさない)。境界クレート(fmf-ffi / fmf-service)は clippy.toml の disallowed-methods で `unwrap_or_default` を禁止 — 黙ったフォールバックはコンパイル時に弾かれる
-- **カウンタ名の正本**: `fmf-contract::counters::COUNTER_NAMES`(C# の CountersData は gen-contract が生成、fmf-core の golden テストが CountersSnapshot の serde キーを名簿と突合 — 追加漏れは機械検出)
-- **劣化カウンタ**(`MetricsSnapshot.counters`、0でなければF12に表示): stat_fetch_failures / usn_batches_truncated / snapshot_load_failures / snapshot_save_failures / deferred_names_unresolved / corrupt_mft_records / journal_rescans / scan_pipeline_fallbacks(スキャンのread-ahead I/Oスレッド起動失敗→逐次読みに劣化)/ offset_table_rebuild_fallbacks(オフセットテーブルのウォーターマーク不整合→フル再構築に劣化)/ lazy_perm_rebuild_fallbacks(遅延ソート順列の同種防御)/ compaction_aborts(コンパクション中の世代不整合→コピー破棄。単一書き手不変条件の破れ検知)/ pipe_malformed_frames(不正フレーム→接続切断)/ pipe_events_dropped(イベント有界キュー溢れ→最古ドロップ)/ pipe_connections_rejected(インスタンス上限超過)/ deferred_name_cache_overflow(拡張レコード名キャッシュ満杯→ディスク読みに劣化)/ deferred_name_read_failures(遅延名前解決のディスク読み失敗)/ pipe_results_evicted(結果ハンドルのLRU追い出し)/ trace_serialize_failures(QueryTrace JSON化失敗→空トレースで応答)
-- **エラー詳細の単一実装**: `fmf_core::diag::error_chain`(全cause連結・**4KiB上限+"…"切詰め**)— FFI `fmf_last_error` と pipe エラー応答ペイロードの両方がこれ
-- **診断初期化の単一の家**: `fmf_core::diag::init_diag(log_dir, level)`(ロギング+panicフック+diagリング接続・冪等)を FFI / サービス / CLI の全入口が呼ぶ。log_dir 解決は `resolve_log_dir`: **明示指定(config/CLI)> `%ProgramData%\find-my-files\logs` 既定** — この優先順位の実装はここ1箇所のみ
-- **C#規約**: fire-and-forgetは必ず `task.Forget(area)`(例外→app.log+InfoBar)。シェル操作は`ShellOps`経由。グローバル例外ハンドラがクラッシュマーカーを書き、次回起動時に通知
-- **診断コピー**: F12パネルの「診断情報をコピー」= stats JSON+app.log末尾+環境情報
+- **Logs**: engine=`%ProgramData%\find-my-files\logs\engine.log` (daily rotation, filter via the `FMF_LOG` env var), app=`%APPDATA%\find-my-files\logs\app.log` (one-generation rotation at 2MB)
+- **diag ring** (fmf-core::diag): holds the most recent 128 tracing events at WARN or above+panics (with backtrace). Always included in `MetricsSnapshot.recent_errors`
+- **panic**: caught by a global hook→log+ring. The volume thread has a `catch_unwind` firewall, so even on panic the UI always receives `VolumeFailed` (no silent hang)
+- **Event kind 6 `FMF_EVENT_ENGINE_ERROR`**: a POD notification that a diag event occurred (entries=severity 1=warn/2=error/3=panic). Detail text is pulled from the stats JSON (push notification+pull detail)
+- **Degradation recording convention (ADR-0018)**: a degradation path uses `fmf_core::degrade!` (the only way to do tracing::warn!+counter increment **atomically**; `rg degrade!` = enumerates all degradation paths). The batch path inside scan is the sole exception, returning the degradation in a `ScanStats` field and mapping it to counters+warn in one place at the worker layer (do not scatter the macro across the hot path). The boundary crates (fmf-ffi / fmf-service) forbid `unwrap_or_default` via disallowed-methods in clippy.toml — a silent fallback is rejected at compile time
+- **Canonical source of counter names**: `fmf-contract::counters::COUNTER_NAMES` (C#'s CountersData is generated by gen-contract, and fmf-core's golden test reconciles CountersSnapshot's serde keys with the roster — a missing addition is mechanically detected)
+- **Degradation counters** (`MetricsSnapshot.counters`, shown in F12 if nonzero): stat_fetch_failures / usn_batches_truncated / snapshot_load_failures / snapshot_save_failures / deferred_names_unresolved / corrupt_mft_records / journal_rescans / scan_pipeline_fallbacks (scan read-ahead I/O thread startup failure→degrade to sequential read) / offset_table_rebuild_fallbacks (offset table watermark mismatch→degrade to full rebuild) / lazy_perm_rebuild_fallbacks (the same kind of defense for the lazy sort permutation) / compaction_aborts (generation mismatch during compaction→discard the copy. Detects a break of the single-writer invariant) / pipe_malformed_frames (malformed frame→disconnect) / pipe_events_dropped (event bounded-queue overflow→drop oldest) / pipe_connections_rejected (instance limit exceeded) / deferred_name_cache_overflow (extension-record name cache full→degrade to disk read) / deferred_name_read_failures (disk-read failure of lazy name resolution) / pipe_results_evicted (LRU eviction of a result handle) / trace_serialize_failures (QueryTrace JSON-ification failure→respond with an empty trace)
+- **Single implementation of error detail**: `fmf_core::diag::error_chain` (joins all causes, **4KiB limit+"…" truncation**) — both FFI `fmf_last_error` and the pipe error-response payload use this
+- **Single home of diagnostics init**: `fmf_core::diag::init_diag(log_dir, level)` (logging+panic hook+diag ring connect, idempotent) is called by all entry points: FFI / service / CLI. log_dir resolution is `resolve_log_dir`: **explicit specification (config/CLI) > `%ProgramData%\find-my-files\logs` default** — this priority is implemented in only this one place
+- **C# convention**: fire-and-forget always uses `task.Forget(area)` (exception→app.log+InfoBar). Shell operations go through `ShellOps`. A global exception handler writes a crash marker and notifies on the next start
+- **Diagnostics copy**: the F12 panel's "Copy diagnostics" = stats JSON+tail of app.log+environment info
 
-| FFIコード | 意味 | UI挙動 | リトライ |
+| FFI code | meaning | UI behavior | retry |
 |---|---|---|---|
-| FMF_E_QUERY_SYNTAX(5) | クエリ構文エラー | ステータスバーに表示 | 入力修正 |
-| FMF_E_STALE(2) | 構造的世代交代 | 同一クエリ自動再発行 | 自動 |
-| FMF_E_NOT_ADMIN(3) | 昇格不足 | InfoBar+説明 | 再起動 |
-| FMF_E_LOCKED(7) | index_dir を他エンジンが保持 | InfoBar+説明(「サービス稼働中。in-proc は just service-stop 後に」) | サービス停止後に再起動 |
-| FMF_E_PANIC(99) | エンジン内panic | InfoBar+engine.log誘導 | 不可(報告) |
-| その他(1,4,6) | 引数/ボリューム/IO | InfoBar | 場合による |
+| FMF_E_QUERY_SYNTAX(5) | query syntax error | shown in the status bar | fix input |
+| FMF_E_STALE(2) | structural generation change | auto re-issue the same query | automatic |
+| FMF_E_NOT_ADMIN(3) | insufficient elevation | InfoBar+explanation | restart |
+| FMF_E_LOCKED(7) | index_dir held by another engine | InfoBar+explanation ("Service is running. Use in-proc after just service-stop") | restart after stopping the service |
+| FMF_E_PANIC(99) | panic inside the engine | InfoBar+pointer to engine.log | not possible (report) |
+| others (1,4,6) | argument/volume/IO | InfoBar | depends |
 
-## 遅延予算(変更→画面反映 ≤1s のAC内訳)
+## Latency Budget (breakdown of the change→on-screen ≤1s AC)
 
-USNバッチ確定 ≤100ms + エンジンIndexChangedデバウンス 200ms(唯一のスロットル)+ UI再クエリ ≤100ms + 描画 ≤100ms = **≤500ms**(2倍余裕)。UI側に追加スロットルを置かないこと。
+USN batch commit ≤100ms + engine IndexChanged debounce 200ms (the only throttle) + UI re-query ≤100ms + render ≤100ms = **≤500ms** (2× margin). Do not place an additional throttle on the UI side.
 
-pipe 経路の追加予算(**正本はここ** — 他文書の数値は本節を参照): ResultPage 64行の往復 p99
-**≤5ms**(暫定 — ループバック結合テストがアサートし、実測で確定する)。F12 の `PageRttEwma` で
-常時観測。イベントプッシュは上記デバウンス後のワンホップで、予算構造は変わらない。
+Additional budget for the pipe path (**canonical here** — other docs' numbers reference this section): ResultPage 64-row round trip p99
+**≤5ms** (provisional — the loopback integration test asserts it, to be finalized by measurement). Continuously observed via F12's `PageRttEwma`.
+Event push is one hop after the debounce above, so the budget structure does not change.
 
-pipe のテストゲート: プロトコル round-trip とループバック結合(一意pipe名+
-`insert_ready_volume`)は非昇格の `cargo test` で無条件実行。C#クライアント×実 fmf-service の
-結合は `FMF_PIPE_TESTS=1`(`just test-pipe`)。実ボリュームを使うサービスE2Eは従来どおり
-`FMF_ADMIN_TESTS=1`(昇格)。
+pipe test gates: protocol round-trip and loopback integration (unique pipe name+
+`insert_ready_volume`) run unconditionally under non-elevated `cargo test`. The C# client × real fmf-service
+integration is `FMF_PIPE_TESTS=1` (`just test-pipe`). The service E2E using real volumes is, as before,
+`FMF_ADMIN_TESTS=1` (elevated).

@@ -1,25 +1,25 @@
-# ADR-0009: コンパクションは旧id昇順リマップ(再ソートなし)
+# ADR-0009: compaction is old-id ascending remap (no re-sort)
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-tombstone行とプール内の死バイトはコンパクションで回収する。生存エントリは旧id昇順で再番号付けする — 相対順序が保存されるため、(key, id)順の全構造(perm_name、FRN索引)は filter+remap のO(n)コピーで引き継がれ、再ソートしない。volumeスレッドがバッチ適用毎に閾値判定する: `len≥100k かつ(tombstone_ratio>12.5% または dead_name_bytes>32MiB)`。
+Compaction reclaims tombstone rows and dead bytes in the pool. Live entries are renumbered in old-id ascending order — because relative order is preserved, every (key, id)-ordered structure (perm_name, FRN index) is carried over by an O(n) filter+remap copy with no re-sort. The volume thread evaluates the threshold on each batch apply: `len≥100k AND (tombstone_ratio>12.5% OR dead_name_bytes>32MiB)`.
 
-## 根拠
+## Rationale
 
-- tombstone行とrename放棄の名前バイトは無限に蓄積し、B/entry RAMゲートへのスローリーク(従来はフルリスキャンでしか回収できない)
-- 旧id昇順リマップなら生存エントリの相対順序が保存され、ソート済み構造はバイト等価にfilter+remapできる(O(n)、ソートコストゼロ)
-- 判定入力は dead_name_bytes 可観測性(IndexStats.pool_garbage_ratio)。閾値は実ボリューム観測を前提に設定
+- Tombstone rows and the name bytes abandoned by renames accumulate without bound — a slow leak against the B/entry RAM gate (previously reclaimable only by a full rescan)
+- With old-id ascending remap, the relative order of live entries is preserved, so sorted structures can be filtered+remapped byte-equivalently (O(n), zero sort cost)
+- The decision input is dead_name_bytes observability (IndexStats.pool_garbage_ratio). Thresholds are set on the premise of real-volume observation
 
-## 影響
+## Impact
 
-- コピー構築はread guard下で行う(クエリ並走可。書き手はvolumeスレッド1本のみ)。swapは `install_index` 経由でµs級write lock+structural generation bump
-- コンパクション毎に開いている結果ハンドルはハードSTALE(`FMF_E_STALE`)→UIが同一クエリを自動再発行(既存機構)
-- 死んだディレクトリの子はrootへ付け替え(push_rawのorphan方針と同一)
-- 防御の世代チェック失敗は `compaction_aborts` カウンタ+コピー破棄(単一書き手不変条件の破れ検知。黙らない)
+- The copy build runs under a read guard (queries run concurrently; the only writer is the single volume thread). The swap goes through `install_index` with a µs-scale write lock + structural generation bump
+- Result handles open across a compaction go hard STALE (`FMF_E_STALE`) → the UI auto-reissues the same query (existing mechanism)
+- Children of dead directories are reparented to root (same as the orphan policy of push_raw)
+- A defensive generation-check failure increments the `compaction_aborts` counter + discards the copy (detection of a broken single-writer invariant; does not stay silent)
 
-## 再検討トリガ
+## Re-examination trigger
 
-- `compaction_aborts > 0` の観測(単一書き手不変条件の見直し)
-- 閾値が実運用でコンパクション頻発または回収不足を示した場合(閾値再調整)
+- Observation of `compaction_aborts > 0` (revisit the single-writer invariant)
+- If the thresholds show, in real operation, that compaction fires too often or reclaims too little (threshold re-tuning)

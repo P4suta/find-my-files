@@ -1,25 +1,25 @@
-# ADR-0013: 計測規律(冷機・back-to-back・実ボリューム絶対ゲート)
+# ADR-0013: Measurement discipline (cold machine, back-to-back, real-volume absolute gate)
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-性能判定は次に固定する: (1) baseline記録と`perf-gate`/`bench-check`は冷機・アイドル時のみ(事前にtypeperfで `% Processor Performance` ≥95%を確認) (2) criterion比較は同一セッションのback-to-back A/B限定 (3) 最終判定は実ボリューム絶対ゲート(クエリp99 ≤50ms、restore p50 ≤1s)+クエリp50相対 +50%。合成1Mベンチの名前分布は実C:実測(fold同一73.2% / ユニーク名53.2% / 平均WTF-8長29.7B)に較正し、`build_synthetic` が毎回その比率をassertする。
+Performance judgments are fixed as follows: (1) baseline recording and `perf-gate`/`bench-check` only on a cold, idle machine (confirm `% Processor Performance` >=95% beforehand with typeperf) (2) criterion comparisons limited to back-to-back A/B within the same session (3) the final judgment is the real-volume absolute gate (query p99 <=50ms, restore p50 <=1s) plus a query p50 relative +50%. The name distribution of the synthetic 1M benchmark is calibrated to measured real C: data (identical fold 73.2% / unique names 53.2% / mean WTF-8 length 29.7B), and `build_synthetic` asserts those ratios every run.
 
-## 根拠
+## Rationale
 
-- このマシンは全コア負荷数分で ~75%クロックにスロットルし、p50が+30〜46%一様にドリフトする(純固定CPU作業のsnapshot restore含む)。old/new同時A/Bで「両方同じだけ遅い=マシンドリフト」を確認済み
-- criterionも状態依存: 同一コードを40分空けて計測すると+30%ドリフト(parse_compile、µs級の純CPUベンチ)
-- p99-of-50-runsは実質max(OSヒカップ1発でトリップ)。200runにしても±60%スイング → p99は絶対予算(50ms)でのみゲート
-- 合成criterionベンチはコード配置だけで±12〜23%動く(合成で出た"回帰"が実C:で再現せず逆に−4%だった例)。実際の破壊は+48%・5×級で、p50相対+50%ゲートの外側に明確に出る
-- 較正前の合成索引は全名前ユニーク・小文字のみで、プール/カラムレイアウトの判定に無効だった
+- This machine throttles to ~75% clock after a few minutes of all-core load, drifting p50 uniformly +30 to +46% (including snapshot restore, which is pure fixed-CPU work). Confirmed via simultaneous old/new A/B that "both equally slow = machine drift".
+- criterion is also state-dependent: measuring the same code 40 minutes apart drifts +30% (parse_compile, a µs-class pure-CPU bench).
+- p99-of-50-runs is effectively max (a single OS hiccup trips it). Even at 200 runs it swings +-60% -> p99 is gated only by the absolute budget (50ms).
+- Synthetic criterion benches move +-12 to 23% from code layout alone (a synthetic "regression" that did not reproduce on real C: and was actually -4%). Real breakage shows up at +48% / 5x class, clearly outside the p50 relative +50% gate.
+- The pre-calibration synthetic index had all-unique, lowercase-only names, making it useless for judging pool/column layout.
 
-## 影響
+## Consequences
 
-- +50%未満のp50回帰は実ボリュームゲートでは検出しない(検出は `bench-micro-check` のback-to-back 10%中央値ゲートが担う)
-- 「restore含め全項目が一様に劣化」はサーマル署名として扱い、コード回帰と判定しない(冷機で再計測)
-- baselineはマシン依存。ボリュームのentry数がbaselineから10%超ドリフトしたら再記録
+- p50 regressions under +50% are not detected by the real-volume gate (detection is handled by the back-to-back 10% median gate in `bench-micro-check`).
+- "all items including restore degrade uniformly" is treated as a thermal signature, not judged a code regression (re-measure cold).
+- The baseline is machine-dependent. Re-record when the volume's entry count drifts more than 10% from the baseline.
 
-## 再検討トリガ
+## Re-examination triggers
 
-- 計測専用の熱的に安定したマシン(常時クロック≥95%)が使えるようになった場合、相対ゲートの引き締めを再検討
+- If a thermally stable machine dedicated to measurement (constant clock >=95%) becomes available, reconsider tightening the relative gate.

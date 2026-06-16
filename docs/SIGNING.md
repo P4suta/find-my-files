@@ -1,89 +1,102 @@
-# コード署名 — 配布物の Authenticode 署名
+# Code Signing — Authenticode Signing of Distributables
 
-配布 zip 内の自前バイナリ(`FindMyFiles.exe` ほか)を **SSL.com eSigner**(クラウド HSM 署名)で
-Authenticode 署名するための手順書。判断の経緯と却下案は [ADR-0020](adr/0020-code-signing-provider.md)。
+Runbook for Authenticode-signing the project's own binaries (`FindMyFiles.exe` and others) in the
+distribution zip with **SSL.com eSigner** (cloud HSM signing). For the decision rationale and rejected
+alternatives, see [ADR-0020](adr/0020-code-signing-provider.md).
 
-## 現状
+## Current state
 
-`.github/workflows/release.yml` に署名ステップは**配線済みだが休眠**している。署名は **非ブロッキング**で、
-リポジトリ Secrets(`ES_USERNAME` / `CREDENTIAL_ID`)が揃うまではタグを切っても **未署名のまま `::warning::` を出して完走**する。
-**証明書を取得し、下記4つの Secrets を登録した次のタグから自動で署名が有効化される。** それ以外に CI を触る必要はない。
+The signing step in `.github/workflows/release.yml` is **wired up but dormant**. Signing is **non-blocking**:
+until the repository Secrets (`ES_USERNAME` / `CREDENTIAL_ID`) are in place, cutting a tag still **completes,
+leaving the binaries unsigned and emitting a `::warning::`**.
+**Signing activates automatically from the next tag after you obtain a certificate and register the 4 Secrets below.**
+No other CI changes are needed.
 
-署名対象は**自前の PE のみ** — `FindMyFiles.exe`(ユーザーが起動する本体 = SmartScreen 判定の主対象)、`fmf.exe`、
-`fmf-service.exe`、`fmf_engine.dll`。同梱の .NET / WindowsAppSDK ランタイム DLL は既に Microsoft 署名済みのため再署名しない
-(署名クォータの浪費と他者著作物への署名を避ける)。
+Only the **project's own PE files** are signed — `FindMyFiles.exe` (the executable the user launches = the main
+target of SmartScreen evaluation), `fmf.exe`, `fmf-service.exe`, `fmf_engine.dll`. The bundled .NET / WindowsAppSDK
+runtime DLLs are already Microsoft-signed and are not re-signed (to avoid wasting the signing quota and signing
+others' copyrighted works).
 
-## 前提知識(なぜこの構成か)
+## Background (why this setup)
 
-- **日本在住の個人**は Azure Artifact Signing(旧 Trusted Signing)の個人枠が**対象外**(米/加/EU/英のみ)。
-- **EV 署名はもう SmartScreen の即時信頼を与えない**(Microsoft が2024年3月に変更)。本アプリはカーネルドライバを積まない
-  ため、EV を取っても実利はほぼ無い。よって個人名義の **IV(Individual Validation)** で十分。
-- SmartScreen は評判ベース。署名しても**初回は警告が出ることがあり**、ダウンロード実績が積み上がると消える。署名の即効効果は
-  「不明な発行元」が消え、プロパティに**自分の名前**が出ること。
+- An **individual residing in Japan** is **not eligible** for the individual tier of Azure Artifact Signing
+  (formerly Trusted Signing) (US/CA/EU/UK only).
+- **EV signing no longer grants immediate SmartScreen trust** (Microsoft changed this in March 2024). This app
+  ships no kernel driver, so taking EV brings almost no practical benefit. Therefore individual-name
+  **IV (Individual Validation)** is sufficient.
+- SmartScreen is reputation-based. Even when signed, **a warning may appear on first run** and disappears as
+  download history accumulates. The immediate effect of signing is that "unknown publisher" disappears and
+  **your name** appears in the properties.
 
-## 有効化手順(証明書を取りたくなったら)
+## Activation procedure (when you want a certificate)
 
-### A. 証明書の取得(SSL.com)
+### A. Obtain the certificate (SSL.com)
 
-1. [SSL.com](https://www.ssl.com/) でアカウントを作成。
-2. **Code Signing** の証明書を購入。**eSigner(クラウド署名)対応の Individual Validation(IV)** を選ぶ
-   (USB トークン版ではなくクラウド版)。目安 年 $130〜250。
-   - EV の肩書きが欲しい場合のみ **Sole Proprietor EV**(法人登記不要)を選んでもよい。**本リポジトリの CI は変更不要**
-     (同じ Action・同じ4 Secrets)。ただし SmartScreen 挙動は IV と同等。
+1. Create an account at [SSL.com](https://www.ssl.com/).
+2. Purchase a **Code Signing** certificate. Choose **Individual Validation (IV) with eSigner (cloud signing)**
+   support (the cloud version, not the USB token version). Expect roughly $130–250 per year.
+   - Only if you want the EV title, you may choose **Sole Proprietor EV** (no corporate registration required).
+     **No changes to this repository's CI** (same Action, same 4 Secrets). But SmartScreen behavior is the same
+     as IV.
 
-### B. 本人確認(IV validation)
+### B. Identity verification (IV validation)
 
-3. 政府発行 ID + 本人確認(書類/ビデオ)。**法人登記は不要**。日本の個人/個人事業主の取得実績あり。
+3. Government-issued ID + identity verification (documents/video). **No corporate registration required.** There
+   is a track record of Japanese individuals / sole proprietors obtaining it.
 
-### C. eSigner を自動署名用に設定
+### C. Configure eSigner for automated signing
 
-4. SSL.com ダッシュボードで:
-   - 署名証明書の **Credential ID** を控える。
-   - **自動署名用の TOTP(2FA)シークレット**(Base32 文字列)を発行して控える。
-   - アカウントの **ユーザー名 / パスワード**。
+4. In the SSL.com dashboard:
+   - Note the **Credential ID** of the signing certificate.
+   - Issue and note the **TOTP (2FA) secret for automated signing** (a Base32 string).
+   - The account **username / password**.
 
-### D. GitHub Secrets を4つ登録
+### D. Register 4 GitHub Secrets
 
-5. リポジトリ → Settings → Secrets and variables → Actions → New repository secret で:
+5. In the repository → Settings → Secrets and variables → Actions → New repository secret:
 
-   | Secret 名 | 値 |
+   | Secret name | Value |
    |---|---|
-   | `ES_USERNAME` | SSL.com ユーザー名 |
-   | `ES_PASSWORD` | SSL.com パスワード |
-   | `CREDENTIAL_ID` | 署名証明書の Credential ID |
-   | `ES_TOTP_SECRET` | eSigner 自動署名用 TOTP シークレット(Base32) |
+   | `ES_USERNAME` | SSL.com username |
+   | `ES_PASSWORD` | SSL.com password |
+   | `CREDENTIAL_ID` | Credential ID of the signing certificate |
+   | `ES_TOTP_SECRET` | TOTP secret for eSigner automated signing (Base32) |
 
-   → 次に `vX.Y.Z` タグを切る(または `release` を `workflow_dispatch`)と、`HAVE_SIGNING` が `true` になり署名が走る。
+   → On the next `vX.Y.Z` tag (or `release` via `workflow_dispatch`), `HAVE_SIGNING` becomes `true` and signing runs.
 
-### E. 検証
+### E. Verification
 
-6. **空打ち(証明書取得前でも今すぐ可)**: Secrets 未設定のまま Actions → release を `workflow_dispatch` 実行 →
-   署名ステップが skip され `::warning::` が出て、zip / checksum / Release 作成まで**失敗せず完走**することを確認
-   (= 休眠配管がパイプラインを壊さない)。
-7. **本署名(Secrets 登録後)**: テストタグ(例 `v0.0.1-rc1`)を切って実行。「Sign staged binaries」が走り、
-   「Verify signatures」が4ファイルとも `signed: ... - CN=<あなたの名前>` を出して green になることを確認。
-8. **ローカル確認**: Release の zip を展開し、Windows で:
+6. **Dry run (possible right now, even before obtaining a certificate)**: with Secrets unset, run Actions → release
+   via `workflow_dispatch` → confirm that the signing step is skipped, a `::warning::` is emitted, and the
+   zip / checksum / Release creation **complete without failure** (= the dormant wiring does not break the pipeline).
+7. **Real signing (after registering Secrets)**: cut a test tag (e.g. `v0.0.1-rc1`) and run. Confirm that
+   "Sign staged binaries" runs and "Verify signatures" turns green with all 4 files showing
+   `signed: ... - CN=<your name>`.
+8. **Local confirmation**: extract the Release zip and on Windows:
    ```powershell
    signtool verify /pa /v build\dist\FindMyFiles\FindMyFiles.exe   # → Successfully verified
    Get-AuthenticodeSignature build\dist\FindMyFiles\FindMyFiles.exe # → Status: Valid
    ```
-   `FindMyFiles.exe` のプロパティ →「デジタル署名」タブに自分の名前とタイムスタンプが出る。
+   In the properties of `FindMyFiles.exe` → "Digital Signatures" tab, your name and a timestamp appear.
 
-## 更新(失効対応)
+## Renewal (handling expiry)
 
-- 公開信頼コード署名証明書の有効期間は CA/Browser Forum 規定で **最長 ~460日(約15か月)**。失効前に SSL.com で更新する。
-- 更新で **Credential ID / TOTP が変わる場合のみ** 対応する Secret を更新する。
+- The validity period of a publicly trusted code signing certificate is, per CA/Browser Forum rules,
+  **at most ~460 days (about 15 months)**. Renew at SSL.com before expiry.
+- **Only if the Credential ID / TOTP change** on renewal, update the corresponding Secret.
 
-## トラブルシュート
+## Troubleshooting
 
-- **Verify signatures が落ちる**: `batch_sign` が `override` ではなく別フォルダへ署名済みファイルを書いた可能性。
-  Action のログで出力先を確認し、必要なら `release.yml` の署名ステップに `output_path` を指定して「Copy signed binaries back」
-  のコピー元をそこに合わせる。
-- **`Get-AuthenticodeSignature` が `UnknownError`**: 公開信頼チェーン未解決。`signtool verify /pa` で詳細を確認。
-- **初回起動でまだ SmartScreen 警告が出る**: 仕様(評判が浅いため)。ダウンロードが積み上がると消える。EV でも同様。
+- **Verify signatures fails**: `batch_sign` may have written the signed files to a separate folder instead of
+  `override`. Check the output location in the Action log and, if needed, specify `output_path` in the signing step
+  of `release.yml` so the copy source for "Copy signed binaries back" matches it.
+- **`Get-AuthenticodeSignature` returns `UnknownError`**: the public trust chain is unresolved. Check details with
+  `signtool verify /pa`.
+- **A SmartScreen warning still appears on first launch**: expected (reputation is shallow). It disappears as
+  downloads accumulate. Same with EV.
 
-## 関連
+## Related
 
-- [ADR-0020 — コード署名プロバイダ選定](adr/0020-code-signing-provider.md)
+- [ADR-0020 — Code Signing Provider Selection](adr/0020-code-signing-provider.md)
 - [SECURITY.md](SECURITY.md)
-- 配線本体: `.github/workflows/release.yml`
+- Wiring itself: `.github/workflows/release.yml`

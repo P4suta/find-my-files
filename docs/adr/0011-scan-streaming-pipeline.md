@@ -1,24 +1,24 @@
-# ADR-0011: ストリーミングスキャンパイプライン(I/O多重化は却下)
+# ADR-0011: streaming scan pipeline (I/O multiplexing rejected)
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-初回スキャンは$MFTを16MiBチャンクのbuffered同期ストリーミング読みとし、専用I/Oスレッド1本がチャンクN+1を先読み(バッファ3本でRAM上限固定)、チャンク内はレコード境界1MiBサブレンジでrayon並列パースする。$ATTRIBUTE_LIST(deferred)の名前解決は、ストリーミング中に$FILE_NAME持ち拡張レコードをRAMキャッシュ(上限128Ki件≈128MiB一時)し、ディスク読みゼロで行う。NO_BUFFERING+overlappedによるI/O多重化は採用しない。
+The initial scan reads $MFT as buffered synchronous streaming in 16MiB chunks; a single dedicated I/O thread prefetches chunk N+1 (3 buffers fix the RAM ceiling), and within a chunk rayon parses 1MiB record-boundary subranges in parallel. Name resolution for $ATTRIBUTE_LIST (deferred) RAM-caches the extension records that carry $FILE_NAME during streaming (capped at 128Ki entries ≈ 128MiB temporary) and runs with zero disk reads. I/O multiplexing via NO_BUFFERING + overlapped is not adopted.
 
-## 根拠
+## Rationale
 
-- deferredパス実測: ディスク読み版2.9s → RAMキャッシュで**8ms**。`\\.\C:` のランダムリードは発行ハンドル数によらずカーネルで直列化されるため、並列I/Oでは縮まない
-- スキャン全体 5.0s→2.1s(read 1.6sが律速)
-- `fmf io-probe C:`($MFT 1.54GiB)実測: buffered同期 962.6 / +SEQUENTIAL_SCAN 960.9 / NO_BUFFERING同期 958.2 / NO_BUFFERING+overlapped QD2 1075.9 / QD4 **1101.6 MB/s(+14.4%)**。採用基準(read +30%でStage 2、scan全体−25%で採用)未達。scan全体への効果は2.0→~1.85s見込みで、M2スキャンゲート(60s)を30倍クリア済みの現状に見合わない
-- EntryId割当はワーカーバッチをチャンク順に追記するため逐次版と決定的に一致(adminテスト `streaming_scan_matches_reference` が等価性ゲート)
+- Measured deferred path: 2.9s with the disk-read version → **8ms** with the RAM cache. Random reads on `\\.\C:` are serialized in the kernel regardless of the number of outstanding handles, so they do not shrink with parallel I/O
+- Whole scan 5.0s→2.1s (read at 1.6s is the limiter)
+- `fmf io-probe C:` ($MFT 1.54GiB) measured: buffered sync 962.6 / +SEQUENTIAL_SCAN 960.9 / NO_BUFFERING sync 958.2 / NO_BUFFERING+overlapped QD2 1075.9 / QD4 **1101.6 MB/s (+14.4%)**. Below the adoption bar (read +30% for Stage 2; adopt at whole-scan −25%). The whole-scan effect is projected at 2.0→~1.85s, not worth it given the current state already clearing the M2 scan gate (60s) by 30×
+- EntryId assignment appends worker batches in chunk order, so it matches the sequential version deterministically (admin test `streaming_scan_matches_reference` is the equivalence gate)
 
-## 影響
+## Impact
 
-- 一時RAM: パイプラインバッファ3×16MiB+拡張レコードキャッシュ(上限128Ki件)。超過は `ext_name_cache_skipped` カウンタ+ディスクフォールバック
-- I/Oスレッド起動失敗は `scan_pipeline_fallbacks` カウンタ+逐次読みに劣化(黙らない)
-- `fmf io-probe` は計測ツールとして常備する
+- Temporary RAM: 3×16MiB pipeline buffers + extension-record cache (cap 128Ki entries). Overflow increments the `ext_name_cache_skipped` counter + falls back to disk
+- I/O thread startup failure increments the `scan_pipeline_fallbacks` counter + degrades to sequential reads (does not stay silent)
+- `fmf io-probe` is kept on hand as a measurement tool
 
-## 再検討トリガ
+## Re-examination trigger
 
-- マルチボリューム同時スキャン要件が立った場合、またはスキャンゲートが10s以下に強化された場合(overlapped多重化のStage 2を再評価)
+- If a multi-volume concurrent-scan requirement arises, or the scan gate is tightened to 10s or below (re-evaluate Stage 2 overlapped multiplexing)

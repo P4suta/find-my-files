@@ -1,43 +1,44 @@
-# セキュリティ — 脅威モデルと防御(v2 サービス分離)
+# Security — Threat Model and Defenses (v2 service split)
 
-現在の構成: 特権サービス `fmf-service`(LocalSystem・特権最小化)が NTFS の $MFT/USN を読み、
-非特権UIが named pipe で接続する。判断の経緯と却下案は
-[ADR-0016](adr/0016-service-split-named-pipe.md) / [ADR-0017](adr/0017-service-security-model.md)、
-API仕様の裏取りは [RESEARCH.md](RESEARCH.md)。
+Current architecture: a privileged service `fmf-service` (LocalSystem, least privilege) reads NTFS $MFT/USN,
+and the non-privileged UI connects over a named pipe. Decision history and rejected options are in
+[ADR-0016](adr/0016-service-split-named-pipe.md) / [ADR-0017](adr/0017-service-security-model.md);
+API spec verification is in [RESEARCH.md](RESEARCH.md).
 
-## 脅威と防御
+## Threats and Defenses
 
-| # | 脅威 | 防御 |
+| # | Threat | Defense |
 |---|---|---|
-| 1 | ACL迂回の名前漏洩 — 特権インデクサが、利用者のACLでは見えないファイル名を**別ユーザー**へ露出する | pipe DACL を SYSTEM+利用者SIDに限定(install時捕捉のSID **+ 非昇格UIが `--owner-sid` で転送する日常ユーザーSID**。後者は `validate_user_sid` で実在ユーザー型のみ採用 — OTS昇格でも日常ユーザーを締め出さず、かつ任意SIDの混入を防ぐ)。Authenticated Users / Everyone のACEなし(既定拒否)+接続時トークン照合 |
-| 2 | リモート接続 | `PIPE_REJECT_REMOTE_CLIENTS`(+サーバ機能はやらないことリストで恒久非実装) |
-| 3 | 匿名接続 | 明示DACLに匿名ACEなし=既定拒否(NullSessionPipes の既定はポリシー依存のため当てにしない) |
-| 4 | pipe名スクワッティング / 偽サーバ | サーバ: **初回インスタンスのみ** `FILE_FLAG_FIRST_PIPE_INSTANCE`(2本目以降はフラグ無し — 初回を保持し続ける限り名前の先取りは不能)。クライアント: 既定pipe名では `GetNamedPipeServerProcessId` → **SCM登録の fmf-engine サービスPIDと照合**(`QueryServiceStatusEx`。非昇格UIで動く — SYSTEMプロセスのトークンは非昇格では開けず[ACCESS_DENIED]、session 0 プロセスの identity も取得不可。squatter は SCM登録[要admin]ができずPIDが一致しない) |
-| 5 | 悪意あるクライアント入力(不正フレーム・巨大len・未知opcode・病的regex) | 長さ上限16MiB・検証失敗は接続切断+`pipe_malformed_frames` カウンタ。dispatcher 全体が catch_unwind 防火壁(panic は FMF_E_PANIC 応答、サービスは生存)。正規表現は線形時間マッチ(ReDoS不在)+ コンパイル上限 `size_limit`/`dfa_size_limit`=1MiB で計算DoSを丁寧に拒否(超過は FMF_E_QUERY_SYNTAX。ADR-0023・RESEARCH.md) |
-| 6 | ローカルDoS(接続洪水・ハンドル枯渇・flush連打) | pipe インスタンス上限 8(超過は接続拒否+`pipe_connections_rejected`)。結果ハンドル上限64/接続(LRU evict→STALE)。Flush は pipe に公開しない(サービス内部の定期+停止時のみ)。イベントは有界キュー+ドロップで USN スレッドを保護。なお到達できるのは認可済み同一ユーザーのみ(#1) |
-| 7 | データファイル自体の漏洩(.fmfidx は全ボリュームのファイル名を含む) | install 時に `%ProgramData%\find-my-files` へ保護DACL(SYSTEM+Administrators。logs サブディレクトリのみ利用者read)。uninstall は既定でデータ保持(残置物を案内表示)、`--purge-data` で削除 |
-| 8 | 残存リスク(受容) | 認可済みユーザーは自分のACLで見えないファイルの「名前・パス」も検索できる(ファイル名のみ索引の構造的性質。内容・ACL実体は読めない)。単一ユーザー機を主対象とし、マルチユーザー認可は ADR-0017 の再検討トリガ |
+| 1 | ACL-bypass name leak — the privileged indexer exposes file names invisible under the user's own ACL to **another user** | Restrict the pipe DACL to SYSTEM + the user SID (SID captured at install time **+ the everyday-user SID forwarded by the non-elevated UI via `--owner-sid`**. The latter is accepted only if it is a real-user type via `validate_user_sid` — keeps the everyday user from being locked out even under OTS elevation, while preventing injection of an arbitrary SID). No Authenticated Users / Everyone ACE (deny by default) + token check on connect |
+| 2 | Remote connection | `PIPE_REJECT_REMOTE_CLIENTS` (+ server features are permanently out of scope per the won't-do list) |
+| 3 | Anonymous connection | No anonymous ACE in the explicit DACL = deny by default (the NullSessionPipes default is policy-dependent, so do not rely on it) |
+| 4 | Pipe-name squatting / spoofed server | Server: `FILE_FLAG_FIRST_PIPE_INSTANCE` **on the first instance only** (no flag on subsequent instances — name preemption is impossible as long as the first instance is held). Client: for the default pipe name, `GetNamedPipeServerProcessId` → **match against the SCM-registered fmf-engine service PID** (`QueryServiceStatusEx`; works non-elevated — a SYSTEM process token cannot be opened non-elevated [ACCESS_DENIED], and a session 0 process identity is not obtainable either. A squatter cannot register with the SCM [requires admin] so its PID will not match) |
+| 5 | Malicious client input (malformed frame, huge len, unknown opcode, pathological regex) | 16 MiB length cap; validation failure drops the connection + `pipe_malformed_frames` counter. The whole dispatcher is a catch_unwind firewall (panic returns FMF_E_PANIC, the service survives). Regex is linear-time matching (no ReDoS) + compile caps `size_limit`/`dfa_size_limit`=1 MiB to gracefully reject computational DoS (overflow returns FMF_E_QUERY_SYNTAX. ADR-0023, RESEARCH.md) |
+| 6 | Local DoS (connection flood, handle exhaustion, flush spamming) | Pipe instance cap 8 (overflow rejects the connection + `pipe_connections_rejected`). Result handle cap 64/connection (LRU evict → STALE). Flush is not exposed over the pipe (only the service-internal periodic flush and flush on stop). Events use a bounded queue + drop to protect the USN thread. Note that only the authorized same user can even reach this (#1) |
+| 7 | Leak of the data file itself (.fmfidx contains every file name on every volume) | At install, apply a protective DACL to `%ProgramData%\find-my-files` (SYSTEM + Administrators; user read only on the logs subdirectory). Uninstall keeps data by default (shows guidance about leftovers); `--purge-data` deletes it |
+| 8 | Residual risk (accepted) | An authorized user can search the "name/path" of files invisible under their own ACL (a structural property of name-only indexing; the contents and the actual ACL cannot be read). Targets single-user machines primarily; multi-user authorization is a re-examination trigger in ADR-0017 |
 
-## 配布物の完全性(コード署名)
+## Distribution Integrity (code signing)
 
-配布バイナリの Authenticode 署名は SSL.com eSigner(個人IV)で行う。配線は `release.yml` に休眠状態で組み込み済みで、
-証明書取得後に GitHub Secrets を入れると有効化される。取得・有効化手順は [SIGNING.md](SIGNING.md)、選定の根拠は
-[ADR-0020](adr/0020-code-signing-provider.md)。署名はタグ駆動 `release.yml` 限定(`ci.yml` の開発成果物は署名しない)。
+Authenticode signing of the distributed binaries is done with SSL.com eSigner (individual IV). The wiring is built into
+`release.yml` in a dormant state and is activated once the GitHub Secrets are set after obtaining the certificate. The
+acquisition/activation steps are in [SIGNING.md](SIGNING.md); the rationale for the choice is in
+[ADR-0020](adr/0020-code-signing-provider.md). Signing is limited to the tag-driven `release.yml` (the `ci.yml` dev artifacts are not signed).
 
-## 手動検証チェックリスト(リリース前に1回実施し、結果と日付をここに記録)
+## Manual Verification Checklist (run once before each release; record the result and date here)
 
-自動化できない項目(別ユーザートークン・別マシンが必要)。SDDL構築関数の構造は単体テストでピン済み。
+Items that cannot be automated (require another user's token or another machine). The structure of the SDDL-building functions is pinned by unit tests.
 
-- [ ] 別ユーザー(非認可SID)からの pipe 接続が拒否される
-- [ ] リモートからの `\\<host>\pipe\fmf-engine-v2` 接続が拒否される
-- [x] 非昇格プロセスから `%ProgramData%\find-my-files\index\*.fmfidx` が読めない(2026-06-14: 昇格実機検証で **`Users:RX` で読めるバグを発見** → install を修正 → icacls で `index/`・`c.fmfidx` とも SYSTEM+Administrators のみと確認。下記実施記録参照)
-- [x] 非昇格プロセスから `%ProgramData%\find-my-files\logs\engine.log` は読める(F12診断動線)(2026-06-14: icacls で SYSTEM+Administrators + install ユーザー read を確認)
-- [ ] OTS昇格(別の管理者アカウントで昇格)後も、日常ユーザーが非昇格で pipe 接続できる(`--owner-sid` 伝搬)
-- [ ] 稼働中サービスへ「登録し直す」→ 再起動で `authorized_sids` が反映され、それまで拒否されていたユーザーが接続できる(`pipe client token rejected` が止む)
-- [ ] `fmf-service uninstall` 後の残置物が案内どおり / `--purge-data` で消える
+- [ ] A pipe connection from another user (non-authorized SID) is rejected
+- [ ] A remote connection to `\\<host>\pipe\fmf-engine-v2` is rejected
+- [x] `%ProgramData%\find-my-files\index\*.fmfidx` cannot be read from a non-elevated process (2026-06-14: elevated on-machine verification **found a bug where it was readable with `Users:RX`** → fixed install → confirmed via icacls that both `index/` and `c.fmfidx` are SYSTEM + Administrators only. See the implementation record below)
+- [x] `%ProgramData%\find-my-files\logs\engine.log` can be read from a non-elevated process (F12 diagnostics path) (2026-06-14: confirmed via icacls SYSTEM + Administrators + install-user read)
+- [ ] After OTS elevation (elevated with a different admin account), the everyday user can still connect to the pipe non-elevated (`--owner-sid` propagation)
+- [ ] "Re-register" to a running service → restart reflects `authorized_sids`, and a previously-rejected user can connect (`pipe client token rejected` stops)
+- [ ] Leftovers after `fmf-service uninstall` match the guidance / are removed by `--purge-data`
 
-実施記録:
+Implementation record:
 
-- **コードレベル監査(2026-06-14)**: 上表の各防御を実装コードへ追跡し確認。SDDL は `security.rs::pipe_sddl` / `logs_dir_sddl` の純関数で構築され単体テスト(`sddl_structure_is_pinned` 等)が literal 形状(Everyone/Authenticated Users/Administrators ACE 不在)をピン。`--owner-sid` 伝搬(脅威1)は三重防御を確認 — ①UI が転送する SID は実トークン由来(`WindowsIdentity.GetCurrent().User`、詐称不可)②`ServiceSetup.IsValidSid` が `S-1-` + 英数/ハイフンのみに制限しコマンドライン引数注入を阻止(注入テスト網羅: `; rm -rf` / 空白分割 / 全角数字)③昇格 install 内の `validate_user_sid` が `LookupAccountSidW` で実在ユーザー型(`SidTypeUser`)のみ採用しグループ/well-known/未解決を拒否(`validate_user_sid_rejects_system_and_garbage`)。接続時トークン照合 `verify_client` は impersonate→SID 照合→`RevertToSelf` を全経路で実施。**結論: コード経路は健全・既存テストで網羅、コード変更不要**。
-- **昇格実機検証で発見・修正した実バグ(2026-06-14・脅威7)**: install が `index/` に保護DACLを明示適用しておらず(`logs/` は明示適用で正しい一方)、スナップショット `index/c.fmfidx`(全ボリュームの全ファイル名)が `BUILTIN\Users:(RX)` で**全ローカルユーザー読み取り可能**だった。原因: `index/` は作成時に `%ProgramData%` の Users ACE を継承し、ルートを後から `D:P` 保護しても `set_dir_dacl` が使う `SetFileSecurityW` は既存の子へ再伝播しない(`logs/` が正しく `index/` だけ露出する非対称が根本原因の証拠 — クリーンインストールでも再現)。修正: `fmf-service/src/main.rs` install に `set_dir_dacl(&data_dir.join("index"), &data_dir_sddl())` を追加(`logs/` と同じ明示適用)。再ビルド+再install+icacls で `index/`・`c.fmfidx` とも SYSTEM+Administrators のみを確認、既存ファイルは `icacls /reset` で remediate 済み。
-- **実行時サインオフ(残り未実施)**: 別ユーザートークン・リモートホスト・OTS昇格・uninstall 残置を要する項目は、昇格済みマルチユーザー/ネットワーク環境でリリース前に実施して日付を記録する。
+- **Code-level audit (2026-06-14)**: traced each defense in the table above to the implementation and confirmed it; conclusion was that the code paths are sound and covered by existing tests, no code change needed. See the commit for the full trace.
+- **Real bug found and fixed in elevated on-machine verification (2026-06-14, threat 7)**: install did not explicitly apply the protective DACL to `index/` (while `logs/` was correctly applied explicitly), so the snapshot `index/c.fmfidx` (every file name on every volume) was **readable by all local users with `BUILTIN\Users:(RX)`**. Cause: `index/` inherits the Users ACE from `%ProgramData%` at creation time, and protecting the root afterward with `D:P` does not re-propagate to existing children because `SetFileSecurityW` (used by `set_dir_dacl`) does not (the asymmetry where `logs/` is correct and only `index/` is exposed is evidence of the root cause — reproduces even on a clean install). Fix: added `set_dir_dacl(&data_dir.join("index"), &data_dir_sddl())` to install in `fmf-service/src/main.rs` (the same explicit application as `logs/`). After rebuild + reinstall + icacls, confirmed both `index/` and `c.fmfidx` are SYSTEM + Administrators only; existing files were remediated with `icacls /reset`.
+- **Runtime sign-off (remaining, not yet done)**: items requiring another user's token, a remote host, OTS elevation, or uninstall leftovers must be run in an elevated multi-user/network environment before release, with the date recorded.

@@ -1,43 +1,43 @@
-# ADR-0021: ビルド出力の単一 build/ ツリー集約
+# ADR-0021: Consolidate build output into a single build/ tree
 
-日付: 2026-06-14 / 状態: 採用
+Date: 2026-06-14 / Status: Adopted
 
-## 決定
+## Decision
 
-全てのビルド成果物をリポジトリルートの単一 `build/` ツリーに集約する。
+Consolidate all build artifacts into a single `build/` tree at the repository root.
 
 ```
 build/
-├── engine/        # engine ワークスペースの cargo target-dir
-├── xtask/         # xtask ワークスペースの cargo target-dir
-├── app/           # C# の bin 出力(FindMyFiles / FindMyFiles.Tests)
-├── dist/FindMyFiles/   # publish バンドル
-├── package/       # リリース zip + SHA256SUMS.txt
-├── sbom/          # CycloneDX SBOM(release.yml)
-├── site/          # GitHub Pages 組立(landing + book + doc)
-└── docs-book/     # mdBook 出力
+├── engine/        # cargo target-dir for the engine workspace
+├── xtask/         # cargo target-dir for the xtask workspace
+├── app/           # C# bin output (FindMyFiles / FindMyFiles.Tests)
+├── dist/FindMyFiles/   # publish bundle
+├── package/       # release zip + SHA256SUMS.txt
+├── sbom/          # CycloneDX SBOM (release.yml)
+├── site/          # GitHub Pages assembly (landing + book + doc)
+└── docs-book/     # mdBook output
 ```
 
-機構(いずれも禁止規約に抵触しない手段):
+Mechanism (all means that do not violate the prohibition rules):
 
-- **Rust**: ワークスペース毎に `.cargo/config.toml` の `[build] target-dir`(`engine/.cargo` → `../build/engine`、`xtask/.cargo` → `../build/xtask`)。相対パスは `.cargo/` の親基準で解決される(`cargo metadata` で実測確認済み)。**リポジトリルートに1本置く案は却下**(両ワークスペースが同一 target を共有し ADR-0018 の分離則を壊す)。
-- **C# bin**: 各 csproj の `BaseOutputPath`(`..\..\build\app\<proj>\`)。
-- **dist/package/site**: `xtask/src/paths.rs` を単一正本に(`build_root`/`dist_dir`/`package_dir`/`engine_release_dir`/`site_dir`)。
-- **mdBook**: `docs/book.toml` の `build.build-dir = ../build/docs-book`。
+- **Rust**: per-workspace `[build] target-dir` in `.cargo/config.toml` (`engine/.cargo` → `../build/engine`, `xtask/.cargo` → `../build/xtask`). Relative paths resolve against the `.cargo/` parent (confirmed empirically with `cargo metadata`). **A single config at the repository root is rejected** (both workspaces would share one target and break the ADR-0018 separation rule).
+- **C# bin**: each csproj's `BaseOutputPath` (`..\..\build\app\<proj>\`).
+- **dist/package/site**: `xtask/src/paths.rs` as the single source of truth (`build_root`/`dist_dir`/`package_dir`/`engine_release_dir`/`site_dir`).
+- **mdBook**: `build.build-dir = ../build/docs-book` in `docs/book.toml`.
 
-## 根拠
+## Rationale
 
-- 成果物が `engine/target`・`xtask/target`・`app/**/bin`・ルート `dist/`・ルート zip・ルート SBOM・`site/` に散在し、把握と掃除のコストが高かった。`build/` 1本なら「消せば全部消える」+ `.gitignore` 実質1行。
-- `.cargo/config.toml` の target-dir はツールチェーンピンではないため `rust-toolchain.toml`/`global.json` を置かない規約(mise 二重管理回避)に非抵触。
+- Artifacts were scattered across `engine/target`, `xtask/target`, `app/**/bin`, root `dist/`, root zip, root SBOM, and `site/`, making them costly to track and clean. A single `build/` means "delete it and everything is gone" plus an effectively one-line `.gitignore`.
+- The target-dir in `.cargo/config.toml` is not a toolchain pin, so it does not violate the rule against placing `rust-toolchain.toml`/`global.json` (avoiding double management with mise).
 
-## 影響
+## Consequences
 
-- **C# obj は据え置き**(`app/**/obj/`)。obj 移設は `BaseIntermediateOutputPath` を restore 前評価で効かせる必要があり `Directory.Build.props` が事実上必須だが、CLAUDE.md は同ファイルを禁止(`winapp run` のアナライザ注入を黙って shadow するため)。obj は中間物で gitignore 済みのため実害なし。
-- dev ツリーの `fmf-service.exe` 探索(`ServiceSetup.cs` 本番 + pipe/contract テスト)は `build/engine/release` に追従。
-- `testutil.rs` の test-tmp フォールバック既定は `build/engine`(config.toml の target-dir は `CARGO_TARGET_DIR` env を立てないため)。
-- CI(ci/release/pages)のアーティファクト・SBOM・パッケージ・Pages パスを全て `build/` 配下へ更新。`site/` は committed なランディング源のまま、組立出力は `build/site`。
-- 旧来の `engine/target` 等を前提にしたツール(rust-analyzer 等)は config.toml を尊重するため追従(必要ならリロード)。
+- **C# obj stays put** (`app/**/obj/`). Relocating obj requires `BaseIntermediateOutputPath` to take effect during pre-restore evaluation, which effectively requires `Directory.Build.props`, but CLAUDE.md prohibits that file (it silently shadows the analyzer injection of `winapp run`). obj is intermediate output and already gitignored, so there is no real harm.
+- The dev-tree `fmf-service.exe` lookup (`ServiceSetup.cs` production + pipe/contract tests) follows `build/engine/release`.
+- The test-tmp fallback default in `testutil.rs` is `build/engine` (because the config.toml target-dir does not set the `CARGO_TARGET_DIR` env var).
+- CI (ci/release/pages) artifact, SBOM, package, and Pages paths are all updated to under `build/`. `site/` remains the committed landing source; assembly output goes to `build/site`.
+- Tools that assumed the old `engine/target` etc. (rust-analyzer, etc.) follow because they respect config.toml (reload if needed).
 
-## 再検討トリガ
+## Re-examination triggers
 
-- C# obj もルートから消したい要求が強まり、`winapp run` のアナライザ注入機構が `Directory.Build.props` 非依存に変わった場合(props 解禁の是非を再評価)。
+- If demand to also remove C# obj from the root grows strong and the `winapp run` analyzer-injection mechanism changes to no longer depend on `Directory.Build.props` (re-evaluate whether to allow props).

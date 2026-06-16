@@ -1,24 +1,24 @@
-# ADR-0004: fold-overflow名前レイアウト
+# ADR-0004: fold-overflow name layout
 
-日付: 2026-06-11 / 状態: 採用済み
+Date: 2026-06-11 / Status: Accepted
 
-## 決定
+## Decision
 
-連続スイープ可能な全長プールはfold済み `lower_pool` の1本だけとする。原文はfoldと異なる場合のみ `orig_pool` に格納し、`orig_off`(u32、sentinel `u32::MAX` = fold同一)で参照する。`name()` はfold同一エントリでlowerスライスをそのまま貸す。
+The only full-length pool that can be swept contiguously is the single folded `lower_pool`. The original text is stored in `orig_pool` only when it differs from the fold, referenced by `orig_off` (u32, sentinel `u32::MAX` = identical to fold). `name()` lends the lower slice directly for fold-identical entries.
 
-## 根拠
+## Rationale
 
-- 実C:実測(1,268,450件): fold同一(lower == orig バイト一致)= 73.2%。名前の二重格納の約3/4は同一バイトの重複
-- 実測 −16B/entry。M2 RAMゲート(≤110B/entry)達成の最大単項
-- 健全性3本柱: (1) foldは長さ保存(ADR-0003) (2) 原文一致 ⇒ fold一致(supersetスイープが健全。subsume.rs の bridge_needle と同じ代数) (3) fold不安定needle(自身のfoldと異なるneedle)はfold同一名に出現不可 → `orig_off` sentinel一発のO(1)棄却で候補の73%を解決
-- 対案(i)「(entry, orig_off) ソート済みペア」は予測 −19.6B/entry でu32カラム方式(−17.7B)より1.9B優位だが、residual検証毎の二分探索が乗るためp99リスク回避でu32カラムを採用
+- Real C: measurement (1,268,450 entries): fold-identical (lower == orig byte match) = 73.2%. About 3/4 of the double-stored names are duplicate identical bytes
+- Measured −16B/entry. The single largest term toward the M2 RAM gate (≤110B/entry)
+- Three soundness pillars: (1) the fold is length-preserving (ADR-0003) (2) original match ⇒ fold match (a superset sweep is sound; same algebra as bridge_needle in subsume.rs) (3) a fold-unstable needle (a needle differing from its own fold) cannot appear in a fold-identical name → an O(1) rejection via a single `orig_off` sentinel resolves 73% of candidates
+- Alternative (i) "sorted (entry, orig_off) pairs" is predicted at −19.6B/entry, 1.9B better than the u32-column approach (−17.7B), but adds a binary search per residual verification, so the u32 column was chosen to avoid p99 risk
 
-## 影響
+## Consequences
 
-- 大文字を含むneedle(smart case)とSensitiveモードは原文を直接スイープできず、foldしたneedleのスーパーセットスイープ+原文residual検証になる
-- 受け入れた劣化: 実C: 大文字needle("Win"、smart-case)p50 2.5→3.6ms(p99予算50msの7%)
-- スナップショットも同分だけ縮小(FMFIDX04)
+- Needles containing uppercase (smart case) and Sensitive mode cannot sweep the original directly; they become a superset sweep of the folded needle + original-text residual verification
+- Accepted regression: real C: uppercase needle ("Win", smart-case) p50 2.5→3.6ms (7% of the p99 budget of 50ms)
+- The snapshot shrinks by the same amount (FMFIDX04)
 
-## 再検討トリガ
+## Re-examination triggers
 
-- 実ボリュームでfold同一比率が大きく崩れる名前分布(50%未満級)が観測された場合
+- If a name distribution is observed on a real volume where the fold-identical ratio collapses substantially (below 50%-class)

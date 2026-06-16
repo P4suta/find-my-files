@@ -1,65 +1,66 @@
-# サプライチェーンと来歴(provenance)
+# Supply Chain and Provenance
 
-配布物が「このリポジトリの、この commit から、改ざんされていない CI で作られた」ことを
-利用者が機械検証できるようにするための仕組みと、その確認手順。コード署名(Authenticode)は
-[SIGNING.md](SIGNING.md) を参照。本節は **ビルド来歴(SLSA provenance)・SBOM・依存ピン留め** を扱う。
+The mechanisms and verification procedures that let users machine-verify that a distributable was
+"built from this commit of this repository, by an untampered CI." For code signing (Authenticode), see
+[SIGNING.md](SIGNING.md). This document covers **build provenance (SLSA provenance), SBOM, and dependency pinning**.
 
-## 利用者向け: ダウンロードを検証する
+## For users: verify a download
 
-`release.yml`(タグ駆動)は GitHub ネイティブの keyless attestation を発行する。**秘密鍵は無く**、
-ワークフローの OIDC トークンで Sigstore(Fulcio/Rekor)に署名する。検証に必要なのは `gh` だけ:
+`release.yml` (tag-driven) issues GitHub-native keyless attestation. There is **no private key**; it signs to
+Sigstore (Fulcio/Rekor) with the workflow's OIDC token. All you need to verify is `gh`:
 
 ```
-# ビルド来歴(どの commit / workflow / runner が作ったか)を検証
+# Verify build provenance (which commit / workflow / runner built it)
 gh attestation verify find-my-files-vX.Y.Z-win-x64.zip --repo P4suta/find-my-files
 
-# SBOM が同じ zip に紐づくことを検証(CycloneDX predicate)
+# Verify that the SBOM is bound to the same zip (CycloneDX predicate)
 gh attestation verify find-my-files-vX.Y.Z-win-x64.zip --repo P4suta/find-my-files \
   --predicate-type https://cyclonedx.org/bom
 ```
 
-検証成功は「成果物のダイジェストが、`P4suta/find-my-files` の `release.yml` から発行された
-attestation と一致する」ことを意味する。リリースには以下が添付される:
+Successful verification means "the artifact's digest matches an attestation issued from `P4suta/find-my-files`'s
+`release.yml`." The release attaches the following:
 
-| 資産 | 内容 |
+| Asset | Contents |
 |---|---|
-| `find-my-files-vX.Y.Z-win-x64.zip` | アプリ + エンジンバイナリ(署名有効時は Authenticode 署名済み) |
-| `SHA256SUMS.txt` | zip の SHA-256 |
-| `fmf-engine.cdx.json` | Rust エンジンの SBOM(CycloneDX 1.6。`cargo-sbom`、ワークスペース全依存) |
-| `app.cdx.json` | C# アプリの SBOM(CycloneDX 1.6。CycloneDX dotnet tool、NuGet グラフ) |
+| `find-my-files-vX.Y.Z-win-x64.zip` | App + engine binaries (Authenticode-signed when signing is enabled) |
+| `SHA256SUMS.txt` | SHA-256 of the zip |
+| `fmf-engine.cdx.json` | SBOM of the Rust engine (CycloneDX 1.6. `cargo-sbom`, all workspace dependencies) |
+| `app.cdx.json` | SBOM of the C# app (CycloneDX 1.6. CycloneDX dotnet tool, NuGet graph) |
 
-zip・SHA256SUMS にはビルド来歴 attestation、各 SBOM には SBOM attestation が紐づく
-(リポジトリの **Attestations** タブで一覧。計3件)。
+The zip and SHA256SUMS have a build-provenance attestation, and each SBOM has an SBOM attestation
+(listed in the repository's **Attestations** tab; 3 total).
 
-## 依存とビルドの統制
+## Dependency and build controls
 
-| 面 | 仕組み |
+| Aspect | Mechanism |
 |---|---|
-| Rust 依存ロック | `engine/Cargo.lock` / `xtask/Cargo.lock`(commit 済み) |
-| C# 依存ロック | `app/FindMyFiles/packages.lock.json` / `app/FindMyFiles.Tests/packages.lock.json`。CI は `-p:RestoreLockedMode=true` で stale を失敗扱い |
-| 脆弱性 | `cargo-audit`(RustSec・週次 + lock 変更時)。C# は CodeQL + Dependabot |
-| ライセンス/出所 | `cargo-deny`(bans / licenses / sources。未知レジストリ・git は deny) |
-| 自動更新 | Dependabot(cargo / nuget×2 / github-actions。週次) |
-| Action ピン | 全 workflow の third-party action を **40桁コミット SHA** にピン(`# vX.Y.Z` 併記)。Dependabot が SHA とコメントを更新。`actionlint` が hygiene ジョブで workflow を検証 |
-| 姿勢監視 | OpenSSF Scorecard(週次・SARIF を Security タブへ・README バッジ) |
-| 再現ビルド | C# は CI で `ContinuousIntegrationBuild=true`(埋め込みソースパス正規化。`Deterministic` は SDK 既定)。Rust は既定で決定論的 |
+| Rust dependency lock | `engine/Cargo.lock` / `xtask/Cargo.lock` (committed) |
+| C# dependency lock | `app/FindMyFiles/packages.lock.json` / `app/FindMyFiles.Tests/packages.lock.json`. CI treats stale as failure via `-p:RestoreLockedMode=true` |
+| Vulnerabilities | `cargo-audit` (RustSec, weekly + on lock change). C# uses CodeQL + Dependabot |
+| License/provenance | `cargo-deny` (bans / licenses / sources. Unknown registries and git are deny) |
+| Auto-update | Dependabot (cargo / nuget×2 / github-actions. Weekly) |
+| Action pinning | Third-party actions in all workflows are pinned to a **40-char commit SHA** (with `# vX.Y.Z` alongside). Dependabot updates the SHA and comment. `actionlint` validates workflows in the hygiene job |
+| Posture monitoring | OpenSSF Scorecard (weekly, SARIF to the Security tab, README badge) |
+| Reproducible build | C# uses `ContinuousIntegrationBuild=true` in CI (embedded source path normalization. `Deterministic` is the SDK default). Rust is deterministic by default |
 
-## メンテナ向け: 初回 attested リリースの runbook
+## For maintainers: runbook for the first attested release
 
-attestation/SBOM ステップはタグ時のみ発火するため、**実タグの前に dry-run** で OIDC/権限経路を確認する:
+The attestation/SBOM steps fire only on tags, so **do a dry-run before the real tag** to confirm the OIDC/permission path:
 
-1. 既存のテストタグ(または使い捨てタグ)で `release` を **`workflow_dispatch`**(入力 `tag_name`)から手動実行。
-   `permissions: id-token: write / attestations: write` と各ステップが通ることを確認。
-2. 本番は通常どおり `just release`(版 bump + タグ push)→ `release.yml` が自動発火。
-3. 完了後、`gh attestation verify <zip> --repo P4suta/find-my-files` が成功し、**Attestations** タブに3件
-   (provenance + SBOM×2)、リリースに zip / SHA256SUMS / `*.cdx.json` が揃うことを確認。
+1. Manually run `release` via **`workflow_dispatch`** (input `tag_name`) with an existing test tag (or a throwaway tag).
+   Confirm that `permissions: id-token: write / attestations: write` and each step pass.
+2. For production, run `just release` as usual (version bump + tag push) → `release.yml` fires automatically.
+3. After completion, confirm that `gh attestation verify <zip> --repo P4suta/find-my-files` succeeds, the
+   **Attestations** tab has 3 items (provenance + SBOM×2), and the release has zip / SHA256SUMS / `*.cdx.json`.
 
-### 留意点
+### Notes
 
-- **SBOM ツールは CI/release 限定**で導入する(`mise.toml` の開発ループには入れない)。Rust は
-  `cargo install cargo-sbom`、C# は `dotnet tool install --global CycloneDX`(いずれも版ピン)。両言語 **CycloneDX 1.6** に統一。
-- ロックファイル更新は Dependabot の nuget PR が `packages.lock.json` を再生成する。ローカルで版を
-  足したら `dotnet restore`(両 csproj)→ commit。`Roslynator.Analyzers` の浮動 `4.*` はロックファイルが
-  解決版にピンするので、bump 時はロックファイル再生成が要る(= 意図した決定論)。
-- 任意の将来拡張: `Microsoft.SourceLink.GitHub`(PDB を commit にトレース可能化)。依存面を増やす分
-  見送り中。配布 PDB のデバッグ需要が出たら追加を検討。
+- **SBOM tools are CI/release-only** (not added to the `mise.toml` development loop). For Rust,
+  `cargo install cargo-sbom`; for C#, `dotnet tool install --global CycloneDX` (both version-pinned). Both languages
+  standardize on **CycloneDX 1.6**.
+- For lock file updates, Dependabot's nuget PR regenerates `packages.lock.json`. After adding a version locally,
+  run `dotnet restore` (both csproj) → commit. The floating `4.*` of `Roslynator.Analyzers` is pinned to the
+  resolved version by the lock file, so on bump the lock file must be regenerated (= the intended determinism).
+- Optional future extension: `Microsoft.SourceLink.GitHub` (makes PDBs traceable to commits). Deferred because it
+  adds dependency surface. Consider adding it if there is debugging demand for distributed PDBs.

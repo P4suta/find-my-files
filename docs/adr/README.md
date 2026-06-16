@@ -1,26 +1,26 @@
-# ADR索引
+# ADR index
 
-- [0001](0001-filename-only-index.md) — ファイル名のみ索引(content/プロパティ索引はしない)
-- [0002](0002-linear-sweep-no-trigram.md) — 線形プールスイープ+インクリメンタル検索、trigram転置索引は不採用
-- [0003](0003-wtf8-length-preserving-fold.md) — 名前はWTF-8格納、foldは長さ保存の単文字小文字化のみ
-- [0004](0004-fold-overflow-name-layout.md) — fold済みプール1本+原文オーバーフロー(−16B/entry)
-- [0005](0005-frn-index-sorted-permutation.md) — FRN索引はソート済みid順列(25→12→4B/entry)
-- [0006](0006-lazy-sort-permutations.md) — size/mtime順列は遅延derived cache(−8B/entry)
-- [0007](0007-size-u32-overflow.md) — size列u32+オーバーフローmap(−4B/entry)
-- [0008](0008-insertion-point-batch-merge.md) — USNバッチは挿入位置マージ(54.6→2.0ms@1M)
-- [0009](0009-compaction-order-preserving-remap.md) — コンパクションは旧id昇順リマップ・再ソートなし
-- [0010](0010-snapshot-raw-pod-no-compat.md) — スナップショットは生POD+全検証・後方互換なし
-- [0011](0011-scan-streaming-pipeline.md) — ストリーミングスキャン採用、I/O多重化は却下(+14.4% < +30%)
-- [0012](0012-default-allocator-record-arena.md) — 既定アロケータ+RecordArena、mimalloc却下(WS +260MB)
-- [0013](0013-measurement-discipline.md) — 計測規律: 冷機・back-to-back・実ボリューム絶対ゲート
-- [0014](0014-build-tooling-rejections.md) — rust-lld/sccache/nextest却下、codegen-units=1の理由
-- [0015](0015-winui-data-virtualization.md) — WinUI 3データ仮想化(IList+INCC+IItemsRangeInfo)
-- [0016](0016-service-split-named-pipe.md) — v2サービス分離: fmf-service+named pipe、トランスポート却下案、flush公開面
-- [0017](0017-service-security-model.md) — サービスのセキュリティモデル: LocalSystem+特権最小化、pipe DACL 4層
-- [0018](0018-contract-single-source.md) — 契約の単一正本化(fmf-contract)+捕獲先行ゴールデンコーパス、シーム2本上限
-- [0019](0019-focused-search-query-rewrite.md) — 絞り込みモード=UI層クエリ書き換え(ext:+!path:)、エンジン内ビット・ランキングは却下
-- [0020](0020-code-signing-provider.md) — コード署名=SSL.com eSigner/個人IV、Azure(日本個人不可)・EV(SmartScreen即時信頼喪失)は却下
-- [0021](0021-build-output-layout.md) — ビルド出力を単一 build/ に集約(per-workspace .cargo/config.toml、C# bin は BaseOutputPath・obj は据え置き)
-- [0022](0022-boundary-seams-behavioral-tests.md) — OS/シェル/UI 境界はテスト可能シーム+挙動テスト必須(reveal初日壊れの教訓、mutation/カバレッジゲート)
-- [0023](0023-regex-first-class.md) — 正規表現の第一級化: literal-prefilter駆動+コンパイル上限1MiB、契約20B化(pipe v2)、trigramは依然不採用
-- [0024](0024-non-elevated-scope-index.md) — 非昇格スコープ索引モード: フォルダ走査+ReadDirectoryChangesWを2シームの第2実装に、合成FRN(パスハッシュ)で形式無変更、ADR-0001の「フォルダ走査しない」を一点改訂
+- [0001](0001-filename-only-index.md) — Filename-only index (no content/property index)
+- [0002](0002-linear-sweep-no-trigram.md) — Linear pool sweep + incremental search; trigram inverted index rejected
+- [0003](0003-wtf8-length-preserving-fold.md) — Names stored as WTF-8; fold is length-preserving single-char lowercasing only
+- [0004](0004-fold-overflow-name-layout.md) — Single folded pool + original-text overflow (−16B/entry)
+- [0005](0005-frn-index-sorted-permutation.md) — FRN index is a sorted id permutation (25→12→4B/entry)
+- [0006](0006-lazy-sort-permutations.md) — size/mtime permutations are a lazy derived cache (−8B/entry)
+- [0007](0007-size-u32-overflow.md) — size column u32 + overflow map (−4B/entry)
+- [0008](0008-insertion-point-batch-merge.md) — USN batch is insertion-point merge (54.6→2.0ms@1M)
+- [0009](0009-compaction-order-preserving-remap.md) — Compaction remaps in ascending old-id order, no re-sort
+- [0010](0010-snapshot-raw-pod-no-compat.md) — Snapshot is raw POD + full validation, no backward compatibility
+- [0011](0011-scan-streaming-pipeline.md) — Streaming scan adopted; I/O multiplexing rejected (+14.4% < +30%)
+- [0012](0012-default-allocator-record-arena.md) — Default allocator + RecordArena; mimalloc rejected (WS +260MB)
+- [0013](0013-measurement-discipline.md) — Measurement discipline: cold, back-to-back, real-volume absolute gate
+- [0014](0014-build-tooling-rejections.md) — rust-lld/sccache/nextest rejected; rationale for codegen-units=1
+- [0015](0015-winui-data-virtualization.md) — WinUI 3 data virtualization (IList+INCC+IItemsRangeInfo)
+- [0016](0016-service-split-named-pipe.md) — v2 service split: fmf-service + named pipe; rejected transport options; flush public surface
+- [0017](0017-service-security-model.md) — Service security model: LocalSystem + least privilege, 4-layer pipe DACL
+- [0018](0018-contract-single-source.md) — Single source of truth for the contract (fmf-contract) + capture-first golden corpus, 2-seam ceiling
+- [0019](0019-focused-search-query-rewrite.md) — Focused search mode = UI-layer query rewrite (ext:+!path:); in-engine bits/ranking rejected
+- [0020](0020-code-signing-provider.md) — Code signing = SSL.com eSigner/individual IV; Azure (not available to Japanese individuals) and EV (immediate loss of SmartScreen trust) rejected
+- [0021](0021-build-output-layout.md) — Build output consolidated into a single build/ (per-workspace .cargo/config.toml, C# bin via BaseOutputPath, obj left in place)
+- [0022](0022-boundary-seams-behavioral-tests.md) — OS/shell/UI boundaries require testable seams + behavioral tests (lesson from reveal day-one breakage, mutation/coverage gate)
+- [0023](0023-regex-first-class.md) — First-class regex: literal-prefilter-driven + 1MiB compile cap, contract narrowed to 20B (pipe v2); trigram still rejected
+- [0024](0024-non-elevated-scope-index.md) — Non-elevated scope index mode: folder walk + ReadDirectoryChangesW as the second implementation of the 2 seams; synthetic FRN (path hash) keeps the format unchanged; a single-point revision of ADR-0001's "no folder walk"

@@ -444,16 +444,17 @@ fn render_md() -> String {
     w("     Regenerate with `just contract-gen`; `cargo test --workspace`");
     w("     fails on drift. -->");
     w("");
-    w("# 契約リファレンス(生成)");
+    w("# Contract reference (generated)");
     w("");
-    w("fmf-contract クレートの定義値から機械生成した FFI / パイプ契約のスナップショット。");
-    w("意味と安全契約の散文正本は [アーキテクチャ](ARCHITECTURE.md)、Rust API の詳細は");
-    w("rustdoc(`/doc/fmf_contract/`)を参照。数値は `offset_of!` / `size_of!` の実値。");
+    w("Machine-generated snapshot of the FFI / pipe contract from the values defined in the");
+    w("fmf-contract crate. The prose canonical source for semantics and the safety contract is");
+    w("[Architecture](ARCHITECTURE.md); for Rust API details see rustdoc");
+    w("(`/doc/fmf_contract/`). Numbers are the actual `offset_of!` / `size_of!` values.");
     w("");
 
-    w("## 版数とパイプ名");
+    w("## Versions and pipe name");
     w("");
-    w("| 項目 | 値 |");
+    w("| Item | Value |");
     w("|---|---|");
     w(&format!("| `ABI_VERSION` | {} |", versions::ABI_VERSION));
     w(&format!(
@@ -471,9 +472,9 @@ fn render_md() -> String {
     ));
     w("");
 
-    w("## 状態コード(フレームヘッダ status / FFI 返り値。append-only)");
+    w("## Status codes (frame header status / FFI return values. append-only)");
     w("");
-    w("| 名前 | 値 |");
+    w("| Name | Value |");
     w("|---|---|");
     for (name, v) in [
         ("OK", codes::OK),
@@ -490,9 +491,9 @@ fn render_md() -> String {
     }
     w("");
 
-    w("## パイプ オペコード(イベント push は 1..=6 を kind として再利用)");
+    w("## Pipe opcodes (event pushes reuse 1..=6 as the kind)");
     w("");
-    w("| 名前 | 値 |");
+    w("| Name | Value |");
     w("|---|---|");
     for (name, v) in [
         ("HELLO", opcodes::HELLO),
@@ -512,9 +513,9 @@ fn render_md() -> String {
     }
     w("");
 
-    w("## イベント種別(FFI `FmfEvent.kind` = パイプ event-push opcode)");
+    w("## Event kinds (FFI `FmfEvent.kind` = pipe event-push opcode)");
     w("");
-    w("| 種別 | 値 |");
+    w("| Kind | Value |");
     w("|---|---|");
     for (name, v) in [
         ("Progress", events::FMF_EVENT_PROGRESS),
@@ -528,9 +529,9 @@ fn render_md() -> String {
     }
     w("");
 
-    w("## 上限値(プロトコル事実。チューナブルではない)");
+    w("## Limits (protocol facts. not tunable)");
     w("");
-    w("| 定数 | 値 |");
+    w("| Constant | Value |");
     w("|---|---|");
     w(&format!(
         "| `MAX_PAYLOAD_LEN` | {} |",
@@ -547,13 +548,13 @@ fn render_md() -> String {
     w(&format!("| `PAGE_ROWS` | {} |", limits::PAGE_ROWS));
     w("");
 
-    w("## POD レイアウト(`#[repr(C)]`・`offset_of!` 実値)");
+    w("## POD layouts (`#[repr(C)]`, actual `offset_of!` values)");
     w("");
 
     let mut layout = |title: &str, total: usize, fields: &[(&str, usize)]| {
-        w(&format!("### `{title}`({total} B)"));
+        w(&format!("### `{title}` ({total} B)"));
         w("");
-        w("| フィールド | offset |");
+        w("| Field | offset |");
         w("|---|---|");
         for (name, off) in fields {
             w(&format!("| `{name}` | {off} |"));
@@ -638,7 +639,7 @@ fn render_md() -> String {
         ],
     );
 
-    w("## 劣化カウンタ名(stats JSON の `snake_case` キー。append-only)");
+    w("## Degradation counter names (`snake_case` keys of the stats JSON. append-only)");
     w("");
     for name in counters::COUNTER_NAMES {
         w(&format!("- `{name}`"));
