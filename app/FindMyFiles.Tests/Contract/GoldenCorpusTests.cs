@@ -10,7 +10,7 @@ namespace FindMyFiles.Tests.Contract;
 /// Pins the shared golden corpus (contract/golden/, captured by the Rust
 /// suite via the FMF_BLESS=1 ritual) against the C# codec: every frame must
 /// decode and re-encode byte-for-byte. Rust and C# reading the same files is
-/// what makes "Rust/C# 両テストが同一ゴールデンバイトをピンする" true
+/// what makes "Rust and C# tests both pin the same golden bytes" true
 /// (ADR-0018). The C# codec stays hand-written on purpose — two independent
 /// implementations agreeing on one corpus is the verification structure.
 /// </summary>

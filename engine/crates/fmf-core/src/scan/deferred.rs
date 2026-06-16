@@ -55,7 +55,7 @@ struct LazyRecordReader<'a> {
     failed: bool,
     /// Failed `read_record` calls — each one is a name that stays
     /// unresolved until the next rescan. `resolve_deferred` folds this into
-    /// its batch, so the count reaches `ScanStats` (黙らない).
+    /// its batch, so the count reaches `ScanStats` (don't go silent).
     failures: u64,
 }
 

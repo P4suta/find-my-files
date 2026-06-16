@@ -41,7 +41,7 @@ pub enum UsnError {
 }
 
 /// Why the journal can no longer be tailed; all of these mean "fall back to
-/// a full rescan" (docs/RESEARCH.md定石).
+/// a full rescan" (docs/RESEARCH.md established practice).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalGone {
     /// The requested USN range was overwritten/purged (`ERROR_JOURNAL_ENTRY_DELETED`).

@@ -1,6 +1,7 @@
 //! Machine-wide service config: `%ProgramData%\find-my-files\service.json`
-//! (docs/ARCHITECTURE.md「Pipe プロトコル」§マシン単位設定). Owned by the
-//! service; `install` (P4) seeds it with the captured user SID.
+//! (docs/ARCHITECTURE.md "Pipe protocol" §machine-wide settings).
+//!
+//! Owned by the service; `install` (P4) seeds it with the captured user SID.
 
 use std::path::{Path, PathBuf};
 

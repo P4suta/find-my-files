@@ -215,7 +215,7 @@ mod tests {
 
         let s = compute_name_stats(&idx);
         assert_eq!(s.live, 6);
-        assert_eq!(s.fold_identical, 3); // readme.txt ×2 + 日本語.txt
+        assert_eq!(s.fold_identical, 3); // readme.txt x2 + the Japanese-named fixture
         assert_eq!(s.size_ge_4gib, 1);
         assert!((s.unique_name_ratio - 5.0 / 6.0).abs() < 1e-9);
         assert!((s.unique_folded_ratio - 5.0 / 6.0).abs() < 1e-9);

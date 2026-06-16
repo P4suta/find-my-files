@@ -4,7 +4,8 @@
 //! surfaced through `MetricsSnapshot` → the F12 panel and `fmf stats`, and
 //! (c) any registered sinks (the FFI forwards them as `ENGINE_ERROR` events
 //! to the UI).
-//! 「落ちない・固まらない・黙らない」の「黙らない」を担う層。
+//! The layer responsible for the "don't go silent" arm of
+//! "don't crash / don't hang / don't go silent".
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -249,11 +250,13 @@ pub fn error_chain(e: &dyn std::error::Error) -> String {
     s
 }
 
-/// 劣化パス(フォールバックで回復するもの)の唯一の記録手段: warn と
-/// カウンタ増分を不可分に行う(「黙らない」の構文形 — ADR-0018)。
-/// `rg degrade!` が劣化パスの全列挙になる。バッチ経路(スキャン内部)は
-/// stats フィールドで劣化を返し、worker 層で一括して counters へ写像する
-/// (ホットパスにマクロを散らさない)。
+/// The one way to record a degraded path (one that recovers via fallback):
+/// warn and counter increment done atomically (the syntactic form of
+/// "don't go silent" — ADR-0018).
+///
+/// `rg degrade!` enumerates every degraded path. Batch paths (scan internals)
+/// return degradation via stats fields and the worker layer maps them to
+/// counters in one place (don't scatter the macro across the hot path).
 #[macro_export]
 macro_rules! degrade {
     ($counter:expr, $($arg:tt)*) => {{

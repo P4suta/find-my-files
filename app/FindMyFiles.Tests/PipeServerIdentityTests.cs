@@ -7,7 +7,7 @@ using Xunit;
 namespace FindMyFiles.Tests;
 
 /// <summary>
-/// Client-side fake-server defense (SECURITY.md 脅威4): a pipe is trusted only
+/// Client-side fake-server defense (SECURITY.md threat 4): a pipe is trusted only
 /// when its server process is the SCM-registered fmf-engine service. The test
 /// process is never that service, so the check answers false for it and for
 /// any in-process server it hosts. Works unelevated (no SYSTEM token reads).

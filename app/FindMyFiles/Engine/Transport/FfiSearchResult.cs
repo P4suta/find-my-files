@@ -20,7 +20,7 @@ internal sealed unsafe class FfiSearchResult(IntPtr handle, long count) : SafeHa
             () =>
         {
             // AddRef/Release keep the native result alive across an in-flight
-            // fetch even if Dispose() races (docs/ARCHITECTURE.md C#契約).
+            // fetch even if Dispose() races (docs/ARCHITECTURE.md C# contract).
             var added = false;
             DangerousAddRef(ref added);
             try

@@ -3,17 +3,19 @@ namespace FindMyFiles.Engine;
 /// <summary>Materialized, sort-ordered result; pages are O(1) reads.</summary>
 public interface ISearchResult : IDisposable
 {
-    /// <summary>確定した一致総数(<see cref="GetRangeAsync"/> で取れる行数の
-    /// 上限)。仮想化リストのスクロール範囲はこれが決める。</summary>
+    /// <summary>The settled total match count (the upper bound on rows obtainable
+    /// via <see cref="GetRangeAsync"/>). This determines the virtualized list's
+    /// scroll range.</summary>
     long Count { get; }
 
-    /// <summary>結果の <paramref name="offset"/> から最大 <paramref name="count"/>
-    /// 行を取得する(可視ウィンドウのページ読み)。</summary>
-    /// <param name="offset">先頭からの 0 始まり行オフセット。</param>
-    /// <param name="count">取得する最大行数。</param>
-    /// <param name="ct">協調キャンセル用トークン。</param>
-    /// <returns>要求範囲の <see cref="RowData"/>(末尾近くでは
-    /// <paramref name="count"/> 未満になりうる)。</returns>
+    /// <summary>Fetches up to <paramref name="count"/> rows from
+    /// <paramref name="offset"/> in the result (page read of the visible
+    /// window).</summary>
+    /// <param name="offset">0-based row offset from the start.</param>
+    /// <param name="count">Maximum number of rows to fetch.</param>
+    /// <param name="ct">Cooperative cancellation token.</param>
+    /// <returns>The <see cref="RowData"/> for the requested range (may be fewer
+    /// than <paramref name="count"/> near the end).</returns>
     /// <exception cref="StaleResultException">
     /// The index was structurally rebuilt — re-run the query.
     /// </exception>

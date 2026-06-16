@@ -7,7 +7,7 @@ namespace FindMyFiles.Services;
 /// <item><c>--data-dir=&lt;path&gt;</c> when given (tests, scratch, power users);</item>
 /// <item><c>&lt;exe&gt;\data</c> when it can be created and written — the default,
 /// so a copied/unzipped build keeps everything in its own folder and touches
-/// neither the user profile nor the registry ("置くだけ・消すだけ");</item>
+/// neither the user profile nor the registry ("just drop it / just delete it");</item>
 /// <item>the per-user profile (<c>%APPDATA%</c> / <c>%LOCALAPPDATA%</c>) only when the
 /// app folder is read-only (e.g. installed under Program Files).</item>
 /// </list>

@@ -32,7 +32,8 @@ pub struct ServerOptions {
     /// Enable debug fault injection (`!!panic` / `!!drop` / `!!lag`); always
     /// off for the installed service.
     pub debug_faults: bool,
-    /// Connect-time token allowlist (docs/SECURITY.md 4層防御の④)。Empty =
+    /// Connect-time token allowlist (docs/SECURITY.md layer 4 of the 4-layer
+    /// defense). Empty =
     /// no check (console/test mode); the installed service always fills it.
     pub authorized_sids: Vec<String>,
 }

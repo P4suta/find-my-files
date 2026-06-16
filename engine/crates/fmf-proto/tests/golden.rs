@@ -1,7 +1,7 @@
 //! Golden corpus pin: every representative frame the protocol can carry,
 //! captured byte-for-byte in `contract/golden/` (repo root). The C# suite
-//! (`GoldenCorpusTests`) pins the very same files — this is the "Rust/C# 両
-//! テストが同一ゴールデンバイトをピンする" rule made real (ADR-0018).
+//! (`GoldenCorpusTests`) pins the very same files — this is the "Rust and C#
+//! tests pin the same golden bytes" rule made real (ADR-0018).
 //!
 //! Re-capture (bless) is an explicit ritual for intentional contract
 //! changes only:

@@ -4,7 +4,7 @@
 //! candidates. Groups without a usable literal fall back to a chunked
 //! full scan, and the empty query walks the permutation directly. Results
 //! materialize as O(1)-pageable, sort-ordered id arrays
-//! (docs/ARCHITECTURE.md「クエリ時マテリアライズ」).
+//! (docs/ARCHITECTURE.md "query-time materialization").
 
 use rayon::prelude::*;
 

@@ -14,8 +14,8 @@ public static class ServiceProvisioner
 {
     /// <summary>install (idempotent) + restart in one elevated step (the
     /// fmf-service `setup` verb), forwarding the daily user's SID so OTS
-    /// elevation doesn't lock them out (docs/SECURITY.md 脅威1). Blocking work
-    /// runs off the UI thread.</summary>
+    /// elevation doesn't lock them out (docs/SECURITY.md threat 1). Blocking
+    /// work runs off the UI thread.</summary>
     /// <returns>The outcome of the elevated setup step (success, declined, or failed).</returns>
     public static async Task<ServiceActionOutcome> RegisterAsync()
     {

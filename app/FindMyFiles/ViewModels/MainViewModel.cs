@@ -46,13 +46,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     public partial bool IncludeHiddenSystem { get; set; }
 
-    /// <summary>絞り込みモード (focused search, ADR-0019): the toolbar toggle.
+    /// <summary>Focused search (ADR-0019): the toolbar toggle.
     /// Initialized from settings in the ctor; flips push down to the
     /// orchestrator, persist, and requery as a filter change (top reset).</summary>
     [ObservableProperty]
     public partial bool FocusedSearch { get; set; }
 
-    /// <summary>正規表現モード (ADR-0023): treat the whole query as one regex.
+    /// <summary>Regex mode (ADR-0023): treat the whole query as one regex.
     /// Restored from settings in the ctor; flips persist and requery as a
     /// filter change (the same text now means something different).</summary>
     [ObservableProperty]
@@ -86,7 +86,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// UI (box + result list) should be shown instead of the setup screen.</summary>
     public bool IsReady => !IsDisconnected;
 
-    /// <summary>Setup screen progress text ("管理者の許可を待っています…" etc.);
+    /// <summary>Setup screen progress text ("waiting for admin permission…" etc.);
     /// empty hides the progress row.</summary>
     [ObservableProperty]
     public partial string SetupStatus { get; set; } = string.Empty;
@@ -258,9 +258,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             var volumes = await _engine.ListVolumesAsync().ConfigureAwait(false);
             await _engine.StartIndexingAsync(volumes).ConfigureAwait(false);
 
-            // 起動時点の実状態を反映(pipe では接続前にサービスが索引済みのことが
-            // ある)。無条件「作成中」をやめ、既Readyなら「準備完了」に。以後の
-            // Scanning→Ready 遷移は OnVolumeUpdated が拾う。
+            // Reflect the real state at startup (over a pipe the service may
+            // already be indexed before we connect). Drop the unconditional
+            // "preparing" and show "ready" when already Ready; later
+            // Scanning→Ready transitions are picked up by OnVolumeUpdated.
             StatusText = StatusFormatter.Overall(await _engine.GetStatusAsync(), volumes);
         }
         catch (Exception ex)

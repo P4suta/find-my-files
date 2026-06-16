@@ -10,7 +10,7 @@
 //!
 //! Swap-in goes through `VolumeSlot::install_index`, which bumps the
 //! structural generation: open result handles go hard-stale and the UI
-//! re-issues its query (docs/ARCHITECTURE.md, generation 2層).
+//! re-issues its query (docs/ARCHITECTURE.md, generation 2-tier).
 
 use parking_lot::Mutex;
 

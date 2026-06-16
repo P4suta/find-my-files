@@ -6,7 +6,7 @@ namespace FindMyFiles.Tests;
 /// <summary>Behavioural tests for <see cref="FileLog"/> — formatting, rotation
 /// and tail, exercised against a temp directory instead of %APPDATA% via the
 /// path-parameterised internal cores. Previously the logger had no tests at all
-/// (it is the "黙らない" backstop, so it must actually work).</summary>
+/// (it is the "don't go silent" backstop, so it must actually work).</summary>
 public sealed class FileLogTests
 {
     private static string TempDir() => Directory.CreateTempSubdirectory("fmf-log-").FullName;

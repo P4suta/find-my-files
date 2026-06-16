@@ -1,11 +1,12 @@
 namespace FindMyFiles.Engine;
 
-/// <summary>索引が構造的に再構築され、保持していた結果ハンドルの行 ID が
-/// 無効になったことを示す(<see cref="ISearchResult.GetRangeAsync"/> から
-/// 送出)。回復はクエリの再実行。</summary>
+/// <summary>The index was structurally rebuilt and the row IDs of a held result
+/// handle are now invalid (thrown from
+/// <see cref="ISearchResult.GetRangeAsync"/>). Recovery is to re-run the
+/// query.</summary>
 public sealed class StaleResultException : Exception
 {
-    /// <summary>定型メッセージで初期化する。</summary>
+    /// <summary>Initializes with the canned message.</summary>
     public StaleResultException()
         : base("result is stale; re-run the query")
     {

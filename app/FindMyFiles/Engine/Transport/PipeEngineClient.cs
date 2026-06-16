@@ -9,12 +9,12 @@ namespace FindMyFiles.Engine;
 
 /// <summary>
 /// Engine client over the fmf-service named pipe (docs/ARCHITECTURE.md
-/// 「Pipe プロトコル」). This class is the connection *supervisor* plus the
+/// "Pipe protocol"). This class is the connection *supervisor* plus the
 /// request multiplexing table; the established connection itself (stream,
 /// read loop, serialized writer, epoch) is one <see cref="PipeConnection"/>
 /// object, replaced wholesale on every (re)connect. The supervisor loop:
 /// connect → server-is-SYSTEM check (default pipe name only; SECURITY.md
-/// 脅威4) → Hello (version check; a mismatch is fatal) → Subscribe →
+/// Threat 4) → Hello (version check; a mismatch is fatal) → Subscribe →
 /// IndexStatus (synthesized VolumeUpdated + IndexChanged) → Connected. On
 /// disconnect every pending request fails fast with
 /// <see cref="EngineUnavailableException"/>, live results turn stale because
@@ -67,7 +67,7 @@ public sealed class PipeEngineClient : IEngineClient
     /// <summary>Connects to the fmf-service named pipe and starts the
     /// supervisor loop immediately. <paramref name="pipeName"/> defaults to
     /// <see cref="PipeProtocol.DefaultPipeName"/>; only that default name has
-    /// its server identity verified (SECURITY.md 脅威4) — a custom name
+    /// its server identity verified (SECURITY.md Threat 4) — a custom name
     /// (tests) skips the SYSTEM check.</summary>
     /// <param name="pipeName">Pipe to connect to, as either the short name or
     /// the full <c>\\.\pipe\…</c> path.</param>
@@ -77,7 +77,7 @@ public sealed class PipeEngineClient : IEngineClient
     }
 
     /// <summary>Server identity is verified on the default pipe name only;
-    /// a custom --pipe-name (tests) skips the check (SECURITY.md 脅威4).</summary>
+    /// a custom --pipe-name (tests) skips the check (SECURITY.md Threat 4).</summary>
     private readonly bool _verifyServerIdentity;
 
     /// <summary>Tests pass autoStart=false to attach event handlers before
@@ -223,7 +223,7 @@ public sealed class PipeEngineClient : IEngineClient
             {
                 // A version skew or a non-SYSTEM impostor server never fixes
                 // itself by retrying — stay down until a human fixes one side
-                // (pipe spec / SECURITY.md 脅威4). Requests keep failing with
+                // (pipe spec / SECURITY.md Threat 4). Requests keep failing with
                 // EngineUnavailableException.
                 FileLog.Error("pipe", $"fatal pipe failure — not reconnecting: {ex.Message}");
                 SafeDispose(stream);
@@ -367,7 +367,7 @@ public sealed class PipeEngineClient : IEngineClient
         }
     }
 
-    /// <summary>A faulting consumer must not kill the read loop (落ちない).</summary>
+    /// <summary>A faulting consumer must not kill the read loop (don't crash).</summary>
     /// <param name="raise">The handler invocation to run guarded.</param>
     /// <param name="what">Label for the event, used in the failure log.</param>
     private static void RaiseSafe(Action raise, string what)

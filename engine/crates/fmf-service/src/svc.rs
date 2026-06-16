@@ -41,7 +41,7 @@ pub struct ServeOptions {
 /// Exit code reported when the writer lock never came free.
 ///
 /// Visible in the event log, but a clean `SERVICE_STOPPED` so the SCM does not
-/// crash-loop us against the lock holder (docs/ARCHITECTURE.md §単一書き手の排他).
+/// crash-loop us against the lock holder (docs/ARCHITECTURE.md §single-writer exclusion).
 pub const EXIT_LOCKED: u32 = 7;
 
 /// Brings the engine + pipe server up, parks until `stop`, tears down.

@@ -2,7 +2,7 @@
 //!
 //! Binary payloads are little-endian, padding free,
 //! concatenated in documented order; cold-path payloads are UTF-8 JSON with
-//! `snake_case` fields (docs/ARCHITECTURE.md「Pipe プロトコル」§オペコード表
+//! `snake_case` fields (docs/ARCHITECTURE.md "Pipe protocol" §Opcode table
 //! — the canonical table). The types themselves come from `fmf_contract`;
 //! only the byte logic lives here.
 

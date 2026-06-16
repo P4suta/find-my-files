@@ -243,13 +243,13 @@ impl VolumeIndex {
     }
 
     /// The content generation — bumped by every USN batch; open result
-    /// handles stay readable across it (docs/ARCHITECTURE.md, generation 2層).
+    /// handles stay readable across it (docs/ARCHITECTURE.md, generation 2-tier).
     pub const fn content_generation(&self) -> u64 {
         self.content_generation
     }
 
     /// The structural generation — bumped only by compaction/rebuild, which
-    /// hard-stales open result handles (docs/ARCHITECTURE.md, generation 2層).
+    /// hard-stales open result handles (docs/ARCHITECTURE.md, generation 2-tier).
     pub const fn structural_generation(&self) -> u64 {
         self.structural_generation
     }
@@ -261,7 +261,7 @@ impl VolumeIndex {
     /// Carry the structural generation across a rebuild: a freshly built
     /// index replacing one whose generation was `prev` must read as strictly
     /// newer, so open result handles go hard-stale (docs/ARCHITECTURE.md,
-    /// generation 2層). Compaction (M2) will reuse this.
+    /// generation 2-tier). Compaction (M2) will reuse this.
     pub(crate) const fn bump_structural_from(&mut self, prev: u64) {
         self.structural_generation = prev + 1;
     }

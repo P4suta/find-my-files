@@ -36,13 +36,14 @@ public static class EngineClientFactory
 {
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromMilliseconds(250);
 
-    /// <summary>起動時に一度だけ呼び、上記の優先順位でエンジン実装を 1 つ
-    /// 解決して返す。サービス不在+非昇格など in-proc が使えない状況では
-    /// 空エンジン(<see cref="FakeEngineClient.CreateEmpty"/>)に劣化させ、
-    /// UI を setup 画面に誘導する(自動 runas はしない)。</summary>
-    /// <param name="args">プロセスのコマンドライン引数(`--fake-engine` /
-    /// `--engine=` / `--pipe-name=` を見る)。</param>
-    /// <returns>選択された <see cref="IEngineClient"/> 実装の単一インスタンス。</returns>
+    /// <summary>Called once at startup; resolves and returns a single engine
+    /// implementation by the priority above. When in-proc is unavailable (no
+    /// service plus not elevated), degrades to the empty engine
+    /// (<see cref="FakeEngineClient.CreateEmpty"/>) and steers the UI to the
+    /// setup screen (no auto-runas).</summary>
+    /// <param name="args">Process command-line args (reads `--fake-engine` /
+    /// `--engine=` / `--pipe-name=`).</param>
+    /// <returns>The single chosen <see cref="IEngineClient"/> implementation instance.</returns>
     public static IEngineClient Resolve(string[] args)
     {
         var dataRoot = AppPaths.IsPortable

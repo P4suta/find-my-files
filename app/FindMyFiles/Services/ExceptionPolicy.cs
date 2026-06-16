@@ -4,8 +4,8 @@ namespace FindMyFiles.Services;
 
 /// <summary>
 /// The single home for the process-wide exception funnels
-/// (「落ちない・固まらない・黙らない」). Three sources, three suppression
-/// rules:
+/// (don't crash / don't hang / don't go silent). Three sources, three
+/// suppression rules:
 ///
 /// 1. XAML <see cref="Application.UnhandledException"/> — suppressed
 ///    (<c>Handled = true</c>) and surfaced as an error InfoBar for the first

@@ -224,7 +224,7 @@ impl PipeListener {
     /// Creates the next server instance and waits for a client or the stop
     /// event. The first instance carries `FILE_FLAG_FIRST_PIPE_INSTANCE` —
     /// and only the first (a second flagged instance would fail against our
-    /// own; docs/SECURITY.md 脅威4).
+    /// own; docs/SECURITY.md threat 4).
     ///
     /// # Errors
     /// Returns the OS error if `CreateNamedPipeW`, the stop-event creation, or

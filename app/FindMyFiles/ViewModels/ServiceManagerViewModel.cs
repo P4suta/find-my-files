@@ -7,7 +7,7 @@ namespace FindMyFiles.ViewModels;
 
 /// <summary>
 /// The service-manager dialog's state: the read-only SCM state line plus the
-/// per-action UAC mutations the gear menu's「サービスの管理…」exposes — the one
+/// per-action UAC mutations the gear menu's "Manage service…" exposes — the one
 /// place the app manages the fmf-engine service. Each action shells one
 /// elevated fmf-service verb (<see cref="ServiceSetup.RunElevated"/>); the app
 /// itself stays asInvoker. UI thread only — the work itself hops to a thread
@@ -19,8 +19,8 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     /// disables every action and the state line says why.</summary>
     private readonly string? _exe;
 
-    /// <summary>The read-only SCM state line (未登録 / 停止 / 実行中 (PID …) /
-    /// ツール未検出). Recomputed by <see cref="Refresh"/>.</summary>
+    /// <summary>The read-only SCM state line (not installed / stopped /
+    /// running (PID …) / tool not found). Recomputed by <see cref="Refresh"/>.</summary>
     [ObservableProperty]
     public partial string StateText { get; set; } = Loc.Get("Svc_StateChecking");
 
@@ -40,20 +40,20 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(NotBusy))]
     public partial bool Busy { get; set; }
 
-    /// <summary>削除 checkbox: also wipe <c>%ProgramData%\find-my-files</c>
+    /// <summary>Uninstall checkbox: also wipe <c>%ProgramData%\find-my-files</c>
     /// (index + service.json) on uninstall, vs leaving the data in place.</summary>
     [ObservableProperty]
     public partial bool PurgeData { get; set; }
 
     /// <summary>Fallback only: shown when the automatic post-register relaunch
     /// couldn't confirm the service came up — surfaces the manual
-    /// 「アプリを再起動」button.</summary>
+    /// "Restart app" button.</summary>
     [ObservableProperty]
     public partial bool NeedsAppRestart { get; set; }
 
     // ── State, for the header icon + section visibility (set in Refresh) ──
 
-    /// <summary>Service installed and running — drives the header「実行中」icon.</summary>
+    /// <summary>Service installed and running — drives the header "running" icon.</summary>
     [ObservableProperty]
     public partial bool IsRunning { get; set; }
 
@@ -61,34 +61,34 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     [ObservableProperty]
     public partial bool IsStopped { get; set; }
 
-    /// <summary>Service not installed at all — shows the 登録 prompt.</summary>
+    /// <summary>Service not installed at all — shows the register prompt.</summary>
     [ObservableProperty]
     public partial bool IsNotInstalled { get; set; }
 
-    /// <summary>Installed (Stopped or Running) — gates the 稼働/削除 groups.</summary>
+    /// <summary>Installed (Stopped or Running) — gates the lifecycle/uninstall groups.</summary>
     [ObservableProperty]
     public partial bool IsInstalled { get; set; }
 
     // ── Which lifecycle buttons apply (set in Refresh) ──
 
-    /// <summary>開始 applies — service is installed and Stopped.</summary>
+    /// <summary>Start applies — service is installed and Stopped.</summary>
     [ObservableProperty]
     public partial bool CanStart { get; set; }
 
-    /// <summary>停止 applies — service is Running.</summary>
+    /// <summary>Stop applies — service is Running.</summary>
     [ObservableProperty]
     public partial bool CanStop { get; set; }
 
-    /// <summary>再起動 applies — service is Running.</summary>
+    /// <summary>Restart applies — service is Running.</summary>
     [ObservableProperty]
     public partial bool CanRestart { get; set; }
 
-    /// <summary>削除 applies — service is installed (Stopped or Running).</summary>
+    /// <summary>Uninstall applies — service is installed (Stopped or Running).</summary>
     [ObservableProperty]
     public partial bool CanUninstall { get; set; }
 
-    /// <summary>The service tool is available (gates the 登録 group). The
-    /// accent「登録して開始」vs plain「登録し直す」split is by Is(Not)Installed.</summary>
+    /// <summary>The service tool is available (gates the register group). The
+    /// accent "register and start" vs plain "re-register" split is by Is(Not)Installed.</summary>
     [ObservableProperty]
     public partial bool CanRegister { get; set; }
 
@@ -158,7 +158,7 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     /// <summary>install (idempotent) + restart in one elevated step (the
     /// fmf-service `setup` verb). The daily user's SID is forwarded so OTS
     /// elevation — a *different* admin account at the UAC prompt — does not
-    /// lock this user out of the pipe (docs/SECURITY.md 脅威1). The app is
+    /// lock this user out of the pipe (docs/SECURITY.md threat 1). The app is
     /// unelevated here, so CurrentUserSid is exactly that daily user.</summary>
     /// <returns>A task that completes when the elevated <c>setup</c> verb finishes.</returns>
     public Task RegisterAsync()

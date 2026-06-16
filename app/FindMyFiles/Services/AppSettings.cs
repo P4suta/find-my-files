@@ -19,13 +19,13 @@ public sealed class AppSettings
     /// switcher persists it here and relaunches to take effect.</summary>
     public string Language { get; set; } = "auto";
 
-    /// <summary>絞り込みモード (focused search, ADR-0019): rewrite queries in
+    /// <summary>Focused-search mode (ADR-0019): rewrite queries in
     /// the UI with the two lists below before they reach the engine. On by
     /// default — the casual user wants a handful of hits, not 10,000; the
     /// toolbar toggle flips it per session and persists here.</summary>
     public bool FocusedSearch { get; set; } = true;
 
-    /// <summary>正規表現モード (ADR-0023): treat the whole query as one regex.
+    /// <summary>Regex mode (ADR-0023): treat the whole query as one regex.
     /// Off by default; the gear-menu toggle flips it and persists here.</summary>
     public bool RegexMode { get; set; }
 
@@ -62,10 +62,12 @@ public sealed class AppSettings
         "exe", "msi", "lnk",
     ];
 
-    /// <summary>非昇格スコープモード (ADR-0024) で索引するルートフォルダの絶対
-    /// パス。空 = 未設定で、setup 画面は管理者経路(全ドライブ最速)を主に促す。
-    /// 1 つ以上入ると次回起動で <c>EngineChoice.WalkInProc</c> に解決され、サービ
-    /// スも管理者権限も使えない会社 PC でフォルダ走査検索が動く。</summary>
+    /// <summary>Absolute paths of the root folders to index in non-elevated
+    /// scope mode (ADR-0024). Empty = unconfigured, and the setup screen mainly
+    /// pushes the admin path (all drives, fastest). One or more entries resolve
+    /// to <c>EngineChoice.WalkInProc</c> on the next launch, so folder-walk
+    /// search works on a corporate PC where neither the service nor admin rights
+    /// are available.</summary>
     public string[] ScopeRoots { get; set; } = [];
 
     private static readonly JsonSerializerOptions JsonOpts = new()

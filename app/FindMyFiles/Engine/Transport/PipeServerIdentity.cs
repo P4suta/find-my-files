@@ -5,7 +5,7 @@ using Microsoft.Win32.SafeHandles;
 namespace FindMyFiles.Engine;
 
 /// <summary>
-/// Client-side fake-server defense (SECURITY.md 脅威4, pipe-name squatting):
+/// Client-side fake-server defense (SECURITY.md Threat 4, pipe-name squatting):
 /// the process at the far end of the default pipe must be the SCM-registered
 /// fmf-engine service. Comparing the pipe's server PID to the service's PID
 /// works from an unelevated client — reading a SYSTEM process's token does
