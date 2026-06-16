@@ -32,4 +32,6 @@ pub const COUNTER_NAMES: &[&str] = &[
     "deferred_name_read_failures",
     "pipe_results_evicted",
     "trace_serialize_failures",
+    "walk_read_errors",
+    "walk_depth_truncated",
 ];

@@ -158,4 +158,6 @@ rustdoc(`/doc/fmf_contract/`)を参照。数値は `offset_of!` / `size_of!` の
 - `deferred_name_read_failures`
 - `pipe_results_evicted`
 - `trace_serialize_failures`
+- `walk_read_errors`
+- `walk_depth_truncated`
 

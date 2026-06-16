@@ -84,6 +84,19 @@ pub struct JournalView {
     pub(crate) first_usn: i64,
 }
 
+#[cfg(windows)]
+impl JournalView {
+    /// The synthetic view for a scope-mode (folder-walk) snapshot (ADR-0024):
+    /// journal id 0 with no retention window, so `snapshot_decision` always
+    /// restores a loaded walk snapshot — there is no USN cursor to validate.
+    pub(crate) const fn scope() -> Self {
+        Self {
+            journal_id: 0,
+            first_usn: 0,
+        }
+    }
+}
+
 /// One volume's USN journal session, reopenable across journal-gone
 /// rescans. `open` must succeed before any other method is called (the
 /// worker guarantees this; implementations may panic otherwise — the

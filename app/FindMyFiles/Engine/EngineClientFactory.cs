@@ -19,6 +19,11 @@ internal enum EngineChoice
     /// <summary>No live service and not elevated — degrade to the empty engine
     /// (no auto-runas); the setup screen offers the one-click install.</summary>
     EmptyNotElevated,
+
+    /// <summary>No live service, not elevated, but the user has configured scope
+    /// roots (ADR-0024) — run the non-elevated folder-walk engine in-proc over
+    /// those roots (the corporate-PC path where admin is forbidden).</summary>
+    WalkInProc,
 }
 
 /// <summary>
@@ -40,13 +45,19 @@ public static class EngineClientFactory
     /// <returns>選択された <see cref="IEngineClient"/> 実装の単一インスタンス。</returns>
     public static IEngineClient Resolve(string[] args)
     {
+        FileLog.Info(
+            "app",
+            AppPaths.IsPortable
+                ? $"data root: portable ({AppPaths.PortableRoot})"
+                : "data root: per-user profile (app folder not writable)");
         if (HasFlag(args, "--fake-engine"))
         {
             FileLog.Info("app", "engine: fake (--fake-engine)");
             return new FakeEngineClient();
         }
         var pipeName = OptionValue(args, "--pipe-name=") ?? PipeProtocol.DefaultPipeName;
-        var mode = OptionValue(args, "--engine=") ?? AppSettings.Load().Engine;
+        var settings = AppSettings.Load();
+        var mode = OptionValue(args, "--engine=") ?? settings.Engine;
         if (string.Equals(mode, "pipe", StringComparison.OrdinalIgnoreCase))
         {
             FileLog.Info("app", $"engine: pipe ({pipeName})");
@@ -69,7 +80,8 @@ public static class EngineClientFactory
         var choice = DecideAuto(
             () => PipeEngineClient.Probe(pipeName, ProbeTimeout),
             ServiceSetup.QueryState,
-            ServiceSetup.IsProcessElevated);
+            ServiceSetup.IsProcessElevated,
+            () => settings.ScopeRoots.Length > 0);
         if (choice == EngineChoice.Pipe)
         {
             FileLog.Info("app", $"engine: pipe ({pipeName}, probe succeeded)");
@@ -92,24 +104,40 @@ public static class EngineClientFactory
             return FakeEngineClient.CreateEmpty();
         }
 
+        if (choice == EngineChoice.WalkInProc)
+        {
+            // Not elevated, no service, but scope roots are configured (ADR-0024):
+            // run the folder-walk engine in-proc over the user's index at
+            // %LOCALAPPDATA% — the corporate-PC path where admin is forbidden.
+            FileLog.Info(
+                "app",
+                $"engine: scope walk in-proc ({settings.ScopeRoots.Length} roots, not elevated)");
+            return FfiEngineClient.CreateScope(settings.ScopeRoots);
+        }
+
         // EmptyNotElevated: no live service and not elevated. In-proc would fail
         // at the MFT read; degrade to the empty engine (no auto-runas) so the
-        // setup screen can offer the one-click install.
+        // setup screen can offer the one-click install (which leads with admin).
         FileLog.Warn("app", "engine: empty fallback (no service answered, not elevated)");
         return FakeEngineClient.CreateEmpty();
     }
 
     /// <summary>The auto-mode decision: probe the pipe, else fall back by service
-    /// state and elevation. Pure over the three injected probes so the branch
-    /// table is unit-testable. Short-circuits: a successful probe never consults
-    /// the service state or elevation; a running service never consults
-    /// elevation.</summary>
+    /// state, elevation, and scope config. Pure over the four injected probes so
+    /// the branch table is unit-testable. Short-circuits: a successful probe never
+    /// consults the rest; a running service never consults elevation; an elevated
+    /// process never consults scope config.</summary>
     /// <param name="probe">Pipe probe — did a Hello round-trip succeed?</param>
     /// <param name="serviceState">SCM state of the engine service.</param>
     /// <param name="elevated">Whether this process is elevated.</param>
+    /// <param name="hasScopeConfig">Whether the user configured scope roots
+    /// (ADR-0024) — consulted only when not elevated and no service.</param>
     /// <returns>The transport to construct.</returns>
     internal static EngineChoice DecideAuto(
-        Func<bool> probe, Func<EngineServiceState> serviceState, Func<bool> elevated)
+        Func<bool> probe,
+        Func<EngineServiceState> serviceState,
+        Func<bool> elevated,
+        Func<bool> hasScopeConfig)
     {
         if (probe())
         {
@@ -119,7 +147,14 @@ public static class EngineClientFactory
         {
             return EngineChoice.EmptyServiceUnreachable;
         }
-        return elevated() ? EngineChoice.Ffi : EngineChoice.EmptyNotElevated;
+        if (elevated())
+        {
+            return EngineChoice.Ffi;
+        }
+        // Not elevated, no service: walk the user's chosen roots if any are
+        // configured (ADR-0024), else send them to the setup screen (which
+        // leads with the admin path). `hasScopeConfig` is consulted last.
+        return hasScopeConfig() ? EngineChoice.WalkInProc : EngineChoice.EmptyNotElevated;
     }
 
     internal static bool HasFlag(string[] args, string flag) =>

@@ -71,6 +71,39 @@ pub unsafe extern "C" fn fmf_index_start(
     })
 }
 
+/// Begin a non-elevated scope-mode index over `n` absolute root paths.
+///
+/// Mirrors [`fmf_index_start`] but routes the `roots` to
+/// `Engine::index_start_scope` (folder-walk + watcher, ADR-0024); the host
+/// must have created the engine on a per-user (`%LOCALAPPDATA%`) index dir.
+/// Additive ABI — a new export, no POD layout change, so `ABI_VERSION` is
+/// unchanged. Safety: see docs/ARCHITECTURE.md.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fmf_index_start_scope(
+    h: *mut c_void,
+    roots: *const *const c_char,
+    n: u32,
+) -> i32 {
+    guard(|| {
+        let handle = match unsafe { engine(h) } {
+            Ok(e) => e,
+            Err(c) => return c,
+        };
+        if roots.is_null() && n > 0 {
+            return FMF_E_INVALID_ARG;
+        }
+        let mut paths = Vec::with_capacity(n as usize);
+        for i in 0..n as usize {
+            match unsafe { utf8_arg(*roots.add(i)) } {
+                Ok(s) => paths.push(s.to_string()),
+                Err(c) => return c,
+            }
+        }
+        handle.engine.index_start_scope(&paths);
+        FMF_OK
+    })
+}
+
 /// Report per-volume indexing status for the engine behind handle `h`, writing
 /// up to `cap` entries into `buf` and the total count into `count`. Safety: see docs/ARCHITECTURE.md.
 #[unsafe(no_mangle)]

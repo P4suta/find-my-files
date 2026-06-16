@@ -18,7 +18,8 @@ use crate::metrics::{Counters, ScanTrace, UsnTrace};
 use crate::usn::{JournalGone, ReadOutcome, UsnError, UsnRecord, apply_batch};
 
 use super::seams::{JournalSource, JournalView, WinJournalSource};
-use super::volume::{JournalCheckpoint, VolumeSlot};
+use super::volume::{JournalCheckpoint, VolumeSlot, WorkerKind};
+use super::watch::WatcherJournalSource;
 use super::{Engine, EngineEvent, VolumeState};
 
 /// Engine-side debounce for `IndexChanged` — the only throttle in the whole
@@ -136,8 +137,19 @@ impl Engine {
     /// lives on the slot, created by `index_start`).
     #[cfg(windows)]
     pub(super) fn volume_thread(self: Arc<Self>, slot: Arc<VolumeSlot>) {
-        let mut journal = WinJournalSource::new(slot.label.clone());
-        self.volume_thread_with(slot, &mut journal);
+        // Pick the change-source seam by slot kind (ADR-0024). Clone the roots
+        // out of the borrow first so `slot` is free to move into the call.
+        let walk_roots = match &slot.kind {
+            WorkerKind::Mft => None,
+            WorkerKind::Walk { roots } => Some(roots.clone()),
+        };
+        if let Some(roots) = walk_roots {
+            let mut journal = WatcherJournalSource::new(roots);
+            self.volume_thread_with(slot, &mut journal);
+        } else {
+            let mut journal = WinJournalSource::new(slot.label.clone());
+            self.volume_thread_with(slot, &mut journal);
+        }
     }
 
     /// Panic firewall: a crashing volume thread must never leave the UI
@@ -245,8 +257,19 @@ impl Engine {
                     // A rejected snapshot must not stay resident while the
                     // scan (and the tail session after it) runs.
                     drop(load);
-                    match crate::mft::scan_volume(&label) {
+                    // Initial-scan source by slot kind (ADR-0024): the $MFT
+                    // stream (elevated) or the non-elevated folder walk. Both
+                    // yield (VolumeIndex, ScanStats); the walk is infallible.
+                    let scanned = match &slot.kind {
+                        WorkerKind::Mft => crate::mft::scan_volume(&label),
+                        WorkerKind::Walk { roots } => Ok(crate::scan::walk::walk_scan(roots)),
+                    };
+                    match scanned {
                         Ok((mut idx, stats)) => {
+                            let scan_source = match &slot.kind {
+                                WorkerKind::Walk { .. } => "walk",
+                                WorkerKind::Mft => "scan",
+                            };
                             tracing::info!(
                                 volume = %label,
                                 entries = idx.len(),
@@ -292,9 +315,34 @@ impl Engine {
                                     "deferred-name disk reads failed — those names stay unresolved until rescan"
                                 );
                             }
+                            // Scope-walk degradations (ADR-0024): same single
+                            // stats→counters+warn mapping point as the $MFT
+                            // ones above; zero for the privileged path.
+                            if stats.walk_read_errors > 0 {
+                                Counters::add(
+                                    &self.metrics.counters.walk_read_errors,
+                                    stats.walk_read_errors,
+                                );
+                                tracing::warn!(
+                                    volume = %label,
+                                    errors = stats.walk_read_errors,
+                                    "scope walk: paths skipped (unreadable) — absent until re-index"
+                                );
+                            }
+                            if stats.walk_depth_truncated > 0 {
+                                Counters::add(
+                                    &self.metrics.counters.walk_depth_truncated,
+                                    stats.walk_depth_truncated,
+                                );
+                                tracing::warn!(
+                                    volume = %label,
+                                    truncated = stats.walk_depth_truncated,
+                                    "scope walk: subtrees not descended (depth cap)"
+                                );
+                            }
                             self.metrics.record_scan(ScanTrace {
                                 volume: label.clone(),
-                                source: "scan".to_string(),
+                                source: scan_source.to_string(),
                                 read_bytes: stats.mft_bytes,
                                 read_ms: stats.elapsed_mft_load_ms,
                                 mb_per_s: if stats.elapsed_mft_load_ms > 0 {
@@ -317,7 +365,7 @@ impl Engine {
                         Err(e) => {
                             *slot.phase.lock() = VolumeState::Failed;
                             self.emit(EngineEvent::VolumeFailed {
-                                volume: label.clone(),
+                                volume: label,
                                 message: e.to_string(),
                             });
                             return;

@@ -713,3 +713,46 @@ fn stat_fetch_failure_storm_counts_and_batches_still_apply() {
     assert_eq!(phase_of(&e, label), VolumeState::Ready);
     e.shutdown();
 }
+
+/// Scope mode (ADR-0024) end to end through the *real* worker, unprivileged:
+/// `index_start_scope` folder-walks a real tree, the no-op watcher idles, and
+/// a query returns the walked file with its reconstructed path — no $MFT, no
+/// USN, no elevation. This is the non-elevated counterpart to the admin
+/// scan-path E2E.
+#[test]
+fn scope_walk_indexes_and_serves_queries() {
+    // A real on-disk tree the walk enumerates (removed on drop).
+    struct Tree(std::path::PathBuf);
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let (_dir, e) = test_engine();
+    let rx = sink_channel(&e);
+
+    let tree = Tree(std::env::temp_dir().join(format!("fmf-scope-e2e-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&tree.0);
+    std::fs::create_dir_all(tree.0.join("docs")).unwrap();
+    std::fs::write(tree.0.join("docs").join("quarterly_report.txt"), b"x").unwrap();
+
+    e.index_start_scope(&[tree.0.to_str().unwrap().to_string()]);
+    lifecycle_until(&rx, "scope", |ev| {
+        matches!(ev, EngineEvent::VolumeReady { .. })
+    });
+
+    let (r, _) = e.query("quarterly", &QueryOptions::default()).unwrap();
+    let rows = r.page(0, 10).unwrap();
+    assert_eq!(rows.len(), 1, "the walked file is searchable");
+    assert_eq!(rows[0].name, b"quarterly_report.txt");
+    // The path reconstructs through the synthetic-FRN parent chain: the
+    // empty scope ROOT is skipped, so the parent path ends at the real dir.
+    assert!(
+        rows[0].parent_path.ends_with(b"docs\\"),
+        "parent path: {}",
+        String::from_utf8_lossy(&rows[0].parent_path)
+    );
+
+    e.shutdown();
+}

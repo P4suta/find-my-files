@@ -128,6 +128,8 @@ public sealed class CountersData
     public ulong DeferredNameReadFailures { get; set; }
     public ulong PipeResultsEvicted { get; set; }
     public ulong TraceSerializeFailures { get; set; }
+    public ulong WalkReadErrors { get; set; }
+    public ulong WalkDepthTruncated { get; set; }
 }
 
 // ── Native PODs (LayoutKind.Explicit: offsets are the Rust offset_of!

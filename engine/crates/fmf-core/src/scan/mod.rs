@@ -21,6 +21,8 @@ mod parse;
 mod pipeline;
 mod probe;
 mod volume_io;
+pub mod walk;
+mod walk_id;
 
 pub use probe::{IoProbeMode, ProbeStats, io_probe};
 
@@ -84,6 +86,17 @@ pub struct ScanStats {
     /// Deferred-pass targeted disk reads that failed — each one is a name
     /// that stays unresolved until the next rescan.
     pub deferred_name_read_failures: u64,
+    /// Scope-mode (folder-walk, ADR-0024) only: directories enumerated.
+    pub walk_dirs: u64,
+    /// Scope-mode only: files enumerated.
+    pub walk_files: u64,
+    /// Scope-mode only: wall-clock of the enumeration phase (ms).
+    pub elapsed_walk_ms: u64,
+    /// Scope-mode only: roots/dirs/entries skipped because they could not be
+    /// read (permission, vanished). The worker maps this to a counter + warn.
+    pub walk_read_errors: u64,
+    /// Scope-mode only: subtrees not descended because they hit `MAX_DEPTH`.
+    pub walk_depth_truncated: u64,
 }
 
 /// Full initial scan: stream the volume's $MFT and build the in-memory

@@ -19,7 +19,8 @@ public sealed class EngineClientFactoryTests
         var choice = EngineClientFactory.DecideAuto(
             probe: () => true,
             serviceState: () => { stateCalls++; return EngineServiceState.Stopped; },
-            elevated: () => { elevCalls++; return true; });
+            elevated: () => { elevCalls++; return true; },
+            hasScopeConfig: () => false);
 
         Assert.Equal(EngineChoice.Pipe, choice);
         Assert.Equal(0, stateCalls); // a successful probe short-circuits
@@ -32,7 +33,8 @@ public sealed class EngineClientFactoryTests
         var elevCalls = 0;
 
         var choice = EngineClientFactory.DecideAuto(
-            () => false, () => EngineServiceState.Running, () => { elevCalls++; return true; });
+            () => false, () => EngineServiceState.Running, () => { elevCalls++; return true; },
+            () => false);
 
         Assert.Equal(EngineChoice.EmptyServiceUnreachable, choice);
         Assert.Equal(0, elevCalls); // a running service short-circuits before elevation
@@ -41,19 +43,34 @@ public sealed class EngineClientFactoryTests
     [Fact]
     public void DecideAuto_chooses_ffi_when_no_service_and_elevated()
     {
+        var scopeCalls = 0;
+
         var choice = EngineClientFactory.DecideAuto(
-            () => false, () => EngineServiceState.Stopped, () => true);
+            () => false, () => EngineServiceState.Stopped, () => true,
+            () => { scopeCalls++; return true; });
 
         Assert.Equal(EngineChoice.Ffi, choice);
+        Assert.Equal(0, scopeCalls); // elevation short-circuits before scope config
     }
 
     [Fact]
-    public void DecideAuto_chooses_empty_when_no_service_and_not_elevated()
+    public void DecideAuto_chooses_empty_when_no_service_not_elevated_and_no_scope()
     {
         var choice = EngineClientFactory.DecideAuto(
-            () => false, () => EngineServiceState.NotInstalled, () => false);
+            () => false, () => EngineServiceState.NotInstalled, () => false, () => false);
 
         Assert.Equal(EngineChoice.EmptyNotElevated, choice);
+    }
+
+    [Fact]
+    public void DecideAuto_chooses_walk_when_no_service_not_elevated_and_scope_configured()
+    {
+        // ADR-0024: the corporate-PC path — admin forbidden, but the user picked
+        // folders to fall back on.
+        var choice = EngineClientFactory.DecideAuto(
+            () => false, () => EngineServiceState.NotInstalled, () => false, () => true);
+
+        Assert.Equal(EngineChoice.WalkInProc, choice);
     }
 
     [Theory]

@@ -260,6 +260,11 @@ pub struct Counters {
     /// `QueryTrace` JSON serialization failed; the response carried an empty
     /// trace (the query itself succeeded).
     pub trace_serialize_failures: std::sync::atomic::AtomicU64,
+    /// Scope walk (ADR-0024): paths skipped because they could not be read
+    /// (permission denied or vanished mid-walk) — silent data loss otherwise.
+    pub walk_read_errors: std::sync::atomic::AtomicU64,
+    /// Scope walk: subtrees not descended because they hit the depth cap.
+    pub walk_depth_truncated: std::sync::atomic::AtomicU64,
 }
 
 /// Plain-integer, JSON-serializable copy of `Counters` for the FFI/UI.
@@ -309,6 +314,10 @@ pub struct CountersSnapshot {
     /// `QueryTrace` JSON serialization failed; the response carried an empty
     /// trace (the query itself succeeded).
     pub trace_serialize_failures: u64,
+    /// Scope walk (ADR-0024): paths skipped because they could not be read.
+    pub walk_read_errors: u64,
+    /// Scope walk: subtrees not descended because they hit the depth cap.
+    pub walk_depth_truncated: u64,
 }
 
 /// The query layer has no `MetricsHub` handle (its degradations normally go
@@ -360,6 +369,8 @@ impl Counters {
             deferred_name_read_failures: self.deferred_name_read_failures.load(Relaxed),
             pipe_results_evicted: self.pipe_results_evicted.load(Relaxed),
             trace_serialize_failures: self.trace_serialize_failures.load(Relaxed),
+            walk_read_errors: self.walk_read_errors.load(Relaxed),
+            walk_depth_truncated: self.walk_depth_truncated.load(Relaxed),
         }
     }
 }

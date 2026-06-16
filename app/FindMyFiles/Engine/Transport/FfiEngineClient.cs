@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using FindMyFiles.Services;
 
 namespace FindMyFiles.Engine;
 
@@ -24,6 +25,12 @@ public sealed unsafe class FfiEngineClient : IEngineClient
 
     private IntPtr _handle;
     private GCHandle _self;
+
+    /// <summary>Non-null in scope mode (ADR-0024): the absolute roots to
+    /// folder-walk. <see cref="StartIndexingAsync"/> then drives
+    /// <c>fmf_index_start_scope</c>, and <see cref="ListVolumesAsync"/> returns
+    /// these — so the unchanged startup flow (list → start) indexes them.</summary>
+    private readonly IReadOnlyList<string>? _scopeRoots;
 
     /// <inheritdoc/>
     public event Action<string>? IndexChanged;
@@ -51,11 +58,32 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     {
     }
 
-    /// <summary>Test seam (contract suite): a throwaway index dir keeps the
-    /// suite off %ProgramData% and out of the service's writer lock.</summary>
-    internal FfiEngineClient(string indexDir)
+    /// <summary>Creates a non-elevated **scope-mode** engine (ADR-0024) indexing
+    /// only <paramref name="roots"/> by folder-walk — no admin, no service. The
+    /// index and the engine log both live under the portable data root
+    /// (<see cref="AppPaths"/>): <c>&lt;exe&gt;\data\{index,logs}</c> by default, so
+    /// scope mode pollutes nothing outside the app's own folder.</summary>
+    public static FfiEngineClient CreateScope(IReadOnlyList<string> roots)
     {
-        var config = $$"""{"index_dir": {{System.Text.Json.JsonSerializer.Serialize(indexDir)}}}""";
+        var logDir = AppPaths.LogDir;
+        Directory.CreateDirectory(logDir); // ensure the engine can open engine.log
+        return new(AppPaths.ScopeIndexDir, roots, logDir);
+    }
+
+    /// <summary>Test seam (contract suite): a throwaway index dir keeps the
+    /// suite off %ProgramData% and out of the service's writer lock. When
+    /// <paramref name="scopeRoots"/> is non-null the client runs in scope mode
+    /// (folder-walk over those roots, ADR-0024); <paramref name="logDir"/>, when
+    /// given, redirects the engine log (portable mode) via the config's
+    /// <c>log_dir</c> key.</summary>
+    internal FfiEngineClient(
+        string indexDir, IReadOnlyList<string>? scopeRoots = null, string? logDir = null)
+    {
+        _scopeRoots = scopeRoots;
+        var idx = System.Text.Json.JsonSerializer.Serialize(indexDir);
+        var config = logDir is null
+            ? $$"""{"index_dir": {{idx}}}"""
+            : $$"""{"index_dir": {{idx}}, "log_dir": {{System.Text.Json.JsonSerializer.Serialize(logDir)}}}""";
         var rc = NativeEngine.fmf_engine_create(config, out _handle);
         if (rc != NativeEngine.Ok)
         {
@@ -127,6 +155,12 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     /// <inheritdoc/>
     public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
     {
+        if (_scopeRoots is not null)
+        {
+            // Scope mode: the "volumes" to index ARE the configured roots, so
+            // the unchanged startup flow (list → start) drives the folder-walk.
+            return Task.FromResult(_scopeRoots);
+        }
         var handle = _handle;
         return Task.Run<IReadOnlyList<string>>(() =>
         {
@@ -164,6 +198,9 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     public Task StartIndexingAsync(IReadOnlyList<string> volumes, CancellationToken ct = default)
     {
         var handle = _handle;
+        // Scope mode walks the roots (ListVolumesAsync handed StartAsync the same
+        // list); volume mode indexes the drive labels. Same marshaling either way.
+        var scope = _scopeRoots is not null;
         return Task.Run(() =>
         {
             var ptrs = new IntPtr[volumes.Count];
@@ -175,10 +212,12 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                 }
                 fixed (IntPtr* pp = ptrs)
                 {
-                    var rc = NativeEngine.fmf_index_start(handle, (byte**)pp, (uint)volumes.Count);
+                    var rc = scope
+                        ? NativeEngine.fmf_index_start_scope(handle, (byte**)pp, (uint)volumes.Count)
+                        : NativeEngine.fmf_index_start(handle, (byte**)pp, (uint)volumes.Count);
                     if (rc != NativeEngine.Ok)
                     {
-                        NativeEngine.Throw(rc, "fmf_index_start");
+                        NativeEngine.Throw(rc, scope ? "fmf_index_start_scope" : "fmf_index_start");
                     }
                 }
             }

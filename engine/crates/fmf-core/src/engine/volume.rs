@@ -42,6 +42,17 @@ pub(super) struct JournalCheckpoint {
     pub(super) next_usn: i64,
 }
 
+/// What drives a volume slot: the privileged $MFT scan + USN journal, or the
+/// non-elevated folder-walk + `ReadDirectoryChangesW` watcher (scope mode,
+/// ADR-0024). The worker reuses one loop for both; this picks the initial-scan
+/// source and the change source at the two branch points.
+pub(super) enum WorkerKind {
+    /// `mft::scan_volume(label)` + `WinJournalSource` — needs elevation.
+    Mft,
+    /// `scan::walk::walk_scan(roots)` + `WatcherJournalSource` — no elevation.
+    Walk { roots: Vec<String> },
+}
+
 pub(super) struct VolumeSlot {
     pub(super) label: String,
     pub(super) phase: Mutex<VolumeState>,
@@ -61,12 +72,27 @@ pub(super) struct VolumeSlot {
     /// Snapshot persistence seam for this volume (ADR-0018) — production
     /// is `WinSnapshotStore` on `snapshot_path(...)`.
     pub(super) store: Arc<dyn SnapshotStore>,
+    /// Initial-scan + change source this slot drives (ADR-0024).
+    pub(super) kind: WorkerKind,
 }
 
 impl VolumeSlot {
-    /// A slot in its initial Scanning state, before any index exists —
-    /// the shape `index_start` (and the worker tests) spawn workers on.
+    /// A privileged ($MFT + USN) slot in its initial Scanning state — the
+    /// shape `index_start` (and the worker tests) spawn workers on.
     pub(super) fn scanning(label: String, store: Arc<dyn SnapshotStore>) -> Self {
+        Self::scanning_kind(label, store, WorkerKind::Mft)
+    }
+
+    /// A non-elevated scope-mode (folder-walk + watcher) slot (ADR-0024).
+    pub(super) fn scanning_walk(
+        label: String,
+        store: Arc<dyn SnapshotStore>,
+        roots: Vec<String>,
+    ) -> Self {
+        Self::scanning_kind(label, store, WorkerKind::Walk { roots })
+    }
+
+    fn scanning_kind(label: String, store: Arc<dyn SnapshotStore>, kind: WorkerKind) -> Self {
         Self {
             label,
             phase: Mutex::new(VolumeState::Scanning),
@@ -78,6 +104,7 @@ impl VolumeSlot {
             last_saved: Mutex::new(None),
             save_lock: Mutex::new(()),
             store,
+            kind,
         }
     }
 

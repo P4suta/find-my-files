@@ -448,8 +448,15 @@ impl VolumeIndex {
             };
         }
         for &c in chain[..depth].iter().rev() {
-            out.extend_from_slice(self.name(c));
-            out.push(b'\\');
+            // The synthetic scope-mode ROOT (ADR-0024) carries no name; skip
+            // it (name + separator) so multi-root paths don't gain a leading
+            // `\`. Real $MFT entries always have a name, so this is inert for
+            // the privileged path (its ROOT is the volume label, e.g. "C:").
+            let name = self.name(c);
+            if !name.is_empty() {
+                out.extend_from_slice(name);
+                out.push(b'\\');
+            }
         }
     }
 

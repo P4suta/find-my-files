@@ -62,17 +62,23 @@ public sealed class AppSettings
         "exe", "msi", "lnk",
     ];
 
+    /// <summary>非昇格スコープモード (ADR-0024) で索引するルートフォルダの絶対
+    /// パス。空 = 未設定で、setup 画面は管理者経路(全ドライブ最速)を主に促す。
+    /// 1 つ以上入ると次回起動で <c>EngineChoice.WalkInProc</c> に解決され、サービ
+    /// スも管理者権限も使えない会社 PC でフォルダ走査検索が動く。</summary>
+    public string[] ScopeRoots { get; set; } = [];
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
         WriteIndented = true,
     };
 
-    /// <summary>Absolute path to the user-scope settings file
-    /// (<c>%APPDATA%\find-my-files\settings.json</c>).</summary>
-    public static string SettingsPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "find-my-files", "settings.json");
+    /// <summary>Absolute path to the user-scope settings file. Portable by
+    /// default (<c>&lt;exe&gt;\data\settings.json</c>); falls back to
+    /// <c>%APPDATA%\find-my-files\settings.json</c> when the app folder is
+    /// read-only. See <see cref="AppPaths"/>.</summary>
+    public static string SettingsPath => AppPaths.SettingsFile;
 
     /// <summary>Load settings from <see cref="SettingsPath"/>, falling back to
     /// defaults (and quarantining the file) if it is missing or corrupt.</summary>
