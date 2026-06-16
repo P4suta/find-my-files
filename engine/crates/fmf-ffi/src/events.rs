@@ -16,6 +16,8 @@ pub use fmf_contract::events::{
 };
 pub use fmf_contract::pod::FmfEvent;
 
+/// Callback the host registers to receive engine events; invoked with a borrowed
+/// `FmfEvent` and the opaque `user` token. `None` clears the registration.
 pub type FmfEventCb = Option<unsafe extern "C" fn(ev: *const FmfEvent, user: *mut c_void)>;
 
 pub(crate) struct CallbackSink {
@@ -27,6 +29,9 @@ pub(crate) struct CallbackSink {
 unsafe impl Send for CallbackSink {}
 unsafe impl Sync for CallbackSink {}
 
+/// Registers (or clears, when `cb` is `None`) the event callback for the engine
+/// handle `h`; the callback may fire from any thread. Returns `FMF_OK` or an error
+/// code. Safety: see docs/ARCHITECTURE.md.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_set_event_callback(
     h: *mut c_void,

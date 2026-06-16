@@ -8,6 +8,11 @@
 //! Append new counters at the end; never rename (F12 history and the golden
 //! `stats_snapshot.json` key on them).
 
+/// The ordered `snake_case` keys of the degradation counters.
+///
+/// Exposed as `MetricsSnapshot.counters` in the stats JSON. Contract surface:
+/// append new names at the end, never rename. Both the C# `CountersData` and
+/// fmf-core's `CountersSnapshot` serde keys are pinned against this list.
 pub const COUNTER_NAMES: &[&str] = &[
     "stat_fetch_failures",
     "usn_batches_truncated",
@@ -27,4 +32,6 @@ pub const COUNTER_NAMES: &[&str] = &[
     "deferred_name_read_failures",
     "pipe_results_evicted",
     "trace_serialize_failures",
+    "walk_read_errors",
+    "walk_depth_truncated",
 ];

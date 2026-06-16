@@ -20,17 +20,24 @@ use crate::events::Broadcaster;
 use crate::faults::Faults;
 use crate::pipe::{Accepted, Event, PipeListener, PipeStream};
 
+/// Max concurrent pipe instances the listener will create; further clients
+/// hit `ERROR_PIPE_BUSY` at the OS until a slot frees.
 pub const MAX_INSTANCES: u32 = 8;
 const WORKERS_PER_CONNECTION: usize = 2;
 
+/// Configuration for starting the pipe [`Server`].
 pub struct ServerOptions {
+    /// Named-pipe name the listener binds and accepts connections on.
     pub pipe_name: String,
+    /// Enable debug fault injection (`!!panic` / `!!drop` / `!!lag`); always
+    /// off for the installed service.
     pub debug_faults: bool,
     /// Connect-time token allowlist (docs/SECURITY.md 4層防御の④)。Empty =
     /// no check (console/test mode); the installed service always fills it.
     pub authorized_sids: Vec<String>,
 }
 
+/// Running pipe server: owns the accept thread and its stop event.
 pub struct Server {
     stop: Arc<Event>,
     accept_thread: Option<std::thread::JoinHandle<()>>,
@@ -64,6 +71,7 @@ impl Server {
         self.stop.set();
     }
 
+    /// Blocks until the accept thread has exited (call after [`Server::stop`]).
     pub fn join(mut self: Arc<Self>) {
         if let Some(s) = Arc::get_mut(&mut self)
             && let Some(t) = s.accept_thread.take()

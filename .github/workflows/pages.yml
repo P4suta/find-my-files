@@ -4,6 +4,7 @@ name: Deploy GitHub Pages
 #   /        — landing page (site/index.html, ja/en)
 #   /book/   — mdBook design docs rendered from docs/ (ARCHITECTURE + ADRs)
 #   /doc/    — rustdoc API reference (cargo doc)
+#   /api/    — DocFX C# API reference (app/FindMyFiles public surface)
 # Requires Settings > Pages > Source = "GitHub Actions" (set once after publish).
 
 on:
@@ -13,6 +14,9 @@ on:
       - "site/**"
       - "docs/**"
       - "engine/**"
+      - "app/**"
+      - "docfx/**"
+      - ".config/dotnet-tools.json"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -56,9 +60,15 @@ jobs:
         # so route the output to build/engine/doc explicitly (ADR-0021).
         run: cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml --target-dir build/engine
 
-      # Stage book + doc into site/ next to the landing page (xtask: just
-      # docs-assemble), verifying both source trees exist first.
-      - name: Assemble site (landing + book + doc)
+      - name: Build C# API reference (DocFX -> build/docs-csharp/_site)
+        # Builds FindMyFiles.dll + its XML doc file (the csproj builds the Rust
+        # FFI itself), restores the pinned docfx local tool, then runs DocFX off
+        # the built assembly (not the WinUI .csproj). See `just doc-csharp`.
+        run: just doc-csharp
+
+      # Stage book + doc + api into site/ next to the landing page (xtask: just
+      # docs-assemble), verifying all source trees exist first.
+      - name: Assemble site (landing + book + doc + api)
         run: just docs-assemble
 
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0

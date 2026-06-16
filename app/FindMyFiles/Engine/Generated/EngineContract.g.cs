@@ -13,11 +13,11 @@ namespace FindMyFiles.Engine;
 /// <summary>The engine contract, radiated from fmf-contract.</summary>
 internal static class EngineContract
 {
-    public const uint AbiVersion = 1;
-    public const uint ProtocolVersion = 1;
+    public const uint AbiVersion = 2;
+    public const uint ProtocolVersion = 2;
 
     /// <summary>Pipe name without the <c>\\.\pipe\</c> prefix.</summary>
-    public const string PipeNameShort = "fmf-engine-v1";
+    public const string PipeNameShort = "fmf-engine-v2";
 
     /// <summary>SCM service name (the in-app service setup drives it).</summary>
     public const string ServiceName = "fmf-engine";
@@ -86,7 +86,7 @@ internal static class EngineContract
     }
 
     public const int EventSize = 32;
-    public const int QueryOptionsSize = 16;
+    public const int QueryOptionsSize = 20;
     public const int VolumeStatusSize = 32;
     public const int PageStructSize = 32;
     public const int BlobSize = 16;
@@ -128,19 +128,22 @@ public sealed class CountersData
     public ulong DeferredNameReadFailures { get; set; }
     public ulong PipeResultsEvicted { get; set; }
     public ulong TraceSerializeFailures { get; set; }
+    public ulong WalkReadErrors { get; set; }
+    public ulong WalkDepthTruncated { get; set; }
 }
 
 // ── Native PODs (LayoutKind.Explicit: offsets are the Rust offset_of!
 // values; Size pins the total) — the structs NativeEngine marshals. ──
 internal static partial class NativeEngine
 {
-    [StructLayout(LayoutKind.Explicit, Size = 16)]
+    [StructLayout(LayoutKind.Explicit, Size = 20)]
     internal struct FmfQueryOptions
     {
         [FieldOffset(0)] public uint Sort;
         [FieldOffset(4)] public uint Desc;
         [FieldOffset(8)] public uint CaseMode;
         [FieldOffset(12)] public uint IncludeHiddenSystem;
+        [FieldOffset(16)] public uint RegexMode;
     }
 
     [StructLayout(LayoutKind.Explicit, Size = 48)]

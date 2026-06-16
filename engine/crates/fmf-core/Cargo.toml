@@ -22,6 +22,7 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 xxhash-rust = { workspace = true }
 regex = { workspace = true }
+regex-syntax = { workspace = true }
 serde = { workspace = true }
 
 [features]

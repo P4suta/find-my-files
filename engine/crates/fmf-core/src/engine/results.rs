@@ -7,12 +7,19 @@ use super::volume::VolumeSlot;
 
 /// One row handed across the FFI: everything the UI list needs.
 pub struct Row {
+    /// Stable handle: volume index in the high 32 bits, `EntryId` in the low.
     pub entry_ref: u64,
+    /// NTFS File Reference Number for this entry.
     pub frn: u64,
+    /// File size in bytes (0 for directories).
     pub size: u64,
+    /// Last-modified time, Windows FILETIME (100 ns ticks since 1601-01-01 UTC).
     pub mtime: i64,
+    /// Bitflags: bit0 = directory, bit1 = deleted-since-query (UI marker).
     pub flags: u32,
+    /// File name, WTF-8 bytes (no path separators).
     pub name: Vec<u8>,
+    /// Parent directory path, WTF-8 bytes.
     pub parent_path: Vec<u8>,
 }
 
@@ -26,11 +33,13 @@ pub struct ResultSet {
 }
 
 impl ResultSet {
+    /// Number of rows in the materialized result.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.rows.len()
     }
 
+    /// True when the result contains no rows.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.rows.is_empty()

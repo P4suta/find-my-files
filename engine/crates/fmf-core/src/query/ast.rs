@@ -4,18 +4,24 @@ use thiserror::Error;
 
 use super::dates::Civil;
 
+/// Reasons [`parse`] rejects malformed query text.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
+    /// A `"` opened a quoted section that was never closed.
     #[error("unclosed quote")]
     UnclosedQuote,
+    /// A `size:` value did not parse as a byte amount or range.
     #[error("invalid size filter `{0}`")]
     InvalidSize(String),
+    /// A `dm:` value did not parse as a date or date range.
     #[error("invalid date filter `{0}`")]
     InvalidDate(String),
+    /// Negation was applied to a term that cannot be negated (e.g. `!folder:foo`).
     #[error("`{0}` cannot be negated")]
     CannotNegate(String),
 }
 
+/// A single matchable condition within an AND group of the [`Ast`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Term {
     /// Substring in the file name.
@@ -32,22 +38,28 @@ pub enum Term {
     Ext(Vec<String>),
     /// `size:` — inclusive byte range.
     Size {
+        /// Lower bound, in bytes (inclusive).
         min: u64,
+        /// Upper bound, in bytes (inclusive).
         max: u64,
     },
     /// `dm:` — [start, end) at local midnight; `None` = unbounded.
     Mtime {
+        /// Inclusive start of the range at local midnight; `None` = unbounded below.
         start: Option<Civil>,
+        /// Exclusive end of the range at local midnight; `None` = unbounded above.
         end: Option<Civil>,
     },
     /// `folder:` / `file:`.
     IsDir(bool),
+    /// Logical negation of the inner term.
     Not(Box<Self>),
 }
 
 /// OR of AND groups: `a b | c` → `[[a, b], [c]]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ast {
+    /// AND groups joined by OR: a file matches if every term in any one group matches.
     pub groups: Vec<Vec<Term>>,
 }
 

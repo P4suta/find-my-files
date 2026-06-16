@@ -60,9 +60,15 @@
   </resheader>
 
   <!-- ===== XAML (x:Uid) ===== -->
-  <data name="SearchBox.PlaceholderText" xml:space="preserve"><value>按文件名搜索…</value></data>
+  <data name="Search_Placeholder" xml:space="preserve"><value>按文件名搜索…</value></data>
+  <data name="Search_PlaceholderRegexName" xml:space="preserve"><value>用正则表达式匹配文件名…</value></data>
+  <data name="Search_PlaceholderRegexPath" xml:space="preserve"><value>用正则表达式匹配完整路径…</value></data>
   <data name="OptFocused.Text" xml:space="preserve"><value>精简(仅常用格式，排除系统区域)</value></data>
   <data name="OptSystem.Text" xml:space="preserve"><value>包含系统和隐藏文件</value></data>
+  <data name="OptRegex.Text" xml:space="preserve"><value>正则表达式模式</value></data>
+  <data name="RegexScopeMenu.Text" xml:space="preserve"><value>正则匹配范围</value></data>
+  <data name="RegexScopeName.Text" xml:space="preserve"><value>文件名</value></data>
+  <data name="RegexScopePath.Text" xml:space="preserve"><value>完整路径</value></data>
   <data name="SortHeaderItem.Text" xml:space="preserve"><value>排序方式</value></data>
   <data name="SortName.Text" xml:space="preserve"><value>名称</value></data>
   <data name="SortSize.Text" xml:space="preserve"><value>大小</value></data>

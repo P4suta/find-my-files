@@ -26,12 +26,19 @@ struct ResultEntry {
     lagged: bool,
 }
 
+/// Per-connection dispatch state: owns the live result handles and the
+/// hello/version handshake for one pipe client.
 pub struct Connection {
+    /// Shared engine all opcodes route into (the only place logic lives).
     pub engine: Arc<Engine>,
+    /// Debug fault injector (`!!panic` / `!!drop` / `!!lag`); a no-op for
+    /// installed services.
     pub faults: Faults,
     results: Mutex<HashMap<u64, ResultEntry>>,
     next_result_id: AtomicU64,
     use_clock: AtomicU64,
+    /// True once a valid Hello with a matching protocol version arrived;
+    /// any other opcode before that is a protocol violation (Drop).
     pub hello_done: AtomicBool,
     /// Live-connection count shared with the accept loop (`ServiceInfo`
     /// reports it; the server owns increment/decrement).
@@ -45,12 +52,16 @@ pub enum Outcome {
     /// Subscribe/Unsubscribe handled by the caller (owns the queue), then
     /// reply OK with an empty payload.
     Subscribe,
+    /// Unsubscribe handled by the caller (owns the queue), then reply OK
+    /// with an empty payload.
     Unsubscribe,
     /// Protocol violation or `!!drop` fault — tear the connection down.
     Drop,
 }
 
 impl Connection {
+    /// Create a fresh connection bound to the shared engine, fault injector,
+    /// and the accept loop's live-connection counter; starts pre-handshake.
     pub fn new(
         engine: Arc<Engine>,
         faults: Faults,
@@ -67,6 +78,9 @@ impl Connection {
         }
     }
 
+    /// Handle one request opcode inside a `catch_unwind` firewall: a panic
+    /// answers `FMF_E_PANIC` and the connection survives, mirroring the FFI
+    /// `guard`.
     pub fn dispatch(&self, op: u16, payload: &[u8]) -> Outcome {
         let result = catch_unwind(AssertUnwindSafe(|| self.dispatch_inner(op, payload)));
         match result {

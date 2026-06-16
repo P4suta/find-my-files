@@ -4,6 +4,8 @@
     "\"unterminated",
     "regex:[",
     "regex:(",
+    "regex:a{2,1}",
+    "regex:(a{500}){500}",
     "size:abc",
     "size:>",
     "size:1..x",

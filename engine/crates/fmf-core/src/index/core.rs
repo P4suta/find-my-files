@@ -7,6 +7,11 @@ use rustc_hash::FxHashMap;
 use super::frn::FrnIndex;
 use super::{EntryId, Frn, NO_PARENT, RecordNo, SortKey, flags};
 
+/// In-memory per-volume index.
+///
+/// Struct-of-arrays entry columns, two string pools sharing one offset/length
+/// table, an FRN map, and the always-sorted name permutation
+/// (docs/ARCHITECTURE.md). One instance per indexed volume.
 pub struct VolumeIndex {
     /// The one contiguous, sweepable pool: every entry's *folded* name at
     /// `name_off..name_off+name_len`. Most names fold to themselves
@@ -95,18 +100,22 @@ fn column_size(size_lo: &[u32], size_ovf: &FxHashMap<EntryId, u64>, id: EntryId)
 }
 
 impl VolumeIndex {
+    /// Total entry slots, live plus tombstoned (the column length).
     pub const fn len(&self) -> usize {
         self.name_off.len()
     }
 
+    /// True when no entries have ever been appended.
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Live entry count: total slots minus tombstones.
     pub const fn live_len(&self) -> usize {
         self.len() - self.tombstones as usize
     }
 
+    /// The volume root's [`EntryId`] (always slot 0).
     pub const ROOT: EntryId = 0;
 
     /// The original-spelling name. Fold-identical entries (most of them)
@@ -121,11 +130,14 @@ impl VolumeIndex {
         }
     }
 
+    /// The case-folded name bytes of `id` (ADR-0004), straight from the
+    /// folded pool — the form every matcher compares against.
     #[inline]
     pub fn lower_name(&self, id: EntryId) -> &[u8] {
         pool_lower_name(&self.lower_pool, &self.name_off, &self.name_len, id)
     }
 
+    /// True while `id` is a real entry — false once it has been tombstoned.
     #[inline]
     pub fn is_live(&self, id: EntryId) -> bool {
         self.flag[id as usize] & flags::TOMBSTONE == 0
@@ -137,16 +149,20 @@ impl VolumeIndex {
         self.flag[id as usize] & flags::EXCLUDED != 0
     }
 
+    /// True when `id` is a directory rather than a file.
     #[inline]
     pub fn is_dir(&self, id: EntryId) -> bool {
         self.flag[id as usize] & flags::IS_DIR != 0
     }
 
+    /// True when `id` is a reparse point (symlink, junction, mount point).
     #[inline]
     pub fn is_reparse(&self, id: EntryId) -> bool {
         self.flag[id as usize] & flags::REPARSE != 0
     }
 
+    /// File size of `id` in bytes, read through the u32 column and the
+    /// overflow map for ≥4 GiB files (ADR-0007).
     #[inline]
     pub fn size(&self, id: EntryId) -> u64 {
         column_size(&self.size_lo, &self.size_ovf, id)
@@ -176,16 +192,19 @@ impl VolumeIndex {
         }
     }
 
+    /// Last-modification time of `id` as a Windows FILETIME tick count.
     #[inline]
     pub fn mtime(&self, id: EntryId) -> i64 {
         self.mtime[id as usize]
     }
 
+    /// The [`EntryId`] of `id`'s parent directory ([`NO_PARENT`] at the root).
     #[inline]
     pub fn parent(&self, id: EntryId) -> EntryId {
         self.parent[id as usize]
     }
 
+    /// The NTFS File Reference Number of `id`.
     #[inline]
     pub fn frn(&self, id: EntryId) -> Frn {
         Frn(self.frn[id as usize])
@@ -223,10 +242,14 @@ impl VolumeIndex {
         &self.lower_pool
     }
 
+    /// The content generation — bumped by every USN batch; open result
+    /// handles stay readable across it (docs/ARCHITECTURE.md, generation 2層).
     pub const fn content_generation(&self) -> u64 {
         self.content_generation
     }
 
+    /// The structural generation — bumped only by compaction/rebuild, which
+    /// hard-stales open result handles (docs/ARCHITECTURE.md, generation 2層).
     pub const fn structural_generation(&self) -> u64 {
         self.structural_generation
     }
@@ -391,6 +414,8 @@ impl VolumeIndex {
         self.perm_name.shrink_to_fit();
     }
 
+    /// The always-maintained name-sorted permutation: entry ids in default
+    /// (folded-name) sort order, the merge target of every USN batch.
     pub fn name_permutation(&self) -> &[EntryId] {
         &self.perm_name
     }
@@ -423,11 +448,20 @@ impl VolumeIndex {
             };
         }
         for &c in chain[..depth].iter().rev() {
-            out.extend_from_slice(self.name(c));
-            out.push(b'\\');
+            // The synthetic scope-mode ROOT (ADR-0024) carries no name; skip
+            // it (name + separator) so multi-root paths don't gain a leading
+            // `\`. Real $MFT entries always have a name, so this is inert for
+            // the privileged path (its ROOT is the volume label, e.g. "C:").
+            let name = self.name(c);
+            if !name.is_empty() {
+                out.extend_from_slice(name);
+                out.push(b'\\');
+            }
         }
     }
 
+    /// Fraction of slots that are tombstones (0.0–1.0) — the compaction
+    /// trigger input. 0.0 for an empty index.
     pub fn tombstone_ratio(&self) -> f64 {
         if self.is_empty() {
             0.0

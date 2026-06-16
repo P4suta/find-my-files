@@ -17,10 +17,14 @@ use crate::index::{Frn, RawEntry, VolumeIndex, VolumeIndexBuilder};
 // crate::scan; re-exported here so callers keep one import path.
 pub use crate::scan::{ScanStats, scan_volume};
 
+/// Failure modes of a raw $MFT volume scan.
 #[derive(Debug, Error)]
 pub enum MftError {
+    /// The process lacks the privileges to open the raw volume (MFT/USN reads
+    /// require an elevated process; run from an administrator terminal).
     #[error("volume scan requires an elevated process (run from an administrator terminal)")]
     NotElevated,
+    /// An error surfaced by the underlying ntfs-reader (volume open or $MFT read).
     #[error("ntfs-reader: {0}")]
     Ntfs(#[from] NtfsReaderError),
 }
@@ -28,7 +32,9 @@ pub enum MftError {
 /// Measurements from a full $MFT scan of one volume.
 #[derive(Debug, Default)]
 pub struct SpikeStats {
+    /// Drive letter spec of the scanned volume (e.g. `C:`).
     pub volume: String,
+    /// Time to open the raw volume handle, in milliseconds.
     pub elapsed_volume_open_ms: u64,
     /// Time for `Mft::new`: reads the whole $MFT into memory + fixups.
     pub elapsed_mft_load_ms: u64,
@@ -36,21 +42,29 @@ pub struct SpikeStats {
     pub elapsed_iterate_ms: u64,
     /// Size of the raw $MFT — the peak-RAM driver of this approach.
     pub mft_bytes: u64,
+    /// Total number of $MFT records walked (in-use and free), a count.
     pub total_records: u64,
+    /// Number of named file records indexed, a count.
     pub files: u64,
+    /// Number of named directory records indexed, a count.
     pub dirs: u64,
+    /// Number of records whose name is a reparse point (junction/symlink), a count.
     pub reparse_points: u64,
     /// Records where the base record holds no usable $`FILE_NAME` (needs
     /// attribute-list handling in M0).
     pub no_name_in_base_record: u64,
+    /// Sum of name lengths across all named records, in UTF-16 code units.
     pub name_utf16_units_total: u64,
+    /// Longest single name encountered, in UTF-16 code units.
     pub max_name_utf16_units: u64,
     /// Sanity check that `reference_number()` carries a sequence value.
     pub frn_sequence_nonzero: u64,
+    /// Peak working set of the process during the scan, in bytes.
     pub peak_working_set_bytes: u64,
 }
 
 impl SpikeStats {
+    /// Mean name length across named records, in UTF-16 code units.
     #[must_use]
     pub fn avg_name_utf16_units(&self) -> f64 {
         let named = (self.files + self.dirs).max(1);

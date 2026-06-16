@@ -11,19 +11,31 @@ use serde::{Deserialize, Serialize};
 pub use fmf_contract::opcodes as opcode;
 pub use fmf_contract::pod::{FmfEvent, FmfQueryOptions, FmfRow};
 
+/// Why a payload failed to decode (or encode, for JSON).
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
+    /// Payload byte length did not match the expected fixed/derived size.
     #[error("payload is {got} bytes, expected {expected} for {what}")]
     Length {
+        /// Message kind that failed (for diagnostics).
         what: &'static str,
+        /// Expected payload length in bytes.
         expected: usize,
+        /// Actual payload length in bytes received.
         got: usize,
     },
+    /// Trailing text payload was not valid UTF-8.
     #[error("payload of {what} is not valid UTF-8")]
-    Utf8 { what: &'static str },
+    Utf8 {
+        /// Message kind that failed (for diagnostics).
+        what: &'static str,
+    },
+    /// JSON (de)serialization failed for a cold-path message.
     #[error("json {what}: {source}")]
     Json {
+        /// Message kind that failed (for diagnostics).
         what: &'static str,
+        /// Underlying `serde_json` error.
         #[source]
         source: serde_json::Error,
     },
@@ -58,14 +70,18 @@ const fn check_len(what: &'static str, b: &[u8], expected: usize) -> Result<(), 
 
 // ── Hello (op 1, binary) ────────────────────────────────────────────────
 
+/// Client handshake request (op 1): announces the protocol version it speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HelloReq {
+    /// Pipe protocol version the client expects to speak.
     pub protocol_version: u32,
 }
 
 impl HelloReq {
+    /// Encoded payload length in bytes.
     pub const LEN: usize = 4;
 
+    /// Encode this request into its little-endian wire bytes.
     #[must_use]
     pub fn encode(self) -> Vec<u8> {
         self.protocol_version.to_le_bytes().to_vec()
@@ -82,16 +98,22 @@ impl HelloReq {
     }
 }
 
+/// Server handshake response (op 1): the versions and PID the server reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HelloResp {
+    /// Pipe protocol version the server speaks.
     pub protocol_version: u32,
+    /// FFI ABI version the server's core was built against.
     pub abi_version: u32,
+    /// OS process id of the serving fmf-service.
     pub server_pid: u32,
 }
 
 impl HelloResp {
+    /// Encoded payload length in bytes.
     pub const LEN: usize = 12;
 
+    /// Encode this response into its little-endian wire bytes.
     #[must_use]
     pub fn encode(self) -> Vec<u8> {
         let mut v = Vec::with_capacity(Self::LEN);
@@ -116,6 +138,8 @@ impl HelloResp {
 
 // ── Query (op 7, binary options + UTF-8 text) ───────────────────────────
 
+/// Encode a query request (op 7): the fixed options header followed by the
+/// UTF-8 query text.
 #[must_use]
 pub fn encode_query_req(opt: FmfQueryOptions, text: &str) -> Vec<u8> {
     let mut v = Vec::with_capacity(FmfQueryOptions::LEN + text.len());
@@ -123,6 +147,7 @@ pub fn encode_query_req(opt: FmfQueryOptions, text: &str) -> Vec<u8> {
     v.extend_from_slice(&opt.desc.to_le_bytes());
     v.extend_from_slice(&opt.case_mode.to_le_bytes());
     v.extend_from_slice(&opt.include_hidden_system.to_le_bytes());
+    v.extend_from_slice(&opt.regex_mode.to_le_bytes());
     v.extend_from_slice(text.as_bytes());
     v
 }
@@ -145,6 +170,7 @@ pub fn decode_query_req(b: &[u8]) -> Result<(FmfQueryOptions, &str), WireError> 
         desc: u32_at(b, 4),
         case_mode: u32_at(b, 8),
         include_hidden_system: u32_at(b, 12),
+        regex_mode: u32_at(b, 16),
     };
     let text = std::str::from_utf8(&b[FmfQueryOptions::LEN..])
         .map_err(|_| WireError::Utf8 { what: "QueryReq" })?;
@@ -154,13 +180,17 @@ pub fn decode_query_req(b: &[u8]) -> Result<(FmfQueryOptions, &str), WireError> 
 /// Query response head; the `QueryTrace` JSON follows it verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryRespHead {
+    /// Server-assigned handle for paging this result set.
     pub result_id: u64,
+    /// Total number of matching rows in the result set.
     pub count: u64,
 }
 
 impl QueryRespHead {
+    /// Encoded head length in bytes (trace JSON follows separately).
     pub const LEN: usize = 16;
 
+    /// Encode the head, then append the `QueryTrace` JSON verbatim.
     #[must_use]
     pub fn encode_with_trace(self, trace_json: &[u8]) -> Vec<u8> {
         let mut v = Vec::with_capacity(Self::LEN + trace_json.len());
@@ -193,16 +223,22 @@ impl QueryRespHead {
 
 // ── ResultPage (op 8, binary) ───────────────────────────────────────────
 
+/// Request for a page of rows from a prior result set (op 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResultPageReq {
+    /// Handle of the result set to page, from `QueryRespHead::result_id`.
     pub result_id: u64,
+    /// Index of the first row to return (0-based).
     pub offset: u64,
+    /// Maximum number of rows to return in this page.
     pub count: u32,
 }
 
 impl ResultPageReq {
+    /// Encoded payload length in bytes.
     pub const LEN: usize = 20;
 
+    /// Encode this request into its little-endian wire bytes.
     #[must_use]
     pub fn encode(self) -> Vec<u8> {
         let mut v = Vec::with_capacity(Self::LEN);
@@ -256,10 +292,14 @@ fn read_row_at(b: &[u8], off: usize) -> FmfRow {
 /// Decoded view of a `ResultPage` response payload:
 /// `{row_count:u32, blob_len:u32}` → rows (48 B × `row_count`) → blob.
 pub struct PageView<'a> {
+    /// Decoded rows; string fields point into `blob` by offset.
     pub rows: Vec<FmfRow>,
+    /// Packed UTF-8 string blob the rows' name/parent offsets index into.
     pub blob: &'a [u8],
 }
 
+/// Encode a result page (op 8): a `{row_count, blob_len}` header, then the
+/// fixed-size rows, then the string blob.
 #[must_use]
 pub fn encode_page(rows: &[FmfRow], blob: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(8 + rows.len() * FmfRow::LEN + blob.len());
@@ -302,6 +342,7 @@ pub fn decode_page(b: &[u8]) -> Result<PageView<'_>, WireError> {
 
 // ── ResultFree (op 9, binary) ───────────────────────────────────────────
 
+/// Encode a result-free request (op 9): releases the result set `result_id`.
 #[must_use]
 pub fn encode_result_free(result_id: u64) -> Vec<u8> {
     result_id.to_le_bytes().to_vec()
@@ -344,6 +385,7 @@ pub fn decode_event(b: &[u8]) -> Result<FmfEvent, WireError> {
 
 // ── JSON messages (op 4/5/6/10/12) ──────────────────────────────────────
 
+/// Per-volume status as carried in the JSON volume-status message (op 5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeStatusWire {
     /// Drive label, e.g. "C:" — the one volume identifier on the wire.
@@ -351,18 +393,25 @@ pub struct VolumeStatusWire {
     /// Same values as FFI FmfVolumeStatus.state (0=Scanning 1=Ready
     /// 2=Rescanning 3=Failed).
     pub state: u32,
+    /// Number of indexed file entries on this volume.
     pub entries: u64,
 }
 
+/// Request to begin indexing a set of volumes (op 4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexStartReq {
+    /// Drive labels to index, e.g. `["C:", "D:"]`.
     pub volumes: Vec<String>,
 }
 
+/// Service self-report returned by the info message (op 12).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceInfoResp {
+    /// Service uptime in milliseconds.
     pub uptime_ms: u64,
+    /// Number of currently connected pipe clients.
     pub connections: u32,
+    /// Service version string, e.g. "0.1.0".
     pub version: String,
 }
 
@@ -411,6 +460,7 @@ mod tests {
             desc: 1,
             case_mode: 2,
             include_hidden_system: 0,
+            regex_mode: 3, // whole-query regex (bit0) over the full path (bit1)
         };
         let bytes = encode_query_req(opt, "win");
         assert_eq!(
@@ -420,6 +470,7 @@ mod tests {
                 1, 0, 0, 0, // desc
                 2, 0, 0, 0, // case=Sensitive
                 0, 0, 0, 0, // include_hidden_system
+                3, 0, 0, 0, // regex_mode = whole(bit0) | path(bit1)
                 b'w', b'i', b'n',
             ]
         );

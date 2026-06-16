@@ -129,7 +129,9 @@
     "deferred_name_cache_overflow": 75,
     "deferred_name_read_failures": 76,
     "pipe_results_evicted": 77,
-    "trace_serialize_failures": 78
+    "trace_serialize_failures": 78,
+    "walk_read_errors": 79,
+    "walk_depth_truncated": 80
   },
   "recent_errors": [
     {

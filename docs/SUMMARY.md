@@ -1,6 +1,7 @@
 # Summary
 
 - [アーキテクチャ](ARCHITECTURE.md)
+- [契約リファレンス（生成）](contract.md)
 - [技術的裏取り（RESEARCH）](RESEARCH.md)
 - [セキュリティモデル](SECURITY.md)
 - [コード署名](SIGNING.md)

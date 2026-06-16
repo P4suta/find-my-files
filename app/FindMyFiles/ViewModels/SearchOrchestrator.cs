@@ -135,13 +135,18 @@ public sealed class SearchOrchestrator
         }
         // Focused mode is a pure rewrite at the last moment — the ViewModel
         // keeps the user's text, the engine sees the effective query, and
-        // every log/error below reports what the engine actually saw.
-        var query = FocusedSearch
+        // every log/error below reports what the engine actually saw. It is
+        // suppressed in regex mode: the engine treats the whole text as one
+        // pattern, so appended !path:/ext: terms would corrupt the regex.
+        var query = FocusedSearch && !request.Options.RegexMode
             ? FocusedQueryRewriter.Compose(request.Query, FocusedExcludePaths, FocusedExtensions)
             : request.Query;
         // Highlight the user's raw words, not the focused-mode rewrite: the
-        // appended !path:/ext: filters are not what the user typed.
-        var highlighter = MatchHighlighter.Compile(request.Query);
+        // appended !path:/ext: filters are not what the user typed. In regex
+        // mode the whole query is the pattern (ADR-0023).
+        IHighlighter highlighter = request.Options.RegexMode
+            ? MatchHighlighter.CompileRegex(request.Query, request.Options.Scope)
+            : MatchHighlighter.Compile(request.Query);
         try
         {
             var outcome = await _engine.SearchAsync(query, request.Options);

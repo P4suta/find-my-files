@@ -21,6 +21,8 @@ mod parse;
 mod pipeline;
 mod probe;
 mod volume_io;
+pub mod walk;
+mod walk_id;
 
 pub use probe::{IoProbeMode, ProbeStats, io_probe};
 
@@ -41,7 +43,9 @@ use volume_io::mft_layout;
 /// Statistics from a full index build.
 #[derive(Debug, Default)]
 pub struct ScanStats {
+    /// Drive letter spec that was scanned (e.g. `C:`).
     pub volume: String,
+    /// Wall-clock time for the whole scan + build (ms).
     pub elapsed_total_ms: u64,
     /// Accumulated device-read time. Overlaps with parsing on the pipelined
     /// path, so read + parse + build + sort may exceed total.
@@ -59,9 +63,13 @@ pub struct ScanStats {
     /// 1 when the read-ahead I/O thread could not start and the scan
     /// degraded to inline sequential reads.
     pub pipeline_fallbacks: u64,
+    /// Files indexed (count).
     pub files: u64,
+    /// Directories indexed (count).
     pub dirs: u64,
+    /// Records dropped because no usable name could be resolved (count).
     pub skipped_no_name: u64,
+    /// Peak working-set RAM of the scanning process (bytes).
     pub peak_working_set_bytes: u64,
     /// Raw $MFT size — the bytes the initial scan reads.
     pub mft_bytes: u64,
@@ -78,6 +86,17 @@ pub struct ScanStats {
     /// Deferred-pass targeted disk reads that failed — each one is a name
     /// that stays unresolved until the next rescan.
     pub deferred_name_read_failures: u64,
+    /// Scope-mode (folder-walk, ADR-0024) only: directories enumerated.
+    pub walk_dirs: u64,
+    /// Scope-mode only: files enumerated.
+    pub walk_files: u64,
+    /// Scope-mode only: wall-clock of the enumeration phase (ms).
+    pub elapsed_walk_ms: u64,
+    /// Scope-mode only: roots/dirs/entries skipped because they could not be
+    /// read (permission, vanished). The worker maps this to a counter + warn.
+    pub walk_read_errors: u64,
+    /// Scope-mode only: subtrees not descended because they hit `MAX_DEPTH`.
+    pub walk_depth_truncated: u64,
 }
 
 /// Full initial scan: stream the volume's $MFT and build the in-memory

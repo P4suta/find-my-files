@@ -4,21 +4,28 @@
 //! (docs/ARCHITECTURE.md C-4). The conversion is injected via
 //! [`DateResolver`] so the parser/compiler stay pure and tests can use UTC.
 
+/// FILETIME ticks (100 ns since 1601-01-01) at the Unix epoch (1970-01-01).
 pub const FILETIME_UNIX_EPOCH: i64 = 116_444_736_000_000_000;
 const TICKS_PER_SECOND: i64 = 10_000_000;
 
+/// A proleptic Gregorian calendar date with no time-of-day or zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Civil {
+    /// Year (full, e.g. 2026).
     pub y: i32,
+    /// Month, 1..=12.
     pub m: u32,
+    /// Day of month, 1..=31.
     pub d: u32,
 }
 
 impl Civil {
+    /// The calendar date one day after this one (handles month/leap rollover).
     pub const fn next_day(self) -> Self {
         civil_from_days(days_from_civil(self) + 1)
     }
 
+    /// The first day of the month following this date's month.
     pub const fn first_of_next_month(self) -> Self {
         if self.m == 12 {
             Self {
@@ -35,6 +42,8 @@ impl Civil {
         }
     }
 
+    /// True if the date is a real calendar date within FILETIME's range
+    /// (year 1601..=9999, valid month, day within the month's length).
     pub fn is_valid(self) -> bool {
         if !(1601..=9999).contains(&self.y) || !(1..=12).contains(&self.m) {
             return false;
@@ -69,6 +78,8 @@ pub const fn days_from_civil(c: Civil) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// Inverse of [`days_from_civil`]: the civil date for a day count since
+/// 1970-01-01 (Howard Hinnant's `civil_from_days`).
 pub const fn civil_from_days(days: i64) -> Civil {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -88,6 +99,8 @@ pub const fn civil_from_days(days: i64) -> Civil {
 
 /// Converts a civil date (midnight) to FILETIME ticks.
 pub trait DateResolver {
+    /// FILETIME ticks (100 ns since 1601-01-01) for midnight at the start of
+    /// the given civil date, in this resolver's time zone.
     fn filetime_at_midnight(&self, c: Civil) -> i64;
 }
 

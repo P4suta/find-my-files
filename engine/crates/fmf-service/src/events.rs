@@ -65,6 +65,7 @@ impl EventQueue {
         }
     }
 
+    /// Marks the queue closed and wakes any blocked `pop` so it returns None.
     pub fn close(&self) {
         self.state.lock().closed = true;
         self.ready.notify_all();
@@ -105,12 +106,14 @@ impl Broadcaster {
         b
     }
 
+    /// Registers a new subscriber and returns its bounded queue to drain.
     pub fn subscribe(&self) -> Arc<EventQueue> {
         let q = EventQueue::new();
         self.subscribers.lock().push(q.clone());
         q
     }
 
+    /// Closes the subscriber's queue and drops it from the fan-out list.
     pub fn unsubscribe(&self, q: &Arc<EventQueue>) {
         q.close();
         self.subscribers.lock().retain(|s| !Arc::ptr_eq(s, q));

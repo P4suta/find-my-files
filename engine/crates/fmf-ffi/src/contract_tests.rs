@@ -86,6 +86,7 @@ fn default_opts() -> FmfQueryOptions {
         desc: 0,      // Asc
         case_mode: 0, // Smart
         include_hidden_system: 0,
+        regex_mode: 0, // whole-query regex off
     }
 }
 
@@ -156,7 +157,7 @@ fn error_codes_match_contract_table() {
 
 #[test]
 fn abi_version_is_pinned() {
-    assert_eq!(fmf_abi_version(), 1);
+    assert_eq!(fmf_abi_version(), 2);
 }
 
 #[test]
@@ -165,9 +166,9 @@ fn contract_values_are_pinned_literally() {
     // these literal pins are the independent tripwire that catches an
     // accidental edit of the canonical file itself (ADR-0018). Append-only
     // table: renumbering is a breaking protocol change.
-    assert_eq!(fmf_contract::versions::PROTOCOL_VERSION, 1);
-    assert_eq!(fmf_contract::versions::ABI_VERSION, 1);
-    assert_eq!(fmf_contract::versions::PIPE_NAME, r"\\.\pipe\fmf-engine-v1");
+    assert_eq!(fmf_contract::versions::PROTOCOL_VERSION, 2);
+    assert_eq!(fmf_contract::versions::ABI_VERSION, 2);
+    assert_eq!(fmf_contract::versions::PIPE_NAME, r"\\.\pipe\fmf-engine-v2");
     assert_eq!(fmf_contract::opcodes::HELLO, 1);
     assert_eq!(fmf_contract::opcodes::SUBSCRIBE, 2);
     assert_eq!(fmf_contract::opcodes::UNSUBSCRIBE, 3);
@@ -267,12 +268,13 @@ fn fmf_page_layout_pinned() {
 #[test]
 fn fmf_query_options_layout_pinned() {
     // Contract lists the option fields but not a byte layout — pinned.
-    assert_eq!(size_of::<FmfQueryOptions>(), 16);
+    assert_eq!(size_of::<FmfQueryOptions>(), 20);
     assert_eq!(align_of::<FmfQueryOptions>(), 4);
     assert_eq!(offset_of!(FmfQueryOptions, sort), 0);
     assert_eq!(offset_of!(FmfQueryOptions, desc), 4);
     assert_eq!(offset_of!(FmfQueryOptions, case_mode), 8);
     assert_eq!(offset_of!(FmfQueryOptions, include_hidden_system), 12);
+    assert_eq!(offset_of!(FmfQueryOptions, regex_mode), 16);
 }
 
 #[test]

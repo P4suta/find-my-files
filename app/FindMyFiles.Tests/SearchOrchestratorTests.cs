@@ -256,6 +256,29 @@ public sealed class SearchOrchestratorTests
     }
 
     [Fact]
+    public void RegexMode_PassesOptionsThrough_AndSuppressesFocusedRewrite()
+    {
+        SyncContext.RunContinuationsInline();
+        _orchestrator.FocusedExcludePaths = [@"\windows\"];
+        _orchestrator.FocusedExtensions = ["pdf"];
+        _orchestrator.FocusedSearch = true; // on — but regex mode must override it
+
+        var opts = new SearchOptions(
+            FmfSort.Name, false, FmfCase.Smart, IncludeHiddenSystem: false,
+            RegexMode: true, Scope: RegexScope.Path);
+        _request = new SearchRequest(@"report.*\.pdf$", opts);
+        _orchestrator.Requery(RequeryOrigin.Filter);
+
+        var search = Assert.Single(_engine.Searches);
+        // The whole-regex flag and scope reach the engine verbatim…
+        Assert.True(search.Options.RegexMode);
+        Assert.Equal(RegexScope.Path, search.Options.Scope);
+        // …and the pattern is NOT rewritten by focused mode (it would corrupt
+        // the regex). The engine sees exactly what the user typed.
+        Assert.Equal(@"report.*\.pdf$", search.Query);
+    }
+
+    [Fact]
     public void IndexChanged_RequeriesViaTheDispatcher()
     {
         SyncContext.RunContinuationsInline();

@@ -50,6 +50,36 @@ public sealed class AppSettingsTests
     }
 
     [Fact]
+    public void RegexSettings_DefaultOffNameScope_AndRoundTrip()
+    {
+        var fresh = new AppSettings();
+        Assert.False(fresh.RegexMode);
+        Assert.Equal("name", fresh.RegexScope);
+
+        var dir = Path.Combine(Path.GetTempPath(), "fmf-settings-" + Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(dir, "settings.json");
+        try
+        {
+            new AppSettings { RegexMode = true, RegexScope = "path" }.SaveTo(path);
+
+            var loaded = AppSettings.LoadFrom(path);
+            Assert.True(loaded.RegexMode);
+            Assert.Equal("path", loaded.RegexScope);
+
+            var json = File.ReadAllText(path);
+            Assert.Contains("\"regex_mode\"", json);
+            Assert.Contains("\"regex_scope\"", json);
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void MissingKeys_FallBackToDefaults()
     {
         // A pre-feature settings.json (engine only) keeps working and gains

@@ -55,6 +55,9 @@ pub fn index(
         desc: false,
         case: CaseMode::Smart,
         include_hidden_system,
+        // The REPL parses queries normally; `regex:` per-term syntax covers
+        // regex without a whole-query mode here.
+        ..QueryOptions::default()
     };
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();

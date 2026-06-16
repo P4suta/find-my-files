@@ -4,20 +4,20 @@ using System.Text;
 namespace FindMyFiles.Services;
 
 /// <summary>
-/// Zero-dependency file logger for the app process. Engine-side logs go to
-/// %ProgramData%\find-my-files\logs\engine.log; this covers everything that
-/// happens on the C# side. Thread-safe, single rotation generation.
+/// Zero-dependency file logger for the app process. Covers everything on the
+/// C# side; the log directory is resolved by <see cref="AppPaths"/> (portable
+/// <c>&lt;exe&gt;\data\logs</c> by default, else <c>%APPDATA%\find-my-files\logs</c>) —
+/// the same dir the scope engine logs into. Thread-safe, single rotation
+/// generation.
 /// </summary>
 public static class FileLog
 {
     private static readonly object Gate = new();
-    private static readonly string LogDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "find-my-files", "logs");
+    private static readonly string LogDir = AppPaths.LogDir;
 
-    /// <summary>Absolute path to the active log file
-    /// (<c>%APPDATA%\find-my-files\logs\app.log</c>) — surfaced for the
-    /// diagnostics "open log folder" affordance.</summary>
+    /// <summary>Absolute path to the active log file (<c>…\logs\app.log</c> under
+    /// the resolved data root) — surfaced for the diagnostics "open log folder"
+    /// affordance.</summary>
     public static string LogPath => Path.Combine(LogDir, "app.log");
 
     /// <summary>Absolute path to the crash marker dropped on a fatal exit and

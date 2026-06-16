@@ -212,9 +212,41 @@ public sealed class FakeEngineClient : IEngineClient
             needle = needle.Replace("!!lag", "", StringComparison.Ordinal).Trim();
         }
 #endif
-        IEnumerable<RowData> hits = needle.Length == 0
-            ? _rows
-            : _rows.Where(r => r.Name.Contains(needle, StringComparison.OrdinalIgnoreCase));
+        IEnumerable<RowData> hits;
+        if (options.RegexMode && needle.Length != 0)
+        {
+            // Deterministic regex mode for UI tests. .NET regex differs from
+            // the engine's rust regex, but the fake only needs to filter
+            // plausibly and reject invalid patterns the same way (a 100ms
+            // match timeout guards the test double against pathological input).
+            var ci = options.Case switch
+            {
+                FmfCase.Insensitive => true,
+                FmfCase.Sensitive => false,
+                _ => !needle.Any(char.IsUpper),
+            };
+            System.Text.RegularExpressions.Regex re;
+            try
+            {
+                re = new System.Text.RegularExpressions.Regex(
+                    needle,
+                    ci
+                        ? System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                        : System.Text.RegularExpressions.RegexOptions.None,
+                    TimeSpan.FromMilliseconds(100));
+            }
+            catch (ArgumentException e)
+            {
+                throw new QuerySyntaxException($"invalid regex: {e.Message}");
+            }
+            hits = _rows.Where(r => re.IsMatch(options.Scope == RegexScope.Path ? r.FullPath : r.Name));
+        }
+        else
+        {
+            hits = needle.Length == 0
+                ? _rows
+                : _rows.Where(r => r.Name.Contains(needle, StringComparison.OrdinalIgnoreCase));
+        }
         if (!options.IncludeHiddenSystem)
         {
             hits = hits.Where(r => (r.Flags & 4) == 0);

@@ -22,3 +22,5 @@
 - [0020](0020-code-signing-provider.md) — コード署名=SSL.com eSigner/個人IV、Azure(日本個人不可)・EV(SmartScreen即時信頼喪失)は却下
 - [0021](0021-build-output-layout.md) — ビルド出力を単一 build/ に集約(per-workspace .cargo/config.toml、C# bin は BaseOutputPath・obj は据え置き)
 - [0022](0022-boundary-seams-behavioral-tests.md) — OS/シェル/UI 境界はテスト可能シーム+挙動テスト必須(reveal初日壊れの教訓、mutation/カバレッジゲート)
+- [0023](0023-regex-first-class.md) — 正規表現の第一級化: literal-prefilter駆動+コンパイル上限1MiB、契約20B化(pipe v2)、trigramは依然不採用
+- [0024](0024-non-elevated-scope-index.md) — 非昇格スコープ索引モード: フォルダ走査+ReadDirectoryChangesWを2シームの第2実装に、合成FRN(パスハッシュ)で形式無変更、ADR-0001の「フォルダ走査しない」を一点改訂

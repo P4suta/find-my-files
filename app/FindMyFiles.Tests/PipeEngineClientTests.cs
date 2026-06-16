@@ -185,7 +185,9 @@ public sealed class PipeEngineClientTests
     [Fact]
     public async Task ProtocolMismatch_IsFatal_NoReconnect()
     {
-        using var server = new FakePipeServer { ProtocolVersion = 2 };
+        // A version the client does not speak (one past the current) — e.g. a
+        // stale or future service binary — must be a fatal, no-reconnect mismatch.
+        using var server = new FakePipeServer { ProtocolVersion = PipeProtocol.ProtocolVersion + 1 };
         using var client = new PipeEngineClient(server.PipeName);
 
         await WaitUntilAsync(() => server.ConnectionCount == 1, "first connection");

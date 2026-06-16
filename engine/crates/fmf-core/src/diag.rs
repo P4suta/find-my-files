@@ -14,11 +14,15 @@ use std::time::Instant;
 use parking_lot::Mutex;
 use serde::Serialize;
 
+/// Severity class of a captured diagnostic event, in ascending order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
+    /// A degraded path that recovered via fallback (the `degrade!` form).
     Warn,
+    /// A handled failure surfaced to the operator.
     Error,
+    /// A panic captured by the `install_panic_hook` backtrace path.
     Panic,
 }
 
@@ -34,14 +38,21 @@ impl Severity {
     }
 }
 
+/// One captured diagnostic event: the unit stored in the ring and fanned out
+/// to sinks.
 #[derive(Clone, Debug, Serialize)]
 pub struct ErrorEvent {
+    /// Monotonic sequence number, assigned per event from process start (1-based).
     pub seq: u64,
+    /// Milliseconds since the first diagnostics call (process uptime, ms).
     pub uptime_ms: u64,
+    /// Severity class of this event.
     pub severity: Severity,
     /// tracing target (module path) — "where".
     pub area: String,
+    /// Volume the event pertains to (e.g. "C:"), when known.
     pub volume: Option<String>,
+    /// Human-readable message — "what".
     pub message: String,
 }
 
@@ -63,6 +74,7 @@ pub fn register_sink(sink: Sink) -> SinkGuard {
     SinkGuard(id)
 }
 
+/// Lifetime handle for a registered sink; dropping it unregisters the sink.
 pub struct SinkGuard(u64);
 
 impl Drop for SinkGuard {
@@ -97,6 +109,7 @@ pub fn record(severity: Severity, area: &str, volume: Option<String>, message: S
     }
 }
 
+/// Snapshot of the diagnostics ring (oldest first), capped at the ring size.
 pub fn recent_errors() -> Vec<ErrorEvent> {
     RING.lock().iter().cloned().collect()
 }

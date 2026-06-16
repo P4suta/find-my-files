@@ -52,11 +52,13 @@ impl TestDir {
         Self { path }
     }
 
+    /// The absolute path of this per-test directory.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Resolve `p` relative to this test directory.
     pub fn join(&self, p: impl AsRef<Path>) -> PathBuf {
         self.path.join(p)
     }
@@ -76,6 +78,11 @@ impl Drop for TestDir {
     }
 }
 
+/// Build a [`RawEntry`] from a bare record number.
+///
+/// Synthesizes its FRN as `(1 << 48) | record` (sequence 1) and clears
+/// reparse/hidden/system. `size` is in bytes; `mtime` is a FILETIME (100ns
+/// ticks since 1601, UTC).
 #[must_use]
 pub const fn raw(
     record: u64,
@@ -98,6 +105,7 @@ pub const fn raw(
     }
 }
 
+/// Encode `s` as a UTF-16 code-unit vector, as scan entry names arrive.
 #[must_use]
 pub fn u16s(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
@@ -116,6 +124,8 @@ pub fn build_sample() -> VolumeIndex {
     b.finish()
 }
 
+/// Build a [`RawEntry`] for attribute-filter tests: like [`raw`] but with
+/// explicit `is_hidden`/`is_system` and zeroed `size`/`mtime`.
 #[must_use]
 pub const fn raw_attr(
     record: u64,

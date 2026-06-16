@@ -23,10 +23,18 @@ use crate::{config, host, server};
 // it too — ADR-0018 radiation).
 pub use fmf_proto::SERVICE_NAME;
 
+/// Knobs for [`serve`]: where data lives, which pipe to bind, and dev toggles.
 pub struct ServeOptions {
+    /// Machine-wide data root (`%ProgramData%\find-my-files`); holds
+    /// `service.json`, the `index` snapshot dir, and `logs`.
     pub data_dir: std::path::PathBuf,
+    /// Named-pipe address the server listens on for UI clients.
     pub pipe_name: String,
+    /// Enable the `--debug-faults` query hooks (`!!panic` / `!!drop` / `!!lag`);
+    /// always off for an installed service.
     pub debug_faults: bool,
+    /// Skip the initial volume index on startup (serve the existing snapshot
+    /// only); used for fast bring-up in dev.
     pub no_index: bool,
 }
 

@@ -37,7 +37,7 @@
       "file": "query_req_basic.bin"
     },
     {
-      "desc": "op7 request: Mtime/Desc/Sensitive/include-hidden + multi-byte UTF-8 text",
+      "desc": "op7 request: Mtime/Desc/Sensitive/include-hidden/regex(whole+path) + multi-byte UTF-8 text",
       "file": "query_req_unicode.bin"
     },
     {

@@ -62,6 +62,10 @@ internal static partial class NativeEngine
     [LibraryImport("fmf_engine")]
     internal static unsafe partial int fmf_index_start(IntPtr handle, byte** volumes, uint n);
 
+    // ADR-0024: non-elevated scope-mode start over absolute root paths.
+    [LibraryImport("fmf_engine")]
+    internal static unsafe partial int fmf_index_start_scope(IntPtr handle, byte** roots, uint n);
+
     [LibraryImport("fmf_engine")]
     internal static unsafe partial int fmf_index_status(
         IntPtr handle, FmfVolumeStatus* buf, uint cap, out uint count);

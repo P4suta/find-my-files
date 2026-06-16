@@ -60,9 +60,15 @@
   </resheader>
 
   <!-- ===== XAML (x:Uid) ===== -->
-  <data name="SearchBox.PlaceholderText" xml:space="preserve"><value>Search by file name…</value></data>
+  <data name="Search_Placeholder" xml:space="preserve"><value>Search by file name…</value></data>
+  <data name="Search_PlaceholderRegexName" xml:space="preserve"><value>Regex over file name…</value></data>
+  <data name="Search_PlaceholderRegexPath" xml:space="preserve"><value>Regex over full path…</value></data>
   <data name="OptFocused.Text" xml:space="preserve"><value>Focused (common formats only, exclude system areas)</value></data>
   <data name="OptSystem.Text" xml:space="preserve"><value>Include system and hidden files</value></data>
+  <data name="OptRegex.Text" xml:space="preserve"><value>Regex mode</value></data>
+  <data name="RegexScopeMenu.Text" xml:space="preserve"><value>Regex applies to</value></data>
+  <data name="RegexScopeName.Text" xml:space="preserve"><value>File name</value></data>
+  <data name="RegexScopePath.Text" xml:space="preserve"><value>Full path</value></data>
   <data name="SortHeaderItem.Text" xml:space="preserve"><value>Sort by</value></data>
   <data name="SortName.Text" xml:space="preserve"><value>Name</value></data>
   <data name="SortSize.Text" xml:space="preserve"><value>Size</value></data>

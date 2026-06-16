@@ -130,33 +130,39 @@ internal static class PipeProtocol
             BinaryPrimitives.ReadUInt32LittleEndian(payload[8..]));
     }
 
-    // ── Query (op 7, 16B POD options + UTF-8 text) ──────────────────────
+    // ── Query (op 7, 20B POD options + UTF-8 text) ──────────────────────
 
     public static byte[] EncodeQueryReq(SearchOptions options, string text)
     {
         var textBytes = Encoding.UTF8.GetBytes(text);
-        var b = new byte[16 + textBytes.Length];
+        var b = new byte[EngineContract.QueryOptionsSize + textBytes.Length];
         BinaryPrimitives.WriteUInt32LittleEndian(b, (uint)options.Sort);
         BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), options.Descending ? 1u : 0u);
         BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(8), (uint)options.Case);
         BinaryPrimitives.WriteUInt32LittleEndian(
             b.AsSpan(12), options.IncludeHiddenSystem ? 1u : 0u);
-        textBytes.CopyTo(b, 16);
+        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(16), options.RegexModeBits);
+        textBytes.CopyTo(b, EngineContract.QueryOptionsSize);
         return b;
     }
 
     public static (SearchOptions Options, string Text) DecodeQueryReq(ReadOnlySpan<byte> payload)
     {
-        if (payload.Length < 16)
+        var len = EngineContract.QueryOptionsSize;
+        if (payload.Length < len)
         {
-            throw new InvalidDataException($"QueryReq payload is {payload.Length} bytes, need ≥16");
+            throw new InvalidDataException(
+                $"QueryReq payload is {payload.Length} bytes, need ≥{len}");
         }
+        var regexBits = BinaryPrimitives.ReadUInt32LittleEndian(payload[16..]);
         var options = new SearchOptions(
             (FmfSort)BinaryPrimitives.ReadUInt32LittleEndian(payload),
             BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]) != 0,
             (FmfCase)BinaryPrimitives.ReadUInt32LittleEndian(payload[8..]),
-            BinaryPrimitives.ReadUInt32LittleEndian(payload[12..]) != 0);
-        return (options, Encoding.UTF8.GetString(payload[16..]));
+            BinaryPrimitives.ReadUInt32LittleEndian(payload[12..]) != 0,
+            (regexBits & 1u) != 0,
+            (regexBits & 2u) != 0 ? RegexScope.Path : RegexScope.Name);
+        return (options, Encoding.UTF8.GetString(payload[len..]));
     }
 
     public static byte[] EncodeQueryResp(ulong resultId, ulong count, string traceJson)

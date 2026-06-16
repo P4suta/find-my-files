@@ -12,6 +12,7 @@ use crate::mft::MftError;
 use super::pipeline::{Chunk, SCAN_CHUNK, plan_chunks};
 use super::volume_io::mft_layout;
 
+/// I/O strategy to measure for one $MFT read pass (ADR-0011).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IoProbeMode {
     /// The production strategy: buffered synchronous reads.
@@ -26,9 +27,13 @@ pub enum IoProbeMode {
     NoBufOverlapped,
 }
 
+/// Throughput result of one measured $MFT read pass.
 pub struct ProbeStats {
+    /// Bytes read during the measured pass.
     pub bytes: u64,
+    /// Wall-clock duration of the read pass, in milliseconds.
     pub elapsed_ms: u64,
+    /// Throughput in mebibytes per second (`bytes` over elapsed seconds).
     pub mb_per_s: f64,
 }
 

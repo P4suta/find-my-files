@@ -189,7 +189,8 @@ fn corpus() -> Vec<Case> {
     );
     case(
         "query_req_unicode.bin",
-        "op7 request: Mtime/Desc/Sensitive/include-hidden + multi-byte UTF-8 text",
+        "op7 request: Mtime/Desc/Sensitive/include-hidden/regex(whole+path) + \
+         multi-byte UTF-8 text",
         frame(
             opcode::QUERY,
             0,
@@ -201,6 +202,7 @@ fn corpus() -> Vec<Case> {
                     desc: 1,
                     case_mode: 2,
                     include_hidden_system: 1,
+                    regex_mode: 3,
                 },
                 "日本語 ext:txt",
             ),

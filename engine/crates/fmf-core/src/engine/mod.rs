@@ -10,6 +10,8 @@ mod seams;
 mod search;
 mod volume;
 #[cfg(windows)]
+mod watch;
+#[cfg(windows)]
 mod worker;
 
 #[cfg(test)]
@@ -32,8 +34,11 @@ use crate::query;
 
 use volume::{JournalCheckpoint, VolumeSlot};
 
+/// Engine startup configuration.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
+    /// Root directory holding per-volume snapshots and the `.writer.lock`
+    /// (`%ProgramData%\find-my-files\`).
     pub index_dir: PathBuf,
 }
 
@@ -42,31 +47,50 @@ pub struct EngineConfig {
 // definition directly, so no wire↔engine mapping exists (ADR-0018).
 pub use fmf_contract::options::VolumeState;
 
+/// Asynchronous notification a volume emits to the event sink during scanning
+/// and tailing (mapped 1:1 to a contract POD by [`EngineEvent::to_wire`]).
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
+    /// Initial-scan progress: `entries` files seen so far on `volume`.
     Progress {
+        /// Volume label (e.g. `"C:"`).
         volume: String,
+        /// Files indexed so far (running count).
         entries: u64,
     },
+    /// `volume`'s initial scan finished; it is now queryable with `entries`
+    /// total files.
     VolumeReady {
+        /// Volume label (e.g. `"C:"`).
         volume: String,
+        /// Total files indexed when the scan completed (count).
         entries: u64,
     },
     /// Emitted (debounced, engine-side only throttle) after USN batches.
     IndexChanged {
+        /// Volume label (e.g. `"C:"`).
         volume: String,
     },
+    /// A full rescan of `volume` has begun (e.g. the USN journal was lost).
     RescanStarted {
+        /// Volume label (e.g. `"C:"`).
         volume: String,
     },
+    /// `volume` could not be opened or scanned; `message` is the human-readable
+    /// reason.
     VolumeFailed {
+        /// Volume label (e.g. `"C:"`).
         volume: String,
+        /// Human-readable failure reason.
         message: String,
     },
     /// A WARN/ERROR/panic was recorded in the diagnostics ring; the UI pulls
     /// details from the metrics snapshot (push notification + pull detail).
     EngineError {
+        /// Severity recorded in the diagnostics ring (1=warn, 2=error,
+        /// 3=panic).
         severity: u64, // 1=warn 2=error 3=panic
+        /// Volume label the diagnostic was attributed to (empty if none).
         volume: String,
     },
 }
@@ -90,14 +114,19 @@ impl EngineEvent {
     }
 }
 
+/// Callback the engine invokes (from any thread) to deliver an [`EngineEvent`].
 pub type EventSink = Arc<dyn Fn(&EngineEvent) + Send + Sync>;
 
+/// A failure answering a query (parse, compile, or a stale result set).
 #[derive(Debug, Error)]
 pub enum EngineError {
+    /// The query text could not be parsed.
     #[error("query parse: {0}")]
     Parse(#[from] query::ParseError),
+    /// The parsed query could not be compiled.
     #[error("query compile: {0}")]
     Compile(#[from] query::CompileError),
+    /// The result set references an index that has since been rebuilt.
     #[error("result is stale (index was rebuilt)")]
     Stale,
 }
@@ -111,17 +140,33 @@ pub enum EngineCreateError {
         "index directory is locked by another engine process (holder pid: {})",
         .0.map_or_else(|| "unknown".to_string(), |p| p.to_string())
     )]
+    /// Another engine process already holds the writer lock (its pid if
+    /// readable). The cross-process arm of the single-writer invariant.
     Locked(Option<u32>),
+    /// The index directory could not be created or its lock could not be
+    /// opened.
     #[error("index directory: {0}")]
     Io(#[from] std::io::Error),
 }
 
+/// The multi-volume engine: owns one index per NTFS volume, drives scans and
+/// USN tailing, and answers queries. Holds the single-writer lock for its
+/// whole lifetime.
 pub struct Engine {
     config: EngineConfig,
     sink: RwLock<Option<EventSink>>,
     volumes: RwLock<Vec<Arc<VolumeSlot>>>,
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     metrics: MetricsHub,
+    /// Last `(text, options) → compiled query`. An identical re-issue — a USN-
+    /// driven requery of the same text (the `RefreshInPlace` path) — then skips
+    /// parse + compile, which matters most for a heavy regex. Always sound:
+    /// the compiled query is a pure function of `(text, options)` (the date
+    /// resolver maps civil dates to ticks independently of the wall clock).
+    /// Keying on the whole `QueryOptions` over-approximates (only case + the
+    /// regex mode/scope actually steer compilation) but stays trivially
+    /// correct. Engine-wide because compilation is volume-independent.
+    compile_cache: Mutex<Option<(String, query::QueryOptions, Arc<query::CompiledQuery>)>>,
     /// Keeps the diag→EngineError forwarding registered for our lifetime.
     _diag_guard: Mutex<Option<crate::diag::SinkGuard>>,
     /// Exclusive-write handle on `{index_dir}\.writer.lock` for our whole
@@ -149,6 +194,7 @@ impl Engine {
             volumes: RwLock::new(Vec::new()),
             threads: Mutex::new(Vec::new()),
             metrics: MetricsHub::new(),
+            compile_cache: Mutex::new(None),
             _diag_guard: Mutex::new(None),
             #[cfg(windows)]
             _writer_lock: writer_lock,
@@ -206,6 +252,8 @@ impl Engine {
         }
     }
 
+    /// Install (or clear with `None`) the callback that receives every
+    /// [`EngineEvent`].
     pub fn set_event_sink(&self, sink: Option<EventSink>) {
         *self.sink.write() = sink;
     }
@@ -269,6 +317,59 @@ impl Engine {
         }
     }
 
+    /// Begin a non-elevated **scope-mode** index over `roots` (absolute base
+    /// paths), folder-walked and watched in-process without elevation
+    /// (ADR-0024). Unlike [`Self::index_start`], the change source is
+    /// `ReadDirectoryChangesW`, not the USN journal, and the snapshot lives
+    /// under a single fixed `scope` label (so a hostile `roots` entry can
+    /// never steer `snapshot_path` — only the fixed label does). Idempotent:
+    /// a second call while the scope slot exists is a no-op.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the volume worker thread cannot be spawned.
+    #[cfg(windows)]
+    pub fn index_start_scope(self: &Arc<Self>, roots: &[String]) {
+        const SCOPE_LABEL: &str = "scope";
+        let roots: Vec<String> = roots
+            .iter()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty())
+            .collect();
+        if roots.is_empty() {
+            tracing::warn!("index_start_scope: no roots configured");
+            self.emit(EngineEvent::VolumeFailed {
+                volume: SCOPE_LABEL.to_string(),
+                message: "スコープ索引のフォルダが未設定です".to_string(),
+            });
+            return;
+        }
+        let slot = {
+            let mut vols = self.volumes.write();
+            if vols.iter().any(|s| s.label == SCOPE_LABEL) {
+                return;
+            }
+            let store = Arc::new(seams::WinSnapshotStore::new(volume::snapshot_path(
+                &self.config.index_dir,
+                SCOPE_LABEL,
+            )));
+            let slot = Arc::new(VolumeSlot::scanning_walk(
+                SCOPE_LABEL.to_string(),
+                store,
+                roots,
+            ));
+            vols.push(slot.clone());
+            slot
+        };
+        let engine = self.clone();
+        let handle = std::thread::Builder::new()
+            .name(format!("fmf-vol-{SCOPE_LABEL}"))
+            .spawn(move || engine.volume_thread(slot))
+            .expect("spawn volume thread");
+        self.threads.lock().push(handle);
+    }
+
+    /// Per-volume status: `(label, state, files scanned so far)`.
     pub fn status(&self) -> Vec<(String, VolumeState, u64)> {
         self.volumes
             .read()
@@ -277,6 +378,7 @@ impl Engine {
             .collect()
     }
 
+    /// The engine's metrics hub (counters and the diagnostics ring).
     pub const fn metrics(&self) -> &MetricsHub {
         &self.metrics
     }
@@ -335,6 +437,7 @@ impl Engine {
         saved
     }
 
+    /// Signal every volume thread to stop and join them (bounded wait).
     pub fn shutdown(&self) {
         // Close the diag→EngineError forwarding window first: shutdown-time
         // WARNs (final flush, journal teardown) still reach the log and the
@@ -373,6 +476,7 @@ impl Engine {
                 &self.config.index_dir,
                 label,
             ))),
+            kind: volume::WorkerKind::Mft,
         });
         self.volumes.write().push(slot);
     }

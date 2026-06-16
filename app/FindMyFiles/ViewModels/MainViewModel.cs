@@ -1,6 +1,7 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
+using RegexScopeKind = FindMyFiles.Engine.RegexScope;
 
 namespace FindMyFiles.ViewModels;
 
@@ -49,6 +50,28 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// orchestrator, persist, and requery as a filter change (top reset).</summary>
     [ObservableProperty]
     public partial bool FocusedSearch { get; set; }
+
+    /// <summary>正規表現モード (ADR-0023): treat the whole query as one regex.
+    /// Restored from settings in the ctor; flips persist and requery as a
+    /// filter change (the same text now means something different).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SearchPlaceholder))]
+    public partial bool RegexMode { get; set; }
+
+    /// <summary>Which haystack the whole-query regex matches (name/path). Only
+    /// affects results while <see cref="RegexMode"/> is on, but persisted
+    /// independently so it survives toggling regex off and on.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SearchPlaceholder))]
+    public partial RegexScopeKind RegexScope { get; set; }
+
+    /// <summary>The search box hint — regex/scope-aware, so the box itself
+    /// signals that regex mode is on (the toggle lives in the gear menu).</summary>
+    public string SearchPlaceholder => RegexMode
+        ? Loc.Get(RegexScope == RegexScopeKind.Path
+            ? "Search_PlaceholderRegexPath"
+            : "Search_PlaceholderRegexName")
+        : Loc.Get("Search_Placeholder");
 
     // ── Disconnected setup screen (empty fake engine: no service yet) ──
 
@@ -113,12 +136,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         Search = new SearchOrchestrator(engine, _engineEvents, dispatcher, Results,
             () => new SearchRequest(
                 SearchText,
-                new SearchOptions(Sort, SortDescending, FmfCase.Smart, IncludeHiddenSystem)));
+                new SearchOptions(Sort, SortDescending, FmfCase.Smart, IncludeHiddenSystem,
+                    RegexMode, RegexScope)));
         // Focused-search wiring: the lists are settings-owned; the toggle
         // state flows through OnFocusedSearchChanged (Search exists by now).
         Search.FocusedExcludePaths = _settings.FocusedExcludePaths;
         Search.FocusedExtensions = _settings.FocusedExtensions;
         FocusedSearch = _settings.FocusedSearch;
+        // Regex mode/scope restore (same ctor-time no-op requery as focused).
+        RegexScope = _settings.RegexScope == "path" ? RegexScopeKind.Path : RegexScopeKind.Name;
+        RegexMode = _settings.RegexMode;
         Notifications = new NotificationCenter(dispatcher);
         Perf = new PerfPanelViewModel(engine);
 
@@ -245,6 +272,36 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _settings.Save();
         }
         Search.Requery(RequeryOrigin.Filter);
+    }
+
+    /// <summary>Regex toggle → persist + filter requery (the live query text
+    /// switches between substring and whole-regex semantics). Also runs once
+    /// from the ctor; the save is skipped when unchanged and the requery is a
+    /// no-op on the still-empty query.</summary>
+    partial void OnRegexModeChanged(bool value)
+    {
+        if (_settings.RegexMode != value)
+        {
+            _settings.RegexMode = value;
+            _settings.Save();
+        }
+        Search.Requery(RequeryOrigin.Filter);
+    }
+
+    /// <summary>Scope radio → persist; requery only while regex mode is on
+    /// (scope is inert otherwise).</summary>
+    partial void OnRegexScopeChanged(RegexScopeKind value)
+    {
+        var s = value == RegexScopeKind.Path ? "path" : "name";
+        if (_settings.RegexScope != s)
+        {
+            _settings.RegexScope = s;
+            _settings.Save();
+        }
+        if (RegexMode)
+        {
+            Search.Requery(RequeryOrigin.Filter);
+        }
     }
 
     /// <summary>Column-header click: re-clicking the active <see cref="Sort"/>

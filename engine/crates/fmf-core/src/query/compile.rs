@@ -11,15 +11,20 @@ use super::ast::{Ast, Term};
 use super::dates::DateResolver;
 use crate::wtf8;
 
-// The case mode is contract surface (FmfQueryOptions.case_mode carries it
-// as u32) — the canonical definition is used directly (ADR-0018).
-pub use fmf_contract::options::CaseMode;
+// The case mode / regex scope are contract surface (FmfQueryOptions carries
+// them as u32) — the canonical definitions are used directly (ADR-0018).
+pub use fmf_contract::options::{CaseMode, RegexScope};
 
+/// Why a query failed to compile into an executable plan.
 #[derive(Debug, Error)]
 pub enum CompileError {
+    /// A `regex:`/`path:`-regex (or whole-query) pattern is invalid syntax or
+    /// exceeds the compile size limit (`REGEX_SIZE_LIMIT`, ADR-0023).
     #[error("invalid regex `{pattern}`: {source}")]
     Regex {
+        /// The offending pattern text, as written in the query.
         pattern: String,
+        /// The underlying error from the `regex` crate's builder.
         source: regex::Error,
     },
 }
@@ -176,6 +181,8 @@ impl CompiledGroup {
     }
 }
 
+/// An executable plan: one compiled AND group per OR clause, plus the path
+/// pools the sweep must materialize to evaluate them.
 pub struct CompiledQuery {
     pub(super) groups: Vec<CompiledGroup>,
     pub(super) needs_folded_paths: bool,
@@ -244,10 +251,23 @@ fn wildcard_to_regex_body(pattern: &str) -> String {
     out
 }
 
+/// Compile-time bounds on a user regex (ADR-0023). The `regex` crate matches
+/// in guaranteed linear time (finite automata, no backtracking) — so there is
+/// no `ReDoS` *execution* blowup — but a pathological pattern can still demand a
+/// large program/DFA at *build* time. We index file names only (p99 ≈110 B),
+/// so a legitimate name regex never approaches 1 MiB; capping there turns a
+/// memory-DoS pattern into a clean `CompiledTooBig` → `FMF_E_QUERY_SYNTAX`
+/// rejection (it flows through `CompileError::Regex` unchanged), instead of
+/// letting the elevated service compile it. Both default higher (10/2 MiB).
+const REGEX_SIZE_LIMIT: usize = 1 << 20;
+const REGEX_DFA_SIZE_LIMIT: usize = 1 << 20;
+
 fn build_regex(body: &str, ci: bool, pattern_for_err: &str) -> Result<Regex, CompileError> {
     RegexBuilder::new(body)
         .case_insensitive(ci)
         .dot_matches_new_line(true)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
         .build()
         .map_err(|source| CompileError::Regex {
             pattern: pattern_for_err.to_string(),
@@ -436,6 +456,121 @@ fn driver_for(t: &CTerm) -> (Driver, bool) {
     }
 }
 
+/// Kill switch for the regex literal prefilter (`FMF_REGEX_PREFILTER=0`) —
+/// forces literal-less *and* literal-bearing regex groups onto the chunked
+/// full scan. A field escape hatch if a prefilter soundness bug ever
+/// surfaces (the same shape as `FMF_QUERY_CACHE`, ADR-0023).
+fn regex_prefilter_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("FMF_REGEX_PREFILTER").map_or(true, |v| v != "0"))
+}
+
+/// Extract a *required* literal factor from a name regex and turn it into a
+/// folded-pool substring sweep — the same linear sweep every literal query
+/// uses (ADR-0002), so regex stays off the full scan without any standing
+/// index (ADR-0023).
+///
+/// Soundness: regex-syntax prefix (resp. suffix) extraction yields literals
+/// that every match must begin (resp. end) with; the longest common
+/// prefix/suffix `S` of that set is therefore present, contiguously, in
+/// every matched substring — hence in the name. Folding `S` and sweeping the
+/// (folded) lower pool is a superset for both case modes (an original-case
+/// occurrence implies the folded one, length-preserving per code point), and
+/// the `NameRegex` residual re-checks every candidate exactly. Returns `None`
+/// when no usable literal exists (`\d+`, a leading `.*`, an alternation with
+/// no common factor); the caller then falls back to a full scan.
+fn regex_name_prefilter(re: &Regex) -> Option<Driver> {
+    use regex_syntax::hir::literal::{ExtractKind, Extractor};
+
+    let hir = regex_syntax::parse(re.as_str()).ok()?;
+    let factor = |kind: ExtractKind| -> Option<Vec<u8>> {
+        let is_suffix = matches!(kind, ExtractKind::Suffix);
+        let mut ex = Extractor::new();
+        ex.kind(kind);
+        let seq = ex.extract(&hir);
+        let bytes = if is_suffix {
+            seq.longest_common_suffix()
+        } else {
+            seq.longest_common_prefix()
+        }?;
+        // A common factor that splits a multi-byte code point is unusable as
+        // a folded needle; bail to a full scan rather than fold garbage.
+        let folded = wtf8::fold_str(std::str::from_utf8(bytes).ok()?).into_bytes();
+        // A 1-byte needle hits nearly every name — the per-hit sweep
+        // bookkeeping then loses to a plain full scan (the `score >= 4` gate).
+        (folded.len() >= 2).then_some(folded)
+    };
+
+    // Prefer the longer required factor; both map to a sound substring sweep.
+    let needle = [ExtractKind::Prefix, ExtractKind::Suffix]
+        .into_iter()
+        .filter_map(factor)
+        .max_by_key(Vec::len)?;
+    Some(Driver::Sub {
+        needle_len: needle.len(),
+        finder: memmem::Finder::new(&needle).into_owned(),
+    })
+}
+
+/// When a group has no literal driver, try to drive it from a positive name
+/// regex's required literal. The regex matcher stays in `terms` as the
+/// residual that confirms each candidate, so `driver_term` is `None`.
+fn regex_prefilter_driver(terms: &[CTerm]) -> Driver {
+    if !regex_prefilter_enabled() {
+        return Driver::FullScan;
+    }
+    terms
+        .iter()
+        .filter(|t| !t.negated)
+        .find_map(|t| match &t.matcher {
+            Matcher::NameRegex { re } => regex_name_prefilter(re),
+            _ => None,
+        })
+        .unwrap_or(Driver::FullScan)
+}
+
+/// Compile the *entire* query text as one regex (whole-query regex mode).
+///
+/// No parsing, no operators (ADR-0023) — the text is the pattern, matched
+/// against the file name or the full path per `scope`. Name scope reuses the
+/// literal prefilter; path scope falls back to a full scan (the path pool is
+/// not contiguous). One AND group, the regex left as the residual.
+///
+/// # Errors
+///
+/// Returns [`CompileError::Regex`] if `text` is not a valid regex or exceeds
+/// the compile size limit.
+pub fn compile_whole_regex(
+    text: &str,
+    case: CaseMode,
+    scope: RegexScope,
+) -> Result<CompiledQuery, CompileError> {
+    let re = build_regex(text, insensitive(text, case), text)?;
+    let (matcher, needs_orig_paths) = match scope {
+        RegexScope::Name => (Matcher::NameRegex { re }, false),
+        RegexScope::Path => (Matcher::PathRegex { re }, true),
+    };
+    let term = CTerm {
+        negated: false,
+        matcher,
+        exact_needle_unstable: false,
+    };
+    let driver = match scope {
+        RegexScope::Name => regex_prefilter_driver(std::slice::from_ref(&term)),
+        RegexScope::Path => Driver::FullScan,
+    };
+    Ok(CompiledQuery {
+        groups: vec![CompiledGroup {
+            driver,
+            terms: vec![term],
+            driver_term: None,
+            driver_exact: true,
+        }],
+        needs_folded_paths: false,
+        needs_orig_paths,
+    })
+}
+
 /// Compile a parsed [`Ast`] into an executable [`CompiledQuery`].
 ///
 /// # Errors
@@ -476,7 +611,11 @@ pub fn compile(
                     driver_exact = exact;
                     d
                 }
-                _ => Driver::FullScan,
+                // No usable literal driver. A positive name regex can still
+                // narrow via its required literal (the regex stays a residual
+                // — driver_term None, driver_exact irrelevant); otherwise full
+                // scan.
+                _ => regex_prefilter_driver(&terms),
             }
         };
 
@@ -511,5 +650,110 @@ impl CompiledQuery {
         let mut labels: Vec<&str> = self.groups.iter().map(|g| g.driver.label()).collect();
         labels.dedup();
         labels.join("+")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::parse;
+    use super::*;
+
+    fn prefilter_needle(pattern: &str) -> Option<Vec<u8>> {
+        let re = build_regex(pattern, false, pattern).unwrap();
+        match regex_name_prefilter(&re) {
+            Some(Driver::Sub { finder, .. }) => Some(finder.needle().to_vec()),
+            Some(_) => panic!("regex prefilter must only produce a Sub driver"),
+            None => None,
+        }
+    }
+
+    #[test]
+    fn regex_prefilter_extracts_required_literal() {
+        // Leading literal → prefix factor.
+        assert_eq!(prefilter_needle("^report"), Some(b"report".to_vec()));
+        assert_eq!(prefilter_needle("windows.*"), Some(b"windows".to_vec()));
+        // Trailing-anchored literal → suffix factor (the prefix is `.*`).
+        assert_eq!(prefilter_needle(r".*\.dll"), Some(b".dll".to_vec()));
+        assert_eq!(prefilter_needle(r"\.rs$"), Some(b".rs".to_vec()));
+        // Folded for the lower-pool sweep; the case-sensitive residual still
+        // re-checks each candidate.
+        assert_eq!(prefilter_needle("^Report"), Some(b"report".to_vec()));
+    }
+
+    #[test]
+    fn regex_prefilter_declines_without_a_usable_literal() {
+        assert_eq!(prefilter_needle(r"\d+"), None);
+        assert_eq!(prefilter_needle(".*"), None);
+        assert_eq!(
+            prefilter_needle("a"),
+            None,
+            "1-byte literal is not selective"
+        );
+        assert_eq!(
+            prefilter_needle("dll|exe"),
+            None,
+            "no common factor across the alternation"
+        );
+    }
+
+    #[test]
+    fn regex_only_group_drives_a_pool_scan() {
+        // A pure name-regex group with a literal must leave the full scan
+        // behind: a Sub driver, no driver_term (the regex stays the residual).
+        let ast = parse("regex:^report").unwrap();
+        let q = compile(&ast, CaseMode::Smart, &super::super::dates::UtcResolver).unwrap();
+        let g = &q.groups[0];
+        assert!(matches!(g.driver, Driver::Sub { .. }), "expected pool-scan");
+        assert!(g.driver_term.is_none(), "regex must remain a residual");
+        assert!(
+            g.terms
+                .iter()
+                .any(|t| matches!(t.matcher, Matcher::NameRegex { .. })),
+            "the regex residual confirms each candidate"
+        );
+
+        // A literal-less regex stays on the full scan.
+        let ast = parse(r"regex:\d+").unwrap();
+        let q = compile(&ast, CaseMode::Smart, &super::super::dates::UtcResolver).unwrap();
+        assert!(matches!(q.groups[0].driver, Driver::FullScan));
+    }
+
+    #[test]
+    fn oversized_regex_is_rejected_not_compiled() {
+        // A pattern that demands a >1 MiB program must come back as a clean
+        // CompileError (→ FMF_E_QUERY_SYNTAX), never a panic or an OOM. The
+        // bounded-repetition blowup unrolls past REGEX_SIZE_LIMIT.
+        let ast = parse(r"regex:(a{500}){500}").unwrap();
+        let result = compile(&ast, CaseMode::Smart, &super::super::dates::UtcResolver);
+        assert!(
+            matches!(result, Err(CompileError::Regex { .. })),
+            "a 1 MiB+ regex program must be refused, not compiled"
+        );
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use proptest::{prop_assert, proptest};
+
+    use super::super::{dates::UtcResolver, parse};
+    use super::*;
+
+    proptest! {
+        // Compiling a `regex:` term must never panic and never OOM, whatever
+        // the pattern: it returns Ok (a built matcher) or a CompileError
+        // (invalid syntax or over the size limit). Biased to the regex
+        // metacharacter alphabet so the build paths get dense coverage.
+        #[test]
+        fn regex_compile_is_panic_free_and_bounded(
+            body in r"[a-z0-9()\[\]{}.*+?^$|\\]{0,40}"
+        ) {
+            let text = format!("regex:\"{body}\"");
+            if let Ok(ast) = parse(&text) {
+                // Ok or Err — both are acceptable; the property is "no panic".
+                let _ = compile(&ast, CaseMode::Smart, &UtcResolver);
+                prop_assert!(true);
+            }
+        }
     }
 }

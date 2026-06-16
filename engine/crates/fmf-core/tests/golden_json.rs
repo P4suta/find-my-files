@@ -58,6 +58,8 @@ fn invalid_queries_are_rejected_by_the_real_parser() {
         "\"unterminated",
         "regex:[",
         "regex:(",
+        "regex:a{2,1}",        // min>max repetition — invalid regex syntax
+        "regex:(a{500}){500}", // exceeds the 1 MiB compile size limit (ADR-0023)
         "size:abc",
         "size:>",
         "size:1..x",
@@ -237,6 +239,8 @@ fn metrics_snapshot_json_shape_is_pinned() {
             deferred_name_read_failures: 76,
             pipe_results_evicted: 77,
             trace_serialize_failures: 78,
+            walk_read_errors: 79,
+            walk_depth_truncated: 80,
         },
         recent_errors: vec![ErrorEvent {
             seq: 81,
