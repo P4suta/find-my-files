@@ -118,6 +118,7 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
             CanStart = CanStop = CanRestart = CanUninstall = CanRegister = false;
             return;
         }
+
         var state = ServiceSetup.QueryState();
         IsRunning = state == EngineServiceState.Running;
         IsStopped = state == EngineServiceState.Stopped;
@@ -143,12 +144,15 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     }
 
     /// <summary>Start the stopped service (one elevated <c>start</c> verb).</summary>
+    /// <returns>A task that completes when the elevated <c>start</c> verb finishes.</returns>
     public Task StartAsync() => RunAsync("start", Loc.Get("Svc_Started"));
 
     /// <summary>Stop the running service (one elevated <c>stop</c> verb).</summary>
+    /// <returns>A task that completes when the elevated <c>stop</c> verb finishes.</returns>
     public Task StopAsync() => RunAsync("stop", Loc.Get("Svc_Stopped"));
 
     /// <summary>Restart the running service (one elevated <c>restart</c> verb).</summary>
+    /// <returns>A task that completes when the elevated <c>restart</c> verb finishes.</returns>
     public Task RestartAsync() => RunAsync("restart", Loc.Get("Svc_Restarted"));
 
     /// <summary>install (idempotent) + restart in one elevated step (the
@@ -156,6 +160,7 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     /// elevation — a *different* admin account at the UAC prompt — does not
     /// lock this user out of the pipe (docs/SECURITY.md 脅威1). The app is
     /// unelevated here, so CurrentUserSid is exactly that daily user.</summary>
+    /// <returns>A task that completes when the elevated <c>setup</c> verb finishes.</returns>
     public Task RegisterAsync()
     {
         var sid = ServiceSetup.CurrentUserSid();
@@ -165,6 +170,7 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
 
     /// <summary>Uninstall the service (one elevated <c>uninstall</c> verb),
     /// adding <c>--purge-data</c> when <see cref="PurgeData"/> is set.</summary>
+    /// <returns>A task that completes when the elevated <c>uninstall</c> verb finishes.</returns>
     public Task UninstallAsync() =>
         RunAsync(PurgeData ? "uninstall --purge-data" : "uninstall", Loc.Get("Svc_Uninstalled"));
 
@@ -179,12 +185,13 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
         {
             return;
         }
+
         Busy = true;
         ResultText = string.Empty;
         NeedsAppRestart = false;
         try
         {
-            var result = await Task.Run(() => ServiceSetup.RunElevated(_exe, args));
+            var result = await Task.Run(() => ServiceSetup.RunElevated(_exe, args)).ConfigureAwait(false);
             var verb = args.Split(' ', 2)[0];
             (ResultSeverity, ResultText) = result.Outcome switch
             {
@@ -193,6 +200,7 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
                 _ => (NotifySeverity.Error, Loc.Get("Svc_Failed", result.ExitCode, verb)),
             };
             FileLog.Info("service-ui", $"`{args}` → {result.Outcome} (exit {result.ExitCode})");
+
             // Register/start succeeds, but this instance is still on the empty
             // fake engine (the transport is chosen once, at startup). Wait for
             // the service's pipe to come up, then relaunch automatically so the
@@ -203,7 +211,7 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
             {
                 ResultSeverity = NotifySeverity.Info;
                 ResultText = Loc.Get("Setup_Connecting");
-                if (!await ServiceProvisioner.WaitForServiceThenRelaunchAsync())
+                if (!await ServiceProvisioner.WaitForServiceThenRelaunchAsync().ConfigureAwait(false))
                 {
                     ResultSeverity = NotifySeverity.Warning;
                     ResultText = Loc.Get("Svc_RegisteredNotConfirmed");
@@ -217,5 +225,4 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
             Refresh();
         }
     }
-
 }

@@ -12,7 +12,9 @@ namespace FindMyFiles.Services;
 /// </summary>
 public static class FileLog
 {
-    private static readonly object Gate = new();
+    private const long RotateBytes = 2 * 1024 * 1024;
+
+    private static readonly System.Threading.Lock Gate = new();
     private static readonly string LogDir = AppPaths.LogDir;
 
     /// <summary>Absolute path to the active log file (<c>…\logs\app.log</c> under
@@ -24,8 +26,6 @@ public static class FileLog
     /// read back on the next launch (see <see cref="WriteCrashMarker"/> /
     /// <see cref="TakeCrashMarker"/>).</summary>
     public static string CrashMarkerPath => Path.Combine(LogDir, "crash.marker");
-
-    private const long RotateBytes = 2 * 1024 * 1024;
 
     /// <summary>Log an informational line under <paramref name="area"/> (the
     /// subsystem tag shown in brackets).</summary>
@@ -83,6 +83,7 @@ public static class FileLog
         {
             sb.Append(" ── ").Append(ex);
         }
+
         return sb.ToString();
     }
 
@@ -134,6 +135,7 @@ public static class FileLog
                 {
                     return "(no app.log)";
                 }
+
                 var all = File.ReadAllLines(logPath);
                 return string.Join('\n', all.TakeLast(lines));
             }
@@ -161,6 +163,7 @@ public static class FileLog
     }
 
     /// <summary>Returns and clears the crash marker from the previous run.</summary>
+    /// <returns>The marker contents, or <c>null</c> if absent or unreadable.</returns>
     public static string? TakeCrashMarker()
     {
         try
@@ -169,6 +172,7 @@ public static class FileLog
             {
                 return null;
             }
+
             var text = File.ReadAllText(CrashMarkerPath);
             File.Delete(CrashMarkerPath);
             return text;

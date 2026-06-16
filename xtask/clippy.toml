@@ -1,0 +1,4 @@
+# unwrap_used (Cargo.toml) is denied in production; tests may unwrap freely and
+# dbg! is harmless there.
+allow-unwrap-in-tests = true
+allow-dbg-in-tests = true

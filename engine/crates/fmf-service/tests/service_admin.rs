@@ -99,7 +99,7 @@ fn wait_ready(s: &mut PipeStream, next_id: &mut u32, deadline: Duration) -> u64 
         let (h, p) = request(s, *next_id, opcode::INDEX_STATUS, &[]);
         assert_eq!(h.status, codes::OK);
         let status: Vec<messages::VolumeStatusWire> =
-            messages::decode_json("IndexStatus", &p).unwrap();
+            messages::decode_json("IndexStatus", &p).expect("decode IndexStatus");
         if let Some(v) = status.iter().find(|v| v.volume == "C:") {
             assert_ne!(v.state, 3, "C: indexing failed");
             if v.state == 1 {

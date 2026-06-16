@@ -1,12 +1,12 @@
+using FindMyFiles.Controls;
+using FindMyFiles.Engine;
+using FindMyFiles.Services;
+using FindMyFiles.ViewModels;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
 using Windows.System;
-using FindMyFiles.Controls;
-using FindMyFiles.Engine;
-using FindMyFiles.Services;
-using FindMyFiles.ViewModels;
 
 namespace FindMyFiles;
 
@@ -36,11 +36,13 @@ public sealed partial class MainPage : Page
         ViewModel = new MainViewModel(
             App.EngineClient, new DispatcherQueueDispatcher(App.DispatcherQueue));
         InitializeComponent();
+
         // Attached properties (tooltip / accessibility name) localize in code —
         // simpler than the x:Uid attached-property resw syntax.
         ToolTipService.SetToolTip(OptionsButton, Loc.Get("OptionsButton_ToolTip"));
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
             OptionsButton, Loc.Get("OptionsButton_Name"));
+
         // Reflect the persisted UI language in the switcher's radio group.
         (AppSettings.Load().Language switch
         {
@@ -49,22 +51,26 @@ public sealed partial class MainPage : Page
             "zh-Hans" => LangZh,
             _ => LangAuto,
         }).IsChecked = true;
+
         // Reflect the restored regex scope (the ViewModel already loaded it)
         // in the radio group. Setting IsChecked programmatically does not fire
         // Click, so this does not loop back into the ViewModel.
         (ViewModel.RegexScope == RegexScope.Path ? RegexScopePath : RegexScopeName).IsChecked = true;
         _viewport = new ResultsViewportManager(ResultsList);
         ViewModel.Results.ResultsPublished += _viewport.OnResultsPublished;
+
         // IME: half-composed text (romaji fragments, candidate strings)
         // must not query — search the final string on commit/cancel.
         SearchBox.TextCompositionStarted += (_, _) => ViewModel.Search.NotifyCompositionStarted();
         SearchBox.TextCompositionEnded += (_, _) =>
             ViewModel.Search.NotifyCompositionEnded(ViewModel.SearchText);
+
         // 空クエリ=中央の大検索バー(Empty)、入力で上へ移動して結果を出す(Results)。
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         Loaded += (_, _) =>
         {
             UpdateSearchState(useTransitions: false);
+
             // Disconnected → the search box is collapsed; focus the setup CTA.
             if (ViewModel.IsReady)
             {
@@ -74,6 +80,7 @@ public sealed partial class MainPage : Page
             {
                 EnableSearchButton.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
             }
+
             ViewModel.StartAsync().Forget("startup");
         };
     }
@@ -81,7 +88,7 @@ public sealed partial class MainPage : Page
     private void OnViewModelPropertyChanged(
         object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(MainViewModel.SearchText))
+        if (string.Equals(e.PropertyName, nameof(MainViewModel.SearchText), StringComparison.Ordinal))
         {
             UpdateSearchState(useTransitions: true);
         }
@@ -142,18 +149,19 @@ public sealed partial class MainPage : Page
         {
             return;
         }
+
         var settings = AppSettings.Load();
-        if (settings.Language == lang)
+        if (string.Equals(settings.Language, lang, StringComparison.Ordinal))
         {
             return;
         }
+
         settings.Language = lang;
         settings.Save();
         ShellOps.Relaunch();
     }
 
     // ── Drag & drop: folder → path: filter, file → name search ──────────
-
     private void Page_DragOver(object sender, Microsoft.UI.Xaml.DragEventArgs e)
     {
         if (e.DataView.Contains(StandardDataFormats.StorageItems))
@@ -178,12 +186,14 @@ public sealed partial class MainPage : Page
             {
                 return;
             }
+
             var items = await e.DataView.GetStorageItemsAsync();
             var item = items.Count > 0 ? items[0] : null;
             if (item is null)
             {
                 return;
             }
+
             if (item.IsOfType(StorageItemTypes.Folder))
             {
                 // Scope the current query to the dropped folder.
@@ -205,7 +215,6 @@ public sealed partial class MainPage : Page
     }
 
     // ── Keyboard / pointer / menu → viewport manager and ViewModel ──────
-
     private void SearchBox_KeyDown(object sender, KeyRoutedEventArgs e)
     {
         switch (e.Key)
@@ -229,7 +238,7 @@ public sealed partial class MainPage : Page
     {
         var ctrl = (Microsoft.UI.Input.InputKeyboardSource
             .GetKeyStateForCurrentThread(VirtualKey.Control)
-            & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0;
+            & Windows.UI.Core.CoreVirtualKeyStates.Down) != Windows.UI.Core.CoreVirtualKeyStates.None;
         switch (e.Key)
         {
             case VirtualKey.Enter when ctrl:

@@ -1,6 +1,6 @@
-using Microsoft.UI.Xaml;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
+using Microsoft.UI.Xaml;
 
 namespace FindMyFiles;
 
@@ -57,7 +57,7 @@ public partial class App : Application
         try
         {
             var lang = AppSettings.Load().Language;
-            if (!string.IsNullOrEmpty(lang) && lang != "auto")
+            if (!string.IsNullOrEmpty(lang) && !string.Equals(lang, "auto", StringComparison.Ordinal))
             {
                 Microsoft.Windows.Globalization.ApplicationLanguages.PrimaryLanguageOverride = lang;
             }
@@ -71,8 +71,7 @@ public partial class App : Application
     /// <inheritdoc/>
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        FileLog.Info("app", $"launch v{typeof(App).Assembly.GetName().Version} "
-            + $"os={Environment.OSVersion.VersionString}");
+        FileLog.Info("app", $"launch v{typeof(App).Assembly.GetName().Version} os={Environment.OSVersion.VersionString}");
 
         var cmdLine = Environment.GetCommandLineArgs();
 

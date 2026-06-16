@@ -42,6 +42,7 @@ public sealed partial class PerfPanelViewModel : ObservableObject
 
     /// <summary>Binds the panel to <paramref name="engine"/> — the source of
     /// both the stats snapshot and the transport label.</summary>
+    /// <param name="engine">Engine client supplying stats and the transport label.</param>
     public PerfPanelViewModel(IEngineClient engine)
     {
         _engine = engine;
@@ -53,13 +54,15 @@ public sealed partial class PerfPanelViewModel : ObservableObject
     /// <summary>Pull a fresh <see cref="Stats"/> snapshot from the engine and
     /// raise <see cref="PerfDataChanged"/>. Awaitable so a pipe round-trip
     /// doesn't block the caller.</summary>
+    /// <returns>A <see cref="Task"/> that completes once the snapshot is refreshed.</returns>
     public async Task RefreshStatsAsync()
     {
-        Stats = await _engine.GetStatsAsync();
+        Stats = await _engine.GetStatsAsync().ConfigureAwait(false);
         PerfDataChanged?.Invoke();
     }
 
     /// <summary>Record one completed query (trace may be null).</summary>
+    /// <param name="trace">Stage breakdown of the query, or null when none was emitted.</param>
     public void RecordTrace(QueryTraceData? trace)
     {
         LastTrace = trace;
@@ -71,6 +74,7 @@ public sealed partial class PerfPanelViewModel : ObservableObject
                 _recentTotalsUs.RemoveAt(0);
             }
         }
+
         PerfDataChanged?.Invoke();
     }
 }

@@ -2,47 +2,6 @@ using System.Collections.Concurrent;
 
 namespace FindMyFiles.Services;
 
-/// <summary>Severity of an <see cref="AppNotification"/> — selects the InfoBar
-/// style and the file-log level, and decides whether the entry auto-dismisses
-/// (Info) or stays until the user closes it.</summary>
-public enum NotifySeverity
-{
-    /// <summary>Transient confirmation — logged at INFO; dissolves on its own.</summary>
-    Info,
-
-    /// <summary>A degraded path the user should know about — logged at WARN;
-    /// stays until dismissed.</summary>
-    Warning,
-
-    /// <summary>A failure — logged at ERROR; stays until dismissed.</summary>
-    Error,
-}
-
-/// <summary>One entry in the InfoBar stack. Immutable, identity-stamped, and
-/// carries an optional action button so a notification can offer its own
-/// remedy (e.g. "restart the app" after a service install).</summary>
-/// <param name="Severity">Visual style + log level + auto-dismiss policy.</param>
-/// <param name="Message">The headline shown in the InfoBar.</param>
-/// <param name="Detail">Optional secondary line (often an exception message).</param>
-/// <param name="ActionLabel">Caption for the action button; null hides it.</param>
-/// <param name="Action">Invoked when the action button is pressed; see
-/// <see cref="Invoke"/>.</param>
-public sealed record AppNotification(
-    NotifySeverity Severity,
-    string Message,
-    string? Detail = null,
-    string? ActionLabel = null,
-    Action? Action = null)
-{
-    /// <summary>Stable per-notification identity (a hex GUID) so the InfoBar
-    /// list can track and remove this exact entry.</summary>
-    public string Id { get; } = Guid.NewGuid().ToString("N");
-
-    /// <summary>x:Bind target for the InfoBar action button (no-op when the
-    /// notification carries no action).</summary>
-    public void Invoke() => Action?.Invoke();
-}
-
 /// <summary>
 /// Process-wide notification funnel. Anything (global handlers, background
 /// tasks, the engine callback) can post from any thread; the ViewModel
@@ -89,6 +48,7 @@ public static class Notifier
                 FileLog.Info("notify", message);
                 break;
         }
+
         var handler = Posted;
         if (handler is null)
         {
@@ -101,6 +61,8 @@ public static class Notifier
     }
 
     /// <summary>Drain posts that arrived before the UI was ready.</summary>
+    /// <param name="handler">Subscriber invoked for each notification, including
+    /// the replayed pre-subscription backlog.</param>
     public static void Attach(Action<AppNotification> handler)
     {
         Posted += handler;

@@ -32,7 +32,8 @@ public sealed class PipeEngineClient : IEngineClient
     private readonly CancellationTokenSource _cts = new();
     private readonly ConcurrentDictionary<
         uint, TaskCompletionSource<(int Status, byte[] Payload)>> _pending = new();
-    private readonly object _statsLock = new();
+
+    private readonly System.Threading.Lock _statsLock = new();
 
     private PipeConnection? _connection;
     private Task? _supervisor;
@@ -81,10 +82,12 @@ public sealed class PipeEngineClient : IEngineClient
 
     /// <summary>Tests pass autoStart=false to attach event handlers before
     /// the supervisor races them to the first connection.</summary>
+    /// <param name="pipeName">Pipe to connect to, short name or full path.</param>
+    /// <param name="autoStart">Whether to start the supervisor loop immediately.</param>
     internal PipeEngineClient(string pipeName, bool autoStart)
     {
         _pipeName = ToShortName(pipeName);
-        _verifyServerIdentity = _pipeName == PipeProtocol.DefaultPipeName;
+        _verifyServerIdentity = string.Equals(_pipeName, PipeProtocol.DefaultPipeName, StringComparison.Ordinal);
         if (autoStart)
         {
             Start();
@@ -95,6 +98,7 @@ public sealed class PipeEngineClient : IEngineClient
         _supervisor ??= Task.Run(() => SuperviseAsync(_cts.Token), CancellationToken.None);
 
     /// <summary>Accepts both the full path (\\.\pipe\name) and the short name.</summary>
+    /// <param name="pipeName">Pipe name as either the full path or short name.</param>
     private static string ToShortName(string pipeName)
     {
         const string prefix = @"\\.\pipe\";
@@ -105,6 +109,9 @@ public sealed class PipeEngineClient : IEngineClient
 
     /// <summary>Can a server be reached and Hello'd on this pipe within the
     /// timeout? Used by the factory's `auto` mode (250ms budget).</summary>
+    /// <param name="pipeName">Pipe to probe, short name or full path.</param>
+    /// <param name="timeout">Budget for connect plus the Hello round-trip.</param>
+    /// <returns>True if a protocol-compatible server answered within the timeout.</returns>
     public static bool Probe(string pipeName, TimeSpan timeout)
     {
         try
@@ -129,11 +136,17 @@ public sealed class PipeEngineClient : IEngineClient
             // ("pipe client token rejected") — invisible to console-mode
             // tests where authorized_sids is empty and the check is skipped.
             using var stream = new NamedPipeClientStream(
-                ".", ToShortName(pipeName), PipeDirection.InOut, PipeOptions.Asynchronous,
+                ".",
+                ToShortName(pipeName),
+                PipeDirection.InOut,
+                PipeOptions.Asynchronous,
                 System.Security.Principal.TokenImpersonationLevel.Identification);
             await stream.ConnectAsync(cts.Token).ConfigureAwait(false);
             var frame = PipeProtocol.EncodeFrame(
-                PipeProtocol.Op.Hello, 0, 1, 0,
+                PipeProtocol.Op.Hello,
+                0,
+                1,
+                0,
                 PipeProtocol.EncodeHelloReq(PipeProtocol.ProtocolVersion));
             await stream.WriteAsync(frame, cts.Token).ConfigureAwait(false);
             var header = new byte[PipeProtocol.HeaderLen];
@@ -144,10 +157,12 @@ public sealed class PipeEngineClient : IEngineClient
             {
                 await stream.ReadExactlyAsync(payload, cts.Token).ConfigureAwait(false);
             }
+
             if (h.StatusCode != PipeProtocol.Status.Ok)
             {
                 return false;
             }
+
             var (version, _, _) = PipeProtocol.DecodeHelloResp(payload);
             return version == PipeProtocol.ProtocolVersion;
         }
@@ -158,7 +173,6 @@ public sealed class PipeEngineClient : IEngineClient
     }
 
     // ── Connection supervisor ───────────────────────────────────────────
-
     private async Task SuperviseAsync(CancellationToken ct)
     {
         var backoff = InitialBackoff;
@@ -172,7 +186,10 @@ public sealed class PipeEngineClient : IEngineClient
                 // our SID for the authorized_sids check (see Probe). Without
                 // it the server gets an anonymous token and rejects us.
                 stream = new NamedPipeClientStream(
-                    ".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous,
+                    ".",
+                    _pipeName,
+                    PipeDirection.InOut,
+                    PipeOptions.Asynchronous,
                     System.Security.Principal.TokenImpersonationLevel.Identification);
                 await stream.ConnectAsync(ct).ConfigureAwait(false);
                 if (_verifyServerIdentity && !PipeServerIdentity.IsServerTrusted(stream.SafePipeHandle))
@@ -192,6 +209,7 @@ public sealed class PipeEngineClient : IEngineClient
                 {
                     Interlocked.Increment(ref _reconnects);
                 }
+
                 everConnected = true;
                 backoff = InitialBackoff;
                 SetConnection(EngineConnectionState.Connected);
@@ -216,6 +234,7 @@ public sealed class PipeEngineClient : IEngineClient
             {
                 FileLog.Warn("pipe", $"connection attempt failed: {ex.Message}");
             }
+
             SafeDispose(stream);
             TearDownConnection();
             SetConnection(everConnected
@@ -229,33 +248,40 @@ public sealed class PipeEngineClient : IEngineClient
             {
                 break;
             }
+
             backoff = TimeSpan.FromTicks(Math.Min(backoff.Ticks * 2, MaxBackoff.Ticks));
         }
+
         TearDownConnection();
     }
 
     /// <summary>Fixed (re)connect sequence — the pipe spec is canonical:
     /// Hello → Subscribe → IndexStatus → synthesized events.</summary>
+    /// <param name="ct">Cancels the handshake on teardown or shutdown.</param>
     private async Task HandshakeAsync(CancellationToken ct)
     {
         var (status, payload) = await RequestAsync(
             PipeProtocol.Op.Hello,
-            PipeProtocol.EncodeHelloReq(PipeProtocol.ProtocolVersion), ct).ConfigureAwait(false);
+            PipeProtocol.EncodeHelloReq(PipeProtocol.ProtocolVersion),
+            ct).ConfigureAwait(false);
         if (status == PipeProtocol.Status.InvalidArg)
         {
             throw new ProtocolMismatchException(
                 $"server rejected protocol version {PipeProtocol.ProtocolVersion}: {Detail(payload)}");
         }
+
         if (status != PipeProtocol.Status.Ok)
         {
             throw new EngineUnavailableException($"Hello failed ({status}): {Detail(payload)}");
         }
+
         var (serverVersion, abiVersion, serverPid) = PipeProtocol.DecodeHelloResp(payload);
         if (serverVersion != PipeProtocol.ProtocolVersion)
         {
             throw new ProtocolMismatchException(
                 $"server speaks protocol {serverVersion}, this client speaks {PipeProtocol.ProtocolVersion}");
         }
+
         lock (_statsLock)
         {
             _serverPid = serverPid;
@@ -283,11 +309,15 @@ public sealed class PipeEngineClient : IEngineClient
         {
             RaiseSafe(() => VolumeUpdated?.Invoke(s), "VolumeUpdated");
         }
+
         RaiseSafe(() => IndexChanged?.Invoke("*"), "IndexChanged");
     }
 
     /// <summary>Response frames from the connection's read loop land in the
     /// multiplexing table (out-of-order completion is wire-legal).</summary>
+    /// <param name="requestId">Id of the pending request this frame answers.</param>
+    /// <param name="status">Wire status code of the response.</param>
+    /// <param name="payload">Response body bytes.</param>
     private void OnResponse(uint requestId, int status, byte[] payload)
     {
         if (_pending.TryRemove(requestId, out var tcs))
@@ -298,6 +328,7 @@ public sealed class PipeEngineClient : IEngineClient
 
     /// <summary>Event pushes fire handlers on the read-loop thread; the
     /// same contract as FFI engine threads — consumers marshal.</summary>
+    /// <param name="payload">Encoded event frame body to decode and dispatch.</param>
     private void DispatchEvent(byte[] payload)
     {
         var (kind, entries, volume) = PipeProtocol.DecodeEvent(payload);
@@ -337,6 +368,8 @@ public sealed class PipeEngineClient : IEngineClient
     }
 
     /// <summary>A faulting consumer must not kill the read loop (落ちない).</summary>
+    /// <param name="raise">The handler invocation to run guarded.</param>
+    /// <param name="what">Label for the event, used in the failure log.</param>
     private static void RaiseSafe(Action raise, string what)
     {
         try
@@ -383,12 +416,12 @@ public sealed class PipeEngineClient : IEngineClient
         {
             return;
         }
+
         _connectionState = state;
         RaiseSafe(() => ConnectionChanged?.Invoke(state), "ConnectionChanged");
     }
 
     // ── Request plumbing ────────────────────────────────────────────────
-
     private async Task<(int Status, byte[] Payload)> RequestAsync(
         ushort opcode, byte[] payload, CancellationToken ct = default)
     {
@@ -402,6 +435,7 @@ public sealed class PipeEngineClient : IEngineClient
         var tcs = new TaskCompletionSource<(int Status, byte[] Payload)>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
+
         // The caller's ct joins the client-lifetime token: either one aborts
         // the wait. Caller cancellation surfaces as OperationCanceledException;
         // a client-lifetime cancellation (Dispose) keeps reading as
@@ -430,6 +464,10 @@ public sealed class PipeEngineClient : IEngineClient
 
     /// <summary>Request + FFI-equivalent status mapping (error responses
     /// carry the detail text inline).</summary>
+    /// <param name="opcode">Operation code of the request frame.</param>
+    /// <param name="payload">Request body bytes.</param>
+    /// <param name="operation">Operation name for the failure message.</param>
+    /// <param name="ct">Cancels the request.</param>
     private async Task<byte[]> RequestOkAsync(
         ushort opcode, byte[] payload, string operation, CancellationToken ct = default)
     {
@@ -443,6 +481,7 @@ public sealed class PipeEngineClient : IEngineClient
                 _ => new EngineException($"{operation} failed ({status}): {Detail(resp)}", status),
             };
         }
+
         return resp;
     }
 
@@ -513,6 +552,7 @@ public sealed class PipeEngineClient : IEngineClient
             FileLog.Warn("pipe", $"stats unavailable: {ex.Message}");
             return null;
         }
+
         var stats = JsonSerializer.Deserialize<EngineStatsData>(payload, EngineJson.SnakeCase);
         if (stats is not null)
         {
@@ -528,6 +568,7 @@ public sealed class PipeEngineClient : IEngineClient
                 };
             }
         }
+
         return stats;
     }
 
@@ -546,12 +587,14 @@ public sealed class PipeEngineClient : IEngineClient
         var payload = await RequestOkAsync(
             PipeProtocol.Op.ResultPage,
             PipeProtocol.EncodeResultPageReq(resultId, (ulong)offset, (uint)count),
-            "ResultPage", ct).ConfigureAwait(false);
+            "ResultPage",
+            ct).ConfigureAwait(false);
         var rttUs = Stopwatch.GetElapsedTime(start).TotalMicroseconds;
         lock (_statsLock)
         {
-            _pageRttEwmaUs = _pageRttEwmaUs == 0 ? rttUs : 0.8 * _pageRttEwmaUs + 0.2 * rttUs;
+            _pageRttEwmaUs = _pageRttEwmaUs == 0 ? rttUs : (0.8 * _pageRttEwmaUs) + (0.2 * rttUs);
         }
+
         return PipeProtocol.DecodePageResp(payload);
     }
 
@@ -561,6 +604,7 @@ public sealed class PipeEngineClient : IEngineClient
         {
             return; // the server freed it together with the dead connection
         }
+
         ReleaseResultAsync(resultId).Forget("pipe.release");
     }
 
@@ -586,10 +630,12 @@ public sealed class PipeEngineClient : IEngineClient
         {
             return;
         }
+
         // Stop the supervisor and break the connection; never block shutdown
         // on the background task.
         _cts.Cancel();
         TearDownConnection();
+
         // The supervisor may still observe the token after we return, so the
         // CTS is disposed only once that background task has actually exited
         // (or immediately if it never started) — never on the Dispose thread.

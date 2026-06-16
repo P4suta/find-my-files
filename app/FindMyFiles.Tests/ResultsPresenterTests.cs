@@ -67,8 +67,11 @@ public sealed class ResultsPresenterTests
     public async Task PresentEmpty_after_a_publish_clears_results_and_count()
     {
         await _presenter.PublishAsync(
-            new StubSearchResult(Rows.Many(3)), null, RequeryOrigin.Initial,
-            CompiledHighlighter.Empty, () => true);
+            new StubSearchResult(Rows.Many(3)),
+            null,
+            RequeryOrigin.Initial,
+            CompiledHighlighter.Empty,
+            () => true);
         Assert.Equal(3, _presenter.ResultsSource.Count);
 
         _presenter.PresentEmpty();
@@ -81,14 +84,20 @@ public sealed class ResultsPresenterTests
     public async Task RefreshInPlaceAsync_falls_back_to_publish_when_the_count_changed()
     {
         await _presenter.PublishAsync(
-            new StubSearchResult(Rows.Many(5)), null, RequeryOrigin.Initial,
-            CompiledHighlighter.Empty, () => true);
+            new StubSearchResult(Rows.Many(5)),
+            null,
+            RequeryOrigin.Initial,
+            CompiledHighlighter.Empty,
+            () => true);
         var pubs = new List<ResultsPublication>();
         _presenter.ResultsPublished += pubs.Add;
 
         await _presenter.RefreshInPlaceAsync(
-            new StubSearchResult(Rows.Many(8)), null, RequeryOrigin.IndexChanged,
-            CompiledHighlighter.Empty, () => true);
+            new StubSearchResult(Rows.Many(8)),
+            null,
+            RequeryOrigin.IndexChanged,
+            CompiledHighlighter.Empty,
+            () => true);
 
         Assert.Equal(8, _presenter.ResultsSource.Count);
         Assert.Single(pubs); // the fallback went through the announcing publish path
@@ -98,14 +107,20 @@ public sealed class ResultsPresenterTests
     public async Task RefreshInPlaceAsync_same_count_refreshes_without_announcing()
     {
         await _presenter.PublishAsync(
-            new StubSearchResult(Rows.Many(5)), null, RequeryOrigin.Initial,
-            CompiledHighlighter.Empty, () => true);
+            new StubSearchResult(Rows.Many(5)),
+            null,
+            RequeryOrigin.Initial,
+            CompiledHighlighter.Empty,
+            () => true);
         var pubs = new List<ResultsPublication>();
         _presenter.ResultsPublished += pubs.Add;
 
         await _presenter.RefreshInPlaceAsync(
-            new StubSearchResult(Rows.Many(5)), null, RequeryOrigin.IndexChanged,
-            CompiledHighlighter.Empty, () => true);
+            new StubSearchResult(Rows.Many(5)),
+            null,
+            RequeryOrigin.IndexChanged,
+            CompiledHighlighter.Empty,
+            () => true);
 
         Assert.Empty(pubs); // RefreshInPlace path raises no Reset/announce
         Assert.Equal(5, _presenter.ResultsSource.Count);

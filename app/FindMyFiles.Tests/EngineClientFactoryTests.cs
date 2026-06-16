@@ -18,8 +18,16 @@ public sealed class EngineClientFactoryTests
 
         var choice = EngineClientFactory.DecideAuto(
             probe: () => true,
-            serviceState: () => { stateCalls++; return EngineServiceState.Stopped; },
-            elevated: () => { elevCalls++; return true; },
+            serviceState: () =>
+            {
+                stateCalls++;
+                return EngineServiceState.Stopped;
+            },
+            elevated: () =>
+            {
+                elevCalls++;
+                return true;
+            },
             hasScopeConfig: () => false);
 
         Assert.Equal(EngineChoice.Pipe, choice);
@@ -33,7 +41,13 @@ public sealed class EngineClientFactoryTests
         var elevCalls = 0;
 
         var choice = EngineClientFactory.DecideAuto(
-            () => false, () => EngineServiceState.Running, () => { elevCalls++; return true; },
+            () => false,
+            () => EngineServiceState.Running,
+            () =>
+            {
+                elevCalls++;
+                return true;
+            },
             () => false);
 
         Assert.Equal(EngineChoice.EmptyServiceUnreachable, choice);
@@ -46,8 +60,14 @@ public sealed class EngineClientFactoryTests
         var scopeCalls = 0;
 
         var choice = EngineClientFactory.DecideAuto(
-            () => false, () => EngineServiceState.Stopped, () => true,
-            () => { scopeCalls++; return true; });
+            () => false,
+            () => EngineServiceState.Stopped,
+            () => true,
+            () =>
+            {
+                scopeCalls++;
+                return true;
+            });
 
         Assert.Equal(EngineChoice.Ffi, choice);
         Assert.Equal(0, scopeCalls); // elevation short-circuits before scope config

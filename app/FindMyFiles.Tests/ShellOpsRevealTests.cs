@@ -12,6 +12,7 @@ public sealed class ShellOpsRevealTests
     private sealed class FakeRevealApi(int parseHr, int openHr) : IRevealApi
     {
         internal int OpenCalls { get; private set; }
+
         internal int FreeCalls { get; private set; }
 
         public int ParseDisplayName(string path, out IntPtr pidl)

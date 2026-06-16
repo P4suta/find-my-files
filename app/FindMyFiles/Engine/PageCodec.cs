@@ -20,6 +20,7 @@ internal static class PageCodec
             throw new ArgumentException(
                 $"row bytes ({rowBytes.Length}) are not a multiple of {RowSize}", nameof(rowBytes));
         }
+
         var count = rowBytes.Length / RowSize;
         var rows = new List<RowData>(count);
         for (var i = 0; i < count; i++)
@@ -47,6 +48,7 @@ internal static class PageCodec
                 Name: Wtf8.Decode(blob.Slice((int)nameOff, nameLen)),
                 ParentPath: Wtf8.Decode(blob.Slice((int)parentPathOff, parentPathLen))));
         }
+
         return rows;
     }
 }

@@ -98,6 +98,19 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <!-- Correctness-focused analyzers (MAxxxx): IFormatProvider/culture, async
+         pitfalls, equality, etc. — little overlap with the rules above. -->
+    <PackageReference Include="Meziantou.Analyzer" Version="2.*">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!-- Layout/ordering/documentation analyzers (SAxxxx). 1.2.0-beta is the line
+         that understands modern C# (file-scoped namespaces); the established style
+         keeps the conflicting opinion rules off in .editorconfig. -->
+    <PackageReference Include="StyleCop.Analyzers" Version="1.2.0-*">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
 
   <!-- Rust engine: build (skippable via /p:SkipRustBuild=true) and bundle

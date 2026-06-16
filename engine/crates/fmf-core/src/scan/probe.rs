@@ -52,7 +52,8 @@ struct AlignedBuf {
 
 impl AlignedBuf {
     fn new(size: usize) -> Self {
-        let layout = std::alloc::Layout::from_size_align(size, NOBUF_ALIGN).unwrap();
+        let layout = std::alloc::Layout::from_size_align(size, NOBUF_ALIGN)
+            .expect("NOBUF_ALIGN is a power-of-two alignment");
         // Safety: layout has non-zero size; abort on allocation failure.
         let ptr = std::ptr::NonNull::new(unsafe { std::alloc::alloc(layout) })
             .unwrap_or_else(|| std::alloc::handle_alloc_error(layout));

@@ -93,6 +93,7 @@ public sealed class AppSettings
             {
                 return new AppSettings();
             }
+
             return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), JsonOpts)
                 ?? new AppSettings();
         }

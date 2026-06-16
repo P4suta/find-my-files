@@ -55,6 +55,7 @@ public sealed class PipeConnectionTests
         var conn = Wrap(client);
 
         server.Dispose(); // server side goes away under the connection
+
         // The supervisor awaits ReadLoop to know the connection died — it
         // must complete (never fault, never hang).
         await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5));

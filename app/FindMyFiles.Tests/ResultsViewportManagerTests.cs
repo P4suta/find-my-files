@@ -53,9 +53,11 @@ public sealed class ResultsViewportManagerTests
     public void Selection_restore_respects_the_window_and_the_item_count()
     {
         var items = new object?[] { Row(1, 0), Row(2, 1), Row(3, 2) };
+
         // Row 0 exists but sits outside the seeded window.
         Assert.Null(ResultsViewportManager.FindSelectionIndex(
             i => items[i], items.Length, firstSeededIndex: 1, lastSeededIndex: 2, entryRef: 1));
+
         // Window reaches past the item count: the count clamps, never throws.
         Assert.Null(ResultsViewportManager.FindSelectionIndex(
             i => items[i], itemCount: 2, firstSeededIndex: 0, lastSeededIndex: 5, entryRef: 3));

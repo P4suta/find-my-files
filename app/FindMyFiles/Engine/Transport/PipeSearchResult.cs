@@ -21,6 +21,7 @@ internal sealed class PipeSearchResult(
         {
             throw new StaleResultException();
         }
+
         Interlocked.Increment(ref _inFlight);
         try
         {
@@ -28,6 +29,7 @@ internal sealed class PipeSearchResult(
             {
                 throw new StaleResultException(); // re-check inside the guard
             }
+
             return await client.FetchPageAsync(resultId, offset, count, ct).ConfigureAwait(false);
         }
         finally

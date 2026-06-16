@@ -77,6 +77,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         {
             output.WriteLine("environment gate closed — contract fact skipped");
         }
+
         return _client;
     }
 
@@ -87,11 +88,13 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         {
             return;
         }
+
         foreach (var query in GoldenInvalidQueries())
         {
             await Assert.ThrowsAsync<QuerySyntaxException>(
                 () => client.SearchAsync(query, SearchOptions.Default));
         }
+
         // A syntax error must not poison the client: a valid query still works.
         var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default);
         outcome.Result.Dispose();
@@ -104,6 +107,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         {
             return;
         }
+
         var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default);
         using var result = outcome.Result;
         Assert.True(result.Count >= 0, "Count must never be negative");
@@ -124,6 +128,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         {
             return;
         }
+
         using var cts = new CancellationTokenSource();
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
@@ -137,6 +142,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         {
             return;
         }
+
         var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default);
         using var result = outcome.Result;
         using var cts = new CancellationTokenSource();
@@ -152,6 +158,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         {
             return;
         }
+
         var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default);
         using var result = outcome.Result;
         if (!await TryForceStaleAsync(client))
@@ -159,6 +166,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
             output.WriteLine("no stale hook for this implementation — fact skipped");
             return;
         }
+
         await Assert.ThrowsAsync<StaleResultException>(() => result.GetRangeAsync(0, 1));
 
         // Stale is recoverable by re-running the query, never terminal.
@@ -173,9 +181,11 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         {
             return;
         }
+
         if (IsInProcTransport)
         {
             Assert.Equal(EngineConnectionState.InProc, client.Connection);
+
             // …and it stays InProc across use (fixed, no transitions).
             var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default);
             outcome.Result.Dispose();

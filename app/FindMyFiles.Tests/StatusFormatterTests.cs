@@ -18,7 +18,6 @@ public sealed class StatusFormatterTests
     }
 
     // Assertions are against the en-US resource values (LocTestInit pins them).
-
     [Fact]
     public void Count_WithTrace_ShowsMillisecondsAndHits()
     {

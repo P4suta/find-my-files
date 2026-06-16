@@ -20,11 +20,12 @@ public sealed class FfiInProcContractTests(ITestOutputHelper output)
 
     protected override Task<IEngineClient?> AcquireClientOrSkipAsync()
     {
-        if (Environment.GetEnvironmentVariable("FMF_ADMIN_TESTS") != "1")
+        if (!string.Equals(Environment.GetEnvironmentVariable("FMF_ADMIN_TESTS"), "1", StringComparison.Ordinal))
         {
             _output.WriteLine("FMF_ADMIN_TESTS != 1 — skipped (elevated gate)");
             return Task.FromResult<IEngineClient?>(null);
         }
+
         _indexDir = Path.Combine(Path.GetTempPath(), "fmf-ffitest-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_indexDir);
         return Task.FromResult<IEngineClient?>(new FfiEngineClient(_indexDir));
@@ -43,6 +44,7 @@ public sealed class FfiInProcContractTests(ITestOutputHelper output)
                 // Lock file released a beat late — temp dir is self-cleaning.
             }
         }
+
         return Task.CompletedTask;
     }
 

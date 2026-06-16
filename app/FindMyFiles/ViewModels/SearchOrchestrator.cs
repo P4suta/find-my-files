@@ -4,12 +4,6 @@ using FindMyFiles.Services;
 
 namespace FindMyFiles.ViewModels;
 
-/// <summary>Snapshot of what to search — the ViewModel stays the single
-/// source of truth for the UI state; the orchestrator only pulls it.</summary>
-/// <param name="Query">Raw user query text (before any focused-mode rewrite).</param>
-/// <param name="Options">Sort, case and hidden/system flags for this search.</param>
-public readonly record struct SearchRequest(string Query, SearchOptions Options);
-
 /// <summary>
 /// When and what to search: 50ms debounce on typing (clearing is instant), a
 /// generation counter that discards superseded responses, requery triggers
@@ -72,6 +66,7 @@ public sealed class SearchOrchestrator
             () => Requery(RequeryOrigin.Typing));
 
         _presenter.ResultsSource.BecameStale += () => Requery(RequeryOrigin.Stale);
+
         // Already on the UI thread — the marshaler is the crossing point.
         engineEvents.IndexChanged += _ => Requery(RequeryOrigin.IndexChanged);
     }
@@ -81,12 +76,14 @@ public sealed class SearchOrchestrator
     /// <summary>Search box text changed: debounce a normal edit (50ms),
     /// requery immediately on a clear (so emptying feels instant), and ignore
     /// edits while an IME composition is in flight.</summary>
+    /// <param name="value">The current search box text after the edit.</param>
     public void NotifyTextChanged(string value)
     {
         if (_composing)
         {
             return; // IME composition in flight — wait for the commit
         }
+
         if (string.IsNullOrEmpty(value))
         {
             _debounce.Stop();
@@ -108,6 +105,7 @@ public sealed class SearchOrchestrator
 
     /// <summary>IME composition committed (or cancelled) — search the final
     /// text through the normal debounce.</summary>
+    /// <param name="value">The committed search box text after composition.</param>
     public void NotifyCompositionEnded(string value)
     {
         _composing = false;
@@ -118,6 +116,7 @@ public sealed class SearchOrchestrator
     /// generation so any in-flight older response is discarded.
     /// <paramref name="origin"/> records why (and lets the presenter decide
     /// whether to preserve scroll/selection).</summary>
+    /// <param name="origin">Why the requery was triggered.</param>
     public void Requery(RequeryOrigin origin) =>
         RunQueryAsync(origin).Forget($"query.{origin}");
 
@@ -125,6 +124,7 @@ public sealed class SearchOrchestrator
     {
         var generation = Interlocked.Increment(ref _generation);
         var request = _request();
+
         // Product rule: no query, no results — a match-all listing would
         // also churn on every USN tick (its ids keep changing).
         if (string.IsNullOrWhiteSpace(request.Query))
@@ -133,6 +133,7 @@ public sealed class SearchOrchestrator
             _presenter.PresentEmpty();
             return;
         }
+
         // Focused mode is a pure rewrite at the last moment — the ViewModel
         // keeps the user's text, the engine sees the effective query, and
         // every log/error below reports what the engine actually saw. It is
@@ -141,6 +142,7 @@ public sealed class SearchOrchestrator
         var query = FocusedSearch && !request.Options.RegexMode
             ? FocusedQueryRewriter.Compose(request.Query, FocusedExcludePaths, FocusedExtensions)
             : request.Query;
+
         // Highlight the user's raw words, not the focused-mode rewrite: the
         // appended !path:/ext: filters are not what the user typed. In regex
         // mode the whole query is the pattern (ADR-0023).
@@ -149,12 +151,13 @@ public sealed class SearchOrchestrator
             : MatchHighlighter.Compile(request.Query);
         try
         {
-            var outcome = await _engine.SearchAsync(query, request.Options);
+            var outcome = await _engine.SearchAsync(query, request.Options).ConfigureAwait(false);
             if (generation != Interlocked.Read(ref _generation))
             {
                 outcome.Result.Dispose(); // a newer query superseded this one
                 return;
             }
+
             TraceCaptured?.Invoke(outcome.Trace);
             if (outcome.Trace?.Unchanged == true)
             {
@@ -165,15 +168,16 @@ public sealed class SearchOrchestrator
                     outcome.Trace,
                     origin,
                     highlighter,
-                    () => generation == Interlocked.Read(ref _generation));
+                    () => generation == Interlocked.Read(ref _generation)).ConfigureAwait(false);
                 return;
             }
+
             await _presenter.PublishAsync(
                 outcome.Result,
                 outcome.Trace,
                 origin,
                 highlighter,
-                () => generation == Interlocked.Read(ref _generation));
+                () => generation == Interlocked.Read(ref _generation)).ConfigureAwait(false);
         }
         catch (StaleResultException)
         {

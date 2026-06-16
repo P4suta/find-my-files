@@ -1,6 +1,6 @@
-using Microsoft.UI.Xaml.Controls;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
+using Microsoft.UI.Xaml.Controls;
 
 namespace FindMyFiles.Controls;
 
@@ -29,6 +29,7 @@ public sealed class ResultsViewportManager
     /// (<see cref="ResultRow.EntryRef"/>) can be re-found and reselected after a
     /// position-preserving requery's Reset clears the ListView selection.
     /// </summary>
+    /// <param name="list">The results ListView to wrap and track.</param>
     public ResultsViewportManager(ListView list)
     {
         _list = list;
@@ -51,6 +52,7 @@ public sealed class ResultsViewportManager
     /// and, best effort, the selection. Explicit placement — the ListView's
     /// own behavior after a Reset is version-dependent.
     /// </summary>
+    /// <param name="pub">The freshly published result and its restore hints.</param>
     public void OnResultsPublished(ResultsPublication pub)
     {
         if (CanRestoreViewport(pub.RestoreIndex, _list.Items.Count))
@@ -72,9 +74,13 @@ public sealed class ResultsViewportManager
         {
             return;
         }
+
         if (FindSelectionIndex(
-                i => _list.Items[i], _list.Items.Count,
-                pub.FirstSeededIndex, pub.LastSeededIndex, entryRef) is { } index)
+                i => _list.Items[i],
+                _list.Items.Count,
+                pub.FirstSeededIndex,
+                pub.LastSeededIndex,
+                entryRef) is { } index)
         {
             _list.SelectedIndex = index;
         }
@@ -84,10 +90,12 @@ public sealed class ResultsViewportManager
 
     /// <summary>The currently selected row, or <c>null</c> if nothing (or a
     /// non-row) is selected.</summary>
+    /// <returns>The selected <see cref="ResultRow"/>, or <c>null</c>.</returns>
     public ResultRow? SelectedRow() => _list.SelectedItem as ResultRow;
 
     /// <summary>The selected row, falling back to the top row — what Enter from
     /// the search box opens when the user never moved into the list.</summary>
+    /// <returns>The selected row, the top row, or <c>null</c> when empty.</returns>
     public ResultRow? SelectedOrTopRow() =>
         SelectedRow() ?? (_list.Items.Count > 0 ? _list.Items[0] as ResultRow : null);
 
@@ -143,6 +151,9 @@ public sealed class ResultsViewportManager
 
     /// <summary>A restore index is honored only when it addresses a row that
     /// exists in the newly published result.</summary>
+    /// <param name="restoreIndex">The requested first visible row, or <c>null</c>.</param>
+    /// <param name="itemCount">The published result's row count.</param>
+    /// <returns><c>true</c> when the index is present and in range.</returns>
     internal static bool CanRestoreViewport(int? restoreIndex, int itemCount) =>
         restoreIndex is { } restore && restore >= 0 && restore < itemCount;
 
@@ -151,6 +162,12 @@ public sealed class ResultsViewportManager
     /// seeded window of the new result; null when it is gone — the selection
     /// then deliberately stays cleared rather than guessed.
     /// </summary>
+    /// <param name="itemAt">Accessor for the row at a given index.</param>
+    /// <param name="itemCount">Total row count in the new result.</param>
+    /// <param name="firstSeededIndex">First index of the seeded window.</param>
+    /// <param name="lastSeededIndex">Last index of the seeded window.</param>
+    /// <param name="entryRef">Engine identity of the previously selected row.</param>
+    /// <returns>The matching index, or <c>null</c> when the row is gone.</returns>
     internal static int? FindSelectionIndex(
         Func<int, object?> itemAt,
         int itemCount,
@@ -165,10 +182,13 @@ public sealed class ResultsViewportManager
                 return i;
             }
         }
+
         return null;
     }
 
     /// <summary>Real (non-placeholder) full paths of a selection, in order.</summary>
+    /// <param name="selectedItems">The currently selected ListView items.</param>
+    /// <returns>The non-placeholder full paths, in selection order.</returns>
     internal static List<string> CopyablePaths(System.Collections.IEnumerable selectedItems) =>
         [.. selectedItems
             .OfType<ResultRow>()
@@ -184,11 +204,13 @@ public sealed class ResultsViewportManager
             {
                 return viewer;
             }
+
             if (FindScrollViewer(child) is { } nested)
             {
                 return nested;
             }
         }
+
         return null;
     }
 }

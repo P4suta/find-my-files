@@ -43,6 +43,7 @@ public sealed class NotificationCenter
         {
             Items.RemoveAt(0);
         }
+
         Items.Add(n);
         if (n.Severity == NotifySeverity.Info)
         {

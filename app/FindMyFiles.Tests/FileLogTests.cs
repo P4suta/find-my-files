@@ -14,7 +14,11 @@ public sealed class FileLogTests
     [Fact]
     public void FormatLine_carries_level_area_and_message_on_one_line()
     {
-        var line = FileLog.FormatLine("WARN", "shell", "boom", null,
+        var line = FileLog.FormatLine(
+            "WARN",
+            "shell",
+            "boom",
+            null,
             new DateTimeOffset(2026, 6, 15, 1, 2, 3, TimeSpan.Zero));
 
         Assert.Contains("[WARN] [shell] boom", line, StringComparison.Ordinal);
@@ -25,8 +29,12 @@ public sealed class FileLogTests
     [Fact]
     public void FormatLine_appends_the_exception_after_a_separator()
     {
-        var line = FileLog.FormatLine("ERROR", "x", "msg",
-            new InvalidOperationException("kaboom"), DateTimeOffset.UnixEpoch);
+        var line = FileLog.FormatLine(
+            "ERROR",
+            "x",
+            "msg",
+            new InvalidOperationException("kaboom"),
+            DateTimeOffset.UnixEpoch);
 
         Assert.Contains(" ── ", line, StringComparison.Ordinal);
         Assert.Contains("kaboom", line, StringComparison.Ordinal);
@@ -43,7 +51,10 @@ public sealed class FileLogTests
             var text = File.ReadAllText(Path.Combine(dir, "app.log"));
             Assert.Equal("hello world" + Environment.NewLine, text);
         }
-        finally { Directory.Delete(dir, recursive: true); }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]
@@ -61,7 +72,10 @@ public sealed class FileLogTests
             Assert.True(File.Exists(path + ".old"));
             Assert.Equal(200, new FileInfo(path + ".old").Length);
         }
-        finally { Directory.Delete(dir, recursive: true); }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]
@@ -78,7 +92,10 @@ public sealed class FileLogTests
             Assert.True(File.Exists(path));
             Assert.False(File.Exists(path + ".old"));
         }
-        finally { Directory.Delete(dir, recursive: true); }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]
@@ -92,7 +109,10 @@ public sealed class FileLogTests
 
             Assert.Equal("d\ne", FileLog.TailFrom(path, 2));
         }
-        finally { Directory.Delete(dir, recursive: true); }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]
