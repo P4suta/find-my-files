@@ -3,6 +3,10 @@
 //! (ADR-0013). Run via `just bench-micro`; compare before/after every
 //! kernel change.
 
+// Bench harness, not production: `unwrap` keeps the setup terse, and clippy's
+// allow-unwrap-in-tests does not cover benchmark targets.
+#![allow(clippy::unwrap_used)]
+
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use fmf_core::engine::{Engine, EngineConfig};
 use fmf_core::index::{Frn, RawEntry, SortKey, VolumeIndex, VolumeIndexBuilder};

@@ -85,7 +85,7 @@ impl Engine {
             .cloned()
             .collect();
 
-        let mut per_volume: Vec<(Arc<VolumeSlot>, Arc<Vec<EntryId>>, u64)> = Vec::new();
+        let mut per_volume: Vec<(Arc<VolumeSlot>, Arc<[EntryId]>, u64)> = Vec::new();
         let mut refined = 0usize;
         let mut all_unchanged = true;
         for slot in &slots {
@@ -114,7 +114,7 @@ impl Engine {
             trace.materialize_us += m.materialize_us;
             trace.entries_scanned += m.entries_scanned;
             trace.excluded_skipped += m.excluded_skipped;
-            let ids = Arc::new(r.ids);
+            let ids: Arc<[EntryId]> = Arc::from(r.ids);
             // Same query text+options re-issued (USN-driven requery) with an
             // identical id list → the screen has nothing to change. Vec
             // equality is a memcmp and only runs when text+opt match.
@@ -168,8 +168,8 @@ impl Engine {
                         Some(b) => {
                             let (ib, vb) = (per_volume[b].1[cursors[b]], b);
                             let (iv, vv) = (ids[cursors[v]], v);
-                            let idx_b = guards[vb].as_ref().unwrap();
-                            let idx_v = guards[vv].as_ref().unwrap();
+                            let idx_b = guards[vb].as_ref().expect("active volume guard held");
+                            let idx_v = guards[vv].as_ref().expect("active volume guard held");
                             if cmp_entries(idx_v, iv, idx_b, ib, opt) == std::cmp::Ordering::Less {
                                 Some(vv)
                             } else {

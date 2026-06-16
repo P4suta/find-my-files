@@ -10,6 +10,9 @@ public static class StatusFormatter
     /// <summary>Result-count line: "<paramref name="hits"/> 件" plus the
     /// elapsed query time (ms) when a <paramref name="trace"/> is present
     /// (<see cref="QueryTraceData.TotalUs"/> → ms), the bare count otherwise.</summary>
+    /// <param name="trace">Latest query trace, or null when timing is unavailable.</param>
+    /// <param name="hits">Number of matching results.</param>
+    /// <returns>Localized count line, with elapsed time when a trace is present.</returns>
     public static string Count(QueryTraceData? trace, long hits) =>
         trace is { } t
             ? Loc.Get("Status_CountWithTime", t.TotalUs / 1000.0, hits)
@@ -17,6 +20,8 @@ public static class StatusFormatter
 
     /// <summary>Status line for a rejected query — the engine's syntax-error
     /// <paramref name="message"/> behind a localized prefix.</summary>
+    /// <param name="message">Engine syntax-error message for the rejected query.</param>
+    /// <returns>Localized error line with the engine message behind a prefix.</returns>
     public static string QueryError(string message) => Loc.Get("Status_QueryErrorPrefix", message);
 
     /// <summary>Startup/refresh snapshot of the overall index state — reflects
@@ -24,6 +29,9 @@ public static class StatusFormatter
     /// shows "indexing…". <paramref name="requested"/> is the list we asked to
     /// index, used only for messaging when the engine hasn't surfaced any
     /// status yet.</summary>
+    /// <param name="volumes">Per-volume status the engine reports right now.</param>
+    /// <param name="requested">Volumes we asked to index, used only for early messaging.</param>
+    /// <returns>Localized overall index-state line.</returns>
     public static string Overall(
         IReadOnlyList<VolumeStatus> volumes, IReadOnlyList<string> requested)
     {
@@ -33,6 +41,7 @@ public static class StatusFormatter
                 ? Loc.Get("Status_NoNtfsDrives")
                 : Loc.Get("Status_Indexing", string.Join(", ", requested));
         }
+
         var pending = volumes
             .Where(v => v.State is VolumeState.Scanning or VolumeState.Rescanning)
             .Select(v => v.Label)
@@ -41,16 +50,20 @@ public static class StatusFormatter
         {
             return Loc.Get("Status_Indexing", string.Join(", ", pending));
         }
+
         if (volumes.All(v => v.State == VolumeState.Failed))
         {
             return Loc.Get("Status_IndexFailed", string.Join(", ", volumes.Select(v => v.Label)));
         }
+
         var total = volumes.Where(v => v.State == VolumeState.Ready).Sum(v => (long)v.Entries);
         return Loc.Get("Status_Ready", total);
     }
 
     /// <summary>Status-bar transport badge: which engine the app talks to
     /// right now (client type + live connection state).</summary>
+    /// <param name="engine">Engine client whose type and connection state to describe.</param>
+    /// <returns>Localized transport badge for the active engine.</returns>
     public static string EngineMode(IEngineClient engine) => engine switch
     {
         FakeEngineClient { IsEmpty: true } => Loc.Get("EngineMode_Disconnected"),
@@ -67,6 +80,9 @@ public static class StatusFormatter
 
     /// <summary>Status-bar line for a volume state change; falls back to the
     /// current text for states that carry no message.</summary>
+    /// <param name="s">Volume status that changed.</param>
+    /// <param name="current">Existing status text, returned for states with no message.</param>
+    /// <returns>Localized line for the new volume state, or <paramref name="current"/>.</returns>
     public static string Volume(VolumeStatus s, string current) => s.State switch
     {
         VolumeState.Scanning => Loc.Get("Volume_Indexing", s.Label, s.Entries),

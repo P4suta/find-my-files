@@ -134,7 +134,7 @@ impl Client {
             .encode(),
         );
         assert_eq!(h.status, codes::OK);
-        let resp = messages::HelloResp::decode(&p).unwrap();
+        let resp = messages::HelloResp::decode(&p).expect("decode HelloResp");
         assert_eq!(resp.protocol_version, PROTOCOL_VERSION);
         assert_eq!(resp.server_pid, std::process::id());
         c
@@ -193,7 +193,7 @@ impl Client {
         if h.status != codes::OK {
             return (h.status, None);
         }
-        let (head, trace) = messages::QueryRespHead::decode(&p).unwrap();
+        let (head, trace) = messages::QueryRespHead::decode(&p).expect("decode QueryRespHead");
         assert!(!trace.is_empty(), "QueryTrace JSON rides along");
         (h.status, Some((head.result_id, head.count)))
     }

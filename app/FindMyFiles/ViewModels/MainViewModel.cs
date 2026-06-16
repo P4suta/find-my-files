@@ -182,18 +182,23 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         ScopeFolders.CollectionChanged += (_, _) => OnPropertyChanged(nameof(CanStartScope));
         _engineEvents = new EngineEventMarshaler(engine, dispatcher);
         Results = new ResultsPresenter(dispatcher);
-        Search = new SearchOrchestrator(engine, _engineEvents, dispatcher, Results,
+        Search = new SearchOrchestrator(
+            engine,
+            _engineEvents,
+            dispatcher,
+            Results,
             () => new SearchRequest(
                 SearchText,
-                new SearchOptions(Sort, SortDescending, FmfCase.Smart, IncludeHiddenSystem,
-                    RegexMode, RegexScope)));
+                new SearchOptions(Sort, SortDescending, FmfCase.Smart, IncludeHiddenSystem, RegexMode, RegexScope)));
+
         // Focused-search wiring: the lists are settings-owned; the toggle
         // state flows through OnFocusedSearchChanged (Search exists by now).
         Search.FocusedExcludePaths = _settings.FocusedExcludePaths;
         Search.FocusedExtensions = _settings.FocusedExtensions;
         FocusedSearch = _settings.FocusedSearch;
+
         // Regex mode/scope restore (same ctor-time no-op requery as focused).
-        RegexScope = _settings.RegexScope == "path" ? RegexScopeKind.Path : RegexScopeKind.Name;
+        RegexScope = string.Equals(_settings.RegexScope, "path", StringComparison.Ordinal) ? RegexScopeKind.Path : RegexScopeKind.Name;
         RegexMode = _settings.RegexMode;
         Notifications = new NotificationCenter(dispatcher);
         Perf = new PerfPanelViewModel(engine);
@@ -237,6 +242,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <summary>Startup sequence, in order: status text → StartIndexing →
     /// initial requery. Runs on the UI thread; the engine calls are awaited
     /// so a pipe transport never blocks it.</summary>
+    /// <returns>A task that completes once startup indexing and the initial requery are kicked off.</returns>
     public async Task StartAsync()
     {
         if (_engine is FakeEngineClient { IsEmpty: true })
@@ -246,10 +252,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             StatusText = Loc.Get("Status_ServiceUnregistered");
             return;
         }
+
         try
         {
-            var volumes = await _engine.ListVolumesAsync();
-            await _engine.StartIndexingAsync(volumes);
+            var volumes = await _engine.ListVolumesAsync().ConfigureAwait(false);
+            await _engine.StartIndexingAsync(volumes).ConfigureAwait(false);
+
             // 起動時点の実状態を反映(pipe では接続前にサービスが索引済みのことが
             // ある)。無条件「作成中」をやめ、既Readyなら「準備完了」に。以後の
             // Scanning→Ready 遷移は OnVolumeUpdated が拾う。
@@ -262,6 +270,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             Notifications.Push(new AppNotification(
                 NotifySeverity.Error, Loc.Get("Notify_IndexStartFailedTitle"), ex.Message));
         }
+
         Search.Requery(RequeryOrigin.Initial);
     }
 
@@ -269,25 +278,29 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// then (on success) wait for its pipe and relaunch — so a first-time user
     /// goes from the setup screen to a working search box in one click. The app
     /// stays unelevated; only fmf-service is elevated (per-action UAC).</summary>
+    /// <returns>A task that completes when registration finishes, or before relaunch on success.</returns>
     public async Task EnableSearchAsync()
     {
         if (SetupBusy)
         {
             return;
         }
+
         SetupBusy = true;
         SetupStatus = Loc.Get("Setup_WaitingForPermission");
         try
         {
-            switch (await ServiceProvisioner.RegisterAsync())
+            switch (await ServiceProvisioner.RegisterAsync().ConfigureAwait(false))
             {
                 case ServiceActionOutcome.Ok:
                     SetupStatus = Loc.Get("Setup_Connecting");
+
                     // On success this process relaunches and never returns here.
-                    if (!await ServiceProvisioner.WaitForServiceThenRelaunchAsync())
+                    if (!await ServiceProvisioner.WaitForServiceThenRelaunchAsync().ConfigureAwait(false))
                     {
                         SetupStatus = Loc.Get("Setup_ConnectCheckFailed");
                     }
+
                     break;
                 case ServiceActionOutcome.Cancelled:
                     SetupStatus = string.Empty;
@@ -306,9 +319,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <summary>Setup screen (no-admin path): open the folder picker and add the
     /// chosen folder to <see cref="ScopeFolders"/> (case-insensitive dedupe).
     /// The picker is single-select, so this adds one folder per click.</summary>
+    /// <returns>A task that completes once the picked folder (if any) has been added.</returns>
     public async Task PickScopeFoldersAsync()
     {
-        var path = await _folderPicker();
+        var path = await _folderPicker().ConfigureAwait(false);
         if (path is not null
             && !ScopeFolders.Any(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)))
         {
@@ -330,6 +344,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             return;
         }
+
         _settings.ScopeRoots = [.. ScopeFolders];
         _settings.Save();
         _relaunch();
@@ -352,6 +367,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _settings.FocusedSearch = value;
             _settings.Save();
         }
+
         Search.Requery(RequeryOrigin.Filter);
     }
 
@@ -366,6 +382,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _settings.RegexMode = value;
             _settings.Save();
         }
+
         Search.Requery(RequeryOrigin.Filter);
     }
 
@@ -379,6 +396,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _settings.RegexScope = s;
             _settings.Save();
         }
+
         if (RegexMode)
         {
             Search.Requery(RequeryOrigin.Filter);
@@ -388,6 +406,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <summary>Column-header click: re-clicking the active <see cref="Sort"/>
     /// column toggles <see cref="SortDescending"/>, a new column switches to it
     /// ascending. Either way requeries with <see cref="RequeryOrigin.Sort"/>.</summary>
+    /// <param name="key">The sort column the clicked header maps to.</param>
     public void SetSort(FmfSort key)
     {
         if (Sort == key)
@@ -399,6 +418,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             Sort = key;
             SortDescending = false;
         }
+
         Search.Requery(RequeryOrigin.Sort);
     }
 
@@ -412,6 +432,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 Loc.Get("Notify_VolumeIndexFailedTitle", s.Label),
                 Loc.Get("Notify_VolumeIndexFailedBody")));
         }
+
         if (s.State == VolumeState.Ready)
         {
             Search.Requery(RequeryOrigin.VolumeReady);
@@ -424,6 +445,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             return; // the persistent reconnect banner already explains this
         }
+
         // Service-side errors are localized by status code here (the app absorbs
         // the service's English detail, which is appended for diagnostics).
         var known = e is EngineException or QuerySyntaxException or StaleResultException;
@@ -435,6 +457,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     /// <summary>Localize a service/engine error by type or FMF_E_* code — the
     /// app-side absorption of the service's English-only error surface.</summary>
+    /// <param name="e">The engine/service exception to map to a localized message.</param>
+    /// <returns>The localized error text for the exception's type or FMF_E_* code.</returns>
     internal static string EngineErrorText(Exception e) => e switch
     {
         QuerySyntaxException => Loc.Get("Err_QuerySyntax"),
@@ -454,9 +478,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     };
 
     /// <summary>Engine diagnostics: pull the detail text behind the POD event.</summary>
+    /// <param name="severity">The reported error severity (≥2 surfaces a notification, ≥3 is a panic).</param>
     private async Task HandleEngineErrorAsync(int severity)
     {
-        await Perf.RefreshStatsAsync();
+        await Perf.RefreshStatsAsync().ConfigureAwait(false);
         if (severity >= 2)
         {
             var last = Perf.Stats?.RecentErrors.LastOrDefault();

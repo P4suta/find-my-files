@@ -1,0 +1,8 @@
+# Workspace clippy config. Applies to every member that lacks its own clippy.toml
+# (fmf-ffi and fmf-service have their own — these keys are restated there, since
+# clippy reads the nearest file and does not merge).
+#
+# unwrap_used and dbg_macro (engine/Cargo.toml) are denied in production; tests may
+# unwrap freely (a failing test SHOULD panic) and dbg! is harmless there.
+allow-unwrap-in-tests = true
+allow-dbg-in-tests = true

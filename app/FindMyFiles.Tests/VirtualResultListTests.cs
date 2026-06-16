@@ -118,7 +118,7 @@ public sealed class VirtualResultListTests
         var mine = new List<AppNotification>();
         void Handler(AppNotification n)
         {
-            if (n.Message == "結果の読み込みでエラーが発生しました")
+            if (string.Equals(n.Message, "結果の読み込みでエラーが発生しました", StringComparison.Ordinal))
             {
                 mine.Add(n);
             }
@@ -313,10 +313,12 @@ public sealed class VirtualResultListTests
         var enumerated = _list.Cast<ResultRow>().Count();
 
         Assert.Equal(10_000, enumerated);
+
         // The seeded viewport page survived: same instance, still filled —
         // enumerating must not evict realized pages (placeholder flash).
         Assert.Same(viewportRow, Row(0));
         Assert.False(Row(0).IsPlaceholder);
+
         // Transient enumeration rows are honestly absent.
         Assert.Equal(-1, _list.IndexOf(_list.Cast<ResultRow>().Last()));
     }
@@ -371,7 +373,9 @@ public sealed class VirtualResultListTests
     private sealed class OffThreadDispatcher : FindMyFiles.Services.IDispatcher
     {
         public bool HasThreadAccess => false;
+
         public bool TryEnqueue(Action action) => true;
+
         public FindMyFiles.Services.IDispatcherTimer CreateOneShotTimer(
             TimeSpan interval, Action tick) => throw new NotSupportedException();
     }

@@ -684,8 +684,9 @@ fn main() {
                 drifted = true;
             }
         } else {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, rendered).unwrap();
+            std::fs::create_dir_all(path.parent().expect("generated path has a parent"))
+                .expect("create generated output directory");
+            std::fs::write(path, rendered).expect("write generated file");
             println!("wrote {}", path.display());
         }
     }

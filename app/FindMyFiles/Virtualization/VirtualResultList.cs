@@ -1,22 +1,12 @@
 using System.Collections;
 using System.Collections.Specialized;
-using Microsoft.UI.Xaml.Data;
 using FindMyFiles.Engine;
 using FindMyFiles.Highlighting;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
+using Microsoft.UI.Xaml.Data;
 
 namespace FindMyFiles.Virtualization;
-
-/// <summary>
-/// A page of already-fetched rows handed to
-/// <see cref="VirtualResultList.Reassign"/>, so the viewport is filled the
-/// instant a new result is published — never a placeholder flash.
-/// </summary>
-/// <param name="Page">Page index (row index ÷ <see cref="VirtualResultList.PageSize"/>)
-/// these rows belong to.</param>
-/// <param name="Rows">The page's rows in slot order, as fetched from the engine.</param>
-public readonly record struct PageSeed(long Page, IReadOnlyList<RowData> Rows);
 
 /// <summary>
 /// Random-access data virtualization for ListView: non-generic IList +
@@ -81,6 +71,8 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// mutation is checked against (<see cref="EnsureUiThread"/>) and the queue
     /// background fetch completions marshal back through.
     /// </summary>
+    /// <param name="dispatcher">The UI-thread dispatcher mutations are gated on
+    /// and fetch completions are marshaled back through.</param>
     public VirtualResultList(IDispatcher dispatcher)
     {
         _dispatcher = dispatcher;
@@ -109,6 +101,12 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// <paramref name="result"/> transfers to this list (it is disposed by
     /// the next Reassign/RefreshInPlace or by <see cref="Dispose"/>).
     /// </summary>
+    /// <param name="result">The new backing result whose ownership transfers to
+    /// this list; null clears the list to empty.</param>
+    /// <param name="seeds">Pre-fetched pages of <paramref name="result"/> used to
+    /// fill the viewport before the Reset is raised.</param>
+    /// <param name="highlighter">Compiled highlighter for the active query; null
+    /// falls back to <see cref="CompiledHighlighter.Empty"/>.</param>
     public void Reassign(
         ISearchResult? result, IReadOnlyList<PageSeed> seeds, IHighlighter? highlighter = null)
     {
@@ -117,6 +115,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         _epoch++;
         _fetchCts.Cancel();
         _fetchCts = new CancellationTokenSource();
+
         // Re-arm the page-fetch failure notice for the new result set: the
         // once-only suppression in the fetch path is per-epoch, not per-process,
         // so a later distinct failure still surfaces to the user.
@@ -133,6 +132,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         {
             ApplySeed(seed);
         }
+
         old?.Dispose();
         CollectionChanged?.Invoke(
             this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
@@ -155,6 +155,12 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// <paramref name="result"/> transfers to this list. In-flight fetches
     /// of the previous epoch are cancelled here too.
     /// </summary>
+    /// <param name="result">The verified-identical result to swap in; ownership
+    /// transfers to this list. A Count mismatch falls back to <see cref="Reassign"/>.</param>
+    /// <param name="seeds">Pre-fetched pages of <paramref name="result"/> that
+    /// re-fill realized rows in place without a Reset.</param>
+    /// <param name="highlighter">Compiled highlighter for the active query; null
+    /// falls back to <see cref="CompiledHighlighter.Empty"/>.</param>
     public void RefreshInPlace(
         ISearchResult result, IReadOnlyList<PageSeed> seeds, IHighlighter? highlighter = null)
     {
@@ -171,6 +177,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
             Reassign(result, seeds, highlighter);
             return;
         }
+
         _highlighter = highlighter ?? CompiledHighlighter.Empty;
         _epoch++;
         _fetchCts.Cancel();
@@ -184,6 +191,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         {
             ApplySeed(seed);
         }
+
         old?.Dispose();
         if (LastVisibleRange is { } visible)
         {
@@ -193,6 +201,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
 
     /// <summary>Always-on (not Debug-only): a cross-thread mutation reaches
     /// XAML as a marshaling crash far from the cause — fail loud here.</summary>
+    /// <param name="member">Calling member name, included in the thrown message.</param>
     private void EnsureUiThread(string member)
     {
         if (!_dispatcher.HasThreadAccess)
@@ -207,11 +216,13 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         {
             return;
         }
+
         var rows = GetOrCreatePage(seed.Page);
         for (var i = 0; i < seed.Rows.Count && i < rows.Length; i++)
         {
             rows[i].Fill(seed.Rows[i], _highlighter);
         }
+
         _loaded.Add(seed.Page);
     }
 
@@ -237,6 +248,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
             {
                 throw new ArgumentOutOfRangeException(nameof(index), index, $"Count={Count}");
             }
+
             return GetOrCreatePage(index / PageSize)[index % PageSize];
         }
         set => throw new NotSupportedException();
@@ -249,11 +261,13 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
             Touch(page);
             return rows;
         }
+
         rows = new ResultRow[PageSize];
         for (var i = 0; i < PageSize; i++)
         {
-            rows[i] = ResultRow.CreatePlaceholder(page * PageSize + i);
+            rows[i] = ResultRow.CreatePlaceholder((page * PageSize) + i);
         }
+
         _pages[page] = rows;
         _lru.AddFirst(page);
         EvictIfNeeded();
@@ -275,6 +289,8 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// <summary>WinRT-free body of RangesChanged (unit-testable). An empty
     /// list reports (-1,-1); remembering that would poison every later
     /// position-preserving requery with Items[-1].</summary>
+    /// <param name="firstVisible">First realized item index, or -1 when empty.</param>
+    /// <param name="lastVisible">Last realized item index.</param>
     internal void NotifyVisibleRange(int firstVisible, int lastVisible)
     {
         if (firstVisible < 0 || lastVisible < firstVisible)
@@ -282,6 +298,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
             LastVisibleRange = null;
             return;
         }
+
         LastVisibleRange = (firstVisible, lastVisible);
         EnsureRange(firstVisible, lastVisible);
     }
@@ -290,12 +307,15 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// Kick background fetches for the pages covering the given visible
     /// range ± one page of buffer. WinRT-free seam (unit-testable).
     /// </summary>
+    /// <param name="firstVisible">First visible item index of the range to cover.</param>
+    /// <param name="lastVisible">Last visible item index of the range to cover.</param>
     internal void EnsureRange(int firstVisible, int lastVisible)
     {
         if (_disposed || Count == 0 || _result is not { } result)
         {
             return;
         }
+
         var first = Math.Max(0, firstVisible - PageSize);
         var last = Math.Min(Count - 1, lastVisible + PageSize);
         for (var page = (long)(first / PageSize); page <= last / PageSize; page++)
@@ -324,12 +344,14 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
                 {
                     return;
                 }
+
                 _inFlight.Remove(page);
                 var rows = GetOrCreatePage(page);
                 for (var i = 0; i < data.Count && i < rows.Length; i++)
                 {
                     rows[i].Fill(data[i], _highlighter);
                 }
+
                 _loaded.Add(page);
             });
         }
@@ -341,6 +363,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
                 {
                     return; // a requery already replaced this result — no stale storm
                 }
+
                 _inFlight.Remove(page);
                 BecameStale?.Invoke();
             });
@@ -376,6 +399,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
                     "結果の読み込みでエラーが発生しました",
                     ex.Message);
             }
+
             _dispatcher.TryEnqueue(() =>
             {
                 if (epoch == _epoch)
@@ -414,6 +438,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     public void Dispose()
     {
         _disposed = true;
+
         // Cancel first so in-flight fetches stop, then dispose: _disposed is
         // already set, so EnsureRange won't read the token again and queued
         // continuations bail on the _disposed guard — nothing observes the
@@ -451,6 +476,8 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// Contains/IndexOf; vouching for a row of a previous result would send XAML
     /// to GetAt(staleIndex) and crash (ADR-0015), so membership is never faked.
     /// </summary>
+    /// <param name="value">The candidate item to test for membership.</param>
+    /// <returns>True only when the current cache holds that exact instance in its slot.</returns>
     public bool Contains(object? value) => IndexOf(value) >= 0;
 
     /// <summary>
@@ -460,17 +487,21 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// AND the current page cache holds that exact instance in that slot. Rows
     /// from previous results or evicted pages answer absent.
     /// </summary>
+    /// <param name="value">The candidate item to locate.</param>
+    /// <returns>The row's index, or -1 when it is not a current cached member.</returns>
     public int IndexOf(object? value)
     {
         if (value is not ResultRow r || r.Index >= Count)
         {
             return -1;
         }
+
         return _pages.TryGetValue(r.Index / PageSize, out var rows)
             && ReferenceEquals(rows[r.Index % PageSize], r)
             ? (int)r.Index
             : -1;
     }
+
     /// <inheritdoc/>
     /// <exception cref="NotSupportedException">Always — the list is read-only.</exception>
     public void Insert(int index, object? value) => throw new NotSupportedException();
@@ -486,6 +517,8 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// <summary>Read surface stays landmine-free: copy what is cached, hand
     /// out transient placeholders for the rest (never cached — see
     /// <see cref="GetEnumerator"/>).</summary>
+    /// <param name="array">Destination array the rows are copied into.</param>
+    /// <param name="index">Start offset in <paramref name="array"/> to copy from.</param>
     public void CopyTo(Array array, int index)
     {
         ArgumentNullException.ThrowIfNull(array);
@@ -494,6 +527,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         {
             throw new ArgumentException("destination array too small", nameof(array));
         }
+
         for (var i = 0; i < Count; i++)
         {
             array.SetValue(RowAtWithoutCaching(i), index + i);
@@ -507,6 +541,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// their live instances; everything else yields transient placeholders,
     /// which by the membership invariant safely answer "absent".
     /// </summary>
+    /// <returns>An enumerator yielding cached instances and transient placeholders.</returns>
     public IEnumerator GetEnumerator()
     {
         for (var i = 0; i < Count; i++)

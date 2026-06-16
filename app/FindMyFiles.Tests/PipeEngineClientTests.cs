@@ -21,7 +21,7 @@ public sealed class PipeEngineClientTests
         };
         using var client = new PipeEngineClient(server.PipeName, autoStart: false);
         var log = new List<string>();
-        var gate = new object();
+        var gate = new System.Threading.Lock();
         client.VolumeUpdated += s =>
         {
             lock (gate)
@@ -46,7 +46,7 @@ public sealed class PipeEngineClientTests
             {
                 lock (gate)
                 {
-                    return log.Contains("index-changed");
+                    return log.Contains("index-changed", StringComparer.Ordinal);
                 }
             },
             "synthesized IndexChanged");
@@ -58,6 +58,7 @@ public sealed class PipeEngineClientTests
                 PipeProtocol.Op.Hello, PipeProtocol.Op.Subscribe, PipeProtocol.Op.IndexStatus,
             },
             server.OpcodesOf(0));
+
         // …and the catch-up events are synthesized locally from IndexStatus:
         // every volume first, then exactly one IndexChanged.
         lock (gate)
@@ -106,6 +107,7 @@ public sealed class PipeEngineClientTests
 
         // Pending requests fail fast — no 10s timeout wait.
         await Assert.ThrowsAsync<EngineUnavailableException>(() => fetch);
+
         // The surviving handle is epoch-invalidated: stale, not hanging.
         await Assert.ThrowsAsync<StaleResultException>(() => outcome.Result.GetRangeAsync(0, 1));
     }
@@ -128,6 +130,7 @@ public sealed class PipeEngineClientTests
         await Assert.ThrowsAsync<EngineUnavailableException>(
             () => client.SearchAsync("a", SearchOptions.Default));
         sw.Stop();
+
         // There is no connection to write to, so the failure is immediate —
         // never the 10s per-request deadline.
         Assert.True(
@@ -165,6 +168,7 @@ public sealed class PipeEngineClientTests
             () => Volatile.Read(ref indexChanged) == 2, "re-fired IndexChanged");
 
         Assert.True(Volatile.Read(ref sawReconnecting) >= 1);
+
         // The second connection replays the full fixed sequence.
         Assert.Equal(
             new[]
@@ -192,6 +196,7 @@ public sealed class PipeEngineClientTests
 
         await WaitUntilAsync(() => server.ConnectionCount == 1, "first connection");
         await server.WaitForAsync(PipeProtocol.Op.Hello);
+
         // The 250ms backoff would have produced a retry well within this
         // window — a fatal mismatch must not.
         await Task.Delay(750);
@@ -219,6 +224,7 @@ public sealed class PipeEngineClientTests
             await release.Task;
             return (PipeProtocol.Status.Ok, PipeProtocol.EncodePageResp(Rows.Many(4)));
         }
+
         server.Handler = (op, _) => op == PipeProtocol.Op.ResultPage ? HoldAsync() : null;
 
         var fetch = outcome.Result.GetRangeAsync(0, 4);
@@ -242,7 +248,7 @@ public sealed class PipeEngineClientTests
         var volumes = new List<VolumeStatus>();
         var errors = new List<int>();
         var indexChanged = new List<string>();
-        var gate = new object();
+        var gate = new System.Threading.Lock();
         client.VolumeUpdated += s =>
         {
             lock (gate)

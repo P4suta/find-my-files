@@ -18,19 +18,20 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     /// instance. This closes the dispose/recreate window: a native callback
     /// still in flight while Dispose runs resolves the instance but fails
     /// the generation check, instead of racing the engine teardown.</summary>
-    private static long s_generation;
+    private static long generation;
 
     private readonly long _registeredGeneration;
-    private long _liveGeneration;
-
-    private IntPtr _handle;
-    private GCHandle _self;
 
     /// <summary>Non-null in scope mode (ADR-0024): the absolute roots to
     /// folder-walk. <see cref="StartIndexingAsync"/> then drives
     /// <c>fmf_index_start_scope</c>, and <see cref="ListVolumesAsync"/> returns
     /// these — so the unchanged startup flow (list → start) indexes them.</summary>
     private readonly IReadOnlyList<string>? _scopeRoots;
+
+    private long _liveGeneration;
+
+    private IntPtr _handle;
+    private GCHandle _self;
 
     /// <inheritdoc/>
     public event Action<string>? IndexChanged;
@@ -47,14 +48,18 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     /// <inheritdoc/>
     /// <remarks>In-proc has no transport, so this never fires; the
     /// add/remove accessors are empty.</remarks>
-    public event Action<EngineConnectionState>? ConnectionChanged { add { } remove { } }
+    public event Action<EngineConnectionState>? ConnectionChanged
+    {
+        add { } remove { }
+    }
 
     /// <summary>Creates the in-proc engine over the default machine index at
     /// <c>%ProgramData%\find-my-files\index</c>.</summary>
     public FfiEngineClient()
         : this(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "find-my-files", "index"))
+            "find-my-files",
+            "index"))
     {
     }
 
@@ -63,6 +68,8 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     /// index and the engine log both live under the portable data root
     /// (<see cref="AppPaths"/>): <c>&lt;exe&gt;\data\{index,logs}</c> by default, so
     /// scope mode pollutes nothing outside the app's own folder.</summary>
+    /// <param name="roots">Absolute folder roots to folder-walk and index.</param>
+    /// <returns>A scope-mode client over the portable data root.</returns>
     public static FfiEngineClient CreateScope(IReadOnlyList<string> roots)
     {
         var logDir = AppPaths.LogDir;
@@ -76,6 +83,9 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     /// (folder-walk over those roots, ADR-0024); <paramref name="logDir"/>, when
     /// given, redirects the engine log (portable mode) via the config's
     /// <c>log_dir</c> key.</summary>
+    /// <param name="indexDir">Directory holding the on-disk index.</param>
+    /// <param name="scopeRoots">When non-null, the roots to folder-walk (scope mode); otherwise volume mode.</param>
+    /// <param name="logDir">When non-null, redirects the engine log here (portable mode).</param>
     internal FfiEngineClient(
         string indexDir, IReadOnlyList<string>? scopeRoots = null, string? logDir = null)
     {
@@ -95,9 +105,9 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         // The registration generation is recorded on the instance: events
         // only flow while the live generation still equals it (see OnEvent).
         _self = GCHandle.Alloc(this, GCHandleType.Weak);
-        _registeredGeneration = Interlocked.Increment(ref s_generation);
+        _registeredGeneration = Interlocked.Increment(ref generation);
         _liveGeneration = _registeredGeneration;
-        rc = NativeEngine.fmf_set_event_callback(_handle, &OnEvent, GCHandle.ToIntPtr(_self));
+        rc = NativeEngine.Fmf_set_event_callback(_handle, &OnEvent, GCHandle.ToIntPtr(_self));
         if (rc != NativeEngine.Ok)
         {
             NativeEngine.Throw(rc, "fmf_set_event_callback");
@@ -116,12 +126,14 @@ public sealed unsafe class FfiEngineClient : IEngineClient
             // never deliver an event from a dying engine.
             return;
         }
+
         string volume;
         int len = 0;
         while (len < 16 && ev->Volume[len] != 0)
         {
             len++;
         }
+
         volume = Encoding.UTF8.GetString(ev->Volume, len);
 
         switch ((EventKind)ev->Kind)
@@ -152,6 +164,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     // the UI thread out of the FFI entirely. The ct goes to Task.Run: FFI
     // calls are short and non-cancellable mid-flight, so cancellation takes
     // effect at scheduling time (a pre-cancelled ct never crosses the FFI).
+
     /// <inheritdoc/>
     public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
     {
@@ -161,8 +174,10 @@ public sealed unsafe class FfiEngineClient : IEngineClient
             // the unchanged startup flow (list → start) drives the folder-walk.
             return Task.FromResult(_scopeRoots);
         }
+
         var handle = _handle;
-        return Task.Run<IReadOnlyList<string>>(() =>
+        return Task.Run<IReadOnlyList<string>>(
+            () =>
         {
             var buf = stackalloc NativeEngine.FmfVolumeStatus[26];
             var rc = NativeEngine.fmf_list_volumes(handle, buf, 26, out var count);
@@ -170,13 +185,16 @@ public sealed unsafe class FfiEngineClient : IEngineClient
             {
                 NativeEngine.Throw(rc, "fmf_list_volumes");
             }
+
             var result = new List<string>((int)count);
             for (var i = 0; i < count && i < 26; i++)
             {
                 result.Add(LabelOf(buf[i]));
             }
+
             return result;
-        }, ct);
+        },
+            ct);
     }
 
 #pragma warning disable RCS1242 // `in` is required to pin the fixed-size Label buffer via `fixed` below; FmfVolumeStatus is a generated marshaling struct, never mutated here
@@ -190,6 +208,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
             {
                 len++;
             }
+
             return Encoding.UTF8.GetString(p, len);
         }
     }
@@ -198,10 +217,12 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     public Task StartIndexingAsync(IReadOnlyList<string> volumes, CancellationToken ct = default)
     {
         var handle = _handle;
+
         // Scope mode walks the roots (ListVolumesAsync handed StartAsync the same
         // list); volume mode indexes the drive labels. Same marshaling either way.
         var scope = _scopeRoots is not null;
-        return Task.Run(() =>
+        return Task.Run(
+            () =>
         {
             var ptrs = new IntPtr[volumes.Count];
             try
@@ -210,11 +231,12 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                 {
                     ptrs[i] = Marshal.StringToCoTaskMemUTF8(volumes[i]);
                 }
+
                 fixed (IntPtr* pp = ptrs)
                 {
                     var rc = scope
-                        ? NativeEngine.fmf_index_start_scope(handle, (byte**)pp, (uint)volumes.Count)
-                        : NativeEngine.fmf_index_start(handle, (byte**)pp, (uint)volumes.Count);
+                        ? NativeEngine.Fmf_index_start_scope(handle, (byte**)pp, (uint)volumes.Count)
+                        : NativeEngine.Fmf_index_start(handle, (byte**)pp, (uint)volumes.Count);
                     if (rc != NativeEngine.Ok)
                     {
                         NativeEngine.Throw(rc, scope ? "fmf_index_start_scope" : "fmf_index_start");
@@ -231,14 +253,16 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                     }
                 }
             }
-        }, ct);
+        },
+            ct);
     }
 
     /// <inheritdoc/>
     public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default)
     {
         var handle = _handle;
-        return Task.Run<IReadOnlyList<VolumeStatus>>(() =>
+        return Task.Run<IReadOnlyList<VolumeStatus>>(
+            () =>
         {
             var buf = stackalloc NativeEngine.FmfVolumeStatus[26];
             var rc = NativeEngine.fmf_index_status(handle, buf, 26, out var count);
@@ -246,14 +270,17 @@ public sealed unsafe class FfiEngineClient : IEngineClient
             {
                 NativeEngine.Throw(rc, "fmf_index_status");
             }
+
             var result = new List<VolumeStatus>((int)count);
             for (var i = 0; i < count && i < 26; i++)
             {
                 result.Add(new VolumeStatus(
                     LabelOf(buf[i]), (VolumeState)buf[i].State, buf[i].Entries));
             }
+
             return result;
-        }, ct);
+        },
+            ct);
     }
 
     /// <inheritdoc/>
@@ -261,7 +288,8 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         string query, SearchOptions options, CancellationToken ct = default)
     {
         var handle = _handle;
-        return Task.Run(() =>
+        return Task.Run(
+            () =>
         {
             var native = new NativeEngine.FmfQueryOptions
             {
@@ -285,25 +313,30 @@ public sealed unsafe class FfiEngineClient : IEngineClient
 #pragma warning restore RCS1242
                 traceJson = rc == NativeEngine.Ok ? NativeEngine.TakeBlob(trace) : null;
             }
+
             if (rc != NativeEngine.Ok)
             {
                 NativeEngine.Throw(rc, "fmf_query");
             }
+
             QueryTraceData? traceData = null;
             if (traceJson is not null)
             {
                 traceData = System.Text.Json.JsonSerializer
                     .Deserialize<QueryTraceData>(traceJson, EngineJson.SnakeCase);
             }
+
             return new SearchOutcome(new FfiSearchResult(result, (long)count), traceData);
-        }, ct);
+        },
+            ct);
     }
 
     /// <inheritdoc/>
     public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default)
     {
         var handle = _handle;
-        return Task.Run(() =>
+        return Task.Run(
+            () =>
         {
             string? json;
             unsafe
@@ -311,11 +344,13 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                 var rc = NativeEngine.fmf_engine_stats(handle, out var blob);
                 json = rc == NativeEngine.Ok ? NativeEngine.TakeBlob(blob) : null;
             }
+
             return json is null
                 ? null
                 : System.Text.Json.JsonSerializer
                     .Deserialize<EngineStatsData>(json, EngineJson.SnakeCase);
-        }, ct);
+        },
+            ct);
     }
 
     /// <inheritdoc/>
@@ -324,74 +359,21 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         // Advance the generation FIRST: a native callback already in flight
         // on an engine thread resolves this instance but fails the
         // generation check, before fmf_set_event_callback(NULL) even lands.
-        Volatile.Write(ref _liveGeneration, Interlocked.Increment(ref s_generation));
+        Volatile.Write(ref _liveGeneration, Interlocked.Increment(ref generation));
         if (_handle != IntPtr.Zero)
         {
             // Teardown return codes are intentionally ignored — there is no
             // recovery action during dispose.
-            _ = NativeEngine.fmf_set_event_callback(_handle, null, IntPtr.Zero);
-            _ = NativeEngine.fmf_engine_destroy(_handle); // joins engine threads
+            _ = NativeEngine.Fmf_set_event_callback(_handle, null, IntPtr.Zero);
+            _ = NativeEngine.Fmf_engine_destroy(_handle); // joins engine threads
             _handle = IntPtr.Zero;
         }
+
         // Freed last: fmf_engine_destroy joined the threads that could still
         // dereference the handle, so no recycled-slot access is reachable.
         if (_self.IsAllocated)
         {
             _self.Free();
         }
-    }
-}
-
-internal sealed unsafe class FfiSearchResult(IntPtr handle, long count) : SafeHandle(handle, true), ISearchResult
-{
-    public long Count { get; } = count;
-
-    public override bool IsInvalid => this.handle == IntPtr.Zero;
-
-    protected override bool ReleaseHandle()
-    {
-        return NativeEngine.fmf_result_free(this.handle) == NativeEngine.Ok;
-    }
-
-    public Task<IReadOnlyList<RowData>> GetRangeAsync(
-        long offset, int count, CancellationToken ct = default)
-    {
-        return Task.Run<IReadOnlyList<RowData>>(() =>
-        {
-            // AddRef/Release keep the native result alive across an in-flight
-            // fetch even if Dispose() races (docs/ARCHITECTURE.md C#契約).
-            var added = false;
-            DangerousAddRef(ref added);
-            try
-            {
-                var rc = NativeEngine.fmf_result_page(
-                    handle, (ulong)offset, (uint)count, out var page);
-                if (rc != NativeEngine.Ok)
-                {
-                    NativeEngine.Throw(rc, "fmf_result_page");
-                }
-                try
-                {
-                    // The native page is the same layout the pipe carries:
-                    // 48-byte rows + blob, decoded by the shared PageCodec.
-                    return (IReadOnlyList<RowData>)PageCodec.Decode(
-                        new ReadOnlySpan<byte>(
-                            page->Rows.ToPointer(), (int)page->RowCount * PageCodec.RowSize),
-                        new ReadOnlySpan<byte>(page->Blob.ToPointer(), (int)page->BlobLen));
-                }
-                finally
-                {
-                    // Free path: the return code carries no recovery action.
-                    _ = NativeEngine.fmf_page_free(page);
-                }
-            }
-            finally
-            {
-                if (added)
-                {
-                    DangerousRelease();
-                }
-            }
-        }, ct);
     }
 }

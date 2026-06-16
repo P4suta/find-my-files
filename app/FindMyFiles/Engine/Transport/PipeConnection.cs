@@ -17,6 +17,7 @@ namespace FindMyFiles.Engine;
 internal sealed class PipeConnection : IDisposable
 {
     private readonly NamedPipeClientStream _stream;
+
     // CA2213 false positive: SemaphoreSlim only owns a disposable handle if its
     // AvailableWaitHandle is accessed — it never is here (only WaitAsync/Release).
     // Disposing it would also break the write-after-dispose normalization below
@@ -58,6 +59,9 @@ internal sealed class PipeConnection : IDisposable
     /// normalized to <see cref="EngineUnavailableException"/> right here, in
     /// the owner of the stream — the structural replacement for catching
     /// ObjectDisposedException at every call site.</summary>
+    /// <param name="frame">The encoded frame bytes to write to the pipe.</param>
+    /// <param name="ct">Cancels the wait for the write lock and the write itself.</param>
+    /// <returns>A task that completes when the frame has been written.</returns>
     internal async Task WriteFrameAsync(byte[] frame, CancellationToken ct)
     {
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
@@ -68,6 +72,7 @@ internal sealed class PipeConnection : IDisposable
                 throw new EngineUnavailableException(
                     "engine service connection lost: connection is closed");
             }
+
             await _stream.WriteAsync(frame, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException)
@@ -95,6 +100,7 @@ internal sealed class PipeConnection : IDisposable
                 {
                     await _stream.ReadExactlyAsync(payload, ct).ConfigureAwait(false);
                 }
+
                 if (h.IsEvent)
                 {
                     _onEvent(payload);

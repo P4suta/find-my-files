@@ -33,14 +33,14 @@ public sealed class GoldenCorpusTests
     [Fact]
     public void Manifest_CoversEveryBinFile_AndViceVersa()
     {
-        var manifest = ManifestFiles().ToHashSet();
+        var manifest = ManifestFiles().ToHashSet(StringComparer.Ordinal);
         var onDisk = Directory.GetFiles(GoldenDir, "*.bin")
             .Select(Path.GetFileName)
-            .ToHashSet();
+            .ToHashSet(StringComparer.Ordinal);
 
-        Assert.True(manifest.SetEquals(onDisk!),
-            $"manifest/disk drift — manifest only: [{string.Join(", ", manifest.Except(onDisk!))}], "
-            + $"disk only: [{string.Join(", ", onDisk!.Except(manifest))}]");
+        var drift = $"manifest/disk drift — manifest only: [{string.Join(", ", manifest.Except(onDisk!, StringComparer.Ordinal))}], "
+            + $"disk only: [{string.Join(", ", onDisk!.Except(manifest, StringComparer.Ordinal))}]";
+        Assert.True(manifest.SetEquals(onDisk!), drift);
     }
 
     [Fact]
@@ -57,7 +57,8 @@ public sealed class GoldenCorpusTests
             var frame = PipeProtocol.EncodeFrame(
                 header.Opcode, header.Flags, header.RequestId, header.StatusCode, reencoded);
 
-            Assert.True(bytes.AsSpan().SequenceEqual(frame),
+            Assert.True(
+                bytes.AsSpan().SequenceEqual(frame),
                 $"{file}: C# re-encode drifted from the golden bytes");
         }
     }
@@ -73,21 +74,24 @@ public sealed class GoldenCorpusTests
             Assert.True(kind == header.Opcode, $"{file}: event kind vs opcode");
             return PipeProtocol.EncodeEvent(kind, entries, volume);
         }
+
         if (header.StatusCode != 0)
         {
             // Error responses carry a UTF-8 detail string.
             return Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(payload));
         }
+
         switch (header.Opcode, header.IsResponse)
         {
             case (PipeProtocol.Op.Hello, false):
                 return PipeProtocol.EncodeHelloReq(
                     BinaryPrimitives.ReadUInt32LittleEndian(payload));
             case (PipeProtocol.Op.Hello, true):
-            {
-                var (proto, abi, pid) = PipeProtocol.DecodeHelloResp(payload);
-                return PipeProtocol.EncodeHelloResp(proto, abi, pid);
-            }
+                {
+                    var (proto, abi, pid) = PipeProtocol.DecodeHelloResp(payload);
+                    return PipeProtocol.EncodeHelloResp(proto, abi, pid);
+                }
+
             case (PipeProtocol.Op.Subscribe, _) or (PipeProtocol.Op.Unsubscribe, _):
                 Assert.True(payload.Length == 0, $"{file}: expected empty payload");
                 return payload;
@@ -98,35 +102,39 @@ public sealed class GoldenCorpusTests
                 return PipeProtocol.EncodeIndexStartReq(
                     PipeProtocol.DecodeIndexStartReq(payload));
             case (PipeProtocol.Op.Query, false):
-            {
-                var (options, text) = PipeProtocol.DecodeQueryReq(payload);
-                return PipeProtocol.EncodeQueryReq(options, text);
-            }
+                {
+                    var (options, text) = PipeProtocol.DecodeQueryReq(payload);
+                    return PipeProtocol.EncodeQueryReq(options, text);
+                }
+
             case (PipeProtocol.Op.Query, true):
-            {
-                var (resultId, count, traceJson) = PipeProtocol.DecodeQueryResp(payload);
-                return PipeProtocol.EncodeQueryResp(resultId, count, traceJson);
-            }
+                {
+                    var (resultId, count, traceJson) = PipeProtocol.DecodeQueryResp(payload);
+                    return PipeProtocol.EncodeQueryResp(resultId, count, traceJson);
+                }
+
             case (PipeProtocol.Op.ResultPage, false):
-            {
-                var (resultId, offset, count) = PipeProtocol.DecodeResultPageReq(payload);
-                return PipeProtocol.EncodeResultPageReq(resultId, offset, count);
-            }
+                {
+                    var (resultId, offset, count) = PipeProtocol.DecodeResultPageReq(payload);
+                    return PipeProtocol.EncodeResultPageReq(resultId, offset, count);
+                }
+
             case (PipeProtocol.Op.ResultPage, true):
                 return PipeProtocol.EncodePageResp(PipeProtocol.DecodePageResp(payload));
             case (PipeProtocol.Op.ResultFree, false):
                 return PipeProtocol.EncodeResultFreeReq(
                     PipeProtocol.DecodeResultFreeReq(payload));
             case (PipeProtocol.Op.ServiceInfo, true):
-            {
-                // C# has no ServiceInfo encoder (the client only consumes it);
-                // pin the snake_case key set and pass the payload through.
-                using var doc = JsonDocument.Parse(payload);
-                Assert.True(doc.RootElement.TryGetProperty("uptime_ms", out _), file);
-                Assert.True(doc.RootElement.TryGetProperty("connections", out _), file);
-                Assert.True(doc.RootElement.TryGetProperty("version", out _), file);
-                return payload;
-            }
+                {
+                    // C# has no ServiceInfo encoder (the client only consumes it);
+                    // pin the snake_case key set and pass the payload through.
+                    using var doc = JsonDocument.Parse(payload);
+                    Assert.True(doc.RootElement.TryGetProperty("uptime_ms", out _), file);
+                    Assert.True(doc.RootElement.TryGetProperty("connections", out _), file);
+                    Assert.True(doc.RootElement.TryGetProperty("version", out _), file);
+                    return payload;
+                }
+
             default:
                 throw new Xunit.Sdk.XunitException(
                     $"{file}: opcode {header.Opcode} (response={header.IsResponse}) has no "
@@ -148,10 +156,11 @@ public sealed class GoldenCorpusTests
         Assert.Equal("C:\\メモ\\", rows[1].ParentPath);
         Assert.Equal(0x1_0000_0001UL, rows[1].Size); // u64 survives, not truncated
         Assert.Equal(-5, rows[1].Mtime);             // i64 signedness survives
+
         // Unpaired surrogate U+D800 must round-trip through the WTF-8 decode
         // into UTF-16 (that's the whole point of WTF-8 on this wire).
         Assert.Equal('\uD800', rows[2].Name[0]);
-        Assert.EndsWith("tail.dat", rows[2].Name);
+        Assert.EndsWith("tail.dat", rows[2].Name, StringComparison.Ordinal);
         Assert.True(rows[2].IsDirectory);
     }
 

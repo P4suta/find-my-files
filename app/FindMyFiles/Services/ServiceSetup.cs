@@ -4,49 +4,6 @@ using FindMyFiles.Engine;
 
 namespace FindMyFiles.Services;
 
-/// <summary>SCM registration/run state of the fmf-engine service, as seen by
-/// the unelevated UI via <see cref="ServiceSetup.QueryState"/> — drives whether
-/// the app offers to install, start, or nothing at all.</summary>
-public enum EngineServiceState
-{
-    /// <summary>No <see cref="EngineContract.ServiceName"/> entry in the SCM
-    /// (or the SCM is unreachable) — the UI offers a one-time install.</summary>
-    NotInstalled,
-
-    /// <summary>Registered but not running — the UI offers to start it.</summary>
-    Stopped,
-
-    /// <summary>Running (or on its way up: START/CONTINUE_PENDING) — no offer
-    /// needed; the pipe transport can connect.</summary>
-    Running,
-}
-
-/// <summary>Verdict of one elevated lifecycle action (<see
-/// cref="ServiceSetup.RunElevated"/>). Output is unreadable under
-/// ShellExecute, so the exit code is the only signal; a declined UAC prompt
-/// is distinguished from a genuine failure so the UI can say so.</summary>
-public enum ServiceActionOutcome
-{
-    /// <summary>The elevated action exited 0 — the verb succeeded.</summary>
-    Ok,
-
-    /// <summary>The action ran but exited non-zero (or could not be
-    /// launched/timed out) — a genuine failure to surface to the user.</summary>
-    Failed,
-
-    /// <summary>The user dismissed the UAC prompt (ERROR_CANCELLED 1223) — not
-    /// a failure, so the UI says "cancelled" rather than "error".</summary>
-    Cancelled,
-}
-
-/// <summary>Result of one <see cref="ServiceSetup.RunElevated"/> call: the
-/// classified <paramref name="Outcome"/> plus the raw process
-/// <paramref name="ExitCode"/> (-1 when the process never produced one).</summary>
-/// <param name="Outcome">Success / failure / user-cancelled classification.</param>
-/// <param name="ExitCode">fmf-service.exe exit code, or -1 if it could not be
-/// launched, timed out, or the UAC prompt was declined.</param>
-public readonly record struct ServiceActionResult(ServiceActionOutcome Outcome, int ExitCode);
-
 /// <summary>
 /// In-app service setup — the GUI half ADR-0016 left to a terminal: detects
 /// the fmf-engine SCM registration (read-only, works unelevated) and drives
@@ -59,6 +16,7 @@ public static partial class ServiceSetup
     /// <summary>True when *this* process is already running with an
     /// Administrator token — the in-proc engine path needs it, and when set the
     /// in-app install/start verbs can skip their own UAC prompt.</summary>
+    /// <returns>True when the current process token is in the Administrators role.</returns>
     public static bool IsProcessElevated()
     {
         using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
@@ -67,6 +25,7 @@ public static partial class ServiceSetup
     }
 
     /// <summary>Read-only SCM query for <see cref="EngineContract.ServiceName"/>.</summary>
+    /// <returns>The service's install/run state for the offer logic.</returns>
     public static EngineServiceState QueryState()
     {
         const uint ScManagerConnect = 0x0001;
@@ -76,6 +35,7 @@ public static partial class ServiceSetup
         {
             return EngineServiceState.NotInstalled;
         }
+
         try
         {
             var svc = OpenService(scm, EngineContract.ServiceName, ServiceQueryStatus);
@@ -83,12 +43,14 @@ public static partial class ServiceSetup
             {
                 return EngineServiceState.NotInstalled; // ERROR_SERVICE_DOES_NOT_EXIST
             }
+
             try
             {
                 if (!QueryServiceStatus(svc, out var status))
                 {
                     return EngineServiceState.Stopped;
                 }
+
                 // 2=START_PENDING 4=RUNNING 5=CONTINUE_PENDING — anything on
                 // its way up counts as running for the offer logic.
                 return status.CurrentState is 2 or 4 or 5
@@ -111,6 +73,7 @@ public static partial class ServiceSetup
     /// compares this to the pipe's server PID — an unelevated client can read
     /// it (unlike a SYSTEM process's token), and a squatter never matches
     /// because registering the service needs admin.</summary>
+    /// <returns>The running service's process id, or 0 when not installed/running.</returns>
     public static uint QueryServiceProcessId()
     {
         const uint ScManagerConnect = 0x0001;
@@ -122,6 +85,7 @@ public static partial class ServiceSetup
         {
             return 0;
         }
+
         try
         {
             var svc = OpenService(scm, EngineContract.ServiceName, ServiceQueryStatus);
@@ -129,6 +93,7 @@ public static partial class ServiceSetup
             {
                 return 0;
             }
+
             try
             {
                 var size = (uint)Marshal.SizeOf<ServiceStatusProcess>();
@@ -139,7 +104,9 @@ public static partial class ServiceSetup
                     {
                         return 0;
                     }
+
                     var status = Marshal.PtrToStructure<ServiceStatusProcess>(buffer);
+
                     // dwProcessId is only meaningful while RUNNING.
                     return status.CurrentState == ServiceRunning ? status.ProcessId : 0;
                 }
@@ -161,6 +128,8 @@ public static partial class ServiceSetup
 
     /// <summary>fmf-service.exe next to the app (the dist bundle) or in the
     /// dev tree (build\engine\release, walking up from the bin dir).</summary>
+    /// <param name="baseDir">Directory to start the search from (typically the app's bin dir).</param>
+    /// <returns>Full path to fmf-service.exe, or null when it cannot be found.</returns>
     public static string? LocateServiceExe(string baseDir)
     {
         var bundled = Path.Combine(baseDir, "fmf-service.exe");
@@ -168,6 +137,7 @@ public static partial class ServiceSetup
         {
             return bundled;
         }
+
         var dir = new DirectoryInfo(baseDir);
         for (var i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
         {
@@ -177,6 +147,7 @@ public static partial class ServiceSetup
                 return dev;
             }
         }
+
         return null;
     }
 
@@ -187,6 +158,9 @@ public static partial class ServiceSetup
     /// 1223) is reported distinctly. <paramref name="args"/> is built from
     /// fixed verbs plus SID-validated flags, never raw user text. Blocking —
     /// call off the UI thread.</summary>
+    /// <param name="exe">Path to fmf-service.exe to launch elevated.</param>
+    /// <param name="args">Service verb plus SID-validated flags to pass on the command line.</param>
+    /// <returns>The classified outcome and raw exit code of the elevated action.</returns>
     public static ServiceActionResult RunElevated(string exe, string args)
     {
         try
@@ -197,6 +171,7 @@ public static partial class ServiceSetup
                 Arguments = args,
                 UseShellExecute = true, // required for the runas verb
                 Verb = "runas", // elevate just this action; the app stays asInvoker
+
                 // A console exe under ShellExecute ignores CreateNoWindow; hide
                 // the window so the verb doesn't flash a console.
                 WindowStyle = ProcessWindowStyle.Hidden,
@@ -205,10 +180,12 @@ public static partial class ServiceSetup
             {
                 return new ServiceActionResult(ServiceActionOutcome.Failed, -1);
             }
+
             if (!p.WaitForExit(60_000))
             {
                 return new ServiceActionResult(ServiceActionOutcome.Failed, -1);
             }
+
             return new ServiceActionResult(
                 p.ExitCode == 0 ? ServiceActionOutcome.Ok : ServiceActionOutcome.Failed,
                 p.ExitCode);
@@ -230,6 +207,7 @@ public static partial class ServiceSetup
     /// admin account) does not lock this user out of the pipe (脅威1).
     /// Null when unavailable — install then authorizes only the elevated
     /// account.</summary>
+    /// <returns>The current user's SID string, or null when it cannot be read.</returns>
     public static string? CurrentUserSid()
     {
         try
@@ -247,6 +225,8 @@ public static partial class ServiceSetup
     /// <summary>A well-formed SID string (S-1-… of digits and hyphens) —
     /// guards the value going onto the fmf-service command line against
     /// argument injection before it is interpolated.</summary>
+    /// <param name="s">Candidate SID string to validate.</param>
+    /// <returns>True when the value is a well-formed SID safe to pass on the command line.</returns>
     public static bool IsValidSid(string? s) =>
         s is not null
         && s.StartsWith("S-1-", StringComparison.Ordinal)

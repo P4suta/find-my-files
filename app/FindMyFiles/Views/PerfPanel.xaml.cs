@@ -1,9 +1,9 @@
 using System.ComponentModel;
-using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace FindMyFiles.Views;
 
@@ -62,6 +62,7 @@ public sealed partial class PerfPanel : UserControl
             old.PerfDataChanged -= RenderPerf;
             old.PropertyChanged -= OnViewModelPropertyChanged;
         }
+
         if (e.NewValue is PerfPanelViewModel vm)
         {
             vm.PerfDataChanged += RenderPerf;
@@ -71,7 +72,7 @@ public sealed partial class PerfPanel : UserControl
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(PerfPanelViewModel.IsOpen) && ViewModel is { } vm)
+        if (string.Equals(e.PropertyName, nameof(PerfPanelViewModel.IsOpen), StringComparison.Ordinal) && ViewModel is { } vm)
         {
             if (vm.IsOpen)
             {
@@ -139,6 +140,7 @@ public sealed partial class PerfPanel : UserControl
                 {
                     continue;
                 }
+
                 StageBar.ColumnDefinitions.Add(new ColumnDefinition
                 {
                     Width = new Microsoft.UI.Xaml.GridLength(us, Microsoft.UI.Xaml.GridUnitType.Star),
@@ -154,6 +156,7 @@ public sealed partial class PerfPanel : UserControl
                 Microsoft.UI.Xaml.Controls.Grid.SetColumn(seg, col++);
                 StageBar.Children.Add(seg);
             }
+
             StageLegend.Text = string.Join("  ", stages
                 .Where(s => s.Us > 0)
                 .Select(s => $"{s.Name} {s.Us / 1000.0:F2}ms"));
@@ -171,8 +174,9 @@ public sealed partial class PerfPanel : UserControl
             {
                 points.Add(new Windows.Foundation.Point(
                     i * w / Math.Max(recent.Count - 1, 1),
-                    H - (recent[i] / (double)max) * (H - 2) - 1));
+                    H - ((recent[i] / (double)max) * (H - 2)) - 1));
             }
+
             Spark.Points = points;
         }
 
@@ -195,8 +199,9 @@ public sealed partial class PerfPanel : UserControl
             // Degradations: recent WARN+/panic events and nonzero counters.
             ErrorsText.Text = string.Join("\n", stats.RecentErrors.TakeLast(8).Select(er =>
                 $"[{er.UptimeMs / 1000}s] {er.Severity.ToUpperInvariant()} {er.Area}" +
-                $"{(string.IsNullOrEmpty(er.Volume) ? "" : $" ({er.Volume})")}: " +
+                $"{(string.IsNullOrEmpty(er.Volume) ? string.Empty : $" ({er.Volume})")}: " +
                 $"{FirstLine(er.Message)}"));
+
             // Reflect over the generated CountersData (EngineContract.g.cs)
             // so a counter added to the contract registry shows up here with
             // zero UI edits — the hand-written list this replaced silently

@@ -74,9 +74,9 @@ public sealed class MainViewModelEventTests
     }
 
     [Theory]
-    [InlineData(3)]  // FMF_E_NOT_ADMIN
-    [InlineData(5)]  // FMF_E_QUERY_SYNTAX
-    [InlineData(7)]  // FMF_E_LOCKED
+    [InlineData(3)] // FMF_E_NOT_ADMIN
+    [InlineData(5)] // FMF_E_QUERY_SYNTAX
+    [InlineData(7)] // FMF_E_LOCKED
     [InlineData(99)] // FMF_E_PANIC
     [InlineData(42)] // unknown → generic
     public void EngineErrorText_maps_every_engine_code_to_a_localized_message(int code)

@@ -135,7 +135,7 @@ fn corpus() -> Vec<Case> {
                     },
                 ],
             )
-            .unwrap(),
+            .expect("encode golden fixture"),
         ),
     );
     case(
@@ -152,7 +152,7 @@ fn corpus() -> Vec<Case> {
                     volumes: vec!["C:".into(), "D:".into()],
                 },
             )
-            .unwrap(),
+            .expect("encode golden fixture"),
         ),
     );
     case(
@@ -171,7 +171,7 @@ fn corpus() -> Vec<Case> {
                     entries: 42,
                 }],
             )
-            .unwrap(),
+            .expect("encode golden fixture"),
         ),
     );
 
@@ -408,7 +408,7 @@ fn corpus() -> Vec<Case> {
                     version: "0.1.0".into(),
                 },
             )
-            .unwrap(),
+            .expect("encode golden fixture"),
         ),
     );
 
@@ -418,8 +418,8 @@ fn corpus() -> Vec<Case> {
 fn check_file(file: &str, bytes: &[u8]) {
     let path = golden_dir().join(file);
     if bless_mode() {
-        std::fs::create_dir_all(golden_dir()).unwrap();
-        std::fs::write(&path, bytes).unwrap();
+        std::fs::create_dir_all(golden_dir()).expect("create golden dir");
+        std::fs::write(&path, bytes).expect("write golden fixture");
         return;
     }
     let on_disk = std::fs::read(&path).unwrap_or_else(|e| {

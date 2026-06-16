@@ -37,6 +37,7 @@ public sealed class ExceptionPolicy
     }
 
     /// <summary>Wire all three funnels. Call once, from the App constructor.</summary>
+    /// <param name="app">The WinUI application whose exception events are hooked.</param>
     public static void Install(Application app)
     {
         var policy = new ExceptionPolicy();
@@ -46,6 +47,8 @@ public sealed class ExceptionPolicy
     }
 
     /// <summary>Suppression rule for funnel 1, as a pure predicate.</summary>
+    /// <param name="occurrence">The 1-based count of XAML exceptions seen so far.</param>
+    /// <returns><c>true</c> while still within the storm budget (suppress); <c>false</c> once the storm threshold is exceeded.</returns>
     internal static bool WithinStormBudget(int occurrence) => occurrence <= XamlStormBudget;
 
     private void OnXamlUnhandledException(

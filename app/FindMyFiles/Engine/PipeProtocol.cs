@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
@@ -54,15 +55,16 @@ internal static class PipeProtocol
         public const int Panic = EngineContract.Status.Panic;
     }
 
+    [StructLayout(LayoutKind.Auto)]
     public readonly record struct FrameHeader(
         uint Len, ushort Opcode, ushort Flags, uint RequestId, int StatusCode)
     {
         public bool IsResponse => (Flags & FlagResponse) != 0;
+
         public bool IsEvent => (Flags & FlagEvent) != 0;
     }
 
     // ── Frame header ────────────────────────────────────────────────────
-
     public static void WriteHeader(Span<byte> dest, FrameHeader h)
     {
         BinaryPrimitives.WriteUInt32LittleEndian(dest, h.Len);
@@ -74,8 +76,10 @@ internal static class PipeProtocol
 
     /// <summary>Decodes a <see cref="FrameHeader"/> from the first bytes of a
     /// frame on the wire (the inverse of the header writer above).</summary>
+    /// <param name="src">The frame bytes; the first <see cref="HeaderLen"/> are read.</param>
     /// <exception cref="InvalidDataException">announced payload over the cap
     /// — the connection has no resync point and must be dropped</exception>
+    /// <returns>The decoded frame header.</returns>
     public static FrameHeader ReadHeader(ReadOnlySpan<byte> src)
     {
         var h = new FrameHeader(
@@ -89,10 +93,17 @@ internal static class PipeProtocol
             throw new InvalidDataException(
                 $"frame payload {h.Len} bytes exceeds the {MaxPayloadLen}-byte cap");
         }
+
         return h;
     }
 
     /// <summary>One contiguous frame: header (len filled in) + payload.</summary>
+    /// <param name="opcode">Operation code for the frame.</param>
+    /// <param name="flags">Frame flag bits (response/event).</param>
+    /// <param name="requestId">Request correlation id; 0 for events.</param>
+    /// <param name="status">Status code carried in the header.</param>
+    /// <param name="payload">Payload bytes to append after the header.</param>
+    /// <returns>The header followed by the payload, as one byte array.</returns>
     public static byte[] EncodeFrame(
         ushort opcode, ushort flags, uint requestId, int status, ReadOnlySpan<byte> payload)
     {
@@ -103,7 +114,6 @@ internal static class PipeProtocol
     }
 
     // ── Hello (op 1, binary) ────────────────────────────────────────────
-
     public static byte[] EncodeHelloReq(uint protocolVersion)
     {
         var b = new byte[4];
@@ -131,7 +141,6 @@ internal static class PipeProtocol
     }
 
     // ── Query (op 7, 20B POD options + UTF-8 text) ──────────────────────
-
     public static byte[] EncodeQueryReq(SearchOptions options, string text)
     {
         var textBytes = Encoding.UTF8.GetBytes(text);
@@ -154,6 +163,7 @@ internal static class PipeProtocol
             throw new InvalidDataException(
                 $"QueryReq payload is {payload.Length} bytes, need ≥{len}");
         }
+
         var regexBits = BinaryPrimitives.ReadUInt32LittleEndian(payload[16..]);
         var options = new SearchOptions(
             (FmfSort)BinaryPrimitives.ReadUInt32LittleEndian(payload),
@@ -182,6 +192,7 @@ internal static class PipeProtocol
         {
             throw new InvalidDataException($"QueryResp payload is {payload.Length} bytes, need ≥16");
         }
+
         return (
             BinaryPrimitives.ReadUInt64LittleEndian(payload),
             BinaryPrimitives.ReadUInt64LittleEndian(payload[8..]),
@@ -189,7 +200,6 @@ internal static class PipeProtocol
     }
 
     // ── ResultPage (op 8, binary) ───────────────────────────────────────
-
     public static byte[] EncodeResultPageReq(ulong resultId, ulong offset, uint count)
     {
         var b = new byte[20];
@@ -210,24 +220,29 @@ internal static class PipeProtocol
     }
 
     /// <summary>`{row_count:u32, blob_len:u32}` + 48B rows + WTF-8 blob.</summary>
+    /// <param name="payload">The ResultPage response payload bytes.</param>
+    /// <returns>The decoded rows from the page.</returns>
     public static List<RowData> DecodePageResp(ReadOnlySpan<byte> payload)
     {
         if (payload.Length < 8)
         {
             throw new InvalidDataException($"PageResp payload is {payload.Length} bytes, need ≥8");
         }
+
         var rowCount = BinaryPrimitives.ReadUInt32LittleEndian(payload);
         var blobLen = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
+
         // Validate the declared sizes in long: the fields are u32, so
         // `rowCount * RowSize` overflows int for a hostile/buggy frame. The 16 MiB
         // frame cap already bounds payload.Length, so once this equality holds
         // every offset below fits an int.
-        var expected = 8L + (long)rowCount * RowSize + blobLen;
+        var expected = 8L + ((long)rowCount * RowSize) + blobLen;
         if (expected != payload.Length)
         {
             throw new InvalidDataException(
                 $"PageResp payload is {payload.Length} bytes, expected {expected} for {rowCount} rows");
         }
+
         var rowBytes = (int)rowCount * RowSize;
         return PageCodec.Decode(
             payload.Slice(8, rowBytes),
@@ -263,6 +278,7 @@ internal static class PipeProtocol
             BinaryPrimitives.WriteUInt16LittleEndian(
                 r[EngineContract.RowOffsets.ParentPathLen..], (ushort)parent.Length);
         }
+
         var b = new byte[8 + rowBytes.Length + blob.Count];
         BinaryPrimitives.WriteUInt32LittleEndian(b, (uint)rows.Count);
         BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), (uint)blob.Count);
@@ -272,7 +288,6 @@ internal static class PipeProtocol
     }
 
     // ── ResultFree (op 9, binary) ───────────────────────────────────────
-
     public static byte[] EncodeResultFreeReq(ulong resultId)
     {
         var b = new byte[8];
@@ -290,6 +305,8 @@ internal static class PipeProtocol
 
     /// <summary>32B POD `{kind:u32, _pad:u32, entries:u64, volume:[u8;16]}`;
     /// volume is the zero-padded UTF-8 drive label ("C:"), not a GUID.</summary>
+    /// <param name="payload">The 32-byte event payload bytes.</param>
+    /// <returns>The event kind, entry count, and source volume label.</returns>
     public static (uint Kind, ulong Entries, string Volume) DecodeEvent(ReadOnlySpan<byte> payload)
     {
         CheckLen("Event", payload, 32);
@@ -299,6 +316,7 @@ internal static class PipeProtocol
         {
             len = 16;
         }
+
         return (
             BinaryPrimitives.ReadUInt32LittleEndian(payload),
             BinaryPrimitives.ReadUInt64LittleEndian(payload[8..]),
@@ -316,11 +334,12 @@ internal static class PipeProtocol
     }
 
     // ── JSON payloads (op 4/5/6/10/12, snake_case via EngineJson) ───────
-
     private sealed class VolumeStatusJson
     {
         public string Volume { get; set; } = string.Empty;
+
         public uint State { get; set; }
+
         public ulong Entries { get; set; }
     }
 
@@ -331,6 +350,8 @@ internal static class PipeProtocol
 
     /// <summary>`[{"volume":"C:","state":1,"entries":42}]` — ListVolumes and
     /// IndexStatus share this shape; state values equal VolumeState.</summary>
+    /// <param name="payload">The JSON volume-status array as UTF-8 bytes.</param>
+    /// <returns>The decoded per-volume status list.</returns>
     public static List<VolumeStatus> DecodeVolumeStatuses(ReadOnlySpan<byte> payload)
     {
         var wire = JsonSerializer.Deserialize<List<VolumeStatusJson>>(payload, EngineJson.SnakeCase) ?? [];

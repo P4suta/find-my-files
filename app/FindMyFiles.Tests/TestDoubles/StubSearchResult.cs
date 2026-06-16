@@ -11,7 +11,9 @@ namespace FindMyFiles.Tests.TestDoubles;
 public sealed class StubSearchResult(IReadOnlyList<RowData> rows) : ISearchResult
 {
     public int FetchCount { get; private set; }
+
     public int DisposeCount { get; private set; }
+
     public bool Disposed => DisposeCount > 0;
 
     /// <summary>When set, GetRangeAsync awaits this before completing.</summary>
@@ -42,14 +44,17 @@ public sealed class StubSearchResult(IReadOnlyList<RowData> rows) : ISearchResul
         {
             await gate.Task;
         }
+
         if (HonorCancellation)
         {
             ct.ThrowIfCancellationRequested();
         }
+
         if (ThrowOnFetch is { } ex)
         {
             throw ex;
         }
+
         var start = (int)Math.Min(offset, rows.Count);
         var n = Math.Max(0, Math.Min(count, rows.Count - start));
         return [.. rows.Skip(start).Take(n)];

@@ -36,9 +36,9 @@ public sealed class AppSettingsTests
 
             // The wire names are stable snake_case — what users hand-edit.
             var json = File.ReadAllText(path);
-            Assert.Contains("\"focused_search\"", json);
-            Assert.Contains("\"focused_exclude_paths\"", json);
-            Assert.Contains("\"focused_extensions\"", json);
+            Assert.Contains("\"focused_search\"", json, StringComparison.Ordinal);
+            Assert.Contains("\"focused_exclude_paths\"", json, StringComparison.Ordinal);
+            Assert.Contains("\"focused_extensions\"", json, StringComparison.Ordinal);
         }
         finally
         {
@@ -67,8 +67,8 @@ public sealed class AppSettingsTests
             Assert.Equal("path", loaded.RegexScope);
 
             var json = File.ReadAllText(path);
-            Assert.Contains("\"regex_mode\"", json);
-            Assert.Contains("\"regex_scope\"", json);
+            Assert.Contains("\"regex_mode\"", json, StringComparison.Ordinal);
+            Assert.Contains("\"regex_scope\"", json, StringComparison.Ordinal);
         }
         finally
         {

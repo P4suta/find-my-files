@@ -44,7 +44,8 @@ public sealed class ResultRowTests
         var mtime = new DateTimeOffset(2026, 3, 4, 5, 6, 0, TimeSpan.Zero).ToFileTime();
         var row = ResultRow.CreatePlaceholder(0);
         row.Fill(Rows.File(1, "a.txt", mtime: mtime));
-        var expected = DateTimeOffset.FromFileTime(mtime).ToLocalTime().ToString("yyyy/MM/dd HH:mm");
+        var expected = DateTimeOffset.FromFileTime(mtime).ToLocalTime()
+            .ToString("yyyy/MM/dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
         Assert.Equal(expected, row.DateText);
         Assert.NotEqual(string.Empty, row.DateText);
     }
@@ -97,6 +98,7 @@ public sealed class ResultRowTests
     public void Fill_PathTerm_SplitsHighlightAtBoundary()
     {
         var row = ResultRow.CreatePlaceholder(0);
+
         // ParentPath "F:\t\" + Name "report.txt"; the path term spans the boundary.
         row.Fill(Rows.File(1, "report.txt"), MatchHighlighter.Compile(@"t\report"));
         Assert.Equal([new HighlightRange(3, 2)], row.PathRanges); // "t\" in the parent
@@ -112,7 +114,7 @@ public sealed class ResultRowTests
         var nameChanges = 0;
         row.PropertyChanged += (_, e) =>
         {
-            if (e.PropertyName == nameof(ResultRow.NameRanges))
+            if (string.Equals(e.PropertyName, nameof(ResultRow.NameRanges), StringComparison.Ordinal))
             {
                 nameChanges++;
             }

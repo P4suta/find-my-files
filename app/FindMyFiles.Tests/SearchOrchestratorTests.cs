@@ -20,7 +20,10 @@ public sealed class SearchOrchestratorTests
     {
         _presenter = new ResultsPresenter(_dispatcher);
         _orchestrator = new SearchOrchestrator(
-            _engine, new EngineEventMarshaler(_engine, _dispatcher), _dispatcher, _presenter,
+            _engine,
+            new EngineEventMarshaler(_engine, _dispatcher),
+            _dispatcher,
+            _presenter,
             () => _request);
     }
 
@@ -264,15 +267,21 @@ public sealed class SearchOrchestratorTests
         _orchestrator.FocusedSearch = true; // on — but regex mode must override it
 
         var opts = new SearchOptions(
-            FmfSort.Name, false, FmfCase.Smart, IncludeHiddenSystem: false,
-            RegexMode: true, Scope: RegexScope.Path);
+            FmfSort.Name,
+            false,
+            FmfCase.Smart,
+            IncludeHiddenSystem: false,
+            RegexMode: true,
+            Scope: RegexScope.Path);
         _request = new SearchRequest(@"report.*\.pdf$", opts);
         _orchestrator.Requery(RequeryOrigin.Filter);
 
         var search = Assert.Single(_engine.Searches);
+
         // The whole-regex flag and scope reach the engine verbatim…
         Assert.True(search.Options.RegexMode);
         Assert.Equal(RegexScope.Path, search.Options.Scope);
+
         // …and the pattern is NOT rewritten by focused mode (it would corrupt
         // the regex). The engine sees exactly what the user typed.
         Assert.Equal(@"report.*\.pdf$", search.Query);

@@ -16,6 +16,7 @@ public static class ServiceProvisioner
     /// fmf-service `setup` verb), forwarding the daily user's SID so OTS
     /// elevation doesn't lock them out (docs/SECURITY.md 脅威1). Blocking work
     /// runs off the UI thread.</summary>
+    /// <returns>The outcome of the elevated setup step (success, declined, or failed).</returns>
     public static async Task<ServiceActionOutcome> RegisterAsync()
     {
         var exe = ServiceSetup.LocateServiceExe(AppContext.BaseDirectory);
@@ -24,9 +25,10 @@ public static class ServiceProvisioner
             FileLog.Warn("service-ui", "fmf-service.exe not found — cannot register");
             return ServiceActionOutcome.Failed;
         }
+
         var sid = ServiceSetup.CurrentUserSid();
         var args = ServiceSetup.IsValidSid(sid) ? $"setup --owner-sid={sid}" : "setup";
-        var result = await Task.Run(() => ServiceSetup.RunElevated(exe, args));
+        var result = await Task.Run(() => ServiceSetup.RunElevated(exe, args)).ConfigureAwait(false);
         FileLog.Info("service-ui", $"`{args}` → {result.Outcome} (exit {result.ExitCode})");
         return result.Outcome;
     }
@@ -36,18 +38,21 @@ public static class ServiceProvisioner
     /// the fresh instance connects. Returns false if the pipe never came up in
     /// time (the caller then offers a manual retry). On success this process
     /// exits and never returns.</summary>
+    /// <returns>True once the pipe answered and a relaunch was triggered; false if it never came up in time.</returns>
     public static async Task<bool> WaitForServiceThenRelaunchAsync()
     {
         for (var attempt = 0; attempt < 16; attempt++)
         {
             if (await PipeEngineClient.ProbeAsync(
-                    PipeProtocol.DefaultPipeName, TimeSpan.FromMilliseconds(300)))
+                    PipeProtocol.DefaultPipeName, TimeSpan.FromMilliseconds(300)).ConfigureAwait(false))
             {
                 ShellOps.Relaunch(); // replaces this process with a connected one
                 return true;
             }
-            await Task.Delay(200);
+
+            await Task.Delay(200).ConfigureAwait(false);
         }
+
         return false;
     }
 }

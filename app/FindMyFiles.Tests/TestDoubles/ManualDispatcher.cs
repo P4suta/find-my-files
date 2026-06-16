@@ -42,6 +42,7 @@ public sealed class ManualDispatcher : IDispatcher
             _queue.Dequeue()();
             ran++;
         }
+
         return ran;
     }
 
@@ -80,6 +81,7 @@ public sealed class ManualDispatcher : IDispatcher
             {
                 return;
             }
+
             IsStarted = false; // one-shot
             tick();
         }

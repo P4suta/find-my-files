@@ -22,6 +22,10 @@ public static class FocusedQueryRewriter
     /// An empty/whitespace query is returned unchanged — the "no query, no
     /// results" rule stays the orchestrator's, and a rewrite must never turn
     /// an empty query into a non-empty one.</summary>
+    /// <param name="userQuery">The user's raw query text.</param>
+    /// <param name="excludePaths">Noise paths appended as <c>!path:"…"</c> exclusions.</param>
+    /// <param name="extensions">The extension whitelist appended as one <c>ext:</c> term.</param>
+    /// <returns>The rewritten query, or the input unchanged when empty or already constrained.</returns>
     public static string Compose(
         string userQuery,
         IReadOnlyList<string> excludePaths,
@@ -31,6 +35,7 @@ public static class FocusedQueryRewriter
         {
             return userQuery;
         }
+
         var excludeSuffix = BuildExcludeSuffix(excludePaths);
         var extSuffix = BuildExtSuffix(extensions);
         if (excludeSuffix.Length == 0 && extSuffix.Length == 0)
@@ -42,6 +47,7 @@ public static class FocusedQueryRewriter
         for (var i = 0; i < groups.Count; i++)
         {
             var group = groups[i];
+
             // Simple substring heuristics on the user's group (quoted
             // occurrences over-match, which only skips a suffix — the user's
             // terms always win). Both flags are decided before any append:
@@ -53,12 +59,15 @@ public static class FocusedQueryRewriter
             {
                 group += excludeSuffix;
             }
+
             if (!hasTypeFilter)
             {
                 group += extSuffix;
             }
+
             groups[i] = group;
         }
+
         return string.Join(" | ", groups);
     }
 
@@ -75,6 +84,7 @@ public static class FocusedQueryRewriter
             {
                 inQuotes = !inQuotes;
             }
+
             if (c == '|' && !inQuotes)
             {
                 groups.Add(current.ToString().Trim());
@@ -85,6 +95,7 @@ public static class FocusedQueryRewriter
                 current.Append(c);
             }
         }
+
         groups.Add(current.ToString().Trim());
         return groups;
     }
@@ -99,6 +110,7 @@ public static class FocusedQueryRewriter
             {
                 continue;
             }
+
             // A quote inside the value cannot be escaped in the query
             // language — it would silently change the whole query's meaning.
             if (p.Contains('"', StringComparison.Ordinal))
@@ -106,8 +118,10 @@ public static class FocusedQueryRewriter
                 WarnOnce("focused", $"exclude path with a quote ignored: {p}");
                 continue;
             }
+
             sb.Append(" !path:\"").Append(p).Append('"');
         }
+
         return sb.ToString();
     }
 
@@ -121,6 +135,7 @@ public static class FocusedQueryRewriter
             {
                 continue;
             }
+
             // ext: is an unquoted atom — whitespace/quote/pipe would break
             // tokenization; ;/, are the engine's own list separators.
             if (e.Any(char.IsWhiteSpace) || e.AsSpan().ContainsAny("\"|;,"))
@@ -128,8 +143,10 @@ public static class FocusedQueryRewriter
                 WarnOnce("focused", $"extension entry ignored: {e}");
                 continue;
             }
+
             valid.Add(e);
         }
+
         // No valid entries → no term at all (an empty ext: matches nothing).
         return valid.Count == 0 ? string.Empty : " ext:" + string.Join(';', valid);
     }
@@ -143,6 +160,7 @@ public static class FocusedQueryRewriter
                 return;
             }
         }
+
         FileLog.Warn(area, message + " (settings.json)");
     }
 

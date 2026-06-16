@@ -116,14 +116,12 @@ pub fn search(
         .groups
         .iter()
         .any(|g| !matches!(g.driver, Driver::FullScan | Driver::MatchAll));
-    let table: Option<std::sync::Arc<OffsetTable>> = if needs_table {
-        Some(idx.cached_derived_or_update(|prev| match prev {
+    let table: Option<std::sync::Arc<OffsetTable>> = needs_table.then(|| {
+        idx.cached_derived_or_update(|prev| match prev {
             Some(p) => OffsetTable::extend_from(idx, p),
             None => OffsetTable::build(idx),
-        }))
-    } else {
-        None
-    };
+        })
+    });
     metrics.memo_us = stage.lap();
 
     let n = idx.len();

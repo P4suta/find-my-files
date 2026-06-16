@@ -38,6 +38,7 @@ public sealed class ShellOpsTests
     private sealed class RecordingRunner : IProcessRunner
     {
         internal ProcessStartInfo? Started { get; private set; }
+
         internal int Calls { get; private set; }
 
         public void Start(ProcessStartInfo psi)

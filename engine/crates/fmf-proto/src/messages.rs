@@ -42,19 +42,23 @@ pub enum WireError {
 }
 
 fn u16_at(b: &[u8], off: usize) -> u16 {
-    u16::from_le_bytes(b[off..off + 2].try_into().unwrap())
+    u16::from_le_bytes([b[off], b[off + 1]])
 }
 
 fn u32_at(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
+    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 
 fn u64_at(b: &[u8], off: usize) -> u64 {
-    u64::from_le_bytes(b[off..off + 8].try_into().unwrap())
+    let mut a = [0u8; 8];
+    a.copy_from_slice(&b[off..off + 8]);
+    u64::from_le_bytes(a)
 }
 
 fn bytes16_at(b: &[u8], off: usize) -> [u8; 16] {
-    b[off..off + 16].try_into().unwrap()
+    let mut a = [0u8; 16];
+    a.copy_from_slice(&b[off..off + 16]);
+    a
 }
 
 const fn check_len(what: &'static str, b: &[u8], expected: usize) -> Result<(), WireError> {

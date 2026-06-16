@@ -36,21 +36,21 @@ internal static partial class NativeEngine
     }
 
     [LibraryImport("fmf_engine")]
-    internal static partial uint fmf_abi_version();
+    internal static partial uint Fmf_abi_version();
 
     [LibraryImport("fmf_engine", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int fmf_engine_create(string configJson, out IntPtr handle);
 
     [LibraryImport("fmf_engine")]
-    internal static partial int fmf_engine_destroy(IntPtr handle);
+    internal static partial int Fmf_engine_destroy(IntPtr handle);
 
     // Save-now for Ready, dirty volumes. The UI never calls this on its own;
     // it exists for in-proc parity with the service path (ARCHITECTURE.md).
     [LibraryImport("fmf_engine")]
-    internal static partial int fmf_flush(IntPtr handle);
+    internal static partial int Fmf_flush(IntPtr handle);
 
     [LibraryImport("fmf_engine")]
-    internal static unsafe partial int fmf_set_event_callback(
+    internal static unsafe partial int Fmf_set_event_callback(
         IntPtr handle,
         delegate* unmanaged[Cdecl]<FmfEvent*, IntPtr, void> cb,
         IntPtr user);
@@ -60,18 +60,18 @@ internal static partial class NativeEngine
         IntPtr handle, FmfVolumeStatus* buf, uint cap, out uint count);
 
     [LibraryImport("fmf_engine")]
-    internal static unsafe partial int fmf_index_start(IntPtr handle, byte** volumes, uint n);
+    internal static unsafe partial int Fmf_index_start(IntPtr handle, byte** volumes, uint n);
 
     // ADR-0024: non-elevated scope-mode start over absolute root paths.
     [LibraryImport("fmf_engine")]
-    internal static unsafe partial int fmf_index_start_scope(IntPtr handle, byte** roots, uint n);
+    internal static unsafe partial int Fmf_index_start_scope(IntPtr handle, byte** roots, uint n);
 
     [LibraryImport("fmf_engine")]
     internal static unsafe partial int fmf_index_status(
         IntPtr handle, FmfVolumeStatus* buf, uint cap, out uint count);
 
     [LibraryImport("fmf_engine")]
-    internal static unsafe partial int fmf_blob_free(FmfBlob* blob);
+    internal static unsafe partial int Fmf_blob_free(FmfBlob* blob);
 
     [LibraryImport("fmf_engine")]
     internal static unsafe partial int fmf_engine_stats(IntPtr handle, out FmfBlob* blob);
@@ -91,13 +91,14 @@ internal static partial class NativeEngine
         {
             return null;
         }
+
         try
         {
             return System.Text.Encoding.UTF8.GetString((byte*)blob->Data, (int)blob->Len);
         }
         finally
         {
-            _ = fmf_blob_free(blob);
+            _ = Fmf_blob_free(blob);
         }
     }
 
@@ -106,10 +107,10 @@ internal static partial class NativeEngine
         IntPtr resultHandle, ulong offset, uint count, out FmfPage* page);
 
     [LibraryImport("fmf_engine")]
-    internal static unsafe partial int fmf_page_free(FmfPage* page);
+    internal static unsafe partial int Fmf_page_free(FmfPage* page);
 
     [LibraryImport("fmf_engine")]
-    internal static partial int fmf_result_free(IntPtr resultHandle);
+    internal static partial int Fmf_result_free(IntPtr resultHandle);
 
     [LibraryImport("fmf_engine")]
     internal static unsafe partial int fmf_last_error(byte* buf, ref uint len);
@@ -131,98 +132,5 @@ internal static partial class NativeEngine
             Stale => new StaleResultException(),
             _ => new EngineException($"{operation} failed ({code}): {detail}", code),
         };
-    }
-}
-
-/// <summary>
-/// WTF-8 decoding: like UTF-8 but unpaired surrogates round-trip, matching
-/// the engine's name pools. C# strings hold unpaired surrogates natively.
-/// </summary>
-internal static class Wtf8
-{
-    public static string Decode(ReadOnlySpan<byte> bytes)
-    {
-        var chars = new char[bytes.Length]; // UTF-16 units ≤ WTF-8 bytes
-        int n = 0, i = 0;
-        while (i < bytes.Length)
-        {
-            uint b0 = bytes[i];
-            uint cp;
-            int adv;
-            if (b0 < 0x80) { cp = b0; adv = 1; }
-            else if (b0 < 0xE0)
-            {
-                cp = ((b0 & 0x1F) << 6) | (uint)(bytes[i + 1] & 0x3F);
-                adv = 2;
-            }
-            else if (b0 < 0xF0)
-            {
-                cp = ((b0 & 0x0F) << 12) | (uint)((bytes[i + 1] & 0x3F) << 6)
-                     | (uint)(bytes[i + 2] & 0x3F);
-                adv = 3;
-            }
-            else
-            {
-                cp = ((b0 & 0x07) << 18) | (uint)((bytes[i + 1] & 0x3F) << 12)
-                     | (uint)((bytes[i + 2] & 0x3F) << 6) | (uint)(bytes[i + 3] & 0x3F);
-                adv = 4;
-            }
-            i += adv;
-            if (cp >= 0x10000)
-            {
-                cp -= 0x10000;
-                chars[n++] = (char)(0xD800 + (cp >> 10));
-                chars[n++] = (char)(0xDC00 + (cp & 0x3FF));
-            }
-            else
-            {
-                chars[n++] = (char)cp; // includes lone surrogates — intentional
-            }
-        }
-        return new string(chars, 0, n);
-    }
-
-    /// <summary>WTF-8 encoding: the inverse of <see cref="Decode"/>. Lone
-    /// surrogates become 3-byte sequences instead of U+FFFD.</summary>
-    public static byte[] Encode(string s)
-    {
-        var bytes = new byte[s.Length * 3]; // WTF-8 bytes ≤ 3 × UTF-16 units
-        int n = 0, i = 0;
-        while (i < s.Length)
-        {
-            uint cp = s[i];
-            if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
-            {
-                cp = (uint)char.ConvertToUtf32(s[i], s[i + 1]);
-                i += 2;
-            }
-            else
-            {
-                i++; // lone surrogates fall through as 3-byte sequences
-            }
-            if (cp < 0x80)
-            {
-                bytes[n++] = (byte)cp;
-            }
-            else if (cp < 0x800)
-            {
-                bytes[n++] = (byte)(0xC0 | (cp >> 6));
-                bytes[n++] = (byte)(0x80 | (cp & 0x3F));
-            }
-            else if (cp < 0x10000)
-            {
-                bytes[n++] = (byte)(0xE0 | (cp >> 12));
-                bytes[n++] = (byte)(0x80 | ((cp >> 6) & 0x3F));
-                bytes[n++] = (byte)(0x80 | (cp & 0x3F));
-            }
-            else
-            {
-                bytes[n++] = (byte)(0xF0 | (cp >> 18));
-                bytes[n++] = (byte)(0x80 | ((cp >> 12) & 0x3F));
-                bytes[n++] = (byte)(0x80 | ((cp >> 6) & 0x3F));
-                bytes[n++] = (byte)(0x80 | (cp & 0x3F));
-            }
-        }
-        return bytes[..n];
     }
 }

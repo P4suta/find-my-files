@@ -135,9 +135,9 @@ impl VolumeIndex {
             return Err(bad("bad magic"));
         }
         h.update(&head);
-        let journal_id = u64::from_le_bytes(head[8..16].try_into().unwrap());
-        let next_usn = i64::from_le_bytes(head[16..24].try_into().unwrap());
-        let count = u64::from_le_bytes(head[24..32].try_into().unwrap()) as usize;
+        let journal_id = u64::from_le_bytes(head[8..16].try_into().expect("32-byte header"));
+        let next_usn = i64::from_le_bytes(head[16..24].try_into().expect("32-byte header"));
+        let count = u64::from_le_bytes(head[24..32].try_into().expect("32-byte header")) as usize;
 
         let lower_pool: Vec<u8> = read_vec(r, &mut h)?;
         let orig_pool: Vec<u8> = read_vec(r, &mut h)?;

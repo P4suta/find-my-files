@@ -17,12 +17,16 @@ internal static partial class PipeServerIdentity
 {
     /// <summary>True only when the pipe's server is the running fmf-engine
     /// service process.</summary>
+    /// <param name="pipe">The connected default-pipe handle to inspect.</param>
+    /// <returns>True when the pipe's server process is the fmf-engine service; otherwise false.</returns>
     internal static bool IsServerTrusted(SafePipeHandle pipe) =>
         GetNamedPipeServerProcessId(pipe, out var serverPid) && IsServiceProcess(serverPid);
 
     /// <summary>True when <paramref name="pid"/> is the running fmf-engine
     /// service process. Split out so unit tests can exercise it without a
     /// live pipe.</summary>
+    /// <param name="pid">The process id to compare against the live service's pid.</param>
+    /// <returns>True when the service is running and its pid equals <paramref name="pid"/>; otherwise false.</returns>
     internal static bool IsServiceProcess(uint pid)
     {
         var servicePid = ServiceSetup.QueryServiceProcessId();

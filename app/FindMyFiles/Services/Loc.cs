@@ -24,18 +24,24 @@ public static class Loc
 
     /// <summary>Resolve a key to the current UI language. A missing key falls
     /// back to the key itself so the gap is visible, never an empty UI.</summary>
+    /// <param name="key">Flat resource identifier (e.g. Status_Preparing).</param>
+    /// <returns>The localized string, or the key itself when unresolved.</returns>
     public static string Get(string key)
     {
         if (Override is { } over)
         {
             return over(key);
         }
+
         var value = Loader.GetString(key);
         return string.IsNullOrEmpty(value) ? key : value;
     }
 
     /// <summary>Resolve a key whose value is a composite format string
     /// (placeholders {0}, {1}, …) and fill it.</summary>
+    /// <param name="key">Flat resource identifier whose value is a format string.</param>
+    /// <param name="args">Values substituted into the {0}, {1}, … placeholders.</param>
+    /// <returns>The localized string with the arguments formatted in.</returns>
     public static string Get(string key, params object[] args) =>
         string.Format(CultureInfo.CurrentCulture, Get(key), args);
 }

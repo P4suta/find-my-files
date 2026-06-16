@@ -70,12 +70,16 @@ public sealed partial class ResultRow : ObservableObject
     /// <summary>Make an empty row for <paramref name="index"/> — the
     /// virtualized list's only constructor, called for every slot before any
     /// data is fetched.</summary>
+    /// <param name="index">Absolute position of the row in the full result set.</param>
+    /// <returns>A new placeholder row keyed to <paramref name="index"/>.</returns>
     public static ResultRow CreatePlaceholder(long index) => new() { Index = index };
 
     /// <summary>Populate this placeholder from an engine <see cref="RowData"/>
     /// page hit: copies identity (<see cref="EntryRef"/>, <see cref="FullPath"/>),
     /// formats size/date for display, picks the type glyph, and clears
     /// <see cref="IsPlaceholder"/>. In place — the bound instance is reused.</summary>
+    /// <param name="data">The engine page hit supplying this row's identity and fields.</param>
+    /// <param name="highlighter">Active-query highlighter, or null when no query is set.</param>
     public void Fill(RowData data, IHighlighter? highlighter = null)
     {
         EntryRef = data.EntryRef;
@@ -96,6 +100,8 @@ public sealed partial class ResultRow : ObservableObject
     /// boundary so each TextBlock gets only its own slice. Ranges are assigned
     /// only when they change, so a same-query RefreshInPlace refill (identical
     /// ranges) raises no notification and repaints nothing.</summary>
+    /// <param name="highlighter">Active-query highlighter, or null when no query is set.</param>
+    /// <param name="data">The engine page hit whose name and path are matched.</param>
     private void ApplyHighlight(IHighlighter? highlighter, RowData data)
     {
         if (highlighter is null || highlighter.IsEmpty)
@@ -103,6 +109,7 @@ public sealed partial class ResultRow : ObservableObject
             AssignRanges(NoRanges, NoRanges);
             return;
         }
+
         var nameHits = new List<HighlightRange>(highlighter.Ranges(data.Name, HighlightField.Name));
         var parentHits = new List<HighlightRange>();
         var boundary = data.ParentPath.Length;
@@ -110,6 +117,7 @@ public sealed partial class ResultRow : ObservableObject
         {
             SplitAtBoundary(r, boundary, parentHits, nameHits);
         }
+
         AssignRanges(
             ToShared(CompiledHighlighter.MergeRanges(nameHits)),
             ToShared(CompiledHighlighter.MergeRanges(parentHits)));
@@ -118,12 +126,15 @@ public sealed partial class ResultRow : ObservableObject
     /// <summary>Assign the computed ranges, but only when they differ from the
     /// current ones — equal ranges keep the existing reference so the
     /// ObservableProperty setter stays silent (RefreshInPlace anti-flicker).</summary>
+    /// <param name="name">Computed highlight ranges for the name.</param>
+    /// <param name="path">Computed highlight ranges for the parent path.</param>
     private void AssignRanges(IReadOnlyList<HighlightRange> name, IReadOnlyList<HighlightRange> path)
     {
         if (!RangesEqual(NameRanges, name))
         {
             NameRanges = name;
         }
+
         if (!RangesEqual(PathRanges, path))
         {
             PathRanges = path;
@@ -134,6 +145,10 @@ public sealed partial class ResultRow : ObservableObject
     /// before <paramref name="boundary"/> highlights the parent path, the slice
     /// after highlights the name (re-based to name-local coordinates). A match
     /// straddling the separator lands in both.</summary>
+    /// <param name="r">A full-path match range in full-path coordinates.</param>
+    /// <param name="boundary">Index where the parent path ends and the name begins.</param>
+    /// <param name="parent">Accumulates the parent-path slice of the match.</param>
+    /// <param name="name">Accumulates the name slice, re-based to name-local coordinates.</param>
     private static void SplitAtBoundary(
         HighlightRange r, int boundary, List<HighlightRange> parent, List<HighlightRange> name)
     {
@@ -143,6 +158,7 @@ public sealed partial class ResultRow : ObservableObject
             var leftEnd = Math.Min(end, boundary);
             parent.Add(new HighlightRange(r.Start, leftEnd - r.Start));
         }
+
         if (end > boundary)
         {
             var rightStart = Math.Max(r.Start, boundary);
@@ -159,10 +175,12 @@ public sealed partial class ResultRow : ObservableObject
         {
             return true;
         }
+
         if (a.Count != b.Count)
         {
             return false;
         }
+
         for (var i = 0; i < a.Count; i++)
         {
             if (a[i] != b[i])
@@ -170,6 +188,7 @@ public sealed partial class ResultRow : ObservableObject
                 return false;
             }
         }
+
         return true;
     }
 

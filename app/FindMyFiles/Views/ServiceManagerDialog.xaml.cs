@@ -1,8 +1,8 @@
-using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace FindMyFiles.Views;
 
@@ -36,21 +36,25 @@ public sealed partial class ServiceManagerDialog : ContentDialog
     /// instance (ContentDialog allows only one open at a time). Named OpenAsync,
     /// not ShowAsync, to avoid hiding the inherited
     /// <see cref="ContentDialog.ShowAsync()"/>.</summary>
+    /// <returns>A <see cref="Task"/> that completes when the dialog closes.</returns>
     public static async Task OpenAsync()
     {
         if (_open)
         {
             return;
         }
+
         var root = App.Window?.Content?.XamlRoot;
         if (root is null)
         {
             return;
         }
+
         _open = true;
         try
         {
             await new ServiceManagerDialog { XamlRoot = root }.ShowAsync();
+
             // If the service was uninstalled/stopped while this instance was
             // running on the pipe, its connection is dead and can't recover —
             // relaunch so the app re-resolves the engine and lands on the setup

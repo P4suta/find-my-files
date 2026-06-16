@@ -19,12 +19,12 @@ public sealed class ServiceSetupTests
             var dev = Path.Combine(root.FullName, "build", "engine", "release");
             Directory.CreateDirectory(dev);
             var devExe = Path.Combine(dev, "fmf-service.exe");
-            File.WriteAllText(devExe, "");
+            File.WriteAllText(devExe, string.Empty);
             Assert.Equal(devExe, ServiceSetup.LocateServiceExe(baseDir));
 
             // The dist bundle wins over the dev tree.
             var bundled = Path.Combine(baseDir, "fmf-service.exe");
-            File.WriteAllText(bundled, "");
+            File.WriteAllText(bundled, string.Empty);
             Assert.Equal(bundled, ServiceSetup.LocateServiceExe(baseDir));
         }
         finally
@@ -52,7 +52,7 @@ public sealed class ServiceSetupTests
     {
         var sid = ServiceSetup.CurrentUserSid();
         Assert.NotNull(sid);
-        Assert.StartsWith("S-1-", sid);
+        Assert.StartsWith("S-1-", sid, StringComparison.Ordinal);
         Assert.True(ServiceSetup.IsValidSid(sid), "own SID must survive the injection guard");
     }
 }

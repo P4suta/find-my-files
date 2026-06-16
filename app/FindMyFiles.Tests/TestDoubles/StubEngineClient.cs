@@ -19,7 +19,9 @@ public sealed class StubEngineClient : IEngineClient
     public sealed class PendingSearch(string query, SearchOptions options)
     {
         public string Query { get; } = query;
+
         public SearchOptions Options { get; } = options;
+
         public TaskCompletionSource<SearchOutcome> Tcs { get; } = new();
 
         /// <summary>Complete this query with rows; returns the result so the
@@ -47,8 +49,11 @@ public sealed class StubEngineClient : IEngineClient
     public Exception? ThrowOnStartup { get; set; }
 
     public event Action<string>? IndexChanged;
+
     public event Action<VolumeStatus>? VolumeUpdated;
+
     public event Action<int>? EngineErrorOccurred;
+
     public event Action<EngineConnectionState>? ConnectionChanged;
 
     public EngineConnectionState Connection => EngineConnectionState.InProc;
@@ -87,10 +92,13 @@ public sealed class StubEngineClient : IEngineClient
         {
             throw ex;
         }
+
         var pending = new PendingSearch(query, options);
         Searches.Add(pending);
         return pending.Tcs.Task;
     }
 
-    public void Dispose() { }
+    public void Dispose()
+    {
+    }
 }

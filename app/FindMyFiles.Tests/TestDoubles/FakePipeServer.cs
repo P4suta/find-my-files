@@ -29,11 +29,12 @@ public sealed class FakePipeServer : IDisposable
     private sealed class Conn
     {
         public required NamedPipeServerStream Stream { get; init; }
+
         public SemaphoreSlim WriteLock { get; } = new(1, 1);
     }
 
     private readonly CancellationTokenSource _cts = new();
-    private readonly object _gate = new();
+    private readonly System.Threading.Lock _gate = new();
     private readonly List<Conn> _conns = [];
     private readonly List<(int Connection, ushort Opcode, byte[] Payload)> _received = [];
     private int _connections;
@@ -41,7 +42,9 @@ public sealed class FakePipeServer : IDisposable
     public string PipeName { get; } = "fmf-test-" + Guid.NewGuid().ToString("N");
 
     public uint ProtocolVersion { get; set; } = PipeProtocol.ProtocolVersion;
+
     public uint AbiVersion { get; set; } = 1;
+
     public uint ServerPid { get; set; } = 4242;
 
     /// <summary>Write every response one byte at a time.</summary>
@@ -61,7 +64,7 @@ public sealed class FakePipeServer : IDisposable
 
     public FakePipeServer()
     {
-        Task.Run(AcceptLoopAsync);
+        _ = Task.Run(AcceptLoopAsync);
     }
 
     public IReadOnlyList<(int Connection, ushort Opcode, byte[] Payload)> Received
@@ -95,14 +98,17 @@ public sealed class FakePipeServer : IDisposable
             {
                 n = _received.Count(r => r.Opcode == opcode);
             }
+
             if (n >= minCount)
             {
                 return;
             }
+
             if (Environment.TickCount64 > deadline)
             {
                 throw new TimeoutException($"opcode {opcode} arrived {n} < {minCount} times");
             }
+
             await Task.Delay(10);
         }
     }
@@ -115,12 +121,18 @@ public sealed class FakePipeServer : IDisposable
         {
             conn = _conns.LastOrDefault(c => c.Stream.IsConnected);
         }
+
         if (conn is null)
         {
             throw new InvalidOperationException("no connected client to push to");
         }
+
         await SendAsync(
-            conn, (ushort)kind, PipeProtocol.FlagEvent, 0, 0,
+            conn,
+            (ushort)kind,
+            PipeProtocol.FlagEvent,
+            0,
+            0,
             PipeProtocol.EncodeEvent(kind, entries, volume));
     }
 
@@ -140,6 +152,7 @@ public sealed class FakePipeServer : IDisposable
                 {
                 }
             }
+
             _conns.Clear();
         }
     }
@@ -158,9 +171,11 @@ public sealed class FakePipeServer : IDisposable
             try
             {
                 stream = new NamedPipeServerStream(
-                    PipeName, PipeDirection.InOut,
+                    PipeName,
+                    PipeDirection.InOut,
                     NamedPipeServerStream.MaxAllowedServerInstances,
-                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                    PipeTransmissionMode.Byte,
+                    PipeOptions.Asynchronous);
                 await stream.WaitForConnectionAsync(_cts.Token);
             }
             catch
@@ -168,11 +183,13 @@ public sealed class FakePipeServer : IDisposable
                 stream?.Dispose();
                 return;
             }
+
             var conn = new Conn { Stream = stream };
             lock (_gate)
             {
                 _conns.Add(conn);
             }
+
             var index = Interlocked.Increment(ref _connections) - 1;
             _ = Task.Run(() => ServeAsync(conn, index));
         }
@@ -192,10 +209,12 @@ public sealed class FakePipeServer : IDisposable
                 {
                     await conn.Stream.ReadExactlyAsync(payload, _cts.Token);
                 }
+
                 lock (_gate)
                 {
                     _received.Add((index, h.Opcode, payload));
                 }
+
                 // Concurrent dispatch: a held response (Handler gate) must
                 // not stop the server from reading the next request.
                 _ = Task.Run(async () =>
@@ -225,6 +244,7 @@ public sealed class FakePipeServer : IDisposable
         {
             return await overridden;
         }
+
         switch (opcode)
         {
             case PipeProtocol.Op.Hello:
@@ -242,13 +262,14 @@ public sealed class FakePipeServer : IDisposable
                 return (PipeProtocol.Status.Ok,
                     PipeProtocol.EncodeQueryResp(1, (ulong)Rows.Count, "{}"));
             case PipeProtocol.Op.ResultPage:
-            {
-                var (_, offset, count) = PipeProtocol.DecodeResultPageReq(payload);
-                var start = (int)Math.Min(offset, (ulong)Rows.Count);
-                var n = Math.Min((int)count, Rows.Count - start);
-                return (PipeProtocol.Status.Ok,
-                    PipeProtocol.EncodePageResp(Rows.GetRange(start, n)));
-            }
+                {
+                    var (_, offset, count) = PipeProtocol.DecodeResultPageReq(payload);
+                    var start = (int)Math.Min(offset, (ulong)Rows.Count);
+                    var n = Math.Min((int)count, Rows.Count - start);
+                    return (PipeProtocol.Status.Ok,
+                        PipeProtocol.EncodePageResp(Rows.GetRange(start, n)));
+                }
+
             case PipeProtocol.Op.Stats:
                 return (PipeProtocol.Status.Ok, "{}"u8.ToArray());
             default:

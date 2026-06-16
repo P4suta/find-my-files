@@ -1,10 +1,5 @@
 namespace FindMyFiles.Highlighting;
 
-/// <summary>One piece of a string for highlighted rendering.</summary>
-/// <param name="Text">The piece's text.</param>
-/// <param name="Highlighted">True when this piece should be emphasized.</param>
-public readonly record struct HighlightSegment(string Text, bool Highlighted);
-
 /// <summary>
 /// Splits a string into consecutive highlighted/plain segments from a set of
 /// merged ranges — the pure, unit-tested core of the highlight renderer, kept
@@ -22,6 +17,7 @@ public static class HighlightSegmenter
     /// </summary>
     /// <param name="text">The full string being rendered.</param>
     /// <param name="ranges">The spans to emphasize.</param>
+    /// <returns>The string split into consecutive plain and highlighted pieces, in order.</returns>
     public static List<HighlightSegment> Split(string text, IReadOnlyList<HighlightRange> ranges)
     {
         var segments = new List<HighlightSegment>();
@@ -34,16 +30,20 @@ public static class HighlightSegmenter
             {
                 segments.Add(new HighlightSegment(text[pos..start], false));
             }
+
             if (end > start)
             {
                 segments.Add(new HighlightSegment(text[start..end], true));
             }
+
             pos = end;
         }
+
         if (pos < text.Length)
         {
             segments.Add(new HighlightSegment(text[pos..], false));
         }
+
         return segments;
     }
 }

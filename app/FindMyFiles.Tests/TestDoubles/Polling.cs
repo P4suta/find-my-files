@@ -14,6 +14,7 @@ public static class Polling
             {
                 throw new TimeoutException($"timed out waiting for: {what}");
             }
+
             await Task.Delay(10);
         }
     }

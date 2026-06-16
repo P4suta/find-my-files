@@ -49,6 +49,7 @@ public sealed class EngineEventMarshalerTests
         marshaler.IndexChanged += _ => second++;
 
         _engine.RaiseIndexChanged("*");
+
         // One TryEnqueue hop fans out to every subscriber synchronously.
         Assert.Equal(1, _dispatcher.DrainQueue());
         Assert.Equal(1, first);

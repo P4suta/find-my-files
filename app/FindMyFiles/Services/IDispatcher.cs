@@ -24,6 +24,9 @@ public interface IDispatcher
     /// One-shot timer: fires <paramref name="tick"/> once per Start().
     /// Start() while pending restarts the interval (debounce semantics).
     /// </summary>
+    /// <param name="interval">Delay between Start() and the tick.</param>
+    /// <param name="tick">Callback fired on the UI thread when the interval elapses.</param>
+    /// <returns>A restartable timer handle bound to this dispatcher.</returns>
     IDispatcherTimer CreateOneShotTimer(TimeSpan interval, Action tick);
 }
 

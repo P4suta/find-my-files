@@ -45,16 +45,16 @@ public static class EngineClientFactory
     /// <returns>選択された <see cref="IEngineClient"/> 実装の単一インスタンス。</returns>
     public static IEngineClient Resolve(string[] args)
     {
-        FileLog.Info(
-            "app",
-            AppPaths.IsPortable
-                ? $"data root: portable ({AppPaths.PortableRoot})"
-                : "data root: per-user profile (app folder not writable)");
+        var dataRoot = AppPaths.IsPortable
+            ? $"data root: portable ({AppPaths.PortableRoot})"
+            : "data root: per-user profile (app folder not writable)";
+        FileLog.Info("app", dataRoot);
         if (HasFlag(args, "--fake-engine"))
         {
             FileLog.Info("app", "engine: fake (--fake-engine)");
             return new FakeEngineClient();
         }
+
         var pipeName = OptionValue(args, "--pipe-name=") ?? PipeProtocol.DefaultPipeName;
         var settings = AppSettings.Load();
         var mode = OptionValue(args, "--engine=") ?? settings.Engine;
@@ -63,17 +63,20 @@ public static class EngineClientFactory
             FileLog.Info("app", $"engine: pipe ({pipeName})");
             return new PipeEngineClient(pipeName);
         }
+
         if (string.Equals(mode, "inproc", StringComparison.OrdinalIgnoreCase))
         {
             FileLog.Info("app", "engine: in-proc FFI (explicit)");
             return new FfiEngineClient();
         }
+
         if (!string.Equals(mode, "auto", StringComparison.OrdinalIgnoreCase))
         {
             FileLog.Warn(
                 "app",
                 $"unknown engine mode `{mode}` (allowed: pipe | inproc | auto) — using auto");
         }
+
         // auto (or unknown mode → auto): probe the service pipe, else fall back
         // by service state + elevation. The decision table is unit-tested via
         // DecideAuto without touching the SCM, the pipe, or the token.
@@ -87,12 +90,14 @@ public static class EngineClientFactory
             FileLog.Info("app", $"engine: pipe ({pipeName}, probe succeeded)");
             return new PipeEngineClient(pipeName);
         }
+
         if (choice == EngineChoice.Ffi)
         {
             // Service absent or stopped → the writer lock is free for in-proc.
             FileLog.Info("app", "engine: in-proc FFI (no live service, process is elevated)");
             return new FfiEngineClient();
         }
+
         if (choice == EngineChoice.EmptyServiceUnreachable)
         {
             // Running, but our token isn't on its authorized-SID list (a stale
@@ -143,14 +148,17 @@ public static class EngineClientFactory
         {
             return EngineChoice.Pipe;
         }
+
         if (serviceState() == EngineServiceState.Running)
         {
             return EngineChoice.EmptyServiceUnreachable;
         }
+
         if (elevated())
         {
             return EngineChoice.Ffi;
         }
+
         // Not elevated, no service: walk the user's chosen roots if any are
         // configured (ADR-0024), else send them to the setup screen (which
         // leads with the admin path). `hasScopeConfig` is consulted last.

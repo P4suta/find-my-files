@@ -20,6 +20,7 @@ public sealed class PipeServerIdentityTests
 
     [Fact]
     public void IsServiceProcess_NonexistentPid_FailsClosed() =>
+
         // Real PIDs are multiples of 4 — 3 can never name a process, so the
         // check must answer false, not throw.
         Assert.False(PipeServerIdentity.IsServiceProcess(3));
@@ -32,6 +33,7 @@ public sealed class PipeServerIdentityTests
         {
             return; // service not installed/running here — nothing to assert
         }
+
         Assert.True(PipeServerIdentity.IsServiceProcess(pid));
     }
 

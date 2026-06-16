@@ -38,6 +38,7 @@ public sealed class PipeOverFakeServerContractTests(ITestOutputHelper output)
                             Encoding.UTF8.GetBytes($"syntax error (scripted fixture): {text}")));
                     }
                 }
+
                 return null; // default handlers
             },
         };

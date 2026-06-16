@@ -21,11 +21,12 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
     [Fact]
     public async Task RealService_SearchAsync_KillAsync_ReconnectAsync_RoundTrips()
     {
-        if (Environment.GetEnvironmentVariable(GateVariable) != "1")
+        if (!string.Equals(Environment.GetEnvironmentVariable(GateVariable), "1", StringComparison.Ordinal))
         {
             output.WriteLine($"{GateVariable} != 1 — skipped (run via `just test-pipe`)");
             return;
         }
+
         var exe = FindServiceExe();
         var pipeName = @"\\.\pipe\fmf-itest-" + Guid.NewGuid().ToString("N");
         var dataDir = Path.Combine(Path.GetTempPath(), "fmf-itest-" + Guid.NewGuid().ToString("N"));
@@ -38,7 +39,8 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
             using var client = new PipeEngineClient(pipeName);
             await WaitUntilAsync(
                 () => client.Connection == EngineConnectionState.Connected,
-                "connect to fmf-service", 30_000);
+                "connect to fmf-service",
+                30_000);
 
             // --no-index: zero Ready volumes. A query still succeeds (the
             // contract: queries always target Ready volumes only) with 0 hits.
@@ -57,7 +59,8 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
             await service.WaitForExitAsync();
             await WaitUntilAsync(
                 () => client.Connection == EngineConnectionState.Reconnecting,
-                "client notices the dead service", 15_000);
+                "client notices the dead service",
+                15_000);
             await Assert.ThrowsAsync<EngineUnavailableException>(
                 () => client.SearchAsync("anything", SearchOptions.Default));
 
@@ -68,7 +71,8 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
             service = StartService(exe, pipeName, dataDir);
             await WaitUntilAsync(
                 () => client.Connection == EngineConnectionState.Connected,
-                "reconnect to the restarted service", 30_000);
+                "reconnect to the restarted service",
+                30_000);
             var again = await client.SearchAsync("anything", SearchOptions.Default);
             Assert.Equal(0, again.Result.Count);
             again.Result.Dispose();
@@ -87,11 +91,12 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
     [Fact]
     public async Task RealService_DropFault_FailsFast_AndTheSupervisorRecovers()
     {
-        if (Environment.GetEnvironmentVariable(GateVariable) != "1")
+        if (!string.Equals(Environment.GetEnvironmentVariable(GateVariable), "1", StringComparison.Ordinal))
         {
             output.WriteLine($"{GateVariable} != 1 — skipped (run via `just test-pipe`)");
             return;
         }
+
         var exe = FindServiceExe();
         var pipeName = @"\\.\pipe\fmf-itest-" + Guid.NewGuid().ToString("N");
         var dataDir = Path.Combine(Path.GetTempPath(), "fmf-itest-" + Guid.NewGuid().ToString("N"));
@@ -104,7 +109,8 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
             using var client = new PipeEngineClient(pipeName);
             await WaitUntilAsync(
                 () => client.Connection == EngineConnectionState.Connected,
-                "connect to fmf-service", 30_000);
+                "connect to fmf-service",
+                30_000);
 
             // The dropped request fails fast with the transport exception —
             // not a query error, and not the 10s request timeout.
@@ -114,10 +120,12 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
             // The supervisor reconnects on its own and the next query works.
             await WaitUntilAsync(
                 () => client.Connection == EngineConnectionState.Reconnecting,
-                "client noticed the drop", 15_000);
+                "client noticed the drop",
+                15_000);
             await WaitUntilAsync(
                 () => client.Connection == EngineConnectionState.Connected,
-                "reconnect after !!drop", 30_000);
+                "reconnect after !!drop",
+                30_000);
             var outcome = await client.SearchAsync("anything", SearchOptions.Default);
             Assert.Equal(0, outcome.Result.Count);
             outcome.Result.Dispose();
@@ -142,6 +150,7 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
                 return candidate;
             }
         }
+
         throw new FileNotFoundException(
             "build/engine/release/fmf-service.exe not found above "
             + $"{AppContext.BaseDirectory} — run `just service-build` first");
@@ -186,6 +195,7 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
         {
             return;
         }
+
         try
         {
             output.WriteLine($"[{tag}] {line}");
@@ -201,6 +211,7 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
         {
             return;
         }
+
         try
         {
             if (!p.HasExited)

@@ -102,7 +102,10 @@ pub fn parse(input: &str) -> Result<Ast, ParseError> {
         }
         let terms = terms_from_atom(&atom, negated)?;
         for t in terms {
-            groups.last_mut().unwrap().push(t);
+            groups
+                .last_mut()
+                .expect("groups is seeded with one element")
+                .push(t);
         }
     }
 

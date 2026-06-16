@@ -21,17 +21,23 @@ public static class HighlightText
     /// either change rebuilds the inlines).</summary>
     public static readonly DependencyProperty SourceProperty =
         DependencyProperty.RegisterAttached(
-            "Source", typeof(string), typeof(HighlightText),
+            "Source",
+            typeof(string),
+            typeof(HighlightText),
             new PropertyMetadata(null, OnChanged));
 
     /// <summary>Ranges of <see cref="SourceProperty"/> to emphasize (UTF-16
     /// coordinates, sorted and merged by the highlighter).</summary>
     public static readonly DependencyProperty RangesProperty =
         DependencyProperty.RegisterAttached(
-            "Ranges", typeof(IReadOnlyList<HighlightRange>), typeof(HighlightText),
+            "Ranges",
+            typeof(IReadOnlyList<HighlightRange>),
+            typeof(HighlightText),
             new PropertyMetadata(null, OnChanged));
 
     /// <summary>Set the display text on <paramref name="element"/>.</summary>
+    /// <param name="element">The element to set the display text on.</param>
+    /// <param name="value">The text to display.</param>
     public static void SetSource(DependencyObject element, string? value)
     {
         ArgumentNullException.ThrowIfNull(element);
@@ -39,6 +45,8 @@ public static class HighlightText
     }
 
     /// <summary>Get the display text from <paramref name="element"/>.</summary>
+    /// <param name="element">The element to read the display text from.</param>
+    /// <returns>The display text, or null if none is set.</returns>
     public static string? GetSource(DependencyObject element)
     {
         ArgumentNullException.ThrowIfNull(element);
@@ -46,6 +54,8 @@ public static class HighlightText
     }
 
     /// <summary>Set the highlight ranges on <paramref name="element"/>.</summary>
+    /// <param name="element">The element to set the highlight ranges on.</param>
+    /// <param name="value">The ranges to emphasize.</param>
     public static void SetRanges(DependencyObject element, IReadOnlyList<HighlightRange>? value)
     {
         ArgumentNullException.ThrowIfNull(element);
@@ -53,6 +63,8 @@ public static class HighlightText
     }
 
     /// <summary>Get the highlight ranges from <paramref name="element"/>.</summary>
+    /// <param name="element">The element to read the highlight ranges from.</param>
+    /// <returns>The highlight ranges, or null if none are set.</returns>
     public static IReadOnlyList<HighlightRange>? GetRanges(DependencyObject element)
     {
         ArgumentNullException.ThrowIfNull(element);
@@ -78,6 +90,7 @@ public static class HighlightText
             tb.Inlines.Add(new Run { Text = text });
             return;
         }
+
         var accent = AccentBrush();
         foreach (var seg in HighlightSegmenter.Split(text, ranges))
         {
@@ -90,6 +103,7 @@ public static class HighlightText
                     run.Foreground = accent;
                 }
             }
+
             tb.Inlines.Add(run);
         }
     }

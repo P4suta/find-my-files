@@ -27,7 +27,7 @@ pub(super) struct VolumeQueryCache {
     pub(super) opt: QueryOptions,
     pub(super) content_generation: u64,
     pub(super) structural_generation: u64,
-    pub(super) ids: Arc<Vec<EntryId>>,
+    pub(super) ids: Arc<[EntryId]>,
 }
 
 /// USN position paired with the index state, shared with `Engine::flush`.

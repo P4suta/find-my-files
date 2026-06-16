@@ -12,6 +12,9 @@ namespace FindMyFiles.Services;
 /// </summary>
 public static partial class ShellOps
 {
+    /// <summary><c>COINIT_APARTMENTTHREADED</c> — reveal runs on a dedicated STA.</summary>
+    private const uint COINITAPARTMENTTHREADED = 0x2;
+
     /// <summary>Full path to explorer.exe (<c>%WINDIR%\explorer.exe</c>).
     /// Launching by bare name under <c>UseShellExecute=false</c> lets
     /// CreateProcess search the current directory first — a binary-planting
@@ -42,6 +45,8 @@ public static partial class ShellOps
     /// <see cref="ProcessStartInfo.ArgumentList"/> element, never concatenated
     /// into the <see cref="ProcessStartInfo.Arguments"/> command line where a quote
     /// could break out and inject explorer switches.</summary>
+    /// <param name="fullPath">Absolute path to open, carried as a single argument.</param>
+    /// <returns>The configured explorer.exe start info for the "open" launch.</returns>
     internal static ProcessStartInfo BuildOpenStartInfo(string fullPath)
     {
         var psi = new ProcessStartInfo { FileName = ExplorerPath, UseShellExecute = false };
@@ -75,7 +80,7 @@ public static partial class ShellOps
     /// <param name="fullPath">Absolute path to reveal and select.</param>
     private static void RevealOnSta(string failureMessage, string fullPath)
     {
-        int coHr = CoInitializeEx(IntPtr.Zero, COINIT_APARTMENTTHREADED);
+        int coHr = CoInitializeEx(IntPtr.Zero, COINITAPARTMENTTHREADED);
         try
         {
             if (DoReveal(RealRevealApi.Instance, fullPath) is { } failure)
@@ -147,6 +152,7 @@ public static partial class ShellOps
                 FileName = Environment.ProcessPath!,
                 UseShellExecute = true,
             });
+
             // Only reached when the new instance actually launched.
             Application.Current.Exit();
         });
@@ -203,6 +209,7 @@ public static partial class ShellOps
 
     /// <summary>Win32-error-specific hint — "access denied" must not read
     /// like "the file vanished" (the two have opposite remedies).</summary>
+    /// <param name="ex">The failure whose Win32 error code selects the hint.</param>
     private static string Hint(Exception ex) =>
         (ex as System.ComponentModel.Win32Exception)?.NativeErrorCode switch
         {
@@ -211,9 +218,6 @@ public static partial class ShellOps
             1223 => Loc.Get("Shell_HintCancelled"),          // ERROR_CANCELLED
             _ => Loc.Get("Shell_HintMovedRecently"),
         };
-
-    /// <summary><c>COINIT_APARTMENTTHREADED</c> — reveal runs on a dedicated STA.</summary>
-    private const uint COINIT_APARTMENTTHREADED = 0x2;
 
     // COM init for the reveal STA thread (SHOpenFolderAndSelectItems needs an
     // initialised STA). Pinned to System32 like the other shell imports.

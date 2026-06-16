@@ -22,20 +22,30 @@ public sealed class FakeEngineClient : IEngineClient
     /// <inheritdoc/>
     /// <remarks>The fake never indexes, so this never fires (empty
     /// accessors).</remarks>
-    public event Action<string>? IndexChanged { add { } remove { } }
+    public event Action<string>? IndexChanged
+    {
+        add { } remove { }
+    }
 
     /// <inheritdoc/>
     /// <remarks>Volume state is fixed (one Ready volume), so this never fires
     /// (empty accessors).</remarks>
-    public event Action<VolumeStatus>? VolumeUpdated { add { } remove { } }
+    public event Action<VolumeStatus>? VolumeUpdated
+    {
+        add { } remove { }
+    }
 
     /// <inheritdoc/>
     /// <remarks>In-proc has no transport, so this never fires (empty
     /// accessors).</remarks>
-    public event Action<EngineConnectionState>? ConnectionChanged { add { } remove { } }
+    public event Action<EngineConnectionState>? ConnectionChanged
+    {
+        add { } remove { }
+    }
 
     /// <summary>In-proc: no transport, no state transitions.</summary>
     public EngineConnectionState Connection => EngineConnectionState.InProc;
+
     // Only the DEBUG-only fault injection raises this; Release builds keep
     // the member to satisfy IEngineClient.
 #pragma warning disable CS0067
@@ -51,6 +61,7 @@ public sealed class FakeEngineClient : IEngineClient
     /// searching demo rows has no practical value (user verdict), so the
     /// auto-fallback shows zero results plus the setup notification instead.
     /// The data-bearing fake stays what <c>--fake-engine</c> is for.</summary>
+    /// <returns>A rowless fake that reports 未接続 and yields no results.</returns>
     public static FakeEngineClient CreateEmpty() => new(empty: true);
 
     /// <summary>True for the unelevated auto-fallback instance (no rows) —
@@ -72,6 +83,7 @@ public sealed class FakeEngineClient : IEngineClient
             _rows = [];
             return;
         }
+
         // fake/demo sample-data generation, never security-sensitive — System.Random is intentional
 #pragma warning disable CA5394
         var rng = new Random(42);
@@ -82,6 +94,7 @@ public sealed class FakeEngineClient : IEngineClient
         for (var i = 0; i < EntryCount; i++)
         {
             var isDir = i % 50 == 0;
+
             // Every 97th entry plays a hidden/system file so the UI toggle is
             // exercisable against deterministic data.
             var isHiddenSystem = i % 97 == 0;
@@ -94,7 +107,7 @@ public sealed class FakeEngineClient : IEngineClient
                 EntryRef: (ulong)i,
                 Frn: (uint)i | (1UL << 48),
                 Size: isDir ? 0UL : (ulong)rng.Next(0, 1 << 24),
-                Mtime: baseTime + (long)i * 10_000_000,
+                Mtime: baseTime + ((long)i * 10_000_000),
                 Flags: (isDir ? 1u : 0u) | (isHiddenSystem ? 4u : 0u),
                 Name: name,
                 ParentPath: dirs[rng.Next(dirs.Length)]));
@@ -119,8 +132,9 @@ public sealed class FakeEngineClient : IEngineClient
         {
             FileLog.Warn(
                 "fake-engine",
-                $"invalid_queries.json not loadable ({path}) — accepting every query", ex);
-            return new HashSet<string>();
+                $"invalid_queries.json not loadable ({path}) — accepting every query",
+                ex);
+            return new HashSet<string>(StringComparer.Ordinal);
         }
     }
 
@@ -182,11 +196,12 @@ public sealed class FakeEngineClient : IEngineClient
 #if DEBUG
         // Fault injection for end-to-end verification of the error pipeline
         // (InfoBar, F12 panel, app.log) without touching real volumes.
-        if (query.Trim() == "!!panic")
+        if (string.Equals(query.Trim(), "!!panic", StringComparison.Ordinal))
         {
             throw new EngineException("fault injection: simulated engine panic", 99);
         }
-        if (query.Trim() == "!!warn")
+
+        if (string.Equals(query.Trim(), "!!warn", StringComparison.Ordinal))
         {
             _injectedErrors.Add(new ErrorEventData
             {
@@ -209,7 +224,7 @@ public sealed class FakeEngineClient : IEngineClient
         if (needle.Contains("!!lag", StringComparison.Ordinal))
         {
             pageLag = TimeSpan.FromMilliseconds(250);
-            needle = needle.Replace("!!lag", "", StringComparison.Ordinal).Trim();
+            needle = needle.Replace("!!lag", string.Empty, StringComparison.Ordinal).Trim();
         }
 #endif
         IEnumerable<RowData> hits;
@@ -226,19 +241,21 @@ public sealed class FakeEngineClient : IEngineClient
                 _ => !needle.Any(char.IsUpper),
             };
             System.Text.RegularExpressions.Regex re;
+            var reOptions = ci
+                ? System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                : System.Text.RegularExpressions.RegexOptions.None;
             try
             {
                 re = new System.Text.RegularExpressions.Regex(
                     needle,
-                    ci
-                        ? System.Text.RegularExpressions.RegexOptions.IgnoreCase
-                        : System.Text.RegularExpressions.RegexOptions.None,
+                    reOptions,
                     TimeSpan.FromMilliseconds(100));
             }
             catch (ArgumentException e)
             {
                 throw new QuerySyntaxException($"invalid regex: {e.Message}");
             }
+
             hits = _rows.Where(r => re.IsMatch(options.Scope == RegexScope.Path ? r.FullPath : r.Name));
         }
         else
@@ -247,6 +264,7 @@ public sealed class FakeEngineClient : IEngineClient
                 ? _rows
                 : _rows.Where(r => r.Name.Contains(needle, StringComparison.OrdinalIgnoreCase));
         }
+
         if (!options.IncludeHiddenSystem)
         {
             hits = hits.Where(r => (r.Flags & 4) == 0);
@@ -277,12 +295,15 @@ public sealed class FakeEngineClient : IEngineClient
         {
             _traces.RemoveAt(0);
         }
+
         return Task.FromResult(new SearchOutcome(
             new FakeResult(this, Volatile.Read(ref _epoch), list, pageLag), trace));
     }
 
     /// <inheritdoc/>
-    public void Dispose() { }
+    public void Dispose()
+    {
+    }
 
     private sealed class FakeResult(
         FakeEngineClient owner, int epoch, List<RowData> rows, TimeSpan pageLag) : ISearchResult
@@ -297,15 +318,19 @@ public sealed class FakeEngineClient : IEngineClient
             {
                 throw new StaleResultException(); // BumpEpoch invalidated us
             }
+
             if (pageLag > TimeSpan.Zero)
             {
                 await Task.Delay(pageLag, ct).ConfigureAwait(false);
             }
+
             var start = (int)Math.Min(offset, rows.Count);
             var n = Math.Max(0, Math.Min(count, rows.Count - start));
             return rows.GetRange(start, n);
         }
 
-        public void Dispose() { }
+        public void Dispose()
+        {
+        }
     }
 }

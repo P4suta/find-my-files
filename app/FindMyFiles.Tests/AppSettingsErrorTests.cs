@@ -37,7 +37,10 @@ public sealed class AppSettingsErrorTests
             Assert.False(File.Exists(path));              // original moved…
             Assert.True(File.Exists(path + ".bad"));      // …to the .bad quarantine
         }
-        finally { Directory.Delete(dir, recursive: true); }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]
@@ -56,6 +59,9 @@ public sealed class AppSettingsErrorTests
             Assert.Equal("ja", loaded.Language);
             Assert.False(loaded.FocusedSearch);
         }
-        finally { Directory.Delete(dir, recursive: true); }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 }

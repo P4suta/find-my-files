@@ -17,7 +17,7 @@ internal static class LocTestInit
         var path = Path.Combine(AppContext.BaseDirectory, "Strings.en-US.resw");
         var map = XDocument.Load(path).Root!
             .Elements("data")
-            .ToDictionary(d => d.Attribute("name")!.Value, d => d.Element("value")!.Value);
+            .ToDictionary(d => d.Attribute("name")!.Value, d => d.Element("value")!.Value, StringComparer.Ordinal);
         Loc.Override = key => map.TryGetValue(key, out var v) ? v : key;
     }
 }

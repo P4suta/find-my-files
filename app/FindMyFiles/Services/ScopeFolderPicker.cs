@@ -18,6 +18,7 @@ public static class ScopeFolderPicker
     public static async Task<string?> PickAsync()
     {
         var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.Desktop };
+
         // FolderPicker throws when shown unless at least one filter is present.
         picker.FileTypeFilter.Add("*");
         InitializeWithWindow.Initialize(picker, App.WindowHandle);

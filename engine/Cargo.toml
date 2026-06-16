@@ -15,6 +15,9 @@ edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
 repository = "https://github.com/P4suta/find-my-files"
+# Internal crates, never published to a registry (path deps are versionless by
+# design; this also lets cargo-deny's allow-wildcard-paths exempt them).
+publish = false
 
 # Maximal lint policy — the single source of truth; every member opts in with
 # `[lints] workspace = true`. Security-hardening intent (this session's north
@@ -68,6 +71,34 @@ option_if_let_else = "allow"
 # metadata is intentionally absent; transitive duplicate versions are not ours.
 cargo_common_metadata = "allow"
 multiple_crate_versions = "allow"
+
+# ── Curated `restriction` lints. The group is opt-in per-lint by design (enabling
+#    it wholesale is discouraged and would force mass allows). Each below earns its
+#    place; everything else in the group stays off.
+# Crash-safety ("don't crash"): a bare `unwrap()` carries no context, so ban it —
+# parsing of external/on-disk data returns an error instead, internal invariants
+# become `expect("why")`. `expect`/`panic!` themselves stay allowed: a documented
+# invariant panic is legitimate fail-fast, and denying them would only force
+# blanket re-allows (against the "don't add dead panic paths" rationale below).
+# Tests re-allow unwrap via allow-unwrap-in-tests in clippy.toml.
+unwrap_used = "deny"
+# No debugging residue in committed code (dbg! re-allowed in tests via clippy.toml).
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+# Correctness / footguns.
+mem_forget = "deny"
+rc_buffer = "deny"
+rc_mutex = "deny"
+mutex_atomic = "deny"
+lossy_float_literal = "deny"
+verbose_file_reads = "deny"
+try_err = "deny"
+# Consistency with the existing layout/style.
+empty_structs_with_brackets = "deny"
+unnecessary_self_imports = "deny"
+if_then_some_else_none = "deny"
+wildcard_dependencies = "deny"
 
 [workspace.dependencies]
 fmf-contract = { path = "crates/fmf-contract" }

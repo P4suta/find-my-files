@@ -23,11 +23,12 @@ public sealed class PipeRealServiceContractTests(ITestOutputHelper output)
 
     protected override async Task<IEngineClient?> AcquireClientOrSkipAsync()
     {
-        if (Environment.GetEnvironmentVariable("FMF_PIPE_TESTS") != "1")
+        if (!string.Equals(Environment.GetEnvironmentVariable("FMF_PIPE_TESTS"), "1", StringComparison.Ordinal))
         {
             _output.WriteLine("FMF_PIPE_TESTS != 1 — skipped (run via `just test-pipe`)");
             return null;
         }
+
         var exe = FindServiceExe();
         var pipeName = @"\\.\pipe\fmf-ctest-" + Guid.NewGuid().ToString("N");
         _dataDir = Path.Combine(Path.GetTempPath(), "fmf-ctest-" + Guid.NewGuid().ToString("N"));
@@ -37,7 +38,8 @@ public sealed class PipeRealServiceContractTests(ITestOutputHelper output)
         var client = new PipeEngineClient(pipeName);
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
-            "connect to fmf-service", 30_000);
+            "connect to fmf-service",
+            30_000);
         return client;
     }
 
@@ -49,6 +51,7 @@ public sealed class PipeRealServiceContractTests(ITestOutputHelper output)
         {
             TryDeleteDirectory(_dataDir);
         }
+
         return Task.CompletedTask;
     }
 
@@ -73,6 +76,7 @@ public sealed class PipeRealServiceContractTests(ITestOutputHelper output)
                 return candidate;
             }
         }
+
         throw new FileNotFoundException(
             "build/engine/release/fmf-service.exe not found above "
             + $"{AppContext.BaseDirectory} — run `just service-build` first");
@@ -112,6 +116,7 @@ public sealed class PipeRealServiceContractTests(ITestOutputHelper output)
         {
             return;
         }
+
         try
         {
             _output.WriteLine($"[{tag}] {line}");
@@ -127,6 +132,7 @@ public sealed class PipeRealServiceContractTests(ITestOutputHelper output)
         {
             return;
         }
+
         try
         {
             if (!p.HasExited)

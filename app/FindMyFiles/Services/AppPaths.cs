@@ -61,6 +61,7 @@ public static class AppPaths
         {
             return Path.GetFullPath(explicitDir);
         }
+
         var exeData = Path.Combine(AppContext.BaseDirectory, "data");
         return TryEnsureWritable(exeData) ? exeData : null;
     }
@@ -75,6 +76,7 @@ public static class AppPaths
                 return a[prefix.Length..];
             }
         }
+
         return null;
     }
 

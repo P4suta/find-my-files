@@ -85,11 +85,13 @@ fn u16_at(b: &[u8], off: usize) -> u16 {
 }
 #[inline]
 fn u32_at(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
+    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 #[inline]
 fn u64_at(b: &[u8], off: usize) -> u64 {
-    u64::from_le_bytes(b[off..off + 8].try_into().unwrap())
+    let mut a = [0u8; 8];
+    a.copy_from_slice(&b[off..off + 8]);
+    u64::from_le_bytes(a)
 }
 
 /// Parse a raw FSCTL output buffer.
