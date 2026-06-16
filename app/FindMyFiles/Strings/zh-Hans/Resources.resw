@@ -82,8 +82,13 @@
   <data name="MnuOpenPath.Text" xml:space="preserve"><value>打开文件夹并选中文件</value></data>
   <data name="MnuCopyPath.Text" xml:space="preserve"><value>复制路径</value></data>
   <data name="SetupTitle.Text" xml:space="preserve"><value>开始设置文件搜索</value></data>
-  <data name="SetupBody.Text" xml:space="preserve"><value>为了快速搜索文件名，需要先进行一次设置。系统会请求管理员权限。</value></data>
+  <data name="SetupBody.Text" xml:space="preserve"><value>索引整个驱动器最快、最全 — 只需一次性的管理员权限设置。</value></data>
   <data name="EnableSearch.Content" xml:space="preserve"><value>启用搜索</value></data>
+  <data name="SetupOrDivider.Text" xml:space="preserve"><value>— 或 —</value></data>
+  <data name="ScopeSetupTitle.Text" xml:space="preserve"><value>没有管理员权限?</value></data>
+  <data name="ScopeSetupBody.Text" xml:space="preserve"><value>只选择你常用的文件夹进行搜索 — 无需管理员权限或安装，也不留痕迹。</value></data>
+  <data name="ScopePickFolders.Content" xml:space="preserve"><value>选择文件夹…</value></data>
+  <data name="ScopeStartSearch.Content" xml:space="preserve"><value>开始搜索这些文件夹</value></data>
   <data name="SvcDialog.Title" xml:space="preserve"><value>管理服务</value></data>
   <data name="SvcDialog.CloseButtonText" xml:space="preserve"><value>关闭</value></data>
   <data name="SvcSubtitle.Text" xml:space="preserve"><value>fmf-engine(文件名搜索服务)</value></data>
@@ -141,6 +146,7 @@
   <data name="Setup_Connecting" xml:space="preserve"><value>正在连接服务…</value></data>
   <data name="Setup_ConnectCheckFailed" xml:space="preserve"><value>无法确认连接，请重试。</value></data>
   <data name="Setup_Failed" xml:space="preserve"><value>设置失败，请重试。</value></data>
+  <data name="Setup_PortableLocation" xml:space="preserve"><value>所有内容都保存在 {0}，不会在此文件夹之外写入任何内容。</value></data>
 
   <data name="Svc_StateChecking" xml:space="preserve"><value>正在检查…</value></data>
   <data name="Svc_ExeNotFound" xml:space="preserve"><value>未找到 fmf-service.exe</value></data>

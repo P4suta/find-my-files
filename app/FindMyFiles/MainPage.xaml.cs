@@ -118,6 +118,22 @@ public sealed partial class MainPage : Page
     private void EnableSearch_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         ViewModel.EnableSearchAsync().Forget("service-ui");
 
+    // セットアップ画面のスコープ経路(管理者不要, ADR-0024): フォルダ選択→保存→
+    // relaunch で WalkInProc に入る。
+    private void PickScopeFolders_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        ViewModel.PickScopeFoldersAsync().Forget("scope-ui");
+
+    private void StartScopeSearch_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        ViewModel.StartScopeSearch();
+
+    private void RemoveScopeFolder_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (sender is Microsoft.UI.Xaml.FrameworkElement { Tag: string path })
+        {
+            ViewModel.RemoveScopeFolder(path);
+        }
+    }
+
     // 言語切替: settings.json に永続化してアプリを再起動(App ctor が
     // PrimaryLanguageOverride を適用)。Tag は "auto"/"ja"/"en"/"zh-Hans"。
     private void Language_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)

@@ -82,8 +82,13 @@
   <data name="MnuOpenPath.Text" xml:space="preserve"><value>Open folder and select file</value></data>
   <data name="MnuCopyPath.Text" xml:space="preserve"><value>Copy path</value></data>
   <data name="SetupTitle.Text" xml:space="preserve"><value>Let's set up file search</value></data>
-  <data name="SetupBody.Text" xml:space="preserve"><value>To search file names fast, a one-time setup is needed. You'll be asked for administrator permission.</value></data>
+  <data name="SetupBody.Text" xml:space="preserve"><value>Indexing every drive is fastest and finds everything — it just takes a one-time setup with administrator permission.</value></data>
   <data name="EnableSearch.Content" xml:space="preserve"><value>Enable search</value></data>
+  <data name="SetupOrDivider.Text" xml:space="preserve"><value>— or —</value></data>
+  <data name="ScopeSetupTitle.Text" xml:space="preserve"><value>No administrator rights?</value></data>
+  <data name="ScopeSetupBody.Text" xml:space="preserve"><value>Pick the folders you actually use and search just those — no admin, no install, nothing left behind.</value></data>
+  <data name="ScopePickFolders.Content" xml:space="preserve"><value>Choose folders…</value></data>
+  <data name="ScopeStartSearch.Content" xml:space="preserve"><value>Start searching these folders</value></data>
   <data name="SvcDialog.Title" xml:space="preserve"><value>Manage service</value></data>
   <data name="SvcDialog.CloseButtonText" xml:space="preserve"><value>Close</value></data>
   <data name="SvcSubtitle.Text" xml:space="preserve"><value>fmf-engine (file name search service)</value></data>
@@ -141,6 +146,7 @@
   <data name="Setup_Connecting" xml:space="preserve"><value>Connecting to the service…</value></data>
   <data name="Setup_ConnectCheckFailed" xml:space="preserve"><value>Couldn't confirm the connection. Please try again.</value></data>
   <data name="Setup_Failed" xml:space="preserve"><value>Setup failed. Please try again.</value></data>
+  <data name="Setup_PortableLocation" xml:space="preserve"><value>Everything is kept in {0} — nothing is written outside this folder.</value></data>
 
   <data name="Svc_StateChecking" xml:space="preserve"><value>Checking…</value></data>
   <data name="Svc_ExeNotFound" xml:space="preserve"><value>fmf-service.exe not found</value></data>

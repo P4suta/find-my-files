@@ -82,8 +82,13 @@
   <data name="MnuOpenPath.Text" xml:space="preserve"><value>フォルダーを開いてファイルを選択</value></data>
   <data name="MnuCopyPath.Text" xml:space="preserve"><value>パスをコピー</value></data>
   <data name="SetupTitle.Text" xml:space="preserve"><value>ファイル検索をはじめましょう</value></data>
-  <data name="SetupBody.Text" xml:space="preserve"><value>高速にファイル名を検索できるよう、最初に一度だけ準備します。管理者の許可を求められます。</value></data>
+  <data name="SetupBody.Text" xml:space="preserve"><value>全ドライブをまるごと索引するのが最速で、何でも見つかります。最初に一度だけ管理者の許可で準備します。</value></data>
   <data name="EnableSearch.Content" xml:space="preserve"><value>検索を有効にする</value></data>
+  <data name="SetupOrDivider.Text" xml:space="preserve"><value>— または —</value></data>
+  <data name="ScopeSetupTitle.Text" xml:space="preserve"><value>管理者権限が取れない?</value></data>
+  <data name="ScopeSetupBody.Text" xml:space="preserve"><value>よく使うフォルダだけを選んで検索します。管理者権限もインストールも不要、痕跡も残しません。</value></data>
+  <data name="ScopePickFolders.Content" xml:space="preserve"><value>フォルダを選ぶ…</value></data>
+  <data name="ScopeStartSearch.Content" xml:space="preserve"><value>選んだフォルダで検索を始める</value></data>
   <data name="SvcDialog.Title" xml:space="preserve"><value>サービスの管理</value></data>
   <data name="SvcDialog.CloseButtonText" xml:space="preserve"><value>閉じる</value></data>
   <data name="SvcSubtitle.Text" xml:space="preserve"><value>fmf-engine(ファイル名検索サービス)</value></data>
@@ -141,6 +146,7 @@
   <data name="Setup_Connecting" xml:space="preserve"><value>サービスに接続しています…</value></data>
   <data name="Setup_ConnectCheckFailed" xml:space="preserve"><value>接続を確認できませんでした。もう一度お試しください。</value></data>
   <data name="Setup_Failed" xml:space="preserve"><value>セットアップに失敗しました。もう一度お試しください。</value></data>
+  <data name="Setup_PortableLocation" xml:space="preserve"><value>設定とインデックスは {0} に保存され、このフォルダの外には何も書き込みません。</value></data>
 
   <data name="Svc_StateChecking" xml:space="preserve"><value>確認中…</value></data>
   <data name="Svc_ExeNotFound" xml:space="preserve"><value>fmf-service.exe が見つかりません</value></data>

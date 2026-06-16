@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
@@ -101,6 +102,32 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// enabled state.</summary>
     public bool SetupNotBusy => !SetupBusy;
 
+    // ── Scope mode (ADR-0024): the no-admin path on the setup screen ──
+
+    /// <summary>Folders the user has chosen to fold-walk in scope mode, shown on
+    /// the setup screen. Seeded from settings; <see cref="StartScopeSearch"/>
+    /// persists them as <see cref="AppSettings.ScopeRoots"/> and relaunches.</summary>
+    public ObservableCollection<string> ScopeFolders { get; }
+
+    /// <summary>The "start scope search" button is enabled only once at least
+    /// one folder has been chosen.</summary>
+    public bool CanStartScope => ScopeFolders.Count > 0;
+
+    // CA1822 (mark static): a false positive for x:Bind targets — these surface
+    // static AppPaths state to the setup screen and must be instance members of
+    // the bound ViewModel for `{x:Bind ViewModel.…}` to resolve them.
+#pragma warning disable CA1822
+    /// <summary>True when app state lives next to the exe rather than the user
+    /// profile (<see cref="AppPaths"/>) — drives the setup screen's "nothing
+    /// leaves this folder" footnote. Fixed at startup, so x:Bind OneTime.</summary>
+    public bool IsPortable => AppPaths.IsPortable;
+
+    /// <summary>The portable-data-root footnote (only shown when
+    /// <see cref="IsPortable"/>).</summary>
+    public string DataLocationText =>
+        Loc.Get("Setup_PortableLocation", AppPaths.PortableRoot ?? string.Empty);
+#pragma warning restore CA1822
+
     /// <summary>How results land in the virtualized list (publish / refresh
     /// in place / empty) — the seam the orchestrator hands outcomes to.</summary>
     public ResultsPresenter Results { get; }
@@ -119,6 +146,15 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     private readonly AppSettings _settings;
 
+    /// <summary>The scope-folder picker (UI boundary) — injected so the
+    /// add/dedupe logic is unit-testable without showing a real dialog.</summary>
+    private readonly Func<Task<string?>> _folderPicker;
+
+    /// <summary>The unelevated relaunch action (UI/shell boundary) — injected so
+    /// <see cref="StartScopeSearch"/>'s persist step is testable without exiting
+    /// the process.</summary>
+    private readonly Action _relaunch;
+
     /// <summary>Builds the focused components, restores focused-search settings,
     /// and subscribes the engine events (volume updates, errors, connection
     /// changes). Call <see cref="StartAsync"/> afterwards to begin indexing.</summary>
@@ -127,10 +163,23 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// and back timers.</param>
     /// <param name="settings">App settings to read/persist; loaded from disk
     /// when null.</param>
-    public MainViewModel(IEngineClient engine, IDispatcher dispatcher, AppSettings? settings = null)
+    /// <param name="folderPicker">Scope-folder picker; defaults to the real
+    /// <see cref="ScopeFolderPicker.PickAsync"/> (tests inject a fake).</param>
+    /// <param name="relaunch">Unelevated relaunch action; defaults to the real
+    /// <see cref="ShellOps.Relaunch"/> (tests inject a no-op).</param>
+    public MainViewModel(
+        IEngineClient engine,
+        IDispatcher dispatcher,
+        AppSettings? settings = null,
+        Func<Task<string?>>? folderPicker = null,
+        Action? relaunch = null)
     {
         _engine = engine;
         _settings = settings ?? AppSettings.Load();
+        _folderPicker = folderPicker ?? ScopeFolderPicker.PickAsync;
+        _relaunch = relaunch ?? ShellOps.Relaunch;
+        ScopeFolders = new ObservableCollection<string>(_settings.ScopeRoots);
+        ScopeFolders.CollectionChanged += (_, _) => OnPropertyChanged(nameof(CanStartScope));
         _engineEvents = new EngineEventMarshaler(engine, dispatcher);
         Results = new ResultsPresenter(dispatcher);
         Search = new SearchOrchestrator(engine, _engineEvents, dispatcher, Results,
@@ -252,6 +301,38 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             SetupBusy = false;
         }
+    }
+
+    /// <summary>Setup screen (no-admin path): open the folder picker and add the
+    /// chosen folder to <see cref="ScopeFolders"/> (case-insensitive dedupe).
+    /// The picker is single-select, so this adds one folder per click.</summary>
+    public async Task PickScopeFoldersAsync()
+    {
+        var path = await _folderPicker();
+        if (path is not null
+            && !ScopeFolders.Any(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)))
+        {
+            ScopeFolders.Add(path);
+        }
+    }
+
+    /// <summary>Drop one folder from the scope list (the per-row × button).</summary>
+    /// <param name="path">The folder path to remove.</param>
+    public void RemoveScopeFolder(string path) => ScopeFolders.Remove(path);
+
+    /// <summary>Persist the chosen folders as <see cref="AppSettings.ScopeRoots"/>
+    /// and relaunch (unelevated): the fresh instance, with scope roots set and no
+    /// running service, resolves to <c>WalkInProc</c> and folder-walks them
+    /// (ADR-0024). No-op with an empty list.</summary>
+    public void StartScopeSearch()
+    {
+        if (ScopeFolders.Count == 0)
+        {
+            return;
+        }
+        _settings.ScopeRoots = [.. ScopeFolders];
+        _settings.Save();
+        _relaunch();
     }
 
     partial void OnSearchTextChanged(string value) => Search.NotifyTextChanged(value);
