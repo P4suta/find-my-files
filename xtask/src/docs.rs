@@ -1,7 +1,7 @@
 //! `xtask docs-assemble` — assemble the GitHub Pages site under build/site
 //! (replaces the Copy-Item step in pages.yml). The committed landing page
 //! (site/) is the base; the mdBook output (build/docs-book), rustdoc
-//! (build/engine/doc) and the DocFX C# API reference (build/docs-csharp/_site)
+//! (build/engine/doc) and the `DocFX` C# API reference (build/docs-csharp/_site)
 //! layer on top as build/site/book, build/site/doc and build/site/api
 //! (ADR-0021). pages.yml then uploads build/site as the Pages artifact.
 
