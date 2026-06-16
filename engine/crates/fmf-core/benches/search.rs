@@ -198,8 +198,11 @@ fn bench_queries(c: &mut Criterion) {
         ("wildcard_suffix", "*.rs"),
         ("composite_path", "size:>100mb path:windows"),
         ("negation", "report !backup"),
-        // Full-scan over original names regardless of case mode.
+        // Regex prefilter (ADR-0023): a prefix/suffix literal keeps regex on
+        // the pool sweep; a literal-less pattern falls back to the full scan.
         ("regex", "regex:win.*\\.dll"),
+        ("regex_suffix", "regex:\\.dll$"),
+        ("regex_scan", "regex:[0-9]{4}x"),
     ];
 
     let mut g = c.benchmark_group("query");

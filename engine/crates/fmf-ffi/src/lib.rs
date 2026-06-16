@@ -6,11 +6,17 @@
 // canonical FFI contract) rather than per-function doc comments.
 #![allow(clippy::missing_safety_doc)]
 
+/// Heap-allocated JSON blob exchanged with C# (engine stats) and its free function.
 pub mod blob;
+/// Per-thread last-error storage and the panic/error guard wrapping every entry point.
 pub mod error;
+/// Engine-event callback registration and the C-ABI event struct delivered to C#.
 pub mod events;
+/// Engine handle lifecycle: ABI version, create, flush and destroy.
 pub mod handle;
+/// Query execution and paged result retrieval, plus their free functions.
 pub mod results;
+/// Volume enumeration, indexing start and indexing-status queries.
 pub mod volumes;
 
 pub use blob::FmfBlob;

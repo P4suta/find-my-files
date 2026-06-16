@@ -41,7 +41,9 @@ use volume_io::mft_layout;
 /// Statistics from a full index build.
 #[derive(Debug, Default)]
 pub struct ScanStats {
+    /// Drive letter spec that was scanned (e.g. `C:`).
     pub volume: String,
+    /// Wall-clock time for the whole scan + build (ms).
     pub elapsed_total_ms: u64,
     /// Accumulated device-read time. Overlaps with parsing on the pipelined
     /// path, so read + parse + build + sort may exceed total.
@@ -59,9 +61,13 @@ pub struct ScanStats {
     /// 1 when the read-ahead I/O thread could not start and the scan
     /// degraded to inline sequential reads.
     pub pipeline_fallbacks: u64,
+    /// Files indexed (count).
     pub files: u64,
+    /// Directories indexed (count).
     pub dirs: u64,
+    /// Records dropped because no usable name could be resolved (count).
     pub skipped_no_name: u64,
+    /// Peak working-set RAM of the scanning process (bytes).
     pub peak_working_set_bytes: u64,
     /// Raw $MFT size — the bytes the initial scan reads.
     pub mft_bytes: u64,

@@ -1,4 +1,6 @@
 using System.Text;
+using System.Text.RegularExpressions;
+using FindMyFiles.Engine;
 
 namespace FindMyFiles.Highlighting;
 
@@ -25,6 +27,24 @@ public enum HighlightField
 public readonly record struct HighlightRange(int Start, int Length);
 
 /// <summary>
+/// A compiled query that can emphasize the slices of a displayed string it
+/// matched. Implemented by the substring/wildcard <see cref="CompiledHighlighter"/>
+/// and the whole-query <see cref="RegexHighlighter"/>; the results list and rows
+/// depend only on this seam.
+/// </summary>
+public interface IHighlighter
+{
+    /// <summary>True when nothing will ever be highlighted — the caller can
+    /// skip per-row work entirely.</summary>
+    bool IsEmpty { get; }
+
+    /// <summary>The ranges of <paramref name="text"/> to emphasize for
+    /// <paramref name="field"/> (UTF-16 units of <paramref name="text"/>),
+    /// sorted and merged; empty when nothing matches.</summary>
+    IReadOnlyList<HighlightRange> Ranges(string text, HighlightField field);
+}
+
+/// <summary>
 /// A query compiled into the positive text needles worth highlighting. Pure
 /// (no WinUI), so it is unit-testable and reusable across rows. Built once per
 /// query by <see cref="MatchHighlighter.Compile"/> and queried per displayed
@@ -39,7 +59,7 @@ public readonly record struct HighlightRange(int Start, int Length);
 /// hidden, only its emphasis is skipped (落ちない・黙らない). This guarantees
 /// the UI never lights up a position the engine did not actually match.
 /// </summary>
-public sealed class CompiledHighlighter
+public sealed class CompiledHighlighter : IHighlighter
 {
     /// <summary>A highlighter with no terms — every <see cref="Ranges"/> call
     /// returns empty. Used for empty/filter-only queries.</summary>
@@ -309,6 +329,40 @@ public static class MatchHighlighter
         return needles.Count == 0 ? CompiledHighlighter.Empty : new CompiledHighlighter(needles);
     }
 
+    /// <summary>
+    /// Compile a whole-query regex highlighter (regex mode, ADR-0023): the
+    /// entire <paramref name="query"/> is one pattern, emphasized in the name
+    /// or full path per <paramref name="scope"/>. Smart-case (insensitive
+    /// unless the pattern carries an uppercase-ish scalar), matching the
+    /// product default. A pattern .NET cannot compile yields
+    /// <see cref="CompiledHighlighter.Empty"/> — the engine reports the syntax
+    /// error; the highlighter just stays dark rather than guess.
+    /// </summary>
+    public static IHighlighter CompileRegex(string query, RegexScope scope)
+    {
+        if (string.IsNullOrEmpty(query))
+        {
+            return CompiledHighlighter.Empty;
+        }
+        var options = RegexOptions.Singleline
+            | (CompiledHighlighter.HasFoldUppercase(query)
+                ? RegexOptions.None
+                : RegexOptions.IgnoreCase);
+        try
+        {
+            // .NET regex differs from the engine's rust regex, so a re-match
+            // can disagree; "skip safely" (no highlight) is preferred to
+            // lighting up a guessed position. The 100ms timeout caps a
+            // pathological pattern.
+            var re = new Regex(query, options, TimeSpan.FromMilliseconds(100));
+            return new RegexHighlighter(re, scope);
+        }
+        catch (ArgumentException)
+        {
+            return CompiledHighlighter.Empty;
+        }
+    }
+
     /// <summary>Walk the query into (atom, negated) pairs, honoring quotes and
     /// treating <c>|</c> as a separator — OR groups are unioned, since the UI
     /// cannot know which group a row matched (mirrors ast.rs tokenization, but
@@ -502,4 +556,46 @@ public static class MatchHighlighter
 
     private static bool HasWildcard(string s) =>
         s.Contains('*', StringComparison.Ordinal) || s.Contains('?', StringComparison.Ordinal);
+}
+
+/// <summary>
+/// Highlights a whole-query regex (regex mode) by re-matching the displayed
+/// string. Emphasizes the name field for a name-scope pattern and the path
+/// field for a path-scope one — the same field the engine matched, so
+/// <c>ResultRow</c>'s parent/name split applies unchanged. A match-timeout (or
+/// any mismatch with the engine's rust regex) simply yields no ranges: a row
+/// the engine returned is never hidden, only its emphasis is skipped.
+/// </summary>
+public sealed class RegexHighlighter(Regex re, RegexScope scope) : IHighlighter
+{
+    /// <inheritdoc/>
+    public bool IsEmpty => false;
+
+    /// <inheritdoc/>
+    public IReadOnlyList<HighlightRange> Ranges(string text, HighlightField field)
+    {
+        // The pattern matched one haystack: the name (name scope) or the full
+        // path (path scope). Only light that field.
+        var target = scope == RegexScope.Path ? HighlightField.Path : HighlightField.Name;
+        if (field != target || text.Length == 0)
+        {
+            return [];
+        }
+        try
+        {
+            var ranges = new List<HighlightRange>();
+            foreach (Match m in re.Matches(text))
+            {
+                if (m.Length > 0)
+                {
+                    ranges.Add(new HighlightRange(m.Index, m.Length));
+                }
+            }
+            return CompiledHighlighter.MergeRanges(ranges);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return []; // skip safely rather than light up a guess
+        }
+    }
 }

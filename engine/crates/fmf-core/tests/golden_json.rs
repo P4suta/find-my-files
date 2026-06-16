@@ -58,6 +58,8 @@ fn invalid_queries_are_rejected_by_the_real_parser() {
         "\"unterminated",
         "regex:[",
         "regex:(",
+        "regex:a{2,1}",        // min>max repetition — invalid regex syntax
+        "regex:(a{500}){500}", // exceeds the 1 MiB compile size limit (ADR-0023)
         "size:abc",
         "size:>",
         "size:1..x",

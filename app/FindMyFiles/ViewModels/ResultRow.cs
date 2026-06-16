@@ -76,7 +76,7 @@ public sealed partial class ResultRow : ObservableObject
     /// page hit: copies identity (<see cref="EntryRef"/>, <see cref="FullPath"/>),
     /// formats size/date for display, picks the type glyph, and clears
     /// <see cref="IsPlaceholder"/>. In place — the bound instance is reused.</summary>
-    public void Fill(RowData data, CompiledHighlighter? highlighter = null)
+    public void Fill(RowData data, IHighlighter? highlighter = null)
     {
         EntryRef = data.EntryRef;
         FullPath = data.FullPath;
@@ -96,7 +96,7 @@ public sealed partial class ResultRow : ObservableObject
     /// boundary so each TextBlock gets only its own slice. Ranges are assigned
     /// only when they change, so a same-query RefreshInPlace refill (identical
     /// ranges) raises no notification and repaints nothing.</summary>
-    private void ApplyHighlight(CompiledHighlighter? highlighter, RowData data)
+    private void ApplyHighlight(IHighlighter? highlighter, RowData data)
     {
         if (highlighter is null || highlighter.IsEmpty)
         {

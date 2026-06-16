@@ -230,6 +230,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                 Desc = options.Descending ? 1u : 0u,
                 CaseMode = (uint)options.Case,
                 IncludeHiddenSystem = options.IncludeHiddenSystem ? 1u : 0u,
+                RegexMode = options.RegexModeBits,
             };
             int rc;
             IntPtr result;

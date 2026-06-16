@@ -76,3 +76,13 @@
   https://github.com/mullvad/windows-service-rs
 - **SeBackupPrivilege と生ボリューム読み**: 文書化されているのは「通常ファイルのACLバイパスでの内容取得」まで。\\.\C: の生ボリュームハンドルが SeBackupPrivilege 単独で開ける保証は**文書上存在しない**(調査範囲: Managing Privileges in a File System ほか)。ボリュームハンドルは管理者必須(上記「権限」項)→ ADR-0017 が専用低権限アカウント案を却下した根拠。
   https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/privileges
+
+## 正規表現エンジン(rust `regex` crate、2026-06-15 調査・第一級化の前提=ADR-0023)
+
+- **線形時間保証・ReDoS 不在**: `regex` crate は有限オートマトン(lazy DFA / Pike VM)で実装され、**バックトラッキングを行わない**。マッチは「入力長 × パターン長」に**線形**で、正規表現サービス系を悩ます catastrophic backtracking(ReDoS の実行時指数爆発)は**構造的に発生しない**と公式に明記。`(a+)+$` 系の悪性パターンでも実行は線形。
+  https://docs.rs/regex/latest/regex/#untrusted-input
+  https://docs.rs/regex/latest/regex/#performance
+- **残る攻撃面=コンパイル時間/メモリ**: 信頼できないパターンを受ける場合の唯一の DoS 面は、巨大パターン(`a{1000}{1000}` のような有界繰り返し展開)が要求する**コンパイル時のプログラム/DFA サイズ**。crate は `RegexBuilder::size_limit`(コンパイル済みプログラムのバイト上限・**既定 10 MiB**)と `dfa_size_limit`(lazy DFA キャッシュのバイト上限・**既定 2 MiB**)を提供し、超過時は `build()` が `Error`(`CompiledTooBig` 相当)を返す。`nest_limit`(既定 250)はパース木の深さ上限。信頼できないパターンには**両 size limit を絞れ**と公式が推奨。
+  https://docs.rs/regex/latest/regex/struct.RegexBuilder.html#method.size_limit
+  https://docs.rs/regex/latest/regex/struct.RegexBuilder.html#method.dfa_size_limit
+- find-my-files の採用値は 各 1 MiB(名前長 p99 ≈110B に対し過剰に余裕、正当パターンは到達せず、悪性パターンは `FMF_E_QUERY_SYNTAX` で丁寧に拒否)。決定と再検討トリガは ADR-0023。

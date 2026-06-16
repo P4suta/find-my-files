@@ -15,18 +15,28 @@ use crate::volume;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FmfRow {
+    /// Stable engine-internal entry handle for this result.
     pub entry_ref: u64,
+    /// NTFS File Reference Number of the entry.
     pub frn: u64,
+    /// File size in bytes.
     pub size: u64,
+    /// Last-modified time (Windows FILETIME ticks: 100 ns since 1601).
     pub mtime: i64,
+    /// Byte offset of the file name into the page's trailing string blob.
     pub name_off: u32,
+    /// Byte offset of the parent path into the page's trailing string blob.
     pub parent_path_off: u32,
+    /// Packed entry attribute flags (hidden/system/directory bits).
     pub flags: u32,
+    /// File name length in bytes within the string blob (WTF-8).
     pub name_len: u16,
+    /// Parent path length in bytes within the string blob (WTF-8).
     pub parent_path_len: u16,
 }
 
 impl FmfRow {
+    /// Size of one row in bytes (48).
     pub const LEN: usize = size_of::<Self>();
 }
 
@@ -48,12 +58,18 @@ const _: () = {
 /// blob). Pointers, so FFI-only — the pipe sends rows and blob inline.
 #[repr(C)]
 pub struct FmfPage {
+    /// Number of rows in the `rows` array.
     pub row_count: u32,
+    /// C ABI padding (reserved; always 0).
     #[expect(clippy::pub_underscore_fields, reason = "C ABI padding/reserved field")]
     pub _pad: u32,
+    /// Pointer to the `row_count`-element array of [`FmfRow`].
     pub rows: *const FmfRow,
+    /// Pointer to the trailing string blob the row offsets index into.
     pub blob: *const u8,
+    /// String blob length in bytes.
     pub blob_len: u32,
+    /// C ABI padding (reserved; always 0).
     #[expect(clippy::pub_underscore_fields, reason = "C ABI padding/reserved field")]
     pub _pad2: u32,
 }
@@ -71,8 +87,11 @@ const _: () = {
 /// `fmf_blob_free`.
 #[repr(C)]
 pub struct FmfBlob {
+    /// Pointer to the UTF-8 JSON payload bytes.
     pub data: *const u8,
+    /// Payload length in bytes.
     pub len: u32,
+    /// C ABI padding (reserved; always 0).
     #[expect(clippy::pub_underscore_fields, reason = "C ABI padding/reserved field")]
     pub _pad: u32,
 }
@@ -92,15 +111,20 @@ const _: () = {
 pub struct FmfEvent {
     /// [`crate::events::EventKind`] as u32.
     pub kind: u32,
+    /// C ABI padding (reserved; always 0).
     #[expect(clippy::pub_underscore_fields, reason = "C ABI padding/reserved field")]
     pub _pad: u32,
+    /// Entry count carried by the event (e.g. indexed entries so far).
     pub entries: u64,
+    /// Zero-padded UTF-8 drive label this event concerns (e.g. "C:").
     pub volume: [u8; 16],
 }
 
 impl FmfEvent {
+    /// Size of the event in bytes (32).
     pub const LEN: usize = size_of::<Self>();
 
+    /// Builds an event, encoding `volume` into the fixed 16-byte label.
     #[must_use]
     pub fn new(kind: u32, entries: u64, volume: &str) -> Self {
         Self {
@@ -111,6 +135,7 @@ impl FmfEvent {
         }
     }
 
+    /// Decodes the fixed 16-byte label back to a trimmed drive string.
     #[must_use]
     pub fn volume_str(&self) -> &str {
         volume::decode_label(&self.volume)
@@ -126,39 +151,53 @@ const _: () = {
     assert!(offset_of!(FmfEvent, volume) == 16);
 };
 
-/// Query options — 16 bytes, no padding, LE on the wire. Field values are
+/// Query options — 20 bytes, no padding, LE on the wire. Field values are
 /// the [`crate::options`] enums as u32.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FmfQueryOptions {
+    /// Result column to order by ([`crate::options::SortKey`] as u32).
     pub sort: u32,
+    /// Nonzero sorts descending; 0 ascending.
     pub desc: u32,
+    /// Case-matching policy ([`crate::options::CaseMode`] as u32).
     pub case_mode: u32,
     /// Nonzero shows hidden/system entries (default-excluded otherwise).
     pub include_hidden_system: u32,
+    /// Packed regex mode (ADR-0023): bit0 = treat the whole query as one
+    /// regex, bit1 = scope (0 = file name, 1 = full path). 0 = off (the
+    /// query parses normally; `regex:` per-term syntax still works). Higher
+    /// bits are reserved 0, so a future flag keeps `LEN` at 20.
+    pub regex_mode: u32,
 }
 
 impl FmfQueryOptions {
+    /// Size of the options struct in bytes (20).
     pub const LEN: usize = size_of::<Self>();
 }
 
 const _: () = {
-    assert!(size_of::<FmfQueryOptions>() == 16);
+    assert!(size_of::<FmfQueryOptions>() == 20);
     assert!(align_of::<FmfQueryOptions>() == 4);
     assert!(offset_of!(FmfQueryOptions, sort) == 0);
     assert!(offset_of!(FmfQueryOptions, desc) == 4);
     assert!(offset_of!(FmfQueryOptions, case_mode) == 8);
     assert!(offset_of!(FmfQueryOptions, include_hidden_system) == 12);
+    assert!(offset_of!(FmfQueryOptions, regex_mode) == 16);
 };
 
 /// FFI volume status. `state` is [`crate::options::VolumeState`] as u32.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FmfVolumeStatus {
+    /// Zero-padded UTF-8 drive label this status concerns (e.g. "C:").
     pub label: [u8; 16],
+    /// Volume lifecycle state ([`crate::options::VolumeState`] as u32).
     pub state: u32,
+    /// C ABI padding (reserved; always 0).
     #[expect(clippy::pub_underscore_fields, reason = "C ABI padding/reserved field")]
     pub _pad: u32,
+    /// Number of indexed entries on this volume.
     pub entries: u64,
 }
 
@@ -178,7 +217,9 @@ const _: () = {
 pub struct FrameHeader {
     /// Payload length in bytes (the header itself excluded).
     pub len: u32,
+    /// Frame operation code (request/response/event kind).
     pub opcode: u16,
+    /// Per-opcode bit flags.
     pub flags: u16,
     /// Request/response correlation; 0 on event pushes.
     pub request_id: u32,
@@ -187,8 +228,10 @@ pub struct FrameHeader {
 }
 
 impl FrameHeader {
+    /// Size of the frame header in bytes (16).
     pub const LEN: usize = size_of::<Self>();
 
+    /// Serializes the header to its 16-byte little-endian wire form.
     #[must_use]
     pub fn to_bytes(self) -> [u8; Self::LEN] {
         let mut b = [0u8; Self::LEN];
@@ -200,6 +243,7 @@ impl FrameHeader {
         b
     }
 
+    /// Parses a header from its 16-byte little-endian wire form.
     #[must_use]
     pub const fn from_bytes(b: &[u8; Self::LEN]) -> Self {
         Self {

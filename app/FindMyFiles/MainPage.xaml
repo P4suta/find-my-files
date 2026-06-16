@@ -96,18 +96,22 @@
             <!--  Search box: a plain TextBox on purpose (AutoSuggestBox's accept semantics fight live filtering — docs/ARCHITECTURE.md).  -->
             <TextBox
                 x:Name="SearchBox"
-                x:Uid="SearchBox"
                 Grid.Column="0"
                 AutomationProperties.AutomationId="SearchBox"
                 KeyDown="SearchBox_KeyDown"
+                PlaceholderText="{x:Bind ViewModel.SearchPlaceholder, Mode=OneWay}"
                 Style="{StaticResource LauncherSearchBoxStyle}"
                 Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}">
-                <!--  フォーカス時の青い2pxアクセント下線を消す(Google 風に常時1pxの丸枠だけ)。
-                      TextBox テンプレートが Focused 状態でこの2リソースを使うので、この TextBox
-                      スコープだけで上書き(他の TextBox には波及させない)。  -->
+                <!--  Google 風に常時1pxの丸枠だけにする。TextBox 既定は (1) Focused で青い2px
+                      アクセント下線、(2) 通常/ホバー時に ControlElevationBorderBrush(下辺が濃い
+                      立体感グラデ)を使う。後者がフォーカスを外したとき「下線/車道」のように見える
+                      ので、Focused とあわせて通常・ホバーの枠ブラシも平坦な ControlStrokeColorDefaultBrush
+                      に上書きする(この TextBox スコープだけ・他へは波及させない)。  -->
                 <TextBox.Resources>
                     <Thickness x:Key="TextControlBorderThemeThicknessFocused">1</Thickness>
                     <StaticResource x:Key="TextControlBorderBrushFocused" ResourceKey="ControlStrokeColorDefaultBrush" />
+                    <StaticResource x:Key="TextControlBorderBrush" ResourceKey="ControlStrokeColorDefaultBrush" />
+                    <StaticResource x:Key="TextControlBorderBrushPointerOver" ResourceKey="ControlStrokeColorDefaultBrush" />
                 </TextBox.Resources>
             </TextBox>
             <!--  検索バーをすっきり保つため、絞り込み・隠しファイル・並べ替え・状態表示・診断は
@@ -132,6 +136,25 @@
                             x:Uid="OptSystem"
                             AutomationProperties.AutomationId="OptSystem"
                             IsChecked="{x:Bind ViewModel.IncludeHiddenSystem, Mode=TwoWay}" />
+                        <ToggleMenuFlyoutItem
+                            x:Uid="OptRegex"
+                            AutomationProperties.AutomationId="OptRegex"
+                            IsChecked="{x:Bind ViewModel.RegexMode, Mode=TwoWay}" />
+                        <MenuFlyoutSubItem x:Uid="RegexScopeMenu" AutomationProperties.AutomationId="RegexScopeMenu">
+                            <RadioMenuFlyoutItem
+                                x:Name="RegexScopeName"
+                                x:Uid="RegexScopeName"
+                                AutomationProperties.AutomationId="RegexScopeName"
+                                Click="RegexScopeName_Click"
+                                GroupName="RegexScope"
+                                IsChecked="True" />
+                            <RadioMenuFlyoutItem
+                                x:Name="RegexScopePath"
+                                x:Uid="RegexScopePath"
+                                AutomationProperties.AutomationId="RegexScopePath"
+                                Click="RegexScopePath_Click"
+                                GroupName="RegexScope" />
+                        </MenuFlyoutSubItem>
                         <MenuFlyoutSeparator />
                         <MenuFlyoutSubItem x:Uid="SortHeaderItem">
                             <RadioMenuFlyoutItem

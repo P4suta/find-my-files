@@ -143,7 +143,7 @@ public sealed partial class ResultsPresenter : ObservableObject
         ISearchResult result,
         QueryTraceData? trace,
         RequeryOrigin origin,
-        CompiledHighlighter highlighter,
+        IHighlighter highlighter,
         Func<bool> isCurrent)
     {
         Debug.Assert(_dispatcher.HasThreadAccess, "PublishAsync must start on the UI thread");
@@ -193,7 +193,7 @@ public sealed partial class ResultsPresenter : ObservableObject
         ISearchResult result,
         QueryTraceData? trace,
         RequeryOrigin origin,
-        CompiledHighlighter highlighter,
+        IHighlighter highlighter,
         Func<bool> isCurrent)
     {
         Debug.Assert(_dispatcher.HasThreadAccess, "RefreshInPlaceAsync must start on the UI thread");

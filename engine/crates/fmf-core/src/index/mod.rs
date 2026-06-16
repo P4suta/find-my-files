@@ -25,12 +25,18 @@ pub mod testutil;
 pub use self::builder::{FinishTimings, VolumeIndexBuilder};
 pub use self::core::VolumeIndex;
 
+/// Dense, append-only index into the struct-of-arrays entry columns.
 pub type EntryId = u32;
+/// Sentinel `parent` value for an entry attached to the volume root (no parent).
 pub const NO_PARENT: EntryId = u32::MAX;
 
+/// Per-entry flag bits packed into the index's `flags` column (one `u8`).
 pub mod flags {
+    /// This entry is a directory.
     pub const IS_DIR: u8 = 1;
+    /// This entry is deleted but not yet compacted away.
     pub const TOMBSTONE: u8 = 2;
+    /// This entry is a reparse point (symlink, junction, mount point).
     pub const REPARSE: u8 = 4;
     /// Raw `FILE_ATTRIBUTE_HIDDEN`.
     pub const HIDDEN: u8 = 8;
@@ -136,11 +142,17 @@ pub struct RawEntry<'a> {
     pub parent_frn: Frn,
     /// This entry's full reference; its `.record()` is the identity key.
     pub frn: Frn,
+    /// The file name as raw UTF-16 code units (as stored in the MFT).
     pub name_utf16: &'a [u16],
+    /// Whether this entry is a directory.
     pub is_dir: bool,
+    /// Whether this entry is a reparse point (symlink, junction, mount point).
     pub is_reparse: bool,
+    /// Raw `FILE_ATTRIBUTE_HIDDEN`.
     pub is_hidden: bool,
+    /// Raw `FILE_ATTRIBUTE_SYSTEM`.
     pub is_system: bool,
+    /// File size in bytes.
     pub size: u64,
     /// FILETIME (100ns ticks since 1601, UTC).
     pub mtime: i64,
@@ -152,15 +164,26 @@ pub struct RawEntry<'a> {
 /// memcpys. `name_wtf8`/`lower_wtf8` must come from
 /// [`crate::wtf8::push_wtf8_pair`] (equal lengths, shared offsets).
 pub struct EncodedEntry<'a> {
+    /// The parent directory's full reference — its `.record()` resolves the
+    /// parent (an unknown parent attaches the entry to the root).
     pub parent_frn: Frn,
+    /// This entry's full reference; its `.record()` is the identity key.
     pub frn: Frn,
+    /// The file name, WTF-8 encoded (paired with `lower_wtf8`, shared offsets).
     pub name_wtf8: &'a [u8],
+    /// The lowercased file name, WTF-8 encoded (same length as `name_wtf8`).
     pub lower_wtf8: &'a [u8],
+    /// Whether this entry is a directory.
     pub is_dir: bool,
+    /// Whether this entry is a reparse point (symlink, junction, mount point).
     pub is_reparse: bool,
+    /// Raw `FILE_ATTRIBUTE_HIDDEN`.
     pub is_hidden: bool,
+    /// Raw `FILE_ATTRIBUTE_SYSTEM`.
     pub is_system: bool,
+    /// File size in bytes.
     pub size: u64,
+    /// FILETIME (100ns ticks since 1601, UTC).
     pub mtime: i64,
 }
 

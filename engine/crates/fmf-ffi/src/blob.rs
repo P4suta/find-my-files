@@ -29,6 +29,8 @@ pub(crate) fn blob_from_json(json: String) -> *mut FmfBlob {
     Box::into_raw(owned).cast()
 }
 
+/// Frees a JSON blob previously returned by the engine (e.g. from
+/// `fmf_engine_stats`). Null is a no-op. Safety: see docs/ARCHITECTURE.md.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_blob_free(p: *mut FmfBlob) -> i32 {
     guard(|| {

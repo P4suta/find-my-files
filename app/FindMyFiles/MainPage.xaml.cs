@@ -49,6 +49,10 @@ public sealed partial class MainPage : Page
             "zh-Hans" => LangZh,
             _ => LangAuto,
         }).IsChecked = true;
+        // Reflect the restored regex scope (the ViewModel already loaded it)
+        // in the radio group. Setting IsChecked programmatically does not fire
+        // Click, so this does not loop back into the ViewModel.
+        (ViewModel.RegexScope == RegexScope.Path ? RegexScopePath : RegexScopeName).IsChecked = true;
         _viewport = new ResultsViewportManager(ResultsList);
         ViewModel.Results.ResultsPublished += _viewport.OnResultsPublished;
         // IME: half-composed text (romaji fragments, candidate strings)
@@ -252,4 +256,10 @@ public sealed partial class MainPage : Page
 
     private void HeaderDate_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         ViewModel.SetSort(FmfSort.Mtime);
+
+    private void RegexScopeName_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        ViewModel.RegexScope = RegexScope.Name;
+
+    private void RegexScopePath_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        ViewModel.RegexScope = RegexScope.Path;
 }

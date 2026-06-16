@@ -13,6 +13,13 @@ use crate::{FMF_E_INVALID_ARG, FMF_E_IO, FMF_E_QUERY_SYNTAX, FMF_E_STALE, FMF_OK
 // The query/page PODs radiate from the contract (ADR-0018).
 pub use fmf_contract::pod::{FmfPage, FmfQueryOptions, FmfRow};
 
+/// Runs a query against the engine, returning an opaque result-set handle plus
+/// the total match count and an optional JSON query trace.
+///
+/// Writes the result-set handle to `out_handle`, the match count to `out_count`,
+/// and (when `out_trace` is non-null) a `FmfBlob` holding the stage-breakdown
+/// trace as JSON. Returns `FMF_OK` on success or an `FMF_E_*` code.
+/// Safety: see docs/ARCHITECTURE.md.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_query(
     h: *mut c_void,
@@ -83,6 +90,13 @@ struct PageOwned {
 // reorder breaks the build instead of dangling a caller's pointer.
 const _: () = assert!(std::mem::offset_of!(PageOwned, page) == 0);
 
+/// Materializes a window of rows from a result-set handle into a freshly
+/// allocated `FmfPage`.
+///
+/// Fills `count` rows starting at `offset` and writes the owning page pointer to
+/// `out`; free it with `fmf_page_free`. Returns `FMF_OK`, or `FMF_E_STALE` if the
+/// structural generation moved (re-run the query), or another `FMF_E_*` code.
+/// Safety: see docs/ARCHITECTURE.md.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_result_page(
     r: *mut c_void,
@@ -127,6 +141,8 @@ pub unsafe extern "C" fn fmf_result_page(
     })
 }
 
+/// Frees a `FmfPage` previously returned by `fmf_result_page`. Null is a no-op.
+/// Returns `FMF_OK`. Safety: see docs/ARCHITECTURE.md.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_page_free(p: *mut FmfPage) -> i32 {
     guard(|| {
@@ -137,6 +153,8 @@ pub unsafe extern "C" fn fmf_page_free(p: *mut FmfPage) -> i32 {
     })
 }
 
+/// Frees a result-set handle previously returned by `fmf_query`. Null is a
+/// no-op. Returns `FMF_OK`. Safety: see docs/ARCHITECTURE.md.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_result_free(r: *mut c_void) -> i32 {
     guard(|| {

@@ -69,6 +69,9 @@ impl PipeSecurity {
         Ok(Self { descriptor })
     }
 
+    /// A `SECURITY_ATTRIBUTES` pointing at this owned descriptor, ready to pass
+    /// to pipe creation. The handle is non-inheritable; valid only while `self`
+    /// lives.
     #[must_use]
     pub const fn attributes(&self) -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES {

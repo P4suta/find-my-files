@@ -25,6 +25,16 @@ public sealed class AppSettings
     /// toolbar toggle flips it per session and persists here.</summary>
     public bool FocusedSearch { get; set; } = true;
 
+    /// <summary>正規表現モード (ADR-0023): treat the whole query as one regex.
+    /// Off by default; the gear-menu toggle flips it and persists here.</summary>
+    public bool RegexMode { get; set; }
+
+    /// <summary>Which haystack the whole-query regex matches — "name" or
+    /// "path". Kept independent of <see cref="RegexMode"/> so the choice
+    /// survives toggling regex off and back on. Unknown values fall back to
+    /// "name".</summary>
+    public string RegexScope { get; set; } = "name";
+
     /// <summary>Noise directories excluded in focused mode, each appended as
     /// a quoted <c>!path:"…"</c> term. Plain substring match against the full
     /// path (engine semantics) — no wildcards needed.</summary>

@@ -18,6 +18,16 @@ pub const BENCH_QUERIES: &[&str] = &[
     "ext:dll",                  // extension filter
     "size:>100mb path:windows", // composite
     "*.rs",                     // wildcard
+    // Regex with a literal → the prefilter keeps it on the pool sweep, so it
+    // honors the p99 budget like any indexed query (ADR-0023).
+    "regex:win.*\\.dll",
+    // NOTE: a literal-less regex (e.g. `[0-9]{6,}`) has no literal to prefilter
+    // on, so it is a full scan whose cost scales linearly with entry count —
+    // ~29 ms @1M (within budget) but past the fixed 50 ms line on volumes well
+    // over the 1M spec scale. It is measured in the criterion micro-bench
+    // (query/regex_scan, ungated) rather than gated here, where the absolute
+    // budget would fail purely because the machine holds more files than spec
+    // (ADR-0023). Indexing regex is rejected by ADR-0001/0002.
 ];
 
 #[derive(serde::Serialize, serde::Deserialize)]

@@ -9,15 +9,22 @@ use std::io::{Read, Write};
 pub use fmf_contract::limits::MAX_PAYLOAD_LEN;
 pub use fmf_contract::pod::FrameHeader;
 
+/// Wire size of the fixed frame header, in bytes (16).
 pub const HEADER_LEN: usize = FrameHeader::LEN;
 
+/// `flags` bit marking a frame as a response to a prior request.
 pub const FLAG_RESPONSE: u16 = 1 << 0;
+/// `flags` bit marking a frame as an unsolicited server-pushed event.
 pub const FLAG_EVENT: u16 = 1 << 1;
 
+/// Why a frame could not be read or written.
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
+    /// The header's payload length (bytes) exceeds [`MAX_PAYLOAD_LEN`]; a
+    /// protocol violation that tears down the connection.
     #[error("frame payload {0} bytes exceeds the {MAX_PAYLOAD_LEN}-byte cap")]
     TooLong(u32),
+    /// The underlying stream read or write failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

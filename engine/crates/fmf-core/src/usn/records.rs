@@ -7,31 +7,49 @@
 
 /// Reason flags we act on (winioctl.h).
 pub mod reason {
+    /// File data was overwritten (`USN_REASON_DATA_OVERWRITE`).
     pub const DATA_OVERWRITE: u32 = 0x0000_0001;
+    /// File data was extended (`USN_REASON_DATA_EXTEND`).
     pub const DATA_EXTEND: u32 = 0x0000_0002;
+    /// File data was truncated (`USN_REASON_DATA_TRUNCATION`).
     pub const DATA_TRUNCATION: u32 = 0x0000_0004;
+    /// Basic file info (attributes/timestamps) changed (`USN_REASON_BASIC_INFO_CHANGE`).
     pub const BASIC_INFO_CHANGE: u32 = 0x0000_8000;
+    /// File or directory was created (`USN_REASON_FILE_CREATE`).
     pub const FILE_CREATE: u32 = 0x0000_0100;
+    /// File or directory was deleted (`USN_REASON_FILE_DELETE`).
     pub const FILE_DELETE: u32 = 0x0000_0200;
+    /// Record carries the name the file had before a rename (`USN_REASON_RENAME_OLD_NAME`).
     pub const RENAME_OLD_NAME: u32 = 0x0000_1000;
+    /// Record carries the name the file has after a rename (`USN_REASON_RENAME_NEW_NAME`).
     pub const RENAME_NEW_NAME: u32 = 0x0000_2000;
+    /// A hard link was added or removed (`USN_REASON_HARD_LINK_CHANGE`).
     pub const HARD_LINK_CHANGE: u32 = 0x0001_0000;
+    /// Final record after a handle to the file was closed (`USN_REASON_CLOSE`).
     pub const CLOSE: u32 = 0x8000_0000;
 }
 
+/// Hidden-file attribute bit (`FILE_ATTRIBUTE_HIDDEN`).
 pub const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+/// System-file attribute bit (`FILE_ATTRIBUTE_SYSTEM`).
 pub const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+/// Directory attribute bit (`FILE_ATTRIBUTE_DIRECTORY`).
 pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+/// Reparse-point attribute bit (`FILE_ATTRIBUTE_REPARSE_POINT`), e.g. symlinks/junctions.
 pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 /// One decoded journal record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsnRecord {
+    /// Update Sequence Number — this record's monotonic position in the journal.
     pub usn: i64,
     /// Full 64-bit FRN (with sequence).
     pub frn: u64,
+    /// Full 64-bit FRN of the containing directory (with sequence).
     pub parent_frn: u64,
+    /// Bitfield of `reason::*` flags describing what changed.
     pub reason: u32,
+    /// Bitfield of `FILE_ATTRIBUTE_*` flags for the file at record time.
     pub attributes: u32,
     /// File name in UTF-16 units (single link name, see RESEARCH.md on
     /// hard links).
@@ -39,18 +57,22 @@ pub struct UsnRecord {
 }
 
 impl UsnRecord {
+    /// True if this record is for a directory.
     #[must_use]
     pub const fn is_dir(&self) -> bool {
         self.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
     }
+    /// True if this record is for a reparse point (symlink/junction).
     #[must_use]
     pub const fn is_reparse(&self) -> bool {
         self.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
+    /// True if the hidden attribute is set.
     #[must_use]
     pub const fn is_hidden(&self) -> bool {
         self.attributes & FILE_ATTRIBUTE_HIDDEN != 0
     }
+    /// True if the system attribute is set.
     #[must_use]
     pub const fn is_system(&self) -> bool {
         self.attributes & FILE_ATTRIBUTE_SYSTEM != 0

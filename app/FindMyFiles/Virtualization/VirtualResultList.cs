@@ -60,7 +60,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     // through this list (seeds + background fetches). Swapped atomically with
     // the result in Reassign/RefreshInPlace so rows always match the query
     // they are shown under.
-    private CompiledHighlighter _highlighter = CompiledHighlighter.Empty;
+    private IHighlighter _highlighter = CompiledHighlighter.Empty;
     private int _epoch;
 
     // Per-epoch cancellation, second line of defense behind the epoch check:
@@ -110,7 +110,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// the next Reassign/RefreshInPlace or by <see cref="Dispose"/>).
     /// </summary>
     public void Reassign(
-        ISearchResult? result, IReadOnlyList<PageSeed> seeds, CompiledHighlighter? highlighter = null)
+        ISearchResult? result, IReadOnlyList<PageSeed> seeds, IHighlighter? highlighter = null)
     {
         EnsureUiThread(nameof(Reassign));
         _highlighter = highlighter ?? CompiledHighlighter.Empty;
@@ -156,7 +156,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// of the previous epoch are cancelled here too.
     /// </summary>
     public void RefreshInPlace(
-        ISearchResult result, IReadOnlyList<PageSeed> seeds, CompiledHighlighter? highlighter = null)
+        ISearchResult result, IReadOnlyList<PageSeed> seeds, IHighlighter? highlighter = null)
     {
         EnsureUiThread(nameof(RefreshInPlace));
         if ((int)Math.Min(result.Count, int.MaxValue) != Count)

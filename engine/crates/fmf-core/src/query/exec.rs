@@ -38,21 +38,31 @@ fn path_memos(idx: &VolumeIndex, q: &CompiledQuery) -> PathMemos {
 /// 65536 entries per parallel task for full scans.
 const CHUNK: usize = 1 << 16;
 
+/// One volume's query result: the matching ids plus the index generations
+/// they were computed against (for staleness checks and incremental refine).
 pub struct SearchResult {
     /// Matching entries in the requested sort order.
     pub ids: Vec<EntryId>,
+    /// Content generation (name/data edits) of the index when these ids were produced.
     pub content_generation: u64,
+    /// Structural generation (live-set / tree shape) of the index when these ids were produced.
     pub structural_generation: u64,
 }
 
 /// Per-volume stage timings for [`crate::metrics::QueryTrace`].
 #[derive(Debug, Default, Clone)]
 pub struct SearchMetrics {
+    /// Human-readable label of the driver that executed this query (e.g. `perm-walk`).
     pub driver: String,
+    /// Time spent building or extending the cached memo/offset structures (µs).
     pub memo_us: u64,
+    /// Time spent sweeping pools and evaluating residual matchers (µs).
     pub scan_us: u64,
+    /// Time spent walking the sort permutation to materialize the id array (µs).
     pub materialize_us: u64,
+    /// Number of entries examined during the scan (count).
     pub entries_scanned: u64,
+    /// Number of entries skipped because they are hidden/system and excluded (count).
     pub excluded_skipped: u64,
 }
 
@@ -471,11 +481,177 @@ mod tests {
         assert_eq!(names(&idx, "regex:^ma.n\\.rs$"), vec!["main.rs"]);
     }
 
+    /// The literal prefilter must never lose a match: a regex query through
+    /// the engine (prefiltered pool sweep + residual, or a full scan when no
+    /// literal exists) must equal a naive `Regex::is_match` over every name,
+    /// for every case mode and a spread of pattern shapes. This is the one
+    /// unacceptable failure mode — a superset prefilter that drops a real hit.
+    #[test]
+    fn regex_matches_naive_oracle() {
+        use regex::bytes::RegexBuilder;
+
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+        }
+        let frags = [
+            "report",
+            "Report",
+            "main",
+            "src",
+            "日本",
+            "語",
+            "data",
+            "DLL",
+            "exe",
+            "img",
+            "2024",
+            "v2",
+            "ファイル",
+            "tmp",
+        ];
+        let exts = [".rs", ".txt", ".PDF", ".dll", ".log", ".日", ""];
+        let mut rng = Rng(0x9E37_79B9);
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        // The builder seeds the volume root ("C:"); it is a live entry a name
+        // regex sees too (e.g. `.*`), so the naive oracle must include it.
+        let mut made: Vec<String> = vec!["C:".to_string()];
+        for i in 0..300u64 {
+            let mut name = String::new();
+            for _ in 0..=(rng.next() % 3) {
+                name.push_str(frags[rng.next() as usize % frags.len()]);
+            }
+            name.push_str(exts[rng.next() as usize % exts.len()]);
+            if name.is_empty() {
+                name.push('x');
+            }
+            let units: Vec<u16> = name.encode_utf16().collect();
+            b.push(RawEntry {
+                parent_frn: Frn(5),
+                frn: Frn((1 << 48) | (100 + i)),
+                name_utf16: &units,
+                is_dir: false,
+                is_reparse: false,
+                is_hidden: false,
+                is_system: false,
+                size: i,
+                mtime: i as i64,
+            });
+            made.push(name);
+        }
+        let idx = b.finish();
+
+        // Prefilter-bearing (prefix/suffix literal) and literal-less (full
+        // scan) shapes, plus alternations, anchors, multibyte and digits.
+        let patterns = [
+            "^report",
+            "report",
+            "ort",
+            "main.*rs$",
+            "日.*語",
+            "[0-9]+",
+            "v[0-9]",
+            r".*\.rs$",
+            r"\.dll$",
+            "dll|exe",
+            "^$",
+            "Report",
+            "REPORT",
+            "src.*main",
+            r"^\d",
+            ".*",
+            "ファイル",
+            "(report|main)",
+            r"tmp.*\.log$",
+            "日本",
+        ];
+        let cases = [CaseMode::Smart, CaseMode::Insensitive, CaseMode::Sensitive];
+        for pat in patterns {
+            for case in cases {
+                let opt = QueryOptions {
+                    case,
+                    ..Default::default()
+                };
+                let ci = match case {
+                    CaseMode::Insensitive => true,
+                    CaseMode::Sensitive => false,
+                    CaseMode::Smart => !crate::wtf8::has_uppercase(pat),
+                };
+                let re = RegexBuilder::new(pat)
+                    .case_insensitive(ci)
+                    .dot_matches_new_line(true)
+                    .build()
+                    .unwrap();
+                let mut expect: Vec<String> = made
+                    .iter()
+                    .filter(|n| re.is_match(n.as_bytes()))
+                    .cloned()
+                    .collect();
+                expect.sort();
+                // Quote so the parser keeps `|`/`$`/etc. inside one regex atom.
+                let mut got = run(&idx, &format!(r#"regex:"{pat}""#), opt);
+                got.sort();
+                assert_eq!(
+                    got, expect,
+                    "regex `{pat}` (case {case:?}) diverged from the naive oracle"
+                );
+            }
+        }
+    }
+
     #[test]
     fn date_filter_utc() {
         let idx = sample();
         let r = names(&idx, "dm:>=1650 ext:pdf");
         assert_eq!(r, vec!["Report.PDF"]);
+    }
+
+    /// Whole-query regex mode (ADR-0023): the entire text is one regex, no
+    /// parsing/operators, matched against the name or the full path per scope.
+    #[test]
+    fn whole_regex_mode_name_and_path_scope() {
+        use super::super::{RegexScope, compile_whole_regex};
+
+        let idx = sample();
+        let run_re = |pat: &str, scope: RegexScope| {
+            let q = compile_whole_regex(pat, CaseMode::Smart, scope).unwrap();
+            let mut got: Vec<String> = search(&idx, &q, &QueryOptions::default())
+                .0
+                .ids
+                .iter()
+                .map(|&id| String::from_utf8_lossy(idx.name(id)).into_owned())
+                .collect();
+            got.sort();
+            got
+        };
+
+        // Name scope: the text is a regex over the file name. Operators that
+        // the normal parser would treat as AND/OR are regex metachars here.
+        assert_eq!(run_re(r"\.rs$", RegexScope::Name), vec!["main.rs"]);
+        assert_eq!(run_re("^report", RegexScope::Name), vec!["Report.PDF"]); // smart-case ci
+        assert_eq!(
+            run_re("pdf|txt", RegexScope::Name),
+            vec!["Report.PDF", "notes.txt"]
+        );
+        // A literal-less pattern falls back to the full scan and still matches.
+        assert!(run_re(r"[0-9]", RegexScope::Name).is_empty()); // no sample name has a digit
+
+        // Path scope: matched against the full path (parent included).
+        assert_eq!(
+            run_re(r"docs.*\.pdf$", RegexScope::Path),
+            vec!["Report.PDF"]
+        );
+
+        // Invalid / oversized patterns are a compile error, never a panic.
+        assert!(compile_whole_regex("(", CaseMode::Smart, RegexScope::Name).is_err());
+        assert!(compile_whole_regex("(a{500}){500}", CaseMode::Smart, RegexScope::Name).is_err());
     }
 
     #[test]

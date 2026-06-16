@@ -6,12 +6,16 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Machine-wide service settings persisted to `service.json`. Owned by the
+/// service; missing or unreadable fields fall back to [`Default`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServiceConfig {
     /// Drive labels to index. Empty = all fixed NTFS volumes at startup.
     pub volumes: Vec<String>,
+    /// Tracing filter level for the engine log (e.g. `info`, `debug`).
     pub log_level: String,
+    /// Interval between index flushes to disk, in seconds.
     pub flush_interval_secs: u64,
     /// SIDs allowed to connect (P4: SDDL + connect-time token check).
     pub authorized_sids: Vec<String>,
@@ -28,6 +32,8 @@ impl Default for ServiceConfig {
     }
 }
 
+/// The machine-wide data directory `%ProgramData%\find-my-files` (falls back
+/// to `C:\ProgramData` if `ProgramData` is unset).
 #[must_use]
 pub fn default_data_dir() -> PathBuf {
     let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());

@@ -13,6 +13,7 @@ use serde::Serialize;
 /// Stage breakdown of one query, in microseconds.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct QueryTrace {
+    /// The raw query text this trace measured.
     pub query: String,
     /// Which execution strategy drove candidate generation (visualized in
     /// the perf panel): e.g. "full-scan", "pool-scan", "suffix", "perm-walk".
@@ -25,18 +26,27 @@ pub struct QueryTrace {
     /// the displayed result instead of re-publishing (no repaint churn from
     /// idle USN traffic).
     pub unchanged: bool,
+    /// Query parse time, in microseconds.
     pub parse_us: u64,
+    /// Query compile time, in microseconds.
     pub compile_us: u64,
     /// Dir-path memo (only path queries; 0 when cached/warm).
     pub memo_us: u64,
+    /// Candidate-generation scan time, in microseconds.
     pub scan_us: u64,
+    /// Result-row materialization time, in microseconds.
     pub materialize_us: u64,
     /// Multi-volume k-way merge.
     pub merge_us: u64,
+    /// End-to-end query time, in microseconds.
     pub total_us: u64,
+    /// Number of index entries examined during scanning.
     pub entries_scanned: u64,
+    /// Number of entries skipped by exclusion rules.
     pub excluded_skipped: u64,
+    /// Number of matching entries returned.
     pub hits: u64,
+    /// Number of volumes queried.
     pub volumes: u32,
 }
 
@@ -45,50 +55,81 @@ pub struct QueryTrace {
 /// restore gate visible next to full-scan costs.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ScanTrace {
+    /// The volume this event established (e.g. "C:").
     pub volume: String,
     /// "scan" | "snapshot".
     pub source: String,
+    /// Bytes read from the MFT / snapshot.
     pub read_bytes: u64,
+    /// Raw read time, in milliseconds.
     pub read_ms: u64,
+    /// Read throughput, in megabytes per second.
     pub mb_per_s: f64,
+    /// MFT-record parse time, in milliseconds.
     pub parse_ms: u64,
     /// Deferred $`ATTRIBUTE_LIST` name resolution.
     pub deferred_ms: u64,
+    /// Index-build time, in milliseconds.
     pub build_ms: u64,
+    /// Sort time, in milliseconds.
     pub sort_ms: u64,
+    /// End-to-end time to establish the index, in milliseconds.
     pub total_ms: u64,
+    /// Number of index entries established.
     pub entries: u64,
+    /// Peak process working set during the event, in bytes.
     pub peak_ws_bytes: u64,
 }
 
 /// One applied USN batch.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct UsnTrace {
+    /// The volume this USN batch was applied to (e.g. "C:").
     pub volume: String,
+    /// Number of USN records in the batch.
     pub records: u64,
+    /// Number of entries inserted or updated.
     pub upserted: u64,
+    /// Number of entries removed (tombstoned).
     pub deleted: u64,
+    /// Number of entries whose size/mtime stat was refreshed.
     pub stat_updated: u64,
+    /// Number of stat refreshes that failed.
     pub stat_failures: u64,
+    /// Time to apply the batch to the index, in microseconds.
     pub apply_us: u64,
 }
 
 /// Per-column memory accounting for one volume index.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct IndexStats {
+    /// The volume this index covers (e.g. "C:").
     pub volume: String,
+    /// Total rows in the index (live + tombstones).
     pub entries: u64,
+    /// Number of live (non-tombstoned) rows.
     pub live_entries: u64,
+    /// Number of tombstoned (deleted) rows.
     pub tombstones: u64,
+    /// Bytes held by the original-case name pool.
     pub name_pool_bytes: u64,
+    /// Bytes held by the case-folded (lowercase) name pool.
     pub lower_pool_bytes: u64,
+    /// Bytes held by the name-pool offset table.
     pub offsets_bytes: u64,
+    /// Bytes held by the parent-pointer column.
     pub parent_bytes: u64,
+    /// Bytes held by the file-size column.
     pub size_bytes: u64,
+    /// Bytes held by the modification-time column.
     pub mtime_bytes: u64,
+    /// Bytes held by the File Reference Number column.
     pub frn_bytes: u64,
+    /// Bytes held by the per-entry flag column.
     pub flag_bytes: u64,
+    /// Bytes held by the sort permutations.
     pub permutations_bytes: u64,
+    /// Bytes held by the FRN-to-row lookup map.
     pub frn_map_bytes: u64,
     /// Abandoned name bytes across both pools (tombstoned rows, in-place
     /// dir renames: the folded copy always, the original copy when one
@@ -100,9 +141,13 @@ pub struct IndexStats {
     /// Generation-cached query accelerators (offset table, dir-path memo).
     /// Part of the bytes/entry gate — they live in the engine process.
     pub derived_cache_bytes: u64,
+    /// Total resident bytes for this index (sum of all columns + caches).
     pub total_bytes: u64,
+    /// `total_bytes / entries` — the bytes/entry gate metric.
     pub bytes_per_entry: f64,
+    /// Content generation counter (bumps on name/data changes).
     pub content_generation: u64,
+    /// Structural generation counter (bumps on add/remove/rename).
     pub structural_generation: u64,
 }
 
@@ -124,13 +169,18 @@ impl IndexStats {
 /// [2^i, 2^(i+1)) µs. 32 buckets cover > an hour.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Histogram {
+    /// Per-bucket counts; bucket i covers [2^i, 2^(i+1)) µs (length 32).
     pub buckets: Vec<u64>, // length 32
+    /// Total number of recorded values.
     pub count: u64,
+    /// Sum of all recorded values, in microseconds.
     pub sum_us: u64,
+    /// Largest recorded value, in microseconds.
     pub max_us: u64,
 }
 
 impl Histogram {
+    /// Create an empty histogram with 32 zeroed buckets.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -139,6 +189,7 @@ impl Histogram {
         }
     }
 
+    /// Record a value (in microseconds) into its log2 bucket and update totals.
     pub fn record(&mut self, us: u64) {
         let b = (64 - us.max(1).leading_zeros() as usize - 1).min(31);
         self.buckets[b] += 1;
@@ -169,13 +220,21 @@ impl Histogram {
 /// otherwise vanish into fallback paths. Zero-cost atomics, always on.
 #[derive(Debug, Default)]
 pub struct Counters {
+    /// Times a per-entry size/mtime stat fetch failed.
     pub stat_fetch_failures: std::sync::atomic::AtomicU64,
+    /// Times a USN batch was truncated (records dropped before apply).
     pub usn_batches_truncated: std::sync::atomic::AtomicU64,
+    /// Times a snapshot failed to load (fell back to a full scan).
     pub snapshot_load_failures: std::sync::atomic::AtomicU64,
+    /// Times a snapshot failed to save.
     pub snapshot_save_failures: std::sync::atomic::AtomicU64,
+    /// Times a deferred $`ATTRIBUTE_LIST` name could not be resolved.
     pub deferred_names_unresolved: std::sync::atomic::AtomicU64,
+    /// Times a corrupt MFT record was encountered and skipped.
     pub corrupt_mft_records: std::sync::atomic::AtomicU64,
+    /// Times the USN journal was rescanned from scratch (gap recovery).
     pub journal_rescans: std::sync::atomic::AtomicU64,
+    /// Times the scan pipeline fell back to a slower path.
     pub scan_pipeline_fallbacks: std::sync::atomic::AtomicU64,
     /// A compacted copy was discarded because the index mutated under it —
     /// impossible while the volume thread is the only writer; nonzero means
@@ -203,25 +262,52 @@ pub struct Counters {
     pub trace_serialize_failures: std::sync::atomic::AtomicU64,
 }
 
+/// Plain-integer, JSON-serializable copy of `Counters` for the FFI/UI.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct CountersSnapshot {
+    /// Times a per-entry size/mtime stat fetch failed.
     pub stat_fetch_failures: u64,
+    /// Times a USN batch was truncated (records dropped before apply).
     pub usn_batches_truncated: u64,
+    /// Times a snapshot failed to load (fell back to a full scan).
     pub snapshot_load_failures: u64,
+    /// Times a snapshot failed to save.
     pub snapshot_save_failures: u64,
+    /// Times a deferred $`ATTRIBUTE_LIST` name could not be resolved.
     pub deferred_names_unresolved: u64,
+    /// Times a corrupt MFT record was encountered and skipped.
     pub corrupt_mft_records: u64,
+    /// Times the USN journal was rescanned from scratch (gap recovery).
     pub journal_rescans: u64,
+    /// Times the scan pipeline fell back to a slower path.
     pub scan_pipeline_fallbacks: u64,
+    /// Times the query-layer offset table had to be rebuilt as a fallback.
     pub offset_table_rebuild_fallbacks: u64,
+    /// Times a lazy permutation had to be rebuilt as a fallback.
     pub lazy_perm_rebuild_fallbacks: u64,
+    /// A compacted copy was discarded because the index mutated under it —
+    /// impossible while the volume thread is the only writer; nonzero means
+    /// that invariant broke somewhere.
     pub compaction_aborts: u64,
+    /// Pipe server (fmf-service): a frame failed validation and the
+    /// connection was dropped.
     pub pipe_malformed_frames: u64,
+    /// Pipe server: a subscriber's bounded event queue overflowed and the
+    /// oldest event was dropped.
     pub pipe_events_dropped: u64,
+    /// Pipe server: a client was turned away at the instance cap.
     pub pipe_connections_rejected: u64,
+    /// Scan: the extension-record name cache hit its capacity; remaining
+    /// deferred names fall back to per-record disk reads.
     pub deferred_name_cache_overflow: u64,
+    /// Scan: a deferred-name disk read failed (the entry keeps a
+    /// placeholder name until the next rescan).
     pub deferred_name_read_failures: u64,
+    /// Pipe server: a result handle was LRU-evicted at the per-connection
+    /// cap; its next page fetch answers STALE("evicted").
     pub pipe_results_evicted: u64,
+    /// `QueryTrace` JSON serialization failed; the response carried an empty
+    /// trace (the query itself succeeded).
     pub trace_serialize_failures: u64,
 }
 
@@ -234,6 +320,7 @@ static LAZY_PERM_REBUILD_FALLBACKS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 impl Counters {
+    /// Increment a counter by one (relaxed atomic).
     pub fn bump(counter: &std::sync::atomic::AtomicU64) {
         counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -246,10 +333,12 @@ impl Counters {
         LAZY_PERM_REBUILD_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Add `n` to a counter (relaxed atomic).
     pub fn add(counter: &std::sync::atomic::AtomicU64, n: u64) {
         counter.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Read all counters into a plain-integer `CountersSnapshot`.
     pub fn snapshot(&self) -> CountersSnapshot {
         use std::sync::atomic::Ordering::Relaxed;
         CountersSnapshot {
@@ -278,13 +367,21 @@ impl Counters {
 /// Aggregated, JSON-serializable snapshot for the FFI/UI.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct MetricsSnapshot {
+    /// Most recent query traces, newest last.
     pub recent_queries: Vec<QueryTrace>,
+    /// Latency histogram across all recorded queries.
     pub query_histogram: Histogram,
+    /// 50th-percentile query latency, in microseconds.
     pub p50_us: u64,
+    /// 99th-percentile query latency, in microseconds.
     pub p99_us: u64,
+    /// Most recent applied USN batches.
     pub recent_usn: Vec<UsnTrace>,
+    /// Most recent index-established (scan/snapshot) events.
     pub scans: Vec<ScanTrace>,
+    /// Per-volume memory accounting for each live index.
     pub indexes: Vec<IndexStats>,
+    /// Process-wide degradation counters.
     pub counters: CountersSnapshot,
     /// WARN+ events and panics (diag ring), oldest first.
     pub recent_errors: Vec<crate::diag::ErrorEvent>,
@@ -301,10 +398,12 @@ pub struct MetricsHub {
     histogram: Mutex<Histogram>,
     usn: Mutex<VecDeque<UsnTrace>>,
     scans: Mutex<VecDeque<ScanTrace>>,
+    /// Process-wide degradation counters.
     pub counters: Counters,
 }
 
 impl MetricsHub {
+    /// Create an empty hub with a fresh 32-bucket histogram.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -313,6 +412,7 @@ impl MetricsHub {
         }
     }
 
+    /// Record a query trace into the ring and its latency into the histogram.
     pub fn record_query(&self, trace: QueryTrace) {
         self.histogram.lock().record(trace.total_us);
         let mut q = self.queries.lock();
@@ -322,6 +422,7 @@ impl MetricsHub {
         q.push_back(trace);
     }
 
+    /// Record a USN-batch trace into the ring.
     pub fn record_usn(&self, trace: UsnTrace) {
         let mut u = self.usn.lock();
         if u.len() == USN_RING {
@@ -330,6 +431,7 @@ impl MetricsHub {
         u.push_back(trace);
     }
 
+    /// Record an index-established (scan/snapshot) trace into the ring.
     pub fn record_scan(&self, trace: ScanTrace) {
         let mut s = self.scans.lock();
         if s.len() == SCAN_RING {
@@ -338,6 +440,7 @@ impl MetricsHub {
         s.push_back(trace);
     }
 
+    /// The most recently recorded query trace, if any.
     pub fn last_query(&self) -> Option<QueryTrace> {
         self.queries.lock().back().cloned()
     }
@@ -366,6 +469,7 @@ impl MetricsHub {
 pub struct Stage(std::time::Instant);
 
 impl Stage {
+    /// Start a stopwatch at the current instant.
     #[must_use]
     pub fn start() -> Self {
         Self(std::time::Instant::now())
@@ -378,6 +482,7 @@ impl Stage {
         us
     }
 
+    /// Elapsed time since start (or last lap), in microseconds.
     #[must_use]
     pub fn elapsed_us(&self) -> u64 {
         self.0.elapsed().as_micros() as u64

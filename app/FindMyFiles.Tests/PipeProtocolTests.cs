@@ -41,10 +41,9 @@ public sealed class PipeProtocolTests
     [Fact]
     public void QueryReq_GoldenBytes_MatchTheRustPin()
     {
-        var bytes = PipeProtocol.EncodeQueryReq(
-            new SearchOptions(FmfSort.Size, Descending: true, FmfCase.Sensitive,
-                IncludeHiddenSystem: false),
-            "win");
+        var opts = new SearchOptions(FmfSort.Size, Descending: true, FmfCase.Sensitive,
+            IncludeHiddenSystem: false, RegexMode: true, Scope: RegexScope.Path);
+        var bytes = PipeProtocol.EncodeQueryReq(opts, "win");
 
         Assert.Equal(
             new byte[]
@@ -53,12 +52,13 @@ public sealed class PipeProtocolTests
                 1, 0, 0, 0, // desc
                 2, 0, 0, 0, // case = Sensitive
                 0, 0, 0, 0, // include_hidden_system
+                3, 0, 0, 0, // regex_mode = whole(bit0) | path(bit1)
                 (byte)'w', (byte)'i', (byte)'n',
             },
             bytes);
 
         var (options, text) = PipeProtocol.DecodeQueryReq(bytes);
-        Assert.Equal(new SearchOptions(FmfSort.Size, true, FmfCase.Sensitive, false), options);
+        Assert.Equal(opts, options);
         Assert.Equal("win", text);
     }
 

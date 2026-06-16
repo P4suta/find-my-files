@@ -24,6 +24,10 @@ repository = "https://github.com/P4suta/find-my-files"
 # (priority 0) wins; every such re-allow MUST carry a `reason = "…"`.
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+# Every public item carries a doc comment — the Rust mirror of the C# side's
+# CS1591 (GenerateDocumentationFile + warnings-as-errors). rustdoc (just doc /
+# pages.yml) and `cargo check` both enforce it.
+missing_docs = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
@@ -96,6 +100,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 regex = "1"
+# Literal extraction from a regex HIR drives the prefilter that keeps regex
+# queries on the linear pool sweep instead of a full scan (ADR-0023). Pinned
+# to regex's own syntax crate; already in the lock as a transitive dep.
+regex-syntax = "0.8"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

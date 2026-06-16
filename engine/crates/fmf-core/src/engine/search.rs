@@ -48,9 +48,32 @@ impl Engine {
         let t_total = crate::metrics::Stage::start();
         let mut stage = crate::metrics::Stage::start();
 
-        let ast = query::parse(text)?;
-        trace.parse_us = stage.lap();
-        let compiled = Arc::new(query::compile(&ast, opt.case, &date_resolver())?);
+        // Reuse the previous compile when the same (text, case) is re-issued
+        // (USN-driven requery / RefreshInPlace) — parse + compile are skipped,
+        // which is the biggest single cost for a regex query.
+        let cached = {
+            let cache = self.compile_cache.lock();
+            cache
+                .as_ref()
+                .and_then(|(t, o, q)| (t.as_str() == text && o == opt).then(|| Arc::clone(q)))
+        };
+        let compiled = if let Some(q) = cached {
+            trace.parse_us = stage.lap();
+            q
+        } else if opt.regex_mode {
+            // Whole-query regex: the entire text is one pattern — no parse,
+            // no operators (ADR-0023).
+            trace.parse_us = stage.lap();
+            let q = Arc::new(query::compile_whole_regex(text, opt.case, opt.regex_scope)?);
+            *self.compile_cache.lock() = Some((text.to_string(), *opt, Arc::clone(&q)));
+            q
+        } else {
+            let ast = query::parse(text)?;
+            trace.parse_us = stage.lap();
+            let q = Arc::new(query::compile(&ast, opt.case, &date_resolver())?);
+            *self.compile_cache.lock() = Some((text.to_string(), *opt, Arc::clone(&q)));
+            q
+        };
         trace.driver = compiled.driver_label();
         trace.compile_us = stage.lap();
 

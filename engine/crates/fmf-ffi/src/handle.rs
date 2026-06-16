@@ -15,6 +15,7 @@ pub(crate) struct EngineHandle {
     pub(crate) _sink_keepalive: parking_lot::Mutex<Option<Arc<CallbackSink>>>,
 }
 
+/// Returns the engine ABI version the C# host must match before calling any other entry point.
 #[unsafe(no_mangle)]
 pub const extern "C" fn fmf_abi_version() -> u32 {
     fmf_contract::versions::ABI_VERSION
@@ -99,6 +100,7 @@ pub unsafe extern "C" fn fmf_flush(h: *mut c_void) -> i32 {
     })
 }
 
+/// Detaches the event sink, shuts the engine down, and frees the handle. Safety: see docs/ARCHITECTURE.md.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_engine_destroy(h: *mut c_void) -> i32 {
     guard(|| {

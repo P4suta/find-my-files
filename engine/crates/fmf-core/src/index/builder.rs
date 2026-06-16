@@ -70,6 +70,8 @@ impl VolumeIndexBuilder {
         }
     }
 
+    /// Append a scanned entry with a provisional ROOT parent; the real
+    /// parent is resolved later in [`Self::finish`] once the FRN index exists.
     pub fn push(&mut self, e: RawEntry) {
         let id = self.idx.push_raw(&e, VolumeIndex::ROOT);
         self.parent_frns.push(e.parent_frn);
@@ -84,18 +86,25 @@ impl VolumeIndexBuilder {
         debug_assert_eq!(self.parent_frns.len(), id as usize + 1);
     }
 
+    /// The number of entries pushed so far (including the root).
     pub const fn len(&self) -> usize {
         self.idx.len()
     }
 
+    /// True when no entries have been pushed (never true after [`Self::new`],
+    /// which seeds the root).
     pub const fn is_empty(&self) -> bool {
         self.idx.is_empty()
     }
 
+    /// Run the two-pass finalization and return the queryable [`VolumeIndex`],
+    /// discarding the stage timings.
     pub fn finish(self) -> VolumeIndex {
         self.finish_timed().0
     }
 
+    /// Run the two-pass finalization (resolve parents, propagate EXCLUDED,
+    /// build the name sort) and return the [`VolumeIndex`] with stage timings.
     pub fn finish_timed(mut self) -> (VolumeIndex, FinishTimings) {
         use rayon::prelude::*;
 

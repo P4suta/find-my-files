@@ -14,6 +14,8 @@ use crate::index::{Frn, RawEntry, RecordNo, VolumeIndex};
 /// neither (RESEARCH.md), so the live session asks the volume; replay tests
 /// inject canned values.
 pub trait StatFetcher {
+    /// Look up the current size (bytes) and mtime for an FRN, or `None` when
+    /// the file is already gone or the fetcher has no answer.
     fn stat(&self, frn: u64) -> Option<(u64, i64)>;
 }
 
@@ -25,11 +27,17 @@ impl StatFetcher for NullStatFetcher {
     }
 }
 
+/// Outcome tally for one applied journal batch, one counter per op kind.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct BatchStats {
+    /// Files/dirs created or renamed (upserted or moved in place).
     pub created_or_renamed: u32,
+    /// Entries removed from the index because they were tombstoned.
     pub deleted: u32,
+    /// Existing entries whose size/mtime were refreshed.
     pub stat_updated: u32,
+    /// Records that resolved to no index change (e.g. delete of an entry that
+    /// was never present, or a stat with no fetchable value).
     pub ignored: u32,
     /// Volume lookups (size/mtime) that came back empty — usually the file
     /// vanished before we could stat it; floods indicate a real problem.

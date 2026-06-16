@@ -172,7 +172,7 @@ bench-micro-baseline:
 [working-directory: 'engine']
 bench-micro-check:
     cargo bench -p fmf-core --bench search -- --baseline committed
-    cargo run --release -p fmf-cli -- criterion-gate
+    cargo run --release -p fmf-cli -- criterion-gate --dir ../build/engine/criterion
 
 # Full performance gate before merging fmf-core changes (elevated, cool machine)
 perf-gate: bench-check bench-micro-check
@@ -236,14 +236,25 @@ package tag:
 
 # ── Docs ─────────────────────────────────────────────────────────────────
 
-# Build the mdBook design docs (build/docs-book) + rustdoc (build/engine/doc).
+# Build every published doc artifact: mdBook design docs (build/docs-book) +
+# rustdoc (build/engine/doc) + the C# API reference (build/docs-csharp/_site).
 # Same outputs the pages.yml workflow publishes to GitHub Pages.
 # --document-private-items: the crates are internal (no external API surface),
 # so the docs are for maintainers — private items are the interesting part, and
 # documenting them also resolves intra-doc links to non-pub helpers.
-doc:
+doc: doc-csharp
     mdbook build docs
     cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml --target-dir build/engine
+
+# Build the C# API reference (build/docs-csharp/_site) with DocFX. Metadata comes
+# from the BUILT FindMyFiles.dll + its XML doc file, not the .csproj — DocFX
+# cannot open the WinUI/WindowsAppSDK project in a Roslyn workspace. The plain
+# `dotnet build` (no SkipRustBuild) lets the csproj build fmf_engine.dll itself,
+# so this recipe is self-sufficient. docfx is a pinned dotnet local tool.
+doc-csharp:
+    dotnet build app/FindMyFiles -c Release
+    dotnet tool restore
+    dotnet docfx docfx/docfx.json
 
 # Live-preview the design docs at http://localhost:3000
 doc-serve:

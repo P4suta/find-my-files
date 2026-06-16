@@ -27,10 +27,15 @@ use windows_sys::Win32::System::Ioctl::{
 use super::apply::StatFetcher;
 use super::records::{UsnRecord, parse_buffer};
 
+/// Hard failure from the OS-facing journal/volume layer (unrecoverable here;
+/// distinct from the recoverable journal-gone conditions in [`JournalGone`]).
 #[derive(Debug, Error)]
 pub enum UsnError {
+    /// Opening the volume handle failed: the volume path (`\\.\C:`) and the
+    /// raw win32 error code.
     #[error("cannot open volume {0} (win32 error {1})")]
     OpenVolume(String, u32),
+    /// A `DeviceIoControl`/FSCTL call failed, carrying the raw win32 error code.
     #[error("FSCTL failed (win32 error {0})")]
     Fsctl(u32),
 }
@@ -39,25 +44,40 @@ pub enum UsnError {
 /// a full rescan" (docs/RESEARCH.md定石).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalGone {
+    /// The requested USN range was overwritten/purged (`ERROR_JOURNAL_ENTRY_DELETED`).
     EntryDeleted,
+    /// The journal is being deleted (`ERROR_JOURNAL_DELETE_IN_PROGRESS`).
     DeleteInProgress,
+    /// No active journal exists on the volume (`ERROR_JOURNAL_NOT_ACTIVE`).
     NotActive,
+    /// The journal id no longer matches the persisted checkpoint (journal was
+    /// recreated; surfaced as `ERROR_INVALID_PARAMETER`).
     IdMismatch,
 }
 
+/// Result of one blocking journal read: either a parsed batch of records or a
+/// recoverable signal that the journal can no longer be tailed.
 pub enum ReadOutcome {
+    /// A batch of parsed records from the journal buffer.
     Records {
+        /// The parsed USN records, in journal order.
         records: Vec<UsnRecord>,
         /// Trailing bytes were malformed and dropped — surfaced as a
         /// counter + warning by the caller.
         truncated: bool,
     },
+    /// The journal can no longer be tailed; the caller falls back to a rescan.
     Gone(JournalGone),
 }
 
+/// An open USN journal positioned for tailing: the volume handle plus the
+/// current replay cursor.
 pub struct UsnJournal {
     handle: OwnedHandle,
+    /// The journal's identity (`UsnJournalID`); changes if NTFS recreates it,
+    /// which invalidates any persisted checkpoint.
     pub journal_id: u64,
+    /// The next USN to read from; advances past each returned batch.
     pub next_usn: i64,
 }
 

@@ -1,7 +1,8 @@
 //! `xtask docs-assemble` — assemble the GitHub Pages site under build/site
 //! (replaces the Copy-Item step in pages.yml). The committed landing page
-//! (site/) is the base; the mdBook output (build/docs-book) and rustdoc
-//! (build/engine/doc) layer on top as build/site/book and build/site/doc
+//! (site/) is the base; the mdBook output (build/docs-book), rustdoc
+//! (build/engine/doc) and the DocFX C# API reference (build/docs-csharp/_site)
+//! layer on top as build/site/book, build/site/doc and build/site/api
 //! (ADR-0021). pages.yml then uploads build/site as the Pages artifact.
 
 use crate::{fsx, paths};
@@ -21,12 +22,16 @@ pub fn run() -> Result<()> {
     fsx::copy_dir_all(&landing, &site)
         .with_context(|| format!("copy {} -> {}", landing.display(), site.display()))?;
 
-    // mdBook output + rustdoc — must be built first (`just doc`).
+    // mdBook output + rustdoc + DocFX C# API — must be built first (`just doc`).
     let pairs = [
         (paths::build_root().join("docs-book"), site.join("book")),
         (
             paths::build_root().join("engine").join("doc"),
             site.join("doc"),
+        ),
+        (
+            paths::build_root().join("docs-csharp").join("_site"),
+            site.join("api"),
         ),
     ];
     for (src, dst) in &pairs {

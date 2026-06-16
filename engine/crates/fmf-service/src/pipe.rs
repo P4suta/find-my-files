@@ -55,6 +55,8 @@ impl Event {
         }))
     }
 
+    /// Signals the event, waking any thread waiting on it (used to break a
+    /// quiet accept loop on SCM stop / Ctrl+C).
     pub fn set(&self) {
         unsafe { SetEvent(self.0.as_raw_handle() as HANDLE) };
     }
@@ -193,12 +195,18 @@ pub struct PipeListener {
     security: Option<crate::security::PipeSecurity>,
 }
 
+/// Outcome of one `accept`: either a connected client stream or a stop signal.
 pub enum Accepted {
+    /// A client connected; carries the duplex pipe endpoint.
     Connection(PipeStream),
+    /// The stop event fired before any client connected; the accept loop exits.
     Stopped,
 }
 
 impl PipeListener {
+    /// Creates a listener for `path` allowing up to `instances` concurrent
+    /// pipe instances; `security` is the explicit descriptor (None = process
+    /// default, console/test only — the installed service always sets one).
     #[must_use]
     pub fn new(
         path: &str,
