@@ -151,7 +151,14 @@ public sealed class SearchOrchestrator
             : MatchHighlighter.Compile(request.Query);
         try
         {
-            var outcome = await _engine.SearchAsync(query, request.Options).ConfigureAwait(false);
+            // No ConfigureAwait(false): RunQueryAsync starts on the UI thread, and
+            // every await below resumes into UI work — TraceCaptured (bound Perf
+            // state) and the presenter's Reassign/CountText (EnsureUiThread). The
+            // engine completes off the UI thread (FFI Task.Run, pipe read loop), so
+            // resuming on the captured dispatcher is what keeps that work on the UI
+            // thread; ConfigureAwait(false) here threw RPC_E_WRONG_THREAD under the
+            // in-proc engine (.editorconfig disables CA2007/MA0004 for this reason).
+            var outcome = await _engine.SearchAsync(query, request.Options);
             if (generation != Interlocked.Read(ref _generation))
             {
                 outcome.Result.Dispose(); // a newer query superseded this one
@@ -168,7 +175,7 @@ public sealed class SearchOrchestrator
                     outcome.Trace,
                     origin,
                     highlighter,
-                    () => generation == Interlocked.Read(ref _generation)).ConfigureAwait(false);
+                    () => generation == Interlocked.Read(ref _generation));
                 return;
             }
 
@@ -177,7 +184,7 @@ public sealed class SearchOrchestrator
                 outcome.Trace,
                 origin,
                 highlighter,
-                () => generation == Interlocked.Read(ref _generation)).ConfigureAwait(false);
+                () => generation == Interlocked.Read(ref _generation));
         }
         catch (StaleResultException)
         {

@@ -27,6 +27,49 @@ public sealed class SearchOrchestratorTests
             () => _request);
     }
 
+    /// <summary>Regression (scope-mode "internal error (query.Typing)"): the engine
+    /// completes SearchAsync off the UI thread (FFI Task.Run, pipe read loop), so
+    /// RunQueryAsync's continuation — TraceCaptured (bound Perf state) and the
+    /// presenter's Reassign/CountText (EnsureUiThread) — must resume on the captured
+    /// UI SynchronizationContext. ConfigureAwait(false) ran it on the completing thread
+    /// → COMException 0x8001010E (RPC_E_WRONG_THREAD). This pins the fix.</summary>
+    [Fact]
+    public void Query_continuation_resumes_on_the_captured_synchronization_context()
+    {
+        var traceFired = false;
+        _orchestrator.TraceCaptured += _ => traceFired = true;
+
+        var ui = new RecordingSyncContext();
+        var saved = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(ui);
+        try
+        {
+            _request = new SearchRequest("a", SearchOptions.Default);
+            _orchestrator.Requery(RequeryOrigin.Typing); // suspends at `await SearchAsync`, capturing `ui`
+            Assert.Single(_engine.Searches);
+            Assert.False(traceFired);
+
+            // Complete the query while `ui` is NOT current (mirrors the engine
+            // completing off the UI thread): a correct continuation must Post back to
+            // `ui` rather than run inline on the completing thread.
+            SynchronizationContext.SetSynchronizationContext(null);
+            _engine.Searches[0].CompleteWith(Rows.Many(3, "r"));
+            SynchronizationContext.SetSynchronizationContext(ui);
+
+            // With the bug (ConfigureAwait(false)) the continuation ran inline off `ui`:
+            // TraceCaptured already fired and nothing was marshaled.
+            Assert.True(ui.Posted > 0, "query continuation must marshal to the UI context");
+            Assert.False(traceFired);
+
+            ui.Drain();
+            Assert.True(traceFired);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(saved);
+        }
+    }
+
     [Fact]
     public void SupersededQuery_ResultIsDisposed_AndNeverPublished()
     {
