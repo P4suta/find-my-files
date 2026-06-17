@@ -10,7 +10,7 @@ internal sealed unsafe class FfiSearchResult(IntPtr handle, long count) : SafeHa
 
     protected override bool ReleaseHandle()
     {
-        return NativeEngine.Fmf_result_free(this.handle) == NativeEngine.Ok;
+        return NativeEngine.fmf_result_free(this.handle) == NativeEngine.Ok;
     }
 
     public Task<IReadOnlyList<RowData>> GetRangeAsync(
@@ -44,7 +44,7 @@ internal sealed unsafe class FfiSearchResult(IntPtr handle, long count) : SafeHa
                 finally
                 {
                     // Free path: the return code carries no recovery action.
-                    _ = NativeEngine.Fmf_page_free(page);
+                    _ = NativeEngine.fmf_page_free(page);
                 }
             }
             finally
