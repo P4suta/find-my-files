@@ -30,6 +30,11 @@ just = "1"
 # were previously assumed on PATH (a reproducibility gap).
 "cargo:taplo-cli" = "0.10"
 "cargo:typos-cli" = "1"
+# actionlint lints .github/workflows/*.yml (syntax, ${{ }} expression types,
+# shellcheck over run: blocks). CI runs it via the raven-actions/actionlint
+# action; pinned here so workflow edits can be validated locally before push
+# (not a cargo crate — the github backend fetches the prebuilt release binary).
+"github:rhysd/actionlint" = "1.7.7"
 
 [settings]
 # Fetch cargo: backend tools as prebuilt binaries (cargo-binstall) rather than

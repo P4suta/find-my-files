@@ -1,7 +1,10 @@
 # cargo-mutants config (ADR-0022). Curated to the highest-risk fmf-core
 # soundness surfaces only, so a CI lane runs in minutes rather than over the
-# whole workspace. Pass with `cargo mutants --config engine/mutants.toml` (it is
-# NOT at the default .cargo/mutants.toml path on purpose — the parent wires CI).
+# whole workspace. It is NOT at the default .cargo/mutants.toml path on purpose,
+# so it must be passed explicitly: `just mutants --config mutants.toml` (the
+# recipe runs from engine/, so the path is relative to it — `just mutants --list`
+# alone enumerates the *whole* workspace; the `--config` is what scopes it to the
+# 7 files below). `just mutants --config mutants.toml --in-diff <diff>` for PRs.
 #
 # Globs containing a slash match the entire repo-relative path, so the `**/`
 # prefix reaches `crates/fmf-core/src/...` from the engine workspace root. A bare

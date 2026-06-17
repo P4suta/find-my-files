@@ -297,9 +297,13 @@ machete:
 mutants *args="":
     cargo mutants {{args}}
 
-# Mutation testing (C#, Stryker.NET — ADR-0022). Slow on the WinUI app — scope
-# with --mutate, e.g. `just stryker --mutate "**/ShellOps.cs"`. The tool is
-# pinned in .config/dotnet-tools.json; `dotnet tool restore` provisions it.
+# Mutation testing (C#, Stryker.NET — ADR-0022). Runs FROM the test project dir
+# so Stryker discovers FindMyFiles.Tests.csproj and auto-loads stryker-config.json
+# (the curated mutate scope) — run from the repo root it errors "no .csproj found".
+# Slow on the WinUI app — scope a single file with --mutate, e.g.
+# `just stryker --mutate "**/Services/ShellOps.cs"`. The tool is pinned in
+# .config/dotnet-tools.json (found by walking up); `dotnet tool restore` provisions it.
+[working-directory: 'app/FindMyFiles.Tests']
 stryker *args="":
     dotnet tool restore
     dotnet stryker {{args}}
