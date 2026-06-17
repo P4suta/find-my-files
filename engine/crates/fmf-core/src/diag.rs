@@ -202,18 +202,22 @@ pub fn install_panic_hook() {
 
 /// Resolves the engine log directory.
 ///
-/// An explicit override (config key, CLI flag) wins; the machine-wide default
-/// is `%ProgramData%\find-my-files\logs`. The one implementation of this rule
-/// — every entry point (FFI, service, CLI) resolves through here (ADR-0018;
-/// the rule's prose lives in docs/ARCHITECTURE.md).
+/// An explicit override (config key, CLI flag) wins; otherwise the log sits in
+/// a `logs` subdir of `index_dir` — the location the caller already chose to
+/// write the index, so it shares the index's writability and pollution domain
+/// (portable → `<exe>\data\index\logs`, scope → `%LOCALAPPDATA%\…\index\logs`).
+/// There is deliberately **no machine-wide default**: falling back to
+/// `%ProgramData%` dirtied the machine for non-elevated callers and panicked
+/// when that dir existed but was not writable. The machine service does not rely
+/// on this fallback — it passes its own `%ProgramData%\find-my-files\logs`
+/// explicitly. The one implementation of this rule — every entry point resolves
+/// through here (ADR-0018; the rule's prose lives in docs/ARCHITECTURE.md).
 #[must_use]
-pub fn resolve_log_dir(explicit: Option<std::path::PathBuf>) -> std::path::PathBuf {
-    explicit.unwrap_or_else(|| {
-        let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
-        std::path::Path::new(&base)
-            .join("find-my-files")
-            .join("logs")
-    })
+pub fn resolve_log_dir(
+    explicit: Option<std::path::PathBuf>,
+    index_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    explicit.unwrap_or_else(|| index_dir.join("logs"))
 }
 
 /// The one diagnostics bootstrap: file/stderr logging + panic capture +
@@ -376,5 +380,29 @@ mod tests {
         let before = seen.lock().len();
         record(Severity::Warn, "t", None, "after-drop".into());
         assert_eq!(seen.lock().len(), before);
+    }
+
+    #[test]
+    fn log_dir_defaults_next_to_the_index_never_machine_wide() {
+        use std::path::{Path, PathBuf};
+
+        let index = Path::new("some").join("writable").join("index");
+
+        // Default: the log co-locates under the caller's index dir, so it
+        // inherits the index's writability and pollution domain.
+        assert_eq!(resolve_log_dir(None, &index), index.join("logs"));
+
+        // An explicit override (config/CLI) always wins.
+        let explicit = PathBuf::from("elsewhere").join("logs");
+        assert_eq!(resolve_log_dir(Some(explicit.clone()), &index), explicit);
+
+        // Never falls back to a hard-coded machine-wide ProgramData path
+        // (that dirtied the machine for non-elevated callers and panicked when
+        // unwritable).
+        assert!(
+            !resolve_log_dir(None, &index)
+                .to_string_lossy()
+                .contains("ProgramData")
+        );
     }
 }

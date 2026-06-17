@@ -58,6 +58,7 @@ pub unsafe extern "C" fn fmf_engine_create(
                 .get("log_dir")
                 .and_then(|v| v.as_str())
                 .map(std::path::PathBuf::from),
+            std::path::Path::new(index_dir),
         );
         let log_level = parsed
             .get("log_level")
