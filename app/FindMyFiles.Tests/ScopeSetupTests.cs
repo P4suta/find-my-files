@@ -148,31 +148,6 @@ public sealed class ScopeSetupTests
     }
 
     [Fact]
-    public void StartScopeSearch_persists_roots_and_relaunches()
-    {
-        var relaunched = false;
-        var settings = new AppSettings { ScopeRoots = [@"C:\A"] };
-        var vm = Build(settings, relaunch: () => relaunched = true);
-        vm.ScopeFolders.Add(@"C:\B");
-
-        vm.StartScopeSearch();
-
-        Assert.Equal(FoldersAB, settings.ScopeRoots);
-        Assert.True(relaunched);
-    }
-
-    [Fact]
-    public void StartScopeSearch_is_a_noop_with_no_folders()
-    {
-        var relaunched = false;
-        var vm = Build(new AppSettings(), relaunch: () => relaunched = true);
-
-        vm.StartScopeSearch();
-
-        Assert.False(relaunched);
-    }
-
-    [Fact]
     public void ApplyScopeChange_relaunches_and_persists_normalized()
     {
         var relaunched = false;

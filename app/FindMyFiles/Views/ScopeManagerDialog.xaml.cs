@@ -6,12 +6,14 @@ using Microsoft.UI.Xaml.Controls;
 namespace FindMyFiles.Views;
 
 /// <summary>
-/// Wiring only: the gear menu's "Change search folders…" dialog (scope mode,
-/// ADR-0024). State and the persist/relaunch live on the shared
-/// <see cref="MainViewModel"/>; the buttons drive its actions through the
-/// sanctioned <see cref="FindMyFiles.Services.TaskExtensions.Forget"/> funnel
-/// (CLAUDE.md convention). The mirror of <see cref="ServiceManagerDialog"/> for
-/// the non-elevated path.
+/// Wiring only: the scope-folder dialog (ADR-0024). Two contexts share it — the
+/// setup screen's "no admin?" link (first-run onboarding, folders only) and the
+/// gear menu's "Change search folders…" (re-selection, folders + excludes).
+/// State and the persist/relaunch live on the shared <see cref="MainViewModel"/>;
+/// the buttons drive its actions through the sanctioned
+/// <see cref="FindMyFiles.Services.TaskExtensions.Forget"/> funnel (CLAUDE.md
+/// convention). The mirror of <see cref="ServiceManagerDialog"/> for the
+/// non-elevated path.
 /// </summary>
 // View code-behind: dialog wiring, not unit-tested (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
@@ -23,19 +25,35 @@ public sealed partial class ScopeManagerDialog : ContentDialog
     /// <see cref="MainViewModel.ScopeFolders"/> the setup screen seeds.</summary>
     public MainViewModel VM { get; }
 
-    private ScopeManagerDialog(MainViewModel vm)
+    /// <summary>Whether the excludes section shows. False in the setup
+    /// (first-run) context — excludes come later, once indexing has started, via
+    /// the gear's "change search folders"; true for re-selection.</summary>
+    public bool ShowExcludes { get; }
+
+    private ScopeManagerDialog(MainViewModel vm, bool setup)
     {
         VM = vm;
+        ShowExcludes = !setup;
         InitializeComponent();
+        if (setup)
+        {
+            // First-run wording; the x:Uid defaults ("Search folders" / "Apply
+            // and restart") read as a re-selection, not onboarding.
+            Title = Loc.Get("ScopeDialog_SetupTitle");
+            PrimaryButtonText = Loc.Get("ScopeDialog_SetupStart");
+        }
     }
 
-    /// <summary>The single entry point (the gear menu). Resolves a XamlRoot from
-    /// the main window and guards against a second instance (ContentDialog allows
-    /// only one open at a time). Named OpenAsync, not ShowAsync, to avoid hiding
-    /// the inherited <see cref="ContentDialog.ShowAsync()"/>.</summary>
+    /// <summary>The single entry point (setup link / gear menu). Resolves a
+    /// XamlRoot from the main window and guards against a second instance
+    /// (ContentDialog allows only one open at a time). Named OpenAsync, not
+    /// ShowAsync, to avoid hiding the inherited
+    /// <see cref="ContentDialog.ShowAsync()"/>.</summary>
     /// <param name="vm">The page ViewModel to edit.</param>
+    /// <param name="setup">True for the first-run setup context (folders only,
+    /// onboarding wording); false for re-selection (folders + excludes).</param>
     /// <returns>A <see cref="Task"/> that completes when the dialog closes.</returns>
-    public static async Task OpenAsync(MainViewModel vm)
+    public static async Task OpenAsync(MainViewModel vm, bool setup = false)
     {
         if (_open)
         {
@@ -51,7 +69,7 @@ public sealed partial class ScopeManagerDialog : ContentDialog
         _open = true;
         try
         {
-            await new ScopeManagerDialog(vm) { XamlRoot = root }.ShowAsync();
+            await new ScopeManagerDialog(vm, setup) { XamlRoot = root }.ShowAsync();
         }
         catch (Exception ex)
         {
