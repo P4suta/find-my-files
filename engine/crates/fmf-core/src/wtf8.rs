@@ -230,16 +230,75 @@ mod tests {
 #[cfg(test)]
 mod proptests {
     use proptest::collection::vec as prop_vec;
-    use proptest::prelude::any;
-    use proptest::{prop_assert_eq, proptest};
+    use proptest::prelude::{Strategy, any};
+    use proptest::sample::select;
+    use proptest::{prop_assert, prop_assert_eq, prop_oneof, proptest};
 
-    use super::{fold_str, push_wtf8_pair, wtf8_to_utf16};
+    use super::{fold_str, has_uppercase, push_wtf8_pair, wtf8_to_utf16};
+
+    /// Code points whose folding stresses the length-preserving rule
+    /// (ADR-0003): Turkish dotted I (İ lowercases to two chars → must be kept),
+    /// dotless ı / ASCII I, German sharp-s (ß has no single-char lowering),
+    /// full-width Latin (Ａ→ａ, both 3 bytes), a non-ASCII same-length foldable
+    /// (Σ→σ), and Ⱥ (lowercases to a shorter encoding → must be kept). A `.*`
+    /// strategy reaches these only by luck; pinning them keeps the hard cases
+    /// in the input space on every run.
+    const TRICKY_CHARS: &[char] = &[
+        'İ', 'ı', 'I', 'i', 'ß', 'Ａ', 'ａ', 'Ｚ', 'Σ', 'σ', 'Ⱥ', 'A', 'z', '.',
+    ];
+
+    /// UTF-16 units that exercise surrogate handling: lone high/low surrogates
+    /// (legal NTFS names, ill-formed UTF-16) plus the halves of an emoji
+    /// surrogate pair, so the paired and unpaired branches both get hit.
+    const TRICKY_UNITS: &[u16] = &[0xD800, 0xDBFF, 0xDC00, 0xDFFF, 0xD83E, 0xDD80];
+
+    /// A single UTF-16 unit drawn from the tricky set, a tricky char's units,
+    /// or the whole `u16` space.
+    fn tricky_unit() -> impl Strategy<Value = u16> {
+        let char_units: Vec<u16> = TRICKY_CHARS
+            .iter()
+            .flat_map(|c| {
+                let mut buf = [0u16; 2];
+                c.encode_utf16(&mut buf).to_vec()
+            })
+            .collect();
+        prop_oneof![
+            select(TRICKY_UNITS.to_vec()),
+            select(char_units),
+            any::<u16>(),
+        ]
+    }
+
+    /// A `Vec<u16>` heavily seeded with surrogates and tricky-fold chars.
+    fn tricky_units() -> impl Strategy<Value = Vec<u16>> {
+        prop_vec(tricky_unit(), 0usize..32)
+    }
+
+    /// A `String` built from the tricky-fold chars interleaved with arbitrary
+    /// `char`s — always valid UTF-8, but rich in the fold edge cases.
+    fn tricky_string() -> impl Strategy<Value = String> {
+        prop_vec(
+            prop_oneof![select(TRICKY_CHARS.to_vec()), any::<char>()],
+            0usize..32,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+    }
 
     proptest! {
         // The two pools grow by the same byte count for ANY UTF-16 name — the
         // shared-offset invariant (ADR-0003), across the whole input space.
         #[test]
         fn pools_same_length_for_any_units(units in prop_vec(any::<u16>(), 0usize..64)) {
+            let (mut name, mut lower) = (Vec::new(), Vec::new());
+            push_wtf8_pair(&units, &mut name, &mut lower);
+            prop_assert_eq!(name.len(), lower.len());
+        }
+
+        // Same shared-offset invariant, now forced onto the hard fold cases
+        // (Turkish İ, ß, full-width Latin, surrogate pairs and lone surrogates)
+        // every run instead of relying on `any::<u16>()` to stumble onto them.
+        #[test]
+        fn pools_same_length_for_tricky_units(units in tricky_units()) {
             let (mut name, mut lower) = (Vec::new(), Vec::new());
             push_wtf8_pair(&units, &mut name, &mut lower);
             prop_assert_eq!(name.len(), lower.len());
@@ -256,6 +315,17 @@ mod proptests {
             prop_assert_eq!(back, units);
         }
 
+        // Round-trip on the surrogate-heavy generator: lone surrogates and
+        // emoji pairs must survive the WTF-8 encode/decode unchanged.
+        #[test]
+        fn tricky_name_roundtrips_through_utf16(units in tricky_units()) {
+            let (mut name, mut lower) = (Vec::new(), Vec::new());
+            push_wtf8_pair(&units, &mut name, &mut lower);
+            let mut back = Vec::new();
+            wtf8_to_utf16(&name, &mut back);
+            prop_assert_eq!(back, units);
+        }
+
         // `fold_str` preserves byte length and is idempotent for ANY UTF-8 string.
         #[test]
         fn fold_str_length_preserving_and_idempotent(s in ".*") {
@@ -263,6 +333,56 @@ mod proptests {
             prop_assert_eq!(folded.len(), s.len());
             let twice = fold_str(&folded);
             prop_assert_eq!(twice, folded);
+        }
+
+        // Same length + idempotence, forced onto the tricky-fold chars — these
+        // are exactly the code points where a non-length-preserving lowering
+        // (İ→i̇, ß→ss, Ⱥ→its shorter form) would break the shared-offset pool.
+        #[test]
+        fn fold_str_length_preserving_and_idempotent_tricky(s in tricky_string()) {
+            let folded = fold_str(&s);
+            prop_assert_eq!(folded.len(), s.len());
+            let twice = fold_str(&folded);
+            prop_assert_eq!(twice, folded);
+        }
+
+        // `has_uppercase` is exactly the "folding changes something" predicate:
+        // it must agree with `fold_str(s) != s` for ANY UTF-8 string. A
+        // disagreement would desync smart-case from the pool it selects.
+        #[test]
+        fn has_uppercase_agrees_with_fold_changing(s in ".*") {
+            prop_assert_eq!(has_uppercase(&s), fold_str(&s) != s);
+        }
+
+        // The same agreement on the fold edge cases, where a smart-case
+        // mistake is most likely (İ is "uppercase" to Unicode but unfoldable by
+        // our rule, so it must read as has_uppercase == false).
+        #[test]
+        fn has_uppercase_agrees_with_fold_changing_tricky(s in tricky_string()) {
+            prop_assert_eq!(has_uppercase(&s), fold_str(&s) != s);
+        }
+
+        // The needle fold (`fold_str`) and the pool fold (`push_wtf8_pair`'s
+        // lower output) must produce identical bytes for any well-formed UTF-8
+        // name — otherwise a case-insensitive needle would not align with the
+        // folded pool it scans. Restricted to inputs free of lone surrogates,
+        // where `String` and the UTF-16 units agree.
+        #[test]
+        fn needle_fold_matches_pool_fold(s in ".*") {
+            let units: Vec<u16> = s.encode_utf16().collect();
+            let (mut name, mut lower) = (Vec::new(), Vec::new());
+            push_wtf8_pair(&units, &mut name, &mut lower);
+            prop_assert_eq!(name, s.as_bytes());
+            let folded = fold_str(&s);
+            prop_assert_eq!(folded.as_bytes(), &lower[..]);
+        }
+
+        // A folded string never contains a code point our rule would still
+        // fold — fixed-point reached in one pass (a sharper idempotence: not
+        // just `fold(fold(s)) == fold(s)` but "nothing left to fold").
+        #[test]
+        fn folded_string_has_no_uppercase(s in tricky_string()) {
+            prop_assert!(!has_uppercase(&fold_str(&s)));
         }
     }
 }
