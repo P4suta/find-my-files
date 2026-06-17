@@ -163,6 +163,54 @@ fn live_names(idx: &VolumeIndex) -> Vec<String> {
         .collect()
 }
 
+/// The sorted set of full paths over every live entry — the volume-wide
+/// observable the task's invariant pins ("same LIVE name set as a fresh scan
+/// of the equivalent end state"). Built from `append_path` so a moved subtree
+/// shows up as moved descendants, not just renamed leaves.
+fn live_path_set(idx: &VolumeIndex) -> Vec<String> {
+    let mut paths: Vec<String> = (0..idx.len() as u32)
+        .filter(|&id| idx.is_live(id))
+        .map(|id| {
+            let mut p = Vec::new();
+            idx.append_path(id, &mut p);
+            String::from_utf8(p).expect("WTF-8 paths in these fixtures are UTF-8")
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// One node of an end-state tree: record number, parent record, name, dir-ness.
+struct Node {
+    record: u64,
+    parent: u64,
+    name: &'static str,
+    is_dir: bool,
+}
+
+/// Build an index directly from an end-state tree — the "fresh scan" side of
+/// the replay invariant. Pushes in the given order (parents before children),
+/// exactly as an initial enumeration would, so the result is independent of
+/// the journal path that `replay` exercises.
+fn fresh_scan(nodes: &[Node]) -> VolumeIndex {
+    let mut b = VolumeIndexBuilder::new("C:", 5);
+    for n in nodes {
+        let units: Vec<u16> = n.name.encode_utf16().collect();
+        b.push(RawEntry {
+            parent_frn: Frn(frn(n.parent)),
+            frn: Frn(frn(n.record)),
+            name_utf16: &units,
+            is_dir: n.is_dir,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 0,
+            mtime: 0,
+        });
+    }
+    b.finish()
+}
+
 // ── Builder fidelity ─────────────────────────────────────────────────────
 
 #[test]
@@ -600,4 +648,354 @@ fn replay_continues_correctly_across_a_mid_stream_compaction() {
     let names = live_names(&idx);
     assert!(names.contains(&"fresh2.log".to_string()));
     assert!(!names.contains(&"fresh.log".to_string()));
+}
+
+// ── Scenario f: garbage spliced mid-batch ────────────────────────────────
+
+#[test]
+fn garbage_record_mid_batch_keeps_the_prefix_and_flags_the_loss() {
+    // A well-formed create, a corrupt record whose RecordLength (16) is below
+    // the fixed 60-byte header, then a second well-formed create. The parser
+    // must stop at the garbage (flagging truncation) without panicking, and
+    // the records it *did* yield must apply cleanly — the already-good prefix
+    // is never corrupted by the malformed tail.
+    let mut idx = base_index();
+    let mut buf = usn_buffer(
+        4000,
+        &[RecSpec {
+            usn: 1000,
+            frn: frn(40),
+            parent_frn: frn(10),
+            reason: reason::FILE_CREATE | reason::CLOSE,
+            attributes: ARCHIVE,
+            name: "before.txt",
+        }],
+    );
+    // Splice a record whose RecordLength is nonsense (< 60).
+    let mut junk = vec![0u8; 64];
+    junk[0..4].copy_from_slice(&16u32.to_le_bytes());
+    junk[4..6].copy_from_slice(&2u16.to_le_bytes());
+    buf.extend_from_slice(&junk);
+    // A perfectly good record sits past the garbage; the parser never reaches
+    // it (it stops at the corrupt RecordLength) — its loss rides the flag.
+    encode_record_v2(
+        &mut buf,
+        &RecSpec {
+            usn: 2000,
+            frn: frn(41),
+            parent_frn: frn(10),
+            reason: reason::FILE_CREATE | reason::CLOSE,
+            attributes: ARCHIVE,
+            name: "after.txt",
+        },
+    );
+
+    let (next, records, truncated) = parse_buffer(&buf);
+    assert!(truncated, "mid-batch garbage must raise the flag");
+    assert_eq!(next, 4000, "the resume cursor still round-trips");
+    assert_eq!(records.len(), 1, "parsing stops at the corrupt length");
+    assert_eq!(String::from_utf16(&records[0].name).unwrap(), "before.txt");
+
+    // The salvaged prefix applies cleanly and corrupts nothing already there.
+    let stats = apply_batch(&mut idx, &records, &no_stats());
+    assert_eq!(stats.created_or_renamed, 1);
+    assert_eq!(path_of(&idx, 40), r"C:\docs\before.txt");
+    assert_eq!(idx.entry_by_record(41), None, "the casualty never landed");
+
+    // The applied end state matches a fresh scan of {base tree + before.txt}.
+    assert_eq!(
+        live_path_set(&idx),
+        live_path_set(&fresh_scan(&[
+            Node {
+                record: 10,
+                parent: 5,
+                name: "docs",
+                is_dir: true
+            },
+            Node {
+                record: 11,
+                parent: 10,
+                name: "note.txt",
+                is_dir: false
+            },
+            Node {
+                record: 20,
+                parent: 5,
+                name: "archive",
+                is_dir: true
+            },
+            Node {
+                record: 40,
+                parent: 10,
+                name: "before.txt",
+                is_dir: false
+            },
+        ]))
+    );
+}
+
+// ── Scenario g: FRN record-number reuse ──────────────────────────────────
+
+#[test]
+fn frn_record_reuse_resolves_to_the_new_entry_not_the_tombstone() {
+    // NTFS reuses the low-48-bit record number after a file is deleted: a
+    // later create can carry the same record number (different sequence in
+    // the top 16 bits). Liveness/identity must follow the new entry, never
+    // the tombstoned one — a stale resolution would surface a deleted file.
+    let mut idx = base_index();
+    let live_before = idx.live_len();
+
+    // Batch 1: create record 30, sequence 1.
+    let fetch = MapFetcher(HashMap::from([(frn(30), (10, 11))]));
+    replay(
+        &mut idx,
+        1001,
+        &[RecSpec {
+            usn: 1000,
+            frn: frn(30),
+            parent_frn: frn(10),
+            reason: reason::FILE_CREATE | reason::CLOSE,
+            attributes: ARCHIVE,
+            name: "old_owner.txt",
+        }],
+        &fetch,
+    );
+    assert_eq!(path_of(&idx, 30), r"C:\docs\old_owner.txt");
+
+    // Batch 2: delete record 30 (sequence 1 — the tombstoned file).
+    let stats = replay(
+        &mut idx,
+        2001,
+        &[RecSpec {
+            usn: 2000,
+            frn: frn(30),
+            parent_frn: frn(10),
+            reason: reason::FILE_DELETE | reason::CLOSE,
+            attributes: ARCHIVE,
+            name: "old_owner.txt",
+        }],
+        &no_stats(),
+    );
+    assert_eq!(stats.deleted, 1, "the tombstoned record was removed");
+    assert_eq!(
+        idx.entry_by_record(30),
+        None,
+        "record 30 misses while freed"
+    );
+
+    // Batch 3: NTFS reuses the freed record number with a bumped sequence
+    // (sequence 2 in the top 16 bits). The full FRN differs but `.record()`
+    // collides with the tombstone — resolution must follow the new entry.
+    let reused_frn = (2u64 << 48) | 0x1E;
+    let fetch = MapFetcher(HashMap::from([(reused_frn, (777, 888))]));
+    replay(
+        &mut idx,
+        3001,
+        &[RecSpec {
+            usn: 3000,
+            frn: reused_frn,
+            parent_frn: frn(20),
+            reason: reason::FILE_CREATE | reason::CLOSE,
+            attributes: ARCHIVE,
+            name: "new_owner.log",
+        }],
+        &fetch,
+    );
+
+    // The record number now resolves to the *new* owner, not the tombstone.
+    let id = idx.entry_by_record(30).expect("record 30 is live again");
+    assert_eq!(idx.name(id), b"new_owner.log");
+    assert_eq!((idx.size(id), idx.mtime(id)), (777, 888));
+    assert_eq!(path_of(&idx, 30), r"C:\archive\new_owner.log");
+    assert_eq!(idx.live_len(), live_before + 1, "one net new live entry");
+    let names = live_names(&idx);
+    assert!(
+        !names.contains(&"old_owner.txt".to_string()),
+        "tombstone hidden"
+    );
+
+    // End-state parity: a fresh scan with record 30 = new_owner.log.
+    assert_eq!(
+        live_path_set(&idx),
+        live_path_set(&fresh_scan(&[
+            Node {
+                record: 10,
+                parent: 5,
+                name: "docs",
+                is_dir: true
+            },
+            Node {
+                record: 11,
+                parent: 10,
+                name: "note.txt",
+                is_dir: false
+            },
+            Node {
+                record: 20,
+                parent: 5,
+                name: "archive",
+                is_dir: true
+            },
+            Node {
+                record: 30,
+                parent: 20,
+                name: "new_owner.log",
+                is_dir: false
+            },
+        ]))
+    );
+}
+
+// ── Scenario h: interleaved subtree create/delete/rename ─────────────────
+
+#[test]
+fn interleaved_subtree_ops_match_a_fresh_scan_of_the_end_state() {
+    // Build a small subtree under docs\ via the journal, move the subtree
+    // directory (descendant paths must follow the in-place dir rename),
+    // delete one leaf, and create a sibling — all interleaved across two
+    // batches the way NTFS would emit them. The end state must equal a fresh
+    // scan of the equivalent tree, paths and liveness alike.
+    let mut idx = base_index();
+
+    // Batch 1: mkdir docs\proj, then two files under it, plus a stray file.
+    replay(
+        &mut idx,
+        100,
+        &[
+            RecSpec {
+                usn: 10,
+                frn: frn(50),
+                parent_frn: frn(10),
+                reason: reason::FILE_CREATE | reason::CLOSE,
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+                name: "proj",
+            },
+            RecSpec {
+                usn: 20,
+                frn: frn(51),
+                parent_frn: frn(50),
+                reason: reason::FILE_CREATE | reason::CLOSE,
+                attributes: ARCHIVE,
+                name: "a.rs",
+            },
+            RecSpec {
+                usn: 30,
+                frn: frn(52),
+                parent_frn: frn(50),
+                reason: reason::FILE_CREATE | reason::CLOSE,
+                attributes: ARCHIVE,
+                name: "b.rs",
+            },
+            RecSpec {
+                usn: 40,
+                frn: frn(53),
+                parent_frn: frn(10),
+                reason: reason::FILE_CREATE | reason::CLOSE,
+                attributes: ARCHIVE,
+                name: "stray.txt",
+            },
+        ],
+        &no_stats(),
+    );
+    assert_eq!(path_of(&idx, 51), r"C:\docs\proj\a.rs");
+    assert_eq!(path_of(&idx, 52), r"C:\docs\proj\b.rs");
+
+    // Batch 2: move proj\ under archive\ (rename pair on the dir only — its
+    // children emit nothing), delete a.rs, create c.rs under the moved dir.
+    let stats = replay(
+        &mut idx,
+        200,
+        &[
+            RecSpec {
+                usn: 50,
+                frn: frn(50),
+                parent_frn: frn(10),
+                reason: reason::RENAME_OLD_NAME,
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+                name: "proj",
+            },
+            RecSpec {
+                usn: 60,
+                frn: frn(50),
+                parent_frn: frn(20),
+                reason: reason::RENAME_NEW_NAME | reason::CLOSE,
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+                name: "proj",
+            },
+            RecSpec {
+                usn: 70,
+                frn: frn(51),
+                parent_frn: frn(50),
+                reason: reason::FILE_DELETE | reason::CLOSE,
+                attributes: ARCHIVE,
+                name: "a.rs",
+            },
+            RecSpec {
+                usn: 80,
+                frn: frn(54),
+                parent_frn: frn(50),
+                reason: reason::FILE_CREATE | reason::CLOSE,
+                attributes: ARCHIVE,
+                name: "c.rs",
+            },
+        ],
+        &no_stats(),
+    );
+    assert_eq!(stats.deleted, 1);
+    assert_eq!(stats.created_or_renamed, 2, "the dir move + the new c.rs");
+
+    // The moved directory keeps its EntryId, so the untouched child b.rs
+    // follows the move lazily; the new c.rs lands under the new location.
+    assert_eq!(path_of(&idx, 52), r"C:\archive\proj\b.rs");
+    assert_eq!(path_of(&idx, 54), r"C:\archive\proj\c.rs");
+    assert_eq!(idx.entry_by_record(51), None, "a.rs was deleted");
+
+    // The whole live tree equals a fresh scan of the equivalent end state.
+    assert_eq!(
+        live_path_set(&idx),
+        live_path_set(&fresh_scan(&[
+            Node {
+                record: 10,
+                parent: 5,
+                name: "docs",
+                is_dir: true
+            },
+            Node {
+                record: 11,
+                parent: 10,
+                name: "note.txt",
+                is_dir: false
+            },
+            Node {
+                record: 20,
+                parent: 5,
+                name: "archive",
+                is_dir: true
+            },
+            Node {
+                record: 50,
+                parent: 20,
+                name: "proj",
+                is_dir: true
+            },
+            Node {
+                record: 52,
+                parent: 50,
+                name: "b.rs",
+                is_dir: false
+            },
+            Node {
+                record: 53,
+                parent: 10,
+                name: "stray.txt",
+                is_dir: false
+            },
+            Node {
+                record: 54,
+                parent: 50,
+                name: "c.rs",
+                is_dir: false
+            },
+        ]))
+    );
 }
