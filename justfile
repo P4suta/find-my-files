@@ -269,15 +269,17 @@ doc: doc-csharp
     mdbook build docs
     cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml --target-dir build/engine
 
-# Build the C# API reference (build/docs-csharp/_site) with DocFX. Metadata comes
-# from the BUILT FindMyFiles.dll + its XML doc file, not the .csproj — DocFX
-# cannot open the WinUI/WindowsAppSDK project in a Roslyn workspace. The plain
-# `dotnet build` (no SkipRustBuild) lets the csproj build fmf_engine.dll itself,
-# so this recipe is self-sufficient. docfx is a pinned dotnet local tool.
+# Build the C# API reference (build/docs-csharp/_site) from the BUILT
+# FindMyFiles.dll + its XML doc. DefaultDocumentation reads the assembly via IL,
+# so it works with the current .NET 10 SDK (DocFX's Roslyn path extracts zero
+# types — docfx#11046 / #40), and emits Markdown; xtask renders it to HTML with
+# mdBook (same renderer as the design docs). The plain `dotnet build` (no
+# SkipRustBuild) lets the csproj build fmf_engine.dll itself, so this recipe is
+# self-sufficient. DefaultDocumentation is a pinned dotnet local tool.
 doc-csharp:
     dotnet build app/FindMyFiles -c Release
     dotnet tool restore
-    dotnet docfx docfx/docfx.json
+    cargo run --manifest-path xtask/Cargo.toml --target-dir build/xtask -- doc-csharp
 
 # Live-preview the design docs at http://localhost:3000
 doc-serve:

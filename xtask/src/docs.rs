@@ -2,7 +2,7 @@
 //! (replaces the Copy-Item step in pages.yml). The committed landing page
 //! (site/) is the base; the mdBook output (build/docs-book) and rustdoc
 //! (build/engine/doc) layer on top as build/site/book and build/site/doc, and
-//! the `DocFX` C# API reference (build/docs-csharp/_site), when present, as
+//! the C# API reference (build/docs-csharp/_site), when present, as
 //! build/site/api (ADR-0021). pages.yml then uploads build/site as the Pages
 //! artifact.
 
@@ -42,11 +42,17 @@ pub fn run() -> Result<()> {
             .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
     }
 
-    // The DocFX C# API reference is optional: DocFX 2.78.5 (the latest release)
-    // extracts zero types from assemblies built by the current .NET 10 SDK, so
-    // when its output is absent we omit the api/ section with a loud warning
-    // rather than failing the whole deploy. It returns automatically once DocFX
-    // can read the SDK's output (tracked in #40).
+    // `cargo doc` on a multi-crate workspace writes no root index.html (only
+    // per-crate dirs like fmf_core/index.html), so a bare /doc/ would 404. Drop
+    // a redirect to the core crate; rustdoc's crate dropdown reaches the rest.
+    let doc_index = site.join("doc").join("index.html");
+    std::fs::write(&doc_index, doc_index_redirect_html("fmf_core"))
+        .with_context(|| format!("write {}", doc_index.display()))?;
+
+    // The C# API reference is optional: when `just doc-csharp` (DefaultDocumentation
+    // -> mdBook) hasn't been run, or it failed, build/docs-csharp/_site is absent
+    // and we omit the api/ section with a loud warning rather than failing the
+    // whole deploy. pages.yml runs doc-csharp before this, so /api/ is populated.
     let api_src = paths::build_root().join("docs-csharp").join("_site");
     let api_dst = site.join("api");
     if api_src.is_dir() {
@@ -56,10 +62,45 @@ pub fn run() -> Result<()> {
     } else {
         eprintln!(
             "docs-assemble: WARNING — {} missing; omitting the C# API reference \
-             (DocFX cannot read the current .NET 10 SDK output; see #40)",
+             (run `just doc-csharp` first)",
             api_src.display()
         );
         println!("docs-assemble: assembled landing + book + doc into build/site/ (api omitted)");
     }
     Ok(())
+}
+
+/// The redirect page written at the rustdoc output root (build/site/doc/
+/// index.html). `cargo doc` on a multi-crate workspace emits no top-level
+/// index, so /doc/ would 404; this meta-refreshes to the core crate, from which
+/// rustdoc's crate dropdown reaches the rest. Returns the page so the markup is
+/// unit-tested without touching the filesystem.
+fn doc_index_redirect_html(crate_name: &str) -> String {
+    format!(
+        "<!DOCTYPE html>\n\
+         <html lang=\"en\">\n\
+         <head>\n\
+         <meta charset=\"utf-8\">\n\
+         <meta http-equiv=\"refresh\" content=\"0; url={crate_name}/index.html\">\n\
+         <link rel=\"canonical\" href=\"{crate_name}/index.html\">\n\
+         <title>find-my-files — Rust API</title>\n\
+         </head>\n\
+         <body>\n\
+         <p>Redirecting to the <a href=\"{crate_name}/index.html\">find-my-files Rust API</a>…</p>\n\
+         </body>\n\
+         </html>\n"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doc_redirect_points_at_the_named_crate() {
+        let html = doc_index_redirect_html("fmf_core");
+        assert!(html.starts_with("<!DOCTYPE html>"));
+        assert!(html.contains("content=\"0; url=fmf_core/index.html\""));
+        assert!(html.contains("href=\"fmf_core/index.html\""));
+    }
 }
