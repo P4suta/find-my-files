@@ -14,13 +14,18 @@ on:
   schedule:
     - cron: "23 4 * * 1"
 
+# Least privilege: the token is read-only at the top level; the single job
+# requests the security-events write it needs to upload SARIF (Scorecard's
+# Token-Permissions check rewards job-scoped writes over top-level ones).
 permissions:
-  security-events: write
   contents: read
 
 jobs:
   analyze:
     runs-on: windows-latest
+    permissions:
+      security-events: write # upload CodeQL SARIF results
+      contents: read # checkout
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 

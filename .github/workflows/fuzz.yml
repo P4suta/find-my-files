@@ -1,0 +1,70 @@
+# Bounded libFuzzer smoke over the named-pipe wire codec (fmf-proto +
+# fmf-contract) — the privilege-boundary parsers (non-elevated UI -> elevated
+# fmf-service, docs/SECURITY.md). These build cross-platform, so they fuzz on
+# Linux. cargo-fuzz needs nightly + libFuzzer (Linux), installed CI-only here;
+# the pinned dev toolchain stays stable (mise.toml). Each target runs for a
+# short, fixed budget so a real crash fails the run without flaking on time.
+# The fmf-core parsers are proptest-covered; see docs/SCORECARD.md for why they
+# are not fuzzed here yet.
+name: fuzz
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "engine/fuzz/**"
+      - "engine/crates/fmf-proto/**"
+      - "engine/crates/fmf-contract/**"
+      - ".github/workflows/fuzz.yml"
+  pull_request:
+    paths:
+      - "engine/fuzz/**"
+      - "engine/crates/fmf-proto/**"
+      - "engine/crates/fmf-contract/**"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    - cron: "43 4 * * 1" # Monday 04:43 UTC (staggered from codeql/cargo-audit/scorecard)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    # Force nightly for cargo-fuzz and every cargo build it spawns.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [frame_decode, message_decode]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Same pinned action as the rest of CI; nightly via the toolchain input
+      # (the SHA is the stable-branch pin, but the action code is identical and
+      # `toolchain` overrides what it installs).
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable-branch pin
+        with:
+          toolchain: nightly
+
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-fuzz
+
+      # Run from engine/ so cargo-fuzz finds ./fuzz (no --fuzz-dir keeps this
+      # working across cargo-fuzz versions). Artifacts land under build/engine
+      # via engine/.cargo/config.toml (gitignored by build/).
+      #
+      # --target gnu is required: taiki-e/install-action ships a musl-static
+      # cargo-fuzz, and cargo-fuzz defaults the fuzz target to its own build
+      # triple (musl), but ASan is incompatible with static musl libc. The gnu
+      # target is the runner host, so its std is already present.
+      - name: fuzz ${{ matrix.target }} (60s)
+        working-directory: engine
+        run: cargo fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=60

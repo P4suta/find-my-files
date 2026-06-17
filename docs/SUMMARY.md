@@ -6,6 +6,7 @@
 - [Security model](SECURITY.md)
 - [Code signing](SIGNING.md)
 - [Supply chain and provenance](SUPPLY_CHAIN.md)
+- [OpenSSF Scorecard](SCORECARD.md)
 
 # Design decisions (ADR)
 

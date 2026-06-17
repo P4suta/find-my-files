@@ -1,0 +1,7 @@
+# Code owners for find-my-files.
+#
+# Every change defaults to the maintainer. Enabling branch protection's
+# "Require review from Code Owners" on `main` then routes review requests here
+# automatically (see docs/SCORECARD.md for the branch-protection runbook).
+# GitHub matches the LAST matching pattern, so order narrow rules after broad.
+*       @P4suta

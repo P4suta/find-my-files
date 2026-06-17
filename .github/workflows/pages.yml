@@ -20,10 +20,11 @@ on:
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
+# Least privilege: read-only at the top level; the deploy job requests the
+# Pages + OIDC writes it needs (Scorecard's Token-Permissions check rewards
+# job-scoped writes over top-level ones).
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One concurrent deploy; let in-progress runs finish.
 concurrency:
@@ -32,6 +33,10 @@ concurrency:
 
 jobs:
   deploy:
+    permissions:
+      contents: read # checkout
+      pages: write # publish to GitHub Pages
+      id-token: write # OIDC token the Pages deploy environment requires
     # windows-latest because rustdoc must compile the Windows-only crates
     # (fmf-core → ntfs-reader / windows-sys, fmf-service) that fail to
     # `cargo doc` on Linux. mdBook builds fine here too, so one job suffices.
