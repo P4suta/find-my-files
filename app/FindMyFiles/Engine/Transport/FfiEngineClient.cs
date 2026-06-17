@@ -45,6 +45,12 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     /// <summary>In-proc: no transport, no state transitions.</summary>
     public EngineConnectionState Connection => EngineConnectionState.InProc;
 
+    /// <summary>True when this client runs in scope mode (ADR-0024: folder-walk
+    /// over <see cref="_scopeRoots"/>) rather than whole-volume mode. Lets the
+    /// ViewModel pick the scope-vs-privileged UI without reaching past
+    /// <see cref="IEngineClient"/>.</summary>
+    public bool IsScopeMode => _scopeRoots is not null;
+
     /// <inheritdoc/>
     /// <remarks>In-proc has no transport, so this never fires; the
     /// add/remove accessors are empty.</remarks>

@@ -125,6 +125,11 @@ public sealed partial class MainPage : Page
     private void ServiceManager_MenuClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         Views.ServiceManagerDialog.OpenAsync().Forget("service-ui");
 
+    // Settings (gear) flyout → "Change search folders…" (scope mode, ADR-0024).
+    // The mirror of ServiceManager_MenuClick for the non-elevated path.
+    private void ScopeManager_MenuClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        Views.ScopeManagerDialog.OpenAsync(ViewModel).Forget("scope-ui");
+
     // Primary button of the disconnected setup screen → one-click register → auto relaunch.
     private void EnableSearch_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         ViewModel.EnableSearchAsync().Forget("service-ui");

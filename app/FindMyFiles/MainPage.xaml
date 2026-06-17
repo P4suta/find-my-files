@@ -178,6 +178,11 @@
                         <!--  状態(旧フッター)はサブ項目に押し込み、オプションと同列にしない(情報なので無効表示)。  -->
                         <MenuFlyoutSubItem x:Uid="StatusMenuItem" AutomationProperties.AutomationId="StatusMenu">
                             <MenuFlyoutItem
+                                AutomationProperties.AutomationId="StatusMode"
+                                IsEnabled="False"
+                                Text="{x:Bind ViewModel.ModeText}"
+                                Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady)}" />
+                            <MenuFlyoutItem
                                 AutomationProperties.AutomationId="StatusState"
                                 IsEnabled="False"
                                 Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" />
@@ -222,10 +227,18 @@
                             AutomationProperties.AutomationId="DiagToggle"
                             Click="PerfPanel_MenuClick" />
                         <MenuFlyoutSeparator />
+                        <!--  特権↔非特権でモード別に出し分け(相互排他)。
+                              Disconnected(setup画面)時は IsReady=false で両方畳む。  -->
                         <MenuFlyoutItem
                             x:Uid="ServiceManageMenu"
                             AutomationProperties.AutomationId="ServiceManageMenu"
-                            Click="ServiceManager_MenuClick" />
+                            Click="ServiceManager_MenuClick"
+                            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsPrivilegedMode)}" />
+                        <MenuFlyoutItem
+                            x:Uid="ScopeManageMenu"
+                            AutomationProperties.AutomationId="ScopeManageMenu"
+                            Click="ScopeManager_MenuClick"
+                            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsScopeMode)}" />
                     </MenuFlyout>
                 </Button.Flyout>
             </Button>
