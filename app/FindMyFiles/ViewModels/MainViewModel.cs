@@ -200,6 +200,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// a stub engine. Defaults to inspecting the real <see cref="FfiEngineClient"/>.</summary>
     private readonly Func<bool> _isScopeMode;
 
+    /// <summary>The "make search usable" steps (register elevated → wait for the
+    /// pipe → relaunch), injected so <see cref="EnableSearchAsync"/> is testable
+    /// without elevation or exiting the process. Defaults to
+    /// <see cref="ServiceProvisioner.Real"/>.</summary>
+    private readonly ServiceProvisioner _provisioner;
+
     /// <summary>Builds the focused components, restores focused-search settings,
     /// and subscribes the engine events (volume updates, errors, connection
     /// changes). Call <see cref="StartAsync"/> afterwards to begin indexing.</summary>
@@ -215,19 +221,24 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <param name="isScopeMode">Reports whether the engine is a scope-mode walk;
     /// defaults to inspecting the real <see cref="FfiEngineClient"/> (tests inject
     /// a constant to drive the mode-dependent UI).</param>
+    /// <param name="provisioner">The register→wait→relaunch steps behind the setup
+    /// screen's one-click button; defaults to <see cref="ServiceProvisioner.Real"/>
+    /// (tests inject fakes so <see cref="EnableSearchAsync"/> runs without UAC).</param>
     public MainViewModel(
         IEngineClient engine,
         IDispatcher dispatcher,
         AppSettings? settings = null,
         Func<Task<string?>>? folderPicker = null,
         Action? relaunch = null,
-        Func<bool>? isScopeMode = null)
+        Func<bool>? isScopeMode = null,
+        ServiceProvisioner? provisioner = null)
     {
         _engine = engine;
         _settings = settings ?? AppSettings.Load();
         _folderPicker = folderPicker ?? ScopeFolderPicker.PickAsync;
         _relaunch = relaunch ?? ShellOps.Relaunch;
         _isScopeMode = isScopeMode ?? (() => _engine is FfiEngineClient { IsScopeMode: true });
+        _provisioner = provisioner ?? ServiceProvisioner.Real;
         ScopeFolders = new ObservableCollection<string>(_settings.ScopeRoots);
         ScopeExcludes = new ObservableCollection<string>(_settings.ScopeExcludes);
         ScopeFolders.CollectionChanged += (_, _) =>
@@ -354,13 +365,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             // SetupStatus / SetupBusy, which drive the setup-screen controls
             // (button IsEnabled, progress ring, info bar) — resuming off the UI thread
             // throws RPC_E_WRONG_THREAD.
-            switch (await ServiceProvisioner.RegisterAsync())
+            switch (await _provisioner.RegisterAsync())
             {
                 case ServiceActionOutcome.Ok:
                     SetupStatus = Loc.Get("Setup_Connecting");
 
                     // On success this process relaunches and never returns here.
-                    if (!await ServiceProvisioner.WaitForServiceThenRelaunchAsync())
+                    if (!await _provisioner.WaitForServiceThenRelaunchAsync())
                     {
                         SetupStatus = Loc.Get("Setup_ConnectCheckFailed");
                     }

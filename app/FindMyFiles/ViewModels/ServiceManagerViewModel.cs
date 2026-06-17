@@ -19,6 +19,12 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     /// disables every action and the state line says why.</summary>
     private readonly string? _exe;
 
+    /// <summary>The wait-for-pipe-then-relaunch step after a successful elevated
+    /// register/start, injected so the post-register flow is testable without a
+    /// real service or exiting the process. Defaults to
+    /// <see cref="ServiceProvisioner.Real"/>.</summary>
+    private readonly ServiceProvisioner _provisioner;
+
     /// <summary>The read-only SCM state line (not installed / stopped /
     /// running (PID …) / tool not found). Recomputed by <see cref="Refresh"/>.</summary>
     [ObservableProperty]
@@ -102,9 +108,12 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
 
     /// <summary>Locates <c>fmf-service.exe</c> once (bundle or dev tree); the
     /// dialog should call <see cref="Refresh"/> on open to fill the state line.</summary>
-    public ServiceManagerViewModel()
+    /// <param name="provisioner">The post-register wait+relaunch steps; defaults to
+    /// <see cref="ServiceProvisioner.Real"/> (tests inject a fake).</param>
+    public ServiceManagerViewModel(ServiceProvisioner? provisioner = null)
     {
         _exe = ServiceSetup.LocateServiceExe(AppContext.BaseDirectory);
+        _provisioner = provisioner ?? ServiceProvisioner.Real;
     }
 
     /// <summary>Re-read the SCM state and recompute which actions apply. Cheap
@@ -215,7 +224,7 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
             {
                 ResultSeverity = NotifySeverity.Info;
                 ResultText = Loc.Get("Setup_Connecting");
-                if (!await ServiceProvisioner.WaitForServiceThenRelaunchAsync())
+                if (!await _provisioner.WaitForServiceThenRelaunchAsync())
                 {
                     ResultSeverity = NotifySeverity.Warning;
                     ResultText = Loc.Get("Svc_RegisteredNotConfirmed");

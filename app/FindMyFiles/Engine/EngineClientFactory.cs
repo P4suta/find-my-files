@@ -56,6 +56,17 @@ public static class EngineClientFactory
             return new FakeEngineClient();
         }
 
+        if (string.Equals(OptionValue(args, "--engine="), "empty", StringComparison.OrdinalIgnoreCase))
+        {
+            // Test seam (mirrors the always-available `--fake-engine`): force the
+            // empty fake so UI automation can drive the real *disconnected* setup
+            // screen — `--fake-engine` returns the data-bearing fake, which never
+            // enters the setup state (MainViewModel.IsDisconnected). Harmless in
+            // release: a deliberate flag that just shows the legitimate setup screen.
+            FileLog.Info("app", "engine: empty fake (--engine=empty test seam)");
+            return FakeEngineClient.CreateEmpty();
+        }
+
         var pipeName = OptionValue(args, "--pipe-name=") ?? PipeProtocol.DefaultPipeName;
         var settings = AppSettings.Load();
         var mode = OptionValue(args, "--engine=") ?? settings.Engine;
