@@ -137,6 +137,57 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>!!panic fault injection (fmf-service --debug-faults): the
+    /// dispatch firewall (catch_unwind) turns a handler panic into an
+    /// FMF_E_PANIC (99) reply, so the C# client sees an <see cref="EngineException"/>
+    /// — NOT a dropped connection. The same connection keeps answering afterwards,
+    /// which is the whole point of the firewall (a buggy query must not take the
+    /// service down). The Rust loopback test proves the server side; this pins the
+    /// client's observable surface: error code 99, no reconnect, still alive.</summary>
+    [Fact]
+    public async Task RealService_PanicFault_SurfacesAsEngineError_AndTheConnectionSurvives()
+    {
+        if (!string.Equals(Environment.GetEnvironmentVariable(GateVariable), "1", StringComparison.Ordinal))
+        {
+            output.WriteLine($"{GateVariable} != 1 — skipped (run via `just test-pipe`)");
+            return;
+        }
+
+        var exe = FindServiceExe();
+        var pipeName = @"\\.\pipe\fmf-itest-" + Guid.NewGuid().ToString("N");
+        var dataDir = Path.Combine(Path.GetTempPath(), "fmf-itest-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dataDir);
+
+        Process? service = null;
+        try
+        {
+            service = StartService(exe, pipeName, dataDir, debugFaults: true);
+            using var client = new PipeEngineClient(pipeName);
+            await WaitUntilAsync(
+                () => client.Connection == EngineConnectionState.Connected,
+                "connect to fmf-service",
+                30_000);
+
+            // The firewall caught the panic and replied FMF_E_PANIC (99): the
+            // client raises an EngineException, not a transport drop.
+            var ex = await Assert.ThrowsAsync<EngineException>(
+                () => client.SearchAsync("!!panic", SearchOptions.Default));
+            Assert.Equal(99, ex.Code);
+
+            // The connection survived the caught panic — no reconnect — and the
+            // same client still answers a normal query.
+            Assert.Equal(EngineConnectionState.Connected, client.Connection);
+            var outcome = await client.SearchAsync("anything", SearchOptions.Default);
+            Assert.Equal(0, outcome.Result.Count);
+            outcome.Result.Dispose();
+        }
+        finally
+        {
+            KillQuietly(service);
+            TryDeleteDirectory(dataDir);
+        }
+    }
+
     /// <summary>Resolve build/engine/release/fmf-service.exe by walking up
     /// from the test assembly (repo-relative; built by `just service-build`).</summary>
     private static string FindServiceExe()

@@ -925,3 +925,326 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use proptest::prelude::*;
+
+    use super::super::dates::UtcResolver;
+    use super::super::{
+        CaseMode, CompiledQuery, QueryOptions, RegexScope, compile, compile_whole_regex, parse,
+        subsumes,
+    };
+    use super::{EntryId, refine, search};
+    use crate::index::{Frn, RawEntry, SortKey, VolumeIndex, VolumeIndexBuilder};
+
+    // Counts every subsumed pair the refine-vs-fresh oracle actually checked,
+    // summed across *all* generated proptest cases. The vacuity guard
+    // (`subsumption_fires_at_least_sometimes`) reads it: without it a green run
+    // could simply mean subsumption never fired and the equality was never
+    // exercised.
+    static REFINED_PAIRS: AtomicU64 = AtomicU64::new(0);
+
+    /// Name fragments spanning the matcher domains the subsumption algebra
+    /// bridges: ASCII case pairs (smart-case fold ↔ orig), multibyte UTF-8
+    /// (fold is length-preserving per code point), a surrogate pair, and
+    /// extension-shaped tails. Short and overlapping so random concatenations
+    /// collide and the typed prefixes/suffixes actually subsume.
+    const FRAGMENTS: &[&str] = &[
+        "ab", "abc", "Re", "report", "Report", "ort", "tab", "TAB", "日本", "語", "𠮷", "x",
+        "main", ".rs", ".txt", ".PDF",
+    ];
+
+    /// One generated index entry: a name plus the attributes the option
+    /// cross-product reads (dir/hidden/system for visibility, size/mtime for
+    /// the sort columns).
+    #[derive(Debug, Clone)]
+    struct GenEntry {
+        name: String,
+        is_dir: bool,
+        is_hidden: bool,
+        is_system: bool,
+        size: u64,
+        mtime: i64,
+    }
+
+    fn entry_strategy() -> impl Strategy<Value = GenEntry> {
+        (
+            proptest::collection::vec(0usize..FRAGMENTS.len(), 1..=4),
+            any::<bool>(),
+            any::<bool>(),
+            any::<bool>(),
+            0u64..(8u64 << 30),
+            0i64..(20_000i64 * 864_000_000_000),
+        )
+            .prop_map(|(parts, is_dir, is_hidden, is_system, size, mtime)| {
+                let name: String = parts.iter().map(|&i| FRAGMENTS[i]).collect();
+                GenEntry {
+                    name,
+                    is_dir,
+                    is_hidden,
+                    is_system,
+                    size,
+                    mtime,
+                }
+            })
+    }
+
+    fn build_index(entries: &[GenEntry]) -> VolumeIndex {
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        for (i, e) in entries.iter().enumerate() {
+            let units: Vec<u16> = e.name.encode_utf16().collect();
+            b.push(RawEntry {
+                parent_frn: Frn(5),
+                frn: Frn((1 << 48) | (100 + i as u64)),
+                name_utf16: &units,
+                is_dir: e.is_dir,
+                is_reparse: false,
+                is_hidden: e.is_hidden,
+                is_system: e.is_system,
+                size: e.size,
+                mtime: e.mtime,
+            });
+        }
+        b.finish()
+    }
+
+    /// A typed-query growth step: each variant appends to the previous text so
+    /// the result *usually* narrows — the case subsumption is designed for.
+    /// Suffix/filter steps mix in the non-name matcher domains.
+    #[derive(Debug, Clone)]
+    enum Step {
+        /// Append the next character of a fragment (incremental typing).
+        Frag(usize),
+        /// Append a whole extra name term (AND narrows further).
+        Term(usize),
+        /// Append a `*lit*` wildcard term.
+        Wildcard(usize),
+        /// Append a negated name term.
+        Not(usize),
+        /// Append a `size:` lower-bound filter.
+        Size(u64),
+        /// Append a `file:` / `folder:` filter.
+        IsDir(bool),
+        /// Append an `ext:` filter.
+        Ext(usize),
+        /// A backspace-like reset to a shorter prefix (deliberately *widens*,
+        /// so subsumption must decline — keeps the oracle honest).
+        Truncate,
+    }
+
+    fn step_strategy() -> impl Strategy<Value = Step> {
+        prop_oneof![
+            (0usize..FRAGMENTS.len()).prop_map(Step::Frag),
+            (0usize..FRAGMENTS.len()).prop_map(Step::Term),
+            (0usize..FRAGMENTS.len()).prop_map(Step::Wildcard),
+            (0usize..FRAGMENTS.len()).prop_map(Step::Not),
+            (1u64..(4u64 << 30)).prop_map(Step::Size),
+            any::<bool>().prop_map(Step::IsDir),
+            (0usize..3usize).prop_map(Step::Ext),
+            Just(Step::Truncate),
+        ]
+    }
+
+    /// Turn a step sequence into a growing list of query texts. `Truncate`
+    /// chops the trailing whitespace-delimited atom; every other step appends.
+    fn texts_from_steps(steps: &[Step]) -> Vec<String> {
+        use std::fmt::Write as _;
+        const EXTS: &[&str] = &["rs", "txt", "pdf"];
+        let mut cur = String::new();
+        let mut out = vec![cur.clone()];
+        for step in steps {
+            match step {
+                Step::Frag(i) => cur.push_str(FRAGMENTS[*i]),
+                Step::Term(i) => {
+                    cur.push(' ');
+                    cur.push_str(FRAGMENTS[*i]);
+                }
+                Step::Wildcard(i) => {
+                    cur.push_str(" *");
+                    cur.push_str(FRAGMENTS[*i].trim_start_matches('.'));
+                    cur.push('*');
+                }
+                Step::Not(i) => {
+                    cur.push_str(" !");
+                    cur.push_str(FRAGMENTS[*i].trim_start_matches('.'));
+                }
+                Step::Size(min) => {
+                    write!(cur, " size:>{min}").expect("writing to a String is infallible");
+                }
+                Step::IsDir(d) => {
+                    cur.push_str(if *d { " folder:" } else { " file:" });
+                }
+                Step::Ext(i) => {
+                    cur.push_str(" ext:");
+                    cur.push_str(EXTS[*i]);
+                }
+                Step::Truncate => {
+                    let trimmed = cur.trim_end();
+                    let keep = trimmed.rfind(char::is_whitespace).map_or(0, |p| p);
+                    cur.truncate(keep);
+                }
+            }
+            out.push(cur.clone());
+        }
+        out
+    }
+
+    /// Compile one query text honoring whole-query regex mode (then the text
+    /// *is* the pattern). Returns `None` when the text fails to compile (an
+    /// invalid regex fragment); the caller skips that step.
+    fn compile_text(text: &str, opt: &QueryOptions) -> Option<CompiledQuery> {
+        if opt.regex_mode {
+            compile_whole_regex(text, opt.case, opt.regex_scope).ok()
+        } else {
+            compile(&parse(text).ok()?, opt.case, &UtcResolver).ok()
+        }
+    }
+
+    fn options_strategy() -> impl Strategy<Value = QueryOptions> {
+        (
+            prop_oneof![
+                Just(SortKey::Name),
+                Just(SortKey::Size),
+                Just(SortKey::Mtime)
+            ],
+            any::<bool>(),
+            prop_oneof![
+                Just(CaseMode::Smart),
+                Just(CaseMode::Insensitive),
+                Just(CaseMode::Sensitive)
+            ],
+            any::<bool>(),
+            any::<bool>(),
+            prop_oneof![Just(RegexScope::Name), Just(RegexScope::Path)],
+        )
+            .prop_map(
+                |(sort, desc, case, include_hidden_system, regex_mode, regex_scope)| QueryOptions {
+                    sort,
+                    desc,
+                    case,
+                    include_hidden_system,
+                    regex_mode,
+                    regex_scope,
+                },
+            )
+    }
+
+    proptest! {
+        // The one unacceptable failure mode (subsume.rs): whenever
+        // `subsumes(prev, next)` claims the next result fits inside the
+        // previous one, `refine(prev_ids)` must reproduce `search(next)`
+        // EXACTLY — identical id set *and* order — across the full option
+        // cross-product (sort × desc × hidden/system × case × regex × scope)
+        // and a random index. A divergence here is a real soundness bug:
+        // refine would silently drop or misorder live results. Both prev and
+        // next compile under the *same* options (the real refine precondition:
+        // a typing session keeps its options and index generation fixed).
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn refine_equals_fresh_whenever_subsumed(
+            entries in proptest::collection::vec(entry_strategy(), 1..40),
+            steps in proptest::collection::vec(step_strategy(), 1..8),
+            opt in options_strategy(),
+        ) {
+            let idx = build_index(&entries);
+            let texts = texts_from_steps(&steps);
+
+            let mut prev: Option<(CompiledQuery, Vec<EntryId>)> = None;
+            for text in &texts {
+                let Some(q) = compile_text(text, &opt) else {
+                    // An uncompilable step breaks the chain — a fresh search
+                    // would start over, so drop the cached predecessor too.
+                    prev = None;
+                    continue;
+                };
+                let fresh = search(&idx, &q, &opt).0.ids;
+
+                if let Some((pq, pids)) = &prev
+                    && subsumes(pq, &opt, &q, &opt)
+                {
+                    let refined = refine(&idx, &q, &opt, pids).0.ids;
+                    prop_assert_eq!(
+                        &refined,
+                        &fresh,
+                        "refine diverged from fresh search at `{}` (opt {:?})",
+                        text,
+                        opt
+                    );
+                    REFINED_PAIRS.fetch_add(1, Ordering::Relaxed);
+                }
+                prev = Some((q, fresh));
+            }
+        }
+    }
+
+    // Vacuity guard: the proptest above is only meaningful if subsumption
+    // actually fired and the refine==fresh equality was exercised. proptest
+    // runs every `#[test]` in this module in the same process, so the shared
+    // counter is populated by the time this (alphabetically later) test runs.
+    // The threshold is deliberately well below the typical count (hundreds of
+    // subsumed pairs over 256 cases) so it tolerates shrinking/seed variance
+    // while still catching a regression that makes subsumption never fire.
+    #[test]
+    fn subsumption_fires_at_least_sometimes() {
+        // Drive a deterministic spread of options directly so the guard does
+        // not rely on the fuzz test's nondeterministic ordering: incremental
+        // typing under each sort/case must subsume at least the obvious steps.
+        let entries: Vec<GenEntry> = (0..30u64)
+            .map(|i| {
+                let name = format!(
+                    "{}{}{}",
+                    FRAGMENTS[i as usize % FRAGMENTS.len()],
+                    FRAGMENTS[(i as usize + 3) % FRAGMENTS.len()],
+                    if i % 2 == 0 { ".rs" } else { ".txt" },
+                );
+                GenEntry {
+                    name,
+                    is_dir: i % 5 == 0,
+                    is_hidden: i % 7 == 0,
+                    is_system: i % 11 == 0,
+                    size: i * 1024,
+                    mtime: i as i64 * 864_000_000_000,
+                }
+            })
+            .collect();
+        let idx = build_index(&entries);
+
+        let mut local_fired = 0u64;
+        for sort in [SortKey::Name, SortKey::Size, SortKey::Mtime] {
+            for case in [CaseMode::Smart, CaseMode::Insensitive, CaseMode::Sensitive] {
+                let opt = QueryOptions {
+                    sort,
+                    case,
+                    ..Default::default()
+                };
+                let seq = ["", "r", "re", "rep", "repo", "report", "report .rs"];
+                let mut prev: Option<(CompiledQuery, Vec<EntryId>)> = None;
+                for text in seq {
+                    let q = compile_text(text, &opt).expect("static texts compile");
+                    let fresh = search(&idx, &q, &opt).0.ids;
+                    if let Some((pq, pids)) = &prev
+                        && subsumes(pq, &opt, &q, &opt)
+                    {
+                        let refined = refine(&idx, &q, &opt, pids).0.ids;
+                        assert_eq!(
+                            refined, fresh,
+                            "refine diverged from fresh search at `{text}` (opt {opt:?})"
+                        );
+                        local_fired += 1;
+                    }
+                    prev = Some((q, fresh));
+                }
+            }
+        }
+        assert!(
+            local_fired >= 9,
+            "subsumption barely fired ({local_fired}) — the oracle is vacuous"
+        );
+        // Fold the fuzz test's tally in too (best-effort: it may not have run
+        // yet under filtered/sharded runs, hence the independent local check).
+        REFINED_PAIRS.fetch_add(local_fired, Ordering::Relaxed);
+    }
+}

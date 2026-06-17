@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using Microsoft.UI.Xaml;
 using Windows.ApplicationModel.DataTransfer;
 
 namespace FindMyFiles.Services;
@@ -143,20 +142,35 @@ public static partial class ShellOps
     /// now-running service over the pipe (the engine transport is chosen once,
     /// at startup). Strictly user-initiated (the "restart app" button). A
     /// failed launch notifies and leaves the current instance running.</summary>
-    public static void Relaunch()
-    {
+    public static void Relaunch() =>
+        RelaunchWith(RealProcessRunner.Instance, DispatcherAppExit.Instance);
+
+    /// <summary>Relaunch core, parameterised over the process launcher and the
+    /// app-exit step so both the launch and the "only exit once the new instance
+    /// started" ordering are unit-testable (the public <see cref="Relaunch"/>
+    /// wires the real runner + the UI-thread-marshaling exit). <paramref name="exit"/>
+    /// runs <em>after</em> <paramref name="runner"/> so a failed launch never tears
+    /// down the only window. The production <paramref name="exit"/> marshals onto
+    /// the UI thread (<see cref="DispatcherAppExit"/>): this can be reached from a
+    /// thread-pool thread — the post-register pipe-probe continuation resumes off
+    /// the UI thread (<see cref="ServiceProvisioner.WaitForServiceThenRelaunchAsync"/>
+    /// uses <c>ConfigureAwait(false)</c>) — where a direct
+    /// <c>Application.Current.Exit()</c> throws RPC_E_WRONG_THREAD, gets swallowed
+    /// by <see cref="Run"/>, and orphans the old window beside the new one.</summary>
+    /// <param name="runner">Process launcher (real or a test fake).</param>
+    /// <param name="exit">App-exit step (UI-thread-marshaling in production).</param>
+    internal static void RelaunchWith(IProcessRunner runner, IAppExit exit) =>
         Run(Loc.Get("Shell_RelaunchFailed"), "FindMyFiles", () =>
         {
-            Process.Start(new ProcessStartInfo
+            runner.Start(new ProcessStartInfo
             {
                 FileName = Environment.ProcessPath!,
                 UseShellExecute = true,
             });
 
             // Only reached when the new instance actually launched.
-            Application.Current.Exit();
+            exit.Exit();
         });
-    }
 
     /// <summary>Put <paramref name="text"/> on the clipboard. A failure is
     /// logged and surfaced as a warning notification (clipboard access can be

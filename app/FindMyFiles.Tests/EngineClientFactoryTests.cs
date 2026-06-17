@@ -107,4 +107,14 @@ public sealed class EngineClientFactoryTests
     public void OptionValue_extracts_the_suffix_or_null(
         string[] args, string prefix, string? expected) =>
         Assert.Equal(expected, EngineClientFactory.OptionValue(args, prefix));
+
+    [Fact]
+    public void Resolve_empty_engine_seam_returns_the_disconnected_fake()
+    {
+        // `--engine=empty` (the UI-automation seam) forces the disconnected setup
+        // state that `--fake-engine` can't reach (it returns the data-bearing fake).
+        var engine = EngineClientFactory.Resolve(["--engine=empty"]);
+
+        Assert.True(engine is FakeEngineClient { IsEmpty: true });
+    }
 }

@@ -1,0 +1,22 @@
+{
+  "stryker-config": {
+    "project": "FindMyFiles.csproj",
+    "test-projects": ["FindMyFiles.Tests.csproj"],
+    "mutate": [
+      "**/Services/ShellOps.cs",
+      "**/Services/ServiceProvisioner.cs",
+      "**/Services/ServiceSetup.cs",
+      "**/ViewModels/SearchOrchestrator.cs",
+      "**/ViewModels/MainViewModel.cs",
+      "**/Engine/EngineClientFactory.cs",
+      "**/Engine/PageCodec.cs",
+      "**/Engine/PipeProtocol.cs"
+    ],
+    "thresholds": {
+      "high": 80,
+      "low": 60,
+      "break": 0
+    },
+    "reporters": ["progress", "html", "cleartext"]
+  }
+}
