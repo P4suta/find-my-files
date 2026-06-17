@@ -426,6 +426,16 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+                <!--  入れ子の可視化(ADR-0025): より大きな選択フォルダに包含される
+                      ものを明示し、適用時に統合されることが伝わるようにする。  -->
+                <TextBlock
+                    AutomationProperties.AutomationId="ScopeCoverageNote"
+                    Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                    Style="{ThemeResource CaptionTextBlockStyle}"
+                    Text="{x:Bind ViewModel.ScopeCoverageNote, Mode=OneWay}"
+                    TextAlignment="Center"
+                    TextWrapping="Wrap"
+                    Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ViewModel.ScopeCoverageNote), Mode=OneWay}" />
                 <Button
                     x:Uid="ScopePickFolders"
                     HorizontalAlignment="Center"

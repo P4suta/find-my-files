@@ -98,6 +98,11 @@
   <data name="Status_ModeScope" xml:space="preserve"><value>Mode: selected folders</value></data>
   <data name="Status_ModePrivileged" xml:space="preserve"><value>Mode: all drives</value></data>
   <data name="Scope_OpenFailed" xml:space="preserve"><value>Couldn't open search folders</value></data>
+  <data name="ScopeDialogExcludesHeader.Text" xml:space="preserve"><value>Skip these subfolders</value></data>
+  <data name="ScopeDialogExcludesBody.Text" xml:space="preserve"><value>Folders inside the ones above that you don't want indexed (for example node_modules or build output). Changes are re-walked on apply.</value></data>
+  <data name="ScopeDialogAddExclude.Content" xml:space="preserve"><value>Add a folder to skip…</value></data>
+  <data name="Scope_CoverageNote" xml:space="preserve"><value>Already inside a larger selected folder (these are merged): {0}</value></data>
+  <data name="Scope_ExcludeNotUnderRoot" xml:space="preserve"><value>Folders to skip must be inside one of the search folders.</value></data>
   <data name="SvcDialog.Title" xml:space="preserve"><value>Manage service</value></data>
   <data name="SvcDialog.CloseButtonText" xml:space="preserve"><value>Close</value></data>
   <data name="SvcSubtitle.Text" xml:space="preserve"><value>fmf-engine (file name search service)</value></data>

@@ -71,25 +71,29 @@ pub unsafe extern "C" fn fmf_index_start(
     })
 }
 
-/// Begin a non-elevated scope-mode index over `n` absolute root paths.
+/// Begin a non-elevated scope-mode index over `n` absolute root paths, pruning
+/// any subtree under one of the `m` `excludes` paths at walk time (ADR-0025).
 ///
-/// Mirrors [`fmf_index_start`] but routes the `roots` to
-/// `Engine::index_start_scope` (folder-walk + watcher, ADR-0024); the host
-/// must have created the engine on a per-user (`%LOCALAPPDATA%`) index dir.
-/// Additive ABI — a new export, no POD layout change, so `ABI_VERSION` is
-/// unchanged. Safety: see docs/ARCHITECTURE.md.
+/// Mirrors [`fmf_index_start`] but routes `roots`/`excludes` to
+/// `Engine::index_start_scope` (folder-walk + watcher, ADR-0024); the host must
+/// have created the engine on a per-user (`%LOCALAPPDATA%`) index dir. Scope
+/// mode is FFI-only and co-shipped with this DLL, so the signature is extended
+/// in place (no POD layout change, `ABI_VERSION` unchanged). Safety: see
+/// docs/ARCHITECTURE.md.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_index_start_scope(
     h: *mut c_void,
     roots: *const *const c_char,
     n: u32,
+    excludes: *const *const c_char,
+    m: u32,
 ) -> i32 {
     guard(|| {
         let handle = match unsafe { engine(h) } {
             Ok(e) => e,
             Err(c) => return c,
         };
-        if roots.is_null() && n > 0 {
+        if (roots.is_null() && n > 0) || (excludes.is_null() && m > 0) {
             return FMF_E_INVALID_ARG;
         }
         let mut paths = Vec::with_capacity(n as usize);
@@ -99,7 +103,14 @@ pub unsafe extern "C" fn fmf_index_start_scope(
                 Err(c) => return c,
             }
         }
-        handle.engine.index_start_scope(&paths);
+        let mut excl = Vec::with_capacity(m as usize);
+        for i in 0..m as usize {
+            match unsafe { utf8_arg(*excludes.add(i)) } {
+                Ok(s) => excl.push(s.to_string()),
+                Err(c) => return c,
+            }
+        }
+        handle.engine.index_start_scope(&paths, &excl);
         FMF_OK
     })
 }

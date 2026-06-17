@@ -70,6 +70,12 @@ public sealed class AppSettings
     /// are available.</summary>
     public string[] ScopeRoots { get; set; } = [];
 
+    /// <summary>Absolute subfolder paths pruned from the scope walk (ADR-0025).
+    /// Each must lie under one of <see cref="ScopeRoots"/>; the walk skips the
+    /// matching subtree so it is never indexed. Empty = index everything under
+    /// the roots.</summary>
+    public string[] ScopeExcludes { get; set; } = [];
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,

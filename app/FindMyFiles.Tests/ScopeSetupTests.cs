@@ -21,6 +21,7 @@ public sealed class ScopeSetupTests
     private static readonly string[] FoldersAOther = [@"C:\A", @"C:\Other"];
     private static readonly string[] FoldersDocs = [@"C:\Docs"];
     private static readonly string[] FoldersB = [@"C:\B"];
+    private static readonly string[] ExcludeNm = [@"C:\A\node_modules"];
 
     private MainViewModel Build(
         AppSettings settings,
@@ -254,5 +255,77 @@ public sealed class ScopeSetupTests
         var privileged = Build(new AppSettings(), isScopeMode: () => false).ModeText;
 
         Assert.NotEqual(scope, privileged);
+    }
+
+    [Fact]
+    public void ApplyScopeChange_persists_excludes_under_a_root()
+    {
+        var settings = new AppSettings { ScopeRoots = [@"C:\A"] };
+        var vm = Build(settings, relaunch: () => { });
+        vm.ScopeExcludes.Add(@"C:\A\node_modules");
+
+        vm.ApplyScopeChange();
+
+        Assert.Equal(ExcludeNm, settings.ScopeExcludes);
+    }
+
+    [Fact]
+    public void ApplyScopeChange_relaunches_when_only_excludes_change()
+    {
+        var relaunched = false;
+        var settings = new AppSettings { ScopeRoots = [@"C:\A"] };
+        var vm = Build(settings, relaunch: () => relaunched = true);
+        vm.ScopeExcludes.Add(@"C:\A\node_modules");
+
+        vm.ApplyScopeChange();
+
+        Assert.True(relaunched);
+    }
+
+    [Fact]
+    public void ApplyScopeChange_drops_excludes_not_under_a_kept_root()
+    {
+        var settings = new AppSettings { ScopeRoots = [@"C:\A"] };
+        var vm = Build(settings, relaunch: () => { });
+        vm.ScopeFolders.Add(@"C:\B"); // a root change forces the relaunch
+        vm.ScopeExcludes.Add(@"C:\Z\orphan"); // under no selected root → dropped
+
+        vm.ApplyScopeChange();
+
+        Assert.Empty(settings.ScopeExcludes);
+    }
+
+    [Fact]
+    public async Task PickScopeExclude_rejects_a_path_outside_the_roots()
+    {
+        var vm = Build(
+            new AppSettings { ScopeRoots = [@"C:\A"] },
+            picker: () => Task.FromResult<string?>(@"C:\Z\outside"));
+
+        await vm.PickScopeExcludeAsync();
+
+        Assert.Empty(vm.ScopeExcludes);
+    }
+
+    [Fact]
+    public async Task PickScopeExclude_adds_a_path_inside_a_root()
+    {
+        var vm = Build(
+            new AppSettings { ScopeRoots = [@"C:\A"] },
+            picker: () => Task.FromResult<string?>(@"C:\A\node_modules"));
+
+        await vm.PickScopeExcludeAsync();
+
+        Assert.Equal(ExcludeNm, vm.ScopeExcludes);
+    }
+
+    [Fact]
+    public void ScopeCoverageNote_is_empty_without_nesting_and_set_with_it()
+    {
+        var vm = Build(new AppSettings { ScopeRoots = [@"C:\A", @"C:\B"] });
+        Assert.Empty(vm.ScopeCoverageNote);
+
+        vm.ScopeFolders.Add(@"C:\A\nested"); // now subsumed by C:\A
+        Assert.NotEmpty(vm.ScopeCoverageNote);
     }
 }

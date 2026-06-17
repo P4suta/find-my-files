@@ -77,6 +77,19 @@ public sealed partial class ScopeManagerDialog : ContentDialog
         }
     }
 
+    // Picks one subfolder to prune from the walk (ADR-0025); the VM rejects it
+    // with a notice when it is not inside a selected root.
+    private void AddExclude_Click(object sender, RoutedEventArgs e) =>
+        VM.PickScopeExcludeAsync().Forget("scope-ui");
+
+    private void RemoveExclude_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string path })
+        {
+            VM.RemoveScopeExclude(path);
+        }
+    }
+
     // Primary button: normalize, persist, and relaunch into the new scope.
     // No-op (just closes) when nothing changed.
     private void Apply_Click(ContentDialog sender, ContentDialogButtonClickEventArgs args) =>

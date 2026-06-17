@@ -49,8 +49,12 @@ pub(super) struct JournalCheckpoint {
 pub(super) enum WorkerKind {
     /// `mft::scan_volume(label)` + `WinJournalSource` — needs elevation.
     Mft,
-    /// `scan::walk::walk_scan(roots)` + `WatcherJournalSource` — no elevation.
-    Walk { roots: Vec<String> },
+    /// `scan::walk::walk_scan(roots, excludes)` + `WatcherJournalSource` — no
+    /// elevation. `excludes` prunes matching subtrees at walk time (ADR-0025).
+    Walk {
+        roots: Vec<String>,
+        excludes: Vec<String>,
+    },
 }
 
 pub(super) struct VolumeSlot {
@@ -88,8 +92,9 @@ impl VolumeSlot {
         label: String,
         store: Arc<dyn SnapshotStore>,
         roots: Vec<String>,
+        excludes: Vec<String>,
     ) -> Self {
-        Self::scanning_kind(label, store, WorkerKind::Walk { roots })
+        Self::scanning_kind(label, store, WorkerKind::Walk { roots, excludes })
     }
 
     fn scanning_kind(label: String, store: Arc<dyn SnapshotStore>, kind: WorkerKind) -> Self {

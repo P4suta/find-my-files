@@ -141,7 +141,7 @@ impl Engine {
         // out of the borrow first so `slot` is free to move into the call.
         let walk_roots = match &slot.kind {
             WorkerKind::Mft => None,
-            WorkerKind::Walk { roots } => Some(roots.clone()),
+            WorkerKind::Walk { roots, .. } => Some(roots.clone()),
         };
         if let Some(roots) = walk_roots {
             let mut journal = WatcherJournalSource::new(roots);
@@ -262,7 +262,9 @@ impl Engine {
                     // yield (VolumeIndex, ScanStats); the walk is infallible.
                     let scanned = match &slot.kind {
                         WorkerKind::Mft => crate::mft::scan_volume(&label),
-                        WorkerKind::Walk { roots } => Ok(crate::scan::walk::walk_scan(roots)),
+                        WorkerKind::Walk { roots, excludes } => {
+                            Ok(crate::scan::walk::walk_scan(roots, excludes))
+                        }
                     };
                     match scanned {
                         Ok((mut idx, stats)) => {
@@ -274,6 +276,9 @@ impl Engine {
                                 volume = %label,
                                 entries = idx.len(),
                                 ms = stats.elapsed_total_ms,
+                                // Normal scope-mode pruning (ADR-0025), 0 elsewhere;
+                                // surfaced here rather than as a degrade counter.
+                                excluded_pruned = stats.walk_excluded_pruned,
                                 "full scan complete"
                             );
                             idx.shrink_to_fit();

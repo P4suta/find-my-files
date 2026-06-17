@@ -329,9 +329,14 @@ impl Engine {
     ///
     /// Panics if the volume worker thread cannot be spawned.
     #[cfg(windows)]
-    pub fn index_start_scope(self: &Arc<Self>, roots: &[String]) {
+    pub fn index_start_scope(self: &Arc<Self>, roots: &[String], excludes: &[String]) {
         const SCOPE_LABEL: &str = "scope";
         let roots: Vec<String> = roots
+            .iter()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty())
+            .collect();
+        let excludes: Vec<String> = excludes
             .iter()
             .map(|r| r.trim().to_string())
             .filter(|r| !r.is_empty())
@@ -357,6 +362,7 @@ impl Engine {
                 SCOPE_LABEL.to_string(),
                 store,
                 roots,
+                excludes,
             ));
             vols.push(slot.clone());
             slot

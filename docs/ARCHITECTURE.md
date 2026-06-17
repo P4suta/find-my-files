@@ -136,6 +136,7 @@ Common conventions:
 - **Pointer/length contract (caller's responsibility)**: at the C ABI boundary, Rust cannot validate array length or allocated capacity.
   - `(buf, cap)` output buffer (`fmf_list_volumes` / `fmf_index_status`): `buf` must point to **`cap`** writable `FmfVolumeStatus`. The engine writes at most `cap` entries and returns the true total in `*count` (`buf=NULL` is a size query that writes only `*count`).
   - `(volumes, n)` input array (`fmf_index_start`): `volumes` must point to **`n`** valid NUL-terminated UTF-8 `char*`.
+  - `(roots, n, excludes, m)` input arrays (`fmf_index_start_scope`): `roots`/`excludes` must point to **`n`**/**`m`** valid NUL-terminated UTF-8 `char*` (scope mode, ADR-0024/-0025).
   - POD pointers (`FmfQueryOptions*` / `FmfVolumeStatus*` / `FmfEvent*` …) must satisfy the declared `#[repr(C)]` size/alignment (C# marshals with the corresponding explicit layout, and `fmf-contract` pins it with compile-time `offset_of` assertions).
   - The engine null-checks every pointer and writes up to the `cap` limit, but **cannot detect a length claim exceeding the actual allocation** (undefined behavior). This contract is guaranteed by the sole caller, `FfiEngineClient`, constructing each array together with its length as a unit (this is why `fmf-ffi` uses `#![allow(clippy::missing_safety_doc)]` to delegate per-function safety notes to this section).
 
@@ -156,6 +157,7 @@ int32_t fmf_set_event_callback(FmfEngineHandle h, FmfEventCb cb, void* user); //
 // ── volumes and index ──
 int32_t fmf_list_volumes(FmfEngineHandle h, FmfVolumeStatus* buf, uint32_t cap, uint32_t* count);
 int32_t fmf_index_start(FmfEngineHandle h, const char* const* volumes, uint32_t n); // explicit start, async; elements are drive labels "C:"
+int32_t fmf_index_start_scope(FmfEngineHandle h, const char* const* roots, uint32_t n, const char* const* excludes, uint32_t m); // non-elevated folder-walk (ADR-0024); excludes prune matching subtrees at walk time (ADR-0025)
 int32_t fmf_index_status(FmfEngineHandle h, FmfVolumeStatus* buf, uint32_t cap, uint32_t* count);
 // FmfVolumeStatus.state: Scanning / Ready / Rescanning / Failed
 // queries always succeed over "Ready volumes only" (UI judges the partial-result InfoBar by state)
