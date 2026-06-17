@@ -4,8 +4,18 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-public sealed class ShellOpsTests
+public sealed class ShellOpsTests : IDisposable
 {
+    // The relaunch failure-path tests below post to the process-wide Notifier
+    // (ShellOps.Run reports swallowed failures); reset it on teardown so a post
+    // can't replay into another test's ViewModel. DisableTestParallelization
+    // (see TestParallelization.cs) makes this reset deterministic.
+    public void Dispose()
+    {
+        Notifier.ResetForTests();
+        GC.SuppressFinalize(this);
+    }
+
     [Theory]
     [InlineData(@"C:\Users\Public\report.txt")]
     [InlineData(@"C:\My Documents\quarterly report.txt")] // spaces

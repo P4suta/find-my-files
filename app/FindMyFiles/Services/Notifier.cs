@@ -71,4 +71,16 @@ public static class Notifier
             handler(n);
         }
     }
+
+    /// <summary>Test-only: drop every subscriber and the pending backlog so this
+    /// process-wide static cannot leak posts across tests — a post made with no
+    /// live subscriber is queued and replayed into the next one to attach. Never
+    /// for production, where the app keeps a single long-lived subscriber.</summary>
+    internal static void ResetForTests()
+    {
+        Posted = null;
+        while (Pending.TryDequeue(out _))
+        {
+        }
+    }
 }
