@@ -91,6 +91,10 @@ public sealed partial class ResultsPresenter : ObservableObject
     {
         Debug.Assert(_dispatcher.HasThreadAccess, "PublishAsync must start on the UI thread");
 
+        // The page reads below must NOT ConfigureAwait(false): the heavy fetch runs
+        // off-thread inside GetRangeAsync (FFI Task.Run / pipe I/O), but the
+        // continuation resumes here to call ResultsSource.Reassign / set CountText,
+        // both of which require the UI thread (EnsureUiThread throws otherwise).
         var count = (int)Math.Min(result.Count, int.MaxValue);
         var (firstIndex, lastIndex, restoreIndex) = SeedWindow(origin, count);
 
@@ -102,7 +106,7 @@ public sealed partial class ResultsPresenter : ObservableObject
                  page++)
             {
                 var rows = await result.GetRangeAsync(
-                    (long)page * VirtualResultList.PageSize, VirtualResultList.PageSize).ConfigureAwait(false);
+                    (long)page * VirtualResultList.PageSize, VirtualResultList.PageSize);
                 seeds.Add(new PageSeed(page, rows));
             }
         }
@@ -153,7 +157,7 @@ public sealed partial class ResultsPresenter : ObservableObject
         var count = (int)Math.Min(result.Count, int.MaxValue);
         if (count != ResultsSource.Count)
         {
-            await PublishAsync(result, trace, origin, highlighter, isCurrent).ConfigureAwait(false);
+            await PublishAsync(result, trace, origin, highlighter, isCurrent);
             return;
         }
 
@@ -167,7 +171,7 @@ public sealed partial class ResultsPresenter : ObservableObject
                  page++)
             {
                 var rows = await result.GetRangeAsync(
-                    (long)page * VirtualResultList.PageSize, VirtualResultList.PageSize).ConfigureAwait(false);
+                    (long)page * VirtualResultList.PageSize, VirtualResultList.PageSize);
                 seeds.Add(new PageSeed(page, rows));
             }
         }
