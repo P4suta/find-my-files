@@ -24,14 +24,19 @@ on:
         required: true
         type: string
 
+# Least privilege: read-only at the top level; the build job requests the
+# write scopes it needs (Scorecard's Token-Permissions check rewards
+# job-scoped writes over top-level ones).
 permissions:
-  contents: write # create the GitHub Release + upload assets
-  id-token: write # OIDC token for keyless Sigstore signing (attestations)
-  attestations: write # write build-provenance + SBOM attestations
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write # create the GitHub Release + upload assets
+      id-token: write # OIDC token for keyless Sigstore signing (attestations)
+      attestations: write # write build-provenance + SBOM attestations
     env:
       # Resolve the tag from either trigger; reused for checkout, zip, release.
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}

@@ -214,6 +214,21 @@ profile *args="bench C:":
     cargo build --profile profiling -p fmf-cli
     samply record -- ../build/engine/profiling/fmf-cli {{args}}
 
+# ── Fuzz (Linux/nightly; CI fuzz.yml runs this on every wire-codec change) ─
+
+# libFuzzer over the pipe wire codec (fmf-proto/fmf-contract — the privilege
+# boundary). Needs nightly + cargo-fuzz on Linux/WSL (flaky on Windows).
+# Run from engine/ so cargo-fuzz finds ./fuzz (no --fuzz-dir = version-proof).
+# e.g. `just fuzz message_decode 120`
+[working-directory: 'engine']
+fuzz target="frame_decode" secs="60":
+    cargo +nightly fuzz run {{target}} -- -max_total_time={{secs}}
+
+# Compile all fuzz targets without running them (fast harness sanity check).
+[working-directory: 'engine']
+fuzz-build:
+    cargo +nightly fuzz build
+
 # ── Hygiene ──────────────────────────────────────────────────────────────
 
 # Sweep leftover TestDir fixtures (build/engine/test-tmp). Their Drop-time

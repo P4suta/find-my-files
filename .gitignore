@@ -21,6 +21,15 @@ test-results.json
 *.fmfidx
 engine/crates/fmf-core/testdata/large/
 
+# cargo-fuzz working output. Its dir model (corpus/artifacts/target next to the
+# fuzz crate) does not compose with the build/ redirect (ADR-0021), so ignore
+# these in place; they are nightly, CI-only, machine-local. The committed
+# Cargo.lock is kept for reproducibility.
+engine/fuzz/target/
+engine/fuzz/corpus/
+engine/fuzz/artifacts/
+engine/fuzz/coverage/
+
 # Local-only tool overrides
 mise.local.toml
 .mise.local.toml
