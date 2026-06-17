@@ -15,6 +15,7 @@ mod semver;
 mod version;
 
 mod clean;
+mod csharp_docs;
 mod docs;
 mod package;
 mod publish;
@@ -57,6 +58,9 @@ enum Commands {
     CleanTemp,
     /// Stage generated docs (mdBook + rustdoc) into site/ for GitHub Pages.
     DocsAssemble,
+    /// Generate the C# API reference (`DefaultDocumentation` -> `mdBook`) into
+    /// build/docs-csharp/_site. The caller builds the app + restores tools first.
+    DocCsharp,
 }
 
 fn main() -> Result<()> {
@@ -69,5 +73,6 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::DocsAssemble => docs::run(),
+        Commands::DocCsharp => csharp_docs::run(),
     }
 }
