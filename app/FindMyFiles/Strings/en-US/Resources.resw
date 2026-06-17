@@ -89,6 +89,15 @@
   <data name="ScopeSetupBody.Text" xml:space="preserve"><value>Pick the folders you actually use and search just those — no admin, no install, nothing left behind.</value></data>
   <data name="ScopePickFolders.Content" xml:space="preserve"><value>Choose folders…</value></data>
   <data name="ScopeStartSearch.Content" xml:space="preserve"><value>Start searching these folders</value></data>
+  <data name="ScopeManageMenu.Text" xml:space="preserve"><value>Change search folders…</value></data>
+  <data name="ScopeDialog.Title" xml:space="preserve"><value>Search folders</value></data>
+  <data name="ScopeDialog.PrimaryButtonText" xml:space="preserve"><value>Apply and restart</value></data>
+  <data name="ScopeDialog.CloseButtonText" xml:space="preserve"><value>Cancel</value></data>
+  <data name="ScopeDialogBody.Text" xml:space="preserve"><value>Add as many folders as you like — each one is searched. Applying restarts the app to re-index.</value></data>
+  <data name="ScopeDialogAddFolder.Content" xml:space="preserve"><value>Add folder…</value></data>
+  <data name="Status_ModeScope" xml:space="preserve"><value>Mode: selected folders</value></data>
+  <data name="Status_ModePrivileged" xml:space="preserve"><value>Mode: all drives</value></data>
+  <data name="Scope_OpenFailed" xml:space="preserve"><value>Couldn't open search folders</value></data>
   <data name="SvcDialog.Title" xml:space="preserve"><value>Manage service</value></data>
   <data name="SvcDialog.CloseButtonText" xml:space="preserve"><value>Close</value></data>
   <data name="SvcSubtitle.Text" xml:space="preserve"><value>fmf-engine (file name search service)</value></data>

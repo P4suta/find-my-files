@@ -86,6 +86,22 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// UI (box + result list) should be shown instead of the setup screen.</summary>
     public bool IsReady => !IsDisconnected;
 
+    /// <summary>True once indexing in **scope mode** (ADR-0024: a user-chosen
+    /// set of folders, not all drives). Gates the gear menu's "change search
+    /// folders" item. Fixed at startup (the transport is chosen once), so
+    /// x:Bind OneTime is enough.</summary>
+    public bool IsScopeMode => IsReady && _isScopeMode();
+
+    /// <summary>True once indexing in the elevated whole-volume mode (service
+    /// or in-proc). Gates the gear menu's "manage service" item — the
+    /// complement of <see cref="IsScopeMode"/> while ready, both false while
+    /// disconnected. Fixed at startup, so x:Bind OneTime.</summary>
+    public bool IsPrivilegedMode => IsReady && !_isScopeMode();
+
+    /// <summary>The current index mode for the status submenu's info row
+    /// (selected folders vs all drives). Fixed at startup, so x:Bind OneTime.</summary>
+    public string ModeText => Loc.Get(_isScopeMode() ? "Status_ModeScope" : "Status_ModePrivileged");
+
     /// <summary>Setup screen progress text ("waiting for admin permission…" etc.);
     /// empty hides the progress row.</summary>
     [ObservableProperty]
@@ -155,6 +171,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// the process.</summary>
     private readonly Action _relaunch;
 
+    /// <summary>Reports whether the live engine is a scope-mode walk (ADR-0024)
+    /// — injected so the mode-driven UI (<see cref="IsScopeMode"/> /
+    /// <see cref="IsPrivilegedMode"/> / <see cref="ModeText"/>) is testable with
+    /// a stub engine. Defaults to inspecting the real <see cref="FfiEngineClient"/>.</summary>
+    private readonly Func<bool> _isScopeMode;
+
     /// <summary>Builds the focused components, restores focused-search settings,
     /// and subscribes the engine events (volume updates, errors, connection
     /// changes). Call <see cref="StartAsync"/> afterwards to begin indexing.</summary>
@@ -167,17 +189,22 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <see cref="ScopeFolderPicker.PickAsync"/> (tests inject a fake).</param>
     /// <param name="relaunch">Unelevated relaunch action; defaults to the real
     /// <see cref="ShellOps.Relaunch"/> (tests inject a no-op).</param>
+    /// <param name="isScopeMode">Reports whether the engine is a scope-mode walk;
+    /// defaults to inspecting the real <see cref="FfiEngineClient"/> (tests inject
+    /// a constant to drive the mode-dependent UI).</param>
     public MainViewModel(
         IEngineClient engine,
         IDispatcher dispatcher,
         AppSettings? settings = null,
         Func<Task<string?>>? folderPicker = null,
-        Action? relaunch = null)
+        Action? relaunch = null,
+        Func<bool>? isScopeMode = null)
     {
         _engine = engine;
         _settings = settings ?? AppSettings.Load();
         _folderPicker = folderPicker ?? ScopeFolderPicker.PickAsync;
         _relaunch = relaunch ?? ShellOps.Relaunch;
+        _isScopeMode = isScopeMode ?? (() => _engine is FfiEngineClient { IsScopeMode: true });
         ScopeFolders = new ObservableCollection<string>(_settings.ScopeRoots);
         ScopeFolders.CollectionChanged += (_, _) => OnPropertyChanged(nameof(CanStartScope));
         _engineEvents = new EngineEventMarshaler(engine, dispatcher);
@@ -349,21 +376,41 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <param name="path">The folder path to remove.</param>
     public void RemoveScopeFolder(string path) => ScopeFolders.Remove(path);
 
-    /// <summary>Persist the chosen folders as <see cref="AppSettings.ScopeRoots"/>
-    /// and relaunch (unelevated): the fresh instance, with scope roots set and no
-    /// running service, resolves to <c>WalkInProc</c> and folder-walks them
-    /// (ADR-0024). No-op with an empty list.</summary>
-    public void StartScopeSearch()
+    /// <summary>Setup screen (no-admin, initial): commit the chosen folders and
+    /// relaunch into <c>WalkInProc</c>. Same mechanism as
+    /// <see cref="ApplyScopeChange"/> (the engine has no live root-swap), so it
+    /// simply defers to it.</summary>
+    public void StartScopeSearch() => ApplyScopeChange();
+
+    /// <summary>Apply the current <see cref="ScopeFolders"/> as the scope: drop
+    /// roots nested under another (<see cref="ScopePaths.Normalize"/>), and if the
+    /// set actually changed, persist it as <see cref="AppSettings.ScopeRoots"/>
+    /// and relaunch (unelevated) into a fresh <c>WalkInProc</c> that folder-walks
+    /// the new set (ADR-0024). The engine has no live root-swap
+    /// (<c>index_start_scope</c> no-ops on an existing scope slot), so a relaunch
+    /// is the only way to re-walk. No-op when empty or unchanged, so re-opening
+    /// the manager and closing it without edits never restarts.</summary>
+    public void ApplyScopeChange()
     {
-        if (ScopeFolders.Count == 0)
+        var roots = ScopePaths.Normalize(ScopeFolders);
+        if (roots.Count == 0 || SameRoots(roots, _settings.ScopeRoots))
         {
             return;
         }
 
-        _settings.ScopeRoots = [.. ScopeFolders];
+        _settings.ScopeRoots = [.. roots];
         _settings.Save();
         _relaunch();
     }
+
+    /// <summary>Order- and case-insensitive set equality for scope roots, so a
+    /// reorder or case-only edit counts as "unchanged" and skips the relaunch.</summary>
+    private static bool SameRoots(List<string> a, string[] b) =>
+        a.Count == b.Length
+        && a.OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+            .SequenceEqual(
+                b.OrderBy(p => p, StringComparer.OrdinalIgnoreCase),
+                StringComparer.OrdinalIgnoreCase);
 
     partial void OnSearchTextChanged(string value) => Search.NotifyTextChanged(value);
 

@@ -17,13 +17,16 @@ public sealed class ScopeSetupTests
 
     // CA1861: constant array arguments to Assert.Equal are hoisted to fields.
     private static readonly string[] FoldersAB = [@"C:\A", @"C:\B"];
+    private static readonly string[] FoldersA = [@"C:\A"];
+    private static readonly string[] FoldersAOther = [@"C:\A", @"C:\Other"];
     private static readonly string[] FoldersDocs = [@"C:\Docs"];
     private static readonly string[] FoldersB = [@"C:\B"];
 
     private MainViewModel Build(
         AppSettings settings,
         Func<Task<string?>>? picker = null,
-        Action? relaunch = null)
+        Action? relaunch = null,
+        Func<bool>? isScopeMode = null)
     {
         SyncContext.RunContinuationsInline();
         return new MainViewModel(
@@ -31,7 +34,8 @@ public sealed class ScopeSetupTests
             _dispatcher,
             settings,
             picker ?? (() => Task.FromResult<string?>(null)),
-            relaunch ?? (() => { }));
+            relaunch ?? (() => { }),
+            isScopeMode);
     }
 
     [Fact]
@@ -165,5 +169,90 @@ public sealed class ScopeSetupTests
         vm.StartScopeSearch();
 
         Assert.False(relaunched);
+    }
+
+    [Fact]
+    public void ApplyScopeChange_relaunches_and_persists_normalized()
+    {
+        var relaunched = false;
+        var settings = new AppSettings(); // unconfigured (mirrors a fresh setup)
+        var vm = Build(settings, relaunch: () => relaunched = true);
+        vm.ScopeFolders.Add(@"C:\A");
+        vm.ScopeFolders.Add(@"C:\A\B"); // nested under C:\A → collapsed away
+        vm.ScopeFolders.Add(@"C:\Other");
+
+        vm.ApplyScopeChange();
+
+        Assert.True(relaunched);
+        Assert.Equal(FoldersAOther, settings.ScopeRoots);
+    }
+
+    [Fact]
+    public void ApplyScopeChange_is_a_noop_when_unchanged_ignoring_order_and_case()
+    {
+        var relaunched = false;
+        var settings = new AppSettings { ScopeRoots = [@"C:\A", @"C:\B"] };
+        var vm = Build(settings, relaunch: () => relaunched = true);
+        vm.ScopeFolders.Clear();
+        vm.ScopeFolders.Add(@"c:\b"); // same set, different order + case
+        vm.ScopeFolders.Add(@"C:\A");
+
+        vm.ApplyScopeChange();
+
+        Assert.False(relaunched);
+        Assert.Equal(FoldersAB, settings.ScopeRoots); // original casing untouched
+    }
+
+    [Fact]
+    public void ApplyScopeChange_is_a_noop_when_nesting_collapses_to_the_current_set()
+    {
+        var relaunched = false;
+        var settings = new AppSettings { ScopeRoots = [@"C:\A"] };
+        var vm = Build(settings, relaunch: () => relaunched = true);
+        vm.ScopeFolders.Add(@"C:\A\B"); // collapses back to {C:\A}
+
+        vm.ApplyScopeChange();
+
+        Assert.False(relaunched);
+        Assert.Equal(FoldersA, settings.ScopeRoots);
+    }
+
+    [Fact]
+    public void ApplyScopeChange_is_a_noop_with_no_folders()
+    {
+        var relaunched = false;
+        var vm = Build(new AppSettings(), relaunch: () => relaunched = true);
+
+        vm.ApplyScopeChange();
+
+        Assert.False(relaunched);
+    }
+
+    [Fact]
+    public void IsScopeMode_drives_the_mode_split_when_ready()
+    {
+        var vm = Build(new AppSettings(), isScopeMode: () => true);
+
+        Assert.True(vm.IsReady); // StubEngineClient is not the empty fake
+        Assert.True(vm.IsScopeMode);
+        Assert.False(vm.IsPrivilegedMode);
+    }
+
+    [Fact]
+    public void IsPrivilegedMode_drives_the_mode_split_when_ready()
+    {
+        var vm = Build(new AppSettings(), isScopeMode: () => false);
+
+        Assert.True(vm.IsPrivilegedMode);
+        Assert.False(vm.IsScopeMode);
+    }
+
+    [Fact]
+    public void ModeText_differs_between_the_two_modes()
+    {
+        var scope = Build(new AppSettings(), isScopeMode: () => true).ModeText;
+        var privileged = Build(new AppSettings(), isScopeMode: () => false).ModeText;
+
+        Assert.NotEqual(scope, privileged);
     }
 }
