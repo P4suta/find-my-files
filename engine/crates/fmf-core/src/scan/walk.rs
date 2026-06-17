@@ -17,6 +17,7 @@
 //! caches each `WIN32_FIND_DATAW`, so `DirEntry::metadata()` serves
 //! size/mtime/attributes from that cache with no extra syscall and no `unsafe`.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -55,13 +56,15 @@ struct Pending {
     depth: u32,
 }
 
-/// Walk `roots` (absolute base paths) and build a queryable [`VolumeIndex`].
+/// Walk `roots` (absolute base paths), pruning any subtree whose folded path
+/// matches an entry in `excludes` (ADR-0025), and build a queryable
+/// [`VolumeIndex`].
 ///
 /// Infallible by design (don't crash): an unreadable root or directory is counted
 /// in [`ScanStats::walk_read_errors`] and skipped, never propagated. The
 /// worker maps that count to a counter + warn at its single mapping point.
 #[must_use]
-pub fn walk_scan(roots: &[String]) -> (VolumeIndex, ScanStats) {
+pub fn walk_scan(roots: &[String], excludes: &[String]) -> (VolumeIndex, ScanStats) {
     let t0 = Instant::now();
     let mut stats = ScanStats {
         volume: "scope".to_string(),
@@ -74,6 +77,22 @@ pub fn walk_scan(roots: &[String]) -> (VolumeIndex, ScanStats) {
     let mut name_buf: Vec<u8> = Vec::new();
     let mut lower_buf: Vec<u8> = Vec::new();
     let mut stack: Vec<Pending> = Vec::new();
+
+    // Fold each excluded subtree to the same per-char lowercase form the walk
+    // builds for every entry (ADR-0003/-0025), so the prune check below is one
+    // case-insensitive hash lookup that never re-folds a path. Empty (lookups
+    // all-miss) in the common no-exclude case.
+    let prune_set: HashSet<Vec<u8>> = excludes
+        .iter()
+        .map(|e| {
+            units.clear();
+            units.extend(PathBuf::from(e).as_os_str().encode_wide());
+            name_buf.clear();
+            lower_buf.clear();
+            push_wtf8_pair(&units, &mut name_buf, &mut lower_buf);
+            lower_buf.clone()
+        })
+        .collect();
 
     for root in roots {
         let path = PathBuf::from(root);
@@ -106,9 +125,17 @@ pub fn walk_scan(roots: &[String]) -> (VolumeIndex, ScanStats) {
             mtime: md.last_write_time() as i64,
         });
         stats.dirs += 1;
+        // A root that folds to a trailing separator (drive roots: `C:\` →
+        // `c:\`) would seed its children as `c:\\users`; strip it so they read
+        // `c:\users` — canonical, matching fold(full_path), the exclude set
+        // above, and the watcher's stateless recompute.
+        let mut folded = lower_buf.clone();
+        if folded.last() == Some(&b'\\') {
+            folded.pop();
+        }
         stack.push(Pending {
             path,
-            folded: lower_buf.clone(),
+            folded,
             record,
             depth: 0,
         });
@@ -147,6 +174,14 @@ pub fn walk_scan(roots: &[String]) -> (VolumeIndex, ScanStats) {
             folded_child.push(b'\\');
             folded_child.extend_from_slice(&lower_buf);
             let record = path_record(&folded_child);
+
+            // User-excluded subtree (scope mode, ADR-0025): drop the directory
+            // and skip descent so nothing under it is indexed. Matched on the
+            // folded path already built for the record — one lookup, no re-fold.
+            if is_dir && prune_set.contains(&folded_child) {
+                stats.walk_excluded_pruned += 1;
+                continue;
+            }
 
             b.push(RawEntry {
                 parent_frn: Frn(cur.record),
@@ -233,7 +268,7 @@ mod tests {
         std::fs::write(root.join("sub").join("beta.log"), b"bb").unwrap();
 
         let root_str = root.to_str().unwrap().to_string();
-        let (idx, stats) = walk_scan(std::slice::from_ref(&root_str));
+        let (idx, stats) = walk_scan(std::slice::from_ref(&root_str), &[]);
 
         // Root + sub (2 dirs) and alpha.txt + beta.log (2 files).
         assert_eq!(stats.dirs, 2, "dirs");
@@ -272,10 +307,13 @@ mod tests {
         std::fs::write(a.join("one.txt"), b"1").unwrap();
         std::fs::write(b.join("two.txt"), b"2").unwrap();
 
-        let (idx, stats) = walk_scan(&[
-            a.to_str().unwrap().to_string(),
-            b.to_str().unwrap().to_string(),
-        ]);
+        let (idx, stats) = walk_scan(
+            &[
+                a.to_str().unwrap().to_string(),
+                b.to_str().unwrap().to_string(),
+            ],
+            &[],
+        );
         assert_eq!(stats.files, 2, "one file per root");
 
         for (root, name) in [(&a, "one.txt"), (&b, "two.txt")] {
@@ -291,11 +329,79 @@ mod tests {
 
     #[test]
     fn missing_root_is_counted_not_fatal() {
-        let (idx, stats) = walk_scan(&["Z:\\does\\not\\exist-fmf".to_string()]);
+        let (idx, stats) = walk_scan(&["Z:\\does\\not\\exist-fmf".to_string()], &[]);
         assert_eq!(stats.walk_read_errors, 1);
         // Only the synthetic ROOT slot exists; no real entries.
         assert_eq!(stats.files, 0);
         assert_eq!(stats.dirs, 0);
         assert_eq!(idx.live_len(), 1, "just the empty synthetic root");
+    }
+
+    #[test]
+    fn excluded_subtree_is_pruned() {
+        let tree = Tree::new("exclude");
+        let root = tree.0.join("Projects");
+        std::fs::create_dir_all(root.join("app").join("node_modules")).unwrap();
+        std::fs::create_dir_all(root.join("archive")).unwrap();
+        std::fs::write(root.join("app").join("main.rs"), b"m").unwrap();
+        std::fs::write(root.join("app").join("node_modules").join("dep.js"), b"d").unwrap();
+        std::fs::write(root.join("archive").join("old.txt"), b"o").unwrap();
+
+        let root_str = root.to_str().unwrap().to_string();
+        let nm = format!("{root_str}\\app\\node_modules");
+        let archive = format!("{root_str}\\archive");
+        let (idx, stats) = walk_scan(
+            std::slice::from_ref(&root_str),
+            &[nm.clone(), archive.clone()],
+        );
+
+        // Both excluded subtrees are pruned at their roots.
+        assert_eq!(stats.walk_excluded_pruned, 2, "two subtrees pruned");
+        // app/main.rs survives; the excluded files (and the excluded dirs
+        // themselves) do not.
+        let present = |p: &str| idx.entry_by_record(path_record(&folded(p))).is_some();
+        assert!(
+            present(&format!("{root_str}\\app\\main.rs")),
+            "sibling kept"
+        );
+        assert!(!present(&format!("{nm}\\dep.js")), "excluded file dropped");
+        assert!(
+            !present(&format!("{archive}\\old.txt")),
+            "excluded file dropped"
+        );
+        assert!(!present(&nm), "excluded dir itself dropped");
+        assert!(!present(&archive), "excluded dir itself dropped");
+    }
+
+    #[test]
+    fn root_with_trailing_separator_resolves_and_prunes_canonically() {
+        let tree = Tree::new("trailingsep");
+        let base = tree.0.join("Data");
+        std::fs::create_dir_all(base.join("keep")).unwrap();
+        std::fs::create_dir_all(base.join("skip")).unwrap();
+        std::fs::write(base.join("keep").join("a.txt"), b"a").unwrap();
+        std::fs::write(base.join("skip").join("b.txt"), b"b").unwrap();
+
+        let base_str = base.to_str().unwrap().to_string();
+        // Root passed WITH a trailing separator (how a drive root like `C:\`
+        // arrives): children must still key on single-separator folded paths,
+        // so both lookups and exclude matching work.
+        let root_with_sep = format!("{base_str}\\");
+        let skip = format!("{base_str}\\skip");
+        let (idx, stats) = walk_scan(
+            std::slice::from_ref(&root_with_sep),
+            std::slice::from_ref(&skip),
+        );
+
+        assert_eq!(
+            stats.walk_excluded_pruned, 1,
+            "trailing-sep root still prunes"
+        );
+        let present = |p: &str| idx.entry_by_record(path_record(&folded(p))).is_some();
+        assert!(
+            present(&format!("{base_str}\\keep\\a.txt")),
+            "kept file resolves"
+        );
+        assert!(!present(&format!("{skip}\\b.txt")), "excluded file dropped");
     }
 }

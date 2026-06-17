@@ -129,6 +129,29 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// one folder has been chosen.</summary>
     public bool CanStartScope => ScopeFolders.Count > 0;
 
+    /// <summary>Subfolders to prune from the walk (ADR-0025), shown in the scope
+    /// manager dialog. Each must sit under a <see cref="ScopeFolders"/> root;
+    /// seeded from settings, persisted by <see cref="ApplyScopeChange"/>.</summary>
+    public ObservableCollection<string> ScopeExcludes { get; }
+
+    /// <summary>A note naming the folders already inside a larger selected one,
+    /// so the user sees the bigger set subsumes them (they merge on apply).
+    /// Empty when the selection has no nesting. Recomputed on every
+    /// <see cref="ScopeFolders"/> change.</summary>
+    public string ScopeCoverageNote
+    {
+        get
+        {
+            var kept = ScopePaths.Normalize(ScopeFolders);
+            var covered = ScopeFolders
+                .Where(f => !kept.Any(k => string.Equals(k, f, StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+            return covered.Count == 0
+                ? string.Empty
+                : Loc.Get("Scope_CoverageNote", string.Join(", ", covered));
+        }
+    }
+
     // CA1822 (mark static): a false positive for x:Bind targets — these surface
     // static AppPaths state to the setup screen and must be instance members of
     // the bound ViewModel for `{x:Bind ViewModel.…}` to resolve them.
@@ -206,7 +229,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _relaunch = relaunch ?? ShellOps.Relaunch;
         _isScopeMode = isScopeMode ?? (() => _engine is FfiEngineClient { IsScopeMode: true });
         ScopeFolders = new ObservableCollection<string>(_settings.ScopeRoots);
-        ScopeFolders.CollectionChanged += (_, _) => OnPropertyChanged(nameof(CanStartScope));
+        ScopeExcludes = new ObservableCollection<string>(_settings.ScopeExcludes);
+        ScopeFolders.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(CanStartScope));
+            OnPropertyChanged(nameof(ScopeCoverageNote));
+        };
         _engineEvents = new EngineEventMarshaler(engine, dispatcher);
         Results = new ResultsPresenter(dispatcher);
         Search = new SearchOrchestrator(
@@ -376,6 +404,38 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <param name="path">The folder path to remove.</param>
     public void RemoveScopeFolder(string path) => ScopeFolders.Remove(path);
 
+    /// <summary>Manager dialog (scope mode): pick a subfolder to prune from the
+    /// walk (ADR-0025). Rejected with a notice when it is not inside one of the
+    /// chosen <see cref="ScopeFolders"/> roots (an exclude outside the indexed
+    /// set prunes nothing). Case-insensitive dedupe.</summary>
+    /// <returns>A task that completes once the picked folder (if valid) is added.</returns>
+    public async Task PickScopeExcludeAsync()
+    {
+        // No ConfigureAwait(false): the continuation mutates bound collections,
+        // so it must resume on the UI thread (see PickScopeFoldersAsync).
+        var path = await _folderPicker();
+        if (path is null)
+        {
+            return;
+        }
+
+        if (!ScopePaths.IsUnderAnyRoot(path, ScopeFolders))
+        {
+            Notifications.Push(new AppNotification(
+                NotifySeverity.Warning, Loc.Get("Scope_ExcludeNotUnderRoot"), path));
+            return;
+        }
+
+        if (!ScopeExcludes.Any(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)))
+        {
+            ScopeExcludes.Add(path);
+        }
+    }
+
+    /// <summary>Drop one excluded subfolder (the per-row × button).</summary>
+    /// <param name="path">The exclude path to remove.</param>
+    public void RemoveScopeExclude(string path) => ScopeExcludes.Remove(path);
+
     /// <summary>Setup screen (no-admin, initial): commit the chosen folders and
     /// relaunch into <c>WalkInProc</c>. Same mechanism as
     /// <see cref="ApplyScopeChange"/> (the engine has no live root-swap), so it
@@ -393,19 +453,31 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public void ApplyScopeChange()
     {
         var roots = ScopePaths.Normalize(ScopeFolders);
-        if (roots.Count == 0 || SameRoots(roots, _settings.ScopeRoots))
+        if (roots.Count == 0)
+        {
+            return;
+        }
+
+        // Keep only excludes still inside a (normalized) root — a removed root
+        // makes its excludes moot; the engine ignores non-matching ones anyway.
+        var excludes = ScopeExcludes
+            .Where(e => ScopePaths.IsUnderAnyRoot(e, roots))
+            .ToList();
+
+        if (SameSet(roots, _settings.ScopeRoots) && SameSet(excludes, _settings.ScopeExcludes))
         {
             return;
         }
 
         _settings.ScopeRoots = [.. roots];
+        _settings.ScopeExcludes = [.. excludes];
         _settings.Save();
         _relaunch();
     }
 
-    /// <summary>Order- and case-insensitive set equality for scope roots, so a
-    /// reorder or case-only edit counts as "unchanged" and skips the relaunch.</summary>
-    private static bool SameRoots(List<string> a, string[] b) =>
+    /// <summary>Order- and case-insensitive set equality, so a reorder or
+    /// case-only edit counts as "unchanged" and skips the relaunch.</summary>
+    private static bool SameSet(List<string> a, string[] b) =>
         a.Count == b.Length
         && a.OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
             .SequenceEqual(

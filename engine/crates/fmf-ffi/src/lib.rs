@@ -62,8 +62,13 @@ mod export_pins {
             crate::volumes::fmf_list_volumes;
         let _: unsafe extern "C" fn(*mut c_void, *const *const c_char, u32) -> i32 =
             crate::volumes::fmf_index_start;
-        let _: unsafe extern "C" fn(*mut c_void, *const *const c_char, u32) -> i32 =
-            crate::volumes::fmf_index_start_scope;
+        let _: unsafe extern "C" fn(
+            *mut c_void,
+            *const *const c_char,
+            u32,
+            *const *const c_char,
+            u32,
+        ) -> i32 = crate::volumes::fmf_index_start_scope;
         let _: unsafe extern "C" fn(*mut c_void, *mut FmfVolumeStatus, u32, *mut u32) -> i32 =
             crate::volumes::fmf_index_status;
         let _: unsafe extern "C" fn(*mut FmfBlob) -> i32 = crate::blob::fmf_blob_free;

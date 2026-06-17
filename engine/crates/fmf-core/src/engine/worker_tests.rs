@@ -737,7 +737,7 @@ fn scope_walk_indexes_and_serves_queries() {
     std::fs::create_dir_all(tree.0.join("docs")).unwrap();
     std::fs::write(tree.0.join("docs").join("quarterly_report.txt"), b"x").unwrap();
 
-    e.index_start_scope(&[tree.0.to_str().unwrap().to_string()]);
+    e.index_start_scope(&[tree.0.to_str().unwrap().to_string()], &[]);
     lifecycle_until(&rx, "scope", |ev| {
         matches!(ev, EngineEvent::VolumeReady { .. })
     });

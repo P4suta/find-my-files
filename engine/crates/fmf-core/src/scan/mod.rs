@@ -97,6 +97,10 @@ pub struct ScanStats {
     pub walk_read_errors: u64,
     /// Scope-mode only: subtrees not descended because they hit `MAX_DEPTH`.
     pub walk_depth_truncated: u64,
+    /// Scope-mode only: directories (and their subtrees) skipped because they
+    /// matched a user exclude (ADR-0025). Normal behaviour, not a degradation —
+    /// surfaced in the scan-complete log, never a degrade counter.
+    pub walk_excluded_pruned: u64,
 }
 
 /// Full initial scan: stream the volume's $MFT and build the in-memory

@@ -28,6 +28,11 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     /// these — so the unchanged startup flow (list → start) indexes them.</summary>
     private readonly IReadOnlyList<string>? _scopeRoots;
 
+    /// <summary>Scope mode only (ADR-0025): absolute subfolder paths the walk
+    /// prunes. Marshaled alongside the roots in <see cref="StartIndexingAsync"/>;
+    /// empty (or null in volume mode) means no pruning.</summary>
+    private readonly IReadOnlyList<string>? _scopeExcludes;
+
     private long _liveGeneration;
 
     private IntPtr _handle;
@@ -75,12 +80,14 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     /// (<see cref="AppPaths"/>): <c>&lt;exe&gt;\data\{index,logs}</c> by default, so
     /// scope mode pollutes nothing outside the app's own folder.</summary>
     /// <param name="roots">Absolute folder roots to folder-walk and index.</param>
+    /// <param name="excludes">Absolute subfolders to prune from the walk (ADR-0025).</param>
     /// <returns>A scope-mode client over the portable data root.</returns>
-    public static FfiEngineClient CreateScope(IReadOnlyList<string> roots)
+    public static FfiEngineClient CreateScope(
+        IReadOnlyList<string> roots, IReadOnlyList<string> excludes)
     {
         var logDir = AppPaths.LogDir;
         Directory.CreateDirectory(logDir); // ensure the engine can open engine.log
-        return new(AppPaths.ScopeIndexDir, roots, logDir);
+        return new(AppPaths.ScopeIndexDir, roots, logDir, excludes);
     }
 
     /// <summary>Test seam (contract suite): a throwaway index dir keeps the
@@ -92,10 +99,15 @@ public sealed unsafe class FfiEngineClient : IEngineClient
     /// <param name="indexDir">Directory holding the on-disk index.</param>
     /// <param name="scopeRoots">When non-null, the roots to folder-walk (scope mode); otherwise volume mode.</param>
     /// <param name="logDir">When non-null, redirects the engine log here (portable mode).</param>
+    /// <param name="scopeExcludes">Scope-mode subfolders to prune from the walk (ADR-0025).</param>
     internal FfiEngineClient(
-        string indexDir, IReadOnlyList<string>? scopeRoots = null, string? logDir = null)
+        string indexDir,
+        IReadOnlyList<string>? scopeRoots = null,
+        string? logDir = null,
+        IReadOnlyList<string>? scopeExcludes = null)
     {
         _scopeRoots = scopeRoots;
+        _scopeExcludes = scopeExcludes;
         var idx = System.Text.Json.JsonSerializer.Serialize(indexDir);
         var config = logDir is null
             ? $$"""{"index_dir": {{idx}}}"""
@@ -219,45 +231,67 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         }
     }
 
+    /// <summary>Marshal a string list to an array of UTF-8 <c>char*</c> for the
+    /// FFI; pair with <see cref="FreeUtf8"/> in a finally.</summary>
+    private static IntPtr[] MarshalUtf8(IReadOnlyList<string> items)
+    {
+        var ptrs = new IntPtr[items.Count];
+        for (var i = 0; i < items.Count; i++)
+        {
+            ptrs[i] = Marshal.StringToCoTaskMemUTF8(items[i]);
+        }
+
+        return ptrs;
+    }
+
+    /// <summary>Free the UTF-8 <c>char*</c> array a <see cref="MarshalUtf8"/>
+    /// call allocated.</summary>
+    private static void FreeUtf8(IntPtr[] ptrs)
+    {
+        foreach (var p in ptrs)
+        {
+            if (p != IntPtr.Zero)
+            {
+                Marshal.FreeCoTaskMem(p);
+            }
+        }
+    }
+
     /// <inheritdoc/>
     public Task StartIndexingAsync(IReadOnlyList<string> volumes, CancellationToken ct = default)
     {
         var handle = _handle;
 
         // Scope mode walks the roots (ListVolumesAsync handed StartAsync the same
-        // list); volume mode indexes the drive labels. Same marshaling either way.
+        // list) and prunes the excludes; volume mode indexes the drive labels.
         var scope = _scopeRoots is not null;
+        IReadOnlyList<string> excludes = scope ? _scopeExcludes ?? [] : [];
         return Task.Run(
             () =>
         {
-            var ptrs = new IntPtr[volumes.Count];
+            var rootPtrs = MarshalUtf8(volumes);
+            var exclPtrs = MarshalUtf8(excludes);
             try
             {
-                for (var i = 0; i < volumes.Count; i++)
+                fixed (IntPtr* rp = rootPtrs)
                 {
-                    ptrs[i] = Marshal.StringToCoTaskMemUTF8(volumes[i]);
-                }
-
-                fixed (IntPtr* pp = ptrs)
-                {
-                    var rc = scope
-                        ? NativeEngine.fmf_index_start_scope(handle, (byte**)pp, (uint)volumes.Count)
-                        : NativeEngine.fmf_index_start(handle, (byte**)pp, (uint)volumes.Count);
-                    if (rc != NativeEngine.Ok)
+                    fixed (IntPtr* ep = exclPtrs)
                     {
-                        NativeEngine.Throw(rc, scope ? "fmf_index_start_scope" : "fmf_index_start");
+                        var rc = scope
+                            ? NativeEngine.fmf_index_start_scope(
+                                handle, (byte**)rp, (uint)volumes.Count, (byte**)ep, (uint)exclPtrs.Length)
+                            : NativeEngine.fmf_index_start(handle, (byte**)rp, (uint)volumes.Count);
+                        if (rc != NativeEngine.Ok)
+                        {
+                            NativeEngine.Throw(rc, scope ? "fmf_index_start_scope" : "fmf_index_start");
+                        }
                     }
                 }
             }
             finally
             {
-                foreach (var p in ptrs)
-                {
-                    if (p != IntPtr.Zero)
-                    {
-                        Marshal.FreeCoTaskMem(p);
-                    }
-                }
+                FreeUtf8(rootPtrs);
+                FreeUtf8(exclPtrs);
             }
         },
             ct);

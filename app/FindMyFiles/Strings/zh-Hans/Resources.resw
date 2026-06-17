@@ -98,6 +98,11 @@
   <data name="Status_ModeScope" xml:space="preserve"><value>模式: 选定文件夹</value></data>
   <data name="Status_ModePrivileged" xml:space="preserve"><value>模式: 所有驱动器</value></data>
   <data name="Scope_OpenFailed" xml:space="preserve"><value>无法打开搜索文件夹</value></data>
+  <data name="ScopeDialogExcludesHeader.Text" xml:space="preserve"><value>跳过这些子文件夹</value></data>
+  <data name="ScopeDialogExcludesBody.Text" xml:space="preserve"><value>上述文件夹中你不想索引的部分(例如 node_modules 或构建输出)。应用后将重新遍历。</value></data>
+  <data name="ScopeDialogAddExclude.Content" xml:space="preserve"><value>添加要跳过的文件夹…</value></data>
+  <data name="Scope_CoverageNote" xml:space="preserve"><value>已包含在选定的更大文件夹中(将被合并): {0}</value></data>
+  <data name="Scope_ExcludeNotUnderRoot" xml:space="preserve"><value>要跳过的文件夹必须位于某个搜索文件夹之内。</value></data>
   <data name="SvcDialog.Title" xml:space="preserve"><value>管理服务</value></data>
   <data name="SvcDialog.CloseButtonText" xml:space="preserve"><value>关闭</value></data>
   <data name="SvcSubtitle.Text" xml:space="preserve"><value>fmf-engine(文件名搜索服务)</value></data>

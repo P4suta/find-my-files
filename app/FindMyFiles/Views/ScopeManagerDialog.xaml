@@ -57,6 +57,55 @@
             AutomationProperties.AutomationId="ScopeDialogAddFolder"
             Click="AddFolder_Click" />
 
+        <!--  入れ子の可視化(ADR-0025): 大きいフォルダに包含される選択を明示。  -->
+        <TextBlock
+            AutomationProperties.AutomationId="ScopeDialogCoverageNote"
+            Foreground="{ThemeResource SystemFillColorCautionBrush}"
+            Style="{ThemeResource CaptionTextBlockStyle}"
+            Text="{x:Bind VM.ScopeCoverageNote, Mode=OneWay}"
+            TextWrapping="Wrap"
+            Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(VM.ScopeCoverageNote), Mode=OneWay}" />
+
+        <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+        <!--  除外サブフォルダ(ADR-0025): root配下の特定フォルダを索引から外す。  -->
+        <TextBlock x:Uid="ScopeDialogExcludesHeader" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+        <TextBlock
+            x:Uid="ScopeDialogExcludesBody"
+            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+            Style="{ThemeResource CaptionTextBlockStyle}"
+            TextWrapping="Wrap" />
+        <ItemsControl AutomationProperties.AutomationId="ScopeDialogExcludes" ItemsSource="{x:Bind VM.ScopeExcludes, Mode=OneWay}">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="x:String">
+                    <Grid Margin="0,2" ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            VerticalAlignment="Center"
+                            Style="{ThemeResource CaptionTextBlockStyle}"
+                            Text="{x:Bind}"
+                            TextTrimming="CharacterEllipsis"
+                            ToolTipService.ToolTip="{x:Bind}" />
+                        <Button
+                            Grid.Column="1"
+                            Padding="8,4"
+                            Click="RemoveExclude_Click"
+                            Content="&#xE711;"
+                            FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                            FontSize="12"
+                            Tag="{x:Bind}" />
+                    </Grid>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <Button
+            x:Uid="ScopeDialogAddExclude"
+            AutomationProperties.AutomationId="ScopeDialogAddExclude"
+            Click="AddExclude_Click" />
+
         <TextBlock
             Foreground="{ThemeResource TextFillColorTertiaryBrush}"
             Style="{ThemeResource CaptionTextBlockStyle}"

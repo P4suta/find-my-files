@@ -117,8 +117,8 @@ public static class EngineClientFactory
             // %LOCALAPPDATA% — the corporate-PC path where admin is forbidden.
             FileLog.Info(
                 "app",
-                $"engine: scope walk in-proc ({settings.ScopeRoots.Length} roots, not elevated)");
-            return FfiEngineClient.CreateScope(settings.ScopeRoots);
+                $"engine: scope walk in-proc ({settings.ScopeRoots.Length} roots, {settings.ScopeExcludes.Length} excludes, not elevated)");
+            return FfiEngineClient.CreateScope(settings.ScopeRoots, settings.ScopeExcludes);
         }
 
         // EmptyNotElevated: no live service and not elevated. In-proc would fail

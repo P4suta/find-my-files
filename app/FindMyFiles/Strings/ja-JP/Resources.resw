@@ -98,6 +98,11 @@
   <data name="Status_ModeScope" xml:space="preserve"><value>モード: 選択フォルダ</value></data>
   <data name="Status_ModePrivileged" xml:space="preserve"><value>モード: 全ドライブ</value></data>
   <data name="Scope_OpenFailed" xml:space="preserve"><value>検索フォルダを開けませんでした</value></data>
+  <data name="ScopeDialogExcludesHeader.Text" xml:space="preserve"><value>除外するサブフォルダ</value></data>
+  <data name="ScopeDialogExcludesBody.Text" xml:space="preserve"><value>上のフォルダの中で索引したくないもの(node_modules やビルド出力など)。適用すると再walkします。</value></data>
+  <data name="ScopeDialogAddExclude.Content" xml:space="preserve"><value>除外フォルダを追加…</value></data>
+  <data name="Scope_CoverageNote" xml:space="preserve"><value>選択済みのより大きなフォルダに含まれます(統合されます): {0}</value></data>
+  <data name="Scope_ExcludeNotUnderRoot" xml:space="preserve"><value>除外フォルダは検索フォルダのいずれかの中にある必要があります。</value></data>
   <data name="SvcDialog.Title" xml:space="preserve"><value>サービスの管理</value></data>
   <data name="SvcDialog.CloseButtonText" xml:space="preserve"><value>閉じる</value></data>
   <data name="SvcSubtitle.Text" xml:space="preserve"><value>fmf-engine(ファイル名検索サービス)</value></data>
