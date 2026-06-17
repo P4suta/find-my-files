@@ -1,0 +1,28 @@
+# cargo-mutants config (ADR-0022). Curated to the highest-risk fmf-core
+# soundness surfaces only, so a CI lane runs in minutes rather than over the
+# whole workspace. Pass with `cargo mutants --config engine/mutants.toml` (it is
+# NOT at the default .cargo/mutants.toml path on purpose — the parent wires CI).
+#
+# Globs containing a slash match the entire repo-relative path, so the `**/`
+# prefix reaches `crates/fmf-core/src/...` from the engine workspace root. A bare
+# filename (no slash) would match by name only; we pin full paths to avoid
+# accidentally pulling same-named files from other crates.
+
+# Where a broken mutant is most likely to slip past the suite: query execution,
+# subsumption, compilation, the in-memory index mutate/compact paths, USN replay,
+# and the WTF-8 codec (unsafe surface).
+examine_globs = [
+  "**/src/query/exec.rs",
+  "**/src/query/subsume.rs",
+  "**/src/query/compile.rs",
+  "**/src/index/mutate.rs",
+  "**/src/index/compact.rs",
+  "**/src/usn/apply.rs",
+  "**/src/wtf8.rs",
+]
+
+# Some of these tests do real index/USN-replay work, so a mutated build can run
+# slower than the clean baseline before it's caught. Give each mutant 5x the
+# baseline test time (plus the auto lower bound) so slow-but-correct mutants
+# don't get miscounted as timeouts.
+timeout_multiplier = 5.0
