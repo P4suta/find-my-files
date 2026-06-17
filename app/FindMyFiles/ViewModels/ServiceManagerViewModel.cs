@@ -191,7 +191,11 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
         NeedsAppRestart = false;
         try
         {
-            var result = await Task.Run(() => ServiceSetup.RunElevated(_exe, args)).ConfigureAwait(false);
+            // RunElevated already runs off the UI thread (Task.Run); resume on the
+            // dispatcher (no ConfigureAwait) because the continuation sets bound
+            // ResultSeverity / ResultText / Busy and calls Refresh(). RunAsync is
+            // invoked from the dialog's UI-thread commands.
+            var result = await Task.Run(() => ServiceSetup.RunElevated(_exe, args));
             var verb = args.Split(' ', 2)[0];
             (ResultSeverity, ResultText) = result.Outcome switch
             {
@@ -211,7 +215,7 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
             {
                 ResultSeverity = NotifySeverity.Info;
                 ResultText = Loc.Get("Setup_Connecting");
-                if (!await ServiceProvisioner.WaitForServiceThenRelaunchAsync().ConfigureAwait(false))
+                if (!await ServiceProvisioner.WaitForServiceThenRelaunchAsync())
                 {
                     ResultSeverity = NotifySeverity.Warning;
                     ResultText = Loc.Get("Svc_RegisteredNotConfirmed");

@@ -57,7 +57,11 @@ public sealed partial class PerfPanelViewModel : ObservableObject
     /// <returns>A <see cref="Task"/> that completes once the snapshot is refreshed.</returns>
     public async Task RefreshStatsAsync()
     {
-        Stats = await _engine.GetStatsAsync().ConfigureAwait(false);
+        // No ConfigureAwait(false): Stats is bound and PerfDataChanged is contractually
+        // raised on the UI thread, so the continuation must resume on the caller's
+        // dispatcher (callers invoke this from the UI thread). Resuming off it would
+        // update bound state from a pool thread → RPC_E_WRONG_THREAD.
+        Stats = await _engine.GetStatsAsync();
         PerfDataChanged?.Invoke();
     }
 
