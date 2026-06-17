@@ -35,22 +35,32 @@ internal static partial class NativeEngine
         }
     }
 
+    // These P/Invoke entry points are named to match fmf_engine.dll's lowercase
+    // `#[no_mangle]` C exports EXACTLY: LibraryImport uses the method name as the
+    // symbol and GetProcAddress is case-sensitive, so a PascalCased name resolves
+    // to nothing → EntryPointNotFoundException at the first call, silently demoting
+    // in-proc / scope mode to the empty fake. SA1300 ("begin with uppercase") wants
+    // PascalCase and would reintroduce exactly that break (it is the original cause:
+    // it only flags entry points with no out/ref param, so the surface drifted half
+    // PascalCased), so it is disabled across the binding block. NativeEngineBindingTests
+    // pins the lowercase shape so any future drift fails the build instead of search.
+#pragma warning disable SA1300 // FFI entry points mirror the DLL's lowercase C exports, not C# naming
     [LibraryImport("fmf_engine")]
-    internal static partial uint Fmf_abi_version();
+    internal static partial uint fmf_abi_version();
 
     [LibraryImport("fmf_engine", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int fmf_engine_create(string configJson, out IntPtr handle);
 
     [LibraryImport("fmf_engine")]
-    internal static partial int Fmf_engine_destroy(IntPtr handle);
+    internal static partial int fmf_engine_destroy(IntPtr handle);
 
     // Save-now for Ready, dirty volumes. The UI never calls this on its own;
     // it exists for in-proc parity with the service path (ARCHITECTURE.md).
     [LibraryImport("fmf_engine")]
-    internal static partial int Fmf_flush(IntPtr handle);
+    internal static partial int fmf_flush(IntPtr handle);
 
     [LibraryImport("fmf_engine")]
-    internal static unsafe partial int Fmf_set_event_callback(
+    internal static unsafe partial int fmf_set_event_callback(
         IntPtr handle,
         delegate* unmanaged[Cdecl]<FmfEvent*, IntPtr, void> cb,
         IntPtr user);
@@ -60,18 +70,18 @@ internal static partial class NativeEngine
         IntPtr handle, FmfVolumeStatus* buf, uint cap, out uint count);
 
     [LibraryImport("fmf_engine")]
-    internal static unsafe partial int Fmf_index_start(IntPtr handle, byte** volumes, uint n);
+    internal static unsafe partial int fmf_index_start(IntPtr handle, byte** volumes, uint n);
 
     // ADR-0024: non-elevated scope-mode start over absolute root paths.
     [LibraryImport("fmf_engine")]
-    internal static unsafe partial int Fmf_index_start_scope(IntPtr handle, byte** roots, uint n);
+    internal static unsafe partial int fmf_index_start_scope(IntPtr handle, byte** roots, uint n);
 
     [LibraryImport("fmf_engine")]
     internal static unsafe partial int fmf_index_status(
         IntPtr handle, FmfVolumeStatus* buf, uint cap, out uint count);
 
     [LibraryImport("fmf_engine")]
-    internal static unsafe partial int Fmf_blob_free(FmfBlob* blob);
+    internal static unsafe partial int fmf_blob_free(FmfBlob* blob);
 
     [LibraryImport("fmf_engine")]
     internal static unsafe partial int fmf_engine_stats(IntPtr handle, out FmfBlob* blob);
@@ -98,7 +108,7 @@ internal static partial class NativeEngine
         }
         finally
         {
-            _ = Fmf_blob_free(blob);
+            _ = fmf_blob_free(blob);
         }
     }
 
@@ -107,13 +117,14 @@ internal static partial class NativeEngine
         IntPtr resultHandle, ulong offset, uint count, out FmfPage* page);
 
     [LibraryImport("fmf_engine")]
-    internal static unsafe partial int Fmf_page_free(FmfPage* page);
+    internal static unsafe partial int fmf_page_free(FmfPage* page);
 
     [LibraryImport("fmf_engine")]
-    internal static partial int Fmf_result_free(IntPtr resultHandle);
+    internal static partial int fmf_result_free(IntPtr resultHandle);
 
     [LibraryImport("fmf_engine")]
     internal static unsafe partial int fmf_last_error(byte* buf, ref uint len);
+#pragma warning restore SA1300
 
     internal static unsafe string LastError()
     {

@@ -107,7 +107,7 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         _self = GCHandle.Alloc(this, GCHandleType.Weak);
         _registeredGeneration = Interlocked.Increment(ref generation);
         _liveGeneration = _registeredGeneration;
-        rc = NativeEngine.Fmf_set_event_callback(_handle, &OnEvent, GCHandle.ToIntPtr(_self));
+        rc = NativeEngine.fmf_set_event_callback(_handle, &OnEvent, GCHandle.ToIntPtr(_self));
         if (rc != NativeEngine.Ok)
         {
             NativeEngine.Throw(rc, "fmf_set_event_callback");
@@ -235,8 +235,8 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                 fixed (IntPtr* pp = ptrs)
                 {
                     var rc = scope
-                        ? NativeEngine.Fmf_index_start_scope(handle, (byte**)pp, (uint)volumes.Count)
-                        : NativeEngine.Fmf_index_start(handle, (byte**)pp, (uint)volumes.Count);
+                        ? NativeEngine.fmf_index_start_scope(handle, (byte**)pp, (uint)volumes.Count)
+                        : NativeEngine.fmf_index_start(handle, (byte**)pp, (uint)volumes.Count);
                     if (rc != NativeEngine.Ok)
                     {
                         NativeEngine.Throw(rc, scope ? "fmf_index_start_scope" : "fmf_index_start");
@@ -364,8 +364,8 @@ public sealed unsafe class FfiEngineClient : IEngineClient
         {
             // Teardown return codes are intentionally ignored — there is no
             // recovery action during dispose.
-            _ = NativeEngine.Fmf_set_event_callback(_handle, null, IntPtr.Zero);
-            _ = NativeEngine.Fmf_engine_destroy(_handle); // joins engine threads
+            _ = NativeEngine.fmf_set_event_callback(_handle, null, IntPtr.Zero);
+            _ = NativeEngine.fmf_engine_destroy(_handle); // joins engine threads
             _handle = IntPtr.Zero;
         }
 
