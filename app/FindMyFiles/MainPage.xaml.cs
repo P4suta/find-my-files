@@ -134,21 +134,10 @@ public sealed partial class MainPage : Page
     private void EnableSearch_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         ViewModel.EnableSearchAsync().Forget("service-ui");
 
-    // Setup screen scope path (no admin, ADR-0024): pick folders → save →
-    // relaunch enters WalkInProc.
-    private void PickScopeFolders_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
-        ViewModel.PickScopeFoldersAsync().Forget("scope-ui");
-
-    private void StartScopeSearch_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
-        ViewModel.StartScopeSearch();
-
-    private void RemoveScopeFolder_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
-    {
-        if (sender is Microsoft.UI.Xaml.FrameworkElement { Tag: string path })
-        {
-            ViewModel.RemoveScopeFolder(path);
-        }
-    }
+    // Setup screen scope path (no admin, ADR-0024): a single link opens the
+    // scope setup dialog (folders only; excludes come later via the gear).
+    private void ScopeSetup_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        Views.ScopeManagerDialog.OpenAsync(ViewModel, setup: true).Forget("scope-ui");
 
     // Language switch: persist to settings.json and relaunch the app (App ctor
     // applies PrimaryLanguageOverride). Tag is "auto"/"ja"/"en"/"zh-Hans".

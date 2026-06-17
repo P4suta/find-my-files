@@ -381,81 +381,19 @@
                 Click="EnableSearch_Click"
                 IsEnabled="{x:Bind ViewModel.SetupNotBusy, Mode=OneWay}"
                 Style="{StaticResource AccentButtonStyle}" />
-            <!--  非昇格スコープ経路(ADR-0024): 管理者CTAを主役に保ちつつ、その下に
-                  控えめに「フォルダを選ぶ」代替を置く。管理者権限が取れない会社PC向け。  -->
-            <StackPanel Spacing="8">
-                <TextBlock
-                    x:Uid="SetupOrDivider"
-                    HorizontalAlignment="Center"
-                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                    Style="{ThemeResource CaptionTextBlockStyle}" />
-                <TextBlock
-                    x:Uid="ScopeSetupTitle"
-                    HorizontalAlignment="Center"
-                    Style="{ThemeResource BodyStrongTextBlockStyle}"
-                    TextAlignment="Center" />
-                <TextBlock
-                    x:Uid="ScopeSetupBody"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                    Style="{ThemeResource CaptionTextBlockStyle}"
-                    TextAlignment="Center"
-                    TextWrapping="Wrap" />
-                <ItemsControl ItemsSource="{x:Bind ViewModel.ScopeFolders, Mode=OneWay}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="x:String">
-                            <Grid Margin="0,2" ColumnSpacing="8">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock
-                                    VerticalAlignment="Center"
-                                    Style="{ThemeResource CaptionTextBlockStyle}"
-                                    Text="{x:Bind}"
-                                    TextTrimming="CharacterEllipsis"
-                                    ToolTipService.ToolTip="{x:Bind}" />
-                                <Button
-                                    Grid.Column="1"
-                                    Padding="8,4"
-                                    Click="RemoveScopeFolder_Click"
-                                    Content="&#xE711;"
-                                    FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                    FontSize="12"
-                                    Tag="{x:Bind}" />
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-                <!--  入れ子の可視化(ADR-0025): より大きな選択フォルダに包含される
-                      ものを明示し、適用時に統合されることが伝わるようにする。  -->
-                <TextBlock
-                    AutomationProperties.AutomationId="ScopeCoverageNote"
-                    Foreground="{ThemeResource SystemFillColorCautionBrush}"
-                    Style="{ThemeResource CaptionTextBlockStyle}"
-                    Text="{x:Bind ViewModel.ScopeCoverageNote, Mode=OneWay}"
-                    TextAlignment="Center"
-                    TextWrapping="Wrap"
-                    Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ViewModel.ScopeCoverageNote), Mode=OneWay}" />
-                <Button
-                    x:Uid="ScopePickFolders"
-                    HorizontalAlignment="Center"
-                    AutomationProperties.AutomationId="ScopePickFolders"
-                    Click="PickScopeFolders_Click" />
-                <Button
-                    x:Uid="ScopeStartSearch"
-                    HorizontalAlignment="Center"
-                    AutomationProperties.AutomationId="ScopeStartSearch"
-                    Click="StartScopeSearch_Click"
-                    IsEnabled="{x:Bind ViewModel.CanStartScope, Mode=OneWay}" />
-                <TextBlock
-                    HorizontalAlignment="Center"
-                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                    Style="{ThemeResource CaptionTextBlockStyle}"
-                    Text="{x:Bind ViewModel.DataLocationText, Mode=OneTime}"
-                    TextAlignment="Center"
-                    TextWrapping="Wrap"
-                    Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsPortable)}" />
-            </StackPanel>
+            <!--  非昇格スコープ経路(ADR-0024): 管理者CTAを主役に保ち、その下に
+                  控えめなリンク1つだけ。実体(フォルダ選択)は別画面=
+                  ScopeManagerDialog に逃がし、setup画面のごちゃつきを避ける。  -->
+            <TextBlock
+                x:Uid="SetupOrDivider"
+                HorizontalAlignment="Center"
+                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                Style="{ThemeResource CaptionTextBlockStyle}" />
+            <HyperlinkButton
+                x:Uid="ScopeSetupLink"
+                HorizontalAlignment="Center"
+                AutomationProperties.AutomationId="ScopeSetupLink"
+                Click="ScopeSetup_Click" />
             <StackPanel
                 HorizontalAlignment="Center"
                 Orientation="Horizontal"

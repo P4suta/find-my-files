@@ -85,10 +85,9 @@
   <data name="SetupBody.Text" xml:space="preserve"><value>Indexing every drive is fastest and finds everything — it just takes a one-time setup with administrator permission.</value></data>
   <data name="EnableSearch.Content" xml:space="preserve"><value>Enable search</value></data>
   <data name="SetupOrDivider.Text" xml:space="preserve"><value>— or —</value></data>
-  <data name="ScopeSetupTitle.Text" xml:space="preserve"><value>No administrator rights?</value></data>
-  <data name="ScopeSetupBody.Text" xml:space="preserve"><value>Pick the folders you actually use and search just those — no admin, no install, nothing left behind.</value></data>
-  <data name="ScopePickFolders.Content" xml:space="preserve"><value>Choose folders…</value></data>
-  <data name="ScopeStartSearch.Content" xml:space="preserve"><value>Start searching these folders</value></data>
+  <data name="ScopeSetupLink.Content" xml:space="preserve"><value>No administrator rights? Choose folders instead</value></data>
+  <data name="ScopeDialog_SetupTitle" xml:space="preserve"><value>Choose search folders</value></data>
+  <data name="ScopeDialog_SetupStart" xml:space="preserve"><value>Search these folders</value></data>
   <data name="ScopeManageMenu.Text" xml:space="preserve"><value>Change search folders…</value></data>
   <data name="ScopeDialog.Title" xml:space="preserve"><value>Search folders</value></data>
   <data name="ScopeDialog.PrimaryButtonText" xml:space="preserve"><value>Apply and restart</value></data>

@@ -120,8 +120,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     // ── Scope mode (ADR-0024): the no-admin path on the setup screen ──
 
-    /// <summary>Folders the user has chosen to fold-walk in scope mode, shown on
-    /// the setup screen. Seeded from settings; <see cref="StartScopeSearch"/>
+    /// <summary>Folders the user has chosen to fold-walk in scope mode, edited in
+    /// the scope dialog. Seeded from settings; <see cref="ApplyScopeChange"/>
     /// persists them as <see cref="AppSettings.ScopeRoots"/> and relaunches.</summary>
     public ObservableCollection<string> ScopeFolders { get; }
 
@@ -190,7 +190,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private readonly Func<Task<string?>> _folderPicker;
 
     /// <summary>The unelevated relaunch action (UI/shell boundary) — injected so
-    /// <see cref="StartScopeSearch"/>'s persist step is testable without exiting
+    /// <see cref="ApplyScopeChange"/>'s persist step is testable without exiting
     /// the process.</summary>
     private readonly Action _relaunch;
 
@@ -435,12 +435,6 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <summary>Drop one excluded subfolder (the per-row × button).</summary>
     /// <param name="path">The exclude path to remove.</param>
     public void RemoveScopeExclude(string path) => ScopeExcludes.Remove(path);
-
-    /// <summary>Setup screen (no-admin, initial): commit the chosen folders and
-    /// relaunch into <c>WalkInProc</c>. Same mechanism as
-    /// <see cref="ApplyScopeChange"/> (the engine has no live root-swap), so it
-    /// simply defers to it.</summary>
-    public void StartScopeSearch() => ApplyScopeChange();
 
     /// <summary>Apply the current <see cref="ScopeFolders"/> as the scope: drop
     /// roots nested under another (<see cref="ScopePaths.Normalize"/>), and if the

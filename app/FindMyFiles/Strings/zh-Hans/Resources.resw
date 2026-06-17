@@ -85,10 +85,9 @@
   <data name="SetupBody.Text" xml:space="preserve"><value>索引整个驱动器最快、最全 — 只需一次性的管理员权限设置。</value></data>
   <data name="EnableSearch.Content" xml:space="preserve"><value>启用搜索</value></data>
   <data name="SetupOrDivider.Text" xml:space="preserve"><value>— 或 —</value></data>
-  <data name="ScopeSetupTitle.Text" xml:space="preserve"><value>没有管理员权限?</value></data>
-  <data name="ScopeSetupBody.Text" xml:space="preserve"><value>选择你常用的文件夹进行搜索(可多选) — 无需管理员权限或安装，也不留痕迹。</value></data>
-  <data name="ScopePickFolders.Content" xml:space="preserve"><value>选择文件夹…</value></data>
-  <data name="ScopeStartSearch.Content" xml:space="preserve"><value>开始搜索这些文件夹</value></data>
+  <data name="ScopeSetupLink.Content" xml:space="preserve"><value>没有管理员权限? 改为选择文件夹</value></data>
+  <data name="ScopeDialog_SetupTitle" xml:space="preserve"><value>选择搜索文件夹</value></data>
+  <data name="ScopeDialog_SetupStart" xml:space="preserve"><value>搜索这些文件夹</value></data>
   <data name="ScopeManageMenu.Text" xml:space="preserve"><value>更改搜索文件夹…</value></data>
   <data name="ScopeDialog.Title" xml:space="preserve"><value>搜索文件夹</value></data>
   <data name="ScopeDialog.PrimaryButtonText" xml:space="preserve"><value>应用并重启</value></data>

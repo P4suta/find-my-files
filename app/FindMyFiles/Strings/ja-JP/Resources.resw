@@ -85,10 +85,9 @@
   <data name="SetupBody.Text" xml:space="preserve"><value>全ドライブをまるごと索引するのが最速で、何でも見つかります。最初に一度だけ管理者の許可で準備します。</value></data>
   <data name="EnableSearch.Content" xml:space="preserve"><value>検索を有効にする</value></data>
   <data name="SetupOrDivider.Text" xml:space="preserve"><value>— または —</value></data>
-  <data name="ScopeSetupTitle.Text" xml:space="preserve"><value>管理者権限が取れない?</value></data>
-  <data name="ScopeSetupBody.Text" xml:space="preserve"><value>よく使うフォルダを選んで検索します(複数可)。管理者権限もインストールも不要、痕跡も残しません。</value></data>
-  <data name="ScopePickFolders.Content" xml:space="preserve"><value>フォルダを選ぶ…</value></data>
-  <data name="ScopeStartSearch.Content" xml:space="preserve"><value>選んだフォルダで検索を始める</value></data>
+  <data name="ScopeSetupLink.Content" xml:space="preserve"><value>管理者権限がない場合はこちら</value></data>
+  <data name="ScopeDialog_SetupTitle" xml:space="preserve"><value>検索フォルダを選ぶ</value></data>
+  <data name="ScopeDialog_SetupStart" xml:space="preserve"><value>選んだフォルダで検索を始める</value></data>
   <data name="ScopeManageMenu.Text" xml:space="preserve"><value>検索フォルダを変更…</value></data>
   <data name="ScopeDialog.Title" xml:space="preserve"><value>検索フォルダ</value></data>
   <data name="ScopeDialog.PrimaryButtonText" xml:space="preserve"><value>変更して再起動</value></data>
