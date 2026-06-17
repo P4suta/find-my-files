@@ -255,8 +255,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         try
         {
-            var volumes = await _engine.ListVolumesAsync().ConfigureAwait(false);
-            await _engine.StartIndexingAsync(volumes).ConfigureAwait(false);
+            // Stay on the dispatcher (no ConfigureAwait): the continuation sets the
+            // bound StatusText and pushes notifications, so it must resume on the UI
+            // thread — resuming off it throws RPC_E_WRONG_THREAD (see .editorconfig
+            // CA2007/MA0004, disabled for exactly this UI-app reason).
+            var volumes = await _engine.ListVolumesAsync();
+            await _engine.StartIndexingAsync(volumes);
 
             // Reflect the real state at startup (over a pipe the service may
             // already be indexed before we connect). Drop the unconditional
@@ -291,13 +295,17 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         SetupStatus = Loc.Get("Setup_WaitingForPermission");
         try
         {
-            switch (await ServiceProvisioner.RegisterAsync().ConfigureAwait(false))
+            // Stay on the dispatcher (no ConfigureAwait): every branch sets the bound
+            // SetupStatus / SetupBusy, which drive the setup-screen controls
+            // (button IsEnabled, progress ring, info bar) — resuming off the UI thread
+            // throws RPC_E_WRONG_THREAD.
+            switch (await ServiceProvisioner.RegisterAsync())
             {
                 case ServiceActionOutcome.Ok:
                     SetupStatus = Loc.Get("Setup_Connecting");
 
                     // On success this process relaunches and never returns here.
-                    if (!await ServiceProvisioner.WaitForServiceThenRelaunchAsync().ConfigureAwait(false))
+                    if (!await ServiceProvisioner.WaitForServiceThenRelaunchAsync())
                     {
                         SetupStatus = Loc.Get("Setup_ConnectCheckFailed");
                     }
@@ -323,7 +331,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <returns>A task that completes once the picked folder (if any) has been added.</returns>
     public async Task PickScopeFoldersAsync()
     {
-        var path = await _folderPicker().ConfigureAwait(false);
+        // No ConfigureAwait(false): the picker is a genuinely async OS dialog, and the
+        // continuation mutates the bound ScopeFolders — whose CollectionChanged drives
+        // the start button's IsEnabled via x:Bind. Resuming off the dispatcher updates a
+        // control from a pool thread → COMException 0x8001010E (RPC_E_WRONG_THREAD), which
+        // .Forget swallows, so the user silently can't proceed. The UI app resumes on the
+        // dispatcher by convention (.editorconfig disables CA2007/MA0004 for this reason).
+        var path = await _folderPicker();
         if (path is not null
             && !ScopeFolders.Any(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)))
         {
@@ -482,7 +496,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <param name="severity">The reported error severity (≥2 surfaces a notification, ≥3 is a panic).</param>
     private async Task HandleEngineErrorAsync(int severity)
     {
-        await Perf.RefreshStatsAsync().ConfigureAwait(false);
+        // EngineEventMarshaler already marshaled this onto the UI thread; stay there
+        // (no ConfigureAwait) — RefreshStatsAsync sets bound Perf state and the
+        // continuation pushes a bound Notification.
+        await Perf.RefreshStatsAsync();
         if (severity >= 2)
         {
             var last = Perf.Stats?.RecentErrors.LastOrDefault();
