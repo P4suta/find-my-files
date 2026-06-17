@@ -60,6 +60,11 @@ jobs:
       # Run from engine/ so cargo-fuzz finds ./fuzz (no --fuzz-dir keeps this
       # working across cargo-fuzz versions). Artifacts land under build/engine
       # via engine/.cargo/config.toml (gitignored by build/).
+      #
+      # --target gnu is required: taiki-e/install-action ships a musl-static
+      # cargo-fuzz, and cargo-fuzz defaults the fuzz target to its own build
+      # triple (musl), but ASan is incompatible with static musl libc. The gnu
+      # target is the runner host, so its std is already present.
       - name: fuzz ${{ matrix.target }} (60s)
         working-directory: engine
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60
+        run: cargo fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=60

@@ -1,10 +1,11 @@
-# cargo-fuzz harnesses for the named-pipe wire codec (fmf-proto + fmf-contract).
-# These are the *only* untrusted-input parsers that build cross-platform (zero
-# Windows deps), so they fuzz on the Linux CI runner. The wire protocol is the
-# privilege boundary (non-elevated UI -> elevated fmf-service), making it the
-# highest-value parser to fuzz (docs/SECURITY.md). The fmf-core parsers
-# (wtf8/usn/snapshot/query) are proptest-covered; extending libFuzzer to them
-# needs fmf-core made Linux-buildable — a separate effort (see docs/SCORECARD.md).
+# cargo-fuzz harnesses for the named-pipe wire codec (fmf-proto, which exercises
+# fmf-contract's byte conversions transitively). These are the *only*
+# untrusted-input parsers that build cross-platform (zero Windows deps), so they
+# fuzz on the Linux CI runner. The wire protocol is the privilege boundary
+# (non-elevated UI -> elevated fmf-service), making it the highest-value parser
+# to fuzz (docs/SECURITY.md). The fmf-core parsers (wtf8/usn/snapshot/query) are
+# proptest-covered; extending libFuzzer to them needs fmf-core made
+# Linux-buildable — a separate effort (see docs/SCORECARD.md).
 [package]
 name = "fmf-fuzz"
 version = "0.0.0"
@@ -14,10 +15,11 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+# fmf-contract is reached through fmf-proto (not named directly), so it is not a
+# direct dependency — cargo-machete would flag it as unused otherwise.
 [dependencies]
 libfuzzer-sys = "0.4"
 fmf-proto = { path = "../crates/fmf-proto" }
-fmf-contract = { path = "../crates/fmf-contract" }
 
 # Crash traces over speed; cargo-fuzz already enables debug-assertions +
 # overflow-checks, so arithmetic on attacker-controlled lengths is caught.
