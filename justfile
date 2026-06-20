@@ -24,6 +24,7 @@ setup:
 # Logic lives in xtask (the doctor subcommand); this is a thin wrapper, and
 # --target-dir keeps xtask output under build/ (ADR-0021).
 [group('setup')]
+[doc('Check the dev environment matches the mise.toml pins (run after just setup)')]
 doctor:
     cargo run --manifest-path xtask/Cargo.toml --target-dir build/xtask -- doctor
 
@@ -41,6 +42,7 @@ check: check-contract
 # fmf-contract leaf — so `just check` catches a forgotten `just contract-gen`
 # without waiting for the whole engine test build (ADR-0018).
 [group('daily')]
+[doc('Fast contract-drift tripwire — gen-contract --check, sub-second warm')]
 [working-directory: 'engine']
 check-contract:
     cargo run -q -p fmf-contract --bin gen-contract -- --check
@@ -114,6 +116,7 @@ verify: fmt-check lint test test-app
 # Time the full pre-push gate exactly as the hook runs it — per-job timings come
 # from lefthook itself, so no shell timing logic lives in the recipe.
 [group('daily')]
+[doc('Run the whole pre-push gate via lefthook, with per-job timings')]
 verify-timed:
     lefthook run pre-push
 
@@ -121,6 +124,7 @@ verify-timed:
 # and shows only the errors. Defaults to clippy to mirror the lint gate — config
 # in engine/bacon.toml. Quit with q/Esc.
 [group('daily')]
+[doc('Background cargo watcher for the engine (bacon) — recompile on save')]
 [working-directory: 'engine']
 dev:
     bacon
