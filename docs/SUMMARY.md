@@ -1,6 +1,8 @@
 # Summary
 
 - [Architecture](ARCHITECTURE.md)
+- [Development guide](DEVELOPMENT.md)
+- [Troubleshooting](TROUBLESHOOTING.md)
 - [Contract reference (generated)](contract.md)
 - [Technical research (RESEARCH)](RESEARCH.md)
 - [Security model](SECURITY.md)
@@ -33,3 +35,6 @@
   - [0020 — Code signing provider selection](adr/0020-code-signing-provider.md)
   - [0021 — Build output consolidated into a single build/](adr/0021-build-output-layout.md)
   - [0022 — Boundaries require seams + behavioral tests](adr/0022-boundary-seams-behavioral-tests.md)
+  - [0023 — First-class regex (trigram still rejected)](adr/0023-regex-first-class.md)
+  - [0024 — Non-elevated scope index mode](adr/0024-non-elevated-scope-index.md)
+  - [0025 — Scope excludes prune at walk time](adr/0025-scope-exclude-walk-prune.md)

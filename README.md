@@ -60,6 +60,11 @@ just index C:       # index a volume from the CLI (elevated terminal required)
 
 The WinUI 3 app lives in `app/` (from milestone M1 onward).
 
+**New here?** Read [CONTRIBUTING](CONTRIBUTING.md) for setup and the development loop,
+then the [Development guide](docs/DEVELOPMENT.md) — the project's fixed rules and
+deliberate non-goals — before changing anything structural. Hitting an error code or a
+puzzling failure? See [Troubleshooting](docs/TROUBLESHOOTING.md).
+
 ## Architecture
 
 ```
