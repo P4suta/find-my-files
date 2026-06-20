@@ -18,6 +18,9 @@ struct Cli {
     /// When to colourise human-facing output (auto: only on a terminal).
     #[arg(long, value_enum, default_value_t = ColorArg::Auto, global = true)]
     color: ColorArg,
+    /// Suppress the progress spinner and other stderr chrome.
+    #[arg(short, long, global = true)]
+    quiet: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -99,23 +102,26 @@ fn main() {
 
     let cli = Cli::parse();
     let color = cmd::term::resolve_color(cli.color);
+    // Make the choice global so the styled anstream macros pick it up.
+    color.write_global();
+    let ctx = cmd::ctx::Ctx { quiet: cli.quiet };
     let result = match cli.command {
         Command::Spike { drive } => cmd::index::spike(&drive),
         Command::Index {
             drive,
             stats,
             include_hidden_system,
-        } => cmd::index::index(&drive, stats, include_hidden_system),
+        } => cmd::index::index(&drive, stats, include_hidden_system, ctx),
         Command::Bench {
             drive,
             json,
             baseline,
-        } => cmd::bench::bench(&drive, json.as_deref(), baseline.as_deref()),
+        } => cmd::bench::bench(&drive, json.as_deref(), baseline.as_deref(), ctx),
         Command::Stats {
             drive,
             trigram_estimate,
             name_stats,
-        } => cmd::stats::stats(&drive, trigram_estimate, name_stats),
+        } => cmd::stats::stats(&drive, trigram_estimate, name_stats, ctx),
         Command::IoProbe {
             drive,
             mode,
@@ -123,7 +129,7 @@ fn main() {
             runs,
         } => cmd::io_probe::io_probe(&drive, mode, qd, runs),
         Command::Diag => cmd::diag::diag(),
-        Command::Watch { drive } => cmd::index::watch(&drive),
+        Command::Watch { drive } => cmd::index::watch(&drive, ctx),
         Command::CriterionGate { dir, threshold } => {
             cmd::criterion_gate::criterion_gate(&dir, threshold)
         }

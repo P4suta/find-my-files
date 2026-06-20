@@ -22,6 +22,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 anstream = { workspace = true }
 anstyle = { workspace = true }
+indicatif = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

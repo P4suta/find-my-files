@@ -7,6 +7,7 @@ use std::time::Instant;
 use fmf_core::index::SortKey;
 use fmf_core::query::{CaseMode, QueryOptions};
 
+use super::ctx::Ctx;
 use super::{build_index, run_query};
 
 pub fn spike(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -44,8 +45,9 @@ pub fn index(
     drive: &str,
     stats_only: bool,
     include_hidden_system: bool,
+    ctx: Ctx,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let idx = build_index(drive)?;
+    let idx = build_index(drive, ctx)?;
     if stats_only {
         return Ok(());
     }
@@ -102,11 +104,11 @@ pub fn index(
 
 /// Scan, then tail the journal. The checkpoint is taken *before* the scan so
 /// changes made during the scan are replayed, not lost (ARCHITECTURE.md).
-pub fn watch(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn watch(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
     use fmf_core::usn::{ReadOutcome, UsnJournal, VolumeStatFetcher, apply_batch};
 
     let mut journal = UsnJournal::open(drive, None)?;
-    let mut idx = build_index(drive)?;
+    let mut idx = build_index(drive, ctx)?;
     let fetch = VolumeStatFetcher::open(drive)?;
     eprintln!(
         "watching {drive} (journal id {:#x}, from usn {}) — Ctrl+C to stop",

@@ -5,13 +5,15 @@ use fmf_core::index::VolumeIndex;
 use fmf_core::query;
 
 use super::build_index;
+use super::ctx::Ctx;
 
 pub fn stats(
     drive: &str,
     trigram_estimate: bool,
     name_stats: bool,
+    ctx: Ctx,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let idx = build_index(drive)?;
+    let idx = build_index(drive, ctx)?;
     // Mirror the engine's Ready state (offset table prewarmed) so the
     // accounting reflects what the app actually holds.
     query::prewarm(&idx);

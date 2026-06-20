@@ -3,6 +3,7 @@
 
 pub mod bench;
 pub mod criterion_gate;
+pub mod ctx;
 pub mod diag;
 pub mod exit;
 pub mod index;
@@ -10,6 +11,7 @@ pub mod io_probe;
 pub mod stats;
 pub mod term;
 
+use ctx::Ctx;
 use fmf_core::index::VolumeIndex;
 use fmf_core::query::{self, QueryOptions};
 
@@ -22,8 +24,11 @@ fn date_resolver() -> impl query::DateResolver {
     query::UtcResolver
 }
 
-fn build_index(drive: &str) -> Result<VolumeIndex, Box<dyn std::error::Error>> {
-    let (mut idx, s) = fmf_core::mft::scan_volume(drive)?;
+fn build_index(drive: &str, ctx: Ctx) -> Result<VolumeIndex, Box<dyn std::error::Error>> {
+    let pb = term::spinner(ctx, format!("indexing {drive}"));
+    let scan = fmf_core::mft::scan_volume(drive);
+    pb.finish_and_clear();
+    let (mut idx, s) = scan?;
     // Mirror the engine (volume thread does the same): the build leaves
     // power-of-two capacity slack that would distort every RAM number.
     idx.shrink_to_fit();

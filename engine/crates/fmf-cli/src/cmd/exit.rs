@@ -11,7 +11,6 @@ use std::error::Error;
 use std::io::Write;
 
 use anstream::{AutoStream, ColorChoice};
-use anstyle::{AnsiColor, Style};
 use fmf_contract::codes;
 use fmf_core::engine::{EngineCreateError, EngineError};
 use fmf_core::mft::MftError;
@@ -92,7 +91,6 @@ pub const fn code_name(code: i32) -> &'static str {
 #[must_use]
 pub fn report(err: &(dyn Error + 'static), color: ColorChoice) -> i32 {
     let mut stderr = AutoStream::new(std::io::stderr(), color);
-    let red = Style::new().fg_color(Some(AnsiColor::Red.into())).bold();
     let label = match classify(err) {
         Some(code) => format!("error[{}]", code_name(code)),
         None => "error".to_owned(),
@@ -100,9 +98,8 @@ pub fn report(err: &(dyn Error + 'static), color: ColorChoice) -> i32 {
     // anstream strips these escapes when the stream is not taking colour.
     let _ = writeln!(
         stderr,
-        "{}{label}{}: {err}",
-        red.render(),
-        red.render_reset()
+        "{}: {err}",
+        super::term::paint(super::term::ERROR, &label)
     );
     let mut source = err.source();
     while let Some(cause) = source {
