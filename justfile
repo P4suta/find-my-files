@@ -32,8 +32,18 @@ doctor:
 # Type-check without codegen — the fast inner loop
 [group('daily')]
 [working-directory: 'engine']
-check:
+check: check-contract
     cargo check --workspace --all-targets
+
+# Fast contract-drift tripwire (~sub-second warm): the committed C# bindings +
+# docs/contract.md still match the contract source. Same `--check` assertion as
+# drift.rs inside `cargo test`, but it compiles only the dependency-free
+# fmf-contract leaf — so `just check` catches a forgotten `just contract-gen`
+# without waiting for the whole engine test build (ADR-0018).
+[group('daily')]
+[working-directory: 'engine']
+check-contract:
+    cargo run -q -p fmf-contract --bin gen-contract -- --check
 
 # Build the engine (release binaries)
 [group('daily')]
@@ -100,6 +110,20 @@ fmt-check:
 # Everything the pre-push hook checks, in one shot
 [group('daily')]
 verify: fmt-check lint test test-app
+
+# Time the full pre-push gate exactly as the hook runs it — per-job timings come
+# from lefthook itself, so no shell timing logic lives in the recipe.
+[group('daily')]
+verify-timed:
+    lefthook run pre-push
+
+# Background cargo watcher for the engine inner loop (bacon): recompiles on save
+# and shows only the errors. Defaults to clippy to mirror the lint gate — config
+# in engine/bacon.toml. Quit with q/Esc.
+[group('daily')]
+[working-directory: 'engine']
+dev:
+    bacon
 
 # Regenerate app/FindMyFiles/Engine/Generated/EngineContract.g.cs from the
 # contract single source (ADR-0018). cargo test runs the drift check.
