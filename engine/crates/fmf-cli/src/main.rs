@@ -10,10 +10,14 @@ mod cmd;
 use clap::{Parser, Subcommand};
 
 use crate::cmd::io_probe::ProbeModeArg;
+use crate::cmd::term::ColorArg;
 
 #[derive(Parser)]
-#[command(name = "fmf", about = "find-my-files engine developer CLI")]
+#[command(name = "fmf", version, about = "find-my-files engine developer CLI")]
 struct Cli {
+    /// When to colourise human-facing output (auto: only on a terminal).
+    #[arg(long, value_enum, default_value_t = ColorArg::Auto, global = true)]
+    color: ColorArg,
     #[command(subcommand)]
     command: Command,
 }
@@ -94,6 +98,7 @@ fn main() {
     fmf_core::diag::init_diag(None, "info");
 
     let cli = Cli::parse();
+    let color = cmd::term::resolve_color(cli.color);
     let result = match cli.command {
         Command::Spike { drive } => cmd::index::spike(&drive),
         Command::Index {
@@ -124,12 +129,7 @@ fn main() {
         }
     };
     if let Err(e) = result {
-        eprintln!("error: {e}");
-        let mut source = e.source();
-        while let Some(cause) = source {
-            eprintln!("  caused by: {cause}");
-            source = cause.source();
-        }
-        std::process::exit(1);
+        let code = cmd::exit::report(e.as_ref(), color);
+        std::process::exit(code);
     }
 }
