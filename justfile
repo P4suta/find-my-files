@@ -1,5 +1,8 @@
 # find-my-files task runner. Requires: mise (rust/dotnet), see mise.toml.
 # Recipes marked (elevated) need an administrator terminal.
+#
+# `just` (no args) prints this menu, grouped by area via the [group('…')]
+# attributes below. New here? Run `just setup`, then `just check`.
 
 # just defaults to `sh` even on Windows — absent in elevated PowerShell,
 # exactly where the admin recipes must run. powershell.exe always exists.
@@ -11,6 +14,8 @@ default:
 # ── Setup ────────────────────────────────────────────────────────────────
 
 # One-time setup: install pinned toolchain + git hooks
+[group('setup')]
+[working-directory: 'engine']
 setup:
     mise install
     lefthook install
@@ -18,19 +23,25 @@ setup:
 # ── Daily loop ───────────────────────────────────────────────────────────
 
 # Type-check without codegen — the fast inner loop
+[group('daily')]
 [working-directory: 'engine']
 check:
     cargo check --workspace --all-targets
 
+# Build the engine (release binaries)
+[group('daily')]
 [working-directory: 'engine']
 build:
     cargo build --release
 
+# Run the engine unit tests (cargo, unelevated)
+[group('daily')]
 [working-directory: 'engine']
 test:
     cargo test --workspace
 
 # C# unit tests (no elevation; never rebuilds the Rust engine)
+[group('daily')]
 test-app:
     dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
 
@@ -39,6 +50,8 @@ test-app:
 # -p:CollectCoverage=true and no comma-bearing prop ever reaches the shell. CI runs
 # `just test-app-cov true` (locked enforces packages.lock.json); locally the bare
 # recipe reproduces the identical gate.
+[group('daily')]
+[doc('C# unit tests + coverage gate (line+branch >=55)')]
 test-app-cov locked="false":
     dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true -p:RestoreLockedMode={{locked}} -p:CollectCoverage=true
 
@@ -47,16 +60,21 @@ test-app-cov locked="false":
 # in its own shell, so the assignment must share the line with cargo). `cargo
 # --config 'env.X="1"'` is NOT used: the recipe's powershell.exe strips the nested
 # quotes, leaving the bare integer 1, which cargo rejects ("expected a string").
+[group('daily')]
+[doc('Run the elevated, ignore-gated real-volume MFT/USN tests')]
 [working-directory: 'engine']
 test-admin:
     $env:FMF_ADMIN_TESTS = '1'; cargo test --workspace -- --ignored
 
+# Clippy (deny warnings) + typos
+[group('daily')]
 [working-directory: 'engine']
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
     typos
 
 # Format Rust (engine + xtask workspaces) and all TOML (repo-wide, taplo.toml).
+[group('daily')]
 fmt:
     cargo fmt --manifest-path engine/Cargo.toml --all
     cargo fmt --manifest-path xtask/Cargo.toml --all
@@ -65,16 +83,21 @@ fmt:
 # Verify Rust + TOML formatting. C# style/format/analyzers are enforced by the
 # build itself (EnforceCodeStyleInBuild + AnalysisMode=All + warnings-as-errors),
 # exercised by `test-app` — so `verify` below also covers C#.
+[group('daily')]
+[doc('Check Rust + TOML formatting (C# format is enforced by the build)')]
 fmt-check:
     cargo fmt --manifest-path engine/Cargo.toml --all -- --check
     cargo fmt --manifest-path xtask/Cargo.toml --all -- --check
     taplo fmt --check
 
 # Everything the pre-push hook checks, in one shot
+[group('daily')]
 verify: fmt-check lint test test-app
 
 # Regenerate app/FindMyFiles/Engine/Generated/EngineContract.g.cs from the
 # contract single source (ADR-0018). cargo test runs the drift check.
+[group('daily')]
+[doc('Regenerate the C# EngineContract bindings from the contract source (ADR-0018)')]
 [working-directory: 'engine']
 contract-gen:
     cargo run -p fmf-contract --bin gen-contract
@@ -91,51 +114,66 @@ contract-gen:
 # working-directory xtask (not --manifest-path from root): cargo discovers
 # .cargo/config.toml from the CWD, so target-dir → build/xtask only when run
 # from inside xtask/ (ADR-0021).
+[group('release')]
+[doc('Assemble the distributable bundle into build/dist/FindMyFiles')]
 [working-directory: 'xtask']
 publish-app skip_rust="false":
     cargo run --release -- publish --skip-rust {{skip_rust}}
 
 # Local/release publish: build the engine first, then publish (rust is already
 # built, so the in-build cargo step is skipped).
+[group('release')]
+[doc('Build the engine, then assemble the distributable bundle')]
 publish: build (publish-app "true")
 
 # ── Service (v2: fmf-service + named pipe; ADR-0016/0017) ────────────────
 
 # Console-mode service in the foreground — the dev inner loop (elevated;
 # Ctrl+C = flush + graceful stop). Unelevated pipe debugging: add --no-index
+[group('service')]
+[doc('Run fmf-service in the foreground — the dev inner loop (elevated)')]
 [working-directory: 'engine']
 service-dev *args="":
     cargo run --release -p fmf-service -- run {{args}}
 
+# Build fmf-service (release)
+[group('service')]
 [working-directory: 'engine']
 service-build:
     cargo build --release -p fmf-service
 
 # Register the Windows service: captures your SID, hardens the data-dir
 # DACLs, delayed auto start + crash recovery (elevated)
+[group('service')]
 service-install: service-build
     build/engine/release/fmf-service.exe install
 
 # Deregister; data stays unless you pass --purge-data (elevated)
+[group('service')]
 service-uninstall *args="":
     build/engine/release/fmf-service.exe uninstall {{args}}
 
 # (elevated)
+[group('service')]
 service-start:
     build/engine/release/fmf-service.exe start
 
 # (elevated)
+[group('service')]
 service-stop:
     build/engine/release/fmf-service.exe stop
 
 # Rebuild + restart the installed service (elevated)
+[group('service')]
 service-restart: service-stop service-build service-start
 
 # SCM state + live pipe handshake (works unelevated)
+[group('service')]
 service-status:
     build/engine/release/fmf-service.exe status
 
 # C# client × real fmf-service integration (FMF_PIPE_TESTS gate; no elevation)
+[group('service')]
 test-pipe: service-build
     dotnet test app/FindMyFiles.Tests --settings app/FindMyFiles.Tests/pipe.runsettings -p:SkipRustBuild=true
 
@@ -144,71 +182,85 @@ test-pipe: service-build
 # --engine=empty (setup screen) and --fake-engine (search) and asserts on the
 # AutomationIds. The script owns process lifecycle; this recipe is a thin
 # pwsh wrapper. -IncludeFaults requires a DEBUG bundle, so it is off here.
+[group('service')]
+[doc('winapp UI-automation smoke suite (publishes the bundle; no elevation)')]
 ui-test: publish
     pwsh -NoProfile -ExecutionPolicy Bypass -File app/FindMyFiles.Tests/UiAutomation/ui-tests.ps1 -ExePath build/dist/FindMyFiles/FindMyFiles.exe
 
 # ── Benchmarks & gates (discipline: ADR-0013, engine/benches/README.md) ──
 
 # Run the benchmark query set against a real volume (elevated)
+[group('bench')]
 [working-directory: 'engine']
 bench drive="C:" *args="":
     cargo run --release -p fmf-cli -- bench {{drive}} {{args}}
 
 # Real-volume regression gate vs the committed baseline (elevated, cool machine)
+[group('bench')]
 [working-directory: 'engine']
 bench-check drive="C:":
     cargo run --release -p fmf-cli -- bench {{drive}} --baseline benches/baseline.json
 
 # Note the machine and entry count in benches/README.md when regenerating.
 # (Re)record the committed real-volume baseline (elevated, cool machine)
+[group('bench')]
 [working-directory: 'engine']
 bench-baseline drive="C:":
     cargo run --release -p fmf-cli -- bench {{drive}} --json benches/baseline.json
 
 # Criterion micro-benchmarks on the synthetic 1M index (no elevation)
+[group('bench')]
 [working-directory: 'engine']
 bench-micro *args="":
     cargo bench -p fmf-core {{args}}
 
 # Lives in build/engine/criterion (machine-local; gone on cargo clean).
 # Record the local criterion baseline — start of every optimization session
+[group('bench')]
 [working-directory: 'engine']
 bench-micro-baseline:
     cargo bench -p fmf-core --bench search -- --save-baseline committed
 
 # Compare against the local baseline; fail on >10% median regressions
+[group('bench')]
 [working-directory: 'engine']
 bench-micro-check:
     cargo bench -p fmf-core --bench search -- --baseline committed
     cargo run --release -p fmf-cli -- criterion-gate --dir ../build/engine/criterion
 
 # Full performance gate before merging fmf-core changes (elevated, cool machine)
+[group('bench')]
 perf-gate: bench-check bench-micro-check
 
 # ── Volume tools (elevated) ──────────────────────────────────────────────
 
 # Index a volume, print scan stats, drop into the query REPL
+[group('volume')]
 [working-directory: 'engine']
 index drive="C:":
     cargo run --release -p fmf-cli -- index {{drive}} --stats
 
 # Per-column memory accounting (the B/entry RAM gate figure)
+[group('volume')]
 [working-directory: 'engine']
 stats drive="C:" *args="":
     cargo run --release -p fmf-cli -- stats {{drive}} {{args}}
 
 # Name/size distribution — the input for pool/column layout decisions
+[group('volume')]
 [working-directory: 'engine']
 name-stats drive="C:":
     cargo run --release -p fmf-cli -- stats {{drive}} --name-stats
 
 # $MFT read-throughput probe per I/O strategy (verdicts: ADR-0011)
+[group('volume')]
 [working-directory: 'engine']
 io-probe drive="C:" mode="buffered" *args="":
     cargo run --release -p fmf-cli -- io-probe {{drive}} --mode {{mode}} {{args}}
 
 # Machine code is identical to release — only debuginfo is upgraded.
 # Profile fmf-cli under samply (ETW; elevated), e.g. `just profile bench C:`
+[group('volume')]
 [working-directory: 'engine']
 profile *args="bench C:":
     cargo build --profile profiling -p fmf-cli
@@ -220,11 +272,14 @@ profile *args="bench C:":
 # boundary). Needs nightly + cargo-fuzz on Linux/WSL (flaky on Windows).
 # Run from engine/ so cargo-fuzz finds ./fuzz (no --fuzz-dir = version-proof).
 # e.g. `just fuzz message_decode 120`
+[group('fuzz')]
+[doc('libFuzzer over the pipe wire codec (nightly + cargo-fuzz; Linux/WSL)')]
 [working-directory: 'engine']
 fuzz target="frame_decode" secs="60":
     cargo +nightly fuzz run {{target}} -- -max_total_time={{secs}}
 
 # Compile all fuzz targets without running them (fast harness sanity check).
+[group('fuzz')]
 [working-directory: 'engine']
 fuzz-build:
     cargo +nightly fuzz build
@@ -234,6 +289,8 @@ fuzz-build:
 # Sweep leftover TestDir fixtures (build/engine/test-tmp). Their Drop-time
 # removal is best-effort, so killed test runs can leave directories behind;
 # cargo clean also removes them, this is the cheaper broom.
+[group('hygiene')]
+[doc('Sweep leftover TestDir fixtures (build/engine/test-tmp)')]
 [working-directory: 'xtask']
 clean-temp:
     cargo run -- clean-temp
@@ -245,6 +302,8 @@ clean-temp:
 # (GITHUB_TOKEN only — no stored secret). Logic + guards (semver, existing-tag,
 # no-op) + tests live in xtask; `--dry-run` shows the diff without committing.
 # Usage:  just release 0.2.0   then   git push; git push origin v0.2.0
+[group('release')]
+[doc('Cut a release: bump version, commit, create a signed tag')]
 [working-directory: 'xtask']
 release version *args="":
     cargo run -- release {{version}} {{args}}
@@ -253,6 +312,8 @@ release version *args="":
 # signing). Outputs find-my-files-v<version>-win-x64.zip + SHA256SUMS.txt under
 # build/package/ — the assets release.yml attaches. --release: deflate wants a
 # non-debug build. Usage:  just package v0.2.0
+[group('release')]
+[doc('Zip + checksum the assembled bundle for a release tag')]
 [working-directory: 'xtask']
 package tag:
     cargo run --release -- package {{tag}}
@@ -265,6 +326,8 @@ package tag:
 # --document-private-items: the crates are internal (no external API surface),
 # so the docs are for maintainers — private items are the interesting part, and
 # documenting them also resolves intra-doc links to non-pub helpers.
+[group('docs')]
+[doc('Build all published docs: mdBook + rustdoc + C# API reference')]
 doc: doc-csharp
     mdbook build docs
     cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml --target-dir build/engine
@@ -276,17 +339,22 @@ doc: doc-csharp
 # mdBook (same renderer as the design docs). The plain `dotnet build` (no
 # SkipRustBuild) lets the csproj build fmf_engine.dll itself, so this recipe is
 # self-sufficient. DefaultDocumentation is a pinned dotnet local tool.
+[group('docs')]
+[doc('Build the C# API reference (DefaultDocumentation to mdBook)')]
 doc-csharp:
     dotnet build app/FindMyFiles -c Release
     dotnet tool restore
     cargo run --manifest-path xtask/Cargo.toml --target-dir build/xtask -- doc-csharp
 
 # Live-preview the design docs at http://localhost:3000
+[group('docs')]
 doc-serve:
     mdbook serve docs --open
 
 # Stage the built docs into build/site (build/site/book + build/site/doc) — the same assembly
 # pages.yml publishes. Run `just doc` first. Logic lives in xtask.
+[group('docs')]
+[doc('Stage the built docs into build/site (what pages.yml publishes)')]
 [working-directory: 'xtask']
 docs-assemble:
     cargo run -- docs-assemble
@@ -294,22 +362,27 @@ docs-assemble:
 # ── Quality gates (also enforced in CI) ──────────────────────────────────
 
 # Rust line coverage (cargo-llvm-cov). CI gates with --fail-under-lines.
+[group('quality')]
 [working-directory: 'engine']
 cov:
     cargo llvm-cov --workspace --summary-only
 
 # License / ban / source policy (cargo-deny). Advisories live in cargo-audit.
+[group('quality')]
 [working-directory: 'engine']
 deny:
     cargo deny check bans licenses sources
 
 # Unused dependencies (cargo-machete).
+[group('quality')]
 machete:
     cargo machete engine
 
 # Mutation testing (Rust, ADR-0022): which tests pass even when code is broken?
 # Slow — scope it, e.g. `just mutants -p fmf-core -f src/query/exec.rs`.
 # `just mutants --list -f <file>` enumerates mutants without running them.
+[group('quality')]
+[doc('Mutation testing (Rust, ADR-0022) — slow; scope it')]
 [working-directory: 'engine']
 mutants *args="":
     cargo mutants {{args}}
@@ -320,6 +393,8 @@ mutants *args="":
 # Slow on the WinUI app — scope a single file with --mutate, e.g.
 # `just stryker --mutate "**/Services/ShellOps.cs"`. The tool is pinned in
 # .config/dotnet-tools.json (found by walking up); `dotnet tool restore` provisions it.
+[group('quality')]
+[doc('Mutation testing (C#, Stryker.NET; ADR-0022)')]
 [working-directory: 'app/FindMyFiles.Tests']
 stryker *args="":
     dotnet tool restore
