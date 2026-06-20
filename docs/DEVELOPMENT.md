@@ -49,6 +49,14 @@ and tests pass.
 - **Procedural build/release/verification logic lives in the `xtask/` crate** (the cargo-xtask pattern); `just` is a thin wrapper. `xtask` is its own workspace at the repo root — never a member of the engine workspace. Pure logic in `xtask` gets unit tests; never inline PowerShell back into a recipe.
 - Git hooks are managed by **lefthook** (`just setup` installs them). pre-commit: typos + rustfmt + taplo. pre-push: clippy + test + test-app (+ the xtask checks when `xtask/` changed). **Never bypass a hook** (`git push --no-verify` is forbidden) — the hooks are the quality gate.
 
+## Editors
+
+The repo ships editor config so the toolchain works out of the box:
+
+- **VS Code** — open the folder. `.vscode/extensions.json` recommends rust-analyzer, CodeLLDB, the C# Dev Kit, Even Better TOML, and a justfile highlighter; `.vscode/settings.json` points rust-analyzer at **both** Cargo workspaces (engine + xtask — they are separate), runs clippy on save (matching the `-D warnings` gate), and folds generated `*.g.cs` under their source. `.vscode/tasks.json` exposes `check` / `test` / `verify` / `doctor` / `dev` as tasks; `.vscode/launch.json` debugs `fmf` / `fmf-service` via CodeLLDB (non-elevated targets — MFT/USN work needs an elevated editor).
+- **Visual Studio / Rider** — open `FindMyFiles.slnx` (the app + its tests). The Rust engine is built through `just` / `cargo`, not the solution; `.editorconfig` carries the C# style and analyzer severities.
+- **Any editor** — `rustfmt`, `taplo`, and `typos` are the canonical formatters/linters (`just fmt` / `just fmt-check`); `.editorconfig` covers the rest. Run `just doctor` to confirm your toolchain matches the pins.
+
 ## Elevation (administrator) rules
 
 - Reading the `$MFT` and the USN journal **requires elevation** → that is the job of the `fmf-engine` service (or, from an elevated terminal, `--engine=inproc` / `just service-dev` / the real-volume tests and benches).

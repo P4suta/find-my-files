@@ -1,0 +1,59 @@
+{
+  // Run with Terminal → Run Task… (or Ctrl+Shift+B for the default build task).
+  // Each task is a thin call into a `just` recipe — the justfile is the single
+  // source of truth for how things run.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "check",
+      "detail": "just check — fast type-check + contract tripwire",
+      "type": "shell",
+      "command": "just",
+      "args": ["check"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "test (engine)",
+      "detail": "just test — engine unit tests",
+      "type": "shell",
+      "command": "just",
+      "args": ["test"],
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "test-app (C#)",
+      "detail": "just test-app — WinUI app unit tests",
+      "type": "shell",
+      "command": "just",
+      "args": ["test-app"],
+      "problemMatcher": []
+    },
+    {
+      "label": "verify",
+      "detail": "just verify — everything the pre-push hook checks",
+      "type": "shell",
+      "command": "just",
+      "args": ["verify"],
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "doctor",
+      "detail": "just doctor — check the dev environment",
+      "type": "shell",
+      "command": "just",
+      "args": ["doctor"],
+      "problemMatcher": []
+    },
+    {
+      "label": "dev (bacon watch)",
+      "detail": "just dev — background cargo watcher (recompile on save)",
+      "type": "shell",
+      "command": "just",
+      "args": ["dev"],
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}
