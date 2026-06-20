@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/app/">
+    <Project Path="app/FindMyFiles.Tests/FindMyFiles.Tests.csproj" />
+    <Project Path="app/FindMyFiles/FindMyFiles.csproj" />
+  </Folder>
+</Solution>

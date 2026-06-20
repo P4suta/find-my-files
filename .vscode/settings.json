@@ -1,0 +1,49 @@
+{
+  // ── Rust ────────────────────────────────────────────────────────────────
+  // This repo has TWO Cargo workspaces (engine + xtask, deliberately separate —
+  // ADR-0021). rust-analyzer only discovers the first by default, so point it at
+  // both, or xtask shows up as "not part of a workspace".
+  "rust-analyzer.linkedProjects": [
+    "engine/Cargo.toml",
+    "xtask/Cargo.toml"
+  ],
+  // Use clippy for on-save diagnostics so the editor surfaces exactly what the
+  // -D warnings gate enforces (maximal-lint policy). Override in your user
+  // settings if you prefer the lighter `cargo check`.
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.check.allTargets": true,
+  // Both .cargo/config.toml files redirect target-dir under build/ — don't let
+  // the editor resurrect engine/target or xtask/target (just doctor flags it).
+  "[rust]": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "rust-lang.rust-analyzer"
+  },
+
+  // ── C# (the WinUI 3 app) ────────────────────────────────────────────────
+  // Style + analyzers are enforced by .editorconfig and the build itself
+  // (EnforceCodeStyleInBuild + AnalysisMode=All); just format on save.
+  "[csharp]": {
+    "editor.formatOnSave": true
+  },
+
+  // ── TOML ────────────────────────────────────────────────────────────────
+  "[toml]": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "tamasfe.even-better-toml"
+  },
+  "evenBetterToml.formatter.alignEntries": false,
+
+  // ── Workspace chrome ────────────────────────────────────────────────────
+  // Fold generated bindings + designer files under their source.
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.patterns": {
+    "*.cs": "${capture}.g.cs, ${capture}.g.i.cs, ${capture}.Designer.cs"
+  },
+  // build/ is the single artifact tree (ADR-0021) — keep it out of search.
+  "search.exclude": {
+    "build/**": true
+  },
+  "files.watcherExclude": {
+    "build/**": true
+  }
+}

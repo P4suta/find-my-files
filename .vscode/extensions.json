@@ -1,0 +1,11 @@
+{
+  // Suggested when opening the repo (Extensions: Show Recommended Extensions).
+  "recommendations": [
+    "rust-lang.rust-analyzer", // Rust IntelliSense + clippy-on-save
+    "vadimcn.vscode-lldb", // CodeLLDB — Rust debugging (see launch.json)
+    "tamasfe.even-better-toml", // TOML formatting (matches taplo)
+    "ms-dotnettools.csdevkit", // C# Dev Kit — the WinUI 3 app
+    "ms-dotnettools.csharp", // C# language service
+    "skellock.just" // justfile syntax highlighting
+  ]
+}

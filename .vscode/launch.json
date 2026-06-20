@@ -1,0 +1,33 @@
+{
+  // Rust debugging via CodeLLDB (vadimcn.vscode-lldb). The `cargo` block builds
+  // first and resolves the binary from cargo's JSON output, so it honours the
+  // engine's build/engine target-dir (ADR-0021) automatically.
+  //
+  // Only non-elevated targets are wired here. MFT/USN work (index/bench/watch)
+  // needs an elevated terminal — debug those from an admin VS Code, or attach.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug fmf-cli: diag",
+      "cargo": {
+        "args": ["build", "--bin", "fmf", "--manifest-path", "engine/Cargo.toml"],
+        "filter": { "name": "fmf", "kind": "bin" }
+      },
+      "args": ["diag"],
+      "cwd": "${workspaceFolder}/engine"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug fmf-service: status (unelevated)",
+      "cargo": {
+        "args": ["build", "--bin", "fmf-service", "--manifest-path", "engine/Cargo.toml"],
+        "filter": { "name": "fmf-service", "kind": "bin" }
+      },
+      "args": ["status"],
+      "cwd": "${workspaceFolder}/engine"
+    }
+  ]
+}
