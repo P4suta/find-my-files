@@ -16,6 +16,9 @@ lefthook = "2"
 # terminals the engine already requires for real-volume work. cargo backend:
 # the GitHub release tags (samply-v*) don't resolve via ubi/github backends.
 "cargo:samply" = "0.13.1"
+# Background cargo watcher for the engine inner loop (`just dev`): recompiles on
+# save and surfaces only the errors. cargo backend, binstall-fetched like the rest.
+"cargo:bacon" = "3"
 # mdBook — renders docs/ (ARCHITECTURE + ADRs) into the published design-docs
 # site (just doc / pages.yml). cargo backend, version-pinned like samply so CI
 # and local builds match.

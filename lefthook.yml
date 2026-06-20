@@ -14,6 +14,13 @@ pre-commit:
       run: taplo fmt --check
 
 pre-push:
+  # Lanes run concurrently; jobs WITHIN a group stay sequential because they share
+  # a cargo target dir (concurrent cargo on one dir contends on the build lock).
+  # Every command is byte-identical to the old sequential list — only the
+  # scheduling changed (engine ∥ dotnet ∥ xtask), and contract-drift now fails
+  # fast ahead of clippy/test. The gate is not weakened: nothing is skipped or
+  # relaxed, and `--no-verify` is still forbidden.
+  parallel: true
   jobs:
     # Non-blocking reminder: the perf gates need an elevated shell, so they
     # cannot run here — nudge instead of silently skipping them. (echo exits 0,
@@ -21,27 +28,45 @@ pre-push:
     - name: perf-nudge
       glob: "engine/crates/fmf-core/**"
       run: echo "fmf-core changed — run 'just perf-gate' from an elevated shell before merging"
-    - name: clippy
-      root: engine/
-      run: cargo clippy --workspace --all-targets -- -D warnings
-    - name: test
-      root: engine/
-      run: cargo test --workspace
+
+    # Engine lane: shares build/engine, so its jobs run sequentially. contract-drift
+    # goes first — a forgotten `just contract-gen` fails in ~sub-second instead of
+    # after the whole workspace test. drift.rs inside `test` remains the
+    # authoritative gate (defense in depth; this is just an earlier signal).
+    - name: engine
+      group:
+        jobs:
+          - name: contract-drift
+            root: engine/
+            run: cargo run -q -p fmf-contract --bin gen-contract -- --check
+          - name: clippy
+            root: engine/
+            run: cargo clippy --workspace --all-targets -- -D warnings
+          - name: test
+            root: engine/
+            run: cargo test --workspace
+
+    # dotnet lane: separate toolchain + output tree, safe to run alongside the
+    # engine and xtask lanes.
     - name: test-app
       run: dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
-    # The xtask crate is its own workspace (engine's --workspace doesn't cover
-    # it); gate it here too, only when xtask files change. One command per job
-    # (no `&&` chaining) so the hook never depends on which shell runs it.
+
+    # xtask lane: its own workspace + target dir (build/xtask), so it shares
+    # nothing with the engine lane. Internally sequential (shared build/xtask);
+    # each job glob-gated so the lane is a no-op when xtask/ is untouched.
     # --target-dir build/xtask: these run from the repo root via --manifest-path,
     # and cargo discovers .cargo/config.toml from the CWD (not the manifest), so
     # the config's target-dir doesn't apply — route output to build/xtask
     # explicitly so the hook doesn't resurrect xtask/target (ADR-0021).
-    - name: xtask-fmt
-      glob: "xtask/**"
-      run: cargo fmt --manifest-path xtask/Cargo.toml --all -- --check
-    - name: xtask-clippy
-      glob: "xtask/**"
-      run: cargo clippy --manifest-path xtask/Cargo.toml --all-targets --target-dir build/xtask -- -D warnings
-    - name: xtask-test
-      glob: "xtask/**"
-      run: cargo test --manifest-path xtask/Cargo.toml --target-dir build/xtask
+    - name: xtask
+      group:
+        jobs:
+          - name: xtask-fmt
+            glob: "xtask/**"
+            run: cargo fmt --manifest-path xtask/Cargo.toml --all -- --check
+          - name: xtask-clippy
+            glob: "xtask/**"
+            run: cargo clippy --manifest-path xtask/Cargo.toml --all-targets --target-dir build/xtask -- -D warnings
+          - name: xtask-test
+            glob: "xtask/**"
+            run: cargo test --manifest-path xtask/Cargo.toml --target-dir build/xtask

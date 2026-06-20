@@ -164,11 +164,10 @@ jobs:
       - name: clippy (compiles the engine; later steps reuse it)
         run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: engine
-      - name: contract codegen
-        run: cargo run -p fmf-contract --bin gen-contract
-        working-directory: engine
-      - name: fail on contract drift
-        run: git diff --exit-code -- app/FindMyFiles/Engine/Generated/
+      # Contract drift is gated by drift.rs inside the workspace test run below
+      # (it runs `gen-contract --check`, covering both EngineContract.g.cs and
+      # docs/contract.md), so no separate codegen + git-diff step is needed here
+      # (ADR-0018).
       - name: test + line coverage gate
         run: cargo llvm-cov --workspace --fail-under-lines 70 --lcov --output-path engine-lcov.info
         working-directory: engine
