@@ -20,6 +20,13 @@ setup:
     mise install
     lefthook install
 
+# Check the dev environment matches mise.toml (run right after `just setup`).
+# Logic lives in xtask (the doctor subcommand); this is a thin wrapper, and
+# --target-dir keeps xtask output under build/ (ADR-0021).
+[group('setup')]
+doctor:
+    cargo run --manifest-path xtask/Cargo.toml --target-dir build/xtask -- doctor
+
 # ── Daily loop ───────────────────────────────────────────────────────────
 
 # Type-check without codegen — the fast inner loop

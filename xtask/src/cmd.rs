@@ -31,3 +31,21 @@ pub fn succeeds(dir: &Path, program: &str, args: &[&str]) -> Result<bool> {
         .with_context(|| format!("failed to spawn `{program}` (is it on PATH?)"))?;
     Ok(status.success())
 }
+
+/// Run `program args…` in `dir`, capturing its standard output. Returns the
+/// trimmed output on success, or `None` when the program is missing or exits
+/// non-zero — for version probes (`rustc --version`) where absence is a normal
+/// answer rather than an error to bail on.
+#[must_use]
+pub fn capture(dir: &Path, program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
