@@ -4,9 +4,11 @@
 pub mod bench;
 pub mod criterion_gate;
 pub mod diag;
+pub mod exit;
 pub mod index;
 pub mod io_probe;
 pub mod stats;
+pub mod term;
 
 use fmf_core::index::VolumeIndex;
 use fmf_core::query::{self, QueryOptions};

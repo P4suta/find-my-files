@@ -15,7 +15,14 @@ path = "src/main.rs"
 
 [dependencies]
 fmf-core = { workspace = true }
+fmf-contract = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+anstream = { workspace = true }
+anstyle = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
