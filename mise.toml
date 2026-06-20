@@ -8,6 +8,10 @@ dotnet = "10"
 # (release.yml) builds the distributable via the same `just publish` recipe —
 # no second copy of the bundling logic.
 just = "1"
+# Git-hook manager. `just setup` runs `lefthook install`; pinning it here closes a
+# reproducibility gap (it was provisioned globally but never declared per-repo) and
+# lets `just doctor` verify it. Registered mise short-name → aqua backend.
+lefthook = "2"
 # ETW-based sampling profiler (just profile) — pairs with the elevated
 # terminals the engine already requires for real-volume work. cargo backend:
 # the GitHub release tags (samply-v*) don't resolve via ubi/github backends.

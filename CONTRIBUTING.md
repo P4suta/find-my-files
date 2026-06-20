@@ -15,6 +15,7 @@ The toolchain is pinned with [mise](https://mise.jdx.dev/) and tasks run through
 ```
 mise install     # rust, dotnet, just (pinned in mise.toml)
 just setup       # toolchain + git hooks (lefthook)
+just doctor      # verify your environment matches the pins
 ```
 
 Do not install toolchains ad hoc — declare them in `mise.toml` and run

@@ -17,6 +17,7 @@ mod version;
 mod clean;
 mod csharp_docs;
 mod docs;
+mod doctor;
 mod package;
 mod publish;
 mod release;
@@ -61,6 +62,9 @@ enum Commands {
     /// Generate the C# API reference (`DefaultDocumentation` -> `mdBook`) into
     /// build/docs-csharp/_site. The caller builds the app + restores tools first.
     DocCsharp,
+    /// Check that the dev environment matches the `mise.toml` pins and the gate
+    /// prerequisites (tool versions, lefthook, elevation, the build/ layout).
+    Doctor,
 }
 
 fn main() -> Result<()> {
@@ -74,5 +78,6 @@ fn main() -> Result<()> {
         }
         Commands::DocsAssemble => docs::run(),
         Commands::DocCsharp => csharp_docs::run(),
+        Commands::Doctor => doctor::run(),
     }
 }

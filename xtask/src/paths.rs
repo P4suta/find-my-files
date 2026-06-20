@@ -52,3 +52,8 @@ pub fn app_csproj() -> PathBuf {
         .join("FindMyFiles")
         .join("FindMyFiles.csproj")
 }
+
+/// The mise tool-pin manifest at the repo root (what `just doctor` checks).
+pub fn mise_toml() -> PathBuf {
+    repo_root().join("mise.toml")
+}
