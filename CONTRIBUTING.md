@@ -1,7 +1,11 @@
 # Contributing to find-my-files
 
 Thanks for your interest! A few conventions keep this project fast and
-maintainable.
+maintainable. Please follow our [Code of Conduct](.github/CODE_OF_CONDUCT.md).
+
+For the project's fixed rules, deliberate non-goals, and the elevation / UI / perf
+conventions, see the [Development guide](docs/DEVELOPMENT.md) — read it before
+changing anything structural.
 
 ## Setup
 
