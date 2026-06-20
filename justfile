@@ -33,7 +33,7 @@ doctor:
 # Type-check without codegen — the fast inner loop
 [group('daily')]
 [working-directory: 'engine']
-check: check-contract
+check: check-contract check-cli-docs
     cargo check --workspace --all-targets
 
 # Fast contract-drift tripwire (~sub-second warm): the committed C# bindings +
@@ -46,6 +46,14 @@ check: check-contract
 [working-directory: 'engine']
 check-contract:
     cargo run -q -p fmf-contract --bin gen-contract -- --check
+
+# CLI-reference drift tripwire: docs/cli.md still matches the clap command tree
+# (the same generator `just cli-gen` writes). Mirrors check-contract (ADR-0018).
+[group('daily')]
+[doc('CLI-reference drift tripwire — docs/cli.md matches the clap surface')]
+[working-directory: 'engine']
+check-cli-docs:
+    cargo run -q -p fmf-cli --example codegen -- --check
 
 # Build the engine (release binaries)
 [group('daily')]
@@ -136,6 +144,14 @@ dev:
 [working-directory: 'engine']
 contract-gen:
     cargo run -p fmf-contract --bin gen-contract
+
+# Regenerate docs/cli.md (committed) and the shell completions in
+# build/completions/ (PowerShell/bash/zsh/fish) from the clap command tree.
+[group('daily')]
+[doc('Regenerate docs/cli.md + build/completions/ from the clap surface')]
+[working-directory: 'engine']
+cli-gen:
+    cargo run -q -p fmf-cli --example codegen
 
 # Assemble the distributable bundle in build/dist/FindMyFiles: PUBLISHED app (not a
 # bare `dotnet build` — the WinUI component package only wires WinRT.Runtime.dll,

@@ -45,7 +45,11 @@ When you file a perf or correctness report, a screenshot of F12 plus the relevan
 ## Error codes — symptom → cause → fix
 
 The codes are **append-only and never renumbered** (the contract tests pin the
-values). Full table: [ARCHITECTURE](ARCHITECTURE.md#ffi-contract-c-abi).
+values). Full table: [ARCHITECTURE](ARCHITECTURE.md#ffi-contract-c-abi). The
+`fmf` CLI maps the same numbers onto its **process exit code** (`$LASTEXITCODE`),
+and `--format json` repeats them in the error envelope (`error.code` /
+`error.code_num`) — so a script can branch on the failure class
+([ADR-0026](adr/0026-cli-surface-polish.md)).
 
 | Code | What it means | What to do |
 |---|---|---|

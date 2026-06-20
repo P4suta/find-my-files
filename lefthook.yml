@@ -39,6 +39,9 @@ pre-push:
           - name: contract-drift
             root: engine/
             run: cargo run -q -p fmf-contract --bin gen-contract -- --check
+          - name: cli-docs-drift
+            root: engine/
+            run: cargo run -q -p fmf-cli --example codegen -- --check
           - name: clippy
             root: engine/
             run: cargo clippy --workspace --all-targets -- -D warnings

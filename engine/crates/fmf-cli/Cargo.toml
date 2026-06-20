@@ -27,3 +27,5 @@ indicatif = { workspace = true }
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+clap_complete = { workspace = true }
+clap-markdown = { workspace = true }

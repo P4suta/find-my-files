@@ -150,6 +150,10 @@ indicatif = "0.17"
 # its stdout/stderr/exit code.
 assert_cmd = "2"
 predicates = "3"
+# CLI codegen (the `codegen` example only): shell completions and the Markdown
+# CLI reference, both rendered from the single clap command tree.
+clap_complete = "4"
+clap-markdown = "0.1"
 
 # Engine is always built/measured in release; keep stack traces usable.
 # codegen-units=1 keeps hot-path inlining independent of module layout

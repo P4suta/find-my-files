@@ -27,11 +27,16 @@ prebuilt binaries instead of compiling from source.
 ## Development loop
 
 ```
-just check         # fast type-check (no codegen)
+just check         # fast type-check + contract/CLI-doc drift tripwires
 just verify        # fmt-check + lint + test + test-app (what pre-push runs)
 just contract-gen  # regenerate the C# bindings if you changed the contract
+just cli-gen       # regenerate docs/cli.md + shell completions if you changed the CLI surface
 just doc           # build the design docs (mdBook) + rustdoc locally
 ```
+
+The `fmf` developer CLI's reference (`docs/cli.md`) is generated from its clap
+surface; `just check` fails if it drifts. `just cli-gen` also writes tab
+completions to `build/completions/` (PowerShell/bash/zsh/fish).
 
 `just service-dev` runs the engine service in the foreground (elevated). The
 WinUI app talks to it over a named pipe; without the service installed it falls
@@ -55,7 +60,8 @@ the default `GITHUB_TOKEN`.
 - `just verify` must be green.
 - Touched `fmf-core`? Run `just perf-gate` in an elevated, cool-machine shell
   (the perf discipline in `docs/adr/0013`).
-- Never hand-edit `app/FindMyFiles/Engine/Generated/` — it is generated.
+- Changed the `fmf` CLI surface? Run `just cli-gen` so `docs/cli.md` stays in sync.
+- Never hand-edit `app/FindMyFiles/Engine/Generated/` or `docs/cli.md` — both are generated.
 
 ## CI vs. local toolchain
 

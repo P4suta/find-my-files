@@ -58,7 +58,11 @@ just service-dev    # run the engine service in the foreground (elevated)
 just index C:       # index a volume from the CLI (elevated terminal required)
 ```
 
-The WinUI 3 app lives in `app/` (from milestone M1 onward).
+The `fmf` developer CLI supports `--version`, TTY-aware colour, scriptable
+`--format json`, and `FMF_E_*` process exit codes; its full reference is the
+generated [CLI reference](docs/cli.md), and `just cli-gen` writes tab
+completions for PowerShell/bash/zsh/fish. The WinUI 3 app lives in `app/`
+(from milestone M1 onward).
 
 **New here?** Read [CONTRIBUTING](CONTRIBUTING.md) for setup and the development loop,
 then the [Development guide](docs/DEVELOPMENT.md) — the project's fixed rules and
