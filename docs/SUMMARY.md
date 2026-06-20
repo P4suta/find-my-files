@@ -3,6 +3,7 @@
 - [Architecture](ARCHITECTURE.md)
 - [Development guide](DEVELOPMENT.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
+- [CLI reference (generated)](cli.md)
 - [Contract reference (generated)](contract.md)
 - [Technical research (RESEARCH)](RESEARCH.md)
 - [Security model](SECURITY.md)
@@ -38,3 +39,4 @@
   - [0023 — First-class regex (trigram still rejected)](adr/0023-regex-first-class.md)
   - [0024 — Non-elevated scope index mode](adr/0024-non-elevated-scope-index.md)
   - [0025 — Scope excludes prune at walk time](adr/0025-scope-exclude-walk-prune.md)
+  - [0026 — CLI surface polish](adr/0026-cli-surface-polish.md)

@@ -25,3 +25,4 @@
 - [0023](0023-regex-first-class.md) — First-class regex: literal-prefilter-driven + 1MiB compile cap, contract narrowed to 20B (pipe v2); trigram still rejected
 - [0024](0024-non-elevated-scope-index.md) — Non-elevated scope index mode: folder walk + ReadDirectoryChangesW as the second implementation of the 2 seams; synthetic FRN (path hash) keeps the format unchanged; a single-point revision of ADR-0001's "no folder walk"
 - [0025](0025-scope-exclude-walk-prune.md) — Scope-mode excludes prune at walk time (not query time): exclude paths flow to the folder walk and the subtree is never indexed
+- [0026](0026-cli-surface-polish.md) — `fmf` CLI gets first-class DevEx polish (--version/--color/--quiet/--format, FMF_E_* exit codes, colour+spinner, generated reference+completions); stays a developer tool, `fmf search`/TUI rejected
