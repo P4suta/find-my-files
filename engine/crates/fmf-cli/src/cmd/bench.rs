@@ -5,15 +5,17 @@ use std::time::Instant;
 
 use fmf_core::query::QueryOptions;
 
-use super::{build_index, run_query};
+use super::ctx::Ctx;
+use super::{build_index, run_query, term};
 use crate::bench_support::{BENCH_QUERIES, BenchReport, QueryBench, bench_restore, median};
 
 pub fn bench(
     drive: &str,
     json: Option<&std::path::Path>,
     baseline: Option<&std::path::Path>,
+    ctx: Ctx,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let idx = build_index(drive)?;
+    let idx = build_index(drive, ctx)?;
     let opt = QueryOptions::default();
 
     let mut report = BenchReport {
@@ -24,9 +26,15 @@ pub fn bench(
         restore: None,
     };
 
-    println!(
-        "{:<28} {:>10} {:>9} {:>9} {:>9} {:>9} | {:>8} {:>8} {:>8}",
-        "query", "hits", "p50_us", "p99_us", "max_us", "cold_us", "memo", "scan", "mat"
+    anstream::println!(
+        "{}",
+        term::paint(
+            term::HEADER,
+            &format!(
+                "{:<28} {:>10} {:>9} {:>9} {:>9} {:>9} | {:>8} {:>8} {:>8}",
+                "query", "hits", "p50_us", "p99_us", "max_us", "cold_us", "memo", "scan", "mat"
+            )
+        )
     );
     for q in BENCH_QUERIES {
         // 200 runs make p99 a real percentile, not the max (ADR-0013).
@@ -101,10 +109,12 @@ pub fn bench(
         let old: BenchReport = serde_json::from_str(&std::fs::read_to_string(path)?)?;
         // Entry-count drift past ±10% invalidates the baseline (ADR-0013).
         if report.entries.abs_diff(old.entries) > old.entries / 10 {
-            eprintln!(
-                "WARNING entries drifted {}→{} (>10%) since the baseline was recorded — \
+            anstream::eprintln!(
+                "{} entries drifted {}→{} (>10%) since the baseline was recorded — \
                  regression verdicts are unreliable; consider `just bench-baseline`",
-                old.entries, report.entries
+                term::paint(term::WARN, "WARNING"),
+                old.entries,
+                report.entries
             );
         }
         let mut regressed = false;
@@ -116,16 +126,22 @@ pub fn bench(
                 continue;
             };
             if gate(qb.p50_us, prev.p50_us, 200) {
-                eprintln!(
-                    "REGRESSION {:<24} p50 {}→{}µs",
-                    qb.query, prev.p50_us, qb.p50_us
+                anstream::eprintln!(
+                    "{} {:<24} p50 {}→{}µs",
+                    term::paint(term::ERROR, "REGRESSION"),
+                    qb.query,
+                    prev.p50_us,
+                    qb.p50_us
                 );
                 regressed = true;
             }
             if qb.p99_us > P99_BUDGET_US {
-                eprintln!(
-                    "OVER BUDGET {:<24} p99 {}µs > {}µs acceptance line",
-                    qb.query, qb.p99_us, P99_BUDGET_US
+                anstream::eprintln!(
+                    "{} {:<24} p99 {}µs > {}µs acceptance line",
+                    term::paint(term::ERROR, "OVER BUDGET"),
+                    qb.query,
+                    qb.p99_us,
+                    P99_BUDGET_US
                 );
                 regressed = true;
             }
@@ -133,16 +149,21 @@ pub fn bench(
         if let Some(new) = &report.restore
             && new.p50_ms > RESTORE_BUDGET_MS
         {
-            eprintln!(
-                "OVER BUDGET snapshot restore p50 {}ms > {}ms acceptance line",
-                new.p50_ms, RESTORE_BUDGET_MS
+            anstream::eprintln!(
+                "{} snapshot restore p50 {}ms > {}ms acceptance line",
+                term::paint(term::ERROR, "OVER BUDGET"),
+                new.p50_ms,
+                RESTORE_BUDGET_MS
             );
             regressed = true;
         }
         if regressed {
             return Err("benchmark regression vs baseline".into());
         }
-        eprintln!("no regression vs {}", path.display());
+        anstream::eprintln!(
+            "{}",
+            term::paint(term::OK, &format!("no regression vs {}", path.display()))
+        );
     }
     Ok(())
 }

@@ -1,6 +1,8 @@
 //! `criterion-gate` — turn criterion change reports into an exit code
 //! (criterion itself never sets one on regressions; ADR-0013).
 
+use super::term;
+
 /// Collect `<bench>/change/estimates.json` paths under criterion's output dir.
 fn collect_change_reports(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -53,7 +55,11 @@ pub fn criterion_gate(
                 |p| p.display().to_string().replace('\\', "/"),
             );
         if median > threshold {
-            eprintln!("REGRESSION {name} median {:+.1}%", median * 100.0);
+            anstream::eprintln!(
+                "{} {name} median {:+.1}%",
+                term::paint(term::ERROR, "REGRESSION"),
+                median * 100.0
+            );
             regressed = true;
         }
     }

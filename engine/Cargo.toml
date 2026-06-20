@@ -143,6 +143,9 @@ serde_json = "1"
 # a clap dependency). No colour is ever hardcoded — the stream decides.
 anstream = "0.6"
 anstyle = "1"
+# A spinner while a volume is being indexed; hides itself when stderr is not a
+# terminal, so it never pollutes piped/JSON output.
+indicatif = "0.17"
 # CLI behavioural tests (dev-only): drive the built `fmf` binary and assert on
 # its stdout/stderr/exit code.
 assert_cmd = "2"
