@@ -8,6 +8,7 @@ pub mod diag;
 pub mod exit;
 pub mod index;
 pub mod io_probe;
+pub mod json;
 pub mod stats;
 pub mod term;
 
@@ -32,30 +33,34 @@ fn build_index(drive: &str, ctx: Ctx) -> Result<VolumeIndex, Box<dyn std::error:
     // Mirror the engine (volume thread does the same): the build leaves
     // power-of-two capacity slack that would distort every RAM number.
     idx.shrink_to_fit();
-    let per_entry = if idx.is_empty() {
-        0
-    } else {
-        s.peak_working_set_bytes / idx.len() as u64
-    };
-    eprintln!(
-        "indexed {} entries ({} files, {} dirs, {} skipped) in {} ms ($MFT read {} ms, parse {} ms, deferred {} names {} ms, build {} ms, sort {} ms — read/parse overlap)",
-        idx.len(),
-        s.files,
-        s.dirs,
-        s.skipped_no_name,
-        s.elapsed_total_ms,
-        s.elapsed_mft_load_ms,
-        s.elapsed_parse_ms,
-        s.deferred_names,
-        s.elapsed_deferred_ms,
-        s.elapsed_build_ms,
-        s.elapsed_sort_ms
-    );
-    eprintln!(
-        "peak working set {:.1} MiB (≈{} B/entry incl. $MFT buffer)",
-        s.peak_working_set_bytes as f64 / (1024.0 * 1024.0),
-        per_entry
-    );
+    // These scan stats are decorative stderr chrome; stay silent under
+    // --quiet/--format json so machine output is not crowded.
+    if ctx.human_chrome() {
+        let per_entry = if idx.is_empty() {
+            0
+        } else {
+            s.peak_working_set_bytes / idx.len() as u64
+        };
+        eprintln!(
+            "indexed {} entries ({} files, {} dirs, {} skipped) in {} ms ($MFT read {} ms, parse {} ms, deferred {} names {} ms, build {} ms, sort {} ms — read/parse overlap)",
+            idx.len(),
+            s.files,
+            s.dirs,
+            s.skipped_no_name,
+            s.elapsed_total_ms,
+            s.elapsed_mft_load_ms,
+            s.elapsed_parse_ms,
+            s.deferred_names,
+            s.elapsed_deferred_ms,
+            s.elapsed_build_ms,
+            s.elapsed_sort_ms
+        );
+        eprintln!(
+            "peak working set {:.1} MiB (≈{} B/entry incl. $MFT buffer)",
+            s.peak_working_set_bytes as f64 / (1024.0 * 1024.0),
+            per_entry
+        );
+    }
     Ok(idx)
 }
 

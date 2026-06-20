@@ -110,10 +110,12 @@ pub fn watch(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
     let mut journal = UsnJournal::open(drive, None)?;
     let mut idx = build_index(drive, ctx)?;
     let fetch = VolumeStatFetcher::open(drive)?;
-    eprintln!(
-        "watching {drive} (journal id {:#x}, from usn {}) — Ctrl+C to stop",
-        journal.journal_id, journal.next_usn
-    );
+    if ctx.human_chrome() {
+        eprintln!(
+            "watching {drive} (journal id {:#x}, from usn {}) — Ctrl+C to stop",
+            journal.journal_id, journal.next_usn
+        );
+    }
     let mut buf = Vec::new();
     loop {
         match journal.read_blocking(&mut buf)? {
@@ -128,15 +130,28 @@ pub fn watch(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let s = apply_batch(&mut idx, &rs, &fetch);
-                eprintln!(
-                    "{} records → {} upserted, {} deleted, {} stat, {} ignored (live {})",
-                    rs.len(),
-                    s.created_or_renamed,
-                    s.deleted,
-                    s.stat_updated,
-                    s.ignored,
-                    idx.live_len()
-                );
+                if ctx.is_json() {
+                    // One NDJSON record per applied batch, so the stream can be
+                    // piped to a processor live.
+                    super::json::emit_line(&Batch {
+                        records: rs.len() as u64,
+                        upserted: s.created_or_renamed as u64,
+                        deleted: s.deleted as u64,
+                        stat: s.stat_updated as u64,
+                        ignored: s.ignored as u64,
+                        live: idx.live_len() as u64,
+                    })?;
+                } else {
+                    eprintln!(
+                        "{} records → {} upserted, {} deleted, {} stat, {} ignored (live {})",
+                        rs.len(),
+                        s.created_or_renamed,
+                        s.deleted,
+                        s.stat_updated,
+                        s.ignored,
+                        idx.live_len()
+                    );
+                }
             }
             ReadOutcome::Gone(g) => {
                 eprintln!("journal unavailable ({g:?}) — full rescan required, exiting");
@@ -145,4 +160,15 @@ pub fn watch(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// One applied USN batch, as an NDJSON record under `watch --format json`.
+#[derive(serde::Serialize)]
+struct Batch {
+    records: u64,
+    upserted: u64,
+    deleted: u64,
+    stat: u64,
+    ignored: u64,
+    live: u64,
 }

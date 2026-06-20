@@ -16,6 +16,10 @@ use fmf_core::engine::{EngineCreateError, EngineError};
 use fmf_core::mft::MftError;
 use fmf_core::query::{CompileError, ParseError};
 use fmf_core::usn::UsnError;
+use serde::Serialize;
+
+use super::ctx::Format;
+use super::json::FORMAT_VERSION;
 
 /// Win32 `ERROR_ACCESS_DENIED` — a raw-volume open that fails this way means
 /// the terminal is not elevated, not that the volume is unreadable.
@@ -85,14 +89,58 @@ pub const fn code_name(code: i32) -> &'static str {
     }
 }
 
-/// Print `err` and its cause chain to stderr (red `error[CODE]:` label when the
-/// stream takes colour) and return the process exit code. A classified error is
-/// labelled with its `FMF_E_*` code; an unclassified one is a plain `error:`.
+/// The machine-readable error payload emitted to stderr under `--format json`.
+#[derive(Serialize)]
+struct ErrorEnvelope<'a> {
+    format_version: u32,
+    error: ErrorBody<'a>,
+}
+
+#[derive(Serialize)]
+struct ErrorBody<'a> {
+    /// Symbolic `FMF_E_*` name, or `null` for an unclassified failure.
+    code: Option<&'a str>,
+    /// The process exit code (the `FMF_E_*` number, or 1).
+    code_num: i32,
+    message: String,
+    causes: Vec<String>,
+}
+
+/// Report `err` to stderr and return the process exit code.
+///
+/// Text mode prints a `error[CODE]:` label (red when the stream takes colour)
+/// and the cause chain; JSON mode emits an [`ErrorEnvelope`] so a script can
+/// parse the failure. A classified error carries its `FMF_E_*` code.
 #[must_use]
-pub fn report(err: &(dyn Error + 'static), color: ColorChoice) -> i32 {
+pub fn report(err: &(dyn Error + 'static), color: ColorChoice, format: Format) -> i32 {
+    let code = status_code(err);
+    let mut causes = Vec::new();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        causes.push(cause.to_string());
+        source = cause.source();
+    }
+
+    if matches!(format, Format::Json) {
+        let envelope = ErrorEnvelope {
+            format_version: FORMAT_VERSION,
+            error: ErrorBody {
+                code: classify(err).map(code_name),
+                code_num: code,
+                message: err.to_string(),
+                causes,
+            },
+        };
+        // Errors are JSON-only data: no colour, straight to stderr.
+        if let Ok(line) = serde_json::to_string(&envelope) {
+            eprintln!("{line}");
+        }
+        return code;
+    }
+
     let mut stderr = AutoStream::new(std::io::stderr(), color);
     let label = match classify(err) {
-        Some(code) => format!("error[{}]", code_name(code)),
+        Some(c) => format!("error[{}]", code_name(c)),
         None => "error".to_owned(),
     };
     // anstream strips these escapes when the stream is not taking colour.
@@ -101,12 +149,10 @@ pub fn report(err: &(dyn Error + 'static), color: ColorChoice) -> i32 {
         "{}: {err}",
         super::term::paint(super::term::ERROR, &label)
     );
-    let mut source = err.source();
-    while let Some(cause) = source {
+    for cause in causes {
         let _ = writeln!(stderr, "  caused by: {cause}");
-        source = cause.source();
     }
-    status_code(err)
+    code
 }
 
 #[cfg(test)]
