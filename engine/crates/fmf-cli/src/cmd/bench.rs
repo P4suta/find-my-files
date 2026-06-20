@@ -26,16 +26,18 @@ pub fn bench(
         restore: None,
     };
 
-    anstream::println!(
-        "{}",
-        term::paint(
-            term::HEADER,
-            &format!(
-                "{:<28} {:>10} {:>9} {:>9} {:>9} {:>9} | {:>8} {:>8} {:>8}",
-                "query", "hits", "p50_us", "p99_us", "max_us", "cold_us", "memo", "scan", "mat"
+    if !ctx.is_json() {
+        anstream::println!(
+            "{}",
+            term::paint(
+                term::HEADER,
+                &format!(
+                    "{:<28} {:>10} {:>9} {:>9} {:>9} {:>9} | {:>8} {:>8} {:>8}",
+                    "query", "hits", "p50_us", "p99_us", "max_us", "cold_us", "memo", "scan", "mat"
+                )
             )
-        )
-    );
+        );
+    }
     for q in BENCH_QUERIES {
         // 200 runs make p99 a real percentile, not the max (ADR-0013).
         const RUNS: usize = 200;
@@ -64,36 +66,43 @@ pub fn bench(
             p50_materialize_us: median(mats),
             cold_us,
         };
-        println!(
-            "{:<28} {:>10} {:>9} {:>9} {:>9} {:>9} | {:>8} {:>8} {:>8}",
-            qb.query,
-            qb.hits,
-            qb.p50_us,
-            qb.p99_us,
-            qb.max_us,
-            qb.cold_us,
-            qb.p50_memo_us,
-            qb.p50_scan_us,
-            qb.p50_materialize_us
-        );
+        if !ctx.is_json() {
+            println!(
+                "{:<28} {:>10} {:>9} {:>9} {:>9} {:>9} | {:>8} {:>8} {:>8}",
+                qb.query,
+                qb.hits,
+                qb.p50_us,
+                qb.p99_us,
+                qb.max_us,
+                qb.cold_us,
+                qb.p50_memo_us,
+                qb.p50_scan_us,
+                qb.p50_materialize_us
+            );
+        }
         report.queries.push(qb);
     }
     report.peak_working_set_bytes = fmf_core::mft::peak_working_set();
-    println!(
-        "peak working set {:.1} MiB",
-        report.peak_working_set_bytes as f64 / (1024.0 * 1024.0)
-    );
-
     report.restore = Some(bench_restore(&idx)?);
-    if let Some(r) = &report.restore {
+    if ctx.is_json() {
+        // The whole report goes to stdout as one document; the human table and
+        // the baseline verdict below stay on text/stderr.
+        super::json::emit(&report)?;
+    } else {
         println!(
-            "snapshot save {} ms; restore p50 {} ms / min {} ms ({:.1} MiB, {} entries)",
-            r.save_ms,
-            r.p50_ms,
-            r.min_ms,
-            r.file_bytes as f64 / (1024.0 * 1024.0),
-            r.entries
+            "peak working set {:.1} MiB",
+            report.peak_working_set_bytes as f64 / (1024.0 * 1024.0)
         );
+        if let Some(r) = &report.restore {
+            println!(
+                "snapshot save {} ms; restore p50 {} ms / min {} ms ({:.1} MiB, {} entries)",
+                r.save_ms,
+                r.p50_ms,
+                r.min_ms,
+                r.file_bytes as f64 / (1024.0 * 1024.0),
+                r.entries
+            );
+        }
     }
 
     if let Some(path) = json {

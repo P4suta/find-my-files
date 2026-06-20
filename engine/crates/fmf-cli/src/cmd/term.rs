@@ -37,13 +37,14 @@ pub fn paint(style: Style, text: &str) -> String {
 
 /// A steady-ticking spinner for a long blocking step (e.g. indexing a volume).
 ///
-/// Returns a hidden, inert bar when `--quiet` is set or stderr is not a
-/// terminal, so the spinner never lands in piped or redirected output. Call
-/// [`ProgressBar::finish_and_clear`] when the step ends.
+/// Returns a hidden, inert bar unless human chrome is wanted (text format, not
+/// `--quiet`) *and* stderr is a terminal, so the spinner never lands in piped,
+/// redirected, or JSON output. Call [`ProgressBar::finish_and_clear`] when the
+/// step ends.
 #[must_use]
 pub fn spinner(ctx: Ctx, message: impl Into<std::borrow::Cow<'static, str>>) -> ProgressBar {
     use std::io::IsTerminal as _;
-    if ctx.quiet || !std::io::stderr().is_terminal() {
+    if !ctx.human_chrome() || !std::io::stderr().is_terminal() {
         return ProgressBar::hidden();
     }
     let pb = ProgressBar::new_spinner();

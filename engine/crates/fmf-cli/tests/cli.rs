@@ -58,3 +58,34 @@ fn diag_runs_unelevated_and_reports_the_version() {
         .success()
         .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
+
+#[test]
+fn diag_json_is_a_versioned_object() {
+    let assert = fmf().args(["--format", "json", "diag"]).assert().success();
+    let v: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("diag --format json is JSON");
+    assert_eq!(v["format_version"].as_u64(), Some(1));
+    assert_eq!(v["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
+    assert!(v["recent_errors"].is_array());
+}
+
+#[test]
+fn json_format_errors_are_structured() {
+    // `index Q:` fails fast (no such volume / not elevated) — either way the
+    // failure must surface as a JSON envelope on stderr, as the last line
+    // (any diagnostics logging precedes it).
+    let assert = fmf()
+        .args(["--format", "json", "index", "Q:"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    let last = stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .expect("stderr is not empty");
+    let v: serde_json::Value = serde_json::from_str(last).expect("error line is JSON");
+    assert_eq!(v["format_version"].as_u64(), Some(1));
+    assert!(v["error"]["code_num"].is_i64());
+    assert!(v["error"]["message"].is_string());
+}

@@ -9,6 +9,7 @@ mod cmd;
 
 use clap::{Parser, Subcommand};
 
+use crate::cmd::ctx::Format;
 use crate::cmd::io_probe::ProbeModeArg;
 use crate::cmd::term::ColorArg;
 
@@ -21,6 +22,10 @@ struct Cli {
     /// Suppress the progress spinner and other stderr chrome.
     #[arg(short, long, global = true)]
     quiet: bool,
+    /// Output format. `json` emits a machine-readable document on stdout for
+    /// the commands that support it (diag, bench, watch); others stay text.
+    #[arg(long, value_enum, default_value_t = Format::Human, global = true)]
+    format: Format,
     #[command(subcommand)]
     command: Command,
 }
@@ -104,7 +109,10 @@ fn main() {
     let color = cmd::term::resolve_color(cli.color);
     // Make the choice global so the styled anstream macros pick it up.
     color.write_global();
-    let ctx = cmd::ctx::Ctx { quiet: cli.quiet };
+    let ctx = cmd::ctx::Ctx {
+        quiet: cli.quiet,
+        format: cli.format,
+    };
     let result = match cli.command {
         Command::Spike { drive } => cmd::index::spike(&drive),
         Command::Index {
@@ -128,14 +136,14 @@ fn main() {
             qd,
             runs,
         } => cmd::io_probe::io_probe(&drive, mode, qd, runs),
-        Command::Diag => cmd::diag::diag(),
+        Command::Diag => cmd::diag::diag(ctx),
         Command::Watch { drive } => cmd::index::watch(&drive, ctx),
         Command::CriterionGate { dir, threshold } => {
             cmd::criterion_gate::criterion_gate(&dir, threshold)
         }
     };
     if let Err(e) = result {
-        let code = cmd::exit::report(e.as_ref(), color);
+        let code = cmd::exit::report(e.as_ref(), color, ctx.format);
         std::process::exit(code);
     }
 }
