@@ -76,12 +76,6 @@ public sealed class AppSettings
     /// the roots.</summary>
     public string[] ScopeExcludes { get; set; } = [];
 
-    private static readonly JsonSerializerOptions JsonOpts = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-        WriteIndented = true,
-    };
-
     /// <summary>Absolute path to the user-scope settings file. Portable by
     /// default (<c>&lt;exe&gt;\data\settings.json</c>); falls back to
     /// <c>%APPDATA%\find-my-files\settings.json</c> when the app folder is
@@ -102,7 +96,7 @@ public sealed class AppSettings
                 return new AppSettings();
             }
 
-            return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), JsonOpts)
+            return JsonSerializer.Deserialize(File.ReadAllText(path), AppSettingsJsonContext.Default.AppSettings)
                 ?? new AppSettings();
         }
         catch (Exception ex)
@@ -135,7 +129,7 @@ public sealed class AppSettings
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, JsonSerializer.Serialize(this, JsonOpts));
+            File.WriteAllText(path, JsonSerializer.Serialize(this, AppSettingsJsonContext.Default.AppSettings));
         }
         catch (Exception ex)
         {
