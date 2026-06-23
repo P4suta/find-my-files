@@ -8,6 +8,7 @@ pub mod dispatch;
 pub mod events;
 pub mod faults;
 pub mod host;
+pub mod lifecycle;
 pub mod pipe;
 pub mod security;
 pub mod server;

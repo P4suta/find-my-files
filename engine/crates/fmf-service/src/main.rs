@@ -2,8 +2,9 @@
 //! SCM entry, and the lifecycle subcommands. `install` is a subcommand and
 //! not an sc.exe one-liner because it must do four things atomically:
 //! capture the installing user's SID into service.json, harden the data-dir
-//! DACLs, register with delayed start + crash recovery, and set the
-//! preshutdown/privilege configs (ADR-0017).
+//! DACLs, register with on-demand (demand) start + crash recovery, and set the
+//! preshutdown/privilege configs (ADR-0017) plus the service-object DACL and GC
+//! task (ADR-0027).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +14,7 @@ use clap::Parser;
 use fmf_core::diag::error_chain;
 use fmf_service::pipe::{Event, PipeStream};
 use fmf_service::svc::{EXIT_LOCKED, SERVICE_NAME, ServeOptions};
-use fmf_service::{config, security, svc};
+use fmf_service::{config, lifecycle, security, svc};
 
 #[derive(Parser)]
 #[command(name = "fmf-service", about = "find-my-files engine service")]
@@ -34,7 +35,8 @@ enum Cli {
         no_index: bool,
     },
     /// Register the Windows service (elevated; captures your SID, hardens
-    /// the data dir, sets delayed start + crash recovery + preshutdown).
+    /// the data dir, sets on-demand start + crash recovery + preshutdown, and
+    /// grants the user unelevated start/stop + the daily GC task, ADR-0027).
     Install {
         /// Also authorize this user SID on the pipe. The unelevated app
         /// forwards the daily user's SID here so OTS elevation (install runs
@@ -67,6 +69,14 @@ enum Cli {
     Restart,
     /// SCM state + a live pipe handshake ping.
     Status,
+    /// (internal) Daily GC: uninstall the on-demand service when it has gone
+    /// unused past the idle threshold (ADR-0027). Run by the SYSTEM Scheduled
+    /// Task that `install` registers; a no-op while the install is in use.
+    Gc {
+        /// Override the `service.json` `gc_max_idle_days` threshold (0 = never).
+        #[arg(long)]
+        max_idle_days: Option<u64>,
+    },
     /// (internal) SCM entry point — launched by the service controller.
     #[command(hide = true)]
     ServiceEntry,
@@ -91,6 +101,7 @@ fn main() -> std::process::ExitCode {
         Cli::Stop => report(stop_service()),
         Cli::Restart => report(restart_service()),
         Cli::Status => report(status()),
+        Cli::Gc { max_idle_days } => report(gc(max_idle_days)),
     };
     if ok {
         std::process::ExitCode::SUCCESS
@@ -237,7 +248,33 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
         security::set_dir_dacl(&target, &sddl).map_err(|e| format!("{what} DACL: {e}"))?;
     }
 
-    // 4. Register: LocalSystem, delayed auto start, restart-on-crash.
+    // 3b. Copy fmf-service.exe out of the (portable) app bundle into the
+    //     hardened data root, and point the registration + GC task at this
+    //     stable copy (ADR-0027): both then survive the app folder being
+    //     deleted, and a standard user — who cannot write the SYSTEM+Admins
+    //     data root — cannot replace the SYSTEM binary (docs/SECURITY.md). The
+    //     copy inherits the protected DACL just applied to the root. Stop any
+    //     running instance first so its own image isn't locked for the copy.
+    let _ = stop_service();
+    let stable_exe = lifecycle::stable_exe_path(&data_dir);
+    let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if current_exe != stable_exe {
+        std::fs::copy(&current_exe, &stable_exe).map_err(|e| {
+            format!(
+                "stable exe copy ({} → {}): {e}",
+                current_exe.display(),
+                stable_exe.display()
+            )
+        })?;
+    }
+    // The user SIDs allowed to start/stop the service unelevated (ADR-0027) —
+    // the same identities authorized on the pipe.
+    let mut svc_users = vec![sid.clone()];
+    if let Some(owner) = &owner_sid {
+        svc_users.push(owner.clone());
+    }
+
+    // 4. Register: LocalSystem, on-demand (manual) start, restart-on-crash.
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -248,9 +285,9 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
             name: SERVICE_NAME.into(),
             display_name: "find-my-files engine".into(),
             service_type: ServiceType::OWN_PROCESS,
-            start_type: ServiceStartType::AutoStart,
+            start_type: ServiceStartType::OnDemand,
             error_control: ServiceErrorControl::Normal,
-            executable_path: std::env::current_exe().map_err(|e| e.to_string())?,
+            executable_path: stable_exe.clone(),
             launch_arguments: vec!["service-entry".into()],
             dependencies: vec![],
             account_name: None, // LocalSystem
@@ -275,9 +312,6 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
         Err(e) => return Err(format!("create_service: {}", error_chain(&e))),
     };
     service
-        .set_delayed_auto_start(true)
-        .map_err(|e| format!("delayed start: {e}"))?;
-    service
         .update_failure_actions(ServiceFailureActions {
             reset_period: windows_service::service::ServiceFailureResetPeriod::After(
                 Duration::from_hours(24),
@@ -299,7 +333,24 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
     set_required_privileges(&["SeChangeNotifyPrivilege"])?;
     set_preshutdown_timeout(Duration::from_mins(3))?;
 
-    println!("installed '{SERVICE_NAME}' (LocalSystem, delayed auto start)");
+    // 6. On-demand lifecycle (ADR-0027): let the authorized user(s) start/stop
+    //    the service unelevated (start/stop/query only — never change-config or
+    //    delete, which on a LocalSystem service would be local privilege
+    //    escalation), force DEMAND_START even on an older AutoStart
+    //    registration, and register the daily GC task.
+    security::set_service_dacl(SERVICE_NAME, &security::service_sddl(&svc_users))
+        .map_err(|e| format!("service DACL: {e}"))?;
+    set_start_type_demand()?;
+    if cfg.gc_max_idle_days > 0
+        && let Err(e) = register_gc_task(&data_dir, &stable_exe)
+    {
+        println!(
+            "warning: GC auto-cleanup task not registered ({e}); the service \
+             still works but will not self-remove when unused"
+        );
+    }
+
+    println!("installed '{SERVICE_NAME}' (LocalSystem, on-demand start)");
     println!("authorized SID: {sid}");
     if let Some(owner) = &owner_sid {
         println!("authorized SID (forwarded owner): {owner}");
@@ -321,6 +372,31 @@ fn setup(owner_sid: Option<String>) -> Result<(), String> {
 }
 
 fn uninstall(purge_data: bool) -> Result<(), String> {
+    deregister_service_and_task()?;
+
+    let data_dir = config::default_data_dir();
+    if purge_data {
+        std::fs::remove_dir_all(&data_dir).map_err(|e| format!("purge: {e}"))?;
+        println!("purged {}", data_dir.display());
+    } else {
+        // Remove the stable binary copy too — it is program clutter, not user
+        // data (a re-install copies it fresh from the bundle). Keep only the
+        // index/logs/service.json the user may want to reuse; --purge-data
+        // removes those as well. uninstall runs from the bundle exe, so the
+        // stable copy is not in use and deletes cleanly (no reboot needed).
+        let _ = std::fs::remove_file(lifecycle::stable_exe_path(&data_dir));
+        println!(
+            "kept {} — index snapshots (every indexed file name), logs and \
+             service.json remain; rerun with --purge-data to remove them",
+            data_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Stops (if running) and deletes the SCM service, then removes the GC
+/// Scheduled Task. Shared by `uninstall` and `gc`.
+fn deregister_service_and_task() -> Result<(), String> {
     use windows_service::service::{ServiceAccess, ServiceState};
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
@@ -353,18 +429,40 @@ fn uninstall(purge_data: bool) -> Result<(), String> {
     }
     service.delete().map_err(|e| format!("delete: {e}"))?;
     println!("uninstalled '{SERVICE_NAME}'");
-
-    let data_dir = config::default_data_dir();
-    if purge_data {
-        std::fs::remove_dir_all(&data_dir).map_err(|e| format!("purge: {e}"))?;
-        println!("purged {}", data_dir.display());
-    } else {
-        println!(
-            "kept {} — index snapshots (every indexed file name), logs and \
-             service.json remain; rerun with --purge-data to remove them",
-            data_dir.display()
-        );
+    if let Err(e) = delete_gc_task() {
+        println!("note: GC task not removed ({e})");
     }
+    Ok(())
+}
+
+/// Daily GC entry (ADR-0027): when the install has gone unused past the idle
+/// threshold, tear it down completely — service, Scheduled Task, index/logs/
+/// config. The running stable binary and its (then-empty) directory cannot be
+/// deleted while this process holds them, so they are scheduled for deletion on
+/// the next reboot. Otherwise a no-op. Deliberately does NOT init the file log
+/// (that would lock the logs dir this may delete).
+fn gc(max_idle_days: Option<u64>) -> Result<(), String> {
+    let data_dir = config::default_data_dir();
+    let cfg = config::ServiceConfig::load(&data_dir.join("service.json"));
+    let threshold = max_idle_days.unwrap_or(cfg.gc_max_idle_days);
+    let last_use = lifecycle::read_last_use(&data_dir);
+    if !lifecycle::gc_should_remove(std::time::SystemTime::now(), last_use, threshold) {
+        println!("gc: in use or disabled (threshold {threshold}d) — nothing to do");
+        return Ok(());
+    }
+
+    println!("gc: unused > {threshold}d — removing the on-demand install");
+    deregister_service_and_task()?;
+    // The service is stopped now, so these are free to delete.
+    for sub in ["index", "logs"] {
+        let _ = std::fs::remove_dir_all(data_dir.join(sub));
+    }
+    let _ = std::fs::remove_file(data_dir.join("service.json"));
+    let _ = std::fs::remove_file(lifecycle::last_use_path(&data_dir));
+    // The running stable image (and its now-empty dir) self-delete on reboot.
+    schedule_delete_on_reboot(&lifecycle::stable_exe_path(&data_dir));
+    schedule_delete_on_reboot(&data_dir);
+    println!("gc: done (binary + data dir removed on next reboot)");
     Ok(())
 }
 
@@ -482,6 +580,128 @@ fn ping(pipe_name: &str) -> std::io::Result<(u32, u32)> {
     let (_, payload) = read_frame(&mut s).map_err(std::io::Error::other)?;
     let resp = HelloResp::decode(&payload).map_err(std::io::Error::other)?;
     Ok((resp.server_pid, resp.abi_version))
+}
+
+// ── On-demand lifecycle helpers (ADR-0027) ─────────────────────────────
+
+/// Registers the daily GC Scheduled Task as SYSTEM from an XML definition —
+/// `<Command>`/`<Arguments>` are separate elements, sidestepping schtasks
+/// `/TR` command-line quoting. The action is the stable binary + the `gc` verb.
+fn register_gc_task(
+    data_dir: &std::path::Path,
+    stable_exe: &std::path::Path,
+) -> Result<(), String> {
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
+         <RegistrationInfo><Description>find-my-files engine on-demand GC (ADR-0027)</Description></RegistrationInfo>\n\
+         <Triggers><CalendarTrigger><StartBoundary>2024-01-01T03:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers>\n\
+         <Principals><Principal id=\"Author\"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\n\
+         <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><ExecutionTimeLimit>PT5M</ExecutionTimeLimit></Settings>\n\
+         <Actions Context=\"Author\"><Exec><Command>{}</Command><Arguments>gc</Arguments></Exec></Actions>\n\
+         </Task>\n",
+        stable_exe.display()
+    );
+    let xml_path = data_dir.join("gc-task.xml");
+    std::fs::write(&xml_path, xml).map_err(|e| format!("write task xml: {e}"))?;
+    let status = std::process::Command::new("schtasks")
+        .args(["/Create", "/F", "/TN", lifecycle::GC_TASK_NAME, "/XML"])
+        .arg(&xml_path)
+        .status();
+    let _ = std::fs::remove_file(&xml_path);
+    match status {
+        Ok(s) if s.success() => {
+            println!("registered daily GC task '{}'", lifecycle::GC_TASK_NAME);
+            Ok(())
+        }
+        Ok(s) => Err(format!(
+            "schtasks /Create exited {}",
+            s.code().unwrap_or(-1)
+        )),
+        Err(e) => Err(format!("schtasks /Create: {e}")),
+    }
+}
+
+/// Removes the GC Scheduled Task. A missing task (`schtasks` exit 1) is success.
+fn delete_gc_task() -> Result<(), String> {
+    let status = std::process::Command::new("schtasks")
+        .args(["/Delete", "/F", "/TN", lifecycle::GC_TASK_NAME])
+        .status()
+        .map_err(|e| format!("schtasks /Delete: {e}"))?;
+    if status.success() || status.code() == Some(1) {
+        Ok(())
+    } else {
+        Err(format!(
+            "schtasks /Delete exited {}",
+            status.code().unwrap_or(-1)
+        ))
+    }
+}
+
+/// Forces the service start type to `DEMAND_START` — a no-op on a freshly
+/// created on-demand service, but the migration path for an older `AutoStart`
+/// registration (ADR-0027). The `windows-service` wrapper does not expose a
+/// post-create config change, so go through raw `ChangeServiceConfigW`.
+fn set_start_type_demand() -> Result<(), String> {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::System::Services::{
+        ChangeServiceConfigW, CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT,
+        SERVICE_CHANGE_CONFIG, SERVICE_DEMAND_START, SERVICE_NO_CHANGE,
+    };
+    let name: Vec<u16> = SERVICE_NAME.encode_utf16().chain([0]).collect();
+    unsafe {
+        let scm = OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT);
+        if scm.is_null() {
+            return Err(std::io::Error::from_raw_os_error(GetLastError() as i32).to_string());
+        }
+        let svc = OpenServiceW(scm, name.as_ptr(), SERVICE_CHANGE_CONFIG);
+        if svc.is_null() {
+            let e = std::io::Error::from_raw_os_error(GetLastError() as i32);
+            CloseServiceHandle(scm);
+            return Err(e.to_string());
+        }
+        let ok = ChangeServiceConfigW(
+            svc,
+            SERVICE_NO_CHANGE,
+            SERVICE_DEMAND_START,
+            SERVICE_NO_CHANGE,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+        let err = GetLastError();
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        if ok == 0 {
+            return Err(std::io::Error::from_raw_os_error(err as i32).to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Schedules `path` for deletion on the next reboot — the self-delete idiom for
+/// the running GC binary and its directory (`MoveFileEx` + delay-until-reboot).
+fn schedule_delete_on_reboot(path: &std::path::Path) {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain([0])
+        .collect();
+    let ok = unsafe { MoveFileExW(wide.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) };
+    if ok == 0 {
+        let e = std::io::Error::from_raw_os_error(unsafe { GetLastError() } as i32);
+        println!(
+            "note: could not schedule {} for deletion ({e})",
+            path.display()
+        );
+    }
 }
 
 // ── Raw SERVICE_CONFIG_* the wrapper crate does not cover ───────────────
