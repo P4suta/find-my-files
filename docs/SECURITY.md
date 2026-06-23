@@ -17,6 +17,8 @@ API spec verification is in [RESEARCH.md](RESEARCH.md).
 | 6 | Local DoS (connection flood, handle exhaustion, flush spamming) | Pipe instance cap 8 (overflow rejects the connection + `pipe_connections_rejected`). Result handle cap 64/connection (LRU evict → STALE). Flush is not exposed over the pipe (only the service-internal periodic flush and flush on stop). Events use a bounded queue + drop to protect the USN thread. Note that only the authorized same user can even reach this (#1) |
 | 7 | Leak of the data file itself (.fmfidx contains every file name on every volume) | At install, apply a protective DACL to `%ProgramData%\find-my-files` (SYSTEM + Administrators; user read only on the logs subdirectory). Uninstall keeps data by default (shows guidance about leftovers); `--purge-data` deletes it |
 | 8 | Residual risk (accepted) | An authorized user can search the "name/path" of files invisible under their own ACL (a structural property of name-only indexing; the contents and the actual ACL cannot be read). Targets single-user machines primarily; multi-user authorization is a re-examination trigger in ADR-0017 |
+| 9 | Privilege escalation via the unelevated start/stop right (on-demand lifecycle, ADR-0027) | The *service-object* DACL grants the authorized user SID(s) only `SERVICE_START`/`SERVICE_STOP`/`SERVICE_QUERY_STATUS`+read (built by the unit-pinned `security::service_sddl`; never hand-rolled). It deliberately withholds `SERVICE_CHANGE_CONFIG`, `DELETE`, `WRITE_DAC`, `WRITE_OWNER` from a standard user — granting any would let a non-admin repoint this **LocalSystem** service's binary and run code as SYSTEM. SYSTEM/Administrators keep full control (SCM management + the SYSTEM-run GC's `DeleteService`). The pin asserts start/stop are present and the four escalation rights are absent |
+| 10 | Tampering with the stable SYSTEM binary (ADR-0027) | The on-demand service and the daily GC Scheduled Task run `%ProgramData%\find-my-files\fmf-service.exe` **as SYSTEM**; a standard-user-writable copy would be SYSTEM code execution. The binary is copied into the data root *after* it is hardened (threat 7: protected `D:P` SYSTEM+Administrators, object-inheriting), so the copy inherits a non-user-writable DACL. The GC task runs as `S-1-5-18` with `HighestAvailable` |
 
 ## Distribution Integrity (code signing)
 
@@ -36,6 +38,9 @@ Items that cannot be automated (require another user's token or another machine)
 - [ ] After OTS elevation (elevated with a different admin account), the everyday user can still connect to the pipe non-elevated (`--owner-sid` propagation)
 - [ ] "Re-register" to a running service → restart reflects `authorized_sids`, and a previously-rejected user can connect (`pipe client token rejected` stops)
 - [ ] Leftovers after `fmf-service uninstall` match the guidance / are removed by `--purge-data`
+- [ ] (ADR-0027) `sc qc fmf-engine` shows `DEMAND_START` (not AUTO_START); `sc sdshow fmf-engine` grants the user SID start/stop/query only — no `DC`/`SD`/`WD`/`WO`
+- [ ] (ADR-0027) `%ProgramData%\find-my-files\fmf-service.exe` is **not** writable by a standard user (icacls: SYSTEM + Administrators only); a non-authorized user cannot start/stop the service
+- [ ] (ADR-0027) App launch starts the stopped service **without a UAC prompt**; closing the app self-stops it after `idle_stop_secs`; `fmf-service gc` with an aged `last_use` removes service + Scheduled Task + data
 
 Implementation record:
 
