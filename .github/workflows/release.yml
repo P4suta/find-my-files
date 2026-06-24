@@ -168,7 +168,11 @@ jobs:
       # Zip + checksum the (now-signed) bundle. Runs after signing so the zip
       # holds signed binaries. Logic + output names live in xtask (just package):
       # find-my-files-v<version>-win-x64.zip + SHA256SUMS.txt under build/package/.
+      # Release-only: `just package` requires a vX.Y.Z TAG, and the zip is only
+      # consumed by the gated attest/release steps - so a publish=false signing
+      # test (TAG=main) stops cleanly after Verify.
       - name: Package (zip + checksums)
+        if: env.PUBLISH == 'true'
         run: just package ${{ env.TAG }}
 
       # Build provenance + SBOM attestations for the published artifacts. Keyless
