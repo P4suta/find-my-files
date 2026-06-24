@@ -127,6 +127,12 @@ jobs:
           dir_path: ${{ github.workspace }}\sign-stage
           override: "true"
           environment_name: PROD
+          # Our SSL.com account requires a pre-signing malware scan; with this
+          # off, batch_sign sends only hashes and SSL.com rejects with "hash
+          # needs to be scanned first". true makes the Action scan the files
+          # inline before signing (the maintainer's documented fix). Keeps the
+          # scan as a safety gate; would need to be false only for MSIX inputs.
+          malware_block: "true"
 
       - name: Copy signed binaries back into the bundle
         if: env.HAVE_SIGNING == 'true'

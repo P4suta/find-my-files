@@ -92,6 +92,10 @@ others' copyrighted works).
 
 ## Troubleshooting
 
+- **Sign step fails with `hash needs to be scanned first before submitting for signing`**: the SSL.com account has
+  the pre-signing malware blocker enabled, so `batch_sign` cannot sign hashes that were never scanned. The fix is
+  already wired in `release.yml`: `malware_block: "true"` makes the Action scan the files inline before signing.
+  (If you ever sign MSIX inputs, SSL.com requires the scan be **disabled** for those — flip it back to `false`.)
 - **Verify signatures fails**: `batch_sign` may have written the signed files to a separate folder instead of
   `override`. Check the output location in the Action log and, if needed, specify `output_path` in the signing step
   of `release.yml` so the copy source for "Copy signed binaries back" matches it.
