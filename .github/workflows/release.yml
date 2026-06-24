@@ -104,15 +104,16 @@ jobs:
       # SmartScreen judges, the rest are our Rust binaries. The bundled .NET /
       # WindowsAppSDK runtime DLLs are already Microsoft-signed - re-signing them
       # would waste eSigner quota and claim authorship we don't have. So we stage
-      # just our four files, batch-sign them with a single OTP, copy them back,
-      # then hard-verify. eSigner is cloud HSM-backed: no token reaches the runner;
-      # the TOTP secret drives unattended auth.
+      # just our four files, batch-sign them into a separate `signed/` dir, copy
+      # them back, then hard-verify. eSigner is cloud HSM-backed: no token reaches
+      # the runner; the TOTP secret drives unattended auth.
       - name: Stage first-party binaries for signing
         if: env.HAVE_SIGNING == 'true'
         shell: pwsh
         run: |
           $bins = 'FindMyFiles.exe', 'fmf.exe', 'fmf-service.exe', 'fmf_engine.dll'
           New-Item -ItemType Directory -Force sign-stage | Out-Null
+          New-Item -ItemType Directory -Force signed | Out-Null
           $bins | ForEach-Object { Copy-Item "build/dist/FindMyFiles/$_" sign-stage/ }
 
       - name: Sign staged binaries (SSL.com eSigner)
@@ -125,7 +126,11 @@ jobs:
           credential_id: ${{ secrets.CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
           dir_path: ${{ github.workspace }}\sign-stage
-          override: "true"
+          # Write signed files to a dedicated dir. batch_sign does NOT honor
+          # `override` (the Action never forwards -override), so without an
+          # explicit output_path the signed files land elsewhere and copy-back
+          # would grab the unsigned originals (-> Verify "NotSigned").
+          output_path: ${{ github.workspace }}\signed
           environment_name: PROD
           # Our SSL.com account requires a pre-signing malware scan; with this
           # off, batch_sign sends only hashes and SSL.com rejects with "hash
@@ -137,7 +142,7 @@ jobs:
       - name: Copy signed binaries back into the bundle
         if: env.HAVE_SIGNING == 'true'
         shell: pwsh
-        run: Copy-Item sign-stage/* build/dist/FindMyFiles/ -Force
+        run: Copy-Item signed/* build/dist/FindMyFiles/ -Force
 
       # Never ship a "signed" build that is silently unsigned: once signing was
       # requested, fail the release if any of our binaries lacks a valid
