@@ -116,9 +116,9 @@ public sealed partial class MainPage : Page
         }
     }
 
-    // Settings (gear) flyout → "show/hide diagnostics" toggles the diagnostics panel.
+    // Settings (gear) flyout → "show/hide diagnostics" toggles the diagnostics window.
     private void PerfPanel_MenuClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
-        ViewModel.Perf.Toggle();
+        App.ToggleDiagnostics(ViewModel.Perf);
 
     // Settings (gear) flyout → "Manage service…". Calls the shared entry point
     // (which contains the single-dialog guard + failure notification).

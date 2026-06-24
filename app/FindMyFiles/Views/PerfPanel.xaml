@@ -3,82 +3,271 @@
     x:Class="FindMyFiles.Views.PerfPanel"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:conv="using:FindMyFiles.Converters"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:eng="using:FindMyFiles.Engine"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <!-- Performance panel (F12). Rendering of the stage bar / sparkline
-         happens in code-behind — it is diagnostic chrome, not app data.
-         Solid (non-acrylic) background so the dense diagnostic text stays
-         legible — over the window Acrylic it was washing out. -->
-    <Border
-        Padding="16,8"
-        AutomationProperties.AutomationId="PerfPanel"
-        Background="{ThemeResource SolidBackgroundFillColorBaseAltBrush}"
-        BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
-        BorderThickness="0,1,0,0">
-        <Grid ColumnSpacing="24">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            <StackPanel Grid.Column="0" Spacing="4">
-                <TextBlock
-                    x:Name="PerfHeadline"
-                    FontFamily="Consolas"
-                    Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                <Grid x:Name="StageBar" Height="14" />
-                <TextBlock
-                    x:Name="StageLegend"
-                    FontFamily="Consolas"
-                    FontSize="11"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                <Grid Height="44" Margin="0,4,0,0">
-                    <Polyline
-                        x:Name="Spark"
-                        Stroke="{ThemeResource AccentFillColorDefaultBrush}"
-                        StrokeThickness="1.5" />
-                </Grid>
-                <TextBlock
-                    x:Name="HistText"
-                    FontFamily="Consolas"
-                    FontSize="11"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                <TextBlock
-                    x:Name="ErrorsText"
-                    AutomationProperties.AutomationId="PerfErrors"
-                    FontFamily="Consolas"
-                    FontSize="11"
-                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                    TextWrapping="Wrap" />
-            </StackPanel>
-            <StackPanel Grid.Column="1" MinWidth="280" Spacing="4">
-                <TextBlock
-                    x:Name="VolumesText"
-                    FontFamily="Consolas"
-                    FontSize="11"
-                    Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                <TextBlock
-                    x:Name="UsnFeed"
-                    FontFamily="Consolas"
-                    FontSize="11"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                <TextBlock
-                    x:Name="TransportText"
-                    FontFamily="Consolas"
-                    FontSize="11"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                <TextBlock
-                    x:Name="CountersText"
-                    FontFamily="Consolas"
-                    FontSize="11"
-                    Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+    <UserControl.Resources>
+        <!--  One card chrome for every diagnostics section: a self-drawn Fluent
+              card (no SettingsControls package) that floats on the window Mica.  -->
+        <Style x:Key="DiagCardStyle" TargetType="Border">
+            <Setter Property="Padding" Value="16" />
+            <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="{ThemeResource OverlayCornerRadius}" />
+        </Style>
+    </UserControl.Resources>
+
+    <!--  Diagnostics page (hosted in DiagnosticsWindow). The root is transparent
+          so the window Mica shows through and each section reads as a Fluent card
+          floating on the material; the dense diagnostic text stays legible because
+          it always sits inside a card, not on bare Mica. The stage bar + sparkline
+          are drawn imperatively in code-behind (x:Name targets) — diagnostic
+          chrome, not app data. Everything else is declarative x:Bind through
+          DiagFormat (pure, tested). ThemeResource brushes only. Sections stack
+          vertically inside a ScrollViewer so the data fits a tall, narrow window.  -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="24" Spacing="16">
+
+            <!--  Header row: page title + copy button. The PerfPanel automation hook
+                  rides this title TextBlock (a layout Grid has no automation peer, and
+                  the title is always present when the panel is open, so wait-for
+                  'PerfPanel' resolves exactly to "panel shown"). It also labels the
+                  last-query card directly below it.  -->
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel
+                    VerticalAlignment="Center"
+                    Orientation="Horizontal"
+                    Spacing="8">
+                    <FontIcon
+                        VerticalAlignment="Center"
+                        FontSize="16"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Glyph="&#xE946;" />
+                    <TextBlock
+                        x:Uid="DiagLastQueryHeader"
+                        AutomationProperties.AutomationId="PerfPanel"
+                        VerticalAlignment="Center"
+                        Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                </StackPanel>
                 <Button
+                    Grid.Column="1"
                     x:Uid="CopyDiag"
                     AutomationProperties.AutomationId="CopyDiag"
-                    Click="CopyDiag_Click"
-                    FontSize="11" />
-            </StackPanel>
-        </Grid>
-    </Border>
+                    Click="CopyDiag_Click" />
+            </Grid>
+
+            <!--  Last-query card: query line, metric tiles, stage bar, legend +
+                  percentiles, sparkline.  -->
+            <Border Style="{StaticResource DiagCardStyle}">
+                <StackPanel Spacing="8">
+                    <!--  Query in a subtle control-scale inset: wraps to a few lines
+                          then truncates with an ellipsis, full compiled query on hover.  -->
+                    <Border
+                        Padding="12,8"
+                        Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}"
+                        CornerRadius="{ThemeResource ControlCornerRadius}">
+                        <TextBlock
+                            MaxLines="3"
+                            Text="{x:Bind conv:DiagFormat.Query(ViewModel.LastTrace), Mode=OneWay}"
+                            TextTrimming="CharacterEllipsis"
+                            TextWrapping="Wrap"
+                            ToolTipService.ToolTip="{x:Bind conv:DiagFormat.Query(ViewModel.LastTrace), Mode=OneWay}" />
+                    </Border>
+                    <!--  Metric tiles: value (BodyStrong) over a small Caption label.  -->
+                    <StackPanel Orientation="Horizontal" Spacing="32">
+                        <StackPanel>
+                            <TextBlock
+                                Style="{ThemeResource BodyStrongTextBlockStyle}"
+                                Text="{x:Bind conv:DiagFormat.TotalMs(ViewModel.LastTrace), Mode=OneWay}" />
+                            <TextBlock
+                                x:Uid="DiagStatTime"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Style="{ThemeResource CaptionTextBlockStyle}" />
+                        </StackPanel>
+                        <StackPanel>
+                            <TextBlock
+                                Style="{ThemeResource BodyStrongTextBlockStyle}"
+                                Text="{x:Bind conv:DiagFormat.Hits(ViewModel.LastTrace), Mode=OneWay}" />
+                            <TextBlock
+                                x:Uid="DiagStatHits"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Style="{ThemeResource CaptionTextBlockStyle}" />
+                        </StackPanel>
+                        <StackPanel>
+                            <TextBlock
+                                Style="{ThemeResource BodyStrongTextBlockStyle}"
+                                Text="{x:Bind conv:DiagFormat.Scanned(ViewModel.LastTrace), Mode=OneWay}" />
+                            <TextBlock
+                                x:Uid="DiagStatScanned"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Style="{ThemeResource CaptionTextBlockStyle}" />
+                        </StackPanel>
+                        <StackPanel>
+                            <TextBlock
+                                Style="{ThemeResource BodyStrongTextBlockStyle}"
+                                Text="{x:Bind conv:DiagFormat.Driver(ViewModel.LastTrace), Mode=OneWay}" />
+                            <TextBlock
+                                x:Uid="DiagStatDriver"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Style="{ThemeResource CaptionTextBlockStyle}" />
+                        </StackPanel>
+                    </StackPanel>
+                    <Grid x:Name="StageBar" Height="8" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            x:Name="StageLegend"
+                            Grid.Column="0"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Style="{ThemeResource CaptionTextBlockStyle}"
+                            TextTrimming="CharacterEllipsis" />
+                        <TextBlock
+                            Grid.Column="1"
+                            Margin="12,0,0,0"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Style="{ThemeResource CaptionTextBlockStyle}"
+                            Text="{x:Bind conv:DiagFormat.Percentiles(ViewModel.Stats), Mode=OneWay}" />
+                    </Grid>
+                    <!--  Sparkline host: must stay horizontally stretched and Height 40
+                          (RenderPerf reads Spark.ActualWidth and hardcodes H=40).  -->
+                    <Grid Height="40">
+                        <Polyline
+                            x:Name="Spark"
+                            Stroke="{ThemeResource AccentFillColorDefaultBrush}"
+                            StrokeThickness="1.5" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!--  Storage card: per-volume index stats + recent USN feed.  -->
+            <Border Style="{StaticResource DiagCardStyle}">
+                <StackPanel Spacing="6">
+                    <TextBlock
+                        x:Uid="DiagStorageHeader"
+                        Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.Stats.Indexes, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="eng:IndexStatsData">
+                                <Grid Margin="0,2,0,0" ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="28" />
+                                        <ColumnDefinition Width="96" />
+                                        <ColumnDefinition Width="76" />
+                                        <ColumnDefinition Width="84" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock
+                                        Grid.Column="0"
+                                        Style="{ThemeResource CaptionTextBlockStyle}"
+                                        Text="{x:Bind Volume}" />
+                                    <TextBlock
+                                        Grid.Column="1"
+                                        HorizontalAlignment="Right"
+                                        Style="{ThemeResource CaptionTextBlockStyle}"
+                                        Text="{x:Bind conv:DiagFormat.Count(LiveEntries)}" />
+                                    <TextBlock
+                                        Grid.Column="2"
+                                        HorizontalAlignment="Right"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Style="{ThemeResource CaptionTextBlockStyle}"
+                                        Text="{x:Bind conv:DiagFormat.Mb(TotalBytes)}" />
+                                    <TextBlock
+                                        Grid.Column="3"
+                                        HorizontalAlignment="Right"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Style="{ThemeResource CaptionTextBlockStyle}"
+                                        Text="{x:Bind conv:DiagFormat.BytesPer(BytesPerEntry)}" />
+                                    <TextBlock
+                                        Grid.Column="4"
+                                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                        Style="{ThemeResource CaptionTextBlockStyle}"
+                                        Text="{x:Bind conv:DiagFormat.Gen(ContentGeneration)}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.RecentUsnTail, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="eng:UsnTraceData">
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    Style="{ThemeResource CaptionTextBlockStyle}"
+                                    Text="{x:Bind conv:DiagFormat.Usn(Volume, Records, Upserted, Deleted, StatUpdated, ApplyUs)}"
+                                    TextTrimming="CharacterEllipsis" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <!--  Transport card: engine mode + pipe detail.  -->
+            <Border Style="{StaticResource DiagCardStyle}">
+                <StackPanel Spacing="4">
+                    <TextBlock
+                        x:Uid="DiagTransportHeader"
+                        Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <TextBlock
+                        Style="{ThemeResource CaptionTextBlockStyle}"
+                        Text="{x:Bind ViewModel.EngineMode, Mode=OneWay}" />
+                    <TextBlock
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Style="{ThemeResource CaptionTextBlockStyle}"
+                        Text="{x:Bind conv:DiagFormat.Transport(ViewModel.Stats), Mode=OneWay}"
+                        TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+            <!--  Health: an always-open InfoBar. Severity (Informational before the
+                  first poll, Success when clean, Warning on degradation counters,
+                  Error on recent WARN+ events) carries the state and its own glyph;
+                  the content carries the detail. Not closable — permanent status.  -->
+            <InfoBar
+                x:Uid="DiagHealthHeaderBar"
+                IsClosable="False"
+                IsOpen="True"
+                Severity="{x:Bind conv:DiagFormat.HealthSeverity(ViewModel.Stats), Mode=OneWay}">
+                <InfoBar.Content>
+                    <StackPanel Margin="0,0,0,12" Spacing="6">
+                        <TextBlock
+                            x:Uid="DiagHealthy"
+                            Style="{ThemeResource CaptionTextBlockStyle}"
+                            Visibility="{x:Bind conv:DiagFormat.HealthyVis(ViewModel.Stats), Mode=OneWay}" />
+                        <TextBlock
+                            Style="{ThemeResource CaptionTextBlockStyle}"
+                            Text="{x:Bind conv:DiagFormat.Counters(ViewModel.Stats), Mode=OneWay}"
+                            TextWrapping="Wrap"
+                            Visibility="{x:Bind conv:DiagFormat.CountersVis(ViewModel.Stats), Mode=OneWay}" />
+                        <ScrollViewer
+                            MaxHeight="64"
+                            VerticalScrollBarVisibility="Auto"
+                            Visibility="{x:Bind conv:DiagFormat.HasErrorsVis(ViewModel.Stats), Mode=OneWay}">
+                            <ItemsControl
+                                AutomationProperties.AutomationId="PerfErrors"
+                                ItemsSource="{x:Bind ViewModel.RecentErrorsTail, Mode=OneWay}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="eng:ErrorEventData">
+                                        <TextBlock
+                                            Style="{ThemeResource CaptionTextBlockStyle}"
+                                            Text="{x:Bind conv:DiagFormat.Error(UptimeMs, Severity, Area, Volume, Message)}"
+                                            TextWrapping="Wrap" />
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </StackPanel>
+                </InfoBar.Content>
+            </InfoBar>
+        </StackPanel>
+    </ScrollViewer>
 </UserControl>

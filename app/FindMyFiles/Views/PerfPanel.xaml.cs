@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using FindMyFiles.Engine;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
 using Microsoft.UI.Xaml;
@@ -8,13 +7,13 @@ using Microsoft.UI.Xaml.Controls;
 namespace FindMyFiles.Views;
 
 /// <summary>
-/// The F12 performance panel: stage bar (proportional theme-brush segments),
-/// latency sparkline, volume/USN/error text blocks and the one-click
-/// diagnostics dump. Rendered imperatively from
-/// <see cref="PerfPanelViewModel.PerfDataChanged"/> — it is diagnostic
-/// chrome, not app data. The host supplies <see cref="ViewModel"/> via
-/// x:Bind; the 1 Hz stats poll runs only while the panel is open.
-/// UI thread only.
+/// The F12 diagnostics panel. The stage bar (proportional theme-brush
+/// segments) and the latency sparkline are drawn imperatively from
+/// <see cref="PerfPanelViewModel.PerfDataChanged"/> — diagnostic chrome, not
+/// app data. Everything else (headline, volumes, USN, transport, errors,
+/// counters) is declarative x:Bind through DiagFormat. The host supplies
+/// <see cref="ViewModel"/> via x:Bind; the 1 Hz stats poll runs only while the
+/// panel is open. UI thread only.
 /// </summary>
 // View code-behind: imperative F12 rendering, not unit-tested (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
@@ -61,12 +60,14 @@ public sealed partial class PerfPanel : UserControl
         {
             old.PerfDataChanged -= RenderPerf;
             old.PropertyChanged -= OnViewModelPropertyChanged;
+            _statsTimer.Stop();
         }
 
         if (e.NewValue is PerfPanelViewModel vm)
         {
             vm.PerfDataChanged += RenderPerf;
             vm.PropertyChanged += OnViewModelPropertyChanged;
+            SyncTimer(vm);
         }
     }
 
@@ -74,15 +75,26 @@ public sealed partial class PerfPanel : UserControl
     {
         if (string.Equals(e.PropertyName, nameof(PerfPanelViewModel.IsOpen), StringComparison.Ordinal) && ViewModel is { } vm)
         {
-            if (vm.IsOpen)
-            {
-                _statsTimer.Start();
-                vm.RefreshStatsAsync().Forget("perf.stats");
-            }
-            else
-            {
-                _statsTimer.Stop();
-            }
+            SyncTimer(vm);
+        }
+    }
+
+    /// <summary>
+    /// Reconciles the 1 Hz stats poll with <see cref="PerfPanelViewModel.IsOpen"/>.
+    /// Called both on `ViewModel` assignment and on `IsOpen` change so the poll
+    /// starts regardless of whether the DP is set before or after the panel opens
+    /// (<c>Start</c> is idempotent). An immediate refresh primes the first frame.
+    /// </summary>
+    private void SyncTimer(PerfPanelViewModel vm)
+    {
+        if (vm.IsOpen)
+        {
+            _statsTimer.Start();
+            vm.RefreshStatsAsync().Forget("perf.stats");
+        }
+        else
+        {
+            _statsTimer.Stop();
         }
     }
 
@@ -106,8 +118,9 @@ public sealed partial class PerfPanel : UserControl
     }
 
     /// <summary>
-    /// Diagnostic chrome rendered imperatively: stage bar (proportional
-    /// theme-brush segments), latency sparkline, volume/USN text blocks.
+    /// Diagnostic chrome rendered imperatively: the stage bar (proportional
+    /// theme-brush segments) and the latency sparkline. All textual data is
+    /// declarative x:Bind, not touched here.
     /// </summary>
     private void RenderPerf()
     {
@@ -119,10 +132,6 @@ public sealed partial class PerfPanel : UserControl
         var t = vm.LastTrace;
         if (t is not null)
         {
-            PerfHeadline.Text =
-                $"{t.Query switch { "" => "(all)", var q => q }}  —  {t.TotalUs / 1000.0:F2} ms" +
-                $"  driver={t.Driver}  hits={t.Hits:N0}  scanned={t.EntriesScanned:N0}";
-
             (string Name, ulong Us, string BrushKey)[] stages =
             [
                 ("parse", t.ParseUs + t.CompileUs, "AccentFillColorTertiaryBrush"),
@@ -179,44 +188,6 @@ public sealed partial class PerfPanel : UserControl
 
             Spark.Points = points;
         }
-
-        var stats = vm.Stats;
-        if (stats is not null)
-        {
-            HistText.Text = $"p50 {stats.P50Us / 1000.0:F2}ms   p99 {stats.P99Us / 1000.0:F2}ms";
-            TransportText.Text = $"Engine: {vm.EngineMode}"
-                + (stats.Transport is { } tr
-                    ? $"\nTransport: {tr.State} / reconnects {tr.Reconnects}"
-                        + $" / page RTT EWMA {tr.PageRttEwmaUs:F0}µs / server pid {tr.ServerPid}"
-                    : string.Empty);
-            VolumesText.Text = string.Join("\n", stats.Indexes.Select(v =>
-                $"{v.Volume}  {v.LiveEntries:N0} 件  {v.TotalBytes / (1024.0 * 1024.0):F0} MB" +
-                $"  ({v.BytesPerEntry:F0} B/件)  gen {v.ContentGeneration}"));
-            UsnFeed.Text = string.Join("\n", stats.RecentUsn.TakeLast(6).Select(u =>
-                $"{u.Volume} {u.Records}rec → +{u.Upserted} -{u.Deleted} ~{u.StatUpdated}" +
-                $" ({u.ApplyUs}µs)"));
-
-            // Degradations: recent WARN+/panic events and nonzero counters.
-            ErrorsText.Text = string.Join("\n", stats.RecentErrors.TakeLast(8).Select(er =>
-                $"[{er.UptimeMs / 1000}s] {er.Severity.ToUpperInvariant()} {er.Area}" +
-                $"{(string.IsNullOrEmpty(er.Volume) ? string.Empty : $" ({er.Volume})")}: " +
-                $"{FirstLine(er.Message)}"));
-
-            // Reflect over the generated CountersData (EngineContract.g.cs)
-            // so a counter added to the contract registry shows up here with
-            // zero UI edits — the hand-written list this replaced silently
-            // missed 8 of 18 counters.
-            var c = stats.Counters;
-            var nonzero = CounterProps
-                .Select(p => (
-                    Name: System.Text.Json.JsonNamingPolicy.SnakeCaseLower.ConvertName(p.Name),
-                    V: (ulong)p.GetValue(c)!))
-                .Where(x => x.V > 0)
-                .ToList();
-            CountersText.Text = nonzero.Count == 0
-                ? string.Empty
-                : "劣化カウンタ: " + string.Join("  ", nonzero.Select(x => $"{x.Name}={x.V}"));
-        }
     }
 
     private static readonly System.Text.Json.JsonSerializerOptions DiagJsonOptions =
@@ -224,15 +195,4 @@ public sealed partial class PerfPanel : UserControl
         {
             WriteIndented = true,
         };
-
-    private static readonly System.Reflection.PropertyInfo[] CounterProps =
-        [.. typeof(CountersData).GetProperties()
-            .Where(p => p.PropertyType == typeof(ulong))];
-
-    private static string FirstLine(string s)
-    {
-        var i = s.IndexOf('\n', StringComparison.Ordinal);
-        var line = i < 0 ? s : s[..i];
-        return line.Length > 120 ? line[..120] + "…" : line;
-    }
 }

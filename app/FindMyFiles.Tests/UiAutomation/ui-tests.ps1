@@ -328,21 +328,51 @@ function Invoke-ScrollPhase {
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Phase D — diagnostics: DiagToggle opens the perf panel
-#   DiagToggle is the MenuFlyoutItem in the OptionsButton flyout that toggles
-#   ViewModel.Perf.IsOpen; PerfPanel (AutomationId=PerfPanel) becomes visible.
+#   DiagToggle is the MenuFlyoutItem in the MAIN window's OptionsButton (gear)
+#   flyout. It calls App.ToggleDiagnostics, which now opens PerfPanel
+#   (AutomationId=PerfPanel) in a SEPARATE top-level DiagnosticsWindow rather
+#   than inside the main window. So the gear/menu invokes still target the main
+#   window (-a $AppPid), but the PerfPanel assertion + screenshot must target the
+#   new diagnostics window by its HWND. We discover that window with
+#   `list-windows --json` and pick the one whose title is neither the main
+#   window ('FindMyFiles') nor the transient menu/flyout host ('PopupHost').
 # ──────────────────────────────────────────────────────────────────────────────
 function Invoke-DiagPhase {
     Write-Host "`n=== Phase D: diagnostics panel ===" -ForegroundColor Cyan
 
+    # The gear menu lives in the MAIN window, so DiagToggle still invokes there.
     Test-UI 'Diag: open the perf panel via DiagToggle' {
         Invoke-Ui invoke 'OptionsButton' -a $AppPid | Out-Null
         Start-Sleep -Milliseconds 400
         Invoke-Ui invoke 'DiagToggle' -a $AppPid
     }
-    Test-UI 'Diag: PerfPanel is shown' {
-        Invoke-Ui wait-for 'PerfPanel' -a $AppPid -t 3000
+
+    # The panel now lives in its own top-level window. Enumerate the process's
+    # windows and pick the one that is neither the main window ('FindMyFiles') nor
+    # a transient menu/flyout host ('PopupHost'); that is the DiagnosticsWindow.
+    $script:diagHwnd = $null
+    Test-UI 'Diag: diagnostics window opened as a separate top-level window' {
+        # Give the new window a moment to materialise in the automation tree.
+        Start-Sleep -Milliseconds 600
+        $windows = @(Invoke-Ui list-windows -a $AppPid --json 2>$null | ConvertFrom-Json)
+        $diag = $windows | Where-Object {
+            $_.title -ne 'FindMyFiles' -and $_.title -ne 'PopupHost'
+        } | Select-Object -First 1
+        if ($null -eq $diag) {
+            throw "no separate diagnostics window found (titles: $(($windows | ForEach-Object { $_.title }) -join ', '))"
+        }
+        $script:diagHwnd = $diag.hwnd
+        $global:LASTEXITCODE = 0
     }
-    Invoke-Ui screenshot -a $AppPid -o (Join-Path $OutDir 'D-perfpanel.png') 2>$null
+
+    # PerfPanel must be present INSIDE the diagnostics window, not the main one.
+    Test-UI 'Diag: PerfPanel is shown in the diagnostics window' {
+        if ($null -eq $script:diagHwnd) { throw 'no diagnostics window HWND captured' }
+        Invoke-Ui wait-for 'PerfPanel' -w $script:diagHwnd -t 3000
+    }
+    if ($script:diagHwnd) {
+        Invoke-Ui screenshot -w $script:diagHwnd -o (Join-Path $OutDir 'D-perfpanel.png') 2>$null
+    }
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
