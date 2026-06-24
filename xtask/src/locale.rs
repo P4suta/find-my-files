@@ -3,7 +3,9 @@
 //! `WinAppSDK` self-contained publish drops ~85 locale resource dirs; the bundle
 //! keeps only the languages the app actually ships (lookups fall back to the
 //! neutral resources when a locale dir is absent). This is the pure decision
-//! the publish step applies to each top-level dir under dist/FindMyFiles.
+//! the publish step applies to each top-level dir under the published app
+//! payload (`build/dist/FindMyFiles/app` — the bundle root holds only the
+//! launcher + README).
 
 use regex::Regex;
 use std::sync::OnceLock;

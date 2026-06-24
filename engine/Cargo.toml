@@ -7,6 +7,7 @@ members = [
   "crates/fmf-cli",
   "crates/fmf-proto",
   "crates/fmf-service",
+  "crates/fmf-launcher",
 ]
 
 [workspace.package]

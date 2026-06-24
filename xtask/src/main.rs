@@ -43,8 +43,9 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Assemble the distributable bundle in dist/FindMyFiles (publish the app,
-    /// prune locales, copy the engine binaries, then self-verify the bundle).
+    /// Assemble the distributable bundle in dist/FindMyFiles (publish the app
+    /// into app/, prune locales, copy the engine binaries, add the root launcher
+    /// + README, then self-verify the bundle).
     Publish {
         /// Skip the in-build cargo step (CI: engine binaries are prebuilt).
         #[arg(long, action = clap::ArgAction::Set, default_value_t = false)]

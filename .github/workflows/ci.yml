@@ -176,8 +176,8 @@ jobs:
         working-directory: engine
         env:
           RUSTDOCFLAGS: "-D warnings"
-      - name: build engine dll + service + cli (release, for the app + artifacts)
-        run: cargo build --release -p fmf-ffi -p fmf-service -p fmf-cli
+      - name: build engine dll + service + cli + launcher (release, for the app + artifacts)
+        run: cargo build --release -p fmf-ffi -p fmf-service -p fmf-cli -p fmf-launcher
         working-directory: engine
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -186,6 +186,7 @@ jobs:
             build/engine/release/fmf_engine.dll
             build/engine/release/fmf-service.exe
             build/engine/release/fmf.exe
+            build/engine/release/fmf-launcher.exe
           if-no-files-found: error
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

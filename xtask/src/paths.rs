@@ -25,9 +25,19 @@ pub fn engine_release_dir() -> PathBuf {
     build_root().join("engine").join("release")
 }
 
-/// The distributable bundle directory assembled by `publish`.
+/// The distributable bundle directory assembled by `publish` — the zip root.
+/// Holds only the native launcher (`FindMyFiles.exe`) + `README.txt`; the
+/// self-contained app lives one level down in [`app_dir`].
 pub fn dist_dir() -> PathBuf {
     build_root().join("dist").join("FindMyFiles")
+}
+
+/// The self-contained app payload, one level under the bundle root. The ~100
+/// publish files (apphost, runtime DLLs, engine binaries) stay co-located here
+/// because the .NET apphost resolves its DLLs / `*.deps.json` from its own
+/// directory — so only the launcher + README can sit at the root.
+pub fn app_dir() -> PathBuf {
+    dist_dir().join("app")
 }
 
 /// Where `package` drops the release zip + `SHA256SUMS.txt`.
