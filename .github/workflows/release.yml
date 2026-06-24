@@ -227,10 +227,16 @@ jobs:
           $thumb = $cert.Thumbprint
           Write-Host "signing with thumbprint $thumb (HasPrivateKey=$($cert.HasPrivateKey))"
 
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+          # Prefer the x86 signtool: eSigner CKA exposes the signing key through a
+          # 32-bit KSP (eSignerKSP) that a 64-bit signtool cannot load - it then
+          # reports "No certificates were found that met all the given criteria"
+          # even though the cert is in the store with HasPrivateKey=True (SSL.com
+          # documents using x86). x86 verifies fine too. Fall back to x64 only if
+          # x86 is somehow absent.
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x86\signtool.exe" |
             Sort-Object FullName | Select-Object -Last 1
           if (-not $signtool) {
-            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x86\signtool.exe" |
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
               Sort-Object FullName | Select-Object -Last 1
           }
           if (-not $signtool) { throw 'signtool.exe not found on runner' }
