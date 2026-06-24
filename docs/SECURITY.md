@@ -23,11 +23,26 @@ API spec verification is in [RESEARCH.md](RESEARCH.md).
 ## Distribution Integrity (code signing)
 
 Authenticode signing of the distributed binaries is done with SSL.com eSigner (individual IV). It is **active**: an IV
-certificate (`CN=Yasunobu Sakashita`) was obtained 2026-06-24 and the eSigner Secrets are registered, so `release.yml`
-signs the binaries from each tag. The wiring stays non-blocking (an unsigned build emits a `::warning::` rather than
-failing if the Secrets are ever absent). The acquisition/renewal steps are in [SIGNING.md](SIGNING.md); the rationale
-for the choice is in [ADR-0020](adr/0020-code-signing-provider.md). Signing is limited to the tag-driven `release.yml`
-(the `ci.yml` dev artifacts are not signed).
+certificate (`CN=Yasunobu Sakashita`) was obtained 2026-06-24, so `release.yml` signs the binaries from each tag using
+the standard `signtool` driven by the eSigner CKA (ADR-0029). The wiring stays non-blocking (an unsigned build emits a
+`::warning::` rather than failing if the secrets are ever absent). The acquisition/renewal steps are in
+[SIGNING.md](SIGNING.md); the provider/cert rationale is in [ADR-0020](adr/0020-code-signing-provider.md) and the
+CKA + `signtool` mechanism in [ADR-0029](adr/0029-ci-signing-cka-pipeline.md). Signing is limited to the tag-driven
+`release.yml` (the `ci.yml` dev artifacts are not signed).
+
+Hardening of the signing path (ADR-0029):
+
+- **Credential isolation by job split.** `release.yml` runs `build`→`sign`→`publish`; only `sign` carries the signing
+  secrets, on a read-only token. The build surface (toolchain + SBOM tools fetched at release time) never receives the
+  credentials, and `publish`'s write/attestation token never coexists with them.
+- **Approval-gated environment.** The eSigner secrets are **environment secrets** on an approval-gated `release`
+  environment (required reviewer; deployment refs restricted to `v*.*.*` + `main`), not repo-level — so a
+  `workflow_dispatch` from an arbitrary ref, or a compromised workflow, cannot mint signatures unattended.
+- **Hard verification.** Once signing is requested, every PE must pass `signtool verify /pa /tw` (non-zero exit on an
+  invalid chain **or a missing RFC 3161 timestamp**) and a signer-subject assertion (`CN=Yasunobu Sakashita`), so a
+  silently-unsigned, untimestamped, or wrong-cert build fails the release.
+- **Pinned tooling.** All Actions are SHA-pinned; the CKA installer (downloaded at runtime, not an Action) is gated on a
+  committed SHA-256 before it runs.
 
 ## Manual Verification Checklist (run once before each release; record the result and date here)
 
@@ -43,6 +58,8 @@ Items that cannot be automated (require another user's token or another machine)
 - [ ] (ADR-0027) `sc qc fmf-engine` shows `DEMAND_START` (not AUTO_START); `sc sdshow fmf-engine` grants the user SID start/stop/query only — no `DC`/`SD`/`WD`/`WO`
 - [ ] (ADR-0027) `%ProgramData%\find-my-files\fmf-service.exe` is **not** writable by a standard user (icacls: SYSTEM + Administrators only); a non-authorized user cannot start/stop the service
 - [ ] (ADR-0027) App launch starts the stopped service **without a UAC prompt**; closing the app self-stops it after `idle_stop_secs`; `fmf-service gc` with an aged `last_use` removes service + Scheduled Task + data
+- [ ] (ADR-0029) The `sign` job **pauses for reviewer approval** before any signing step runs (the `release` environment gate); the eSigner secrets are environment secrets, not repo-level (Settings → Environments → `release`)
+- [ ] (ADR-0029) On a `publish=false` smoke test, **Verify signatures** prints `chain+timestamp+signer OK` for all five PEs and the run ends cleanly after `sign`; a downloaded release zip passes `signtool verify /pa /tw /v` (timestamped) with subject `CN=Yasunobu Sakashita`
 
 Implementation record:
 

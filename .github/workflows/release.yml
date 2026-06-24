@@ -1,21 +1,32 @@
-# Tag-driven build/sign/publish. Pushing a vX.Y.Z tag (or running this workflow
-# manually with a tag) builds the distributable bundle (`just publish`),
-# Authenticode-signs our own PE binaries with SSL.com eSigner (cloud HSM) when
-# signing secrets are present, then zips + checksums + attaches to a GitHub
-# Release whose notes are auto-generated from the commits since the last tag.
-# It also emits CycloneDX SBOMs (engine + app) and keyless build-provenance +
-# SBOM attestations (Sigstore via the OIDC GITHUB_TOKEN - no stored secrets);
-# verify a download with `gh attestation verify <zip> --repo P4suta/find-my-files`.
+# Tag-driven build / sign / publish, split into three jobs so the signing
+# credentials touch the smallest possible surface:
 #
-# Auth: the default GITHUB_TOKEN for the release; SSL.com eSigner via four repo
-# secrets (ES_USERNAME / ES_PASSWORD / CREDENTIAL_ID / ES_TOTP_SECRET). Signing
-# is non-blocking: until those secrets exist the run publishes an UNSIGNED zip
-# with a ::warning:: rather than failing. Setup + rationale live in
-# docs/SIGNING.md and docs/adr/0020-code-signing-provider.md.
+#   build   -> assembles the distributable bundle (`just publish`) + SBOMs and
+#              uploads them as artifacts. Holds NO secrets, read-only token.
+#   sign    -> downloads the bundle, Authenticode-signs our own PE binaries with
+#              SSL.com eSigner via the eSigner CKA (Cloud Key Adapter): the cloud
+#              certificate is loaded into the Windows store as a virtual token and
+#              we sign with the standard `signtool` (RFC 3161 timestamp, in place),
+#              then hard-verify chain + timestamp + signer. This is the only job
+#              that sees the signing secrets, so it runs in the approval-gated
+#              `release` environment.
+#   publish -> downloads the signed bundle, zips + checksums it (`just package`),
+#              writes keyless build-provenance + SBOM attestations (Sigstore via
+#              the OIDC GITHUB_TOKEN - no stored secrets) and attaches everything
+#              to a GitHub Release. Runs only on a tag push / publish=true.
+#
+# Auth: the default GITHUB_TOKEN for the release; SSL.com eSigner CKA via repo/
+# environment secrets (ES_USERNAME / ES_PASSWORD / ES_TOTP_SECRET). Signing is
+# non-blocking: until those secrets exist the run publishes an UNSIGNED zip with
+# a ::warning:: rather than failing. Setup + rationale live in docs/SIGNING.md,
+# docs/adr/0020-code-signing-provider.md (provider/cert) and
+# docs/adr/0029-ci-signing-cka-pipeline.md (CKA + signtool, this 3-job shape).
 #
 # A manual run (workflow_dispatch) with publish=false builds + signs + verifies
 # but creates no Release/attestations - a signing smoke test that is safe under
 # immutable releases. Tag pushes always publish.
+#
+# Verify a download with `gh attestation verify <zip> --repo P4suta/find-my-files`.
 name: release
 
 on:
@@ -33,48 +44,45 @@ on:
         default: true
         type: boolean
 
-# Least privilege: read-only at the top level; the build job requests the
-# write scopes it needs (Scorecard's Token-Permissions check rewards
-# job-scoped writes over top-level ones).
+# One release per ref at a time; never cancel a run mid-sign/mid-publish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least privilege: read-only at the top level; each job requests only the scopes
+# it needs (Scorecard's Token-Permissions check rewards job-scoped writes).
 permissions:
   contents: read
 
+env:
+  # Resolve the tag from either trigger; reused for checkout, zip, release.
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+  # Build the shipped binaries from the committed Cargo.lock, never a silent
+  # re-resolve (the cargo-sbom install step pins its own --locked).
+  CARGO_NET_LOCKED: "true"
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # 1) Build the distributable bundle + SBOMs. No secrets here.
+  # ---------------------------------------------------------------------------
   build:
     runs-on: windows-latest
     permissions:
-      contents: write # create the GitHub Release + upload assets
-      id-token: write # OIDC token for keyless Sigstore signing (attestations)
-      attestations: write # write build-provenance + SBOM attestations
-    env:
-      # Resolve the tag from either trigger; reused for checkout, zip, release.
-      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
-      # secrets.* cannot be referenced in `if:`; hoist presence to a job-level
-      # env bool, then gate the signing steps on env.HAVE_SIGNING.
-      HAVE_SIGNING: ${{ secrets.ES_USERNAME != '' && secrets.CREDENTIAL_ID != '' }}
-      # Publish the GitHub Release + attestations only on tag pushes, or on a
-      # manual run that opts in (publish=true, the default). A manual run with
-      # publish=false builds+signs+verifies but creates no Release - a signing
-      # smoke test that is safe under immutable releases (a published release
-      # cannot be deleted).
-      PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
-      # Build the shipped binaries from the committed Cargo.lock, never a silent
-      # re-resolve (the cargo-sbom install step pins its own --locked).
-      CARGO_NET_LOCKED: "true"
+      contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ env.TAG }}
 
-      # Provisions the pinned toolchain (rust 1.95 / dotnet 10 / just) from
-      # mise.toml so the shipped artifact is built on the exact pins.
+      # Provisions the pinned toolchain (rust / dotnet / just) from mise.toml so
+      # the shipped artifact is built on the exact pins.
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
           install: true
 
       # SBOM tooling (release-only; deliberately not in mise.toml's dev loop).
-      # cargo-sbom emits one CycloneDX doc for the whole engine workspace; the
-      # CycloneDX dotnet tool covers the app's NuGet graph. Both version-pinned.
+      # Version-pinned; both crates.io and NuGet verify package integrity against
+      # their immutable indexes, so a pinned version is fetched reproducibly.
       # Append the dotnet global-tool dir to PATH for the later SBOM step.
       - name: Install SBOM tools
         shell: pwsh
@@ -88,7 +96,7 @@ jobs:
 
       # SBOMs (CycloneDX 1.6 JSON), generated after the build so the resolved
       # graphs match what shipped. The Rust step uses bash because pwsh's `>`
-      # would emit UTF-16. Attached to the release + attested below.
+      # would emit UTF-16. Attached to the release + attested in publish.
       - name: Generate Rust SBOM (CycloneDX)
         working-directory: engine
         shell: bash
@@ -100,108 +108,208 @@ jobs:
           --output build/sbom --filename app.cdx.json
           --output-format Json --spec-version 1.6 --runtime win-x64
 
-      # Authenticode-sign only our own PE binaries. The user-facing entry point
-      # is the root launcher FindMyFiles.exe (what SmartScreen judges first); the
-      # rest are the apphost + our Rust binaries one level down in app\. The
-      # bundled .NET / WindowsAppSDK runtime DLLs are already Microsoft-signed -
-      # re-signing them would waste eSigner quota and claim authorship we don't
-      # have. So we stage just our five files, batch-sign them into a separate
-      # `signed/` dir, copy them back, then hard-verify. eSigner is cloud
-      # HSM-backed: no token reaches the runner; the TOTP secret drives auth.
-      #
-      # Two of the five share the basename FindMyFiles.exe (the root launcher and
-      # the app\ apphost), so a flat copy-by-basename would collide. Stage via a
-      # path -> unique-name map; Authenticode lives inside the PE (filename-
-      # independent), so the staging rename is safe and we map back afterwards.
-      - name: Stage first-party binaries for signing
-        if: env.HAVE_SIGNING == 'true'
-        shell: pwsh
-        run: |
-          $map = @(
-            @{ Src = 'FindMyFiles.exe';     Stage = 'FindMyFiles.exe' }
-            @{ Src = 'app/FindMyFiles.exe'; Stage = 'app-FindMyFiles.exe' }
-            @{ Src = 'app/fmf.exe';         Stage = 'fmf.exe' }
-            @{ Src = 'app/fmf-service.exe'; Stage = 'fmf-service.exe' }
-            @{ Src = 'app/fmf_engine.dll';  Stage = 'fmf_engine.dll' }
-          )
-          New-Item -ItemType Directory -Force sign-stage | Out-Null
-          New-Item -ItemType Directory -Force signed | Out-Null
-          $map | ForEach-Object { Copy-Item "build/dist/FindMyFiles/$($_.Src)" "sign-stage/$($_.Stage)" }
-
-      - name: Sign staged binaries (SSL.com eSigner)
-        if: env.HAVE_SIGNING == 'true'
-        uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
+      - name: Upload unsigned bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          command: batch_sign
-          username: ${{ secrets.ES_USERNAME }}
-          password: ${{ secrets.ES_PASSWORD }}
-          credential_id: ${{ secrets.CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          dir_path: ${{ github.workspace }}\sign-stage
-          # Write signed files to a dedicated dir. batch_sign does NOT honor
-          # `override` (the Action never forwards -override), so without an
-          # explicit output_path the signed files land elsewhere and copy-back
-          # would grab the unsigned originals (-> Verify "NotSigned").
-          output_path: ${{ github.workspace }}\signed
-          environment_name: PROD
-          # Our SSL.com account requires a pre-signing malware scan; with this
-          # off, batch_sign sends only hashes and SSL.com rejects with "hash
-          # needs to be scanned first". true makes the Action scan the files
-          # inline before signing (the maintainer's documented fix). Keeps the
-          # scan as a safety gate; would need to be false only for MSIX inputs.
-          malware_block: "true"
+          name: dist
+          path: build/dist/FindMyFiles
+          retention-days: 1
+          if-no-files-found: error
 
-      - name: Copy signed binaries back into the bundle
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: build/sbom
+          retention-days: 1
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 2) Authenticode-sign our own PEs with SSL.com eSigner (CKA + signtool).
+  #    The only job with signing secrets -> approval-gated `release` environment.
+  # ---------------------------------------------------------------------------
+  sign:
+    needs: build
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: read
+    env:
+      # secrets.* cannot be referenced in `if:`; hoist presence to a job-level
+      # env bool, then gate the signing steps on env.HAVE_SIGNING. CKA is driven
+      # by username/password/TOTP, so gate on those (not the legacy CREDENTIAL_ID).
+      HAVE_SIGNING: ${{ secrets.ES_USERNAME != '' && secrets.ES_TOTP_SECRET != '' }}
+      # Our SSL.com IV certificate's subject. Used to pick the right cert out of
+      # the store after CKA load AND to assert the signer at verify time, so a
+      # different (even validly-chained) certificate cannot pass silently.
+      SIGNER_SUBJECT_CONTAINS: "CN=Yasunobu Sakashita"
+      # eSigner CKA installer, pinned to a GitHub release asset + its SHA-256 so
+      # the runtime download is integrity-checked (the version-less ssl.com/download
+      # redirect is not pinnable). Bump both together; see docs/SIGNING.md.
+      CKA_URL: "https://github.com/SSLcom/eSignerCKA/releases/download/v1.0.7/SSL.COM-eSigner-CKA_1.0.7.zip"
+      CKA_SHA256: "0F40F0EF0AA5C7D73B2D854EC0D2F2BE551A6BBBD99CBBD886F7D3EF77C3327C"
+    steps:
+      - name: Download unsigned bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: build/dist/FindMyFiles
+
+      # Acquire the CKA from the pinned release asset and refuse to proceed unless
+      # the bytes match the committed SHA-256, then silently install it.
+      - name: Acquire eSigner CKA (pinned + checksummed)
         if: env.HAVE_SIGNING == 'true'
         shell: pwsh
         run: |
-          $map = @(
-            @{ Src = 'FindMyFiles.exe';     Stage = 'FindMyFiles.exe' }
-            @{ Src = 'app/FindMyFiles.exe'; Stage = 'app-FindMyFiles.exe' }
-            @{ Src = 'app/fmf.exe';         Stage = 'fmf.exe' }
-            @{ Src = 'app/fmf-service.exe'; Stage = 'fmf-service.exe' }
-            @{ Src = 'app/fmf_engine.dll';  Stage = 'fmf_engine.dll' }
-          )
-          $map | ForEach-Object { Copy-Item "signed/$($_.Stage)" "build/dist/FindMyFiles/$($_.Src)" -Force }
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest $env:CKA_URL -OutFile cka.zip
+          $got = (Get-FileHash cka.zip -Algorithm SHA256).Hash
+          if ($got -ne $env:CKA_SHA256) {
+            throw "eSigner CKA checksum mismatch: got $got expected $env:CKA_SHA256"
+          }
+          Expand-Archive -Force cka.zip -DestinationPath cka-extract
+          $installer = Get-ChildItem cka-extract -Recurse -Filter 'SSL.COM eSigner CKA_*.exe' |
+            Where-Object { $_.FullName -notlike '*__MACOSX*' } | Select-Object -First 1
+          if (-not $installer) { throw 'CKA installer not found in archive' }
+          New-Item -ItemType Directory -Force C:\eSignerCKA | Out-Null
+          & $installer.FullName /CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /DIR="C:\eSignerCKA" | Out-Null
 
-      # Never ship a "signed" build that is silently unsigned: once signing was
-      # requested, fail the release if any of our binaries lacks a valid
-      # Authenticode signature (e.g. batch_sign wrote elsewhere and copy-back
-      # picked up the unsigned originals).
+      # Authenticate the CKA to SSL.com (TOTP) and load the cloud cert into the
+      # CurrentUser store, then pick OUR certificate by subject and stash its
+      # thumbprint for signtool.
+      - name: Load signing certificate
+        if: env.HAVE_SIGNING == 'true'
+        shell: pwsh
+        # Pass the secrets through the environment (masked, never expanded into
+        # the command string) rather than interpolating them into the run body.
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          C:\eSignerCKA\eSignerCKATool.exe config `
+            -mode product `
+            -user "$env:ES_USERNAME" `
+            -pass "$env:ES_PASSWORD" `
+            -totp "$env:ES_TOTP_SECRET" `
+            -key "C:\eSignerCKA\master.key" -r
+          C:\eSignerCKA\eSignerCKATool.exe unload
+          C:\eSignerCKA\eSignerCKATool.exe load
+          $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
+            Where-Object { $_.Subject -like "*$env:SIGNER_SUBJECT_CONTAINS*" } |
+            Select-Object -First 1
+          if (-not $cert) { throw "expected signing certificate ($env:SIGNER_SUBJECT_CONTAINS) not in store after CKA load" }
+          "THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Sign only our own PEs, in place, with the standard signtool: SHA-256 file
+      # digest + RFC 3161 timestamp from SSL.com's TSA (so signatures outlive the
+      # cert). The bundled .NET / WindowsAppSDK runtime DLLs are already Microsoft-
+      # signed - re-signing them would waste quota and claim authorship we don't
+      # have. Full paths sign the two same-named FindMyFiles.exe in place, so the
+      # old stage -> batch_sign -> copy-back dance is gone.
+      - name: Sign first-party binaries
+        if: env.HAVE_SIGNING == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) {
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x86\signtool.exe" |
+              Sort-Object FullName | Select-Object -Last 1
+          }
+          if (-not $signtool) { throw 'signtool.exe not found on runner' }
+          $targets = 'FindMyFiles.exe', 'app/FindMyFiles.exe', 'app/fmf.exe', 'app/fmf-service.exe', 'app/fmf_engine.dll'
+          foreach ($f in $targets) {
+            & $signtool.FullName sign /fd sha256 /tr http://ts.ssl.com /td sha256 /sha1 $env:THUMBPRINT "build/dist/FindMyFiles/$f"
+            if ($LASTEXITCODE -ne 0) { throw "signtool sign failed for $f (exit $LASTEXITCODE)" }
+          }
+
+      # Never ship a "signed" build that is silently unsigned, untimestamped, or
+      # signed by the wrong cert. signtool verify /pa /tw: exit 0 = chain valid +
+      # timestamped, 2 = NOT timestamped, 1 = invalid -> any non-zero fails. Then
+      # assert the signer subject (TimeStamperCertificate from Get-Authenticode-
+      # Signature is unreliable under -FilePath, so we lean on signtool for the
+      # timestamp and on the subject for identity).
       - name: Verify signatures
         if: env.HAVE_SIGNING == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) {
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x86\signtool.exe" |
+              Sort-Object FullName | Select-Object -Last 1
+          }
           $targets = 'FindMyFiles.exe', 'app/FindMyFiles.exe', 'app/fmf.exe', 'app/fmf-service.exe', 'app/fmf_engine.dll'
           foreach ($f in $targets) {
-            $sig = Get-AuthenticodeSignature "build/dist/FindMyFiles/$f"
-            if ($sig.Status -ne 'Valid') {
-              throw "Authenticode check failed for $f - status: $($sig.Status)"
+            $p = "build/dist/FindMyFiles/$f"
+            & $signtool.FullName verify /pa /tw $p
+            if ($LASTEXITCODE -ne 0) { throw "verify failed for $f (exit $LASTEXITCODE) - chain invalid or NOT timestamped" }
+            $sig = Get-AuthenticodeSignature $p
+            if ($sig.SignerCertificate.Subject -notlike "*$env:SIGNER_SUBJECT_CONTAINS*") {
+              throw "unexpected signer for $f - $($sig.SignerCertificate.Subject)"
             }
-            Write-Host "signed: $f - $($sig.SignerCertificate.Subject)"
+            Write-Host "verified: $f - $($sig.SignerCertificate.Subject) (chain+timestamp+signer OK)"
           }
 
       - name: Warn if unsigned
         if: env.HAVE_SIGNING != 'true'
         run: echo "::warning::Signing secrets absent - publishing UNSIGNED binaries (SmartScreen will warn end users). See docs/SIGNING.md to enable."
 
-      # Zip + checksum the (now-signed) bundle. Runs after signing so the zip
-      # holds signed binaries. Logic + output names live in xtask (just package):
-      # find-my-files-v<version>-win-x64.zip + SHA256SUMS.txt under build/package/.
-      # Release-only: `just package` requires a vX.Y.Z TAG, and the zip is only
-      # consumed by the gated attest/release steps - so a publish=false signing
-      # test (TAG=main) stops cleanly after Verify.
+      - name: Upload signed bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-signed
+          path: build/dist/FindMyFiles
+          retention-days: 1
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 3) Zip + checksum the signed bundle, attest, and attach to the Release.
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: sign
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+    runs-on: windows-latest
+    permissions:
+      contents: write # create the GitHub Release + upload assets
+      id-token: write # OIDC token for keyless Sigstore signing (attestations)
+      attestations: write # write build-provenance + SBOM attestations
+    steps:
+      # The repo is needed for `just package` (xtask) + the toolchain.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          install: true
+
+      - name: Download signed bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist-signed
+          path: build/dist/FindMyFiles
+
+      - name: Download SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom
+          path: build/sbom
+
+      # Zip + checksum the (now-signed) bundle. Logic + output names live in xtask
+      # (just package): find-my-files-v<version>-win-x64.zip + SHA256SUMS.txt under
+      # build/package/. `just package` requires a vX.Y.Z TAG.
       - name: Package (zip + checksums)
-        if: env.PUBLISH == 'true'
         run: just package ${{ env.TAG }}
 
       # Build provenance + SBOM attestations for the published artifacts. Keyless
-      # via the workflow's OIDC token (no stored secrets). After packaging so the
-      # attested zip is final (holds the signed binaries when signing ran).
+      # via the workflow's OIDC token (no stored secrets).
       # Verify: gh attestation verify <zip> --repo P4suta/find-my-files
       - name: Attest build provenance
-        if: env.PUBLISH == 'true'
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: |
@@ -209,21 +317,18 @@ jobs:
             build/package/SHA256SUMS.txt
 
       - name: Attest Rust SBOM
-        if: env.PUBLISH == 'true'
         uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: build/package/find-my-files-*-win-x64.zip
           sbom-path: build/sbom/fmf-engine.cdx.json
 
       - name: Attest C# SBOM
-        if: env.PUBLISH == 'true'
         uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: build/package/find-my-files-*-win-x64.zip
           sbom-path: build/sbom/app.cdx.json
 
       - name: Attach assets to release
-        if: env.PUBLISH == 'true'
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           tag_name: ${{ env.TAG }}

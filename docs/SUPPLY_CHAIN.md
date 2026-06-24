@@ -46,12 +46,18 @@ The zip and SHA256SUMS have a build-provenance attestation, and each SBOM has an
 
 ## For maintainers: runbook for the first attested release
 
-The attestation/SBOM steps fire only on tags, so **do a dry-run before the real tag** to confirm the OIDC/permission path:
+`release.yml` runs three jobs — `build` → `sign` → `publish` — and the attestation/SBOM steps live in `publish`,
+which fires only when publishing. The `sign` job pauses for approval (the `release` environment). So:
 
-1. Manually run `release` via **`workflow_dispatch`** (input `tag_name`) with an existing test tag (or a throwaway tag).
-   Confirm that `permissions: id-token: write / attestations: write` and each step pass.
-2. For production, run `just release` as usual (version bump + tag push) → `release.yml` fires automatically.
-3. After completion, confirm that `gh attestation verify <zip> --repo P4suta/find-my-files` succeeds, the
+1. **Signing-only dry-run** (safe under immutable releases): run `release` via **`workflow_dispatch`** with
+   `tag_name=main`, `publish=false`. Approve the `sign` job; confirm `build`+`sign`+verify pass and the run ends with
+   **no Release** (the `publish` job is skipped). See [SIGNING.md](SIGNING.md) §F.
+2. **Attestation/OIDC dry-run**: to exercise the `publish` job (`id-token: write` / `attestations: write`), run
+   `workflow_dispatch` with a throwaway `tag_name` and `publish=true`. Note immutable releases make a published
+   release non-deletable, so use a tag you are happy to keep.
+3. For production, run `just release` as usual (version bump + signed tag push) → `release.yml` fires automatically;
+   approve the `sign` job when prompted.
+4. After completion, confirm that `gh attestation verify <zip> --repo P4suta/find-my-files` succeeds, the
    **Attestations** tab has 3 items (provenance + SBOM×2), and the release has zip / SHA256SUMS / `*.cdx.json`.
 
 ### Notes
