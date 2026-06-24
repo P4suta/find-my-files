@@ -117,10 +117,20 @@
   <data name="SvcPurgeData.Content" xml:space="preserve"><value>索引・ログも削除</value></data>
   <data name="SvcRestartApp.Content" xml:space="preserve"><value>アプリを再起動</value></data>
   <data name="CopyDiag.Content" xml:space="preserve"><value>診断情報をコピー</value></data>
+  <data name="DiagLastQueryHeader.Text" xml:space="preserve"><value>直近クエリ</value></data>
+  <data name="DiagStorageHeader.Text" xml:space="preserve"><value>ストレージ</value></data>
+  <data name="DiagTransportHeader.Text" xml:space="preserve"><value>トランスポート</value></data>
+  <data name="DiagHealthy.Text" xml:space="preserve"><value>劣化なし</value></data>
+  <data name="DiagStatTime.Text" xml:space="preserve"><value>時間</value></data>
+  <data name="DiagStatHits.Text" xml:space="preserve"><value>ヒット</value></data>
+  <data name="DiagStatScanned.Text" xml:space="preserve"><value>走査</value></data>
+  <data name="DiagStatDriver.Text" xml:space="preserve"><value>方式</value></data>
+  <data name="DiagHealthHeaderBar.Title" xml:space="preserve"><value>健全性</value></data>
 
   <!-- ===== Code (Loc.Get) ===== -->
   <data name="OptionsButton_ToolTip" xml:space="preserve"><value>設定・状態・診断(絞り込み/隠しファイル/並べ替え/件数/エンジン/診断)</value></data>
   <data name="OptionsButton_Name" xml:space="preserve"><value>設定・状態・診断</value></data>
+  <data name="DiagWindowTitle" xml:space="preserve"><value>診断</value></data>
 
   <data name="Status_Preparing" xml:space="preserve"><value>準備中…</value></data>
   <data name="Status_CountWithTime" xml:space="preserve"><value>{0:F1} ms · {1:N0} 件</value></data>

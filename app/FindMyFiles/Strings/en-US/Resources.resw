@@ -117,10 +117,20 @@
   <data name="SvcPurgeData.Content" xml:space="preserve"><value>Also delete the index and logs</value></data>
   <data name="SvcRestartApp.Content" xml:space="preserve"><value>Restart app</value></data>
   <data name="CopyDiag.Content" xml:space="preserve"><value>Copy diagnostics</value></data>
+  <data name="DiagLastQueryHeader.Text" xml:space="preserve"><value>Last query</value></data>
+  <data name="DiagStorageHeader.Text" xml:space="preserve"><value>Storage</value></data>
+  <data name="DiagTransportHeader.Text" xml:space="preserve"><value>Transport</value></data>
+  <data name="DiagHealthy.Text" xml:space="preserve"><value>No degradations</value></data>
+  <data name="DiagStatTime.Text" xml:space="preserve"><value>Time</value></data>
+  <data name="DiagStatHits.Text" xml:space="preserve"><value>Hits</value></data>
+  <data name="DiagStatScanned.Text" xml:space="preserve"><value>Scanned</value></data>
+  <data name="DiagStatDriver.Text" xml:space="preserve"><value>Driver</value></data>
+  <data name="DiagHealthHeaderBar.Title" xml:space="preserve"><value>Health</value></data>
 
   <!-- ===== Code (Loc.Get) ===== -->
   <data name="OptionsButton_ToolTip" xml:space="preserve"><value>Settings, status, diagnostics (focus / hidden files / sort / count / engine / diagnostics)</value></data>
   <data name="OptionsButton_Name" xml:space="preserve"><value>Settings, status, diagnostics</value></data>
+  <data name="DiagWindowTitle" xml:space="preserve"><value>Diagnostics</value></data>
 
   <data name="Status_Preparing" xml:space="preserve"><value>Preparing…</value></data>
   <data name="Status_CountWithTime" xml:space="preserve"><value>{0:F1} ms · {1:N0} items</value></data>

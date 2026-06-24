@@ -11,6 +11,8 @@ namespace FindMyFiles.ViewModels;
 public sealed partial class PerfPanelViewModel : ObservableObject
 {
     private const int MaxRecent = 64;
+    private const int UsnTailMax = 6;
+    private const int ErrorTailMax = 8;
 
     private readonly IEngineClient _engine;
     private readonly List<ulong> _recentTotalsUs = [];
@@ -27,10 +29,23 @@ public sealed partial class PerfPanelViewModel : ObservableObject
     /// <summary>Last engine stats snapshot (counters, RAM, recent errors), or
     /// null before the first <see cref="RefreshStatsAsync"/>.</summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(RecentUsnTail))]
+    [NotifyPropertyChangedFor(nameof(RecentErrorsTail))]
     public partial EngineStatsData? Stats { get; set; }
 
     /// <summary>Latencies of the most recent queries (µs, oldest first).</summary>
     public IReadOnlyList<ulong> RecentTotalsUs => _recentTotalsUs;
+
+    /// <summary>The most recent USN batches (capped) for the panel's storage
+    /// card. x:Bind can't call <c>TakeLast</c>, so the cap lives here; it
+    /// re-notifies when <see cref="Stats"/> swaps.</summary>
+    public IReadOnlyList<UsnTraceData> RecentUsnTail =>
+        Stats?.RecentUsn is { } u ? u.TakeLast(UsnTailMax).ToList() : [];
+
+    /// <summary>The most recent WARN+ engine events (capped) for the panel's
+    /// health card; re-notifies when <see cref="Stats"/> swaps.</summary>
+    public IReadOnlyList<ErrorEventData> RecentErrorsTail =>
+        Stats?.RecentErrors is { } e ? e.TakeLast(ErrorTailMax).ToList() : [];
 
     /// <summary>Engine transport label for the F12 panel — moved off the gear
     /// menu, where its internal terms (fake / in-proc) confused end users; F12

@@ -1,5 +1,7 @@
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
+using FindMyFiles.ViewModels;
+using FindMyFiles.Views;
 using Microsoft.UI.Xaml;
 
 namespace FindMyFiles;
@@ -33,6 +35,38 @@ public partial class App : Application
     /// take a parent window (file pickers, etc.) — the unpackaged WinUI 3 way.</summary>
     public static nint WindowHandle =>
         WinRT.Interop.WindowNative.GetWindowHandle(Window);
+
+    /// <summary>The non-modal diagnostics window, or <c>null</c> when closed. A
+    /// single instance toggled by <see cref="ToggleDiagnostics"/>; the main
+    /// window's `Closed` handler closes it first so no orphan top-level window
+    /// survives shutdown.</summary>
+    private static DiagnosticsWindow? _diagWindow;
+
+    /// <summary>Open or close the diagnostics window, sharing the supplied
+    /// <see cref="PerfPanelViewModel"/> (the single `MainViewModel.Perf`
+    /// instance). When already open, closing it is enough; the `Closed` handler
+    /// clears the reference and stops polling via <c>IsOpen</c>. When opening,
+    /// setting <c>IsOpen</c> to <see langword="true"/> starts the 1 Hz timer.
+    /// UI-thread serialized, so the open/close toggle has no race.</summary>
+    /// <param name="perf">The shared performance view model to display.</param>
+    public static void ToggleDiagnostics(PerfPanelViewModel perf)
+    {
+        if (_diagWindow is not null)
+        {
+            _diagWindow.Close();
+            return;
+        }
+
+        var win = new DiagnosticsWindow(perf);
+        win.Closed += (_, _) =>
+        {
+            _diagWindow = null;
+            perf.IsOpen = false;
+        };
+        _diagWindow = win;
+        win.Activate();
+        perf.IsOpen = true;          // panel is subscribed → SyncTimer starts polling
+    }
 
     /// <summary>Initialize in order: apply language override → `InitializeComponent`
     /// → <c>ExceptionPolicy.Install</c>. The language override must run before
@@ -113,6 +147,9 @@ public partial class App : Application
         Window = new MainWindow();
         Window.Closed += (_, _) =>
         {
+            // Close the diagnostics window first so no orphan top-level window
+            // survives shutdown (mandatory correction 1).
+            _diagWindow?.Close();
             try
             {
                 EngineClient.Dispose();

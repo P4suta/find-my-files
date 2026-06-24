@@ -8,7 +8,6 @@
     xmlns:hl="using:FindMyFiles.Highlighting"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:svc="using:FindMyFiles.Services"
-    xmlns:views="using:FindMyFiles.Views"
     xmlns:vm="using:FindMyFiles.ViewModels"
     mc:Ignorable="d">
 
@@ -42,8 +41,6 @@
             <RowDefinition x:Name="SearchRow" Height="Auto" />
             <!--  結果(*)は検索バー直下から画面下端まで使う(フッター撤去済み・衝突相手なし)。  -->
             <RowDefinition x:Name="ResultsRow" Height="*" />
-            <!--  診断パネル。既定は畳む(0)・開くと最下部に出る。  -->
-            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <!--  通知バナー(Row 0)。検索バーと横位置(MaxWidth/Margin)を揃える。
@@ -258,7 +255,7 @@
                   seeded Reset, never by swapping the ItemsSource (ADR-0015).  -->
             <!--  結果は * 行いっぱいに表示(ウィンドウ全体を使い、スクロールバーもフル丈)。
                   仮想化は ItemsStackPanel＋IItemsRangeInfo が担う(行の高さ制約は不要)。
-                  フッターは別の Auto 行(Row 3)にあるので構造上この ListView と重なり得ない。  -->
+                  最下行(*)なので下に重なる要素は無い(診断は別ウィンドウへ分離済み)。  -->
             <ListView
                 x:Name="ResultsList"
                 AutomationProperties.AutomationId="ResultsList"
@@ -340,18 +337,12 @@
             </ListView>
         </Grid>
 
-        <!--  Performance panel(設定→診断 で開閉)。最下部(Row 3)に出る。  -->
-        <views:PerfPanel
-            Grid.Row="3"
-            ViewModel="{x:Bind ViewModel.Perf}"
-            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.Perf.IsOpen), Mode=OneWay}" />
-
         <!--  未接続(空エンジン)時のセットアップ画面。検索バー等は IsReady で畳まれ、
               これが画面中央に出る。主ボタンはワンクリックで登録→自動再起動。
               IsDisconnected は起動時固定なので OneTime。  -->
         <StackPanel
             Grid.Row="0"
-            Grid.RowSpan="4"
+            Grid.RowSpan="3"
             MaxWidth="420"
             Padding="24"
             HorizontalAlignment="Center"

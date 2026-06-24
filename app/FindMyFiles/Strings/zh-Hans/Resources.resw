@@ -117,10 +117,20 @@
   <data name="SvcPurgeData.Content" xml:space="preserve"><value>同时删除索引和日志</value></data>
   <data name="SvcRestartApp.Content" xml:space="preserve"><value>重启应用</value></data>
   <data name="CopyDiag.Content" xml:space="preserve"><value>复制诊断信息</value></data>
+  <data name="DiagLastQueryHeader.Text" xml:space="preserve"><value>最近的查询</value></data>
+  <data name="DiagStorageHeader.Text" xml:space="preserve"><value>存储</value></data>
+  <data name="DiagTransportHeader.Text" xml:space="preserve"><value>传输</value></data>
+  <data name="DiagHealthy.Text" xml:space="preserve"><value>无降级</value></data>
+  <data name="DiagStatTime.Text" xml:space="preserve"><value>时间</value></data>
+  <data name="DiagStatHits.Text" xml:space="preserve"><value>命中</value></data>
+  <data name="DiagStatScanned.Text" xml:space="preserve"><value>扫描</value></data>
+  <data name="DiagStatDriver.Text" xml:space="preserve"><value>方式</value></data>
+  <data name="DiagHealthHeaderBar.Title" xml:space="preserve"><value>健康状况</value></data>
 
   <!-- ===== Code (Loc.Get) ===== -->
   <data name="OptionsButton_ToolTip" xml:space="preserve"><value>设置、状态、诊断(精简/隐藏文件/排序/数量/引擎/诊断)</value></data>
   <data name="OptionsButton_Name" xml:space="preserve"><value>设置、状态、诊断</value></data>
+  <data name="DiagWindowTitle" xml:space="preserve"><value>诊断</value></data>
 
   <data name="Status_Preparing" xml:space="preserve"><value>正在准备…</value></data>
   <data name="Status_CountWithTime" xml:space="preserve"><value>{0:F1} ms · {1:N0} 项</value></data>
