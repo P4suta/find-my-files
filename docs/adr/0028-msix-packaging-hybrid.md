@@ -75,8 +75,8 @@ the SCM service, set DACLs, strip privileges, and create the GC task; RESEARCH.m
   engine tools (CLI/service) shipped inside the zip / as the install source for the service.
 - **New surface**: a `Package.appxmanifest` (`Publisher` = the SSL.com IV cert Subject DN *exactly*,
   `runFullTrust`, **no** `desktop6:Service`), visual assets, a CI step to build + sign the `.msix`
-  (folded into the same eSigner CKA + `signtool` path as the binaries — ADR-0029 — `signtool` signs
-  `.msix` directly) with a `Publisher == cert Subject` assertion, and an `xtask package-msix` verb
+  (folded into the same `SSLcom/esigner-codesign` signing path as the binaries — ADR-0029 — the Action
+  signs `.msix` directly) with a `Publisher == cert Subject` assertion, and an `xtask package-msix` verb
   sourced from `paths.rs`. App code: package-identity detection in `AppPaths` (force the profile path, disable
   portable `<exe>\data` under MSIX), a packaged-mode source for `fmf-service.exe`, and a settings
   migration.

@@ -125,8 +125,9 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # 2) Authenticode-sign our own PEs with SSL.com eSigner (CKA + signtool).
-  #    The only job with signing secrets -> approval-gated `release` environment.
+  # 2) Authenticode-sign our own PEs with SSL.com eSigner (the official
+  #    SSLcom/esigner-codesign Action). The only job with signing secrets ->
+  #    approval-gated `release` environment.
   # ---------------------------------------------------------------------------
   sign:
     needs: build
@@ -136,18 +137,12 @@ jobs:
       contents: read
     env:
       # secrets.* cannot be referenced in `if:`; hoist presence to a job-level
-      # env bool, then gate the signing steps on env.HAVE_SIGNING. CKA is driven
-      # by username/password/TOTP, so gate on those (not the legacy CREDENTIAL_ID).
-      HAVE_SIGNING: ${{ secrets.ES_USERNAME != '' && secrets.ES_TOTP_SECRET != '' }}
-      # Our SSL.com IV certificate's subject. Used to pick the right cert out of
-      # the store after CKA load AND to assert the signer at verify time, so a
+      # env bool, then gate the signing steps on env.HAVE_SIGNING. batch_sign is
+      # driven by the credential_id, so gate on its presence.
+      HAVE_SIGNING: ${{ secrets.ES_USERNAME != '' && secrets.CREDENTIAL_ID != '' }}
+      # Our SSL.com IV certificate's subject - asserted at verify time so a
       # different (even validly-chained) certificate cannot pass silently.
       SIGNER_SUBJECT_CONTAINS: "CN=Yasunobu Sakashita"
-      # eSigner CKA installer, pinned to a GitHub release asset + its SHA-256 so
-      # the runtime download is integrity-checked (the version-less ssl.com/download
-      # redirect is not pinnable). Bump both together; see docs/SIGNING.md.
-      CKA_URL: "https://github.com/SSLcom/eSignerCKA/releases/download/v1.0.7/SSL.COM-eSigner-CKA_1.0.7.zip"
-      CKA_SHA256: "0F40F0EF0AA5C7D73B2D854EC0D2F2BE551A6BBBD99CBBD886F7D3EF77C3327C"
     steps:
       - name: Download unsigned bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -155,96 +150,63 @@ jobs:
           name: dist
           path: build/dist/FindMyFiles
 
-      # Acquire the CKA from the pinned release asset and refuse to proceed unless
-      # the bytes match the committed SHA-256, then silently install it.
-      - name: Acquire eSigner CKA (pinned + checksummed)
+      # Collect just our own PE files into a flat staging dir for batch_sign. The
+      # bundled .NET / WindowsAppSDK runtime DLLs are already Microsoft-signed -
+      # re-signing them would waste eSigner quota and claim authorship we don't
+      # have. Two of the five share the basename FindMyFiles.exe (the root launcher
+      # and the app\ apphost), so a flat copy-by-basename would collide; stage via
+      # a path -> unique-name map (Authenticode lives inside the PE, so the rename
+      # is safe) and map back afterwards.
+      - name: Stage first-party binaries for signing
         if: env.HAVE_SIGNING == 'true'
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          Invoke-WebRequest $env:CKA_URL -OutFile cka.zip
-          $got = (Get-FileHash cka.zip -Algorithm SHA256).Hash
-          if ($got -ne $env:CKA_SHA256) {
-            throw "eSigner CKA checksum mismatch: got $got expected $env:CKA_SHA256"
-          }
-          Expand-Archive -Force cka.zip -DestinationPath cka-extract
-          $installer = Get-ChildItem cka-extract -Recurse -Filter 'SSL.COM eSigner CKA_*.exe' |
-            Where-Object { $_.FullName -notlike '*__MACOSX*' } | Select-Object -First 1
-          if (-not $installer) { throw 'CKA installer not found in archive' }
-          New-Item -ItemType Directory -Force C:\eSignerCKA | Out-Null
-          & $installer.FullName /CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /DIR="C:\eSignerCKA" | Out-Null
+          $map = @(
+            @{ Src = 'FindMyFiles.exe';     Stage = 'FindMyFiles.exe' }
+            @{ Src = 'app/FindMyFiles.exe'; Stage = 'app-FindMyFiles.exe' }
+            @{ Src = 'app/fmf.exe';         Stage = 'fmf.exe' }
+            @{ Src = 'app/fmf-service.exe'; Stage = 'fmf-service.exe' }
+            @{ Src = 'app/fmf_engine.dll';  Stage = 'fmf_engine.dll' }
+          )
+          New-Item -ItemType Directory -Force sign-stage | Out-Null
+          New-Item -ItemType Directory -Force signed | Out-Null
+          $map | ForEach-Object { Copy-Item "build/dist/FindMyFiles/$($_.Src)" "sign-stage/$($_.Stage)" }
 
-      # Authenticate the CKA (TOTP), load the cloud cert into the store, and sign
-      # in the SAME step. The eSigner CKA cert/KSP session does not reliably
-      # persist into a separate signtool process, so a split load-step -> sign-step
-      # yields signtool's "No certificates were found that met all the given
-      # criteria"; loading and signing must share one shell. Sign only our own PEs,
-      # in place, with the standard signtool: SHA-256 file digest + RFC 3161
-      # timestamp from SSL.com's TSA (so signatures outlive the cert). The bundled
-      # .NET / WindowsAppSDK runtime DLLs are already Microsoft-signed - re-signing
-      # them would waste quota and claim authorship we don't have. Full paths sign
-      # the two same-named FindMyFiles.exe in place, so the old stage -> batch_sign
-      # -> copy-back dance is gone.
-      - name: Sign first-party binaries (eSigner CKA)
+      - name: Sign staged binaries (SSL.com eSigner)
+        if: env.HAVE_SIGNING == 'true'
+        uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
+        with:
+          command: batch_sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          dir_path: ${{ github.workspace }}\sign-stage
+          # Write signed files to a dedicated dir. batch_sign does NOT honor
+          # `override` (the Action never forwards -override), so without an
+          # explicit output_path the signed files land elsewhere and copy-back
+          # would grab the unsigned originals (-> Verify "NotSigned").
+          output_path: ${{ github.workspace }}\signed
+          environment_name: PROD
+          # Our SSL.com account requires a pre-signing malware scan; with this
+          # off, batch_sign sends only hashes and SSL.com rejects with "hash
+          # needs to be scanned first". true makes the Action scan the files
+          # inline before signing. CodeSignTool timestamps via SSL.com's TSA, so
+          # the signatures outlive the cert (Verify enforces a timestamp below).
+          malware_block: "true"
+
+      - name: Copy signed binaries back into the bundle
         if: env.HAVE_SIGNING == 'true'
         shell: pwsh
-        # Pass the secrets through the environment (masked, never expanded into
-        # the command string) rather than interpolating them into the run body.
-        env:
-          ES_USERNAME: ${{ secrets.ES_USERNAME }}
-          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
-          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          C:\eSignerCKA\eSignerCKATool.exe config `
-            -mode product `
-            -user "$env:ES_USERNAME" `
-            -pass "$env:ES_PASSWORD" `
-            -totp "$env:ES_TOTP_SECRET" `
-            -key "C:\eSignerCKA\master.key" -r
-          C:\eSignerCKA\eSignerCKATool.exe unload
-          C:\eSignerCKA\eSignerCKATool.exe load
-
-          # Diagnostics: show exactly what CKA placed in the stores (Subject is
-          # masked in the log if it overlaps a secret; Thumbprint/HasPrivateKey
-          # are what matter for the cert selection below).
-          Write-Host '--- Cert:\CurrentUser\My ---'
-          Get-ChildItem Cert:\CurrentUser\My | Format-Table Thumbprint, HasPrivateKey, Subject -AutoSize | Out-String | Write-Host
-          Write-Host '--- Cert:\LocalMachine\My ---'
-          Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Format-Table Thumbprint, HasPrivateKey, Subject -AutoSize | Out-String | Write-Host
-
-          # Pick OUR code-signing cert, preferring the one that actually carries
-          # the CKA-backed private key.
-          $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
-            Where-Object { $_.Subject -like "*$env:SIGNER_SUBJECT_CONTAINS*" -and $_.HasPrivateKey } |
-            Select-Object -First 1
-          if (-not $cert) {
-            $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
-              Where-Object { $_.Subject -like "*$env:SIGNER_SUBJECT_CONTAINS*" } |
-              Select-Object -First 1
-          }
-          if (-not $cert) { throw "expected signing certificate ($env:SIGNER_SUBJECT_CONTAINS) not in store after CKA load" }
-          $thumb = $cert.Thumbprint
-          Write-Host "signing with thumbprint $thumb (HasPrivateKey=$($cert.HasPrivateKey))"
-
-          # Prefer the x86 signtool: eSigner CKA exposes the signing key through a
-          # 32-bit KSP (eSignerKSP) that a 64-bit signtool cannot load - it then
-          # reports "No certificates were found that met all the given criteria"
-          # even though the cert is in the store with HasPrivateKey=True (SSL.com
-          # documents using x86). x86 verifies fine too. Fall back to x64 only if
-          # x86 is somehow absent.
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x86\signtool.exe" |
-            Sort-Object FullName | Select-Object -Last 1
-          if (-not $signtool) {
-            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
-              Sort-Object FullName | Select-Object -Last 1
-          }
-          if (-not $signtool) { throw 'signtool.exe not found on runner' }
-          $targets = 'FindMyFiles.exe', 'app/FindMyFiles.exe', 'app/fmf.exe', 'app/fmf-service.exe', 'app/fmf_engine.dll'
-          foreach ($f in $targets) {
-            & $signtool.FullName sign /fd sha256 /tr http://ts.ssl.com /td sha256 /sha1 $thumb "build/dist/FindMyFiles/$f"
-            if ($LASTEXITCODE -ne 0) { throw "signtool sign failed for $f (exit $LASTEXITCODE)" }
-          }
+          $map = @(
+            @{ Src = 'FindMyFiles.exe';     Stage = 'FindMyFiles.exe' }
+            @{ Src = 'app/FindMyFiles.exe'; Stage = 'app-FindMyFiles.exe' }
+            @{ Src = 'app/fmf.exe';         Stage = 'fmf.exe' }
+            @{ Src = 'app/fmf-service.exe'; Stage = 'fmf-service.exe' }
+            @{ Src = 'app/fmf_engine.dll';  Stage = 'fmf_engine.dll' }
+          )
+          $map | ForEach-Object { Copy-Item "signed/$($_.Stage)" "build/dist/FindMyFiles/$($_.Src)" -Force }
 
       # Never ship a "signed" build that is silently unsigned, untimestamped, or
       # signed by the wrong cert. signtool verify /pa /tw: exit 0 = chain valid +
