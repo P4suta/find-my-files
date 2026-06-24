@@ -1,12 +1,14 @@
 # ADR-0020: Code-signing provider selection (SSL.com eSigner / individual IV)
 
-Date: 2026-06-13 / Status: Accepted (wiring dormant — certificate not yet obtained. Runbook docs/SIGNING.md)
+Date: 2026-06-13 / Status: Accepted (active — IV certificate obtained 2026-06-24; eSigner secrets registered. Runbook docs/SIGNING.md)
+
+Certificate holder: `CN=Yasunobu Sakashita` (SSL.com individual IV, code-signing EKU), issued via `SSL.com Code Signing Intermediate CA RSA R1`.
 
 ## Decision
 
 Authenticode signing of the distributed binaries is done with **SSL.com eSigner** (a cloud HSM signing service) + a **personal Individual Validation (IV)
 certificate**. Signing is kept as a **CI-environment-specific YAML step** in `release.yml` (tag-driven), not placed in `xtask/`.
-Until the certificate is obtained it stays **non-blocking and dormant** (if Secrets are unset, finish unsigned + `::warning::`).
+Signing is **non-blocking** by design (if Secrets are unset, finish unsigned + `::warning::`); it stayed dormant until the certificate was obtained and is now active.
 
 The signing targets are **only the 4 in-house PEs**: `FindMyFiles.exe` / `fmf.exe` / `fmf-service.exe` / `fmf_engine.dll`. The bundled
 .NET / WindowsAppSDK runtime DLLs are Microsoft-signed, so they are not re-signed.
@@ -32,7 +34,7 @@ The signing targets are **only the 4 in-house PEs**: `FindMyFiles.exe` / `fmf.ex
 ## Consequences
 
 - The signing step in `release.yml` has already been swapped from Azure to SSL.com eSigner. The gate `HAVE_SIGNING` is
-  decided by the presence of `ES_USERNAME` + `CREDENTIAL_ID`. Enabling it is **just adding 4 Secrets** (docs/SIGNING.md, section D).
+  decided by the presence of `ES_USERNAME` + `CREDENTIAL_ID`. The 4 Secrets were registered 2026-06-24, so **signing is active from the next tag** (docs/SIGNING.md, section D).
 - Publicly trusted certificates expire after at most ~460 days (CA/Browser Forum 2026). Renewal procedure is in docs/SIGNING.md.
 - Signing is **limited to the tag-driven `release.yml`**. `ci.yml` (PR/push) does not sign (do not distribute development intermediates, conserve quota, fork PRs
   cannot access Secrets).

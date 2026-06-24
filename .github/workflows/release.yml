@@ -12,6 +12,10 @@
 # is non-blocking: until those secrets exist the run publishes an UNSIGNED zip
 # with a ::warning:: rather than failing. Setup + rationale live in
 # docs/SIGNING.md and docs/adr/0020-code-signing-provider.md.
+#
+# A manual run (workflow_dispatch) with publish=false builds + signs + verifies
+# but creates no Release/attestations - a signing smoke test that is safe under
+# immutable releases. Tag pushes always publish.
 name: release
 
 on:
@@ -20,9 +24,14 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Tag to build the release from (e.g. v0.1.0)"
+        description: "Tag (or ref) to build from (e.g. v0.1.0, or main for a signing test)"
         required: true
         type: string
+      publish:
+        description: "Publish a GitHub Release (false = build+sign+verify only, no release/attestations)"
+        required: false
+        default: true
+        type: boolean
 
 # Least privilege: read-only at the top level; the build job requests the
 # write scopes it needs (Scorecard's Token-Permissions check rewards
@@ -43,6 +52,12 @@ jobs:
       # secrets.* cannot be referenced in `if:`; hoist presence to a job-level
       # env bool, then gate the signing steps on env.HAVE_SIGNING.
       HAVE_SIGNING: ${{ secrets.ES_USERNAME != '' && secrets.CREDENTIAL_ID != '' }}
+      # Publish the GitHub Release + attestations only on tag pushes, or on a
+      # manual run that opts in (publish=true, the default). A manual run with
+      # publish=false builds+signs+verifies but creates no Release - a signing
+      # smoke test that is safe under immutable releases (a published release
+      # cannot be deleted).
+      PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
       # Build the shipped binaries from the committed Cargo.lock, never a silent
       # re-resolve (the cargo-sbom install step pins its own --locked).
       CARGO_NET_LOCKED: "true"
@@ -150,6 +165,7 @@ jobs:
       # attested zip is final (holds the signed binaries when signing ran).
       # Verify: gh attestation verify <zip> --repo P4suta/find-my-files
       - name: Attest build provenance
+        if: env.PUBLISH == 'true'
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: |
@@ -157,18 +173,21 @@ jobs:
             build/package/SHA256SUMS.txt
 
       - name: Attest Rust SBOM
+        if: env.PUBLISH == 'true'
         uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: build/package/find-my-files-*-win-x64.zip
           sbom-path: build/sbom/fmf-engine.cdx.json
 
       - name: Attest C# SBOM
+        if: env.PUBLISH == 'true'
         uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: build/package/find-my-files-*-win-x64.zip
           sbom-path: build/sbom/app.cdx.json
 
       - name: Attach assets to release
+        if: env.PUBLISH == 'true'
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           tag_name: ${{ env.TAG }}

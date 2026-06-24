@@ -22,10 +22,12 @@ API spec verification is in [RESEARCH.md](RESEARCH.md).
 
 ## Distribution Integrity (code signing)
 
-Authenticode signing of the distributed binaries is done with SSL.com eSigner (individual IV). The wiring is built into
-`release.yml` in a dormant state and is activated once the GitHub Secrets are set after obtaining the certificate. The
-acquisition/activation steps are in [SIGNING.md](SIGNING.md); the rationale for the choice is in
-[ADR-0020](adr/0020-code-signing-provider.md). Signing is limited to the tag-driven `release.yml` (the `ci.yml` dev artifacts are not signed).
+Authenticode signing of the distributed binaries is done with SSL.com eSigner (individual IV). It is **active**: an IV
+certificate (`CN=Yasunobu Sakashita`) was obtained 2026-06-24 and the eSigner Secrets are registered, so `release.yml`
+signs the binaries from each tag. The wiring stays non-blocking (an unsigned build emits a `::warning::` rather than
+failing if the Secrets are ever absent). The acquisition/renewal steps are in [SIGNING.md](SIGNING.md); the rationale
+for the choice is in [ADR-0020](adr/0020-code-signing-provider.md). Signing is limited to the tag-driven `release.yml`
+(the `ci.yml` dev artifacts are not signed).
 
 ## Manual Verification Checklist (run once before each release; record the result and date here)
 
