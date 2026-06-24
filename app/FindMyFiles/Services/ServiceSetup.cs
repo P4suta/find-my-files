@@ -202,6 +202,59 @@ public static partial class ServiceSetup
         }
     }
 
+    /// <summary>Starts the installed service WITHOUT elevation (on-demand
+    /// lifecycle, ADR-0027): runs <c>fmf-service start</c> as the plain user,
+    /// which succeeds because install granted this user SID SERVICE_START on the
+    /// service object. No UAC, no window. Returns true once the start request was
+    /// accepted (the pipe then comes up asynchronously); false on any failure —
+    /// including an older install that never granted the right — so the caller
+    /// falls back to the setup screen, whose re-register migrates it. Blocking;
+    /// call off the UI thread.</summary>
+    /// <returns>True when the unelevated start request succeeded.</returns>
+    public static bool TryStartUnelevated()
+    {
+        var exe = LocateServiceExe(AppContext.BaseDirectory);
+        if (exe is null)
+        {
+            FileLog.Warn("service-setup", "fmf-service.exe not found — cannot start on demand");
+            return false;
+        }
+
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo
+            {
+                FileName = exe,
+                Arguments = "start",
+                UseShellExecute = false, // no runas → no UAC; relies on the granted START right
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            });
+            if (p is null)
+            {
+                return false;
+            }
+
+            if (!p.WaitForExit(15_000))
+            {
+                FileLog.Warn("service-setup", "unelevated `start` timed out");
+                return false;
+            }
+
+            // start_service() exits 0 on success or already-running; non-zero
+            // means the SCM refused (access denied on an un-migrated install, or
+            // the service is gone). Either way the caller falls back.
+            FileLog.Info("service-setup", $"unelevated `start` → exit {p.ExitCode}");
+            return p.ExitCode == 0;
+        }
+        catch (Exception ex)
+        {
+            FileLog.Warn("service-setup", $"unelevated `start` failed: {ex.Message}");
+            return false;
+        }
+    }
+
     /// <summary>The current user's SID string, forwarded to
     /// `fmf-service install --owner-sid` so OTS elevation (a *different*
     /// admin account) does not lock this user out of the pipe (threat 1).

@@ -36,11 +36,15 @@ pub struct ServerOptions {
     /// defense). Empty =
     /// no check (console/test mode); the installed service always fills it.
     pub authorized_sids: Vec<String>,
+    /// Data root for the machine-wide `last_use` stamp (ADR-0027): each accepted
+    /// connection refreshes it so the GC ages out only a genuinely unused install.
+    pub data_dir: std::path::PathBuf,
 }
 
 /// Running pipe server: owns the accept thread and its stop event.
 pub struct Server {
     stop: Arc<Event>,
+    active: Arc<std::sync::atomic::AtomicUsize>,
     accept_thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -53,15 +57,21 @@ impl Server {
     pub fn start(engine: Arc<Engine>, opts: ServerOptions) -> io::Result<Arc<Self>> {
         let stop = Arc::new(Event::new()?);
         let broadcaster = Broadcaster::install(&engine);
+        // Live-connection count: incremented per accepted connection, freed by
+        // the per-connection guard when its thread exits. Held by the Server so
+        // serve()'s idle self-stop (ADR-0027) can read it.
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let accept_stop = stop.clone();
+        let accept_active = active.clone();
         let accept_thread = std::thread::Builder::new()
             .name("fmf-pipe-accept".to_string())
             .spawn(move || {
-                accept_loop(engine, broadcaster, opts, &accept_stop);
+                accept_loop(engine, broadcaster, opts, &accept_stop, accept_active);
             })
             .expect("spawn accept thread");
         Ok(Arc::new(Self {
             stop,
+            active,
             accept_thread: Some(accept_thread),
         }))
     }
@@ -70,6 +80,12 @@ impl Server {
     /// clients (the engine is flushed/shut down by the caller afterwards).
     pub fn stop(&self) {
         self.stop.set();
+    }
+
+    /// Live pipe-connection count — drives `serve()`'s idle self-stop (ADR-0027).
+    #[must_use]
+    pub fn active_connections(&self) -> usize {
+        self.active.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Blocks until the accept thread has exited (call after [`Server::stop`]).
@@ -87,6 +103,7 @@ fn accept_loop(
     broadcaster: Arc<Broadcaster>,
     opts: ServerOptions,
     stop: &Event,
+    active: Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let security = if opts.authorized_sids.is_empty() {
         None
@@ -102,9 +119,6 @@ fn accept_loop(
             }
         }
     };
-    // Live-connection count: incremented per accepted connection, freed by
-    // the guard when its thread exits (ServiceInfo reports it).
-    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut listener = PipeListener::new(&opts.pipe_name, MAX_INSTANCES, security);
     loop {
         match listener.accept(stop) {
@@ -121,6 +135,9 @@ fn accept_loop(
                     stream.disconnect();
                     continue;
                 }
+                // An authorized client connected — refresh the use stamp so the
+                // GC ages out only a genuinely unused install (ADR-0027).
+                crate::lifecycle::stamp_last_use(&opts.data_dir);
                 let engine = engine.clone();
                 let broadcaster = broadcaster.clone();
                 let faults = Faults::new(opts.debug_faults);

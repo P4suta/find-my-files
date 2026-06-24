@@ -61,7 +61,7 @@ public sealed class EngineClientFactoryTests
 
         var choice = EngineClientFactory.DecideAuto(
             () => false,
-            () => EngineServiceState.Stopped,
+            () => EngineServiceState.NotInstalled,
             () => true,
             () =>
             {
@@ -71,6 +71,43 @@ public sealed class EngineClientFactoryTests
 
         Assert.Equal(EngineChoice.Ffi, choice);
         Assert.Equal(0, scopeCalls); // elevation short-circuits before scope config
+    }
+
+    [Fact]
+    public void DecideAuto_starts_on_demand_when_service_installed_but_stopped()
+    {
+        // ADR-0027: an installed-but-stopped service is started on demand,
+        // regardless of elevation. Resolve owns the start + the fall-back-on-
+        // failure path; DecideAuto only routes to StartThenPipe.
+        var elevCalls = 0;
+
+        var choice = EngineClientFactory.DecideAuto(
+            () => false,
+            () => EngineServiceState.Stopped,
+            () =>
+            {
+                elevCalls++;
+                return true;
+            },
+            () => false);
+
+        Assert.Equal(EngineChoice.StartThenPipe, choice);
+        Assert.Equal(0, elevCalls); // a stopped service is started, not bypassed for FFI
+    }
+
+    [Fact]
+    public void WithoutService_picks_ffi_then_scope_then_empty()
+    {
+        // Elevated → FFI (even with scope configured: elevation wins).
+        Assert.Equal(EngineChoice.Ffi, EngineClientFactory.WithoutService(() => true, () => false));
+        Assert.Equal(EngineChoice.Ffi, EngineClientFactory.WithoutService(() => true, () => true));
+
+        // Not elevated → scope walk when roots exist, else the empty/setup engine.
+        Assert.Equal(
+            EngineChoice.WalkInProc, EngineClientFactory.WithoutService(() => false, () => true));
+        Assert.Equal(
+            EngineChoice.EmptyNotElevated,
+            EngineClientFactory.WithoutService(() => false, () => false));
     }
 
     [Fact]

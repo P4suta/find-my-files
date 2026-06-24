@@ -9,6 +9,11 @@ internal enum EngineChoice
     /// <summary>The service pipe answered the probe.</summary>
     Pipe,
 
+    /// <summary>The service is installed but stopped — start it unelevated and
+    /// connect over the pipe (on-demand lifecycle, ADR-0027). Resolved inside
+    /// <see cref="EngineClientFactory.Resolve"/>; never surfaced to the UI.</summary>
+    StartThenPipe,
+
     /// <summary>No live service and the process is elevated — in-proc FFI.</summary>
     Ffi,
 
@@ -97,6 +102,26 @@ public static class EngineClientFactory
             ServiceSetup.QueryState,
             ServiceSetup.IsProcessElevated,
             () => settings.ScopeRoots.Length > 0);
+
+        if (choice == EngineChoice.StartThenPipe)
+        {
+            // Installed but stopped: start it unelevated (the install granted this
+            // user SERVICE_START — ADR-0027), then connect over the pipe as it
+            // comes up (PipeEngineClient's supervisor retries until it answers).
+            // If the start can't be done — e.g. an older install without the
+            // granted right — fall back as if no service is present; the setup
+            // screen's re-register then migrates it.
+            if (ServiceSetup.TryStartUnelevated())
+            {
+                FileLog.Info("app", $"engine: pipe ({pipeName}, started on-demand service)");
+                return new PipeEngineClient(pipeName);
+            }
+
+            choice = WithoutService(
+                ServiceSetup.IsProcessElevated, () => settings.ScopeRoots.Length > 0);
+            FileLog.Warn("app", $"engine: on-demand start failed — falling back ({choice})");
+        }
+
         if (choice == EngineChoice.Pipe)
         {
             FileLog.Info("app", $"engine: pipe ({pipeName}, probe succeeded)");
@@ -161,19 +186,32 @@ public static class EngineClientFactory
             return EngineChoice.Pipe;
         }
 
-        if (serviceState() == EngineServiceState.Running)
+        // Probe failed: decide by SCM state. A running service that didn't answer
+        // rejected our token; an installed-but-stopped one is started on demand
+        // (ADR-0027); only a truly absent service consults elevation/scope.
+        return serviceState() switch
         {
-            return EngineChoice.EmptyServiceUnreachable;
-        }
+            EngineServiceState.Running => EngineChoice.EmptyServiceUnreachable,
+            EngineServiceState.Stopped => EngineChoice.StartThenPipe,
+            _ => WithoutService(elevated, hasScopeConfig),
+        };
+    }
 
+    /// <summary>The transport when no service is available: in-proc FFI if
+    /// elevated, else the non-elevated scope walk when roots are configured
+    /// (ADR-0024), else the empty engine (the setup screen, which leads with the
+    /// admin path). Also the fallback when an on-demand
+    /// <see cref="EngineChoice.StartThenPipe"/> start cannot be performed.</summary>
+    /// <param name="elevated">Whether this process is elevated.</param>
+    /// <param name="hasScopeConfig">Whether scope roots are configured (ADR-0024).</param>
+    /// <returns>The transport to construct when the service is absent/unstartable.</returns>
+    internal static EngineChoice WithoutService(Func<bool> elevated, Func<bool> hasScopeConfig)
+    {
         if (elevated())
         {
             return EngineChoice.Ffi;
         }
 
-        // Not elevated, no service: walk the user's chosen roots if any are
-        // configured (ADR-0024), else send them to the setup screen (which
-        // leads with the admin path). `hasScopeConfig` is consulted last.
         return hasScopeConfig() ? EngineChoice.WalkInProc : EngineChoice.EmptyNotElevated;
     }
 

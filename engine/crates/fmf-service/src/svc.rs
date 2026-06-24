@@ -8,8 +8,9 @@
 use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use fmf_core::engine::VolumeState;
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
 };
@@ -17,7 +18,7 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::{define_windows_service, service_dispatcher};
 
 use crate::pipe::Event;
-use crate::{config, host, server};
+use crate::{config, host, lifecycle, server};
 
 // The SCM name is contract surface (the app's in-app service setup needs
 // it too — ADR-0018 radiation).
@@ -55,6 +56,8 @@ pub fn serve(
     stop_event: &Arc<Event>,
 ) -> Result<(), u32> {
     let cfg = config::ServiceConfig::load(&opts.data_dir.join("service.json"));
+    // On-demand idle self-stop (ADR-0027); 0 = disabled (legacy resident).
+    let idle_stop = Duration::from_secs(cfg.idle_stop_secs);
 
     let engine = match host::create_engine_with_retry(opts.data_dir.join("index"), stop, 10) {
         Ok(e) => e,
@@ -81,6 +84,7 @@ pub fn serve(
             pipe_name: opts.pipe_name.clone(),
             debug_faults: opts.debug_faults,
             authorized_sids: cfg.authorized_sids.clone(),
+            data_dir: opts.data_dir.clone(),
         },
     ) {
         Ok(s) => s,
@@ -112,12 +116,49 @@ pub fn serve(
         }
     });
 
+    // Park until stopped (SCM Stop / Ctrl+C) or, when idle-stop is enabled,
+    // until the service has sat with no live connection past its timeout
+    // (ADR-0027). The idle clock starts only once a client has connected and
+    // dropped (`seen_client`), and a self-stop is held off while an initial
+    // scan is still running.
+    let mut seen_client = false;
+    let mut idle_since = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(200));
+        if idle_stop.is_zero() {
+            continue;
+        }
+        if srv.active_connections() > 0 {
+            seen_client = true;
+            idle_since = Instant::now();
+            continue;
+        }
+        if !seen_client || idle_since.elapsed() < idle_stop {
+            continue;
+        }
+        // Idle past the timeout with no client. Stop unless an initial scan is
+        // still in flight (the rare client-less bring-up); status() is consulted
+        // only here, at most once per idle window.
+        let indexing = engine
+            .status()
+            .iter()
+            .any(|(_, state, _)| *state == VolumeState::Scanning);
+        if lifecycle::idle_should_stop(seen_client, 0, indexing, idle_since.elapsed(), idle_stop) {
+            tracing::info!(
+                idle_secs = idle_stop.as_secs(),
+                "idle — self-stopping (on-demand)"
+            );
+            // Signal stop so the periodic-flush thread exits and the teardown
+            // below (flusher.join) doesn't block.
+            stop.store(true, Ordering::Relaxed);
+            break;
+        }
+        idle_since = Instant::now(); // a scan held us off; re-check next window
     }
     let _ = stop_event; // accept-loop wakeups go through Server::stop below
 
     tracing::info!("stopping — flushing snapshots");
+    lifecycle::stamp_last_use(&opts.data_dir);
     srv.stop();
     let _ = flusher.join();
     engine.flush();

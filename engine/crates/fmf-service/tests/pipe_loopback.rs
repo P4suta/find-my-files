@@ -83,6 +83,7 @@ fn start(tag: &str, debug_faults: bool) -> Harness {
             pipe_name: pipe_name.clone(),
             debug_faults,
             authorized_sids: Vec::new(),
+            data_dir: dir.path().to_path_buf(),
         },
     )
     .expect("server start");

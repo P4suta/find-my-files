@@ -18,6 +18,14 @@ pub struct ServiceConfig {
     pub log_level: String,
     /// Interval between index flushes to disk, in seconds.
     pub flush_interval_secs: u64,
+    /// Self-stop the service after this many seconds with no live pipe
+    /// connection (on-demand lifecycle, ADR-0027). `0` disables idle-stop —
+    /// the legacy "stay resident once started" behaviour. The clock starts
+    /// only after the first client has connected and then dropped.
+    pub idle_stop_secs: u64,
+    /// The daily GC task (ADR-0027) uninstalls the service when it has not
+    /// been used for this many days. `0` disables the GC.
+    pub gc_max_idle_days: u64,
     /// SIDs allowed to connect (P4: SDDL + connect-time token check).
     pub authorized_sids: Vec<String>,
 }
@@ -28,6 +36,8 @@ impl Default for ServiceConfig {
             volumes: Vec::new(),
             log_level: "info".to_string(),
             flush_interval_secs: 300,
+            idle_stop_secs: 300,
+            gc_max_idle_days: 7,
             authorized_sids: Vec::new(),
         }
     }
