@@ -6,11 +6,14 @@ alternatives, see [ADR-0020](adr/0020-code-signing-provider.md).
 
 ## Current state
 
-The signing step in `.github/workflows/release.yml` is **wired up but dormant**. Signing is **non-blocking**:
-until the repository Secrets (`ES_USERNAME` / `CREDENTIAL_ID`) are in place, cutting a tag still **completes,
-leaving the binaries unsigned and emitting a `::warning::`**.
-**Signing activates automatically from the next tag after you obtain a certificate and register the 4 Secrets below.**
-No other CI changes are needed.
+**Active.** A personal **Individual Validation (IV)** code-signing certificate was obtained from SSL.com on
+2026-06-24 (`CN=Yasunobu Sakashita`, code-signing EKU verified) and the 4 eSigner Secrets are registered, so
+`.github/workflows/release.yml` **Authenticode-signs the binaries from each `vX.Y.Z` tag**.
+
+Signing remains **non-blocking** by design: if the repository Secrets (`ES_USERNAME` / `CREDENTIAL_ID`) were ever
+removed, cutting a tag would still **complete, leaving the binaries unsigned and emitting a `::warning::`** rather
+than failing. The activation procedure below is retained as the runbook for renewal and for re-issuing the
+certificate. No CI changes are needed to keep signing working.
 
 Only the **project's own PE files** are signed — `FindMyFiles.exe` (the executable the user launches = the main
 target of SmartScreen evaluation), `fmf.exe`, `fmf-service.exe`, `fmf_engine.dll`. The bundled .NET / WindowsAppSDK
@@ -28,7 +31,9 @@ others' copyrighted works).
   download history accumulates. The immediate effect of signing is that "unknown publisher" disappears and
   **your name** appears in the properties.
 
-## Activation procedure (when you want a certificate)
+## Activation procedure (kept for renewal / re-issue)
+
+> Completed 2026-06-24 for the current certificate. Follow these steps again only when renewing or re-issuing.
 
 ### A. Obtain the certificate (SSL.com)
 
@@ -66,9 +71,9 @@ others' copyrighted works).
 
 ### E. Verification
 
-6. **Dry run (possible right now, even before obtaining a certificate)**: with Secrets unset, run Actions → release
+6. **Dry run (only relevant before the Secrets are registered)**: with Secrets unset, run Actions → release
    via `workflow_dispatch` → confirm that the signing step is skipped, a `::warning::` is emitted, and the
-   zip / checksum / Release creation **complete without failure** (= the dormant wiring does not break the pipeline).
+   zip / checksum / Release creation **complete without failure** (= the non-blocking wiring does not break the pipeline).
 7. **Real signing (after registering Secrets)**: cut a test tag (e.g. `v0.0.1-rc1`) and run. Confirm that
    "Sign staged binaries" runs and "Verify signatures" turns green with all 4 files showing
    `signed: ... - CN=<your name>`.
