@@ -77,6 +77,19 @@ A privileged-indexer → non-privileged-UI design carries an information-disclos
 - **SeBackupPrivilege and raw-volume reads**: what is documented goes only as far as "retrieving content of normal files by bypassing the ACL". There is **no documented guarantee** that a raw volume handle to \\.\C: can be opened with SeBackupPrivilege alone (research scope: Managing Privileges in a File System and others). Volume handles require admin (see "Privileges" item above) → the basis on which ADR-0017 rejected the dedicated low-privilege-account proposal.
   https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/privileges
 
+## On-demand service lifecycle (researched 2026-06-23, premise = ADR-0027)
+
+The v2 service was registered SERVICE_AUTO_START (boot-resident). ADR-0027 moves it to demand-start + unelevated start/stop + idle stop + a daily GC. Supporting facts:
+
+- **SetServiceObjectSecurity / per-service DACL**: a service object carries its own security descriptor, and the SCM grants access per the *service* DACL. By adding an ACE granting a user `SERVICE_START`/`SERVICE_STOP`, that **non-admin user can start/stop the service** (the standard `sc sdset` / `SetServiceObjectSecurity` pattern). The dangerous bits (`SERVICE_CHANGE_CONFIG`, `DELETE`, `WRITE_DAC`, `WRITE_OWNER`) must stay admin-only — `SERVICE_CHANGE_CONFIG` lets the holder rewrite `lpBinaryPathName`, i.e. run arbitrary code as the service account (LocalSystem) = local privilege escalation.
+  https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-setserviceobjectsecurity / https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights
+- **SERVICE_DEMAND_START / ChangeServiceConfig**: `CreateService` with `dwStartType = SERVICE_DEMAND_START` registers a manual-start service (no boot launch); `ChangeServiceConfigW(SERVICE_NO_CHANGE, SERVICE_DEMAND_START, …)` migrates an existing AUTO_START registration. A stopped demand-start service is an inert SCM database row — no process, no RAM.
+  https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-createservicew
+- **MoveFileEx + MOVEFILE_DELAY_UNTIL_REBOOT**: schedules a delete (lpNewFileName = NULL) processed at next boot via `PendingFileRenameOperations`; "can be used only … by a member of the Administrators group or LocalSystem". The standard idiom for a running image deleting itself (the SYSTEM GC removing its own `%ProgramData%` binary + dir).
+  https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw
+- **Task Scheduler as SYSTEM**: a task with principal `S-1-5-18` (LocalSystem) + `RunLevel=HighestAvailable` runs unattended with full privilege; `StartWhenAvailable=true` runs a missed daily trigger when the machine is next on. Registering from XML (`schtasks /Create /XML`) keeps `<Command>`/`<Arguments>` as separate elements, avoiding `/TR` command-line quoting pitfalls. Registration itself requires elevation (done during the one-time elevated install).
+  https://learn.microsoft.com/en-us/windows/win32/taskschd/daily-trigger-example--xml-
+
 ## Regex engine (rust `regex` crate, researched 2026-06-15, premise for first-class status = ADR-0023)
 
 - **Linear-time guarantee, no ReDoS**: the `regex` crate is implemented with finite automata (lazy DFA / Pike VM) and **does not backtrack**. Matching is **linear** in "input length × pattern length", and the catastrophic backtracking that plagues regex services (ReDoS runtime exponential blowup) **cannot occur structurally**, as officially stated. Even malicious `(a+)+$`-style patterns run linearly.

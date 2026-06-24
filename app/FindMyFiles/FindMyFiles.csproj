@@ -6,6 +6,10 @@
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>FindMyFiles</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Embed the app icon into the PE so Explorer / pinned shortcuts show it
+         too. The taskbar/Alt-Tab icon comes from AppWindow.SetIcon at runtime
+         (loose Assets\AppIcon.ico, copied below); this is the on-disk exe face. -->
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <!-- Build output goes under the repo-root build/ tree, not app/FindMyFiles/bin
          (ADR-0021): one place for every artifact. Only bin moves — obj stays put
          because relocating BaseIntermediateOutputPath needs a Directory.Build.props,

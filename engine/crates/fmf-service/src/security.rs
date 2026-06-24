@@ -255,6 +255,73 @@ pub fn data_tree_dacls(log_readers: &[&str]) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// The service-object DACL (ADR-0027): SYSTEM/Admins full, each user start/stop.
+///
+/// `D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(…;;;BA)(A;;CCLCSWRPWPLORC;;;<sid>)…`
+/// — SYSTEM and Administrators keep full control, each authorized user gets
+/// query-config/status + start + stop + interrogate + read, nobody else.
+///
+/// The user ACE deliberately omits change-config (`DC`), delete (`SD`),
+/// write-DAC (`WD`) and write-owner (`WO`): granting any of those to a standard
+/// user on a `LocalSystem` service would let them repoint the service binary and
+/// run arbitrary code as SYSTEM (local privilege escalation, docs/SECURITY.md).
+/// SYSTEM keeps full control so the SYSTEM-run GC task can `DeleteService`.
+#[must_use]
+pub fn service_sddl(user_sids: &[String]) -> String {
+    // SERVICE_ALL_ACCESS in SDDL rights letters (matches Windows' default SY/BA
+    // ACEs); the per-user set is query+start+stop+interrogate+read only.
+    const FULL: &str = "CCDCLCSWRPWPDTLOCRSDRCWDWO";
+    let mut s = format!("D:P(A;;{FULL};;;SY)(A;;{FULL};;;BA)");
+    for sid in user_sids {
+        s.push_str("(A;;CCLCSWRPWPLORC;;;");
+        s.push_str(sid);
+        s.push(')');
+    }
+    s
+}
+
+/// Sets the service-object DACL from an SDDL string (install-time, elevated).
+///
+/// The only way an authorized user gains unelevated start/stop on the on-demand
+/// service (ADR-0027). Build `sddl` via [`service_sddl`]; never hand-roll it.
+///
+/// # Errors
+/// Returns the OS error if the SCM/service cannot be opened with `WRITE_DAC`,
+/// the SDDL fails to convert, or `SetServiceObjectSecurity` fails.
+pub fn set_service_dacl(service_name: &str, sddl: &str) -> io::Result<()> {
+    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+    use windows_sys::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT,
+        SetServiceObjectSecurity,
+    };
+    // Standard rights (windows-sys does not surface these as named consts here).
+    const WRITE_DAC: u32 = 0x0004_0000;
+    const READ_CONTROL: u32 = 0x0002_0000;
+
+    let sec = PipeSecurity::from_sddl(sddl)?;
+    let name: Vec<u16> = service_name.encode_utf16().chain([0]).collect();
+    unsafe {
+        let scm = OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT);
+        if scm.is_null() {
+            return Err(last_error());
+        }
+        let svc = OpenServiceW(scm, name.as_ptr(), WRITE_DAC | READ_CONTROL);
+        if svc.is_null() {
+            let e = last_error();
+            CloseServiceHandle(scm);
+            return Err(e);
+        }
+        let ok = SetServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, sec.descriptor);
+        let err = last_error();
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        if ok == 0 {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
 /// Applies an SDDL-described protected DACL to a directory (install-time).
 ///
 /// # Errors
@@ -353,6 +420,37 @@ mod tests {
             !two.contains(";;;BA)"),
             "no Administrators ACE (deny-only under UAC)"
         );
+    }
+
+    #[test]
+    fn service_sddl_grants_user_start_stop_not_config_or_delete() {
+        // SYSTEM + Administrators full control; no user → just those two ACEs.
+        const FULL: &str = "CCDCLCSWRPWPDTLOCRSDRCWDWO";
+        assert_eq!(
+            service_sddl(&[]),
+            format!("D:P(A;;{FULL};;;SY)(A;;{FULL};;;BA)")
+        );
+        let one = service_sddl(&["S-1-5-21-1-2-3-1001".to_string()]);
+        assert_eq!(
+            one,
+            format!("D:P(A;;{FULL};;;SY)(A;;{FULL};;;BA)(A;;CCLCSWRPWPLORC;;;S-1-5-21-1-2-3-1001)")
+        );
+
+        // The user ACE grants start (RP) and stop (WP) — the whole point — but
+        // NEVER change-config / delete / write-DAC / write-owner, which on a
+        // LocalSystem service would be local privilege escalation.
+        let user_ace = "(A;;CCLCSWRPWPLORC;;;S-1-5-21-1-2-3-1001)";
+        assert!(one.contains(user_ace));
+        assert!(user_ace.contains("RP"), "user can start (RP)");
+        assert!(user_ace.contains("WP"), "user can stop (WP)");
+        for forbidden in ["DC", "SD", "WD", "WO"] {
+            assert!(
+                !user_ace.contains(forbidden),
+                "user ACE must not grant {forbidden} on a LocalSystem service"
+            );
+        }
+        // And it converts to a real security descriptor.
+        PipeSecurity::from_sddl(&one).expect("service SDDL converts");
     }
 
     #[test]
