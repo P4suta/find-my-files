@@ -14,12 +14,15 @@ Run this before any release, and after touching:
 
 ## Preconditions
 
-- [ ] A **published** bundle exists: `just publish` → `build/dist/FindMyFiles/FindMyFiles.exe`.
+- [ ] A **published** bundle exists: `just publish`. The bundle root holds the
+      launcher `build/dist/FindMyFiles/FindMyFiles.exe` (what a user runs) +
+      `README.txt`; the app itself and the engine binaries live one level down in
+      `build/dist/FindMyFiles/app/`.
 - [ ] A **clean, non-elevated standard user** (or a fresh local account). The app
       launches `asInvoker` — start it normally, never "Run as administrator".
 - [ ] **No fmf-engine service installed** to start (so the first run lands on the
       disconnected setup screen). Verify: `just service-status` reports the
-      service absent / stopped, or run `build/dist/FindMyFiles/fmf-service.exe status`.
+      service absent / stopped, or run `build/dist/FindMyFiles/app/fmf-service.exe status`.
 - [ ] You can read the app log. Path depends on the data-root mode:
   - **Portable** (default — the bundle writes beside the exe): `build/dist/FindMyFiles/data/logs/app.log`
   - **Profile**: `%APPDATA%\find-my-files\logs\app.log`

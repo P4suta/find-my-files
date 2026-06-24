@@ -15,10 +15,11 @@ removed, cutting a tag would still **complete, leaving the binaries unsigned and
 than failing. The activation procedure below is retained as the runbook for renewal and for re-issuing the
 certificate. No CI changes are needed to keep signing working.
 
-Only the **project's own PE files** are signed — `FindMyFiles.exe` (the executable the user launches = the main
-target of SmartScreen evaluation), `fmf.exe`, `fmf-service.exe`, `fmf_engine.dll`. The bundled .NET / WindowsAppSDK
-runtime DLLs are already Microsoft-signed and are not re-signed (to avoid wasting the signing quota and signing
-others' copyrighted works).
+Only the **project's own PE files** are signed — the root launcher `FindMyFiles.exe` (the executable the user
+double-clicks = the main target of SmartScreen evaluation), the apphost `app\FindMyFiles.exe`, and the engine
+binaries `app\fmf.exe`, `app\fmf-service.exe`, `app\fmf_engine.dll`. The bundled .NET / WindowsAppSDK runtime DLLs
+are already Microsoft-signed and are not re-signed (to avoid wasting the signing quota and signing others'
+copyrighted works).
 
 ## Background (why this setup)
 
@@ -75,12 +76,14 @@ others' copyrighted works).
    via `workflow_dispatch` → confirm that the signing step is skipped, a `::warning::` is emitted, and the
    zip / checksum / Release creation **complete without failure** (= the non-blocking wiring does not break the pipeline).
 7. **Real signing (after registering Secrets)**: cut a test tag (e.g. `v0.0.1-rc1`) and run. Confirm that
-   "Sign staged binaries" runs and "Verify signatures" turns green with all 4 files showing
+   "Sign staged binaries" runs and "Verify signatures" turns green with all 5 files showing
    `signed: ... - CN=<your name>`.
-8. **Local confirmation**: extract the Release zip and on Windows:
+8. **Local confirmation**: extract the Release zip and on Windows verify the
+   root launcher (the rest — apphost + engine binaries — sit under `app\`):
    ```powershell
-   signtool verify /pa /v build\dist\FindMyFiles\FindMyFiles.exe   # → Successfully verified
-   Get-AuthenticodeSignature build\dist\FindMyFiles\FindMyFiles.exe # → Status: Valid
+   signtool verify /pa /v FindMyFiles.exe          # the launcher → Successfully verified
+   Get-AuthenticodeSignature FindMyFiles.exe        # → Status: Valid
+   Get-AuthenticodeSignature app\FindMyFiles.exe    # the apphost → Status: Valid
    ```
    In the properties of `FindMyFiles.exe` → "Digital Signatures" tab, your name and a timestamp appear.
 

@@ -100,21 +100,33 @@ jobs:
           --output build/sbom --filename app.cdx.json
           --output-format Json --spec-version 1.6 --runtime win-x64
 
-      # Authenticode-sign only our own PE binaries: FindMyFiles.exe is the one
-      # SmartScreen judges, the rest are our Rust binaries. The bundled .NET /
-      # WindowsAppSDK runtime DLLs are already Microsoft-signed - re-signing them
-      # would waste eSigner quota and claim authorship we don't have. So we stage
-      # just our four files, batch-sign them into a separate `signed/` dir, copy
-      # them back, then hard-verify. eSigner is cloud HSM-backed: no token reaches
-      # the runner; the TOTP secret drives unattended auth.
+      # Authenticode-sign only our own PE binaries. The user-facing entry point
+      # is the root launcher FindMyFiles.exe (what SmartScreen judges first); the
+      # rest are the apphost + our Rust binaries one level down in app\. The
+      # bundled .NET / WindowsAppSDK runtime DLLs are already Microsoft-signed -
+      # re-signing them would waste eSigner quota and claim authorship we don't
+      # have. So we stage just our five files, batch-sign them into a separate
+      # `signed/` dir, copy them back, then hard-verify. eSigner is cloud
+      # HSM-backed: no token reaches the runner; the TOTP secret drives auth.
+      #
+      # Two of the five share the basename FindMyFiles.exe (the root launcher and
+      # the app\ apphost), so a flat copy-by-basename would collide. Stage via a
+      # path -> unique-name map; Authenticode lives inside the PE (filename-
+      # independent), so the staging rename is safe and we map back afterwards.
       - name: Stage first-party binaries for signing
         if: env.HAVE_SIGNING == 'true'
         shell: pwsh
         run: |
-          $bins = 'FindMyFiles.exe', 'fmf.exe', 'fmf-service.exe', 'fmf_engine.dll'
+          $map = @(
+            @{ Src = 'FindMyFiles.exe';     Stage = 'FindMyFiles.exe' }
+            @{ Src = 'app/FindMyFiles.exe'; Stage = 'app-FindMyFiles.exe' }
+            @{ Src = 'app/fmf.exe';         Stage = 'fmf.exe' }
+            @{ Src = 'app/fmf-service.exe'; Stage = 'fmf-service.exe' }
+            @{ Src = 'app/fmf_engine.dll';  Stage = 'fmf_engine.dll' }
+          )
           New-Item -ItemType Directory -Force sign-stage | Out-Null
           New-Item -ItemType Directory -Force signed | Out-Null
-          $bins | ForEach-Object { Copy-Item "build/dist/FindMyFiles/$_" sign-stage/ }
+          $map | ForEach-Object { Copy-Item "build/dist/FindMyFiles/$($_.Src)" "sign-stage/$($_.Stage)" }
 
       - name: Sign staged binaries (SSL.com eSigner)
         if: env.HAVE_SIGNING == 'true'
@@ -142,7 +154,15 @@ jobs:
       - name: Copy signed binaries back into the bundle
         if: env.HAVE_SIGNING == 'true'
         shell: pwsh
-        run: Copy-Item signed/* build/dist/FindMyFiles/ -Force
+        run: |
+          $map = @(
+            @{ Src = 'FindMyFiles.exe';     Stage = 'FindMyFiles.exe' }
+            @{ Src = 'app/FindMyFiles.exe'; Stage = 'app-FindMyFiles.exe' }
+            @{ Src = 'app/fmf.exe';         Stage = 'fmf.exe' }
+            @{ Src = 'app/fmf-service.exe'; Stage = 'fmf-service.exe' }
+            @{ Src = 'app/fmf_engine.dll';  Stage = 'fmf_engine.dll' }
+          )
+          $map | ForEach-Object { Copy-Item "signed/$($_.Stage)" "build/dist/FindMyFiles/$($_.Src)" -Force }
 
       # Never ship a "signed" build that is silently unsigned: once signing was
       # requested, fail the release if any of our binaries lacks a valid
@@ -153,7 +173,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($f in 'FindMyFiles.exe', 'fmf.exe', 'fmf-service.exe', 'fmf_engine.dll') {
+          $targets = 'FindMyFiles.exe', 'app/FindMyFiles.exe', 'app/fmf.exe', 'app/fmf-service.exe', 'app/fmf_engine.dll'
+          foreach ($f in $targets) {
             $sig = Get-AuthenticodeSignature "build/dist/FindMyFiles/$f"
             if ($sig.Status -ne 'Valid') {
               throw "Authenticode check failed for $f - status: $($sig.Status)"

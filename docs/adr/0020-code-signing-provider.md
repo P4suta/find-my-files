@@ -10,8 +10,10 @@ Authenticode signing of the distributed binaries is done with **SSL.com eSigner*
 certificate**. Signing is kept as a **CI-environment-specific YAML step** in `release.yml` (tag-driven), not placed in `xtask/`.
 Signing is **non-blocking** by design (if Secrets are unset, finish unsigned + `::warning::`); it stayed dormant until the certificate was obtained and is now active.
 
-The signing targets are **only the 4 in-house PEs**: `FindMyFiles.exe` / `fmf.exe` / `fmf-service.exe` / `fmf_engine.dll`. The bundled
-.NET / WindowsAppSDK runtime DLLs are Microsoft-signed, so they are not re-signed.
+The signing targets are **only our own PEs** — 5 since the bundle gained a root launcher (see ADR-0021): the root launcher
+`FindMyFiles.exe`, the apphost `app\FindMyFiles.exe`, `app\fmf.exe`, `app\fmf-service.exe`, `app\fmf_engine.dll`. The bundled
+.NET / WindowsAppSDK runtime DLLs are Microsoft-signed, so they are not re-signed. (Two of the five share the basename
+`FindMyFiles.exe`, so `release.yml` stages them via a path→unique-name map before batch-signing.)
 
 ## Rationale
 

@@ -229,14 +229,15 @@ test-pipe: service-build
     dotnet test app/FindMyFiles.Tests --settings app/FindMyFiles.Tests/pipe.runsettings -p:SkipRustBuild=true
 
 # winapp UI-automation smoke suite (no elevation). Publishes the bundle, then
-# hands the published FindMyFiles.exe to ui-tests.ps1, which launches it under
-# --engine=empty (setup screen) and --fake-engine (search) and asserts on the
-# AutomationIds. The script owns process lifecycle; this recipe is a thin
-# pwsh wrapper. -IncludeFaults requires a DEBUG bundle, so it is off here.
+# hands the published apphost (app/FindMyFiles.exe, NOT the root launcher — that
+# spawns-and-exits, so automation must attach to the real app) to ui-tests.ps1,
+# which launches it under --engine=empty (setup screen) and --fake-engine
+# (search) and asserts on the AutomationIds. The script owns process lifecycle;
+# this recipe is a thin pwsh wrapper. -IncludeFaults requires a DEBUG bundle.
 [group('service')]
 [doc('winapp UI-automation smoke suite (publishes the bundle; no elevation)')]
 ui-test: publish
-    pwsh -NoProfile -ExecutionPolicy Bypass -File app/FindMyFiles.Tests/UiAutomation/ui-tests.ps1 -ExePath build/dist/FindMyFiles/FindMyFiles.exe
+    pwsh -NoProfile -ExecutionPolicy Bypass -File app/FindMyFiles.Tests/UiAutomation/ui-tests.ps1 -ExePath build/dist/FindMyFiles/app/FindMyFiles.exe
 
 # ── Benchmarks & gates (discipline: ADR-0013, engine/benches/README.md) ──
 
