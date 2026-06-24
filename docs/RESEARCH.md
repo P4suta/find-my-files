@@ -121,3 +121,18 @@ The hybrid "packaged UI + unpackaged service" decision (ADR-0028) rests on these
   https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-behind-the-scenes
 - **Self-contained vs framework-dependent MSIX**: framework-dependent is smaller but needs the Windows App Runtime present on the target (no Store resolver on the sideload/winget self-host path); self-contained carries WinAppSDK in-package and installs with nothing pre-present, but is not serviceable for WinAppSDK CVEs (rebuild to patch). → self-contained chosen (matches the existing `WindowsAppSDKSelfContained=true`); framework-dependent is the package-size re-examination trigger.
   https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/deploy-overview
+
+## Code signing — CI integration (researched 2026-06-25, premise for ADR-0029)
+
+ADR-0020 fixed the provider/cert (SSL.com eSigner, individual IV). These facts drove the *mechanism* (CKA + `signtool`) and the `build`→`sign`→`publish` split:
+
+- **Azure Trusted Signing (the 2026 managed standard) is unavailable here.** Individual-developer onboarding is **paused**, and new tenants are limited to **US/CA organizations with 3+ years of verifiable history** — a Japanese individual cannot enroll. This closes the door ADR-0020 already noted (it was US/CA/EU/UK individual-only before).
+  https://techcommunity.microsoft.com/blog/microsoft-security-blog/trusted-signing-is-now-open-for-individual-developers-to-sign-up-in-public-previ/4273554 / https://learn.microsoft.com/en-us/answers/questions/5810735/cant-create-a-new-trusted-signing-individual-ident
+- **`dotnet sign` only delegates to Azure Key Vault / Trusted Signing.** The modern Microsoft CLI computes a digest and submits it to AKV/Trusted Signing for RSA signing; it has **no SSL.com eSigner backend**. So the "most standard" CLI is not usable with this cert.
+  https://github.com/dotnet/sign
+- **eSigner CKA (Cloud Key Adapter) presents the cloud cert as a Windows store cert.** CKA "acts like a virtual USB token and loads the code-signing certs to the certificate store" via a CNG KSP, so the **standard `signtool`** (and `certutil`) sign with it — no Java tool, no copy-back. Headless CI flow: silent-install the CKA, `eSignerCKATool.exe config -mode product -user … -pass … -totp … -key … -r`, `unload`/`load`, read the thumbprint from `Cert:\CurrentUser\My`, then `signtool sign /fd sha256 /tr http://ts.ssl.com /td sha256 /sha1 <thumbprint>`.
+  https://github.com/SSLcom/eSignerCKA / https://www.ssl.com/how-to/how-to-integrate-esigner-cka-with-ci-cd-tools-for-automated-code-signing/
+- **`signtool verify /pa /tw` is the authoritative timestamp check.** Exit **0** = chain valid + timestamped, **2** = signed but **not** timestamped, **1** = invalid — so any non-zero fails the build, catching a missing RFC 3161 timestamp (without which a signature dies with the ~460-day cert).
+  https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/signtool
+- **`Get-AuthenticodeSignature.TimeStamperCertificate` is unreliable for this assertion**: it is null under `-FilePath` on the runner (a long-standing PowerShell bug), so the timestamp guarantee must come from `signtool`, not this property. The cmdlet is still fine for the signer-subject check.
+  https://github.com/PowerShell/PowerShell/issues/4060

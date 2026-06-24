@@ -74,10 +74,10 @@ the SCM service, set DACLs, strip privileges, and create the GC task; RESEARCH.m
 - **Three artifacts**: `.msix` (App Installer + winget), the portable `.zip` (unchanged), and the
   engine tools (CLI/service) shipped inside the zip / as the install source for the service.
 - **New surface**: a `Package.appxmanifest` (`Publisher` = the SSL.com IV cert Subject DN *exactly*,
-  `runFullTrust`, **no** `desktop6:Service`), visual assets, a CI step to build + eSigner-sign the
-  `.msix` (`malware_block:"false"` for the MSIX input — the existing `release.yml` comment already
-  flags this) with a `Publisher == cert Subject` assertion, and an `xtask package-msix` verb sourced
-  from `paths.rs`. App code: package-identity detection in `AppPaths` (force the profile path, disable
+  `runFullTrust`, **no** `desktop6:Service`), visual assets, a CI step to build + sign the `.msix`
+  (folded into the same eSigner CKA + `signtool` path as the binaries — ADR-0029 — `signtool` signs
+  `.msix` directly) with a `Publisher == cert Subject` assertion, and an `xtask package-msix` verb
+  sourced from `paths.rs`. App code: package-identity detection in `AppPaths` (force the profile path, disable
   portable `<exe>\data` under MSIX), a packaged-mode source for `fmf-service.exe`, and a settings
   migration.
 - **Residual risks (must be tracked):**
