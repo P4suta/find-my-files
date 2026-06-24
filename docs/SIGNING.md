@@ -96,9 +96,9 @@ others' copyrighted works).
   the pre-signing malware blocker enabled, so `batch_sign` cannot sign hashes that were never scanned. The fix is
   already wired in `release.yml`: `malware_block: "true"` makes the Action scan the files inline before signing.
   (If you ever sign MSIX inputs, SSL.com requires the scan be **disabled** for those — flip it back to `false`.)
-- **Verify signatures fails**: `batch_sign` may have written the signed files to a separate folder instead of
-  `override`. Check the output location in the Action log and, if needed, specify `output_path` in the signing step
-  of `release.yml` so the copy source for "Copy signed binaries back" matches it.
+- **Verify signatures fails with `NotSigned`**: `batch_sign` does not honor `override`, so the signed files must be
+  written to an explicit `output_path` — otherwise "Copy signed binaries back" copies the unsigned originals. This is
+  already wired: the sign step sets `output_path` to a `signed/` dir and copy-back reads from there (not `sign-stage/`).
 - **`Get-AuthenticodeSignature` returns `UnknownError`**: the public trust chain is unresolved. Check details with
   `signtool verify /pa`.
 - **A SmartScreen warning still appears on first launch**: expected (reputation is shallow). It disappears as
