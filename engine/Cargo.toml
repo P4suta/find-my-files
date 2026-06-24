@@ -141,7 +141,7 @@ serde_json = "1"
 # CLI presentation: TTY-aware colouring that strips ANSI when redirected
 # (anstream) over clap's own style vocabulary (anstyle, already in the lock as
 # a clap dependency). No colour is ever hardcoded — the stream decides.
-anstream = "0.6"
+anstream = "1.0"
 anstyle = "1"
 # A spinner while a volume is being indexed; hides itself when stderr is not a
 # terminal, so it never pollutes piped/JSON output.
