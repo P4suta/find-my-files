@@ -4,7 +4,7 @@ Date: 2026-06-13 / Status: Accepted (active — IV certificate obtained 2026-06-
 
 Certificate holder: `CN=Yasunobu Sakashita` (SSL.com individual IV, code-signing EKU), issued via `SSL.com Code Signing Intermediate CA RSA R1`.
 
-> **Update (2026-06-25):** the **provider and certificate decided here are unchanged**, but the CI *integration mechanism* has moved on — see [ADR-0029](0029-ci-signing-cka-pipeline.md). `release.yml` now signs with the standard `signtool` via the eSigner **CKA** (not the Java `batch_sign` Action), in a `build`→`sign`→`publish` job split with the secrets behind an approval-gated `release` environment. The rationale below (why SSL.com eSigner / IV over Azure / EV / Certum / SignPath) still stands; the paragraphs about `batch_sign` and the staging map describe the original mechanism, now superseded by ADR-0029. Azure Trusted Signing has since **paused individual onboarding** entirely (US/CA orgs, 3+ years only), reinforcing the rejection below.
+> **Update (2026-06-25):** the **provider, certificate, and signing Action decided here are unchanged** — `release.yml` still signs with the official `SSLcom/esigner-codesign` Action (`batch_sign`) and the staging map described below. What changed is the *pipeline around it*: see [ADR-0029](0029-ci-signing-cka-pipeline.md) — a `build`→`sign`→`publish` job split with the secrets behind an approval-gated `release` environment, plus a hardened verify (`signtool /pa /tw` timestamp + signer-CN). (An eSigner CKA + standard `signtool` mechanism was trialled to drop the staging/copy-back but **failed in CI** and was reverted — ADR-0029.) Azure Trusted Signing has since **paused individual onboarding** entirely (US/CA orgs, 3+ years only), reinforcing the rejection below.
 
 ## Decision
 

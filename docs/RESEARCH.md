@@ -124,13 +124,15 @@ The hybrid "packaged UI + unpackaged service" decision (ADR-0028) rests on these
 
 ## Code signing — CI integration (researched 2026-06-25, premise for ADR-0029)
 
-ADR-0020 fixed the provider/cert (SSL.com eSigner, individual IV). These facts drove the *mechanism* (CKA + `signtool`) and the `build`→`sign`→`publish` split:
+ADR-0020 fixed the provider/cert (SSL.com eSigner, individual IV). These facts drove the *mechanism* (official Action) and the `build`→`sign`→`publish` split:
 
 - **Azure Trusted Signing (the 2026 managed standard) is unavailable here.** Individual-developer onboarding is **paused**, and new tenants are limited to **US/CA organizations with 3+ years of verifiable history** — a Japanese individual cannot enroll. This closes the door ADR-0020 already noted (it was US/CA/EU/UK individual-only before).
   https://techcommunity.microsoft.com/blog/microsoft-security-blog/trusted-signing-is-now-open-for-individual-developers-to-sign-up-in-public-previ/4273554 / https://learn.microsoft.com/en-us/answers/questions/5810735/cant-create-a-new-trusted-signing-individual-ident
 - **`dotnet sign` only delegates to Azure Key Vault / Trusted Signing.** The modern Microsoft CLI computes a digest and submits it to AKV/Trusted Signing for RSA signing; it has **no SSL.com eSigner backend**. So the "most standard" CLI is not usable with this cert.
   https://github.com/dotnet/sign
-- **eSigner CKA (Cloud Key Adapter) presents the cloud cert as a Windows store cert.** CKA "acts like a virtual USB token and loads the code-signing certs to the certificate store" via a CNG KSP, so the **standard `signtool`** (and `certutil`) sign with it — no Java tool, no copy-back. Headless CI flow: silent-install the CKA, `eSignerCKATool.exe config -mode product -user … -pass … -totp … -key … -r`, `unload`/`load`, read the thumbprint from `Cert:\CurrentUser\My`, then `signtool sign /fd sha256 /tr http://ts.ssl.com /td sha256 /sha1 <thumbprint>`.
+- **The official `SSLcom/esigner-codesign` Action (`batch_sign`) is SSL.com's recommended CI integration, and it works with this account.** It downloads CodeSignTool, runs `scan_code` (pre-signing malware scan, required when the account has the malware blocker on), signs, and timestamps via SSL.com's TSA. Only file hashes leave the runner. Proven green on this cert in CI (run `28082306344`). It is SHA-pinnable (v1.3.2). `sign`/`batch_sign` also accept `.msix`.
+  https://github.com/SSLcom/esigner-codesign
+- **eSigner CKA (Cloud Key Adapter) was tried and fails in CI.** CKA loads the cloud cert into the Windows store via a CNG KSP so the standard `signtool` can sign — but the KSP is **32-bit** (x64 signtool reports "No certificates were found…"; x86 is required, per SSL.com), and even with x86 the sign call fails at credential retrieval: `Signing credentials not configured … SignerSign() failed (0x80090003)`. This is a CKA-internal CSC credential path, **not** an account/PIN problem (the Action's `batch_sign` signs fine on the same account). Rejected for CI; see ADR-0029.
   https://github.com/SSLcom/eSignerCKA / https://www.ssl.com/how-to/how-to-integrate-esigner-cka-with-ci-cd-tools-for-automated-code-signing/
 - **`signtool verify /pa /tw` is the authoritative timestamp check.** Exit **0** = chain valid + timestamped, **2** = signed but **not** timestamped, **1** = invalid — so any non-zero fails the build, catching a missing RFC 3161 timestamp (without which a signature dies with the ~460-day cert).
   https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/signtool

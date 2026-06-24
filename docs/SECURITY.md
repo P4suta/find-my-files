@@ -22,13 +22,13 @@ API spec verification is in [RESEARCH.md](RESEARCH.md).
 
 ## Distribution Integrity (code signing)
 
-Authenticode signing of the distributed binaries is done with SSL.com eSigner (individual IV). It is **active**: an IV
-certificate (`CN=Yasunobu Sakashita`) was obtained 2026-06-24, so `release.yml` signs the binaries from each tag using
-the standard `signtool` driven by the eSigner CKA (ADR-0029). The wiring stays non-blocking (an unsigned build emits a
-`::warning::` rather than failing if the secrets are ever absent). The acquisition/renewal steps are in
+Authenticode signing of the distributed binaries is done with SSL.com eSigner (individual IV) via the official
+`SSLcom/esigner-codesign` Action (`batch_sign`). It is **active**: an IV certificate (`CN=Yasunobu Sakashita`) was
+obtained 2026-06-24, so `release.yml` signs the binaries from each tag. The wiring stays non-blocking (an unsigned build
+emits a `::warning::` rather than failing if the secrets are ever absent). The acquisition/renewal steps are in
 [SIGNING.md](SIGNING.md); the provider/cert rationale is in [ADR-0020](adr/0020-code-signing-provider.md) and the
-CKA + `signtool` mechanism in [ADR-0029](adr/0029-ci-signing-cka-pipeline.md). Signing is limited to the tag-driven
-`release.yml` (the `ci.yml` dev artifacts are not signed).
+pipeline shape (and why the eSigner CKA alternative was rejected) in [ADR-0029](adr/0029-ci-signing-cka-pipeline.md).
+Signing is limited to the tag-driven `release.yml` (the `ci.yml` dev artifacts are not signed).
 
 Hardening of the signing path (ADR-0029):
 
@@ -41,8 +41,8 @@ Hardening of the signing path (ADR-0029):
 - **Hard verification.** Once signing is requested, every PE must pass `signtool verify /pa /tw` (non-zero exit on an
   invalid chain **or a missing RFC 3161 timestamp**) and a signer-subject assertion (`CN=Yasunobu Sakashita`), so a
   silently-unsigned, untimestamped, or wrong-cert build fails the release.
-- **Pinned tooling.** All Actions are SHA-pinned; the CKA installer (downloaded at runtime, not an Action) is gated on a
-  committed SHA-256 before it runs.
+- **Pinned tooling.** Every Action — including the `SSLcom/esigner-codesign` signing Action — is pinned to a 40-char
+  commit SHA (CodeSignTool itself sends only file hashes to SSL.com; the source never leaves the runner).
 
 ## Manual Verification Checklist (run once before each release; record the result and date here)
 
