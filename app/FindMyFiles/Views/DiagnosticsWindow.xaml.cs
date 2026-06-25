@@ -34,7 +34,12 @@ public sealed partial class DiagnosticsWindow : Window
         // DPI-correct, flicker-free sizing (ctor runs before first paint).
         var hwnd = Win32Interop.GetWindowFromWindowId(AppWindow.Id);
         var scale = GetDpiForWindow(hwnd) / 96.0;
-        AppWindow.ResizeClient(new SizeInt32((int)(560 * scale), (int)(720 * scale)));
+
+        // Window sizing comes from the design-token system (Themes/Tokens.Semantic.xaml).
+        var res = Application.Current.Resources;
+        AppWindow.ResizeClient(new SizeInt32(
+            (int)((double)res["DiagWindowWidth"] * scale),
+            (int)((double)res["DiagWindowHeight"] * scale)));
         var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
         var sz = AppWindow.Size;
         AppWindow.Move(new PointInt32(
@@ -42,8 +47,8 @@ public sealed partial class DiagnosticsWindow : Window
             area.Y + ((area.Height - sz.Height) / 2)));
         if (AppWindow.Presenter is OverlappedPresenter p)
         {
-            p.PreferredMinimumWidth = 440;
-            p.PreferredMinimumHeight = 540;
+            p.PreferredMinimumWidth = (int)(double)res["DiagWindowMinWidth"];
+            p.PreferredMinimumHeight = (int)(double)res["DiagWindowMinHeight"];
             p.IsMaximizable = false;
         }
     }

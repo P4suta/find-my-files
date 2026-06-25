@@ -84,6 +84,13 @@ public static class HighlightText
     /// emphasized (bold + accent) Runs.</summary>
     private static void Rebuild(TextBlock tb, string text, IReadOnlyList<HighlightRange>? ranges)
     {
+        // Expose the plain text to UIA explicitly. The content lives in Inlines
+        // (Runs), and WinUI's TextBlock automation peer takes its Name from the
+        // Text property — which stays empty here — so without this a screen reader
+        // would read result rows as blank. Set the unformatted string, not the
+        // highlight markup.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(tb, text);
+
         tb.Inlines.Clear();
         if (ranges is null || ranges.Count == 0)
         {

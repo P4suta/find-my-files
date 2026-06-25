@@ -8,50 +8,15 @@
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                <!--  Design tokens → styles. Order matters: primitives, then
+                      semantic (references primitives), then styles (reference
+                      both). The token system lives in Themes/ — see
+                      Tokens.Primitives.xaml for the layering + type rules.  -->
+                <ResourceDictionary Source="ms-appx:///Themes/Tokens.Primitives.xaml" />
+                <ResourceDictionary Source="ms-appx:///Themes/Tokens.Semantic.xaml" />
+                <ResourceDictionary Source="ms-appx:///Themes/Styles.xaml" />
+                <ResourceDictionary Source="ms-appx:///Themes/Settings.xaml" />
             </ResourceDictionary.MergedDictionaries>
-
-            <!--  Raycast/Spotlight 風ランチャーのスタイルトークン。色は全て Fluent の ThemeResource を参照(ハードコード禁止)。  -->
-
-            <!--  大きめの中央検索ボックス  -->
-            <Style
-                x:Key="LauncherSearchBoxStyle"
-                BasedOn="{StaticResource DefaultTextBoxStyle}"
-                TargetType="TextBox">
-                <Setter Property="FontSize" Value="20" />
-                <Setter Property="MinHeight" Value="56" />
-                <Setter Property="VerticalContentAlignment" Value="Center" />
-                <!--  WinUI の TextBox は単一行だと VerticalContentAlignment では縦中央にならず、
-                      実質 Padding の上値でテキスト位置が決まる。高さ56・FontSize20 で中央に来る
-                      よう上下14を与える(上0だと最上部に張り付く)。左右は角丸に合わせ広め。  -->
-                <Setter Property="Padding" Value="24,14" />
-                <!--  Google 風の角丸ピル。高さ56の半分=28で左右が完全な半円に。  -->
-                <Setter Property="CornerRadius" Value="28" />
-            </Style>
-
-            <!--  結果行: ファイル名(上段)  -->
-            <Style
-                x:Key="ResultNameTextStyle"
-                BasedOn="{StaticResource BodyStrongTextBlockStyle}"
-                TargetType="TextBlock">
-                <Setter Property="TextTrimming" Value="CharacterEllipsis" />
-            </Style>
-
-            <!--  結果行: パス(下段・控えめ)  -->
-            <Style
-                x:Key="ResultPathTextStyle"
-                BasedOn="{StaticResource CaptionTextBlockStyle}"
-                TargetType="TextBlock">
-                <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
-                <Setter Property="TextTrimming" Value="CharacterEllipsis" />
-            </Style>
-
-            <!--  結果行: サイズ/日時(右端・最も控えめ)  -->
-            <Style
-                x:Key="ResultMetaTextStyle"
-                BasedOn="{StaticResource CaptionTextBlockStyle}"
-                TargetType="TextBlock">
-                <Setter Property="Foreground" Value="{ThemeResource TextFillColorTertiaryBrush}" />
-            </Style>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

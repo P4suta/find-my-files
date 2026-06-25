@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+    Semantic design tokens — purpose-named dimensions, corner radii, and the
+    Thickness shapes (Margin / Padding / BorderThickness). A Thickness cannot be
+    composed from x:Double tokens in markup, so every distinct shape is declared
+    here once and referenced by name. Off-grid values the design genuinely needs
+    (the 14px search-box centring, the 1.5px hairline, the 28px pill) live here
+    named and single-sourced — deliberately not snapped to the 4px grid.
+
+    Depends on Tokens.Primitives.xaml (merged earlier). Fluent's own
+    ControlCornerRadius (4) / OverlayCornerRadius (8) come from
+    XamlControlsResources and are referenced directly, never redefined here.
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--  ===== Layout dimensions (x:Double) =====  -->
+    <x:Double x:Key="ContentMaxWidth">860</x:Double>
+    <x:Double x:Key="SetupMaxWidth">420</x:Double>
+    <x:Double x:Key="DialogMinWidth">380</x:Double>
+
+    <!--  Search row: the box and the options button are both 56 tall; the pill
+          radius is half that (28) so the ends read as full semicircles.  -->
+    <x:Double x:Key="SearchControlSize">56</x:Double>
+    <x:Double x:Key="SearchBoxFontSize">20</x:Double>
+    <CornerRadius x:Key="SearchPillCornerRadius">28</CornerRadius>
+
+    <!--  Result list. 56 = Fluent's comfortable list-row height (was 52).  -->
+    <x:Double x:Key="ListItemMinHeight">56</x:Double>
+    <x:Double x:Key="MetaColumnMinWidth">96</x:Double>
+
+    <!--  Inline affordances  -->
+    <x:Double x:Key="ProgressRingSizeSmall">16</x:Double>
+    <x:Double x:Key="ProgressRingSizeMedium">20</x:Double>
+    <x:Double x:Key="DividerHeight">1</x:Double>
+
+    <!--  Compact spacing inside dense cards (off the 4px grid by design).  -->
+    <x:Double x:Key="CardSectionSpacing">6</x:Double>
+
+    <!--  ===== Diagnostics panel chrome (x:Double) =====  -->
+    <x:Double x:Key="StageBarHeight">8</x:Double>
+    <x:Double x:Key="SparklineHeight">40</x:Double>
+    <x:Double x:Key="SparklineStrokeThickness">1.5</x:Double>
+    <x:Double x:Key="ErrorScrollMaxHeight">64</x:Double>
+    <CornerRadius x:Key="StageSegmentCornerRadius">2</CornerRadius>
+
+    <!--  Diagnostics window initial + minimum client size (read in code-behind).  -->
+    <x:Double x:Key="DiagWindowWidth">560</x:Double>
+    <x:Double x:Key="DiagWindowHeight">720</x:Double>
+    <x:Double x:Key="DiagWindowMinWidth">440</x:Double>
+    <x:Double x:Key="DiagWindowMinHeight">540</x:Double>
+
+    <!--  ===== Thickness shapes — Padding =====  -->
+    <Thickness x:Key="SearchBoxPadding">24,14</Thickness>
+    <Thickness x:Key="CardPadding">16</Thickness>
+    <Thickness x:Key="PageContentPadding">24</Thickness>
+    <Thickness x:Key="QueryInsetPadding">12,8</Thickness>
+    <Thickness x:Key="ListItemPadding">12,6,12,6</Thickness>
+    <Thickness x:Key="RemoveButtonPadding">8,4</Thickness>
+
+    <!--  ===== Thickness shapes — Margin =====  -->
+    <Thickness x:Key="ContentGutterMargin">24,16,24,0</Thickness>
+    <Thickness x:Key="ResultsAreaMargin">24,12,24,16</Thickness>
+    <Thickness x:Key="NotificationItemMargin">0,0,0,4</Thickness>
+    <Thickness x:Key="DialogListRowMargin">0,2</Thickness>
+    <Thickness x:Key="StorageRowMargin">0,2,0,0</Thickness>
+    <Thickness x:Key="LegendSpacerMargin">12,0,0,0</Thickness>
+    <Thickness x:Key="HealthContentMargin">0,0,0,12</Thickness>
+
+    <!--  ===== BorderThickness =====  -->
+    <Thickness x:Key="CardBorderThickness">1</Thickness>
+</ResourceDictionary>

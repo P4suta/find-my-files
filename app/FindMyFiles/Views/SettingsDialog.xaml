@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentDialog
+    x:Class="FindMyFiles.Views.SettingsDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:conv="using:FindMyFiles.Converters"
+    xmlns:ctl="using:FindMyFiles.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    x:Uid="SettingsDialog"
+    AutomationProperties.AutomationId="SettingsDialog"
+    DefaultButton="Close"
+    mc:Ignorable="d">
+
+    <!--  Settings, status and diagnostics — the gear button's surface, rebuilt as a
+          Fluent settings page (self-built SettingsCard, no CommunityToolkit dep).
+          Toggles two-way bind to the ViewModel (its OnXxxChanged handlers persist +
+          requery); sort / regex-scope / language go through code-behind so they hit
+          the same VM methods the old menu used. Status is read-only text.  -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel MinWidth="{StaticResource DialogMinWidth}" Spacing="{StaticResource SpacingMedium}">
+
+            <!--  ── Search behaviour ──  -->
+            <TextBlock x:Uid="SettingsGroup_Search" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+            <ctl:SettingsCard x:Uid="OptFocused" Glyph="&#xE71C;" Style="{StaticResource SettingsCardStyle}">
+                <ToggleSwitch
+                    AutomationProperties.AutomationId="OptFocused"
+                    IsOn="{x:Bind VM.FocusedSearch, Mode=TwoWay}" />
+            </ctl:SettingsCard>
+            <ctl:SettingsCard x:Uid="OptSystem" Glyph="&#xE890;" Style="{StaticResource SettingsCardStyle}">
+                <ToggleSwitch
+                    AutomationProperties.AutomationId="OptSystem"
+                    IsOn="{x:Bind VM.IncludeHiddenSystem, Mode=TwoWay}" />
+            </ctl:SettingsCard>
+            <ctl:SettingsCard x:Uid="OptRegex" Glyph="&#xE943;" Style="{StaticResource SettingsCardStyle}">
+                <ToggleSwitch
+                    AutomationProperties.AutomationId="OptRegex"
+                    IsOn="{x:Bind VM.RegexMode, Mode=TwoWay}" />
+            </ctl:SettingsCard>
+            <ctl:SettingsCard x:Uid="RegexScopeMenu" Style="{StaticResource SettingsCardStyle}">
+                <StackPanel Orientation="Horizontal" Spacing="{StaticResource SpacingSmall}">
+                    <RadioButton
+                        x:Name="RegexScopeName"
+                        x:Uid="RegexScopeName"
+                        AutomationProperties.AutomationId="RegexScopeName"
+                        Click="RegexScopeName_Click"
+                        GroupName="RegexScope" />
+                    <RadioButton
+                        x:Name="RegexScopePath"
+                        x:Uid="RegexScopePath"
+                        AutomationProperties.AutomationId="RegexScopePath"
+                        Click="RegexScopePath_Click"
+                        GroupName="RegexScope" />
+                </StackPanel>
+            </ctl:SettingsCard>
+
+            <!--  ── Sorting ──  -->
+            <ctl:SettingsCard x:Uid="SortHeaderItem" Glyph="&#xE8CB;" Style="{StaticResource SettingsCardStyle}">
+                <StackPanel Orientation="Horizontal" Spacing="{StaticResource SpacingSmall}">
+                    <RadioButton
+                        x:Name="SortName"
+                        x:Uid="SortName"
+                        AutomationProperties.AutomationId="SortName"
+                        Click="SortName_Click"
+                        GroupName="SortField" />
+                    <RadioButton
+                        x:Name="SortSize"
+                        x:Uid="SortSize"
+                        AutomationProperties.AutomationId="SortSize"
+                        Click="SortSize_Click"
+                        GroupName="SortField" />
+                    <RadioButton
+                        x:Name="SortDate"
+                        x:Uid="SortDate"
+                        AutomationProperties.AutomationId="SortDate"
+                        Click="SortDate_Click"
+                        GroupName="SortField" />
+                </StackPanel>
+            </ctl:SettingsCard>
+            <ctl:SettingsCard x:Uid="SortDescendingCard" Style="{StaticResource SettingsCardStyle}">
+                <ToggleSwitch
+                    AutomationProperties.AutomationId="SortDescending"
+                    IsOn="{x:Bind VM.SortDescending, Mode=OneWay}"
+                    Toggled="SortDescending_Toggled" />
+            </ctl:SettingsCard>
+
+            <!--  ── General ──  -->
+            <TextBlock x:Uid="SettingsGroup_General" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+            <ctl:SettingsCard x:Uid="LangMenu" Glyph="&#xE774;" Style="{StaticResource SettingsCardStyle}">
+                <ComboBox
+                    x:Name="LangCombo"
+                    AutomationProperties.AutomationId="LangCombo"
+                    SelectionChanged="Language_SelectionChanged">
+                    <ComboBoxItem
+                        x:Name="LangAuto"
+                        x:Uid="LangSystem"
+                        AutomationProperties.AutomationId="LangSystem"
+                        Tag="auto" />
+                    <ComboBoxItem
+                        x:Name="LangJa"
+                        AutomationProperties.AutomationId="LangJa"
+                        Content="日本語"
+                        Tag="ja" />
+                    <ComboBoxItem
+                        x:Name="LangEn"
+                        AutomationProperties.AutomationId="LangEn"
+                        Content="English"
+                        Tag="en" />
+                    <ComboBoxItem
+                        x:Name="LangZh"
+                        AutomationProperties.AutomationId="LangZh"
+                        Content="简体中文"
+                        Tag="zh-Hans" />
+                </ComboBox>
+            </ctl:SettingsCard>
+            <ctl:SettingsCard x:Uid="OptCloseToTray" Glyph="&#xE922;" Style="{StaticResource SettingsCardStyle}">
+                <ToggleSwitch
+                    AutomationProperties.AutomationId="OptCloseToTray"
+                    IsOn="{x:Bind VM.CloseToTray, Mode=TwoWay}" />
+            </ctl:SettingsCard>
+
+            <!--  ── Status (read-only) ──  -->
+            <TextBlock x:Uid="StatusMenuItem" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+            <StackPanel Spacing="{StaticResource SpacingXSmall}">
+                <TextBlock
+                    AutomationProperties.AutomationId="StatusMode"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Style="{ThemeResource CaptionTextBlockStyle}"
+                    Text="{x:Bind VM.ModeText}"
+                    Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsReady)}" />
+                <TextBlock
+                    AutomationProperties.AutomationId="StatusState"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Style="{ThemeResource CaptionTextBlockStyle}"
+                    Text="{x:Bind VM.StatusText, Mode=OneWay}" />
+                <TextBlock
+                    AutomationProperties.AutomationId="StatusCount"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Style="{ThemeResource CaptionTextBlockStyle}"
+                    Text="{x:Bind VM.Results.CountText, Mode=OneWay}"
+                    Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(VM.Results.CountText), Mode=OneWay}" />
+            </StackPanel>
+
+            <!--  ── Advanced & management ──  -->
+            <TextBlock x:Uid="SettingsGroup_Advanced" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+            <ctl:SettingsCard x:Uid="DiagCard" Glyph="&#xE9D9;" Style="{StaticResource SettingsCardStyle}">
+                <Button
+                    x:Uid="ActionOpen"
+                    AutomationProperties.AutomationId="DiagToggle"
+                    Click="Diag_Click" />
+            </ctl:SettingsCard>
+            <ctl:SettingsCard
+                x:Uid="ServiceCard"
+                Glyph="&#xE912;"
+                Style="{StaticResource SettingsCardStyle}"
+                Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsPrivilegedMode)}">
+                <Button
+                    x:Uid="ActionOpen"
+                    AutomationProperties.AutomationId="ServiceManageMenu"
+                    Click="Service_Click" />
+            </ctl:SettingsCard>
+            <ctl:SettingsCard
+                x:Uid="ScopeCard"
+                Glyph="&#xE8B7;"
+                Style="{StaticResource SettingsCardStyle}"
+                Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsScopeMode)}">
+                <Button
+                    x:Uid="ActionOpen"
+                    AutomationProperties.AutomationId="ScopeManageMenu"
+                    Click="Scope_Click" />
+            </ctl:SettingsCard>
+        </StackPanel>
+    </ScrollViewer>
+</ContentDialog>

@@ -63,22 +63,25 @@
   <data name="Search_Placeholder" xml:space="preserve"><value>ファイル名で検索…</value></data>
   <data name="Search_PlaceholderRegexName" xml:space="preserve"><value>ファイル名を正規表現で検索…</value></data>
   <data name="Search_PlaceholderRegexPath" xml:space="preserve"><value>フルパスを正規表現で検索…</value></data>
-  <data name="OptFocused.Text" xml:space="preserve"><value>絞り込み(よく使う形式に限定・システム領域を除外)</value></data>
-  <data name="OptSystem.Text" xml:space="preserve"><value>システム・隠しファイルを含める</value></data>
-  <data name="OptRegex.Text" xml:space="preserve"><value>正規表現モード</value></data>
-  <data name="OptCloseToTray.Text" xml:space="preserve"><value>閉じてもトレイに常駐する</value></data>
-  <data name="RegexScopeMenu.Text" xml:space="preserve"><value>正規表現の対象</value></data>
-  <data name="RegexScopeName.Text" xml:space="preserve"><value>ファイル名</value></data>
-  <data name="RegexScopePath.Text" xml:space="preserve"><value>フルパス</value></data>
-  <data name="SortHeaderItem.Text" xml:space="preserve"><value>並べ替え</value></data>
-  <data name="SortName.Text" xml:space="preserve"><value>名前</value></data>
-  <data name="SortSize.Text" xml:space="preserve"><value>サイズ</value></data>
-  <data name="SortDate.Text" xml:space="preserve"><value>更新日時</value></data>
+  <data name="OptFocused.Header" xml:space="preserve"><value>絞り込み</value></data>
+  <data name="OptFocused.Description" xml:space="preserve"><value>よく使う形式に限定し、システム領域を除外</value></data>
+  <data name="OptSystem.Header" xml:space="preserve"><value>システム・隠しファイルを含める</value></data>
+  <data name="OptRegex.Header" xml:space="preserve"><value>正規表現モード</value></data>
+  <data name="OptRegex.Description" xml:space="preserve"><value>クエリ全体を1つの正規表現として扱う</value></data>
+  <data name="OptCloseToTray.Header" xml:space="preserve"><value>トレイに常駐</value></data>
+  <data name="OptCloseToTray.Description" xml:space="preserve"><value>閉じても終了せずバックグラウンドで動作し続ける</value></data>
+  <data name="RegexScopeMenu.Header" xml:space="preserve"><value>正規表現の対象</value></data>
+  <data name="RegexScopeName.Content" xml:space="preserve"><value>ファイル名</value></data>
+  <data name="RegexScopePath.Content" xml:space="preserve"><value>フルパス</value></data>
+  <data name="SortHeaderItem.Header" xml:space="preserve"><value>並べ替え</value></data>
+  <data name="SortName.Content" xml:space="preserve"><value>名前</value></data>
+  <data name="SortSize.Content" xml:space="preserve"><value>サイズ</value></data>
+  <data name="SortDate.Content" xml:space="preserve"><value>更新日時</value></data>
   <data name="StatusMenuItem.Text" xml:space="preserve"><value>状態</value></data>
-  <data name="DiagToggle.Text" xml:space="preserve"><value>診断情報を表示/隠す</value></data>
-  <data name="ServiceManageMenu.Text" xml:space="preserve"><value>サービスの管理…</value></data>
-  <data name="LangMenu.Text" xml:space="preserve"><value>言語</value></data>
-  <data name="LangSystem.Text" xml:space="preserve"><value>システム既定</value></data>
+  <data name="DiagCard.Header" xml:space="preserve"><value>診断情報を表示/隠す</value></data>
+  <data name="ServiceCard.Header" xml:space="preserve"><value>サービスの管理…</value></data>
+  <data name="LangMenu.Header" xml:space="preserve"><value>言語</value></data>
+  <data name="LangSystem.Content" xml:space="preserve"><value>システム既定</value></data>
   <data name="MnuOpen.Text" xml:space="preserve"><value>開く</value></data>
   <data name="MnuOpenPath.Text" xml:space="preserve"><value>フォルダーを開いてファイルを選択</value></data>
   <data name="MnuCopyPath.Text" xml:space="preserve"><value>パスをコピー</value></data>
@@ -89,7 +92,14 @@
   <data name="ScopeSetupLink.Content" xml:space="preserve"><value>管理者権限がない場合はこちら</value></data>
   <data name="ScopeDialog_SetupTitle" xml:space="preserve"><value>検索フォルダを選ぶ</value></data>
   <data name="ScopeDialog_SetupStart" xml:space="preserve"><value>選んだフォルダで検索を始める</value></data>
-  <data name="ScopeManageMenu.Text" xml:space="preserve"><value>検索フォルダを変更…</value></data>
+  <data name="ScopeCard.Header" xml:space="preserve"><value>検索フォルダを変更…</value></data>
+  <data name="SettingsDialog.Title" xml:space="preserve"><value>設定</value></data>
+  <data name="SettingsDialog.CloseButtonText" xml:space="preserve"><value>閉じる</value></data>
+  <data name="SettingsGroup_Search.Text" xml:space="preserve"><value>検索</value></data>
+  <data name="SettingsGroup_General.Text" xml:space="preserve"><value>全般</value></data>
+  <data name="SettingsGroup_Advanced.Text" xml:space="preserve"><value>詳細</value></data>
+  <data name="SortDescendingCard.Header" xml:space="preserve"><value>降順</value></data>
+  <data name="ActionOpen.Content" xml:space="preserve"><value>開く</value></data>
   <data name="ScopeDialog.Title" xml:space="preserve"><value>検索フォルダ</value></data>
   <data name="ScopeDialog.PrimaryButtonText" xml:space="preserve"><value>変更して再起動</value></data>
   <data name="ScopeDialog.CloseButtonText" xml:space="preserve"><value>キャンセル</value></data>
@@ -98,6 +108,9 @@
   <data name="Status_ModeScope" xml:space="preserve"><value>モード: 選択フォルダ</value></data>
   <data name="Status_ModePrivileged" xml:space="preserve"><value>モード: 全ドライブ</value></data>
   <data name="Scope_OpenFailed" xml:space="preserve"><value>検索フォルダを開けませんでした</value></data>
+  <data name="Settings_OpenFailed" xml:space="preserve"><value>設定を開けませんでした</value></data>
+  <data name="NoResultsTitle.Text" xml:space="preserve"><value>結果が見つかりません</value></data>
+  <data name="NoResults_Body" xml:space="preserve"><value>「{0}」に一致する結果はありません</value></data>
   <data name="ScopeDialogExcludesHeader.Text" xml:space="preserve"><value>除外するサブフォルダ</value></data>
   <data name="ScopeDialogExcludesBody.Text" xml:space="preserve"><value>上のフォルダの中で索引したくないもの(node_modules やビルド出力など)。適用すると再walkします。</value></data>
   <data name="ScopeDialogAddExclude.Content" xml:space="preserve"><value>除外フォルダを追加…</value></data>

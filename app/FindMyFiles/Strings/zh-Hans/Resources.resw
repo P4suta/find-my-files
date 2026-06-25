@@ -63,22 +63,25 @@
   <data name="Search_Placeholder" xml:space="preserve"><value>按文件名搜索…</value></data>
   <data name="Search_PlaceholderRegexName" xml:space="preserve"><value>用正则表达式匹配文件名…</value></data>
   <data name="Search_PlaceholderRegexPath" xml:space="preserve"><value>用正则表达式匹配完整路径…</value></data>
-  <data name="OptFocused.Text" xml:space="preserve"><value>精简(仅常用格式，排除系统区域)</value></data>
-  <data name="OptSystem.Text" xml:space="preserve"><value>包含系统和隐藏文件</value></data>
-  <data name="OptRegex.Text" xml:space="preserve"><value>正则表达式模式</value></data>
-  <data name="OptCloseToTray.Text" xml:space="preserve"><value>关闭时驻留到托盘</value></data>
-  <data name="RegexScopeMenu.Text" xml:space="preserve"><value>正则匹配范围</value></data>
-  <data name="RegexScopeName.Text" xml:space="preserve"><value>文件名</value></data>
-  <data name="RegexScopePath.Text" xml:space="preserve"><value>完整路径</value></data>
-  <data name="SortHeaderItem.Text" xml:space="preserve"><value>排序方式</value></data>
-  <data name="SortName.Text" xml:space="preserve"><value>名称</value></data>
-  <data name="SortSize.Text" xml:space="preserve"><value>大小</value></data>
-  <data name="SortDate.Text" xml:space="preserve"><value>修改日期</value></data>
+  <data name="OptFocused.Header" xml:space="preserve"><value>精简</value></data>
+  <data name="OptFocused.Description" xml:space="preserve"><value>仅常用格式，排除系统区域</value></data>
+  <data name="OptSystem.Header" xml:space="preserve"><value>包含系统和隐藏文件</value></data>
+  <data name="OptRegex.Header" xml:space="preserve"><value>正则表达式模式</value></data>
+  <data name="OptRegex.Description" xml:space="preserve"><value>将整个查询作为一个正则表达式</value></data>
+  <data name="OptCloseToTray.Header" xml:space="preserve"><value>关闭到托盘</value></data>
+  <data name="OptCloseToTray.Description" xml:space="preserve"><value>关闭时不退出，继续在后台运行</value></data>
+  <data name="RegexScopeMenu.Header" xml:space="preserve"><value>正则匹配范围</value></data>
+  <data name="RegexScopeName.Content" xml:space="preserve"><value>文件名</value></data>
+  <data name="RegexScopePath.Content" xml:space="preserve"><value>完整路径</value></data>
+  <data name="SortHeaderItem.Header" xml:space="preserve"><value>排序方式</value></data>
+  <data name="SortName.Content" xml:space="preserve"><value>名称</value></data>
+  <data name="SortSize.Content" xml:space="preserve"><value>大小</value></data>
+  <data name="SortDate.Content" xml:space="preserve"><value>修改日期</value></data>
   <data name="StatusMenuItem.Text" xml:space="preserve"><value>状态</value></data>
-  <data name="DiagToggle.Text" xml:space="preserve"><value>显示/隐藏诊断信息</value></data>
-  <data name="ServiceManageMenu.Text" xml:space="preserve"><value>管理服务…</value></data>
-  <data name="LangMenu.Text" xml:space="preserve"><value>语言</value></data>
-  <data name="LangSystem.Text" xml:space="preserve"><value>系统默认</value></data>
+  <data name="DiagCard.Header" xml:space="preserve"><value>显示/隐藏诊断信息</value></data>
+  <data name="ServiceCard.Header" xml:space="preserve"><value>管理服务…</value></data>
+  <data name="LangMenu.Header" xml:space="preserve"><value>语言</value></data>
+  <data name="LangSystem.Content" xml:space="preserve"><value>系统默认</value></data>
   <data name="MnuOpen.Text" xml:space="preserve"><value>打开</value></data>
   <data name="MnuOpenPath.Text" xml:space="preserve"><value>打开文件夹并选中文件</value></data>
   <data name="MnuCopyPath.Text" xml:space="preserve"><value>复制路径</value></data>
@@ -89,7 +92,14 @@
   <data name="ScopeSetupLink.Content" xml:space="preserve"><value>没有管理员权限? 改为选择文件夹</value></data>
   <data name="ScopeDialog_SetupTitle" xml:space="preserve"><value>选择搜索文件夹</value></data>
   <data name="ScopeDialog_SetupStart" xml:space="preserve"><value>搜索这些文件夹</value></data>
-  <data name="ScopeManageMenu.Text" xml:space="preserve"><value>更改搜索文件夹…</value></data>
+  <data name="ScopeCard.Header" xml:space="preserve"><value>更改搜索文件夹…</value></data>
+  <data name="SettingsDialog.Title" xml:space="preserve"><value>设置</value></data>
+  <data name="SettingsDialog.CloseButtonText" xml:space="preserve"><value>关闭</value></data>
+  <data name="SettingsGroup_Search.Text" xml:space="preserve"><value>搜索</value></data>
+  <data name="SettingsGroup_General.Text" xml:space="preserve"><value>常规</value></data>
+  <data name="SettingsGroup_Advanced.Text" xml:space="preserve"><value>高级</value></data>
+  <data name="SortDescendingCard.Header" xml:space="preserve"><value>降序</value></data>
+  <data name="ActionOpen.Content" xml:space="preserve"><value>打开</value></data>
   <data name="ScopeDialog.Title" xml:space="preserve"><value>搜索文件夹</value></data>
   <data name="ScopeDialog.PrimaryButtonText" xml:space="preserve"><value>应用并重启</value></data>
   <data name="ScopeDialog.CloseButtonText" xml:space="preserve"><value>取消</value></data>
@@ -98,6 +108,9 @@
   <data name="Status_ModeScope" xml:space="preserve"><value>模式: 选定文件夹</value></data>
   <data name="Status_ModePrivileged" xml:space="preserve"><value>模式: 所有驱动器</value></data>
   <data name="Scope_OpenFailed" xml:space="preserve"><value>无法打开搜索文件夹</value></data>
+  <data name="Settings_OpenFailed" xml:space="preserve"><value>无法打开设置</value></data>
+  <data name="NoResultsTitle.Text" xml:space="preserve"><value>未找到结果</value></data>
+  <data name="NoResults_Body" xml:space="preserve"><value>未找到与“{0}”匹配的结果</value></data>
   <data name="ScopeDialogExcludesHeader.Text" xml:space="preserve"><value>跳过这些子文件夹</value></data>
   <data name="ScopeDialogExcludesBody.Text" xml:space="preserve"><value>上述文件夹中你不想索引的部分(例如 node_modules 或构建输出)。应用后将重新遍历。</value></data>
   <data name="ScopeDialogAddExclude.Content" xml:space="preserve"><value>添加要跳过的文件夹…</value></data>

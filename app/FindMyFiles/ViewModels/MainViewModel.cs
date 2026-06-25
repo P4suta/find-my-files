@@ -25,12 +25,22 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <summary>The search box text (two-way). Changes flow to the
     /// orchestrator's debounce via <c>OnSearchTextChanged</c>.</summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(NoResultsText))]
     public partial string SearchText { get; set; } = string.Empty;
 
     /// <summary>The status-bar line — index progress, result count, or an
     /// error summary, all already localized (<see cref="StatusFormatter"/>).</summary>
     [ObservableProperty]
     public partial string StatusText { get; set; } = Loc.Get("Status_Preparing");
+
+    /// <summary>True when the current non-empty query completed with zero results
+    /// — drives the "no results" empty state. Set when results land, cleared on
+    /// each keystroke and on search failure so it never flashes mid-load.</summary>
+    [ObservableProperty]
+    public partial bool HasNoResults { get; set; }
+
+    /// <summary>The "no results" body line, naming the searched query.</summary>
+    public string NoResultsText => Loc.Get("NoResults_Body", SearchText);
 
     /// <summary>Active sort column (name/size/mtime); changing it via
     /// <see cref="SetSort"/> requeries with <see cref="RequeryOrigin.Sort"/>.</summary>
@@ -279,6 +289,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         Search.TraceCaptured += Perf.RecordTrace;
         Search.SearchFailed += OnSearchFailed;
+        Results.ResultsPublished += OnResultsPublished;
 
         _engineEvents.VolumeUpdated += OnVolumeUpdated;
         _engineEvents.EngineErrorOccurred += severity =>
@@ -497,7 +508,22 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 b.OrderBy(p => p, StringComparer.OrdinalIgnoreCase),
                 StringComparer.OrdinalIgnoreCase);
 
-    partial void OnSearchTextChanged(string value) => Search.NotifyTextChanged(value);
+    partial void OnSearchTextChanged(string value)
+    {
+        // Hide the no-results state the moment a new query is pending so it never
+        // flashes mid-load; OnResultsPublished re-shows it if the query lands empty.
+        HasNoResults = false;
+        Search.NotifyTextChanged(value);
+    }
+
+    /// <summary>Results landed (including zero-hit publishes): show the empty
+    /// state only when a non-empty query produced no rows. Authoritative signal —
+    /// fires after the count is set in <see cref="ResultsPresenter.PublishAsync"/>.</summary>
+    private void OnResultsPublished(ResultsPublication published)
+    {
+        _ = published; // the publication payload isn't needed; only that results landed
+        HasNoResults = !string.IsNullOrEmpty(SearchText) && Results.ResultsSource.Count == 0;
+    }
 
     partial void OnIncludeHiddenSystemChanged(bool value) =>
         Search.Requery(RequeryOrigin.Filter);
@@ -581,6 +607,21 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         Search.Requery(RequeryOrigin.Sort);
     }
 
+    /// <summary>Settings UI: set the sort direction explicitly — the settings
+    /// dialog has a dedicated descending toggle, unlike the result header's
+    /// click-to-flip <see cref="SetSort"/>. Requeries only on an actual change.</summary>
+    /// <param name="descending">True to sort results descending.</param>
+    public void SetSortDescending(bool descending)
+    {
+        if (SortDescending == descending)
+        {
+            return;
+        }
+
+        SortDescending = descending;
+        Search.Requery(RequeryOrigin.Sort);
+    }
+
     private void OnVolumeUpdated(VolumeStatus s)
     {
         StatusText = StatusFormatter.Volume(s, StatusText);
@@ -600,6 +641,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     private void OnSearchFailed(Exception e)
     {
+        HasNoResults = false; // an error surfaces via the InfoBar, not the empty state
         if (_engine.Connection == EngineConnectionState.Reconnecting)
         {
             return; // the persistent reconnect banner already explains this

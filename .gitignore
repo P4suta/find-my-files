@@ -16,6 +16,8 @@ app/**/obj/
 screenshots/
 test-results.json
 **/*.cobertura.xml
+# winapp UI-automation run output (screenshots + results JSON)
+app/FindMyFiles.Tests/UiAutomation/artifacts/
 
 # Engine runtime artifacts
 *.fmfidx

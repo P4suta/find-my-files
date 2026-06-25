@@ -1,5 +1,4 @@
 using FindMyFiles.Controls;
-using FindMyFiles.Engine;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
 using Microsoft.UI.Xaml.Controls;
@@ -45,19 +44,6 @@ public sealed partial class MainPage : Page
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
             OptionsButton, Loc.Get("OptionsButton_Name"));
 
-        // Reflect the persisted UI language in the switcher's radio group.
-        (AppSettings.Load().Language switch
-        {
-            "ja" => LangJa,
-            "en" => LangEn,
-            "zh-Hans" => LangZh,
-            _ => LangAuto,
-        }).IsChecked = true;
-
-        // Reflect the restored regex scope (the ViewModel already loaded it)
-        // in the radio group. Setting IsChecked programmatically does not fire
-        // Click, so this does not loop back into the ViewModel.
-        (ViewModel.RegexScope == RegexScope.Path ? RegexScopePath : RegexScopeName).IsChecked = true;
         _viewport = new ResultsViewportManager(ResultsList);
         ViewModel.Results.ResultsPublished += _viewport.OnResultsPublished;
 
@@ -116,19 +102,11 @@ public sealed partial class MainPage : Page
         }
     }
 
-    // Settings (gear) flyout → "show/hide diagnostics" toggles the diagnostics window.
-    private void PerfPanel_MenuClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
-        App.ToggleDiagnostics(ViewModel.Perf);
-
-    // Settings (gear) flyout → "Manage service…". Calls the shared entry point
-    // (which contains the single-dialog guard + failure notification).
-    private void ServiceManager_MenuClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
-        Views.ServiceManagerDialog.OpenAsync().Forget("service-ui");
-
-    // Settings (gear) flyout → "Change search folders…" (scope mode, ADR-0024).
-    // The mirror of ServiceManager_MenuClick for the non-elevated path.
-    private void ScopeManager_MenuClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
-        Views.ScopeManagerDialog.OpenAsync(ViewModel).Forget("scope-ui");
+    // Gear button → the settings / status / diagnostics dialog (the old MenuFlyout,
+    // rebuilt as a Fluent settings page). Service / scope / diagnostics open from
+    // inside it.
+    private void OptionsButton_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        Views.SettingsDialog.OpenAsync(ViewModel).Forget("settings-ui");
 
     // Primary button of the disconnected setup screen → one-click register → auto relaunch.
     private void EnableSearch_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
@@ -138,26 +116,6 @@ public sealed partial class MainPage : Page
     // scope setup dialog (folders only; excludes come later via the gear).
     private void ScopeSetup_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         Views.ScopeManagerDialog.OpenAsync(ViewModel, setup: true).Forget("scope-ui");
-
-    // Language switch: persist to settings.json and relaunch the app (App ctor
-    // applies PrimaryLanguageOverride). Tag is "auto"/"ja"/"en"/"zh-Hans".
-    private void Language_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
-    {
-        if (sender is not MenuFlyoutItemBase { Tag: string lang })
-        {
-            return;
-        }
-
-        var settings = AppSettings.Load();
-        if (string.Equals(settings.Language, lang, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        settings.Language = lang;
-        settings.Save();
-        ShellOps.Relaunch();
-    }
 
     // ── Drag & drop: folder → path: filter, file → name search ──────────
     private void Page_DragOver(object sender, Microsoft.UI.Xaml.DragEventArgs e)
@@ -270,19 +228,4 @@ public sealed partial class MainPage : Page
 
     private void MenuCopyPath_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         _viewport.CopySelectedPaths();
-
-    private void HeaderName_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
-        ViewModel.SetSort(FmfSort.Name);
-
-    private void HeaderSize_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
-        ViewModel.SetSort(FmfSort.Size);
-
-    private void HeaderDate_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
-        ViewModel.SetSort(FmfSort.Mtime);
-
-    private void RegexScopeName_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
-        ViewModel.RegexScope = RegexScope.Name;
-
-    private void RegexScopePath_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
-        ViewModel.RegexScope = RegexScope.Path;
 }
