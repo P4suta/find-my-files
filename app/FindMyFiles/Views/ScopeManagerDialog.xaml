@@ -16,7 +16,7 @@
     <!--  非昇格スコープモード(ADR-0024)の索引対象フォルダーを索引中に選び直す。
           「変更して再起動」はエンジンに稼働中のroot差し替えAPIが無いため
           (index_start_scope は既存scopeスロットで no-op)、保存+再起動で再walkする。  -->
-    <StackPanel MinWidth="380" Spacing="12">
+    <StackPanel MinWidth="{StaticResource DialogMinWidth}" Spacing="{StaticResource SpacingMedium}">
         <TextBlock
             x:Uid="ScopeDialogBody"
             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -28,7 +28,7 @@
         <ItemsControl AutomationProperties.AutomationId="ScopeDialogFolders" ItemsSource="{x:Bind VM.ScopeFolders, Mode=OneWay}">
             <ItemsControl.ItemTemplate>
                 <DataTemplate x:DataType="x:String">
-                    <Grid Margin="0,2" ColumnSpacing="8">
+                    <Grid Margin="{StaticResource DialogListRowMargin}" ColumnSpacing="{StaticResource SpacingSmall}">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
@@ -41,11 +41,11 @@
                             ToolTipService.ToolTip="{x:Bind}" />
                         <Button
                             Grid.Column="1"
-                            Padding="8,4"
+                            Padding="{StaticResource RemoveButtonPadding}"
                             Click="RemoveFolder_Click"
                             Content="&#xE711;"
                             FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                            FontSize="12"
+                            FontSize="{StaticResource IconSizeXSmall}"
                             Tag="{x:Bind}" />
                     </Grid>
                 </DataTemplate>
@@ -69,8 +69,8 @@
         <!--  除外サブフォルダ(ADR-0025): root配下の特定フォルダを索引から外す。
               setup(初回)文脈では ShowExcludes=false で丸ごと畳む(まだ索引前なので
               除外は早い)。再選択(歯車)文脈でのみ表示。  -->
-        <StackPanel Spacing="12" Visibility="{x:Bind conv:UiConverters.BoolToVis(ShowExcludes)}">
-            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+        <StackPanel Spacing="{StaticResource SpacingMedium}" Visibility="{x:Bind conv:UiConverters.BoolToVis(ShowExcludes)}">
+            <Border Height="{StaticResource DividerHeight}" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
             <TextBlock x:Uid="ScopeDialogExcludesHeader" Style="{ThemeResource BodyStrongTextBlockStyle}" />
             <TextBlock
                 x:Uid="ScopeDialogExcludesBody"
@@ -80,7 +80,7 @@
             <ItemsControl AutomationProperties.AutomationId="ScopeDialogExcludes" ItemsSource="{x:Bind VM.ScopeExcludes, Mode=OneWay}">
                 <ItemsControl.ItemTemplate>
                     <DataTemplate x:DataType="x:String">
-                        <Grid Margin="0,2" ColumnSpacing="8">
+                        <Grid Margin="{StaticResource DialogListRowMargin}" ColumnSpacing="{StaticResource SpacingSmall}">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
@@ -93,11 +93,11 @@
                                 ToolTipService.ToolTip="{x:Bind}" />
                             <Button
                                 Grid.Column="1"
-                                Padding="8,4"
+                                Padding="{StaticResource RemoveButtonPadding}"
                                 Click="RemoveExclude_Click"
                                 Content="&#xE711;"
                                 FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                FontSize="12"
+                                FontSize="{StaticResource IconSizeXSmall}"
                                 Tag="{x:Bind}" />
                         </Grid>
                     </DataTemplate>

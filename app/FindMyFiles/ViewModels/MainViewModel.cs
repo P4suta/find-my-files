@@ -581,6 +581,21 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         Search.Requery(RequeryOrigin.Sort);
     }
 
+    /// <summary>Settings UI: set the sort direction explicitly — the settings
+    /// dialog has a dedicated descending toggle, unlike the result header's
+    /// click-to-flip <see cref="SetSort"/>. Requeries only on an actual change.</summary>
+    /// <param name="descending">True to sort results descending.</param>
+    public void SetSortDescending(bool descending)
+    {
+        if (SortDescending == descending)
+        {
+            return;
+        }
+
+        SortDescending = descending;
+        Search.Requery(RequeryOrigin.Sort);
+    }
+
     private void OnVolumeUpdated(VolumeStatus s)
     {
         StatusText = StatusFormatter.Volume(s, StatusText);

@@ -13,10 +13,10 @@
         <!--  One card chrome for every diagnostics section: a self-drawn Fluent
               card (no SettingsControls package) that floats on the window Mica.  -->
         <Style x:Key="DiagCardStyle" TargetType="Border">
-            <Setter Property="Padding" Value="16" />
+            <Setter Property="Padding" Value="{StaticResource CardPadding}" />
             <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
             <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
-            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderThickness" Value="{StaticResource CardBorderThickness}" />
             <Setter Property="CornerRadius" Value="{ThemeResource OverlayCornerRadius}" />
         </Style>
     </UserControl.Resources>
@@ -30,7 +30,7 @@
           DiagFormat (pure, tested). ThemeResource brushes only. Sections stack
           vertically inside a ScrollViewer so the data fits a tall, narrow window.  -->
     <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Padding="24" Spacing="16">
+        <StackPanel Padding="{StaticResource PageContentPadding}" Spacing="{StaticResource SpacingLarge}">
 
             <!--  Header row: page title + copy button. The PerfPanel automation hook
                   rides this title TextBlock (a layout Grid has no automation peer, and
@@ -45,10 +45,10 @@
                 <StackPanel
                     VerticalAlignment="Center"
                     Orientation="Horizontal"
-                    Spacing="8">
+                    Spacing="{StaticResource SpacingSmall}">
                     <FontIcon
                         VerticalAlignment="Center"
-                        FontSize="16"
+                        FontSize="{StaticResource IconSizeSmall}"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                         Glyph="&#xE946;" />
                     <TextBlock
@@ -67,11 +67,11 @@
             <!--  Last-query card: query line, metric tiles, stage bar, legend +
                   percentiles, sparkline.  -->
             <Border Style="{StaticResource DiagCardStyle}">
-                <StackPanel Spacing="8">
+                <StackPanel Spacing="{StaticResource SpacingSmall}">
                     <!--  Query in a subtle control-scale inset: wraps to a few lines
                           then truncates with an ellipsis, full compiled query on hover.  -->
                     <Border
-                        Padding="12,8"
+                        Padding="{StaticResource QueryInsetPadding}"
                         Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}"
                         CornerRadius="{ThemeResource ControlCornerRadius}">
                         <TextBlock
@@ -82,7 +82,7 @@
                             ToolTipService.ToolTip="{x:Bind conv:DiagFormat.Query(ViewModel.LastTrace), Mode=OneWay}" />
                     </Border>
                     <!--  Metric tiles: value (BodyStrong) over a small Caption label.  -->
-                    <StackPanel Orientation="Horizontal" Spacing="32">
+                    <StackPanel Orientation="Horizontal" Spacing="{StaticResource SpacingXXLarge}">
                         <StackPanel>
                             <TextBlock
                                 Style="{ThemeResource BodyStrongTextBlockStyle}"
@@ -120,7 +120,7 @@
                                 Style="{ThemeResource CaptionTextBlockStyle}" />
                         </StackPanel>
                     </StackPanel>
-                    <Grid x:Name="StageBar" Height="8" />
+                    <Grid x:Name="StageBar" Height="{StaticResource StageBarHeight}" />
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
@@ -134,32 +134,37 @@
                             TextTrimming="CharacterEllipsis" />
                         <TextBlock
                             Grid.Column="1"
-                            Margin="12,0,0,0"
+                            Margin="{StaticResource LegendSpacerMargin}"
                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                             Style="{ThemeResource CaptionTextBlockStyle}"
                             Text="{x:Bind conv:DiagFormat.Percentiles(ViewModel.Stats), Mode=OneWay}" />
                     </Grid>
-                    <!--  Sparkline host: must stay horizontally stretched and Height 40
-                          (RenderPerf reads Spark.ActualWidth and hardcodes H=40).  -->
-                    <Grid Height="40">
+                    <!--  Sparkline host: stays horizontally stretched; the height is the
+                          SparklineHeight token, which RenderPerf reads too so the XAML
+                          host and the polyline geometry can never drift.  -->
+                    <Grid Height="{StaticResource SparklineHeight}">
                         <Polyline
                             x:Name="Spark"
                             Stroke="{ThemeResource AccentFillColorDefaultBrush}"
-                            StrokeThickness="1.5" />
+                            StrokeThickness="{StaticResource SparklineStrokeThickness}" />
                     </Grid>
                 </StackPanel>
             </Border>
 
             <!--  Storage card: per-volume index stats + recent USN feed.  -->
             <Border Style="{StaticResource DiagCardStyle}">
-                <StackPanel Spacing="6">
+                <StackPanel Spacing="{StaticResource CardSectionSpacing}">
                     <TextBlock
                         x:Uid="DiagStorageHeader"
                         Style="{ThemeResource BodyStrongTextBlockStyle}" />
                     <ItemsControl ItemsSource="{x:Bind ViewModel.Stats.Indexes, Mode=OneWay}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate x:DataType="eng:IndexStatsData">
-                                <Grid Margin="0,2,0,0" ColumnSpacing="12">
+                                <Grid Margin="{StaticResource StorageRowMargin}" ColumnSpacing="{StaticResource SpacingMedium}">
+                                    <!--  Fixed diagnostic-table column widths, left as literals:
+                                          ColumnDefinition.Width is a GridLength, which does not accept
+                                          a Double token resource, and these are a one-off table layout
+                                          (not a reused design dimension).  -->
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="28" />
                                         <ColumnDefinition Width="96" />
@@ -213,7 +218,7 @@
 
             <!--  Transport card: engine mode + pipe detail.  -->
             <Border Style="{StaticResource DiagCardStyle}">
-                <StackPanel Spacing="4">
+                <StackPanel Spacing="{StaticResource SpacingXSmall}">
                     <TextBlock
                         x:Uid="DiagTransportHeader"
                         Style="{ThemeResource BodyStrongTextBlockStyle}" />
@@ -238,7 +243,7 @@
                 IsOpen="True"
                 Severity="{x:Bind conv:DiagFormat.HealthSeverity(ViewModel.Stats), Mode=OneWay}">
                 <InfoBar.Content>
-                    <StackPanel Margin="0,0,0,12" Spacing="6">
+                    <StackPanel Margin="{StaticResource HealthContentMargin}" Spacing="{StaticResource CardSectionSpacing}">
                         <TextBlock
                             x:Uid="DiagHealthy"
                             Style="{ThemeResource CaptionTextBlockStyle}"
@@ -249,7 +254,7 @@
                             TextWrapping="Wrap"
                             Visibility="{x:Bind conv:DiagFormat.CountersVis(ViewModel.Stats), Mode=OneWay}" />
                         <ScrollViewer
-                            MaxHeight="64"
+                            MaxHeight="{StaticResource ErrorScrollMaxHeight}"
                             VerticalScrollBarVisibility="Auto"
                             Visibility="{x:Bind conv:DiagFormat.HasErrorsVis(ViewModel.Stats), Mode=OneWay}">
                             <ItemsControl

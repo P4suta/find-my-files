@@ -47,8 +47,8 @@
               専用行なので結果リストとは重ならず、EmptyState でも表示される。  -->
         <ItemsControl
             Grid.Row="0"
-            MaxWidth="860"
-            Margin="24,16,24,0"
+            MaxWidth="{StaticResource ContentMaxWidth}"
+            Margin="{StaticResource ContentGutterMargin}"
             AutomationProperties.AutomationId="NotifyBar"
             ItemsSource="{x:Bind ViewModel.Notifications.Items}"
             Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady)}">
@@ -56,7 +56,7 @@
                 <DataTemplate x:DataType="svc:AppNotification">
                     <InfoBar
                         Title="{x:Bind Message}"
-                        Margin="0,0,0,4"
+                        Margin="{StaticResource NotificationItemMargin}"
                         Closed="Notification_Closed"
                         IsOpen="True"
                         Message="{x:Bind Detail}"
@@ -76,10 +76,10 @@
               位置変化は RepositionThemeTransition で滑らかに。  -->
         <Grid
             Grid.Row="1"
-            MaxWidth="860"
-            Margin="24,16,24,0"
+            MaxWidth="{StaticResource ContentMaxWidth}"
+            Margin="{StaticResource ContentGutterMargin}"
             VerticalAlignment="Center"
-            ColumnSpacing="8"
+            ColumnSpacing="{StaticResource SpacingSmall}"
             Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady)}">
             <Grid.Transitions>
                 <TransitionCollection>
@@ -116,132 +116,14 @@
             <Button
                 x:Name="OptionsButton"
                 Grid.Column="1"
-                Width="56"
-                Height="56"
+                Width="{StaticResource SearchControlSize}"
+                Height="{StaticResource SearchControlSize}"
                 Padding="0"
                 VerticalAlignment="Center"
                 AutomationProperties.AutomationId="OptionsButton"
-                CornerRadius="28">
-                <FontIcon FontSize="16" Glyph="&#xE713;" />
-                <Button.Flyout>
-                    <MenuFlyout Placement="BottomEdgeAlignedRight">
-                        <ToggleMenuFlyoutItem
-                            x:Uid="OptFocused"
-                            AutomationProperties.AutomationId="OptFocused"
-                            IsChecked="{x:Bind ViewModel.FocusedSearch, Mode=TwoWay}" />
-                        <ToggleMenuFlyoutItem
-                            x:Uid="OptSystem"
-                            AutomationProperties.AutomationId="OptSystem"
-                            IsChecked="{x:Bind ViewModel.IncludeHiddenSystem, Mode=TwoWay}" />
-                        <ToggleMenuFlyoutItem
-                            x:Uid="OptRegex"
-                            AutomationProperties.AutomationId="OptRegex"
-                            IsChecked="{x:Bind ViewModel.RegexMode, Mode=TwoWay}" />
-                        <MenuFlyoutSubItem x:Uid="RegexScopeMenu" AutomationProperties.AutomationId="RegexScopeMenu">
-                            <RadioMenuFlyoutItem
-                                x:Name="RegexScopeName"
-                                x:Uid="RegexScopeName"
-                                AutomationProperties.AutomationId="RegexScopeName"
-                                Click="RegexScopeName_Click"
-                                GroupName="RegexScope"
-                                IsChecked="True" />
-                            <RadioMenuFlyoutItem
-                                x:Name="RegexScopePath"
-                                x:Uid="RegexScopePath"
-                                AutomationProperties.AutomationId="RegexScopePath"
-                                Click="RegexScopePath_Click"
-                                GroupName="RegexScope" />
-                        </MenuFlyoutSubItem>
-                        <ToggleMenuFlyoutItem
-                            x:Uid="OptCloseToTray"
-                            AutomationProperties.AutomationId="OptCloseToTray"
-                            IsChecked="{x:Bind ViewModel.CloseToTray, Mode=TwoWay}" />
-                        <MenuFlyoutSeparator />
-                        <MenuFlyoutSubItem x:Uid="SortHeaderItem">
-                            <RadioMenuFlyoutItem
-                                x:Uid="SortName"
-                                AutomationProperties.AutomationId="SortName"
-                                Click="HeaderName_Click"
-                                GroupName="SortOrder"
-                                IsChecked="True" />
-                            <RadioMenuFlyoutItem
-                                x:Uid="SortSize"
-                                AutomationProperties.AutomationId="SortSize"
-                                Click="HeaderSize_Click"
-                                GroupName="SortOrder" />
-                            <RadioMenuFlyoutItem
-                                x:Uid="SortDate"
-                                AutomationProperties.AutomationId="SortDate"
-                                Click="HeaderDate_Click"
-                                GroupName="SortOrder" />
-                        </MenuFlyoutSubItem>
-                        <MenuFlyoutSeparator />
-                        <!--  状態(旧フッター)はサブ項目に押し込み、オプションと同列にしない(情報なので無効表示)。  -->
-                        <MenuFlyoutSubItem x:Uid="StatusMenuItem" AutomationProperties.AutomationId="StatusMenu">
-                            <MenuFlyoutItem
-                                AutomationProperties.AutomationId="StatusMode"
-                                IsEnabled="False"
-                                Text="{x:Bind ViewModel.ModeText}"
-                                Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady)}" />
-                            <MenuFlyoutItem
-                                AutomationProperties.AutomationId="StatusState"
-                                IsEnabled="False"
-                                Text="{x:Bind ViewModel.StatusText, Mode=OneWay}" />
-                            <MenuFlyoutItem
-                                AutomationProperties.AutomationId="StatusCount"
-                                IsEnabled="False"
-                                Text="{x:Bind ViewModel.Results.CountText, Mode=OneWay}"
-                                Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ViewModel.Results.CountText), Mode=OneWay}" />
-                        </MenuFlyoutSubItem>
-                        <MenuFlyoutSubItem x:Uid="LangMenu" AutomationProperties.AutomationId="LangMenu">
-                            <RadioMenuFlyoutItem
-                                x:Name="LangAuto"
-                                x:Uid="LangSystem"
-                                AutomationProperties.AutomationId="LangSystem"
-                                Click="Language_Click"
-                                GroupName="UiLanguage"
-                                Tag="auto" />
-                            <RadioMenuFlyoutItem
-                                x:Name="LangJa"
-                                AutomationProperties.AutomationId="LangJa"
-                                Click="Language_Click"
-                                GroupName="UiLanguage"
-                                Tag="ja"
-                                Text="日本語" />
-                            <RadioMenuFlyoutItem
-                                x:Name="LangEn"
-                                AutomationProperties.AutomationId="LangEn"
-                                Click="Language_Click"
-                                GroupName="UiLanguage"
-                                Tag="en"
-                                Text="English" />
-                            <RadioMenuFlyoutItem
-                                x:Name="LangZh"
-                                AutomationProperties.AutomationId="LangZh"
-                                Click="Language_Click"
-                                GroupName="UiLanguage"
-                                Tag="zh-Hans"
-                                Text="简体中文" />
-                        </MenuFlyoutSubItem>
-                        <MenuFlyoutItem
-                            x:Uid="DiagToggle"
-                            AutomationProperties.AutomationId="DiagToggle"
-                            Click="PerfPanel_MenuClick" />
-                        <MenuFlyoutSeparator />
-                        <!--  特権↔非特権でモード別に出し分け(相互排他)。
-                              Disconnected(setup画面)時は IsReady=false で両方畳む。  -->
-                        <MenuFlyoutItem
-                            x:Uid="ServiceManageMenu"
-                            AutomationProperties.AutomationId="ServiceManageMenu"
-                            Click="ServiceManager_MenuClick"
-                            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsPrivilegedMode)}" />
-                        <MenuFlyoutItem
-                            x:Uid="ScopeManageMenu"
-                            AutomationProperties.AutomationId="ScopeManageMenu"
-                            Click="ScopeManager_MenuClick"
-                            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsScopeMode)}" />
-                    </MenuFlyout>
-                </Button.Flyout>
+                Click="OptionsButton_Click"
+                CornerRadius="{StaticResource SearchPillCornerRadius}">
+                <FontIcon FontSize="{StaticResource IconSizeSmall}" Glyph="&#xE713;" />
             </Button>
         </Grid>
 
@@ -249,8 +131,8 @@
         <Grid
             x:Name="ResultsArea"
             Grid.Row="2"
-            MaxWidth="860"
-            Margin="24,12,24,16"
+            MaxWidth="{StaticResource ContentMaxWidth}"
+            Margin="{StaticResource ResultsAreaMargin}"
             Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady)}">
 
             <!--  Results. ItemsPanel stays ItemsStackPanel (CLAUDE.md UI固定則).
@@ -275,13 +157,13 @@
                 </ListView.ItemContainerTransitions>
                 <ListView.ItemContainerStyle>
                     <Style BasedOn="{StaticResource DefaultListViewItemStyle}" TargetType="ListViewItem">
-                        <Setter Property="MinHeight" Value="52" />
-                        <Setter Property="Padding" Value="12,6,12,6" />
+                        <Setter Property="MinHeight" Value="{StaticResource ListItemMinHeight}" />
+                        <Setter Property="Padding" Value="{StaticResource ListItemPadding}" />
                     </Style>
                 </ListView.ItemContainerStyle>
                 <ListView.ItemTemplate>
                     <DataTemplate x:DataType="vm:ResultRow">
-                        <Grid ColumnSpacing="12">
+                        <Grid ColumnSpacing="{StaticResource SpacingMedium}">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="*" />
@@ -290,7 +172,7 @@
                             <FontIcon
                                 Grid.Column="0"
                                 VerticalAlignment="Center"
-                                FontSize="22"
+                                FontSize="{StaticResource IconSizeLarge}"
                                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                 Glyph="{x:Bind Glyph, Mode=OneWay}" />
                             <StackPanel Grid.Column="1" VerticalAlignment="Center">
@@ -306,7 +188,7 @@
                             </StackPanel>
                             <StackPanel
                                 Grid.Column="2"
-                                MinWidth="96"
+                                MinWidth="{StaticResource MetaColumnMinWidth}"
                                 VerticalAlignment="Center">
                                 <TextBlock
                                     x:Phase="2"
@@ -347,15 +229,15 @@
         <StackPanel
             Grid.Row="0"
             Grid.RowSpan="3"
-            MaxWidth="420"
-            Padding="24"
+            MaxWidth="{StaticResource SetupMaxWidth}"
+            Padding="{StaticResource PageContentPadding}"
             HorizontalAlignment="Center"
             VerticalAlignment="Center"
-            Spacing="16"
+            Spacing="{StaticResource SpacingLarge}"
             Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsDisconnected)}">
             <FontIcon
                 HorizontalAlignment="Center"
-                FontSize="44"
+                FontSize="{StaticResource IconSizeXLarge}"
                 Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                 Glyph="&#xE721;" />
             <TextBlock
@@ -392,11 +274,11 @@
             <StackPanel
                 HorizontalAlignment="Center"
                 Orientation="Horizontal"
-                Spacing="8"
+                Spacing="{StaticResource SpacingSmall}"
                 Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ViewModel.SetupStatus), Mode=OneWay}">
                 <ProgressRing
-                    Width="16"
-                    Height="16"
+                    Width="{StaticResource ProgressRingSizeSmall}"
+                    Height="{StaticResource ProgressRingSizeSmall}"
                     IsActive="{x:Bind ViewModel.SetupBusy, Mode=OneWay}" />
                 <TextBlock
                     VerticalAlignment="Center"

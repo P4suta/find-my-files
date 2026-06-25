@@ -14,10 +14,10 @@
     <!--  fmf-engine のライフサイクル管理。各操作は Verb=runas の単発昇格
           (ServiceSetup.RunElevated)で、アプリ本体は非昇格のまま。状態行は
           読み取り専用 SCM クエリ(昇格不要)。  -->
-    <StackPanel MinWidth="380" Spacing="16">
+    <StackPanel MinWidth="{StaticResource DialogMinWidth}" Spacing="{StaticResource SpacingLarge}">
 
         <!--  状態ヘッダー: アイコン(状態色)+ 状態テキスト + 進捗リング  -->
-        <Grid ColumnSpacing="12">
+        <Grid ColumnSpacing="{StaticResource SpacingMedium}">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
@@ -26,17 +26,17 @@
             <!--  状態色は ThemeResource を XAML で指定するため、3アイコンを出し分け。  -->
             <Grid Grid.Column="0" VerticalAlignment="Center">
                 <FontIcon
-                    FontSize="20"
+                    FontSize="{StaticResource IconSizeMedium}"
                     Foreground="{ThemeResource SystemFillColorSuccessBrush}"
                     Glyph="&#xE73E;"
                     Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsRunning), Mode=OneWay}" />
                 <FontIcon
-                    FontSize="20"
+                    FontSize="{StaticResource IconSizeMedium}"
                     Foreground="{ThemeResource SystemFillColorCautionBrush}"
                     Glyph="&#xE769;"
                     Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsStopped), Mode=OneWay}" />
                 <FontIcon
-                    FontSize="20"
+                    FontSize="{StaticResource IconSizeMedium}"
                     Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                     Glyph="&#xE946;"
                     Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsNotInstalled), Mode=OneWay}" />
@@ -53,19 +53,19 @@
             </StackPanel>
             <ProgressRing
                 Grid.Column="2"
-                Width="20"
-                Height="20"
+                Width="{StaticResource ProgressRingSizeMedium}"
+                Height="{StaticResource ProgressRingSizeMedium}"
                 VerticalAlignment="Center"
                 IsActive="{x:Bind VM.Busy, Mode=OneWay}" />
         </Grid>
 
         <!--  稼働(登録済みのときのみ)  -->
-        <StackPanel Spacing="6" Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsInstalled), Mode=OneWay}">
+        <StackPanel Spacing="{StaticResource CardSectionSpacing}" Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsInstalled), Mode=OneWay}">
             <TextBlock
                 x:Uid="SvcGroupRunning"
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                 Style="{ThemeResource CaptionTextBlockStyle}" />
-            <StackPanel Orientation="Horizontal" Spacing="8">
+            <StackPanel Orientation="Horizontal" Spacing="{StaticResource SpacingSmall}">
                 <Button
                     x:Uid="SvcStart"
                     AutomationProperties.AutomationId="SvcStart"
@@ -89,7 +89,7 @@
         </StackPanel>
 
         <!--  登録: 未登録ならアクセントの「登録して開始」、登録済みなら「登録し直す」  -->
-        <StackPanel Spacing="6" Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.CanRegister), Mode=OneWay}">
+        <StackPanel Spacing="{StaticResource CardSectionSpacing}" Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.CanRegister), Mode=OneWay}">
             <TextBlock
                 x:Uid="SvcGroupRegister"
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -111,17 +111,17 @@
 
         <!--  区切り線(削除ゾーンを明確に分離)  -->
         <Border
-            Height="1"
+            Height="{StaticResource DividerHeight}"
             Background="{ThemeResource DividerStrokeColorDefaultBrush}"
             Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.CanUninstall), Mode=OneWay}" />
 
         <!--  削除  -->
-        <StackPanel Spacing="8" Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.CanUninstall), Mode=OneWay}">
+        <StackPanel Spacing="{StaticResource SpacingSmall}" Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.CanUninstall), Mode=OneWay}">
             <TextBlock
                 x:Uid="SvcGroupDelete"
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                 Style="{ThemeResource CaptionTextBlockStyle}" />
-            <StackPanel Orientation="Horizontal" Spacing="12">
+            <StackPanel Orientation="Horizontal" Spacing="{StaticResource SpacingMedium}">
                 <Button
                     x:Uid="SvcUninstall"
                     AutomationProperties.AutomationId="SvcUninstall"

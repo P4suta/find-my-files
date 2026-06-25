@@ -9,7 +9,10 @@
     Title="FindMyFiles"
     mc:Ignorable="d">
     <Window.SystemBackdrop>
-        <DesktopAcrylicBackdrop />
+        <!--  Mica: the long-lived, tray-resident primary window (ADR-0030) — exactly
+              what Mica is for. Transient surfaces layered on top (menus, dialogs,
+              tooltips) keep their own Acrylic from the system templates.  -->
+        <MicaBackdrop />
     </Window.SystemBackdrop>
 
     <Grid>

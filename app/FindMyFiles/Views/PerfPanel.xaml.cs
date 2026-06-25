@@ -142,6 +142,10 @@ public sealed partial class PerfPanel : UserControl
             ];
             StageBar.ColumnDefinitions.Clear();
             StageBar.Children.Clear();
+
+            // Segment corner radius from the token system, hoisted out of the loop.
+            var segRadius = (Microsoft.UI.Xaml.CornerRadius)Microsoft.UI.Xaml.Application.Current
+                .Resources["StageSegmentCornerRadius"];
             var col = 0;
             foreach (var (_, us, brushKey) in stages)
             {
@@ -160,7 +164,7 @@ public sealed partial class PerfPanel : UserControl
                         (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current
                             .Resources[brushKey],
                     Margin = new Microsoft.UI.Xaml.Thickness(0, 0, 1, 0),
-                    CornerRadius = new Microsoft.UI.Xaml.CornerRadius(2),
+                    CornerRadius = segRadius,
                 };
                 Microsoft.UI.Xaml.Controls.Grid.SetColumn(seg, col++);
                 StageBar.Children.Add(seg);
@@ -175,15 +179,19 @@ public sealed partial class PerfPanel : UserControl
         var recent = vm.RecentTotalsUs;
         if (recent.Count >= 2)
         {
-            var w = Math.Max(Spark.ActualWidth, 240.0);
-            const double H = 40.0;
+            const double MinSparkWidth = 240.0; // geometry floor for a readable sparkline; not a design token.
+            var w = Math.Max(Spark.ActualWidth, MinSparkWidth);
+
+            // Height from the SparklineHeight token; the XAML host Grid binds the same
+            // token, so the drawn geometry and the layout box can never drift.
+            var h = (double)Microsoft.UI.Xaml.Application.Current.Resources["SparklineHeight"];
             var max = Math.Max(recent.Max(), 1UL);
             var points = new Microsoft.UI.Xaml.Media.PointCollection();
             for (var i = 0; i < recent.Count; i++)
             {
                 points.Add(new Windows.Foundation.Point(
                     i * w / Math.Max(recent.Count - 1, 1),
-                    H - ((recent[i] / (double)max) * (H - 2)) - 1));
+                    h - ((recent[i] / (double)max) * (h - 2)) - 1));
             }
 
             Spark.Points = points;

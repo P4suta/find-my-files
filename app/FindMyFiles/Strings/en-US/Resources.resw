@@ -63,22 +63,22 @@
   <data name="Search_Placeholder" xml:space="preserve"><value>Search by file name…</value></data>
   <data name="Search_PlaceholderRegexName" xml:space="preserve"><value>Regex over file name…</value></data>
   <data name="Search_PlaceholderRegexPath" xml:space="preserve"><value>Regex over full path…</value></data>
-  <data name="OptFocused.Text" xml:space="preserve"><value>Focused (common formats only, exclude system areas)</value></data>
-  <data name="OptSystem.Text" xml:space="preserve"><value>Include system and hidden files</value></data>
-  <data name="OptRegex.Text" xml:space="preserve"><value>Regex mode</value></data>
-  <data name="OptCloseToTray.Text" xml:space="preserve"><value>Close to tray (keep running in the background)</value></data>
-  <data name="RegexScopeMenu.Text" xml:space="preserve"><value>Regex applies to</value></data>
-  <data name="RegexScopeName.Text" xml:space="preserve"><value>File name</value></data>
-  <data name="RegexScopePath.Text" xml:space="preserve"><value>Full path</value></data>
-  <data name="SortHeaderItem.Text" xml:space="preserve"><value>Sort by</value></data>
-  <data name="SortName.Text" xml:space="preserve"><value>Name</value></data>
-  <data name="SortSize.Text" xml:space="preserve"><value>Size</value></data>
-  <data name="SortDate.Text" xml:space="preserve"><value>Date modified</value></data>
+  <data name="OptFocused.Header" xml:space="preserve"><value>Focused (common formats only, exclude system areas)</value></data>
+  <data name="OptSystem.Header" xml:space="preserve"><value>Include system and hidden files</value></data>
+  <data name="OptRegex.Header" xml:space="preserve"><value>Regex mode</value></data>
+  <data name="OptCloseToTray.Header" xml:space="preserve"><value>Close to tray (keep running in the background)</value></data>
+  <data name="RegexScopeMenu.Header" xml:space="preserve"><value>Regex applies to</value></data>
+  <data name="RegexScopeName.Content" xml:space="preserve"><value>File name</value></data>
+  <data name="RegexScopePath.Content" xml:space="preserve"><value>Full path</value></data>
+  <data name="SortHeaderItem.Header" xml:space="preserve"><value>Sort by</value></data>
+  <data name="SortName.Content" xml:space="preserve"><value>Name</value></data>
+  <data name="SortSize.Content" xml:space="preserve"><value>Size</value></data>
+  <data name="SortDate.Content" xml:space="preserve"><value>Date modified</value></data>
   <data name="StatusMenuItem.Text" xml:space="preserve"><value>Status</value></data>
-  <data name="DiagToggle.Text" xml:space="preserve"><value>Show/hide diagnostics</value></data>
-  <data name="ServiceManageMenu.Text" xml:space="preserve"><value>Manage service…</value></data>
-  <data name="LangMenu.Text" xml:space="preserve"><value>Language</value></data>
-  <data name="LangSystem.Text" xml:space="preserve"><value>System default</value></data>
+  <data name="DiagCard.Header" xml:space="preserve"><value>Show/hide diagnostics</value></data>
+  <data name="ServiceCard.Header" xml:space="preserve"><value>Manage service…</value></data>
+  <data name="LangMenu.Header" xml:space="preserve"><value>Language</value></data>
+  <data name="LangSystem.Content" xml:space="preserve"><value>System default</value></data>
   <data name="MnuOpen.Text" xml:space="preserve"><value>Open</value></data>
   <data name="MnuOpenPath.Text" xml:space="preserve"><value>Open folder and select file</value></data>
   <data name="MnuCopyPath.Text" xml:space="preserve"><value>Copy path</value></data>
@@ -89,7 +89,14 @@
   <data name="ScopeSetupLink.Content" xml:space="preserve"><value>No administrator rights? Choose folders instead</value></data>
   <data name="ScopeDialog_SetupTitle" xml:space="preserve"><value>Choose search folders</value></data>
   <data name="ScopeDialog_SetupStart" xml:space="preserve"><value>Search these folders</value></data>
-  <data name="ScopeManageMenu.Text" xml:space="preserve"><value>Change search folders…</value></data>
+  <data name="ScopeCard.Header" xml:space="preserve"><value>Change search folders…</value></data>
+  <data name="SettingsDialog.Title" xml:space="preserve"><value>Settings</value></data>
+  <data name="SettingsDialog.CloseButtonText" xml:space="preserve"><value>Close</value></data>
+  <data name="SettingsGroup_Search.Text" xml:space="preserve"><value>Search</value></data>
+  <data name="SettingsGroup_General.Text" xml:space="preserve"><value>General</value></data>
+  <data name="SettingsGroup_Advanced.Text" xml:space="preserve"><value>Advanced</value></data>
+  <data name="SortDescendingCard.Header" xml:space="preserve"><value>Descending</value></data>
+  <data name="ActionOpen.Content" xml:space="preserve"><value>Open</value></data>
   <data name="ScopeDialog.Title" xml:space="preserve"><value>Search folders</value></data>
   <data name="ScopeDialog.PrimaryButtonText" xml:space="preserve"><value>Apply and restart</value></data>
   <data name="ScopeDialog.CloseButtonText" xml:space="preserve"><value>Cancel</value></data>
@@ -98,6 +105,7 @@
   <data name="Status_ModeScope" xml:space="preserve"><value>Mode: selected folders</value></data>
   <data name="Status_ModePrivileged" xml:space="preserve"><value>Mode: all drives</value></data>
   <data name="Scope_OpenFailed" xml:space="preserve"><value>Couldn't open search folders</value></data>
+  <data name="Settings_OpenFailed" xml:space="preserve"><value>Couldn't open settings</value></data>
   <data name="ScopeDialogExcludesHeader.Text" xml:space="preserve"><value>Skip these subfolders</value></data>
   <data name="ScopeDialogExcludesBody.Text" xml:space="preserve"><value>Folders inside the ones above that you don't want indexed (for example node_modules or build output). Changes are re-walked on apply.</value></data>
   <data name="ScopeDialogAddExclude.Content" xml:space="preserve"><value>Add a folder to skip…</value></data>
