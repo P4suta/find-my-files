@@ -63,10 +63,13 @@
   <data name="Search_Placeholder" xml:space="preserve"><value>Search by file name…</value></data>
   <data name="Search_PlaceholderRegexName" xml:space="preserve"><value>Regex over file name…</value></data>
   <data name="Search_PlaceholderRegexPath" xml:space="preserve"><value>Regex over full path…</value></data>
-  <data name="OptFocused.Header" xml:space="preserve"><value>Focused (common formats only, exclude system areas)</value></data>
+  <data name="OptFocused.Header" xml:space="preserve"><value>Focused</value></data>
+  <data name="OptFocused.Description" xml:space="preserve"><value>Common formats only; excludes system areas</value></data>
   <data name="OptSystem.Header" xml:space="preserve"><value>Include system and hidden files</value></data>
   <data name="OptRegex.Header" xml:space="preserve"><value>Regex mode</value></data>
-  <data name="OptCloseToTray.Header" xml:space="preserve"><value>Close to tray (keep running in the background)</value></data>
+  <data name="OptRegex.Description" xml:space="preserve"><value>Treat the whole query as one regular expression</value></data>
+  <data name="OptCloseToTray.Header" xml:space="preserve"><value>Close to tray</value></data>
+  <data name="OptCloseToTray.Description" xml:space="preserve"><value>Keeps running in the background instead of exiting</value></data>
   <data name="RegexScopeMenu.Header" xml:space="preserve"><value>Regex applies to</value></data>
   <data name="RegexScopeName.Content" xml:space="preserve"><value>File name</value></data>
   <data name="RegexScopePath.Content" xml:space="preserve"><value>Full path</value></data>

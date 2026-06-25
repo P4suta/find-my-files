@@ -63,10 +63,13 @@
   <data name="Search_Placeholder" xml:space="preserve"><value>ファイル名で検索…</value></data>
   <data name="Search_PlaceholderRegexName" xml:space="preserve"><value>ファイル名を正規表現で検索…</value></data>
   <data name="Search_PlaceholderRegexPath" xml:space="preserve"><value>フルパスを正規表現で検索…</value></data>
-  <data name="OptFocused.Header" xml:space="preserve"><value>絞り込み(よく使う形式に限定・システム領域を除外)</value></data>
+  <data name="OptFocused.Header" xml:space="preserve"><value>絞り込み</value></data>
+  <data name="OptFocused.Description" xml:space="preserve"><value>よく使う形式に限定し、システム領域を除外</value></data>
   <data name="OptSystem.Header" xml:space="preserve"><value>システム・隠しファイルを含める</value></data>
   <data name="OptRegex.Header" xml:space="preserve"><value>正規表現モード</value></data>
-  <data name="OptCloseToTray.Header" xml:space="preserve"><value>閉じてもトレイに常駐する</value></data>
+  <data name="OptRegex.Description" xml:space="preserve"><value>クエリ全体を1つの正規表現として扱う</value></data>
+  <data name="OptCloseToTray.Header" xml:space="preserve"><value>トレイに常駐</value></data>
+  <data name="OptCloseToTray.Description" xml:space="preserve"><value>閉じても終了せずバックグラウンドで動作し続ける</value></data>
   <data name="RegexScopeMenu.Header" xml:space="preserve"><value>正規表現の対象</value></data>
   <data name="RegexScopeName.Content" xml:space="preserve"><value>ファイル名</value></data>
   <data name="RegexScopePath.Content" xml:space="preserve"><value>フルパス</value></data>

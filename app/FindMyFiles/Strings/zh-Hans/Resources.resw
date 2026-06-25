@@ -63,10 +63,13 @@
   <data name="Search_Placeholder" xml:space="preserve"><value>按文件名搜索…</value></data>
   <data name="Search_PlaceholderRegexName" xml:space="preserve"><value>用正则表达式匹配文件名…</value></data>
   <data name="Search_PlaceholderRegexPath" xml:space="preserve"><value>用正则表达式匹配完整路径…</value></data>
-  <data name="OptFocused.Header" xml:space="preserve"><value>精简(仅常用格式，排除系统区域)</value></data>
+  <data name="OptFocused.Header" xml:space="preserve"><value>精简</value></data>
+  <data name="OptFocused.Description" xml:space="preserve"><value>仅常用格式，排除系统区域</value></data>
   <data name="OptSystem.Header" xml:space="preserve"><value>包含系统和隐藏文件</value></data>
   <data name="OptRegex.Header" xml:space="preserve"><value>正则表达式模式</value></data>
-  <data name="OptCloseToTray.Header" xml:space="preserve"><value>关闭时驻留到托盘</value></data>
+  <data name="OptRegex.Description" xml:space="preserve"><value>将整个查询作为一个正则表达式</value></data>
+  <data name="OptCloseToTray.Header" xml:space="preserve"><value>关闭到托盘</value></data>
+  <data name="OptCloseToTray.Description" xml:space="preserve"><value>关闭时不退出，继续在后台运行</value></data>
   <data name="RegexScopeMenu.Header" xml:space="preserve"><value>正则匹配范围</value></data>
   <data name="RegexScopeName.Content" xml:space="preserve"><value>文件名</value></data>
   <data name="RegexScopePath.Content" xml:space="preserve"><value>完整路径</value></data>

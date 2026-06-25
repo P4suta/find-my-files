@@ -38,12 +38,32 @@
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
-                            <TextBlock
+                            <StackPanel
                                 Grid.Column="0"
                                 VerticalAlignment="Center"
-                                Style="{ThemeResource BodyTextBlockStyle}"
-                                Text="{TemplateBinding Header}"
-                                TextWrapping="Wrap" />
+                                Orientation="Horizontal"
+                                Spacing="{StaticResource SpacingMedium}">
+                                <!--  Optional leading icon — the control collapses it when Glyph is unset.  -->
+                                <FontIcon
+                                    x:Name="PART_Icon"
+                                    VerticalAlignment="Center"
+                                    FontSize="{StaticResource IconSizeMedium}"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Glyph="{TemplateBinding Glyph}" />
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock
+                                        Style="{ThemeResource BodyTextBlockStyle}"
+                                        Text="{TemplateBinding Header}"
+                                        TextWrapping="Wrap" />
+                                    <!--  Optional description — the control collapses it when Description is unset.  -->
+                                    <TextBlock
+                                        x:Name="PART_Description"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Style="{ThemeResource CaptionTextBlockStyle}"
+                                        Text="{TemplateBinding Description}"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </StackPanel>
                             <ContentPresenter
                                 Grid.Column="1"
                                 HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"

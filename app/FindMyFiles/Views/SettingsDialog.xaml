@@ -22,17 +22,17 @@
 
             <!--  ── Search behaviour ──  -->
             <TextBlock x:Uid="SettingsGroup_Search" Style="{ThemeResource BodyStrongTextBlockStyle}" />
-            <ctl:SettingsCard x:Uid="OptFocused" Style="{StaticResource SettingsCardStyle}">
+            <ctl:SettingsCard x:Uid="OptFocused" Glyph="&#xE71C;" Style="{StaticResource SettingsCardStyle}">
                 <ToggleSwitch
                     AutomationProperties.AutomationId="OptFocused"
                     IsOn="{x:Bind VM.FocusedSearch, Mode=TwoWay}" />
             </ctl:SettingsCard>
-            <ctl:SettingsCard x:Uid="OptSystem" Style="{StaticResource SettingsCardStyle}">
+            <ctl:SettingsCard x:Uid="OptSystem" Glyph="&#xE890;" Style="{StaticResource SettingsCardStyle}">
                 <ToggleSwitch
                     AutomationProperties.AutomationId="OptSystem"
                     IsOn="{x:Bind VM.IncludeHiddenSystem, Mode=TwoWay}" />
             </ctl:SettingsCard>
-            <ctl:SettingsCard x:Uid="OptRegex" Style="{StaticResource SettingsCardStyle}">
+            <ctl:SettingsCard x:Uid="OptRegex" Glyph="&#xE943;" Style="{StaticResource SettingsCardStyle}">
                 <ToggleSwitch
                     AutomationProperties.AutomationId="OptRegex"
                     IsOn="{x:Bind VM.RegexMode, Mode=TwoWay}" />
@@ -55,7 +55,7 @@
             </ctl:SettingsCard>
 
             <!--  ── Sorting ──  -->
-            <ctl:SettingsCard x:Uid="SortHeaderItem" Style="{StaticResource SettingsCardStyle}">
+            <ctl:SettingsCard x:Uid="SortHeaderItem" Glyph="&#xE8CB;" Style="{StaticResource SettingsCardStyle}">
                 <StackPanel Orientation="Horizontal" Spacing="{StaticResource SpacingSmall}">
                     <RadioButton
                         x:Name="SortName"
@@ -86,7 +86,7 @@
 
             <!--  ── General ──  -->
             <TextBlock x:Uid="SettingsGroup_General" Style="{ThemeResource BodyStrongTextBlockStyle}" />
-            <ctl:SettingsCard x:Uid="LangMenu" Style="{StaticResource SettingsCardStyle}">
+            <ctl:SettingsCard x:Uid="LangMenu" Glyph="&#xE774;" Style="{StaticResource SettingsCardStyle}">
                 <ComboBox
                     x:Name="LangCombo"
                     AutomationProperties.AutomationId="LangCombo"
@@ -113,7 +113,7 @@
                         Tag="zh-Hans" />
                 </ComboBox>
             </ctl:SettingsCard>
-            <ctl:SettingsCard x:Uid="OptCloseToTray" Style="{StaticResource SettingsCardStyle}">
+            <ctl:SettingsCard x:Uid="OptCloseToTray" Glyph="&#xE922;" Style="{StaticResource SettingsCardStyle}">
                 <ToggleSwitch
                     AutomationProperties.AutomationId="OptCloseToTray"
                     IsOn="{x:Bind VM.CloseToTray, Mode=TwoWay}" />
@@ -143,7 +143,7 @@
 
             <!--  ── Advanced & management ──  -->
             <TextBlock x:Uid="SettingsGroup_Advanced" Style="{ThemeResource BodyStrongTextBlockStyle}" />
-            <ctl:SettingsCard x:Uid="DiagCard" Style="{StaticResource SettingsCardStyle}">
+            <ctl:SettingsCard x:Uid="DiagCard" Glyph="&#xE9D9;" Style="{StaticResource SettingsCardStyle}">
                 <Button
                     x:Uid="ActionOpen"
                     AutomationProperties.AutomationId="DiagToggle"
@@ -151,6 +151,7 @@
             </ctl:SettingsCard>
             <ctl:SettingsCard
                 x:Uid="ServiceCard"
+                Glyph="&#xE912;"
                 Style="{StaticResource SettingsCardStyle}"
                 Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsPrivilegedMode)}">
                 <Button
@@ -160,6 +161,7 @@
             </ctl:SettingsCard>
             <ctl:SettingsCard
                 x:Uid="ScopeCard"
+                Glyph="&#xE8B7;"
                 Style="{StaticResource SettingsCardStyle}"
                 Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsScopeMode)}">
                 <Button
