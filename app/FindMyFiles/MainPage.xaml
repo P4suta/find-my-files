@@ -221,6 +221,34 @@
                     </MenuFlyout>
                 </ListView.ContextFlyout>
             </ListView>
+
+            <!--  検索したが0件のとき、空白の代わりに Fluent 空状態を出す(クエリ有り・結果着地後のみ)。
+                  ListView の兄弟オーバーレイで、ItemsSource は一切触らない(ADR-0015)。  -->
+            <StackPanel
+                MaxWidth="{StaticResource SetupMaxWidth}"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Spacing="{StaticResource SpacingSmall}"
+                Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.HasNoResults), Mode=OneWay}">
+                <FontIcon
+                    HorizontalAlignment="Center"
+                    FontSize="{StaticResource IconSizeXLarge}"
+                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                    Glyph="&#xE721;" />
+                <TextBlock
+                    x:Uid="NoResultsTitle"
+                    AutomationProperties.AutomationId="NoResultsTitle"
+                    HorizontalAlignment="Center"
+                    Style="{ThemeResource SubtitleTextBlockStyle}"
+                    TextAlignment="Center" />
+                <TextBlock
+                    HorizontalAlignment="Center"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Style="{ThemeResource BodyTextBlockStyle}"
+                    Text="{x:Bind ViewModel.NoResultsText, Mode=OneWay}"
+                    TextAlignment="Center"
+                    TextWrapping="Wrap" />
+            </StackPanel>
         </Grid>
 
         <!--  未接続(空エンジン)時のセットアップ画面。検索バー等は IsReady で畳まれ、

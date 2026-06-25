@@ -109,6 +109,8 @@
   <data name="Status_ModePrivileged" xml:space="preserve"><value>Mode: all drives</value></data>
   <data name="Scope_OpenFailed" xml:space="preserve"><value>Couldn't open search folders</value></data>
   <data name="Settings_OpenFailed" xml:space="preserve"><value>Couldn't open settings</value></data>
+  <data name="NoResultsTitle.Text" xml:space="preserve"><value>No results found</value></data>
+  <data name="NoResults_Body" xml:space="preserve"><value>No results for “{0}”</value></data>
   <data name="ScopeDialogExcludesHeader.Text" xml:space="preserve"><value>Skip these subfolders</value></data>
   <data name="ScopeDialogExcludesBody.Text" xml:space="preserve"><value>Folders inside the ones above that you don't want indexed (for example node_modules or build output). Changes are re-walked on apply.</value></data>
   <data name="ScopeDialogAddExclude.Content" xml:space="preserve"><value>Add a folder to skip…</value></data>

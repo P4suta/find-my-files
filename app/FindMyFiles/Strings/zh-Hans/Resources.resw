@@ -109,6 +109,8 @@
   <data name="Status_ModePrivileged" xml:space="preserve"><value>模式: 所有驱动器</value></data>
   <data name="Scope_OpenFailed" xml:space="preserve"><value>无法打开搜索文件夹</value></data>
   <data name="Settings_OpenFailed" xml:space="preserve"><value>无法打开设置</value></data>
+  <data name="NoResultsTitle.Text" xml:space="preserve"><value>未找到结果</value></data>
+  <data name="NoResults_Body" xml:space="preserve"><value>未找到与“{0}”匹配的结果</value></data>
   <data name="ScopeDialogExcludesHeader.Text" xml:space="preserve"><value>跳过这些子文件夹</value></data>
   <data name="ScopeDialogExcludesBody.Text" xml:space="preserve"><value>上述文件夹中你不想索引的部分(例如 node_modules 或构建输出)。应用后将重新遍历。</value></data>
   <data name="ScopeDialogAddExclude.Content" xml:space="preserve"><value>添加要跳过的文件夹…</value></data>

@@ -372,6 +372,26 @@ function Invoke-ScrollPhase {
     Test-UI 'Scroll: list survives deep scroll (still present)' {
         Invoke-Ui wait-for 'ResultsList' -w $mainHwnd -t 2000
     }
+
+    # ── No-results empty state: a needle that matches nothing shows the overlay;
+    #    a matching needle hides it again. The overlay title is a normal TextBlock
+    #    (not a virtualized row), so winapp can see it.
+    Test-UI 'NoResults: empty state shows for a no-match query' {
+        Invoke-Ui set-value 'SearchBox' 'zzz_nomatch_zzz' -a $AppPid
+        Start-Sleep -Milliseconds 500
+        Invoke-Ui wait-for 'NoResultsTitle' -w $mainHwnd -t 3000
+    }
+    Invoke-Ui screenshot -a $AppPid -o (Join-Path $OutDir 'C-noresults.png') 2>$null
+    Test-UI 'NoResults: empty state clears with the query' {
+        # Clearing the box → empty query → the overlay must go (HasNoResults=false
+        # and the results row collapses to EmptyState). Robust regardless of which
+        # fake needles match. Invert a short present-wait: it must NOT find it.
+        Invoke-Ui set-value 'SearchBox' '' -a $AppPid
+        Start-Sleep -Milliseconds 500
+        Invoke-Ui wait-for 'NoResultsTitle' -w $mainHwnd -t 800 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { throw 'no-results overlay still present after clearing the query' }
+        $global:LASTEXITCODE = 0
+    }
     Invoke-Ui screenshot -a $AppPid -o (Join-Path $OutDir 'C-scroll.png') 2>$null
     Invoke-Ui set-value 'SearchBox' '' -a $AppPid 2>$null | Out-Null
 }

@@ -109,6 +109,8 @@
   <data name="Status_ModePrivileged" xml:space="preserve"><value>モード: 全ドライブ</value></data>
   <data name="Scope_OpenFailed" xml:space="preserve"><value>検索フォルダを開けませんでした</value></data>
   <data name="Settings_OpenFailed" xml:space="preserve"><value>設定を開けませんでした</value></data>
+  <data name="NoResultsTitle.Text" xml:space="preserve"><value>結果が見つかりません</value></data>
+  <data name="NoResults_Body" xml:space="preserve"><value>「{0}」に一致する結果はありません</value></data>
   <data name="ScopeDialogExcludesHeader.Text" xml:space="preserve"><value>除外するサブフォルダ</value></data>
   <data name="ScopeDialogExcludesBody.Text" xml:space="preserve"><value>上のフォルダの中で索引したくないもの(node_modules やビルド出力など)。適用すると再walkします。</value></data>
   <data name="ScopeDialogAddExclude.Content" xml:space="preserve"><value>除外フォルダを追加…</value></data>
