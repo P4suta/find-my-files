@@ -66,6 +66,7 @@
   <data name="OptFocused.Text" xml:space="preserve"><value>絞り込み(よく使う形式に限定・システム領域を除外)</value></data>
   <data name="OptSystem.Text" xml:space="preserve"><value>システム・隠しファイルを含める</value></data>
   <data name="OptRegex.Text" xml:space="preserve"><value>正規表現モード</value></data>
+  <data name="OptCloseToTray.Text" xml:space="preserve"><value>閉じてもトレイに常駐する</value></data>
   <data name="RegexScopeMenu.Text" xml:space="preserve"><value>正規表現の対象</value></data>
   <data name="RegexScopeName.Text" xml:space="preserve"><value>ファイル名</value></data>
   <data name="RegexScopePath.Text" xml:space="preserve"><value>フルパス</value></data>
@@ -128,6 +129,9 @@
   <data name="DiagHealthHeaderBar.Title" xml:space="preserve"><value>健全性</value></data>
 
   <!-- ===== Code (Loc.Get) ===== -->
+  <data name="Tray_Open" xml:space="preserve"><value>開く</value></data>
+  <data name="Tray_Exit" xml:space="preserve"><value>終了</value></data>
+  <data name="Tray_Tooltip" xml:space="preserve"><value>find-my-files</value></data>
   <data name="OptionsButton_ToolTip" xml:space="preserve"><value>設定・状態・診断(絞り込み/隠しファイル/並べ替え/件数/エンジン/診断)</value></data>
   <data name="OptionsButton_Name" xml:space="preserve"><value>設定・状態・診断</value></data>
   <data name="DiagWindowTitle" xml:space="preserve"><value>診断</value></data>

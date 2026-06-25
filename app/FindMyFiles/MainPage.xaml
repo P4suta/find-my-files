@@ -152,6 +152,10 @@
                                 Click="RegexScopePath_Click"
                                 GroupName="RegexScope" />
                         </MenuFlyoutSubItem>
+                        <ToggleMenuFlyoutItem
+                            x:Uid="OptCloseToTray"
+                            AutomationProperties.AutomationId="OptCloseToTray"
+                            IsChecked="{x:Bind ViewModel.CloseToTray, Mode=TwoWay}" />
                         <MenuFlyoutSeparator />
                         <MenuFlyoutSubItem x:Uid="SortHeaderItem">
                             <RadioMenuFlyoutItem

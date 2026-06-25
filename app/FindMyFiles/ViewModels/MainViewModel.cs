@@ -66,6 +66,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [NotifyPropertyChangedFor(nameof(SearchPlaceholder))]
     public partial RegexScopeKind RegexScope { get; set; }
 
+    /// <summary>Tray-resident mode (ADR-0030): the gear-menu toggle. When on,
+    /// closing (×) hides to the tray instead of exiting and the engine stays
+    /// hot. Restored from settings in the ctor; a flip just persists — the close
+    /// handler re-reads the setting from disk.</summary>
+    [ObservableProperty]
+    public partial bool CloseToTray { get; set; }
+
     /// <summary>The search box hint — regex/scope-aware, so the box itself
     /// signals that regex mode is on (the toggle lives in the gear menu).</summary>
     public string SearchPlaceholder => RegexMode
@@ -266,6 +273,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         // Regex mode/scope restore (same ctor-time no-op requery as focused).
         RegexScope = string.Equals(_settings.RegexScope, "path", StringComparison.Ordinal) ? RegexScopeKind.Path : RegexScopeKind.Name;
         RegexMode = _settings.RegexMode;
+        CloseToTray = _settings.CloseToTray;
         Notifications = new NotificationCenter(dispatcher);
         Perf = new PerfPanelViewModel(engine);
 
@@ -539,6 +547,18 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         if (RegexMode)
         {
             Search.Requery(RequeryOrigin.Filter);
+        }
+    }
+
+    /// <summary>Tray-resident toggle → persist only (no requery; the setting is
+    /// irrelevant to search). App's close handler re-reads it from settings. Also
+    /// runs once from the ctor; the save is skipped when unchanged.</summary>
+    partial void OnCloseToTrayChanged(bool value)
+    {
+        if (_settings.CloseToTray != value)
+        {
+            _settings.CloseToTray = value;
+            _settings.Save();
         }
     }
 
