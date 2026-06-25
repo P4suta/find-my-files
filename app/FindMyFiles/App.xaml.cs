@@ -42,6 +42,14 @@ public partial class App : Application
     /// survives shutdown.</summary>
     private static DiagnosticsWindow? _diagWindow;
 
+    /// <summary>The system-tray icon (ADR-0030), or <c>null</c> when tray init
+    /// failed or before the window is up. Held for the process lifetime.</summary>
+    private static TrayIcon? _tray;
+
+    /// <summary>Set when the user really quits (tray "Exit") so the main window's
+    /// Closing handler lets the close proceed instead of hiding to tray.</summary>
+    private static bool _explicitExit;
+
     /// <summary>Open or close the diagnostics window, sharing the supplied
     /// <see cref="PerfPanelViewModel"/> (the single `MainViewModel.Perf`
     /// instance). When already open, closing it is enough; the `Closed` handler
@@ -150,6 +158,7 @@ public partial class App : Application
             // Close the diagnostics window first so no orphan top-level window
             // survives shutdown (mandatory correction 1).
             _diagWindow?.Close();
+            _tray?.Dispose();
             try
             {
                 EngineClient.Dispose();
@@ -160,5 +169,60 @@ public partial class App : Application
             }
         };
         Window.Activate();
+
+        // Tray-resident mode (ADR-0030): the icon keeps the process (and its hot
+        // engine connection) alive after a close-to-tray. Best-effort — the app
+        // is fully usable without it.
+        _tray = CreateTrayIcon();
+    }
+
+    /// <summary>Creates the tray icon, or <c>null</c> when it cannot be
+    /// initialized — the app stays fully usable without it (ADR-0030).</summary>
+    private static TrayIcon? CreateTrayIcon()
+    {
+        try
+        {
+            return new TrayIcon(WindowHandle, Loc.Get("Tray_Tooltip"), ShowFromTray, ExitApplication);
+        }
+        catch (Exception ex)
+        {
+            FileLog.Warn("tray", $"tray icon init failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Decides whether the main window's close (×) should hide to the
+    /// tray rather than exit (ADR-0030). Called from MainWindow's
+    /// <c>AppWindow.Closing</c>.</summary>
+    /// <returns>True to cancel the close (now hidden to tray); false to exit.</returns>
+    internal static bool HandleMainWindowClosing()
+    {
+        if (WindowLifecycle.ShouldHideToTray(AppSettings.Load().CloseToTray, _explicitExit))
+        {
+            Window.AppWindow.Hide();
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Restores the window from the tray (left-click / "Open"). Runs on
+    /// the UI thread (the subclass proc's thread); a click is user input, so
+    /// Activate brings it to the foreground.</summary>
+    internal static void ShowFromTray()
+    {
+        Window.AppWindow.Show();
+        Window.Activate();
+    }
+
+    /// <summary>Really exits (tray "Exit"): marks the exit explicit so Closing
+    /// lets the window close, runs the normal teardown, then exits the process —
+    /// Hide had kept it alive past the last window.</summary>
+    internal static void ExitApplication()
+    {
+        _explicitExit = true;
+        _tray?.Dispose(); // remove the icon now so no ghost survives if Close runs async
+        Window.Close();
+        Current.Exit();
     }
 }

@@ -66,6 +66,7 @@
   <data name="OptFocused.Text" xml:space="preserve"><value>Focused (common formats only, exclude system areas)</value></data>
   <data name="OptSystem.Text" xml:space="preserve"><value>Include system and hidden files</value></data>
   <data name="OptRegex.Text" xml:space="preserve"><value>Regex mode</value></data>
+  <data name="OptCloseToTray.Text" xml:space="preserve"><value>Close to tray (keep running in the background)</value></data>
   <data name="RegexScopeMenu.Text" xml:space="preserve"><value>Regex applies to</value></data>
   <data name="RegexScopeName.Text" xml:space="preserve"><value>File name</value></data>
   <data name="RegexScopePath.Text" xml:space="preserve"><value>Full path</value></data>
@@ -128,6 +129,9 @@
   <data name="DiagHealthHeaderBar.Title" xml:space="preserve"><value>Health</value></data>
 
   <!-- ===== Code (Loc.Get) ===== -->
+  <data name="Tray_Open" xml:space="preserve"><value>Open</value></data>
+  <data name="Tray_Exit" xml:space="preserve"><value>Exit</value></data>
+  <data name="Tray_Tooltip" xml:space="preserve"><value>find-my-files</value></data>
   <data name="OptionsButton_ToolTip" xml:space="preserve"><value>Settings, status, diagnostics (focus / hidden files / sort / count / engine / diagnostics)</value></data>
   <data name="OptionsButton_Name" xml:space="preserve"><value>Settings, status, diagnostics</value></data>
   <data name="DiagWindowTitle" xml:space="preserve"><value>Diagnostics</value></data>

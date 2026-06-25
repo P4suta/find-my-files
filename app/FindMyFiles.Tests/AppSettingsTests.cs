@@ -105,4 +105,33 @@ public sealed class AppSettingsTests
             }
         }
     }
+
+    [Fact]
+    public void CloseToTray_DefaultOff_AndRoundTrip()
+    {
+        // Default off keeps the unchanged ADR-0027 on-demand behaviour for
+        // users who never opt in (ADR-0030).
+        Assert.False(new AppSettings().CloseToTray);
+
+        var dir = Path.Combine(Path.GetTempPath(), "fmf-settings-" + Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(dir, "settings.json");
+        try
+        {
+            new AppSettings { CloseToTray = true }.SaveTo(path);
+
+            var loaded = AppSettings.LoadFrom(path);
+            Assert.True(loaded.CloseToTray);
+
+            // Stable snake_case wire name — what users hand-edit.
+            var json = File.ReadAllText(path);
+            Assert.Contains("\"close_to_tray\"", json, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+        }
+    }
 }

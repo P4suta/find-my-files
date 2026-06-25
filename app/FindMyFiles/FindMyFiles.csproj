@@ -38,6 +38,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Single-instance via a hand-written Main (ADR-0030): suppress the
+         XAML-generated entry point so Program.Main owns startup. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
     <!-- Maximal analyzer/style strictness (convention hardening). All .NET
          analyzer rules on, code style enforced in build, every warning an
          error. Security rules (CA2100/CA3006/CA5xxx) are pinned to error in

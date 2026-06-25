@@ -35,6 +35,14 @@ public sealed class AppSettings
     /// "name".</summary>
     public string RegexScope { get; set; } = "name";
 
+    /// <summary>Tray-resident mode (ADR-0030): when on, the close (×) button
+    /// hides the window to the system tray instead of exiting and the process
+    /// stays alive with its engine connection hot, so re-opening is instant and
+    /// the first search pays no cold start. Off by default — close exits and the
+    /// service returns to its on-demand idle-stop (ADR-0027). The gear-menu
+    /// toggle flips it and persists here.</summary>
+    public bool CloseToTray { get; set; }
+
     /// <summary>Noise directories excluded in focused mode, each appended as
     /// a quoted <c>!path:"…"</c> term. Plain substring match against the full
     /// path (engine semantics) — no wildcards needed.</summary>

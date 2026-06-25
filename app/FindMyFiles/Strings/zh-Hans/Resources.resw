@@ -66,6 +66,7 @@
   <data name="OptFocused.Text" xml:space="preserve"><value>精简(仅常用格式，排除系统区域)</value></data>
   <data name="OptSystem.Text" xml:space="preserve"><value>包含系统和隐藏文件</value></data>
   <data name="OptRegex.Text" xml:space="preserve"><value>正则表达式模式</value></data>
+  <data name="OptCloseToTray.Text" xml:space="preserve"><value>关闭时驻留到托盘</value></data>
   <data name="RegexScopeMenu.Text" xml:space="preserve"><value>正则匹配范围</value></data>
   <data name="RegexScopeName.Text" xml:space="preserve"><value>文件名</value></data>
   <data name="RegexScopePath.Text" xml:space="preserve"><value>完整路径</value></data>
@@ -128,6 +129,9 @@
   <data name="DiagHealthHeaderBar.Title" xml:space="preserve"><value>健康状况</value></data>
 
   <!-- ===== Code (Loc.Get) ===== -->
+  <data name="Tray_Open" xml:space="preserve"><value>打开</value></data>
+  <data name="Tray_Exit" xml:space="preserve"><value>退出</value></data>
+  <data name="Tray_Tooltip" xml:space="preserve"><value>find-my-files</value></data>
   <data name="OptionsButton_ToolTip" xml:space="preserve"><value>设置、状态、诊断(精简/隐藏文件/排序/数量/引擎/诊断)</value></data>
   <data name="OptionsButton_Name" xml:space="preserve"><value>设置、状态、诊断</value></data>
   <data name="DiagWindowTitle" xml:space="preserve"><value>诊断</value></data>
