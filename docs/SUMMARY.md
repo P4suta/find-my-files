@@ -47,3 +47,4 @@
   - [0031 — mtime as a u32 Unix-seconds column](adr/0031-mtime-u32-unix-seconds.md)
   - [0032 — Name dictionary-encoding](adr/0032-name-dictionary-encoding.md)
   - [0033 — Phase 3 memory/latency levers](adr/0033-phase3-memory-latency-levers.md)
+  - [0034 — SBOMs consumed by osv-scanner](adr/0034-sbom-consumed-by-osv-scanner.md)

@@ -108,6 +108,21 @@ jobs:
           --output build/sbom --filename app.cdx.json
           --output-format Json --spec-version 1.6 --runtime win-x64
 
+      # Gate the release on known-vulnerable deps in the *resolved shipped
+      # closure* — the .NET/NuGet graph here is only visible via the SBOM, never
+      # to cargo-audit (which reads Cargo.lock). Fail-fast before sign/publish.
+      # Accepted/unfixable advisories live in osv-scanner.toml (ADR-0034).
+      - name: Install osv-scanner
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        with:
+          tool: osv-scanner@2.3.6
+      - name: Scan SBOMs for known vulnerabilities (release gate)
+        run: >-
+          osv-scanner scan source
+          -L build/sbom/fmf-engine.cdx.json
+          -L build/sbom/app.cdx.json
+          --config osv-scanner.toml
+
       - name: Upload unsigned bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

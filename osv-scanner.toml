@@ -1,0 +1,14 @@
+# Accepted / unfixable advisories for the SBOM vulnerability gate and the
+# shipped-release re-scan (release.yml build gate + sbom-monitor.yml). This is
+# the OSV.dev counterpart to engine/deny.toml (cargo-deny) and cargo-audit's
+# ignore list — the single documented escape hatch so an upstream advisory with
+# no fix can't permanently block releases or spam the sbom-vuln issue (ADR-0034).
+#
+# Keep it empty by default. Every entry MUST justify itself (why it can't be
+# fixed, and when to revisit) — an unexplained ignore is a silenced finding.
+#
+# Format:
+#   [[IgnoredVulns]]
+#   id = "GHSA-xxxx-xxxx-xxxx"   # or "RUSTSEC-YYYY-NNNN" / "CVE-YYYY-NNNNN"
+#   # reason: <why this is accepted — no upstream fix, not reachable, etc.>
+#   # revisit after: <date or upstream issue link>

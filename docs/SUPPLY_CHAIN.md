@@ -37,12 +37,22 @@ The zip and SHA256SUMS have a build-provenance attestation, and each SBOM has an
 |---|---|
 | Rust dependency lock | `engine/Cargo.lock` / `xtask/Cargo.lock` (committed) |
 | C# dependency lock | `app/FindMyFiles/packages.lock.json` / `app/FindMyFiles.Tests/packages.lock.json`. CI treats stale as failure via `-p:RestoreLockedMode=true` |
-| Vulnerabilities | `cargo-audit` (RustSec, weekly + on lock change). C# uses CodeQL + Dependabot |
+| Vulnerabilities (source tree) | `cargo-audit` (RustSec, weekly + on lock change). C# uses CodeQL + Dependabot |
+| Vulnerabilities (shipped releases) | `osv-scanner` consumes the release SBOMs: a **release gate** in `release.yml` (blocks publishing a build with a known-vulnerable dep in the resolved closure — incl. the .NET graph `cargo-audit` can't see) and a **weekly re-scan** of the latest release's SBOM (`sbom-monitor.yml`) that catches advisories disclosed *after* shipping. Accepted/unfixable advisories: `osv-scanner.toml`. See [ADR-0034](adr/0034-sbom-consumed-by-osv-scanner.md) |
 | License/provenance | `cargo-deny` (bans / licenses / sources. Unknown registries and git are deny) |
 | Auto-update | Dependabot (cargo / nuget×2 / github-actions. Weekly) |
 | Action pinning | Third-party actions in all workflows are pinned to a **40-char commit SHA** (with `# vX.Y.Z` alongside). Dependabot updates the SHA and comment. `actionlint` validates workflows in the hygiene job |
 | Posture monitoring | OpenSSF Scorecard (weekly, SARIF to the Security tab, README badge) |
 | Reproducible build | C# uses `ContinuousIntegrationBuild=true` in CI (embedded source path normalization. `Deterministic` is the SDK default). Rust is deterministic by default |
+
+## SBOMs are consumed, not just attached (ADR-0034)
+
+The SBOM isn't a write-only release artifact — `osv-scanner` (OSV.dev) reads it at two points:
+
+1. **Release gate** — `release.yml`'s `build` job scans both `*.cdx.json` right after generating them, before sign/publish. A known-vulnerable dependency in the resolved shipped closure fails the build. This catches the **.NET/NuGet graph**, which `cargo-audit` (Rust-only, reads `Cargo.lock`) never sees.
+2. **Shipped-release re-scan** — `sbom-monitor.yml` runs weekly, downloads the **latest release's** attested SBOMs, and re-scans them against the current OSV DB. This is the only check covering *what users already downloaded*: a CVE disclosed after a release is invisible to the source-tree scanners (which only see HEAD).
+
+When the weekly re-scan finds something it opens (or updates) a single issue labelled **`sbom-vuln`** with the osv-scanner report; once the affected release is clean again the issue is auto-closed. With no published release yet the job is a clean no-op and activates on the first release. Accepted/unfixable advisories go in **`osv-scanner.toml`** at the repo root (the OSV counterpart to `engine/deny.toml`), honoured by both the gate and the monitor.
 
 ## For maintainers: runbook for the first attested release
 
