@@ -24,8 +24,37 @@ examine_globs = [
   "**/src/wtf8.rs",
 ]
 
+# `scan/parse.rs` is deliberately NOT listed above. Its byte-fixture suite
+# (`scan::parse::tests`) passes in every ordinary build — `cargo test --lib`,
+# `--release`, and even a plain `RUSTFLAGS="--cfg mutants"` run are all green —
+# so it remains the file's primary defence and is the right place to harden the
+# $MFT decoder. But under cargo-mutants' scratch-tree copy the *unmutated*
+# baseline fails: `plain_file_record_parses_name_parent_and_size` and
+# `resident_data_size_is_the_value_length` read a $DATA size of 0 instead of the
+# fixture value. Both go through ntfs-reader's `resident_header()` /
+# `nonresident_header()`, which hand back a reference into a `#[repr(packed)]`
+# attribute header; reading `value_length` / `data_size` off that reference is an
+# unaligned-reference UB in the dependency that only manifests under the codegen
+# of cargo-mutants' separate build (the mtime path uses a different accessor and
+# stays green, which is why only the two size assertions fail). A failing
+# baseline aborts the whole run before any mutant is tested, so parse.rs cannot
+# be mutation-tested here regardless — and the UB is in ntfs-reader, not our
+# code, so there is nothing to fix on our side. Coverage of the decoder is owned
+# by the in-tree fixtures, not this harness.
+
 # Some of these tests do real index/USN-replay work, so a mutated build can run
 # slower than the clean baseline before it's caught. Give each mutant 5x the
 # baseline test time (plus the auto lower bound) so slow-but-correct mutants
 # don't get miscounted as timeouts.
 timeout_multiplier = 5.0
+
+# Run the library unit tests plus the USN-replay integration test, but NOT the
+# `golden_json` integration test: it reads `contract/golden/*.json` from the
+# repo root via `CARGO_MANIFEST_DIR/../../../contract/golden`, which sits
+# OUTSIDE the engine workspace cargo-mutants copies into its scratch tree — so
+# it fails in the unmutated baseline ("cannot read golden file") and aborts the
+# whole run before any mutant is tested. It pins serde shapes (ADR-0018), not
+# the query/index/usn/wtf8 logic under examination here, so dropping it from the
+# mutation harness costs no kill power. `usn_replay` builds its own byte buffers
+# (no external files) and is a key killer for the index/usn mutants, so it stays.
+additional_cargo_test_args = ["--lib", "--test", "usn_replay"]

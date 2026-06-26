@@ -169,7 +169,8 @@ jobs:
       # docs/contract.md), so no separate codegen + git-diff step is needed here
       # (ADR-0018).
       - name: test + line coverage gate
-        run: cargo llvm-cov --workspace --fail-under-lines 70 --lcov --output-path engine-lcov.info
+        # Measured 79.22% (just cov); gate held ~3pt below for run-to-run headroom.
+        run: cargo llvm-cov --workspace --fail-under-lines 76 --lcov --output-path engine-lcov.info
         working-directory: engine
       - name: doc (warnings = errors)
         run: cargo doc --workspace --no-deps

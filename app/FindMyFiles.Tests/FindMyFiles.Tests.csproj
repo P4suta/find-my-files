@@ -41,12 +41,12 @@
          logic the suite can actually cover (ADR-0022). -->
     <ExcludeByFile>**/*.g.cs,**/*.g.i.cs</ExcludeByFile>
     <!-- Gate (CI app job, via `just test-app-cov`): total line AND branch coverage
-         ≥55. ThresholdStat=total applies the bar to the combined total, not per
+         ≥56. ThresholdStat=total applies the bar to the combined total, not per
          module. Kept here with ExcludeByFile so `dotnet test -p:CollectCoverage=true`
          enforces the identical bar locally — and so no comma-bearing prop ever rides
          a shell command line (`-p:ThresholdType=line,branch` splits at the comma in
          PowerShell → MSBuild MSB1006). Ratchet as coverage grows. -->
-    <Threshold>55</Threshold>
+    <Threshold>56</Threshold>
     <ThresholdType>line,branch</ThresholdType>
     <ThresholdStat>total</ThresholdStat>
   </PropertyGroup>

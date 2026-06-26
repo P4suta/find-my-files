@@ -66,6 +66,38 @@ public sealed class PageCodecTests
     [Fact]
     public void MisalignedRowBytes_AreRejected()
     {
-        Assert.Throws<ArgumentException>(() => PageCodec.Decode(new byte[47], []));
+        var ex = Assert.Throws<ArgumentException>(() => PageCodec.Decode(new byte[47], []));
+
+        // The diagnostic names the offending length and the row stride, so a
+        // truncated buffer is debuggable from the message alone.
+        Assert.Contains("47", ex.Message, StringComparison.Ordinal);
+        Assert.Contains($"multiple of {PageCodec.RowSize}", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MultipleRows_EachReadsItsOwnSliceAndBlobWindow()
+    {
+        // Two distinct rows back-to-back: the per-row offset (i * RowSize) and
+        // the per-row blob windows must stay independent, so a swapped index
+        // or a dropped multiply surfaces as a wrong field on the second row.
+        List<RowData> rows =
+        [
+            new(EntryRef: 1, Frn: 10, Size: 100, Mtime: 5, Flags: 0, Name: "first.txt", ParentPath: "C:\\a\\"),
+            new(EntryRef: 2, Frn: 20, Size: 200, Mtime: 6, Flags: 1, Name: "二.dat", ParentPath: "D:\\"),
+        ];
+        var page = PipeProtocol.EncodePageResp(rows);
+
+        // Decode the row+blob spans directly through PageCodec (skip the 8-byte
+        // PageResp header EncodePageResp prepends).
+        var rowBytes = rows.Count * PageCodec.RowSize;
+        var decoded = PageCodec.Decode(
+            page.AsSpan(8, rowBytes),
+            page.AsSpan(8 + rowBytes));
+
+        Assert.Equal(rows, decoded);
+        Assert.Equal("C:\\a\\first.txt", decoded[0].FullPath);
+        Assert.False(decoded[0].IsDirectory);
+        Assert.Equal("二.dat", decoded[1].Name);
+        Assert.True(decoded[1].IsDirectory);
     }
 }

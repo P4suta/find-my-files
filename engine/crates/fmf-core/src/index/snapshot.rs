@@ -578,3 +578,168 @@ mod tests {
         assert_eq!(loaded.len(), idx.len());
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    //! Round-trip property: any index `write_snapshot` then `read_snapshot`
+    //! reproduces the same observable state and checkpoint — the example-based
+    //! tests above pin specific corruptions, this pins fidelity over the whole
+    //! generated space (names spanning ASCII/multibyte/surrogate, sizes that
+    //! straddle the 4 GiB `size_lo`/`size_ovf` split, real-FILETIME mtimes).
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::index::{Frn, RawEntry, VolumeIndexBuilder};
+
+    /// 4 GiB: the boundary above which a size spills from the `size_lo` u32
+    /// column into the `size_ovf` side map (two serialized sections).
+    const OVF: u64 = 4 << 30;
+
+    const FRAGMENTS: &[&str] = &[
+        "a", "Re", "report", "日本", "𠮷", ".rs", ".TXT", "x", "main",
+    ];
+
+    #[derive(Debug, Clone)]
+    struct Ent {
+        name: String,
+        is_dir: bool,
+        size: u64,
+        mtime: i64,
+    }
+
+    fn ent_strategy() -> impl Strategy<Value = Ent> {
+        const EPOCH: i64 = crate::query::dates::FILETIME_UNIX_EPOCH;
+        (
+            proptest::collection::vec(0usize..FRAGMENTS.len(), 1..=3),
+            any::<bool>(),
+            // Straddle the overflow boundary so both the inline column and the
+            // side map are serialized across the generated cases.
+            prop_oneof![0u64..OVF, OVF..(64u64 << 30)],
+            EPOCH..(EPOCH + 10_000i64 * 864_000_000_000),
+        )
+            .prop_map(|(parts, is_dir, size, mtime)| Ent {
+                name: parts.iter().map(|&i| FRAGMENTS[i]).collect(),
+                is_dir,
+                size,
+                mtime,
+            })
+    }
+
+    /// Build an index whose records are `10, 11, …`, all under the root.
+    fn build(entries: &[Ent]) -> VolumeIndex {
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        for (i, e) in entries.iter().enumerate() {
+            let units: Vec<u16> = e.name.encode_utf16().collect();
+            let record = i as u64 + 10;
+            b.push(RawEntry {
+                parent_frn: Frn(5),
+                frn: Frn((1u64 << 48) | record),
+                name_utf16: &units,
+                is_dir: e.is_dir,
+                is_reparse: false,
+                is_hidden: false,
+                is_system: false,
+                size: e.size,
+                mtime: e.mtime,
+            });
+        }
+        b.finish()
+    }
+
+    fn assert_same(a: &VolumeIndex, b: &VolumeIndex, records: usize) {
+        assert_eq!(a.len(), b.len());
+        assert_eq!(a.live_len(), b.live_len());
+        for i in 0..records as u64 {
+            let rec = i + 10;
+            let ia = a.entry_by_record(rec).expect("record present in source");
+            let ib = b.entry_by_record(rec).expect("record present in loaded");
+            assert_eq!(a.name(ia), b.name(ib), "name for record {rec}");
+            assert_eq!(a.size(ia), b.size(ib), "size for record {rec}");
+            assert_eq!(a.mtime(ia), b.mtime(ib), "mtime for record {rec}");
+            let (mut pa, mut pb) = (Vec::new(), Vec::new());
+            a.append_path(ia, &mut pa);
+            b.append_path(ib, &mut pb);
+            assert_eq!(pa, pb, "path for record {rec}");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn snapshot_round_trips_observable_state_and_checkpoint(
+            entries in proptest::collection::vec(ent_strategy(), 0..12),
+            journal_id in any::<u64>(),
+            next_usn in any::<i64>(),
+        ) {
+            let idx = build(&entries);
+            let mut buf = Vec::new();
+            idx.write_snapshot(&mut buf, journal_id, next_usn).unwrap();
+            let (loaded, gj, gu) = VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+            prop_assert_eq!((gj, gu), (journal_id, next_usn), "checkpoint must round-trip");
+            assert_same(&idx, &loaded, entries.len());
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Robustness: `read_snapshot` parses an *untrusted* stream with unsafe
+        /// POD reads (`read_vec`), so arbitrary byte mutations or truncations of
+        /// a valid snapshot must come back as `Ok`/`Err` — never a panic,
+        /// over-read, or runaway allocation. Mutations to a section's length
+        /// prefix exercise the `try_reserve`/EOF guards that sit *before* the
+        /// trailing checksum check. (Linux-buildable fuzzing of this path is
+        /// blocked by fmf-core's Windows-only deps — see fuzz/README.md; this is
+        /// the in-tree, Windows-runnable stand-in.)
+        #[test]
+        fn read_snapshot_survives_arbitrary_mutation_without_panicking(
+            entries in proptest::collection::vec(ent_strategy(), 1..6),
+            overwrites in proptest::collection::vec(
+                (any::<prop::sample::Index>(), any::<u8>()), 0..10),
+            truncate_to in any::<prop::sample::Index>(),
+        ) {
+            let mut buf = Vec::new();
+            build(&entries).write_snapshot(&mut buf, 1, 2).unwrap();
+            for (at, byte) in &overwrites {
+                let pos = at.index(buf.len());
+                buf[pos] = *byte;
+            }
+            let cut = truncate_to.index(buf.len() + 1);
+            let slice = &buf[..cut];
+
+            // The contract: returns without panicking. A successful load passed
+            // full structural + checksum validation, so every entry is safely
+            // walkable (no OOB name/path access).
+            if let Ok((loaded, _, _)) = VolumeIndex::read_snapshot(&mut &slice[..]) {
+                let mut p = Vec::new();
+                for id in 0..loaded.len() as u32 {
+                    let _ = loaded.name(id);
+                    if loaded.is_live(id) {
+                        p.clear();
+                        loaded.append_path(id, &mut p);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Concrete vacuity companion: a ≥ 4 GiB size really does survive the
+    /// `size_ovf` side-map path (so the property above is not green merely
+    /// because every generated size stayed in the u32 column).
+    #[test]
+    fn overflow_size_survives_the_round_trip() {
+        let idx = build(&[Ent {
+            name: "huge.iso".into(),
+            is_dir: false,
+            size: (7u64 << 30) + 123,
+            mtime: 0,
+        }]);
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 1, 2).unwrap();
+        let (loaded, _, _) = VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+        let id = loaded.entry_by_record(10).unwrap();
+        assert_eq!(loaded.size(id), (7u64 << 30) + 123);
+    }
+}

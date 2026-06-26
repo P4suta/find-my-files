@@ -83,7 +83,11 @@ public sealed class PipeProtocolTests
         PipeProtocol.WriteHeader(
             bytes, new PipeProtocol.FrameHeader(PipeProtocol.MaxPayloadLen + 1, 1, 0, 1, 0));
 
-        Assert.Throws<InvalidDataException>(() => PipeProtocol.ReadHeader(bytes));
+        var ex = Assert.Throws<InvalidDataException>(() => PipeProtocol.ReadHeader(bytes));
+
+        // The drop reason must name the cap — there is no resync point, so this
+        // message is the only forensic trail for a hostile/oversized frame.
+        Assert.Contains(PipeProtocol.MaxPayloadLen.ToString(), ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -137,4 +141,143 @@ public sealed class PipeProtocolTests
 
         Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodePageResp(bytes));
     }
+
+    [Fact]
+    public void PageResp_LyingBlobLength_IsRejected()
+    {
+        var bytes = PipeProtocol.EncodePageResp([new(1, 1, 1, 1, 0, "ab", "C:\\")]);
+        bytes[4]++; // blob_len overstated by one — total no longer matches
+
+        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodePageResp(bytes));
+    }
+
+    [Fact]
+    public void PageResp_EmptyPage_RoundTripsToNoRows()
+    {
+        var bytes = PipeProtocol.EncodePageResp([]);
+
+        Assert.Equal(8, bytes.Length); // just the {row_count, blob_len} header
+        Assert.Empty(PipeProtocol.DecodePageResp(bytes));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(7)] // one short of the 8-byte {row_count, blob_len} header
+    public void PageResp_TruncatedHeader_IsRejected(int len) =>
+        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodePageResp(new byte[len]));
+
+    [Fact]
+    public void Header_AtTheExactCap_IsAccepted()
+    {
+        // The boundary is `> MaxPayloadLen`, so the cap value itself is legal.
+        var bytes = new byte[PipeProtocol.HeaderLen];
+        PipeProtocol.WriteHeader(
+            bytes, new PipeProtocol.FrameHeader(PipeProtocol.MaxPayloadLen, 1, 0, 1, 0));
+
+        Assert.Equal(PipeProtocol.MaxPayloadLen, PipeProtocol.ReadHeader(bytes).Len);
+    }
+
+    [Fact]
+    public void Header_PlainRequest_IsNeitherResponseNorEvent()
+    {
+        var h = new PipeProtocol.FrameHeader(0, PipeProtocol.Op.Query, 0, 9, 0);
+
+        Assert.False(h.IsResponse);
+        Assert.False(h.IsEvent);
+    }
+
+    [Fact]
+    public void EncodeFrame_PrependsTheHeaderWithThePayloadLength()
+    {
+        byte[] payload = [0xAA, 0xBB, 0xCC];
+
+        var frame = PipeProtocol.EncodeFrame(
+            PipeProtocol.Op.Query, PipeProtocol.FlagResponse, 0x11223344, 0, payload);
+
+        var header = PipeProtocol.ReadHeader(frame);
+        Assert.Equal((uint)payload.Length, header.Len);
+        Assert.Equal(PipeProtocol.Op.Query, header.Opcode);
+        Assert.Equal(0x11223344u, header.RequestId);
+        Assert.True(header.IsResponse);
+        Assert.Equal(payload, frame.AsSpan(PipeProtocol.HeaderLen).ToArray());
+    }
+
+    [Fact]
+    public void QueryResp_RoundTrips_WithTraceJson()
+    {
+        var bytes = PipeProtocol.EncodeQueryResp(0xDEAD_BEEF_0000_0001, 42, """{"q":"x"}""");
+
+        Assert.Equal(
+            (0xDEAD_BEEF_0000_0001UL, 42UL, """{"q":"x"}"""),
+            PipeProtocol.DecodeQueryResp(bytes));
+    }
+
+    [Fact]
+    public void ResultPageReq_RoundTrips()
+    {
+        var bytes = PipeProtocol.EncodeResultPageReq(0x0102_0304_0506_0708, 0x1000, 250);
+
+        Assert.Equal(
+            (0x0102_0304_0506_0708UL, 0x1000UL, 250U),
+            PipeProtocol.DecodeResultPageReq(bytes));
+    }
+
+    [Fact]
+    public void ResultFreeReq_RoundTrips()
+    {
+        var bytes = PipeProtocol.EncodeResultFreeReq(0xABCD_1234_5678_9ABC);
+
+        Assert.Equal(0xABCD_1234_5678_9ABCUL, PipeProtocol.DecodeResultFreeReq(bytes));
+    }
+
+    [Fact]
+    public void Event_FullSixteenByteLabel_DecodesWithoutATerminator()
+    {
+        // No NUL inside the 16-byte volume field: the decoder must read all 16
+        // bytes (the `len < 0 → 16` fallback), not stop early.
+        var payload = new byte[32];
+        var label = "0123456789ABCDEF"u8; // exactly 16 bytes, no terminator
+        label.CopyTo(payload.AsSpan(16));
+
+        var (_, _, volume) = PipeProtocol.DecodeEvent(payload);
+
+        Assert.Equal("0123456789ABCDEF", volume);
+    }
+
+    [Theory]
+    [InlineData(11)]
+    [InlineData(13)]
+    public void DecodeHelloResp_WrongLength_IsRejected(int len) =>
+        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodeHelloResp(new byte[len]));
+
+    [Fact]
+    public void DecodeQueryReq_TooShortForOptions_IsRejected() =>
+        Assert.Throws<InvalidDataException>(
+            () => PipeProtocol.DecodeQueryReq(new byte[EngineContract.QueryOptionsSize - 1]));
+
+    [Fact]
+    public void DecodeQueryResp_TooShortForIds_IsRejected() =>
+        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodeQueryResp(new byte[15]));
+
+    [Theory]
+    [InlineData(19)]
+    [InlineData(21)]
+    public void DecodeResultPageReq_WrongLength_IsRejected(int len) =>
+        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodeResultPageReq(new byte[len]));
+
+    [Theory]
+    [InlineData(7)]
+    [InlineData(9)]
+    public void DecodeResultFreeReq_WrongLength_IsRejected(int len) =>
+        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodeResultFreeReq(new byte[len]));
+
+    [Theory]
+    [InlineData(31)]
+    [InlineData(33)]
+    public void DecodeEvent_WrongLength_IsRejected(int len) =>
+        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodeEvent(new byte[len]));
+
+    [Fact]
+    public void DecodeVolumeStatuses_EmptyJsonArray_DecodesToNoStatuses() =>
+        Assert.Empty(PipeProtocol.DecodeVolumeStatuses("[]"u8));
 }

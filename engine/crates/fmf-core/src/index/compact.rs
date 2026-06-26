@@ -250,3 +250,99 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    //! Equivalence property: `compacted()` is observably transparent. After an
+    //! arbitrary mix of upserts (pool garbage) and deletes (tombstones), the
+    //! compacted copy has exactly the same set of live records — same name,
+    //! same path, same size — with the dead ones gone and zero tombstones.
+    //! Each case is non-trivial by construction: record 10 always survives and
+    //! record 11 is always deleted, so neither the "nothing dead" nor the
+    //! "everything dead" degenerate case can make the property vacuous.
+
+    use proptest::prelude::*;
+
+    use crate::index::VolumeIndexBuilder;
+    use crate::index::testutil::{raw, u16s};
+
+    const NAMES: &[&str] = &["file", "DOC", "report.rs", "日本.txt", "x", "Note"];
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn compaction_preserves_every_live_record_observably(
+            names in proptest::collection::vec(0usize..NAMES.len(), 2..10),
+            delete_extra in proptest::collection::vec(any::<bool>(), 2..10),
+            rename_one in any::<bool>(),
+        ) {
+            // Records 10.. under the root; build a clean index first.
+            let n = names.len();
+            let mut b = VolumeIndexBuilder::new("C:", 5);
+            for (i, &name_idx) in names.iter().enumerate() {
+                let nm = u16s(&format!("{}_{i}", NAMES[name_idx]));
+                b.push(raw(10 + i as u64, 5, &nm, false, (i as u64) * 1000, i as i64));
+            }
+            let mut idx = b.finish();
+
+            // Force the non-trivial frame: keep record 10, kill record 11.
+            let mut dead: Vec<u64> = vec![11];
+            for (i, &d) in delete_extra.iter().enumerate().take(n) {
+                let rec = 10 + i as u64;
+                if d && rec != 10 && rec != 11 {
+                    dead.push(rec);
+                }
+            }
+
+            // Optional rename of the kept record → pool garbage without a
+            // tombstone, so compaction's pool rebuild is exercised too.
+            if rename_one {
+                let first_new = idx.len() as u32;
+                idx.upsert(&raw(10, 5, &u16s("renamed_kept"), false, 4242, 7));
+                idx.merge_new_into_permutations(first_new);
+            }
+            for &rec in &dead {
+                idx.delete(rec);
+            }
+            idx.merge_new_into_permutations(idx.len() as u32);
+
+            // Live records are the volume root (record 5, seeded by the
+            // builder) plus the known set 10..10+n minus the deleted ones —
+            // capture each one's observable (name, path, size) by record.
+            let mut live_recs: Vec<u64> = vec![5];
+            live_recs.extend((0..n as u64).map(|i| 10 + i).filter(|r| !dead.contains(r)));
+            let live: Vec<(u64, Vec<u8>, Vec<u8>, u64)> = live_recs
+                .iter()
+                .map(|&rec| {
+                    let id = idx.entry_by_record(rec).expect("live record present pre-compaction");
+                    let mut p = Vec::new();
+                    idx.append_path(id, &mut p);
+                    (rec, idx.name(id).to_vec(), p, idx.size(id))
+                })
+                .collect();
+
+            // Each record is a distinct FRN, so live_len must equal the known
+            // survivor count — guards the property from a silent miscount.
+            prop_assert_eq!(idx.live_len(), live_recs.len());
+
+            let c = idx.compacted();
+
+            prop_assert_eq!(c.len(), live_recs.len(), "compaction drops every tombstone");
+            prop_assert_eq!(c.live_len(), live_recs.len());
+            for (rec, name, path, size) in &live {
+                let id = c
+                    .entry_by_record(*rec)
+                    .unwrap_or_else(|| panic!("live record {rec} lost in compaction"));
+                prop_assert_eq!(c.name(id), &name[..], "name for record {}", rec);
+                let mut p = Vec::new();
+                c.append_path(id, &mut p);
+                prop_assert_eq!(&p, path, "path for record {}", rec);
+                prop_assert_eq!(c.size(id), *size, "size for record {}", rec);
+            }
+            for &rec in &dead {
+                prop_assert!(c.entry_by_record(rec).is_none(), "deleted {} resurfaced", rec);
+            }
+        }
+    }
+}
