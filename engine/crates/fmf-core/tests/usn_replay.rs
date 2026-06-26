@@ -111,6 +111,14 @@ fn no_stats() -> MapFetcher {
     MapFetcher(HashMap::new())
 }
 
+// Real, second-aligned FILETIMEs that round-trip through the u32-seconds
+// mtime column (ADR-0031); pre-1970 small ints collapse to the 0 "unknown"
+// sentinel, so size/mtime carry-over assertions use these instead.
+const MT_BASE: i64 = 132_539_040_000_000_000; // ≈ 2021-01-01
+const MT_X: i64 = 132_854_688_000_000_000; // ≈ 2022-01-01
+const MT_Y: i64 = 133_170_048_000_000_000; // ≈ 2023-01-01
+const MT_Z: i64 = 133_485_696_000_000_000; // ≈ 2024-01-01
+
 /// Parse a synthetic buffer (asserting it is well formed) and apply it.
 fn replay(
     idx: &mut VolumeIndex,
@@ -144,7 +152,7 @@ fn base_index() -> VolumeIndex {
         });
     };
     push(10, 5, "docs", true, 0, 0);
-    push(11, 10, "note.txt", false, 100, 7);
+    push(11, 10, "note.txt", false, 100, MT_BASE);
     push(20, 5, "archive", true, 0, 0);
     b.finish()
 }
@@ -287,7 +295,7 @@ fn rename_storm_replay_keeps_only_the_final_name() {
     }
     // Size/mtime carry over from the replaced entry without a fetcher.
     let id = idx.entry_by_record(11).unwrap();
-    assert_eq!((idx.size(id), idx.mtime(id)), (100, 7));
+    assert_eq!((idx.size(id), idx.mtime(id)), (100, MT_BASE));
     // Exactly one content-generation bump per batch.
     assert_eq!(idx.content_generation(), g0 + 1);
 }
@@ -332,7 +340,7 @@ fn create_then_delete_replay_removes_the_entry_again() {
     let live_before = idx.live_len();
 
     // Batch 1: creation; size/mtime come from the (injected) stat fetcher.
-    let fetch = MapFetcher(HashMap::from([(frn(30), (123, 456))]));
+    let fetch = MapFetcher(HashMap::from([(frn(30), (123, MT_X))]));
     let stats = replay(
         &mut idx,
         1001,
@@ -350,7 +358,7 @@ fn create_then_delete_replay_removes_the_entry_again() {
     assert_eq!(stats.stat_failures, 0);
     assert_eq!(idx.live_len(), live_before + 1);
     let id = idx.entry_by_record(30).expect("created entry is live");
-    assert_eq!((idx.size(id), idx.mtime(id)), (123, 456));
+    assert_eq!((idx.size(id), idx.mtime(id)), (123, MT_X));
     assert_eq!(path_of(&idx, 30), "C:\\docs\\ghost.tmp");
 
     // Batch 2: deletion of the same FRN.
@@ -390,7 +398,7 @@ fn basic_info_change_replay_toggles_excluded_bit() {
     };
 
     // hidden+system on → excluded; the same batch also refreshes size/mtime.
-    let fetch = MapFetcher(HashMap::from([(frn(11), (5000, 99))]));
+    let fetch = MapFetcher(HashMap::from([(frn(11), (5000, MT_Y))]));
     let stats = replay(
         &mut idx,
         1001,
@@ -403,7 +411,7 @@ fn basic_info_change_replay_toggles_excluded_bit() {
     assert_eq!(stats.stat_updated, 1);
     let id = idx.entry_by_record(11).unwrap();
     assert!(idx.is_excluded(id), "hidden|system must set EXCLUDED");
-    assert_eq!((idx.size(id), idx.mtime(id)), (5000, 99));
+    assert_eq!((idx.size(id), idx.mtime(id)), (5000, MT_Y));
 
     // back to a plain archive file → bit clears even when the stat fetch
     // fails (attribute updates must not depend on the volume answering).
@@ -787,7 +795,7 @@ fn frn_record_reuse_resolves_to_the_new_entry_not_the_tombstone() {
     // (sequence 2 in the top 16 bits). The full FRN differs but `.record()`
     // collides with the tombstone — resolution must follow the new entry.
     let reused_frn = (2u64 << 48) | 0x1E;
-    let fetch = MapFetcher(HashMap::from([(reused_frn, (777, 888))]));
+    let fetch = MapFetcher(HashMap::from([(reused_frn, (777, MT_Z))]));
     replay(
         &mut idx,
         3001,
@@ -805,7 +813,7 @@ fn frn_record_reuse_resolves_to_the_new_entry_not_the_tombstone() {
     // The record number now resolves to the *new* owner, not the tombstone.
     let id = idx.entry_by_record(30).expect("record 30 is live again");
     assert_eq!(idx.name(id), b"new_owner.log");
-    assert_eq!((idx.size(id), idx.mtime(id)), (777, 888));
+    assert_eq!((idx.size(id), idx.mtime(id)), (777, MT_Z));
     assert_eq!(path_of(&idx, 30), r"C:\archive\new_owner.log");
     assert_eq!(idx.live_len(), live_before + 1, "one net new live entry");
     let names = live_names(&idx);

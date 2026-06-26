@@ -2,7 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use super::frn::FrnIndex;
 use super::{EntryId, Frn, NO_PARENT, RecordNo, SortKey, flags};
@@ -13,24 +13,34 @@ use super::{EntryId, Frn, NO_PARENT, RecordNo, SortKey, flags};
 /// table, an FRN map, and the always-sorted name permutation
 /// (docs/ARCHITECTURE.md). One instance per indexed volume.
 pub struct VolumeIndex {
-    /// The one contiguous, sweepable pool: every entry's *folded* name at
-    /// `name_off..name_off+name_len`. Most names fold to themselves
-    /// (ADR-0004), so the original spelling is stored only where it differs
-    /// — in `orig_pool` at `orig_off`, same length (the fold is
-    /// length-preserving, wtf8.rs). `orig_off == u32::MAX` means the folded
-    /// bytes *are* the original.
-    pub(super) lower_pool: Vec<u8>,
+    /// The contiguous, sweepable **dictionary** of *distinct* folded names
+    /// (ADR-0032). Each entry indexes it through `name_id`; a name's bytes are
+    /// `dict_pool[dict_off[name_id]..dict_off[name_id+1]]` — the dict is
+    /// gapless and `dict_off` ascending, so a name's length is the gap to the
+    /// next offset (`dict_pool.len()` for the last; ADR-0033 dropped the
+    /// separate `dict_len` column). `name_id` is assigned in dict-append
+    /// order, so the sweep maps a hit to a `name_id` with a monotonic cursor
+    /// and needs no offset table. Most names fold to themselves (ADR-0004);
+    /// the original spelling is stored per-entry only where it differs — in
+    /// `orig_pool` at `orig_off`, same length as the fold (length-preserving,
+    /// wtf8.rs). `orig_off == u32::MAX` means the folded bytes *are* original.
+    pub(super) dict_pool: Vec<u8>,
+    pub(super) dict_off: Vec<u32>,
+    pub(super) name_id: Vec<u32>,
     pub(super) orig_pool: Vec<u8>,
     pub(super) orig_off: Vec<u32>,
-    pub(super) name_off: Vec<u32>,
-    pub(super) name_len: Vec<u16>,
     pub(super) parent: Vec<EntryId>,
     /// File sizes < `u32::MAX`, 4 bytes per entry; `u32::MAX` is the sentinel
     /// for the overflow map (≥4GiB files, ADR-0007). Read through
     /// [`VolumeIndex::size`].
     pub(super) size_lo: Vec<u32>,
     pub(super) size_ovf: FxHashMap<EntryId, u64>,
-    pub(super) mtime: Vec<i64>,
+    /// Last-modification time as Unix-epoch **seconds** in a `u32` (ADR-0031,
+    /// −4 B/entry vs a raw FILETIME `i64`). `0` is the "unknown timestamp"
+    /// sentinel. Encode/decode through
+    /// `query::dates::mtime_{ticks_to_secs,secs_to_ticks}`; read an entry's
+    /// value through [`VolumeIndex::mtime`].
+    pub(super) mtime: Vec<u32>,
     pub(super) frn: Vec<u64>,
     pub(super) flag: Vec<u8>,
     pub(super) frn_index: FrnIndex,
@@ -47,14 +57,18 @@ pub struct VolumeIndex {
     /// updates leave it untouched.
     pub(super) dir_topology_generation: u64,
     pub(super) tombstones: u32,
-    /// Abandoned name bytes across both pools (tombstoned rows and in-place
-    /// dir renames leave their old bytes behind: folded copy always, the
-    /// original copy when one existed). Compaction-trigger input. Not
-    /// persisted — recomputed from tombstones on restore, so rename gaps
-    /// make it a lower bound there.
+    /// Reclaimable original-spelling bytes left by tombstoned rows and
+    /// in-place dir renames (folded bytes are shared in the dictionary and
+    /// their bloat is tracked by `dict_appends_since_dedup` instead,
+    /// ADR-0032). Compaction-trigger input. Not persisted — recomputed from
+    /// tombstones on restore, so rename gaps make it a lower bound there.
     pub(super) dead_name_bytes: u64,
+    /// Dict entries appended since the last `dedup_dict` (USN creates append
+    /// un-deduped, ADR-0032). A churn-trigger input so a pure-create burst
+    /// compacts before the dictionary bloats. Reset by `dedup_dict`.
+    pub(super) dict_appends_since_dedup: u32,
     /// Query-independent caches derived from index content (dir-path memo,
-    /// pool offset table, …) keyed by `content_generation` and value type.
+    /// …) keyed by `content_generation` and value type.
     /// Type-erased so the index stays ignorant of query-module types.
     pub(super) derived_cache: Mutex<Option<DerivedCache>>,
 }
@@ -78,16 +92,22 @@ pub(super) struct DerivedCache {
 // definition each delegates to, so the pair can never drift (the same hazard
 // `SortColumns`'s own doc cites for `cmp_by`).
 
-/// Folded name bytes of `id`, from a name pool and its offset/length columns.
+/// Folded name bytes of `id`, resolved through `name_id` into the dictionary.
+/// The name ends where the next one begins (the dict is gapless), or at the
+/// pool end for the last name (ADR-0033).
 #[inline]
-fn pool_lower_name<'a>(
-    lower_pool: &'a [u8],
-    name_off: &[u32],
-    name_len: &[u16],
+fn dict_lower_name<'a>(
+    dict_pool: &'a [u8],
+    dict_off: &[u32],
+    name_id: &[u32],
     id: EntryId,
 ) -> &'a [u8] {
-    let off = name_off[id as usize] as usize;
-    &lower_pool[off..off + name_len[id as usize] as usize]
+    let nid = name_id[id as usize] as usize;
+    let off = dict_off[nid] as usize;
+    let end = dict_off
+        .get(nid + 1)
+        .map_or(dict_pool.len(), |&e| e as usize);
+    &dict_pool[off..end]
 }
 
 /// Size of `id` read through the u32 column + overflow map (ADR-0007).
@@ -102,7 +122,7 @@ fn column_size(size_lo: &[u32], size_ovf: &FxHashMap<EntryId, u64>, id: EntryId)
 impl VolumeIndex {
     /// Total entry slots, live plus tombstoned (the column length).
     pub const fn len(&self) -> usize {
-        self.name_off.len()
+        self.name_id.len()
     }
 
     /// True when no entries have ever been appended.
@@ -125,7 +145,8 @@ impl VolumeIndex {
         match self.orig_off[id as usize] {
             u32::MAX => self.lower_name(id),
             off => {
-                &self.orig_pool[off as usize..off as usize + self.name_len[id as usize] as usize]
+                let len = self.name_len_of(id);
+                &self.orig_pool[off as usize..off as usize + len]
             }
         }
     }
@@ -134,7 +155,7 @@ impl VolumeIndex {
     /// folded pool — the form every matcher compares against.
     #[inline]
     pub fn lower_name(&self, id: EntryId) -> &[u8] {
-        pool_lower_name(&self.lower_pool, &self.name_off, &self.name_len, id)
+        dict_lower_name(&self.dict_pool, &self.dict_off, &self.name_id, id)
     }
 
     /// True while `id` is a real entry — false once it has been tombstoned.
@@ -192,10 +213,12 @@ impl VolumeIndex {
         }
     }
 
-    /// Last-modification time of `id` as a Windows FILETIME tick count.
+    /// Last-modification time of `id` as a Windows FILETIME tick count,
+    /// reconstructed to the second from the stored `u32` Unix-seconds column
+    /// (ADR-0031); the `0` "unknown timestamp" sentinel maps back to `0`.
     #[inline]
     pub fn mtime(&self, id: EntryId) -> i64 {
-        self.mtime[id as usize]
+        crate::query::dates::mtime_secs_to_ticks(self.mtime[id as usize])
     }
 
     /// The [`EntryId`] of `id`'s parent directory ([`NO_PARENT`] at the root).
@@ -217,15 +240,35 @@ impl VolumeIndex {
         self.frn_index.lookup(record.into(), &self.frn, &self.flag)
     }
 
-    // Raw pool access for the pool-scan query kernel (same crate only).
+    // Raw dictionary access for the pool-scan query kernel (same crate only).
     #[inline]
-    pub(crate) fn name_off_of(&self, id: EntryId) -> u32 {
-        self.name_off[id as usize]
+    pub(crate) fn dict_pool_bytes(&self) -> &[u8] {
+        &self.dict_pool
     }
 
+    /// Per-`name_id` offsets into the dict pool — ascending by construction.
+    #[inline]
+    pub(crate) fn dict_offs(&self) -> &[u32] {
+        &self.dict_off
+    }
+
+    /// An entry's dictionary id.
+    #[inline]
+    pub(crate) fn name_id_of(&self, id: EntryId) -> u32 {
+        self.name_id[id as usize]
+    }
+
+    /// Folded-name length of `id`: the gap from its dict offset to the next
+    /// (or the pool end for the last name; ADR-0033).
     #[inline]
     pub(crate) fn name_len_of(&self, id: EntryId) -> usize {
-        self.name_len[id as usize] as usize
+        let nid = self.name_id[id as usize] as usize;
+        let off = self.dict_off[nid] as usize;
+        let end = self
+            .dict_off
+            .get(nid + 1)
+            .map_or(self.dict_pool.len(), |&e| e as usize);
+        end - off
     }
 
     /// True when the entry's original spelling is its folded form — the
@@ -235,11 +278,6 @@ impl VolumeIndex {
     #[inline]
     pub(crate) fn is_fold_identical(&self, id: EntryId) -> bool {
         self.orig_off[id as usize] == u32::MAX
-    }
-
-    #[inline]
-    pub(crate) fn lower_pool_bytes(&self) -> &[u8] {
-        &self.lower_pool
     }
 
     /// The content generation — bumped by every USN batch; open result
@@ -266,20 +304,10 @@ impl VolumeIndex {
         self.structural_generation = prev + 1;
     }
 
-    /// Return the cached content-derived value of type `T`, rebuilding it
-    /// with `build` when the content generation moved. All cached types are
-    /// invalidated together on a generation change.
-    pub(crate) fn cached_derived<T, F>(&self, build: F) -> Arc<T>
-    where
-        T: Any + Send + Sync,
-        F: FnOnce() -> T,
-    {
-        self.with_derived(|_| build())
-    }
-
-    /// Like [`Self::cached_derived`], but on a generation change `build`
-    /// receives the previous generation's value so it can extend it
-    /// incrementally instead of rebuilding from scratch.
+    /// Return the cached content-derived value of type `T`. On a generation
+    /// change `build` receives the previous generation's value so it can
+    /// extend it incrementally instead of rebuilding from scratch; all cached
+    /// types are invalidated together on a generation change.
     pub(crate) fn cached_derived_or_update<T, F>(&self, build: F) -> Arc<T>
     where
         T: Any + Send + Sync,
@@ -335,8 +363,8 @@ impl VolumeIndex {
     /// The map size is an estimate (hashbrown control bytes + slot padding).
     pub fn stats(&self, volume: &str) -> crate::metrics::IndexStats {
         let n = self.len() as u64;
-        let offsets = (self.name_off.capacity() * 4
-            + self.name_len.capacity() * 2
+        let offsets = (self.name_id.capacity() * 4
+            + self.dict_off.capacity() * 4
             + self.orig_off.capacity() * 4) as u64;
         // perm_name only — the lazy size/mtime permutations are accounted
         // with the derived caches (`derived_cache_bytes`).
@@ -353,7 +381,7 @@ impl VolumeIndex {
             // original-spelling overflow pool (fold-identical names live
             // only in lower_pool).
             name_pool_bytes: self.orig_pool.capacity() as u64,
-            lower_pool_bytes: self.lower_pool.capacity() as u64,
+            lower_pool_bytes: self.dict_pool.capacity() as u64,
             offsets_bytes: offsets,
             parent_bytes: (self.parent.capacity() * 4) as u64,
             // Column + the overflow map (hashbrown estimate: (K,V) slot +
@@ -361,7 +389,7 @@ impl VolumeIndex {
             size_bytes: (self.size_lo.capacity() * 4
                 + self.size_ovf.capacity() * (std::mem::size_of::<(EntryId, u64)>() + 1))
                 as u64,
-            mtime_bytes: (self.mtime.capacity() * 8) as u64,
+            mtime_bytes: (self.mtime.capacity() * 4) as u64,
             frn_bytes: (self.frn.capacity() * 8) as u64,
             flag_bytes: self.flag.capacity() as u64,
             permutations_bytes: perms,
@@ -400,11 +428,11 @@ impl VolumeIndex {
     /// Trim over-allocated columns after a bulk build.
     pub fn shrink_to_fit(&mut self) {
         self.frn_index.shrink_to_fit();
-        self.lower_pool.shrink_to_fit();
+        self.dict_pool.shrink_to_fit();
+        self.dict_off.shrink_to_fit();
+        self.name_id.shrink_to_fit();
         self.orig_pool.shrink_to_fit();
         self.orig_off.shrink_to_fit();
-        self.name_off.shrink_to_fit();
-        self.name_len.shrink_to_fit();
         self.parent.shrink_to_fit();
         self.size_lo.shrink_to_fit();
         self.size_ovf.shrink_to_fit();
@@ -412,6 +440,110 @@ impl VolumeIndex {
         self.frn.shrink_to_fit();
         self.flag.shrink_to_fit();
         self.perm_name.shrink_to_fit();
+    }
+
+    /// Rebuild the dictionary over the *distinct* folded names of the live
+    /// entries (ADR-0032): collapse the un-deduped appends left by the build
+    /// and by USN creates, remap every `name_id`, and reset the churn
+    /// counter. A transient `FxHashMap` interner keyed by the old dict bytes;
+    /// tombstoned entries' names drop out. The original-spelling pool is
+    /// deduped in the same place by its sibling [`Self::dedup_orig`]. O(n) over
+    /// a read-only old dict plus one freshly built pool.
+    pub(super) fn dedup_dict(&mut self) {
+        let n = self.len();
+        let mut new_pool: Vec<u8> = Vec::with_capacity(self.dict_pool.len());
+        let mut new_off: Vec<u32> = Vec::new();
+        let mut new_name_id: Vec<u32> = vec![0u32; n];
+        {
+            let (dict_pool, dict_off, name_id, flag) =
+                (&self.dict_pool, &self.dict_off, &self.name_id, &self.flag);
+            // Pre-size for ~half-distinct names (ADR-0033 Lever 6): skips the
+            // rehash growth across n inserts.
+            let mut interner: FxHashMap<&[u8], u32> =
+                FxHashMap::with_capacity_and_hasher(n / 2, FxBuildHasher);
+            for id in 0..n as u32 {
+                if flag[id as usize] & flags::TOMBSTONE != 0 {
+                    continue;
+                }
+                let nid = name_id[id as usize] as usize;
+                let off = dict_off[nid] as usize;
+                let end = dict_off
+                    .get(nid + 1)
+                    .map_or(dict_pool.len(), |&e| e as usize);
+                let folded = &dict_pool[off..end];
+                let new_id = *interner.entry(folded).or_insert_with(|| {
+                    let assigned = new_off.len() as u32;
+                    new_off.push(new_pool.len() as u32);
+                    new_pool.extend_from_slice(folded);
+                    assigned
+                });
+                new_name_id[id as usize] = new_id;
+            }
+        }
+        self.dict_pool = new_pool;
+        self.dict_off = new_off;
+        self.name_id = new_name_id;
+        self.dict_appends_since_dedup = 0;
+    }
+
+    /// Rebuild the original-spelling pool over the *distinct* live originals
+    /// (ADR-0033 Lever 1). Most names fold to themselves and own no original
+    /// copy (`orig_off == u32::MAX`); the rest store their original verbatim,
+    /// and those originals duplicate heavily across the volume (every `README`,
+    /// `LICENSE`, `Makefile`). A transient interner keyed by the original bytes
+    /// collapses them, pointing each `orig_off` at the one shared copy — on
+    /// real C: 562k differing entries fold to 221k distinct originals (≈−4.5
+    /// B/entry). No length table is needed: the fold is length-preserving
+    /// (ADR-0004), so an original's length is its entry's folded length
+    /// (`name_len_of`). Runs beside [`Self::dedup_dict`] at `finish`/`compacted`.
+    /// O(n) over a read-only old pool plus one freshly built pool.
+    pub(super) fn dedup_orig(&mut self) {
+        let n = self.len();
+        let mut new_pool: Vec<u8> = Vec::with_capacity(self.orig_pool.len());
+        // u32::MAX (fold-identical) is the default; only differing entries are
+        // repointed below.
+        let mut new_off: Vec<u32> = vec![u32::MAX; n];
+        {
+            let (orig_pool, orig_off, name_id, dict_off, dict_pool, flag) = (
+                &self.orig_pool,
+                &self.orig_off,
+                &self.name_id,
+                &self.dict_off,
+                &self.dict_pool,
+                &self.flag,
+            );
+            let mut interner: FxHashMap<&[u8], u32> =
+                FxHashMap::with_capacity_and_hasher(n / 2, FxBuildHasher);
+            for id in 0..n as u32 {
+                if flag[id as usize] & flags::TOMBSTONE != 0 {
+                    continue;
+                }
+                let off = orig_off[id as usize];
+                if off == u32::MAX {
+                    continue; // fold-identical: no original copy to dedup
+                }
+                // The original's length is the entry's folded length (the fold
+                // is length-preserving, ADR-0004), read through the dictionary.
+                let nid = name_id[id as usize] as usize;
+                let dlen = dict_off
+                    .get(nid + 1)
+                    .map_or(dict_pool.len(), |&e| e as usize)
+                    - dict_off[nid] as usize;
+                let orig = &orig_pool[off as usize..off as usize + dlen];
+                // The interner value is the byte offset of the one shared copy;
+                // a real offset is always < u32::MAX (the pool overflow guard in
+                // `push_orig_if_differs`), so it never collides with the
+                // fold-identical sentinel.
+                let new_o = *interner.entry(orig).or_insert_with(|| {
+                    let assigned = new_pool.len() as u32;
+                    new_pool.extend_from_slice(orig);
+                    assigned
+                });
+                new_off[id as usize] = new_o;
+            }
+        }
+        self.orig_pool = new_pool;
+        self.orig_off = new_off;
     }
 
     /// The always-maintained name-sorted permutation: entry ids in default
@@ -480,9 +612,9 @@ impl VolumeIndex {
 
     pub(super) fn sort_columns(&self) -> SortColumns<'_> {
         SortColumns {
-            lower_pool: &self.lower_pool,
-            name_off: &self.name_off,
-            name_len: &self.name_len,
+            dict_pool: &self.dict_pool,
+            dict_off: &self.dict_off,
+            name_id: &self.name_id,
             size_lo: &self.size_lo,
             size_ovf: &self.size_ovf,
             mtime: &self.mtime,
@@ -495,27 +627,27 @@ impl VolumeIndex {
 /// definition of each key's order (a drifting duplicate of `cmp_by` would
 /// silently corrupt the merge).
 pub(super) struct SortColumns<'a> {
-    lower_pool: &'a [u8],
-    name_off: &'a [u32],
-    name_len: &'a [u16],
+    dict_pool: &'a [u8],
+    dict_off: &'a [u32],
+    name_id: &'a [u32],
     size_lo: &'a [u32],
     size_ovf: &'a FxHashMap<EntryId, u64>,
-    mtime: &'a [i64],
+    mtime: &'a [u32],
 }
 
 impl<'a> SortColumns<'a> {
     pub(super) const fn new(
-        lower_pool: &'a [u8],
-        name_off: &'a [u32],
-        name_len: &'a [u16],
+        dict_pool: &'a [u8],
+        dict_off: &'a [u32],
+        name_id: &'a [u32],
         size_lo: &'a [u32],
         size_ovf: &'a FxHashMap<EntryId, u64>,
-        mtime: &'a [i64],
+        mtime: &'a [u32],
     ) -> Self {
         Self {
-            lower_pool,
-            name_off,
-            name_len,
+            dict_pool,
+            dict_off,
+            name_id,
             size_lo,
             size_ovf,
             mtime,
@@ -524,7 +656,7 @@ impl<'a> SortColumns<'a> {
 
     #[inline]
     fn lower_name(&self, id: EntryId) -> &[u8] {
-        pool_lower_name(self.lower_pool, self.name_off, self.name_len, id)
+        dict_lower_name(self.dict_pool, self.dict_off, self.name_id, id)
     }
 
     #[inline]

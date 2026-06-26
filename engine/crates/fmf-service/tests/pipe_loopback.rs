@@ -31,6 +31,11 @@ const fn frn(seq: u64, record: u64) -> u64 {
     (seq << 48) | record
 }
 
+// Real, second-aligned FILETIMEs that round-trip through the u32-seconds
+// mtime column (ADR-0031); pre-1970 small ints collapse to the 0 sentinel.
+const MT_ALPHA: i64 = 132_854_688_000_000_000; // ≈ 2022-01-01
+const MT_BETA: i64 = 133_170_048_000_000_000; // ≈ 2023-01-01
+
 fn test_engine() -> (TestDir, Arc<Engine>) {
     let dir = TestDir::new();
     let e = Engine::new(EngineConfig {
@@ -48,7 +53,7 @@ fn test_engine() -> (TestDir, Arc<Engine>) {
         is_hidden: false,
         is_system: false,
         size: 1234,
-        mtime: 777,
+        mtime: MT_ALPHA,
     });
     let beta: Vec<u16> = "beta.log".encode_utf16().collect();
     b.push(RawEntry {
@@ -60,7 +65,7 @@ fn test_engine() -> (TestDir, Arc<Engine>) {
         is_hidden: false,
         is_system: false,
         size: 99,
-        mtime: 888,
+        mtime: MT_BETA,
     });
     e.insert_ready_volume("C:", b.finish());
     (dir, e)
@@ -232,7 +237,7 @@ fn hello_query_page_free_roundtrip() {
     assert_eq!(row.entry_ref >> 32, 0, "volume ordinal in the high half");
     assert_eq!(row.frn, frn(1, 100));
     assert_eq!(row.size, 1234);
-    assert_eq!(row.mtime, 777);
+    assert_eq!(row.mtime, MT_ALPHA);
     let name = &page.blob[row.name_off as usize..row.name_off as usize + row.name_len as usize];
     assert_eq!(name, b"alpha.txt");
     let parent = &page.blob

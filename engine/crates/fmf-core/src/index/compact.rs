@@ -34,7 +34,8 @@ impl VolumeIndex {
     fn compaction_due_past(&self, min_entries: usize) -> bool {
         self.len() >= min_entries.max(1)
             && (self.tombstone_ratio() > COMPACT_TOMBSTONE_RATIO
-                || self.dead_name_bytes > COMPACT_DEAD_NAME_BYTES)
+                || self.dead_name_bytes > COMPACT_DEAD_NAME_BYTES
+                || self.dict_appends_since_dedup as usize > self.live_len() / 4)
     }
 
     /// A compacted copy: live entries only, pools rebuilt without garbage,
@@ -63,11 +64,11 @@ impl VolumeIndex {
         );
 
         let mut out = Self {
-            lower_pool: Vec::with_capacity(self.lower_pool.len()),
+            dict_pool: Vec::with_capacity(self.dict_pool.len()),
+            dict_off: Vec::with_capacity(live as usize),
+            name_id: Vec::with_capacity(live as usize),
             orig_pool: Vec::with_capacity(self.orig_pool.len()),
             orig_off: Vec::with_capacity(live as usize),
-            name_off: Vec::with_capacity(live as usize),
-            name_len: Vec::with_capacity(live as usize),
             parent: Vec::with_capacity(live as usize),
             size_lo: Vec::with_capacity(live as usize),
             size_ovf: rustc_hash::FxHashMap::default(),
@@ -81,6 +82,7 @@ impl VolumeIndex {
             dir_topology_generation: 0,
             tombstones: 0,
             dead_name_bytes: 0,
+            dict_appends_since_dedup: 0,
             derived_cache: Mutex::new(None),
         };
 
@@ -88,9 +90,11 @@ impl VolumeIndex {
             if !self.is_live(id) {
                 continue;
             }
-            out.name_off.push(out.lower_pool.len() as u32);
-            out.name_len.push(self.name_len[id as usize]);
-            out.lower_pool.extend_from_slice(self.lower_name(id));
+            let name_id = out.dict_off.len() as u32;
+            let off = out.dict_pool.len();
+            out.dict_pool.extend_from_slice(self.lower_name(id));
+            out.dict_off.push(off as u32);
+            out.name_id.push(name_id);
             out.orig_off.push(if self.is_fold_identical(id) {
                 u32::MAX
             } else {
@@ -122,6 +126,11 @@ impl VolumeIndex {
             })
             .collect();
 
+        // Collapse the per-entry dict appends into distinct names (ADR-0032),
+        // and the per-entry originals into distinct copies (ADR-0033 Lever 1);
+        // names are unchanged, so the just-remapped perm_name stays sorted.
+        out.dedup_dict();
+        out.dedup_orig();
         out.shrink_to_fit();
         out
     }

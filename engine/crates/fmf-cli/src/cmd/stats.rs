@@ -11,6 +11,7 @@ pub fn stats(
     drive: &str,
     trigram_estimate: bool,
     name_stats: bool,
+    dict_estimate: bool,
     ctx: Ctx,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let idx = build_index(drive, ctx)?;
@@ -39,6 +40,10 @@ pub fn stats(
             "{}",
             serde_json::to_string_pretty(&compute_name_stats(&idx))?
         );
+    }
+    if dict_estimate {
+        print_dict_estimate(&idx);
+        print_orig_estimate(&idx);
     }
     Ok(())
 }
@@ -169,6 +174,159 @@ fn print_trigram_estimate(idx: &VolumeIndex) {
     );
 }
 
+/// The projected name-dictionary-encoding delta (Phase-2 go/no-go input).
+/// `--trigram-estimate`'s sibling: read-only, nothing is built.
+struct DictEstimate {
+    /// Distinct folded names = dictionary entry count (D).
+    distinct: u64,
+    /// Σ length over the distinct folded names = dictionary pool bytes (`B_d`).
+    dict_bytes: u64,
+    /// Σ folded length over every live entry = today's `lower_pool` content.
+    folded_logical: u64,
+    live: u64,
+    /// Mean distinct-name length `B_d/D` — the figure the net is most
+    /// sensitive to (short high-count duplicates pull it below the mean).
+    mean_distinct_len: f64,
+    /// Net B/entry at rest (the dedup interner freed after build/compaction).
+    net_at_rest: f64,
+    /// Net B/entry if that interner were kept resident — the variant the
+    /// design rejects (it erases the win); shown for contrast.
+    net_resident: f64,
+}
+
+/// Per-distinct cost assumed for the *resident* interner: a folded→id
+/// hashbrown table (u32 id + control byte, ~0.875 load, key referenced from
+/// the pool) amortises to ~16 B/distinct.
+const RESIDENT_INTERNER_BYTES_PER_DISTINCT: f64 = 16.0;
+
+/// Project the memory delta of storing each distinct folded name once in a
+/// dictionary and replacing the per-entry `name_off`+`name_len` (6 B) with a
+/// single `name_id` (4 B). `orig_off`/`orig_pool` stay per-entry — a shared
+/// folded name can back differing originals (README/readme), so the original
+/// columns cannot dedup (ADR-0004). The whole saving is the deduped pool.
+fn compute_dict_estimate(idx: &VolumeIndex) -> DictEstimate {
+    use std::collections::HashSet;
+    let mut distinct: HashSet<&[u8]> = HashSet::new();
+    let mut folded_logical = 0u64;
+    let mut live = 0u64;
+    for id in 0..idx.len() as u32 {
+        if !idx.is_live(id) {
+            continue;
+        }
+        live += 1;
+        let folded = idx.lower_name(id);
+        folded_logical += folded.len() as u64;
+        distinct.insert(folded);
+    }
+    let d = distinct.len() as u64;
+    let dict_bytes: u64 = distinct.iter().map(|s| s.len() as u64).sum();
+    let d_f = d as f64;
+    let n = live.max(1) as f64;
+    // Per-entry net = pool dedup + column swap + dictionary metadata, all /N:
+    //   pool:      B_d − folded_logical            (the dedup win, ≤ 0)
+    //   columns:   −name_len(2)  (name_off→name_id is 4→4)  = −2·N
+    //   dict meta: +dict_off(4·D) +dict_len(2·D)            = +6·D
+    //   orig_off / orig_pool: unchanged (stay per-entry)
+    // This is the Phase-2 projection. Lever 2 (ADR-0033) later dropped the
+    // `dict_len` column (lengths derive from the gapless `dict_off`), so the
+    // realized directory cost is +4·D — a further −2 B/entry over the figure
+    // printed here.
+    let pool_delta = dict_bytes as f64 - folded_logical as f64;
+    let two_n = 2.0 * n;
+    let net_at_rest = 6.0f64.mul_add(d_f, pool_delta - two_n) / n;
+    let net_resident = net_at_rest + RESIDENT_INTERNER_BYTES_PER_DISTINCT * d_f / n;
+    DictEstimate {
+        distinct: d,
+        dict_bytes,
+        folded_logical,
+        live,
+        mean_distinct_len: if d > 0 { dict_bytes as f64 / d_f } else { 0.0 },
+        net_at_rest,
+        net_resident,
+    }
+}
+
+fn print_dict_estimate(idx: &VolumeIndex) {
+    let e = compute_dict_estimate(idx);
+    let n = e.live.max(1) as f64;
+    println!(
+        "dict estimate (folded — realized in Phase 2/ADR-0032): {} distinct folded names, {} dict bytes (L_d={:.1} B; folded pool {:.1} B/entry) → would-be net {:+.1} B/entry at rest ({:+.1} resident)",
+        e.distinct,
+        e.dict_bytes,
+        e.mean_distinct_len,
+        e.folded_logical as f64 / n,
+        e.net_at_rest,
+        e.net_resident,
+    );
+}
+
+/// The delta of interning the original-spelling pool (ADR-0033 Lever 1,
+/// realized): the entries whose original differs from the fold store their
+/// original verbatim in `orig_pool`, and those originals duplicate heavily
+/// across a volume. Read-only.
+struct OrigEstimate {
+    /// Entries whose original differs from the fold (own an `orig_pool` copy).
+    differing: u64,
+    /// Distinct originals among them = deduped `orig_pool` entry count.
+    distinct: u64,
+    /// Σ length over the distinct originals = deduped `orig_pool` bytes.
+    dict_bytes: u64,
+    /// Σ original length over the differing entries = today's `orig_pool`.
+    orig_logical: u64,
+    live: u64,
+    /// Net B/entry of interning: the pool shrinks to the distinct originals and
+    /// `orig_off` stays a 4-byte offset into it — no length table, since the
+    /// fold is length-preserving (ADR-0004), so the whole win is the pool.
+    net: f64,
+}
+
+fn compute_orig_estimate(idx: &VolumeIndex) -> OrigEstimate {
+    use std::collections::HashSet;
+    let mut distinct: HashSet<&[u8]> = HashSet::new();
+    let mut orig_logical = 0u64;
+    let mut differing = 0u64;
+    let mut live = 0u64;
+    for id in 0..idx.len() as u32 {
+        if !idx.is_live(id) {
+            continue;
+        }
+        live += 1;
+        let name = idx.name(id);
+        if name != idx.lower_name(id) {
+            differing += 1;
+            orig_logical += name.len() as u64;
+            distinct.insert(name);
+        }
+    }
+    let d = distinct.len() as u64;
+    let dict_bytes: u64 = distinct.iter().map(|s| s.len() as u64).sum();
+    let n = live.max(1) as f64;
+    // Table-free: orig_off keeps pointing into the (now deduped) pool and the
+    // length comes from the fold (ADR-0004), so the only delta is the pool.
+    let net = (dict_bytes as f64 - orig_logical as f64) / n;
+    OrigEstimate {
+        differing,
+        distinct: d,
+        dict_bytes,
+        orig_logical,
+        live,
+        net,
+    }
+}
+
+fn print_orig_estimate(idx: &VolumeIndex) {
+    let e = compute_orig_estimate(idx);
+    let n = e.live.max(1) as f64;
+    println!(
+        "orig estimate (Lever 1 — realized in ADR-0033): {} differing entries, {} distinct originals, {} deduped bytes (orig pool today {:.1} B/entry) → net {:+.1} B/entry (length from the fold, no offset table)",
+        e.differing,
+        e.distinct,
+        e.dict_bytes,
+        e.orig_logical as f64 / n,
+        e.net,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +382,78 @@ mod tests {
         // Lengths in WTF-8 bytes: 2, 10, 10, 8, 13, 4 → mean 47/6, max 13.
         assert!((s.name_len.mean - 47.0 / 6.0).abs() < 1e-9);
         assert_eq!(s.name_len.max, 13);
+    }
+
+    #[test]
+    fn dict_estimate_projects_dedup_savings() {
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        // Three identical folded names + one differing-case name. Root "C:"
+        // folds to "c:" (len 2) and is its own distinct entry.
+        let names: &[&str] = &["report.log", "report.log", "report.log", "BIG_FILE.DAT"];
+        for (i, name) in names.iter().enumerate() {
+            let units: Vec<u16> = name.encode_utf16().collect();
+            b.push(RawEntry {
+                parent_frn: Frn(5),
+                frn: Frn(100 + i as u64),
+                name_utf16: &units,
+                is_dir: false,
+                is_reparse: false,
+                is_hidden: false,
+                is_system: false,
+                size: 0,
+                mtime: 0,
+            });
+        }
+        let idx = b.finish();
+
+        let e = compute_dict_estimate(&idx);
+        // live = root "c:" + 4 pushed; distinct folded = {c:, report.log, big_file.dat}.
+        assert_eq!(e.live, 5);
+        assert_eq!(e.distinct, 3);
+        // dict bytes = 2 ("c:") + 10 ("report.log") + 12 ("big_file.dat") = 24.
+        assert_eq!(e.dict_bytes, 24);
+        // folded logical = 2 + 10*3 + 12 = 44.
+        assert_eq!(e.folded_logical, 44);
+        assert!((e.mean_distinct_len - 8.0).abs() < 1e-9);
+        // net = (24 − 44 − 2*5 + 6*3) / 5 = −12/5 = −2.4 B/entry.
+        assert!((e.net_at_rest - (-2.4)).abs() < 1e-9);
+        // resident interner adds 16*3/5 = 9.6 → +7.2.
+        assert!((e.net_resident - 7.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn orig_estimate_projects_original_dedup() {
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        // Four "README" + one "Makefile": all differ from their fold, and the
+        // duplicated originals dedup. Root "C:" differs too ("c:").
+        let names: &[&str] = &["README", "README", "README", "README", "Makefile"];
+        for (i, name) in names.iter().enumerate() {
+            let units: Vec<u16> = name.encode_utf16().collect();
+            b.push(RawEntry {
+                parent_frn: Frn(5),
+                frn: Frn(100 + i as u64),
+                name_utf16: &units,
+                is_dir: false,
+                is_reparse: false,
+                is_hidden: false,
+                is_system: false,
+                size: 0,
+                mtime: 0,
+            });
+        }
+        let idx = b.finish();
+
+        let e = compute_orig_estimate(&idx);
+        // live = root "C:" + 5 pushed = 6; all differ (uppercase present).
+        assert_eq!(e.live, 6);
+        assert_eq!(e.differing, 6);
+        // distinct originals = {C:, README, Makefile} = 3.
+        assert_eq!(e.distinct, 3);
+        // dict bytes = 2 ("C:") + 6 ("README") + 8 ("Makefile") = 16.
+        assert_eq!(e.dict_bytes, 16);
+        // orig logical = 2 + 6*4 + 8 = 34.
+        assert_eq!(e.orig_logical, 34);
+        // net = (16 − 34) / 6 = −18/6 = −3.0 (table-free: length from the fold).
+        assert!((e.net - (-3.0)).abs() < 1e-9);
     }
 }

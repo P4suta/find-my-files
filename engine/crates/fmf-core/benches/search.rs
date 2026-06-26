@@ -35,7 +35,7 @@ const FOLD_IDENTICAL_RANGE: std::ops::RangeInclusive<f64> = 0.70..=0.76;
 const UNIQUE_RANGE: std::ops::RangeInclusive<f64> = 0.50..=0.56;
 const MEAN_LEN_RANGE: std::ops::RangeInclusive<f64> = 28.0..=32.0;
 
-fn build_synthetic() -> VolumeIndex {
+fn build_synthetic_unfinished() -> VolumeIndexBuilder {
     use std::collections::HashSet;
     use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -167,8 +167,6 @@ fn build_synthetic() -> VolumeIndex {
             record += 1;
         }
     }
-    let idx = b.finish();
-
     let fold_identical = 1.0 - cased as f64 / total as f64;
     let unique = uniq.len() as f64 / total as f64;
     let mean = byte_sum as f64 / total as f64;
@@ -184,7 +182,12 @@ fn build_synthetic() -> VolumeIndex {
         MEAN_LEN_RANGE.contains(&mean),
         "synthetic mean name length drifted off real-C:: {mean:.1}"
     );
-    idx
+    b
+}
+
+/// The synthetic 1M-entry index, finalized and queryable.
+fn build_synthetic() -> VolumeIndex {
+    build_synthetic_unfinished().finish()
 }
 
 fn bench_queries(c: &mut Criterion) {
@@ -441,11 +444,32 @@ fn bench_snapshot(c: &mut Criterion) {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Initial-build finalize on the synthetic 1M index: parent resolution,
+/// dictionary dedup, and the name-permutation sort (ADR-0033 "1A" build-rank
+/// — distinct names ranked once, entries sorted on a packed integer key).
+/// Informational only: synthetic criterion timings carry ±12-23% layout noise
+/// (ADR-0013), so the real arbiter of the build-rank win is the real-volume
+/// scan time in `just bench-check C:`, judged back-to-back in one session.
+fn bench_build(c: &mut Criterion) {
+    let mut g = c.benchmark_group("build");
+    g.sample_size(10);
+    g.measurement_time(std::time::Duration::from_secs(8));
+    g.bench_function("finish_1m", |b| {
+        b.iter_batched(
+            build_synthetic_unfinished,
+            |builder| std::hint::black_box(builder.finish().len()),
+            BatchSize::PerIteration,
+        );
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_queries,
     bench_typing,
     bench_post_usn,
-    bench_snapshot
+    bench_snapshot,
+    bench_build
 );
 criterion_main!(benches);

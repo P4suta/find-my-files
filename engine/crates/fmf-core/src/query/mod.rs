@@ -9,7 +9,7 @@
 
 mod ast;
 mod compile;
-mod dates;
+pub(crate) mod dates;
 mod exec;
 mod matchers;
 mod memo;

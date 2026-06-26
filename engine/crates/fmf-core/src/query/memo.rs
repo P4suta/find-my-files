@@ -2,133 +2,6 @@ use rayon::prelude::*;
 
 use crate::index::{EntryId, SortKey, VolumeIndex};
 
-// ── Pool offset table (generation-cached) ───────────────────────────────
-
-/// Sorted (pool offset → entry id) table that maps pool-scan hits back to
-/// entries. `name_off` loses monotonicity after renames (new names append),
-/// so a sorted view is maintained per content generation via the index's
-/// derived-cache slot — incrementally when possible ([`Self::extend_from`]):
-/// pool appends are always at the tail, so a generation step is "copy +
-/// append", never a re-sort.
-///
-/// Pairs whose entry has since moved its name (in-place dir renames) stay in
-/// the table as *stale pairs*; the sweep detects them by comparing the
-/// pair's offset against the entry's current `name_off` and skips the
-/// region, exactly like the stale byte gaps it already handles.
-pub(super) struct OffsetTable {
-    pub(super) offs: Vec<u32>,
-    pub(super) ids: Vec<EntryId>,
-    /// Entries `[0, covers_entries)` are represented (possibly stale).
-    covers_entries: u32,
-    /// Pool bytes `[0, covers_pool_len)` are represented.
-    covers_pool_len: u32,
-    stale_pairs: u32,
-}
-
-/// Past this stale fraction the copy-and-append loses to a clean rebuild.
-const STALE_REBUILD_DIVISOR: u32 = 8;
-
-impl OffsetTable {
-    pub(super) fn build(idx: &VolumeIndex) -> Self {
-        let mut pairs: Vec<(u32, EntryId)> = (0..idx.len() as u32)
-            .map(|id| (idx.name_off_of(id), id))
-            .collect();
-        pairs.par_sort_unstable();
-        Self {
-            offs: pairs.iter().map(|p| p.0).collect(),
-            ids: pairs.iter().map(|p| p.1).collect(),
-            covers_entries: idx.len() as u32,
-            covers_pool_len: idx.lower_pool_bytes().len() as u32,
-            stale_pairs: 0,
-        }
-    }
-
-    /// Extend `prev` to the current generation without sorting: keep its
-    /// pairs (reusing the allocations when the cache held the last Arc,
-    /// copying otherwise), then append the pairs past its watermarks.
-    /// Appended entries arrive in offset order by construction; in-place
-    /// renamed dirs (their `name_off` jumped past the watermark) are merged
-    /// in and their old pairs left behind as stale.
-    pub(super) fn extend_from(idx: &VolumeIndex, prev: std::sync::Arc<Self>) -> Self {
-        let n = idx.len() as u32;
-        let pool_len = idx.lower_pool_bytes().len() as u32;
-        // Entries and pool are append-only within a structural generation —
-        // a regressed watermark means the cache got crossed with a different
-        // index. Rebuilding recovers; the fact must not vanish.
-        if prev.covers_entries > n || prev.covers_pool_len > pool_len {
-            crate::metrics::Counters::bump_offset_table_rebuild_fallbacks();
-            tracing::warn!(
-                covers_entries = prev.covers_entries,
-                entries = n,
-                covers_pool = prev.covers_pool_len,
-                pool = pool_len,
-                "offset table watermark regressed — falling back to a full rebuild"
-            );
-            return Self::build(idx);
-        }
-
-        // Appended entries: ids past the watermark; their offsets ascend
-        // with id (names append). In-place renamed dirs: old ids whose
-        // current offset jumped past the pool watermark.
-        let new_ids: Vec<EntryId> = (prev.covers_entries..n).collect();
-        let mut moved: Vec<(u32, EntryId)> = (0..prev.covers_entries)
-            .filter(|&id| idx.name_off_of(id) >= prev.covers_pool_len)
-            .map(|id| (idx.name_off_of(id), id))
-            .collect();
-        moved.sort_unstable();
-
-        let stale_pairs = prev.stale_pairs + moved.len() as u32;
-        if stale_pairs > n / STALE_REBUILD_DIVISOR {
-            tracing::debug!(
-                stale_pairs,
-                n,
-                "offset table stale fraction high — clean rebuild"
-            );
-            return Self::build(idx);
-        }
-
-        // In the common case no in-flight query still holds the previous
-        // table (the cache slot owned the only Arc) — reuse its allocations
-        // and skip the multi-MB copy entirely.
-        let added = new_ids.len() + moved.len();
-        let (mut offs, mut ids) = match std::sync::Arc::try_unwrap(prev) {
-            Ok(owned) => (owned.offs, owned.ids),
-            Err(shared) => (shared.offs.clone(), shared.ids.clone()),
-        };
-        offs.reserve(added);
-        ids.reserve(added);
-
-        // Two-pointer merge of the two off-sorted append lists.
-        let (mut i, mut j) = (0, 0);
-        while i < new_ids.len() || j < moved.len() {
-            let take_new = j >= moved.len()
-                || (i < new_ids.len() && idx.name_off_of(new_ids[i]) <= moved[j].0);
-            if take_new {
-                offs.push(idx.name_off_of(new_ids[i]));
-                ids.push(new_ids[i]);
-                i += 1;
-            } else {
-                offs.push(moved[j].0);
-                ids.push(moved[j].1);
-                j += 1;
-            }
-        }
-        debug_assert!(offs.is_sorted());
-
-        Self {
-            offs,
-            ids,
-            covers_entries: n,
-            covers_pool_len: pool_len,
-            stale_pairs,
-        }
-    }
-
-    pub(super) const fn len(&self) -> usize {
-        self.offs.len()
-    }
-}
-
 // ── Lazy sort permutations (generation-cached) ──────────────────────────
 
 /// Pre-sorted id order for one sort key, built on the first query that
@@ -484,22 +357,18 @@ impl PathMemos {
 /// Build the pool offset table ahead of the first query — the engine calls
 /// this once a volume turns Ready so no keystroke pays the cold cost.
 ///
-/// The dir-path memo is *not* prewarmed: most sessions never issue a path
-/// query, and its footprint (full paths of every directory, ×2 pools) is
-/// real RAM. The first keystroke containing `\` or `path:` builds it once;
-/// after a USN batch it was already rebuilt lazily, so nothing regresses.
-pub fn prewarm(idx: &VolumeIndex) {
-    let _: std::sync::Arc<OffsetTable> = idx.cached_derived(|| OffsetTable::build(idx));
-}
+/// Prewarm derived caches at Ready. A no-op since ADR-0032 removed the
+/// offset-table cache (the name dictionary is resident from build/restore):
+/// the lazy sort and dir-path memos are intentionally built on demand — most
+/// sessions never sort by size/mtime or issue a path query, and those memos'
+/// footprint (full paths of every directory, ×2 pools) is real RAM.
+pub const fn prewarm(_idx: &VolumeIndex) {}
 
-/// Bytes currently held by this index's derived caches (offset table +
-/// dir-path memos), for the RAM accounting in `IndexStats`. Probes only —
-/// never builds.
+/// Bytes currently held by this index's derived caches (dir-path memos and
+/// the lazy sort permutations), for the RAM accounting in `IndexStats`.
+/// Probes only — never builds.
 pub fn derived_cache_bytes(idx: &VolumeIndex) -> u64 {
     let mut total = 0u64;
-    if let Some(t) = idx.derived_probe::<OffsetTable>() {
-        total += (t.offs.capacity() * 4 + t.ids.capacity() * 4) as u64;
-    }
     if let Some(d) = idx.derived_probe::<DirPathsLower>() {
         total += d.0.bytes();
     }
@@ -680,169 +549,6 @@ mod tests {
         assert_memo_matches_oracle(&idx);
     }
 
-    #[test]
-    fn offset_table_reflects_non_monotonic_name_off_after_dir_rename() {
-        let mut idx = build_sample();
-        let docs = idx.entry_by_record(50).unwrap();
-        let zzz = u16s("zzz_docs");
-        idx.rename_dir_in_place(50, &zzz, 5).unwrap();
-        idx.merge_new_into_permutations(idx.len() as u32);
-
-        // Precondition: the rename made raw name_off non-monotonic.
-        let raw_offs: Vec<u32> = (0..idx.len() as u32)
-            .map(|id| idx.name_off_of(id))
-            .collect();
-        assert!(!raw_offs.is_sorted());
-
-        let table = OffsetTable::build(&idx);
-        assert_eq!(table.len(), idx.len());
-        assert!(table.offs.is_sorted());
-        let mut ids = table.ids.clone();
-        ids.sort_unstable();
-        assert_eq!(ids, (0..idx.len() as u32).collect::<Vec<_>>());
-        for (off, &id) in table.offs.iter().zip(&table.ids) {
-            assert_eq!(*off, idx.name_off_of(id), "table pair for entry {id}");
-        }
-        // The renamed dir's name was appended, so it sorts to the end.
-        assert_eq!(*table.ids.last().unwrap(), docs);
-    }
-
-    #[test]
-    fn cached_derived_invalidates_on_content_generation_change() {
-        let mut idx = build_sample();
-        let d1 = idx.cached_derived(|| DirPathsLower::build(&idx));
-        let d2: Arc<DirPathsLower> = idx.cached_derived(|| unreachable!("cache hit expected"));
-        assert!(Arc::ptr_eq(&d1, &d2));
-        // A second cached type joins the generation without evicting the first.
-        let t1 = idx.cached_derived(|| OffsetTable::build(&idx));
-        let d3: Arc<DirPathsLower> = idx.cached_derived(|| unreachable!("cache hit expected"));
-        assert!(Arc::ptr_eq(&d1, &d3));
-
-        idx.merge_new_into_permutations(idx.len() as u32); // no-op batch: gen +1
-        let d4 = idx.cached_derived(|| DirPathsLower::build(&idx));
-        assert!(
-            !Arc::ptr_eq(&d1, &d4),
-            "DirPathsLower must rebuild on a new generation"
-        );
-        let t2 = idx.cached_derived(|| OffsetTable::build(&idx));
-        assert!(
-            !Arc::ptr_eq(&t1, &t2),
-            "OffsetTable must rebuild on a new generation"
-        );
-    }
-
-    /// Oracle: an incrementally extended table must yield exactly the same
-    /// sweep results as a freshly built one, across a chain of generations
-    /// with appends, file renames (tombstone+append) and in-place dir
-    /// renames. The tables themselves differ (stale pairs) — the *results*
-    /// must not.
-    #[test]
-    fn extended_table_sweeps_like_a_fresh_build() {
-        use super::super::compile::Driver;
-        use super::super::sweep::driver_candidates;
-        use memchr::memmem;
-
-        let assert_equiv = |idx: &VolumeIndex, table: &OffsetTable, what: &str| {
-            let fresh = OffsetTable::build(idx);
-            let drivers = [
-                Driver::Sub {
-                    finder: memmem::Finder::new(b"doc").into_owned(),
-                    needle_len: 3,
-                },
-                Driver::Sub {
-                    finder: memmem::Finder::new(b"renamed").into_owned(),
-                    needle_len: 7,
-                },
-                Driver::Prefix {
-                    bytes: b"note".to_vec(),
-                },
-                Driver::Suffixes {
-                    suffixes: vec![b".txt".to_vec()],
-                    files_only: true,
-                },
-            ];
-            for (i, d) in drivers.iter().enumerate() {
-                let mut a = driver_candidates(idx, table, d, true);
-                let mut b = driver_candidates(idx, &fresh, d, true);
-                a.sort_unstable();
-                b.sort_unstable();
-                assert_eq!(a, b, "{what}: driver {i} diverged from fresh build");
-            }
-        };
-
-        // ~100 entries so the stale threshold (n/8) tolerates a few in-place
-        // renames instead of flipping straight to a rebuild.
-        let mut b = VolumeIndexBuilder::new("C:", 5);
-        let dir = u16s("docs_dir");
-        b.push(raw(50, 5, &dir, true, 0, 1));
-        for i in 0..100u64 {
-            let name = if i % 3 == 0 {
-                u16s(&format!("note_{i:03}_doc.txt"))
-            } else {
-                u16s(&format!("file_{i:03}.log"))
-            };
-            let parent = if i % 2 == 0 { 50 } else { 5 };
-            b.push(raw(100 + i, parent, &name, false, i, i as i64));
-        }
-        let mut idx = b.finish();
-        let mut table = OffsetTable::build(&idx);
-
-        // Gen step 1: append a new file + rename an existing file
-        // (tombstone + append, same record).
-        let first_new = idx.len() as u32;
-        let extra = u16s("docs_extra.txt");
-        idx.upsert(&raw(9000, 5, &extra, false, 1, 7));
-        let renamed_file = u16s("note_renamed.txt");
-        idx.upsert(&raw(103, 50, &renamed_file, false, 9, 8));
-        idx.merge_new_into_permutations(first_new);
-        table = OffsetTable::extend_from(&idx, Arc::new(table));
-        assert_eq!(table.stale_pairs, 0, "appends produce no stale pairs");
-        assert_equiv(&idx, &table, "append generation");
-
-        // Gen step 2: in-place dir rename — the moved name strands a stale
-        // pair at its old offset.
-        let zzz = u16s("zzz_docs_renamed");
-        idx.rename_dir_in_place(50, &zzz, 5).unwrap();
-        idx.merge_new_into_permutations(idx.len() as u32);
-        table = OffsetTable::extend_from(&idx, Arc::new(table));
-        assert_eq!(table.stale_pairs, 1);
-        assert!(table.offs.is_sorted());
-        assert_equiv(&idx, &table, "dir-rename generation");
-
-        // Gen step 3: both at once.
-        let first_new = idx.len() as u32;
-        let more = u16s("more_docs.log");
-        idx.upsert(&raw(9001, 50, &more, false, 2, 9));
-        idx.merge_new_into_permutations(first_new);
-        let back = u16s("docs_back");
-        idx.rename_dir_in_place(50, &back, 5).unwrap();
-        idx.merge_new_into_permutations(idx.len() as u32);
-        table = OffsetTable::extend_from(&idx, Arc::new(table));
-        assert_eq!(table.stale_pairs, 2);
-        assert_equiv(&idx, &table, "mixed generation");
-    }
-
-    /// A high stale fraction flips the policy to a clean rebuild — same
-    /// results, watermark reset.
-    #[test]
-    fn extend_falls_back_to_rebuild_past_stale_threshold() {
-        let mut idx = build_sample(); // 4 entries → threshold n/8 = 0
-        let table = OffsetTable::build(&idx);
-        let renamed = u16s("docs_renamed");
-        idx.rename_dir_in_place(50, &renamed, 5).unwrap();
-        idx.merge_new_into_permutations(idx.len() as u32);
-
-        let extended = OffsetTable::extend_from(&idx, Arc::new(table));
-        assert_eq!(
-            extended.stale_pairs, 0,
-            "1 stale > 4/8 entries — must have rebuilt clean"
-        );
-        assert_eq!(extended.len(), idx.len());
-        for (off, &id) in extended.offs.iter().zip(&extended.ids) {
-            assert_eq!(*off, idx.name_off_of(id));
-        }
-    }
-
     /// Oracle: an incrementally extended lazy sort permutation equals a
     /// fresh parallel sort byte-for-byte across append/delete generations
     /// (strict total order → the sorted result is unique).
@@ -857,7 +563,10 @@ mod tests {
             // Mix sizes across the u32 overflow boundary.
             let size = if g % 4 == 0 { (4u64 << 30) + g } else { g * 37 };
             let name = u16s(&format!("lazy_{g}.bin"));
-            idx.upsert(&raw(record, 50, &name, false, size, (g * 13) as i64));
+            // Distinct post-1970 mtimes so the lazy Mtime permutation exercises
+            // a real ordering across generations (ADR-0031).
+            let mtime = crate::query::dates::FILETIME_UNIX_EPOCH + (g as i64 + 1) * 864_000_000_000;
+            idx.upsert(&raw(record, 50, &name, false, size, mtime));
             if g % 3 == 0 {
                 idx.delete(200 + g / 2);
             }
@@ -898,27 +607,34 @@ mod tests {
     }
 
     #[test]
-    fn prewarm_builds_offset_table_but_leaves_dir_paths_lazy() {
+    fn dir_path_memos_are_lazy_and_accounted_separately() {
         let idx = build_sample();
+        // Nothing is cached until a path query builds it — `prewarm` is a
+        // no-op since ADR-0032 removed the offset-table cache.
         prewarm(&idx);
-        let _: Arc<OffsetTable> = idx.cached_derived(|| unreachable!("OffsetTable not prewarmed"));
-        // The dir-path memos only materialize on the first path query that
-        // reads them — and independently of each other.
         assert!(idx.derived_probe::<DirPathsLower>().is_none());
         assert!(idx.derived_probe::<DirPathsOrig>().is_none());
-        assert!(derived_cache_bytes(&idx) > 0, "offset table accounted");
-        let before = derived_cache_bytes(&idx);
-        let _ = idx.cached_derived(|| DirPathsLower::build(&idx));
-        let with_lower = derived_cache_bytes(&idx);
-        assert!(
-            with_lower > before,
-            "lower memo joins the accounting once built"
+        assert_eq!(
+            derived_cache_bytes(&idx),
+            0,
+            "no derived caches until a query"
         );
+
+        let _ = idx.cached_derived_or_update(|prev| match prev {
+            Some(p) => DirPathsLower::extend_from(&idx, p),
+            None => DirPathsLower::build(&idx),
+        });
+        let with_lower = derived_cache_bytes(&idx);
+        assert!(with_lower > 0, "the folded memo joins the accounting");
         assert!(
             idx.derived_probe::<DirPathsOrig>().is_none(),
             "building the folded memo must not drag the orig memo in"
         );
-        let _ = idx.cached_derived(|| DirPathsOrig::build(&idx));
+
+        let _ = idx.cached_derived_or_update(|prev| match prev {
+            Some(p) => DirPathsOrig::extend_from(&idx, p),
+            None => DirPathsOrig::build(&idx),
+        });
         assert!(
             derived_cache_bytes(&idx) > with_lower,
             "orig memo accounted separately"

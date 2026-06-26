@@ -286,7 +286,9 @@ pub struct CountersSnapshot {
     pub journal_rescans: u64,
     /// Times the scan pipeline fell back to a slower path.
     pub scan_pipeline_fallbacks: u64,
-    /// Times the query-layer offset table had to be rebuilt as a fallback.
+    /// Retired: ADR-0032 removed the query-layer offset table (the name
+    /// dictionary is self-indexing). Held at 0 for counter-list stability —
+    /// counters are append-only and never removed (see fmf-contract).
     pub offset_table_rebuild_fallbacks: u64,
     /// Times a lazy permutation had to be rebuilt as a fallback.
     pub lazy_perm_rebuild_fallbacks: u64,
@@ -332,10 +334,6 @@ impl Counters {
     /// Increment a counter by one (relaxed atomic).
     pub fn bump(counter: &std::sync::atomic::AtomicU64) {
         counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub(crate) fn bump_offset_table_rebuild_fallbacks() {
-        OFFSET_TABLE_REBUILD_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(crate) fn bump_lazy_perm_rebuild_fallbacks() {

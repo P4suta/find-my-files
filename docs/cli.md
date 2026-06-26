@@ -121,6 +121,7 @@ Index a volume and dump per-column memory accounting as JSON
 
 * `--trigram-estimate` — Also estimate what a trigram index would cost on this volume's real names — input to the n-gram go/no-go criteria in docs/ARCHITECTURE.md (read-only, nothing is built)
 * `--name-stats` — Also dump per-name statistics over the live entries (fold identity, duplication, length distribution, ≥4GiB sizes) — the measured inputs for pool/column layout decisions (read-only)
+* `--dict-estimate` — Also estimate the name-dictionary-encoding memory delta on this volume's real names: store each distinct folded name once and replace `name_off`+`name_len` with a `name_id` — the Phase-2 go/no-go input (read-only, nothing is built)
 
 
 

@@ -6,7 +6,31 @@
 
 /// FILETIME ticks (100 ns since 1601-01-01) at the Unix epoch (1970-01-01).
 pub const FILETIME_UNIX_EPOCH: i64 = 116_444_736_000_000_000;
-const TICKS_PER_SECOND: i64 = 10_000_000;
+/// FILETIME ticks in one second (100 ns units).
+pub const TICKS_PER_SECOND: i64 = 10_000_000;
+
+/// Encode a FILETIME tick count (100 ns since 1601) as the `mtime` column's
+/// stored form — Unix-epoch **seconds** in a `u32` (ADR-0031, −4 B/entry).
+/// The map is monotonic, so it preserves mtime sort order; it drops
+/// sub-second precision, which `dm:` filters never observe (their bounds are
+/// day-aligned). `0` is a reserved "unknown timestamp" sentinel: a 0 tick (a
+/// failed stat fetch) and every pre-1970 tick collapse to it, and
+/// [`mtime_secs_to_ticks`] maps it back to a 0 tick — so the FILETIME-0
+/// "unknown" value round-trips unchanged. Post-2106 saturates at `u32::MAX`.
+pub fn mtime_ticks_to_secs(ticks: i64) -> u32 {
+    let secs = ticks.saturating_sub(FILETIME_UNIX_EPOCH) / TICKS_PER_SECOND;
+    u32::try_from(secs).unwrap_or(if secs < 0 { 0 } else { u32::MAX })
+}
+
+/// Inverse of [`mtime_ticks_to_secs`], reconstructing a FILETIME tick count
+/// to the second. The sentinel `0` maps back to a 0 tick (not the epoch).
+pub fn mtime_secs_to_ticks(secs: u32) -> i64 {
+    if secs == 0 {
+        0
+    } else {
+        FILETIME_UNIX_EPOCH + i64::from(secs) * TICKS_PER_SECOND
+    }
+}
 
 /// A proleptic Gregorian calendar date with no time-of-day or zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +194,27 @@ mod tests {
             }),
             0
         );
+    }
+
+    #[test]
+    fn mtime_secs_codec_roundtrips_and_clamps() {
+        // A real, second-aligned FILETIME (≈ 2021-01-01) round-trips exactly.
+        let ft = 132_539_040_000_000_000i64;
+        assert_eq!(mtime_secs_to_ticks(mtime_ticks_to_secs(ft)), ft);
+        // Sub-second precision is dropped (truncated to the whole second).
+        assert_eq!(mtime_secs_to_ticks(mtime_ticks_to_secs(ft + 9_999_999)), ft);
+        // The 0 "unknown" sentinel survives unchanged (not pushed to 1970).
+        assert_eq!(mtime_ticks_to_secs(0), 0);
+        assert_eq!(mtime_secs_to_ticks(0), 0);
+        // Pre-1970 (tiny non-zero ticks, and negatives) collapses to it.
+        assert_eq!(mtime_ticks_to_secs(9), 0);
+        assert_eq!(mtime_ticks_to_secs(-5), 0);
+        // The epoch instant maps to secs 0 (a benign 1-second edge at 1970).
+        assert_eq!(mtime_ticks_to_secs(FILETIME_UNIX_EPOCH), 0);
+        // Post-2106 saturates at u32::MAX rather than wrapping.
+        assert_eq!(mtime_ticks_to_secs(i64::MAX), u32::MAX);
+        // Monotonic: ordering is preserved (what makes the column sortable).
+        assert!(mtime_ticks_to_secs(ft) < mtime_ticks_to_secs(ft + 864_000_000_000));
     }
 
     #[test]

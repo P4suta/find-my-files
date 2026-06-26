@@ -9,14 +9,15 @@ use super::{
 impl VolumeIndex {
     // ── Incremental mutation (USN batches; see module docs) ──────────────
 
-    /// Pool bytes `id` owns that compaction could reclaim: the folded copy
-    /// always, plus the original copy when one exists.
+    /// Pool bytes `id` *owns* that a rebuild reclaims: its original-spelling
+    /// copy. The folded bytes are shared in the dictionary (ADR-0032), so a
+    /// dead entry rarely frees them; their bloat is tracked by
+    /// `dict_appends_since_dedup` and collapsed at the next dedup instead.
     fn owned_name_bytes(&self, id: EntryId) -> u64 {
-        let len = self.name_len[id as usize] as u64;
-        if self.orig_off[id as usize] == u32::MAX {
-            len
+        if self.is_fold_identical(id) {
+            0
         } else {
-            len * 2
+            self.name_len_of(id) as u64
         }
     }
 
@@ -85,13 +86,13 @@ impl VolumeIndex {
         let pos = self.perm_name.iter().position(|&x| x == id)?;
         self.perm_name.remove(pos);
 
-        // The old name bytes are abandoned where they live.
+        // The old name's original copy is abandoned; its folded dict entry
+        // becomes unreferenced (reclaimed at the next dedup, ADR-0032).
         self.dead_name_bytes += self.owned_name_bytes(id);
-        let off = self.lower_pool.len();
+        let off = self.dict_pool.len();
         let mut orig = Vec::with_capacity(name_utf16.len() * 3);
-        wtf8::push_wtf8_pair(name_utf16, &mut orig, &mut self.lower_pool);
-        self.name_off[id as usize] = off as u32;
-        self.name_len[id as usize] = (self.lower_pool.len() - off) as u16;
+        wtf8::push_wtf8_pair(name_utf16, &mut orig, &mut self.dict_pool);
+        self.name_id[id as usize] = self.push_dict_entry(off);
         self.orig_off[id as usize] = self.push_orig_if_differs(off, &orig);
         let parent = self
             .entry_by_record(new_parent_record)
@@ -119,7 +120,7 @@ impl VolumeIndex {
     ) -> Option<EntryId> {
         let id = self.entry_by_record(record)?;
         self.set_size(id, size);
-        self.mtime[id as usize] = mtime;
+        self.mtime[id as usize] = crate::query::dates::mtime_ticks_to_secs(mtime);
         Some(id)
     }
 
@@ -141,19 +142,33 @@ impl VolumeIndex {
         }
         let mut batch: Vec<EntryId> = (first_new..self.len() as u32).collect();
         if !batch.is_empty() {
+            // Decorate-sort (ADR-0033): the batch sort does O(B log B)
+            // comparisons, each of which would resolve two folded names
+            // through the `name_id → dict` indirection (ADR-0032). Resolve
+            // each name once, up front, and sort on the borrowed slices —
+            // byte-identical order (name then id, like `cmp_by(Name)`), far
+            // fewer dict derefs. The merge below still resolves the existing
+            // `perm_name` side through `cols`.
+            {
+                let mut decorated: Vec<(&[u8], EntryId)> =
+                    batch.iter().map(|&id| (self.lower_name(id), id)).collect();
+                decorated.sort_unstable_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(&b.1)));
+                for (slot, deco) in batch.iter_mut().zip(&decorated) {
+                    *slot = deco.1;
+                }
+            }
             // Split the borrow: the `&mut` permutation alongside the shared
-            // key columns, comparing through the same SortColumns order
-            // that built it.
+            // key columns, comparing through the same SortColumns order that
+            // built it. `batch` is already in that order from the decorate-sort.
             let Self { perm_name, .. } = self;
             let cols = SortColumns::new(
-                &self.lower_pool,
-                &self.name_off,
-                &self.name_len,
+                &self.dict_pool,
+                &self.dict_off,
+                &self.name_id,
                 &self.size_lo,
                 &self.size_ovf,
                 &self.mtime,
             );
-            batch.sort_unstable_by(|&a, &b| cols.cmp_by(SortKey::Name, a, b));
             merge_sorted_tail(perm_name, &batch, |a, b| cols.cmp_by(SortKey::Name, a, b));
         }
         self.content_generation += 1;
@@ -162,8 +177,8 @@ impl VolumeIndex {
     /// Store the original spelling only when it differs from the folded
     /// bytes just appended at `lower_off` — the fold-identical majority
     /// costs nothing beyond the sentinel (ADR-0004).
-    fn push_orig_if_differs(&mut self, lower_off: usize, orig: &[u8]) -> u32 {
-        if orig == &self.lower_pool[lower_off..] {
+    fn push_orig_if_differs(&mut self, folded_off: usize, orig: &[u8]) -> u32 {
+        if orig == &self.dict_pool[folded_off..] {
             u32::MAX
         } else {
             // < MAX, not <=: u32::MAX is the fold-identical sentinel.
@@ -177,21 +192,32 @@ impl VolumeIndex {
         }
     }
 
+    /// Append a fresh dictionary entry for the folded bytes just written at
+    /// `folded_off..` and return its `name_id`. Un-deduped on the hot path —
+    /// `dedup_dict` collapses duplicates at `finish`/compaction (ADR-0032).
+    fn push_dict_entry(&mut self, folded_off: usize) -> u32 {
+        let name_id = self.dict_off.len() as u32;
+        self.dict_off.push(folded_off as u32);
+        self.dict_appends_since_dedup += 1;
+        name_id
+    }
+
     /// Append with a pre-resolved parent: the USN path resolves against the
     /// live index (see [`Self::upsert`]); the initial-scan builder passes a
     /// provisional ROOT because `finish()` re-resolves every parent anyway —
     /// a per-push lookup against the unmerged FRN tail would be O(n²) there.
     pub(super) fn push_raw(&mut self, e: &RawEntry, parent: EntryId) -> EntryId {
         assert!(
-            self.lower_pool.len() + e.name_utf16.len() * 4 < u32::MAX as usize,
-            "name pool overflow"
+            self.dict_pool.len() + e.name_utf16.len() * 4 < u32::MAX as usize,
+            "name dictionary overflow"
         );
-        let off = self.lower_pool.len();
+        let off = self.dict_pool.len();
         let mut orig = Vec::with_capacity(e.name_utf16.len() * 3);
-        wtf8::push_wtf8_pair(e.name_utf16, &mut orig, &mut self.lower_pool);
+        wtf8::push_wtf8_pair(e.name_utf16, &mut orig, &mut self.dict_pool);
+        let name_id = self.push_dict_entry(off);
         let orig_off = self.push_orig_if_differs(off, &orig);
         self.push_columns(
-            off,
+            name_id,
             orig_off,
             parent,
             e.frn,
@@ -207,14 +233,15 @@ impl VolumeIndex {
     pub(super) fn push_encoded(&mut self, e: &EncodedEntry, parent: EntryId) -> EntryId {
         debug_assert_eq!(e.name_wtf8.len(), e.lower_wtf8.len());
         assert!(
-            self.lower_pool.len() + e.lower_wtf8.len() < u32::MAX as usize,
-            "name pool overflow"
+            self.dict_pool.len() + e.lower_wtf8.len() < u32::MAX as usize,
+            "name dictionary overflow"
         );
-        let off = self.lower_pool.len();
-        self.lower_pool.extend_from_slice(e.lower_wtf8);
+        let off = self.dict_pool.len();
+        self.dict_pool.extend_from_slice(e.lower_wtf8);
+        let name_id = self.push_dict_entry(off);
         let orig_off = self.push_orig_if_differs(off, e.name_wtf8);
         self.push_columns(
-            off,
+            name_id,
             orig_off,
             parent,
             e.frn,
@@ -227,13 +254,14 @@ impl VolumeIndex {
         )
     }
 
-    /// Shared column append after the name bytes already landed in the pools
-    /// at `off`/`orig_off`. The flag/parent logic must stay identical between
-    /// the utf16 (`push_raw`) and pre-encoded (`push_encoded`) entry points.
+    /// Shared column append after the name bytes already landed in the
+    /// dictionary as `name_id` and the original (if any) at `orig_off`. The
+    /// flag/parent logic must stay identical between the utf16 (`push_raw`)
+    /// and pre-encoded (`push_encoded`) entry points.
     #[allow(clippy::too_many_arguments)]
     fn push_columns(
         &mut self,
-        off: usize,
+        name_id: u32,
         orig_off: u32,
         parent: EntryId,
         frn: Frn,
@@ -249,12 +277,12 @@ impl VolumeIndex {
             "volume entry count overflow"
         );
         let id = self.len() as EntryId;
-        self.name_off.push(off as u32);
-        self.name_len.push((self.lower_pool.len() - off) as u16);
+        self.name_id.push(name_id);
         self.orig_off.push(orig_off);
         self.parent.push(parent);
         self.push_size(size);
-        self.mtime.push(mtime);
+        self.mtime
+            .push(crate::query::dates::mtime_ticks_to_secs(mtime));
         self.frn.push(frn.0);
         let mut f = 0u8;
         if is_dir {
@@ -669,6 +697,41 @@ mod tests {
         check(&loaded);
     }
 
+    /// `dedup_orig` (ADR-0033 Lever 1) stores each distinct original once: a
+    /// volume full of repeated capitalized names keeps a single `orig_pool`
+    /// copy of each, while every entry's `name()` still reads back its exact
+    /// original bytes and fold-identical names own no copy at all.
+    #[test]
+    fn dedup_orig_stores_each_original_once() {
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        // 3×README + 2×Makefile differ from their fold; the two lowercase
+        // names are fold-identical and own no original copy.
+        let names = [
+            "README",
+            "README",
+            "README",
+            "Makefile",
+            "Makefile",
+            "notes.txt",
+            "data.bin",
+        ];
+        for (i, name) in names.iter().enumerate() {
+            let units = u16s(name);
+            b.push(raw(100 + i as u64, 5, &units, false, 1, 1));
+        }
+        let idx = b.finish();
+
+        // Every entry reads back its exact original through the shared copy.
+        for (i, name) in names.iter().enumerate() {
+            let id = idx.entry_by_record(100 + i as u64).unwrap();
+            assert_eq!(idx.name(id), name.as_bytes(), "{name}");
+        }
+        // The differing originals are deduped to one copy each: root "C:"
+        // (folds to "c:") + "README" + "Makefile" = 2 + 6 + 8 = 16 bytes, not
+        // the un-deduped 2 + 6*3 + 8*2 = 36. The fold-identical names add none.
+        assert_eq!(idx.orig_pool.len(), 16);
+    }
+
     /// In-place dir renames cross the fold-identity boundary in both
     /// directions: gaining an original copy and dropping back to the
     /// shared folded bytes.
@@ -718,34 +781,34 @@ mod tests {
         assert_eq!(idx.size(id), u64::MAX);
     }
 
-    /// `dead_name_bytes` follows every pool-garbage source — the folded copy
-    /// always, the original copy when one existed ("Note.TXT" does, the
-    /// all-lowercase names don't); snapshot restore recomputes the
+    /// `dead_name_bytes` follows the reclaimable original-spelling copies a
+    /// rebuild drops (ADR-0032): folded bytes are shared in the dictionary, so
+    /// only a non-fold-identical entry ("Note.TXT") owns reclaimable bytes —
+    /// the all-lowercase names own none. Snapshot restore recomputes the
     /// tombstone share (rename gaps are a lost lower bound).
     #[test]
     fn dead_name_bytes_tracks_pool_garbage() {
         let owned = |idx: &VolumeIndex, record: u64| {
             let id = idx.entry_by_record(record).unwrap();
-            let len = idx.name(id).len() as u64;
             if idx.name(id) == idx.lower_name(id) {
-                len
+                0 // fold-identical: nothing owned (folded bytes are shared)
             } else {
-                len * 2
+                idx.name(id).len() as u64 // only the original copy is owned
             }
         };
         let mut idx = build_sample();
         assert_eq!(idx.stats("C:").dead_name_bytes, 0);
 
-        let note = owned(&idx, 100); // "Note.TXT": folded + orig copy
-        assert_eq!(note, 16);
+        let note = owned(&idx, 100); // "Note.TXT": its original copy
+        assert_eq!(note, 8);
         let first_new = idx.len() as u32;
         let renamed = u16s("renamed.txt");
         idx.upsert(&raw(100, 50, &renamed, false, 1, 1));
         idx.merge_new_into_permutations(first_new);
         assert_eq!(idx.stats("C:").dead_name_bytes, note);
 
-        let big = owned(&idx, 60); // "big.bin": folded copy only
-        assert_eq!(big, 7);
+        let big = owned(&idx, 60); // "big.bin": fold-identical, owns nothing
+        assert_eq!(big, 0);
         idx.delete(60);
         assert_eq!(idx.stats("C:").dead_name_bytes, note + big);
 

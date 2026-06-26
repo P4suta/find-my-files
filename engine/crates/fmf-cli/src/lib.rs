@@ -71,6 +71,12 @@ enum Command {
         /// measured inputs for pool/column layout decisions (read-only).
         #[arg(long)]
         name_stats: bool,
+        /// Also estimate the name-dictionary-encoding memory delta on this
+        /// volume's real names: store each distinct folded name once and
+        /// replace `name_off`+`name_len` with a `name_id` — the Phase-2
+        /// go/no-go input (read-only, nothing is built).
+        #[arg(long)]
+        dict_estimate: bool,
     },
     /// Measure $MFT read throughput per I/O strategy (elevated terminal;
     /// reads the scan's exact chunk plan, parses nothing). Verdicts live in
@@ -140,7 +146,8 @@ pub fn run() {
             drive,
             trigram_estimate,
             name_stats,
-        } => cmd::stats::stats(&drive, trigram_estimate, name_stats, ctx),
+            dict_estimate,
+        } => cmd::stats::stats(&drive, trigram_estimate, name_stats, dict_estimate, ctx),
         Command::IoProbe {
             drive,
             mode,
