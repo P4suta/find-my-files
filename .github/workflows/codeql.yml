@@ -1,9 +1,14 @@
-# Static analysis for the C# app. Rust is not a CodeQL-supported language
-# (cargo-audit.yml covers the engine's dependency advisories instead).
+# Static analysis for the C# app and the GitHub Actions workflows themselves.
+# Rust stays out of scope (its CodeQL support is beta/noisy); cargo-audit.yml
+# covers the engine's dependency advisories instead.
 #
-# build-mode: manual because the WinUI app is self-contained and its csproj
-# references fmf_engine.dll — autobuild can't infer that. We build the engine
-# DLL first (the C# build copies it), then run the C# build CodeQL traces.
+# Two independent analyses:
+#   - csharp (analyze): build-mode manual because the WinUI app is self-contained
+#     and its csproj references fmf_engine.dll — autobuild can't infer that. We
+#     build the engine DLL first (the C# build copies it), then trace the C# build.
+#   - actions (analyze-actions): build-mode none, cheap ubuntu. Continuously
+#     re-checks workflow GITHUB_TOKEN permissions so the missing-permissions
+#     class can't silently regress (and closes stale alerts once code complies).
 name: codeql
 
 on:
@@ -60,3 +65,21 @@ jobs:
       - uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           category: "/language:csharp"
+
+  # Scans the workflow YAML itself (GITHUB_TOKEN permissions, untrusted-input,
+  # etc.). build-mode none needs no toolchain, so it runs on cheap ubuntu.
+  analyze-actions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      security-events: write # upload CodeQL SARIF results
+      contents: read # checkout
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          languages: actions
+          build-mode: none
+      - uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          category: "/language:actions"
