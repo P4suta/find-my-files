@@ -96,3 +96,66 @@ pub(super) fn mft_layout(volume_path: &str) -> Result<(usize, u64, RunMap), Ntfs
     let (size, runs) = data_attr.get_nonresident_data_runs(&volume)?;
     Ok((record_size, size, RunMap::from_data_runs(&runs)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `len`-byte record with an update-sequence array at `uso`
+    /// carrying `usn` plus `fixups` (the bytes that belong at each sector
+    /// tail), and write the `usn` sentinel into each sector tail so a correct
+    /// `apply_fixup` succeeds and restores the `fixups`.
+    fn record_with_usa(len: usize, uso: usize, usn: u16, fixups: &[u16]) -> Vec<u8> {
+        let mut r = vec![0u8; len];
+        let usl = (fixups.len() + 1) as u16;
+        r[4..6].copy_from_slice(&(uso as u16).to_le_bytes());
+        r[6..8].copy_from_slice(&usl.to_le_bytes());
+        r[uso..uso + 2].copy_from_slice(&usn.to_le_bytes());
+        for (i, f) in fixups.iter().enumerate() {
+            let off = uso + (i + 1) * 2;
+            r[off..off + 2].copy_from_slice(&f.to_le_bytes());
+            let tail = (i + 1) * SECTOR - 2;
+            r[tail..tail + 2].copy_from_slice(&usn.to_le_bytes());
+        }
+        r
+    }
+
+    #[test]
+    fn rejects_a_buffer_too_small_for_a_header() {
+        assert!(!apply_fixup(&mut [0u8; 47]));
+    }
+
+    #[test]
+    fn rejects_an_update_sequence_length_below_two() {
+        let mut r = vec![0u8; 1024];
+        r[4..6].copy_from_slice(&48u16.to_le_bytes()); // uso
+        r[6..8].copy_from_slice(&1u16.to_le_bytes()); // usl = 1 (no fixups)
+        assert!(!apply_fixup(&mut r));
+    }
+
+    #[test]
+    fn rejects_a_usa_that_runs_past_the_buffer() {
+        let mut r = vec![0u8; 1024];
+        r[4..6].copy_from_slice(&1020u16.to_le_bytes()); // uso near the end
+        r[6..8].copy_from_slice(&8u16.to_le_bytes()); // uso + usl*2 > len
+        assert!(!apply_fixup(&mut r));
+    }
+
+    #[test]
+    fn applies_the_update_sequence_and_restores_sector_tails() {
+        // Two sectors ⇒ two fixups; the tails currently hold the sentinel and
+        // must come back as 0xAAAA and 0xBBBB after the fixup.
+        let mut r = record_with_usa(1024, 48, 0x0001, &[0xAAAA, 0xBBBB]);
+        assert!(apply_fixup(&mut r));
+        assert_eq!(u16::from_le_bytes([r[510], r[511]]), 0xAAAA);
+        assert_eq!(u16::from_le_bytes([r[1022], r[1023]]), 0xBBBB);
+    }
+
+    #[test]
+    fn rejects_a_torn_record_whose_sector_tail_lost_the_sentinel() {
+        let mut r = record_with_usa(1024, 48, 0x0001, &[0xAAAA, 0xBBBB]);
+        // Corrupt the second sector tail so it no longer matches the USN.
+        r[1022] = 0x99;
+        assert!(!apply_fixup(&mut r));
+    }
+}

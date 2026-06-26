@@ -1,0 +1,46 @@
+# Mutation testing (cargo-mutants, ADR-0022). Coverage answers "is this line
+# run?"; mutation answers "would a test NOTICE if it broke?" — the sharper
+# question for the fmf-core soundness surfaces. Curated to the highest-risk
+# files via engine/mutants.toml so a run finishes in minutes, not hours.
+#
+# Informational by design (ADR-0013: measure before gating). fmf-core is
+# Windows-only (ntfs-reader/windows-sys), so this runs on windows-latest, not
+# the ubuntu lanes. It does NOT block merges: there is a small, documented
+# residue of provably-equivalent mutants in wtf8.rs (bitwise `|` vs `^` over
+# disjoint operands; match arms unreachable behind the ASCII fast path), so a
+# zero-survivor exit is not expected. Reviewers read the uploaded survivor list
+# and diff it against that known-equivalent baseline — a NEW survivor outside it
+# means a test that no longer bites.
+name: mutants
+
+on:
+  schedule:
+    - cron: "53 4 * * 1" # Monday 04:53 UTC, alongside the other weekly scans
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    runs-on: windows-latest
+    continue-on-error: true # informational — never gates a merge
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: engine
+          shared-key: engine-win # reuse the ci.yml/codeql dependency cache
+      - uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        with:
+          tool: cargo-mutants,just
+      - name: mutate the curated soundness surfaces
+        run: just mutants --config mutants.toml
+      - name: upload survivor list
+        if: always() # the run "fails" on the known-equivalent residue
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: mutants-out
+          path: engine/mutants.out/
+          retention-days: 30

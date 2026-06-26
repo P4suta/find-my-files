@@ -172,6 +172,37 @@ mod tests {
     }
 
     #[test]
+    fn encoding_width_boundaries_are_exact() {
+        // The first code point of each UTF-8 width must encode one byte wider
+        // than the last of the previous width — pinning the `<` boundaries in
+        // `push_code_point` (and, via round-trip, the lead-byte boundaries in
+        // `wtf8_to_utf16`) against off-by-one drift.
+        let cases: &[(u32, &[u8])] = &[
+            (0x0000_007F, &[0x7F]),                   // last 1-byte
+            (0x0000_0080, &[0xC2, 0x80]),             // first 2-byte
+            (0x0000_07FF, &[0xDF, 0xBF]),             // last 2-byte
+            (0x0000_0800, &[0xE0, 0xA0, 0x80]),       // first 3-byte
+            (0x0000_FFFF, &[0xEF, 0xBF, 0xBF]),       // last 3-byte (BMP)
+            (0x0001_0000, &[0xF0, 0x90, 0x80, 0x80]), // first 4-byte (astral)
+            (0x0010_FFFF, &[0xF4, 0x8F, 0xBF, 0xBF]), // last code point
+        ];
+        for &(cp, want) in cases {
+            let units: Vec<u16> = char::from_u32(cp)
+                .unwrap()
+                .to_string()
+                .encode_utf16()
+                .collect();
+            let (name, lower) = pair(&units);
+            assert_eq!(name, want, "U+{cp:04X} encodes to the wrong byte width");
+            // None of these are cased, so the folded pool mirrors the original.
+            assert_eq!(lower, want, "U+{cp:04X} fold must mirror an uncased point");
+            let mut back = Vec::new();
+            wtf8_to_utf16(&name, &mut back);
+            assert_eq!(back, units, "U+{cp:04X} must round-trip back to UTF-16");
+        }
+    }
+
+    #[test]
     fn istanbul_dotted_i_kept_unfolded() {
         // İ lowercases to "i\u{307}" (multi-char) → kept as-is.
         let units: Vec<u16> = "İ".encode_utf16().collect();

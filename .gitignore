@@ -18,6 +18,12 @@ test-results.json
 **/*.cobertura.xml
 # winapp UI-automation run output (screenshots + results JSON)
 app/FindMyFiles.Tests/UiAutomation/artifacts/
+# coverlet raw coverage output (sibling of the ignored *.cobertura.xml)
+app/FindMyFiles.Tests/coverage.json
+# cargo-mutants run output. Its `mutants.out{,.old}/` dir model sits next to the
+# engine workspace and does not compose with the build/ redirect (ADR-0021), so
+# ignore it in place — it is CI/machine-local, regenerated on every run.
+engine/mutants.out*/
 
 # Engine runtime artifacts
 *.fmfidx

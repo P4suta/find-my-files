@@ -10,7 +10,8 @@
       "**/ViewModels/MainViewModel.cs",
       "**/Engine/EngineClientFactory.cs",
       "**/Engine/PageCodec.cs",
-      "**/Engine/PipeProtocol.cs"
+      "**/Engine/PipeProtocol.cs",
+      "**/Engine/Wtf8.cs"
     ],
     "thresholds": {
       "high": 80,

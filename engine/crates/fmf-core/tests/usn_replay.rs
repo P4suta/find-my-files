@@ -1007,3 +1007,109 @@ fn interleaved_subtree_ops_match_a_fresh_scan_of_the_end_state() {
         ]))
     );
 }
+
+// ── Property: a batch is idempotent under replay ─────────────────────────────
+
+mod idempotence {
+    //! `volume.rs` saves the journal checkpoint *after* applying a batch, so a
+    //! crash between apply and checkpoint replays the batch on next load. That
+    //! is only safe if applying a batch twice equals applying it once — the
+    //! invariant this property pins over random create/delete/rename/attribute
+    //! mixes. (The fixture scenarios above pin specific end states; this pins
+    //! the algebraic property the recovery design leans on.)
+
+    use proptest::prelude::*;
+
+    use super::*;
+
+    const NAMES: &[&str] = &["a.txt", "B.TXT", "note.txt", "leaf", "data.bin", "日本.rs"];
+    // Fresh leaf-file records only — never the base tree's structural records
+    // (5/10/20). Renaming the base `docs` dir (which has a child) or flipping a
+    // record between dir and file are transitions NTFS never emits, and they
+    // are legitimately non-idempotent (the second apply sees a different
+    // dir-ness than the first), so the model stays on leaf files under the
+    // existing directories to pin the property the recovery path actually relies on.
+    const RECORDS: &[u64] = &[30, 40, 50, 60];
+    const PARENTS: &[u64] = &[5, 10, 20];
+
+    #[derive(Debug, Clone)]
+    struct Op {
+        record: u64,
+        parent: u64,
+        reason: u32,
+        attributes: u32,
+        name: &'static str,
+    }
+
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        (
+            0usize..RECORDS.len(),
+            0usize..PARENTS.len(),
+            0u32..4,
+            any::<bool>(),
+            0usize..NAMES.len(),
+        )
+            .prop_map(|(ri, pi, kind, hidden, ni)| {
+                let reason = match kind {
+                    0 => reason::FILE_CREATE | reason::CLOSE,
+                    1 => reason::FILE_DELETE | reason::CLOSE,
+                    2 => reason::RENAME_NEW_NAME | reason::CLOSE,
+                    _ => reason::BASIC_INFO_CHANGE | reason::CLOSE,
+                };
+                let attributes = if hidden {
+                    ARCHIVE | FILE_ATTRIBUTE_HIDDEN
+                } else {
+                    ARCHIVE
+                };
+                Op {
+                    record: RECORDS[ri],
+                    parent: PARENTS[pi],
+                    reason,
+                    attributes,
+                    name: NAMES[ni],
+                }
+            })
+    }
+
+    /// Parse a batch of ops into records (size/mtime stay absent → the
+    /// fetcher-free carry-over/sentinel paths run).
+    fn records_for(ops: &[Op]) -> Vec<UsnRecord> {
+        let specs: Vec<RecSpec> = ops
+            .iter()
+            .enumerate()
+            .map(|(i, op)| RecSpec {
+                usn: 1000 + i as i64 * 10,
+                frn: frn(op.record),
+                parent_frn: frn(op.parent),
+                reason: op.reason,
+                attributes: op.attributes,
+                name: op.name,
+            })
+            .collect();
+        let (_, records, truncated) = parse_buffer(&usn_buffer(9000, &specs));
+        assert!(!truncated, "well-formed generated batch");
+        records
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(192))]
+
+        #[test]
+        fn applying_a_batch_twice_equals_once(ops in proptest::collection::vec(op_strategy(), 0..12)) {
+            let records = records_for(&ops);
+
+            let mut once = base_index();
+            apply_batch(&mut once, &records, &no_stats());
+
+            let mut twice = base_index();
+            apply_batch(&mut twice, &records, &no_stats());
+            apply_batch(&mut twice, &records, &no_stats());
+
+            prop_assert_eq!(
+                live_path_set(&once),
+                live_path_set(&twice),
+                "replaying a batch must not change the end state"
+            );
+        }
+    }
+}
