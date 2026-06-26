@@ -12,7 +12,7 @@ use super::{EntryId, VolumeIndex, flags};
 // Any semantic change to a section bumps the version in the magic: older
 // snapshots must fail the magic check and trigger a full rescan rather
 // than load with wrong semantics (ADR-0010, no backward compatibility).
-const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX04";
+const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX07";
 
 const fn pod_bytes<T: Copy>(v: &[T]) -> &[u8] {
     // Safety: T is a plain-old-data column type (u8/u16/u32/u64/i64).
@@ -87,11 +87,11 @@ impl VolumeIndex {
         h.update(&head);
         w.write_all(&head)?;
 
-        write_vec(w, &mut h, &self.lower_pool)?;
+        write_vec(w, &mut h, &self.dict_pool)?;
+        write_vec(w, &mut h, &self.dict_off)?;
+        write_vec(w, &mut h, &self.name_id)?;
         write_vec(w, &mut h, &self.orig_pool)?;
         write_vec(w, &mut h, &self.orig_off)?;
-        write_vec(w, &mut h, &self.name_off)?;
-        write_vec(w, &mut h, &self.name_len)?;
         write_vec(w, &mut h, &self.parent)?;
         write_vec(w, &mut h, &self.size_lo)?;
         // Overflow sizes as two parallel sections, id-sorted (deterministic
@@ -139,16 +139,16 @@ impl VolumeIndex {
         let next_usn = i64::from_le_bytes(head[16..24].try_into().expect("32-byte header"));
         let count = u64::from_le_bytes(head[24..32].try_into().expect("32-byte header")) as usize;
 
-        let lower_pool: Vec<u8> = read_vec(r, &mut h)?;
+        let dict_pool: Vec<u8> = read_vec(r, &mut h)?;
+        let dict_off: Vec<u32> = read_vec(r, &mut h)?;
+        let name_id: Vec<u32> = read_vec(r, &mut h)?;
         let orig_pool: Vec<u8> = read_vec(r, &mut h)?;
         let orig_off: Vec<u32> = read_vec(r, &mut h)?;
-        let name_off: Vec<u32> = read_vec(r, &mut h)?;
-        let name_len: Vec<u16> = read_vec(r, &mut h)?;
         let parent: Vec<u32> = read_vec(r, &mut h)?;
         let size_lo: Vec<u32> = read_vec(r, &mut h)?;
         let ovf_ids: Vec<u32> = read_vec(r, &mut h)?;
         let ovf_sizes: Vec<u64> = read_vec(r, &mut h)?;
-        let mtime: Vec<i64> = read_vec(r, &mut h)?;
+        let mtime: Vec<u32> = read_vec(r, &mut h)?;
         let frn: Vec<u64> = read_vec(r, &mut h)?;
         let flag: Vec<u8> = read_vec(r, &mut h)?;
         let perm_name: Vec<u32> = read_vec(r, &mut h)?;
@@ -159,9 +159,8 @@ impl VolumeIndex {
             return Err(bad("checksum mismatch"));
         }
         let columns_ok = [
+            name_id.len(),
             orig_off.len(),
-            name_off.len(),
-            name_len.len(),
             parent.len(),
             size_lo.len(),
             mtime.len(),
@@ -174,21 +173,41 @@ impl VolumeIndex {
         if !columns_ok {
             return Err(bad("column length mismatch"));
         }
-        // Name slices are untrusted input: every (offset, len) pair must
-        // stay inside its pool or `name()`/`lower_name()` would panic on a
-        // crafted-but-checksum-valid stream.
+        // Name slices are untrusted input. The dictionary is gapless
+        // (ADR-0033): `dict_off` must be non-decreasing and within the pool,
+        // so name k spans `[dict_off[k], dict_off[k+1])` (pool end for the
+        // last). A crafted out-of-order or past-the-pool offset would make
+        // `lower_name` slice out of bounds.
+        let dict_count = dict_off.len();
+        for k in 0..dict_count {
+            let off = dict_off[k] as usize;
+            let end = dict_off.get(k + 1).map_or(dict_pool.len(), |&e| e as usize);
+            if off > end || end > dict_pool.len() {
+                return Err(bad("dict slice out of pool bounds"));
+            }
+        }
+        // Then each entry: its `name_id` must index the dict, and its original
+        // copy (when one exists) must fit using the dict-derived length (the
+        // fold is length-preserving, ADR-0004).
         for i in 0..count {
-            let len = name_len[i] as usize;
-            let lower_ok = (name_off[i] as usize)
-                .checked_add(len)
-                .is_some_and(|end| end <= lower_pool.len());
+            let nid = name_id[i] as usize;
+            if nid >= dict_count {
+                return Err(bad("name_id out of dict bounds"));
+            }
+            let len = {
+                let off = dict_off[nid] as usize;
+                dict_off
+                    .get(nid + 1)
+                    .map_or(dict_pool.len(), |&e| e as usize)
+                    - off
+            };
             let orig_ok = match orig_off[i] {
                 u32::MAX => true,
                 off => (off as usize)
                     .checked_add(len)
                     .is_some_and(|end| end <= orig_pool.len()),
             };
-            if !lower_ok || !orig_ok {
+            if !orig_ok {
                 return Err(bad("name slice out of pool bounds"));
             }
         }
@@ -223,22 +242,26 @@ impl VolumeIndex {
         for (i, f) in flag.iter().enumerate() {
             if f & flags::TOMBSTONE != 0 {
                 tombstones += 1;
-                let len = name_len[i] as u64;
-                dead_name_bytes += if orig_off[i] == u32::MAX {
-                    len
-                } else {
-                    len * 2
-                };
+                // Only the original copy is reclaimable per entry; folded
+                // bytes are shared in the dictionary (ADR-0032).
+                if orig_off[i] != u32::MAX {
+                    let nid = name_id[i] as usize;
+                    let off = dict_off[nid] as usize;
+                    let end = dict_off
+                        .get(nid + 1)
+                        .map_or(dict_pool.len(), |&e| e as usize);
+                    dead_name_bytes += (end - off) as u64;
+                }
             }
         }
 
         Ok((
             Self {
-                lower_pool,
+                dict_pool,
+                dict_off,
+                name_id,
                 orig_pool,
                 orig_off,
-                name_off,
-                name_len,
                 parent,
                 size_lo,
                 size_ovf,
@@ -252,6 +275,7 @@ impl VolumeIndex {
                 dir_topology_generation: 0,
                 tombstones,
                 dead_name_bytes,
+                dict_appends_since_dedup: 0,
                 derived_cache: Mutex::new(None),
             },
             journal_id,
@@ -404,22 +428,22 @@ mod tests {
         buf
     }
 
-    /// Section byte sizes for a structurally valid count=1 snapshot, in
-    /// read order: `lower_pool`, `orig_pool` (empty), `orig_off` (sentinel),
-    /// `name_off`, `name_len`, parent, `size_lo`, size-overflow ids/sizes
-    /// (empty), mtime, frn, flag, `perm_name`.
+    /// Section byte sizes for a structurally valid count=1 snapshot, in read
+    /// order (ADR-0033 / FMFIDX07): `dict_pool`, `dict_off`, `name_id`,
+    /// `orig_pool` (empty), `orig_off` (sentinel), parent, `size_lo`,
+    /// size-overflow ids/sizes (empty), mtime, frn, flag, `perm_name`.
     fn valid_sections() -> Vec<Vec<u8>> {
         vec![
-            b"a".to_vec(),                   // lower_pool
+            b"a".to_vec(),                   // dict_pool (one distinct name "a", len 1)
+            0u32.to_le_bytes().to_vec(),     // dict_off [0] (gapless; len = pool end − 0)
+            0u32.to_le_bytes().to_vec(),     // name_id [0] (entry 0 → name 0)
             Vec::new(),                      // orig_pool (fold-identical)
             u32::MAX.to_le_bytes().to_vec(), // orig_off (sentinel)
-            vec![0u8; 4],                    // name_off (1 × u32)
-            1u16.to_le_bytes().to_vec(),     // name_len (1 byte name)
             vec![0u8; 4],                    // parent
             vec![0u8; 4],                    // size_lo (1 × u32)
             Vec::new(),                      // size overflow ids (none)
             Vec::new(),                      // size overflow sizes (none)
-            vec![0u8; 8],                    // mtime
+            vec![0u8; 4],                    // mtime (1 × u32)
             vec![0u8; 8],                    // frn
             vec![0u8; 1],                    // flag
             vec![0u8; 4],                    // perm_name
@@ -464,9 +488,9 @@ mod tests {
 
     #[test]
     fn snapshot_column_count_mismatch_is_rejected_not_panic() {
-        // name_off carries 2 entries while the header says count=1.
+        // name_id carries 2 entries while the header says count=1.
         let mut sections = valid_sections();
-        sections[3] = vec![0u8; 8];
+        sections[2] = vec![0u8; 8];
         let err = read_crafted(sections);
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("column length"), "{err}");
@@ -476,7 +500,7 @@ mod tests {
     fn snapshot_misaligned_section_is_rejected_not_panic() {
         // 7 bytes cannot be a u32 column.
         let mut sections = valid_sections();
-        sections[3] = vec![0u8; 7];
+        sections[2] = vec![0u8; 7];
         let err = read_crafted(sections);
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("section size"), "{err}");
@@ -484,23 +508,24 @@ mod tests {
 
     #[test]
     fn snapshot_out_of_bounds_name_slices_are_rejected() {
-        // Lower slice runs past the pool (len 2 over a 1-byte pool).
+        // A dict offset past the (1-byte) dict pool — the gapless validator
+        // rejects it before any slice (ADR-0033).
         let mut sections = valid_sections();
-        sections[4] = 2u16.to_le_bytes().to_vec();
+        sections[1] = 5u32.to_le_bytes().to_vec();
         let err = read_crafted(sections);
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("out of pool bounds"), "{err}");
 
         // A non-sentinel orig_off pointing past the (empty) orig pool.
         let mut sections = valid_sections();
-        sections[2] = 0u32.to_le_bytes().to_vec();
+        sections[4] = 0u32.to_le_bytes().to_vec();
         let err = read_crafted(sections);
         assert!(err.to_string().contains("out of pool bounds"), "{err}");
 
         // Control: a real orig byte at offset 0 loads fine and reads back.
         let mut sections = valid_sections();
-        sections[1] = b"A".to_vec();
-        sections[2] = 0u32.to_le_bytes().to_vec();
+        sections[3] = b"A".to_vec();
+        sections[4] = 0u32.to_le_bytes().to_vec();
         let refs: Vec<&[u8]> = sections.iter().map(Vec::as_slice).collect();
         let buf = craft_stream(1, &refs);
         let (idx, _, _) = VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();

@@ -33,6 +33,11 @@ use crate::results::{
     FmfPage, FmfQueryOptions, FmfRow, fmf_page_free, fmf_query, fmf_result_free, fmf_result_page,
 };
 use crate::volumes::{FmfVolumeStatus, fmf_index_start, fmf_index_status, fmf_list_volumes};
+
+// Real, second-aligned FILETIMEs that round-trip through the u32-seconds
+// mtime column (ADR-0031); pre-1970 small ints collapse to the 0 sentinel.
+const MT_ALPHA: i64 = 132_854_688_000_000_000; // ≈ 2022-01-01
+const MT_BETA: i64 = 133_170_048_000_000_000; // ≈ 2023-01-01
 use crate::{
     FMF_E_INVALID_ARG, FMF_E_IO, FMF_E_LOCKED, FMF_E_NOT_ADMIN, FMF_E_PANIC, FMF_E_QUERY_SYNTAX,
     FMF_E_STALE, FMF_E_VOLUME, FMF_OK,
@@ -114,7 +119,7 @@ fn ready_engine() -> (*mut c_void, TestDir) {
         is_hidden: false,
         is_system: false,
         size: 1234,
-        mtime: 777,
+        mtime: MT_ALPHA,
     });
     let beta: Vec<u16> = "beta.log".encode_utf16().collect();
     b.push(RawEntry {
@@ -126,7 +131,7 @@ fn ready_engine() -> (*mut c_void, TestDir) {
         is_hidden: false,
         is_system: false,
         size: 99,
-        mtime: 888,
+        mtime: MT_BETA,
     });
     // The handle struct is crate-visible, so tests can reach the engine
     // behind the opaque pointer without an extra FFI test hook.
@@ -801,7 +806,7 @@ fn page_packs_rows_and_string_blob_per_contract() {
     assert_eq!(row.entry_ref >> 32, 0, "volume ordinal in the high half");
     assert_eq!(row.frn, (1 << 48) | 0x64);
     assert_eq!(row.size, 1234);
-    assert_eq!(row.mtime, 777);
+    assert_eq!(row.mtime, MT_ALPHA);
     let name = unsafe {
         std::slice::from_raw_parts(p.blob.add(row.name_off as usize), row.name_len as usize)
     };

@@ -1,18 +1,19 @@
-//! Query execution. Each AND group is driven by a single SIMD sweep over the
-//! contiguous name pool (pool-scan / prefix / suffix drivers) that yields a
-//! sparse candidate list; residual matchers then verify only those
-//! candidates. Groups without a usable literal fall back to a chunked
-//! full scan, and the empty query walks the permutation directly. Results
-//! materialize as O(1)-pageable, sort-ordered id arrays
+//! Query execution. Each AND group's literal driver runs a single SIMD sweep
+//! over the contiguous distinct-name dictionary (pool-scan / prefix / suffix)
+//! into a `name_id` bitset (ADR-0032); the materialize walk then keeps an
+//! entry when its `name_id` is in some group's set and that group's residual
+//! matchers pass. Groups without a usable literal evaluate their residuals
+//! over every entry, and the empty query walks the permutation directly.
+//! Results materialize as O(1)-pageable, sort-ordered id arrays
 //! (docs/ARCHITECTURE.md "query-time materialization").
 
 use rayon::prelude::*;
 
 use super::QueryOptions;
-use super::compile::{CTerm, CompiledQuery, Driver};
+use super::compile::{CompiledGroup, CompiledQuery, Driver};
 use super::matchers::{EvalCtx, terms_match, terms_match_iter};
-use super::memo::{DirPathsLower, DirPathsOrig, MtimePerm, OffsetTable, PathMemos, SizePerm};
-use super::sweep::driver_candidates;
+use super::memo::{DirPathsLower, DirPathsOrig, MtimePerm, PathMemos, SizePerm};
+use super::sweep::{driver_candidates, name_id_in_set};
 use crate::index::{EntryId, SortKey, VolumeIndex};
 
 /// Build (or incrementally extend) exactly the dir-path memos this query
@@ -34,9 +35,6 @@ fn path_memos(idx: &VolumeIndex, q: &CompiledQuery) -> PathMemos {
         }),
     }
 }
-
-/// 65536 entries per parallel task for full scans.
-const CHUNK: usize = 1 << 16;
 
 /// One volume's query result: the matching ids plus the index generations
 /// they were computed against (for staleness checks and incremental refine).
@@ -95,7 +93,7 @@ pub fn search(
     {
         metrics.driver = "perm-walk".to_string();
         metrics.memo_us = stage.lap();
-        let ids = materialize_filtered(idx, opt, |id| {
+        let ids = materialize_filtered(idx, opt, |_ctx, id| {
             idx.is_live(id) && !(skip_excluded && idx.is_excluded(id))
         });
         metrics.entries_scanned = idx.len() as u64;
@@ -110,82 +108,44 @@ pub fn search(
         );
     }
 
-    // Generation-cached lookup structures.
     let memo = path_memos(idx, q);
-    let needs_table = q
-        .groups
-        .iter()
-        .any(|g| !matches!(g.driver, Driver::FullScan | Driver::MatchAll));
-    let table: Option<std::sync::Arc<OffsetTable>> = needs_table.then(|| {
-        idx.cached_derived_or_update(|prev| match prev {
-            Some(p) => OffsetTable::extend_from(idx, p),
-            None => OffsetTable::build(idx),
-        })
-    });
     metrics.memo_us = stage.lap();
 
-    let n = idx.len();
-    let mut bitmap: Vec<u64> = vec![0u64; n.div_ceil(64)];
-
-    for group in &q.groups {
-        match &group.driver {
-            // MatchAll: no terms in this OR-branch → every live entry matches.
-            // FullScan: a group with no usable literal driver. Both evaluate
-            // the residuals (if any) over every live entry.
-            Driver::MatchAll | Driver::FullScan => {
-                full_scan_group(
-                    idx,
-                    &memo,
-                    &group.terms,
-                    skip_excluded,
-                    &mut bitmap,
-                    &mut metrics,
-                );
-            }
-            driver => {
-                let table = table.as_ref().expect("offset table built");
-                let candidates = driver_candidates(idx, table, driver, skip_excluded);
-                metrics.entries_scanned += candidates.len() as u64;
-                // A case-exact source term makes the folded sweep a superset:
-                // its exact comparison joins the residual pass.
-                if group.terms.is_empty() && group.driver_exact {
-                    for id in candidates {
-                        bitmap[id as usize / 64] |= 1u64 << (id as usize % 64);
-                    }
-                } else {
-                    let passed: Vec<Vec<EntryId>> = candidates
-                        .par_chunks(2048)
-                        .map(|chunk| {
-                            let mut ctx = EvalCtx::default();
-                            chunk
-                                .iter()
-                                .copied()
-                                .filter(|&id| {
-                                    terms_match_iter(
-                                        idx,
-                                        &memo,
-                                        &mut ctx,
-                                        group.residual_terms(),
-                                        id,
-                                    )
-                                })
-                                .collect()
-                        })
-                        .collect();
-                    for ids in passed {
-                        for id in ids {
-                            bitmap[id as usize / 64] |= 1u64 << (id as usize % 64);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Each literal-driver group sweeps the dictionary into a name_id bitset;
+    // MatchAll/FullScan groups carry no set (their residuals run per entry).
+    let sets: Vec<Option<Vec<u64>>> = q
+        .groups
+        .iter()
+        .map(|g| match g.driver {
+            Driver::MatchAll | Driver::FullScan => None,
+            _ => Some(driver_candidates(idx, &g.driver)),
+        })
+        .collect();
     metrics.scan_us = stage.lap();
 
-    let ids = materialize_filtered(idx, opt, |id| {
-        bitmap[id as usize / 64] >> (id as usize % 64) & 1 == 1
+    // One walk. A cheap, selective pre-test runs *before* the liveness /
+    // exclusion `flag` gather: an entry can only match if some literal
+    // group's name is in its sweep set, or some group is a full scan (no set
+    // → defer to the residual pass). On a selective query this rejects ~90%
+    // of entries before they ever touch `flag` (ADR-0033). The survivors then
+    // pay the liveness/exclusion gate and the full per-group match.
+    let ids = materialize_filtered(idx, opt, |ctx, id| {
+        let nid = idx.name_id_of(id);
+        let name_possible = sets
+            .iter()
+            .any(|set| set.as_deref().is_none_or(|s| name_id_in_set(s, nid)));
+        if !name_possible {
+            return false;
+        }
+        if !idx.is_live(id) || (skip_excluded && idx.is_excluded(id)) {
+            return false;
+        }
+        q.groups
+            .iter()
+            .zip(&sets)
+            .any(|(g, set)| group_matches(idx, &memo, ctx, g, set.as_deref(), id))
     });
+    metrics.entries_scanned = idx.len() as u64;
     metrics.materialize_us = stage.lap();
 
     (
@@ -257,51 +217,29 @@ pub fn refine(
     )
 }
 
-fn full_scan_group(
+/// Does `id` satisfy AND group `g`? A literal-driver group: its name is in the
+/// sweep `set`, the suffix `files_only` constraint holds, and the residual
+/// matchers — including the driver term when the folded sweep over-approximated
+/// (`residual_terms`) — pass. MatchAll/FullScan: the group's terms pass.
+fn group_matches(
     idx: &VolumeIndex,
     memo: &PathMemos,
-    terms: &[CTerm],
-    skip_excluded: bool,
-    bitmap: &mut [u64],
-    metrics: &mut SearchMetrics,
-) {
-    let n = idx.len();
-    let chunk_results: Vec<(Vec<u64>, u64, u64)> = (0..n.div_ceil(CHUNK))
-        .into_par_iter()
-        .map(|ci| {
-            let start = ci * CHUNK;
-            let end = (start + CHUNK).min(n);
-            let mut words = vec![0u64; (end - start).div_ceil(64)];
-            let mut ctx = EvalCtx::default();
-            let mut scanned = 0u64;
-            let mut skipped = 0u64;
-            for id in start..end {
-                let id = id as EntryId;
-                if !idx.is_live(id) {
-                    continue;
-                }
-                if skip_excluded && idx.is_excluded(id) {
-                    skipped += 1;
-                    continue;
-                }
-                scanned += 1;
-                if terms_match(idx, memo, &mut ctx, terms, id) {
-                    let rel = id as usize - start;
-                    words[rel / 64] |= 1u64 << (rel % 64);
-                }
-            }
-            (words, scanned, skipped)
-        })
-        .collect();
-
-    let mut word_base = 0usize;
-    for (words, scanned, skipped) in &chunk_results {
-        for (i, w) in words.iter().enumerate() {
-            bitmap[word_base + i] |= w;
+    ctx: &mut EvalCtx,
+    g: &CompiledGroup,
+    set: Option<&[u64]>,
+    id: EntryId,
+) -> bool {
+    match &g.driver {
+        Driver::MatchAll | Driver::FullScan => terms_match(idx, memo, ctx, &g.terms, id),
+        Driver::Suffixes { files_only, .. } => {
+            set.is_some_and(|s| name_id_in_set(s, idx.name_id_of(id)))
+                && !(*files_only && idx.is_dir(id))
+                && terms_match_iter(idx, memo, ctx, g.residual_terms(), id)
         }
-        word_base += CHUNK / 64;
-        metrics.entries_scanned += scanned;
-        metrics.excluded_skipped += skipped;
+        _ => {
+            set.is_some_and(|s| name_id_in_set(s, idx.name_id_of(id)))
+                && terms_match_iter(idx, memo, ctx, g.residual_terms(), id)
+        }
     }
 }
 
@@ -313,7 +251,7 @@ fn full_scan_group(
 fn materialize_filtered(
     idx: &VolumeIndex,
     opt: &QueryOptions,
-    keep: impl Fn(EntryId) -> bool + Sync,
+    keep: impl Fn(&mut EvalCtx, EntryId) -> bool + Sync,
 ) -> Vec<EntryId> {
     // Fine-grained chunks: at 2^17 a 1M-entry walk only fans out 8 ways and
     // the walk becomes the latency floor for every query.
@@ -334,7 +272,14 @@ fn materialize_filtered(
     };
     let chunks: Vec<Vec<EntryId>> = perm
         .par_chunks(MAT_CHUNK)
-        .map(|chunk| chunk.iter().copied().filter(|&id| keep(id)).collect())
+        .map(|chunk| {
+            let mut ctx = EvalCtx::default();
+            chunk
+                .iter()
+                .copied()
+                .filter(|&id| keep(&mut ctx, id))
+                .collect()
+        })
         .collect();
     let total = chunks.iter().map(Vec::len).sum();
     let mut ids = Vec::with_capacity(total);
@@ -396,7 +341,10 @@ mod tests {
                 is_hidden: false,
                 is_system: false,
                 size: *size,
-                mtime: *mtime,
+                // Anchor the day-offsets past 1970 so they survive the
+                // u32-seconds mtime column (ADR-0031); pre-1970 ticks would
+                // collapse to the 0 "unknown" sentinel.
+                mtime: crate::query::dates::FILETIME_UNIX_EPOCH + *mtime,
             });
         }
         b.finish()
@@ -971,13 +919,16 @@ mod proptests {
     }
 
     fn entry_strategy() -> impl Strategy<Value = GenEntry> {
+        // Post-1970 FILETIMEs so the u32-seconds mtime column (ADR-0031)
+        // exercises a real ordering instead of collapsing to the 0 sentinel.
+        const EPOCH: i64 = crate::query::dates::FILETIME_UNIX_EPOCH;
         (
             proptest::collection::vec(0usize..FRAGMENTS.len(), 1..=4),
             any::<bool>(),
             any::<bool>(),
             any::<bool>(),
             0u64..(8u64 << 30),
-            0i64..(20_000i64 * 864_000_000_000),
+            EPOCH..(EPOCH + 20_000i64 * 864_000_000_000),
         )
             .prop_map(|(parts, is_dir, is_hidden, is_system, size, mtime)| {
                 let name: String = parts.iter().map(|&i| FRAGMENTS[i]).collect();
@@ -1206,7 +1157,7 @@ mod proptests {
                     is_hidden: i % 7 == 0,
                     is_system: i % 11 == 0,
                     size: i * 1024,
-                    mtime: i as i64 * 864_000_000_000,
+                    mtime: crate::query::dates::FILETIME_UNIX_EPOCH + i as i64 * 864_000_000_000,
                 }
             })
             .collect();

@@ -165,6 +165,11 @@ mod tests {
         }
     }
 
+    // Real, second-aligned FILETIMEs so the u32-seconds mtime column
+    // round-trips them exactly (ADR-0031): FT0 ≈ 2021-01-01, FT1 ≈ 2022-01-01.
+    const FT0: i64 = 132_539_040_000_000_000;
+    const FT1: i64 = 132_854_688_000_000_000;
+
     fn base_index() -> VolumeIndex {
         let mut b = VolumeIndexBuilder::new("C:", 5);
         let docs: Vec<u16> = "docs".encode_utf16().collect();
@@ -189,7 +194,7 @@ mod tests {
             is_hidden: false,
             is_system: false,
             size: 100,
-            mtime: 7,
+            mtime: FT0,
         });
         b.finish()
     }
@@ -215,11 +220,11 @@ mod tests {
             rec(20, 5, reason::FILE_CREATE | reason::CLOSE, 0x10, "src"),
             rec(21, 20, reason::FILE_CREATE | reason::CLOSE, 0x20, "main.rs"),
         ];
-        let s = apply_batch(&mut idx, &batch, &Fixed(42, 9));
+        let s = apply_batch(&mut idx, &batch, &Fixed(42, FT0));
         assert_eq!(s.created_or_renamed, 2);
         assert_eq!(path_of(&idx, 21), r"C:\src\main.rs");
         let id = idx.entry_by_record(21).unwrap();
-        assert_eq!((idx.size(id), idx.mtime(id)), (42, 9));
+        assert_eq!((idx.size(id), idx.mtime(id)), (42, FT0));
     }
 
     #[test]
@@ -242,7 +247,7 @@ mod tests {
         assert_eq!(path_of(&idx, 11), r"C:\docs\final.txt");
         // Carried over size/mtime survive a rename without a fetcher.
         let id = idx.entry_by_record(11).unwrap();
-        assert_eq!((idx.size(id), idx.mtime(id)), (100, 7));
+        assert_eq!((idx.size(id), idx.mtime(id)), (100, FT0));
     }
 
     #[test]
@@ -293,10 +298,10 @@ mod tests {
             0x20,
             "note.txt",
         )];
-        let s = apply_batch(&mut idx, &batch, &Fixed(5000, 99));
+        let s = apply_batch(&mut idx, &batch, &Fixed(5000, FT1));
         assert_eq!(s.stat_updated, 1);
         let id = idx.entry_by_record(11).unwrap();
-        assert_eq!((idx.size(id), idx.mtime(id)), (5000, 99));
+        assert_eq!((idx.size(id), idx.mtime(id)), (5000, FT1));
     }
 
     #[test]

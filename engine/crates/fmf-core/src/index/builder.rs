@@ -1,7 +1,7 @@
 use parking_lot::Mutex;
 
 use super::frn::FrnIndex;
-use super::{EncodedEntry, EntryId, Frn, NO_PARENT, RawEntry, SortKey, VolumeIndex};
+use super::{EncodedEntry, EntryId, Frn, NO_PARENT, RawEntry, VolumeIndex};
 
 /// Two-pass builder for the initial scan: collect everything, then resolve
 /// parents and sort the permutations (scan order ≠ parent-before-child).
@@ -25,11 +25,11 @@ impl VolumeIndexBuilder {
     #[must_use]
     pub fn new(volume_label: &str, root_record: u64) -> Self {
         let mut idx = VolumeIndex {
-            lower_pool: Vec::new(),
+            dict_pool: Vec::new(),
+            dict_off: Vec::new(),
+            name_id: Vec::new(),
             orig_pool: Vec::new(),
             orig_off: Vec::new(),
-            name_off: Vec::new(),
-            name_len: Vec::new(),
             parent: Vec::new(),
             size_lo: Vec::new(),
             size_ovf: rustc_hash::FxHashMap::default(),
@@ -43,6 +43,7 @@ impl VolumeIndexBuilder {
             dir_topology_generation: 0,
             tombstones: 0,
             dead_name_bytes: 0,
+            dict_appends_since_dedup: 0,
             derived_cache: Mutex::new(None),
         };
         let units: Vec<u16> = volume_label.encode_utf16().collect();
@@ -165,13 +166,48 @@ impl VolumeIndexBuilder {
         timings.build_ms = t.elapsed().as_millis() as u64;
         let t = std::time::Instant::now();
 
+        // Collapse the per-entry name appends into the distinct-name
+        // dictionary before sorting (ADR-0032); the name comparator below
+        // reads each folded name through the deduped `name_id`. The
+        // original-spelling pool is deduped in the same breath (ADR-0033
+        // Lever 1) — independent of the sort, which only reads folded names.
+        self.idx.dedup_dict();
+        self.idx.dedup_orig();
+
         // Name order only — the default sort, needed before the volume can
         // serve its first query. Size/mtime orders build lazily on the
         // first sorted query (query::memo, ADR-0006).
-        let mut perm_name: Vec<EntryId> = (0..self.idx.len() as u32).collect();
-        let idx = &self.idx;
-        perm_name.par_sort_unstable_by(|&a, &b| idx.cmp_by(SortKey::Name, a, b));
-        self.idx.perm_name = perm_name;
+        //
+        // Rank the D distinct dictionary names once by bytes, then sort the
+        // entries on a packed `(rank << 32) | id` u64 key (ADR-0033, "1A").
+        // `dedup_dict` just ran, so `name_id` is dense `0..D` and `dict_off`
+        // is gapless: distinct names map to distinct ranks, making this
+        // byte-identical to a full `cmp_by(SortKey::Name)` sort (equal names
+        // tie-break by id — the key's low 32 bits) while the comparator is a
+        // single integer compare instead of a dictionary deref per compare.
+        let n = self.idx.len();
+        let d = self.idx.dict_off.len();
+        let dict_pool = &self.idx.dict_pool;
+        let dict_off = &self.idx.dict_off;
+        let name_bytes = |nid: usize| {
+            let off = dict_off[nid] as usize;
+            let end = dict_off
+                .get(nid + 1)
+                .map_or(dict_pool.len(), |&e| e as usize);
+            &dict_pool[off..end]
+        };
+        let mut order: Vec<u32> = (0..d as u32).collect();
+        order.par_sort_unstable_by(|&a, &b| name_bytes(a as usize).cmp(name_bytes(b as usize)));
+        let mut rank = vec![0u32; d];
+        for (r, &nid) in order.iter().enumerate() {
+            rank[nid as usize] = r as u32;
+        }
+        let name_id = &self.idx.name_id;
+        let mut keyed: Vec<u64> = (0..n as u32)
+            .map(|id| (u64::from(rank[name_id[id as usize] as usize]) << 32) | u64::from(id))
+            .collect();
+        keyed.par_sort_unstable();
+        self.idx.perm_name = keyed.iter().map(|&k| k as u32).collect();
         timings.sort_ms = t.elapsed().as_millis() as u64;
         (self.idx, timings)
     }
@@ -180,7 +216,50 @@ impl VolumeIndexBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::SortKey;
     use crate::index::testutil::{build_sample, raw, raw_attr, u16s};
+
+    /// 1A build-rank (ADR-0033) must produce a permutation byte-identical to a
+    /// full `cmp_by(SortKey::Name)` sort: the packed `(rank, id)` key has to
+    /// reproduce the (folded-name, id) order exactly. Repeated folded names
+    /// (so `D < n`), case variants that fold together, and a multibyte name
+    /// exercise the dictionary-rank path and the id tie-break inside an
+    /// equal-name run.
+    #[test]
+    fn name_permutation_matches_cmp_by_oracle() {
+        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let names = [
+            "report.log",
+            "report.log",
+            "report.log",
+            ".gitignore",
+            ".gitignore",
+            "README",
+            "readme",
+            "ReadMe",
+            "日本語.txt",
+            "日本語.txt",
+            "alpha",
+            "zulu",
+            "mike",
+            "a.bin",
+        ];
+        for (i, name) in names.iter().enumerate() {
+            let units = u16s(name);
+            b.push(raw(100 + i as u64, 5, &units, false, i as u64, i as i64));
+        }
+        let idx = b.finish();
+
+        // Independent oracle: the one definition of name order, applied by a
+        // plain comparator sort over every id.
+        let mut oracle: Vec<EntryId> = (0..idx.len() as u32).collect();
+        oracle.sort_by(|&a, &b| idx.cmp_by(SortKey::Name, a, b));
+        assert_eq!(
+            idx.name_permutation(),
+            oracle.as_slice(),
+            "build-rank permutation diverged from the cmp_by(Name) oracle"
+        );
+    }
 
     #[test]
     fn parents_resolve_across_scan_order() {

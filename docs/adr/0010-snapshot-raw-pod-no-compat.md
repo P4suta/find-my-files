@@ -1,6 +1,6 @@
 # ADR-0010: snapshot is a raw POD dump + full validation, no backward compatibility
 
-Date: 2026-06-11 / Status: Accepted
+Date: 2026-06-11 / Status: Accepted. The format has since evolved, each bump failing the magic check on the prior version → full rescan: **FMFIDX05** (mtime → u32 Unix-seconds, [ADR-0031](0031-mtime-u32-unix-seconds.md)); **FMFIDX06** (name dictionary-encoding — the `lower_pool`/`name_off`/`name_len` sections become `dict_pool`/`dict_off`/`dict_len`/`name_id`, [ADR-0032](0032-name-dictionary-encoding.md)); **FMFIDX07** (gapless dictionary — the `dict_len` section is dropped, each name's length derived from the next `dict_off`, [ADR-0033](0033-phase3-memory-latency-levers.md))
 
 ## Decision
 

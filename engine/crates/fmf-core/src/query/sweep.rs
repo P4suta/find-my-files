@@ -1,96 +1,73 @@
 use rayon::prelude::*;
 
 use super::compile::Driver;
-use super::memo::OffsetTable;
-use crate::index::{EntryId, VolumeIndex};
+use crate::index::VolumeIndex;
 
 // ── Drivers ─────────────────────────────────────────────────────────────
 
-/// Run a pool-sweep driver and return live (and, when filtering, non-
-/// excluded) candidate entries. Hits are validated against entry
-/// boundaries: pool bytes from renamed-away names ("stale gaps") and
-/// matches spanning two names map outside their entry's range and are
-/// rejected.
-pub(super) fn driver_candidates(
-    idx: &VolumeIndex,
-    table: &OffsetTable,
-    driver: &Driver,
-    skip_excluded: bool,
-) -> Vec<EntryId> {
-    // The folded pool is the only contiguous one; case-exact drivers sweep
-    // it with a folded needle (superset — original-case match implies the
-    // folded match) and the exact comparison runs as a residual.
-    let pool: &[u8] = idx.lower_pool_bytes();
-    if table.len() == 0 || pool.is_empty() {
-        return Vec::new();
+/// Sweep the distinct-name dictionary and return the set of matching
+/// `name_id`s as a bitset (ADR-0032). Per-entry concerns — liveness,
+/// exclusion, `files_only`, and the residual/exact-case checks — are applied
+/// later in the materialize walk, where the entry id (not just its name) is
+/// in hand. The dictionary is gapless (names append contiguously), so a hit
+/// maps to exactly one `name_id` via a monotonic cursor over `dict_off`; a
+/// match spilling past a name's end (`hit + needle_len > name_end`) crosses
+/// into the next name and is rejected.
+pub(super) fn driver_candidates(idx: &VolumeIndex, driver: &Driver) -> Vec<u64> {
+    // The folded dictionary is the only contiguous pool; case-exact drivers
+    // sweep it with a folded needle (superset — original-case match implies
+    // the folded match) and the exact comparison runs as a residual.
+    let pool: &[u8] = idx.dict_pool_bytes();
+    let dict_off = idx.dict_offs();
+    let count = dict_off.len();
+    let mut set = vec![0u64; count.div_ceil(64)];
+    if count == 0 || pool.is_empty() {
+        return set;
     }
 
     // Over-split so uneven hit densities still balance across threads.
     let threads = rayon::current_num_threads().max(1) * 4;
-    let per = table.len().div_ceil(threads).max(1);
-    let ranges: Vec<(usize, usize)> = (0..table.len())
+    let per = count.div_ceil(threads).max(1);
+    let ranges: Vec<(usize, usize)> = (0..count)
         .step_by(per)
-        .map(|s| (s, (s + per).min(table.len())))
+        .map(|s| (s, (s + per).min(count)))
         .collect();
 
-    let accept = |id: EntryId| idx.is_live(id) && !(skip_excluded && idx.is_excluded(id));
-
-    let chunks: Vec<Vec<EntryId>> = ranges
+    // Each range owns a disjoint slice of name_ids, so the matched lists
+    // never overlap — concatenate, then flip the bits once.
+    let matched: Vec<Vec<u32>> = ranges
         .into_par_iter()
         .map(|(ks, ke)| {
-            let pool_start = table.offs[ks] as usize;
-            let pool_end = if ke < table.len() {
-                table.offs[ke] as usize
+            let pool_start = dict_off[ks] as usize;
+            let pool_end = if ke < count {
+                dict_off[ke] as usize
             } else {
                 pool.len()
             };
             let hay = &pool[pool_start..pool_end];
-            let mut out = Vec::new();
+            let mut out: Vec<u32> = Vec::new();
 
             let mut sweep =
                 |needle_len: usize,
                  find: &mut dyn FnMut(&[u8]) -> Option<usize>,
                  anchor: &mut dyn FnMut(usize, usize, usize) -> bool| {
                     let mut pos = 0usize;
-                    // Hits arrive in increasing pool order, so the entry
+                    // Hits arrive in increasing pool order, so the name
                     // cursor advances monotonically — amortized O(1) per hit
                     // instead of a binary search.
                     let mut k = ks;
                     while pos < hay.len() {
                         let Some(rel) = find(&hay[pos..]) else { break };
                         let hit = pool_start + pos + rel;
-                        while k + 1 < ke && (table.offs[k + 1] as usize) <= hit {
+                        while k + 1 < ke && (dict_off[k + 1] as usize) <= hit {
                             k += 1;
                         }
-                        let id = table.ids[k];
-                        let off = table.offs[k] as usize;
-                        // A pair whose entry has since moved its name (in-
-                        // place dir rename, incremental table) covers dead
-                        // bytes — skip its whole region like a stale gap.
-                        if idx.name_off_of(id) as usize != off {
-                            let next = if k + 1 < table.len() {
-                                (table.offs[k + 1] as usize).min(pool_end)
-                            } else {
-                                pool_end
-                            };
-                            pos = next.max(hit + 1) - pool_start;
-                            continue;
-                        }
-                        let end = off + idx.name_len_of(id);
+                        let off = dict_off[k] as usize;
+                        let end = dict_off.get(k + 1).map_or(pool.len(), |&e| e as usize);
                         if hit + needle_len <= end && anchor(hit, off, end) {
-                            if accept(id) {
-                                out.push(id);
-                            }
-                            // One hit per entry is enough: resume at its end.
+                            out.push(k as u32);
+                            // One hit per name is enough: resume at its end.
                             pos = end - pool_start;
-                        } else if hit >= end {
-                            // Stale gap between entries: jump to the next entry.
-                            let next = if k + 1 < table.len() {
-                                (table.offs[k + 1] as usize).min(pool_end)
-                            } else {
-                                pool_end
-                            };
-                            pos = next.max(hit + 1) - pool_start;
                         } else {
                             pos = hit + 1 - pool_start;
                         }
@@ -109,26 +86,18 @@ pub(super) fn driver_candidates(
                         hit == off
                     });
                 }
-                Driver::Suffixes {
-                    suffixes,
-                    files_only,
-                    ..
-                } => {
+                Driver::Suffixes { suffixes, .. } => {
                     // Anchored tails defeat memmem's rare-byte prefilter
                     // ('.' occurs in almost every name), so a sequential
-                    // table-order tail compare wins here.
+                    // dict-order tail compare wins here. `files_only` is a
+                    // per-entry property (a name can back both a dir and a
+                    // file) and is applied in the materialize walk.
                     for k in ks..ke {
-                        let id = table.ids[k];
-                        let off = table.offs[k] as usize;
-                        if idx.name_off_of(id) as usize != off {
-                            continue; // stale pair: dead bytes
-                        }
-                        let name = &pool[off..off + idx.name_len_of(id)];
-                        if suffixes.iter().any(|s| name.ends_with(s))
-                            && (!*files_only || !idx.is_dir(id))
-                            && accept(id)
-                        {
-                            out.push(id);
+                        let off = dict_off[k] as usize;
+                        let end = dict_off.get(k + 1).map_or(pool.len(), |&e| e as usize);
+                        let name = &pool[off..end];
+                        if suffixes.iter().any(|s| name.ends_with(s)) {
+                            out.push(k as u32);
                         }
                     }
                 }
@@ -137,7 +106,19 @@ pub(super) fn driver_candidates(
             out
         })
         .collect();
-    chunks.concat()
+    for chunk in matched {
+        for k in chunk {
+            set[k as usize / 64] |= 1u64 << (k as usize % 64);
+        }
+    }
+    set
+}
+
+/// Test whether `name_id` is present in a sweep result bitset.
+#[inline]
+pub(super) fn name_id_in_set(set: &[u64], name_id: u32) -> bool {
+    set.get(name_id as usize / 64)
+        .is_some_and(|w| w >> (name_id % 64) & 1 == 1)
 }
 
 #[cfg(test)]
@@ -145,8 +126,8 @@ mod tests {
     use memchr::memmem;
 
     use super::*;
-    use crate::index::VolumeIndexBuilder;
     use crate::index::testutil::{raw, raw_attr, u16s};
+    use crate::index::{EntryId, VolumeIndexBuilder};
 
     fn sub_driver(needle: &str) -> Driver {
         Driver::Sub {
@@ -155,10 +136,26 @@ mod tests {
         }
     }
 
-    /// `driver_candidates` over a fresh table, id-sorted for stable assertions.
+    /// `driver_candidates` expanded to live entry ids (applying the per-entry
+    /// liveness/exclusion/`files_only` checks the materialize walk owns),
+    /// id-sorted for stable assertions.
     fn run(idx: &VolumeIndex, driver: &Driver, skip_excluded: bool) -> Vec<EntryId> {
-        let table = OffsetTable::build(idx);
-        let mut ids = driver_candidates(idx, &table, driver, skip_excluded);
+        let set = driver_candidates(idx, driver);
+        let files_only = matches!(
+            driver,
+            Driver::Suffixes {
+                files_only: true,
+                ..
+            }
+        );
+        let mut ids: Vec<EntryId> = (0..idx.len() as u32)
+            .filter(|&id| {
+                name_id_in_set(&set, idx.name_id_of(id))
+                    && idx.is_live(id)
+                    && !(skip_excluded && idx.is_excluded(id))
+                    && !(files_only && idx.is_dir(id))
+            })
+            .collect();
         ids.sort_unstable();
         ids
     }
