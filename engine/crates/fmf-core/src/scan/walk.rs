@@ -25,7 +25,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 
 use crate::index::{Frn, RawEntry, VolumeIndex, VolumeIndexBuilder};
-use crate::wtf8::push_wtf8_pair;
+use crate::wtf8::push_folded;
 
 use super::ScanStats;
 use super::walk_id::path_record;
@@ -74,22 +74,25 @@ pub fn walk_scan(roots: &[String], excludes: &[String]) -> (VolumeIndex, ScanSta
 
     // Reused across every entry so the walk allocates O(depth), not O(entries).
     let mut units: Vec<u16> = Vec::new();
-    let mut name_buf: Vec<u8> = Vec::new();
     let mut lower_buf: Vec<u8> = Vec::new();
+    // The child's folded path, rebuilt per entry into this scratch buffer and
+    // only cloned into the stack when we actually descend a directory — files
+    // (the majority) never clone it, keeping the walk O(depth) not O(entries).
+    let mut folded_scratch: Vec<u8> = Vec::new();
     let mut stack: Vec<Pending> = Vec::new();
 
     // Fold each excluded subtree to the same per-char lowercase form the walk
     // builds for every entry (ADR-0003/-0025), so the prune check below is one
     // case-insensitive hash lookup that never re-folds a path. Empty (lookups
-    // all-miss) in the common no-exclude case.
+    // all-miss) in the common no-exclude case. The scope walk never reads the
+    // original-case spelling (the builder re-derives it), so we fold only.
     let prune_set: HashSet<Vec<u8>> = excludes
         .iter()
         .map(|e| {
             units.clear();
             units.extend(PathBuf::from(e).as_os_str().encode_wide());
-            name_buf.clear();
             lower_buf.clear();
-            push_wtf8_pair(&units, &mut name_buf, &mut lower_buf);
+            push_folded(&units, &mut lower_buf);
             lower_buf.clone()
         })
         .collect();
@@ -105,9 +108,8 @@ pub fn walk_scan(roots: &[String], excludes: &[String]) -> (VolumeIndex, ScanSta
         };
         units.clear();
         units.extend(path.as_os_str().encode_wide());
-        name_buf.clear();
         lower_buf.clear();
-        push_wtf8_pair(&units, &mut name_buf, &mut lower_buf);
+        push_folded(&units, &mut lower_buf);
         let record = path_record(&lower_buf);
         let attrs = md.file_attributes();
         // The root's *name* is its whole absolute base path; with slot 0's
@@ -164,21 +166,23 @@ pub fn walk_scan(roots: &[String], excludes: &[String]) -> (VolumeIndex, ScanSta
             let name = entry.file_name();
             units.clear();
             units.extend(name.encode_wide());
-            name_buf.clear();
             lower_buf.clear();
             // lower_buf = folded name; folding is per-char and length-
             // preserving (ADR-0003), so folded(parent)+"\"+folded(name) equals
             // folded(full path) — the watcher recomputes the same key.
-            push_wtf8_pair(&units, &mut name_buf, &mut lower_buf);
-            let mut folded_child = cur.folded.clone();
-            folded_child.push(b'\\');
-            folded_child.extend_from_slice(&lower_buf);
-            let record = path_record(&folded_child);
+            push_folded(&units, &mut lower_buf);
+            // Build the child's folded path into the reused scratch buffer;
+            // it is cloned into the stack only if we descend (below).
+            folded_scratch.clear();
+            folded_scratch.extend_from_slice(&cur.folded);
+            folded_scratch.push(b'\\');
+            folded_scratch.extend_from_slice(&lower_buf);
+            let record = path_record(&folded_scratch);
 
             // User-excluded subtree (scope mode, ADR-0025): drop the directory
             // and skip descent so nothing under it is indexed. Matched on the
             // folded path already built for the record — one lookup, no re-fold.
-            if is_dir && prune_set.contains(&folded_child) {
+            if is_dir && prune_set.contains(&folded_scratch) {
                 stats.walk_excluded_pruned += 1;
                 continue;
             }
@@ -206,7 +210,7 @@ pub fn walk_scan(roots: &[String], excludes: &[String]) -> (VolumeIndex, ScanSta
                 if cur.depth + 1 < MAX_DEPTH {
                     stack.push(Pending {
                         path: entry.path(),
-                        folded: folded_child,
+                        folded: folded_scratch.clone(),
                         record,
                         depth: cur.depth + 1,
                     });
@@ -254,8 +258,8 @@ mod tests {
             .as_os_str()
             .encode_wide()
             .collect();
-        let (mut n, mut l) = (Vec::new(), Vec::new());
-        push_wtf8_pair(&units, &mut n, &mut l);
+        let mut l = Vec::new();
+        push_folded(&units, &mut l);
         l
     }
 

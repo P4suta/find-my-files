@@ -78,10 +78,10 @@ pub fn search(
     q: &CompiledQuery,
     opt: &QueryOptions,
 ) -> (SearchResult, SearchMetrics) {
-    let mut metrics = SearchMetrics {
-        driver: q.driver_label(),
-        ..Default::default()
-    };
+    // `driver` is filled in per branch below: the empty-query fast path labels
+    // itself "perm-walk", so computing `q.driver_label()` (a Vec + String) up
+    // front would just be discarded there — defer it to the non-empty path.
+    let mut metrics = SearchMetrics::default();
     let mut stage = crate::metrics::Stage::start();
     let skip_excluded = !opt.include_hidden_system;
 
@@ -108,6 +108,7 @@ pub fn search(
         );
     }
 
+    metrics.driver = q.driver_label();
     let memo = path_memos(idx, q);
     metrics.memo_us = stage.lap();
 
@@ -123,18 +124,26 @@ pub fn search(
         .collect();
     metrics.scan_us = stage.lap();
 
+    // When any group is a full scan / match-all (no sweep set), the name_id
+    // pre-test can never reject — its `is_none_or` arm is always true — so the
+    // per-entry name_id gather + set scan would be dead work for those
+    // queries. Hoist that decision out of the hot walk (ADR-0033 lever 3a only
+    // covers the all-literal selective case).
+    let has_unset = sets.iter().any(Option::is_none);
+
     // One walk. A cheap, selective pre-test runs *before* the liveness /
     // exclusion `flag` gather: an entry can only match if some literal
-    // group's name is in its sweep set, or some group is a full scan (no set
-    // → defer to the residual pass). On a selective query this rejects ~90%
+    // group's name is in its sweep set. On a selective query this rejects ~90%
     // of entries before they ever touch `flag` (ADR-0033). The survivors then
-    // pay the liveness/exclusion gate and the full per-group match.
+    // pay the liveness/exclusion gate and the full per-group match — which
+    // reuses the `nid` computed here instead of re-gathering it per group.
     let ids = materialize_filtered(idx, opt, |ctx, id| {
         let nid = idx.name_id_of(id);
-        let name_possible = sets
-            .iter()
-            .any(|set| set.as_deref().is_none_or(|s| name_id_in_set(s, nid)));
-        if !name_possible {
+        if !has_unset
+            && !sets
+                .iter()
+                .any(|set| set.as_deref().is_some_and(|s| name_id_in_set(s, nid)))
+        {
             return false;
         }
         if !idx.is_live(id) || (skip_excluded && idx.is_excluded(id)) {
@@ -143,7 +152,7 @@ pub fn search(
         q.groups
             .iter()
             .zip(&sets)
-            .any(|(g, set)| group_matches(idx, &memo, ctx, g, set.as_deref(), id))
+            .any(|(g, set)| group_matches(idx, &memo, ctx, g, set.as_deref(), nid, id))
     });
     metrics.entries_scanned = idx.len() as u64;
     metrics.materialize_us = stage.lap();
@@ -227,17 +236,18 @@ fn group_matches(
     ctx: &mut EvalCtx,
     g: &CompiledGroup,
     set: Option<&[u64]>,
+    nid: u32,
     id: EntryId,
 ) -> bool {
     match &g.driver {
         Driver::MatchAll | Driver::FullScan => terms_match(idx, memo, ctx, &g.terms, id),
         Driver::Suffixes { files_only, .. } => {
-            set.is_some_and(|s| name_id_in_set(s, idx.name_id_of(id)))
+            set.is_some_and(|s| name_id_in_set(s, nid))
                 && !(*files_only && idx.is_dir(id))
                 && terms_match_iter(idx, memo, ctx, g.residual_terms(), id)
         }
         _ => {
-            set.is_some_and(|s| name_id_in_set(s, idx.name_id_of(id)))
+            set.is_some_and(|s| name_id_in_set(s, nid))
                 && terms_match_iter(idx, memo, ctx, g.residual_terms(), id)
         }
     }

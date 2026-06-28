@@ -101,7 +101,11 @@ fn u64_at(b: &[u8], off: usize) -> u64 {
 /// surface this as a counter+warning instead of letting it vanish).
 #[must_use]
 pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>, bool) {
-    let mut records = Vec::new();
+    // A 64 KiB FSCTL buffer holds hundreds of ~60-80 B V2 records; pre-size
+    // off the input length (min record ~60 B, ~96 B average) to skip the
+    // realloc chain. Bounded by the input, so no over-allocation on a buffer
+    // that decodes to few records.
+    let mut records = Vec::with_capacity(buf.len() / 96);
     let mut truncated = false;
     if buf.len() < 8 {
         return (0, records, !buf.is_empty());
