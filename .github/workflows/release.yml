@@ -3,24 +3,27 @@
 #
 #   build   -> assembles the distributable bundle (`just publish`) + SBOMs and
 #              uploads them as artifacts. Holds NO secrets, read-only token.
-#   sign    -> downloads the bundle, Authenticode-signs our own PE binaries with
-#              SSL.com eSigner via the eSigner CKA (Cloud Key Adapter): the cloud
-#              certificate is loaded into the Windows store as a virtual token and
-#              we sign with the standard `signtool` (RFC 3161 timestamp, in place),
-#              then hard-verify chain + timestamp + signer. This is the only job
-#              that sees the signing secrets, so it runs in the approval-gated
-#              `release` environment.
+#   sign    -> downloads the bundle and Authenticode-signs our own five PE files
+#              with SSL.com eSigner via the official SSLcom/esigner-codesign Action
+#              (command: batch_sign, SHA-pinned): CodeSignTool scans then signs,
+#              timestamping (RFC 3161) via SSL.com's TSA. The five PEs are staged
+#              into a flat dir through a path->unique-name map (two share the
+#              basename FindMyFiles.exe), signed into an explicit output dir, and
+#              copied back; then we hard-verify chain + timestamp + signer. This is
+#              the only job that sees the signing secrets, so it runs in the
+#              approval-gated `release` environment.
 #   publish -> downloads the signed bundle, zips + checksums it (`just package`),
 #              writes keyless build-provenance + SBOM attestations (Sigstore via
 #              the OIDC GITHUB_TOKEN - no stored secrets) and attaches everything
 #              to a GitHub Release. Runs only on a tag push / publish=true.
 #
-# Auth: the default GITHUB_TOKEN for the release; SSL.com eSigner CKA via repo/
-# environment secrets (ES_USERNAME / ES_PASSWORD / ES_TOTP_SECRET). Signing is
-# non-blocking: until those secrets exist the run publishes an UNSIGNED zip with
-# a ::warning:: rather than failing. Setup + rationale live in docs/SIGNING.md,
+# Auth: the default GITHUB_TOKEN for the release; SSL.com eSigner via four `release`
+# environment secrets (ES_USERNAME / ES_PASSWORD / CREDENTIAL_ID / ES_TOTP_SECRET).
+# Signing is non-blocking: until those secrets exist the run publishes an UNSIGNED
+# zip with a ::warning:: rather than failing. Setup + rationale live in docs/SIGNING.md,
 # docs/adr/0020-code-signing-provider.md (provider/cert) and
-# docs/adr/0029-ci-signing-cka-pipeline.md (CKA + signtool, this 3-job shape).
+# docs/adr/0029-ci-signing-cka-pipeline.md (official Action, this 3-job shape;
+# records why the eSigner CKA + standard signtool alternative was rejected).
 #
 # A manual run (workflow_dispatch) with publish=false builds + signs + verifies
 # but creates no Release/attestations - a signing smoke test that is safe under
@@ -70,6 +73,19 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Fail fast on a publishing run pointed at a non-version ref before the
+      # gated `sign` job burns a reviewer approval + an eSigner signing quota on a
+      # misfire (`just package` rejects a non-vX.Y.Z TAG too, but only after sign).
+      # A publish=false smoke test (e.g. tag_name=main) is deliberately exempt.
+      - name: Validate tag for a publishing run
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+        shell: bash
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::publishing run requires a vX.Y.Z tag, got '$TAG' (use publish=false for a signing smoke test from a branch)"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ env.TAG }}
