@@ -65,6 +65,17 @@
          worktree. -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+    <!-- Source Link: stamp the shipped PE/PDB with the exact commit + a GitHub
+         source map, so a stack trace or debugger against a released build resolves
+         to the precise source on github.com. Pairs with the release provenance/SBOM
+         attestations — the binary now self-describes where its source lives. The
+         .NET 10 SDK has Source Link built in, so this needs no PackageReference
+         (the GitHub provider is auto-referenced from the git remote): it enables
+         the feature without adding a dependency. EmbedUntrackedSources also folds
+         generated sources (XAML .g.cs) into the symbols. CI-gated path
+         normalization (ContinuousIntegrationBuild, above) is the other half. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
   </PropertyGroup>
 
   <ItemGroup>
