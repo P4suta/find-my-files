@@ -10,7 +10,7 @@ Design rationale: [ADR-0035](adr/0035-automated-versioning-with-release-please-a
 1. Conventional Commits land on `main` (squash-merged PRs; the PR title is the commit).
 2. [`release-please`](../.github/workflows/release-please.yml) keeps a **Release PR** open
    that bumps `engine/Cargo.toml` + `engine/Cargo.lock` and `app/FindMyFiles/FindMyFiles.csproj`,
-   and updates [`CHANGELOG.md`](../CHANGELOG.md). The version is derived from the commits:
+   and updates [`engine/CHANGELOG.md`](../engine/CHANGELOG.md). The version is derived from the commits:
    `feat:` → minor, `fix:`/`perf:` → patch, `!` / `BREAKING CHANGE:` → major.
 3. **Merge the Release PR.** release-please cuts the `vX.Y.Z` tag and a GitHub Release.
 4. The tag fires [`release.yml`](../.github/workflows/release.yml): build → (signed) → publish,
@@ -65,7 +65,7 @@ The Cargo workspace uses inherited versions (`version.workspace = true`) and CI 
 - `engine/Cargo.toml` `[workspace.package] version`
 - `engine/Cargo.lock` (the internal crates' versions)
 - `app/FindMyFiles/FindMyFiles.csproj` `<Version>` (the `x-release-please-version` line)
-- `CHANGELOG.md`
+- `engine/CHANGELOG.md`
 
 If `Cargo.lock` or the csproj is missed, see the fallback in ADR-0035's re-examination
 triggers (a `toml` extra-file updater + a lock-refresh step).
