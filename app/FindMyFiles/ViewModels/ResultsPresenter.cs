@@ -98,7 +98,8 @@ public sealed partial class ResultsPresenter : ObservableObject
         var count = (int)Math.Min(result.Count, int.MaxValue);
         var (firstIndex, lastIndex, restoreIndex) = SeedWindow(origin, count);
 
-        var seeds = new List<PageSeed>();
+        var seeds = new List<PageSeed>(
+            (lastIndex / VirtualResultList.PageSize) - (firstIndex / VirtualResultList.PageSize) + 1);
         try
         {
             for (var page = firstIndex / VirtualResultList.PageSize;
@@ -163,7 +164,8 @@ public sealed partial class ResultsPresenter : ObservableObject
 
         // Always the position-preserving window: the screen is not moving.
         var (firstIndex, lastIndex, _) = SeedWindow(RequeryOrigin.IndexChanged, count);
-        var seeds = new List<PageSeed>();
+        var seeds = new List<PageSeed>(
+            (lastIndex / VirtualResultList.PageSize) - (firstIndex / VirtualResultList.PageSize) + 1);
         try
         {
             for (var page = firstIndex / VirtualResultList.PageSize;

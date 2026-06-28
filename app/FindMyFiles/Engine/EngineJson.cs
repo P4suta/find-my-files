@@ -13,8 +13,13 @@ namespace FindMyFiles.Engine;
 /// </summary>
 internal static class EngineJson
 {
-    internal static readonly JsonSerializerOptions SnakeCase = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-    };
+    /// <summary>
+    /// The engine-JSON options, backed by the source-generated
+    /// <see cref="EngineJsonContext"/> (compile-time metadata in place of
+    /// reflection, trim/AOT-forward; mirrors the codebase's source-gen posture).
+    /// Returns the context's cached singleton — callers needing a tweak (the
+    /// indented diag dump) derive from it, so the casing and resolver stay
+    /// defined in one place. Every registered engine type resolves through it.
+    /// </summary>
+    internal static JsonSerializerOptions SnakeCase => EngineJsonContext.Default.Options;
 }

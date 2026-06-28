@@ -143,15 +143,16 @@ internal static class PipeProtocol
     // ── Query (op 7, 20B POD options + UTF-8 text) ──────────────────────
     public static byte[] EncodeQueryReq(SearchOptions options, string text)
     {
-        var textBytes = Encoding.UTF8.GetBytes(text);
-        var b = new byte[EngineContract.QueryOptionsSize + textBytes.Length];
+        // Size the frame off the UTF-8 byte count and encode the text straight
+        // into it — no intermediate array + copy (this runs per keystroke).
+        var b = new byte[EngineContract.QueryOptionsSize + Encoding.UTF8.GetByteCount(text)];
         BinaryPrimitives.WriteUInt32LittleEndian(b, (uint)options.Sort);
         BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), options.Descending ? 1u : 0u);
         BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(8), (uint)options.Case);
         BinaryPrimitives.WriteUInt32LittleEndian(
             b.AsSpan(12), options.IncludeHiddenSystem ? 1u : 0u);
         BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(16), options.RegexModeBits);
-        textBytes.CopyTo(b, EngineContract.QueryOptionsSize);
+        Encoding.UTF8.GetBytes(text, b.AsSpan(EngineContract.QueryOptionsSize));
         return b;
     }
 
@@ -334,7 +335,9 @@ internal static class PipeProtocol
     }
 
     // ── JSON payloads (op 4/5/6/10/12, snake_case via EngineJson) ───────
-    private sealed class VolumeStatusJson
+    // internal (not private) only so EngineJsonContext can register them for
+    // source-generated (de)serialization; they remain engine-internal DTOs.
+    internal sealed class VolumeStatusJson
     {
         public string Volume { get; set; } = string.Empty;
 
@@ -343,7 +346,7 @@ internal static class PipeProtocol
         public ulong Entries { get; set; }
     }
 
-    private sealed class IndexStartJson
+    internal sealed class IndexStartJson
     {
         public List<string> Volumes { get; set; } = [];
     }

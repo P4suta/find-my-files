@@ -24,8 +24,28 @@ public sealed class CompiledHighlighter : IHighlighter
     public static readonly CompiledHighlighter Empty = new([]);
 
     private readonly IReadOnlyList<Needle> _needles;
+    private readonly bool _hasName;
+    private readonly bool _hasPath;
 
-    internal CompiledHighlighter(IReadOnlyList<Needle> needles) => _needles = needles;
+    internal CompiledHighlighter(IReadOnlyList<Needle> needles)
+    {
+        _needles = needles;
+
+        // Precompute which fields any needle targets so Ranges can early-return
+        // the shared empty list for an absent field (the common name-only query
+        // calls Ranges(fullPath, Path) per row) without allocating + scanning.
+        foreach (var n in needles)
+        {
+            if (n.Field == HighlightField.Name)
+            {
+                _hasName = true;
+            }
+            else if (n.Field == HighlightField.Path)
+            {
+                _hasPath = true;
+            }
+        }
+    }
 
     /// <summary>True when nothing will ever be highlighted — the caller can
     /// skip per-row work entirely.</summary>
@@ -43,7 +63,8 @@ public sealed class CompiledHighlighter : IHighlighter
     /// <returns>The sorted, merged highlight ranges; empty when nothing matches.</returns>
     public IReadOnlyList<HighlightRange> Ranges(string text, HighlightField field)
     {
-        if (_needles.Count == 0 || text.Length == 0)
+        var fieldPresent = field == HighlightField.Name ? _hasName : _hasPath;
+        if (!fieldPresent || _needles.Count == 0 || text.Length == 0)
         {
             return [];
         }
