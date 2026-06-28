@@ -58,7 +58,9 @@
     "max_us": 10000
   },
   "p50_us": 4,
+  "p90_us": 16384,
   "p99_us": 16384,
+  "p999_us": 16384,
   "recent_usn": [
     {
       "volume": "C:",
@@ -111,6 +113,8 @@
       "structural_generation": 59
     }
   ],
+  "current_ws_bytes": 90,
+  "current_private_bytes": 91,
   "counters": {
     "stat_fetch_failures": 61,
     "usn_batches_truncated": 62,

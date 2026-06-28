@@ -140,6 +140,13 @@
   <data name="DiagStatScanned.Text" xml:space="preserve"><value>Scanned</value></data>
   <data name="DiagStatDriver.Text" xml:space="preserve"><value>Driver</value></data>
   <data name="DiagHealthHeaderBar.Title" xml:space="preserve"><value>Health</value></data>
+  <data name="DiagMemoryHeader.Text" xml:space="preserve"><value>Memory</value></data>
+  <data name="DiagMemProcess.Text" xml:space="preserve"><value>Process</value></data>
+  <data name="DiagMemIndex.Text" xml:space="preserve"><value>Index</value></data>
+  <data name="DiagMemOverhead.Text" xml:space="preserve"><value>Overhead</value></data>
+  <data name="DiagScanHeader.Text" xml:space="preserve"><value>Last scan</value></data>
+  <data name="DiagOpenEngineLog.Content" xml:space="preserve"><value>Engine log</value></data>
+  <data name="DiagOpenAppLog.Content" xml:space="preserve"><value>App log</value></data>
 
   <!-- ===== Code (Loc.Get) ===== -->
   <data name="Tray_Open" xml:space="preserve"><value>Open</value></data>

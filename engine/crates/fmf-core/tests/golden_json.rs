@@ -172,7 +172,9 @@ fn metrics_snapshot_json_shape_is_pinned() {
     let snapshot = MetricsSnapshot {
         recent_queries: vec![sample_trace()],
         p50_us: histogram.percentile_us(0.50),
+        p90_us: histogram.percentile_us(0.90),
         p99_us: histogram.percentile_us(0.99),
+        p999_us: histogram.percentile_us(0.999),
         query_histogram: histogram,
         recent_usn: vec![UsnTrace {
             volume: "C:".into(),
@@ -220,6 +222,8 @@ fn metrics_snapshot_json_shape_is_pinned() {
             content_generation: 58,
             structural_generation: 59,
         }],
+        current_ws_bytes: 90,
+        current_private_bytes: 91,
         counters: CountersSnapshot {
             stat_fetch_failures: 61,
             usn_batches_truncated: 62,

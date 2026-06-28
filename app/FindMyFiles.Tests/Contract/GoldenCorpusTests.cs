@@ -127,11 +127,14 @@ public sealed class GoldenCorpusTests
             case (PipeProtocol.Op.ServiceInfo, true):
                 {
                     // C# has no ServiceInfo encoder (the client only consumes it);
-                    // pin the snake_case key set and pass the payload through.
+                    // pin the snake_case key set and that it deserializes into the
+                    // DTO the pipe client fills, then pass the payload through.
                     using var doc = JsonDocument.Parse(payload);
                     Assert.True(doc.RootElement.TryGetProperty("uptime_ms", out _), file);
                     Assert.True(doc.RootElement.TryGetProperty("connections", out _), file);
-                    Assert.True(doc.RootElement.TryGetProperty("version", out _), file);
+                    Assert.True(doc.RootElement.TryGetProperty("version", out var ver), file);
+                    var info = JsonSerializer.Deserialize<ServiceInfoData>(payload, EngineJson.SnakeCase)!;
+                    Assert.Equal(ver.GetString(), info.Version);
                     return payload;
                 }
 
@@ -175,14 +178,34 @@ public sealed class GoldenCorpusTests
         Assert.Equal("refine", trace.Cache);
         Assert.Equal(81UL, trace.TotalUs);
         Assert.NotEqual(0UL, stats.P50Us);
+        Assert.NotEqual(0UL, stats.P90Us);
         Assert.NotEqual(0UL, stats.P99Us);
+        Assert.NotEqual(0UL, stats.P999Us);
+        Assert.Equal(6UL, stats.QueryHistogram.Count);
+        Assert.Equal(32, stats.QueryHistogram.Buckets.Count);
         var usn = Assert.Single(stats.RecentUsn);
         Assert.Equal(25UL, usn.StatFailures);
         Assert.Equal(26UL, usn.ApplyUs);
+        var scan = Assert.Single(stats.Scans);
+        Assert.Equal("snapshot", scan.Source);
+        Assert.Equal(33.5, scan.MbPerS);
+        Assert.Equal(39UL, scan.Entries);
+        Assert.Equal(40UL, scan.PeakWsBytes);
         var index = Assert.Single(stats.Indexes);
         Assert.Equal("C:", index.Volume);
         Assert.Equal(41UL, index.Entries);
         Assert.Equal(58UL, index.ContentGeneration);
+
+        // Per-column breakdown the panel surfaces (was silently dropped before).
+        Assert.Equal(44UL, index.NamePoolBytes);
+        Assert.Equal(53UL, index.FrnMapBytes);
+        Assert.Equal(54UL, index.DeadNameBytes);
+        Assert.Equal(0.5, index.PoolGarbageRatio);
+        Assert.Equal(59UL, index.StructuralGeneration);
+
+        // Process memory footprint (the headline new figure).
+        Assert.Equal(90UL, stats.CurrentWsBytes);
+        Assert.Equal(91UL, stats.CurrentPrivateBytes);
         Assert.Equal(61UL, stats.Counters.StatFetchFailures);
         Assert.Equal(67UL, stats.Counters.JournalRescans);
         Assert.Equal(74UL, stats.Counters.PipeConnectionsRejected);

@@ -91,10 +91,104 @@ public sealed class DiagFormatTests
         Assert.Equal(string.Empty, DiagFormat.Percentiles(null));
 
     [Fact]
-    public void Percentiles_renders_p50_and_p99()
+    public void Percentiles_renders_the_standard_p50_p90_p99_p999_line()
     {
-        var stats = new EngineStatsData { P50Us = 1200, P99Us = 4500 };
-        Assert.Equal("p50 1.20 ms · p99 4.50 ms", DiagFormat.Percentiles(stats));
+        var stats = new EngineStatsData { P50Us = 1200, P90Us = 2100, P99Us = 4500, P999Us = 9000 };
+        Assert.Equal(
+            "p50 1.20 ms · p90 2.10 ms · p99 4.50 ms · p99.9 9.00 ms",
+            DiagFormat.Percentiles(stats));
+    }
+
+    [Fact]
+    public void ProcessMemory_is_empty_when_no_stats() =>
+        Assert.Equal(string.Empty, DiagFormat.ProcessMemory(null));
+
+    [Fact]
+    public void ProcessMemory_renders_private_bytes_and_working_set_with_standard_names()
+    {
+        // 142 MiB private, 138 MiB working set.
+        var stats = new EngineStatsData
+        {
+            CurrentPrivateBytes = 142UL * 1024 * 1024,
+            CurrentWsBytes = 138UL * 1024 * 1024,
+        };
+        Assert.Equal("Private Bytes 142 MB · Working Set 138 MB", DiagFormat.ProcessMemory(stats));
+    }
+
+    [Fact]
+    public void IndexTotal_sums_resident_index_bytes_across_volumes()
+    {
+        var stats = new EngineStatsData
+        {
+            Indexes =
+            [
+                new IndexStatsData { TotalBytes = 40UL * 1024 * 1024 },
+                new IndexStatsData { TotalBytes = 24UL * 1024 * 1024 },
+            ],
+        };
+        Assert.Equal("64 MB", DiagFormat.IndexTotal(stats));
+    }
+
+    [Fact]
+    public void Overhead_is_working_set_minus_index_bytes_clamped_at_zero()
+    {
+        var stats = new EngineStatsData
+        {
+            CurrentWsBytes = 100UL * 1024 * 1024,
+            Indexes = [new IndexStatsData { TotalBytes = 70UL * 1024 * 1024 }],
+        };
+        Assert.Equal("30 MB", DiagFormat.Overhead(stats));
+
+        // Index larger than WS (shouldn't happen, but must not underflow).
+        var weird = new EngineStatsData
+        {
+            CurrentWsBytes = 10UL * 1024 * 1024,
+            Indexes = [new IndexStatsData { TotalBytes = 70UL * 1024 * 1024 }],
+        };
+        Assert.Equal("0 MB", DiagFormat.Overhead(weird));
+    }
+
+    [Fact]
+    public void IndexColumns_breaks_down_the_dominant_columns_with_garbage_ratio() =>
+        Assert.Equal(
+            "name 40 MB · lower 40 MB · offsets 8 MB · parent 4 MB · perm 4 MB · frn-map 8 MB · dead 1 MB (1.5%)",
+            DiagFormat.IndexColumns(
+                40UL * 1024 * 1024,
+                40UL * 1024 * 1024,
+                8UL * 1024 * 1024,
+                4UL * 1024 * 1024,
+                4UL * 1024 * 1024,
+                8UL * 1024 * 1024,
+                1UL * 1024 * 1024,
+                0.015));
+
+    [Fact]
+    public void Scan_formats_a_restore_line_with_phase_breakdown_and_peak() =>
+        Assert.Equal(
+            "C: snapshot 1.2 s · 850 MB/s · parse 34ms build 36ms sort 37ms · peak 410 MB · 1,234,567件",
+            DiagFormat.Scan("C:", "snapshot", 850, 34, 36, 37, 1200, 1_234_567, 410UL * 1024 * 1024));
+
+    [Fact]
+    public void Service_is_empty_for_inproc_clients() =>
+        Assert.Equal(string.Empty, DiagFormat.Service(new EngineStatsData { Service = null }));
+
+    [Fact]
+    public void Service_renders_uptime_connections_and_version()
+    {
+        var stats = new EngineStatsData
+        {
+            Service = new ServiceInfoData { UptimeMs = 8_000_000, Connections = 1, Version = "0.1.0" },
+        };
+        Assert.Equal("uptime 2h13m · 接続 1 · v0.1.0", DiagFormat.Service(stats));
+    }
+
+    [Fact]
+    public void ServiceVis_tracks_presence_of_service_info()
+    {
+        Assert.Equal(Visibility.Collapsed, DiagFormat.ServiceVis(new EngineStatsData { Service = null }));
+        Assert.Equal(
+            Visibility.Visible,
+            DiagFormat.ServiceVis(new EngineStatsData { Service = new ServiceInfoData() }));
     }
 
     [Fact]

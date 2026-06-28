@@ -567,9 +567,31 @@ public sealed class PipeEngineClient : IEngineClient
                     AbiVersion = _abiVersion,
                 };
             }
+
+            // Service runtime info is a separate op and a nice-to-have on top of
+            // the stats snapshot — best-effort, so a failure here never voids the
+            // stats the panel already has.
+            stats.Service = await TryGetServiceInfoAsync(ct).ConfigureAwait(false);
         }
 
         return stats;
+    }
+
+    private async Task<ServiceInfoData?> TryGetServiceInfoAsync(CancellationToken ct)
+    {
+        try
+        {
+            var (status, payload) = await RequestAsync(PipeProtocol.Op.ServiceInfo, [], ct)
+                .ConfigureAwait(false);
+            return status == PipeProtocol.Status.Ok
+                ? JsonSerializer.Deserialize<ServiceInfoData>(payload, EngineJson.SnakeCase)
+                : null;
+        }
+        catch (EngineUnavailableException ex)
+        {
+            FileLog.Warn("pipe", $"service info unavailable: {ex.Message}");
+            return null;
+        }
     }
 
     // ── Result paging (used by PipeSearchResult) ────────────────────────

@@ -79,11 +79,117 @@ public static class DiagFormat
     /// <returns>The driver label, or empty when <paramref name="t"/> is null.</returns>
     public static string Driver(QueryTraceData? t) => t is null ? string.Empty : t.Driver;
 
-    /// <summary>The p50/p99 latency line (e.g. <c>"p50 0.82 ms · p99 4.21 ms"</c>).</summary>
+    /// <summary>The standard latency-percentile line — p50/p90/p99/p99.9, the
+    /// figures monitoring tools report (e.g.
+    /// <c>"p50 0.82 ms · p90 1.90 ms · p99 4.21 ms · p99.9 9.00 ms"</c>).</summary>
     /// <param name="s">The stats snapshot, or null before the first poll.</param>
     /// <returns>The percentile line, or empty when <paramref name="s"/> is null.</returns>
     public static string Percentiles(EngineStatsData? s) =>
-        s is null ? string.Empty : $"p50 {Ms(s.P50Us)} · p99 {Ms(s.P99Us)}";
+        s is null
+            ? string.Empty
+            : $"p50 {Ms(s.P50Us)} · p90 {Ms(s.P90Us)} · p99 {Ms(s.P99Us)} · p99.9 {Ms(s.P999Us)}";
+
+    /// <summary>The host process's live memory footprint, using the standard
+    /// Windows names (<c>"Private Bytes 142 MB · Working Set 138 MB"</c>) —
+    /// the same figures Task Manager / Process Explorer report. In pipe mode
+    /// this is the service process; under <c>--engine=inproc</c> the app.</summary>
+    /// <param name="s">The stats snapshot, or null before the first poll.</param>
+    /// <returns>The memory line, or empty when <paramref name="s"/> is null.</returns>
+    public static string ProcessMemory(EngineStatsData? s) =>
+        s is null
+            ? string.Empty
+            : $"Private Bytes {Mb(s.CurrentPrivateBytes)} · Working Set {Mb(s.CurrentWsBytes)}";
+
+    /// <summary>Total resident index bytes summed across all volumes (the
+    /// engine's own accounting), as whole MB.</summary>
+    /// <param name="s">The stats snapshot, or null before the first poll.</param>
+    /// <returns>The index total, or empty when <paramref name="s"/> is null.</returns>
+    public static string IndexTotal(EngineStatsData? s) =>
+        s is null ? string.Empty : Mb(IndexBytes(s));
+
+    /// <summary>Process working set minus the indexes' resident bytes — the
+    /// non-index overhead (engine + runtime), as whole MB. Clamped at 0.</summary>
+    /// <param name="s">The stats snapshot, or null before the first poll.</param>
+    /// <returns>The overhead, or empty when <paramref name="s"/> is null.</returns>
+    public static string Overhead(EngineStatsData? s)
+    {
+        if (s is null)
+        {
+            return string.Empty;
+        }
+
+        var idx = IndexBytes(s);
+        return Mb(s.CurrentWsBytes > idx ? s.CurrentWsBytes - idx : 0);
+    }
+
+    /// <summary>Per-column byte breakdown for one volume index (where the RAM
+    /// goes), with the spool garbage ratio. Member-wise (not object) so it
+    /// binds from an <c>IndexStatsData</c> DataTemplate, like
+    /// <see cref="Usn"/>.</summary>
+    /// <param name="namePool">Original-name spool bytes.</param>
+    /// <param name="lowerPool">Case-folded name spool bytes.</param>
+    /// <param name="offsets">Name-offset table bytes.</param>
+    /// <param name="parent">Parent-pointer column bytes.</param>
+    /// <param name="perm">Name-sort permutation bytes.</param>
+    /// <param name="frnMap">FRN→row lookup map bytes.</param>
+    /// <param name="deadName">Reclaimable dead-name spool bytes.</param>
+    /// <param name="garbageRatio">Dead-name fraction of the spools (0..1).</param>
+    /// <returns>The breakdown line.</returns>
+    public static string IndexColumns(
+        ulong namePool,
+        ulong lowerPool,
+        ulong offsets,
+        ulong parent,
+        ulong perm,
+        ulong frnMap,
+        ulong deadName,
+        double garbageRatio) =>
+        $"name {Mb(namePool)} · lower {Mb(lowerPool)} · offsets {Mb(offsets)} · " +
+        $"parent {Mb(parent)} · perm {Mb(perm)} · frn-map {Mb(frnMap)} · " +
+        $"dead {Mb(deadName)} ({Percent(garbageRatio)})";
+
+    /// <summary>One index-established (scan/restore) event as a compact line
+    /// (e.g. <c>"C: snapshot 1.2 s · 850 MB/s · parse 34ms build 36ms sort 37ms · peak 410 MB · 1,234,567件"</c>).
+    /// Member-wise so it binds from a <c>ScanTraceData</c> DataTemplate.</summary>
+    /// <param name="volume">Drive label.</param>
+    /// <param name="source">How the index was established (scan/snapshot).</param>
+    /// <param name="mbPerS">Read throughput in MB/s.</param>
+    /// <param name="parseMs">ms spent parsing MFT records.</param>
+    /// <param name="buildMs">ms spent building the index.</param>
+    /// <param name="sortMs">ms spent sorting the permutation.</param>
+    /// <param name="totalMs">End-to-end ms.</param>
+    /// <param name="entries">Entry count once established.</param>
+    /// <param name="peakWs">Peak working set during the establish, in bytes.</param>
+    /// <returns>The scan line.</returns>
+    public static string Scan(
+        string volume,
+        string source,
+        double mbPerS,
+        ulong parseMs,
+        ulong buildMs,
+        ulong sortMs,
+        ulong totalMs,
+        ulong entries,
+        ulong peakWs) =>
+        $"{volume} {source} {Secs(totalMs)} · {mbPerS.ToString("F0", Inv)} MB/s · " +
+        $"parse {parseMs}ms build {buildMs}ms sort {sortMs}ms · " +
+        $"peak {Mb(peakWs)} · {Count(entries)}件";
+
+    /// <summary>The service runtime line (pipe only): uptime, active
+    /// connections and version (e.g. <c>"uptime 2h13m · 接続 1 · v0.1.0"</c>).
+    /// Empty for in-proc clients where there is no separate service.</summary>
+    /// <param name="s">The stats snapshot, or null before the first poll.</param>
+    /// <returns>The service line, or empty when there is no service.</returns>
+    public static string Service(EngineStatsData? s) =>
+        s?.Service is { } svc
+            ? $"uptime {Uptime(svc.UptimeMs)} · 接続 {svc.Connections} · v{svc.Version}"
+            : string.Empty;
+
+    /// <summary>Visible only when a service is on the other end (pipe clients).</summary>
+    /// <param name="s">The stats snapshot, or null before the first poll.</param>
+    /// <returns><c>Visible</c> when there is service info, otherwise <c>Collapsed</c>.</returns>
+    public static Visibility ServiceVis(EngineStatsData? s) =>
+        s?.Service is not null ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>The pipe-transport detail line. Empty for in-proc/fake clients
     /// (no wire), where the panel shows only the engine-mode label above it.</summary>
@@ -189,6 +295,40 @@ public static class DiagFormat
 
     private static bool AnyDegraded(EngineStatsData s) =>
         CounterProps.Any(p => (ulong)p.GetValue(s.Counters)! > 0);
+
+    private static ulong IndexBytes(EngineStatsData s)
+    {
+        ulong total = 0;
+        foreach (var ix in s.Indexes)
+        {
+            total += ix.TotalBytes;
+        }
+
+        return total;
+    }
+
+    /// <summary>A 0..1 ratio as a one-decimal percentage (e.g. <c>"1.5%"</c>).</summary>
+    private static string Percent(double ratio) => (ratio * 100.0).ToString("F1", Inv) + "%";
+
+    /// <summary>Milliseconds as seconds with one decimal once past a second
+    /// (e.g. <c>"1.2 s"</c>), otherwise whole milliseconds (e.g. <c>"820ms"</c>).</summary>
+    private static string Secs(ulong ms) =>
+        ms >= 1000 ? (ms / 1000.0).ToString("F1", Inv) + " s" : ms.ToString(Inv) + "ms";
+
+    /// <summary>Milliseconds as a coarse uptime: <c>"2h13m"</c> / <c>"13m"</c> /
+    /// <c>"45s"</c>.</summary>
+    private static string Uptime(ulong ms)
+    {
+        var totalSecs = ms / 1000;
+        var hours = totalSecs / 3600;
+        var mins = (totalSecs % 3600) / 60;
+        if (hours > 0)
+        {
+            return $"{hours}h{mins:D2}m";
+        }
+
+        return mins > 0 ? $"{mins}m" : $"{totalSecs}s";
+    }
 
     private static readonly PropertyInfo[] CounterProps =
         [.. typeof(CountersData).GetProperties().Where(p => p.PropertyType == typeof(ulong))];

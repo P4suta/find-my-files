@@ -29,9 +29,57 @@ public sealed class IndexStatsData
     /// figure measured against the ≤110 B/file target.</summary>
     public double BytesPerEntry { get; set; }
 
+    // ── Per-column byte breakdown (where the RAM goes) ──────────────────────
+    // The columns sum (with the derived cache) to TotalBytes; surfacing them
+    // lets the F12 panel show which structure dominates the footprint.
+
+    /// <summary>Bytes held by the original-name spool (the cased file names).</summary>
+    public ulong NamePoolBytes { get; set; }
+
+    /// <summary>Bytes held by the case-folded name spool (used for matching).</summary>
+    public ulong LowerPoolBytes { get; set; }
+
+    /// <summary>Bytes of the name-offset table into the spools.</summary>
+    public ulong OffsetsBytes { get; set; }
+
+    /// <summary>Bytes of the parent-pointer column (the directory tree).</summary>
+    public ulong ParentBytes { get; set; }
+
+    /// <summary>Bytes of the file-size column (u32 + overflow side table).</summary>
+    public ulong SizeBytes { get; set; }
+
+    /// <summary>Bytes of the modification-time column.</summary>
+    public ulong MtimeBytes { get; set; }
+
+    /// <summary>Bytes of the file-reference-number (FRN) column.</summary>
+    public ulong FrnBytes { get; set; }
+
+    /// <summary>Bytes of the per-entry flag column.</summary>
+    public ulong FlagBytes { get; set; }
+
+    /// <summary>Bytes of the name-sort permutation (the ordered view).</summary>
+    public ulong PermutationsBytes { get; set; }
+
+    /// <summary>Bytes of the FRN→row lookup map (USN apply uses it).</summary>
+    public ulong FrnMapBytes { get; set; }
+
+    /// <summary>Spool bytes occupied by superseded names awaiting compaction.</summary>
+    public ulong DeadNameBytes { get; set; }
+
+    /// <summary><c>DeadNameBytes / (NamePoolBytes + LowerPoolBytes)</c> — how
+    /// much of the spools is reclaimable garbage (compaction trigger).</summary>
+    public double PoolGarbageRatio { get; set; }
+
+    /// <summary>Bytes of query-layer derived caches (e.g. directory-path
+    /// memos) attributed to this volume.</summary>
+    public ulong DerivedCacheBytes { get; set; }
+
     /// <summary>Bumps on every content change (USN apply, rescan). A stable
     /// value means an <see cref="QueryTraceData.Unchanged"/> re-query is
-    /// possible; the structural generation (not exposed here) is what
-    /// invalidates a result with <see cref="StaleResultException"/>.</summary>
+    /// possible.</summary>
     public ulong ContentGeneration { get; set; }
+
+    /// <summary>Bumps on every structural change (add/delete/rename) — what
+    /// invalidates a held result with <see cref="StaleResultException"/>.</summary>
+    public ulong StructuralGeneration { get; set; }
 }
