@@ -89,14 +89,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.1839" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" />
     <!-- WinUI component package instead of the Microsoft.WindowsAppSDK
          metapackage: a filename-search app needs none of the AI/ML
          (onnxruntime, DirectML), Widgets or WebView2 payload the
          metapackage drags into the self-contained output (~50MB). -->
     <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.2.1" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.3.2" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.4.0" />
     <!-- Extra build-time analyzers (convention hardening). Floating 4.* so a
          missing exact pin can't break restore offline — pin to the resolved
          version after the next `dotnet restore`. Analyzer-only: PrivateAssets=all
@@ -107,7 +107,7 @@
     </PackageReference>
     <!-- Correctness-focused analyzers (MAxxxx): IFormatProvider/culture, async
          pitfalls, equality, etc. — little overlap with the rules above. -->
-    <PackageReference Include="Meziantou.Analyzer" Version="2.*">
+    <PackageReference Include="Meziantou.Analyzer" Version="3.*">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
