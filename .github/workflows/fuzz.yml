@@ -43,6 +43,7 @@ jobs:
       RUSTUP_TOOLCHAIN: nightly
     strategy:
       fail-fast: false
+      matrix:
         # Wire codec (fmf-proto) + the fmf-core decoders now reachable on Linux.
         target:
           [
