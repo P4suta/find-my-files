@@ -1,7 +1,5 @@
 # cargo-deny policy. Advisories are owned by cargo-audit.yml (weekly cron);
 # this gate runs `cargo deny check bans licenses sources` on each PR.
-# (cargo-deny 0.16.x can't parse CVSS 4.0 advisories — another reason
-# advisories live in cargo-audit, not here.)
 
 [licenses]
 # SPDX identifiers we accept. Covers the current dependency tree
@@ -23,6 +21,10 @@ allow = [
   "BSL-1.0",
 ]
 confidence-threshold = 0.8
+# The allow list is a curated superset of the current tree (plus headroom for
+# licenses a new dep may pull in). cargo-deny 0.18+ warns on allow entries no
+# crate currently uses; that fights the superset intent, so don't flag unused.
+unused-allowed-license = "allow"
 
 [bans]
 # Transitive duplicate versions are not ours to fix (mirrors the clippy
