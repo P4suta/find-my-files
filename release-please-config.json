@@ -5,9 +5,14 @@
   "bootstrap-sha": "3672e3fc8406c7d9a1f44f0d7197fdcfa5ded2df",
   "packages": {
     "engine": {
-      "release-type": "rust",
+      "release-type": "simple",
       "package-name": "find-my-files",
       "extra-files": [
+        {
+          "type": "toml",
+          "path": "engine/Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
         {
           "type": "generic",
           "path": "app/FindMyFiles/FindMyFiles.csproj"

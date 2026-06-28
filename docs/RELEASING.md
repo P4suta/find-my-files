@@ -9,14 +9,33 @@ Design rationale: [ADR-0035](adr/0035-automated-versioning-with-release-please-a
 
 1. Conventional Commits land on `main` (squash-merged PRs; the PR title is the commit).
 2. [`release-please`](../.github/workflows/release-please.yml) keeps a **Release PR** open
-   that bumps `engine/Cargo.toml` + `engine/Cargo.lock` and `app/FindMyFiles/FindMyFiles.csproj`,
+   that bumps `engine/Cargo.toml` (`[workspace.package] version`, then a `cargo update
+   --workspace` step syncs `engine/Cargo.lock`) and `app/FindMyFiles/FindMyFiles.csproj`,
    and updates [`engine/CHANGELOG.md`](../engine/CHANGELOG.md). The version is derived from the commits:
    `feat:` → minor, `fix:`/`perf:` → patch, `!` / `BREAKING CHANGE:` → major.
-3. **Merge the Release PR.** release-please cuts the `vX.Y.Z` tag and a GitHub Release.
-4. The tag fires [`release.yml`](../.github/workflows/release.yml): build → (signed) → publish,
-   attaching the signed bundle + `SHA256SUMS.txt`.
+3. **Add the `release: approved` label** to the Release PR. Until it's there the
+   `release-gate` check fails the PR (so a release is never an accidental merge).
+4. **Merge the Release PR.** release-please cuts the `vX.Y.Z` tag and a GitHub Release.
+5. The tag fires [`release.yml`](../.github/workflows/release.yml): build → **sign (approve in
+   the `release` environment)** → **publish (approve again)**, attaching the signed bundle +
+   `SHA256SUMS.txt`.
 
 You never hand-pick or hand-edit a version. The Release PR diff *is* the preview.
+
+## Release safety (defence in depth)
+
+Cutting a real, immutable release is deliberately gated by several independent steps
+(ADR-0035), so an ambiguous instruction can't ship one by accident:
+
+- **Label gate** — the Release PR can't merge until you add `release: approved` (`release-gate`).
+- **Manual merge** — the Release PR is never auto-merged.
+- **Tag protection** — a ruleset allows `v*.*.*` tag creation only by the release-please App,
+  so no stray/manual tag push can start the pipeline.
+- **Two environment approvals** — both the `sign` and `publish` jobs pause on the `release`
+  environment (reviewer = the maintainer); the irreversible publish has its own approval.
+- **Agent contract** — automated tooling (incl. the AI assistant) will not merge the Release PR,
+  push a `v*` tag, approve the `release` environment, or run `release.yml` with `publish=true`
+  without an explicit, version-named instruction.
 
 ## Activation (one-time)
 
@@ -62,13 +81,17 @@ with one deliberate difference: **release-please's environment has no required r
 The Cargo workspace uses inherited versions (`version.workspace = true`) and CI builds
 `--locked`. On the **first** Release PR, confirm the diff bumps **all** of:
 
-- `engine/Cargo.toml` `[workspace.package] version`
-- `engine/Cargo.lock` (the internal crates' versions)
+- `engine/Cargo.toml` `[workspace.package] version` (the `toml` extra-file updater)
+- `engine/Cargo.lock` (the internal crates' versions — a follow-up `chore: sync Cargo.lock`
+  commit from the `cargo update --workspace` step in `release-please.yml`)
 - `app/FindMyFiles/FindMyFiles.csproj` `<Version>` (the `x-release-please-version` line)
 - `engine/CHANGELOG.md`
 
-If `Cargo.lock` or the csproj is missed, see the fallback in ADR-0035's re-examination
-triggers (a `toml` extra-file updater + a lock-refresh step).
+This `simple` + `toml` updater + lock-sync setup exists because release-please's `rust`
+release-type can't write workspace-*inherited* versions (it fails with "value at path
+package.version is not tagged"; googleapis/release-please#2478). If `engine/Cargo.lock`
+shows stale (the Release PR's `--locked` CI would go red), the lock-sync step did not run —
+check that `release-please.yml`'s sync step is gated on the Release PR existing.
 
 ## Nightly builds
 

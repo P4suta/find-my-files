@@ -117,6 +117,35 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Defence in depth (ADR-0035): a release-please Release PR (labelled
+  # "autorelease: pending") cannot be merged until a human deliberately adds the
+  # "release: approved" label — so cutting a real release is an explicit act, not
+  # an accidental merge. Every non-release PR passes unconditionally.
+  release-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Require an explicit approval label on a Release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          labels=$(gh pr view "$PR" --repo "$REPO" --json labels -q '.labels[].name')
+          if echo "$labels" | grep -qx "autorelease: pending"; then
+            if echo "$labels" | grep -qx "release: approved"; then
+              echo "Release PR carries 'release: approved' — gate open."
+            else
+              echo "::error::This is a release PR. Add the 'release: approved' label to allow merge (deliberate release; ADR-0035)."
+              exit 1
+            fi
+          else
+            echo "Not a release PR — gate passes."
+          fi
+
   # The xtask dev-tooling crate (build/release plumbing) is its own workspace of
   # pure, OS-agnostic logic, so it tests on cheap ubuntu. Always runs — xtask/
   # isn't in the `changes` filter and ci-required gates on it. Advisory scanning
@@ -261,7 +290,7 @@ jobs:
   # `skipped` (docs-only) as success — avoids the "Expected — Waiting" deadlock.
   ci-required:
     if: always()
-    needs: [hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app]
+    needs: [hygiene, deny, machete, contract-lint, pr-title, release-gate, xtask, engine-build-test, app]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
