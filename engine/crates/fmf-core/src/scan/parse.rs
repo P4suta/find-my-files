@@ -134,7 +134,8 @@ impl ParsedBatch {
         let name_data = name.data;
         let units = name.header.name_length as usize;
         let a = extract_attrs(f);
-        if f.is_directory() {
+        let is_dir = f.is_directory();
+        if is_dir {
             self.dirs += 1;
         } else {
             self.files += 1;
@@ -150,7 +151,7 @@ impl ParsedBatch {
             frn: f.reference_number(),
             name_off,
             name_len: self.name_pool.len() as u32 - name_off,
-            is_dir: f.is_directory(),
+            is_dir,
             attrs: a,
         });
     }

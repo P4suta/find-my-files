@@ -57,14 +57,20 @@ fn fold_char(c: char) -> char {
     }
 }
 
-/// Decode UTF-16 (with possible unpaired surrogates) and append both the
-/// WTF-8 original and its folded form. The two outputs always grow by the
-/// same number of bytes.
-pub fn push_wtf8_pair(units: &[u16], name_out: &mut Vec<u8>, lower_out: &mut Vec<u8>) {
+/// Decode UTF-16 (with possible unpaired surrogates) into code points,
+/// invoking `f(cp)` for each. The single definition of the surrogate-pairing
+/// walk, shared by [`push_wtf8_pair`] and [`push_folded`] so the two can never
+/// drift. ASCII units (`u < 0x80`, never a surrogate) take a fast first arm
+/// that skips the pairing test.
+#[inline]
+fn for_each_code_point(units: &[u16], mut f: impl FnMut(u32)) {
     let mut i = 0;
     while i < units.len() {
         let u = units[i];
-        let cp: u32 = if (0xD800..=0xDBFF).contains(&u)
+        let cp: u32 = if u < 0x80 {
+            i += 1;
+            u as u32
+        } else if (0xD800..=0xDBFF).contains(&u)
             && i + 1 < units.len()
             && (0xDC00..=0xDFFF).contains(&units[i + 1])
         {
@@ -76,14 +82,55 @@ pub fn push_wtf8_pair(units: &[u16], name_out: &mut Vec<u8>, lower_out: &mut Vec
             i += 1;
             u as u32
         };
-
-        push_code_point(cp, name_out);
-        match char::from_u32(cp) {
-            Some(c) => push_code_point(fold_char(c) as u32, lower_out),
-            // Lone surrogate: no case to fold, mirror the original bytes.
-            None => push_code_point(cp, lower_out),
-        }
+        f(cp);
     }
+}
+
+/// Append the folded WTF-8 of one code point to `lower_out`: lowercase a real
+/// scalar with the length-preserving rule (ADR-0004), mirror a lone surrogate
+/// unchanged. The single fold-side definition shared by the two encoders.
+#[inline]
+fn push_folded_cp(cp: u32, lower_out: &mut Vec<u8>) {
+    match char::from_u32(cp) {
+        Some(c) => push_code_point(fold_char(c) as u32, lower_out),
+        // Lone surrogate: no case to fold, mirror the original bytes.
+        None => push_code_point(cp, lower_out),
+    }
+}
+
+/// Decode UTF-16 (with possible unpaired surrogates) and append both the
+/// WTF-8 original and its folded form. The two outputs always grow by the
+/// same number of bytes.
+pub fn push_wtf8_pair(units: &[u16], name_out: &mut Vec<u8>, lower_out: &mut Vec<u8>) {
+    for_each_code_point(units, |cp| {
+        if cp < 0x80 {
+            // ASCII dominates real names: one byte per pool, fold is plain
+            // ASCII lowercase — skip `char::from_u32` validation and the
+            // `push_code_point` width cascade.
+            let b = cp as u8;
+            name_out.push(b);
+            lower_out.push(b.to_ascii_lowercase());
+        } else {
+            push_code_point(cp, name_out);
+            push_folded_cp(cp, lower_out);
+        }
+    });
+}
+
+/// Append only the folded form of `units` to `lower_out`.
+///
+/// For callers that never read the original WTF-8 — the scope-mode walk
+/// (scan/walk.rs), where the builder re-derives the stored original from the
+/// UTF-16 name itself. Byte-identical to the `lower_out` [`push_wtf8_pair`]
+/// would produce.
+pub fn push_folded(units: &[u16], lower_out: &mut Vec<u8>) {
+    for_each_code_point(units, |cp| {
+        if cp < 0x80 {
+            lower_out.push((cp as u8).to_ascii_lowercase());
+        } else {
+            push_folded_cp(cp, lower_out);
+        }
+    });
 }
 
 /// Fold a valid UTF-8 string (query needle) with the same rule as the pool.
@@ -265,7 +312,7 @@ mod proptests {
     use proptest::sample::select;
     use proptest::{prop_assert, prop_assert_eq, prop_oneof, proptest};
 
-    use super::{fold_str, has_uppercase, push_wtf8_pair, wtf8_to_utf16};
+    use super::{fold_str, has_uppercase, push_folded, push_wtf8_pair, wtf8_to_utf16};
 
     /// Code points whose folding stresses the length-preserving rule
     /// (ADR-0003): Turkish dotted I (İ lowercases to two chars → must be kept),
@@ -414,6 +461,30 @@ mod proptests {
         #[test]
         fn folded_string_has_no_uppercase(s in tricky_string()) {
             prop_assert!(!has_uppercase(&fold_str(&s)));
+        }
+
+        // The fold-only encoder (`push_folded`, used by the scope-mode walk)
+        // must produce byte-identical output to `push_wtf8_pair`'s lower pool
+        // for ANY UTF-16 units — including lone surrogates and the tricky-fold
+        // chars — or the two scan paths would key entries differently.
+        #[test]
+        fn push_folded_matches_pair_lower(units in prop_vec(any::<u16>(), 0usize..64)) {
+            let (mut name, mut lower) = (Vec::new(), Vec::new());
+            push_wtf8_pair(&units, &mut name, &mut lower);
+            let mut folded = Vec::new();
+            push_folded(&units, &mut folded);
+            prop_assert_eq!(folded, lower);
+        }
+
+        // Same equivalence, forced onto the surrogate-heavy / tricky-fold
+        // generator (lone high/low surrogates, İ/ß/Ⱥ/full-width Latin).
+        #[test]
+        fn push_folded_matches_pair_lower_tricky(units in tricky_units()) {
+            let (mut name, mut lower) = (Vec::new(), Vec::new());
+            push_wtf8_pair(&units, &mut name, &mut lower);
+            let mut folded = Vec::new();
+            push_folded(&units, &mut folded);
+            prop_assert_eq!(folded, lower);
         }
     }
 }

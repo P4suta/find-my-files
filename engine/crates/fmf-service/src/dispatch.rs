@@ -20,7 +20,10 @@ use parking_lot::Mutex;
 use crate::faults::Faults;
 
 struct ResultEntry {
-    set: ResultSet,
+    /// `Arc` so `result_page` can clone the handle under the results lock and
+    /// materialize the page *outside* it (`fill_page` read-locks volume slots);
+    /// the map stays free for the connection's other worker meanwhile.
+    set: Arc<ResultSet>,
     last_used: u64,
     /// `!!lag` fault: page fetches on this result sleep 250ms.
     lagged: bool,
@@ -233,33 +236,30 @@ impl Connection {
                 results.insert(
                     id,
                     ResultEntry {
-                        set,
+                        set: Arc::new(set),
                         last_used: self.use_clock.fetch_add(1, Ordering::Relaxed),
                         lagged,
                     },
                 );
-                // don't go silent: a trace serialization failure is counted and
-                // warned; the query itself succeeded, so the client gets
-                // its result with an (explicitly) empty trace.
-                let trace_json = match serde_json::to_vec(&trace) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        fmf_core::degrade!(
-                            self.engine.metrics().counters.trace_serialize_failures,
-                            error = %e,
-                            "query trace serialization failed — replying with an empty trace"
-                        );
-                        Vec::new()
-                    }
-                };
-                Outcome::Reply(
-                    codes::OK,
-                    messages::QueryRespHead {
-                        result_id: id,
-                        count,
-                    }
-                    .encode_with_trace(&trace_json),
-                )
+                // One buffer: the 16-byte head, then the trace JSON appended in
+                // place (no intermediate Vec + copy). don't go silent: on a
+                // serialize failure, truncate back to the head and reply with an
+                // (explicitly) empty trace, counted + warned — the query itself
+                // succeeded.
+                let mut reply = messages::QueryRespHead {
+                    result_id: id,
+                    count,
+                }
+                .begin_response(256);
+                if let Err(e) = serde_json::to_writer(&mut reply, &trace) {
+                    reply.truncate(messages::QueryRespHead::LEN);
+                    fmf_core::degrade!(
+                        self.engine.metrics().counters.trace_serialize_failures,
+                        error = %e,
+                        "query trace serialization failed — replying with an empty trace"
+                    );
+                }
+                Outcome::Reply(codes::OK, reply)
             }
             Err(e @ (EngineError::Parse(_) | EngineError::Compile(_))) => {
                 Outcome::Reply(codes::QUERY_SYNTAX, error_chain(&e).into_bytes())
@@ -272,7 +272,13 @@ impl Connection {
         let Ok(req) = messages::ResultPageReq::decode(payload) else {
             return Outcome::Drop;
         };
-        let page = {
+        // Clone the result handle under the lock, then materialize the page
+        // OUTSIDE it: fill_page read-locks N volume slots and builds the
+        // rows+blob, work that must not pin the per-connection results map
+        // (the other worker can page a different result, free one, or insert a
+        // new query meanwhile). The cloned Arc keeps the set alive even if it
+        // is evicted/freed mid-fill.
+        let (set, lagged) = {
             let mut results = self.results.lock();
             let Some(entry) = results.get_mut(&req.result_id) else {
                 // Evicted (or never existed): the client recovers through
@@ -283,14 +289,14 @@ impl Connection {
                 );
             };
             entry.last_used = self.use_clock.fetch_add(1, Ordering::Relaxed);
-            if entry.lagged {
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            }
-            // Row+blob packing is fmf-core's single implementation
-            // (ResultSet::fill_page); this layer only frames it.
-            entry.set.fill_page(req.offset as usize, req.count as usize)
+            (Arc::clone(&entry.set), entry.lagged)
         };
-        match page {
+        if lagged {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        // Row+blob packing is fmf-core's single implementation
+        // (ResultSet::fill_page); this layer only frames it.
+        match set.fill_page(req.offset as usize, req.count as usize) {
             Ok((rows, blob)) => Outcome::Reply(codes::OK, messages::encode_page(&rows, &blob)),
             Err(EngineError::Stale) => Outcome::Reply(
                 codes::STALE,
