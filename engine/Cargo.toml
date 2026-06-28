@@ -8,6 +8,7 @@ members = [
   "crates/fmf-proto",
   "crates/fmf-service",
   "crates/fmf-launcher",
+  "crates/fmf-buildstamp",
 ]
 
 [workspace.package]
@@ -105,6 +106,7 @@ wildcard_dependencies = "deny"
 fmf-contract = { path = "crates/fmf-contract" }
 fmf-core = { path = "crates/fmf-core" }
 fmf-proto = { path = "crates/fmf-proto" }
+fmf-buildstamp = { path = "crates/fmf-buildstamp" }
 ntfs-reader = "0.4"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",

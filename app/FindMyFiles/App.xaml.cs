@@ -115,7 +115,7 @@ public partial class App : Application
     /// <inheritdoc/>
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        FileLog.Info("app", $"launch v{typeof(App).Assembly.GetName().Version} os={Environment.OSVersion.VersionString}");
+        FileLog.Info("app", $"launch v{BuildInfo.Version} os={Environment.OSVersion.VersionString}");
 
         var cmdLine = Environment.GetCommandLineArgs();
 

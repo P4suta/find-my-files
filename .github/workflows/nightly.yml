@@ -1,0 +1,94 @@
+# Nightly builds (ADR-0035): an unsigned distributable from the tip of main,
+# stamped `X.Y.Z-nightly.<date>+g<sha>` so it can never be mistaken for a stable
+# release. Published as a 14-day GitHub Actions artifact (NOT a Release) — that
+# keeps it off the Releases list and sidesteps Immutable Releases (no rolling
+# tag to overwrite). Grab the latest with:
+#   gh run download --repo P4suta/find-my-files -n find-my-files-nightly
+# Nightlies are deliberately unsigned (testers accept the SmartScreen warning);
+# the approval-gated signing pipeline is stable-only. See docs/RELEASING.md.
+
+name: nightly
+
+on:
+  schedule:
+    - cron: "47 16 * * *" # 01:47 JST — offset from the Monday security cluster + nightly-admin (17:17)
+  workflow_dispatch:
+
+# A new nightly supersedes an in-flight one; there is only ever one "latest".
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Don't rebuild an identical nightly: skip the scheduled run when main has
+      # not moved in the last 24h (HEAD's own date is the signal — depth-1 is
+      # enough). Manual dispatch always builds.
+      - name: Decide whether to build
+        id: freshness
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$(git log --since='24 hours ago' --format=%H -n 1)" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No commits to main in the last 24h — skipping nightly."
+          fi
+
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        if: steps.freshness.outputs.build == 'true'
+        with:
+          install: true
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        if: steps.freshness.outputs.build == 'true'
+        with:
+          workspaces: engine
+          shared-key: engine-win # reuse the deps cache CI warms on main
+          save-if: false
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        if: steps.freshness.outputs.build == 'true'
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('app/**/packages.lock.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # Stamp the build as a nightly: FMF_BUILD_VERSION (Rust build.rs) +
+      # FmfChannel (C# csproj, read by MSBuild as a property). The canonical
+      # format comes from one place — `xtask version`.
+      - name: Resolve nightly build version
+        if: steps.freshness.outputs.build == 'true'
+        shell: bash
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          VER=$(just version --channel nightly --date "$DATE")
+          echo "FMF_BUILD_VERSION=$VER" >> "$GITHUB_ENV"
+          echo "FmfChannel=nightly.$DATE" >> "$GITHUB_ENV"
+          echo "::notice::Building nightly $VER"
+
+      - name: Build distributable bundle (unsigned)
+        if: steps.freshness.outputs.build == 'true'
+        run: just publish
+
+      - name: Package (tagless — zip name from FMF_BUILD_VERSION)
+        if: steps.freshness.outputs.build == 'true'
+        run: just package
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.freshness.outputs.build == 'true'
+        with:
+          name: find-my-files-nightly
+          path: |
+            build/package/*.zip
+            build/package/SHA256SUMS.txt
+          retention-days: 14
+          if-no-files-found: error

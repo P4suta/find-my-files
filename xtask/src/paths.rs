@@ -50,17 +50,10 @@ pub fn site_dir() -> PathBuf {
     build_root().join("site")
 }
 
-/// The Rust workspace manifest carrying the release version.
+/// The Rust workspace manifest carrying the base version (`xtask version` reads
+/// the `[workspace.package] version` here; release-please bumps it).
 pub fn engine_cargo_toml() -> PathBuf {
     repo_root().join("engine").join("Cargo.toml")
-}
-
-/// The C# app project carrying the release version.
-pub fn app_csproj() -> PathBuf {
-    repo_root()
-        .join("app")
-        .join("FindMyFiles")
-        .join("FindMyFiles.csproj")
 }
 
 /// The mise tool-pin manifest at the repo root (what `just doctor` checks).

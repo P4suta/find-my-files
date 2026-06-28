@@ -16,7 +16,11 @@ use crate::cmd::io_probe::ProbeModeArg;
 use crate::cmd::term::ColorArg;
 
 #[derive(Parser)]
-#[command(name = "fmf", version, about = "find-my-files engine developer CLI")]
+#[command(
+    name = "fmf",
+    version = fmf_buildstamp::VERSION,
+    about = "find-my-files engine developer CLI"
+)]
 struct Cli {
     /// When to colourise human-facing output (auto: only on a terminal).
     #[arg(long, value_enum, default_value_t = ColorArg::Auto, global = true)]

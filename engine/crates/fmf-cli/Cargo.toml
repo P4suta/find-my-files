@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 fmf-core = { workspace = true }
 fmf-contract = { workspace = true }
+fmf-buildstamp = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

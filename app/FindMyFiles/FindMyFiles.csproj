@@ -1,7 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <Version>0.1.0</Version> <!-- release version — bump via 'just release' -->
+    <!-- Base version, bumped by release-please (its generic extra-files updater
+         keys on the annotation comment on the Version line below). Humans never
+         hand-edit it; AssemblyVersion/FileVersion derive from it. ADR-0035. -->
+    <Version>0.1.0</Version> <!-- x-release-please-version -->
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>FindMyFiles</RootNamespace>
@@ -76,6 +79,21 @@
          normalization (ContinuousIntegrationBuild, above) is the other half. -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
+  </PropertyGroup>
+
+  <!-- Channel-aware build identity (ADR-0035), the C# half of the Rust
+       fmf-buildstamp. dev → 0.1.0-dev+<sha> · nightly.<date> →
+       0.1.0-nightly.<date>+<sha> · stable → 0.1.0+<sha>. FmfChannel defaults to
+       `dev`; CI overrides it (an env var is read by MSBuild as a property) to
+       `nightly.<date>` (nightly.yml) or `stable` (release.yml). Source Link
+       already resolves the commit into SourceRevisionId and appends +<sha> to
+       AssemblyInformationalVersion, so we only prepend the channel pre-release
+       tag — this PropertyGroup follows the main one so $(Version) is in scope.
+       The two display sites read AssemblyInformationalVersion via BuildInfo. -->
+  <PropertyGroup>
+    <FmfChannel Condition="'$(FmfChannel)' == ''">dev</FmfChannel>
+    <InformationalVersion Condition="'$(FmfChannel)' != 'stable'">$(Version)-$(FmfChannel)</InformationalVersion>
+    <InformationalVersion Condition="'$(FmfChannel)' == 'stable'">$(Version)</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

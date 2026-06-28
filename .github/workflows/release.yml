@@ -107,6 +107,17 @@ jobs:
           dotnet tool install --global CycloneDX --version 6.2.0
           "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
+      # Stamp the build as a clean stable release. Without these, the
+      # fmf-buildstamp build.rs defaults to `…-dev+g<sha>` and the C# csproj
+      # defaults to the `dev` channel — both wrong for an official release.
+      # FMF_BUILD_VERSION (Rust) = the bare tag version; FmfChannel=stable (C#,
+      # read by MSBuild as a property) suppresses the channel suffix. (ADR-0035)
+      - name: Stamp stable build version
+        shell: bash
+        run: |
+          echo "FMF_BUILD_VERSION=${TAG#v}" >> "$GITHUB_ENV"
+          echo "FmfChannel=stable" >> "$GITHUB_ENV"
+
       - name: Build distributable bundle
         run: just publish
 

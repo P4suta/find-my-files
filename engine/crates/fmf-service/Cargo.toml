@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 fmf-core = { workspace = true }
 fmf-proto = { workspace = true }
+fmf-buildstamp = { workspace = true }
 clap = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

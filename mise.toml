@@ -37,6 +37,10 @@ lefthook = "2"
 # were previously assumed on PATH (a reproducibility gap).
 "cargo:taplo-cli" = "0.10"
 "cargo:typos-cli" = "1"
+# Conventional-Commits linter for the lefthook commit-msg hook (ADR-0035) — the
+# local guard that keeps release-please's version + CHANGELOG derivation fed with
+# well-formed commits. Same crate-ci family as typos; cargo backend, binstalled.
+"cargo:committed" = "1"
 # actionlint lints .github/workflows/*.yml (syntax, ${{ }} expression types,
 # shellcheck over run: blocks). CI runs it via the raven-actions/actionlint
 # action; pinned here so workflow edits can be validated locally before push

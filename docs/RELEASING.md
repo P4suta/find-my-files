@@ -1,0 +1,107 @@
+# Releasing
+
+find-my-files versions itself from Conventional Commits — there is no manual
+version bump. This page covers how a release happens, how to **activate** the
+automation, the **nightly** channel, and the **build-identity** stamping.
+Design rationale: [ADR-0035](adr/0035-automated-versioning-with-release-please-and-build-channels.md).
+
+## How a release happens (once activated)
+
+1. Conventional Commits land on `main` (squash-merged PRs; the PR title is the commit).
+2. [`release-please`](../.github/workflows/release-please.yml) keeps a **Release PR** open
+   that bumps `engine/Cargo.toml` + `engine/Cargo.lock` and `app/FindMyFiles/FindMyFiles.csproj`,
+   and updates [`CHANGELOG.md`](../CHANGELOG.md). The version is derived from the commits:
+   `feat:` → minor, `fix:`/`perf:` → patch, `!` / `BREAKING CHANGE:` → major.
+3. **Merge the Release PR.** release-please cuts the `vX.Y.Z` tag and a GitHub Release.
+4. The tag fires [`release.yml`](../.github/workflows/release.yml): build → (signed) → publish,
+   attaching the signed bundle + `SHA256SUMS.txt`.
+
+You never hand-pick or hand-edit a version. The Release PR diff *is* the preview.
+
+## Activation (one-time)
+
+release-please ships **dormant**: with the App secrets unset, `release-please.yml` runs
+green and no-ops. It runs as a **GitHub App** because a tag pushed by the default
+`GITHUB_TOKEN` does **not** trigger `release.yml` (GitHub's workflow-recursion guard) — so
+the tag must be pushed by a different identity. The workflow mints a short-lived
+installation token at runtime via `actions/create-github-app-token`.
+
+1. **Create a GitHub App** (org or personal). Repository permissions: **Contents:
+   Read & write** and **Pull requests: Read & write**. No webhook needed.
+2. **Install** the App on the `find-my-files` repo.
+3. Generate a **private key** (`.pem`) for the App and note its **App ID**.
+4. **Create an environment** for the credential (this is the hardened part — see below):
+   Settings → Environments → **New environment** → name it **`release-please`**.
+   - **Deployment branches and tags** → **Selected branches** → add **`main`** only.
+   - **Do NOT add required reviewers** (release-please must run unattended).
+5. In that environment's **Environment secrets**, add:
+   - `RELEASE_PLEASE_APP_ID` = the App ID
+   - `RELEASE_PLEASE_APP_PRIVATE_KEY` = the full `.pem` contents (paste the whole file,
+     `-----BEGIN…` through `…END-----`; multi-line is fine)
+6. (Optional, first run) To stop the first Release PR from scanning the entire history,
+   set `bootstrap-sha` in `release-please-config.json` to a recent commit, or seed
+   `.release-please-manifest.json` to the last shipped version.
+
+### Why an environment, not a repository secret
+
+A **repository** secret is readable by a workflow run on *any* branch (a push to a
+feature branch included). The App private key carries `contents: write` +
+`pull-requests: write`, so we scope it: the `release-please` job declares
+`environment: release-please`, and the environment's branch policy (`main` only) means
+only the main-branch release-please run can read the key — a workflow on another branch
+is denied it. This mirrors how the signing secrets live in the `release` environment,
+with one deliberate difference: **release-please's environment has no required reviewers**
+(the human gate is merging the Release PR; the signing approval gate is separate).
+
+> A fine-grained **PAT** with the same two permissions also works — drop the
+> `create-github-app-token` step and pass the PAT directly as `token:`. The App is
+> preferred (no human-tied credential; the token is short-lived and repo-scoped).
+
+### Verify the first Release PR
+
+The Cargo workspace uses inherited versions (`version.workspace = true`) and CI builds
+`--locked`. On the **first** Release PR, confirm the diff bumps **all** of:
+
+- `engine/Cargo.toml` `[workspace.package] version`
+- `engine/Cargo.lock` (the internal crates' versions)
+- `app/FindMyFiles/FindMyFiles.csproj` `<Version>` (the `x-release-please-version` line)
+- `CHANGELOG.md`
+
+If `Cargo.lock` or the csproj is missed, see the fallback in ADR-0035's re-examination
+triggers (a `toml` extra-file updater + a lock-refresh step).
+
+## Nightly builds
+
+[`nightly.yml`](../.github/workflows/nightly.yml) builds an **unsigned** bundle from the
+tip of `main` daily (and on demand), stamped `X.Y.Z-nightly.<date>+g<sha>`. It is published
+as a **14-day GitHub Actions artifact**, not a Release — keeping it off the Releases list and
+clear of stable. Grab the latest:
+
+```
+gh run download --repo P4suta/find-my-files -n find-my-files-nightly
+```
+
+Nightlies are unsigned (SmartScreen will warn) and carry no stability guarantee. They are
+login-gated and expire after 14 days; if anonymous public access is ever needed, see the
+ADR-0035 trigger for promoting them to dated pre-releases.
+
+## Build identity (channels)
+
+`fmf --version`, `fmf-service --version`, and the app's F12 panel report a channel-aware
+string so a build's origin is unambiguous:
+
+| Channel | Example | Where |
+|---|---|---|
+| dev | `0.1.0-dev+g3672e3f` (`.dirty` if the tree is dirty) | local `just build` |
+| nightly | `0.1.0-nightly.20260629+g3672e3f` | `nightly.yml` |
+| stable | `0.1.0` | `release.yml` (tagged) |
+
+The base `X.Y.Z` is the release-please-managed number; the channel suffix is layered at
+build time. Rust uses the `fmf-buildstamp` crate (`build.rs`), driven by `FMF_BUILD_VERSION`;
+C# uses the csproj `InformationalVersion`, driven by the `FmfChannel` MSBuild property. The
+canonical string format comes from one place:
+
+```
+just version --channel nightly --date 20260629   # → 0.1.0-nightly.20260629+g<sha>
+just version --channel stable                     # → 0.1.0
+```

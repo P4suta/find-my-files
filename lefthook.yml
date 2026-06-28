@@ -1,3 +1,12 @@
+commit-msg:
+  jobs:
+    # Conventional Commits feed release-please's version + CHANGELOG derivation
+    # (ADR-0035). The PR-title gate in ci.yml is authoritative for squash-merges;
+    # this is the earlier, local signal. {1} = the commit-message file git hands
+    # the commit-msg hook. Do not bypass with --no-verify.
+    - name: conventional-commit
+      run: committed --commit-file {1}
+
 pre-commit:
   parallel: true
   jobs:
