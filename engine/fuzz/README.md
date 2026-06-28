@@ -1,11 +1,11 @@
 # Fuzzing (cargo-fuzz / libFuzzer)
 
-Coverage-guided fuzzing of the **untrusted-input decoders** that sit on a
-privilege boundary: the named-pipe wire protocol the elevated `fmf-service`
-parses from non-elevated clients. Run with `just fuzz <target> <secs>` (needs a
-nightly toolchain on Linux/WSL); `just fuzz-build` just checks the harness
-compiles. CI runs both targets for 60 s on every relevant push (`fuzz.yml`) and
-on a weekly schedule.
+Coverage-guided fuzzing of the **untrusted-input decoders** on a privilege
+boundary: the named-pipe wire protocol the elevated `fmf-service` parses from
+non-elevated clients, plus the fmf-core parsers that ingest on-disk / OS-supplied
+bytes. Run with `just fuzz <target> <secs>` (needs a nightly toolchain on
+Linux/WSL); `just fuzz-build` just checks the harnesses compile. CI runs every
+target for 60 s on each relevant push (`fuzz.yml`) and on a weekly schedule.
 
 ## Targets
 
@@ -13,24 +13,24 @@ on a weekly schedule.
 |---|---|---|
 | `frame_decode` | `fmf_proto::frame::read_frame` (16-byte header + length-prefixed body) | A lying length must not over-read or allocate unbounded. |
 | `message_decode` | every `fmf_proto::messages` payload decoder (`decode_page`, `decode_event`, `decode_query_req`, the JSON cold paths, …) | Header fields drive slicing/UTF-8 over attacker-controlled bytes. |
+| `query_parse` | `query::parse` → `compile`, plus `compile_whole_regex` | Query text crosses the privilege boundary; the regex builder must hit its size/DFA caps, not panic or run away. |
+| `index_snapshot` | `index::VolumeIndex::read_snapshot` | `unsafe` POD reads (`set_len`) sized by an untrusted length prefix — a corrupt `.fmfidx` must `Err`, not over-read or over-allocate. |
+| `usn_records` | `usn::parse_buffer` (+ `encode_buffer`) | Attacker-influenceable `RecordLength`/name offsets; the walk must terminate and never slice out of bounds. |
+| `wtf8_decode` | `wtf8::wtf8_to_utf16` + fold helpers | Ill-formed UTF-16 / unpaired surrogates must not panic or read out of bounds. |
 
-These live in **fmf-proto**, a dependency-light leaf crate that builds on Linux,
-so libFuzzer's instrumentation and sanitizers apply cleanly.
+`fmf-proto` is a dependency-light leaf crate that builds on Linux. The fmf-core
+targets build there too because the crate's Windows deps (`ntfs-reader` /
+`windows-sys`) are `cfg(windows)`-gated (the `mft` / `scan` / `engine` modules
+are `#[cfg(windows)]`), leaving the pure parsers to compile for Linux — so
+libFuzzer's instrumentation and ASan apply cleanly. This is not cross-platform
+support (the app stays Windows-only); only the OS-independent parsers compile
+off-Windows.
 
-## Why fmf-core's parsers are not (yet) libFuzzer targets
+## Relationship to the property tests
 
-The other untrusted-input decoders — the snapshot reader (`index::snapshot`,
-which does `unsafe` POD reads driven by a length prefix), the USN record parser
-(`usn::records`), the $MFT record parser (`scan::parse`), and the WTF-8 codec —
-all live in **fmf-core**, which depends unconditionally on `ntfs-reader` and
-`windows-sys`. That crate does not build for `x86_64-unknown-linux-gnu`, so it
-cannot host a libFuzzer target here without first extracting the
-platform-independent parsing into its own crate (an architectural change, out of
-scope for the test-hardening work that added this note).
-
-Until then those paths are guarded in-tree, on Windows, by **property tests**
-that fuzz the same surfaces with `proptest` (panic-free / round-trip / structural
-invariants):
+Every fuzzed surface keeps its in-tree `proptest` coverage on Windows (panic-free
+/ round-trip / structural invariants) — libFuzzer adds coverage-guided
+exploration with sanitizers over the same code:
 
 - `index::snapshot::proptests::read_snapshot_survives_arbitrary_mutation_without_panicking`
   — arbitrary mutation/truncation of a valid snapshot, hitting the
