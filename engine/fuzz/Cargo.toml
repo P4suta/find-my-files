@@ -1,11 +1,12 @@
-# cargo-fuzz harnesses for the named-pipe wire codec (fmf-proto, which exercises
-# fmf-contract's byte conversions transitively). These are the *only*
-# untrusted-input parsers that build cross-platform (zero Windows deps), so they
-# fuzz on the Linux CI runner. The wire protocol is the privilege boundary
-# (non-elevated UI -> elevated fmf-service), making it the highest-value parser
-# to fuzz (docs/SECURITY.md). The fmf-core parsers (wtf8/usn/snapshot/query) are
-# proptest-covered; extending libFuzzer to them needs fmf-core made
-# Linux-buildable — a separate effort (see docs/SCORECARD.md).
+# cargo-fuzz harnesses for the untrusted-input parsers, fuzzed on the Linux CI
+# runner. Two surfaces:
+#   - the named-pipe wire codec (fmf-proto / fmf-contract) — the privilege
+#     boundary (non-elevated UI -> elevated fmf-service, docs/SECURITY.md);
+#   - the fmf-core decoders (query / index::snapshot / usn::records / wtf8) —
+#     now reachable because fmf-core's Windows deps (ntfs-reader / windows-sys)
+#     are `cfg(windows)`-gated, so its pure parsers build for Linux.
+# All are proptest-covered in-tree too; libFuzzer adds coverage-guided
+# exploration with ASan over the same surfaces.
 [package]
 name = "fmf-fuzz"
 version = "0.0.0"
@@ -20,6 +21,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 fmf-proto = { path = "../crates/fmf-proto" }
+fmf-core = { path = "../crates/fmf-core" }
 
 # Crash traces over speed; cargo-fuzz already enables debug-assertions +
 # overflow-checks, so arithmetic on attacker-controlled lengths is caught.
@@ -36,6 +38,34 @@ bench = false
 [[bin]]
 name = "message_decode"
 path = "fuzz_targets/message_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "query_parse"
+path = "fuzz_targets/query_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_snapshot"
+path = "fuzz_targets/index_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "usn_records"
+path = "fuzz_targets/usn_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wtf8_decode"
+path = "fuzz_targets/wtf8_decode.rs"
 test = false
 doc = false
 bench = false

@@ -11,8 +11,6 @@ workspace = true
 
 [dependencies]
 fmf-contract = { workspace = true }
-ntfs-reader = { workspace = true }
-windows-sys = { workspace = true }
 memchr = { workspace = true }
 rustc-hash = { workspace = true }
 rayon = { workspace = true }
@@ -25,6 +23,15 @@ xxhash-rust = { workspace = true }
 regex = { workspace = true }
 regex-syntax = { workspace = true }
 serde = { workspace = true }
+
+# Windows-only deps: the $MFT/USN reading (ntfs-reader) and the raw Win32 calls
+# (windows-sys) are gated to the windows target so the crate's pure parsers
+# (query / index::snapshot / usn::records / wtf8) compile on Linux too — that is
+# what lets engine/fuzz host libFuzzer targets for them (the modules that use
+# these deps — mft / scan / engine — are `#[cfg(windows)]` in lib.rs).
+[target.'cfg(windows)'.dependencies]
+ntfs-reader = { workspace = true }
+windows-sys = { workspace = true }
 
 [features]
 # Exposes index::testutil (TestDir RAII + sample-index builders) to the

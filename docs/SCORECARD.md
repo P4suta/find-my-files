@@ -111,30 +111,27 @@ Evidence map for the *passing* criteria (most are already met):
 The open items are typically a couple of "describe X" free-text answers, not
 new engineering.
 
-## Fuzzing scope (and the deferred fmf-core work)
+## Fuzzing scope
 
 `fuzz.yml` runs `engine/fuzz/` on Linux because cargo-fuzz is effectively a
-Linux/nightly tool. The harnesses target **`fmf-proto` + `fmf-contract`** — the
-named-pipe wire codec. That is deliberate, not a shortcut:
+Linux/nightly tool. The harnesses cover both untrusted-input surfaces:
 
-- It is the **privilege boundary** (non-elevated UI → elevated `fmf-service`,
-  see `docs/SECURITY.md`). A hostile local client sending malformed frames to
-  the elevated service hits these parsers first — the highest-value fuzz target
-  in the project.
-- It is the **only untrusted-input parser that builds cross-platform.** The
-  richer parsers (`wtf8`, query parser, `usn::records`, `index::snapshot`) live
-  in `fmf-core`, which depends **unconditionally** on `ntfs-reader` /
-  `windows-sys` and therefore **does not build on Linux** (same reason
-  `pages.yml` notes `cargo doc` fails there). Those are already covered by
-  `proptest` no-panic property tests.
+- The **named-pipe wire codec** (`fmf-proto` + `fmf-contract`) — the **privilege
+  boundary** (non-elevated UI → elevated `fmf-service`, see `docs/SECURITY.md`).
+  A hostile local client sending malformed frames to the elevated service hits
+  these parsers first. Targets: `frame_decode`, `message_decode`.
+- The **`fmf-core` decoders**: the query parser/compiler (`query_parse` — query
+  text crosses the privilege boundary), the snapshot reader (`index_snapshot` —
+  `unsafe` POD reads sized by an untrusted length prefix), the USN record parser
+  (`usn_records`), and the WTF-8 codec (`wtf8_decode`). These became fuzzable by
+  gating fmf-core's Windows deps (`ntfs-reader` / `windows-sys`) behind
+  `[target.'cfg(windows)']` + `#[cfg(windows)]` on the `mft` / `scan` / `engine`
+  modules, so the pure parsers compile for `x86_64-unknown-linux-gnu`. This is
+  *not* cross-platform support (the won't-do list stands — the app stays
+  Windows-only); it only lets the OS-independent parsers be instrumented.
 
-**Deferred follow-up** — to fuzz the `fmf-core` parsers under libFuzzer, make
-the crate Linux-buildable: move `ntfs-reader` (and the `windows-sys` call sites
-in `scan/`, `mft.rs`, `engine/volume.rs`, `usn/session.rs`, `query/dates.rs`)
-behind `[target.'cfg(windows)']` + `#[cfg(windows)]`, leaving the pure modules
-to compile everywhere. That is a fmf-core change touching the disciplined core
-and brushing the "no cross-platform" scope rule, so it is a separate decision,
-not bundled here.
+Every surface keeps its in-tree `proptest` no-panic/round-trip coverage on
+Windows too; libFuzzer adds coverage-guided exploration with ASan on top.
 
 > ADR-0021 note: cargo-fuzz writes `corpus/`, `artifacts/`, `target/` next to
 > the fuzz crate and its dir model doesn't compose with the `build/` redirect,

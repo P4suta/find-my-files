@@ -1,11 +1,11 @@
-# Bounded libFuzzer smoke over the named-pipe wire codec (fmf-proto +
-# fmf-contract) — the privilege-boundary parsers (non-elevated UI -> elevated
-# fmf-service, docs/SECURITY.md). These build cross-platform, so they fuzz on
-# Linux. cargo-fuzz needs nightly + libFuzzer (Linux), installed CI-only here;
-# the pinned dev toolchain stays stable (mise.toml). Each target runs for a
+# Bounded libFuzzer smoke over the untrusted-input parsers, on Linux. Two
+# surfaces: the named-pipe wire codec (fmf-proto + fmf-contract — the
+# privilege-boundary parsers, non-elevated UI -> elevated fmf-service,
+# docs/SECURITY.md) and the fmf-core decoders (query / index::snapshot /
+# usn::records / wtf8), now buildable on Linux because fmf-core's Windows deps
+# are cfg-gated. cargo-fuzz needs nightly + libFuzzer (Linux), installed CI-only
+# here; the pinned dev toolchain stays stable (mise.toml). Each target runs for a
 # short, fixed budget so a real crash fails the run without flaking on time.
-# The fmf-core parsers are proptest-covered; see docs/SCORECARD.md for why they
-# are not fuzzed here yet.
 name: fuzz
 
 on:
@@ -15,12 +15,14 @@ on:
       - "engine/fuzz/**"
       - "engine/crates/fmf-proto/**"
       - "engine/crates/fmf-contract/**"
+      - "engine/crates/fmf-core/**"
       - ".github/workflows/fuzz.yml"
   pull_request:
     paths:
       - "engine/fuzz/**"
       - "engine/crates/fmf-proto/**"
       - "engine/crates/fmf-contract/**"
+      - "engine/crates/fmf-core/**"
       - ".github/workflows/fuzz.yml"
   schedule:
     - cron: "43 4 * * 1" # Monday 04:43 UTC (staggered from codeql/cargo-audit/scorecard)
@@ -42,7 +44,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [frame_decode, message_decode]
+        # Wire codec (fmf-proto) + the fmf-core decoders now reachable on Linux.
+        target:
+          [
+            frame_decode,
+            message_decode,
+            query_parse,
+            index_snapshot,
+            usn_records,
+            wtf8_decode,
+          ]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
