@@ -13,9 +13,11 @@ public sealed partial class PerfPanelViewModel : ObservableObject
     private const int MaxRecent = 64;
     private const int UsnTailMax = 6;
     private const int ErrorTailMax = 8;
+    private const int ScanTailMax = 4;
 
     private readonly IEngineClient _engine;
     private readonly List<ulong> _recentTotalsUs = [];
+    private readonly List<ulong> _recentWsBytes = [];
 
     /// <summary>Whether the F12 panel is showing (toggled by <see cref="Toggle"/>).</summary>
     [ObservableProperty]
@@ -31,10 +33,21 @@ public sealed partial class PerfPanelViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(RecentUsnTail))]
     [NotifyPropertyChangedFor(nameof(RecentErrorsTail))]
+    [NotifyPropertyChangedFor(nameof(ScansTail))]
     public partial EngineStatsData? Stats { get; set; }
 
     /// <summary>Latencies of the most recent queries (µs, oldest first).</summary>
     public IReadOnlyList<ulong> RecentTotalsUs => _recentTotalsUs;
+
+    /// <summary>Host-process working set over the recent polls (bytes, oldest
+    /// first) — the source for the memory sparkline.</summary>
+    public IReadOnlyList<ulong> RecentWsBytes => _recentWsBytes;
+
+    /// <summary>The most recent index-establish events (scan/snapshot restore,
+    /// capped, newest last) for the scan card's feed; re-notifies when
+    /// <see cref="Stats"/> swaps.</summary>
+    public IReadOnlyList<ScanTraceData> ScansTail =>
+        Stats?.Scans is { } s ? s.TakeLast(ScanTailMax).ToList() : [];
 
     /// <summary>The most recent USN batches (capped) for the panel's storage
     /// card. x:Bind can't call <c>TakeLast</c>, so the cap lives here; it
@@ -77,6 +90,15 @@ public sealed partial class PerfPanelViewModel : ObservableObject
         // dispatcher (callers invoke this from the UI thread). Resuming off it would
         // update bound state from a pool thread → RPC_E_WRONG_THREAD.
         Stats = await _engine.GetStatsAsync();
+        if (Stats is { } s)
+        {
+            _recentWsBytes.Add(s.CurrentWsBytes);
+            if (_recentWsBytes.Count > MaxRecent)
+            {
+                _recentWsBytes.RemoveAt(0);
+            }
+        }
+
         PerfDataChanged?.Invoke();
     }
 

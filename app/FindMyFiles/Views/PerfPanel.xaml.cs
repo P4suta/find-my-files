@@ -117,6 +117,29 @@ public sealed partial class PerfPanel : UserControl
         Notifier.Post(NotifySeverity.Info, "診断情報をクリップボードにコピーしました");
     }
 
+    /// <summary>Open the engine's log folder (%ProgramData%\find-my-files\logs)
+    /// in Explorer via <see cref="ShellOps"/> (unelevated). Quick path to the
+    /// engine.log the InfoBar points at.</summary>
+    private void OpenEngineLog_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        var folder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "find-my-files",
+            "logs");
+        ShellOps.Open(folder);
+    }
+
+    /// <summary>Open the app's log folder (the directory holding app.log) in
+    /// Explorer via <see cref="ShellOps"/> (unelevated).</summary>
+    private void OpenAppLog_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        var folder = Path.GetDirectoryName(FileLog.LogPath);
+        if (!string.IsNullOrEmpty(folder))
+        {
+            ShellOps.Open(folder);
+        }
+    }
+
     /// <summary>
     /// Diagnostic chrome rendered imperatively: the stage bar (proportional
     /// theme-brush segments) and the latency sparkline. All textual data is
@@ -175,26 +198,80 @@ public sealed partial class PerfPanel : UserControl
                 .Select(s => $"{s.Name} {s.Us / 1000.0:F2}ms"));
         }
 
-        // Sparkline over the recent query latencies.
-        var recent = vm.RecentTotalsUs;
-        if (recent.Count >= 2)
+        // Sparklines: recent query latencies and the host process's working set.
+        DrawSparkline(Spark, vm.RecentTotalsUs);
+        DrawSparkline(MemSpark, vm.RecentWsBytes);
+
+        // Latency distribution: log2-bucket histogram behind the percentile line.
+        RenderHistogram(vm.Stats?.QueryHistogram);
+    }
+
+    /// <summary>Plots <paramref name="data"/> (oldest first) as a polyline into
+    /// <paramref name="target"/>, normalised to its own max so the shape reads
+    /// regardless of scale. No-op for fewer than two points.</summary>
+    private static void DrawSparkline(Microsoft.UI.Xaml.Shapes.Polyline target, IReadOnlyList<ulong> data)
+    {
+        if (data.Count < 2)
         {
-            const double MinSparkWidth = 240.0; // geometry floor for a readable sparkline; not a design token.
-            var w = Math.Max(Spark.ActualWidth, MinSparkWidth);
+            target.Points = [];
+            return;
+        }
 
-            // Height from the SparklineHeight token; the XAML host Grid binds the same
-            // token, so the drawn geometry and the layout box can never drift.
-            var h = (double)Microsoft.UI.Xaml.Application.Current.Resources["SparklineHeight"];
-            var max = Math.Max(recent.Max(), 1UL);
-            var points = new Microsoft.UI.Xaml.Media.PointCollection();
-            for (var i = 0; i < recent.Count; i++)
+        const double MinSparkWidth = 240.0; // geometry floor for a readable sparkline; not a design token.
+        var w = Math.Max(target.ActualWidth, MinSparkWidth);
+
+        // Height from the SparklineHeight token; the XAML host Grid binds the same
+        // token, so the drawn geometry and the layout box can never drift.
+        var h = (double)Microsoft.UI.Xaml.Application.Current.Resources["SparklineHeight"];
+        var max = Math.Max(data.Max(), 1UL);
+        var points = new Microsoft.UI.Xaml.Media.PointCollection();
+        for (var i = 0; i < data.Count; i++)
+        {
+            points.Add(new Windows.Foundation.Point(
+                i * w / Math.Max(data.Count - 1, 1),
+                h - ((data[i] / (double)max) * (h - 2)) - 1));
+        }
+
+        target.Points = points;
+    }
+
+    /// <summary>Draws the latency histogram as bottom-aligned bars, one column
+    /// per log2 bucket from the first to the last non-empty bucket (bucket i
+    /// covers [2^i, 2^(i+1)) µs). Heights normalise to the tallest bucket.</summary>
+    private void RenderHistogram(Engine.HistogramData? hist)
+    {
+        LatencyHist.ColumnDefinitions.Clear();
+        LatencyHist.Children.Clear();
+        if (hist?.Buckets is not { Count: > 0 } buckets)
+        {
+            return;
+        }
+
+        var last = buckets.FindLastIndex(c => c > 0);
+        if (last < 0)
+        {
+            return; // no samples yet
+        }
+
+        var first = buckets.FindIndex(c => c > 0);
+        var max = Math.Max(buckets.Max(), 1UL);
+        var h = (double)Microsoft.UI.Xaml.Application.Current.Resources["SparklineHeight"];
+        var fill = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current
+            .Resources["AccentFillColorTertiaryBrush"];
+
+        var col = 0;
+        for (var i = first; i <= last; i++)
+        {
+            LatencyHist.ColumnDefinitions.Add(new ColumnDefinition());
+            var bar = new Microsoft.UI.Xaml.Controls.Border
             {
-                points.Add(new Windows.Foundation.Point(
-                    i * w / Math.Max(recent.Count - 1, 1),
-                    h - ((recent[i] / (double)max) * (h - 2)) - 1));
-            }
-
-            Spark.Points = points;
+                Background = fill,
+                VerticalAlignment = Microsoft.UI.Xaml.VerticalAlignment.Bottom,
+                Height = Math.Max(buckets[i] / (double)max * h, buckets[i] > 0 ? 1.0 : 0.0),
+                Margin = new Microsoft.UI.Xaml.Thickness(0, 0, 1, 0),
+            };
+            Microsoft.UI.Xaml.Controls.Grid.SetColumn(bar, col++);
+            LatencyHist.Children.Add(bar);
         }
     }
 

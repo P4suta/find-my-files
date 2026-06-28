@@ -57,11 +57,23 @@
                         VerticalAlignment="Center"
                         Style="{ThemeResource BodyStrongTextBlockStyle}" />
                 </StackPanel>
-                <Button
+                <StackPanel
                     Grid.Column="1"
-                    x:Uid="CopyDiag"
-                    AutomationProperties.AutomationId="CopyDiag"
-                    Click="CopyDiag_Click" />
+                    Orientation="Horizontal"
+                    Spacing="{StaticResource SpacingSmall}">
+                    <Button
+                        x:Uid="DiagOpenEngineLog"
+                        AutomationProperties.AutomationId="OpenEngineLog"
+                        Click="OpenEngineLog_Click" />
+                    <Button
+                        x:Uid="DiagOpenAppLog"
+                        AutomationProperties.AutomationId="OpenAppLog"
+                        Click="OpenAppLog_Click" />
+                    <Button
+                        x:Uid="CopyDiag"
+                        AutomationProperties.AutomationId="CopyDiag"
+                        Click="CopyDiag_Click" />
+                </StackPanel>
             </Grid>
 
             <!--  Last-query card: query line, metric tiles, stage bar, legend +
@@ -139,6 +151,10 @@
                             Style="{ThemeResource CaptionTextBlockStyle}"
                             Text="{x:Bind conv:DiagFormat.Percentiles(ViewModel.Stats), Mode=OneWay}" />
                     </Grid>
+                    <!--  Latency distribution: log2-bucket histogram (the standard view
+                          behind the percentile line). Drawn imperatively from
+                          Stats.QueryHistogram, like the stage bar.  -->
+                    <Grid x:Name="LatencyHist" Height="{StaticResource SparklineHeight}" />
                     <!--  Sparkline host: stays horizontally stretched; the height is the
                           SparklineHeight token, which RenderPerf reads too so the XAML
                           host and the polyline geometry can never drift.  -->
@@ -160,45 +176,53 @@
                     <ItemsControl ItemsSource="{x:Bind ViewModel.Stats.Indexes, Mode=OneWay}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate x:DataType="eng:IndexStatsData">
-                                <Grid Margin="{StaticResource StorageRowMargin}" ColumnSpacing="{StaticResource SpacingMedium}">
-                                    <!--  Fixed diagnostic-table column widths, left as literals:
-                                          ColumnDefinition.Width is a GridLength, which does not accept
-                                          a Double token resource, and these are a one-off table layout
-                                          (not a reused design dimension).  -->
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="28" />
-                                        <ColumnDefinition Width="96" />
-                                        <ColumnDefinition Width="76" />
-                                        <ColumnDefinition Width="84" />
-                                        <ColumnDefinition Width="*" />
-                                    </Grid.ColumnDefinitions>
+                                <StackPanel Margin="{StaticResource StorageRowMargin}">
+                                    <Grid ColumnSpacing="{StaticResource SpacingMedium}">
+                                        <!--  Fixed diagnostic-table column widths, left as literals:
+                                              ColumnDefinition.Width is a GridLength, which does not accept
+                                              a Double token resource, and these are a one-off table layout
+                                              (not a reused design dimension).  -->
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="28" />
+                                            <ColumnDefinition Width="96" />
+                                            <ColumnDefinition Width="76" />
+                                            <ColumnDefinition Width="84" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock
+                                            Grid.Column="0"
+                                            Style="{ThemeResource CaptionTextBlockStyle}"
+                                            Text="{x:Bind Volume}" />
+                                        <TextBlock
+                                            Grid.Column="1"
+                                            HorizontalAlignment="Right"
+                                            Style="{ThemeResource CaptionTextBlockStyle}"
+                                            Text="{x:Bind conv:DiagFormat.Count(LiveEntries)}" />
+                                        <TextBlock
+                                            Grid.Column="2"
+                                            HorizontalAlignment="Right"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Style="{ThemeResource CaptionTextBlockStyle}"
+                                            Text="{x:Bind conv:DiagFormat.Mb(TotalBytes)}" />
+                                        <TextBlock
+                                            Grid.Column="3"
+                                            HorizontalAlignment="Right"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Style="{ThemeResource CaptionTextBlockStyle}"
+                                            Text="{x:Bind conv:DiagFormat.BytesPer(BytesPerEntry)}" />
+                                        <TextBlock
+                                            Grid.Column="4"
+                                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                            Style="{ThemeResource CaptionTextBlockStyle}"
+                                            Text="{x:Bind conv:DiagFormat.Gen(ContentGeneration)}" />
+                                    </Grid>
+                                    <!--  Per-column memory breakdown — where the volume's RAM goes.  -->
                                     <TextBlock
-                                        Grid.Column="0"
-                                        Style="{ThemeResource CaptionTextBlockStyle}"
-                                        Text="{x:Bind Volume}" />
-                                    <TextBlock
-                                        Grid.Column="1"
-                                        HorizontalAlignment="Right"
-                                        Style="{ThemeResource CaptionTextBlockStyle}"
-                                        Text="{x:Bind conv:DiagFormat.Count(LiveEntries)}" />
-                                    <TextBlock
-                                        Grid.Column="2"
-                                        HorizontalAlignment="Right"
-                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                        Style="{ThemeResource CaptionTextBlockStyle}"
-                                        Text="{x:Bind conv:DiagFormat.Mb(TotalBytes)}" />
-                                    <TextBlock
-                                        Grid.Column="3"
-                                        HorizontalAlignment="Right"
-                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                        Style="{ThemeResource CaptionTextBlockStyle}"
-                                        Text="{x:Bind conv:DiagFormat.BytesPer(BytesPerEntry)}" />
-                                    <TextBlock
-                                        Grid.Column="4"
                                         Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                         Style="{ThemeResource CaptionTextBlockStyle}"
-                                        Text="{x:Bind conv:DiagFormat.Gen(ContentGeneration)}" />
-                                </Grid>
+                                        Text="{x:Bind conv:DiagFormat.IndexColumns(NamePoolBytes, LowerPoolBytes, OffsetsBytes, ParentBytes, PermutationsBytes, FrnMapBytes, DeadNameBytes, PoolGarbageRatio)}"
+                                        TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
@@ -216,7 +240,79 @@
                 </StackPanel>
             </Border>
 
-            <!--  Transport card: engine mode + pipe detail.  -->
+            <!--  Memory card: the host process footprint using Task Manager's own
+                  names (Private Bytes / Working Set) + an index/overhead roll-up
+                  and a working-set sparkline. In pipe mode this is the service
+                  process; for the in-proc engine it is the app process.  -->
+            <Border Style="{StaticResource DiagCardStyle}">
+                <StackPanel Spacing="{StaticResource SpacingSmall}">
+                    <TextBlock
+                        x:Uid="DiagMemoryHeader"
+                        Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <StackPanel>
+                        <TextBlock
+                            AutomationProperties.AutomationId="PerfProcessMem"
+                            Style="{ThemeResource BodyStrongTextBlockStyle}"
+                            Text="{x:Bind conv:DiagFormat.ProcessMemory(ViewModel.Stats), Mode=OneWay}"
+                            TextWrapping="Wrap" />
+                        <TextBlock
+                            x:Uid="DiagMemProcess"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Style="{ThemeResource CaptionTextBlockStyle}" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="{StaticResource SpacingXXLarge}">
+                        <StackPanel>
+                            <TextBlock
+                                Style="{ThemeResource BodyStrongTextBlockStyle}"
+                                Text="{x:Bind conv:DiagFormat.IndexTotal(ViewModel.Stats), Mode=OneWay}" />
+                            <TextBlock
+                                x:Uid="DiagMemIndex"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Style="{ThemeResource CaptionTextBlockStyle}" />
+                        </StackPanel>
+                        <StackPanel>
+                            <TextBlock
+                                Style="{ThemeResource BodyStrongTextBlockStyle}"
+                                Text="{x:Bind conv:DiagFormat.Overhead(ViewModel.Stats), Mode=OneWay}" />
+                            <TextBlock
+                                x:Uid="DiagMemOverhead"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Style="{ThemeResource CaptionTextBlockStyle}" />
+                        </StackPanel>
+                    </StackPanel>
+                    <!--  Working-set sparkline; drawn imperatively like the latency one.  -->
+                    <Grid Height="{StaticResource SparklineHeight}">
+                        <Polyline
+                            x:Name="MemSpark"
+                            Stroke="{ThemeResource AccentFillColorSecondaryBrush}"
+                            StrokeThickness="{StaticResource SparklineStrokeThickness}" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!--  Scan/restore card: how each index was established — full MFT scan
+                  vs snapshot restore, throughput, phase breakdown and memory peak
+                  (why startup took as long as it did).  -->
+            <Border Style="{StaticResource DiagCardStyle}">
+                <StackPanel Spacing="{StaticResource SpacingXSmall}">
+                    <TextBlock
+                        x:Uid="DiagScanHeader"
+                        Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.ScansTail, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="eng:ScanTraceData">
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Style="{ThemeResource CaptionTextBlockStyle}"
+                                    Text="{x:Bind conv:DiagFormat.Scan(Volume, Source, MbPerS, ParseMs, BuildMs, SortMs, TotalMs, Entries, PeakWsBytes)}"
+                                    TextTrimming="CharacterEllipsis" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <!--  Transport card: engine mode + pipe detail + service runtime.  -->
             <Border Style="{StaticResource DiagCardStyle}">
                 <StackPanel Spacing="{StaticResource SpacingXSmall}">
                     <TextBlock
@@ -230,6 +326,13 @@
                         Style="{ThemeResource CaptionTextBlockStyle}"
                         Text="{x:Bind conv:DiagFormat.Transport(ViewModel.Stats), Mode=OneWay}"
                         TextWrapping="Wrap" />
+                    <!--  Service runtime (pipe only): uptime / connections / version.  -->
+                    <TextBlock
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Style="{ThemeResource CaptionTextBlockStyle}"
+                        Text="{x:Bind conv:DiagFormat.Service(ViewModel.Stats), Mode=OneWay}"
+                        TextWrapping="Wrap"
+                        Visibility="{x:Bind conv:DiagFormat.ServiceVis(ViewModel.Stats), Mode=OneWay}" />
                 </StackPanel>
             </Border>
 

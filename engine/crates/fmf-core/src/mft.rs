@@ -273,26 +273,43 @@ pub fn peak_working_set() -> u64 {
     memory_counters().map_or(0, |c| c.PeakWorkingSetSize as u64)
 }
 
-/// Current working set — the steady-state number the RAM gate cares about
-/// (the peak includes transient scan buffers).
+/// Current working set — the steady-state number the RAM gate cares about.
+///
+/// The peak includes transient scan buffers; this is the `Working Set` figure
+/// Task Manager / Process Explorer / perfmon report for the process.
 #[must_use]
 pub fn current_working_set() -> u64 {
     memory_counters().map_or(0, |c| c.WorkingSetSize as u64)
 }
 
-fn memory_counters() -> Option<windows_sys::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS> {
+/// Private (committed) bytes of the process — `PrivateUsage`.
+///
+/// This is the `Private Bytes` figure Task Manager / Process Explorer /
+/// perfmon report; unlike the working set it is not affected by trimming, so
+/// it is the more stable footprint indicator.
+#[must_use]
+pub fn current_private_bytes() -> u64 {
+    memory_counters().map_or(0, |c| c.PrivateUsage as u64)
+}
+
+fn memory_counters() -> Option<windows_sys::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS_EX>
+{
     use windows_sys::Win32::System::ProcessStatus::{
-        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
     unsafe {
-        let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
-        counters.cb = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        // GetProcessMemoryInfo fills a PROCESS_MEMORY_COUNTERS_EX when handed a
+        // buffer of that size — the EX layout is a strict superset that adds
+        // PrivateUsage. The API types the out-param as the base struct, so we
+        // pass the EX buffer through a cast.
+        let mut counters: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
+        counters.cb = size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
         let ok = GetProcessMemoryInfo(
             GetCurrentProcess(),
-            &raw mut counters,
-            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            (&raw mut counters).cast::<PROCESS_MEMORY_COUNTERS>(),
+            size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
         );
         (ok != 0).then_some(counters)
     }

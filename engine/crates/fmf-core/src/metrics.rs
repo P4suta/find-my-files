@@ -382,14 +382,27 @@ pub struct MetricsSnapshot {
     pub query_histogram: Histogram,
     /// 50th-percentile query latency, in microseconds.
     pub p50_us: u64,
+    /// 90th-percentile query latency, in microseconds.
+    pub p90_us: u64,
     /// 99th-percentile query latency, in microseconds.
     pub p99_us: u64,
+    /// 99.9th-percentile query latency, in microseconds.
+    pub p999_us: u64,
     /// Most recent applied USN batches.
     pub recent_usn: Vec<UsnTrace>,
     /// Most recent index-established (scan/snapshot) events.
     pub scans: Vec<ScanTrace>,
     /// Per-volume memory accounting for each live index.
     pub indexes: Vec<IndexStats>,
+    /// Current working set of the host process, in bytes — the `Working Set`
+    /// figure Task Manager reports. In pipe mode this is the **service**
+    /// process (engine + service overhead); under `--engine=inproc` it is the
+    /// app process.
+    pub current_ws_bytes: u64,
+    /// Current private (committed) bytes of the host process — the `Private
+    /// Bytes` figure Task Manager reports. Same host-process semantics as
+    /// [`Self::current_ws_bytes`].
+    pub current_private_bytes: u64,
     /// Process-wide degradation counters.
     pub counters: CountersSnapshot,
     /// WARN+ events and panics (diag ring), oldest first.
@@ -463,15 +476,41 @@ impl MetricsHub {
                 q.iter().rev().take(recent).rev().cloned().collect()
             },
             p50_us: hist.percentile_us(0.50),
+            p90_us: hist.percentile_us(0.90),
             p99_us: hist.percentile_us(0.99),
+            p999_us: hist.percentile_us(0.999),
             query_histogram: hist,
             recent_usn: self.usn.lock().iter().cloned().collect(),
             scans: self.scans.lock().iter().cloned().collect(),
             indexes,
+            current_ws_bytes: host_working_set(),
+            current_private_bytes: host_private_bytes(),
             counters: self.counters.snapshot(),
             recent_errors: crate::diag::recent_errors(),
         }
     }
+}
+
+/// Host-process working set in bytes (0 off Windows, where `mft` — the only
+/// caller of the process-memory API — is not compiled).
+#[cfg(windows)]
+fn host_working_set() -> u64 {
+    crate::mft::current_working_set()
+}
+#[cfg(not(windows))]
+fn host_working_set() -> u64 {
+    0
+}
+
+/// Host-process private (committed) bytes (0 off Windows; see
+/// [`host_working_set`]).
+#[cfg(windows)]
+fn host_private_bytes() -> u64 {
+    crate::mft::current_private_bytes()
+}
+#[cfg(not(windows))]
+fn host_private_bytes() -> u64 {
+    0
 }
 
 /// Microsecond stopwatch for stage timing.

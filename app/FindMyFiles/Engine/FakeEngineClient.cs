@@ -161,22 +161,69 @@ public sealed class FakeEngineClient : IEngineClient
     /// <inheritdoc/>
     public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default)
     {
+        var rows = (ulong)_rows.Count;
+        var indexBytes = rows * 110;
         var stats = new EngineStatsData
         {
             RecentQueries = _traces.TakeLast(64).ToList(),
             P50Us = 1500,
+            P90Us = 2500,
             P99Us = 4000,
+            P999Us = 8000,
+            QueryHistogram = new HistogramData
+            {
+                // bucket i covers [2^i, 2^(i+1)) µs; a small plausible spread.
+                Buckets = [.. Enumerable.Range(0, 32).Select(i => i is 10 or 11 or 12 ? 4ul : 0ul)],
+                Count = 12,
+                SumUs = 30_000,
+                MaxUs = 8_000,
+            },
+            Scans =
+            [
+                new ScanTraceData
+                {
+                    Volume = "F:",
+                    Source = "snapshot",
+                    ReadBytes = indexBytes,
+                    ReadMs = 40,
+                    MbPerS = 850,
+                    ParseMs = 0,
+                    DeferredMs = 0,
+                    BuildMs = 30,
+                    SortMs = 12,
+                    TotalMs = 82,
+                    Entries = rows,
+                    PeakWsBytes = indexBytes + (96UL << 20),
+                },
+            ],
             Indexes =
             [
                 new IndexStatsData
                 {
                     Volume = "F:",
-                    Entries = (ulong)_rows.Count,
-                    LiveEntries = (ulong)_rows.Count,
-                    TotalBytes = (ulong)_rows.Count * 110,
+                    Entries = rows,
+                    LiveEntries = rows,
+                    TotalBytes = indexBytes,
                     BytesPerEntry = 110,
+                    NamePoolBytes = rows * 40,
+                    LowerPoolBytes = rows * 40,
+                    OffsetsBytes = rows * 8,
+                    ParentBytes = rows * 4,
+                    SizeBytes = rows * 4,
+                    MtimeBytes = rows * 4,
+                    FrnBytes = rows * 8,
+                    FlagBytes = rows,
+                    PermutationsBytes = rows * 4,
+                    FrnMapBytes = rows * 8,
+                    DeadNameBytes = rows,
+                    PoolGarbageRatio = 0.01,
+                    DerivedCacheBytes = 0,
+                    ContentGeneration = 3,
+                    StructuralGeneration = 2,
                 },
             ],
+            CurrentWsBytes = indexBytes + (72UL << 20),
+            CurrentPrivateBytes = indexBytes + (80UL << 20),
             RecentErrors = [.. _injectedErrors],
         };
         return Task.FromResult<EngineStatsData?>(stats);

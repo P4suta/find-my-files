@@ -440,6 +440,13 @@ function Invoke-DiagPhase {
         if ($null -eq $script:diagHwnd) { throw 'no diagnostics window HWND captured' }
         Invoke-Ui wait-for 'PerfPanel' -w $script:diagHwnd -t 3000
     }
+
+    # The memory card surfaces the process footprint (the headline new figure);
+    # its value TextBlock carries the PerfProcessMem hook.
+    Test-UI 'Diag: memory card shows the process footprint' {
+        if ($null -eq $script:diagHwnd) { throw 'no diagnostics window HWND captured' }
+        Invoke-Ui wait-for 'PerfProcessMem' -w $script:diagHwnd -t 3000
+    }
     if ($script:diagHwnd) {
         Invoke-Ui screenshot -w $script:diagHwnd -o (Join-Path $OutDir 'D-perfpanel.png') 2>$null
     }
