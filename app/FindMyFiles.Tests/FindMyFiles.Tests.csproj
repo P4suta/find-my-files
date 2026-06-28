@@ -85,9 +85,12 @@
              Link="golden\%(RecursiveDir)%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest" />
     <!-- The en-US resource values, so the Loc test fixture resolves keys
-         without a PRI in the (non-WinUI) test host. -->
+         without a PRI in the (non-WinUI) test host. The link name avoids a
+         dot-delimited `.en-US.` segment: WinAppSDK's PRI generation parses that
+         as a resource qualifier (`Invalid qualifier: EN-US`, PRI249) — an
+         underscore keeps it a plain neutral resource. -->
     <Content Include="..\FindMyFiles\Strings\en-US\Resources.resw"
-             Link="Strings.en-US.resw"
+             Link="Strings_en-US.resw"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

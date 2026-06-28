@@ -1,0 +1,36 @@
+# Install the Rust toolchain VERSION pinned in mise.toml, so CI lints/tests/builds
+# on the exact toolchain the release is built with (release.yml/pages.yml already
+# provision via mise-action) instead of a floating `stable` that can drift ahead of
+# the pin between a CI run and the shipped build.
+#
+# mise.toml is the single source of truth for this repo's toolchain (CLAUDE.md
+# deliberately keeps no rust-toolchain.toml, to avoid double management). This
+# composite reads the `rust` pin from there and hands it to dtolnay/rust-toolchain,
+# so a bump lives in exactly one place — no per-workflow mirror to keep in sync.
+# (fuzz.yml is the one exception: it needs `nightly` for cargo-fuzz, so it keeps a
+# direct dtolnay step with an explicit `toolchain: nightly`.)
+name: Rust toolchain (mise-pinned)
+description: Install the Rust toolchain version pinned in mise.toml.
+inputs:
+  components:
+    description: Comma-separated rustup components (e.g. "clippy, rustfmt").
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - id: pin
+      shell: bash
+      # mise.toml line: `rust = "1.96"`. awk (not `grep -oP`, whose PCRE is absent
+      # from the windows runners' Git Bash) splits on the quotes and takes the value.
+      run: |
+        version=$(awk -F'"' '/^rust[[:space:]]*=/{print $2; exit}' mise.toml)
+        if [ -z "$version" ]; then
+          echo "::error::could not read the rust pin from mise.toml"; exit 1
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "Using mise-pinned Rust $version"
+    - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable-branch pin; `toolchain` overrides what it installs
+      with:
+        toolchain: ${{ steps.pin.outputs.version }}
+        components: ${{ inputs.components }}

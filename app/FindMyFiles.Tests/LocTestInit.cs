@@ -14,7 +14,7 @@ internal static class LocTestInit
     [ModuleInitializer]
     public static void Init()
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "Strings.en-US.resw");
+        var path = Path.Combine(AppContext.BaseDirectory, "Strings_en-US.resw");
         var map = XDocument.Load(path).Root!
             .Elements("data")
             .ToDictionary(d => d.Attribute("name")!.Value, d => d.Element("value")!.Value, StringComparer.Ordinal);
