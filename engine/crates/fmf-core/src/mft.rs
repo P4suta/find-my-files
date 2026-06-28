@@ -243,7 +243,8 @@ pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), Mf
             }
         });
 
-        if file.is_directory() {
+        let is_dir = file.is_directory();
+        if is_dir {
             stats.dirs += 1;
         } else {
             stats.files += 1;
@@ -252,7 +253,7 @@ pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), Mf
             parent_frn: Frn(parent_frn),
             frn: Frn(file.reference_number()),
             name_utf16: &name_data[..name_len],
-            is_dir: file.is_directory(),
+            is_dir,
             is_reparse,
             is_hidden,
             is_system,

@@ -204,6 +204,20 @@ impl QueryRespHead {
         v
     }
 
+    /// Begin a response buffer with the 16-byte head written and `trace_cap`
+    /// bytes reserved, so the caller appends the `QueryTrace` JSON directly
+    /// into it (e.g. `serde_json::to_writer`) — one allocation, no intermediate
+    /// trace Vec + copy. The head layout stays defined here, not in the
+    /// service. On a serialize failure the caller truncates back to
+    /// [`Self::LEN`] for the empty-trace degrade path.
+    #[must_use]
+    pub fn begin_response(self, trace_cap: usize) -> Vec<u8> {
+        let mut v = Vec::with_capacity(Self::LEN + trace_cap);
+        v.extend_from_slice(&self.result_id.to_le_bytes());
+        v.extend_from_slice(&self.count.to_le_bytes());
+        v
+    }
+
     /// # Errors
     ///
     /// Returns [`WireError::Length`] if `b` is shorter than [`Self::LEN`].

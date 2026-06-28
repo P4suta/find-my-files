@@ -8,7 +8,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use windows_sys::Win32::Foundation::{
     ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
@@ -25,7 +25,7 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+    CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
 };
 
 const PIPE_ACCESS_DUPLEX: u32 = 0x0000_0003;
@@ -61,6 +61,14 @@ impl Event {
         unsafe { SetEvent(self.0.as_raw_handle() as HANDLE) };
     }
 
+    /// Clears the signaled state before reusing the event for a new overlapped
+    /// op: a synchronous completion leaves an auto-reset event signaled (the
+    /// wait that would have reset it never happened), so a reused event must be
+    /// reset or the next wait returns prematurely.
+    fn reset(&self) {
+        unsafe { ResetEvent(self.0.as_raw_handle() as HANDLE) };
+    }
+
     fn raw(&self) -> HANDLE {
         self.0.as_raw_handle() as HANDLE
     }
@@ -68,14 +76,45 @@ impl Event {
 
 /// One duplex pipe endpoint. Cloning shares the OS handle; reads and writes
 /// may run on different threads (independent OVERLAPPED + events).
-#[derive(Clone)]
 pub struct PipeStream {
     handle: Arc<OwnedHandle>,
+    /// This clone's own auto-reset event for overlapped I/O, created on first
+    /// use. Reused across every read/write on this clone instead of a fresh
+    /// `CreateEventW`/`CloseHandle` pair per op. Created lazily because `Clone`
+    /// is infallible and `CreateEventW` is not; each clone gets a *separate*
+    /// event (reads and writes run on different threads and must not share one
+    /// — they would cross each other's waits). `OnceLock` keeps the type
+    /// `Send + Sync` and the per-clone access is single-role (a reader owns its
+    /// clone; writes are serialized under a `Mutex`, server.rs).
+    io_event: OnceLock<Event>,
+}
+
+impl Clone for PipeStream {
+    fn clone(&self) -> Self {
+        Self {
+            handle: Arc::clone(&self.handle),
+            // A fresh, independent event for the clone — NOT a shared one.
+            io_event: OnceLock::new(),
+        }
+    }
 }
 
 impl PipeStream {
     pub(crate) fn raw(&self) -> HANDLE {
         self.handle.as_raw_handle() as HANDLE
+    }
+
+    /// This clone's reusable overlapped-I/O event, created on first use.
+    fn io_event(&self) -> io::Result<&Event> {
+        if let Some(ev) = self.io_event.get() {
+            return Ok(ev);
+        }
+        // First I/O on this clone: create the event. `set` only fails if a
+        // concurrent caller won the race (there is none in practice — single
+        // role per clone), in which case `get_or_init` returns the winner and
+        // our `created` drops; no fallible closure or `unwrap` needed.
+        let created = Event::new()?;
+        Ok(self.io_event.get_or_init(|| created))
     }
 
     /// Client side: opens an existing pipe (blocking I/O is fine here, but
@@ -108,6 +147,7 @@ impl PipeStream {
         }
         Ok(Self {
             handle: Arc::new(unsafe { OwnedHandle::from_raw_handle(h as RawHandle) }),
+            io_event: OnceLock::new(),
         })
     }
 
@@ -122,7 +162,10 @@ impl PipeStream {
         buf_len: usize,
         start: impl FnOnce(*mut OVERLAPPED) -> i32,
     ) -> io::Result<usize> {
-        let ev = Event::new()?;
+        let ev = self.io_event()?;
+        // Reused event: clear any leftover signal from a prior synchronous
+        // completion before issuing the next op (see Event::reset).
+        ev.reset();
         let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
         ov.hEvent = ev.raw();
         let ok = start(&raw mut ov);
@@ -259,6 +302,7 @@ impl PipeListener {
         self.first_created = true;
         let stream = PipeStream {
             handle: Arc::new(unsafe { OwnedHandle::from_raw_handle(h as RawHandle) }),
+            io_event: OnceLock::new(),
         };
 
         let ev = Event::new()?;

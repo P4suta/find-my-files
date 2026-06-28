@@ -5,6 +5,51 @@ use crate::index::VolumeIndex;
 
 // ── Drivers ─────────────────────────────────────────────────────────────
 
+/// Sweep one dictionary sub-range — `hay` is `pool[pool_start..]` covering
+/// names `ks..ke` — pushing each matching `name_id` (`k`) into `out`. Generic
+/// over the finder `find` and the anchor predicate `anchor` so the optimizer
+/// inlines the finder and constant-folds an always-true anchor, instead of a
+/// `&mut dyn FnMut` indirect call per hit. Hits arrive in increasing pool
+/// order, so the `k` cursor over the gapless `dict_off` advances monotonically
+/// — amortized O(1) per hit, no binary search; a hit spilling past a name's
+/// end (`hit + needle_len > end`) crosses into the next name and is rejected.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn sweep_range<F, A>(
+    out: &mut Vec<u32>,
+    pool: &[u8],
+    dict_off: &[u32],
+    ks: usize,
+    ke: usize,
+    pool_start: usize,
+    hay: &[u8],
+    needle_len: usize,
+    mut find: F,
+    mut anchor: A,
+) where
+    F: FnMut(&[u8]) -> Option<usize>,
+    A: FnMut(usize, usize, usize) -> bool,
+{
+    let mut pos = 0usize;
+    let mut k = ks;
+    while pos < hay.len() {
+        let Some(rel) = find(&hay[pos..]) else { break };
+        let hit = pool_start + pos + rel;
+        while k + 1 < ke && (dict_off[k + 1] as usize) <= hit {
+            k += 1;
+        }
+        let off = dict_off[k] as usize;
+        let end = dict_off.get(k + 1).map_or(pool.len(), |&e| e as usize);
+        if hit + needle_len <= end && anchor(hit, off, end) {
+            out.push(k as u32);
+            // One hit per name is enough: resume at its end.
+            pos = end - pool_start;
+        } else {
+            pos = hit + 1 - pool_start;
+        }
+    }
+}
+
 /// Sweep the distinct-name dictionary and return the set of matching
 /// `name_id`s as a bitset (ADR-0032). Per-entry concerns — liveness,
 /// exclusion, `files_only`, and the residual/exact-case checks — are applied
@@ -47,44 +92,41 @@ pub(super) fn driver_candidates(idx: &VolumeIndex, driver: &Driver) -> Vec<u64> 
             let hay = &pool[pool_start..pool_end];
             let mut out: Vec<u32> = Vec::new();
 
-            let mut sweep =
-                |needle_len: usize,
-                 find: &mut dyn FnMut(&[u8]) -> Option<usize>,
-                 anchor: &mut dyn FnMut(usize, usize, usize) -> bool| {
-                    let mut pos = 0usize;
-                    // Hits arrive in increasing pool order, so the name
-                    // cursor advances monotonically — amortized O(1) per hit
-                    // instead of a binary search.
-                    let mut k = ks;
-                    while pos < hay.len() {
-                        let Some(rel) = find(&hay[pos..]) else { break };
-                        let hit = pool_start + pos + rel;
-                        while k + 1 < ke && (dict_off[k + 1] as usize) <= hit {
-                            k += 1;
-                        }
-                        let off = dict_off[k] as usize;
-                        let end = dict_off.get(k + 1).map_or(pool.len(), |&e| e as usize);
-                        if hit + needle_len <= end && anchor(hit, off, end) {
-                            out.push(k as u32);
-                            // One hit per name is enough: resume at its end.
-                            pos = end - pool_start;
-                        } else {
-                            pos = hit + 1 - pool_start;
-                        }
-                    }
-                };
-
             match driver {
                 Driver::Sub {
                     finder, needle_len, ..
                 } => {
-                    sweep(*needle_len, &mut |h| finder.find(h), &mut |_, _, _| true);
+                    // Monomorphize over the finder + an always-true anchor so
+                    // the optimizer inlines `find` and folds the anchor away —
+                    // no `&mut dyn FnMut` indirection per hit (the Sub anchor
+                    // does no work).
+                    sweep_range(
+                        &mut out,
+                        pool,
+                        dict_off,
+                        ks,
+                        ke,
+                        pool_start,
+                        hay,
+                        *needle_len,
+                        |h| finder.find(h),
+                        |_, _, _| true,
+                    );
                 }
                 Driver::Prefix { bytes, .. } => {
                     let finder = memchr::memmem::Finder::new(bytes);
-                    sweep(bytes.len(), &mut |h| finder.find(h), &mut |hit, off, _| {
-                        hit == off
-                    });
+                    sweep_range(
+                        &mut out,
+                        pool,
+                        dict_off,
+                        ks,
+                        ke,
+                        pool_start,
+                        hay,
+                        bytes.len(),
+                        |h| finder.find(h),
+                        |hit, off, _| hit == off,
+                    );
                 }
                 Driver::Suffixes { suffixes, .. } => {
                     // Anchored tails defeat memmem's rare-byte prefilter

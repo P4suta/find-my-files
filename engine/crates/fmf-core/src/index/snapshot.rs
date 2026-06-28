@@ -204,29 +204,45 @@ impl VolumeIndex {
                 return Err(bad("dict slice out of pool bounds"));
             }
         }
-        // Then each entry: its `name_id` must index the dict, and its original
-        // copy (when one exists) must fit using the dict-derived length (the
-        // fold is length-preserving, ADR-0004).
+        // Then each entry, in one pass: its `name_id` must index the dict; its
+        // original copy (when one exists) must fit using the dict-derived
+        // length (the fold is length-preserving, ADR-0004); and a tombstoned
+        // entry contributes its reclaimable original copy to `dead_name_bytes`.
+        // Folding the tombstone tally into this validation walk avoids a second
+        // sweep over the same columns, and the dict-derived length is computed
+        // only for the entries that actually carry an original copy (the ~3/4
+        // that fold to themselves skip it; ADR-0004).
+        let mut tombstones = 0u32;
+        // Lower bound: rename gaps aren't tombstoned and are lost here.
+        let mut dead_name_bytes = 0u64;
         for i in 0..count {
             let nid = name_id[i] as usize;
             if nid >= dict_count {
                 return Err(bad("name_id out of dict bounds"));
             }
-            let len = {
+            let is_tombstone = flag[i] & flags::TOMBSTONE != 0;
+            if is_tombstone {
+                tombstones += 1;
+            }
+            // Fold-identical entries (orig_off == MAX) share their bytes in the
+            // dictionary (ADR-0032): no fit check and nothing reclaimable, so
+            // they never touch dict_off. Only a stored original needs the
+            // dict-derived length, for both the bounds check and the tally.
+            if orig_off[i] != u32::MAX {
                 let off = dict_off[nid] as usize;
-                dict_off
+                let len = dict_off
                     .get(nid + 1)
                     .map_or(dict_pool.len(), |&e| e as usize)
-                    - off
-            };
-            let orig_ok = match orig_off[i] {
-                u32::MAX => true,
-                off => (off as usize)
+                    - off;
+                let orig_ok = (orig_off[i] as usize)
                     .checked_add(len)
-                    .is_some_and(|end| end <= orig_pool.len()),
-            };
-            if !orig_ok {
-                return Err(bad("name slice out of pool bounds"));
+                    .is_some_and(|end| end <= orig_pool.len());
+                if !orig_ok {
+                    return Err(bad("name slice out of pool bounds"));
+                }
+                if is_tombstone {
+                    dead_name_bytes += len as u64;
+                }
             }
         }
         // Overflow pairs are untrusted too: every id must point at a
@@ -253,25 +269,10 @@ impl VolumeIndex {
         let size_ovf: rustc_hash::FxHashMap<u32, u64> =
             ovf_ids.into_iter().zip(ovf_sizes).collect();
 
+        // `tombstones` / `dead_name_bytes` were accumulated in the single
+        // validation pass above (ADR-0032: only the per-entry original copy is
+        // reclaimable; folded bytes stay shared in the dictionary).
         let frn_index = super::frn::FrnIndex::build(&frn, &flag);
-        let mut tombstones = 0u32;
-        // Lower bound: rename gaps aren't tombstoned and are lost here.
-        let mut dead_name_bytes = 0u64;
-        for (i, f) in flag.iter().enumerate() {
-            if f & flags::TOMBSTONE != 0 {
-                tombstones += 1;
-                // Only the original copy is reclaimable per entry; folded
-                // bytes are shared in the dictionary (ADR-0032).
-                if orig_off[i] != u32::MAX {
-                    let nid = name_id[i] as usize;
-                    let off = dict_off[nid] as usize;
-                    let end = dict_off
-                        .get(nid + 1)
-                        .map_or(dict_pool.len(), |&e| e as usize);
-                    dead_name_bytes += (end - off) as u64;
-                }
-            }
-        }
 
         Ok((
             Self {
