@@ -160,7 +160,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
-          tool: cargo-llvm-cov@0.6.24
+          tool: cargo-llvm-cov@0.8.7
       - name: clippy (compiles the engine; later steps reuse it)
         run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: engine

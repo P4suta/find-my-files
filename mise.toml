@@ -2,7 +2,7 @@
 # This machine manages tools via chezmoi + mise — do NOT install toolchains ad hoc;
 # declare them here and run `mise install`.
 [tools]
-rust = "1.95"
+rust = "1.96"
 dotnet = "10"
 # Task runner (justfile). Declared here so `mise install` provisions it and CI
 # (release.yml) builds the distributable via the same `just publish` recipe —
@@ -22,11 +22,11 @@ lefthook = "2"
 # mdBook — renders docs/ (ARCHITECTURE + ADRs) into the published design-docs
 # site (just doc / pages.yml). cargo backend, version-pinned like samply so CI
 # and local builds match.
-"cargo:mdbook" = "0.4.40"
+"cargo:mdbook" = "0.5"
 # Quality-gate tooling (CI + `just cov`/`deny`/`machete`). cargo backend;
 # cargo.binstall below fetches prebuilt binaries instead of compiling from
 # source (compiling mdbook took ~2min in CI).
-"cargo:cargo-llvm-cov" = "0.6"
+"cargo:cargo-llvm-cov" = "0.8"
 "cargo:cargo-deny" = "0.19"
 "cargo:cargo-machete" = "0.9"
 # Mutation testing (`just mutants`) — surfaces tests that pass even when code is
@@ -41,7 +41,7 @@ lefthook = "2"
 # shellcheck over run: blocks). CI runs it via the raven-actions/actionlint
 # action; pinned here so workflow edits can be validated locally before push
 # (not a cargo crate — the github backend fetches the prebuilt release binary).
-"github:rhysd/actionlint" = "1.7.7"
+"github:rhysd/actionlint" = "1.7.12"
 
 [settings]
 # Fetch cargo: backend tools as prebuilt binaries (cargo-binstall) rather than

@@ -4,6 +4,14 @@
 # build/docs-book) — one tree, one ignore line.
 build/
 
+# Cargo's default target dir. Build output normally lands under build/ via each
+# workspace's .cargo/config.toml (ADR-0021); but a cargo run that bypasses that
+# config — `cargo --manifest-path <ws>/Cargo.toml` from the repo root, or some
+# rust-analyzer / IDE invocations — falls back to <ws>/target. Ignore it
+# everywhere so stray artifacts can never be committed and hooks (typos) skip
+# them. (Covers engine/target, xtask/target, engine/fuzz/target.)
+target/
+
 # C# intermediate output stays in-tree: relocating obj needs a
 # Directory.Build.props, which CLAUDE.md forbids (ADR-0021).
 app/**/obj/
@@ -20,6 +28,9 @@ test-results.json
 app/FindMyFiles.Tests/UiAutomation/artifacts/
 # coverlet raw coverage output (sibling of the ignored *.cobertura.xml)
 app/FindMyFiles.Tests/coverage.json
+# llvm-cov line-coverage report written into engine/ by the CI gate / `just cov`
+# (cargo llvm-cov --output-path engine-lcov.info).
+engine-lcov.info
 # cargo-mutants run output. Its `mutants.out{,.old}/` dir model sits next to the
 # engine workspace and does not compose with the build/ redirect (ADR-0021), so
 # ignore it in place — it is CI/machine-local, regenerated on every run.
@@ -29,11 +40,10 @@ engine/mutants.out*/
 *.fmfidx
 engine/crates/fmf-core/testdata/large/
 
-# cargo-fuzz working output. Its dir model (corpus/artifacts/target next to the
-# fuzz crate) does not compose with the build/ redirect (ADR-0021), so ignore
-# these in place; they are nightly, CI-only, machine-local. The committed
-# Cargo.lock is kept for reproducibility.
-engine/fuzz/target/
+# cargo-fuzz working output. Its dir model (corpus/artifacts next to the fuzz
+# crate) does not compose with the build/ redirect (ADR-0021), so ignore these
+# in place; they are nightly, CI-only, machine-local. (fuzz/target is covered by
+# the top-level target/ rule.) The committed Cargo.lock is kept for reproducibility.
 engine/fuzz/corpus/
 engine/fuzz/artifacts/
 engine/fuzz/coverage/
