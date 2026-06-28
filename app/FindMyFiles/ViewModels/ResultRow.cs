@@ -88,8 +88,11 @@ public sealed partial class ResultRow : ObservableObject
         Name = data.Name;
         ParentPath = data.ParentPath;
         SizeText = data.IsDirectory ? string.Empty : FormatSize(data.Size);
+
+        // FromFileTime already yields the instant at the local offset, so the
+        // ToLocalTime() this replaces was a no-op conversion to the same offset.
         DateText = data.Mtime > 0
-            ? DateTimeOffset.FromFileTime(data.Mtime).ToLocalTime().ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture)
+            ? DateTimeOffset.FromFileTime(data.Mtime).ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture)
             : string.Empty;
         Glyph = data.IsDirectory ? "" : ""; // Folder : Page
         ApplyHighlight(highlighter, data);
@@ -110,10 +113,26 @@ public sealed partial class ResultRow : ObservableObject
             return;
         }
 
-        var nameHits = new List<HighlightRange>(highlighter.Ranges(data.Name, HighlightField.Name));
+        // Name ranges come back already sorted + merged — usable as-is.
+        var nameRanges = highlighter.Ranges(data.Name, HighlightField.Name);
+
+        // Reuse the FullPath stored by Fill instead of recomputing ParentPath +
+        // Name. For a name-only query (the common case) this returns empty and
+        // we skip the split, the merge, and the extra lists entirely.
+        var pathHits = highlighter.Ranges(FullPath, HighlightField.Path);
+        if (pathHits.Count == 0)
+        {
+            AssignRanges(ToShared(nameRanges), NoRanges);
+            return;
+        }
+
+        // A path term matched: split each full-path hit at the parent/name
+        // boundary so each TextBlock gets only its own slice. The name side can
+        // gain hits, so re-merge it; the parent side is built fresh here.
+        var nameHits = new List<HighlightRange>(nameRanges);
         var parentHits = new List<HighlightRange>();
         var boundary = data.ParentPath.Length;
-        foreach (var r in highlighter.Ranges(data.FullPath, HighlightField.Path))
+        foreach (var r in pathHits)
         {
             SplitAtBoundary(r, boundary, parentHits, nameHits);
         }
@@ -166,7 +185,7 @@ public sealed partial class ResultRow : ObservableObject
         }
     }
 
-    private static IReadOnlyList<HighlightRange> ToShared(List<HighlightRange> list) =>
+    private static IReadOnlyList<HighlightRange> ToShared(IReadOnlyList<HighlightRange> list) =>
         list.Count == 0 ? NoRanges : list;
 
     private static bool RangesEqual(IReadOnlyList<HighlightRange> a, IReadOnlyList<HighlightRange> b)

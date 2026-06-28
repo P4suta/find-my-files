@@ -12,7 +12,11 @@ internal static class Wtf8
     /// <returns>The decoded string, with any lone surrogates preserved.</returns>
     public static string Decode(ReadOnlySpan<byte> bytes)
     {
-        var chars = new char[bytes.Length]; // UTF-16 units ≤ WTF-8 bytes
+        // UTF-16 units ≤ WTF-8 bytes, so this is a safe upper bound. Decode into
+        // a stack buffer for the common short name/path (≤512 chars = 1 KiB) so
+        // only the unavoidable final string allocates; the throwaway scratch
+        // array is gone from the per-row page-decode path.
+        Span<char> chars = bytes.Length <= 512 ? stackalloc char[bytes.Length] : new char[bytes.Length];
         int n = 0, i = 0;
         while (i < bytes.Length)
         {
@@ -55,7 +59,7 @@ internal static class Wtf8
             }
         }
 
-        return new string(chars, 0, n);
+        return new string(chars[..n]);
     }
 
     /// <summary>WTF-8 encoding: the inverse of <see cref="Decode"/>. Lone

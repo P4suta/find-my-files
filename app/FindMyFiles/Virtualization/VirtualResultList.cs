@@ -128,9 +128,12 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         _inFlight.Clear();
         Count = (int)Math.Min(result?.Count ?? 0, int.MaxValue);
         LastVisibleRange = null;
-        foreach (var seed in seeds)
+
+        // Index loop, not foreach: iterating IReadOnlyList<PageSeed> (a struct
+        // type) through the interface boxes the enumerator.
+        for (var i = 0; i < seeds.Count; i++)
         {
-            ApplySeed(seed);
+            ApplySeed(seeds[i]);
         }
 
         old?.Dispose();
@@ -187,9 +190,11 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         _result = result;
         _loaded.Clear();
         _inFlight.Clear();
-        foreach (var seed in seeds)
+
+        // Index loop, not foreach: see Reassign (avoids a boxed enumerator).
+        for (var i = 0; i < seeds.Count; i++)
         {
-            ApplySeed(seed);
+            ApplySeed(seeds[i]);
         }
 
         old?.Dispose();
