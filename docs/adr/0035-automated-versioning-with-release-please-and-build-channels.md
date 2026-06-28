@@ -1,0 +1,60 @@
+# ADR-0035: Automated versioning (release-please) + dev/nightly/stable build channels
+
+Date: 2026-06-29 / Status: Accepted (supersedes the manual `xtask release` flow; extends ADR-0021's build-output layout with build *identity*)
+
+ADR-0021 put every build artifact under one `build/` tree, but builds had no *identity*: `fmf --version` and the app's version label reported a bare `0.1.0` whether the binary was a contributor's local build, a future nightly, or an official release — all indistinguishable. And cutting a release meant a human ran `xtask release X.Y.Z`, hand-picking the number and hand-editing `engine/Cargo.toml` + the csproj in lockstep. That "version management is human-driven" shape is the thing to remove pre-v0.1, while builds are still free to change.
+
+The decision criterion, set explicitly by the maintainer, is **convenience + how industry-standard/recommended a workflow is** — *not* daily build-loop cost (a small fluctuation there is acceptable). The dual-language reality (Rust `Cargo.toml` + C# `csproj`) is the practical filter: the tool must bump both.
+
+## Decision
+
+1. **release-please owns the version, CHANGELOG, and tag.** Conventional Commits on `main` drive a bot (`googleapis/release-please-action`, SHA-pinned) that keeps a "Release PR" open; merging it bumps the version, updates `CHANGELOG.md`, and cuts a `vX.Y.Z` tag. The maintainer never hand-picks or hand-edits a number — they merge a PR. The Release PR diff *is* the release preview (no local CLI needed). `release-please-config.json` + `.release-please-manifest.json` are the config.
+
+2. **Version stays declared in the files; the bot edits them (not git-derived).** `release-type: "rust"` at package path `engine` bumps `engine/Cargo.toml` `[workspace.package] version` **and** `engine/Cargo.lock` (required — CI is `--locked`). The csproj `<Version>` is bumped by a `generic` extra-file updater keyed on an `x-release-please-version` annotation. The manifest keeps the version present and reproducible (tarball/`.git`-less builds, `cargo metadata`, debuggability) — the "shackle" was the *human driver*, already removed by (1), not the stored number.
+
+3. **Three channels, stamped at build time.** A new leaf crate `fmf-buildstamp` (depended on only by `fmf` + `fmf-service`, never `fmf-core`/`fmf-ffi`) resolves `VERSION` in `build.rs`; the C# csproj computes `InformationalVersion`. The base `X.Y.Z` is the release-please-managed number; the channel suffix is layered at build time:
+   - **dev** (local `just build`) → `X.Y.Z-dev+g<sha>` (`.dirty` when the tree is dirty)
+   - **nightly** → `X.Y.Z-nightly.<date>+g<sha>`
+   - **stable** → clean `X.Y.Z`
+   `xtask version --channel <dev|nightly|stable> [--date]` is the single source of the string *format*; CI exports it as `FMF_BUILD_VERSION` (Rust) / `FmfChannel` (C#).
+
+4. **Conventional Commits are enforced.** Locally via a lefthook `commit-msg` hook (`committed`, mise-pinned); on PRs via the existing `amannn/action-semantic-pull-request` title gate (squash-merge → the PR title becomes the commit, so the title is what release-please reads).
+
+5. **Nightly = unsigned, 14-day GitHub Actions artifact — not a Release.** `nightly.yml` builds the bundle from `main` (skipping when `main` is unchanged in 24h), stamps it nightly, and uploads `find-my-files-nightly`. Artifacts keep nightlies off the Releases list (no confusion with stable) and sidestep **Immutable Releases** (no rolling tag to overwrite). Nightlies are deliberately unsigned; the approval-gated signing pipeline (ADR-0029) is stable-only.
+
+6. **Dormant until a GitHub App is provisioned.** A tag pushed by the default `GITHUB_TOKEN` does **not** trigger other workflows (GitHub's recursion guard), so release-please's tag would not fire `release.yml`. Activation runs as a **GitHub App**: `release-please.yml` mints a short-lived, repo-scoped installation token at runtime (`actions/create-github-app-token`) from the `RELEASE_PLEASE_APP_ID` + `RELEASE_PLEASE_APP_PRIVATE_KEY` secrets and hands it to release-please. Those secrets live in a dedicated **`release-please` environment** with a `main`-only deployment-branch policy (so the `contents:write`+`pull-requests:write` App key can't be read by a workflow on another branch — a repository secret would be readable from any branch's push) and, deliberately, **no required reviewers** (release-please runs unattended; the human gate is merging the Release PR, and signing's approval gate is the separate `release` environment). With those secrets unset the job runs green and no-ops — the scaffolding ships now, the App lights it up later (the project's dormant-first pattern, cf. ADR-0034). A fine-grained PAT with the same two permissions is the fallback.
+
+## Rationale
+
+- **release-please over in-tree (git-cliff + xtask) [the earlier lean]**: once daily-loop cost is *not* a criterion, a bespoke in-tree release script is neither the most convenient nor the most standard option — it is a maintained reinvention. The Release-PR bot is the lower-friction, more-recommended 2024+ workflow and is what the maintainer chose. The reversal is deliberate, recorded here, not drift.
+- **release-please over release-plz**: release-plz is the Rust-native gold standard but only bumps Cargo crates; the C# csproj would be a bolt-on. release-please's `generic`/`extra-files` updater bumps *both* languages from one config — the decisive factor for a dual-language repo.
+- **Declared-and-bot-edited over git-derived (nbgv/vergen)**: a height/`git describe` version is not Conventional-Commits-*semantic* (it can't turn `feat:` into a minor bump), breaks on `.git`-less source builds, and needs two separate tools for two languages. The stored number costs almost nothing and keeps reproducibility/debuggability.
+- **Channel suffix at build time, base in the file**: the stamp (`fmf-buildstamp` / `InformationalVersion`) is the right home for the *derived* part (channel + sha); the *declared* base never needs git at build time. `fmf-buildstamp` is a leaf off the two front-end binaries so the `.git/HEAD` rerun never rebuilds the hot engine crates.
+- **Artifacts for nightly**: with Immutable Releases on, a rolling `nightly` tag can't overwrite assets; dated prereleases would accumulate and need GC. A 14-day artifact auto-expires and is the least-moving-parts "separate bucket".
+
+## Rejected alternatives
+
+- **In-tree git-cliff + xtask (self-authored release command)** — maximum control and reuses the existing `xtask` version-edit code, but non-standard and a maintenance burden; loses on the chosen "convenience + recommended" axis. Rejected (was the prior lean; consciously overturned).
+- **release-plz (Rust-native bot)** — idiomatic for the engine, but Rust-only: the C# version would need a second mechanism. Rejected for a dual-language repo.
+- **nbgv + vergen (git-derived, no stored version)** — the purest "no version to manage" model, but non-composable with CC-semantic bumps, `.git`-dependent, and two-tool. Rejected.
+- **Keep manual `xtask release X.Y.Z`** — simplest diff, but it *is* the human-driven shackle this ADR removes. Rejected.
+- **Nightly as dated GitHub pre-releases** — publicly downloadable without a login, but accumulates under Immutable Releases and needs a GC workflow. Deferred behind a trigger.
+- **Nightly as a rolling `nightly` Release** — the common "always-latest" pattern, but **incompatible with Immutable Releases** (can't overwrite the asset). Rejected outright.
+- **CalVer (`YYYY.MM.x`)** — used by some apps, but a filename-search engine/CLI benefits from SemVer's change-magnitude signal, and CC→SemVer is the mainstream pairing. Rejected.
+
+## Consequences
+
+- The maintainer's release ritual becomes "write Conventional Commits, merge the Release PR." `just release` and the `xtask` version-edit modules (`release.rs`, `version/{cargo_toml,csproj}.rs`) are **removed** — versioning has one owner (release-please), not two.
+- `release.yml` is unchanged in trigger (`v*.*.*`); it gains only a step that stamps the stable build cleanly (`FMF_BUILD_VERSION` / `FmfChannel=stable`).
+- A new CI workflow (`release-please.yml`) and a nightly workflow (`nightly.yml`) appear. The former needs `contents: write` + `pull-requests: write` and is dormant without `RELEASE_PLEASE_TOKEN`.
+- Every contributor commit must be a Conventional Commit (local hook + PR-title gate). `--no-verify` remains forbidden.
+- The wire contract and golden corpus are untouched — the version string is not part of the wire format, so no golden re-capture.
+- **First activation must be verified**: the first Release PR should show `engine/Cargo.toml` + `engine/Cargo.lock` + the csproj all bumped and `CHANGELOG.md` written. If release-please's Rust strategy mishandles the virtual `[workspace.package]` manifest, fall back to a `toml` extra-file (`$.workspace.package.version`) plus a lock-refresh step. (Documented in `docs/RELEASING.md`.)
+
+## Re-examination triggers
+
+- **Anonymous public nightly downloads wanted** → promote nightly artifacts to dated GitHub pre-releases + a retention/GC workflow.
+- **Signed nightly wanted** → add a `sign` job to `nightly.yml` (reusing ADR-0029's pipeline).
+- **release-please's Cargo-workspace handling proves insufficient** (version or `Cargo.lock` not bumped correctly) → switch the Rust side to a `toml` extra-file updater + an explicit `cargo update -p` lock-refresh, or adopt the `cargo-workspace` plugin.
+- **crates.io / NuGet publishing begins** → re-evaluate release-plz (Rust) and a real package-publish step; the current config publishes nothing to a registry.
+- **The C# csproj surface grows complex** (multiple version-bearing props) → reconsider Nerdbank.GitVersioning for the .NET side specifically.

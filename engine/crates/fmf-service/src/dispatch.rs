@@ -193,7 +193,7 @@ impl Connection {
                 &messages::ServiceInfoResp {
                     uptime_ms: self.faults.uptime_ms(),
                     connections: self.active_connections.load(Ordering::Relaxed) as u32,
-                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    version: fmf_buildstamp::VERSION.to_string(),
                 },
             ),
             _ => Outcome::Drop,

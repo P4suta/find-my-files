@@ -426,6 +426,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fmf-buildstamp"
+version = "0.1.0"
+
+[[package]]
 name = "fmf-cli"
 version = "0.1.0"
 dependencies = [
@@ -435,6 +439,7 @@ dependencies = [
  "clap",
  "clap-markdown",
  "clap_complete",
+ "fmf-buildstamp",
  "fmf-contract",
  "fmf-core",
  "indicatif",
@@ -506,6 +511,7 @@ name = "fmf-service"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "fmf-buildstamp",
  "fmf-core",
  "fmf-proto",
  "parking_lot",

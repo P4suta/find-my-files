@@ -65,8 +65,9 @@ which fires only when publishing. The `sign` job pauses for approval (the `relea
 2. **Attestation/OIDC dry-run**: to exercise the `publish` job (`id-token: write` / `attestations: write`), run
    `workflow_dispatch` with a throwaway `tag_name` and `publish=true`. Note immutable releases make a published
    release non-deletable, so use a tag you are happy to keep.
-3. For production, run `just release` as usual (version bump + signed tag push) → `release.yml` fires automatically;
-   approve the `sign` job when prompted.
+3. For production, merge the release-please **Release PR** (it bumps the version + CHANGELOG and pushes the signed
+   `vX.Y.Z` tag) → `release.yml` fires automatically; approve the `sign` job when prompted. See
+   [RELEASING.md](RELEASING.md) / [ADR-0035](adr/0035-automated-versioning-with-release-please-and-build-channels.md).
 4. After completion, confirm that `gh attestation verify <zip> --repo P4suta/find-my-files` succeeds, the
    **Attestations** tab has 3 items (provenance + SBOM×2), and the release has zip / SHA256SUMS / `*.cdx.json`.
 

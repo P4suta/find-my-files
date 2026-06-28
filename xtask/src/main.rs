@@ -20,7 +20,6 @@ mod docs;
 mod doctor;
 mod package;
 mod publish;
-mod release;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -34,14 +33,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Bump the version (Rust workspace + C# app in lockstep), commit, and
-    /// create a signed vX.Y.Z tag. Pushing the tag fires release.yml.
-    Release {
-        /// New semver, e.g. 0.2.0
-        version: String,
-        /// Rewrite the version files and show the diff without committing/tagging.
+    /// Print the canonical channel-aware version string — the source of the
+    /// `FMF_BUILD_VERSION` format that the build stamp and nightly packaging use.
+    /// Release *bumping* is release-please's job, not this command's.
+    Version {
+        /// Build channel: dev | nightly | stable.
+        #[arg(long, default_value = "dev")]
+        channel: String,
+        /// YYYYMMDD date stamp (required for the nightly channel).
         #[arg(long)]
-        dry_run: bool,
+        date: Option<String>,
     },
     /// Assemble the distributable bundle in dist/FindMyFiles (publish the app
     /// into app/, prune locales, copy the engine binaries, add the root launcher
@@ -51,10 +52,11 @@ enum Commands {
         #[arg(long, action = clap::ArgAction::Set, default_value_t = false)]
         skip_rust: bool,
     },
-    /// Zip + checksum the assembled bundle for a release tag (vX.Y.Z).
+    /// Zip + checksum the assembled bundle. With a vX.Y.Z tag → stable zip; omit
+    /// the tag for a nightly, whose name comes from `FMF_BUILD_VERSION`.
     Package {
-        /// The release tag, e.g. v0.2.0 (a leading 'v' is optional).
-        tag: String,
+        /// The release tag, e.g. v0.2.0 (a leading 'v' is optional). Omit for nightly.
+        tag: Option<String>,
     },
     /// Sweep leftover test fixtures (engine/target/test-tmp).
     CleanTemp,
@@ -70,9 +72,9 @@ enum Commands {
 
 fn main() -> Result<()> {
     match Cli::parse().command {
-        Commands::Release { version, dry_run } => release::run(&version, dry_run),
+        Commands::Version { channel, date } => version::run(&channel, date.as_deref()),
         Commands::Publish { skip_rust } => publish::run(skip_rust),
-        Commands::Package { tag } => package::run(&tag),
+        Commands::Package { tag } => package::run(tag.as_deref()),
         Commands::CleanTemp => {
             clean::run();
             Ok(())

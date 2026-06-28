@@ -349,25 +349,29 @@ clean-temp:
 
 # ── Release ──────────────────────────────────────────────────────────────
 
-# Cut a release: bump the version (Rust workspace + C# app in lockstep),
-# commit, and create a signed vX.Y.Z tag. Pushing the tag fires release.yml
-# (GITHUB_TOKEN only — no stored secret). Logic + guards (semver, existing-tag,
-# no-op) + tests live in xtask; `--dry-run` shows the diff without committing.
-# Usage:  just release 0.2.0   then   git push; git push origin v0.2.0
-[group('release')]
-[doc('Cut a release: bump version, commit, create a signed tag')]
-[working-directory: 'xtask']
-release version *args="":
-    cargo run -- release {{version}} {{args}}
+# NOTE: there is intentionally no `just release` recipe. Versioning, the
+# CHANGELOG and the vX.Y.Z tag are owned by release-please (Conventional Commits
+# → an auto-maintained Release PR; merging it cuts the tag, which fires
+# release.yml). Humans never hand-pick or hand-edit a version. See ADR-0035.
 
-# Zip + checksum the assembled bundle for a release tag (run AFTER publish +
-# signing). Outputs find-my-files-v<version>-win-x64.zip + SHA256SUMS.txt under
-# build/package/ — the assets release.yml attaches. --release: deflate wants a
-# non-debug build. Usage:  just package v0.2.0
+# Print the canonical channel-aware build version (the FMF_BUILD_VERSION format).
+# dev/nightly/stable; nightly needs --date. Used by nightly.yml + release.yml.
+# Usage:  just version --channel nightly --date 20260629
 [group('release')]
-[doc('Zip + checksum the assembled bundle for a release tag')]
+[doc('Print the channel-aware build version string')]
 [working-directory: 'xtask']
-package tag:
+version *args="":
+    cargo run -- version {{args}}
+
+# Zip + checksum the assembled bundle (run AFTER publish + signing). With a
+# vX.Y.Z tag → find-my-files-v<version>-win-x64.zip; omit the tag for a nightly,
+# whose name comes from FMF_BUILD_VERSION. Both land + SHA256SUMS.txt under
+# build/package/ — the assets release.yml attaches. --release: deflate wants a
+# non-debug build. Usage:  just package v0.2.0   (or)   just package
+[group('release')]
+[doc('Zip + checksum the assembled bundle (tag = stable, no tag = nightly)')]
+[working-directory: 'xtask']
+package tag="":
     cargo run --release -- package {{tag}}
 
 # ── Docs ─────────────────────────────────────────────────────────────────

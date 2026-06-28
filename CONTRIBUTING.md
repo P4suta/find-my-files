@@ -46,14 +46,22 @@ back to an elevated in-process engine (`--engine=inproc`).
 
 We use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`,
 `fix:`, `perf:`, `docs:`, `refactor:`, `test:`, `chore:`, `ci:`, `deps:`) and
-squash-merge, so the PR title becomes the commit. It keeps history readable and
-feeds the auto-generated GitHub Release notes.
+squash-merge, so the PR title becomes the commit. This is **enforced**: a local
+lefthook `commit-msg` hook (`committed`) checks each message, and a CI gate checks
+the PR title. The format isn't cosmetic — it drives automated versioning.
 
-Releases are cut from a tag, not a bot — no PAT or app key to manage. `just
-release X.Y.Z` bumps the version (Rust workspace + C# app in lockstep), commits,
-and creates a signed `vX.Y.Z` tag. Pushing the tag fires `release.yml`, which
-builds, optionally signs, and attaches the bundle to a GitHub Release using only
-the default `GITHUB_TOKEN`.
+Releases are **not** hand-cut. [release-please](https://github.com/googleapis/release-please)
+reads the Conventional Commits on `main` and keeps a "Release PR" open that bumps
+the version (Rust workspace + C# app), updates `CHANGELOG.md`, and — when you
+merge it — cuts the `vX.Y.Z` tag that fires `release.yml`. **You never pick or
+edit a version number.** `feat:` → minor, `fix:`/`perf:` → patch, a `!`/`BREAKING
+CHANGE:` → major. See [docs/RELEASING.md](docs/RELEASING.md) and
+[ADR-0035](docs/adr/0035-automated-versioning-with-release-please-and-build-channels.md).
+
+`fmf --version` (and the app's F12 panel) report a channel-aware build identity:
+`X.Y.Z-dev+g<sha>` for your local build, `X.Y.Z-nightly.<date>+g<sha>` for a
+nightly, and a clean `X.Y.Z` for a stable release — so a hand-built binary is
+never mistaken for an official one.
 
 ## Before you push
 

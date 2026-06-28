@@ -109,7 +109,7 @@ public sealed partial class PerfPanel : UserControl
             : "(no stats yet)";
         var dump =
             $"find-my-files diagnostics {DateTimeOffset.Now:O}\n" +
-            $"app: v{typeof(App).Assembly.GetName().Version}  os: {Environment.OSVersion.VersionString}\n" +
+            $"app: v{BuildInfo.Version}  os: {Environment.OSVersion.VersionString}\n" +
             $"engine log: %ProgramData%\\find-my-files\\logs\\engine.log\n" +
             $"app log: {FileLog.LogPath}\n\n=== engine stats ===\n{statsJson}\n\n" +
             $"=== app.log (tail) ===\n{FileLog.Tail(50)}\n";

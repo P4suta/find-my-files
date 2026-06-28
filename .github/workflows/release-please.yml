@@ -1,0 +1,74 @@
+# release-please — the version/CHANGELOG/tag bot (ADR-0035).
+#
+# Conventional Commits land on main → this action keeps a "Release PR" open that
+# bumps engine/Cargo.toml + engine/Cargo.lock (rust release-type) and the C# csproj
+# (extra-files generic updater), and updates CHANGELOG.md. Merging that PR cuts a
+# signed-by-nobody `vX.Y.Z` tag, which fires release.yml (build → sign → publish).
+# Humans never hand-pick or hand-edit a version.
+#
+# DORMANT until activated: the tag this action pushes only triggers release.yml if
+# pushed by a non-GITHUB_TOKEN identity (GitHub's recursion guard suppresses
+# workflow triggers from GITHUB_TOKEN-pushed refs). So it runs as a GitHub App: we
+# mint a short-lived installation token at runtime (actions/create-github-app-token)
+# from two secrets — RELEASE_PLEASE_APP_ID and RELEASE_PLEASE_APP_PRIVATE_KEY — and
+# hand it to release-please. With those secrets unset the job runs green and no-ops:
+# the scaffolding ships now, the App lights it up later. See docs/RELEASING.md.
+
+name: release-please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never cancel a release-cut in flight; only one runs per ref anyway.
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The App private key lives in this environment's secrets. Configure the
+    # environment with a deployment-branch policy of `main` only, so a workflow on
+    # any other branch (or a malicious workflow edit on a feature branch) cannot
+    # read the credential — repository secrets, by contrast, are readable from a
+    # push to any branch. Deliberately set NO required reviewers: release-please
+    # must run unattended (the human gate is merging the Release PR; signing's
+    # approval gate is the separate `release` environment in release.yml). ADR-0035.
+    environment: release-please
+    permissions:
+      contents: write # create the release commit, tag and GitHub Release
+      pull-requests: write # open / maintain the Release PR
+    env:
+      # Server-side boolean — never exposes the secret values.
+      HAS_APP: ${{ secrets.RELEASE_PLEASE_APP_ID != '' && secrets.RELEASE_PLEASE_APP_PRIVATE_KEY != '' }}
+    steps:
+      # Mint a short-lived installation token scoped to this repo. Its pushes (the
+      # vX.Y.Z tag) DO trigger release.yml, unlike GITHUB_TOKEN's.
+      - name: Mint GitHub App token
+        id: app-token
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+
+      - name: release-please (active)
+        if: env.HAS_APP == 'true'
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: release-please (dormant — App not configured)
+        if: env.HAS_APP != 'true'
+        run: |
+          echo "::notice::release-please is dormant — set the RELEASE_PLEASE_APP_ID and"
+          echo "RELEASE_PLEASE_APP_PRIVATE_KEY secrets (a GitHub App) to activate."
+          echo "See docs/RELEASING.md and ADR-0035."

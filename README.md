@@ -62,7 +62,11 @@ The `fmf` developer CLI supports `--version`, TTY-aware colour, scriptable
 `--format json`, and `FMF_E_*` process exit codes; its full reference is the
 generated [CLI reference](docs/cli.md), and `just cli-gen` writes tab
 completions for PowerShell/bash/zsh/fish. The WinUI 3 app lives in `app/`
-(from milestone M1 onward).
+(from milestone M1 onward). `--version` reports a channel-aware build identity
+(`X.Y.Z-dev+g<sha>` locally, `…-nightly.<date>+…`, or a clean `X.Y.Z` release).
+
+Versioning and releases are automated from Conventional Commits — see
+[docs/RELEASING.md](docs/RELEASING.md) (and the nightly build channel).
 
 **New here?** Read [CONTRIBUTING](CONTRIBUTING.md) for setup and the development loop,
 then the [Development guide](docs/DEVELOPMENT.md) — the project's fixed rules and

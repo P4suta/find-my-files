@@ -15,9 +15,28 @@ use std::path::Path;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-pub fn run(tag: &str) -> Result<()> {
-    let version = semver::strip_tag_v(tag);
-    semver::validate(version)?;
+pub fn run(tag: Option<&str>) -> Result<()> {
+    // Stable: strict vX.Y.Z tag → `find-my-files-v0.2.0-win-x64.zip`.
+    // Nightly (no tag): name from the build stamp FMF_BUILD_VERSION verbatim
+    // (e.g. `find-my-files-0.1.0-nightly.20260629+g3672e3f-win-x64.zip`), which
+    // already encodes the channel — no `v` prefix and no strict-semver gate.
+    let label = if let Some(tag) = tag {
+        let version = semver::strip_tag_v(tag);
+        semver::validate(version)?;
+        format!("v{version}")
+    } else {
+        let v = std::env::var("FMF_BUILD_VERSION").map_err(|_| {
+            anyhow::anyhow!(
+                "tagless (nightly) packaging needs FMF_BUILD_VERSION — set it from \
+                 `xtask version --channel nightly --date YYYYMMDD`"
+            )
+        })?;
+        let v = v.trim().to_owned();
+        if v.is_empty() {
+            bail!("FMF_BUILD_VERSION is set but empty");
+        }
+        v
+    };
 
     let dist = paths::dist_dir();
     if !dist.exists() {
@@ -30,7 +49,7 @@ pub fn run(tag: &str) -> Result<()> {
     let pkg = paths::package_dir();
     fs::create_dir_all(&pkg).with_context(|| format!("create {}", pkg.display()))?;
 
-    let zip_name = format!("find-my-files-v{version}-win-x64.zip");
+    let zip_name = format!("find-my-files-{label}-win-x64.zip");
     let zip_path = pkg.join(&zip_name);
     write_zip(&dist, &zip_path)?;
 

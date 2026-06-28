@@ -17,7 +17,11 @@ use fmf_service::svc::{EXIT_LOCKED, SERVICE_NAME, ServeOptions};
 use fmf_service::{config, lifecycle, security, svc};
 
 #[derive(Parser)]
-#[command(name = "fmf-service", about = "find-my-files engine service")]
+#[command(
+    name = "fmf-service",
+    version = fmf_buildstamp::VERSION,
+    about = "find-my-files engine service"
+)]
 enum Cli {
     /// Run in the foreground (console mode; Ctrl+C = flush + graceful stop).
     Run {
