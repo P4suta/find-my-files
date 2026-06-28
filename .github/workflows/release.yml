@@ -298,6 +298,11 @@ jobs:
     needs: sign
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
     runs-on: windows-latest
+    # Second approval gate on the irreversible step (ADR-0035): the GitHub Release
+    # is immutable, so publishing requires its own explicit human approval in the
+    # `release` environment, distinct from the `sign` approval ("sign this?" vs
+    # "release this to the world?"). Defence in depth against an accidental release.
+    environment: release
     permissions:
       contents: write # create the GitHub Release + upload assets
       id-token: write # OIDC token for keyless Sigstore signing (attestations)
