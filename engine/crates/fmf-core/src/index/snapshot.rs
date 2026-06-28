@@ -37,10 +37,28 @@ fn read_vec<T: Copy, R: std::io::Read>(
     h: &mut xxhash_rust::xxh64::Xxh64,
 ) -> std::io::Result<Vec<T>> {
     use std::io::{Error, ErrorKind};
+    // A corrupt length must come back as Err (the caller full-rescans), never be
+    // handed to the allocator. `try_reserve_exact` below already turns a failed
+    // reservation into a clean Err in production, but the request still goes to
+    // the allocator first — and under a fuzzer that is a process abort, not an
+    // Err: a multi-exabyte claim trips AddressSanitizer's allocation ceiling, and
+    // even a few-GB claim trips libFuzzer's OOM guard (both surfaced by the
+    // index_snapshot target). Reject anything past a ceiling no real section
+    // approaches — the whole index at the 1M-file target is ~100 MB, so a single
+    // section past 1 GiB (10× the entire index) is corruption — which also keeps
+    // the bounded allocation under the fuzzer's limit, so "corrupt → Err, not
+    // abort" holds while fuzzing the structural decode below.
+    const MAX_SECTION_BYTES: usize = 1 << 30; // 1 GiB
     let mut len8 = [0u8; 8];
     r.read_exact(&mut len8)?;
     h.update(&len8);
     let len = u64::from_le_bytes(len8) as usize;
+    if len > MAX_SECTION_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "section length implausibly large",
+        ));
+    }
     let elem = std::mem::size_of::<T>();
     if !len.is_multiple_of(elem) {
         return Err(Error::new(ErrorKind::InvalidData, "section size mismatch"));
