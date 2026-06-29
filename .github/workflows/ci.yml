@@ -31,6 +31,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ steps.f.outputs.code }}
+      fuzz: ${{ steps.f.outputs.fuzz }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
@@ -41,6 +42,13 @@ jobs:
               - 'engine/**'
               - 'app/**'
               - 'contract/**'
+              - '.github/workflows/ci.yml'
+            fuzz:
+              - 'engine/fuzz/**'
+              - 'engine/crates/fmf-proto/**'
+              - 'engine/crates/fmf-contract/**'
+              - 'engine/crates/fmf-core/**'
+              - '.github/workflows/fuzz.yml'
               - '.github/workflows/ci.yml'
 
   # ── ubuntu hygiene tier: parallel, no needs, cheap fast-fail signal ──
@@ -286,11 +294,24 @@ jobs:
       - run: cargo bench -p fmf-core
         working-directory: engine
 
+  # Bounded libFuzzer smoke over the untrusted-input parsers, folded into the
+  # required gate (#93: it used to be a separate non-required workflow, so
+  # auto-merge could merge with fuzz red). Reuses the fuzz workflow definition
+  # (single source) and runs only when the fuzzable surface changes; otherwise
+  # skipped, which ci-required treats as success.
+  fuzz:
+    needs: changes
+    if: needs.changes.outputs.fuzz == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/fuzz.yml
+
   # Single required status check. Transitively enforces the leaves and treats
-  # `skipped` (docs-only) as success — avoids the "Expected — Waiting" deadlock.
+  # `skipped` (docs-only / paths-gated) as success — avoids the "Expected —
+  # Waiting" deadlock.
   ci-required:
     if: always()
-    needs: [hygiene, deny, machete, contract-lint, pr-title, release-gate, xtask, engine-build-test, app]
+    needs: [hygiene, deny, machete, contract-lint, pr-title, release-gate, xtask, engine-build-test, app, fuzz]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
