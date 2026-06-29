@@ -17,13 +17,10 @@ on:
       - "engine/crates/fmf-contract/**"
       - "engine/crates/fmf-core/**"
       - ".github/workflows/fuzz.yml"
-  pull_request:
-    paths:
-      - "engine/fuzz/**"
-      - "engine/crates/fmf-proto/**"
-      - "engine/crates/fmf-contract/**"
-      - "engine/crates/fmf-core/**"
-      - ".github/workflows/fuzz.yml"
+  # PR gating is driven by ci.yml, which `uses:`-calls this workflow (paths-gated)
+  # and folds it into the single required `ci-required` check, so a fuzz failure
+  # blocks auto-merge (#93). A `pull_request` trigger here too would double-run it.
+  workflow_call:
   schedule:
     - cron: "43 4 * * 1" # Monday 04:43 UTC (staggered from codeql/cargo-audit/scorecard)
   workflow_dispatch:
