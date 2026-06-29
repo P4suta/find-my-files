@@ -78,6 +78,10 @@
   <data name="SortSize.Content" xml:space="preserve"><value>Size</value></data>
   <data name="SortDate.Content" xml:space="preserve"><value>Date modified</value></data>
   <data name="StatusMenuItem.Text" xml:space="preserve"><value>Status</value></data>
+  <data name="About_AppVersion" xml:space="preserve"><value>App: v{0}</value></data>
+  <data name="About_EngineVersion" xml:space="preserve"><value>Engine: v{0}</value></data>
+  <data name="AboutVersionMismatch.Title" xml:space="preserve"><value>Version mismatch</value></data>
+  <data name="AboutVersionMismatch.Message" xml:space="preserve"><value>The app and engine are from different builds. Restart the app, or update so both match.</value></data>
   <data name="DiagCard.Header" xml:space="preserve"><value>Show/hide diagnostics</value></data>
   <data name="ServiceCard.Header" xml:space="preserve"><value>Manage service…</value></data>
   <data name="LangMenu.Header" xml:space="preserve"><value>Language</value></data>

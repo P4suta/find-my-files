@@ -51,12 +51,13 @@ fn color_flag_rejects_an_invalid_value() {
 
 #[test]
 fn diag_runs_unelevated_and_reports_the_version() {
-    // `diag` reads versions/log paths/the diag ring — no volume, no admin.
+    // `diag` reads versions/log paths/the diag ring — no volume, no admin. It
+    // reports the channel-aware build identity (same as `--version`).
     fmf()
         .arg("diag")
         .assert()
         .success()
-        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+        .stdout(predicate::str::contains(fmf_buildstamp::VERSION));
 }
 
 #[test]
@@ -65,7 +66,9 @@ fn diag_json_is_a_versioned_object() {
     let v: serde_json::Value =
         serde_json::from_slice(&assert.get_output().stdout).expect("diag --format json is JSON");
     assert_eq!(v["format_version"].as_u64(), Some(1));
-    assert_eq!(v["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
+    // The channel-aware build identity, not the bare CARGO_PKG_VERSION — must
+    // agree with `fmf --version` (both read fmf_buildstamp::VERSION).
+    assert_eq!(v["version"].as_str(), Some(fmf_buildstamp::VERSION));
     assert!(v["recent_errors"].is_array());
 }
 

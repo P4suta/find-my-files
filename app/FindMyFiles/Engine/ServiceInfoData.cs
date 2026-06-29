@@ -12,6 +12,8 @@ public sealed class ServiceInfoData
     /// <summary>Active client connections the service is currently serving.</summary>
     public uint Connections { get; set; }
 
-    /// <summary>Service binary version (its <c>CARGO_PKG_VERSION</c>).</summary>
+    /// <summary>Service binary version — the channel-aware
+    /// <c>fmf_buildstamp::VERSION</c> (e.g. <c>0.1.0-nightly.&lt;date&gt;+g&lt;sha&gt;</c>),
+    /// the same identity <c>fmf-service --version</c> reports.</summary>
     public string Version { get; set; } = string.Empty;
 }

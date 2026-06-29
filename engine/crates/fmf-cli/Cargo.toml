@@ -30,3 +30,5 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 clap_complete = { workspace = true }
 clap-markdown = { workspace = true }
+# So the CLI tests can pin `diag`'s reported version to the build identity.
+fmf-buildstamp = { workspace = true }

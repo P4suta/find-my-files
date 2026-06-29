@@ -22,7 +22,10 @@ pub fn diag(ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
 
     if ctx.is_json() {
         return json::emit(&DiagReport {
-            version: env!("CARGO_PKG_VERSION"),
+            // Channel-aware build identity, identical to `fmf --version` (clap reads
+            // the same const) — not the bare CARGO_PKG_VERSION, which dropped the
+            // channel/sha and disagreed with --version.
+            version: fmf_buildstamp::VERSION,
             arch: std::env::consts::ARCH,
             engine_log,
             app_log,
@@ -33,7 +36,7 @@ pub fn diag(ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "fmf {} ({})",
-        env!("CARGO_PKG_VERSION"),
+        fmf_buildstamp::VERSION,
         std::env::consts::ARCH
     );
     println!("engine log : {engine_log}");

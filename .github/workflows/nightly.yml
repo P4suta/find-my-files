@@ -73,6 +73,7 @@ jobs:
           VER=$(just version --channel nightly --date "$DATE")
           echo "FMF_BUILD_VERSION=$VER" >> "$GITHUB_ENV"
           echo "FmfChannel=nightly.$DATE" >> "$GITHUB_ENV"
+          echo "NIGHTLY_DATE=$DATE" >> "$GITHUB_ENV"
           echo "::notice::Building nightly $VER"
 
       - name: Build distributable bundle (unsigned)
@@ -86,7 +87,9 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.freshness.outputs.build == 'true'
         with:
-          name: find-my-files-nightly
+          # Date in the artifact name so the downloaded wrapper itself says which
+          # nightly it is (the inner zip already carries the full version string).
+          name: find-my-files-nightly-${{ env.NIGHTLY_DATE }}
           path: |
             build/package/*.zip
             build/package/SHA256SUMS.txt

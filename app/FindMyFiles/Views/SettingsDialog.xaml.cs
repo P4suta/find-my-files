@@ -82,6 +82,10 @@ public sealed partial class SettingsDialog : ContentDialog
         try
         {
             var dialog = new SettingsDialog(vm) { XamlRoot = root };
+
+            // Populate the About block's engine version as the dialog appears
+            // (best-effort; the bound rows fill in when it resolves).
+            vm.RefreshVersionsAsync().Forget("settings-version");
             await dialog.ShowAsync();
 
             // Closed now — safe to open the next surface (another ContentDialog

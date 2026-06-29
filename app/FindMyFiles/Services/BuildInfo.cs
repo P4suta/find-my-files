@@ -23,4 +23,30 @@ public static class BuildInfo
             .InformationalVersion
         ?? typeof(BuildInfo).Assembly.GetName().Version?.ToString()
         ?? "unknown";
+
+    /// <summary>
+    /// The bare <c>X.Y.Z</c> base of a build-version string — everything before
+    /// the first <c>-</c> (pre-release) or <c>+</c> (build metadata). Used to
+    /// compare the app against the engine without tripping on channel/sha.
+    /// </summary>
+    /// <param name="version">A build-version string (possibly empty).</param>
+    /// <returns>The leading <c>X.Y.Z</c> base, or empty when <paramref name="version"/> is.</returns>
+    public static string BaseOf(string version)
+    {
+        if (string.IsNullOrEmpty(version))
+        {
+            return string.Empty;
+        }
+
+        int cut = version.AsSpan().IndexOfAny('-', '+');
+        return cut < 0 ? version : version[..cut];
+    }
+
+    /// <summary>True when two build-version strings share the same <c>X.Y.Z</c>
+    /// base (e.g. app and engine are from the same release).</summary>
+    /// <param name="a">First build-version string.</param>
+    /// <param name="b">Second build-version string.</param>
+    /// <returns>Whether the two share the same <c>X.Y.Z</c> base.</returns>
+    public static bool SameBase(string a, string b) =>
+        string.Equals(BaseOf(a), BaseOf(b), StringComparison.Ordinal);
 }

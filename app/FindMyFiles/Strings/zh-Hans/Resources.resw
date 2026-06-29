@@ -78,6 +78,10 @@
   <data name="SortSize.Content" xml:space="preserve"><value>大小</value></data>
   <data name="SortDate.Content" xml:space="preserve"><value>修改日期</value></data>
   <data name="StatusMenuItem.Text" xml:space="preserve"><value>状态</value></data>
+  <data name="About_AppVersion" xml:space="preserve"><value>应用: v{0}</value></data>
+  <data name="About_EngineVersion" xml:space="preserve"><value>引擎: v{0}</value></data>
+  <data name="AboutVersionMismatch.Title" xml:space="preserve"><value>版本不匹配</value></data>
+  <data name="AboutVersionMismatch.Message" xml:space="preserve"><value>应用与引擎来自不同的构建。请重启应用，或更新以使两者一致。</value></data>
   <data name="DiagCard.Header" xml:space="preserve"><value>显示/隐藏诊断信息</value></data>
   <data name="ServiceCard.Header" xml:space="preserve"><value>管理服务…</value></data>
   <data name="LangMenu.Header" xml:space="preserve"><value>语言</value></data>
