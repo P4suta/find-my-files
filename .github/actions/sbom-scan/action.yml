@@ -1,0 +1,53 @@
+name: Generate SBOMs and scan for vulnerabilities
+description: >-
+  Generate the Rust + C# CycloneDX 1.6 SBOMs into build/sbom/ and gate on
+  known-vulnerable dependencies in the resolved shipped closure (osv-scanner over
+  the SBOMs — the only view of the .NET/NuGet graph cargo-audit can't see). The
+  single source shared by release.yml (release gate) and nightly.yml so the tool
+  versions never drift. Requires the toolchain (mise: rust + dotnet) already
+  installed and `just publish` already run (NuGet restored). No secrets needed.
+
+runs:
+  using: composite
+  steps:
+    # SBOM tooling (release/nightly-only; deliberately not in mise.toml's dev
+    # loop). Version-pinned; both crates.io and NuGet verify package integrity
+    # against their immutable indexes, so a pinned version is fetched
+    # reproducibly. Append the dotnet global-tool dir to PATH for the SBOM step.
+    - name: Install SBOM tools
+      shell: pwsh
+      run: |
+        cargo install cargo-sbom --locked --version 0.10.0
+        dotnet tool install --global CycloneDX --version 6.2.0
+        "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+    # SBOMs (CycloneDX 1.6 JSON), generated after the build so the resolved
+    # graphs match what shipped. The Rust step uses bash because pwsh's `>`
+    # would emit UTF-16.
+    - name: Generate Rust SBOM (CycloneDX)
+      working-directory: engine
+      shell: bash
+      run: mkdir -p ../build/sbom && cargo sbom --output-format cyclone_dx_json_1_6 > ../build/sbom/fmf-engine.cdx.json
+
+    - name: Generate C# SBOM (CycloneDX)
+      shell: pwsh
+      run: >-
+        dotnet CycloneDX app/FindMyFiles/FindMyFiles.csproj
+        --output build/sbom --filename app.cdx.json
+        --output-format Json --spec-version 1.6 --runtime win-x64
+
+    # Gate on known-vulnerable deps in the *resolved shipped closure* — the
+    # .NET/NuGet graph here is only visible via the SBOM, never to cargo-audit
+    # (which reads Cargo.lock). Accepted/unfixable advisories: osv-scanner.toml
+    # (ADR-0034).
+    - name: Install osv-scanner
+      uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
+      with:
+        tool: osv-scanner@2.3.6
+    - name: Scan SBOMs for known vulnerabilities (gate)
+      shell: pwsh
+      run: >-
+        osv-scanner scan source
+        -L build/sbom/fmf-engine.cdx.json
+        -L build/sbom/app.cdx.json
+        --config osv-scanner.toml

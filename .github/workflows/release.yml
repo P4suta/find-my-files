@@ -96,17 +96,6 @@ jobs:
         with:
           install: true
 
-      # SBOM tooling (release-only; deliberately not in mise.toml's dev loop).
-      # Version-pinned; both crates.io and NuGet verify package integrity against
-      # their immutable indexes, so a pinned version is fetched reproducibly.
-      # Append the dotnet global-tool dir to PATH for the later SBOM step.
-      - name: Install SBOM tools
-        shell: pwsh
-        run: |
-          cargo install cargo-sbom --locked --version 0.10.0
-          dotnet tool install --global CycloneDX --version 6.2.0
-          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-
       # Stamp the build as a clean stable release. Without these, the
       # fmf-buildstamp build.rs defaults to `…-dev+g<sha>` and the C# csproj
       # defaults to the `dev` channel — both wrong for an official release.
@@ -121,34 +110,13 @@ jobs:
       - name: Build distributable bundle
         run: just publish
 
-      # SBOMs (CycloneDX 1.6 JSON), generated after the build so the resolved
-      # graphs match what shipped. The Rust step uses bash because pwsh's `>`
-      # would emit UTF-16. Attached to the release + attested in publish.
-      - name: Generate Rust SBOM (CycloneDX)
-        working-directory: engine
-        shell: bash
-        run: mkdir -p ../build/sbom && cargo sbom --output-format cyclone_dx_json_1_6 > ../build/sbom/fmf-engine.cdx.json
-
-      - name: Generate C# SBOM (CycloneDX)
-        run: >-
-          dotnet CycloneDX app/FindMyFiles/FindMyFiles.csproj
-          --output build/sbom --filename app.cdx.json
-          --output-format Json --spec-version 1.6 --runtime win-x64
-
-      # Gate the release on known-vulnerable deps in the *resolved shipped
-      # closure* — the .NET/NuGet graph here is only visible via the SBOM, never
-      # to cargo-audit (which reads Cargo.lock). Fail-fast before sign/publish.
-      # Accepted/unfixable advisories live in osv-scanner.toml (ADR-0034).
-      - name: Install osv-scanner
-        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
-        with:
-          tool: osv-scanner@2.3.6
-      - name: Scan SBOMs for known vulnerabilities (release gate)
-        run: >-
-          osv-scanner scan source
-          -L build/sbom/fmf-engine.cdx.json
-          -L build/sbom/app.cdx.json
-          --config osv-scanner.toml
+      # SBOMs (CycloneDX 1.6) + the osv-scanner release gate, shared with
+      # nightly.yml via a composite action so the tool versions never drift
+      # (ADR-0040). Runs after the build so the resolved graphs match what
+      # shipped; the .NET/NuGet graph is only visible here (not to cargo-audit).
+      # Fail-fast before sign/publish. The SBOMs are attached + attested below.
+      - name: Generate SBOMs and scan (release gate)
+        uses: ./.github/actions/sbom-scan
 
       - name: Upload unsigned bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

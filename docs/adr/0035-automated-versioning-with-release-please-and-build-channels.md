@@ -56,7 +56,7 @@ The decision criterion, set explicitly by the maintainer, is **convenience + how
 ## Re-examination triggers
 
 - **Anonymous public nightly downloads wanted** → promote nightly artifacts to dated GitHub pre-releases + a retention/GC workflow.
-- **Signed nightly wanted** → add a `sign` job to `nightly.yml` (reusing ADR-0029's pipeline).
+- **Signed nightly wanted** → add a `sign` job to `nightly.yml` (reusing ADR-0029's pipeline). Per [ADR-0040](0040-nightly-supply-chain-parity.md), nightly now carries the rest of the supply chain (CycloneDX SBOMs, the osv-scanner gate, and keyless build-provenance + SBOM attestations); **signing is the only remaining stable-only supply-chain gate**, so this trigger is the sole nightly/release difference left.
 - **release-please's Cargo-workspace handling proves insufficient** (version or `Cargo.lock` not bumped correctly) → switch the Rust side to a `toml` extra-file updater + an explicit `cargo update -p` lock-refresh, or adopt the `cargo-workspace` plugin.
 - **crates.io / NuGet publishing begins** → re-evaluate release-plz (Rust) and a real package-publish step; the current config publishes nothing to a registry.
 - **The C# csproj surface grows complex** (multiple version-bearing props) → reconsider Nerdbank.GitVersioning for the .NET side specifically.
