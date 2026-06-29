@@ -527,6 +527,14 @@ public sealed class PipeEngineClient : IEngineClient
         {
             trace = JsonSerializer.Deserialize<QueryTraceData>(traceJson, EngineJson.SnakeCase);
         }
+
+        // Cross-log correlation (ADR-0037): the engine logs the same `rid`
+        // (result handle) for this query, so app.log ↔ engine.log join on it.
+        // Skipped for an unchanged idle requery, mirroring the engine.
+        if (trace is null || !trace.Unchanged)
+        {
+            FileLog.Event("query", "query served", ("rid", resultId), ("hits", count));
+        }
 #pragma warning disable CA2000 // ownership transferred to the caller, disposed by the caller / on epoch change
         return new SearchOutcome(
             new PipeSearchResult(this, resultId, (long)count, CurrentEpoch), trace);

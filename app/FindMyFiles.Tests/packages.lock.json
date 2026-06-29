@@ -142,6 +142,19 @@
         "resolved": "13.0.3",
         "contentHash": "HrC5BXdl00IP9zeV+0Z848QWPAoCr9P3bDEZguI+gkLcBKAOxix/tLEAAHC+UvDNPv4a2d18lOReHMOagPa+zQ=="
       },
+      "Serilog": {
+        "type": "Transitive",
+        "resolved": "4.3.1",
+        "contentHash": "savYe7h5yRlkqBVOwP8cIRDOdqKiPmYCU4W87JH38sBmcKD5EBoXvQIw6bNEvZ/pTe1gsiye3VFCzBsoppGkXQ=="
+      },
+      "Serilog.Sinks.File": {
+        "type": "Transitive",
+        "resolved": "6.0.0",
+        "contentHash": "lxjg89Y8gJMmFxVkbZ+qDgjl+T4yC5F7WSLTvA+5q0R04tfKVLRL/EHpYoJ/MEQd2EeCKDuylBIVnAYMotmh2A==",
+        "dependencies": {
+          "Serilog": "4.0.0"
+        }
+      },
       "StyleCop.Analyzers.Unstable": {
         "type": "Transitive",
         "resolved": "1.2.0.556",
@@ -193,7 +206,9 @@
           "CommunityToolkit.Mvvm": "[8.4.2, )",
           "Microsoft.Windows.SDK.BuildTools": "[10.0.28000.2270, )",
           "Microsoft.Windows.SDK.BuildTools.WinApp": "[0.4.0, )",
-          "Microsoft.WindowsAppSDK.WinUI": "[2.2.1, )"
+          "Microsoft.WindowsAppSDK.WinUI": "[2.2.1, )",
+          "Serilog": "[4.*, )",
+          "Serilog.Sinks.File": "[6.*, )"
         }
       }
     },

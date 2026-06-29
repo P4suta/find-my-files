@@ -1,4 +1,5 @@
 use std::ffi::{c_char, c_void};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use fmf_core::engine::{EngineError, ResultSet};
 use fmf_core::query::QueryOptions;
@@ -12,6 +13,9 @@ use crate::{FMF_E_INVALID_ARG, FMF_E_IO, FMF_E_QUERY_SYNTAX, FMF_E_STALE, FMF_OK
 
 // The query/page PODs radiate from the contract (ADR-0018).
 pub use fmf_contract::pod::{FmfPage, FmfQueryOptions, FmfRow};
+
+/// Per-query correlation counter for the in-process FFI path (see `fmf_query`).
+static FFI_QID: AtomicU64 = AtomicU64::new(1);
 
 /// Runs a query against the engine, returning an opaque result-set handle plus
 /// the total match count and an optional JSON query trace.
@@ -42,11 +46,21 @@ pub unsafe extern "C" fn fmf_query(
             Err(c) => return c,
         };
         let opt: QueryOptions = unsafe { *options }.into();
+        // Per-query correlation: an in-process counter groups this request's
+        // engine-side log lines under `qid`. The cross-log join key for the
+        // (single-process) FFI path is `rid` — the result handle's address,
+        // which the UI also holds — since there is no wire request id here
+        // (ADR-0037). The contract is unchanged.
+        let _qid = tracing::info_span!("req", qid = FFI_QID.fetch_add(1, AtomicOrdering::Relaxed))
+            .entered();
         match handle.engine.query(text, &opt) {
             Ok((rs, trace)) => {
+                let count = rs.len() as u64;
+                let raw = Box::into_raw(Box::new(rs));
+                fmf_core::diag::log_query_served(raw as usize as u64, &trace);
                 unsafe {
-                    *out_count = rs.len() as u64;
-                    *out_handle = Box::into_raw(Box::new(rs)).cast();
+                    *out_count = count;
+                    *out_handle = raw.cast();
                     if !out_trace.is_null() {
                         *out_trace = match serde_json::to_string(&trace) {
                             Ok(json) => blob_from_json(json),

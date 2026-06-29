@@ -84,7 +84,13 @@ impl Connection {
     /// Handle one request opcode inside a `catch_unwind` firewall: a panic
     /// answers `FMF_E_PANIC` and the connection survives, mirroring the FFI
     /// `guard`.
-    pub fn dispatch(&self, op: u16, payload: &[u8]) -> Outcome {
+    ///
+    /// `request_id` is the client's per-request id from the frame header; it
+    /// rides as the `qid` correlation field on every log line this request
+    /// produces, so `engine.log` and the UI's `app.log` share it (the id is
+    /// already on the wire — the contract is unchanged; ADR-0037).
+    pub fn dispatch(&self, op: u16, request_id: u32, payload: &[u8]) -> Outcome {
+        let _qid = tracing::info_span!("req", qid = request_id).entered();
         let result = catch_unwind(AssertUnwindSafe(|| self.dispatch_inner(op, payload)));
         match result {
             Ok(outcome) => outcome,
@@ -219,6 +225,7 @@ impl Connection {
             Ok((set, trace)) => {
                 let count = set.len() as u64;
                 let id = self.next_result_id.fetch_add(1, Ordering::Relaxed);
+                fmf_core::diag::log_query_served(id, &trace);
                 let lagged = self.faults.lag_marker(text);
                 let mut results = self.results.lock();
                 if results.len() >= MAX_RESULTS_PER_CONN {

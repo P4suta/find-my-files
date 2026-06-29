@@ -50,3 +50,4 @@
   - [0034 — SBOMs consumed by osv-scanner](adr/0034-sbom-consumed-by-osv-scanner.md)
   - [0035 — Automated versioning with release-please](adr/0035-automated-versioning-with-release-please-and-build-channels.md)
   - [0036 — In-process soft restart; single-instance-safe relaunch](adr/0036-in-process-soft-restart-and-single-instance-safe-relaunch.md)
+  - [0037 — logfmt diagnostics, retention caps, cross-process correlation](adr/0037-logfmt-diagnostics-and-correlation.md)

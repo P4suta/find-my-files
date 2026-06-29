@@ -125,6 +125,13 @@
          metapackage drags into the self-contained output (~50MB). -->
     <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.2.1" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <!-- Structured logging (ADR-0037): logfmt lines via a custom ITextFormatter,
+         size-capped multi-generation retention via the File sink. Floating so
+         restore can resolve offline; pinned in packages.lock.json. NOT
+         Serilog.Sinks.Async — a synchronous sink keeps the last line on a hard
+         crash ("don't go silent"). -->
+    <PackageReference Include="Serilog" Version="4.*" />
+    <PackageReference Include="Serilog.Sinks.File" Version="6.*" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.4.0" />
     <!-- Extra build-time analyzers (convention hardening). Floating 4.* so a
          missing exact pin can't break restore offline — pin to the resolved

@@ -124,7 +124,7 @@ pub fn command() -> clap::Command {
 /// mapped `FMF_E_*` code on failure. Returns normally on success.
 pub fn run() {
     // Same pipeline as the DLL: stderr log + diag ring + panic capture.
-    fmf_core::diag::init_diag(None, "info");
+    fmf_core::diag::init_diag(None, "info", fmf_core::diag::DEFAULT_MAX_LOG_FILES);
 
     let cli = Cli::parse();
     let color = cmd::term::resolve_color(cli.color);

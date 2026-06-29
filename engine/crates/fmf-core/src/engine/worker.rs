@@ -221,7 +221,7 @@ impl Engine {
                         load.expect("Restore implies a loaded snapshot");
                     journal.set_next_usn(next_usn);
                     let load_ms = load_stage.elapsed().as_millis() as u64;
-                    tracing::info!(volume = %label, entries = idx.len(), ms = load_ms, "snapshot restored");
+                    tracing::info!(area = "snapshot", volume = %label, entries = idx.len(), ms = load_ms, "snapshot restored");
                     let file_bytes = store.file_bytes();
                     self.metrics.record_scan(ScanTrace {
                         volume: label.clone(),
@@ -366,6 +366,14 @@ impl Engine {
                                 entries: idx.len() as u64,
                                 peak_ws_bytes: stats.peak_working_set_bytes,
                             });
+                            tracing::info!(
+                                area = "scan",
+                                volume = %label,
+                                source = %scan_source,
+                                entries = idx.len() as u64,
+                                ms = stats.elapsed_total_ms,
+                                "volume indexed"
+                            );
                             idx
                         }
                         Err(e) => {

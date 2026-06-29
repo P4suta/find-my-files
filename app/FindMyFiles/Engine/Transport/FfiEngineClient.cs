@@ -366,6 +366,18 @@ public sealed unsafe class FfiEngineClient : IEngineClient
                     .Deserialize<QueryTraceData>(traceJson, EngineJson.SnakeCase);
             }
 
+            // Cross-log correlation (ADR-0037): the in-process engine logs this
+            // same `rid` (the result handle's address), the join key for the
+            // single-process FFI path. Skipped for an unchanged idle requery.
+            if (traceData is null || !traceData.Unchanged)
+            {
+                FileLog.Event(
+                    "query",
+                    "query served",
+                    ("rid", unchecked((ulong)result.ToInt64())),
+                    ("hits", count));
+            }
+
             return new SearchOutcome(new FfiSearchResult(result, (long)count), traceData);
         },
             ct);

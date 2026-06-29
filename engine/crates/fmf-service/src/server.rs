@@ -198,7 +198,7 @@ fn run_connection(
             loop {
                 let msg = rx.lock().recv();
                 let Ok((header, payload)) = msg else { return };
-                match conn.dispatch(header.opcode, &payload) {
+                match conn.dispatch(header.opcode, header.request_id, &payload) {
                     Outcome::Reply(status, body) => {
                         let h = FrameHeader {
                             len: 0,
