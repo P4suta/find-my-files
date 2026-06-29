@@ -4,8 +4,10 @@
 //! It renders two artefacts from the single clap command tree
 //! (`fmf_cli::command()`):
 //!
-//! * shell completions (PowerShell/bash/zsh/fish) into `build/completions/`,
-//!   an ignored build output bundled at release time;
+//! * shell completions (PowerShell/bash/zsh/fish) into `build/completions/`, an
+//!   ignored build output for local inspection (the release bundle generates its
+//!   own under `completions/` via the shipped `fmf completions <shell>` — see
+//!   xtask publish — so the bundled scripts always match the shipped binary);
 //! * the Markdown CLI reference at `docs/cli.md`, a committed, generated file
 //!   surfaced in the docs site.
 //!

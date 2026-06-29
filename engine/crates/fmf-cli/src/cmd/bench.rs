@@ -11,7 +11,7 @@ use crate::bench_support::{BENCH_QUERIES, BenchReport, QueryBench, bench_restore
 
 pub fn bench(
     drive: &str,
-    json: Option<&std::path::Path>,
+    out: Option<&std::path::Path>,
     baseline: Option<&std::path::Path>,
     ctx: Ctx,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -105,7 +105,7 @@ pub fn bench(
         }
     }
 
-    if let Some(path) = json {
+    if let Some(path) = out {
         std::fs::write(path, serde_json::to_string_pretty(&report)?)?;
         eprintln!("report written to {}", path.display());
     }

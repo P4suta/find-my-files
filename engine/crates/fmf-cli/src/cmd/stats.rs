@@ -20,17 +20,55 @@ pub fn stats(
     query::prewarm(&idx);
     let mut s = idx.stats(drive);
     s.add_derived_bytes(query::derived_cache_bytes(&idx));
-    println!("{}", serde_json::to_string_pretty(&s)?);
     // The B/file RAM gate reads the steady working set, not the scan peak.
     let ws = fmf_core::mft::current_working_set();
-    eprintln!(
-        "current working set {:.1} MiB (≈{:.0} B/entry — the RAM gate figure)",
-        ws as f64 / (1024.0 * 1024.0),
-        if idx.is_empty() {
-            0.0
-        } else {
-            ws as f64 / idx.len() as f64
+    let ws_per_entry = if idx.is_empty() {
+        0.0
+    } else {
+        ws as f64 / idx.len() as f64
+    };
+
+    // `--format json`: one combined, format_version-stamped document on stdout
+    // (the opt-in estimates merge in as fields) — not the several separate JSON
+    // blobs the human dump prints.
+    if ctx.is_json() {
+        let mut doc = serde_json::Map::new();
+        doc.insert("columns".to_owned(), serde_json::to_value(&s)?);
+        doc.insert("working_set_bytes".to_owned(), ws.into());
+        doc.insert(
+            "working_set_bytes_per_entry".to_owned(),
+            ws_per_entry.into(),
+        );
+        if trigram_estimate {
+            doc.insert(
+                "trigram_estimate".to_owned(),
+                serde_json::to_value(compute_trigram_estimate(&idx))?,
+            );
         }
+        if name_stats {
+            doc.insert(
+                "name_stats".to_owned(),
+                serde_json::to_value(compute_name_stats(&idx))?,
+            );
+        }
+        if dict_estimate {
+            doc.insert(
+                "dict_estimate".to_owned(),
+                serde_json::to_value(compute_dict_estimate(&idx))?,
+            );
+            doc.insert(
+                "orig_estimate".to_owned(),
+                serde_json::to_value(compute_orig_estimate(&idx))?,
+            );
+        }
+        return super::json::emit(&serde_json::Value::Object(doc));
+    }
+
+    // Human: the per-column accounting dump plus the decorative working-set line.
+    println!("{}", serde_json::to_string_pretty(&s)?);
+    eprintln!(
+        "current working set {:.1} MiB (≈{ws_per_entry:.0} B/entry — the RAM gate figure)",
+        ws as f64 / (1024.0 * 1024.0),
     );
     if trigram_estimate {
         print_trigram_estimate(&idx);
@@ -139,10 +177,19 @@ fn compute_name_stats(idx: &VolumeIndex) -> NameStats {
     }
 }
 
+/// A byte-trigram index estimate over the live folded names (criterion (2) of
+/// the n-gram go/no-go in ARCHITECTURE.md). Read-only; nothing is built.
+#[derive(serde::Serialize)]
+struct TrigramEstimate {
+    distinct: u64,
+    postings: u64,
+    total_bytes: u64,
+    per_entry: f64,
+}
+
 /// Estimate a byte-trigram index over the live folded names: distinct
-/// trigrams (dictionary) + total postings (delta-varint assumed ~1.5B
-/// each). Feeds criterion (2) of the n-gram go/no-go in ARCHITECTURE.md.
-fn print_trigram_estimate(idx: &VolumeIndex) {
+/// trigrams (dictionary) + total postings (delta-varint assumed ~1.5B each).
+fn compute_trigram_estimate(idx: &VolumeIndex) -> TrigramEstimate {
     let mut distinct: std::collections::HashSet<[u8; 3]> = std::collections::HashSet::new();
     let mut postings = 0u64;
     let mut live = 0u64;
@@ -160,22 +207,32 @@ fn print_trigram_estimate(idx: &VolumeIndex) {
     let dict_bytes = distinct.len() as u64 * (3 + 4 + 4); // key + offset + len
     let posting_bytes = postings * 3 / 2; // delta varint ≈ 1.5B/posting
     let total = dict_bytes + posting_bytes;
-    let per_entry = if live > 0 {
-        total as f64 / live as f64
-    } else {
-        0.0
-    };
+    TrigramEstimate {
+        distinct: distinct.len() as u64,
+        postings,
+        total_bytes: total,
+        per_entry: if live > 0 {
+            total as f64 / live as f64
+        } else {
+            0.0
+        },
+    }
+}
+
+fn print_trigram_estimate(idx: &VolumeIndex) {
+    let e = compute_trigram_estimate(idx);
     println!(
         "trigram estimate: {} distinct, {} postings → ≈{:.1} MiB ({:.1} B/entry; go/no-go gate: ≤15 B/entry AND total bytes/entry ≤110)",
-        distinct.len(),
-        postings,
-        total as f64 / (1024.0 * 1024.0),
-        per_entry
+        e.distinct,
+        e.postings,
+        e.total_bytes as f64 / (1024.0 * 1024.0),
+        e.per_entry
     );
 }
 
 /// The projected name-dictionary-encoding delta (Phase-2 go/no-go input).
 /// `--trigram-estimate`'s sibling: read-only, nothing is built.
+#[derive(serde::Serialize)]
 struct DictEstimate {
     /// Distinct folded names = dictionary entry count (D).
     distinct: u64,
@@ -264,6 +321,7 @@ fn print_dict_estimate(idx: &VolumeIndex) {
 /// realized): the entries whose original differs from the fold store their
 /// original verbatim in `orig_pool`, and those originals duplicate heavily
 /// across a volume. Read-only.
+#[derive(serde::Serialize)]
 struct OrigEstimate {
     /// Entries whose original differs from the fold (own an `orig_pool` copy).
     differing: u64,

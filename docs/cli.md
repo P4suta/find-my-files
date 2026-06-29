@@ -15,12 +15,22 @@ This document contains the help content for the `fmf` command-line program.
 * [`fmf diag`↴](#fmf-diag)
 * [`fmf watch`↴](#fmf-watch)
 * [`fmf criterion-gate`↴](#fmf-criterion-gate)
+* [`fmf completions`↴](#fmf-completions)
 
 ## `fmf`
 
-find-my-files engine developer CLI
+find-my-files engine developer CLI — index, benchmark and diagnose the Rust search engine from a terminal.
+
+This is a developer / diagnostic tool; end-user search lives in the WinUI app (see the project README). Commands that read the $MFT/USN need an elevated terminal.
 
 **Usage:** `fmf [OPTIONS] <COMMAND>`
+
+EXAMPLES:
+  fmf index C: --stats           # index C: and print memory stats (no REPL)
+  fmf bench C: --out report.json # run the benchmark set, save a JSON report
+  fmf stats C: --format json     # machine-readable per-column accounting
+  fmf -v diag                    # diagnostics with debug-level logging
+  fmf completions powershell     # print a PowerShell completion script
 
 ###### **Subcommands:**
 
@@ -32,6 +42,7 @@ find-my-files engine developer CLI
 * `diag` — Print versions, log locations and the in-process diagnostics ring
 * `watch` — Index a volume, then tail its USN journal and apply changes live, printing one line per applied batch (Ctrl+C to stop)
 * `criterion-gate` — Gate criterion micro-bench results: scan change reports written by `cargo bench -- --baseline <name>` and exit 1 past the threshold (criterion itself never sets an exit code on regressions)
+* `completions` — Print a shell completion script to stdout (bash/zsh/fish/PowerShell/elvish). Add it with e.g. `eval "$(fmf completions bash)"`, or use the pre-generated scripts shipped under `completions/` in the release bundle
 
 ###### **Options:**
 
@@ -48,7 +59,8 @@ find-my-files engine developer CLI
     Never emit colour
 
 * `-q`, `--quiet` — Suppress the progress spinner and other stderr chrome
-* `--format <FORMAT>` — Output format. `json` emits a machine-readable document on stdout for the commands that support it (diag, bench, watch); others stay text
+* `-v`, `--verbose` — Increase log verbosity: `-v` = debug, `-vv` = trace (default: info). The `FMF_LOG` environment variable still takes precedence when set
+* `--format <FORMAT>` — Output format. `json` emits a single machine-readable document on stdout (NDJSON for the streaming `watch`); the interactive `index` REPL and `completions` are text-only
 
   Default value: `human`
 
@@ -56,7 +68,7 @@ find-my-files engine developer CLI
   - `human`:
     Human-readable text (tables, colour, the progress spinner)
   - `json`:
-    A single machine-readable JSON document on stdout (NDJSON — one object per line — for streaming commands like `watch`). Not every command has a JSON form; those keep printing text
+    A single machine-readable JSON document on stdout (NDJSON — one object per line — for streaming commands like `watch`). Honoured by every result-producing command; the interactive `index` REPL stays text
 
 
 
@@ -69,7 +81,7 @@ Spike S0: scan a volume's $MFT and print raw measurements
 
 ###### **Arguments:**
 
-* `<DRIVE>`
+* `<DRIVE>` — Volume to scan, e.g. `C:` (an NTFS drive root)
 
 
 
@@ -81,7 +93,7 @@ Build the index for a volume, print stats, then run an interactive query REPL (r
 
 ###### **Arguments:**
 
-* `<DRIVE>`
+* `<DRIVE>` — Volume to index, e.g. `C:` (an NTFS drive root)
 
 ###### **Options:**
 
@@ -98,12 +110,12 @@ Index a volume and run the fixed benchmark query set
 
 ###### **Arguments:**
 
-* `<DRIVE>`
+* `<DRIVE>` — Volume to index and benchmark, e.g. `C:` (an NTFS drive root)
 
 ###### **Options:**
 
-* `--json <JSON>` — Write the full report as JSON
-* `--baseline <BASELINE>` — Compare against a previous --json report; exit 1 when p50 or p99 regress by more than 20%
+* `--out <OUT>` — Write the full report to this file as JSON (distinct from the global `--format json`, which streams a document to stdout)
+* `--baseline <BASELINE>` — Compare against a previous `--out` report; exit 1 when p50 or p99 regress by more than 20%
 
 
 
@@ -115,7 +127,7 @@ Index a volume and dump per-column memory accounting as JSON
 
 ###### **Arguments:**
 
-* `<DRIVE>`
+* `<DRIVE>` — Volume to index and measure, e.g. `C:` (an NTFS drive root)
 
 ###### **Options:**
 
@@ -133,11 +145,11 @@ Measure $MFT read throughput per I/O strategy (elevated terminal; reads the scan
 
 ###### **Arguments:**
 
-* `<DRIVE>`
+* `<DRIVE>` — Volume to probe, e.g. `C:` (an NTFS drive root)
 
 ###### **Options:**
 
-* `--mode <MODE>`
+* `--mode <MODE>` — I/O strategy to measure (buffered, unbuffered, overlapped …)
 
   Default value: `buffered`
 
@@ -146,7 +158,7 @@ Measure $MFT read throughput per I/O strategy (elevated terminal; reads the scan
 * `--qd <QD>` — Outstanding reads for nobuf-ov
 
   Default value: `4`
-* `--runs <RUNS>`
+* `--runs <RUNS>` — Number of timed runs to take the best of
 
   Default value: `3`
 
@@ -168,7 +180,7 @@ Index a volume, then tail its USN journal and apply changes live, printing one l
 
 ###### **Arguments:**
 
-* `<DRIVE>`
+* `<DRIVE>` — Volume to index and watch, e.g. `C:` (an NTFS drive root)
 
 
 
@@ -186,6 +198,21 @@ Gate criterion micro-bench results: scan change reports written by `cargo bench 
 * `--threshold <THRESHOLD>` — Relative median regression threshold (0.10 = +10%)
 
   Default value: `0.1`
+
+
+
+## `fmf completions`
+
+Print a shell completion script to stdout (bash/zsh/fish/PowerShell/elvish). Add it with e.g. `eval "$(fmf completions bash)"`, or use the pre-generated scripts shipped under `completions/` in the release bundle
+
+**Usage:** `fmf completions <SHELL>`
+
+###### **Arguments:**
+
+* `<SHELL>` — The shell to generate the completion script for
+
+  Possible values: `bash`, `elvish`, `fish`, `powershell`, `zsh`
+
 
 
 

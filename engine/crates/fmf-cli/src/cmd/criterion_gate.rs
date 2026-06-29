@@ -25,6 +25,7 @@ fn collect_change_reports(dir: &std::path::Path, out: &mut Vec<std::path::PathBu
 pub fn criterion_gate(
     dir: &std::path::Path,
     threshold: f64,
+    ctx: super::ctx::Ctx,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut reports = Vec::new();
     collect_change_reports(dir, &mut reports);
@@ -37,8 +38,8 @@ pub fn criterion_gate(
         .into());
     }
 
-    let mut regressed = false;
     let mut checked = 0u32;
+    let mut regressions = Vec::new();
     for path in &reports {
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
         let Some(median) = v["median"]["point_estimate"].as_f64() else {
@@ -55,19 +56,35 @@ pub fn criterion_gate(
                 |p| p.display().to_string().replace('\\', "/"),
             );
         if median > threshold {
-            anstream::eprintln!(
-                "{} {name} median {:+.1}%",
-                term::paint(term::ERROR, "REGRESSION"),
-                median * 100.0
-            );
-            regressed = true;
+            if ctx.human_chrome() {
+                anstream::eprintln!(
+                    "{} {name} median {:+.1}%",
+                    term::paint(term::ERROR, "REGRESSION"),
+                    median * 100.0
+                );
+            }
+            regressions.push((name, median));
         }
     }
-    println!(
-        "criterion-gate: {checked} benches compared, threshold {:+.0}%",
-        threshold * 100.0
-    );
-    if regressed {
+
+    if ctx.is_json() {
+        let regressions_json: Vec<_> = regressions
+            .iter()
+            .map(|(name, median)| serde_json::json!({ "bench": name, "median": median }))
+            .collect();
+        super::json::emit(&serde_json::json!({
+            "checked": checked,
+            "threshold": threshold,
+            "regressions": regressions_json,
+            "passed": regressions.is_empty(),
+        }))?;
+    } else {
+        println!(
+            "criterion-gate: {checked} benches compared, threshold {:+.0}%",
+            threshold * 100.0
+        );
+    }
+    if !regressions.is_empty() {
         return Err("micro-benchmark regression vs criterion baseline".into());
     }
     Ok(())

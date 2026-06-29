@@ -13,8 +13,8 @@ pub enum Format {
     #[default]
     Human,
     /// A single machine-readable JSON document on stdout (NDJSON — one object
-    /// per line — for streaming commands like `watch`). Not every command has a
-    /// JSON form; those keep printing text.
+    /// per line — for streaming commands like `watch`). Honoured by every
+    /// result-producing command; the interactive `index` REPL stays text.
     Json,
 }
 

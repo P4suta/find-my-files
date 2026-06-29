@@ -26,19 +26,47 @@ pub fn io_probe(
     mode: ProbeModeArg,
     qd: usize,
     runs: usize,
+    ctx: super::ctx::Ctx,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut rates = Vec::with_capacity(runs.max(1));
-    for run in 0..runs.max(1) {
+    let runs = runs.max(1);
+    let mut measured = Vec::with_capacity(runs);
+    for run in 0..runs {
         let s = fmf_core::scan::io_probe(drive, mode.into(), qd)?;
-        println!(
-            "run {run}: {:>7.1} MB/s  ({:.1} MiB in {} ms, mode {mode:?}, qd {qd})",
-            s.mb_per_s,
-            s.bytes as f64 / f64::from(1 << 20),
-            s.elapsed_ms
-        );
-        rates.push(s.mb_per_s);
+        if ctx.human_chrome() {
+            println!(
+                "run {run}: {:>7.1} MB/s  ({:.1} MiB in {} ms, mode {mode:?}, qd {qd})",
+                s.mb_per_s,
+                s.bytes as f64 / f64::from(1 << 20),
+                s.elapsed_ms
+            );
+        }
+        measured.push((s.mb_per_s, s.bytes, s.elapsed_ms));
     }
+    let mut rates: Vec<f64> = measured.iter().map(|m| m.0).collect();
     rates.sort_by(f64::total_cmp);
-    println!("median: {:.1} MB/s", rates[rates.len() / 2]);
+    let median = rates[rates.len() / 2];
+
+    if ctx.is_json() {
+        let runs_json: Vec<_> = measured
+            .iter()
+            .enumerate()
+            .map(|(run, &(mb_per_s, bytes, elapsed_ms))| {
+                serde_json::json!({
+                    "run": run,
+                    "mb_per_s": mb_per_s,
+                    "bytes": bytes,
+                    "elapsed_ms": elapsed_ms,
+                })
+            })
+            .collect();
+        super::json::emit(&serde_json::json!({
+            "mode": format!("{mode:?}"),
+            "qd": qd,
+            "runs": runs_json,
+            "median_mb_per_s": median,
+        }))?;
+    } else {
+        println!("median: {median:.1} MB/s");
+    }
     Ok(())
 }

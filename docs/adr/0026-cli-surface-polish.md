@@ -40,3 +40,12 @@ To let the example and the integration tests reuse the clap surface, `fmf-cli` b
 - If scripts come to depend heavily on exit codes and a misclassification surfaces, promote a single `code()` accessor into fmf-core and have both the FFI and the CLI consume it.
 - If a non-interactive, scriptable query against the running service is genuinely needed, revisit `fmf search` via a Rust pipe client (a new design, with its own ADR).
 - If the JSON shapes churn, bump `format_version` and document the change; if consumers need stability guarantees, freeze a subset.
+
+## Follow-up
+
+[ADR-0039](0039-cli-devex-pass-2.md) is the second DevEx pass that makes this ADR's
+aspirations real and closes its gaps — completions are now actually generated into
+the release bundle (and a `fmf completions <shell>` subcommand prints them on demand),
+the `docs/cli.md` drift check became a `cargo test` (CI-gated, not just pre-push),
+`--format json` is honoured by every result-producing command, and `-v/--verbose` was
+added. The remit is unchanged: `fmf` stays a developer/diagnostic tool.

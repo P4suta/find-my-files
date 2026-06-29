@@ -89,10 +89,11 @@ pub fn run(skip_rust: bool) -> Result<()> {
     verify_bundle(&app)?;
     place_launcher_and_readme(&dist)?;
     place_buildinfo(&dist)?;
+    place_completions(&app, &dist)?;
 
     println!(
         "publish: build/dist/FindMyFiles assembled and verified \
-         (root launcher + app/ with {} required files).",
+         (root launcher + app/ with {} required files + shell completions).",
         REQUIRED.len()
     );
     Ok(())
@@ -141,6 +142,37 @@ fn verify_bundle(app: &Path) -> Result<()> {
             "bundle at {} is missing {missing:?} — it would not launch",
             app.display()
         );
+    }
+    Ok(())
+}
+
+/// Ship shell-completion scripts under the bundle's `completions/` dir, generated
+/// by invoking the just-built `app/fmf.exe completions <shell>` — the scripts are
+/// produced by the exact binary in the bundle, so they can never drift from it.
+/// (Resolves the doc-vs-impl gap where completions were claimed to be bundled but
+/// nothing copied them in.)
+fn place_completions(app: &Path, dist: &Path) -> Result<()> {
+    // (shell argument, output filename) — filenames follow clap_complete's own
+    // conventions so an installed script is named what each shell expects.
+    const SHELLS: &[(&str, &str)] = &[
+        ("bash", "fmf.bash"),
+        ("zsh", "_fmf"),
+        ("fish", "fmf.fish"),
+        ("powershell", "_fmf.ps1"),
+    ];
+    let fmf = app.join("fmf.exe");
+    let out_dir = dist.join("completions");
+    fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
+    for (shell, filename) in SHELLS {
+        let output = std::process::Command::new(&fmf)
+            .args(["completions", shell])
+            .output()
+            .with_context(|| format!("run {} completions {shell}", fmf.display()))?;
+        if !output.status.success() {
+            bail!("`fmf completions {shell}` exited with {}", output.status);
+        }
+        fs::write(out_dir.join(filename), &output.stdout)
+            .with_context(|| format!("write completion {filename}"))?;
     }
     Ok(())
 }
@@ -207,6 +239,11 @@ Advanced tools, inside  app\\ :
   app\\fmf.exe          command-line search
   app\\fmf-service.exe  the background service (the app installs/manages it)
 
+Shell completions for the  fmf  command are in  completions\\  (PowerShell, bash,
+zsh, fish). For PowerShell, add to your profile:
+  . \"$PWD\\completions\\_fmf.ps1\"
+Or generate fresh at any time:  app\\fmf.exe completions powershell
+
 Apache-2.0  -  https://github.com/P4suta/find-my-files
 
 --------------------------------------------------------------------------
@@ -227,6 +264,11 @@ FindMyFiles — Windows 向け 高速ファイル名検索
 上級者向けツールは  app\\  内:
   app\\fmf.exe          コマンドライン検索
   app\\fmf-service.exe  バックグラウンドサービス(アプリが導入・管理)
+
+fmf コマンドの補完スクリプトは  completions\\  にあります(PowerShell/bash/zsh/fish)。
+PowerShell ならプロファイルに次を追加:
+  . \"$PWD\\completions\\_fmf.ps1\"
+いつでも生成し直せます:  app\\fmf.exe completions powershell
 
 Apache-2.0  -  https://github.com/P4suta/find-my-files
 ";
