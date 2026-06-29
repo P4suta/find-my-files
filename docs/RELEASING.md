@@ -11,7 +11,7 @@ Design rationale: [ADR-0035](adr/0035-automated-versioning-with-release-please-a
 2. [`release-please`](../.github/workflows/release-please.yml) keeps a **Release PR** open
    that bumps `engine/Cargo.toml` (`[workspace.package] version`, then a `cargo update
    --workspace` step syncs `engine/Cargo.lock`) and `app/FindMyFiles/FindMyFiles.csproj`,
-   and updates [`engine/CHANGELOG.md`](../engine/CHANGELOG.md). The version is derived from the commits:
+   and updates [`CHANGELOG.md`](../CHANGELOG.md). The version is derived from the commits:
    `feat:` → minor, `fix:`/`perf:` → patch, `!` / `BREAKING CHANGE:` → major.
 3. **Add the `release: approved` label** to the Release PR. Until it's there the
    `release-gate` check fails the PR (so a release is never an accidental merge).
@@ -85,7 +85,7 @@ The Cargo workspace uses inherited versions (`version.workspace = true`) and CI 
 - `engine/Cargo.lock` (the internal crates' versions — a follow-up `chore: sync Cargo.lock`
   commit from the `cargo update --workspace` step in `release-please.yml`)
 - `app/FindMyFiles/FindMyFiles.csproj` `<Version>` (the `x-release-please-version` line)
-- `engine/CHANGELOG.md`
+- `CHANGELOG.md`
 
 This `simple` + `toml` updater + lock-sync setup exists because release-please's `rust`
 release-type can't write workspace-*inherited* versions (it fails with "value at path

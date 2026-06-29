@@ -4,7 +4,7 @@
   "tag-separator": "-",
   "bootstrap-sha": "3672e3fc8406c7d9a1f44f0d7197fdcfa5ded2df",
   "packages": {
-    "engine": {
+    ".": {
       "release-type": "simple",
       "package-name": "find-my-files",
       "extra-files": [
