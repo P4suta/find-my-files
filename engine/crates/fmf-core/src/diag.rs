@@ -609,7 +609,7 @@ static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLo
 ///
 /// `log_dir = Some(..)` writes a daily rolling `engine.<date>.log` capped at
 /// `max_log_files` generations; `None` writes to stderr (CLI). Every line is
-/// logfmt (see [`LogfmtFormat`]). The `FMF_LOG` env var overrides `level`.
+/// logfmt (see `LogfmtFormat`). The `FMF_LOG` env var overrides `level`.
 /// Safe to call repeatedly — later calls no-op.
 pub fn init_logging(log_dir: Option<&std::path::Path>, level: &str, max_log_files: usize) {
     use tracing_subscriber::layer::SubscriberExt;
