@@ -78,6 +78,16 @@ with one deliberate difference: **release-please's environment has no required r
 > `create-github-app-token` step and pass the PAT directly as `token:`. The App is
 > preferred (no human-tied credential; the token is short-lived and repo-scoped).
 
+### The first release is pinned to 0.1.0 (one-time)
+
+`release-please-config.json` sets `"release-as": "0.1.0"`. Without it, release-please
+treats the first release from a `0.0.0` manifest as the **initial release → 1.0.0**,
+which is wrong for a pre-1.0 project. `release-as` forces the first release to `0.1.0`.
+
+> **After `v0.1.0` is released, delete the `"release-as": "0.1.0"` line** (it would
+> otherwise pin every future release to 0.1.0). Once removed, the manifest is `0.1.0`
+> and the next `feat:` correctly proposes `0.2.0`.
+
 ### Verify the first Release PR
 
 The Cargo workspace uses inherited versions (`version.workspace = true`) and CI builds
