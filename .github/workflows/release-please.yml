@@ -74,21 +74,31 @@ jobs:
       # own `--locked` CI would fail. `cargo update --workspace` only rewrites the
       # path-crate versions in the lock (no compile). It re-runs whenever a Release
       # PR is (re)built, so a later rebuild that resets the lock self-heals.
+      # Parse the PR JSON in bash (jq), never `fromJSON()` in YAML: a step's `env:`
+      # is evaluated eagerly regardless of `if:`, so a `fromJSON('')` there crashes
+      # the run on the no-op release-please runs where `pr` is empty. This step is
+      # gated on a plain string compare and emits a plain string output.
+      - name: Resolve the Release PR branch
+        id: rp_branch
+        if: ${{ env.HAS_APP == 'true' && steps.rp.outputs.pr != '' }}
+        env:
+          PR_JSON: ${{ steps.rp.outputs.pr }}
+        run: echo "branch=$(printf '%s' "$PR_JSON" | jq -r '.headBranchName')" >> "$GITHUB_OUTPUT"
       - name: Check out the Release PR branch
-        if: ${{ env.HAS_APP == 'true' && steps.rp.outputs.pr }}
+        if: ${{ steps.rp_branch.outputs.branch != '' }}
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ fromJSON(steps.rp.outputs.pr).headBranchName }}
+          ref: ${{ steps.rp_branch.outputs.branch }}
           token: ${{ steps.app-token.outputs.token }}
       - name: Set up Rust (only to sync the lock)
-        if: ${{ env.HAS_APP == 'true' && steps.rp.outputs.pr }}
+        if: ${{ steps.rp_branch.outputs.branch != '' }}
         uses: ./.github/actions/rust-toolchain
       - name: Sync Cargo.lock to the bumped workspace version
-        if: ${{ env.HAS_APP == 'true' && steps.rp.outputs.pr }}
+        if: ${{ steps.rp_branch.outputs.branch != '' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
-          BRANCH: ${{ fromJSON(steps.rp.outputs.pr).headBranchName }}
+          BRANCH: ${{ steps.rp_branch.outputs.branch }}
         run: |
           cargo update --workspace --manifest-path engine/Cargo.toml
           if git diff --quiet -- engine/Cargo.lock; then
