@@ -69,4 +69,50 @@ public sealed class MainViewModelTests
         Assert.Equal(FmfSort.Size, vm.Sort);
         Assert.False(vm.SortDescending);
     }
+
+    private static StubEngineClient EngineReportingVersion(string serviceVersion) =>
+        new()
+        {
+            Stats = new EngineStatsData
+            {
+                Service = new ServiceInfoData { Version = serviceVersion },
+            },
+        };
+
+    [Fact]
+    public async Task RefreshVersions_exposes_the_engine_version_and_clears_mismatch_on_same_base()
+    {
+        // Same X.Y.Z base as the app (different channel/sha) → no mismatch.
+        string sameBase = $"{BuildInfo.BaseOf(BuildInfo.Version)}-nightly.20260629+gabc1234";
+        using var vm = Vm(EngineReportingVersion(sameBase));
+
+        await vm.RefreshVersionsAsync();
+
+        Assert.True(vm.HasEngineVersion);
+        Assert.Equal(sameBase, vm.EngineVersion);
+        Assert.False(vm.HasVersionMismatch);
+    }
+
+    [Fact]
+    public async Task RefreshVersions_flags_a_mismatch_when_the_base_differs()
+    {
+        using var vm = Vm(EngineReportingVersion("99.0.0-dev+gabc1234"));
+
+        await vm.RefreshVersionsAsync();
+
+        Assert.True(vm.HasEngineVersion);
+        Assert.True(vm.HasVersionMismatch);
+    }
+
+    [Fact]
+    public async Task RefreshVersions_stays_empty_for_in_proc_clients_without_a_service()
+    {
+        // Stub with no stats → in-proc client (Ffi/Fake): no separate service.
+        using var vm = Vm(new StubEngineClient());
+
+        await vm.RefreshVersionsAsync();
+
+        Assert.False(vm.HasEngineVersion);
+        Assert.False(vm.HasVersionMismatch);
+    }
 }

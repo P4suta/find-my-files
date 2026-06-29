@@ -5,6 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:conv="using:FindMyFiles.Converters"
     xmlns:ctl="using:FindMyFiles.Controls"
+    xmlns:vm="using:FindMyFiles.ViewModels"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     x:Uid="SettingsDialog"
@@ -139,6 +140,28 @@
                     Style="{ThemeResource CaptionTextBlockStyle}"
                     Text="{x:Bind VM.Results.CountText, Mode=OneWay}"
                     Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(VM.Results.CountText), Mode=OneWay}" />
+                <!--  Build identity: the app version (always) and the engine/service
+                      version (pipe mode only). Selectable so it can be copied into a
+                      bug report; a base mismatch raises the warning below.  -->
+                <TextBlock
+                    AutomationProperties.AutomationId="AboutAppVersion"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    IsTextSelectionEnabled="True"
+                    Style="{ThemeResource CaptionTextBlockStyle}"
+                    Text="{x:Bind vm:MainViewModel.AppVersionText}" />
+                <TextBlock
+                    AutomationProperties.AutomationId="AboutEngineVersion"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    IsTextSelectionEnabled="True"
+                    Style="{ThemeResource CaptionTextBlockStyle}"
+                    Text="{x:Bind VM.EngineVersionText, Mode=OneWay}"
+                    Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.HasEngineVersion), Mode=OneWay}" />
+                <InfoBar
+                    x:Uid="AboutVersionMismatch"
+                    AutomationProperties.AutomationId="AboutVersionMismatch"
+                    IsClosable="False"
+                    IsOpen="{x:Bind VM.HasVersionMismatch, Mode=OneWay}"
+                    Severity="Warning" />
             </StackPanel>
 
             <!--  ── Advanced & management ──  -->

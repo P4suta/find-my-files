@@ -82,19 +82,48 @@
   </PropertyGroup>
 
   <!-- Channel-aware build identity (ADR-0035), the C# half of the Rust
-       fmf-buildstamp. dev → 0.1.0-dev+<sha> · nightly.<date> →
-       0.1.0-nightly.<date>+<sha> · stable → 0.1.0+<sha>. FmfChannel defaults to
-       `dev`; CI overrides it (an env var is read by MSBuild as a property) to
-       `nightly.<date>` (nightly.yml) or `stable` (release.yml). Source Link
-       already resolves the commit into SourceRevisionId and appends +<sha> to
-       AssemblyInformationalVersion, so we only prepend the channel pre-release
-       tag — this PropertyGroup follows the main one so $(Version) is in scope.
-       The two display sites read AssemblyInformationalVersion via BuildInfo. -->
+       fmf-buildstamp — and byte-identical in shape to it:
+         dev     → 0.1.0-dev+g<short7>
+         nightly → 0.1.0-nightly.<date>+g<short7>
+         stable  → 0.1.0                    (clean; matches Rust stable)
+       FmfChannel defaults to `dev`; CI overrides it (an env var is read by
+       MSBuild as a property) to `nightly.<date>` (nightly.yml) or `stable`
+       (release.yml). This PropertyGroup follows the main one so $(Version) is in
+       scope. The two display sites read AssemblyInformationalVersion via BuildInfo.
+
+       We do NOT let Source Link auto-append the commit: its SourceRevisionId is
+       the full 40-char sha with no `g` prefix and would even leak into stable.
+       Instead we disable that (IncludeSourceRevisionInInformationalVersion=false)
+       and construct `+g<short7>` ourselves in the target below, exactly mirroring
+       `xtask version` / fmf-buildstamp (`+g<7>`; stable stays clean). -->
   <PropertyGroup>
     <FmfChannel Condition="'$(FmfChannel)' == ''">dev</FmfChannel>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <!-- Static fallbacks (also the value when git is absent, e.g. a source
+         tarball): stable is clean, non-stable carries the channel tag. The
+         target below upgrades non-stable with +g<short7> when git is available. -->
     <InformationalVersion Condition="'$(FmfChannel)' != 'stable'">$(Version)-$(FmfChannel)</InformationalVersion>
     <InformationalVersion Condition="'$(FmfChannel)' == 'stable'">$(Version)</InformationalVersion>
   </PropertyGroup>
+
+  <!-- Resolve the 7-char git sha and stamp `+g<short7>` onto the non-stable
+       InformationalVersion, just before the assembly-info attribute is generated.
+       (The sha is only knowable at target-execution time, not property-evaluation
+       time.) git-absent → ContinueOnError leaves the static fallback in place. -->
+  <Target Name="FmfStampInformationalVersion"
+          Condition="'$(FmfChannel)' != 'stable'"
+          BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo">
+    <Exec Command="git rev-parse --short=7 HEAD"
+          ConsoleToMSBuild="true"
+          StandardOutputImportance="low"
+          IgnoreExitCode="true"
+          ContinueOnError="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="FmfShortSha" />
+    </Exec>
+    <PropertyGroup Condition="'$(FmfShortSha)' != ''">
+      <InformationalVersion>$(Version)-$(FmfChannel)+g$(FmfShortSha.Trim())</InformationalVersion>
+    </PropertyGroup>
+  </Target>
 
   <ItemGroup>
     <!-- AppWindow.SetIcon takes a real file path, so the icon must exist

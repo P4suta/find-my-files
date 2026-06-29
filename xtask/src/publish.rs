@@ -11,7 +11,7 @@
 //! `--skip-rust true` skips the in-build cargo step (CI prebuilds + downloads
 //! the engine binaries into build/engine/release/ before this runs).
 
-use crate::{cmd, fsx, locale, paths};
+use crate::{cmd, fsx, locale, paths, version};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
@@ -88,6 +88,7 @@ pub fn run(skip_rust: bool) -> Result<()> {
     copy_engine_bins(&app)?;
     verify_bundle(&app)?;
     place_launcher_and_readme(&dist)?;
+    place_buildinfo(&dist)?;
 
     println!(
         "publish: build/dist/FindMyFiles assembled and verified \
@@ -167,6 +168,22 @@ fn place_launcher_and_readme(dist: &Path) -> Result<()> {
             entry.display()
         );
     }
+    Ok(())
+}
+
+/// Drop `BUILDINFO.txt` at the bundle root so a downloaded copy stays
+/// identifiable after the zip name is lost on extraction: which channel, which
+/// version, which commit — readable in Notepad and grep-able by tooling. The
+/// label uses the SAME precedence as the shipped binaries (`FMF_BUILD_VERSION`,
+/// else the local `-dev+g<sha>` default), so the file never disagrees with what
+/// `fmf --version` reports.
+fn place_buildinfo(dist: &Path) -> Result<()> {
+    let full = version::resolve_bundle_version()?;
+    let commit_date = version::git_commit_date();
+    let body = version::render_buildinfo(&full, commit_date.as_deref());
+    // Same Notepad-friendly encoding as README.txt: UTF-8 BOM + CRLF.
+    let text = format!("\u{feff}{}", body.replace('\n', "\r\n"));
+    fs::write(dist.join("BUILDINFO.txt"), text).context("write BUILDINFO.txt")?;
     Ok(())
 }
 

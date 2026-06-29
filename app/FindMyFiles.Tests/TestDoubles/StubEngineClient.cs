@@ -95,8 +95,13 @@ public sealed class StubEngineClient : IEngineClient
     public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<VolumeStatus>>([]);
 
+    /// <summary>Stats returned by <see cref="GetStatsAsync"/>; null (default)
+    /// mirrors an in-proc client with no snapshot. Set to exercise the About
+    /// block's engine-version path.</summary>
+    public EngineStatsData? Stats { get; set; }
+
     public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default) =>
-        Task.FromResult<EngineStatsData?>(null);
+        Task.FromResult(Stats);
 
     public Task<SearchOutcome> SearchAsync(
         string query, SearchOptions options, CancellationToken ct = default)

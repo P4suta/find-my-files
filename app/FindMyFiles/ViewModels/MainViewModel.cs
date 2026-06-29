@@ -121,6 +121,43 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// so x:Bind OneTime.</summary>
     public string ModeText => Loc.Get(_isScopeMode() ? "Status_ModeScope" : "Status_ModePrivileged");
 
+    /// <summary>This app's channel-aware build version line for the Settings About
+    /// block (always available, from <see cref="BuildInfo"/>). Static — bound via
+    /// the type in XAML; the app version is fixed for the process lifetime.</summary>
+    public static string AppVersionText => Loc.Get("About_AppVersion", BuildInfo.Version);
+
+    /// <summary>The engine/service build version, fetched on demand via
+    /// <see cref="RefreshVersionsAsync"/>. Empty until known and for in-proc
+    /// clients (Ffi/Fake) where there is no separate service to ask.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasEngineVersion))]
+    [NotifyPropertyChangedFor(nameof(EngineVersionText))]
+    [NotifyPropertyChangedFor(nameof(HasVersionMismatch))]
+    public partial string EngineVersion { get; set; } = string.Empty;
+
+    /// <summary>Whether an engine version is known (gates the engine version row).</summary>
+    public bool HasEngineVersion => EngineVersion.Length > 0;
+
+    /// <summary>The engine version line for the About block.</summary>
+    public string EngineVersionText => Loc.Get("About_EngineVersion", EngineVersion);
+
+    /// <summary>True when app and engine come from different <c>X.Y.Z</c> bases —
+    /// surfaces a warning so a stale app/service pairing is visible at a glance
+    /// (both stamp the same <c>fmf-buildstamp</c> format, so the bases compare).</summary>
+    public bool HasVersionMismatch =>
+        HasEngineVersion && !BuildInfo.SameBase(BuildInfo.Version, EngineVersion);
+
+    /// <summary>Best-effort fetch of the engine version for the About block. Stays
+    /// empty for in-proc clients or if stats are unavailable — About is purely
+    /// informational, so a failure must not surface as an error. Call on the UI
+    /// thread (it writes a bound property; no ConfigureAwait(false), ADR-0036).</summary>
+    /// <returns>A task that completes once the engine version has been fetched.</returns>
+    public async Task RefreshVersionsAsync()
+    {
+        var stats = await _engine.GetStatsAsync().ConfigureAwait(true);
+        EngineVersion = stats?.Service?.Version ?? string.Empty;
+    }
+
     /// <summary>Setup screen progress text ("waiting for admin permission…" etc.);
     /// empty hides the progress row.</summary>
     [ObservableProperty]
