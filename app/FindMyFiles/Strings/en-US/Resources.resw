@@ -191,7 +191,6 @@
 
   <data name="Setup_WaitingForPermission" xml:space="preserve"><value>Waiting for administrator permission…</value></data>
   <data name="Setup_Connecting" xml:space="preserve"><value>Connecting to the service…</value></data>
-  <data name="Setup_ConnectCheckFailed" xml:space="preserve"><value>Couldn't confirm the connection. Please try again.</value></data>
   <data name="Setup_Failed" xml:space="preserve"><value>Setup failed. Please try again.</value></data>
   <data name="Setup_PortableLocation" xml:space="preserve"><value>Everything is kept in {0} — nothing is written outside this folder.</value></data>
 

@@ -56,7 +56,12 @@ public sealed class StubEngineClient : IEngineClient
 
     public event Action<EngineConnectionState>? ConnectionChanged;
 
-    public EngineConnectionState Connection => EngineConnectionState.InProc;
+    /// <summary>Settable so a test can simulate the pipe warm-up window: start as
+    /// <see cref="EngineConnectionState.Connecting"/> (the VM's startup defers to
+    /// "preparing"), then flip to <see cref="EngineConnectionState.Connected"/> and
+    /// call <see cref="RaiseConnectionChanged"/> to drive the deferred startup.
+    /// Defaults to InProc so existing tests treat the stub as already usable.</summary>
+    public EngineConnectionState Connection { get; set; } = EngineConnectionState.InProc;
 
     public void RaiseIndexChanged(string volume) => IndexChanged?.Invoke(volume);
 
@@ -71,10 +76,18 @@ public sealed class StubEngineClient : IEngineClient
     /// Dispose paths actually unsubscribe.</summary>
     public int IndexChangedSubscribers => IndexChanged?.GetInvocationList().Length ?? 0;
 
-    public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default) =>
-        ThrowOnStartup is { } ex
+    /// <summary>How many times <see cref="ListVolumesAsync"/> was called — lets a
+    /// test pin that the startup sequence runs exactly once (e.g. the Loaded call
+    /// and a later Connected event must not double-run it).</summary>
+    public int ListVolumesCalls { get; private set; }
+
+    public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
+    {
+        ListVolumesCalls++;
+        return ThrowOnStartup is { } ex
             ? Task.FromException<IReadOnlyList<string>>(ex)
             : Task.FromResult<IReadOnlyList<string>>(["F:"]);
+    }
 
     public Task StartIndexingAsync(
         IReadOnlyList<string> volumes, CancellationToken ct = default) => Task.CompletedTask;

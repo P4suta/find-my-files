@@ -191,7 +191,6 @@
 
   <data name="Setup_WaitingForPermission" xml:space="preserve"><value>正在等待管理员授权…</value></data>
   <data name="Setup_Connecting" xml:space="preserve"><value>正在连接服务…</value></data>
-  <data name="Setup_ConnectCheckFailed" xml:space="preserve"><value>无法确认连接，请重试。</value></data>
   <data name="Setup_Failed" xml:space="preserve"><value>设置失败，请重试。</value></data>
   <data name="Setup_PortableLocation" xml:space="preserve"><value>所有内容都保存在 {0}，不会在此文件夹之外写入任何内容。</value></data>
 

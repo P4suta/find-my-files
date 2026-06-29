@@ -304,6 +304,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// Non-Info notifications never auto-dissolve (NotificationCenter).</summary>
     private AppNotification? _reconnectBanner;
 
+    /// <summary>True once <see cref="RunStartupAsync"/> has successfully run.
+    /// Guards against the Loaded call and the first Connected event both running
+    /// startup; cleared on a startup failure so a later connect can retry.</summary>
+    private bool _started;
+
     private void OnConnectionChanged(EngineConnectionState state)
     {
         if (state == EngineConnectionState.Reconnecting)
@@ -316,18 +321,38 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                     Loc.Get("Notify_ReconnectingBody"));
                 Notifications.Push(_reconnectBanner);
             }
+
+            return;
         }
-        else if (state == EngineConnectionState.Connected && _reconnectBanner is not null)
+
+        if (state != EngineConnectionState.Connected)
+        {
+            return;
+        }
+
+        if (_reconnectBanner is not null)
         {
             Notifications.Remove(_reconnectBanner);
             _reconnectBanner = null;
         }
+
+        // First successful connection over a pipe — the service may have been
+        // warming up when the page loaded (freshly registered, cold MFT scan). Run
+        // the startup sequence now so the UI leaves "preparing" and becomes usable.
+        // RunStartupAsync self-guards on _started, so a reconnect only clears the
+        // banner above. Marshaled onto the UI thread by EngineEventMarshaler.
+        if (!_started)
+        {
+            RunStartupAsync().Forget("engine.startup");
+        }
     }
 
-    /// <summary>Startup sequence, in order: status text → StartIndexing →
-    /// initial requery. Runs on the UI thread; the engine calls are awaited
-    /// so a pipe transport never blocks it.</summary>
-    /// <returns>A task that completes once startup indexing and the initial requery are kicked off.</returns>
+    /// <summary>Startup entry, called from the page's Loaded. Branches on engine
+    /// readiness: the empty fake shows the setup screen; a pipe client that hasn't
+    /// connected yet stays on "preparing" and lets <see cref="OnConnectionChanged"/>
+    /// drive the real startup once it connects; an already-usable engine (FFI, or a
+    /// pipe that connected before Loaded) runs it now.</summary>
+    /// <returns>A task that completes once startup is kicked off (or deferred to the connect).</returns>
     public async Task StartAsync()
     {
         if (_engine is FakeEngineClient { IsEmpty: true })
@@ -338,6 +363,36 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // A pipe supervisor connects asynchronously; until it has, the engine is in
+        // the Connecting state and ListVolumes/StartIndexing would throw
+        // EngineUnavailableException and surface a bogus "index start failed". This
+        // is exactly the warm-up window a freshly registered, still-starting service
+        // sits in. Hold "preparing" and let the first Connected event
+        // (OnConnectionChanged) run the startup. Only a never-connected pipe reports
+        // Connecting — FFI / fake / connected-pipe report InProc or Connected.
+        if (_engine.Connection == EngineConnectionState.Connecting)
+        {
+            StatusText = Loc.Get("Status_Preparing");
+            return;
+        }
+
+        await RunStartupAsync();
+    }
+
+    /// <summary>The actual startup work once a usable engine is connected: list
+    /// volumes, kick indexing, reflect status, initial requery. Self-guarding via
+    /// <see cref="_started"/> so the Loaded call and a later Connected event don't
+    /// double-run it; on failure it clears the flag so a subsequent Connected
+    /// (e.g. after a transient warm-up error) can retry.</summary>
+    /// <returns>A task that completes once startup indexing and the initial requery are kicked off.</returns>
+    private async Task RunStartupAsync()
+    {
+        if (_started)
+        {
+            return;
+        }
+
+        _started = true;
         try
         {
             // Stay on the dispatcher (no ConfigureAwait): the continuation sets the
@@ -355,6 +410,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         catch (Exception ex)
         {
+            _started = false; // let a later Connected retry the startup
             FileLog.Error("engine", "startup indexing failed", ex);
             StatusText = Loc.Get("Status_IndexStartFailed");
             Notifications.Push(new AppNotification(
@@ -389,12 +445,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 case ServiceActionOutcome.Ok:
                     SetupStatus = Loc.Get("Setup_Connecting");
 
-                    // On success this process relaunches and never returns here.
-                    if (!await _provisioner.WaitForServiceThenRelaunchAsync())
-                    {
-                        SetupStatus = Loc.Get("Setup_ConnectCheckFailed");
-                    }
-
+                    // Relaunch forcing the pipe transport; in production this process
+                    // exits and never returns. The fresh instance's pipe supervisor
+                    // waits out the just-started service's warm-up (no fixed budget),
+                    // and the UI flips Setup→Ready the moment it connects.
+                    _provisioner.RelaunchIntoPipe();
                     break;
                 case ServiceActionOutcome.Cancelled:
                     SetupStatus = string.Empty;
@@ -642,9 +697,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private void OnSearchFailed(Exception e)
     {
         HasNoResults = false; // an error surfaces via the InfoBar, not the empty state
-        if (_engine.Connection == EngineConnectionState.Reconnecting)
+        if (_engine.Connection is EngineConnectionState.Reconnecting or EngineConnectionState.Connecting)
         {
-            return; // the persistent reconnect banner already explains this
+            // The connection is still settling — the reconnect banner (Reconnecting)
+            // or the "preparing" startup state (Connecting) already explains it; a
+            // failure here is just a request that raced the connect.
+            return;
         }
 
         // Service-side errors are localized by status code here (the app absorbs

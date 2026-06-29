@@ -7,10 +7,21 @@ namespace FindMyFiles.Tests.TestDoubles;
 /// always true (the production Debug.Asserts must pass), TryEnqueue collects
 /// work until the test drains it, and one-shot timers fire only when the test
 /// says so. No real threads, no real time.
+///
+/// <para>The queue is locked because the real <c>DispatcherQueue.TryEnqueue</c>
+/// is thread-safe and production relies on that: a background page fetch awaits
+/// with <c>ConfigureAwait(false)</c> and marshals its completion back through
+/// <c>TryEnqueue</c> — that continuation can resume on a thread-pool thread
+/// (the TPL is free not to inline it) and race a test-thread
+/// <see cref="DrainQueue"/>. An unsynchronized <see cref="Queue{T}"/> tears
+/// under that concurrent enqueue/dequeue (a null slot → NRE). Actions are
+/// invoked outside the lock so re-entrant enqueues and concurrent producers
+/// never block on the action.</para>
 /// </summary>
 public sealed class ManualDispatcher : IDispatcher
 {
     private readonly Queue<Action> _queue = new();
+    private readonly System.Threading.Lock _queueLock = new();
 
     /// <summary>Every timer ever created, in creation order.</summary>
     public List<ManualTimer> Timers { get; } = [];
@@ -19,7 +30,11 @@ public sealed class ManualDispatcher : IDispatcher
 
     public bool TryEnqueue(Action action)
     {
-        _queue.Enqueue(action);
+        lock (_queueLock)
+        {
+            _queue.Enqueue(action);
+        }
+
         return true;
     }
 
@@ -37,9 +52,20 @@ public sealed class ManualDispatcher : IDispatcher
     public int DrainQueue()
     {
         var ran = 0;
-        while (_queue.Count > 0)
+        while (true)
         {
-            _queue.Dequeue()();
+            Action next;
+            lock (_queueLock)
+            {
+                if (_queue.Count == 0)
+                {
+                    break;
+                }
+
+                next = _queue.Dequeue();
+            }
+
+            next(); // outside the lock: an action may re-enqueue or a producer may run
             ran++;
         }
 

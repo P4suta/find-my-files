@@ -89,9 +89,7 @@ public sealed class UiThreadAffinityTests : IDisposable
                 await Task.Delay(20).ConfigureAwait(false);
                 return ServiceActionOutcome.Ok;
             },
-            probe: (_, _) => Task.FromResult(true),
-            relaunch: () => { }, // no-op: don't exit the test process
-            delay: _ => Task.CompletedTask);
+            relaunch: () => { }); // no-op: don't exit the test process
         using var vm = new MainViewModel(
             FakeEngineClient.CreateEmpty(), dispatcher, new AppSettings(), provisioner: provisioner);
 
