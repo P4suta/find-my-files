@@ -71,9 +71,11 @@ jobs:
         run: |
           DATE=$(date -u +%Y%m%d)
           VER=$(just version --channel nightly --date "$DATE")
-          echo "FMF_BUILD_VERSION=$VER" >> "$GITHUB_ENV"
-          echo "FmfChannel=nightly.$DATE" >> "$GITHUB_ENV"
-          echo "NIGHTLY_DATE=$DATE" >> "$GITHUB_ENV"
+          {
+            echo "FMF_BUILD_VERSION=$VER"
+            echo "FmfChannel=nightly.$DATE"
+            echo "NIGHTLY_DATE=$DATE"
+          } >> "$GITHUB_ENV"
           echo "::notice::Building nightly $VER"
 
       - name: Build distributable bundle (unsigned)
