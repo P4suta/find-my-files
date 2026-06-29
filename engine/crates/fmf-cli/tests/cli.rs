@@ -30,6 +30,27 @@ fn help_lists_the_subcommands() {
 }
 
 #[test]
+fn completions_emit_a_script_for_each_shell() {
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        fmf()
+            .args(["completions", shell])
+            .assert()
+            .success()
+            // Every shell's script references the binary name somewhere.
+            .stdout(predicate::str::contains("fmf"));
+    }
+}
+
+#[test]
+fn completions_reject_an_unknown_shell() {
+    fmf()
+        .args(["completions", "tcsh"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
 fn no_subcommand_is_a_usage_error() {
     // clap sets exit code 2 for usage errors, before our dispatch runs.
     fmf().assert().failure().code(2);

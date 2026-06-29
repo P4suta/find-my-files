@@ -258,7 +258,7 @@ bench-check drive="C:":
 [group('bench')]
 [working-directory: 'engine']
 bench-baseline drive="C:":
-    cargo run --release -p fmf-cli -- bench {{drive}} --json benches/baseline.json
+    cargo run --release -p fmf-cli -- bench {{drive}} --out benches/baseline.json
 
 # Criterion micro-benchmarks on the synthetic 1M index (no elevation)
 [group('bench')]

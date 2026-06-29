@@ -24,11 +24,13 @@ tracing = { workspace = true }
 anstream = { workspace = true }
 anstyle = { workspace = true }
 indicatif = { workspace = true }
+# Shell-completion generation: used by the `completions` subcommand (shipped) and
+# the codegen example, both rendering from the single clap command tree.
+clap_complete = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
-clap_complete = { workspace = true }
 clap-markdown = { workspace = true }
 # So the CLI tests can pin `diag`'s reported version to the build identity.
 fmf-buildstamp = { workspace = true }

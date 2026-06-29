@@ -2,6 +2,7 @@
 //! Logic lives in fmf-core; these are drivers and printers only.
 
 pub mod bench;
+pub mod completions;
 pub mod criterion_gate;
 pub mod ctx;
 pub mod diag;

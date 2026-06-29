@@ -58,12 +58,25 @@ just service-dev    # run the engine service in the foreground (elevated)
 just index C:       # index a volume from the CLI (elevated terminal required)
 ```
 
-The `fmf` developer CLI supports `--version`, TTY-aware colour, scriptable
-`--format json`, and `FMF_E_*` process exit codes; its full reference is the
-generated [CLI reference](docs/cli.md), and `just cli-gen` writes tab
-completions for PowerShell/bash/zsh/fish. The WinUI 3 app lives in `app/`
-(from milestone M1 onward). `--version` reports a channel-aware build identity
-(`X.Y.Z-dev+g<sha>` locally, `…-nightly.<date>+…`, or a clean `X.Y.Z` release).
+The `fmf` developer CLI supports `--version`, `-v/--verbose`, TTY-aware colour,
+scriptable `--format json` on every command, and `FMF_E_*` process exit codes;
+its full reference is the generated [CLI reference](docs/cli.md). The WinUI 3 app
+lives in `app/` (from milestone M1 onward). `--version` reports a channel-aware
+build identity (`X.Y.Z-dev+g<sha>` locally, `…-nightly.<date>+…`, or a clean
+`X.Y.Z` release).
+
+**Shell completions** print to stdout via `fmf completions <shell>` (bash, zsh,
+fish, powershell, elvish), and the release bundle also ships pre-generated
+scripts under `completions/`. Install with, for example:
+
+```sh
+# bash / zsh / fish — add to your shell rc (or source the bundled file)
+eval "$(fmf completions bash)"
+```
+```powershell
+# PowerShell — add to $PROFILE (or dot-source the bundled completions/_fmf.ps1)
+fmf completions powershell | Out-String | Invoke-Expression
+```
 
 Versioning and releases are automated from Conventional Commits — see
 [docs/RELEASING.md](docs/RELEASING.md) (and the nightly build channel).

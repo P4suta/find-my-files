@@ -10,9 +10,28 @@ use fmf_core::query::{CaseMode, QueryOptions};
 use super::ctx::Ctx;
 use super::{build_index, run_query};
 
-pub fn spike(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn spike(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
     let s = fmf_core::mft::spike_scan(drive)?;
     let named = s.files + s.dirs;
+    if ctx.is_json() {
+        return super::json::emit(&serde_json::json!({
+            "volume": s.volume,
+            "elapsed_volume_open_ms": s.elapsed_volume_open_ms,
+            "elapsed_mft_load_ms": s.elapsed_mft_load_ms,
+            "mft_bytes": s.mft_bytes,
+            "elapsed_iterate_ms": s.elapsed_iterate_ms,
+            "total_records": s.total_records,
+            "files": s.files,
+            "dirs": s.dirs,
+            "reparse_points": s.reparse_points,
+            "no_name_in_base_record": s.no_name_in_base_record,
+            "avg_name_utf16_units": s.avg_name_utf16_units(),
+            "max_name_utf16_units": s.max_name_utf16_units,
+            "frn_sequence_nonzero": s.frn_sequence_nonzero,
+            "named_records": named,
+            "peak_working_set_bytes": s.peak_working_set_bytes,
+        }));
+    }
     println!("volume               : {}", s.volume);
     println!("open volume          : {} ms", s.elapsed_volume_open_ms);
     println!(
