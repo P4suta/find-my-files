@@ -48,3 +48,5 @@
   - [0032 — Name dictionary-encoding](adr/0032-name-dictionary-encoding.md)
   - [0033 — Phase 3 memory/latency levers](adr/0033-phase3-memory-latency-levers.md)
   - [0034 — SBOMs consumed by osv-scanner](adr/0034-sbom-consumed-by-osv-scanner.md)
+  - [0035 — Automated versioning with release-please](adr/0035-automated-versioning-with-release-please-and-build-channels.md)
+  - [0036 — In-process soft restart; single-instance-safe relaunch](adr/0036-in-process-soft-restart-and-single-instance-safe-relaunch.md)

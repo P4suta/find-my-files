@@ -183,10 +183,10 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
     public Task UninstallAsync() =>
         RunAsync(PurgeData ? "uninstall --purge-data" : "uninstall", Loc.Get("Svc_Uninstalled"));
 
-    /// <summary>Plain (unelevated) relaunch so the fresh instance connects to
-    /// the now-running service over the pipe.</summary>
+    /// <summary>In-process soft restart so the rebuilt page connects to the
+    /// now-running service over the pipe (ADR-0036).</summary>
     [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "x:Bind event/command target must remain an instance method")]
-    public void RestartApp() => ShellOps.Relaunch();
+    public void RestartApp() => App.SoftRestart();
 
     private async Task RunAsync(string args, string okText)
     {
@@ -215,12 +215,11 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
             FileLog.Info("service-ui", $"`{args}` → {result.Outcome} (exit {result.ExitCode})");
 
             // Register/start succeeds, but this instance is still on the empty fake
-            // engine (the transport is chosen once, at startup). Relaunch forcing
-            // the pipe transport so the fresh instance binds a retrying pipe client
-            // and rides out the just-started service's warm-up — the user shouldn't
-            // have to. On success this process exits inside RelaunchIntoPipe; only a
-            // failed relaunch (ShellOps notifies) falls through, where the
-            // pre-armed "Restart app" button is the manual escape hatch.
+            // engine (the transport is chosen once, when the page is built). Re-resolve
+            // it in-process forcing the pipe transport so the rebuilt page binds a
+            // retrying pipe client and rides out the just-started service's warm-up —
+            // the user shouldn't have to. The pre-armed "Restart app" button is the
+            // manual escape hatch if the soft restart can't complete.
             if (result.Outcome == ServiceActionOutcome.Ok
                 && verb is "setup" or "start"
                 && App.EngineClient is FakeEngineClient { IsEmpty: true })

@@ -122,9 +122,12 @@ public sealed partial class SettingsDialog : ContentDialog
         }
     }
 
-    // Language switch: persist to settings.json and relaunch (App ctor applies
-    // PrimaryLanguageOverride). Tag is "auto"/"ja"/"en"/"zh-Hans". No-ops when
-    // unchanged, so the ctor's initial selection never relaunches.
+    // Language switch: persist to settings.json and do a true process restart so
+    // the App ctor re-applies PrimaryLanguageOverride and the window chrome rebuilds
+    // (an in-process soft restart only rebuilds the page body). The restart goes
+    // through AppInstance.Restart so it survives single-instancing (ADR-0036). Tag
+    // is "auto"/"ja"/"en"/"zh-Hans"; no-ops when unchanged, so the ctor's initial
+    // selection never restarts.
     private void Language_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (LangCombo.SelectedItem is not FrameworkElement { Tag: string lang })

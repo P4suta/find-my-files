@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
 using FindMyFiles.Tests.TestDoubles;
@@ -16,9 +15,9 @@ namespace FindMyFiles.Tests;
 /// </summary>
 public sealed class UiThreadAffinityTests : IDisposable
 {
-    // The relaunch tests post to the process-wide Notifier via ShellOps.Run's
-    // swallowed-failure path; reset it on teardown so a post can't replay into
-    // another test's ViewModel (serial execution makes this deterministic).
+    // EnableSearchAsync can route a failure to the process-wide Notifier; reset it
+    // on teardown so a post can't replay into another test (serial execution makes
+    // this deterministic).
     public void Dispose()
     {
         Notifier.ResetForTests();
@@ -42,37 +41,6 @@ public sealed class UiThreadAffinityTests : IDisposable
     }
 
     [Fact]
-    public async Task RelaunchWith_off_the_ui_thread_loses_a_direct_exit_the_orphaned_window_bug()
-    {
-        // Models the shipped bug: the post-register relaunch resumes on a pool
-        // thread, where a direct Application.Current.Exit() throws and is swallowed.
-        using var dispatcher = new DedicatedThreadDispatcher();
-        var runner = new CountingProcessRunner();
-        var exit = new ThreadAffineExit(dispatcher.ThreadId);
-
-        await Task.Run(() => ShellOps.RelaunchWith(runner, exit)); // off the UI thread
-
-        Assert.Equal(1, runner.Calls); // the new instance started (new window opens)...
-        Assert.Equal(0, exit.Exits);   // ...but the exit was lost (old window orphaned)
-    }
-
-    [Fact]
-    public async Task RelaunchWith_off_the_ui_thread_completes_a_marshaling_exit_on_the_ui_thread()
-    {
-        // The fix: DispatcherAppExit marshals the exit onto the UI thread, so even
-        // when the relaunch resumes on a pool thread the old window closes.
-        using var dispatcher = new DedicatedThreadDispatcher();
-        var runner = new CountingProcessRunner();
-        var exit = new MarshalingAppExit(dispatcher);
-
-        await Task.Run(() => ShellOps.RelaunchWith(runner, exit));
-        var ranThreadId = await exit.Ran;
-
-        Assert.Equal(1, runner.Calls);
-        Assert.Equal(dispatcher.ThreadId, ranThreadId); // the exit ran on the UI thread
-    }
-
-    [Fact]
     public async Task EnableSearchAsync_keeps_bound_writes_on_the_ui_thread()
     {
         // The VM await must not ConfigureAwait(false): bound SetupStatus/SetupBusy
@@ -89,7 +57,7 @@ public sealed class UiThreadAffinityTests : IDisposable
                 await Task.Delay(20).ConfigureAwait(false);
                 return ServiceActionOutcome.Ok;
             },
-            relaunch: () => { }); // no-op: don't exit the test process
+            relaunch: () => { }); // no-op: don't rebuild the page in the test
         using var vm = new MainViewModel(
             FakeEngineClient.CreateEmpty(), dispatcher, new AppSettings(), provisioner: provisioner);
 
@@ -105,25 +73,5 @@ public sealed class UiThreadAffinityTests : IDisposable
         await dispatcher.InvokeAsync(() => vm.EnableSearchAsync());
 
         Assert.Empty(offThreadWrites);
-    }
-
-    private sealed class CountingProcessRunner : IProcessRunner
-    {
-        public int Calls { get; private set; }
-
-        public void Start(ProcessStartInfo psi) => Calls++;
-    }
-
-    private sealed class MarshalingAppExit : IAppExit
-    {
-        private readonly DedicatedThreadDispatcher _dispatcher;
-        private readonly TaskCompletionSource<int> _ran = new();
-
-        public MarshalingAppExit(DedicatedThreadDispatcher dispatcher) => _dispatcher = dispatcher;
-
-        public Task<int> Ran => _ran.Task;
-
-        public void Exit() =>
-            _dispatcher.TryEnqueue(() => _ran.TrySetResult(Environment.CurrentManagedThreadId));
     }
 }

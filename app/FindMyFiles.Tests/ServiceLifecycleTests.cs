@@ -1,87 +1,17 @@
-using System.Diagnostics;
 using FindMyFiles.Services;
 using Xunit;
 
 namespace FindMyFiles.Tests;
 
 /// <summary>
-/// Defense-in-depth behavior tests for the service-lifecycle seams that the
-/// thicker suites skipped: the simplest state transitions. Covers the
-/// <see cref="ShellOps.RelaunchWith"/> argument plumbing that separates a plain
-/// restart from the pipe-forcing relaunch (<c>--engine=pipe</c>), and the pure,
-/// unelevated <see cref="ServiceSetup"/> surfaces (exe-location walk + SID
-/// injection guard) that gate the one-time elevation. Anything touching the SCM,
-/// elevation, or a real process launch is deliberately out of scope here.
+/// Defense-in-depth behavior tests for the pure, unelevated
+/// <see cref="ServiceSetup"/> surfaces that the thicker suites skipped: the
+/// exe-location walk and the SID injection guard that gate the one-time
+/// elevation. Anything touching the SCM, elevation, or a real process launch is
+/// deliberately out of scope here.
 /// </summary>
-public sealed class ServiceLifecycleTests : IDisposable
+public sealed class ServiceLifecycleTests
 {
-    // RelaunchWith funnels failures through the process-wide Notifier (via Run);
-    // reset it on teardown so a stray post can't replay into another test.
-    public void Dispose()
-    {
-        Notifier.ResetForTests();
-        GC.SuppressFinalize(this);
-    }
-
-    /// <summary>Captures the start info handed to the runner so the launch
-    /// arguments (not just that a launch happened) can be asserted.</summary>
-    private sealed class CapturingRunner : IProcessRunner
-    {
-        internal ProcessStartInfo? Started { get; private set; }
-
-        public void Start(ProcessStartInfo psi) => Started = psi;
-    }
-
-    /// <summary>Minimal exit seam — counts requests without tearing anything
-    /// down (the real exit is UI-thread-affine and out of scope here).</summary>
-    private sealed class CountingExit : IAppExit
-    {
-        internal int Exits { get; private set; }
-
-        public void Exit() => Exits++;
-    }
-
-    [Fact]
-    public void Relaunch_with_pipe_argument_forces_the_pipe_transport_on_the_new_instance()
-    {
-        // The post-register relaunch must hand the fresh instance --engine=pipe so
-        // it binds the retrying pipe client directly instead of re-running auto
-        // detection (which can momentarily miss the warming service). Nothing
-        // verified the flag actually reached the launch; this pins it verbatim.
-        var runner = new CapturingRunner();
-
-        ShellOps.RelaunchWith(runner, new CountingExit(), "--engine=pipe");
-
-        Assert.NotNull(runner.Started);
-        Assert.Equal("--engine=pipe", runner.Started!.Arguments);
-    }
-
-    [Fact]
-    public void Relaunch_with_no_argument_starts_a_plain_instance_with_empty_command_line()
-    {
-        // The manual "restart app" path passes no argument, so settings.json's
-        // auto transport stays authoritative — the new instance must launch with
-        // an empty command line, never a leftover --engine=pipe.
-        var runner = new CapturingRunner();
-
-        ShellOps.RelaunchWith(runner, new CountingExit());
-
-        Assert.NotNull(runner.Started);
-        Assert.True(string.IsNullOrEmpty(runner.Started!.Arguments));
-    }
-
-    [Fact]
-    public void Relaunch_with_pipe_argument_still_exits_only_after_a_successful_launch()
-    {
-        // The argument path must not change the ordering invariant: exit is
-        // requested only once the new instance has actually started.
-        var exit = new CountingExit();
-
-        ShellOps.RelaunchWith(new CapturingRunner(), exit, "--engine=pipe");
-
-        Assert.Equal(1, exit.Exits);
-    }
-
     [Fact]
     public void Locate_service_exe_returns_null_when_nothing_is_present()
     {

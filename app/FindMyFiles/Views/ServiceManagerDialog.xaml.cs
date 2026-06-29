@@ -56,14 +56,13 @@ public sealed partial class ServiceManagerDialog : ContentDialog
             await new ServiceManagerDialog { XamlRoot = root }.ShowAsync();
 
             // If the service was uninstalled/stopped while this instance was
-            // running on the pipe, its connection is dead and can't recover —
-            // relaunch so the app re-resolves the engine and lands on the setup
-            // screen (the mirror of register's relaunch). Register's own relaunch
-            // already exited the process before this when the user re-registered.
+            // running on the pipe, its connection is dead and can't recover — soft
+            // restart so the app re-resolves the engine in-process and lands on the
+            // setup screen (the mirror of register's soft restart, ADR-0036).
             if (App.EngineClient is PipeEngineClient
                 && ServiceSetup.QueryState() != EngineServiceState.Running)
             {
-                ShellOps.Relaunch();
+                App.SoftRestart();
             }
         }
         catch (Exception ex)

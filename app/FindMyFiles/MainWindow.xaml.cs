@@ -34,4 +34,10 @@ public sealed partial class MainWindow : Window
             args.Cancel = true;
         }
     }
+
+    /// <summary>Rebuild the page graph in place (ADR-0036): re-navigate to a fresh
+    /// <see cref="MainPage"/>, which reads the just-re-resolved <c>App.EngineClient</c>
+    /// and rebuilds its view model. With the default <c>NavigationCacheMode</c> the
+    /// old page Unloads (disposing its view model) and a new one is constructed.</summary>
+    internal void ReloadMainPage() => RootFrame.Navigate(typeof(MainPage));
 }

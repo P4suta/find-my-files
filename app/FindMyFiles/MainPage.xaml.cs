@@ -53,6 +53,12 @@ public sealed partial class MainPage : Page
         SearchBox.TextCompositionEnded += (_, _) =>
             ViewModel.Search.NotifyCompositionEnded(ViewModel.SearchText);
 
+        // A soft restart (ADR-0036) re-navigates the Frame to a fresh MainPage; the
+        // Frame does not dispose the page it replaces, so release the old view
+        // model's engine-event subscriptions here. The disposal is idempotent, so
+        // it coexists with the Window.Closed engine dispose in App.
+        Unloaded += (_, _) => ViewModel.Dispose();
+
         // Empty query = large centered search bar (Empty); on input it moves up
         // and shows results (Results).
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
