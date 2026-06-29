@@ -140,7 +140,7 @@ jobs:
       # to cargo-audit (which reads Cargo.lock). Fail-fast before sign/publish.
       # Accepted/unfixable advisories live in osv-scanner.toml (ADR-0034).
       - name: Install osv-scanner
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
         with:
           tool: osv-scanner@2.3.6
       - name: Scan SBOMs for known vulnerabilities (release gate)
@@ -339,7 +339,7 @@ jobs:
       # via the workflow's OIDC token (no stored secrets).
       # Verify: gh attestation verify <zip> --repo P4suta/find-my-files
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
             build/package/find-my-files-*-win-x64.zip
