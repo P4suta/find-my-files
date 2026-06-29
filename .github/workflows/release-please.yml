@@ -85,17 +85,25 @@ jobs:
         uses: ./.github/actions/rust-toolchain
       - name: Sync Cargo.lock to the bumped workspace version
         if: ${{ env.HAS_APP == 'true' && steps.rp.outputs.pr }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ fromJSON(steps.rp.outputs.pr).headBranchName }}
         run: |
           cargo update --workspace --manifest-path engine/Cargo.toml
-          if ! git diff --quiet -- engine/Cargo.lock; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add engine/Cargo.lock
-            git commit -m "chore: sync Cargo.lock to the release version"
-            git push
-          else
+          if git diff --quiet -- engine/Cargo.lock; then
             echo "Cargo.lock already in sync."
+            exit 0
           fi
+          # Commit via the Contents API, not `git push`: the repo's
+          # require-signed-commits ruleset rejects an unsigned bot commit, but a
+          # commit created through the API is signed by GitHub (the same way
+          # release-please's own commits are). One file, on the Release PR branch.
+          gh api --method PUT "repos/$REPO/contents/engine/Cargo.lock" \
+            -f message="chore: sync Cargo.lock to the release version" \
+            -f branch="$BRANCH" \
+            -f sha="$(git rev-parse "HEAD:engine/Cargo.lock")" \
+            -f content="$(base64 -w0 engine/Cargo.lock)"
 
       - name: release-please (dormant — App not configured)
         if: env.HAS_APP != 'true'

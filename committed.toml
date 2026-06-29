@@ -16,3 +16,19 @@ subject_capitalized = false
 # length limit, so disable committed's 50/72 defaults to stay consistent.
 subject_length = 0
 line_length = 0
+# Match the types CONTRIBUTING.md documents (and the PR-title gate accepts).
+# committed's default set omits ci/build/deps/revert, which the repo uses.
+allowed_types = [
+  "feat",
+  "fix",
+  "perf",
+  "docs",
+  "refactor",
+  "test",
+  "chore",
+  "ci",
+  "build",
+  "deps",
+  "style",
+  "revert",
+]
