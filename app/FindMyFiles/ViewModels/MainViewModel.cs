@@ -95,8 +95,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     /// <summary>True when the engine is the empty fake (unelevated, no service)
     /// — the page shows the setup screen instead of a search box that can only
-    /// return zero rows. Fixed for this instance's lifetime (the transport is
-    /// chosen once; registering relaunches), so x:Bind OneTime is enough.</summary>
+    /// return zero rows. Fixed for this page's lifetime — registering re-resolves
+    /// the engine by rebuilding the page (App.SoftRestart, ADR-0036), so this
+    /// fresh-page property is re-evaluated and x:Bind OneTime is enough.</summary>
     public bool IsDisconnected => _engine is FakeEngineClient { IsEmpty: true };
 
     /// <summary>Inverse of <see cref="IsDisconnected"/> — true when the search
@@ -105,18 +106,19 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     /// <summary>True once indexing in **scope mode** (ADR-0024: a user-chosen
     /// set of folders, not all drives). Gates the gear menu's "change search
-    /// folders" item. Fixed at startup (the transport is chosen once), so
-    /// x:Bind OneTime is enough.</summary>
+    /// folders" item. Fixed for this page's lifetime (a transport change rebuilds
+    /// the page, ADR-0036), so x:Bind OneTime is enough.</summary>
     public bool IsScopeMode => IsReady && _isScopeMode();
 
     /// <summary>True once indexing in the elevated whole-volume mode (service
     /// or in-proc). Gates the gear menu's "manage service" item — the
     /// complement of <see cref="IsScopeMode"/> while ready, both false while
-    /// disconnected. Fixed at startup, so x:Bind OneTime.</summary>
+    /// disconnected. Fixed for this page's lifetime (ADR-0036), so x:Bind OneTime.</summary>
     public bool IsPrivilegedMode => IsReady && !_isScopeMode();
 
     /// <summary>The current index mode for the status submenu's info row
-    /// (selected folders vs all drives). Fixed at startup, so x:Bind OneTime.</summary>
+    /// (selected folders vs all drives). Fixed for this page's lifetime (ADR-0036),
+    /// so x:Bind OneTime.</summary>
     public string ModeText => Loc.Get(_isScopeMode() ? "Status_ModeScope" : "Status_ModePrivileged");
 
     /// <summary>Setup screen progress text ("waiting for admin permission…" etc.);
@@ -206,9 +208,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// add/dedupe logic is unit-testable without showing a real dialog.</summary>
     private readonly Func<Task<string?>> _folderPicker;
 
-    /// <summary>The unelevated relaunch action (UI/shell boundary) — injected so
-    /// <see cref="ApplyScopeChange"/>'s persist step is testable without exiting
-    /// the process.</summary>
+    /// <summary>The in-process soft-restart action (UI/shell boundary) — injected
+    /// so <see cref="ApplyScopeChange"/>'s persist step is testable without
+    /// rebuilding the page. Defaults to <see cref="App.SoftRestart"/>.</summary>
     private readonly Action _relaunch;
 
     /// <summary>Reports whether the live engine is a scope-mode walk (ADR-0024)
@@ -217,9 +219,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// a stub engine. Defaults to inspecting the real <see cref="FfiEngineClient"/>.</summary>
     private readonly Func<bool> _isScopeMode;
 
-    /// <summary>The "make search usable" steps (register elevated → wait for the
-    /// pipe → relaunch), injected so <see cref="EnableSearchAsync"/> is testable
-    /// without elevation or exiting the process. Defaults to
+    /// <summary>The "make search usable" steps (register elevated → soft restart
+    /// into the pipe), injected so <see cref="EnableSearchAsync"/> is testable
+    /// without elevation or rebuilding the page. Defaults to
     /// <see cref="ServiceProvisioner.Real"/>.</summary>
     private readonly ServiceProvisioner _provisioner;
 
@@ -233,8 +235,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// when null.</param>
     /// <param name="folderPicker">Scope-folder picker; defaults to the real
     /// <see cref="ScopeFolderPicker.PickAsync"/> (tests inject a fake).</param>
-    /// <param name="relaunch">Unelevated relaunch action; defaults to the real
-    /// <see cref="ShellOps.Relaunch"/> (tests inject a no-op).</param>
+    /// <param name="relaunch">In-process soft-restart action; defaults to the real
+    /// <see cref="App.SoftRestart"/> (tests inject a no-op).</param>
     /// <param name="isScopeMode">Reports whether the engine is a scope-mode walk;
     /// defaults to inspecting the real <see cref="FfiEngineClient"/> (tests inject
     /// a constant to drive the mode-dependent UI).</param>
@@ -253,7 +255,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _engine = engine;
         _settings = settings ?? AppSettings.Load();
         _folderPicker = folderPicker ?? ScopeFolderPicker.PickAsync;
-        _relaunch = relaunch ?? ShellOps.Relaunch;
+        _relaunch = relaunch ?? App.SoftRestart;
         _isScopeMode = isScopeMode ?? (() => _engine is FfiEngineClient { IsScopeMode: true });
         _provisioner = provisioner ?? ServiceProvisioner.Real;
         ScopeFolders = new ObservableCollection<string>(_settings.ScopeRoots);
@@ -421,10 +423,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>Setup screen's one-click action: register the service elevated,
-    /// then (on success) wait for its pipe and relaunch — so a first-time user
-    /// goes from the setup screen to a working search box in one click. The app
-    /// stays unelevated; only fmf-service is elevated (per-action UAC).</summary>
-    /// <returns>A task that completes when registration finishes, or before relaunch on success.</returns>
+    /// then (on success) re-resolve the engine in-process into the pipe — so a
+    /// first-time user goes from the setup screen to a working search box in one
+    /// click. The app stays unelevated; only fmf-service is elevated (per-action UAC).</summary>
+    /// <returns>A task that completes when registration finishes (the soft restart
+    /// rebuilds the page on success).</returns>
     public async Task EnableSearchAsync()
     {
         if (SetupBusy)
@@ -445,10 +448,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 case ServiceActionOutcome.Ok:
                     SetupStatus = Loc.Get("Setup_Connecting");
 
-                    // Relaunch forcing the pipe transport; in production this process
-                    // exits and never returns. The fresh instance's pipe supervisor
-                    // waits out the just-started service's warm-up (no fixed budget),
-                    // and the UI flips Setup→Ready the moment it connects.
+                    // Re-resolve the engine in-process forcing the pipe transport
+                    // (ADR-0036): the rebuilt page's pipe supervisor waits out the
+                    // just-started service's warm-up (no fixed budget), and the UI
+                    // flips Setup→Ready the moment it connects.
                     _provisioner.RelaunchIntoPipe();
                     break;
                 case ServiceActionOutcome.Cancelled:

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Microsoft.Windows.AppLifecycle;
 using Windows.ApplicationModel.DataTransfer;
 
 namespace FindMyFiles.Services;
@@ -137,56 +138,22 @@ public static partial class ShellOps
     private static InvalidOperationException RevealHrException(int hr) =>
         new($"reveal failed (SHOpenFolderAndSelectItems returned 0x{hr:X8})");
 
-    /// <summary>Relaunch this app (unelevated — no runas) and exit, used by the
-    /// service manager's "restart app" button so the fresh instance picks up the
-    /// now-running service over the pipe (the engine transport is chosen once,
-    /// at startup). A failed launch notifies and leaves the current instance running.</summary>
-    public static void Relaunch() =>
-        RelaunchWith(RealProcessRunner.Instance, DispatcherAppExit.Instance);
+    /// <summary>True process restart, used only by the language switch so the
+    /// <see cref="App"/> ctor re-applies <c>PrimaryLanguageOverride</c> and the
+    /// window chrome is rebuilt. Goes through <see cref="AppInstance.Restart"/>
+    /// (not <c>Process.Start</c> + <c>Application.Exit</c>) so the fresh instance
+    /// wins single-instancing instead of redirecting back to this dying one
+    /// (ADR-0036). Every other "restart" reason — service register, scope change,
+    /// uninstall — is an in-process <see cref="AppReload"/> (App.SoftRestart). A
+    /// failed restart notifies and leaves this instance running.</summary>
+    public static void Relaunch() => RelaunchWith(RealAppRestart.Instance);
 
-    /// <summary>Relaunch forcing the pipe transport (<c>--engine=pipe</c>), used
-    /// right after a successful in-app service registration. The fresh instance
-    /// then binds the retrying pipe client directly — its supervisor waits out the
-    /// freshly-started service's warm-up (writer-lock acquisition, cold MFT scan)
-    /// with 250ms→5s backoff — instead of re-running <c>auto</c> detection, whose
-    /// single 250ms probe can momentarily see the not-yet-answering service and
-    /// fall back to the empty engine (the bug this fixes). The flag is a one-shot
-    /// launch argument; settings.json stays <c>auto</c>, so later manual launches
-    /// auto-detect as before.</summary>
-    public static void RelaunchIntoPipe() =>
-        RelaunchWith(RealProcessRunner.Instance, DispatcherAppExit.Instance, "--engine=pipe");
-
-    /// <summary>Relaunch core, parameterised over the process launcher and the
-    /// app-exit step so both the launch and the "only exit once the new instance
-    /// started" ordering are unit-testable (the public entry points wire the real
-    /// runner + the UI-thread-marshaling exit). <paramref name="exit"/> runs
-    /// <em>after</em> <paramref name="runner"/> so a failed launch never tears down
-    /// the only window. The production <paramref name="exit"/> marshals onto the UI
-    /// thread (<see cref="DispatcherAppExit"/>) because callers may resume off it,
-    /// where a direct <c>Application.Current.Exit()</c> throws RPC_E_WRONG_THREAD,
-    /// gets swallowed by <see cref="Run"/>, and orphans the old window.</summary>
-    /// <param name="runner">Process launcher (real or a test fake).</param>
-    /// <param name="exit">App-exit step (UI-thread-marshaling in production).</param>
-    /// <param name="arguments">Command-line passed to the new instance, or null for
-    /// none. Production uses <c>--engine=pipe</c> (post-register) or nothing (manual restart).</param>
-    internal static void RelaunchWith(IProcessRunner runner, IAppExit exit, string? arguments = null) =>
-        Run(Loc.Get("Shell_RelaunchFailed"), "FindMyFiles", () =>
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = Environment.ProcessPath!,
-                UseShellExecute = true,
-            };
-            if (arguments is not null)
-            {
-                psi.Arguments = arguments;
-            }
-
-            runner.Start(psi);
-
-            // Only reached when the new instance actually launched.
-            exit.Exit();
-        });
+    /// <summary>Relaunch core, parameterised over the restart step so it is
+    /// unit-testable without actually terminating the process. A failure is
+    /// funneled through <see cref="Run"/> (notify, don't crash).</summary>
+    /// <param name="restart">Restart step (real or a test fake).</param>
+    internal static void RelaunchWith(IAppRestart restart) =>
+        Run(Loc.Get("Shell_RelaunchFailed"), "FindMyFiles", () => restart.Restart(string.Empty));
 
     /// <summary>Put <paramref name="text"/> on the clipboard. A failure is
     /// logged and surfaced as a warning notification (clipboard access can be

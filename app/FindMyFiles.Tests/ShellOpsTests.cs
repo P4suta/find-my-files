@@ -73,46 +73,47 @@ public sealed class ShellOpsTests : IDisposable
         Assert.Equal("C:\\dir\\name with \" quote.txt", runner.Started.ArgumentList[0]);
     }
 
-    private sealed class RecordingExit : IAppExit
+    private sealed class RecordingRestart : IAppRestart
     {
-        internal int Exits { get; private set; }
+        internal int Calls { get; private set; }
 
-        public void Exit() => Exits++;
+        internal string? LastArguments { get; private set; }
+
+        public void Restart(string arguments)
+        {
+            Calls++;
+            LastArguments = arguments;
+        }
     }
 
-    private sealed class ThrowingRunner : IProcessRunner
+    private sealed class ThrowingRestart : IAppRestart
     {
-        // Models a failed shell launch (e.g. the exe path vanished).
-        public void Start(ProcessStartInfo psi) =>
-            throw new System.ComponentModel.Win32Exception(2); // ERROR_FILE_NOT_FOUND
-    }
-
-    [Fact]
-    public void RelaunchWith_starts_a_new_instance_then_requests_exit()
-    {
-        // Relaunch used to call Process.Start + Application.Current.Exit() inline,
-        // so nothing verified the ordering or the marshaled exit. Drive both seams.
-        var runner = new RecordingRunner();
-        var exit = new RecordingExit();
-
-        ShellOps.RelaunchWith(runner, exit);
-
-        Assert.Equal(1, runner.Calls);
-        Assert.NotNull(runner.Started);
-        Assert.Equal(Environment.ProcessPath, runner.Started!.FileName);
-        Assert.True(runner.Started!.UseShellExecute); // required for the shell relaunch
-        Assert.Equal(1, exit.Exits); // exit is requested only after a successful launch
+        // Models a failed restart: AppInstance.Restart returns a failure reason,
+        // which RealAppRestart surfaces as an exception for ShellOps.Run to catch.
+        public void Restart(string arguments) =>
+            throw new InvalidOperationException("restart failed");
     }
 
     [Fact]
-    public void RelaunchWith_does_not_exit_when_the_launch_fails()
+    public void RelaunchWith_restarts_the_app_with_empty_arguments()
     {
-        // The invariant guarding the orphaned-window bug's evil twin: if the new
-        // instance never started, never exit — that would kill the only window.
-        var exit = new RecordingExit();
+        // The language switch is the only true restart left (ADR-0036): it must hand
+        // the fresh instance an empty command line, so settings.json's saved language
+        // drives the new instance rather than a stale --engine override.
+        var restart = new RecordingRestart();
 
-        ShellOps.RelaunchWith(new ThrowingRunner(), exit); // Run() swallows the failure
+        ShellOps.RelaunchWith(restart);
 
-        Assert.Equal(0, exit.Exits);
+        Assert.Equal(1, restart.Calls);
+        Assert.Equal(string.Empty, restart.LastArguments);
+    }
+
+    [Fact]
+    public void RelaunchWith_swallows_a_failed_restart_instead_of_throwing()
+    {
+        // A restart failure is funneled through ShellOps.Run (notify, don't crash):
+        // the call must return normally rather than propagate — Dispose resets the
+        // Notifier the swallowed failure posted to.
+        ShellOps.RelaunchWith(new ThrowingRestart());
     }
 }

@@ -9,8 +9,9 @@ cannot click the OS UAC prompt or observe a privileged service install, so these
 flows are verified by hand.
 
 Run this before any release, and after touching:
-`App.xaml.cs`, `ServiceProvisioner`, `ShellOps.Relaunch`, `EngineClientFactory`,
-`MainWindow`, `ScopeManagerDialog`, or `ServiceManagerDialog`.
+`App.xaml.cs` (incl. `SoftRestart`/`AppReload`), `ServiceProvisioner`,
+`ShellOps.Relaunch`/`IAppRestart`, `EngineClientFactory`, `MainWindow`/`MainPage`,
+`ScopeManagerDialog`, or `ServiceManagerDialog`.
 
 ## Preconditions
 
@@ -50,14 +51,16 @@ Launch the published exe normally (double-click, or
 
 ---
 
-## 2. Privileged path — real UAC consent + single-window transition (Exhibit A)
+## 2. Privileged path — real UAC consent + in-process Setup→Ready (Exhibit A)
 
-This is the bug class the automation can't reach. The flow is:
-**Enable search → real UAC prompt → service installs+starts → app waits for the
-pipe → `ShellOps.Relaunch()` spawns a fresh connected instance and the old one
-exits.** The Exhibit-A regression is an **orphaned window**: the pre-relaunch
-instance lingers, leaving two windows (or a dead empty-fake window behind the new
-one). The fix (Slice A) must yield a clean single-window handoff.
+This is the bug class the automation can't reach. The flow is (ADR-0036):
+**Enable search → real UAC prompt → service installs+starts → the app re-resolves
+the engine *in-process* (`App.SoftRestartIntoPipe`: rebuild the page onto a
+retrying pipe client) — no new process.** The original regression (#107) was that
+the old `Process.Start` relaunch redirected back to the still-alive instance under
+single-instancing and **both processes exited — the app vanished**; the user had
+to reopen it manually. The fix must keep everything in one live window with no
+process churn.
 
 ### 2a. Consent ACCEPTED
 
@@ -65,17 +68,20 @@ one). The fix (Slice A) must yield a clean single-window handoff.
       (Yes/No), naming `fmf-service.exe` as the elevated action.
 - [ ] Click **Yes**. The setup screen shows a progress ring / status text while
       the service registers and the pipe comes up (≈ up to 8 s).
-- [ ] The app **relaunches itself unelevated** and comes back **connected**:
+- [ ] The **same window** flips Setup→Ready in place (no flash, no second window,
+      no disappearance):
   - [ ] The search box is now visible (engine ready); the setup screen is gone.
-  - [ ] **Exactly one FindMyFiles window exists** — no orphan. Confirm in Task
-        Manager / `Get-Process FindMyFiles` shows a **single** process.
-  - [ ] The new window has focus and is the foreground window (no stale window
-        hidden behind it).
+  - [ ] **Exactly one FindMyFiles window/process exists throughout** — confirm
+        `Get-Process FindMyFiles` shows a **single** process whose **PID is
+        unchanged** from before the click (proof it stayed in-process).
+  - [ ] The window never vanished — you did **not** have to reopen the app.
 - [ ] Type a 3+ char query → real results stream in from the installed service.
-- [ ] `app.log` shows the register → relaunch sequence and **no `ERROR` lines**.
-      Reading it (PowerShell):
-      `Select-String -Path (Join-Path $env:APPDATA 'find-my-files\logs\app.log') -Pattern 'ERROR'`
-      (or the portable `data\logs\app.log`) — expect **no matches** for this run.
+- [ ] `app.log` shows the register (`setup … → Ok`) line and **no second `launch`
+      line**, and specifically **no `--engine=pipe` launch** — the transition is
+      in-process (a `launch` after this point would mean a process relaunch crept
+      back, the #107 bug). Also **no `ERROR` lines**. Reading it (PowerShell):
+      `Select-String -Path (Join-Path $env:APPDATA 'find-my-files\logs\app.log') -Pattern 'launch|ERROR|--engine=pipe'`
+      (or the portable `data\logs\app.log`) — expect only the single startup `launch`.
 
 ### 2b. Consent DECLINED
 
