@@ -193,6 +193,12 @@ impl Engine {
         trace.total_us = t_total.elapsed_us();
         self.metrics.record_query(trace.clone());
 
+        // The per-query observability line is emitted by the transport layer
+        // (fmf_core::diag::log_query_served), not here: that is where the
+        // result handle `rid` and the ambient `qid` span both exist, so one
+        // line carries the full correlation. Direct callers (CLI/tests) of
+        // Engine::query simply produce no "query served" line.
+
         Ok((
             ResultSet {
                 slots: per_volume.iter().map(|(s, _, _)| s.clone()).collect(),

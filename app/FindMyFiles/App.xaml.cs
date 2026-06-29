@@ -86,6 +86,10 @@ public partial class App : Application
     /// language on the first XAML load.</summary>
     public App()
     {
+        // Stand the logger up first: ApplyLanguageOverride and ExceptionPolicy
+        // below both log, and every FileLog call routes through it (ADR-0037).
+        LogSetup.Init();
+
         // Must run before InitializeComponent so x:Uid / ResourceLoader resolve
         // to the chosen language from the first XAML load.
         ApplyLanguageOverride();
@@ -142,6 +146,9 @@ public partial class App : Application
             {
                 FileLog.Warn("app", "engine dispose failed", ex);
             }
+
+            // Flush the last lines to app.log before the process exits.
+            LogSetup.Shutdown();
         };
         Window.Activate();
 

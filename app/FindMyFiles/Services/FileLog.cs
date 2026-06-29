@@ -1,127 +1,87 @@
-using System.Globalization;
-using System.Text;
+using Serilog;
 
 namespace FindMyFiles.Services;
 
 /// <summary>
-/// Zero-dependency file logger for the app process. Covers everything on the
-/// C# side; the log directory is resolved by <see cref="AppPaths"/> (portable
-/// <c>&lt;exe&gt;\data\logs</c> by default, else <c>%APPDATA%\find-my-files\logs</c>) —
-/// the same dir the scope engine logs into. Thread-safe, single rotation
-/// generation.
+/// Static logging facade for the app process. Routes through the Serilog logger
+/// installed by <see cref="LogSetup"/>, which writes logfmt lines to
+/// <c>…\logs\app.log</c> (resolved by <see cref="AppPaths"/>) — the same dir the
+/// scope engine logs into (ADR-0037). The facade keeps a tiny scalar-only
+/// surface so call sites can never accidentally destructure (and leak) an
+/// object. Best-effort: logging must never become a crash source itself.
 /// </summary>
 public static class FileLog
 {
-    private const long RotateBytes = 2 * 1024 * 1024;
-
-    private static readonly System.Threading.Lock Gate = new();
-    private static readonly string LogDir = AppPaths.LogDir;
-
-    /// <summary>Absolute path to the active log file (<c>…\logs\app.log</c> under
-    /// the resolved data root) — surfaced for the diagnostics "open log folder"
-    /// affordance.</summary>
-    public static string LogPath => Path.Combine(LogDir, "app.log");
+    /// <summary>Absolute path to the active log file (<c>…\logs\app.log</c>) —
+    /// surfaced for the diagnostics "open log folder" affordance and
+    /// <see cref="Tail"/>.</summary>
+    public static string LogPath => Path.Combine(AppPaths.LogDir, "app.log");
 
     /// <summary>Absolute path to the crash marker dropped on a fatal exit and
     /// read back on the next launch (see <see cref="WriteCrashMarker"/> /
     /// <see cref="TakeCrashMarker"/>).</summary>
-    public static string CrashMarkerPath => Path.Combine(LogDir, "crash.marker");
+    public static string CrashMarkerPath => Path.Combine(AppPaths.LogDir, "crash.marker");
 
-    /// <summary>Log an informational line under <paramref name="area"/> (the
-    /// subsystem tag shown in brackets).</summary>
+    /// <summary>Log an informational line under <paramref name="area"/>.</summary>
     /// <param name="area">Subsystem tag, e.g. "notify" or "settings".</param>
     /// <param name="message">The message text.</param>
-    public static void Info(string area, string message) => Write("INFO", area, message, null);
+    public static void Info(string area, string message) =>
+        ForArea(area).Information("{Msg}", message);
 
-    /// <summary>Log a warning under <paramref name="area"/>, optionally
-    /// appending the full <paramref name="ex"/> for the stack trace.</summary>
+    /// <summary>Log a debug line under <paramref name="area"/> (suppressed unless
+    /// the level is lowered via <c>FMF_LOG</c> / <see cref="LogSetup.LevelSwitch"/>).</summary>
     /// <param name="area">Subsystem tag.</param>
     /// <param name="message">The message text.</param>
-    /// <param name="ex">Optional exception to append verbatim.</param>
+    public static void Debug(string area, string message) =>
+        ForArea(area).Debug("{Msg}", message);
+
+    /// <summary>Log a warning under <paramref name="area"/>, optionally appending
+    /// the full <paramref name="ex"/> as the <c>err=</c> field.</summary>
+    /// <param name="area">Subsystem tag.</param>
+    /// <param name="message">The message text.</param>
+    /// <param name="ex">Optional exception to record.</param>
     public static void Warn(string area, string message, Exception? ex = null) =>
-        Write("WARN", area, message, ex);
+        ForArea(area).Warning(ex, "{Msg}", message);
 
-    /// <summary>Log an error under <paramref name="area"/>, optionally
-    /// appending the full <paramref name="ex"/> for the stack trace.</summary>
+    /// <summary>Log an error under <paramref name="area"/>, optionally appending
+    /// the full <paramref name="ex"/> as the <c>err=</c> field.</summary>
     /// <param name="area">Subsystem tag.</param>
     /// <param name="message">The message text.</param>
-    /// <param name="ex">Optional exception to append verbatim.</param>
+    /// <param name="ex">Optional exception to record.</param>
     public static void Error(string area, string message, Exception? ex = null) =>
-        Write("ERROR", area, message, ex);
+        ForArea(area).Error(ex, "{Msg}", message);
 
-    /// <summary>Best-effort: logging must never become a crash source itself.</summary>
-    private static void Write(string level, string area, string message, Exception? ex)
-    {
-        try
-        {
-            lock (Gate)
-            {
-                AppendLine(LogDir, FormatLine(level, area, message, ex, DateTimeOffset.Now));
-            }
-        }
-        catch
-        {
-            // Swallow: nowhere left to report to.
-        }
-    }
-
-    /// <summary>Format one log line (no trailing newline) — pure, so the exact
-    /// shape is unit-testable without touching the filesystem.</summary>
-    /// <param name="level">Level tag (INFO/WARN/ERROR).</param>
+    /// <summary>Log one structured informational line carrying explicit logfmt
+    /// <paramref name="fields"/> (e.g. the per-query <c>rid</c>/<c>hits</c>
+    /// correlation line). Values are logged as scalars only — never
+    /// destructured — so no object graph can leak.</summary>
     /// <param name="area">Subsystem tag.</param>
-    /// <param name="message">The message text.</param>
-    /// <param name="ex">Optional exception appended verbatim after " ── ".</param>
-    /// <param name="now">Timestamp to stamp (injected for determinism).</param>
-    /// <returns>The formatted line.</returns>
-    internal static string FormatLine(string level, string area, string message, Exception? ex, DateTimeOffset now)
+    /// <param name="message">The message text (the trailing <c>msg=</c>).</param>
+    /// <param name="fields">Ordered key/value pairs emitted as inline fields.</param>
+    public static void Event(string area, string message, params (string Key, object Value)[] fields)
     {
-        var sb = new StringBuilder();
-        sb.Append('[').Append(now.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz", CultureInfo.InvariantCulture))
-          .Append("] [").Append(level).Append("] [").Append(area).Append("] ")
-          .Append(message);
-        if (ex is not null)
+        ArgumentNullException.ThrowIfNull(fields);
+        var log = ForArea(area);
+        foreach (var (key, value) in fields)
         {
-            sb.Append(" ── ").Append(ex);
+            log = log.ForContext(key, value);
         }
 
-        return sb.ToString();
+        log.Information("{Msg}", message);
     }
 
-    /// <summary>Append a preformatted line to <c>&lt;dir&gt;\app.log</c>, rotating
-    /// first. Takes the directory so tests can target a temp dir instead of
-    /// %APPDATA%.</summary>
-    /// <param name="dir">Log directory (created if absent).</param>
-    /// <param name="line">The preformatted line (the newline is appended here).</param>
-    internal static void AppendLine(string dir, string line)
-    {
-        Directory.CreateDirectory(dir);
-        var path = Path.Combine(dir, "app.log");
-        RotateIfNeeded(path, RotateBytes);
-        File.AppendAllText(path, line + Environment.NewLine);
-    }
+    private static ILogger ForArea(string area) => Log.ForContext("area", area);
 
-    /// <summary>Move <paramref name="logPath"/> to its <c>.old</c> sibling once it
-    /// exceeds <paramref name="rotateBytes"/> (single rotation generation).</summary>
-    /// <param name="logPath">The active log file.</param>
-    /// <param name="rotateBytes">Size threshold in bytes.</param>
-    internal static void RotateIfNeeded(string logPath, long rotateBytes)
-    {
-        var info = new FileInfo(logPath);
-        if (info.Exists && info.Length > rotateBytes)
-        {
-            var old = logPath + ".old";
-            File.Delete(old);
-            File.Move(logPath, old);
-        }
-    }
-
-    /// <summary>Last `lines` of the log — for the diagnostics clipboard dump.</summary>
+    /// <summary>Last <paramref name="lines"/> of the active log — for the
+    /// diagnostics clipboard dump.</summary>
     /// <param name="lines">How many trailing lines to return.</param>
     /// <returns>The joined tail, or a placeholder if missing/unreadable.</returns>
     public static string Tail(int lines) => TailFrom(LogPath, lines);
 
     /// <summary>Last <paramref name="lines"/> lines of <paramref name="logPath"/>,
-    /// or a placeholder if missing/unreadable. Path-parameterised for tests.</summary>
+    /// or a placeholder if missing/unreadable. Path-parameterised for tests. The
+    /// Serilog File sink keeps the file open shared-read, so this can read it
+    /// while logging continues.</summary>
     /// <param name="logPath">The log file to tail.</param>
     /// <param name="lines">How many trailing lines to return.</param>
     /// <returns>The joined tail (newline-separated), or a placeholder string.</returns>
@@ -129,16 +89,21 @@ public static class FileLog
     {
         try
         {
-            lock (Gate)
+            if (!File.Exists(logPath))
             {
-                if (!File.Exists(logPath))
-                {
-                    return "(no app.log)";
-                }
-
-                var all = File.ReadAllLines(logPath);
-                return string.Join('\n', all.TakeLast(lines));
+                return "(no app.log)";
             }
+
+            using var stream = new FileStream(
+                logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            var all = new List<string>();
+            while (reader.ReadLine() is { } line)
+            {
+                all.Add(line);
+            }
+
+            return string.Join('\n', all.TakeLast(lines));
         }
         catch (Exception ex)
         {
@@ -148,17 +113,20 @@ public static class FileLog
 
     /// <summary>Drop a crash marker (timestamp + <paramref name="detail"/>) so
     /// the next launch can detect an abnormal exit and offer to report it.
-    /// Best-effort; failures are swallowed.</summary>
+    /// Best-effort; failures are swallowed. Kept as a direct synchronous write
+    /// (not a log line) so it survives a hard crash that never flushes the
+    /// logger.</summary>
     /// <param name="detail">Crash context to record alongside the timestamp.</param>
     public static void WriteCrashMarker(string detail)
     {
         try
         {
-            Directory.CreateDirectory(LogDir);
+            Directory.CreateDirectory(AppPaths.LogDir);
             File.WriteAllText(CrashMarkerPath, $"{DateTimeOffset.Now:O}\n{detail}");
         }
         catch
         {
+            // Best-effort: nowhere left to report to.
         }
     }
 

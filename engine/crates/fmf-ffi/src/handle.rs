@@ -64,7 +64,11 @@ pub unsafe extern "C" fn fmf_engine_create(
             .get("log_level")
             .and_then(|v| v.as_str())
             .unwrap_or("info");
-        fmf_core::diag::init_diag(Some(&log_dir), log_level);
+        fmf_core::diag::init_diag(
+            Some(&log_dir),
+            log_level,
+            fmf_core::diag::DEFAULT_MAX_LOG_FILES,
+        );
 
         let engine = match Engine::new(EngineConfig {
             index_dir: index_dir.into(),

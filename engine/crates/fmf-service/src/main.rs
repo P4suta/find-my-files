@@ -132,7 +132,11 @@ fn run_console(
 ) -> std::process::ExitCode {
     let data_dir = data_dir.unwrap_or_else(config::default_data_dir);
     let cfg = config::ServiceConfig::load(&data_dir.join("service.json"));
-    fmf_core::diag::init_diag(Some(&data_dir.join("logs")), &cfg.log_level);
+    fmf_core::diag::init_diag(
+        Some(&data_dir.join("logs")),
+        &cfg.log_level,
+        fmf_core::diag::SERVICE_MAX_LOG_FILES,
+    );
     install_ctrl_c();
 
     let stop = Arc::new(AtomicBool::new(false));
