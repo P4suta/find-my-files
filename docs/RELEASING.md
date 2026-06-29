@@ -28,7 +28,9 @@ Cutting a real, immutable release is deliberately gated by several independent s
 (ADR-0035), so an ambiguous instruction can't ship one by accident:
 
 - **Label gate** — the Release PR can't merge until you add `release: approved` (`release-gate`).
-- **Manual merge** — the Release PR is never auto-merged.
+- **Manual merge** — the Release PR is never auto-merged. The repo-wide auto-merge
+  feature can't be hidden per-PR, so `no-automerge-on-release-pr.yml` turns it back
+  off if it's ever armed on a release-please PR (normal PRs are unaffected).
 - **Tag protection** — a ruleset allows `v*.*.*` tag creation only by the release-please App,
   so no stray/manual tag push can start the pipeline.
 - **Two environment approvals** — both the `sign` and `publish` jobs pause on the `release`
