@@ -3,9 +3,13 @@
 # release. Published as a 14-day GitHub Actions artifact (NOT a Release) — that
 # keeps it off the Releases list and sidesteps Immutable Releases (no rolling
 # tag to overwrite). Grab the latest with:
-#   gh run download --repo P4suta/find-my-files -n find-my-files-nightly
-# Nightlies are deliberately unsigned (testers accept the SmartScreen warning);
-# the approval-gated signing pipeline is stable-only. See docs/RELEASING.md.
+#   gh run download --repo P4suta/find-my-files -n find-my-files-nightly-<date>
+# Nightlies are deliberately UNSIGNED (testers accept the SmartScreen warning);
+# the approval-gated signing pipeline is stable-only. But they DO carry the rest
+# of the supply chain (ADR-0040): CycloneDX SBOMs, an osv-scanner gate, and
+# keyless build-provenance + SBOM attestations — so a nightly is verifiable with
+# `gh attestation verify`, same as a release minus the Authenticode signature.
+# See docs/SUPPLY_CHAIN.md / docs/RELEASING.md.
 
 name: nightly
 
@@ -26,6 +30,10 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write # OIDC token for keyless Sigstore attestation
+      attestations: write # write build-provenance + SBOM attestations
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -82,6 +90,13 @@ jobs:
         if: steps.freshness.outputs.build == 'true'
         run: just publish
 
+      # Same supply-chain artefacts as a release, minus signing (ADR-0040): the
+      # CycloneDX SBOMs + the osv-scanner gate, shared with release.yml via the
+      # composite action so the tool versions never drift.
+      - name: Generate SBOMs and scan (gate)
+        if: steps.freshness.outputs.build == 'true'
+        uses: ./.github/actions/sbom-scan
+
       - name: Package (tagless — zip name from FMF_BUILD_VERSION)
         if: steps.freshness.outputs.build == 'true'
         run: just package
@@ -95,5 +110,32 @@ jobs:
           path: |
             build/package/*.zip
             build/package/SHA256SUMS.txt
+            build/sbom/*.cdx.json
           retention-days: 14
           if-no-files-found: error
+
+      # Keyless build-provenance + SBOM attestations (Sigstore via OIDC, no stored
+      # secrets, no approval gate) — so a nightly is `gh attestation verify`-able,
+      # same as a release minus the Authenticode signature (ADR-0040). The 14-day
+      # artifact expires but the attestations persist in the repo.
+      - name: Attest build provenance
+        if: steps.freshness.outputs.build == 'true'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            build/package/find-my-files-*-win-x64.zip
+            build/package/SHA256SUMS.txt
+
+      - name: Attest Rust SBOM
+        if: steps.freshness.outputs.build == 'true'
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: build/package/find-my-files-*-win-x64.zip
+          sbom-path: build/sbom/fmf-engine.cdx.json
+
+      - name: Attest C# SBOM
+        if: steps.freshness.outputs.build == 'true'
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: build/package/find-my-files-*-win-x64.zip
+          sbom-path: build/sbom/app.cdx.json

@@ -6,8 +6,10 @@ The mechanisms and verification procedures that let users machine-verify that a 
 
 ## For users: verify a download
 
-`release.yml` (tag-driven) issues GitHub-native keyless attestation. There is **no private key**; it signs to
-Sigstore (Fulcio/Rekor) with the workflow's OIDC token. All you need to verify is `gh`:
+Both **stable releases** (`release.yml`, tag-driven) and **nightlies** (`nightly.yml`) issue GitHub-native keyless
+attestation — build provenance + an SBOM attestation per SBOM. There is **no private key**; they sign to
+Sigstore (Fulcio/Rekor) with the workflow's OIDC token. The only supply-chain difference is the Authenticode
+**code signature**, which is stable-only (ADR-0029/ADR-0040). All you need to verify is `gh`:
 
 ```
 # Verify build provenance (which commit / workflow / runner built it)
@@ -31,6 +33,18 @@ Successful verification means "the artifact's digest matches an attestation issu
 The zip and SHA256SUMS have a build-provenance attestation, and each SBOM has an SBOM attestation
 (listed in the repository's **Attestations** tab; 3 total).
 
+**Nightlies** (a 14-day Actions artifact, not a Release) carry the same SBOMs and the same 3 attestations
+(ADR-0040) — they are just unsigned. Download and verify one with:
+
+```
+gh run download --repo P4suta/find-my-files -n find-my-files-nightly-<date>
+gh attestation verify find-my-files-<version>-win-x64.zip --repo P4suta/find-my-files
+```
+
+The attestations persist in the repo even after the 14-day artifact expires. (The nightly's SBOM is *not*
+re-scanned by `sbom-monitor.yml` — that monitor tracks the latest Release only, and a nightly expires; the
+build-time osv-scanner gate still applies.)
+
 ## Dependency and build controls
 
 | Aspect | Mechanism |
@@ -49,7 +63,7 @@ The zip and SHA256SUMS have a build-provenance attestation, and each SBOM has an
 
 The SBOM isn't a write-only release artifact — `osv-scanner` (OSV.dev) reads it at two points:
 
-1. **Release gate** — `release.yml`'s `build` job scans both `*.cdx.json` right after generating them, before sign/publish. A known-vulnerable dependency in the resolved shipped closure fails the build. This catches the **.NET/NuGet graph**, which `cargo-audit` (Rust-only, reads `Cargo.lock`) never sees.
+1. **Build gate** — the shared `.github/actions/sbom-scan` composite scans both `*.cdx.json` right after generating them: in `release.yml`'s `build` job before sign/publish, and in `nightly.yml` before upload (ADR-0040). A known-vulnerable dependency in the resolved shipped closure fails the build. This catches the **.NET/NuGet graph**, which `cargo-audit` (Rust-only, reads `Cargo.lock`) never sees.
 2. **Shipped-release re-scan** — `sbom-monitor.yml` runs weekly, downloads the **latest release's** attested SBOMs, and re-scans them against the current OSV DB. This is the only check covering *what users already downloaded*: a CVE disclosed after a release is invisible to the source-tree scanners (which only see HEAD).
 
 When the weekly re-scan finds something it opens (or updates) a single issue labelled **`sbom-vuln`** with the osv-scanner report; once the affected release is clean again the issue is auto-closed. With no published release yet the job is a clean no-op and activates on the first release. Accepted/unfixable advisories go in **`osv-scanner.toml`** at the repo root (the OSV counterpart to `engine/deny.toml`), honoured by both the gate and the monitor.
