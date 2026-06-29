@@ -214,22 +214,21 @@ public sealed partial class ServiceManagerViewModel : ObservableObject
             };
             FileLog.Info("service-ui", $"`{args}` → {result.Outcome} (exit {result.ExitCode})");
 
-            // Register/start succeeds, but this instance is still on the empty
-            // fake engine (the transport is chosen once, at startup). Wait for
-            // the service's pipe to come up, then relaunch automatically so the
-            // fresh instance connects — the user shouldn't have to.
+            // Register/start succeeds, but this instance is still on the empty fake
+            // engine (the transport is chosen once, at startup). Relaunch forcing
+            // the pipe transport so the fresh instance binds a retrying pipe client
+            // and rides out the just-started service's warm-up — the user shouldn't
+            // have to. On success this process exits inside RelaunchIntoPipe; only a
+            // failed relaunch (ShellOps notifies) falls through, where the
+            // pre-armed "Restart app" button is the manual escape hatch.
             if (result.Outcome == ServiceActionOutcome.Ok
                 && verb is "setup" or "start"
                 && App.EngineClient is FakeEngineClient { IsEmpty: true })
             {
-                ResultSeverity = NotifySeverity.Info;
-                ResultText = Loc.Get("Setup_Connecting");
-                if (!await _provisioner.WaitForServiceThenRelaunchAsync())
-                {
-                    ResultSeverity = NotifySeverity.Warning;
-                    ResultText = Loc.Get("Svc_RegisteredNotConfirmed");
-                    NeedsAppRestart = true;
-                }
+                ResultSeverity = NotifySeverity.Warning;
+                ResultText = Loc.Get("Svc_RegisteredNotConfirmed");
+                NeedsAppRestart = true;
+                _provisioner.RelaunchIntoPipe();
             }
         }
         finally

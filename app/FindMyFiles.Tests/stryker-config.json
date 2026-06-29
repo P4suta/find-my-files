@@ -9,6 +9,8 @@
       "**/ViewModels/SearchOrchestrator.cs",
       "**/ViewModels/MainViewModel.cs",
       "**/Engine/EngineClientFactory.cs",
+      "**/Engine/Transport/PipeEngineClient.cs",
+      "**/Engine/Transport/PipeConnection.cs",
       "**/Engine/PageCodec.cs",
       "**/Engine/PipeProtocol.cs",
       "**/Engine/Wtf8.cs"

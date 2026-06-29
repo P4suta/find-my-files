@@ -28,6 +28,8 @@ test-results.json
 app/FindMyFiles.Tests/UiAutomation/artifacts/
 # coverlet raw coverage output (sibling of the ignored *.cobertura.xml)
 app/FindMyFiles.Tests/coverage.json
+# dotnet test default TRX / sequence output (regenerable per run)
+app/FindMyFiles.Tests/TestResults/
 # llvm-cov line-coverage report written into engine/ by the CI gate / `just cov`
 # (cargo llvm-cov --output-path engine-lcov.info).
 engine-lcov.info

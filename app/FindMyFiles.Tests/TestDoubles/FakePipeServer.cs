@@ -39,6 +39,11 @@ public sealed class FakePipeServer : IDisposable
     private readonly List<(int Connection, ushort Opcode, byte[] Payload)> _received = [];
     private int _connections;
 
+    /// <summary>When non-null, the accept loop waits on this before creating the
+    /// next pipe instance — so the pipe simply does not exist yet and a client's
+    /// connect attempts fail, modelling a service still warming up.</summary>
+    private TaskCompletionSource? _acceptGate;
+
     public string PipeName { get; } = "fmf-test-" + Guid.NewGuid().ToString("N");
 
     public uint ProtocolVersion { get; set; } = PipeProtocol.ProtocolVersion;
@@ -62,10 +67,32 @@ public sealed class FakePipeServer : IDisposable
 
     public int ConnectionCount => Volatile.Read(ref _connections);
 
-    public FakePipeServer()
+    /// <summary>Creates the server and starts accepting. Pass
+    /// <paramref name="startHeld"/> to begin in the warm-up state (no pipe created
+    /// until <see cref="ReleaseAccept"/>) so a client connects only after the gate
+    /// is released — the deterministic way to exercise the supervisor's
+    /// connect-retry/backoff and the Connecting→Connected transition.</summary>
+    /// <param name="startHeld">Begin with the accept gate closed (warm-up).</param>
+    public FakePipeServer(bool startHeld = false)
     {
+        if (startHeld)
+        {
+            _acceptGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
         _ = Task.Run(AcceptLoopAsync);
     }
+
+    /// <summary>Close the accept gate: no new pipe instance is created until
+    /// <see cref="ReleaseAccept"/>, modelling a service that hasn't started serving
+    /// yet. Take effect only before the next accept — set it via the constructor to
+    /// guarantee the very first connection is held.</summary>
+    public void HoldAccept() =>
+        _acceptGate ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Release a <see cref="HoldAccept"/> / start-held gate so the server
+    /// resumes accepting connections.</summary>
+    public void ReleaseAccept() => Interlocked.Exchange(ref _acceptGate, null)?.SetResult();
 
     public IReadOnlyList<(int Connection, ushort Opcode, byte[] Payload)> Received
     {
@@ -167,6 +194,21 @@ public sealed class FakePipeServer : IDisposable
     {
         while (!_cts.IsCancellationRequested)
         {
+            // Warm-up gate: while held, no pipe instance exists, so the client's
+            // connect attempts fail and its supervisor retries with backoff.
+            var gate = Volatile.Read(ref _acceptGate);
+            if (gate is not null)
+            {
+                try
+                {
+                    await gate.Task.WaitAsync(_cts.Token);
+                }
+                catch
+                {
+                    return;
+                }
+            }
+
             NamedPipeServerStream? stream = null;
             try
             {

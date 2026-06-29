@@ -191,7 +191,6 @@
 
   <data name="Setup_WaitingForPermission" xml:space="preserve"><value>管理者の許可を待っています…</value></data>
   <data name="Setup_Connecting" xml:space="preserve"><value>サービスに接続しています…</value></data>
-  <data name="Setup_ConnectCheckFailed" xml:space="preserve"><value>接続を確認できませんでした。もう一度お試しください。</value></data>
   <data name="Setup_Failed" xml:space="preserve"><value>セットアップに失敗しました。もう一度お試しください。</value></data>
   <data name="Setup_PortableLocation" xml:space="preserve"><value>設定とインデックスは {0} に保存され、このフォルダの外には何も書き込みません。</value></data>
 
