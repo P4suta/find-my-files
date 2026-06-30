@@ -36,7 +36,9 @@ jobs:
           jq -c '.[]' .github/labels.json | while IFS= read -r row; do
             name=$(jq -r '.name' <<<"$row")
             color=$(jq -r '.color' <<<"$row")
+            # GitHub caps label descriptions at 100 chars; truncate defensively.
             desc=$(jq -r '.description' <<<"$row")
+            desc=${desc:0:100}
             echo "syncing: $name"
             gh label create "$name" --color "$color" --description "$desc" --force
           done
