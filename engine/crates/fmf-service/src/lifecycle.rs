@@ -76,6 +76,39 @@ pub fn idle_should_stop(
     seen_client && active == 0 && !indexing && idle_for >= timeout
 }
 
+/// Serializes the daily GC Scheduled Task definition for `schtasks /Create /XML`.
+///
+/// Returned as **UTF-16LE with a BOM** under an `encoding="UTF-16"` declaration:
+/// `schtasks` starts reading the file as UTF-16 and aborts at the declaration
+/// with "Cannot switch the encoding" `(1,40)` on non-English Windows (e.g. ja-JP)
+/// when the bytes are UTF-8. UTF-16LE+BOM is the form Windows itself exports, so
+/// the definition loads on every locale. `<Command>`/`<Arguments>` are separate
+/// elements, sidestepping `/TR` command-line quoting; the action runs the stable
+/// binary copy with the `gc` verb as SYSTEM (`S-1-5-18`). The `stable_exe` path is
+/// the fixed hardened-data-root copy (never user input), so it needs no escaping.
+#[must_use]
+pub fn gc_task_xml(stable_exe: &Path) -> Vec<u8> {
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
+         <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
+         <RegistrationInfo><Description>find-my-files engine on-demand GC (ADR-0027)</Description></RegistrationInfo>\n\
+         <Triggers><CalendarTrigger><StartBoundary>2024-01-01T03:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers>\n\
+         <Principals><Principal id=\"Author\"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\n\
+         <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><ExecutionTimeLimit>PT5M</ExecutionTimeLimit></Settings>\n\
+         <Actions Context=\"Author\"><Exec><Command>{}</Command><Arguments>gc</Arguments></Exec></Actions>\n\
+         </Task>\n",
+        stable_exe.display()
+    );
+    // UTF-16LE + BOM (see the doc comment): the BOM is what tells schtasks to read
+    // the rest as UTF-16, matching the declaration.
+    let mut bytes = Vec::with_capacity(2 + xml.len() * 2);
+    bytes.extend_from_slice(&[0xFF, 0xFE]); // UTF-16LE byte-order mark
+    for unit in xml.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
 /// Pure GC decision (ADR-0027): remove an install unused for `max_idle_days`.
 ///
 /// `0` disables it; a missing (`None`) stamp is conservative — never GC without
@@ -151,6 +184,35 @@ mod tests {
         // Future stamp (clock skew) → keep.
         let future = UNIX_EPOCH + Duration::from_secs(40 * SECS_PER_DAY);
         assert!(!gc_should_remove(now, Some(future), 7));
+    }
+
+    #[test]
+    fn gc_task_xml_is_utf16le_bom_for_schtasks() {
+        let exe = Path::new(r"C:\ProgramData\find-my-files\fmf-service.exe");
+        let bytes = gc_task_xml(exe);
+        // Regression (ja-JP): it was UTF-8 and `schtasks /Create /XML` failed with
+        // "Cannot switch the encoding" at the declaration. Must be UTF-16LE + BOM.
+        assert_eq!(&bytes[..2], &[0xFF, 0xFE], "missing UTF-16LE BOM");
+        assert_eq!(bytes.len() % 2, 0, "UTF-16 code units are 2 bytes");
+        // Decode back past the BOM and check the declaration + the SYSTEM action.
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let text = String::from_utf16(&units).expect("round-trips as UTF-16");
+        assert!(
+            text.starts_with("<?xml version=\"1.0\" encoding=\"UTF-16\"?>"),
+            "declaration must announce UTF-16"
+        );
+        assert!(
+            text.contains("<Command>C:\\ProgramData\\find-my-files\\fmf-service.exe</Command>"),
+            "action runs the stable exe"
+        );
+        assert!(
+            text.contains("<Arguments>gc</Arguments>"),
+            "with the gc verb"
+        );
+        assert!(text.contains("<UserId>S-1-5-18</UserId>"), "as SYSTEM");
     }
 
     #[test]
