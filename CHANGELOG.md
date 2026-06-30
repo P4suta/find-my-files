@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/P4suta/find-my-files/compare/v0.1.0...v0.1.1) (2026-06-30)
+
+
+### Bug Fixes
+
+* **ci:** make the release pipeline immutable-compatible (draft-first publish) ([#122](https://github.com/P4suta/find-my-files/issues/122)) ([da95521](https://github.com/P4suta/find-my-files/commit/da95521209fe11414ec7b39100b3da0419f45287))
+* **ci:** only reinstate autorelease:pending on an OPEN release PR ([#124](https://github.com/P4suta/find-my-files/issues/124)) ([fd72bc7](https://github.com/P4suta/find-my-files/commit/fd72bc7248df83d8f1375d5f14570edbe68bb353))
+
 ## 0.1.0 (2026-06-30)
 
 
