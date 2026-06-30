@@ -2,27 +2,27 @@
   {
     "name": "autorelease: pending",
     "color": "ededed",
-    "description": "Owned by release-please: the open Release PR / the PR to tag after merge. Do not remove by hand — release-label-guard.yml restores it (removing it would skip the release)."
+    "description": "release-please tracking label; do not remove (auto-restored) or no release is cut."
   },
   {
     "name": "autorelease: tagged",
     "color": "ededed",
-    "description": "Owned by release-please: the Release PR merged and its vX.Y.Z tag + GitHub Release were cut."
+    "description": "release-please: Release PR merged; its vX.Y.Z tag and GitHub Release were cut."
   },
   {
     "name": "release: approved",
     "color": "0e8a16",
-    "description": "Human approval gate: add to a Release PR to open the release-gate check and allow merge (ADR-0035). Remove to un-approve."
+    "description": "Human approval gate for a Release PR; opens the release-gate check. Remove to un-approve."
   },
   {
     "name": "sbom-vuln",
     "color": "b60205",
-    "description": "Opened by sbom-monitor.yml when osv-scanner finds a vulnerability in a shipped SBOM."
+    "description": "sbom-monitor.yml: osv-scanner found a vulnerability in a shipped SBOM."
   },
   {
     "name": "mise-outdated",
     "color": "fbca04",
-    "description": "Opened by mise-outdated.yml when a mise-pinned tool drifted from its latest release."
+    "description": "mise-outdated.yml: a mise-pinned tool drifted from its latest release."
   },
   {
     "name": "bug",
