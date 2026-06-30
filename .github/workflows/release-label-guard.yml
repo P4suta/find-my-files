@@ -21,8 +21,13 @@ permissions:
 jobs:
   reinstate:
     # `github.event.label.name` on an `unlabeled` event is the label just removed.
+    # Only guard the label on an OPEN release PR: once the PR is merged/closed,
+    # release-please has already cut (or finished with) the release, and a lingering
+    # `autorelease: pending` makes it try to RE-release that merged PR — so removing
+    # the stale label from a closed PR is correct and must NOT be reinstated.
     if: >-
-      startsWith(github.event.pull_request.head.ref, 'release-please--')
+      github.event.pull_request.state == 'open'
+      && startsWith(github.event.pull_request.head.ref, 'release-please--')
       && github.event.label.name == 'autorelease: pending'
     runs-on: ubuntu-latest
     timeout-minutes: 5
