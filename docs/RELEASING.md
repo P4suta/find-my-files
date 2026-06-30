@@ -15,10 +15,15 @@ Design rationale: [ADR-0035](adr/0035-automated-versioning-with-release-please-a
    `feat:` → minor, `fix:`/`perf:` → patch, `!` / `BREAKING CHANGE:` → major.
 3. **Add the `release: approved` label** to the Release PR. Until it's there the
    `release-gate` check fails the PR (so a release is never an accidental merge).
-4. **Merge the Release PR.** release-please cuts the `vX.Y.Z` tag and a GitHub Release.
-5. The tag fires [`release.yml`](../.github/workflows/release.yml): build → **sign (approve in
-   the `release` environment)** → **publish (approve again)**, attaching the signed bundle +
-   `SHA256SUMS.txt`.
+4. **Merge the Release PR.** release-please creates the GitHub Release as a **draft**
+   (config `"draft": true`, so no `vX.Y.Z` git tag exists yet) and dispatches
+   [`release.yml`](../.github/workflows/release.yml).
+5. `release.yml` runs: build → **sign (approve in the `release` environment)** →
+   **publish (approve again)**. The publish step attaches the signed bundle +
+   `SHA256SUMS.txt` to the draft and **publishes it — which is what creates the
+   `vX.Y.Z` tag**. Assets land *before* publish, the order [immutable releases](https://docs.github.com/code-security/concepts/supply-chain-security/immutable-releases)
+   require (a published immutable release can't gain assets afterward — the v0.1.0
+   lesson).
 
 You never hand-pick or hand-edit a version. The Release PR diff *is* the preview.
 
@@ -40,8 +45,12 @@ Cutting a real, immutable release is deliberately gated by several independent s
 - **Manual merge** — the Release PR is never auto-merged. The repo-wide auto-merge
   feature can't be hidden per-PR, so `no-automerge-on-release-pr.yml` turns it back
   off if it's ever armed on a release-please PR (normal PRs are unaffected).
-- **Tag protection** — `.github/rulesets/protect-version-tags.json` allows `v*.*.*` tag
-  creation only by the release-please App, so no stray/manual tag push can start the pipeline.
+- **No tag-triggered cascade** — `release.yml` is started only by an explicit dispatch from
+  `release-please.yml` (after a Release PR merge creates the draft), never by a tag push, so a
+  stray or manual `vX.Y.Z` tag starts nothing. (This is why the old `protect-version-tags`
+  ruleset was retired — its job, blocking stray tags from triggering a release, no longer exists.
+  The tag is now an *output* of publishing, and each real release's tag↔commit↔assets binding is
+  sealed by the immutable-release attestation.)
 - **Two environment approvals** — both the `sign` and `publish` jobs pause on the `release`
   environment (reviewer = the maintainer); the irreversible publish has its own approval.
 - **Agent contract** — automated tooling (incl. the AI assistant) will not merge the Release PR,
