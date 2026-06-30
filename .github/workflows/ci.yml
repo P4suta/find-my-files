@@ -316,9 +316,11 @@ jobs:
 
   # Single required status check. Transitively enforces the leaves and treats
   # `skipped` (docs-only / paths-gated) as success — avoids the "Expected —
-  # Waiting" deadlock.
+  # Waiting" deadlock. PR-only: it gates PR merges, so there is nothing to gate
+  # on a push to main — and a cancelled post-merge push run would otherwise make
+  # gate-results (which counts `cancelled` as failure) paint main spuriously red.
   ci-required:
-    if: always()
+    if: ${{ always() && github.event_name == 'pull_request' }}
     needs: [hygiene, deny, machete, contract-lint, pr-title, release-gate, xtask, engine-build-test, app, fuzz]
     runs-on: ubuntu-latest
     steps:
