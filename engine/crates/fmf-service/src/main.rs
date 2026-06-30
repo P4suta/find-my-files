@@ -592,26 +592,16 @@ fn ping(pipe_name: &str) -> std::io::Result<(u32, u32)> {
 
 // ── On-demand lifecycle helpers (ADR-0027) ─────────────────────────────
 
-/// Registers the daily GC Scheduled Task as SYSTEM from an XML definition —
-/// `<Command>`/`<Arguments>` are separate elements, sidestepping schtasks
-/// `/TR` command-line quoting. The action is the stable binary + the `gc` verb.
+/// Registers the daily GC Scheduled Task as SYSTEM. The XML definition (and the
+/// UTF-16 encoding `schtasks` needs across locales) is built by
+/// [`lifecycle::gc_task_xml`]; here we only drop it to a file and shell out.
 fn register_gc_task(
     data_dir: &std::path::Path,
     stable_exe: &std::path::Path,
 ) -> Result<(), String> {
-    let xml = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
-         <RegistrationInfo><Description>find-my-files engine on-demand GC (ADR-0027)</Description></RegistrationInfo>\n\
-         <Triggers><CalendarTrigger><StartBoundary>2024-01-01T03:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers>\n\
-         <Principals><Principal id=\"Author\"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\n\
-         <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><ExecutionTimeLimit>PT5M</ExecutionTimeLimit></Settings>\n\
-         <Actions Context=\"Author\"><Exec><Command>{}</Command><Arguments>gc</Arguments></Exec></Actions>\n\
-         </Task>\n",
-        stable_exe.display()
-    );
     let xml_path = data_dir.join("gc-task.xml");
-    std::fs::write(&xml_path, xml).map_err(|e| format!("write task xml: {e}"))?;
+    std::fs::write(&xml_path, lifecycle::gc_task_xml(stable_exe))
+        .map_err(|e| format!("write task xml: {e}"))?;
     let status = std::process::Command::new("schtasks")
         .args(["/Create", "/F", "/TN", lifecycle::GC_TASK_NAME, "/XML"])
         .arg(&xml_path)
