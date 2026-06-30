@@ -1,14 +1,19 @@
-# Reconciles the repo's labels from .github/labels.yml (the source of truth) so
+# Reconciles the repo's labels from .github/labels.json (the source of truth) so
 # label names/colors/descriptions are version-controlled, not set by hand. Runs
-# only when the manifest changes (or on demand). `skip-delete: true` makes it
-# additive/update-only — it never deletes labels missing from the manifest (so
-# GitHub defaults and any future tool labels are left alone).
+# only when the manifest changes (or on demand).
+#
+# Deliberately done with `gh` + `jq` (both pre-installed on the runner) rather
+# than a labeler action: this repo restricts Actions to a SHA-pinned allowlist
+# (Settings → Actions → "selected"), so pulling in a third-party labeler would
+# mean widening that trust surface. `gh label create --force` is create-or-update
+# and never deletes, so the sync is additive — labels missing from the manifest
+# (GitHub defaults, future tool labels) are left untouched.
 name: labels-sync
 
 on:
   push:
     branches: [main]
-    paths: [".github/labels.yml"]
+    paths: [".github/labels.json"]
   workflow_dispatch:
 
 permissions:
@@ -23,8 +28,15 @@ jobs:
       issues: write # create/update labels
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: crazy-max/ghaction-github-labeler@548a7c3603594ec17c819e1239f281a3b801ab4d # v6.0.0
-        with:
-          yaml-file: .github/labels.yml
-          skip-delete: true
-          dry-run: false
+      - name: Sync labels from manifest (additive; never deletes)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          jq -c '.[]' .github/labels.json | while IFS= read -r row; do
+            name=$(jq -r '.name' <<<"$row")
+            color=$(jq -r '.color' <<<"$row")
+            desc=$(jq -r '.description' <<<"$row")
+            echo "syncing: $name"
+            gh label create "$name" --color "$color" --description "$desc" --force
+          done
