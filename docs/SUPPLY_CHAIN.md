@@ -6,7 +6,7 @@ The mechanisms and verification procedures that let users machine-verify that a 
 
 ## For users: verify a download
 
-Both **stable releases** (`release.yml`, tag-driven) and **nightlies** (`nightly.yml`) issue GitHub-native keyless
+Both **stable releases** (`release.yml`, dispatched after the Release PR merge) and **nightlies** (`nightly.yml`) issue GitHub-native keyless
 attestation — build provenance + an SBOM attestation per SBOM. There is **no private key**; they sign to
 Sigstore (Fulcio/Rekor) with the workflow's OIDC token. The only supply-chain difference is the Authenticode
 **code signature**, which is stable-only (ADR-0029/ADR-0040). All you need to verify is `gh`:
@@ -79,8 +79,9 @@ which fires only when publishing. The `sign` job pauses for approval (the `relea
 2. **Attestation/OIDC dry-run**: to exercise the `publish` job (`id-token: write` / `attestations: write`), run
    `workflow_dispatch` with a throwaway `tag_name` and `publish=true`. Note immutable releases make a published
    release non-deletable, so use a tag you are happy to keep.
-3. For production, merge the release-please **Release PR** (it bumps the version + CHANGELOG and pushes the signed
-   `vX.Y.Z` tag) → `release.yml` fires automatically; approve the `sign` job when prompted. See
+3. For production, merge the release-please **Release PR** (it bumps the version + CHANGELOG and creates the
+   **draft** release) → `release-please.yml` dispatches `release.yml` automatically; approve the `sign` then
+   `publish` jobs when prompted (publishing the draft creates the `vX.Y.Z` tag). See
    [RELEASING.md](RELEASING.md) / [ADR-0035](adr/0035-automated-versioning-with-release-please-and-build-channels.md).
 4. After completion, confirm that `gh attestation verify <zip> --repo P4suta/find-my-files` succeeds, the
    **Attestations** tab has 3 items (provenance + SBOM×2), and the release has zip / SHA256SUMS / `*.cdx.json`.

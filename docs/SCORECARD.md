@@ -28,13 +28,12 @@ scripts).
 
 As of 2026-06-28 `main` is protected by **rulesets**, not classic branch
 protection (classic was removed; rulesets layer cleanly, export to JSON, and are
-GitHub's forward path). Three rulesets, all committed:
+GitHub's forward path). Two rulesets, both committed:
 
 | File | Target | Enforces |
 |---|---|---|
 | `.github/rulesets/protect-default-branch.json` | `main` | PR required, `ci-required` + `analyze` checks (strict), linear history, conversation resolution, no force-push/deletion, no admin bypass |
 | `.github/rulesets/require-signed-commits.json` | all branches but `gh-pages` | signed commits |
-| `.github/rulesets/protect-version-tags.json` | `refs/tags/v*` | tag creation/deletion only by the release-please App (ADR-0035 release safety) |
 
 GitHub does **not** auto-apply repo-level rulesets from the tree. Create or
 update them from the committed JSON (existing ruleset → use `--method PUT

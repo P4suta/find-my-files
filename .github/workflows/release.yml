@@ -33,16 +33,23 @@
 name: release
 
 on:
-  push:
-    tags: ["v*.*.*"]
+  # Dispatched by release-please.yml once it creates the DRAFT release (drafts fire
+  # no `release` event and create no tag, so we can't trigger on a tag push). The
+  # publish job attaches assets to that draft and publishes it — which is what
+  # creates the `vX.Y.Z` tag, in the asset-before-publish order immutable releases
+  # require. Also runnable by hand for a signing smoke test (publish=false).
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Tag (or ref) to build from (e.g. v0.1.0, or main for a signing test)"
+        description: "Version tag to release (e.g. v0.1.1), or a branch/ref for a publish=false signing test"
         required: true
         type: string
+      sha:
+        description: "Commit SHA to build from (release-please passes the release commit; omit to build from tag_name)"
+        required: false
+        type: string
       publish:
-        description: "Publish a GitHub Release (false = build+sign+verify only, no release/attestations)"
+        description: "Publish the GitHub Release (false = build+sign+verify only, no release/attestations)"
         required: false
         default: true
         type: boolean
@@ -58,8 +65,12 @@ permissions:
   contents: read
 
 env:
-  # Resolve the tag from either trigger; reused for checkout, zip, release.
-  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+  # The version tag (vX.Y.Z) — reused for stamping, zip naming, and the release.
+  TAG: ${{ inputs.tag_name }}
+  # Where to get the code: the release commit SHA when release-please dispatches us
+  # (the tag doesn't exist yet, and pinning the SHA avoids main moving during the
+  # approval waits); falls back to tag_name for a manual branch smoke test.
+  REF: ${{ inputs.sha || inputs.tag_name }}
   # Build the shipped binaries from the committed Cargo.lock, never a silent
   # re-resolve (the cargo-sbom install step pins its own --locked).
   CARGO_NET_LOCKED: "true"
@@ -88,7 +99,7 @@ jobs:
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.REF }}
 
       # Provisions the pinned toolchain (rust / dotnet / just) from mise.toml so
       # the shipped artifact is built on the exact pins.
@@ -279,7 +290,7 @@ jobs:
       # The repo is needed for `just package` (xtask) + the toolchain.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.REF }}
 
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
@@ -325,11 +336,16 @@ jobs:
           subject-path: build/package/find-my-files-*-win-x64.zip
           sbom-path: build/sbom/app.cdx.json
 
-      - name: Attach assets to release
+      # release-please created this release as a DRAFT (config "draft": true) — no
+      # assets, no git tag yet. Uploading to a draft is allowed; softprops uploads
+      # the files and THEN publishes the draft (the order immutable releases require:
+      # assets must be in place before publish). Publishing is what creates the
+      # vX.Y.Z tag. `draft` is intentionally omitted so the action publishes after
+      # upload; the notes are release-please's, so we don't regenerate them.
+      - name: Publish the draft release with the signed assets
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           tag_name: ${{ env.TAG }}
-          generate_release_notes: true
           files: |
             build/package/find-my-files-*-win-x64.zip
             build/package/SHA256SUMS.txt

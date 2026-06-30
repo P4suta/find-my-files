@@ -7,7 +7,7 @@
     ".": {
       "release-type": "simple",
       "package-name": "find-my-files",
-      "release-as": "0.1.0",
+      "draft": true,
       "extra-files": [
         {
           "type": "toml",

@@ -9,7 +9,6 @@ protection (migrated 2026-06-28).
 |---|---|---|
 | `protect-default-branch.json` | `refs/heads/main` | PR required, `ci-required` + `analyze` status checks (strict), linear history, conversation resolution, no force-push, no deletion, no admin bypass |
 | `require-signed-commits.json` | all branches except `gh-pages` | signed commits |
-| `protect-version-tags.json` | `refs/tags/v*` | `v*` tag creation/deletion allowed only by the release-please App (`bypass_actors` `actor_id: 4169572`, an Integration) — no stray/manual/agent tag push can start `release.yml` (ADR-0035) |
 
 > GitHub does **not** auto-apply repository rulesets from files in the tree
 > (only org-level rulesets can be imported). These are the canonical record and

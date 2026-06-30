@@ -2,17 +2,19 @@
 #
 # Conventional Commits land on main → this action keeps a "Release PR" open that
 # bumps engine/Cargo.toml + engine/Cargo.lock (rust release-type) and the C# csproj
-# (extra-files generic updater), and updates CHANGELOG.md. Merging that PR cuts a
-# signed-by-nobody `vX.Y.Z` tag, which fires release.yml (build → sign → publish).
+# (extra-files generic updater), and updates CHANGELOG.md. Merging that PR makes
+# release-please create the GitHub Release as a DRAFT (config "draft": true); this
+# workflow then dispatches release.yml, which builds → signs → attaches assets to
+# the draft → publishes it (publishing creates the `vX.Y.Z` tag). The draft-first
+# order is what makes assets land before the release becomes immutable.
 # Humans never hand-pick or hand-edit a version.
 #
-# DORMANT until activated: the tag this action pushes only triggers release.yml if
-# pushed by a non-GITHUB_TOKEN identity (GitHub's recursion guard suppresses
-# workflow triggers from GITHUB_TOKEN-pushed refs). So it runs as a GitHub App: we
-# mint a short-lived installation token at runtime (actions/create-github-app-token)
-# from two secrets — RELEASE_PLEASE_CLIENT_ID and RELEASE_PLEASE_PRIVATE_KEY — and
-# hand it to release-please. With those secrets unset the job runs green and no-ops:
-# the scaffolding ships now, the App lights it up later. See docs/RELEASING.md.
+# Runs as a GitHub App: a short-lived installation token (actions/create-github-app-token)
+# from two secrets — RELEASE_PLEASE_CLIENT_ID and RELEASE_PLEASE_PRIVATE_KEY — lets
+# release-please push the release commit + open the PR with a signed identity. With
+# those secrets unset the job runs green and no-ops: the scaffolding ships now, the
+# App lights it up later. (The release.yml dispatch uses GITHUB_TOKEN — a
+# workflow_dispatch is the one event GITHUB_TOKEN may start.) See docs/RELEASING.md.
 
 name: release-please
 
@@ -42,8 +44,9 @@ jobs:
     # approval gate is the separate `release` environment in release.yml). ADR-0035.
     environment: release-please
     permissions:
-      contents: write # create the release commit, tag and GitHub Release
+      contents: write # create the release commit and the draft GitHub Release
       pull-requests: write # open / maintain the Release PR
+      actions: write # dispatch release.yml once the draft release is created
     env:
       # Server-side boolean — never exposes the secret values.
       HAS_APP: ${{ secrets.RELEASE_PLEASE_CLIENT_ID != '' && secrets.RELEASE_PLEASE_PRIVATE_KEY != '' }}
@@ -114,6 +117,23 @@ jobs:
             -f branch="$BRANCH" \
             -f sha="$(git rev-parse "HEAD:engine/Cargo.lock")" \
             -f content="$(base64 -w0 engine/Cargo.lock)"
+
+      # release-please created the GitHub Release as a DRAFT (config "draft": true).
+      # Draft releases don't fire `release` events and don't create the git tag, so
+      # we explicitly kick off release.yml to build → sign → attach assets to the
+      # draft → publish it (publishing is what creates the tag). A GITHUB_TOKEN
+      # dispatch IS allowed to start a workflow_dispatch run (the documented
+      # recursion-guard exception), so this needs no App token. ADR-0035.
+      - name: Trigger the signed-release build
+        if: ${{ env.HAS_APP == 'true' && steps.rp.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.rp.outputs.tag_name }}
+          SHA: ${{ steps.rp.outputs.sha }}
+        run: |
+          gh workflow run release.yml --repo "$REPO" --ref main \
+            -f tag_name="$TAG" -f sha="$SHA" -f publish=true
 
       - name: release-please (dormant — App not configured)
         if: env.HAS_APP != 'true'
