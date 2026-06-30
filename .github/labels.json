@@ -1,0 +1,42 @@
+[
+  {
+    "name": "autorelease: pending",
+    "color": "ededed",
+    "description": "Owned by release-please: the open Release PR / the PR to tag after merge. Do not remove by hand — release-label-guard.yml restores it (removing it would skip the release)."
+  },
+  {
+    "name": "autorelease: tagged",
+    "color": "ededed",
+    "description": "Owned by release-please: the Release PR merged and its vX.Y.Z tag + GitHub Release were cut."
+  },
+  {
+    "name": "release: approved",
+    "color": "0e8a16",
+    "description": "Human approval gate: add to a Release PR to open the release-gate check and allow merge (ADR-0035). Remove to un-approve."
+  },
+  {
+    "name": "sbom-vuln",
+    "color": "b60205",
+    "description": "Opened by sbom-monitor.yml when osv-scanner finds a vulnerability in a shipped SBOM."
+  },
+  {
+    "name": "mise-outdated",
+    "color": "fbca04",
+    "description": "Opened by mise-outdated.yml when a mise-pinned tool drifted from its latest release."
+  },
+  {
+    "name": "bug",
+    "color": "d73a4a",
+    "description": "Something isn't working."
+  },
+  {
+    "name": "enhancement",
+    "color": "a2eeef",
+    "description": "New feature or request."
+  },
+  {
+    "name": "dependencies",
+    "color": "0366d6",
+    "description": "Dependency update (Dependabot)."
+  }
+]

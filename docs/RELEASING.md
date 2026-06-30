@@ -35,7 +35,7 @@ Cutting a real, immutable release is deliberately gated by several independent s
   merged PR is never tagged/released. It can't be locked in GitHub, so
   `release-label-guard.yml` reinstates it if it's removed from a release-please PR. (The human
   `release: approved` label is deliberately *not* guarded — removing it to un-approve is fine.)
-  Labels themselves are declared in `.github/labels.yml` (synced by `labels-sync.yml`), so their
+  Labels themselves are declared in `.github/labels.json` (synced by `labels-sync.yml`), so their
   names/colors/meaning are version-controlled, not ad-hoc.
 - **Manual merge** — the Release PR is never auto-merged. The repo-wide auto-merge
   feature can't be hidden per-PR, so `no-automerge-on-release-pr.yml` turns it back
