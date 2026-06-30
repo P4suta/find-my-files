@@ -4,7 +4,7 @@
     <!-- Base version, bumped by release-please (its generic extra-files updater
          keys on the annotation comment on the Version line below). Humans never
          hand-edit it; AssemblyVersion/FileVersion derive from it. ADR-0035. -->
-    <Version>0.1.0</Version> <!-- x-release-please-version -->
+    <Version>0.1.1</Version> <!-- x-release-please-version -->
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>FindMyFiles</RootNamespace>
