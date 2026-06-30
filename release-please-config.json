@@ -8,6 +8,7 @@
       "release-type": "simple",
       "package-name": "find-my-files",
       "draft": true,
+      "force-tag-creation": true,
       "extra-files": [
         {
           "type": "toml",
