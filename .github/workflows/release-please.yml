@@ -10,7 +10,7 @@
 # pushed by a non-GITHUB_TOKEN identity (GitHub's recursion guard suppresses
 # workflow triggers from GITHUB_TOKEN-pushed refs). So it runs as a GitHub App: we
 # mint a short-lived installation token at runtime (actions/create-github-app-token)
-# from two secrets — RELEASE_PLEASE_APP_ID and RELEASE_PLEASE_APP_PRIVATE_KEY — and
+# from two secrets — RELEASE_PLEASE_CLIENT_ID and RELEASE_PLEASE_PRIVATE_KEY — and
 # hand it to release-please. With those secrets unset the job runs green and no-ops:
 # the scaffolding ships now, the App lights it up later. See docs/RELEASING.md.
 
@@ -46,7 +46,7 @@ jobs:
       pull-requests: write # open / maintain the Release PR
     env:
       # Server-side boolean — never exposes the secret values.
-      HAS_APP: ${{ secrets.RELEASE_PLEASE_APP_ID != '' && secrets.RELEASE_PLEASE_APP_PRIVATE_KEY != '' }}
+      HAS_APP: ${{ secrets.RELEASE_PLEASE_CLIENT_ID != '' && secrets.RELEASE_PLEASE_PRIVATE_KEY != '' }}
     steps:
       # Mint a short-lived installation token scoped to this repo. Its pushes (the
       # vX.Y.Z tag) DO trigger release.yml, unlike GITHUB_TOKEN's.
@@ -55,8 +55,8 @@ jobs:
         if: env.HAS_APP == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.RELEASE_PLEASE_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_PRIVATE_KEY }}
 
       - name: release-please (active)
         id: rp
@@ -118,6 +118,6 @@ jobs:
       - name: release-please (dormant — App not configured)
         if: env.HAS_APP != 'true'
         run: |
-          echo "::notice::release-please is dormant — set the RELEASE_PLEASE_APP_ID and"
-          echo "RELEASE_PLEASE_APP_PRIVATE_KEY secrets (a GitHub App) to activate."
+          echo "::notice::release-please is dormant — set the RELEASE_PLEASE_CLIENT_ID and"
+          echo "RELEASE_PLEASE_PRIVATE_KEY secrets (a GitHub App) to activate."
           echo "See docs/RELEASING.md and ADR-0035."

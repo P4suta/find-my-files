@@ -50,15 +50,20 @@ installation token at runtime via `actions/create-github-app-token`.
 1. **Create a GitHub App** (org or personal). Repository permissions: **Contents:
    Read & write** and **Pull requests: Read & write**. No webhook needed.
 2. **Install** the App on the `find-my-files` repo.
-3. Generate a **private key** (`.pem`) for the App and note its **App ID**.
+3. Generate a **private key** (`.pem`) for the App and note its **Client ID** (shown
+   at the top of the App's **General** settings page, e.g. `Iv…`).
 4. **Create an environment** for the credential (this is the hardened part — see below):
    Settings → Environments → **New environment** → name it **`release-please`**.
    - **Deployment branches and tags** → **Selected branches** → add **`main`** only.
    - **Do NOT add required reviewers** (release-please must run unattended).
 5. In that environment's **Environment secrets**, add:
-   - `RELEASE_PLEASE_APP_ID` = the App ID
-   - `RELEASE_PLEASE_APP_PRIVATE_KEY` = the full `.pem` contents (paste the whole file,
+   - `RELEASE_PLEASE_CLIENT_ID` = the App's Client ID
+   - `RELEASE_PLEASE_PRIVATE_KEY` = the full `.pem` contents (paste the whole file,
      `-----BEGIN…` through `…END-----`; multi-line is fine)
+
+   (If an earlier setup used the old `RELEASE_PLEASE_APP_ID` /
+   `RELEASE_PLEASE_APP_PRIVATE_KEY` secrets, delete them and re-add under the names
+   above — the workflow now authenticates the App by **Client ID**, not App ID.)
 6. (Optional, first run) To stop the first Release PR from scanning the entire history,
    set `bootstrap-sha` in `release-please-config.json` to a recent commit, or seed
    `.release-please-manifest.json` to the last shipped version.
