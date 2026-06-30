@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+    # labeled/unlabeled are added so the label-driven `release-gate` re-evaluates
+    # when `release: approved` is added/removed — without them, a label change
+    # leaves the gate's result stale (it would need a manual re-run). The heavy
+    # windows tier skips on these label events (see each job's `if`), so the cost
+    # is only the cheap ubuntu tier + the gate.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 # Cancel superseded PR runs; never cancel main (post-merge lineage/artifacts).
 concurrency:
@@ -181,7 +187,9 @@ jobs:
   # ── windows engine tier: engine compiles once here, the app reuses the dll ──
   engine-build-test:
     needs: [hygiene, changes]
-    if: needs.changes.outputs.code == 'true'
+    # Skip on label events (the gate re-run path) — code didn't change, so this
+    # 30-min tier would just burn time; ci-required treats the skip as success.
+    if: needs.changes.outputs.code == 'true' && github.event.action != 'labeled' && github.event.action != 'unlabeled'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -279,7 +287,7 @@ jobs:
   # `just perf-gate`.
   bench:
     needs: [hygiene, changes]
-    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true' && github.event.action != 'labeled' && github.event.action != 'unlabeled'
     runs-on: windows-latest
     timeout-minutes: 25
     continue-on-error: true
@@ -301,7 +309,7 @@ jobs:
   # skipped, which ci-required treats as success.
   fuzz:
     needs: changes
-    if: needs.changes.outputs.fuzz == 'true'
+    if: needs.changes.outputs.fuzz == 'true' && github.event.action != 'labeled' && github.event.action != 'unlabeled'
     permissions:
       contents: read
     uses: ./.github/workflows/fuzz.yml

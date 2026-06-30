@@ -28,11 +28,20 @@ Cutting a real, immutable release is deliberately gated by several independent s
 (ADR-0035), so an ambiguous instruction can't ship one by accident:
 
 - **Label gate** — the Release PR can't merge until you add `release: approved` (`release-gate`).
+  Adding or removing the label re-evaluates the gate automatically (CI now runs on
+  `labeled`/`unlabeled` events, skipping the heavy windows tier), so there is no manual
+  re-run — the check flips green within seconds of approval.
+- **Label guard** — `autorelease: pending` is release-please's tracking label; without it the
+  merged PR is never tagged/released. It can't be locked in GitHub, so
+  `release-label-guard.yml` reinstates it if it's removed from a release-please PR. (The human
+  `release: approved` label is deliberately *not* guarded — removing it to un-approve is fine.)
+  Labels themselves are declared in `.github/labels.yml` (synced by `labels-sync.yml`), so their
+  names/colors/meaning are version-controlled, not ad-hoc.
 - **Manual merge** — the Release PR is never auto-merged. The repo-wide auto-merge
   feature can't be hidden per-PR, so `no-automerge-on-release-pr.yml` turns it back
   off if it's ever armed on a release-please PR (normal PRs are unaffected).
-- **Tag protection** — a ruleset allows `v*.*.*` tag creation only by the release-please App,
-  so no stray/manual tag push can start the pipeline.
+- **Tag protection** — `.github/rulesets/protect-version-tags.json` allows `v*.*.*` tag
+  creation only by the release-please App, so no stray/manual tag push can start the pipeline.
 - **Two environment approvals** — both the `sign` and `publish` jobs pause on the `release`
   environment (reviewer = the maintainer); the irreversible publish has its own approval.
 - **Agent contract** — automated tooling (incl. the AI assistant) will not merge the Release PR,
