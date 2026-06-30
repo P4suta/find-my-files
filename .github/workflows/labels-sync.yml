@@ -1,0 +1,30 @@
+# Reconciles the repo's labels from .github/labels.yml (the source of truth) so
+# label names/colors/descriptions are version-controlled, not set by hand. Runs
+# only when the manifest changes (or on demand). `skip-delete: true` makes it
+# additive/update-only — it never deletes labels missing from the manifest (so
+# GitHub defaults and any future tool labels are left alone).
+name: labels-sync
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/labels.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # checkout the manifest (job perms replace, not extend, top-level)
+      issues: write # create/update labels
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: crazy-max/ghaction-github-labeler@548a7c3603594ec17c819e1239f281a3b801ab4d # v6.0.0
+        with:
+          yaml-file: .github/labels.yml
+          skip-delete: true
+          dry-run: false
