@@ -38,11 +38,13 @@
 name: release
 
 on:
-  # Dispatched by release-please.yml once it creates the DRAFT release (drafts fire
-  # no `release` event and create no tag, so we can't trigger on a tag push). The
-  # publish job attaches assets to that draft and publishes it — which is what
-  # creates the `vX.Y.Z` tag, in the asset-before-publish order immutable releases
-  # require. Also runnable by hand for a signing smoke test (publish=false).
+  # Dispatched by release-please.yml once it creates the DRAFT release. We trigger on
+  # neither the `release` event (a draft fires none) nor the tag push (dispatch-only
+  # means a stray tag starts nothing). release-please materializes the `vX.Y.Z` tag at
+  # merge (`force-tag-creation`, so it still finds the latest release when computing the
+  # next candidate); the publish job attaches assets to that draft and publishes it, in
+  # the asset-before-publish order immutable releases require. Also runnable by hand for
+  # a signing smoke test (publish=false).
   workflow_dispatch:
     inputs:
       tag_name:

@@ -16,12 +16,16 @@ Design rationale: [ADR-0035](adr/0035-automated-versioning-with-release-please-a
 3. **Add the `release: approved` label** to the Release PR. Until it's there the
    `release-gate` check fails the PR (so a release is never an accidental merge).
 4. **Merge the Release PR.** release-please creates the GitHub Release as a **draft**
-   (config `"draft": true`, so no `vX.Y.Z` git tag exists yet) and dispatches
-   [`release.yml`](../.github/workflows/release.yml).
+   (config `"draft": true`) and **materializes the `vX.Y.Z` git tag at the release
+   commit** (`"force-tag-creation": true`), then dispatches
+   [`release.yml`](../.github/workflows/release.yml). The tag is forced because a draft
+   release otherwise has no git tag, so in this same run release-please can't see the
+   just-cut release and opens a spurious "next" release PR re-listing already-shipped
+   commits ([release-please#1650](https://github.com/googleapis/release-please/issues/1650)).
 5. `release.yml` runs: build → **sign (approve in the `release` environment)** →
    **publish (approve again)**. The publish step attaches the signed bundle +
-   `SHA256SUMS.txt` to the draft and **publishes it — which is what creates the
-   `vX.Y.Z` tag**. Assets land *before* publish, the order [immutable releases](https://docs.github.com/code-security/concepts/supply-chain-security/immutable-releases)
+   `SHA256SUMS.txt` to the draft (which already carries the tag from step 4) and
+   **publishes it**. Assets land *before* publish, the order [immutable releases](https://docs.github.com/code-security/concepts/supply-chain-security/immutable-releases)
    require (a published immutable release can't gain assets afterward — the v0.1.0
    lesson).
 
@@ -49,8 +53,8 @@ Cutting a real, immutable release is deliberately gated by several independent s
   `release-please.yml` (after a Release PR merge creates the draft), never by a tag push, so a
   stray or manual `vX.Y.Z` tag starts nothing. (This is why the old `protect-version-tags`
   ruleset was retired — its job, blocking stray tags from triggering a release, no longer exists.
-  The tag is now an *output* of publishing, and each real release's tag↔commit↔assets binding is
-  sealed by the immutable-release attestation.)
+  release-please creates the tag at merge (`force-tag-creation`), but it is still never a trigger;
+  each real release's tag↔commit↔assets binding is sealed by the immutable-release attestation.)
 - **Two environment approvals** — both the `sign` and `publish` jobs pause on the `release`
   environment (reviewer = the maintainer); the irreversible publish has its own approval.
 - **Agent contract** — automated tooling (incl. the AI assistant) will not merge the Release PR,
