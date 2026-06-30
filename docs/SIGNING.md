@@ -10,11 +10,15 @@ alternative was rejected, see [ADR-0029](adr/0029-ci-signing-cka-pipeline.md).
 
 **Active.** A personal **Individual Validation (IV)** code-signing certificate was obtained from SSL.com on
 2026-06-24 (`CN=Yasunobu Sakashita`, code-signing EKU verified), so `.github/workflows/release.yml`
-**Authenticode-signs the binaries from each `vX.Y.Z` tag**.
+**Authenticode-signs the binaries of each release** (built from the release commit release-please dispatches; the
+`vX.Y.Z` tag is created at publish time, it is not the trigger).
 
-Signing remains **non-blocking** by design: if the signing secrets (`ES_USERNAME` / `CREDENTIAL_ID`) were ever
-removed, cutting a tag would still **complete, leaving the binaries unsigned and emitting a `::warning::`** rather
-than failing. The activation procedure below is retained as the runbook for renewal and re-issue.
+Signing is **gated at publish** by design: a real publish (`publish=true`) re-verifies the bundle's five PE files
+are validly signed (chain + RFC 3161 timestamp + the expected `CN=Yasunobu Sakashita` signer) and **fails before
+creating the immutable Release** if they are not — so a missing or misconfigured signing secret can never ship an
+unsigned release unnoticed. A `publish=false` signing smoke test still runs to completion **unsigned, emitting a
+`::warning::`** (it creates no Release). The activation procedure below is retained as the runbook for renewal and
+re-issue.
 
 Only the **project's own PE files** are signed — the root launcher `FindMyFiles.exe` (the executable the user
 double-clicks = the main target of SmartScreen evaluation), the apphost `app\FindMyFiles.exe`, and the engine
@@ -30,8 +34,10 @@ copyrighted works).
 2. **sign** — downloads the bundle, stages our five PEs, runs the **`SSLcom/esigner-codesign` Action** (`batch_sign`:
    CodeSignTool scans then signs, timestamping via SSL.com's TSA), copies the signed files back, then hard-verifies.
    **This is the only job that sees the signing secrets**, so it runs in the approval-gated **`release` environment**.
-3. **publish** — downloads the signed bundle, `just package` (zip + `SHA256SUMS.txt`), writes keyless attestations
-   (OIDC, no secrets) and attaches everything to the Release. Gated on a tag push / `publish=true`.
+3. **publish** — downloads the signed bundle, **re-verifies it is signed** (a gate at the irreversible boundary —
+   the same chain + timestamp + signer check the sign job runs, via a shared composite action, so an unsigned bundle
+   can never be published), `just package` (zip + `SHA256SUMS.txt`), writes keyless attestations (OIDC, no secrets)
+   and attaches everything to the release-please draft, then publishes it. Gated on `publish=true`.
 
 Two of the five PEs share the basename `FindMyFiles.exe` (the root launcher and the `app\` apphost), so the sign job
 stages them through a path→unique-name map into `sign-stage\`, `batch_sign`s them into `signed\`, and copies them back
@@ -89,7 +95,9 @@ arbitrary ref (or a compromised workflow) cannot mint signatures unattended (ADR
 
 5. Repository → **Settings → Environments → New environment** → name it **`release`**.
 6. **Required reviewers**: add yourself (so every signing run pauses for a deliberate approval). **Deployment branches
-   and tags → Selected**: allow `v*.*.*` (releases) and `main` (the `publish=false` dry run).
+   and tags → Selected**: allow `main`. Under the draft-first model release.yml always runs via `workflow_dispatch
+   --ref main` (both real releases and `publish=false` dry runs), so `main` is the only ref that ever deploys to this
+   environment — a policy that omits it would deny the real `sign`/`publish` jobs.
 7. **Environment secrets** (Add secret), on the `release` environment — **all four** are required by `batch_sign`:
 
    | Secret name | Value |
@@ -102,8 +110,8 @@ arbitrary ref (or a compromised workflow) cannot mint signatures unattended (ADR
    If any of these already exist as **repository** secrets, **delete the repository copies** — leaving them at repo
    level defeats the environment isolation.
 
-   → On the next `vX.Y.Z` tag (or `release` via `workflow_dispatch`), `HAVE_SIGNING` becomes `true` and the `sign` job
-   requests approval, then signs.
+   → On the next release (the `release: approved` Release PR merged → release-please dispatches release.yml) or a
+   manual `workflow_dispatch`, `HAVE_SIGNING` becomes `true` and the `sign` job requests approval, then signs.
 
 ### E. Verification
 
@@ -112,8 +120,10 @@ arbitrary ref (or a compromised workflow) cannot mint signatures unattended (ADR
    gate). Approve it; confirm the **Sign staged binaries** step runs `scan_code` → sign and the **Verify signatures**
    step prints `verified: … - CN=Yasunobu Sakashita (chain+timestamp+signer OK)` for all five files, and the run **ends
    cleanly after `sign`** (no Release, because `publish=false`).
-9. **Real release**: cut a tag (e.g. `v0.0.1-rc1`). After approval, `build`→`sign`→`publish` runs end-to-end and the
-   signed zip + `SHA256SUMS.txt` + SBOMs + attestations are attached.
+9. **Real release**: merge the `release: approved` Release PR — release-please creates the draft and dispatches
+   release.yml automatically (or dispatch it by hand with a plain `tag_name=vX.Y.Z`, no pre-release suffix, and
+   `publish=true`). After both approvals, `build`→`sign`→`publish` runs end-to-end and the signed zip +
+   `SHA256SUMS.txt` + SBOMs + attestations are attached to the published release.
 10. **Local confirmation**: extract the Release zip and on Windows verify the root launcher (the rest — apphost +
     engine binaries — sit under `app\`):
     ```powershell

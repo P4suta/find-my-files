@@ -101,15 +101,13 @@ with one deliberate difference: **release-please's environment has no required r
 > `create-github-app-token` step and pass the PAT directly as `token:`. The App is
 > preferred (no human-tied credential; the token is short-lived and repo-scoped).
 
-### The first release is pinned to 0.1.0 (one-time)
+### Version derivation (`release-as` was a one-time pin, since removed)
 
-`release-please-config.json` sets `"release-as": "0.1.0"`. Without it, release-please
-treats the first release from a `0.0.0` manifest as the **initial release → 1.0.0**,
-which is wrong for a pre-1.0 project. `release-as` forces the first release to `0.1.0`.
-
-> **After `v0.1.0` is released, delete the `"release-as": "0.1.0"` line** (it would
-> otherwise pin every future release to 0.1.0). Once removed, the manifest is `0.1.0`
-> and the next `feat:` correctly proposes `0.2.0`.
+`release-please-config.json` no longer sets `"release-as"`. It was used **once** to pin the
+**first** release to `0.1.0` — without it, release-please treats a first release from a `0.0.0`
+manifest as the initial `1.0.0`, wrong for a pre-1.0 project. The pin was removed in the
+draft-first redesign (#122), so the manifest now tracks the real version: a `feat:` proposes
+the next minor, a `fix:` the next patch.
 
 ### Verify the first Release PR
 
