@@ -19,6 +19,25 @@ pub fn run(dir: &Path, program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Like [`run`], but with extra environment variables set on the child. The
+/// shell-agnostic way to pass a value to a subprocess: `Command::env` sets it
+/// directly, so it never passes through a shell that could mangle it —
+/// powershell.exe strips the nested quotes from `cargo --config 'env.X="1"'`,
+/// leaving a bare `1` that cargo rejects, which is exactly why the elevated
+/// test recipe used to hard-code a PowerShell `$env:` assignment.
+pub fn run_env(dir: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<()> {
+    let status = Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .envs(envs.iter().copied())
+        .status()
+        .with_context(|| format!("failed to spawn `{program}` (is it on PATH?)"))?;
+    if !status.success() {
+        bail!("`{program} {}` exited with {status}", args.join(" "));
+    }
+    Ok(())
+}
+
 /// Run silently and report whether it succeeded — for probes like
 /// `git rev-parse --verify <tag>` where a non-zero exit is a normal answer.
 pub fn succeeds(dir: &Path, program: &str, args: &[&str]) -> Result<bool> {

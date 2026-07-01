@@ -45,9 +45,32 @@ pub fn package_dir() -> PathBuf {
     build_root().join("package")
 }
 
+/// Flat staging dir the release signing step feeds to the eSigner Action
+/// (`sign-stage` populates it, one uniquely-named copy per first-party PE).
+/// Under `build/` so it is covered by the single ignore line (ADR-0021); the
+/// workflow points the Action at the matching `build\sign-stage`.
+pub fn sign_stage_dir() -> PathBuf {
+    build_root().join("sign-stage")
+}
+
+/// Dir the eSigner Action writes the signed PEs into (by their stage names);
+/// `sign-collect` copies them back over the bundle. Under `build/` to match
+/// [`sign_stage_dir`] and the workflow's `build\signed`.
+pub fn signed_dir() -> PathBuf {
+    build_root().join("signed")
+}
+
 /// Where `docs-assemble` stages the GitHub Pages site (`build/site/{book,doc}`).
 pub fn site_dir() -> PathBuf {
     build_root().join("site")
+}
+
+/// The engine workspace dir. Running `cargo` from here (not `--manifest-path`
+/// from the root) is what lets its `.cargo/config.toml` redirect the target dir
+/// under `build/` — the same reason the just recipes use `[working-directory:
+/// 'engine']`.
+pub fn engine_dir() -> PathBuf {
+    repo_root().join("engine")
 }
 
 /// The Rust workspace manifest carrying the base version (`xtask version` reads

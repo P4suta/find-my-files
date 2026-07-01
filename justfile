@@ -82,16 +82,16 @@ test-app:
 test-app-cov locked="false":
     dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true -p:RestoreLockedMode={{locked}} -p:CollectCoverage=true
 
-# Elevation-gated #[ignore] tests: real-volume MFT/USN (elevated).
-# Sets the gate env var the PowerShell way on ONE line (just runs each recipe line
-# in its own shell, so the assignment must share the line with cargo). `cargo
-# --config 'env.X="1"'` is NOT used: the recipe's powershell.exe strips the nested
-# quotes, leaving the bare integer 1, which cargo rejects ("expected a string").
+# Elevation-gated #[ignore] tests: real-volume MFT/USN (elevated). The
+# FMF_ADMIN_TESTS gate is set by xtask via Command::env on the child cargo, not
+# in the shell — powershell.exe strips the nested quotes from `cargo --config
+# 'env.X="1"'` (leaving the bare integer 1, which cargo rejects), so the value
+# must never touch a shell. Logic lives in xtask (the test-admin subcommand).
 [group('daily')]
 [doc('Run the elevated, ignore-gated real-volume MFT/USN tests')]
-[working-directory: 'engine']
+[working-directory: 'xtask']
 test-admin:
-    $env:FMF_ADMIN_TESTS = '1'; cargo test --workspace -- --ignored
+    cargo run -- test-admin
 
 # Clippy (deny warnings) + typos
 [group('daily')]
@@ -373,6 +373,22 @@ version *args="":
 [working-directory: 'xtask']
 package tag="":
     cargo run --release -- package {{tag}}
+
+# Stage the bundle's first-party PEs into sign-stage/ (unique names) for the
+# release signing step, and copy the signed copies back from signed/ afterwards.
+# The map of what-we-sign lives in xtask (publish::FIRST_PARTY_PES), not in the
+# workflow; release.yml calls these around the eSigner Action.
+[group('release')]
+[doc('Stage first-party PEs for release signing')]
+[working-directory: 'xtask']
+sign-stage:
+    cargo run --release -- sign-stage
+
+[group('release')]
+[doc('Copy signed PEs back into the bundle after signing')]
+[working-directory: 'xtask']
+sign-collect:
+    cargo run --release -- sign-collect
 
 # ── Docs ─────────────────────────────────────────────────────────────────
 
