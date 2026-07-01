@@ -20,6 +20,8 @@ mod docs;
 mod doctor;
 mod package;
 mod publish;
+mod signing;
+mod test_admin;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -60,6 +62,13 @@ enum Commands {
     },
     /// Sweep leftover test fixtures (engine/target/test-tmp).
     CleanTemp,
+    /// Stage the bundle's first-party PEs into a flat dir for the release
+    /// signing step (unique names; the eSigner Action signs them in place).
+    SignStage,
+    /// Copy the signed PEs back over the bundle after the signing step.
+    SignCollect,
+    /// Run the elevated, `#[ignore]`-gated engine tests with `FMF_ADMIN_TESTS=1`.
+    TestAdmin,
     /// Stage generated docs (mdBook + rustdoc) into site/ for GitHub Pages.
     DocsAssemble,
     /// Generate the C# API reference (`DefaultDocumentation` -> `mdBook`) into
@@ -79,6 +88,9 @@ fn main() -> Result<()> {
             clean::run();
             Ok(())
         }
+        Commands::SignStage => signing::run_stage(),
+        Commands::SignCollect => signing::run_collect(),
+        Commands::TestAdmin => test_admin::run(),
         Commands::DocsAssemble => docs::run(),
         Commands::DocCsharp => csharp_docs::run(),
         Commands::Doctor => doctor::run(),

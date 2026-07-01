@@ -32,6 +32,26 @@ const REQUIRED: &[&str] = &[
     "fmf.exe",
 ];
 
+/// First-party PEs we Authenticode-sign, as `(path relative to the bundle root,
+/// unique name in the flat signing dir)`. This is the single source of truth the
+/// release workflow's `sign-stage` / `sign-collect` steps drive — the map used
+/// to live duplicated in two inline-PowerShell blocks.
+///
+/// NOT the same set as [`REQUIRED`]: this signs the root launcher (what the user
+/// double-clicks) and excludes Microsoft-signed `WinRT.Runtime.dll` (re-signing
+/// it would waste eSigner quota and claim authorship we don't have). The root
+/// launcher and the `app\` apphost share the basename `FindMyFiles.exe`, so a
+/// flat copy-by-basename would collide — each gets a unique stage name.
+/// Authenticode lives inside the PE, so staging under a different filename and
+/// mapping back afterwards is safe.
+pub const FIRST_PARTY_PES: &[(&str, &str)] = &[
+    ("FindMyFiles.exe", "FindMyFiles.exe"),
+    ("app/FindMyFiles.exe", "app-FindMyFiles.exe"),
+    ("app/fmf.exe", "fmf.exe"),
+    ("app/fmf-service.exe", "fmf-service.exe"),
+    ("app/fmf_engine.dll", "fmf_engine.dll"),
+];
+
 /// The native launcher built in the engine workspace, copied to the bundle root
 /// as [`ENTRY_EXE`] — the single file a user is meant to run. It spawns
 /// `app/FindMyFiles.exe`, forwarding arguments (see the `fmf-launcher` crate).

@@ -8,8 +8,10 @@
 #              (command: batch_sign, SHA-pinned): CodeSignTool scans then signs,
 #              timestamping (RFC 3161) via SSL.com's TSA. The five PEs are staged
 #              into a flat dir through a path->unique-name map (two share the
-#              basename FindMyFiles.exe), signed into an explicit output dir, and
-#              copied back; then we hard-verify chain + timestamp + signer. This is
+#              basename FindMyFiles.exe) that lives in xtask (`just sign-stage` /
+#              `sign-collect`, one source of truth), signed into an explicit
+#              output dir, and copied back; then we hard-verify chain + timestamp
+#              + signer. This is
 #              the only job that sees the signing secrets, so it runs in the
 #              approval-gated `release` environment.
 #   publish -> downloads the signed bundle, RE-VERIFIES it is signed (a gate at
@@ -194,23 +196,14 @@ jobs:
       # bundled .NET / WindowsAppSDK runtime DLLs are already Microsoft-signed -
       # re-signing them would waste eSigner quota and claim authorship we don't
       # have. Two of the five share the basename FindMyFiles.exe (the root launcher
-      # and the app\ apphost), so a flat copy-by-basename would collide; stage via
-      # a path -> unique-name map (Authenticode lives inside the PE, so the rename
-      # is safe) and map back afterwards.
+      # and the app\ apphost), so a flat copy-by-basename would collide; the
+      # what-we-sign map (path -> unique stage name; Authenticode lives inside the
+      # PE, so the rename is safe) lives in xtask (publish::FIRST_PARTY_PES) so it
+      # is defined once and unit-tested, not duplicated across these two steps.
+      # `just sign-stage` writes sign-stage/ (+ an empty signed/ for the output).
       - name: Stage first-party binaries for signing
         if: env.HAVE_SIGNING == 'true'
-        shell: pwsh
-        run: |
-          $map = @(
-            @{ Src = 'FindMyFiles.exe';     Stage = 'FindMyFiles.exe' }
-            @{ Src = 'app/FindMyFiles.exe'; Stage = 'app-FindMyFiles.exe' }
-            @{ Src = 'app/fmf.exe';         Stage = 'fmf.exe' }
-            @{ Src = 'app/fmf-service.exe'; Stage = 'fmf-service.exe' }
-            @{ Src = 'app/fmf_engine.dll';  Stage = 'fmf_engine.dll' }
-          )
-          New-Item -ItemType Directory -Force sign-stage | Out-Null
-          New-Item -ItemType Directory -Force signed | Out-Null
-          $map | ForEach-Object { Copy-Item "build/dist/FindMyFiles/$($_.Src)" "sign-stage/$($_.Stage)" }
+        run: just sign-stage
 
       - name: Sign staged binaries (SSL.com eSigner)
         if: env.HAVE_SIGNING == 'true'
@@ -221,12 +214,12 @@ jobs:
           password: ${{ secrets.ES_PASSWORD }}
           credential_id: ${{ secrets.CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          dir_path: ${{ github.workspace }}\sign-stage
+          dir_path: ${{ github.workspace }}\build\sign-stage
           # Write signed files to a dedicated dir. batch_sign does NOT honor
           # `override` (the Action never forwards -override), so without an
           # explicit output_path the signed files land elsewhere and copy-back
           # would grab the unsigned originals (-> Verify "NotSigned").
-          output_path: ${{ github.workspace }}\signed
+          output_path: ${{ github.workspace }}\build\signed
           environment_name: PROD
           # Our SSL.com account requires a pre-signing malware scan; with this
           # off, batch_sign sends only hashes and SSL.com rejects with "hash
@@ -235,18 +228,11 @@ jobs:
           # the signatures outlive the cert (Verify enforces a timestamp below).
           malware_block: "true"
 
+      # Map the signed PEs back over the bundle (same xtask map, reverse
+      # direction) — see the staging step above.
       - name: Copy signed binaries back into the bundle
         if: env.HAVE_SIGNING == 'true'
-        shell: pwsh
-        run: |
-          $map = @(
-            @{ Src = 'FindMyFiles.exe';     Stage = 'FindMyFiles.exe' }
-            @{ Src = 'app/FindMyFiles.exe'; Stage = 'app-FindMyFiles.exe' }
-            @{ Src = 'app/fmf.exe';         Stage = 'fmf.exe' }
-            @{ Src = 'app/fmf-service.exe'; Stage = 'fmf-service.exe' }
-            @{ Src = 'app/fmf_engine.dll';  Stage = 'fmf_engine.dll' }
-          )
-          $map | ForEach-Object { Copy-Item "signed/$($_.Stage)" "build/dist/FindMyFiles/$($_.Src)" -Force }
+        run: just sign-collect
 
       # Never ship a "signed" build that is silently unsigned, untimestamped, or
       # signed by the wrong cert. The verify (chain + RFC 3161 timestamp + signer
