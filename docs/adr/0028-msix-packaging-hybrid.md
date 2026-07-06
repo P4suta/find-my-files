@@ -1,6 +1,53 @@
 # ADR-0028: MSIX packaging — hybrid (packaged UI, unpackaged service)
 
-Date: 2026-06-24 / Status: Proposed (implementation deferred to a future milestone)
+Date: 2026-06-24 / Status: **Rejected** (2026-07-07 — MSIX distribution has no viable signing/store path for this app; see *Rejection* below). The original hybrid design (Decision et seq.) is retained as the record of what was evaluated and built.
+
+## Rejection (2026-07-07)
+
+The hybrid was **implemented and validated**, then **rejected at the distribution boundary**: there is
+no way to *sign and ship* an MSIX for this app that is simultaneously (a) an **official** signing tool,
+(b) automatable in **CI**, (c) compatible with our **Individual Validation (IV)** certificate (ADR-0020),
+and (d) able to sign **MSIX**. Every candidate failed on at least one axis — and independently, the
+Microsoft Store path is structurally unfit for a service-backed app:
+
+- **SSL.com CodeSignTool** (official, IV-ok, CI-automatable) — **cannot sign MSIX**. CI log:
+  `Error: Unsupported file format for signing - msix`. It signs PEs/MSI, not MSIX packages.
+- **SSL.com eSigner CKA** (official, MSIX-capable via signtool) — **fails in CI**. Already recorded in
+  ADR-0029: 3 dry-runs ending in `SignerSign() failed (0x80090003)` / "Signing credentials not
+  configured" in the KSP credential path. SSL.com further documents CKA's **automated (OTP-less) mode as
+  OV/EV-only** (unverified, ssl.com unreachable), which would exclude our IV cert regardless; either way
+  CKA did not work with this cert.
+- **jsign** (would sign MSIX with the IV cert via the CSC API) — **rejected on policy**: a tool that
+  handles the signing key must be **official vendor tooling**, not third-party OSS.
+- **Microsoft Store** (Microsoft signs the package — no own cert needed) — **structurally unfit**. Store
+  Policy 7.19 §10.x: non-Microsoft **NT service** dependencies are "generally not allowed" (case-by-case,
+  requires disclosure). Our `fmf-service` is a **LocalSystem SCM service** that reads raw MFT/USN and
+  **survives uninstall** — the antithesis of the Store's package-lifecycle model. Estimated certification
+  odds ~15% and fragile; MFT/USN-class search utilities are effectively **absent from the Store** (they
+  ship their own installers), which confirms the mismatch. Individual accounts also likely cannot use the
+  automated submission API (needs an org + Azure AD association).
+
+**What DID work** (so the effort is on record and reusable): `xtask package-msix` built a valid `.msix`
+**in CI on windows-latest** (MakePri/MakeAppx resolved from the pinned SDK BuildTools NuGet), and locally
+the `.msix` was **self-signed → installed → launched → searched** successfully, confirming **R3** (bundled
+service-exe resolution) and **R4** (profile-path forcing under package identity) on a real machine. The
+packaging itself is sound; only the **distribution-layer signing** has no official path today.
+
+**Decision**: reject MSIX distribution. The **signed portable zip (ADR-0021)** remains the single official
+channel — the same choice every comparable MFT/USN tool makes. The implementation is preserved on the
+annotated tag **`archive/msix-attempt-2026-07`** (branch `feat/msix-packaging` was deleted). The
+`.appinstaller` + winget auto-update follow-up sketched during this work is **moot** (it presupposed a
+shippable MSIX).
+
+**Re-examination triggers** (any one revives this):
+1. **Azure Trusted Signing opens to individuals in Japan** (ties to ADR-0020's trigger) — a managed,
+   MSIX-capable signer reachable from CI without a hardware token.
+2. **SSL.com documents a working unattended IV × MSIX recipe**, or eSigner CKA's KSP credential path is
+   fixed (ADR-0029's own trigger).
+3. **The app drops the privileged-service dependency** (e.g. a fully non-elevated engine), which would
+   make the Microsoft Store a clean fit.
+
+The original hybrid design and its rejected alternatives follow, unchanged, as the evaluated record.
 
 ## Decision
 
