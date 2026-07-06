@@ -241,13 +241,28 @@ jobs:
         if: env.HAVE_SIGNING == 'true'
         run: just sign-collect
 
+      # The MSIX version must be a real vX.Y.Z (it becomes the numeric X.Y.Z.0
+      # package version). A publish=false smoke runs from a branch, so TAG is a
+      # ref name, not a version — substitute v0.0.0 so the pack + sign + verify
+      # path is still exercised end-to-end on a throwaway package. A real publish
+      # always has TAG=vX.Y.Z, so MSIX_TAG == TAG there.
+      - name: Resolve MSIX version tag
+        shell: bash
+        run: |
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "MSIX_TAG=$TAG" >> "$GITHUB_ENV"
+          else
+            echo "MSIX_TAG=v0.0.0" >> "$GITHUB_ENV"
+            echo "::notice::Non-version ref '$TAG' (publish=false smoke) — packaging the MSIX as v0.0.0 to exercise the pack/sign/verify path."
+          fi
+
       # Pack the installed-experience .msix (ADR-0028) from the NOW-SIGNED bundle
       # payload, then Authenticode-sign the package wrapper — a second eSigner pass
       # kept in THIS job so the signing secrets never spread to another. Packing
       # runs unconditionally (it exercises the packaging path even on an unsigned
       # smoke run); the staging + signing + collect are gated on HAVE_SIGNING.
       - name: Pack the MSIX from the signed bundle
-        run: just package-msix ${{ env.TAG }}
+        run: just package-msix ${{ env.MSIX_TAG }}
 
       - name: Stage the MSIX for signing
         if: env.HAVE_SIGNING == 'true'
@@ -283,7 +298,7 @@ jobs:
         with:
           bundle-dir: build/dist/FindMyFiles
           signer-subject-contains: ${{ env.SIGNER_SUBJECT_CONTAINS }}
-          msix-path: build/package/find-my-files-${{ env.TAG }}-win-x64.msix
+          msix-path: build/package/find-my-files-${{ env.MSIX_TAG }}-win-x64.msix
 
       - name: Warn if unsigned
         if: env.HAVE_SIGNING != 'true'
