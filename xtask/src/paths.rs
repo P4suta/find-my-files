@@ -45,6 +45,14 @@ pub fn package_dir() -> PathBuf {
     build_root().join("package")
 }
 
+/// The layout `package-msix` assembles before invoking `MakeAppx`
+/// (`build/msix-stage`). Under `build/` like the rest (ADR-0021), so the single
+/// ignore line covers it; the packed `.msix` itself lands in [`package_dir`] so
+/// the existing `SHA256SUMS` sweep picks it up for free.
+pub fn msix_stage_dir() -> PathBuf {
+    build_root().join("msix-stage")
+}
+
 /// Flat staging dir the release signing step feeds to the eSigner Action
 /// (`sign-stage` populates it, one uniquely-named copy per first-party PE).
 /// Under `build/` so it is covered by the single ignore line (ADR-0021); the
@@ -58,6 +66,21 @@ pub fn sign_stage_dir() -> PathBuf {
 /// [`sign_stage_dir`] and the workflow's `build\signed`.
 pub fn signed_dir() -> PathBuf {
     build_root().join("signed")
+}
+
+/// Flat staging dir the eSigner Action reads to sign the packed `.msix` wrapper
+/// (`sign-stage-msix` copies the `.msix` here). Kept separate from the PE
+/// [`sign_stage_dir`] because the `.msix` is packed *after* the PEs are signed —
+/// a second signing pass in the same job.
+pub fn msix_sign_dir() -> PathBuf {
+    build_root().join("msix-sign")
+}
+
+/// Dir the eSigner Action writes the signed `.msix` into; `sign-collect-msix`
+/// copies it back into [`package_dir`] so the checksum sweep + attach see the
+/// signed package. Matches the workflow's `build\msix-signed`.
+pub fn msix_signed_dir() -> PathBuf {
+    build_root().join("msix-signed")
 }
 
 /// Where `docs-assemble` stages the GitHub Pages site (`build/site/{book,doc}`).

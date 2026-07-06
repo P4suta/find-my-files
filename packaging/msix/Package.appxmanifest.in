@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  find-my-files MSIX package manifest (template — `{VERSION}` is substituted by
+  `xtask package-msix` with the 4-part X.Y.Z.0 version).
+
+  HYBRID PACKAGING (ADR-0028): this packages the UI ONLY. There is deliberately
+  NO <desktop6:Service> extension here. That extension exposes none of our
+  service-security controls (service-object DACL, SERVICE_CONFIG_REQUIRED_
+  PRIVILEGES_INFO privilege stripping, install-time SID capture, %ProgramData%
+  DACL hardening, the scheduled GC task — ADR-0017 / ADR-0027). The privileged
+  fmf-service therefore stays a normal, UNPACKAGED SCM service, installed by our
+  own elevated helper (which, launched from this packaged UI, runs WITHOUT
+  package identity and can do all of the above). fmf-service.exe rides in the
+  package only as a plain CONTENT payload — the source the UI copies into
+  %ProgramData% (ADR-0028 R3).
+
+  Publisher MUST stay verbatim "CN=Yasunobu Sakashita" — App Installer derives
+  install trust from a match between this field and the code-signing certificate
+  Subject DN (SSL.com Individual Validation, ADR-0020). `xtask package-msix`
+  asserts this string is present, and CI asserts it equals SIGNER_SUBJECT_CONTAINS.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity
+    Name="P4suta.FindMyFiles"
+    Publisher="CN=Yasunobu Sakashita"
+    Version="{VERSION}"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>FindMyFiles</DisplayName>
+    <PublisherDisplayName>Yasunobu Sakashita</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Fast filename search for Windows.</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily
+      Name="Windows.Desktop"
+      MinVersion="10.0.17763.0"
+      MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-US" />
+    <Resource Language="ja-JP" />
+    <Resource Language="zh-Hans" />
+  </Resources>
+
+  <Capabilities>
+    <!-- Full-trust desktop app; the ONLY capability. No desktop6:Service (see top). -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+  <Applications>
+    <!-- The single registered executable is the .NET apphost. fmf.exe (CLI) and
+         fmf-launcher.exe (zip-only) are intentionally not app entry points. -->
+    <Application
+      Id="FindMyFiles"
+      Executable="FindMyFiles.exe"
+      EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="FindMyFiles"
+        Description="Fast filename search for Windows."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Wide310x150Logo="Assets\Wide310x150Logo.png">
+          <uap:ShowNameOnTiles>
+            <uap:ShowOn Tile="square150x150Logo" />
+          </uap:ShowNameOnTiles>
+        </uap:DefaultTile>
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+</Package>

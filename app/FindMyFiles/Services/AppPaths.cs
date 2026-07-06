@@ -56,6 +56,18 @@ public static class AppPaths
 
     private static string? ResolvePortableRoot()
     {
+        // Packaged (.msix) build (ADR-0028 R4): the install dir under WindowsApps
+        // is read-only, and a packaged process's %APPDATA%/%LOCALAPPDATA% is
+        // copy-on-write redirected to a per-package store — so portable
+        // <exe>\data is neither writable nor appropriate. Force the profile path
+        // (IsPortable => false). A zip user who was on the profile-fallback path
+        // migrates transparently: the redirected %APPDATA% reads fall through to
+        // the real settings.json until the first save copies it into the store.
+        if (PackageIdentity.IsPackaged)
+        {
+            return null;
+        }
+
         var explicitDir = DataDirArg();
         if (!string.IsNullOrWhiteSpace(explicitDir) && TryEnsureWritable(explicitDir))
         {

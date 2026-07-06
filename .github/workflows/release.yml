@@ -186,6 +186,13 @@ jobs:
         with:
           ref: ${{ env.REF }}
 
+      # xtask toolchain for the `just sign-stage`/`sign-collect` shuffles and, below,
+      # the `just package-msix` pack + its sign staging (all logic lives in xtask,
+      # ADR-0021 / the shell-to-xtask migration — never inline PowerShell here).
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          install: true
+
       - name: Download unsigned bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -234,17 +241,49 @@ jobs:
         if: env.HAVE_SIGNING == 'true'
         run: just sign-collect
 
+      # Pack the installed-experience .msix (ADR-0028) from the NOW-SIGNED bundle
+      # payload, then Authenticode-sign the package wrapper — a second eSigner pass
+      # kept in THIS job so the signing secrets never spread to another. Packing
+      # runs unconditionally (it exercises the packaging path even on an unsigned
+      # smoke run); the staging + signing + collect are gated on HAVE_SIGNING.
+      - name: Pack the MSIX from the signed bundle
+        run: just package-msix ${{ env.TAG }}
+
+      - name: Stage the MSIX for signing
+        if: env.HAVE_SIGNING == 'true'
+        run: just sign-stage-msix
+
+      - name: Sign the MSIX (SSL.com eSigner)
+        if: env.HAVE_SIGNING == 'true'
+        uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
+        with:
+          command: batch_sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          dir_path: ${{ github.workspace }}\build\msix-sign
+          output_path: ${{ github.workspace }}\build\msix-signed
+          environment_name: PROD
+          malware_block: "true"
+
+      - name: Copy the signed MSIX back into build/package
+        if: env.HAVE_SIGNING == 'true'
+        run: just sign-collect-msix
+
       # Never ship a "signed" build that is silently unsigned, untimestamped, or
       # signed by the wrong cert. The verify (chain + RFC 3161 timestamp + signer
       # subject) lives in a composite action shared with the publish gate so the
       # two can't drift — so when signing secrets are present (HAVE_SIGNING=true)
       # a publish=false smoke test runs the publish gate's identical check here.
+      # msix-path folds the packed .msix into the same verification pass.
       - name: Verify signatures
         if: env.HAVE_SIGNING == 'true'
         uses: ./.github/actions/verify-signatures
         with:
           bundle-dir: build/dist/FindMyFiles
           signer-subject-contains: ${{ env.SIGNER_SUBJECT_CONTAINS }}
+          msix-path: build/package/find-my-files-${{ env.TAG }}-win-x64.msix
 
       - name: Warn if unsigned
         if: env.HAVE_SIGNING != 'true'
@@ -255,6 +294,17 @@ jobs:
         with:
           name: dist-signed
           path: build/dist/FindMyFiles
+          retention-days: 1
+          if-no-files-found: error
+
+      # The signed .msix travels as its own artifact (it lives in build/package,
+      # not the bundle dir). The publish job downloads it back into build/package
+      # so `just package`'s checksum sweep + the release attach both see it.
+      - name: Upload signed MSIX
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: msix
+          path: build/package/find-my-files-*-win-x64.msix
           retention-days: 1
           if-no-files-found: error
 
@@ -290,6 +340,14 @@ jobs:
           name: dist-signed
           path: build/dist/FindMyFiles
 
+      # The signed .msix back into build/package, where `just package`'s checksum
+      # sweep and the release attach both expect it.
+      - name: Download signed MSIX
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: msix
+          path: build/package
+
       # Gate at the irreversible boundary: a real publish must ship signed binaries.
       # If the signing secrets were absent the sign job only warned and passed the
       # bundle through UNSIGNED (HAVE_SIGNING=false) — fail HERE, before any
@@ -297,12 +355,14 @@ jobs:
       # composite verify the sign job runs, so a signed (HAVE_SIGNING=true)
       # publish=false smoke test exercises this exact check on the sign job (the
       # publish job is skipped on publish=false, so this step's first real run is
-      # the release itself — hence the shared, smoke-tested action).
+      # the release itself — hence the shared, smoke-tested action). msix-path folds
+      # the .msix into the same gate so an unsigned package can't slip through.
       - name: Require the bundle to be signed before publishing
         uses: ./.github/actions/verify-signatures
         with:
           bundle-dir: build/dist/FindMyFiles
           signer-subject-contains: ${{ env.SIGNER_SUBJECT_CONTAINS }}
+          msix-path: build/package/find-my-files-${{ env.TAG }}-win-x64.msix
 
       - name: Download SBOMs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -324,6 +384,7 @@ jobs:
         with:
           subject-path: |
             build/package/find-my-files-*-win-x64.zip
+            build/package/find-my-files-*-win-x64.msix
             build/package/SHA256SUMS.txt
 
       - name: Attest Rust SBOM
@@ -350,6 +411,7 @@ jobs:
           tag_name: ${{ env.TAG }}
           files: |
             build/package/find-my-files-*-win-x64.zip
+            build/package/find-my-files-*-win-x64.msix
             build/package/SHA256SUMS.txt
             build/sbom/fmf-engine.cdx.json
             build/sbom/app.cdx.json

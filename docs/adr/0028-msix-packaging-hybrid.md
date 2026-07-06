@@ -1,6 +1,43 @@
 # ADR-0028: MSIX packaging — hybrid (packaged UI, unpackaged service)
 
-Date: 2026-06-24 / Status: Proposed (implementation deferred to a future milestone)
+Date: 2026-06-24 / Status: Accepted (implemented 2026-07-07 — see *Implementation update* below)
+
+## Implementation update (2026-07-07)
+
+The hybrid landed as specified, with these decisions made concrete during
+implementation:
+
+- **R3 resolved — `fmf-service.exe` ships as a plain CONTENT payload** in the
+  `.msix` (a file, NOT a `desktop6:Service`). This SUPERSEDES the Decision's
+  "package contains `FindMyFiles.exe` + `fmf_engine.dll` only" line: bundling the
+  service exe as content is what gives the read-only-`WindowsApps` UI a defined
+  source to copy into `%ProgramData%`. Single-project MSIX's "one executable" rule
+  is about the *registered* app entry point (still just the apphost); extra loose
+  exes are allowed as content. `ServiceSetup.LocateServiceExe` gained a packaged
+  branch resolving it from `Package.Current.InstalledLocation`. `fmf.exe` (CLI) and
+  the zip launcher remain excluded.
+- **Build path — `xtask package-msix <tag>`**, out-of-band with the standard
+  Windows SDK tools (`MakePri` + `MakeAppx`) sourced from the already-pinned
+  `Microsoft.Windows.SDK.BuildTools` NuGet package. The csproj's
+  `WindowsPackageType=None` is untouched (CLAUDE.md / ADR-0016). MSIX ships **stable
+  only**: the version is the 4-part numeric `X.Y.Z.0` (`version::msix_version`).
+- **Manifest** at `packaging/msix/Package.appxmanifest.in` (+ generated `Assets/`),
+  `Publisher` pinned verbatim to the SSL.com IV cert subject (`xtask` asserts it),
+  `runFullTrust` only, **no** `desktop6:Service`.
+- **R4/R2** — `PackageIdentity.IsPackaged` (via `GetCurrentPackageFullName`) forces
+  the profile path under identity in `AppPaths` (portable `<exe>\data` disabled). A
+  zip→msix user on the profile-fallback path migrates transparently via the OS's
+  copy-on-write read-through of `%APPDATA%`.
+- **CI** — the `sign` job packs the `.msix` from the signed bundle and
+  Authenticode-signs the wrapper with the same eSigner Action (kept in that job so
+  signing secrets never spread); the shared `verify-signatures` composite gained an
+  `msix-path` input so the sign self-check and the publish gate both verify it; the
+  `publish` job checksums, attests, and attaches it beside the zip.
+- **Runtime auto-update** (App Installer `.appinstaller` + winget) is deferred to
+  **ADR-0041** — the numeric-monotonic `X.Y.Z.0` version is chosen now so that
+  channel can bolt on without a version rework.
+
+The original decision and rejected alternatives (still valid) follow.
 
 ## Decision
 

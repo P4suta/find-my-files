@@ -143,6 +143,21 @@ pub fn resolve_bundle_version() -> Result<String> {
     compute(&base, Channel::Dev, None, git_short_sha().as_deref())
 }
 
+/// The mandatory 4-part numeric MSIX / App Installer version (`X.Y.Z.0`), derived
+/// from the `X.Y.Z` release base. An MSIX package version is ALWAYS four numeric
+/// components (`Major.Minor.Build.Revision`); we drive the first three from the
+/// release triple and pin the revision to `0`, so a bumped release tag yields a
+/// strictly-increasing package version — the monotonicity App Installer auto-update
+/// (the future `.appinstaller` channel) relies on. Rejects any base that is not a
+/// plain digit-only triple: pre-release / nightly strings (`…-dev+g…`,
+/// `…-nightly.…`) have no valid MSIX numeric form, so MSIX ships stable only. Pure
+/// (no git, no FS) — the string analogue of the launcher's `numeric_version`, which
+/// only builds a `u64` and cannot emit the dotted form MSIX needs.
+pub fn msix_version(base: &str) -> Result<String> {
+    crate::semver::validate(base)?;
+    Ok(format!("{base}.0"))
+}
+
 /// `git show -s --format=%cs HEAD` — the HEAD commit date (`YYYY-MM-DD`). Used for
 /// the `date:` field on dev/stable bundles (reproducible; no wall clock).
 pub fn git_commit_date() -> Option<String> {
@@ -290,6 +305,29 @@ mod tests {
         // No sha, no date known → those lines are omitted, not blank.
         assert!(!body.contains("commit:"));
         assert!(!body.contains("date:"));
+    }
+
+    #[test]
+    fn msix_version_appends_zero_revision() {
+        assert_eq!(msix_version("0.1.0").unwrap(), "0.1.0.0");
+        assert_eq!(msix_version("1.2.3").unwrap(), "1.2.3.0");
+        assert_eq!(msix_version("10.20.30").unwrap(), "10.20.30.0");
+    }
+
+    #[test]
+    fn msix_version_rejects_non_stable_bases() {
+        // Pre-release / nightly / already-4-part / v-prefixed all have no valid
+        // MSIX numeric form — MSIX ships stable only.
+        for bad in [
+            "0.1.0-dev+gabc1234",
+            "0.1.0-nightly.20260629+gabc1234",
+            "0.1.0.0",
+            "v0.1.0",
+            "1.2",
+            "",
+        ] {
+            assert!(msix_version(bad).is_err(), "{bad} should be rejected");
+        }
     }
 
     #[test]

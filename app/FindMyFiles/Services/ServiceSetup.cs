@@ -132,6 +132,21 @@ public static partial class ServiceSetup
     /// <returns>Full path to fmf-service.exe, or null when it cannot be found.</returns>
     public static string? LocateServiceExe(string baseDir)
     {
+        // Packaged (.msix): fmf-service.exe rides as a content payload in the
+        // read-only install dir (ADR-0028 R3). Resolve it from the package install
+        // location explicitly. The next-to-exe probe below also finds it (baseDir
+        // is the apphost's dir = the install dir), but being explicit survives a
+        // caller that passes a different baseDir. The elevated `setup` child then
+        // copies it into %ProgramData% WITHOUT package identity (ADR-0027).
+        if (PackageIdentity.IsPackaged && PackageIdentity.InstalledLocationPath is { } installDir)
+        {
+            var packaged = Path.Combine(installDir, "fmf-service.exe");
+            if (File.Exists(packaged))
+            {
+                return packaged;
+            }
+        }
+
         var bundled = Path.Combine(baseDir, "fmf-service.exe");
         if (File.Exists(bundled))
         {

@@ -374,6 +374,17 @@ version *args="":
 package tag="":
     cargo run --release -- package {{tag}}
 
+# Build the installed-experience .msix from the assembled bundle (run AFTER
+# publish + signing, so the payload PEs are the signed ones). ADR-0028: packaged
+# UI + unpackaged service. Lands find-my-files-v<version>-win-x64.msix under
+# build/package/ beside the zip; CI signs + attaches it. MSIX ships stable only,
+# so a vX.Y.Z tag is required. Usage:  just package-msix v0.2.0
+[group('release')]
+[doc('Build the installed-experience .msix from the assembled bundle (stable only)')]
+[working-directory: 'xtask']
+package-msix tag="":
+    cargo run --release -- package-msix {{tag}}
+
 # Stage the bundle's first-party PEs into sign-stage/ (unique names) for the
 # release signing step, and copy the signed copies back from signed/ afterwards.
 # The map of what-we-sign lives in xtask (publish::FIRST_PARTY_PES), not in the
@@ -389,6 +400,22 @@ sign-stage:
 [working-directory: 'xtask']
 sign-collect:
     cargo run --release -- sign-collect
+
+# Stage the packed .msix into msix-sign/ for the release signing step, and copy
+# the signed copy back from msix-signed/ into build/package afterwards. A second
+# eSigner pass (the wrapper is packed after its payload PEs are signed);
+# release.yml calls these around the Action, in the sign job (secret-scoped).
+[group('release')]
+[doc('Stage the packed .msix for release signing')]
+[working-directory: 'xtask']
+sign-stage-msix:
+    cargo run --release -- sign-stage-msix
+
+[group('release')]
+[doc('Copy the signed .msix back into build/package after signing')]
+[working-directory: 'xtask']
+sign-collect-msix:
+    cargo run --release -- sign-collect-msix
 
 # ── Docs ─────────────────────────────────────────────────────────────────
 

@@ -10,9 +10,9 @@
 //! a Windows-only API) stays in the workflow between the two.
 
 use crate::{fsx, paths, publish::FIRST_PARTY_PES};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Populate `stage_dir` with one uniquely-named copy of each first-party PE from
 /// the bundle at `dist`. Pure w.r.t. the caller's paths so it is unit-testable.
@@ -76,6 +76,76 @@ pub fn run_collect() -> Result<()> {
         "sign-collect: copied {} signed PE(s) back into {}",
         FIRST_PARTY_PES.len(),
         dist.display()
+    );
+    Ok(())
+}
+
+/// The single packed `.msix` in `dir` — there is exactly one per build (one
+/// architecture, one channel), so zero or many is a staleness/mixup error rather
+/// than something to guess at.
+fn find_msix(dir: &Path) -> Result<PathBuf> {
+    let mut hits: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("msix") {
+            hits.push(path);
+        }
+    }
+    match hits.len() {
+        1 => Ok(hits.pop().expect("len checked == 1")),
+        0 => bail!(
+            "no .msix in {} — run `just package-msix <tag>` first",
+            dir.display()
+        ),
+        n => bail!(
+            "{n} .msix files in {} — expected exactly one",
+            dir.display()
+        ),
+    }
+}
+
+/// `xtask sign-stage-msix`: copy the packed `.msix` out of `build/package` into a
+/// clean flat dir for the eSigner Action, and make its output dir exist. Mirrors
+/// [`run_stage`] for the package wrapper (a second signing pass, since the `.msix`
+/// is packed only after its payload PEs are signed).
+pub fn run_stage_msix() -> Result<()> {
+    let msix = find_msix(&paths::package_dir())?;
+    let stage_dir = paths::msix_sign_dir();
+    let signed_dir = paths::msix_signed_dir();
+
+    fsx::force_remove_dir_all(&stage_dir)
+        .with_context(|| format!("clear {}", stage_dir.display()))?;
+    fsx::force_remove_dir_all(&signed_dir)
+        .with_context(|| format!("clear {}", signed_dir.display()))?;
+    fs::create_dir_all(&stage_dir).with_context(|| format!("create {}", stage_dir.display()))?;
+    fs::create_dir_all(&signed_dir).with_context(|| format!("create {}", signed_dir.display()))?;
+
+    let name = msix.file_name().context("the .msix has no file name")?;
+    let to = stage_dir.join(name);
+    fs::copy(&msix, &to)
+        .with_context(|| format!("stage {} -> {}", msix.display(), to.display()))?;
+    println!(
+        "sign-stage-msix: staged {} into {}",
+        msix.display(),
+        to.display()
+    );
+    Ok(())
+}
+
+/// `xtask sign-collect-msix`: copy the signed `.msix` back over the one in
+/// `build/package`, so the checksum sweep + release attach see the signed wrapper.
+pub fn run_collect_msix() -> Result<()> {
+    let signed = find_msix(&paths::msix_signed_dir())?;
+    let name = signed
+        .file_name()
+        .context("the signed .msix has no file name")?;
+    let dest = paths::package_dir().join(name);
+    fs::copy(&signed, &dest)
+        .with_context(|| format!("collect {} -> {}", signed.display(), dest.display()))?;
+    println!(
+        "sign-collect-msix: copied signed {} back into {}",
+        signed.display(),
+        dest.display()
     );
     Ok(())
 }
@@ -153,6 +223,26 @@ mod tests {
                 "{src} was not replaced with its signed copy"
             );
         }
+
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    /// `find_msix` must insist on exactly one package — zero (nothing packed) and
+    /// many (a stale artifact left behind) are both errors, never a silent guess.
+    #[test]
+    fn find_msix_requires_exactly_one() {
+        let base = scratch("findmsix");
+        let _ = fsx::force_remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+
+        assert!(find_msix(&base).is_err(), "zero .msix should error");
+
+        let one = base.join("find-my-files-v1.2.3-win-x64.msix");
+        fs::write(&one, b"x").unwrap();
+        assert_eq!(find_msix(&base).unwrap(), one);
+
+        fs::write(base.join("stale.msix"), b"y").unwrap();
+        assert!(find_msix(&base).is_err(), "two .msix should error");
 
         fsx::force_remove_dir_all(&base).unwrap();
     }

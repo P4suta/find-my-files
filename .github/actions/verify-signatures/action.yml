@@ -17,6 +17,12 @@ inputs:
   signer-subject-contains:
     description: "Substring the signer certificate subject must contain (identity assertion)."
     required: true
+  msix-path:
+    description: >-
+      Optional path to the packed .msix to verify in the same pass (chain +
+      timestamp + signer subject). Empty = skip (bundle-only verify).
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -31,6 +37,7 @@ runs:
       env:
         BUNDLE_DIR: ${{ inputs.bundle-dir }}
         SIGNER_SUBJECT_CONTAINS: ${{ inputs.signer-subject-contains }}
+        MSIX_PATH: ${{ inputs.msix-path }}
       run: |
         $ErrorActionPreference = 'Stop'
         $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
@@ -40,14 +47,20 @@ runs:
             Sort-Object FullName | Select-Object -Last 1
         }
         if (-not $signtool) { throw "signtool.exe not found under the Windows SDK" }
-        $targets = 'FindMyFiles.exe', 'app/FindMyFiles.exe', 'app/fmf.exe', 'app/fmf-service.exe', 'app/fmf_engine.dll'
-        foreach ($f in $targets) {
-          $p = "$env:BUNDLE_DIR/$f"
+        # The five bundle PEs, plus the .msix wrapper when a path is given. The
+        # .msix carries the same Authenticode signature (signtool verifies a
+        # package the same way), so the identical chain+timestamp+signer assertion
+        # covers it — its manifest Publisher is pinned to this same subject at pack
+        # time (xtask msix::PUBLISHER), so the two agree by construction.
+        $targets = 'FindMyFiles.exe', 'app/FindMyFiles.exe', 'app/fmf.exe', 'app/fmf-service.exe', 'app/fmf_engine.dll' |
+          ForEach-Object { "$env:BUNDLE_DIR/$_" }
+        if ($env:MSIX_PATH) { $targets += $env:MSIX_PATH }
+        foreach ($p in $targets) {
           & $signtool.FullName verify /pa /tw $p
-          if ($LASTEXITCODE -ne 0) { throw "verify failed for $f (exit $LASTEXITCODE) - chain invalid or NOT timestamped" }
+          if ($LASTEXITCODE -ne 0) { throw "verify failed for $p (exit $LASTEXITCODE) - chain invalid or NOT timestamped" }
           $sig = Get-AuthenticodeSignature $p
           if ($sig.SignerCertificate.Subject -notlike "*$env:SIGNER_SUBJECT_CONTAINS*") {
-            throw "unexpected signer for $f - $($sig.SignerCertificate.Subject)"
+            throw "unexpected signer for $p - $($sig.SignerCertificate.Subject)"
           }
-          Write-Host "verified: $f - $($sig.SignerCertificate.Subject) (chain+timestamp+signer OK)"
+          Write-Host "verified: $p - $($sig.SignerCertificate.Subject) (chain+timestamp+signer OK)"
         }

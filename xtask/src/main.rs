@@ -18,6 +18,7 @@ mod clean;
 mod csharp_docs;
 mod docs;
 mod doctor;
+mod msix;
 mod package;
 mod publish;
 mod signing;
@@ -60,6 +61,13 @@ enum Commands {
         /// The release tag, e.g. v0.2.0 (a leading 'v' is optional). Omit for nightly.
         tag: Option<String>,
     },
+    /// Build the installed-experience `.msix` from the assembled bundle (ADR-0028:
+    /// packaged UI + unpackaged service). Run after `just publish`; MSIX ships the
+    /// stable channel only, so a vX.Y.Z tag is required.
+    PackageMsix {
+        /// The release tag, e.g. v0.2.0 (a leading 'v' is optional).
+        tag: Option<String>,
+    },
     /// Sweep leftover test fixtures (engine/target/test-tmp).
     CleanTemp,
     /// Stage the bundle's first-party PEs into a flat dir for the release
@@ -67,6 +75,11 @@ enum Commands {
     SignStage,
     /// Copy the signed PEs back over the bundle after the signing step.
     SignCollect,
+    /// Stage the packed `.msix` for the release signing step (a second eSigner
+    /// pass — the wrapper is packed after its payload PEs are signed).
+    SignStageMsix,
+    /// Copy the signed `.msix` back into build/package after the signing step.
+    SignCollectMsix,
     /// Run the elevated, `#[ignore]`-gated engine tests with `FMF_ADMIN_TESTS=1`.
     TestAdmin,
     /// Stage generated docs (mdBook + rustdoc) into site/ for GitHub Pages.
@@ -84,12 +97,15 @@ fn main() -> Result<()> {
         Commands::Version { channel, date } => version::run(&channel, date.as_deref()),
         Commands::Publish { skip_rust } => publish::run(skip_rust),
         Commands::Package { tag } => package::run(tag.as_deref()),
+        Commands::PackageMsix { tag } => msix::run(tag.as_deref()),
         Commands::CleanTemp => {
             clean::run();
             Ok(())
         }
         Commands::SignStage => signing::run_stage(),
         Commands::SignCollect => signing::run_collect(),
+        Commands::SignStageMsix => signing::run_stage_msix(),
+        Commands::SignCollectMsix => signing::run_collect_msix(),
         Commands::TestAdmin => test_admin::run(),
         Commands::DocsAssemble => docs::run(),
         Commands::DocCsharp => csharp_docs::run(),
