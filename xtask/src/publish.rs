@@ -29,8 +29,8 @@ const ENGINE_BINS: &[&str] = &["fmf-service.exe", "fmf.exe"];
 /// bundled (self-contained). `WinRT.Runtime.dll` alone is NOT enough — it also
 /// ships in a framework-dependent build — so without these the bundle would
 /// launch only where a matching .NET is already installed and demand a runtime
-/// download everywhere else. Guarding here keeps the SelfContained regression
-/// (see FindMyFiles.csproj) from ever shipping green again.
+/// download everywhere else. Guarding here keeps the `SelfContained` regression
+/// (see `FindMyFiles.csproj`) from ever shipping green again.
 const REQUIRED: &[&str] = &[
     "FindMyFiles.exe",
     "WinRT.Runtime.dll",
