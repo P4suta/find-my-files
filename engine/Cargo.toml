@@ -165,6 +165,23 @@ clap-markdown = "0.1"
 debug = "line-tables-only"
 lto = "thin"
 codegen-units = 1
+# Pin the unwind strategy the FFI boundary depends on. fmf-ffi's `guard()`
+# wraps every entry point in catch_unwind (fmf-ffi/src/error.rs), which only
+# contains a panic when unwinding; `panic = "abort"` (a common size tweak) would
+# turn a DLL-internal panic into a process abort that takes the C# host down
+# with it. unwind is the default — this makes the invariant explicit so it can't
+# be flipped by accident.
+panic = "unwind"
+# NOT set: `trim-paths = "all"`. It would strip the `<CARGO_HOME>\registry\src\
+# ...\<crate>\...rs` paths that `core::panic::Location` bakes into the shipped
+# PEs, but the pinned toolchain's Cargo (1.96) rejects the profile key as
+# unstable ("requires nightly"), and mise forbids ad-hoc toolchain swaps. The
+# leak is low-severity in practice: CI-built releases embed only the generic
+# hosted-runner path (`C:\Users\runneradmin\...`) plus the dependency tree that
+# `SHA256SUMS`/SBOM already publish — no personal data. `--remap-path-prefix` is
+# the stable alternative but its FROM is machine-specific (non-portable across
+# CI/dev). Revisit trigger: this Cargo stabilizes `trim-paths` → set it here.
+# (Local dev builds do embed the developer's username; official dist is CI-only.)
 
 # Profiling builds (just profile): identical machine code to release — only
 # the debuginfo is upgraded to full so samply resolves inlined frames.
