@@ -26,8 +26,20 @@
     <!-- Unpackaged + self-contained by design: the engine service install
          needs a non-MSIX story anyway, and packaging is a separate
          milestone (ADR-0016). Deliberate deviation from the winui skill
-         defaults — do not "fix" back to packaged. -->
+         defaults — do not "fix" back to packaged.
+
+         Self-containment has TWO independent axes; both must be on to ship a
+         zip that runs on a machine with no runtimes installed:
+           - <SelfContained> bundles the .NET runtime itself (CoreCLR/hostfxr).
+           - <WindowsAppSDKSelfContained> bundles the WinUI / Windows App SDK.
+         SelfContained must be EXPLICIT: since .NET 8, targeting net8.0+ means a
+         RuntimeIdentifier alone no longer implies it (RID-specified apps default
+         to framework-dependent), so `dotnet publish -r win-x64` would otherwise
+         ship a framework-dependent apphost that demands a .NET download at first
+         run. publish.rs's verify_bundle asserts coreclr.dll is present so this
+         can't silently regress. -->
     <WindowsPackageType>None</WindowsPackageType>
+    <SelfContained>true</SelfContained>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
