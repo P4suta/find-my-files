@@ -3,15 +3,17 @@
 //!
 //! Publishes the app (not a bare `dotnet build` — only the publish output wires
 //! WinRT.Runtime.dll, the `WinAppSDK` native helpers and the compiled XAML into a
-//! runnable bundle), prunes the locale dirs the app doesn't ship, copies the
-//! engine binaries, then SELF-VERIFIES the result. The self-check is what lets
+//! runnable bundle), prunes the locale dirs the app doesn't ship and the dead-
+//! weight artifacts it never loads (PDB / XML doc / design-time + `WebView2` DLLs,
+//! see the `prune` module), copies the engine binaries, then SELF-VERIFIES the
+//! result. The self-check is what lets
 //! us drop ci.yml's separate "verify bundle is runnable" step: the producer of
 //! the bundle guarantees its own output instead of a downstream guard.
 //!
 //! `--skip-rust true` skips the in-build cargo step (CI prebuilds + downloads
 //! the engine binaries into build/engine/release/ before this runs).
 
-use crate::{cmd, fsx, locale, paths, version};
+use crate::{cmd, fsx, locale, paths, prune, version};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
@@ -114,6 +116,7 @@ pub fn run(skip_rust: bool) -> Result<()> {
     cmd::run(&root, "dotnet", &args)?;
 
     prune_locales(&app)?;
+    prune_publish_artifacts(&app)?;
     copy_engine_bins(&app)?;
     verify_bundle(&app)?;
     place_launcher_and_readme(&dist)?;
@@ -149,6 +152,24 @@ fn prune_locales(app: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Strip the dead-weight publish artifacts (see [`prune`]) — files `dotnet
+/// publish` copies in that the running app never loads. Tolerant of absence: a
+/// file we mean to drop simply not being there (an SDK that stops emitting it)
+/// is success, not an error — `verify_bundle` is the gate that a listed file is
+/// actually gone. Only files are removed; the set is all `app/`-root basenames.
+fn prune_publish_artifacts(app: &Path) -> Result<()> {
+    let mut removed = 0u32;
+    for rel in prune::shipped_prune_set() {
+        let path = app.join(rel);
+        if path.exists() {
+            fs::remove_file(&path).with_context(|| format!("prune {}", path.display()))?;
+            removed += 1;
+        }
+    }
+    println!("publish: pruned {removed} unused artifact(s) from app/");
+    Ok(())
+}
+
 fn copy_engine_bins(app: &Path) -> Result<()> {
     let release = paths::engine_release_dir();
     for bin in ENGINE_BINS {
@@ -169,6 +190,20 @@ fn verify_bundle(app: &Path) -> Result<()> {
     if !missing.is_empty() {
         bail!(
             "bundle at {} is missing {missing:?} — it would not launch",
+            app.display()
+        );
+    }
+    // Negative allowlist: the dead-weight artifacts we prune must be gone. Same
+    // philosophy as the missing-file check — the producer guarantees its output.
+    // Catches an SDK update reintroducing a stripped file (e.g. a renamed
+    // WebView2 assembly) that the tolerant pruner would silently miss.
+    let leftover: Vec<&str> = prune::shipped_prune_set()
+        .filter(|f| app.join(f).exists())
+        .collect();
+    if !leftover.is_empty() {
+        bail!(
+            "bundle at {} still ships pruned dead weight {leftover:?} — the prune \
+             list drifted from what publish emits",
             app.display()
         );
     }

@@ -11,6 +11,7 @@ mod paths;
 
 mod checksum;
 mod locale;
+mod prune;
 mod semver;
 mod version;
 
