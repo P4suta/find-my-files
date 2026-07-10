@@ -434,7 +434,7 @@ mod tests {
     /// still return within a bounded time. The old blocking FSCTL mode
     /// (`BytesToWaitFor > 0`) would wedge here forever on a volume with zero
     /// activity, hanging `engine.shutdown()`'s join. Run elevated:
-    /// `FMF_ADMIN_TESTS=1` cargo test -p fmf-core -- --ignored usn_quiet
+    /// `FMF_ADMIN_TESTS=1 cargo test -p fmf-core -- --ignored usn_quiet`
     #[test]
     #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
     fn usn_quiet_journal_read_returns_bounded() {
