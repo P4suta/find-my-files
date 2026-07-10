@@ -238,6 +238,8 @@ fmf-service 可能未运行，或索引被其他引擎锁定(详见 engine.log)�
 
   <data name="Drag_AddAsCondition" xml:space="preserve"><value>添加为搜索条件</value></data>
 
+  <data name="Virtualization_PageFetchFailed" xml:space="preserve"><value>加载结果时出错</value></data>
+
   <data name="Err_QuerySyntax" xml:space="preserve"><value>查询语法错误</value></data>
   <data name="Err_Stale" xml:space="preserve"><value>结果已更新，正在重试</value></data>
   <data name="Err_NotAdmin" xml:space="preserve"><value>需要管理员权限</value></data>

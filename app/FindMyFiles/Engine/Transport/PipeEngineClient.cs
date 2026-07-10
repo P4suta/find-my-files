@@ -207,7 +207,13 @@ public sealed class PipeEngineClient : IEngineClient
                 await HandshakeAsync(ct).ConfigureAwait(false);
                 if (everConnected)
                 {
-                    Interlocked.Increment(ref _reconnects);
+                    // A successful *re*connect after a drop must leave a trace
+                    // ("don't stay silent"): the first connect is announced by
+                    // EngineClientFactory, so only reconnections are logged here
+                    // — e.g. the service was killed and SCM restarted it. Failed
+                    // attempts already log WARN; success used to log nothing.
+                    var reconnects = Interlocked.Increment(ref _reconnects);
+                    FileLog.Event("pipe", "reconnected to engine service", ("reconnects", reconnects));
                 }
 
                 everConnected = true;
