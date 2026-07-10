@@ -1,124 +1,124 @@
 {
   "volume": "C:",
-  "entries": 2147040,
-  "peak_working_set_bytes": 304873472,
+  "entries": 2137099,
+  "peak_working_set_bytes": 303603712,
   "queries": [
     {
       "query": "",
-      "hits": 1493551,
-      "p50_us": 3487,
-      "p99_us": 6231,
-      "max_us": 6804,
+      "hits": 1483219,
+      "p50_us": 3336,
+      "p99_us": 5680,
+      "max_us": 6691,
       "p50_memo_us": 0,
       "p50_scan_us": 0,
-      "p50_materialize_us": 3478,
-      "cold_us": 4814
+      "p50_materialize_us": 3323,
+      "cold_us": 3727
     },
     {
       "query": "e",
-      "hits": 1025902,
-      "p50_us": 15694,
-      "p99_us": 27162,
-      "max_us": 29152,
+      "hits": 1018803,
+      "p50_us": 12023,
+      "p99_us": 16097,
+      "max_us": 16152,
       "p50_memo_us": 1,
       "p50_scan_us": 0,
-      "p50_materialize_us": 15680,
-      "cold_us": 14031
+      "p50_materialize_us": 12009,
+      "cold_us": 12023
     },
     {
       "query": "a",
-      "hits": 932522,
-      "p50_us": 15794,
-      "p99_us": 23274,
-      "max_us": 24287,
+      "hits": 926182,
+      "p50_us": 13229,
+      "p99_us": 21199,
+      "max_us": 27176,
       "p50_memo_us": 1,
       "p50_scan_us": 0,
-      "p50_materialize_us": 15777,
-      "cold_us": 15412
+      "p50_materialize_us": 13215,
+      "cold_us": 12363
     },
     {
       "query": "win",
-      "hits": 159467,
-      "p50_us": 5415,
-      "p99_us": 7567,
-      "max_us": 8467,
+      "hits": 158936,
+      "p50_us": 4727,
+      "p99_us": 5988,
+      "max_us": 6001,
       "p50_memo_us": 0,
-      "p50_scan_us": 2178,
-      "p50_materialize_us": 3204,
-      "cold_us": 5873
+      "p50_scan_us": 2164,
+      "p50_materialize_us": 2510,
+      "cold_us": 4898
     },
     {
       "query": "Win",
-      "hits": 27522,
-      "p50_us": 6520,
-      "p99_us": 13603,
-      "max_us": 14189,
+      "hits": 27207,
+      "p50_us": 5164,
+      "p99_us": 9087,
+      "max_us": 9662,
       "p50_memo_us": 0,
-      "p50_scan_us": 2177,
-      "p50_materialize_us": 4290,
-      "cold_us": 8656
+      "p50_scan_us": 2090,
+      "p50_materialize_us": 3027,
+      "cold_us": 7032
     },
     {
       "query": "qzx",
       "hits": 45,
-      "p50_us": 4430,
-      "p99_us": 6740,
-      "max_us": 7164,
+      "p50_us": 3566,
+      "p99_us": 5322,
+      "max_us": 6013,
       "p50_memo_us": 0,
-      "p50_scan_us": 1583,
-      "p50_materialize_us": 2823,
-      "cold_us": 4700
+      "p50_scan_us": 1672,
+      "p50_materialize_us": 1901,
+      "cold_us": 3978
     },
     {
       "query": "ext:dll",
-      "hits": 80264,
-      "p50_us": 5243,
-      "p99_us": 10912,
-      "max_us": 13270,
-      "p50_memo_us": 1,
-      "p50_scan_us": 1780,
-      "p50_materialize_us": 3406,
-      "cold_us": 5737
+      "hits": 79248,
+      "p50_us": 3861,
+      "p99_us": 8276,
+      "max_us": 17062,
+      "p50_memo_us": 0,
+      "p50_scan_us": 1737,
+      "p50_materialize_us": 2092,
+      "cold_us": 3614
     },
     {
       "query": "size:>100mb path:windows",
-      "hits": 38,
-      "p50_us": 7604,
-      "p99_us": 12793,
-      "max_us": 86080,
+      "hits": 39,
+      "p50_us": 4230,
+      "p99_us": 6213,
+      "max_us": 67911,
       "p50_memo_us": 1,
       "p50_scan_us": 0,
-      "p50_materialize_us": 7584,
-      "cold_us": 86080
+      "p50_materialize_us": 4210,
+      "cold_us": 67911
     },
     {
       "query": "*.rs",
-      "hits": 78580,
-      "p50_us": 5040,
-      "p99_us": 12409,
-      "max_us": 16264,
-      "p50_memo_us": 1,
-      "p50_scan_us": 1743,
-      "p50_materialize_us": 3242,
-      "cold_us": 7222
+      "hits": 77797,
+      "p50_us": 3756,
+      "p99_us": 4700,
+      "max_us": 4852,
+      "p50_memo_us": 0,
+      "p50_scan_us": 1684,
+      "p50_materialize_us": 2049,
+      "cold_us": 3928
     },
     {
       "query": "regex:win.*\\.dll",
-      "hits": 10666,
-      "p50_us": 8814,
-      "p99_us": 19486,
-      "max_us": 22682,
+      "hits": 10505,
+      "p50_us": 7242,
+      "p99_us": 11423,
+      "max_us": 12054,
       "p50_memo_us": 0,
-      "p50_scan_us": 1784,
-      "p50_materialize_us": 6543,
-      "cold_us": 22682
+      "p50_scan_us": 1761,
+      "p50_materialize_us": 5055,
+      "cold_us": 7532
     }
   ],
   "restore": {
-    "file_bytes": 118538974,
-    "entries": 2147040,
-    "save_ms": 80,
-    "p50_ms": 171,
-    "min_ms": 163
+    "file_bytes": 118336776,
+    "entries": 2137099,
+    "save_ms": 69,
+    "p50_ms": 146,
+    "min_ms": 128
   }
 }

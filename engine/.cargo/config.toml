@@ -8,3 +8,12 @@
 # <repo>/build/engine. NOT a toolchain pin — toolchains stay in mise.toml.
 [build]
 target-dir = "../build/engine"
+# Control Flow Guard on every engine binary (issue #137 S-1): fmf-service runs
+# as LocalSystem parsing attacker-influenceable MFT/USN bytes, so CFG is
+# defense-in-depth for the unsafe/FFI surface. Measured cost (interleaved A/B,
+# 3 rounds, real 2.15M-entry C:): geomean +10% query p50, worst p99 28.9 ms —
+# well inside the 50 ms acceptance line; benches/baseline.json is recorded
+# with CFG enabled so the 20% gate stays calibrated. overflow-checks (S-3)
+# stays off: +27% on single-char queries and a measured p99 past the 50 ms
+# line, while dev/test/fuzz profiles already run checked (Cargo.toml).
+rustflags = ["-C", "control-flow-guard"]
