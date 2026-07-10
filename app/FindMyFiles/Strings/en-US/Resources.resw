@@ -238,6 +238,8 @@ The fmf-service may not be running, or another engine may be holding the index (
 
   <data name="Drag_AddAsCondition" xml:space="preserve"><value>Add as a search filter</value></data>
 
+  <data name="Virtualization_PageFetchFailed" xml:space="preserve"><value>Couldn't load results</value></data>
+
   <data name="Err_QuerySyntax" xml:space="preserve"><value>Query syntax error</value></data>
   <data name="Err_Stale" xml:space="preserve"><value>Results changed; retrying</value></data>
   <data name="Err_NotAdmin" xml:space="preserve"><value>Administrator rights required</value></data>
