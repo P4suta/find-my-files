@@ -102,10 +102,11 @@ public sealed class ResultsVirtualizationEdgeTests
         // that kicks many pages, every one of them faulting, still tells the
         // user exactly once (no notification storm while scrolling).
         SyncContext.RunContinuationsInline();
+        var expected = Loc.Get("Virtualization_PageFetchFailed");
         var mine = new List<AppNotification>();
         void Handler(AppNotification n)
         {
-            if (string.Equals(n.Message, "結果の読み込みでエラーが発生しました", StringComparison.Ordinal))
+            if (string.Equals(n.Message, expected, StringComparison.Ordinal))
             {
                 mine.Add(n);
             }

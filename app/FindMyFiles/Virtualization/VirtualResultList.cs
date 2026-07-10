@@ -401,7 +401,7 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
                 _fetchFailureNotified = true;
                 Notifier.Post(
                     NotifySeverity.Error,
-                    "結果の読み込みでエラーが発生しました",
+                    Loc.Get("Virtualization_PageFetchFailed"),
                     ex.Message);
             }
 
