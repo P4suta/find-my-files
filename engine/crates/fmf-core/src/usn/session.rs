@@ -219,7 +219,7 @@ impl UsnJournal {
 
     /// Tail read with a bounded park: returns any records available right now,
     /// advancing `next_usn` past them; on a quiet journal it parks for
-    /// [`IDLE_PARK`] and returns a benign empty batch so the caller can
+    /// `IDLE_PARK` (250 ms) and returns a benign empty batch so the caller can
     /// re-check its stop flag instead of blocking forever.
     ///
     /// This deliberately does **not** use the FSCTL's own blocking mode
