@@ -10,10 +10,13 @@
 //! it, so only one process remains.
 //!
 //! It also keeps portable state at the bundle root: when the user did not pass a
-//! `--data-dir=…`, it appends `--data-dir=<root>\data` so the index/settings/log
-//! tree lands beside the launcher (the documented portable layout) instead of
-//! buried in `app\`. A read-only location still falls back to the per-user
-//! profile via the app's own `AppPaths` probe.
+//! `--data-dir` (in either the `=`-joined or the space-separated spelling), it
+//! appends `--data-dir=<root>\data` so the index/settings/log tree lands beside
+//! the launcher (the documented portable layout) instead of buried in `app\`.
+//! Because the app itself only parses the `=`-joined form, a user-supplied
+//! `--data-dir <value>` pair is rewritten into `--data-dir=<value>` before the
+//! spawn so the space form is honoured too. A read-only location still falls
+//! back to the per-user profile via the app's own `AppPaths` probe.
 
 #![windows_subsystem = "windows"]
 
@@ -30,6 +33,8 @@ const APP_EXE: &str = "FindMyFiles.exe";
 const DATA_SUBDIR: &str = "data";
 /// The app's data-dir flag (it only honours the `=`-joined form, case-insensitively).
 const DATA_DIR_FLAG: &str = "--data-dir=";
+/// The bare (space-separated) spelling the launcher rewrites into [`DATA_DIR_FLAG`].
+const DATA_DIR_FLAG_BARE: &str = "--data-dir";
 
 fn main() {
     let Some(dir) = env::current_exe()
@@ -52,11 +57,12 @@ fn main() {
     }
 
     let forwarded: Vec<OsString> = env::args_os().skip(1).collect();
+    let (forwarded, has_data_dir) = normalize_data_dir(&forwarded);
 
     let mut cmd = Command::new(&app_exe);
     cmd.current_dir(dir.join(APP_SUBDIR));
     cmd.args(&forwarded);
-    if !has_data_dir(&forwarded) {
+    if !has_data_dir {
         let mut arg = OsString::from(DATA_DIR_FLAG);
         arg.push(dir.join(DATA_SUBDIR));
         cmd.arg(arg);
@@ -69,14 +75,49 @@ fn main() {
     // this launcher returns (Windows does not reap children on parent exit).
 }
 
-/// True when the user already passed a `--data-dir=…` the launcher must not
-/// override. Matches the exact form the app honours (`=`-joined, ASCII
-/// case-insensitive), so any other spelling falls through to the default.
-fn has_data_dir(args: &[OsString]) -> bool {
-    args.iter().filter_map(|a| a.to_str()).any(|s| {
-        s.get(..DATA_DIR_FLAG.len())
-            .is_some_and(|p| p.eq_ignore_ascii_case(DATA_DIR_FLAG))
-    })
+/// Normalize the forwarded arguments so the app sees a single `--data-dir=…`
+/// spelling, and report whether the user supplied one at all (in which case the
+/// launcher must not append its portable default).
+///
+/// The app only parses the `=`-joined form (ASCII case-insensitive), so a bare
+/// `--data-dir <value>` pair — the natural spelling a user might type — is
+/// rewritten in place into `--data-dir=<value>`. A trailing bare `--data-dir`
+/// with no following value is not a usable choice: it is forwarded verbatim and
+/// the default still applies. Any already-`=`-joined form is honoured as-is.
+fn normalize_data_dir(args: &[OsString]) -> (Vec<OsString>, bool) {
+    let mut out: Vec<OsString> = Vec::with_capacity(args.len());
+    let mut present = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if let Some(s) = arg.to_str() {
+            // Already `=`-joined (`--data-dir=…`): honour as-is.
+            if s.get(..DATA_DIR_FLAG.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(DATA_DIR_FLAG))
+            {
+                present = true;
+                out.push(arg.clone());
+                i += 1;
+                continue;
+            }
+            // Bare `--data-dir` with a following value: rewrite the pair. A
+            // trailing bare `--data-dir` (no value) falls through, forwarded
+            // verbatim so the launcher's default still applies.
+            if s.eq_ignore_ascii_case(DATA_DIR_FLAG_BARE)
+                && let Some(value) = args.get(i + 1)
+            {
+                let mut joined = OsString::from(DATA_DIR_FLAG);
+                joined.push(value);
+                out.push(joined);
+                present = true;
+                i += 2;
+                continue;
+            }
+        }
+        out.push(arg.clone());
+        i += 1;
+    }
+    (out, present)
 }
 
 /// Surface a fatal message to a GUI user. Under the `windows` subsystem there is
@@ -110,31 +151,82 @@ mod tests {
     #[test]
     fn detects_user_data_dir_equals_form() {
         let args = [OsString::from("--data-dir=C:\\tmp")];
-        assert!(has_data_dir(&args));
+        let (out, present) = normalize_data_dir(&args);
+        assert!(present);
+        assert_eq!(out, args); // honoured verbatim
     }
 
     #[test]
     fn detects_user_data_dir_case_insensitive() {
         let args = [OsString::from("--Data-Dir=C:\\tmp")];
-        assert!(has_data_dir(&args));
+        let (out, present) = normalize_data_dir(&args);
+        assert!(present);
+        assert_eq!(out, args);
     }
 
     #[test]
-    fn split_form_is_not_honoured_so_default_still_applies() {
-        // The app ignores the space-separated spelling, so the launcher must NOT
-        // treat it as "user supplied" — it should append its own default.
-        let args = [OsString::from("--data-dir"), OsString::from("C:\\tmp")];
-        assert!(!has_data_dir(&args));
+    fn space_form_is_normalized_to_equals_form_and_honoured() {
+        // The space-separated spelling must be honoured exactly like the
+        // `=`-joined one: the pair is rewritten and no default is appended.
+        let space = [OsString::from("--data-dir"), OsString::from("C:\\tmp")];
+        let (out, present) = normalize_data_dir(&space);
+        assert!(present);
+        assert_eq!(out, [OsString::from("--data-dir=C:\\tmp")]);
+        // Equivalence: same result as the user typing the `=`-joined form.
+        let (equals_out, _) = normalize_data_dir(&[OsString::from("--data-dir=C:\\tmp")]);
+        assert_eq!(out, equals_out);
+    }
+
+    #[test]
+    fn space_form_case_insensitive_is_normalized() {
+        let args = [OsString::from("--Data-Dir"), OsString::from("C:\\tmp")];
+        let (out, present) = normalize_data_dir(&args);
+        assert!(present);
+        assert_eq!(out, [OsString::from("--data-dir=C:\\tmp")]);
+    }
+
+    #[test]
+    fn space_form_preserves_surrounding_args_and_order() {
+        let args = [
+            OsString::from("--fake-engine"),
+            OsString::from("--data-dir"),
+            OsString::from("C:\\tmp"),
+            OsString::from("!!warn"),
+        ];
+        let (out, present) = normalize_data_dir(&args);
+        assert!(present);
+        assert_eq!(
+            out,
+            [
+                OsString::from("--fake-engine"),
+                OsString::from("--data-dir=C:\\tmp"),
+                OsString::from("!!warn"),
+            ]
+        );
+    }
+
+    #[test]
+    fn trailing_bare_data_dir_falls_through_to_default() {
+        // No value follows — not a usable choice, so it is forwarded verbatim
+        // and the launcher's default still applies.
+        let args = [OsString::from("--data-dir")];
+        let (out, present) = normalize_data_dir(&args);
+        assert!(!present);
+        assert_eq!(out, args);
     }
 
     #[test]
     fn unrelated_flags_do_not_match() {
         let args = [OsString::from("--fake-engine"), OsString::from("!!warn")];
-        assert!(!has_data_dir(&args));
+        let (out, present) = normalize_data_dir(&args);
+        assert!(!present);
+        assert_eq!(out, args);
     }
 
     #[test]
     fn empty_args_have_no_data_dir() {
-        assert!(!has_data_dir(&[]));
+        let (out, present) = normalize_data_dir(&[]);
+        assert!(!present);
+        assert!(out.is_empty());
     }
 }
