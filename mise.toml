@@ -29,6 +29,11 @@ lefthook = "2"
 "cargo:cargo-llvm-cov" = "0.8"
 "cargo:cargo-deny" = "0.19"
 "cargo:cargo-machete" = "0.9"
+# License-notice generation for the distributable bundle (`xtask publish` →
+# THIRD-PARTY-NOTICES.txt, config engine/about.toml). release.yml / nightly.yml
+# provision it from this pin via mise-action; ci.yml's app job installs the same
+# version via taiki-e (it does not use mise-action). binstall-fetched.
+"cargo:cargo-about" = "0.7"
 # Mutation testing (`just mutants`) — surfaces tests that pass even when code is
 # broken (the reveal-class gap, ADR-0022). binstall fetches the prebuilt binary.
 "cargo:cargo-mutants" = "27"

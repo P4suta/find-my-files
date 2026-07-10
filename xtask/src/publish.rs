@@ -13,7 +13,7 @@
 //! `--skip-rust true` skips the in-build cargo step (CI prebuilds + downloads
 //! the engine binaries into build/engine/release/ before this runs).
 
-use crate::{cmd, fsx, locale, paths, prune, version};
+use crate::{cmd, fsx, locale, notices, paths, prune, version};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
@@ -122,10 +122,12 @@ pub fn run(skip_rust: bool) -> Result<()> {
     place_launcher_and_readme(&dist)?;
     place_buildinfo(&dist)?;
     place_completions(&app, &dist)?;
+    place_legal_notices(&root, &dist)?;
 
     println!(
         "publish: build/dist/FindMyFiles assembled and verified \
-         (root launcher + app/ with {} required files + shell completions).",
+         (root launcher + LICENSE.txt + THIRD-PARTY-NOTICES.txt + app/ with {} \
+         required files + shell completions).",
         REQUIRED.len()
     );
     Ok(())
@@ -283,6 +285,108 @@ fn place_buildinfo(dist: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Shipped name of the project license at the bundle root — copied verbatim from
+/// the repo `LICENSE` so it is byte-identical to the governing text.
+const LICENSE_FILE: &str = "LICENSE.txt";
+/// Shipped name of the generated third-party attribution file at the bundle root.
+const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
+
+/// Ship the legal texts the bundle must carry to redistribute its dependencies
+/// (a release gate): the project's own Apache-2.0 `LICENSE.txt`, and a generated
+/// `THIRD-PARTY-NOTICES.txt` attributing every redistributed third party.
+///
+/// - `LICENSE.txt` is a verbatim copy of the repo `LICENSE` (Apache-2.0 §4 wants
+///   the license text to travel with the binaries; a byte copy is the most
+///   defensible form for a legal file — no BOM/CRLF rewriting).
+/// - `THIRD-PARTY-NOTICES.txt` = the curated .NET/NuGet section (see `notices`)
+///   plus the `cargo-about` render of the Rust crate graph. Encoded BOM + CRLF
+///   like README/BUILDINFO so Notepad renders it.
+///
+/// Self-verifies both landed — the producer guarantees a legally shippable
+/// bundle rather than leaning on a downstream guard.
+fn place_legal_notices(root: &Path, dist: &Path) -> Result<()> {
+    // Verbatim copy of the governing license — no re-encoding.
+    let src = root.join("LICENSE");
+    let license = dist.join(LICENSE_FILE);
+    fs::copy(&src, &license)
+        .with_context(|| format!("copy {} -> {}", src.display(), license.display()))?;
+
+    let rust = generate_rust_notices()?;
+    let body = notices::assemble(&rust);
+    // Same Notepad-friendly encoding as README/BUILDINFO: UTF-8 BOM + CRLF.
+    let text = format!("\u{feff}{}", body.replace('\n', "\r\n"));
+    let notices_path = dist.join(NOTICES_FILE);
+    fs::write(&notices_path, text).with_context(|| format!("write {}", notices_path.display()))?;
+
+    for f in [LICENSE_FILE, NOTICES_FILE] {
+        if !dist.join(f).exists() {
+            bail!(
+                "bundle at {} is missing {f} — it may not be redistributed \
+                 without its license/attribution texts",
+                dist.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Render the Rust half of the third-party notices by driving `cargo-about` over
+/// the engine workspace (config + template committed at `engine/about.toml` /
+/// `engine/about.hbs`) and reading back its output for `notices::assemble`.
+///
+/// `--offline --locked`: the release/nightly `just publish` builds the engine
+/// first, so the crate sources are already in the cargo cache — running offline
+/// makes the output reproducible (no clearlydefined.io round-trip, no wall-clock
+/// or service-availability variance) and keeps a release build from depending on
+/// a third-party web service. `cargo-about` is provisioned via the `mise.toml`
+/// pin (release/nightly use mise-action; the ci.yml `app` job installs it +
+/// warms the cache alongside).
+///
+/// Output goes through `-o <file>`, not stdout: cargo-about refuses a redirected
+/// stdout on Windows (PowerShell re-encodes piped bytes to UTF-16 and corrupts
+/// the license texts), so it writes a UTF-8 file we read back.
+fn generate_rust_notices() -> Result<String> {
+    let engine = paths::engine_dir();
+    let out_file =
+        std::env::temp_dir().join(format!("fmf-third-party-rust-{}.txt", std::process::id()));
+    let out_arg = out_file
+        .to_str()
+        .context("temp notices path is not valid UTF-8")?;
+    let output = std::process::Command::new("cargo-about")
+        .args([
+            "generate",
+            "--offline",
+            "--locked",
+            "-c",
+            "about.toml",
+            "about.hbs",
+            "-o",
+            out_arg,
+        ])
+        .current_dir(&engine)
+        .output()
+        .context(
+            "failed to spawn `cargo-about` (is it on PATH? it is pinned in \
+             mise.toml — run `mise install`)",
+        )?;
+    if !output.status.success() {
+        bail!(
+            "`cargo-about generate` exited with {} — stderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let body =
+        fs::read_to_string(&out_file).with_context(|| format!("read {}", out_file.display()))?;
+    // Best-effort cleanup — a stale temp file is harmless and the next run's
+    // pid-tagged name won't collide.
+    let _ = fs::remove_file(&out_file);
+    // cargo-about's -o writes CRLF on Windows; normalize to LF so the single
+    // CRLF re-encoding in `place_legal_notices` doesn't double the carriage
+    // returns (which Notepad renders as stray blank lines).
+    Ok(body.replace('\r', ""))
+}
+
 /// End-user README dropped at the bundle root, beside the launcher (English then
 /// Japanese — the app ships both locales). Stored as LF; written as CRLF + BOM.
 const README: &str = "\
@@ -307,6 +411,10 @@ Shell completions for the  fmf  command are in  completions\\  (PowerShell, bash
 zsh, fish). For PowerShell, add to your profile:
   . \"$PWD\\completions\\_fmf.ps1\"
 Or generate fresh at any time:  app\\fmf.exe completions powershell
+
+Licensing: FindMyFiles is Apache-2.0 — full text in  LICENSE.txt  (here). The
+third-party code it bundles (.NET runtime, Windows App SDK, Rust crates, ...) is
+attributed in  THIRD-PARTY-NOTICES.txt  (here).
 
 Apache-2.0  -  https://github.com/P4suta/find-my-files
 
@@ -333,6 +441,10 @@ fmf コマンドの補完スクリプトは  completions\\  にあります(Powe
 PowerShell ならプロファイルに次を追加:
   . \"$PWD\\completions\\_fmf.ps1\"
 いつでも生成し直せます:  app\\fmf.exe completions powershell
+
+ライセンス: FindMyFiles は Apache-2.0 です(全文はこのフォルダーの  LICENSE.txt )。
+同梱する第三者コード(.NET ランタイム/Windows App SDK/Rust クレート ほか)の
+帰属表示はこのフォルダーの  THIRD-PARTY-NOTICES.txt  にあります。
 
 Apache-2.0  -  https://github.com/P4suta/find-my-files
 ";

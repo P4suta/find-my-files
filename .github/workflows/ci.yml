@@ -255,12 +255,23 @@ jobs:
           dotnet-version: 10.0.x
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
-          tool: just
+          # just: the publish recipe. cargo-about: publish generates the bundle's
+          # THIRD-PARTY-NOTICES.txt from the Rust crate graph. This job does not
+          # use mise-action (release.yml/nightly.yml do), so cargo-about is
+          # installed here directly — same version as the mise.toml pin.
+          tool: just,cargo-about@0.7.1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('app/**/packages.lock.json') }}
           restore-keys: nuget-${{ runner.os }}-
+      # cargo-about runs offline for reproducible notices; warm the crate cache
+      # (index + sources) first since this job downloads the prebuilt engine dll
+      # rather than compiling it. `cargo fetch` doesn't build, so ambient rustc is
+      # fine — the pinned toolchain is only needed to compile the engine.
+      - name: warm cargo cache for offline notice generation
+        working-directory: engine
+        run: cargo fetch --locked
       # Publish (not bare `dotnet build`): only the publish output is a runnable
       # bundle — the WinUI component package wires WinRT.Runtime.dll, the native
       # helpers and compiled XAML in at publish time. Reuses the same just recipe
