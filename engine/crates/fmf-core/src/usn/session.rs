@@ -70,6 +70,14 @@ pub enum ReadOutcome {
     Gone(JournalGone),
 }
 
+/// How long `read_blocking` parks on a quiet journal before returning a
+/// benign empty batch so the worker can re-check its stop flag. Bounds both
+/// shutdown latency (one park tick per volume) and change-reflection latency
+/// (worst case: this + the 200 ms `IndexChanged` debounce, well inside the
+/// ≤1 s budget). Mirrors the scope-mode watcher's 250 ms `IDLE_PARK`; kept
+/// local so the leaf `usn` module doesn't depend on `engine::watch`.
+const IDLE_PARK: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// An open USN journal positioned for tailing: the volume handle plus the
 /// current replay cursor.
 pub struct UsnJournal {
@@ -209,8 +217,21 @@ impl UsnJournal {
         }
     }
 
-    /// Blocking read: returns once at least one record is available (or the
-    /// journal became invalid). Advances `next_usn` past the returned batch.
+    /// Tail read with a bounded park: returns any records available right now,
+    /// advancing `next_usn` past them; on a quiet journal it parks for
+    /// `IDLE_PARK` (250 ms) and returns a benign empty batch so the caller can
+    /// re-check its stop flag instead of blocking forever.
+    ///
+    /// This deliberately does **not** use the FSCTL's own blocking mode
+    /// (`BytesToWaitFor > 0`): per the `READ_USN_JOURNAL_DATA_V0` contract, a
+    /// blocking read "remains outstanding until at least one record is
+    /// returned or I/O is canceled" — it never returns on a `Timeout`, so a
+    /// volume with zero activity would wedge the worker thread and hang
+    /// `engine.shutdown()`'s join (the service-stop / idle-self-stop hang).
+    /// Instead we issue a non-blocking read (`BytesToWaitFor == 0`, which
+    /// "always returns successfully when the end of the change journal file is
+    /// encountered") and park in Rust, mirroring the scope-mode watcher's
+    /// `IDLE_PARK` wakeup contract.
     ///
     /// # Errors
     ///
@@ -224,8 +245,10 @@ impl UsnJournal {
             StartUsn: self.next_usn,
             ReasonMask: u32::MAX,
             ReturnOnlyOnClose: 0,
+            // Non-blocking: return at end-of-journal instead of waiting. The
+            // bounded park below (not the FSCTL) is what caps stop latency.
             Timeout: 0,
-            BytesToWaitFor: 1, // block until data arrives
+            BytesToWaitFor: 0,
             UsnJournalID: self.journal_id,
         };
         unsafe {
@@ -256,6 +279,15 @@ impl UsnJournal {
             let (next, records, truncated) = parse_buffer(&buf[..returned as usize]);
             if next != 0 {
                 self.next_usn = next as i64;
+            }
+            // Quiet journal: the non-blocking read returned only the NextUsn
+            // header (no records, `next == StartUsn`). Park briefly so the
+            // worker re-checks its stop flag within a bounded window — the
+            // benign empty batch is the same wakeup contract the scope-mode
+            // watcher uses — then return. When records are present we skip the
+            // park so a backlog drains in a tight loop.
+            if records.is_empty() {
+                std::thread::sleep(IDLE_PARK);
             }
             Ok(ReadOutcome::Records { records, truncated })
         }
@@ -363,24 +395,21 @@ mod tests {
         assert!(journal.checkpoint_valid(data.UsnJournalID, data.FirstUsn));
         assert!(!journal.checkpoint_valid(data.UsnJournalID.wrapping_add(1), data.FirstUsn));
 
-        // Rewind to the oldest retained USN so the blocking read returns
-        // existing history immediately instead of waiting for new activity.
+        // Rewind to the oldest retained USN so the read returns existing
+        // history immediately (a stock C: always has retained journal records).
         let first_usn = data.FirstUsn;
         journal.next_usn = first_usn;
 
-        // read_blocking has no timeout by design; run it on a helper thread
-        // and bound the wait here so a regression hangs the test, not the
-        // suite. The tickle file (temp dir is on C: on a stock setup) covers
-        // the freshly-created-journal case where no history exists yet.
+        // read_blocking is bounded now (non-blocking FSCTL + IDLE_PARK), so it
+        // always returns. Keep the helper-thread + timeout guard anyway: if a
+        // regression reintroduces the old FSCTL blocking mode, this fails
+        // instead of wedging the suite forever.
         let (tx, rx) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {
             let mut buf = Vec::new();
             let outcome = journal.read_blocking(&mut buf);
             let _ = tx.send((outcome, journal.next_usn));
         });
-        let tickle = std::env::temp_dir().join("fmf-usn-smoke.tmp");
-        let _ = std::fs::write(&tickle, b"tick");
-        let _ = std::fs::remove_file(&tickle);
 
         let (outcome, advanced_usn) = rx
             .recv_timeout(std::time::Duration::from_secs(30))
@@ -397,6 +426,47 @@ mod tests {
                 );
             }
             ReadOutcome::Gone(gone) => panic!("journal gone during smoke: {gone:?}"),
+        }
+    }
+
+    /// Regression guard for the service-stop / idle-self-stop hang: on a quiet
+    /// journal (cursor at the tip, no tickle to wake it) `read_blocking` must
+    /// still return within a bounded time. The old blocking FSCTL mode
+    /// (`BytesToWaitFor > 0`) would wedge here forever on a volume with zero
+    /// activity, hanging `engine.shutdown()`'s join. Run elevated:
+    /// `FMF_ADMIN_TESTS=1 cargo test -p fmf-core -- --ignored usn_quiet`
+    #[test]
+    #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
+    fn usn_quiet_journal_read_returns_bounded() {
+        if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
+            eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
+            return;
+        }
+        let mut journal = UsnJournal::open("C:", None).expect("open C: journal (elevated?)");
+        let data = journal.query().expect("FSCTL_QUERY_USN_JOURNAL");
+        // Position at the journal tip: no history to drain, nothing to wait
+        // for. This is exactly the quiet-volume shutdown condition.
+        journal.next_usn = data.NextUsn;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = tx.send(journal.read_blocking(&mut buf));
+        });
+
+        // Bound generously (IDLE_PARK is 250 ms). A regression that restores
+        // the blocking FSCTL never sends and this times out; the hang is the
+        // bug, so the assertion is the *return*, not what it returns. C: is
+        // never truly idle, so tolerate either an empty batch or real records.
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("read_blocking on a quiet journal did not return — stop-hang regression");
+        reader.join().unwrap();
+        match outcome.expect("FSCTL_READ_USN_JOURNAL") {
+            ReadOutcome::Records { truncated, .. } => {
+                assert!(!truncated, "live FSCTL buffer flagged as truncated");
+            }
+            ReadOutcome::Gone(gone) => panic!("journal gone during quiet read: {gone:?}"),
         }
     }
 }

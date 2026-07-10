@@ -452,9 +452,10 @@ impl Engine {
         for slot in self.volumes.read().iter() {
             slot.stop.store(true, Ordering::Relaxed);
         }
-        // Blocked journal reads return on the next volume write; joining with
-        // a bounded wait keeps shutdown prompt without CancelSynchronousIo
-        // (M2 refinement).
+        // The volume threads park at most `IDLE_PARK` (250 ms) inside
+        // `read_blocking` on a quiet journal, so each re-checks its stop flag
+        // within one tick — the join returns promptly even on a volume with
+        // zero USN activity, without needing CancelSynchronousIo.
         let mut threads = self.threads.lock();
         for t in threads.drain(..) {
             let _ = t.join();

@@ -60,6 +60,22 @@ pub fn signed_dir() -> PathBuf {
     build_root().join("signed")
 }
 
+/// The committed manifest of first-party PE bundle paths the release
+/// `verify-signatures` composite action checks. Generated from
+/// [`crate::publish::FIRST_PARTY_PES`] and pinned by a drift test, so the signed-
+/// file list lives in exactly one place (xtask) instead of a hardcoded copy in
+/// the action's PowerShell. The action reads the file directly from the checkout
+/// (via `GITHUB_ACTION_PATH`); xtask only needs this path to pin/bless it, hence
+/// test-only.
+#[cfg(test)]
+pub fn signed_pe_manifest() -> PathBuf {
+    repo_root()
+        .join(".github")
+        .join("actions")
+        .join("verify-signatures")
+        .join("first-party-pes.txt")
+}
+
 /// Where `docs-assemble` stages the GitHub Pages site (`build/site/{book,doc}`).
 pub fn site_dir() -> PathBuf {
     build_root().join("site")

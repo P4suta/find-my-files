@@ -116,9 +116,10 @@ public sealed class VirtualResultListTests
         // surfaces. Regression for the latch that was never reset.
         SyncContext.RunContinuationsInline();
         var mine = new List<AppNotification>();
+        var expected = Loc.Get("Virtualization_PageFetchFailed");
         void Handler(AppNotification n)
         {
-            if (string.Equals(n.Message, "結果の読み込みでエラーが発生しました", StringComparison.Ordinal))
+            if (string.Equals(n.Message, expected, StringComparison.Ordinal))
             {
                 mine.Add(n);
             }

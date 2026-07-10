@@ -97,6 +97,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     runs-on: windows-latest
+    timeout-minutes: 30 # full publish (cargo release + dotnet publish + SBOMs); cf. nightly's 40
     permissions:
       contents: read
     steps:
@@ -122,6 +123,16 @@ jobs:
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
           install: true
+
+      # A manual dispatch could point a vX.Y.Z tag at a commit whose committed
+      # [workspace.package] version differs — and TAG drives the zip name, the
+      # build stamp, and the Release tag, so a mismatch would ship vX.Y.Z-named
+      # artifacts built from another version. Fail before signing/packaging.
+      # Same gate as the tag-shape check above (a publish=false branch smoke test
+      # is exempt). Logic lives in xtask (unit-tested); TAG flows via env.
+      - name: Verify tag matches the committed version
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+        run: just check-version $env:TAG
 
       # Stamp the build as a clean stable release. Without these, the
       # fmf-buildstamp build.rs defaults to `…-dev+g<sha>` and the C# csproj
@@ -169,6 +180,7 @@ jobs:
   sign:
     needs: build
     runs-on: windows-latest
+    timeout-minutes: 20 # eSigner network round-trips (scan + sign + timestamp) + verify
     environment: release
     permissions:
       contents: read
@@ -265,6 +277,7 @@ jobs:
     needs: sign
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
     runs-on: windows-latest
+    timeout-minutes: 20 # package + attestations + upload/publish to the Release
     # Second approval gate on the irreversible step (ADR-0035): the GitHub Release
     # is immutable, so publishing requires its own explicit human approval in the
     # `release` environment, distinct from the `sign` approval ("sign this?" vs
@@ -314,7 +327,8 @@ jobs:
       # (just package): find-my-files-v<version>-win-x64.zip + SHA256SUMS.txt under
       # build/package/. `just package` requires a vX.Y.Z TAG.
       - name: Package (zip + checksums)
-        run: just package ${{ env.TAG }}
+        # TAG via env (pwsh syntax), not ${{ }} interpolation into the run body.
+        run: just package $env:TAG
 
       # Build provenance + SBOM attestations for the published artifacts. Keyless
       # via the workflow's OIDC token (no stored secrets).

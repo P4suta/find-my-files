@@ -1,0 +1,43 @@
+# cargo-about config — drives THIRD-PARTY-NOTICES.txt generation for the shipped
+# Rust binaries (fmf_engine.dll / fmf.exe / fmf-service.exe / the launcher).
+# Invoked by `xtask publish` (see xtask/src/notices.rs); the human-readable
+# template is about.hbs beside this file.
+#
+# `accepted` MUST stay identical to deny.toml's [licenses].allow — deny.toml is
+# the PR gate that a new dependency's license is permitted, and this list is what
+# the shipped notice attests to. A drift means we'd either ship a notice for a
+# license the gate rejected, or reject generation for one the gate allowed.
+
+# Bundle is win-x64 only: filter the dependency graph to what actually compiles
+# into the shipped Windows binaries, so unix-only crates never appear in the
+# notice.
+targets = ["x86_64-pc-windows-msvc"]
+
+# Dev/build-only crates (criterion, proptest, the fuzz targets, build scripts)
+# are not redistributed, so they carry no notice obligation.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# Fail generation if any in-scope crate's license is not in `accepted` — the
+# notice doubles as a license gate, mirroring deny.toml.
+accepted = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+  "MPL-2.0",
+  "CC0-1.0",
+  "0BSD",
+  "BSL-1.0",
+]
+
+# Our own first-party crates (the fmf-* workspace members, all `publish = false`)
+# are covered by the bundle's LICENSE.txt — exclude them from the THIRD-PARTY
+# notice so it lists only redistributed third-party code.
+[private]
+ignore = true
