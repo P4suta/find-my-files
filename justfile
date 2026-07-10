@@ -374,6 +374,16 @@ version *args="":
 package tag="":
     cargo run --release -- package {{tag}}
 
+# Verify a release tag (vX.Y.Z) matches the committed [workspace.package] version
+# in engine/Cargo.toml — the manual-dispatch guard release.yml runs before
+# signing/packaging so a drifted tag can't ship mislabeled artifacts. Usage:
+# just check-version v0.2.0. Logic lives in xtask.
+[group('release')]
+[doc('Verify a release tag matches the committed workspace version')]
+[working-directory: 'xtask']
+check-version tag:
+    cargo run --release -- check-version {{tag}}
+
 # Stage the bundle's first-party PEs into sign-stage/ (unique names) for the
 # release signing step, and copy the signed copies back from signed/ afterwards.
 # The map of what-we-sign lives in xtask (publish::FIRST_PARTY_PES), not in the
