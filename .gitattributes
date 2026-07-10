@@ -7,6 +7,11 @@
 *.yaml  text eol=lf
 justfile text eol=lf
 
+# Generated from xtask publish::FIRST_PARTY_PES and read verbatim by the
+# verify-signatures composite action + pinned by an xtask drift test: keep it LF
+# so the working tree matches the committed bytes on every platform.
+.github/actions/verify-signatures/first-party-pes.txt text eol=lf
+
 *.cs     text eol=crlf
 *.xaml   text eol=crlf
 *.ps1    text eol=crlf

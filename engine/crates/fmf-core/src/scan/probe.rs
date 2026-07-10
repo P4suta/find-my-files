@@ -117,6 +117,10 @@ struct OvSlot {
     event: windows_sys::Win32::Foundation::HANDLE,
     ov: Box<windows_sys::Win32::System::IO::OVERLAPPED>,
     want: usize,
+    /// True while a read on this slot is outstanding (issued, not yet waited).
+    /// Drives the error-path drain: a slot's buffer must not be freed while the
+    /// kernel may still DMA into it.
+    issued: bool,
 }
 
 fn probe_nobuf_overlapped(
@@ -127,7 +131,7 @@ fn probe_nobuf_overlapped(
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
     use windows_sys::Win32::Storage::FileSystem::ReadFile;
-    use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::System::IO::{CancelIo, GetOverlappedResult, OVERLAPPED};
     use windows_sys::Win32::System::Threading::CreateEventW;
     const ERROR_IO_PENDING: u32 = 997;
 
@@ -144,6 +148,7 @@ fn probe_nobuf_overlapped(
                 event,
                 ov: Box::new(unsafe { std::mem::zeroed::<OVERLAPPED>() }),
                 want: 0,
+                issued: false,
             }
         })
         .collect();
@@ -176,6 +181,9 @@ fn probe_nobuf_overlapped(
         if ok == 0 && unsafe { GetLastError() } != ERROR_IO_PENDING {
             return Err(std::io::Error::last_os_error());
         }
+        // The read is now outstanding (pending or synchronously complete): its
+        // buffer must survive until the matching wait/drain.
+        slot.issued = true;
         Ok(())
     };
     let wait = |slot: &mut OvSlot| -> std::io::Result<u64> {
@@ -186,6 +194,8 @@ fn probe_nobuf_overlapped(
         if ok == 0 {
             return Err(std::io::Error::last_os_error());
         }
+        // Completed cleanly: the buffer is free to reuse/drop.
+        slot.issued = false;
         Ok(transferred as u64)
     };
 
@@ -206,6 +216,26 @@ fn probe_nobuf_overlapped(
         }
         Ok(total)
     })();
+    // Invariant: the AlignedBufs must outlive any I/O the kernel may still be
+    // writing into. On the error path some slots can still have reads
+    // outstanding, so cancel and drain each to completion *before* the buffers
+    // (or the file handle) can drop. GetOverlappedResult waits on `slot.event`,
+    // so the drain must run before the event handles are closed below.
+    if result.is_err() {
+        // Safety: `handle` is the open volume handle for this scope.
+        unsafe { CancelIo(handle) };
+        for s in &slots {
+            if s.issued {
+                let mut transferred = 0u32;
+                // Safety: the OVERLAPPED belongs to an issued read on `handle`;
+                // its event is still open. The status is intentionally ignored
+                // (ERROR_OPERATION_ABORTED is the expected post-cancel result).
+                let _ = unsafe {
+                    GetOverlappedResult(handle, &raw const *s.ov, &raw mut transferred, 1)
+                };
+            }
+        }
+    }
     for s in &slots {
         unsafe { CloseHandle(s.event) };
     }

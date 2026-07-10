@@ -14,7 +14,7 @@
 //! Release *bumping* is NOT here — release-please owns the version/tag/CHANGELOG.
 //! This subcommand only formats a build identity for the dev/nightly/stable lanes.
 
-use crate::{cmd, paths};
+use crate::{cmd, paths, semver};
 use anyhow::{bail, Context, Result};
 use std::fmt::Write as _;
 use std::fs;
@@ -43,6 +43,28 @@ pub fn run(channel: &str, date: Option<&str>) -> Result<()> {
     let base = workspace_base_version()?;
     let sha = git_short_sha();
     println!("{}", compute(&base, channel, date, sha.as_deref())?);
+    Ok(())
+}
+
+/// `xtask check-version <tag>`: hard-fail unless the release `tag` (`vX.Y.Z` or
+/// `X.Y.Z`) matches the committed `[workspace.package] version`. release.yml runs
+/// this on a publishing dispatch BEFORE signing/packaging, so a manual dispatch
+/// whose tag drifts from the code (the zip name, the build stamp, and the Release
+/// tag all come from that tag) is caught before it ships mislabeled artifacts.
+pub fn check_release_tag(tag: &str) -> Result<()> {
+    let committed = workspace_base_version()?;
+    tag_matches(tag, &committed)
+}
+
+/// Pure comparison behind [`check_release_tag`] — unit-tested without the FS.
+fn tag_matches(tag: &str, committed: &str) -> Result<()> {
+    let want = semver::strip_tag_v(tag);
+    if want != committed {
+        bail!(
+            "release tag '{tag}' (version {want}) does not match the committed \
+             workspace version {committed} in engine/Cargo.toml — bump one so they agree"
+        );
+    }
     Ok(())
 }
 
@@ -179,6 +201,20 @@ fn git_short_sha() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tag_matches_accepts_equal_versions() {
+        assert!(tag_matches("v0.1.0", "0.1.0").is_ok());
+        assert!(tag_matches("V0.1.0", "0.1.0").is_ok());
+        assert!(tag_matches("0.1.0", "0.1.0").is_ok());
+    }
+
+    #[test]
+    fn tag_matches_rejects_a_drifted_tag() {
+        assert!(tag_matches("v0.2.0", "0.1.0").is_err());
+        assert!(tag_matches("v0.1.1", "0.1.0").is_err());
+        assert!(tag_matches("v1.0.0", "0.1.0").is_err());
+    }
 
     #[test]
     fn stable_is_the_clean_base() {
