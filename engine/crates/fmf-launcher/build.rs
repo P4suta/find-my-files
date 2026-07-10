@@ -49,7 +49,11 @@ fn main() {
     res.set("OriginalFilename", "FindMyFiles.exe");
     res.set("LegalCopyright", "Apache-2.0");
     res.set("Comments", "https://github.com/P4suta/find-my-files");
-    // Numeric FIXEDFILEINFO version = X.Y.Z.0 (Win32 requires a.b.c.d digits).
+    // Invariant: the numeric FIXEDFILEINFO below and the string `ProductVersion`
+    // above share the SAME `X.Y.Z` base (CARGO_PKG_VERSION = the release-please
+    // workspace version). The numeric form is the clean base only (Win32 digits
+    // can't carry a channel/sha/.dirty); the string carries the full channel-aware
+    // identity. They never disagree on the base triple.
     if let Some(v) = numeric_version(env!("CARGO_PKG_VERSION")) {
         res.set_version_info(winresource::VersionInfo::FILEVERSION, v);
         res.set_version_info(winresource::VersionInfo::PRODUCTVERSION, v);
@@ -60,7 +64,10 @@ fn main() {
 }
 
 /// Channel-aware build version, mirroring `fmf-buildstamp/build.rs` precedence:
-/// `FMF_BUILD_VERSION` (CI authoritative) else the local `…-dev+g<sha>` default.
+/// `FMF_BUILD_VERSION` (CI authoritative) else the local `…-dev+g<sha>[.dirty]`
+/// default. The `.dirty` suffix sits next to the sha (never on the no-git path),
+/// byte-identical to what `fmf-buildstamp` stamps, so a dirty dev build reports
+/// the same version across the launcher, the binaries, and the bundle.
 fn resolve_version() -> String {
     if let Ok(forced) = std::env::var("FMF_BUILD_VERSION") {
         let forced = forced.trim();
@@ -70,7 +77,10 @@ fn resolve_version() -> String {
     }
     let base = env!("CARGO_PKG_VERSION");
     match git_short_sha() {
-        Some(sha) => format!("{base}-dev+g{sha}"),
+        Some(sha) => {
+            let dirty = if git_is_dirty() { ".dirty" } else { "" };
+            format!("{base}-dev+g{sha}{dirty}")
+        }
         None => format!("{base}-dev"),
     }
 }
@@ -85,6 +95,15 @@ fn git_short_sha() -> Option<String> {
     }
     let sha = String::from_utf8(out.stdout).ok()?.trim().to_owned();
     if sha.is_empty() { None } else { Some(sha) }
+}
+
+/// Best-effort dirty check (`git status --porcelain` prints one line per change),
+/// mirroring `fmf-buildstamp/build.rs` so the `.dirty` marker agrees across stampers.
+fn git_is_dirty() -> bool {
+    Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
 /// Pack an `X.Y.Z` base version into the u64 winresource expects for the numeric

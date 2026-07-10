@@ -118,10 +118,13 @@
     <InformationalVersion Condition="'$(FmfChannel)' == 'stable'">$(Version)</InformationalVersion>
   </PropertyGroup>
 
-  <!-- Resolve the 7-char git sha and stamp `+g<short7>` onto the non-stable
+  <!-- Resolve the 7-char git sha and stamp `+g<short7>[.dirty]` onto the non-stable
        InformationalVersion, just before the assembly-info attribute is generated.
        (The sha is only knowable at target-execution time, not property-evaluation
-       time.) git-absent → ContinueOnError leaves the static fallback in place. -->
+       time.) git-absent → ContinueOnError leaves the static fallback in place. The
+       `.dirty` marker sits next to the sha only (never on the git-absent fallback),
+       byte-identical to fmf-buildstamp / fmf-launcher / xtask so a dirty dev build
+       reports one version across the app, the binaries, and the bundle. -->
   <Target Name="FmfStampInformationalVersion"
           Condition="'$(FmfChannel)' != 'stable'"
           BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo">
@@ -132,8 +135,18 @@
           ContinueOnError="true">
       <Output TaskParameter="ConsoleOutput" PropertyName="FmfShortSha" />
     </Exec>
+    <!-- A non-empty porcelain status listing = the tree carries uncommitted
+         changes. Only meaningful alongside a sha, consumed under the same gate. -->
+    <Exec Command="git status --porcelain"
+          ConsoleToMSBuild="true"
+          StandardOutputImportance="low"
+          IgnoreExitCode="true"
+          ContinueOnError="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="FmfGitStatus" />
+    </Exec>
     <PropertyGroup Condition="'$(FmfShortSha)' != ''">
-      <InformationalVersion>$(Version)-$(FmfChannel)+g$(FmfShortSha.Trim())</InformationalVersion>
+      <FmfDirty Condition="'$(FmfGitStatus)' != ''">.dirty</FmfDirty>
+      <InformationalVersion>$(Version)-$(FmfChannel)+g$(FmfShortSha.Trim())$(FmfDirty)</InformationalVersion>
     </PropertyGroup>
   </Target>
 
