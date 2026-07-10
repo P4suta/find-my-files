@@ -379,7 +379,7 @@ Every anomaly always reaches 3 paths: **(1) the log file (2) the diag ring (=aut
 
 ## Latency Budget (breakdown of the change→on-screen ≤1s AC)
 
-USN batch commit ≤100ms + engine IndexChanged debounce 200ms (the only throttle) + UI re-query ≤100ms + render ≤100ms = **≤500ms** (2× margin). Do not place an additional throttle on the UI side.
+idle-edge USN discovery ≤250ms (the tail loop's non-blocking-read park; 0 on a busy volume, which never parks) + USN batch commit ≤100ms + engine IndexChanged debounce 200ms (the only event-rate throttle) + UI re-query ≤100ms + render ≤100ms = **≤750ms** worst case (≤500ms once the volume is active). Do not place an additional throttle on the UI side.
 
 Additional budget for the pipe path (**canonical here** — other docs' numbers reference this section): ResultPage 64-row round trip p99
 **≤5ms** (provisional — the loopback integration test asserts it, to be finalized by measurement). Continuously observed via F12's `PageRttEwma`.
