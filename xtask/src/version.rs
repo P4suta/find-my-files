@@ -130,8 +130,9 @@ pub fn render_buildinfo(full: &str, commit_date: Option<&str>) -> String {
 
 /// Resolve the build version to stamp into the bundle's `BUILDINFO.txt`, with the
 /// SAME precedence the fmf-buildstamp build.rs uses for the binaries: the CI
-/// `FMF_BUILD_VERSION` verbatim, else the local `…-dev+g<sha>` default. Keeps the
-/// in-file label identical to what the shipped binaries report.
+/// `FMF_BUILD_VERSION` verbatim, else the local `…-dev+g<sha>[.dirty]` default.
+/// Keeps the in-file label identical to what the shipped binaries report — a local
+/// dirty `just publish` must not have the exes say `.dirty` while BUILDINFO omits it.
 pub fn resolve_bundle_version() -> Result<String> {
     if let Ok(forced) = std::env::var("FMF_BUILD_VERSION") {
         let forced = forced.trim();
@@ -140,7 +141,29 @@ pub fn resolve_bundle_version() -> Result<String> {
         }
     }
     let base = workspace_base_version()?;
-    compute(&base, Channel::Dev, None, git_short_sha().as_deref())
+    let full = compute(&base, Channel::Dev, None, git_short_sha().as_deref())?;
+    Ok(append_dirty(&full, git_tree_is_dirty()))
+}
+
+/// Append the `.dirty` build-metadata marker when the working tree carries
+/// uncommitted changes — but only next to a real sha (`full` already ends in the
+/// `+g<sha>` metadata a dirty marker attaches to). A version with no git metadata
+/// is left untouched, mirroring the `Some(sha)`-only placement in the
+/// fmf-buildstamp / fmf-launcher build.rs, so the marker never lands on a bare
+/// `…-dev`. Pure: the caller supplies the dirtiness so this stays git/FS-free.
+fn append_dirty(full: &str, dirty: bool) -> String {
+    if dirty && full.contains("+g") {
+        format!("{full}.dirty")
+    } else {
+        full.to_owned()
+    }
+}
+
+/// `git status --porcelain` prints one line per uncommitted change; a non-empty
+/// result means the tree is dirty. Best-effort (git absent → treated as clean).
+fn git_tree_is_dirty() -> bool {
+    cmd::capture(&paths::repo_root(), "git", &["status", "--porcelain"])
+        .is_some_and(|s| !s.is_empty())
 }
 
 /// `git show -s --format=%cs HEAD` — the HEAD commit date (`YYYY-MM-DD`). Used for
@@ -254,6 +277,46 @@ mod tests {
         let id = parse_identity("0.1.0-dev+gabc1234.dirty");
         assert_eq!(id.channel, "dev");
         assert_eq!(id.commit.as_deref(), Some("abc1234.dirty"));
+    }
+
+    #[test]
+    fn append_dirty_marks_only_next_to_a_sha() {
+        // Dirty dev build with a sha → the agreed `.dirty` marker, byte-identical
+        // to what fmf-buildstamp / fmf-launcher / the C# target now stamp.
+        assert_eq!(
+            append_dirty("0.1.0-dev+gabc1234", true),
+            "0.1.0-dev+gabc1234.dirty"
+        );
+        // Clean tree → untouched.
+        assert_eq!(
+            append_dirty("0.1.0-dev+gabc1234", false),
+            "0.1.0-dev+gabc1234"
+        );
+        // No git metadata → never `…-dev.dirty`, even when dirty (mirrors the
+        // `Some(sha)`-only append in the build.rs stampers).
+        assert_eq!(append_dirty("0.1.0-dev", true), "0.1.0-dev");
+    }
+
+    #[test]
+    fn dirty_dev_version_round_trips_through_parse_identity() {
+        // The full contract: the string the four stampers agree on must decode
+        // back to a dev build whose commit carries the `.dirty` marker.
+        let full = append_dirty("0.1.0-dev+gabc1234", true);
+        let id = parse_identity(&full);
+        assert_eq!(id.channel, "dev");
+        assert_eq!(id.commit.as_deref(), Some("abc1234.dirty"));
+        assert_eq!(id.date, None);
+    }
+
+    #[test]
+    fn buildinfo_dirty_dev_carries_dirty_commit_line() {
+        // A dirty local `just publish` stamps BUILDINFO's commit line with the same
+        // `.dirty` marker the exes report — the version never disagrees.
+        let full = append_dirty("0.1.0-dev+gabc1234", true);
+        let body = render_buildinfo(&full, Some("2026-07-11"));
+        assert!(body.contains("version:  0.1.0-dev+gabc1234.dirty\n"));
+        assert!(body.contains("channel:  dev\n"));
+        assert!(body.contains("commit:   abc1234.dirty\n"));
     }
 
     #[test]

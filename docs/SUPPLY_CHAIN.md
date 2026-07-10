@@ -94,5 +94,7 @@ which fires only when publishing. The `sign` job pauses for approval (the `relea
 - For lock file updates, Dependabot's nuget PR regenerates `packages.lock.json`. After adding a version locally,
   run `dotnet restore` (both csproj) → commit. The floating `4.*` of `Roslynator.Analyzers` is pinned to the
   resolved version by the lock file, so on bump the lock file must be regenerated (= the intended determinism).
-- Optional future extension: `Microsoft.SourceLink.GitHub` (makes PDBs traceable to commits). Deferred because it
-  adds dependency surface. Consider adding it if there is debugging demand for distributed PDBs.
+- **Source Link is enabled** (no `PackageReference` needed — the .NET 10 SDK has it built in, auto-referenced from
+  the git remote via `PublishRepositoryUrl` + `EmbedUntrackedSources`). It stamps the shipped PE/PDB with the exact
+  commit and a GitHub source map, so a stack trace or debugger against a released build resolves to the precise
+  source on github.com — pairing with the release provenance/SBOM attestations.
