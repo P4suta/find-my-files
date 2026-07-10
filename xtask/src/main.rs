@@ -61,6 +61,13 @@ enum Commands {
         /// The release tag, e.g. v0.2.0 (a leading 'v' is optional). Omit for nightly.
         tag: Option<String>,
     },
+    /// Verify a release tag (vX.Y.Z) matches the committed workspace version —
+    /// the manual-dispatch guard release.yml runs before signing/packaging so a
+    /// drifted tag can't ship mislabeled artifacts.
+    CheckVersion {
+        /// The release tag, e.g. v0.2.0 (a leading 'v' is optional).
+        tag: String,
+    },
     /// Sweep leftover test fixtures (engine/target/test-tmp).
     CleanTemp,
     /// Stage the bundle's first-party PEs into a flat dir for the release
@@ -85,6 +92,7 @@ fn main() -> Result<()> {
         Commands::Version { channel, date } => version::run(&channel, date.as_deref()),
         Commands::Publish { skip_rust } => publish::run(skip_rust),
         Commands::Package { tag } => package::run(tag.as_deref()),
+        Commands::CheckVersion { tag } => version::check_release_tag(&tag),
         Commands::CleanTemp => {
             clean::run();
             Ok(())

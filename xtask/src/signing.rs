@@ -67,6 +67,22 @@ pub fn run_stage() -> Result<()> {
     Ok(())
 }
 
+/// The body of the committed signed-PE manifest: the bundle-relative `src` path
+/// of every first-party PE (the `verify-signatures` action checks exactly these),
+/// one per line with a trailing newline. Derived from [`FIRST_PARTY_PES`] so the
+/// action never keeps its own copy of the list; the committed file is kept in
+/// lockstep by `tests::manifest_matches_committed`. Test-only: the committed file
+/// is what ships/gets consumed, this just regenerates + pins it.
+#[cfg(test)]
+fn manifest_body() -> String {
+    let mut body = String::new();
+    for (src, _) in FIRST_PARTY_PES {
+        body.push_str(src);
+        body.push('\n');
+    }
+    body
+}
+
 /// `xtask sign-collect`: copy the signed PEs back into the bundle.
 pub fn run_collect() -> Result<()> {
     let dist = paths::dist_dir();
@@ -174,5 +190,28 @@ mod tests {
         assert!(stage(&dist, &base.join("sign-stage")).is_err());
 
         fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    /// The committed manifest the `verify-signatures` action reads must stay in
+    /// lockstep with `FIRST_PARTY_PES` — a drift here means the action verifies
+    /// the wrong set of files. Regenerate with `FMF_BLESS=1` (the same ritual the
+    /// contract golden uses). Read is EOL-normalized so a CRLF checkout still
+    /// compares equal to the LF `manifest_body`.
+    #[test]
+    fn manifest_matches_committed() {
+        let path = paths::signed_pe_manifest();
+        let want = manifest_body();
+        if std::env::var("FMF_BLESS").as_deref() == Ok("1") {
+            fs::write(&path, &want).unwrap_or_else(|e| panic!("bless {}: {e}", path.display()));
+            return;
+        }
+        let got =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert_eq!(
+            got.replace("\r\n", "\n"),
+            want,
+            "{} drifted from FIRST_PARTY_PES — regenerate with FMF_BLESS=1",
+            path.display()
+        );
     }
 }

@@ -40,7 +40,16 @@ runs:
             Sort-Object FullName | Select-Object -Last 1
         }
         if (-not $signtool) { throw "signtool.exe not found under the Windows SDK" }
-        $targets = 'FindMyFiles.exe', 'app/FindMyFiles.exe', 'app/fmf.exe', 'app/fmf-service.exe', 'app/fmf_engine.dll'
+        # The list of first-party PEs to verify is single-sourced from xtask
+        # (publish::FIRST_PARTY_PES) into the committed manifest beside this
+        # action, so it never drifts from what `sign-stage` actually signs. Read
+        # it verbatim (one bundle-relative path per line; blanks tolerated).
+        $manifest = Join-Path $env:GITHUB_ACTION_PATH 'first-party-pes.txt'
+        if (-not (Test-Path $manifest)) { throw "signed-PE manifest not found at $manifest" }
+        $targets = @(Get-Content $manifest | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+        # Fail closed on an empty/blank manifest: verifying zero files would pass
+        # vacuously and let an unsigned bundle through — the exact hole this gate exists to close.
+        if ($targets.Count -eq 0) { throw "signed-PE manifest $manifest is empty - refusing to verify zero files" }
         foreach ($f in $targets) {
           $p = "$env:BUNDLE_DIR/$f"
           & $signtool.FullName verify /pa /tw $p

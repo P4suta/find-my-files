@@ -48,7 +48,7 @@ pub fn run(tag: Option<&str>) -> Result<()> {
     }
 
     let pkg = paths::package_dir();
-    fs::create_dir_all(&pkg).with_context(|| format!("create {}", pkg.display()))?;
+    prepare_package_dir(&pkg)?;
 
     let zip_name = format!("find-my-files-{label}-win-x64.zip");
     let zip_path = pkg.join(&zip_name);
@@ -84,6 +84,17 @@ pub fn run(tag: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Start from an empty package dir. The SHA256SUMS.txt body and the release
+/// upload glob (`build/package/find-my-files-*-win-x64.zip`) are both driven by
+/// whatever files sit here, so a stale zip from an earlier version would linger
+/// into the checksums file and could be re-attached to a release. CI runs on a
+/// fresh runner where the wipe is a no-op; locally it closes the footgun.
+fn prepare_package_dir(pkg: &Path) -> Result<()> {
+    fsx::force_remove_dir_all(pkg).with_context(|| format!("clean {}", pkg.display()))?;
+    fs::create_dir_all(pkg).with_context(|| format!("create {}", pkg.display()))?;
+    Ok(())
+}
+
 /// Zip the *contents* of `dist` (entries land at the zip root, matching
 /// `Compress-Archive -Path dist/FindMyFiles/*`).
 fn write_zip(dist: &Path, zip_path: &Path) -> Result<()> {
@@ -103,4 +114,50 @@ fn write_zip(dist: &Path, zip_path: &Path) -> Result<()> {
     }
     zw.finish().context("finalize zip")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("xtask-package-{tag}-{}", std::process::id()))
+    }
+
+    /// A stale zip from an earlier version must not survive into the next
+    /// packaging run (else it lands in SHA256SUMS.txt and the release glob).
+    #[test]
+    fn prepare_package_dir_clears_stale_artifacts() {
+        let pkg = scratch("prepare");
+        let _ = fsx::force_remove_dir_all(&pkg);
+        fs::create_dir_all(&pkg).unwrap();
+        let stale = pkg.join("find-my-files-v0.0.1-win-x64.zip");
+        fs::write(&stale, b"old").unwrap();
+
+        prepare_package_dir(&pkg).unwrap();
+
+        assert!(pkg.is_dir(), "package dir should exist after prepare");
+        assert!(!stale.exists(), "stale artifact should be gone");
+        assert_eq!(
+            fs::read_dir(&pkg).unwrap().count(),
+            0,
+            "package dir should be empty"
+        );
+
+        fsx::force_remove_dir_all(&pkg).unwrap();
+    }
+
+    /// Preparing a not-yet-existing package dir just creates it (the fresh-runner
+    /// path) — a missing dir is not an error.
+    #[test]
+    fn prepare_package_dir_creates_when_absent() {
+        let pkg = scratch("absent");
+        let _ = fsx::force_remove_dir_all(&pkg);
+
+        prepare_package_dir(&pkg).unwrap();
+
+        assert!(pkg.is_dir(), "package dir should be created");
+
+        fsx::force_remove_dir_all(&pkg).unwrap();
+    }
 }
