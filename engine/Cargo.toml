@@ -183,6 +183,21 @@ panic = "unwind"
 # CI/dev). Revisit trigger: this Cargo stabilizes `trim-paths` → set it here.
 # (Local dev builds do embed the developer's username; official dist is CI-only.)
 
+# Attacker-facing boundary crates keep integer-overflow checks in release
+# (issue #137 S-3): frame/message-decode arithmetic panics loudly (contained
+# by the catch_unwind boundaries → FMF_E_PANIC) instead of silently wrapping.
+# None of these crates sit on the query hot path, so the cost is ~0. fmf-core
+# stays unchecked in release — measured +27% p50 on single-char queries with a
+# p99 past the 50 ms acceptance line (#137) — its coverage is the
+# overflow-checked dev/test/fuzz profiles plus explicit checked arithmetic at
+# trust boundaries; full-core re-measurement on a quiet machine is #152.
+[profile.release.package.fmf-proto]
+overflow-checks = true
+[profile.release.package.fmf-service]
+overflow-checks = true
+[profile.release.package.fmf-contract]
+overflow-checks = true
+
 # Profiling builds (just profile): identical machine code to release — only
 # the debuginfo is upgraded to full so samply resolves inlined frames.
 [profile.profiling]
