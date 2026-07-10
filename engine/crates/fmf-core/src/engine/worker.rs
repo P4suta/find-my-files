@@ -22,8 +22,10 @@ use super::volume::{JournalCheckpoint, VolumeSlot, WorkerKind};
 use super::watch::WatcherJournalSource;
 use super::{Engine, EngineEvent, VolumeState};
 
-/// Engine-side debounce for `IndexChanged` — the only throttle in the whole
-/// change path (docs/ARCHITECTURE.md latency budget).
+/// Engine-side debounce for `IndexChanged` — the only event-rate throttle in
+/// the whole change path (the tail loop's ≤250ms idle-edge read park is a
+/// discovery-latency floor, not a rate throttle; docs/ARCHITECTURE.md latency
+/// budget).
 const INDEX_CHANGED_DEBOUNCE: Duration = Duration::from_millis(200);
 
 /// How the worker establishes a volume's index at the top of its loop.

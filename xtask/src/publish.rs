@@ -76,11 +76,21 @@ pub fn run(skip_rust: bool) -> Result<()> {
     let dist = paths::dist_dir();
     let app = paths::app_dir();
 
-    // Clean the whole stale bundle (launcher + README + app/ payload). Best-
-    // effort by design: a leftover bundle can be locked by a running app, and
-    // `dotnet publish` overwrites anyway — the self-verify at the end is the
-    // real gate. We warn rather than fail (the old recipe swallowed this).
+    // Clean the whole stale bundle (launcher + README + app/ payload). Under CI
+    // a fresh runner always cleans cleanly, so a failure there signals a real
+    // problem (a stale lock / leftover we must not silently publish over) — fail
+    // closed. Locally it stays best-effort: a running app can legitimately lock
+    // the old bundle and `dotnet publish` overwrites anyway (the self-verify at
+    // the end is the real gate), so we warn rather than fail as the old recipe did.
     if let Err(e) = fsx::force_remove_dir_all(&dist) {
+        if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+            return Err(e).with_context(|| {
+                format!(
+                    "clean {} — refusing to publish over leftovers under CI",
+                    dist.display()
+                )
+            });
+        }
         eprintln!(
             "warning: could not fully clean {} ({e}); publishing over the leftovers",
             dist.display()
@@ -117,6 +127,7 @@ pub fn run(skip_rust: bool) -> Result<()> {
 
     prune_locales(&app)?;
     prune_publish_artifacts(&app)?;
+    build_engine_bins_if_needed(skip_rust)?;
     copy_engine_bins(&app)?;
     verify_bundle(&app)?;
     place_launcher_and_readme(&dist)?;
@@ -168,6 +179,29 @@ fn prune_publish_artifacts(app: &Path) -> Result<()> {
     }
     println!("publish: pruned {removed} unused artifact(s) from app/");
     Ok(())
+}
+
+/// Build the standalone engine binaries when the caller did NOT prebuild them.
+///
+/// With `skip_rust=false` the only Rust that ran is the csproj's `BuildRustEngine`
+/// target, which builds `-p fmf-ffi` for `fmf_engine.dll` alone — NOT the engine
+/// exes (`fmf-service.exe` / `fmf.exe`) or the launcher. Without this, running
+/// `just publish-app` on its own (its default is `skip_rust=false`) would sail
+/// through `dotnet publish` and then bail in `copy_engine_bins` on the absent
+/// exes. Build the whole engine workspace (same as `just build`) so those, and
+/// the launcher `place_launcher_and_readme` copies, all exist.
+///
+/// CI passes `skip_rust=true` (it prebuilds + downloads the bins into
+/// `build/engine/release/`), so this is inert on the shipping path — it only
+/// smooths the local single-recipe invocation.
+fn build_engine_bins_if_needed(skip_rust: bool) -> Result<()> {
+    if skip_rust {
+        return Ok(());
+    }
+    // Run from engine/ (not `--manifest-path`) so its `.cargo/config.toml`
+    // redirects the target dir under build/engine (ADR-0021), matching
+    // `paths::engine_release_dir()` that the copy/launcher steps read from.
+    cmd::run(&paths::engine_dir(), "cargo", &["build", "--release"])
 }
 
 fn copy_engine_bins(app: &Path) -> Result<()> {
