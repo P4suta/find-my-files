@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.0](https://github.com/P4suta/find-my-files/compare/v0.1.1...v0.2.0) (2026-07-21)
+
+
+### Features
+
+* **engine:** enable Control Flow Guard on all engine binaries ([#151](https://github.com/P4suta/find-my-files/issues/151)) ([fe83a66](https://github.com/P4suta/find-my-files/commit/fe83a660126caefed5ceb6a9ed734d19ed0ba15b))
+* **engine:** keep overflow checks on in release for the boundary crates ([#153](https://github.com/P4suta/find-my-files/issues/153)) ([ff5814f](https://github.com/P4suta/find-my-files/commit/ff5814f4425af87d82dfd9b3a657c99a320a0df4))
+
+
+### Bug Fixes
+
+* **app:** log successful pipe reconnects and localize the page-fetch failure notice ([#145](https://github.com/P4suta/find-my-files/issues/145)) ([56f2e1b](https://github.com/P4suta/find-my-files/commit/56f2e1bc53508291e2374e071a21b1b3afa6e43e))
+* **deps:** bump crossbeam-epoch to 0.9.20 (RUSTSEC-2026-0204) ([#154](https://github.com/P4suta/find-my-files/issues/154)) ([0b7bdb7](https://github.com/P4suta/find-my-files/commit/0b7bdb7c01ff18a97127d46e77c91d93c15af8a0))
+* **engine:** bound USN tail reads so service stop cannot hang on a quiet volume ([#143](https://github.com/P4suta/find-my-files/issues/143)) ([e2c63ca](https://github.com/P4suta/find-my-files/commit/e2c63caa78fa5f98273f759c02160e2c9a58dc90))
+* honour space-form --data-dir and drain in-flight io-probe reads on error ([#144](https://github.com/P4suta/find-my-files/issues/144)) ([f8252e7](https://github.com/P4suta/find-my-files/commit/f8252e7a601bb8e0a9c5acc1f2feffa4386b0e43))
+* **publish:** ship LICENSE and third-party notices in the bundle ([#147](https://github.com/P4suta/find-my-files/issues/147)) ([0cef8c9](https://github.com/P4suta/find-my-files/commit/0cef8c97c9bdc8b7b29904034bec4c65fc24a2e8))
+* ship self-contained bundle (embed .NET runtime, not framework-dependent) ([#138](https://github.com/P4suta/find-my-files/issues/138)) ([b550655](https://github.com/P4suta/find-my-files/commit/b550655b0f055d169693d6e3ec9e79717485ce09))
+* **version:** align .dirty stamping across stampers and correct the README status ([#148](https://github.com/P4suta/find-my-files/issues/148)) ([e63841f](https://github.com/P4suta/find-my-files/commit/e63841f8095e345110909e685a10ed83ce118534))
+
 ## [0.1.1](https://github.com/P4suta/find-my-files/compare/v0.1.0...v0.1.1) (2026-06-30)
 
 
