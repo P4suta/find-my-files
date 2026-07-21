@@ -120,7 +120,7 @@ jobs:
 
       # Provisions the pinned toolchain (rust / dotnet / just) from mise.toml so
       # the shipped artifact is built on the exact pins.
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           install: true
 
@@ -293,7 +293,7 @@ jobs:
         with:
           ref: ${{ env.REF }}
 
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           install: true
 
@@ -341,13 +341,13 @@ jobs:
             build/package/SHA256SUMS.txt
 
       - name: Attest Rust SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: build/package/find-my-files-*-win-x64.zip
           sbom-path: build/sbom/fmf-engine.cdx.json
 
       - name: Attest C# SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: build/package/find-my-files-*-win-x64.zip
           sbom-path: build/sbom/app.cdx.json
@@ -359,7 +359,7 @@ jobs:
       # vX.Y.Z tag. `draft` is intentionally omitted so the action publishes after
       # upload; the notes are release-please's, so we don't regenerate them.
       - name: Publish the draft release with the signed assets
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ env.TAG }}
           files: |
