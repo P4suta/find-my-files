@@ -1,4 +1,4 @@
-* text=auto
+* text=auto eol=lf
 
 *.rs    text eol=lf
 *.toml  text eol=lf
@@ -12,12 +12,6 @@ justfile text eol=lf
 # so the working tree matches the committed bytes on every platform.
 .github/actions/verify-signatures/first-party-pes.txt text eol=lf
 
-*.cs     text eol=crlf
-*.xaml   text eol=crlf
-*.ps1    text eol=crlf
-*.sln    text eol=crlf
-*.csproj text eol=crlf
-*.manifest text eol=crlf
 
 *.png binary
 *.ico binary
@@ -29,3 +23,6 @@ justfile text eol=lf
 # Without this, a checkout smudges the JSON goldens to CRLF and the pins
 # break (the .bin files only survived via the binary heuristic above).
 contract/golden/** -text
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
