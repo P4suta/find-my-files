@@ -75,15 +75,16 @@ jobs:
       # Lint the workflow YAML itself: syntax, ${{ }} expression types, and
       # shellcheck over run: blocks. Catches workflow errors before a release run.
       - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
-      - name: Audit GitHub Actions security
-        uses: zizmorcore/zizmor-action@6fc4b006235f201fdab3722e17240ab420d580e5 # v0.6.1
+      # The repository intentionally allowlists a small set of setup actions.
+      # Install the repository-pinned zizmor binary through the already-allowed
+      # mise action instead of widening that policy for a second setup wrapper.
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
-          version: 1.28.0
-          online-audits: false
-          persona: auditor
-          min-severity: low
-          advanced-security: false
-          annotations: true
+          install: false
+      - name: Audit GitHub Actions security
+        run: |
+          mise install github:zizmorcore/zizmor
+          mise exec github:zizmorcore/zizmor -- zizmor --offline --persona auditor --min-severity low .
       - uses: crate-ci/typos@bee27e3a4fd1ea2111cf90ab89cd076c870fce14 # v1.47.2 (reads root _typos.toml)
       - uses: uncenter/setup-taplo@b18c8c8302695fe63d6853bc004006215ac52b91 # v2
         with:
@@ -266,9 +267,13 @@ jobs:
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           dotnet-version: 10.0.302
-      - uses: microsoft/setup-WinAppCli@cc8ea9a08b3ee3db43d5aa6bddda4a0e87d800f7 # v0.1
+      # Keep the GitHub Actions allowlist narrow: WinAppCli is already pinned in
+      # mise.toml and is provisioned through the allowlisted mise setup action.
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
-          version: v0.3.1
+          install: false
+      - name: Install pinned WinAppCli
+        run: mise install node "npm:@microsoft/winappcli"
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           # just: the publish recipe. cargo-about: publish generates the bundle's
