@@ -5,11 +5,15 @@
 //! stays identical before and after release signing and can be embedded into
 //! the app before both files are signed.
 
-use anyhow::{bail, Context, Result};
-use sha2::{Digest, Sha256};
-use std::fmt::Write as _;
+use anyhow::{bail, Result};
 use std::path::Path;
 
+#[cfg(windows)]
+use anyhow::Context;
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
+#[cfg(windows)]
+use std::fmt::Write as _;
 #[cfg(windows)]
 use std::fs::File;
 #[cfg(windows)]
@@ -17,6 +21,7 @@ use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]
 use std::sync::Mutex;
 
+#[cfg(windows)]
 const DIGEST_LEVEL_ALL: u32 = 0x01 | 0x02 | 0x04;
 
 #[cfg(windows)]

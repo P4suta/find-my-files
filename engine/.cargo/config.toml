@@ -8,6 +8,7 @@
 # <repo>/build/engine. NOT a toolchain pin — toolchains stay in mise.toml.
 [build]
 target-dir = "../build/engine"
+
 # Control Flow Guard on every engine binary (issue #137 S-1): fmf-service runs
 # as LocalSystem parsing attacker-influenceable MFT/USN bytes, so CFG is
 # defense-in-depth for the unsafe/FFI surface. Measured cost (interleaved A/B,
@@ -21,4 +22,5 @@ target-dir = "../build/engine"
 # service is elevated from an extracted bundle whose static DLL imports are
 # restricted to System32; it must not require a separately installed VC
 # Redistributable (or fall back to an adjacent, user-writable VCRUNTIME DLL).
+[target.'cfg(all(windows, target_env = "msvc"))']
 rustflags = ["-C", "control-flow-guard", "-C", "target-feature=+crt-static"]
