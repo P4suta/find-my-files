@@ -8,6 +8,7 @@
 //! `folder:`.
 
 mod ast;
+mod cancellation;
 mod compile;
 pub(crate) mod dates;
 mod exec;
@@ -17,6 +18,8 @@ mod subsume;
 mod sweep;
 
 pub use ast::{Ast, ParseError, Term, parse};
+pub use cancellation::QueryCancellation;
+pub(crate) use cancellation::QueryCancelled;
 pub use compile::{CaseMode, CompileError, CompiledQuery, compile, compile_whole_regex};
 #[cfg(windows)]
 pub use dates::WindowsLocalResolver;

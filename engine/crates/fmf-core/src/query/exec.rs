@@ -9,12 +9,11 @@
 
 use rayon::prelude::*;
 
-use super::QueryOptions;
 use super::compile::{CompiledGroup, CompiledQuery, Driver};
 use super::matchers::{EvalCtx, terms_match, terms_match_iter};
 use super::memo::{DirTopology, MtimePerm, PathMemos, SizePerm};
 use super::sweep::{driver_candidates_cancellable, name_id_in_set};
-use crate::engine::{EngineError, QueryCancellation};
+use super::{QueryCancellation, QueryCancelled, QueryOptions};
 use crate::index::{EntryId, SortKey, VolumeIndex};
 
 /// Build (or incrementally extend) the compact directory topology only when
@@ -24,7 +23,7 @@ fn path_memos(
     idx: &VolumeIndex,
     q: &CompiledQuery,
     cancellation: &QueryCancellation,
-) -> Result<PathMemos, EngineError> {
+) -> Result<PathMemos, QueryCancelled> {
     let topology = (q.needs_folded_paths || q.needs_orig_paths)
         .then(|| {
             idx.cached_derived_or_try_update(|prev| match prev {
@@ -88,7 +87,7 @@ pub fn search_cancellable(
     q: &CompiledQuery,
     opt: &QueryOptions,
     cancellation: &QueryCancellation,
-) -> Result<(SearchResult, SearchMetrics), EngineError> {
+) -> Result<(SearchResult, SearchMetrics), QueryCancelled> {
     cancellation.check()?;
     // `driver` is filled in per branch below: the empty-query fast path labels
     // itself "perm-walk", so computing `q.driver_label()` (a Vec + String) up
@@ -129,7 +128,7 @@ pub fn search_cancellable(
     let sets: Vec<Option<Vec<u64>>> = q
         .groups
         .iter()
-        .map(|g| -> Result<_, EngineError> {
+        .map(|g| -> Result<_, QueryCancelled> {
             Ok(match g.driver {
                 Driver::MatchAll | Driver::FullScan => None,
                 _ => Some(driver_candidates_cancellable(idx, &g.driver, cancellation)?),
@@ -206,7 +205,7 @@ pub fn refine_cancellable(
     opt: &QueryOptions,
     prev_ids: &[EntryId],
     cancellation: &QueryCancellation,
-) -> Result<(SearchResult, SearchMetrics), EngineError> {
+) -> Result<(SearchResult, SearchMetrics), QueryCancelled> {
     const REFINE_CHUNK: usize = 4096;
     cancellation.check()?;
     let mut metrics = SearchMetrics {
@@ -221,7 +220,7 @@ pub fn refine_cancellable(
 
     let chunks: Vec<Vec<EntryId>> = prev_ids
         .par_chunks(REFINE_CHUNK)
-        .map(|chunk| -> Result<_, EngineError> {
+        .map(|chunk| -> Result<_, QueryCancelled> {
             cancellation.check()?;
             let mut ctx = EvalCtx::default();
             let mut out = Vec::new();
@@ -299,7 +298,7 @@ fn materialize_filtered(
     opt: &QueryOptions,
     cancellation: &QueryCancellation,
     keep: impl Fn(&mut EvalCtx, EntryId) -> bool + Sync,
-) -> Result<Vec<EntryId>, EngineError> {
+) -> Result<Vec<EntryId>, QueryCancelled> {
     // Fine-grained chunks: at 2^17 a 1M-entry walk only fans out 8 ways and
     // the walk becomes the latency floor for every query.
     const MAT_CHUNK: usize = 1 << 14;
@@ -319,7 +318,7 @@ fn materialize_filtered(
     };
     let chunks: Vec<Vec<EntryId>> = perm
         .par_chunks(MAT_CHUNK)
-        .map(|chunk| -> Result<_, EngineError> {
+        .map(|chunk| -> Result<_, QueryCancelled> {
             cancellation.check()?;
             let mut ctx = EvalCtx::default();
             let mut out = Vec::new();

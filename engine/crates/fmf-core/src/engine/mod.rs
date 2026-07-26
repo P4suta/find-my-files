@@ -17,6 +17,7 @@ mod tests;
 #[cfg(all(test, windows))]
 mod worker_tests;
 
+pub use crate::query::QueryCancellation;
 pub use results::{ResultSet, Row};
 
 use std::path::PathBuf;
@@ -48,50 +49,6 @@ pub struct EngineConfig {
 // VolumeStatusWire.state carry it as u32) — the engine uses the canonical
 // definition directly, so no wire↔engine mapping exists (ADR-0018).
 pub use fmf_contract::options::VolumeState;
-
-/// Cloneable cooperative-cancellation state for one query.
-///
-/// This is deliberately execution state rather than an architecture seam:
-/// every clone observes the same monotonic false→true transition, and
-/// cancelling is idempotent.
-#[derive(Clone, Debug, Default)]
-pub struct QueryCancellation {
-    cancelled: Arc<AtomicBool>,
-}
-
-impl QueryCancellation {
-    /// Create a live query cancellation token.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Request cancellation. The transition is monotonic and idempotent.
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-    }
-
-    /// Whether cancellation has been requested.
-    #[must_use]
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-    }
-
-    /// Whether two values refer to the same query lifecycle.
-    #[must_use]
-    pub fn is_same_query(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.cancelled, &other.cancelled)
-    }
-
-    /// Return the canonical cancellation error when cancellation won.
-    pub(crate) fn check(&self) -> Result<(), EngineError> {
-        if self.is_cancelled() {
-            Err(EngineError::Cancelled)
-        } else {
-            Ok(())
-        }
-    }
-}
 
 /// Asynchronous notification a volume emits to the event sink during scanning
 /// and tailing (mapped 1:1 to a contract POD by [`EngineEvent::to_wire`]).
@@ -225,6 +182,12 @@ pub enum EngineError {
     /// A corrupt parent graph prevented reconstruction of a result path.
     #[error("result path: {0}")]
     Path(#[from] crate::index::PathBuildError),
+}
+
+impl From<query::QueryCancelled> for EngineError {
+    fn from(_: query::QueryCancelled) -> Self {
+        Self::Cancelled
+    }
 }
 
 /// Why `Engine::new` refused to start. `Locked` is the cross-process arm of

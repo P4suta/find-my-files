@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 
 use super::compile::Driver;
-use crate::engine::{EngineError, QueryCancellation};
+use super::{QueryCancellation, QueryCancelled};
 use crate::index::VolumeIndex;
 
 // ── Drivers ─────────────────────────────────────────────────────────────
@@ -28,7 +28,7 @@ fn sweep_range<F, A>(
     cancellation: &QueryCancellation,
     mut find: F,
     mut anchor: A,
-) -> Result<(), EngineError>
+) -> Result<(), QueryCancelled>
 where
     F: FnMut(&[u8]) -> Option<usize>,
     A: FnMut(usize, usize, usize) -> bool,
@@ -80,7 +80,7 @@ pub(super) fn driver_candidates_cancellable(
     idx: &VolumeIndex,
     driver: &Driver,
     cancellation: &QueryCancellation,
-) -> Result<Vec<u64>, EngineError> {
+) -> Result<Vec<u64>, QueryCancelled> {
     cancellation.check()?;
     // The folded dictionary is the only contiguous pool; case-exact drivers
     // sweep it with a folded needle (superset — original-case match implies
@@ -105,7 +105,7 @@ pub(super) fn driver_candidates_cancellable(
     // never overlap — concatenate, then flip the bits once.
     let matched: Vec<Vec<u32>> = ranges
         .into_par_iter()
-        .map(|(ks, ke)| -> Result<_, EngineError> {
+        .map(|(ks, ke)| -> Result<_, QueryCancelled> {
             cancellation.check()?;
             let pool_start = dict_off[ks] as usize;
             let pool_end = if ke < count {

@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 
-use crate::engine::{EngineError, QueryCancellation};
+use super::{QueryCancellation, QueryCancelled};
 use crate::index::{EntryId, SortKey, VolumeIndex};
 
 // ── Lazy sort permutations (generation-cached) ──────────────────────────
@@ -35,7 +35,7 @@ impl SizePerm {
     pub(super) fn get_cancellable(
         idx: &VolumeIndex,
         cancellation: &QueryCancellation,
-    ) -> Result<std::sync::Arc<Self>, EngineError> {
+    ) -> Result<std::sync::Arc<Self>, QueryCancelled> {
         idx.cached_derived_or_try_update(|prev| {
             Ok(match prev {
                 Some(p) => Self(SortPerm::extend_cancellable(
@@ -58,7 +58,7 @@ impl MtimePerm {
     pub(super) fn get_cancellable(
         idx: &VolumeIndex,
         cancellation: &QueryCancellation,
-    ) -> Result<std::sync::Arc<Self>, EngineError> {
+    ) -> Result<std::sync::Arc<Self>, QueryCancelled> {
         idx.cached_derived_or_try_update(|prev| {
             Ok(match prev {
                 Some(p) => Self(SortPerm::extend_cancellable(
@@ -111,7 +111,7 @@ impl SortPerm {
         idx: &VolumeIndex,
         key: SortKey,
         cancellation: &QueryCancellation,
-    ) -> Result<Self, EngineError> {
+    ) -> Result<Self, QueryCancelled> {
         let ids = cancellable_sort((0..idx.len() as u32).collect(), idx, key, cancellation)?;
         Ok(Self {
             ids,
@@ -130,7 +130,7 @@ impl SortPerm {
         mut perm: Self,
         key: SortKey,
         cancellation: &QueryCancellation,
-    ) -> Result<Self, EngineError> {
+    ) -> Result<Self, QueryCancelled> {
         cancellation.check()?;
         let n = idx.len() as u32;
         // Entries are append-only within a structural generation — a
@@ -162,7 +162,7 @@ fn cancellable_sort(
     idx: &VolumeIndex,
     key: SortKey,
     cancellation: &QueryCancellation,
-) -> Result<Vec<EntryId>, EngineError> {
+) -> Result<Vec<EntryId>, QueryCancelled> {
     const RUN: usize = 4096;
     cancellation.check()?;
     ids.par_chunks_mut(RUN).try_for_each(|chunk| {
@@ -204,7 +204,7 @@ fn cancellable_sort(
                         value
                     };
                 }
-                Ok::<(), EngineError>(())
+                Ok::<(), QueryCancelled>(())
             })?;
         std::mem::swap(&mut source, &mut destination);
         width = pair_width;
@@ -219,7 +219,7 @@ fn cancellable_merge(
     idx: &VolumeIndex,
     key: SortKey,
     cancellation: &QueryCancellation,
-) -> Result<Vec<EntryId>, EngineError> {
+) -> Result<Vec<EntryId>, QueryCancelled> {
     let mut out = Vec::with_capacity(left.len() + right.len());
     let (mut l, mut r) = (0usize, 0usize);
     while l < left.len() || r < right.len() {
@@ -275,7 +275,7 @@ impl DirTopology {
         idx: &VolumeIndex,
         prev: std::sync::Arc<Self>,
         cancellation: &QueryCancellation,
-    ) -> Result<Self, EngineError> {
+    ) -> Result<Self, QueryCancelled> {
         let mut topology = match std::sync::Arc::try_unwrap(prev) {
             Ok(owned) => owned,
             Err(shared) => Self {
@@ -318,7 +318,7 @@ impl DirTopology {
     pub(super) fn build_cancellable(
         idx: &VolumeIndex,
         cancellation: &QueryCancellation,
-    ) -> Result<Self, EngineError> {
+    ) -> Result<Self, QueryCancelled> {
         const UNSEEN: u8 = 0;
         const VISITING: u8 = 1;
         const DONE: u8 = 2;
