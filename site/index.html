@@ -20,8 +20,6 @@
       <a href="#scope">スコープ</a>
       <a href="#perf">性能</a>
       <a href="./book/">ドキュメント</a>
-      <a href="./doc/">Rust API</a>
-      <a href="./api/">C# API</a>
       <a href="./en/">EN</a>
       <a href="https://github.com/P4suta/find-my-files">GitHub</a>
     </nav>
@@ -95,11 +93,11 @@
   <section id="arch">
     <div class="wrap">
       <h2>アーキテクチャ</h2>
-      <p class="section-sub">既定は非特権 UI + サービス。サービス未導入時は昇格 in-proc フォールバック。</p>
+      <p class="section-sub">既定は非特権 UI + サービス。サービスがない場合、非特権ではセットアップへ進み、既に昇格済みの起動だけが in-proc へフォールバック。</p>
 <pre class="arch">WinUI 3 app（C#・非特権） ──named pipe──▶  <b>fmf-service</b>（Rust・LocalSystem）
    └─ IEngineClient 境界                       └─ <b>fmf-core</b>: $MFT走査・USN tailing・
        ├─ PipeEngineClient（既定）                  インメモリ索引・クエリエンジン
-       └─ FfiEngineClient ──P/Invoke──▶  <b>fmf_engine.dll</b>（昇格in-procフォールバック）</pre>
+       └─ FfiEngineClient ──P/Invoke──▶  <b>fmf_engine.dll</b>（昇格済み起動のみ）</pre>
     </div>
   </section>
 

@@ -17,7 +17,7 @@ namespace FindMyFiles.Controls;
 /// <see cref="FindSelectionIndex"/>, <see cref="CopyablePaths"/>) are static
 /// and unit-tested without a ListView.
 /// </summary>
-public sealed class ResultsViewportManager
+internal sealed class ResultsViewportManager
 {
     private readonly ListView _list;
     private ScrollViewer? _scroller;

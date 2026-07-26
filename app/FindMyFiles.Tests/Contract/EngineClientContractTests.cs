@@ -6,7 +6,7 @@ using Xunit.Abstractions;
 namespace FindMyFiles.Tests.Contract;
 
 /// <summary>
-/// The executable contract of the "same mouth" (CLAUDE.md architecture invariants):
+/// The executable contract of the "same mouth" (AGENTS.md architecture invariants):
 /// every <see cref="IEngineClient"/> the app can be handed must show the same
 /// observable behavior, so these facts run unchanged against all of them.
 /// Derived classes only provide the client and optional hooks:
@@ -28,7 +28,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
     /// <summary>Connected, ready-to-use client — or null when this
     /// derivation's environment gate is closed (every fact then reports and
     /// returns green).</summary>
-    protected abstract Task<IEngineClient?> AcquireClientOrSkipAsync();
+    private protected abstract Task<IEngineClient?> AcquireClientOrSkipAsync();
 
     /// <summary>Teardown for whatever <see cref="AcquireClientOrSkipAsync"/>
     /// stood up (server process, temp dirs); the client itself is disposed
@@ -47,7 +47,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
     /// (index rebuilt / connection epoch turned) and leave the client able
     /// to serve a fresh search. Returns false when this implementation has
     /// no way to force staleness — the stale fact skips.</summary>
-    protected virtual Task<bool> TryForceStaleAsync(IEngineClient client) =>
+    private protected virtual Task<bool> TryForceStaleAsync(IEngineClient client) =>
         Task.FromResult(false);
 
     /// <summary>The shared syntax fixture (contract/golden) — the same file
@@ -122,6 +122,42 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
     }
 
     [Fact]
+    public async Task GetRangeAsync_RejectsSignedUnderflowAndOversizedPages()
+    {
+        if (ClientOrReport() is not { } client)
+        {
+            return;
+        }
+
+        var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default);
+        using var result = outcome.Result;
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            async () => await result.GetRangeAsync(-1, 1));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            async () => await result.GetRangeAsync(0, EngineContract.MaxPageRows + 1));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            async () => await result.GetRangeAsync(0, -1));
+    }
+
+    [Fact]
+    public async Task StartIndexingAsync_RejectsMalformedAndUnboundedVolumeLists()
+    {
+        if (ClientOrReport() is not { } client)
+        {
+            return;
+        }
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            async () => await client.StartIndexingAsync(["..\\escape"]));
+        await Assert.ThrowsAsync<ArgumentException>(
+            async () => await client.StartIndexingAsync(["C:", "c:"]));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            async () => await client.StartIndexingAsync(
+                Enumerable.Repeat("C:", EngineContract.MaxVolumes + 1).ToArray()));
+    }
+
+    [Fact]
     public async Task SearchAsync_PreCancelledToken_ThrowsOperationCanceled()
     {
         if (ClientOrReport() is not { } client)
@@ -133,6 +169,75 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => client.SearchAsync(ValidQuery, SearchOptions.Default, cts.Token));
+    }
+
+    [Fact]
+    public async Task ListVolumesAsync_PreCancelledToken_ThrowsOperationCanceled()
+    {
+        if (ClientOrReport() is not { } client)
+        {
+            return;
+        }
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.ListVolumesAsync(cts.Token));
+    }
+
+    [Fact]
+    public async Task StartIndexingAsync_PreCancelledToken_ThrowsOperationCanceled()
+    {
+        if (ClientOrReport() is not { } client)
+        {
+            return;
+        }
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.StartIndexingAsync(["C:"], cts.Token));
+    }
+
+    [Fact]
+    public async Task GetStatusAsync_PreCancelledToken_ThrowsOperationCanceled()
+    {
+        if (ClientOrReport() is not { } client)
+        {
+            return;
+        }
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.GetStatusAsync(cts.Token));
+    }
+
+    [Fact]
+    public async Task GetStatsAsync_PreCancelledToken_ThrowsOperationCanceled()
+    {
+        if (ClientOrReport() is not { } client)
+        {
+            return;
+        }
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.GetStatsAsync(cts.Token));
+    }
+
+    [Fact]
+    public async Task SearchAsync_RejectsQueriesOverTheUtf8ByteLimit()
+    {
+        if (ClientOrReport() is not { } client)
+        {
+            return;
+        }
+
+        var query = new string('界', (EngineContract.MaxQueryBytes / 3) + 1);
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => client.SearchAsync(query, SearchOptions.Default));
     }
 
     [Fact]

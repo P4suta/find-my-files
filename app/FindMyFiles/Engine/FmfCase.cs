@@ -1,7 +1,7 @@
 namespace FindMyFiles.Engine;
 
 /// <summary>Case-matching mode (wire values of fmf-core's <c>CaseMode</c>).</summary>
-public enum FmfCase
+internal enum FmfCase
 {
     /// <summary>Case-insensitive unless the query contains an uppercase
     /// letter, in which case it becomes case-sensitive.</summary>

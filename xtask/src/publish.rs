@@ -13,19 +13,24 @@
 //! `--skip-rust true` skips the in-build cargo step (CI prebuilds + downloads
 //! the engine binaries into build/engine/release/ before this runs).
 
-use crate::{cmd, fsx, locale, notices, paths, prune, version};
+use crate::{
+    cmd, fsx, locale, notices, paths, pe_digest, pe_load, prune, semver, version, win_version,
+};
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Engine binaries copied in alongside the published app.
-const ENGINE_BINS: &[&str] = &["fmf-service.exe", "fmf.exe"];
+const ENGINE_BINS: &[&str] = &["fmf-service.exe"];
 
 /// Files whose presence (inside `app/`) means the bundle can actually launch.
-/// `FindMyFiles.exe` (the apphost) + `WinRT.Runtime.dll` come from `dotnet
-/// publish`, `fmf_engine.dll` via the csproj `<None Include>`, and the two
-/// engine exes are copied below. The root-level launcher is verified separately
-/// (it is what the user double-clicks; the apphost is its target).
+/// `FindMyFiles.exe` (the apphost), its managed entry assembly, dependency/runtime
+/// manifests, compiled resource index and `WinRT.Runtime.dll` come from `dotnet
+/// publish`; `fmf_engine.dll` comes via the csproj `<None Include>`, and the
+/// service executable is copied below. The root-level launcher is verified separately
+/// (it is what the user double-clicks; the apphost is its target). Compiled XAML
+/// is verified separately against every source `.xaml` file, so adding a view
+/// automatically extends the structural gate.
 ///
 /// `coreclr.dll` / `hostfxr.dll` are the proof the .NET runtime is actually
 /// bundled (self-contained). `WinRT.Runtime.dll` alone is NOT enough — it also
@@ -35,12 +40,17 @@ const ENGINE_BINS: &[&str] = &["fmf-service.exe", "fmf.exe"];
 /// (see `FindMyFiles.csproj`) from ever shipping green again.
 const REQUIRED: &[&str] = &[
     "FindMyFiles.exe",
+    "FindMyFiles.dll",
+    "FindMyFiles.deps.json",
+    "FindMyFiles.runtimeconfig.json",
+    // The Windows App SDK names the application resource PRI after TargetName;
+    // for this project that is FindMyFiles.pri (not a generic resources.pri).
+    "FindMyFiles.pri",
     "WinRT.Runtime.dll",
     "coreclr.dll",
     "hostfxr.dll",
     "fmf_engine.dll",
     "fmf-service.exe",
-    "fmf.exe",
 ];
 
 /// First-party PEs we Authenticode-sign, as `(path relative to the bundle root,
@@ -58,7 +68,7 @@ const REQUIRED: &[&str] = &[
 pub const FIRST_PARTY_PES: &[(&str, &str)] = &[
     ("FindMyFiles.exe", "FindMyFiles.exe"),
     ("app/FindMyFiles.exe", "app-FindMyFiles.exe"),
-    ("app/fmf.exe", "fmf.exe"),
+    ("app/FindMyFiles.dll", "app-FindMyFiles.dll"),
     ("app/fmf-service.exe", "fmf-service.exe"),
     ("app/fmf_engine.dll", "fmf_engine.dll"),
 ];
@@ -70,11 +80,54 @@ const LAUNCHER_BIN: &str = "fmf-launcher.exe";
 /// Shipped name of the launcher at the bundle root (intentionally the same as
 /// the apphost inside `app/` — the user sees one obvious `FindMyFiles.exe`).
 const ENTRY_EXE: &str = "FindMyFiles.exe";
+const TEST_SEAM_MARKER: &str = "FMF_TEST_SEAMS";
+const TEST_SEAM_FIXTURE: &str = "golden/invalid_queries.json";
+const FORBIDDEN_TEST_DIR_NAMES: &[&str] = &["golden", "fixture", "fixtures", "test", "tests"];
 
 pub fn run(skip_rust: bool) -> Result<()> {
+    run_bundle(skip_rust, BundleKind::Shipping)
+}
+
+pub fn run_ui_test(skip_rust: bool) -> Result<()> {
+    run_bundle(skip_rust, BundleKind::UiTest)
+}
+
+#[derive(Clone, Copy)]
+enum BundleKind {
+    Shipping,
+    UiTest,
+}
+
+impl BundleKind {
+    fn paths(self) -> (PathBuf, PathBuf) {
+        match self {
+            Self::Shipping => (paths::dist_dir(), paths::app_dir()),
+            Self::UiTest => (paths::ui_test_dist_dir(), paths::ui_test_app_dir()),
+        }
+    }
+
+    const fn test_seams(self) -> bool {
+        matches!(self, Self::UiTest)
+    }
+
+    const fn artifact_kind(self) -> &'static str {
+        match self {
+            Self::Shipping => "shipping",
+            Self::UiTest => "ui-test",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Shipping => "publish",
+            Self::UiTest => "publish-ui-test",
+        }
+    }
+}
+
+fn run_bundle(skip_rust: bool, kind: BundleKind) -> Result<()> {
     let root = paths::repo_root();
-    let dist = paths::dist_dir();
-    let app = paths::app_dir();
+    let (dist, app) = kind.paths();
 
     // Clean the whole stale bundle (launcher + README + app/ payload). Under CI
     // a fresh runner always cleans cleanly, so a failure there signals a real
@@ -82,20 +135,30 @@ pub fn run(skip_rust: bool) -> Result<()> {
     // closed. Locally it stays best-effort: a running app can legitimately lock
     // the old bundle and `dotnet publish` overwrites anyway (the self-verify at
     // the end is the real gate), so we warn rather than fail as the old recipe did.
-    if let Err(e) = fsx::force_remove_dir_all(&dist) {
-        if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
-            return Err(e).with_context(|| {
-                format!(
-                    "clean {} — refusing to publish over leftovers under CI",
-                    dist.display()
-                )
-            });
-        }
-        eprintln!(
-            "warning: could not fully clean {} ({e}); publishing over the leftovers",
+    fsx::force_remove_dir_all(&dist).with_context(|| {
+        format!(
+            "clean {} — refusing to publish over leftovers",
             dist.display()
-        );
-    }
+        )
+    })?;
+
+    // Build/downloaded engine binaries must exist before compiling the app:
+    // the Authenticode-stable digest of the exact service image is embedded in
+    // the managed assembly and enforced immediately before every elevation.
+    build_engine_bins_if_needed(skip_rust)?;
+    let service_source = paths::engine_release_dir().join("fmf-service.exe");
+    pe_load::require_system32_only(&service_source).with_context(|| {
+        format!(
+            "verify source service's System32-only dependent-load policy at {}",
+            service_source.display()
+        )
+    })?;
+    let service_digest = pe_digest::sha256_file(&service_source).with_context(|| {
+        format!(
+            "derive service image identity from {}",
+            service_source.display()
+        )
+    })?;
 
     // Publish the self-contained app into the `app/` subfolder — the bundle root
     // is reserved for the launcher + README so "which exe do I run" is obvious.
@@ -103,6 +166,9 @@ pub fn run(skip_rust: bool) -> Result<()> {
     // paths::app_dir(), independent of `cmd::run`'s working directory.
     let app_arg = app.to_str().context("app path is not valid UTF-8")?;
     let skip_arg = format!("-p:SkipRustBuild={skip_rust}");
+    let seam_arg = format!("-p:FmfTestSeams={}", kind.test_seams());
+    let artifact_arg = format!("-p:FmfArtifactKind={}", kind.artifact_kind());
+    let service_digest_arg = format!("-p:FmfServiceImageSha256={service_digest}");
     let mut args = vec![
         "publish",
         "app/FindMyFiles",
@@ -113,34 +179,112 @@ pub fn run(skip_rust: bool) -> Result<()> {
         "-o",
         app_arg,
         &skip_arg,
+        &seam_arg,
+        &artifact_arg,
+        &service_digest_arg,
     ];
-    // In CI, build the shipped bundle from the pinned dependency graph: fail the
-    // implicit restore if packages.lock.json is stale (reproducible supply
-    // chain). Locally we stay lenient — a mid-edit dependency bump shouldn't
-    // block `just publish`. The MSBuild property reaches the restore that
-    // `dotnet publish` runs (more robust than the `--locked-mode` CLI flag,
-    // which `publish` does not forward in every SDK).
-    if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
-        args.push("-p:RestoreLockedMode=true");
-    }
+    // Every distributable is built from the pinned dependency graph. Publishing
+    // over a stale lock file is a supply-chain error locally as well as in CI;
+    // dependency edits must update and review packages.lock.json first. The
+    // MSBuild property reaches the implicit restore performed by `dotnet
+    // publish` (more robust than the CLI flag across SDK versions).
+    args.push("-p:RestoreLockedMode=true");
     cmd::run(&root, "dotnet", &args)?;
+    verify_test_artifacts(&app, kind.test_seams())?;
 
     prune_locales(&app)?;
     prune_publish_artifacts(&app)?;
-    build_engine_bins_if_needed(skip_rust)?;
     copy_engine_bins(&app)?;
-    verify_bundle(&app)?;
+    let copied_service_digest = pe_digest::sha256_file(&app.join("fmf-service.exe"))?;
+    if copied_service_digest != service_digest {
+        bail!(
+            "copied fmf-service.exe image identity drifted: expected {service_digest}, \
+             got {copied_service_digest}"
+        );
+    }
+    pe_load::require_system32_only(&app.join("fmf-service.exe")).with_context(|| {
+        format!(
+            "verify copied service's System32-only dependent-load policy at {}",
+            app.join("fmf-service.exe").display()
+        )
+    })?;
+    verify_bundle(&app, &root.join("app/FindMyFiles"))?;
+    let build_version = version::resolve_bundle_version()?;
     place_launcher_and_readme(&dist)?;
-    place_buildinfo(&dist)?;
-    place_completions(&app, &dist)?;
+    place_buildinfo(&dist, &build_version)?;
+    verify_bundle_identity(&dist, &build_version)?;
     place_legal_notices(&root, &dist)?;
 
     println!(
-        "publish: build/dist/FindMyFiles assembled and verified \
+        "{}: {} assembled and verified \
          (root launcher + LICENSE.txt + THIRD-PARTY-NOTICES.txt + app/ with {} \
-         required files + shell completions).",
+         required files).",
+        kind.label(),
+        dist.display(),
         REQUIRED.len()
     );
+    Ok(())
+}
+
+pub fn verify_test_artifacts(app: &Path, expected: bool) -> Result<()> {
+    let marker = app.join(TEST_SEAM_MARKER);
+    if expected {
+        if !is_nonempty_file(&marker) {
+            bail!(
+                "UI-test publish did not emit required seam marker {}",
+                marker.display()
+            );
+        }
+        let fixture = app.join(TEST_SEAM_FIXTURE);
+        if !is_nonempty_file(&fixture) {
+            bail!(
+                "UI-test publish did not emit required non-empty fixture {}",
+                fixture.display()
+            );
+        }
+        return Ok(());
+    }
+
+    if marker.exists() {
+        bail!(
+            "shipping bundle contains forbidden test-seam marker {}",
+            marker.display()
+        );
+    }
+    let mut forbidden_dirs = Vec::new();
+    collect_forbidden_test_dirs(app, app, &mut forbidden_dirs)?;
+    if !forbidden_dirs.is_empty() {
+        forbidden_dirs.sort();
+        bail!("shipping bundle contains forbidden test/fixture directories {forbidden_dirs:?}");
+    }
+    Ok(())
+}
+
+fn collect_forbidden_test_dirs(
+    root: &Path,
+    current: &Path,
+    forbidden: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(current).with_context(|| format!("inspect {}", current.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let name = entry.file_name();
+        if FORBIDDEN_TEST_DIR_NAMES
+            .iter()
+            .any(|candidate| name.to_string_lossy().eq_ignore_ascii_case(candidate))
+        {
+            forbidden.push(
+                path.strip_prefix(root)
+                    .context("test directory escaped publish root")?
+                    .to_path_buf(),
+            );
+            continue;
+        }
+        collect_forbidden_test_dirs(root, &path, forbidden)?;
+    }
     Ok(())
 }
 
@@ -186,11 +330,11 @@ fn prune_publish_artifacts(app: &Path) -> Result<()> {
 /// Build the standalone engine binaries when the caller did NOT prebuild them.
 ///
 /// With `skip_rust=false` the only Rust that ran is the csproj's `BuildRustEngine`
-/// target, which builds `-p fmf-ffi` for `fmf_engine.dll` alone — NOT the engine
-/// exes (`fmf-service.exe` / `fmf.exe`) or the launcher. Without this, running
+/// target, which builds `-p fmf-ffi` for `fmf_engine.dll` alone — NOT the service
+/// executable or the launcher. Without this, running
 /// `just publish-app` on its own (its default is `skip_rust=false`) would sail
 /// through `dotnet publish` and then bail in `copy_engine_bins` on the absent
-/// exes. Build the whole engine workspace (same as `just build`) so those, and
+/// service. Build the whole engine workspace (same as `just build`) so it, and
 /// the launcher `place_launcher_and_readme` copies, all exist.
 ///
 /// CI passes `skip_rust=true` (it prebuilds + downloads the bins into
@@ -217,18 +361,33 @@ fn copy_engine_bins(app: &Path) -> Result<()> {
     Ok(())
 }
 
-fn verify_bundle(app: &Path) -> Result<()> {
+fn verify_bundle(app: &Path, xaml_source: &Path) -> Result<()> {
     let missing: Vec<&str> = REQUIRED
         .iter()
         .copied()
-        .filter(|f| !app.join(f).exists())
+        .filter(|f| !is_nonempty_file(&app.join(f)))
         .collect();
     if !missing.is_empty() {
         bail!(
-            "bundle at {} is missing {missing:?} — it would not launch",
+            "bundle at {} is missing or has empty startup-critical files {missing:?} — \
+             it would not launch",
             app.display()
         );
     }
+
+    let expected_xbf = expected_xbf_paths(xaml_source)?;
+    let missing_xbf: Vec<PathBuf> = expected_xbf
+        .into_iter()
+        .filter(|rel| !is_nonempty_file(&app.join(rel)))
+        .collect();
+    if !missing_xbf.is_empty() {
+        bail!(
+            "bundle at {} is missing or has empty compiled XAML {missing_xbf:?} — \
+             the published WinUI app would fail while loading a page/resource",
+            app.display()
+        );
+    }
+
     // Negative allowlist: the dead-weight artifacts we prune must be gone. Same
     // philosophy as the missing-file check — the producer guarantees its output.
     // Catches an SDK update reintroducing a stripped file (e.g. a renamed
@@ -246,35 +405,69 @@ fn verify_bundle(app: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Ship shell-completion scripts under the bundle's `completions/` dir, generated
-/// by invoking the just-built `app/fmf.exe completions <shell>` — the scripts are
-/// produced by the exact binary in the bundle, so they can never drift from it.
-/// (Resolves the doc-vs-impl gap where completions were claimed to be bundled but
-/// nothing copied them in.)
-fn place_completions(app: &Path, dist: &Path) -> Result<()> {
-    // (shell argument, output filename) — filenames follow clap_complete's own
-    // conventions so an installed script is named what each shell expects.
-    const SHELLS: &[(&str, &str)] = &[
-        ("bash", "fmf.bash"),
-        ("zsh", "_fmf"),
-        ("fish", "fmf.fish"),
-        ("powershell", "_fmf.ps1"),
-    ];
-    let fmf = app.join("fmf.exe");
-    let out_dir = dist.join("completions");
-    fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
-    for (shell, filename) in SHELLS {
-        let output = std::process::Command::new(&fmf)
-            .args(["completions", shell])
-            .output()
-            .with_context(|| format!("run {} completions {shell}", fmf.display()))?;
-        if !output.status.success() {
-            bail!("`fmf completions {shell}` exited with {}", output.status);
+/// A startup artifact must be a real, non-empty file. `Path::exists` alone would
+/// accept an accidentally-created directory or zero-byte placeholder and let a
+/// structurally broken bundle through the producer-side release gate.
+fn is_nonempty_file(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+}
+
+/// Derive the compiled-XAML contract from the application source tree instead of
+/// keeping a second handwritten list. Every checked-in `.xaml` maps to a
+/// bundle-relative `.xbf` at the same path. Generated `obj/` and `bin/` trees are
+/// excluded so a previous build can never manufacture extra expectations.
+///
+/// An empty source set is an error: otherwise a bad source path would make the
+/// check pass vacuously and silently stop verifying XBF altogether.
+fn expected_xbf_paths(source_root: &Path) -> Result<Vec<PathBuf>> {
+    fn visit(root: &Path, dir: &Path, expected: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let path = entry.path();
+            if file_type.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name != "obj" && name != "bin" {
+                    visit(root, &path, expected)?;
+                }
+                continue;
+            }
+            if !file_type.is_file()
+                || !path
+                    .extension()
+                    .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("xaml"))
+            {
+                continue;
+            }
+            let mut rel = path
+                .strip_prefix(root)
+                .with_context(|| {
+                    format!(
+                        "derive XBF path: {} is outside {}",
+                        path.display(),
+                        root.display()
+                    )
+                })?
+                .to_path_buf();
+            rel.set_extension("xbf");
+            expected.push(rel);
         }
-        fs::write(out_dir.join(filename), &output.stdout)
-            .with_context(|| format!("write completion {filename}"))?;
+        Ok(())
     }
-    Ok(())
+
+    let mut expected = Vec::new();
+    visit(source_root, source_root, &mut expected)
+        .with_context(|| format!("derive compiled XAML set from {}", source_root.display()))?;
+    expected.sort();
+    if expected.is_empty() {
+        bail!(
+            "{} contains no source XAML — refusing to verify zero compiled XBF files",
+            source_root.display()
+        );
+    }
+    Ok(expected)
 }
 
 /// Put the user-facing entry point at the bundle root: the native launcher
@@ -309,13 +502,71 @@ fn place_launcher_and_readme(dist: &Path) -> Result<()> {
 /// label uses the SAME precedence as the shipped binaries (`FMF_BUILD_VERSION`,
 /// else the local `-dev+g<sha>` default), so the file never disagrees with what
 /// `fmf --version` reports.
-fn place_buildinfo(dist: &Path) -> Result<()> {
-    let full = version::resolve_bundle_version()?;
+fn place_buildinfo(dist: &Path, full: &str) -> Result<()> {
     let commit_date = version::git_commit_date();
-    let body = version::render_buildinfo(&full, commit_date.as_deref());
+    let body = version::render_buildinfo(full, commit_date.as_deref());
     // Same Notepad-friendly encoding as README.txt: UTF-8 BOM + CRLF.
     let text = format!("\u{feff}{}", body.replace('\n', "\r\n"));
     fs::write(dist.join("BUILDINFO.txt"), text).context("write BUILDINFO.txt")?;
+    Ok(())
+}
+
+/// Prove the user-visible launcher metadata and the adjacent BUILDINFO describe
+/// the exact same build identity. `ProductVersion` carries the full
+/// channel/sha identity, while Win32 `FileVersion` carries its canonical clean
+/// `X.Y.Z` base. The build script already fails closed if the resource could not
+/// be embedded; this post-build readback catches a stale/wrong stamped launcher.
+fn verify_bundle_identity(dist: &Path, expected_full: &str) -> Result<()> {
+    let buildinfo_path = dist.join("BUILDINFO.txt");
+    let buildinfo = fs::read_to_string(&buildinfo_path)
+        .with_context(|| format!("read {}", buildinfo_path.display()))?;
+    let buildinfo_version = parse_buildinfo_version(&buildinfo)?;
+    let launcher = win_version::read(&dist.join(ENTRY_EXE))?;
+    validate_bundle_identity(
+        expected_full,
+        &launcher.product_version,
+        &launcher.file_version,
+        buildinfo_version,
+    )
+}
+
+fn parse_buildinfo_version(source: &str) -> Result<&str> {
+    let versions: Vec<&str> = source
+        .lines()
+        .map(|line| line.trim_start_matches('\u{feff}').trim())
+        .filter_map(|line| line.strip_prefix("version:").map(str::trim))
+        .collect();
+    match versions.as_slice() {
+        [version] if !version.is_empty() => Ok(version),
+        [] => bail!("BUILDINFO.txt has no version field"),
+        [_] => bail!("BUILDINFO.txt has an empty version field"),
+        _ => bail!(
+            "BUILDINFO.txt has {} version fields; exactly one is required",
+            versions.len()
+        ),
+    }
+}
+
+fn validate_bundle_identity(
+    expected_full: &str,
+    launcher_product: &str,
+    launcher_file: &str,
+    buildinfo: &str,
+) -> Result<()> {
+    let base = expected_full
+        .split(['-', '+'])
+        .next()
+        .context("build version has no base version")?;
+    semver::validate(base).context("build version has a non-canonical base")?;
+    for (source, actual, expected) in [
+        ("launcher ProductVersion", launcher_product, expected_full),
+        ("launcher FileVersion", launcher_file, base),
+        ("BUILDINFO version", buildinfo, expected_full),
+    ] {
+        if actual != expected {
+            bail!("bundle identity drift: {source} is '{actual}', expected '{expected}'");
+        }
+    }
     Ok(())
 }
 
@@ -368,19 +619,25 @@ fn place_legal_notices(root: &Path, dist: &Path) -> Result<()> {
 /// the engine workspace (config + template committed at `engine/about.toml` /
 /// `engine/about.hbs`) and reading back its output for `notices::assemble`.
 ///
-/// `--offline --locked`: the release/nightly `just publish` builds the engine
-/// first, so the crate sources are already in the cargo cache — running offline
-/// makes the output reproducible (no clearlydefined.io round-trip, no wall-clock
-/// or service-availability variance) and keeps a release build from depending on
-/// a third-party web service. `cargo-about` is provisioned via the `mise.toml`
-/// pin (release/nightly use mise-action; the ci.yml `app` job installs it +
-/// warms the cache alongside).
+/// Fetch the complete locked graph first, then run `cargo-about` with
+/// `--offline --locked`. A release build only fetches dependencies needed by its
+/// compiled targets; `cargo-about` asks Cargo for workspace metadata, which also
+/// needs sources such as dev/build dependencies. Making that precondition
+/// explicit here keeps every caller (local, CI, nightly and stable) correct on a
+/// cold runner. The render itself remains reproducible and independent of
+/// clearlydefined.io or any other third-party service.
+///
+/// `cargo-about` is provisioned via the `mise.toml` pin (release/nightly use
+/// mise-action; the split ci.yml `app` job installs it directly).
 ///
 /// Output goes through `-o <file>`, not stdout: cargo-about refuses a redirected
 /// stdout on Windows (PowerShell re-encodes piped bytes to UTF-16 and corrupts
 /// the license texts), so it writes a UTF-8 file we read back.
 fn generate_rust_notices() -> Result<String> {
     let engine = paths::engine_dir();
+    cmd::run(&engine, "cargo", &["fetch", "--locked"]).context(
+        "fetch the complete locked Cargo graph required for offline third-party notice generation",
+    )?;
     let out_file =
         std::env::temp_dir().join(format!("fmf-third-party-rust-{}.txt", std::process::id()));
     let out_arg = out_file
@@ -391,6 +648,8 @@ fn generate_rust_notices() -> Result<String> {
             "generate",
             "--offline",
             "--locked",
+            "--manifest-path",
+            "crates/fmf-service/Cargo.toml",
             "-c",
             "about.toml",
             "about.hbs",
@@ -429,22 +688,20 @@ FindMyFiles — fast filename search for Windows
 
 >> To start: double-click  FindMyFiles.exe  (here, in this folder).
 
-That's it. The app and all its runtime files live in the  app\\  subfolder;
-your index, settings and logs go in  data\\  next to this file — so the whole
-folder is portable: copy it anywhere, or delete it, freely.
+The app files live in  app\\ . On first launch, choose Enable Search and accept the one Windows administrator prompt.
+This registers the on-demand search service;
+the app itself stays unprivileged and starts the service only when needed.
 
-Faster whole-drive search (optional): the first time you ask for it, the app
-can install a small background service (one Windows permission prompt). Until
-then it searches the folders you choose.
+Data is stored outside this extracted folder:
+  %ProgramData%\\find-my-files\\  service, index, service settings, engine logs
+  %APPDATA%\\find-my-files\\      UI settings and app log
 
-Advanced tools, inside  app\\ :
-  app\\fmf.exe          command-line search
-  app\\fmf-service.exe  the background service (the app installs/manages it)
-
-Shell completions for the  fmf  command are in  completions\\  (PowerShell, bash,
-zsh, fish). For PowerShell, add to your profile:
-  . \"$PWD\\completions\\_fmf.ps1\"
-Or generate fresh at any time:  app\\fmf.exe completions powershell
+Full uninstall:
+  1. Open the gear menu > Manage service.
+  2. Choose \"Remove service and all data...\", confirm, and accept the UAC prompt.
+     FindMyFiles removes the service and scheduled task, both data directories
+     above, and then closes.
+  3. Delete this extracted folder.
 
 Licensing: FindMyFiles is Apache-2.0 — full text in  LICENSE.txt  (here). The
 third-party code it bundles (.NET runtime, Windows App SDK, Rust crates, ...) is
@@ -459,22 +716,20 @@ FindMyFiles — Windows 向け 高速ファイル名検索
 
 >> 起動: このフォルダーの  FindMyFiles.exe  をダブルクリック。
 
-これだけです。アプリ本体と実行ファイル群は  app\\  サブフォルダーにあります。
-索引・設定・ログはこのファイルの隣の  data\\  に保存されるので、フォルダーごと
-どこへでもコピーでき、削除も自由なポータブル構成です。
+アプリ本体は  app\\  にあります。初回起動時に「検索を有効にする」を選び、
+Windows の管理者許可を1回承認します。これでオンデマンド検索サービスが登録
+されます。アプリ自体は非特権のままで、必要なときだけサービスを起動します。
 
-全ドライブの最速検索(任意): 初回に頼むと、小さなバックグラウンドサービスを
-導入できます(Windows の許可ダイアログが1回)。それまでは選んだフォルダーを
-検索します。
+データは展開先フォルダーの外に保存されます:
+  %ProgramData%\\find-my-files\\  サービス、索引、サービス設定、エンジンログ
+  %APPDATA%\\find-my-files\\      UI 設定、アプリログ
 
-上級者向けツールは  app\\  内:
-  app\\fmf.exe          コマンドライン検索
-  app\\fmf-service.exe  バックグラウンドサービス(アプリが導入・管理)
-
-fmf コマンドの補完スクリプトは  completions\\  にあります(PowerShell/bash/zsh/fish)。
-PowerShell ならプロファイルに次を追加:
-  . \"$PWD\\completions\\_fmf.ps1\"
-いつでも生成し直せます:  app\\fmf.exe completions powershell
+完全にアンインストールするには:
+  1. 歯車メニュー >「サービスの管理」を開きます。
+  2.「サービスとすべてのデータを削除…」を選んで確認し、UAC を承認します。
+     サービスとスケジュールタスク、上記2つのデータフォルダーが削除され、
+     FindMyFiles は終了します。
+  3. この展開先フォルダーを削除します。
 
 ライセンス: FindMyFiles は Apache-2.0 です(全文はこのフォルダーの  LICENSE.txt )。
 同梱する第三者コード(.NET ランタイム/Windows App SDK/Rust クレート ほか)の
@@ -482,3 +737,240 @@ PowerShell ならプロファイルに次を追加:
 
 Apache-2.0  -  https://github.com/P4suta/find-my-files
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("xtask-publish-{tag}-{}", std::process::id()))
+    }
+
+    fn write_nonempty(path: &Path) {
+        fs::create_dir_all(path.parent().expect("fixture path has a parent")).unwrap();
+        fs::write(path, b"x").unwrap();
+    }
+
+    fn complete_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = scratch(tag);
+        let _ = fsx::force_remove_dir_all(&base);
+        let app = base.join("app");
+        let source = base.join("source");
+
+        for required in REQUIRED {
+            write_nonempty(&app.join(required));
+        }
+        for rel in ["App.xaml", "MainPage.xaml", "Views/SettingsDialog.xaml"] {
+            write_nonempty(&source.join(rel));
+            write_nonempty(&app.join(rel).with_extension("xbf"));
+        }
+        (base, app, source)
+    }
+
+    #[test]
+    fn complete_startup_structure_is_accepted() {
+        let (base, app, source) = complete_fixture("complete");
+        verify_bundle(&app, &source).unwrap();
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn ui_test_publish_requires_marker_and_real_fixture() {
+        let base = scratch("ui-test-artifacts");
+        let _cleanup = fsx::force_remove_dir_all(&base);
+        let app = base.join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        assert!(verify_test_artifacts(&app, true).is_err());
+        fs::write(app.join(TEST_SEAM_MARKER), b"enabled\n").unwrap();
+        assert!(verify_test_artifacts(&app, true).is_err());
+        write_nonempty(&app.join(TEST_SEAM_FIXTURE));
+        assert!(verify_test_artifacts(&app, true).is_ok());
+        fs::write(app.join(TEST_SEAM_MARKER), b"").unwrap();
+        assert!(verify_test_artifacts(&app, true).is_err());
+
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn shipping_publish_rejects_marker_and_any_fixture_directory() {
+        let base = scratch("shipping-test-artifacts");
+        let _cleanup = fsx::force_remove_dir_all(&base);
+        let app = base.join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        assert!(verify_test_artifacts(&app, false).is_ok());
+        fs::write(app.join(TEST_SEAM_MARKER), b"enabled\n").unwrap();
+        assert!(verify_test_artifacts(&app, false).is_err());
+        fs::remove_file(app.join(TEST_SEAM_MARKER)).unwrap();
+
+        fs::create_dir_all(app.join("golden")).unwrap();
+        assert!(
+            verify_test_artifacts(&app, false).is_err(),
+            "even an empty golden directory is a shipping boundary violation"
+        );
+        fsx::force_remove_dir_all(&app.join("golden")).unwrap();
+
+        fs::create_dir_all(app.join("payload/Tests")).unwrap();
+        assert!(
+            verify_test_artifacts(&app, false).is_err(),
+            "test directories are forbidden at every depth and case"
+        );
+
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn every_fixed_startup_file_is_required_and_nonempty() {
+        let (base, app, source) = complete_fixture("required");
+        for required in REQUIRED {
+            let path = app.join(required);
+            fs::remove_file(&path).unwrap();
+            assert!(
+                verify_bundle(&app, &source).is_err(),
+                "missing {required} must fail closed"
+            );
+            fs::write(&path, b"").unwrap();
+            assert!(
+                verify_bundle(&app, &source).is_err(),
+                "empty {required} must fail closed"
+            );
+            fs::write(&path, b"x").unwrap();
+        }
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn every_source_xaml_requires_its_matching_nonempty_xbf() {
+        let (base, app, source) = complete_fixture("xbf");
+        let nested = app.join("Views/SettingsDialog.xbf");
+        fs::remove_file(&nested).unwrap();
+        assert!(verify_bundle(&app, &source).is_err());
+        fs::write(&nested, b"").unwrap();
+        assert!(verify_bundle(&app, &source).is_err());
+        fs::write(&nested, b"x").unwrap();
+        verify_bundle(&app, &source).unwrap();
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn generated_xaml_trees_do_not_create_publish_requirements() {
+        let (base, app, source) = complete_fixture("generated");
+        write_nonempty(&source.join("obj/Release/Ghost.xaml"));
+        write_nonempty(&source.join("bin/Release/OtherGhost.xaml"));
+        let expected = expected_xbf_paths(&source).unwrap();
+        assert!(!expected.iter().any(|path| path.starts_with("obj")));
+        assert!(!expected.iter().any(|path| path.starts_with("bin")));
+        verify_bundle(&app, &source).unwrap();
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn empty_or_wrong_source_tree_cannot_pass_vacuously() {
+        let base = scratch("empty-source");
+        let _ = fsx::force_remove_dir_all(&base);
+        let source = base.join("source");
+        fs::create_dir_all(&source).unwrap();
+        assert!(expected_xbf_paths(&source).is_err());
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn managed_entry_assembly_is_in_the_signing_set() {
+        assert!(FIRST_PARTY_PES.iter().any(|(source, stage)| {
+            *source == "app/FindMyFiles.dll" && *stage == "app-FindMyFiles.dll"
+        }));
+    }
+
+    #[test]
+    fn developer_cli_is_not_an_end_user_bundle_or_signing_input() {
+        assert!(!ENGINE_BINS.contains(&"fmf.exe"));
+        assert!(!REQUIRED.contains(&"fmf.exe"));
+        assert!(FIRST_PARTY_PES
+            .iter()
+            .all(|(source, _)| *source != "app/fmf.exe"));
+    }
+
+    #[test]
+    fn shipped_readme_names_the_real_state_roots_and_full_uninstall_path() {
+        for required in [
+            "%ProgramData%\\find-my-files\\",
+            "%APPDATA%\\find-my-files\\",
+            "Manage service",
+            "Remove service and all data...",
+            "サービスの管理",
+            "サービスとすべてのデータを削除…",
+            "accept the one Windows administrator prompt",
+            "both data directories",
+            "上記2つのデータフォルダー",
+            "scheduled task",
+        ] {
+            assert!(
+                README.contains(required),
+                "shipping README must retain accurate setup/uninstall detail: {required}"
+            );
+        }
+
+        let lower = README.to_ascii_lowercase();
+        for forbidden in [
+            "data\\  next to this file",
+            "folder is portable",
+            "delete it, freely",
+            "ポータブル構成",
+            "削除も自由",
+            "does not delete your per-user UI data",
+            "ユーザー別 UI データを削除することはありません",
+        ] {
+            assert!(
+                !lower.contains(&forbidden.to_ascii_lowercase()),
+                "shipping README resurrected a false adjacent-data/portable claim: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn buildinfo_version_parser_requires_exactly_one_value() {
+        assert_eq!(
+            parse_buildinfo_version(
+                "\u{feff}FindMyFiles\r\nversion:  0.1.1-dev+gabc1234\r\nchannel:  dev\r\n"
+            )
+            .unwrap(),
+            "0.1.1-dev+gabc1234"
+        );
+        assert!(parse_buildinfo_version("FindMyFiles\nchannel: dev\n").is_err());
+        assert!(parse_buildinfo_version("version:\n").is_err());
+        assert!(parse_buildinfo_version("version: 0.1.1\nversion: 0.1.2\n").is_err());
+    }
+
+    #[test]
+    fn launcher_and_buildinfo_must_share_one_identity() {
+        validate_bundle_identity(
+            "0.1.1-dev+gabc1234.dirty",
+            "0.1.1-dev+gabc1234.dirty",
+            "0.1.1",
+            "0.1.1-dev+gabc1234.dirty",
+        )
+        .unwrap();
+        assert!(validate_bundle_identity(
+            "0.1.1-dev+gabc1234",
+            "0.1.1-dev+gfffffff",
+            "0.1.1",
+            "0.1.1-dev+gabc1234",
+        )
+        .is_err());
+        assert!(validate_bundle_identity(
+            "0.1.1-dev+gabc1234",
+            "0.1.1-dev+gabc1234",
+            "0.1.0",
+            "0.1.1-dev+gabc1234",
+        )
+        .is_err());
+        assert!(validate_bundle_identity(
+            "0.1.1-dev+gabc1234",
+            "0.1.1-dev+gabc1234",
+            "0.1.1",
+            "0.1.0-dev+gabc1234",
+        )
+        .is_err());
+    }
+}

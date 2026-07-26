@@ -5,7 +5,7 @@ namespace FindMyFiles.ViewModels;
 /// position-preserving origins restore the previous viewport
 /// (docs/ARCHITECTURE.md "two requery families").
 /// </summary>
-public enum RequeryOrigin
+internal enum RequeryOrigin
 {
     /// <summary>First query of the session — reset (top of list).</summary>
     Initial,

@@ -5,12 +5,13 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-public sealed class SearchOrchestratorTests
+public sealed class SearchOrchestratorTests : IDisposable
 {
     private readonly ManualDispatcher _dispatcher = new();
     private readonly StubEngineClient _engine = new();
     private readonly ResultsPresenter _presenter;
     private readonly SearchOrchestrator _orchestrator;
+    private readonly EngineEventMarshaler _events;
     private SearchRequest _request = new(string.Empty, SearchOptions.Default);
 
     /// <summary>The 50ms debounce timer the orchestrator created in its ctor.</summary>
@@ -19,15 +20,16 @@ public sealed class SearchOrchestratorTests
     public SearchOrchestratorTests()
     {
         _presenter = new ResultsPresenter(_dispatcher);
+        _events = new EngineEventMarshaler(_engine, _dispatcher);
         _orchestrator = new SearchOrchestrator(
             _engine,
-            new EngineEventMarshaler(_engine, _dispatcher),
+            _events,
             _dispatcher,
             _presenter,
             () => _request);
     }
 
-    /// <summary>Regression (scope-mode "internal error (query.Typing)"): the engine
+    /// <summary>Regression ("internal error (query.Typing)"): the engine
     /// completes SearchAsync off the UI thread (FFI Task.Run, pipe read loop), so
     /// RunQueryAsync's continuation — TraceCaptured (bound Perf state) and the
     /// presenter's Reassign/CountText (EnsureUiThread) — must resume on the captured
@@ -96,6 +98,68 @@ public sealed class SearchOrchestratorTests
         Assert.Equal(5, _presenter.ResultsSource.Count);
         Assert.Single(publications); // no second publication
         Assert.Equal("new_000000.txt", ((ResultRow)_presenter.ResultsSource[0]!).Name);
+    }
+
+    [Fact]
+    public void Requery_CancelsTheSupersededEngineRequest()
+    {
+        SyncContext.RunContinuationsInline();
+        _request = new SearchRequest("a", SearchOptions.Default);
+        _orchestrator.Requery(RequeryOrigin.Initial);
+        var older = Assert.Single(_engine.Searches);
+        Assert.False(older.CancellationToken.IsCancellationRequested);
+
+        _request = new SearchRequest("ab", SearchOptions.Default);
+        _orchestrator.Requery(RequeryOrigin.Typing);
+
+        Assert.True(older.CancellationToken.IsCancellationRequested);
+        Assert.False(_engine.Searches[1].CancellationToken.IsCancellationRequested);
+    }
+
+    [Fact]
+    public void Requery_CancelsAnOlderPagePrefetch_AndDisposesItsResult()
+    {
+        SyncContext.RunContinuationsInline();
+        _request = new SearchRequest("a", SearchOptions.Default);
+        _orchestrator.Requery(RequeryOrigin.Initial);
+
+        var pageGate = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var olderResult = new StubSearchResult(Rows.Many(80, "old"))
+        {
+            Gate = pageGate,
+            HonorCancellation = true,
+        };
+        _engine.Searches[0].CompleteWith(olderResult);
+        Assert.Equal(1, olderResult.FetchCount);
+        Assert.False(olderResult.LastFetchToken.IsCancellationRequested);
+
+        _request = new SearchRequest("ab", SearchOptions.Default);
+        _orchestrator.Requery(RequeryOrigin.Typing);
+        Assert.True(olderResult.LastFetchToken.IsCancellationRequested);
+
+        pageGate.SetResult();
+        Assert.True(
+            SpinWait.SpinUntil(() => olderResult.Disposed, TimeSpan.FromSeconds(2)),
+            "cancelled prefetch must dispose its unpublished result");
+        Assert.Empty(_presenter.ResultsSource);
+    }
+
+    [Fact]
+    public void Dispose_CancelsTheActiveQuery_AndLateCompletionIsSafe()
+    {
+        SyncContext.RunContinuationsInline();
+        _request = new SearchRequest("a", SearchOptions.Default);
+        _orchestrator.Requery(RequeryOrigin.Initial);
+        var pending = Assert.Single(_engine.Searches);
+
+        _orchestrator.Dispose();
+        Assert.True(pending.CancellationToken.IsCancellationRequested);
+
+        var late = pending.CompleteWith(Rows.Many(3, "late"));
+        Assert.True(late.Disposed);
+        _orchestrator.Requery(RequeryOrigin.Typing);
+        Assert.Single(_engine.Searches);
     }
 
     [Fact]
@@ -281,8 +345,8 @@ public sealed class SearchOrchestratorTests
     public void FocusedSearch_RewritesTheQuery_OnlyWhileTheToggleIsOn()
     {
         SyncContext.RunContinuationsInline();
-        _orchestrator.FocusedExcludePaths = [@"\windows\"];
-        _orchestrator.FocusedExtensions = ["pdf"];
+        _orchestrator.FocusedExcludePathsForTests = [@"\windows\"];
+        _orchestrator.FocusedExtensionsForTests = ["pdf"];
         _request = new SearchRequest("report", SearchOptions.Default);
 
         // Default off: existing behavior, the query passes through verbatim.
@@ -305,8 +369,8 @@ public sealed class SearchOrchestratorTests
     public void RegexMode_PassesOptionsThrough_AndSuppressesFocusedRewrite()
     {
         SyncContext.RunContinuationsInline();
-        _orchestrator.FocusedExcludePaths = [@"\windows\"];
-        _orchestrator.FocusedExtensions = ["pdf"];
+        _orchestrator.FocusedExcludePathsForTests = [@"\windows\"];
+        _orchestrator.FocusedExtensionsForTests = ["pdf"];
         _orchestrator.FocusedSearch = true; // on — but regex mode must override it
 
         var opts = new SearchOptions(
@@ -340,5 +404,12 @@ public sealed class SearchOrchestratorTests
         Assert.Empty(_engine.Searches); // marshaled to the UI queue first
         _dispatcher.DrainQueue();
         Assert.Single(_engine.Searches);
+    }
+
+    public void Dispose()
+    {
+        _orchestrator.Dispose();
+        _presenter.Dispose();
+        _events.Dispose();
     }
 }

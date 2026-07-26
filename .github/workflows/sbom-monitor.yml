@@ -3,12 +3,12 @@
 # This is the one supply-chain check that looks at *what we already shipped*,
 # not the current source tree: cargo-audit / cargo-deny / Dependabot all scan
 # HEAD, so a CVE disclosed *after* a release goes unnoticed for the binary users
-# already have. The release's CycloneDX SBOMs (frozen, attested) are exactly the
+# already have. The release's frozen CycloneDX SBOM assets are exactly the
 # manifest needed to answer "is the shipped v1.0 affected?" — so the SBOM finally
 # does work here instead of being a write-only release artifact (ADR-0034).
 #
-# Dormant until the first release: with no release (or no SBOM assets) the job
-# logs a notice and exits 0, then activates automatically once a release ships.
+# Dormant only until the first published release. Once any release exists, both
+# canonical SBOM assets and their product identity are mandatory.
 name: sbom-monitor
 
 on:
@@ -16,71 +16,213 @@ on:
     - cron: "7 5 * * 1" # weekly Mon 05:07 UTC (offset from cargo-audit/codeql/scorecard crons)
   workflow_dispatch:
 
-permissions:
-  contents: read # read releases + download SBOM assets
-  issues: write # open/update/close the sbom-vuln tracking issue
+permissions: {}
+
+# Serialize scheduled/manual rescans so two report jobs cannot race and create
+# duplicate tracking issues for the same shipped release.
+concurrency:
+  group: sbom-monitor
+  cancel-in-progress: false
 
 jobs:
-  rescan:
-    runs-on: ubuntu-latest
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: read # read releases + download SBOM assets
+    outputs:
+      scan: ${{ steps.fetch.outputs.scan }}
+      tag: ${{ steps.fetch.outputs.tag }}
     steps:
-      # Checkout is only for osv-scanner.toml (the accepted-advisory ignore list).
+      # Checkout is only for osv-scanner.toml (the accepted-advisory ignore
+      # list). The main-only guard above makes manual feature-branch runs inert;
+      # retain the event SHA for an auditable policy snapshot.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Locate latest release + download its SBOMs
         id: fetch
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if ! tag=$(gh release view --json tagName --jq .tagName 2>/dev/null); then
+          set -euo pipefail
+          releases=$(gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          release=$(jq -c '[.[] | select(.draft == false and .prerelease == false)][0] // empty' <<<"$releases")
+          if [ -z "$release" ]; then
             echo "::notice::No published release yet — nothing to re-scan (dormant)."
             echo "scan=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          mkdir -p sbom
-          if ! gh release download "$tag" --pattern '*.cdx.json' --dir sbom 2>/dev/null || [ -z "$(ls -A sbom)" ]; then
-            echo "::notice::Release $tag has no *.cdx.json SBOM assets — nothing to re-scan."
-            echo "scan=false" >> "$GITHUB_OUTPUT"
-            exit 0
+
+          tag=$(jq -r '.tag_name' <<<"$release")
+          if [ "$(jq -r '.immutable' <<<"$release")" != "true" ]; then
+            echo "::error::Latest stable release $tag is not immutable."
+            exit 1
           fi
-          echo "Downloaded SBOMs for $tag:"; ls -l sbom
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Latest stable release has a non-canonical tag '$tag'."
+            exit 1
+          fi
+          mapfile -t actual < <(
+            jq -r '.assets[].name | select(endswith(".cdx.json"))' <<<"$release" |
+              sort
+          )
+          expected=("app.cdx.json" "fmf-engine.cdx.json")
+          if [ "${actual[*]-}" != "${expected[*]}" ]; then
+            echo "::error::Release $tag must contain exactly: ${expected[*]}; found: ${actual[*]-<none>}"
+            exit 1
+          fi
+
+          mkdir -p sbom
+          for name in "${expected[@]}"; do
+            gh release download "$tag" --pattern "$name" --dir sbom
+            expected_digest=$(jq -r --arg name "$name" \
+              '.assets[] | select(.name == $name) | .digest // empty' <<<"$release")
+            if [[ ! "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Release asset $name has no valid GitHub sha256 digest."
+              exit 1
+            fi
+            actual_digest="sha256:$(sha256sum "sbom/$name" | cut -d ' ' -f 1)"
+            if [ "$actual_digest" != "$expected_digest" ]; then
+              echo "::error::Downloaded $name digest $actual_digest does not match release metadata $expected_digest."
+              exit 1
+            fi
+          done
+
+          version=${tag#v}
+          for path in sbom/app.cdx.json sbom/fmf-engine.cdx.json; do
+            jq -e '
+              .bomFormat == "CycloneDX" and
+              .specVersion == "1.6" and
+              (.components | type == "array" and length > 0)
+            ' "$path" >/dev/null
+          done
+          jq -e --arg version "$version" '
+            .metadata.component.type == "application" and
+            .metadata.component.name == "FindMyFiles" and
+            .metadata.component.version == $version and
+            .metadata.component["bom-ref"] == ("FindMyFiles@" + $version)
+          ' sbom/app.cdx.json >/dev/null
+          jq -e --arg version "$version" '
+            .metadata.component.type == "application" and
+            .metadata.component.name == "fmf-engine" and
+            .metadata.component.version == $version and
+            .metadata.component["bom-ref"] == ("fmf-engine@" + $version)
+          ' sbom/fmf-engine.cdx.json >/dev/null
+
+          echo "Downloaded and validated SBOM identity, structure, and asset digests for $tag."
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "scan=true" >> "$GITHUB_OUTPUT"
 
-      - name: Install osv-scanner
+      - name: Hand validated SBOMs to the isolated scanner
         if: steps.fetch.outputs.scan == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-monitor-input
+          path: |
+            sbom/app.cdx.json
+            sbom/fmf-engine.cdx.json
+            osv-scanner.toml
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
+
+  # The third-party scanner gets only read access to this run's validated
+  # artifact. It cannot read repository contents/releases or mutate issues.
+  scan:
+    needs: prepare
+    if: >-
+      ${{
+        needs.prepare.result == 'success' &&
+        needs.prepare.outputs.scan == 'true'
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read # download the validated SBOM handoff artifact
+    outputs:
+      code: ${{ steps.scan.outputs.code }}
+    steps:
+      - name: Download validated SBOMs and policy
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom-monitor-input
+
+      - name: Install osv-scanner
         uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: osv-scanner@2.3.6
 
       - name: Re-scan release SBOMs against today's OSV DB
-        if: steps.fetch.outputs.scan == 'true'
         id: scan
         shell: bash
         run: |
-          # Scan every downloaded SBOM (-L detects CycloneDX by the .cdx.json name).
-          # osv-scanner exit codes: 0 = clean, 1 = vulns/license findings, 128 = no
-          # packages. Capture without tripping `set -e`, then branch.
-          args=(); for f in sbom/*.cdx.json; do args+=(-L "$f"); done
+          # Scan both canonical SBOMs (-L detects CycloneDX by the .cdx.json name).
+          # Capture without tripping `set -e` so the next step can update the
+          # tracking issue before it fails the run. Only 0 (clean) and 1
+          # (findings) are semantic results; every other code is a scanner error
+          # and must fail closed.
           code=0
-          osv-scanner scan source "${args[@]}" --config osv-scanner.toml \
+          osv-scanner scan source \
+            -L sbom/fmf-engine.cdx.json \
+            -L sbom/app.cdx.json \
+            --config osv-scanner.toml \
             --format markdown --output osv-report.md || code=$?
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "osv-scanner exit code: $code"
 
+      - name: Upload vulnerability report
+        if: steps.scan.outputs.code == '1'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-monitor-report
+          path: osv-report.md
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
+
+  # Keep the Issues-write token away from release assets and osv-scanner. This
+  # job receives only the scanner's bounded exit code/tag plus its text report.
+  report:
+    needs: [prepare, scan]
+    if: >-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        needs.prepare.outputs.scan == 'true' &&
+        needs.scan.result == 'success'
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read # download the scanner report artifact
+      issues: write # open/update/close the sbom-vuln tracking issue
+    steps:
+      - name: Download vulnerability report
+        if: needs.scan.outputs.code == '1'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom-monitor-report
+
       - name: Open / update / close the tracking issue
-        if: steps.fetch.outputs.scan == 'true'
         shell: bash
         env:
-          TAG: ${{ steps.fetch.outputs.tag }}
-          CODE: ${{ steps.scan.outputs.code }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          CODE: ${{ needs.scan.outputs.code }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           gh label create sbom-vuln --color B60205 --force \
             --description "Vulnerability found in a shipped release's SBOM (sbom-monitor.yml)"
-          existing=$(gh issue list --label sbom-vuln --state open --json number --jq '.[0].number // empty')
+          mapfile -t existing < <(
+            gh issue list --label sbom-vuln --state open --limit 100 \
+              --json number --jq '.[].number'
+          )
 
           if [ "$CODE" = "1" ]; then
             {
@@ -97,19 +239,28 @@ jobs:
               echo
               echo "</details>"
             } > issue-body.md
-            if [ -n "$existing" ]; then
-              gh issue edit "$existing" --body-file issue-body.md
-              echo "Updated issue #$existing."
+            if [ "${#existing[@]}" -gt 0 ]; then
+              primary=${existing[0]}
+              gh issue edit "$primary" --body-file issue-body.md
+              echo "Updated issue #$primary."
+              for duplicate in "${existing[@]:1}"; do
+                gh issue comment "$duplicate" \
+                  --body "Superseded by the canonical tracking issue #$primary. Closing."
+                gh issue close "$duplicate"
+              done
             else
               gh issue create --title "Vulnerable dependency in shipped release $TAG" \
                 --label sbom-vuln --body-file issue-body.md
             fi
+            echo "::error::Known vulnerabilities remain in the shipped release $TAG."
+            exit 1
           elif [ "$CODE" = "0" ]; then
-            if [ -n "$existing" ]; then
-              gh issue comment "$existing" --body "Latest release ($TAG) SBOM is clean as of $RUN_URL. Closing."
-              gh issue close "$existing"
-            fi
+            for issue in "${existing[@]}"; do
+              gh issue comment "$issue" --body "Latest release ($TAG) SBOM is clean as of $RUN_URL. Closing."
+              gh issue close "$issue"
+            done
             echo "No vulnerabilities in $TAG."
           else
-            echo "::warning::osv-scanner exited $CODE (no packages / scan error) — not treated as a finding."
+            echo "::error::osv-scanner exited unexpectedly with code $CODE."
+            exit 1
           fi

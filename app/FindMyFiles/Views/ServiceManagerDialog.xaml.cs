@@ -2,15 +2,16 @@ using FindMyFiles.Engine;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace FindMyFiles.Views;
 
 /// <summary>
 /// Wiring only: the gear menu's "Manage service…" dialog. State and the
-/// elevated mutations live in <see cref="ServiceManagerViewModel"/>; the
+/// service mutations live in <see cref="ServiceManagerViewModel"/>; the
 /// buttons fire-and-forget its async actions through the sanctioned
-/// <see cref="FindMyFiles.Services.TaskExtensions.Forget"/> funnel (CLAUDE.md convention).
+/// <see cref="FindMyFiles.Services.TaskExtensions.Forget"/> funnel (AGENTS.md convention).
 /// </summary>
 // View code-behind: dialog wiring, not unit-tested (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
@@ -18,9 +19,9 @@ public sealed partial class ServiceManagerDialog : ContentDialog
 {
     private static bool _open;
 
-    /// <summary>ViewModel for service state and elevation-requiring operations
-    /// (register/uninstall/start/stop/restart). Each button fires this instance's async actions via `Forget`.</summary>
-    public ServiceManagerViewModel VM { get; }
+    /// <summary>ViewModel for service lifecycle operations. Each button fires
+    /// this instance's async action via <c>Forget</c>.</summary>
+    internal ServiceManagerViewModel VM { get; }
 
     /// <summary>Creates the ViewModel and runs the initial state `Refresh`. The only public
     /// entry point is <see cref="OpenAsync"/>; direct constructor calls are not expected.</summary>
@@ -28,6 +29,7 @@ public sealed partial class ServiceManagerDialog : ContentDialog
     {
         VM = new ServiceManagerViewModel();
         InitializeComponent();
+        AutomationProperties.SetLabeledBy(PurgeConfirmation, SvcPurgeConfirmTitle);
         VM.Refresh();
     }
 
@@ -37,7 +39,7 @@ public sealed partial class ServiceManagerDialog : ContentDialog
     /// not ShowAsync, to avoid hiding the inherited
     /// <see cref="ContentDialog.ShowAsync()"/>.</summary>
     /// <returns>A <see cref="Task"/> that completes when the dialog closes.</returns>
-    public static async Task OpenAsync()
+    internal static async Task OpenAsync()
     {
         if (_open)
         {
@@ -53,16 +55,25 @@ public sealed partial class ServiceManagerDialog : ContentDialog
         _open = true;
         try
         {
-            await new ServiceManagerDialog { XamlRoot = root }.ShowAsync();
+            var dialog = new ServiceManagerDialog { XamlRoot = root };
+            await dialog.ShowAsync();
 
             // If the service was uninstalled/stopped while this instance was
             // running on the pipe, its connection is dead and can't recover — soft
             // restart so the app re-resolves the engine in-process and lands on the
             // setup screen (the mirror of register's soft restart, ADR-0036).
-            if (App.EngineClient is PipeEngineClient
-                && ServiceSetup.QueryState() != EngineServiceState.Running)
+            if (!dialog.VM.FullUninstallCompleted
+                && App.EngineClient.Kind == EngineClientKind.Service)
             {
-                App.SoftRestart();
+                var state = ServiceSetup.QueryState();
+                if (state == EngineServiceState.Stopped)
+                {
+                    App.SoftRestartIntoUnavailable();
+                }
+                else if (state == EngineServiceState.NotInstalled)
+                {
+                    App.SoftRestart();
+                }
             }
         }
         catch (Exception ex)
@@ -89,7 +100,34 @@ public sealed partial class ServiceManagerDialog : ContentDialog
         VM.RegisterAsync().Forget("service-ui");
 
     private void Uninstall_Click(object sender, RoutedEventArgs e) =>
-        VM.UninstallAsync().Forget("service-ui");
+        VM.UninstallAsync(purgeData: false).Forget("service-ui");
+
+    private void RequestPurge_Click(object sender, RoutedEventArgs e)
+    {
+        VM.RequestPurgeConfirmation();
+        if (VM.PurgeConfirmationVisible)
+        {
+            SvcPurgeConfirm.Focus(FocusState.Programmatic);
+        }
+    }
+
+    private void ConfirmPurge_Click(object sender, RoutedEventArgs e) =>
+        ConfirmPurgeAndRestoreFocusAsync().Forget("service-ui");
+
+    private async Task ConfirmPurgeAndRestoreFocusAsync()
+    {
+        await VM.UninstallAsync(purgeData: true);
+        if (!VM.FullUninstallCompleted)
+        {
+            SvcPurgeData.Focus(FocusState.Programmatic);
+        }
+    }
+
+    private void CancelPurge_Click(object sender, RoutedEventArgs e)
+    {
+        VM.CancelPurgeConfirmation();
+        SvcPurgeData.Focus(FocusState.Programmatic);
+    }
 
     private void RestartApp_Click(object sender, RoutedEventArgs e) => VM.RestartApp();
 }

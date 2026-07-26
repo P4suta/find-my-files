@@ -25,13 +25,13 @@ The premise is to materialize `Engine::flush()` (VolumeSlot's shared checkpoint 
 
 - Option 1: expose as a pipe opcode — rejected. Client-driven flush spamming repeatedly holds index.read(), a local DoS path that stalls USN application (SECURITY.md threat 6)
 - Option 2: not even in FFI, service-internal function only — rejected. The in-proc (--engine=inproc) path and tests cannot reproduce save timing, and it punches a hole in the contract mapping table (1 FFI function = 1 message)
-- Option 3: adopted — FFI `fmf_flush` is exported, the pipe only reserves opcode 11 as a number
+- Option 3: adopted — FFI `fmf_flush` is exported, while the pipe exposes no flush operation
 
 Saving is a service-internal responsibility — periodic (default 300s, staggered across volumes, dirty only) + on SCM Stop/PRESHUTDOWN. Because the PRESHUTDOWN default grace has been shortened to 10 seconds on current Windows (docs/RESEARCH.md), set an explicit extension via `SERVICE_PRESHUTDOWN_INFO` at install time.
 
 ### Distribution
 
-MSIX/installer is deferred for this milestone (WindowsPackageType=None kept). Service deployment is established via `fmf-service install` (sc.exe cannot substitute, because SID capture, DACL setup, and privilege stripping must be done atomically) + a justfile recipe + README instructions. **Switching to asInvoker is conditioned on a working service-deployment mechanism** (default behavior when the service is not deployed: an InfoBar with explanation + fake fallback + a "Restart as administrator" button).
+MSIX/installer is deferred for this milestone (WindowsPackageType=None kept). Service deployment is established via `fmf-service install` (sc.exe cannot substitute, because SID capture, DACL setup, and privilege stripping must be done atomically) + a justfile recipe + README instructions. **Switching to asInvoker is conditioned on a working service-deployment mechanism** (default behavior when the service is not deployed: an InfoBar with explanation and a service-install action; search stays unavailable until setup succeeds).
 
 ## Consequences
 
@@ -42,15 +42,12 @@ MSIX/installer is deferred for this milestone (WindowsPackageType=None kept). Se
 - Removal trigger for FfiEngineClient (--engine=inproc): completion of a one-release soak after service GA
 - drag-out (results→Explorer) is filed separately as a new feature outside this milestone (only the drop direction is resolved here)
 
-## Verification (measured 2026-06-11. Canonical numbers are the CLAUDE.md performance pass-line and the ARCHITECTURE.md latency-budget section)
+## Verification (measured 2026-06-11. Canonical numbers are the AGENTS.md performance pass-line and the ARCHITECTURE.md latency-budget section)
 
-- [x] First index, real C: **2.31s @1,268,560 entries** (gate: 1M≈60s. `just bench-check`). End-to-end via the real service binary (`service_admin.rs`, console-mode child process) also confirms real-C: scan→Ready→query
-- [x] USN→event **250.9ms** (gate 1s. Measured with periodic flush at a 10s interval firing. Almost all of it is the intended engine-side 200ms debounce. The UI side adds the existing 50ms debounce + rendering)
-- [x] kill→restart→restore **1.25s** (including process startup. Gate 2s. The engine-alone restore p50 is 108ms). The same test also proves the snapshot survives (durability) via the periodic flush before the hard kill
-- [x] Search p99 **≤5.6ms** for all queries on real C: (gate 50ms) / the loopback round-trip for a 64-row ResultPage p99 **≤5ms** is constantly asserted by the test (`pipe_loopback.rs::page_roundtrip_stays_inside_the_latency_budget`)
-- [x] RAM: the engine is the same code as the fmf-cli measurement (~99B/entry, WS 119.9MiB @1.27M). The fmf-service addition is only the pipe threads and queues (event queue cap 256×32B/connection)
-- [ ] SCM registration (`fmf-service install` → start → stop → uninstall) real-machine smoke — **left as a manual procedure**. Registering the persistent LocalSystem auto-start service is done by user action (`just service-install`). The SCM-path code goes through the windows-service crate, and the serve core is shared with the console E2E
-- [ ] SECURITY.md manual verification checklist (other-user reject / remote reject need a separate token / separate machine)
+Measured: first index 2.31s/1,268,560 entries; USN→event 250.9ms;
+kill→restart→restore 1.25s; real-C search p99 ≤5.6ms; engine working set
+119.9MiB (~99B/entry). Pipe paging stays pinned at p99 ≤5ms by the loopback
+test. Lifecycle/security verification moved to [ADR-0027](0027-on-demand-service-lifecycle.md).
 
 ## Re-examination triggers
 

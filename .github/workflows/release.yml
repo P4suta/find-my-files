@@ -1,71 +1,77 @@
-# Dispatched (by release-please) build / sign / publish, split into three jobs so
-# the signing credentials touch the smallest possible surface:
+# Dispatched by performance-release.yml after an exact-tag gate completes,
+# then split at each
+# privilege boundary so sensitive authority touches the smallest possible surface:
 #
 #   build   -> assembles the distributable bundle (`just publish`) + SBOMs and
 #              uploads them as artifacts. Holds NO secrets, read-only token.
-#   sign    -> downloads the bundle and Authenticode-signs our own five PE files
-#              with SSL.com eSigner via the official SSLcom/esigner-codesign Action
-#              (command: batch_sign, SHA-pinned): CodeSignTool scans then signs,
-#              timestamping (RFC 3161) via SSL.com's TSA. The five PEs are staged
-#              into a flat dir through a path->unique-name map (two share the
-#              basename FindMyFiles.exe) that lives in xtask (`just sign-stage` /
-#              `sign-collect`, one source of truth), signed into an explicit
-#              output dir, and copied back; then we hard-verify chain + timestamp
-#              + signer. This is
-#              the only job that sees the signing secrets, so it runs in the
-#              approval-gated `release` environment.
-#   publish -> downloads the signed bundle, RE-VERIFIES it is signed (a gate at
-#              the irreversible boundary), zips + checksums it (`just package`),
-#              writes keyless build-provenance + SBOM attestations (Sigstore via
-#              the OIDC GITHUB_TOKEN - no stored secrets) and attaches everything
-#              to the release-please draft, then publishes it. Runs only when
-#              publish=true.
+#   sign-stage -> secretless repository code maps first-party PEs into one flat
+#                 immutable artifact (`just sign-stage`).
+#   sign       -> NO checkout/toolchain/repository code. It only downloads that
+#                 flat artifact, invokes the commit-pinned SSL.com Action, and
+#                 uploads the result. This is the only job that sees signing
+#                 secrets, behind the approval-gated `release` environment.
+#   sign-collect -> secretless repository code maps signed PEs back, verifies the
+#                   committed PE manifest + chain + timestamp + signer, and emits
+#                   the release-candidate bundle.
+#   package -> under a read-only token, re-verifies the artifact handoff, zips +
+#              checksums it (`just package`), and uploads one immutable asset set.
+#   publish -> downloads only that completed asset set; official pinned actions
+#              write keyless build-provenance + SBOM attestations (Sigstore via
+#              OIDC) and attach/publish the release-please draft. It checks out
+#              and executes no repository build code. Runs only when publish=true.
 #
-# Auth: the default GITHUB_TOKEN for the release; SSL.com eSigner via four `release`
-# environment secrets (ES_USERNAME / ES_PASSWORD / CREDENTIAL_ID / ES_TOTP_SECRET).
+# Auth: a short-lived Release Please App token publishes the release; SSL.com
+# eSigner uses four `release` environment secrets (ES_USERNAME / ES_PASSWORD /
+# CREDENTIAL_ID / ES_TOTP_SECRET). The same environment holds the App client ID
+# and private key.
 # Signing is gated at publish: a real run (publish=true) re-verifies the bundle is
 # validly signed and FAILS before creating the (immutable) Release if it is not, so
 # a missing/misconfigured secret can never ship an unsigned release unnoticed. A
-# publish=false smoke test still runs to completion UNSIGNED with a ::warning:: (it
-# creates no Release). Setup + rationale live in docs/SIGNING.md,
-# docs/adr/0020-code-signing-provider.md (provider/cert) and
-# docs/adr/0029-ci-signing-cka-pipeline.md (official Action, this 3-job shape;
+# publish=false rehearsal may run unsigned with an explicit warning (it creates no
+# Release). Human procedure lives in docs/RELEASING.md; rationale is
+# in docs/adr/0020-code-signing-provider.md (provider/cert) and
+# docs/adr/0029-ci-signing-cka-pipeline.md (official Action, this split pipeline;
 # records why the eSigner CKA + standard signtool alternative was rejected).
 #
-# A manual run (workflow_dispatch) with publish=false builds + signs + verifies
-# but creates no Release/attestations - a signing smoke test that is safe under
-# immutable releases.
+# A manual run (workflow_dispatch) with publish=false builds and, when all four
+# eSigner secrets are configured, signs + verifies, but creates no
+# Release/attestations. Without the secrets it is an explicitly unsigned build
+# rehearsal.
 #
 # Verify a download with `gh attestation verify <zip> --repo P4suta/find-my-files`.
 name: release
+run-name: release ${{ inputs.publish && 'publish' || 'rehearsal' }} ${{ inputs.tag_name }}
 
 on:
-  # Dispatched by release-please.yml once it creates the DRAFT release. We trigger on
-  # neither the `release` event (a draft fires none) nor the tag push (dispatch-only
-  # means a stray tag starts nothing). release-please materializes the `vX.Y.Z` tag at
-  # merge (`force-tag-creation`, so it still finds the latest release when computing the
-  # next candidate); the publish job attaches assets to that draft and publishes it, in
-  # the asset-before-publish order immutable releases require. Also runnable by hand for
-  # a signing smoke test (publish=false).
+  # Dispatched by performance-release.yml only after GitHub records the
+  # exact-tag performance workflow as successful. We trigger on neither the
+  # `release` event (a draft fires none) nor the tag push (dispatch-only means a
+  # stray tag starts nothing). release-please materializes the `vX.Y.Z` tag at
+  # merge; the publish job attaches assets to that draft and publishes it in the
+  # asset-before-publish order immutable releases require. Also runnable by hand
+  # for a signing smoke test (publish=false).
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Version tag to release (e.g. v0.1.1), or a branch/ref for a publish=false signing test"
+        description: "Version tag to publish (e.g. v0.1.1), or a rehearsal label when publish=false"
         required: true
         type: string
-      sha:
-        description: "Commit SHA to build from (release-please passes the release commit; omit to build from tag_name)"
+      performance_run_id:
+        description: "Exact successful performance-gate run (required when publish=true)"
         required: false
+        default: ""
         type: string
       publish:
-        description: "Publish the GitHub Release (false = build+sign+verify only, no release/attestations)"
+        description: "Publish the GitHub Release (false = rehearse; sign/verify only when credentials exist)"
         required: false
-        default: true
+        default: false
         type: boolean
 
-# One release per ref at a time; never cancel a run mid-sign/mid-publish.
+# Stable releases are globally serialized so two tags cannot both pass the
+# monotonic-version preflight and race to become Latest. Rehearsals remain
+# independent by their caller-provided label.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.publish && 'stable-publication' || inputs.tag_name }}
   cancel-in-progress: false
 
 # Least privilege: read-only at the top level; each job requests only the scopes
@@ -76,16 +82,6 @@ permissions:
 env:
   # The version tag (vX.Y.Z) — reused for stamping, zip naming, and the release.
   TAG: ${{ inputs.tag_name }}
-  # Where to get the code: the release commit SHA when release-please dispatches us
-  # (the tag doesn't exist yet, and pinning the SHA avoids main moving during the
-  # approval waits); falls back to tag_name for a manual branch smoke test. All
-  # three jobs check this ref out, and the local verify-signatures action is
-  # resolved from its tree — so env.REF must point at a commit that contains that
-  # action (dispatching an old ref that predates it fails closed: never publishes).
-  REF: ${{ inputs.sha || inputs.tag_name }}
-  # Build the shipped binaries from the committed Cargo.lock, never a silent
-  # re-resolve (the cargo-sbom install step pins its own --locked).
-  CARGO_NET_LOCKED: "true"
   # Our SSL.com IV certificate's subject — asserted at verify time (both the sign
   # self-check and the publish gate) so a different (even validly-chained)
   # certificate cannot pass silently. Workflow-level so both jobs share one value.
@@ -96,30 +92,115 @@ jobs:
   # 1) Build the distributable bundle + SBOMs. No secrets here.
   # ---------------------------------------------------------------------------
   build:
-    runs-on: windows-latest
-    timeout-minutes: 30 # full publish (cargo release + dotnet publish + SBOMs); cf. nightly's 40
+    runs-on: windows-2025
+    timeout-minutes: 60 # verify + admin suite + shipping/test publishes + UI/SBOM
     permissions:
+      actions: read # validate and download the exact performance evidence run
       contents: read
     steps:
-      # Fail fast on a publishing run pointed at a non-version ref before the
-      # gated `sign` job burns a reviewer approval + an eSigner signing quota on a
-      # misfire (`just package` rejects a non-vX.Y.Z TAG too, but only after sign).
-      # A publish=false smoke test (e.g. tag_name=main) is deliberately exempt.
-      - name: Validate tag for a publishing run
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
-        shell: bash
+      # A real release is dispatched *at* the already-created tag. Bind the
+      # workflow event, remote tag, draft release, and draft target to one SHA
+      # before executing any repository-local build code.
+      - name: Bind build to the exact draft release
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::publishing run requires a vX.Y.Z tag, got '$TAG' (use publish=false for a signing smoke test from a branch)"
-            exit 1
-          fi
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Publishing requires an exact vX.Y.Z tag, got '$env:TAG'."
+          }
+          if ($env:GITHUB_REF -cne "refs/tags/$env:TAG") {
+            throw "Workflow ref '$env:GITHUB_REF' is not the release tag refs/tags/$env:TAG."
+          }
+          $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
+          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant()) {
+            throw "Tag $env:TAG resolves to $tagSha, but this workflow owns $env:GITHUB_SHA."
+          }
+          $lineage = (
+            gh api "repos/$env:REPO/compare/$tagSha...main" --jq ".status"
+          ).Trim()
+          if ($lineage -cne "ahead" -and $lineage -cne "identical") {
+            throw "Release tag $env:TAG is not on main's protected lineage (compare status: $lineage)."
+          }
+          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
+            "repos/$env:REPO/releases?per_page=100" |
+            ConvertFrom-Json -Depth 20
+          $matches = @(
+            foreach ($page in $pages) {
+              foreach ($candidate in $page) {
+                if ($candidate.draft -and
+                    -not $candidate.prerelease -and
+                    $candidate.tag_name -ceq $env:TAG -and
+                    $candidate.name -ceq $env:TAG) {
+                  $candidate
+                }
+              }
+            }
+          )
+          if ($matches.Count -ne 1) {
+            throw "$env:TAG must identify exactly one existing draft release."
+          }
+          $release = $matches[0]
+          $targetSha = [string]$release.target_commitish
+          if ($targetSha -cnotmatch '^[0-9a-f]{40}$' -or $targetSha -cne $tagSha) {
+            throw "Draft target '$targetSha' must be the exact tag commit $tagSha, not a mutable ref."
+          }
+          "Bound $env:TAG, workflow, and draft target to $tagSha."
+
+      - name: Require the exact successful performance gate for this tag
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PERFORMANCE_RUN_ID: ${{ inputs.performance_run_id }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:PERFORMANCE_RUN_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw "Publishing requires an exact numeric performance_run_id."
+          }
+          $run = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/actions/runs/$env:PERFORMANCE_RUN_ID" |
+            ConvertFrom-Json -Depth 20
+          $expectedWorkflowId = [long]((
+            gh api "repos/$env:REPO/actions/workflows/performance-gate.yml" --jq ".id"
+          ).Trim())
+          if ([long]$run.id -ne [long]$env:PERFORMANCE_RUN_ID -or
+              [long]$run.workflow_id -ne $expectedWorkflowId -or
+              $run.repository.full_name -cne $env:REPO -or
+              $run.event -cne "workflow_dispatch" -or
+              $run.status -cne "completed" -or
+              $run.conclusion -cne "success" -or
+              $run.head_sha -cne $env:GITHUB_SHA -or
+              $run.display_title -cne "performance-gate $env:TAG") {
+            throw "Performance run $env:PERFORMANCE_RUN_ID is not the exact successful gate for $env:TAG at $env:GITHUB_SHA."
+          }
+          $artifacts = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/actions/runs/$env:PERFORMANCE_RUN_ID/artifacts?per_page=100" |
+            ConvertFrom-Json -Depth 20
+          $evidence = @(
+            $artifacts.artifacts |
+              Where-Object {
+                $_.name -ceq "performance-gate-evidence" -and
+                -not $_.expired
+              }
+          )
+          if ($evidence.Count -ne 1) {
+            throw "Performance run $env:PERFORMANCE_RUN_ID has no unique, unexpired evidence artifact."
+          }
+          "Bound performance run $env:PERFORMANCE_RUN_ID to $env:TAG at $env:GITHUB_SHA."
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ env.REF }}
+          persist-credentials: false
 
-      # Provisions the pinned toolchain (rust / dotnet / just) from mise.toml so
-      # the shipped artifact is built on the exact pins.
+      # Provisions the repository-declared toolchain (rust / dotnet / just) from
+      # mise.toml so every release job uses the same versions.
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
           install: true
@@ -131,7 +212,7 @@ jobs:
       # Same gate as the tag-shape check above (a publish=false branch smoke test
       # is exempt). Logic lives in xtask (unit-tested); TAG flows via env.
       - name: Verify tag matches the committed version
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+        if: ${{ inputs.publish }}
         run: just check-version $env:TAG
 
       # Stamp the build as a clean stable release. Without these, the
@@ -140,13 +221,71 @@ jobs:
       # FMF_BUILD_VERSION (Rust) = the bare tag version; FmfChannel=stable (C#,
       # read by MSBuild as a property) suppresses the channel suffix. (ADR-0035)
       - name: Stamp stable build version
+        if: ${{ inputs.publish }}
         shell: bash
         run: |
           echo "FMF_BUILD_VERSION=${TAG#v}" >> "$GITHUB_ENV"
           echo "FmfChannel=stable" >> "$GITHUB_ENV"
 
+      - name: Stamp rehearsal as a development build
+        if: ${{ !inputs.publish }}
+        shell: pwsh
+        run: |
+          $version = (just version --channel dev).Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "xtask returned an empty development version."
+          }
+          "FMF_BUILD_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "FmfChannel=dev" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Re-prove the exact release ref instead of assuming an earlier branch CI
+      # result still covers a manually-dispatched tag/sha.
+      - name: Verify source and deterministic test suites
+        run: just verify
+
+      # windows-2025 runs elevated. This suite has been stable in the nightly
+      # sentinel and covers the otherwise-unreachable real C: MFT scan, live USN
+      # journal, streaming/reference equivalence, and service durability/restore.
+      # It is a release gate before any signing approval or secret is touched.
+      - name: Elevated real-volume MFT, USN, and service suite
+        run: just test-admin
+
+      - name: Upload admin nextest evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-admin-nextest
+          path: build/engine/nextest-ci.xml
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: true
+
       - name: Build distributable bundle
         run: just publish
+
+      # Exercise the exact shipping app without test-only CLI arguments before
+      # moving to the separate seam-enabled full UI suite.
+      - name: Shipping bundle startup smoke (no test seams)
+        run: just ui-test-stable-smoke
+
+      # Shipping artifacts intentionally exclude fake/custom engine seams.
+      # Generate the separately marked test bundle for deterministic UI
+      # automation; signing and every upload below still target build/dist only.
+      - name: Build isolated UI-test bundle
+        run: just publish-ui-test true
+
+      - name: UI-test bundle automation
+        run: just ui-test-published
+
+      - name: Upload UI automation evidence on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-ui-automation-failure
+          path: build/ui-automation/
+          retention-days: 7
+          if-no-files-found: warn
+          overwrite: true
 
       # SBOMs (CycloneDX 1.6) + the osv-scanner release gate, shared with
       # nightly.yml via a composite action so the tool versions never drift
@@ -161,42 +300,37 @@ jobs:
         with:
           name: dist
           path: build/dist/FindMyFiles
-          retention-days: 1
+          retention-days: 14
           if-no-files-found: error
+          overwrite: true
 
       - name: Upload SBOMs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom
           path: build/sbom
-          retention-days: 1
+          retention-days: 14
           if-no-files-found: error
+          overwrite: true
 
   # ---------------------------------------------------------------------------
-  # 2) Authenticode-sign our own PEs with SSL.com eSigner (the official
-  #    SSLcom/esigner-codesign Action). The only job with signing secrets ->
-  #    approval-gated `release` environment.
+  # 2a) Secretless staging. Repository code may run here, but no signing
+  #     credential is present on this runner.
   # ---------------------------------------------------------------------------
-  sign:
+  sign-stage:
     needs: build
-    runs-on: windows-latest
-    timeout-minutes: 20 # eSigner network round-trips (scan + sign + timestamp) + verify
-    environment: release
+    runs-on: windows-2025
+    timeout-minutes: 15
     permissions:
       contents: read
-    env:
-      # secrets.* cannot be referenced in `if:`; hoist presence to a job-level
-      # env bool, then gate the signing steps on env.HAVE_SIGNING. batch_sign is
-      # driven by the credential_id, so gate on its presence.
-      HAVE_SIGNING: ${{ secrets.ES_USERNAME != '' && secrets.CREDENTIAL_ID != '' }}
     steps:
-      # The Verify step uses a local composite action, which needs the repo tree
-      # present (this job otherwise only handles artifacts). Pin to the same
-      # release commit the bundle was built from. Runs first, before the artifact
-      # download below, so checkout's clean does not wipe the downloaded bundle.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ env.REF }}
+          persist-credentials: false
+
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          install: true
 
       - name: Download unsigned bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -204,21 +338,118 @@ jobs:
           name: dist
           path: build/dist/FindMyFiles
 
-      # Collect just our own PE files into a flat staging dir for batch_sign. The
-      # bundled .NET / WindowsAppSDK runtime DLLs are already Microsoft-signed -
-      # re-signing them would waste eSigner quota and claim authorship we don't
-      # have. Two of the five share the basename FindMyFiles.exe (the root launcher
-      # and the app\ apphost), so a flat copy-by-basename would collide; the
-      # what-we-sign map (path -> unique stage name; Authenticode lives inside the
-      # PE, so the rename is safe) lives in xtask (publish::FIRST_PARTY_PES) so it
-      # is defined once and unit-tested, not duplicated across these two steps.
-      # `just sign-stage` writes sign-stage/ (+ an empty signed/ for the output).
+      - name: Revalidate draft identity before staging
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:GITHUB_REF -cne "refs/tags/$env:TAG") {
+            throw "Signing workflow ref '$env:GITHUB_REF' is not refs/tags/$env:TAG."
+          }
+          $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
+          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant()) {
+            throw "Tag $env:TAG moved from workflow SHA $env:GITHUB_SHA to $tagSha."
+          }
+          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
+            "repos/$env:REPO/releases?per_page=100" |
+            ConvertFrom-Json -Depth 20
+          $matches = @(
+            foreach ($page in $pages) {
+              foreach ($candidate in $page) {
+                if ($candidate.draft -and
+                    -not $candidate.prerelease -and
+                    $candidate.tag_name -ceq $env:TAG -and
+                    $candidate.name -ceq $env:TAG) {
+                  $candidate
+                }
+              }
+            }
+          )
+          if ($matches.Count -ne 1) {
+            throw "$env:TAG no longer identifies one expected draft release."
+          }
+          $release = $matches[0]
+          $targetSha = [string]$release.target_commitish
+          if ($targetSha -cnotmatch '^[0-9a-f]{40}$' -or $targetSha -cne $tagSha) {
+            throw "Draft target '$targetSha' must remain the exact tag commit $tagSha."
+          }
+
+      # The path -> unique-stage-name map lives only in xtask. The signing runner
+      # receives this flat artifact as inert bytes and never receives the repo.
       - name: Stage first-party binaries for signing
-        if: env.HAVE_SIGNING == 'true'
         run: just sign-stage
 
+      # upload-artifact omits empty directories. Carry one inert non-PE marker so
+      # the credential runner can materialize the required empty output directory
+      # without executing a shell or pre-populating it with colliding PE names.
+      - name: Materialize the signing output-directory marker
+        shell: pwsh
+        run: Set-Content -LiteralPath build/signed/OUTPUT_DIRECTORY.txt -Value "secretless stage"
+
+      - name: Upload flat signing input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: first-party-pes-unsigned
+          path: build/sign-stage
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Upload signing output-directory marker
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signing-output-directory
+          path: build/signed/OUTPUT_DIRECTORY.txt
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: true
+
+  # ---------------------------------------------------------------------------
+  # 2b) Credential island. Deliberately no checkout, mise, shell, local action,
+  #     or repository executable. Only pinned artifact actions and SSL.com code
+  #     share this runner with the eSigner credentials.
+  # ---------------------------------------------------------------------------
+  sign:
+    needs: sign-stage
+    runs-on: windows-2025
+    timeout-minutes: 20
+    environment: release
+    permissions: {}
+    outputs:
+      signed: ${{ steps.esign.outcome == 'success' }}
+    env:
+      HAVE_SIGNING: >-
+        ${{
+          secrets.ES_USERNAME != '' &&
+          secrets.ES_PASSWORD != '' &&
+          secrets.CREDENTIAL_ID != '' &&
+          secrets.ES_TOTP_SECRET != ''
+        }}
+    steps:
+      - name: Download flat signing input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: first-party-pes-unsigned
+          path: build/sign-stage
+
+      # Materialize an output directory through the same pinned artifact action.
+      # It contains only a non-PE marker, so no unsigned target can collide with
+      # CodeSignTool's outputs.
+      - name: Prepare isolated signing output
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signing-output-directory
+          path: build/signed
+
       - name: Sign staged binaries (SSL.com eSigner)
-        if: env.HAVE_SIGNING == 'true'
+        id: esign
+        # A publish with missing credentials intentionally enters the Action with
+        # empty required inputs and fails closed. An unsigned rehearsal skips it.
+        if: ${{ env.HAVE_SIGNING == 'true' || inputs.publish }}
         uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
         with:
           command: batch_sign
@@ -240,77 +471,114 @@ jobs:
           # the signatures outlive the cert (Verify enforces a timestamp below).
           malware_block: "true"
 
-      # Map the signed PEs back over the bundle (same xtask map, reverse
-      # direction) — see the staging step above.
+      - name: Upload signed result
+        if: ${{ steps.esign.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: first-party-pes-result
+          path: build/signed
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Pass through unsigned rehearsal result
+        if: ${{ !inputs.publish && steps.esign.outcome != 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: first-party-pes-result
+          path: build/sign-stage
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: true
+
+  # ---------------------------------------------------------------------------
+  # 2c) Secretless collection and manifest verification. Repository code returns
+  #     only after the signing credential runner has been destroyed.
+  # ---------------------------------------------------------------------------
+  sign-collect:
+    needs: [build, sign]
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          install: true
+
+      - name: Download unsigned bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: build/dist/FindMyFiles
+
+      - name: Download isolated signing result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: first-party-pes-result
+          path: build/signed
+
       - name: Copy signed binaries back into the bundle
-        if: env.HAVE_SIGNING == 'true'
         run: just sign-collect
 
-      # Never ship a "signed" build that is silently unsigned, untimestamped, or
-      # signed by the wrong cert. The verify (chain + RFC 3161 timestamp + signer
-      # subject) lives in a composite action shared with the publish gate so the
-      # two can't drift — so when signing secrets are present (HAVE_SIGNING=true)
-      # a publish=false smoke test runs the publish gate's identical check here.
+      # The committed manifest is derived from xtask's FIRST_PARTY_PES map. This
+      # verifies every mapped destination after the artifact boundary.
       - name: Verify signatures
-        if: env.HAVE_SIGNING == 'true'
+        if: ${{ needs.sign.outputs.signed == 'true' }}
         uses: ./.github/actions/verify-signatures
         with:
           bundle-dir: build/dist/FindMyFiles
           signer-subject-contains: ${{ env.SIGNER_SUBJECT_CONTAINS }}
 
       - name: Warn if unsigned
-        if: env.HAVE_SIGNING != 'true'
-        run: echo "::warning::Signing secrets absent - publishing UNSIGNED binaries (SmartScreen will warn end users). See docs/SIGNING.md to enable."
+        if: ${{ !inputs.publish && needs.sign.outputs.signed != 'true' }}
+        run: echo "::warning::Signing secrets absent - rehearsal artifact remains unsigned; a real publish fails closed. See docs/RELEASING.md."
 
-      - name: Upload signed bundle
+      - name: Upload release-candidate bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: dist-signed
+          # A rehearsal without credentials is intentionally unsigned, so do
+          # not encode a false signature claim in the artifact name.
+          name: dist-candidate
           path: build/dist/FindMyFiles
-          retention-days: 1
+          retention-days: 14
           if-no-files-found: error
+          overwrite: true
 
   # ---------------------------------------------------------------------------
-  # 3) Zip + checksum the signed bundle, attest, and attach to the Release.
+  # 3) Verify + package the signed candidate under a read-only token.
   # ---------------------------------------------------------------------------
-  publish:
-    needs: sign
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
-    runs-on: windows-latest
-    timeout-minutes: 20 # package + attestations + upload/publish to the Release
-    # Second approval gate on the irreversible step (ADR-0035): the GitHub Release
-    # is immutable, so publishing requires its own explicit human approval in the
-    # `release` environment, distinct from the `sign` approval ("sign this?" vs
-    # "release this to the world?"). Defence in depth against an accidental release.
-    environment: release
+  package:
+    needs: sign-collect
+    if: ${{ inputs.publish }}
+    runs-on: windows-2025
+    timeout-minutes: 15
     permissions:
-      contents: write # create the GitHub Release + upload assets
-      id-token: write # OIDC token for keyless Sigstore signing (attestations)
-      attestations: write # write build-provenance + SBOM attestations
+      contents: read
     steps:
       # The repo is needed for `just package` (xtask) + the toolchain.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ env.REF }}
+          persist-credentials: false
 
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
           install: true
 
-      - name: Download signed bundle
+      - name: Download release-candidate bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: dist-signed
+          name: dist-candidate
           path: build/dist/FindMyFiles
 
-      # Gate at the irreversible boundary: a real publish must ship signed binaries.
-      # If the signing secrets were absent the sign job only warned and passed the
-      # bundle through UNSIGNED (HAVE_SIGNING=false) — fail HERE, before any
-      # attestation or the immutable Release, rather than publishing unsigned. Same
-      # composite verify the sign job runs, so a signed (HAVE_SIGNING=true)
-      # publish=false smoke test exercises this exact check on the sign job (the
-      # publish job is skipped on publish=false, so this step's first real run is
-      # the release itself — hence the shared, smoke-tested action).
+      # A real publish must ship signed binaries. The sign job already fails closed
+      # and verifies in-place; repeat the same manifest/chain/timestamp/signer check
+      # after the artifact handoff, before packaging. A credentialled publish=false
+      # rehearsal exercises this shared verifier in the sign job.
       - name: Require the bundle to be signed before publishing
         uses: ./.github/actions/verify-signatures
         with:
@@ -329,6 +597,154 @@ jobs:
       - name: Package (zip + checksums)
         # TAG via env (pwsh syntax), not ${{ }} interpolation into the run body.
         run: just package $env:TAG
+
+      - name: Revalidate draft identity before asset handoff
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:GITHUB_REF -cne "refs/tags/$env:TAG") {
+            throw "Publish workflow ref '$env:GITHUB_REF' is not refs/tags/$env:TAG."
+          }
+          $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
+          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant()) {
+            throw "Tag $env:TAG moved from workflow SHA $env:GITHUB_SHA to $tagSha."
+          }
+          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
+            "repos/$env:REPO/releases?per_page=100" |
+            ConvertFrom-Json -Depth 20
+          $matches = @(
+            foreach ($page in $pages) {
+              foreach ($candidate in $page) {
+                if ($candidate.draft -and
+                    -not $candidate.prerelease -and
+                    $candidate.tag_name -ceq $env:TAG -and
+                    $candidate.name -ceq $env:TAG) {
+                  $candidate
+                }
+              }
+            }
+          )
+          if ($matches.Count -ne 1) {
+            throw "$env:TAG no longer identifies one expected draft release."
+          }
+          $release = $matches[0]
+          $targetSha = [string]$release.target_commitish
+          if ($targetSha -cnotmatch '^[0-9a-f]{40}$' -or $targetSha -cne $tagSha) {
+            throw "Draft target '$targetSha' must remain the exact tag commit $tagSha."
+          }
+
+      - name: Upload immutable release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: |
+            build/package/find-my-files-*-win-x64.zip
+            build/package/SHA256SUMS.txt
+            build/sbom/fmf-engine.cdx.json
+            build/sbom/app.cdx.json
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: true
+
+  # ---------------------------------------------------------------------------
+  # 4) Attest + publish official actions only. No checkout, build code, secrets,
+  #    or package tooling shares the write/OIDC token.
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: package
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Second approval gate on the irreversible step (ADR-0035): the GitHub Release
+    # is immutable, so publishing requires its own explicit human approval in the
+    # `release` environment, distinct from the `sign` approval ("sign this?" vs
+    # "release this to the world?"). Defence in depth against an accidental release.
+    environment: release
+    permissions:
+      actions: read # download the immutable release-assets handoff
+      contents: read # identity checks; only the short-lived App token mutates
+      id-token: write # OIDC token for keyless Sigstore signing
+      attestations: write # write build-provenance + SBOM attestations
+    steps:
+      - name: Download immutable release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: build
+
+      # GitHub requires a token with Workflows:write when publishing a Release
+      # whose target commit changes workflow files relative to the default
+      # branch. The built-in GITHUB_TOKEN cannot receive that permission. These
+      # App credentials are the same repository-level secrets consumed by
+      # release-please.yml; the protected `release` environment still gates this
+      # irreversible publication job.
+      - name: Mint short-lived publication App token
+        id: publication-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_PLEASE_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_PRIVATE_KEY }}
+          permission-administration: read
+          permission-contents: write
+          permission-workflows: write
+
+      - name: Require immutable releases before attestations
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ steps.publication-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $settings = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/immutable-releases" |
+            ConvertFrom-Json -Depth 10
+          if (-not $settings.enabled) {
+            throw "Repository immutable releases are not enabled; refusing to publish."
+          }
+
+      - name: Revalidate draft identity before attestations
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:GITHUB_REF -cne "refs/tags/$env:TAG") {
+            throw "Publish workflow ref '$env:GITHUB_REF' is not refs/tags/$env:TAG."
+          }
+          $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
+          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant()) {
+            throw "Tag $env:TAG moved from workflow SHA $env:GITHUB_SHA to $tagSha."
+          }
+          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
+            "repos/$env:REPO/releases?per_page=100" |
+            ConvertFrom-Json -Depth 20
+          $matches = @(
+            foreach ($page in $pages) {
+              foreach ($candidate in $page) {
+                if ($candidate.draft -and
+                    -not $candidate.prerelease -and
+                    $candidate.tag_name -ceq $env:TAG -and
+                    $candidate.name -ceq $env:TAG) {
+                  $candidate
+                }
+              }
+            }
+          )
+          if ($matches.Count -ne 1) {
+            throw "$env:TAG no longer identifies one expected draft release."
+          }
+          $release = $matches[0]
+          $targetSha = [string]$release.target_commitish
+          if ($targetSha -cnotmatch '^[0-9a-f]{40}$' -or $targetSha -cne $tagSha) {
+            throw "Draft target '$targetSha' must remain the exact tag commit $tagSha."
+          }
 
       # Build provenance + SBOM attestations for the published artifacts. Keyless
       # via the workflow's OIDC token (no stored secrets).
@@ -352,18 +768,240 @@ jobs:
           subject-path: build/package/find-my-files-*-win-x64.zip
           sbom-path: build/sbom/app.cdx.json
 
-      # release-please created this release as a DRAFT (config "draft": true) — no
-      # assets, no git tag yet. Uploading to a draft is allowed; softprops uploads
-      # the files and THEN publishes the draft (the order immutable releases require:
-      # assets must be in place before publish). Publishing is what creates the
-      # vX.Y.Z tag. `draft` is intentionally omitted so the action publishes after
-      # upload; the notes are release-please's, so we don't regenerate them.
-      - name: Publish the draft release with the signed assets
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
-        with:
-          tag_name: ${{ env.TAG }}
-          files: |
-            build/package/find-my-files-*-win-x64.zip
-            build/package/SHA256SUMS.txt
-            build/sbom/fmf-engine.cdx.json
-            build/sbom/app.cdx.json
+      # Close the time-of-check/time-of-publish window. If the tag or draft moved
+      # while attestations were being written, never let the release action create
+      # a replacement release for the wrong identity.
+      - name: Revalidate draft immediately before publication
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:GITHUB_REF -cne "refs/tags/$env:TAG") {
+            throw "Publish workflow ref '$env:GITHUB_REF' is not refs/tags/$env:TAG."
+          }
+          $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
+          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant()) {
+            throw "Tag $env:TAG moved from workflow SHA $env:GITHUB_SHA to $tagSha."
+          }
+          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
+            "repos/$env:REPO/releases?per_page=100" |
+            ConvertFrom-Json -Depth 20
+          $matches = @(
+            foreach ($page in $pages) {
+              foreach ($candidate in $page) {
+                if ($candidate.draft -and
+                    -not $candidate.prerelease -and
+                    $candidate.tag_name -ceq $env:TAG -and
+                    $candidate.name -ceq $env:TAG) {
+                  $candidate
+                }
+              }
+            }
+          )
+          if ($matches.Count -ne 1) {
+            throw "$env:TAG no longer identifies one expected draft release."
+          }
+          $release = $matches[0]
+          $targetSha = [string]$release.target_commitish
+          if ($targetSha -cnotmatch '^[0-9a-f]{40}$' -or $targetSha -cne $tagSha) {
+            throw "Draft target '$targetSha' must remain the exact tag commit $tagSha."
+          }
+
+      # release-please created the vX.Y.Z tag and draft together. Upload all
+      # assets before publishing: immutable releases cannot be modified later.
+      # `--clobber` makes a retry deterministic for the four expected names, but
+      # an unexpected pre-existing asset fails closed instead of being published.
+      - name: Upload, verify, and publish the draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ steps.publication-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          $zips = @(
+            Get-ChildItem -LiteralPath build/package -Filter "find-my-files-*-win-x64.zip" -File
+          )
+          if ($zips.Count -ne 1) {
+            throw "Expected exactly one packaged zip, found $($zips.Count)."
+          }
+          $localByName = @{}
+          $localByName[$zips[0].Name] = $zips[0].FullName
+          $localByName["SHA256SUMS.txt"] = (Resolve-Path -LiteralPath "build/package/SHA256SUMS.txt").Path
+          $localByName["app.cdx.json"] = (Resolve-Path -LiteralPath "build/sbom/app.cdx.json").Path
+          $localByName["fmf-engine.cdx.json"] = (Resolve-Path -LiteralPath "build/sbom/fmf-engine.cdx.json").Path
+          $expected = @($localByName.Keys) | Sort-Object
+
+          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
+            "repos/$env:REPO/releases?per_page=100" |
+            ConvertFrom-Json -Depth 20
+          $matches = @(
+            foreach ($page in $pages) {
+              foreach ($candidate in $page) {
+                if ($candidate.draft -and
+                    -not $candidate.prerelease -and
+                    $candidate.tag_name -ceq $env:TAG -and
+                    $candidate.name -ceq $env:TAG) {
+                  $candidate
+                }
+              }
+            }
+          )
+          if ($matches.Count -ne 1) {
+            throw "$env:TAG no longer identifies one expected draft release."
+          }
+          $release = $matches[0]
+          $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
+          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant() -or
+              -not $release.draft -or
+              $release.tag_name -cne $env:TAG -or
+              [string]$release.target_commitish -cne $tagSha) {
+            throw "Draft release identity no longer matches the workflow's immutable tag commit."
+          }
+          $unexpected = @(
+            $release.assets |
+              Where-Object { $expected -cnotcontains $_.name } |
+              ForEach-Object { $_.name }
+          )
+          if ($unexpected.Count -ne 0) {
+            throw "Draft contains unexpected assets: $($unexpected -join ', ')."
+          }
+
+          gh release upload $env:TAG `
+            $localByName[$zips[0].Name] `
+            $localByName["SHA256SUMS.txt"] `
+            $localByName["app.cdx.json"] `
+            $localByName["fmf-engine.cdx.json"] `
+            --repo $env:REPO `
+            --clobber
+
+          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
+            "repos/$env:REPO/releases?per_page=100" |
+            ConvertFrom-Json -Depth 20
+          $matches = @(
+            foreach ($page in $pages) {
+              foreach ($candidate in $page) {
+                if ($candidate.draft -and
+                    -not $candidate.prerelease -and
+                    $candidate.tag_name -ceq $env:TAG -and
+                    $candidate.name -ceq $env:TAG) {
+                  $candidate
+                }
+              }
+            }
+          )
+          if ($matches.Count -ne 1) {
+            throw "$env:TAG no longer identifies one expected draft release."
+          }
+          $release = $matches[0]
+          $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
+          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant() -or
+              -not $release.draft -or
+              $release.tag_name -cne $env:TAG -or
+              [string]$release.target_commitish -cne $tagSha) {
+            throw "Draft release identity changed while assets were uploaded."
+          }
+          $actual = @($release.assets | ForEach-Object { $_.name }) | Sort-Object
+          if (Compare-Object $expected $actual) {
+            throw "Draft asset set does not exactly match the release candidate."
+          }
+          foreach ($asset in $release.assets) {
+            if ($asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+              throw "Draft asset '$($asset.name)' has no valid SHA-256 digest."
+            }
+            $localDigest = "sha256:$((Get-FileHash -LiteralPath $localByName[$asset.name] -Algorithm SHA256).Hash.ToLowerInvariant())"
+            if ([string]$asset.digest -cne $localDigest) {
+              throw "Draft asset '$($asset.name)' digest differs from the approved release candidate."
+            }
+          }
+
+          $currentVersion = [Version]$env:TAG.Substring(1)
+          $newerStable = @(
+            foreach ($page in $pages) {
+              foreach ($candidate in $page) {
+                if (-not $candidate.draft -and
+                    -not $candidate.prerelease -and
+                    $candidate.tag_name -cmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -and
+                    [Version]$candidate.tag_name.Substring(1) -gt $currentVersion) {
+                  $candidate.tag_name
+                }
+              }
+            }
+          )
+          if ($newerStable.Count -ne 0) {
+            throw "Refusing out-of-order stable publication; newer release(s) exist: $($newerStable -join ', ')."
+          }
+          $settings = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/immutable-releases" |
+            ConvertFrom-Json -Depth 10
+          if (-not $settings.enabled) {
+            throw "Repository immutable releases were disabled before publication."
+          }
+          gh release edit $env:TAG `
+            --repo $env:REPO `
+            --draft=false `
+            --prerelease=false `
+            --latest `
+            --title $env:TAG `
+            --verify-tag
+
+      - name: Verify the published release is immutable and complete
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $release = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/releases/tags/$env:TAG" |
+            ConvertFrom-Json -Depth 20
+          if ($release.draft -or
+              $release.prerelease -or
+              $release.name -cne $env:TAG -or
+              -not $release.immutable) {
+            throw "$env:TAG was not published as an immutable release."
+          }
+          $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
+          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant() -or
+              $release.tag_name -cne $env:TAG -or
+              [string]$release.target_commitish -cne $tagSha) {
+            throw "Published release identity no longer matches the workflow's immutable tag commit."
+          }
+
+          $zips = @(
+            Get-ChildItem -LiteralPath build/package -Filter "find-my-files-*-win-x64.zip" -File
+          )
+          if ($zips.Count -ne 1) {
+            throw "Expected exactly one packaged zip, found $($zips.Count)."
+          }
+          $expected = @(
+            $zips[0].Name
+            "SHA256SUMS.txt"
+            "app.cdx.json"
+            "fmf-engine.cdx.json"
+          ) | Sort-Object
+          $actual = @($release.assets | ForEach-Object { $_.name }) | Sort-Object
+          if (Compare-Object $expected $actual) {
+            throw "Published asset set does not exactly match the release candidate."
+          }
+
+          $localByName = @{}
+          $localByName[$zips[0].Name] = $zips[0].FullName
+          $localByName["SHA256SUMS.txt"] = (Resolve-Path -LiteralPath "build/package/SHA256SUMS.txt").Path
+          $localByName["app.cdx.json"] = (Resolve-Path -LiteralPath "build/sbom/app.cdx.json").Path
+          $localByName["fmf-engine.cdx.json"] = (Resolve-Path -LiteralPath "build/sbom/fmf-engine.cdx.json").Path
+          foreach ($asset in $release.assets) {
+            if ($asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+              throw "Published asset '$($asset.name)' has no valid SHA-256 digest."
+            }
+            $localDigest = "sha256:$((Get-FileHash -LiteralPath $localByName[$asset.name] -Algorithm SHA256).Hash.ToLowerInvariant())"
+            if ([string]$asset.digest -cne $localDigest) {
+              throw "Published asset '$($asset.name)' digest differs from the approved release candidate."
+            }
+          }
+          "Verified immutable $env:TAG with the exact four release assets."

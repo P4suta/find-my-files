@@ -8,7 +8,7 @@ namespace FindMyFiles.Tests.TestDoubles;
 /// releases it (for in-flight/epoch races), and <see cref="ThrowOnFetch"/>
 /// faults the fetch instead of returning rows.
 /// </summary>
-public sealed class StubSearchResult(IReadOnlyList<RowData> rows) : ISearchResult
+internal sealed class StubSearchResult(IReadOnlyList<RowData> rows) : ISearchResult
 {
     public int FetchCount { get; private set; }
 
@@ -38,6 +38,7 @@ public sealed class StubSearchResult(IReadOnlyList<RowData> rows) : ISearchResul
     public async Task<IReadOnlyList<RowData>> GetRangeAsync(
         long offset, int count, CancellationToken ct = default)
     {
+        var request = EngineRequest.PageRange(offset, count);
         FetchCount++;
         LastFetchToken = ct;
         if (Gate is { } gate)
@@ -55,8 +56,8 @@ public sealed class StubSearchResult(IReadOnlyList<RowData> rows) : ISearchResul
             throw ex;
         }
 
-        var start = (int)Math.Min(offset, rows.Count);
-        var n = Math.Max(0, Math.Min(count, rows.Count - start));
+        var start = (int)Math.Min(request.Offset, (ulong)rows.Count);
+        var n = Math.Min((int)request.Count, rows.Count - start);
         return [.. rows.Skip(start).Take(n)];
     }
 

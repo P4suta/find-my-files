@@ -15,8 +15,8 @@ build/
 │   └── app/            #   self-contained app + engine binaries (apphost, runtime DLLs)
 ├── package/       # release zip + SHA256SUMS.txt
 ├── sbom/          # CycloneDX SBOM (release.yml)
-├── site/          # GitHub Pages assembly (landing + book + doc)
-└── docs-book/     # mdBook output
+├── site/          # GitHub Pages assembly (landing + canonical book)
+└── docs-book/     # canonical mdBook output (implementation API sites are not published)
 ```
 
 Mechanism (all means that do not violate the prohibition rules):
@@ -33,7 +33,7 @@ Mechanism (all means that do not violate the prohibition rules):
 
 ## Consequences
 
-- **C# obj stays put** (`app/**/obj/`). Relocating obj requires `BaseIntermediateOutputPath` to take effect during pre-restore evaluation, which effectively requires `Directory.Build.props`, but CLAUDE.md prohibits that file (it silently shadows the analyzer injection of `winapp run`). obj is intermediate output and already gitignored, so there is no real harm.
+- **C# obj stays put** (`app/**/obj/`). Relocating obj requires `BaseIntermediateOutputPath` to take effect during pre-restore evaluation, which effectively requires `Directory.Build.props`, but AGENTS.md prohibits that file (it silently shadows the analyzer injection of `winapp run`). obj is intermediate output and already gitignored, so there is no real harm.
 - The dev-tree `fmf-service.exe` lookup (`ServiceSetup.cs` production + pipe/contract tests) follows `build/engine/release`.
 - **Bundle internals**: the `dist/FindMyFiles/` root holds only the launcher + `README.txt`; the self-contained app and engine binaries publish into `dist/FindMyFiles/app/` (the .NET apphost must stay co-located with its runtime DLLs, so it cannot move to the root). The root `FindMyFiles.exe` is a tiny native launcher (the `fmf-launcher` crate) that spawns `app/FindMyFiles.exe` — so a downloaded/extracted zip has one obvious thing to run. `paths::app_dir()` is the single source for the subfolder; the app's own relative discovery (`AppPaths`, `ServiceSetup.LocateServiceExe`) is unchanged because everything it needs stays beside the apphost in `app/`.
 - The test-tmp fallback default in `testutil.rs` is `build/engine` (because the config.toml target-dir does not set the `CARGO_TARGET_DIR` env var).

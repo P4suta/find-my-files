@@ -6,6 +6,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       rust-deps:
@@ -22,6 +24,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       xtask-deps:
@@ -32,11 +36,27 @@ updates:
       include: scope
 
   # C# app — one nuget entry per project directory.
+  # Root .NET tool manifest (`.config/dotnet-tools.json`, currently Stryker).
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      dotnet-tools:
+        patterns: ["*"]
+    commit-message:
+      prefix: build
+
   - package-ecosystem: nuget
     directory: /app/FindMyFiles
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     groups:
       dotnet-app:
         patterns: ["*"]
@@ -48,6 +68,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     groups:
       dotnet-tests:
         patterns: ["*"]
@@ -60,6 +82,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]

@@ -2,50 +2,59 @@
 # This machine manages tools via chezmoi + mise — do NOT install toolchains ad hoc;
 # declare them here and run `mise install`.
 [tools]
-rust = "1.96"
-dotnet = "10"
+rust = "1.96.1"
+dotnet = "10.0.302"
+# winapp UI automation is a release gate. Install the official npm package via
+# mise (rather than an ad-hoc winget/MSIX install) so `just setup` is sufficient.
+node = "24.18.0"
+"npm:@microsoft/winappcli" = "0.3.1"
 # Task runner (justfile). Declared here so `mise install` provisions it and CI
 # (release.yml) builds the distributable via the same `just publish` recipe —
 # no second copy of the bundling logic.
-just = "1"
+just = "1.54.0"
 # Git-hook manager. `just setup` runs `lefthook install`; pinning it here closes a
 # reproducibility gap (it was provisioned globally but never declared per-repo) and
 # lets `just doctor` verify it. Registered mise short-name → aqua backend.
-lefthook = "2"
+lefthook = "2.1.9"
 # ETW-based sampling profiler (just profile) — pairs with the elevated
 # terminals the engine already requires for real-volume work. cargo backend:
 # the GitHub release tags (samply-v*) don't resolve via ubi/github backends.
 "cargo:samply" = "0.13.1"
 # Background cargo watcher for the engine inner loop (`just dev`): recompiles on
 # save and surfaces only the errors. cargo backend, binstall-fetched like the rest.
-"cargo:bacon" = "3"
+"cargo:bacon" = "3.23.0"
 # mdBook — renders docs/ (ARCHITECTURE + ADRs) into the published design-docs
 # site (just doc / pages.yml). cargo backend, version-pinned like samply so CI
 # and local builds match.
-"cargo:mdbook" = "0.5"
+"cargo:mdbook" = "0.5.3"
 # Quality-gate tooling (CI + `just cov`/`deny`/`machete`). cargo backend;
 # cargo.binstall below fetches prebuilt binaries instead of compiling from
 # source (compiling mdbook took ~2min in CI).
-"cargo:cargo-llvm-cov" = "0.8"
-"cargo:cargo-deny" = "0.19"
-"cargo:cargo-machete" = "0.9"
+"cargo:cargo-llvm-cov" = "0.8.7"
+"cargo:cargo-nextest" = "0.9.140"
+"cargo:cargo-deny" = "0.19.9"
+"cargo:cargo-machete" = "0.9.2"
 # License-notice generation for the distributable bundle (`xtask publish` →
 # THIRD-PARTY-NOTICES.txt, config engine/about.toml). release.yml / nightly.yml
 # provision it from this pin via mise-action; ci.yml's app job installs the same
 # version via taiki-e (it does not use mise-action). binstall-fetched.
-"cargo:cargo-about" = "0.7"
+"cargo:cargo-about" = "0.7.1"
 # Mutation testing (`just mutants`) — surfaces tests that pass even when code is
 # broken (the reveal-class gap, ADR-0022). binstall fetches the prebuilt binary.
-"cargo:cargo-mutants" = "27"
+"cargo:cargo-mutants" = "27.1.0"
 # Formatter/linter binaries the just recipes, lefthook hooks and CI all invoke
 # (taplo fmt --check, typos). Pinned here so local and CI use one version — they
 # were previously assumed on PATH (a reproducibility gap).
-"cargo:taplo-cli" = "0.10"
-"cargo:typos-cli" = "1"
+"cargo:taplo-cli" = "0.10.0"
+"cargo:typos-cli" = "1.47.2"
+# Security-focused static analysis for GitHub Actions (template injection,
+# ref confusion, excessive permissions, unpinned/mutable action references).
+# actionlint remains the syntax/type/shellcheck half of the same gate.
+"github:zizmorcore/zizmor" = "1.28.0"
 # Conventional-Commits linter for the lefthook commit-msg hook (ADR-0035) — the
 # local guard that keeps release-please's version + CHANGELOG derivation fed with
 # well-formed commits. Same crate-ci family as typos; cargo backend, binstalled.
-"cargo:committed" = "1"
+"cargo:committed" = "1.1.11"
 # actionlint lints .github/workflows/*.yml (syntax, ${{ }} expression types,
 # shellcheck over run: blocks). CI runs it via the raven-actions/actionlint
 # action; pinned here so workflow edits can be validated locally before push

@@ -8,7 +8,7 @@ namespace FindMyFiles.Services;
 /// → activate, right-click → <see cref="TrayMenu"/>), re-adds itself when Explorer
 /// restarts (<c>TaskbarCreated</c>), and removes the icon on <see cref="Dispose"/>.
 /// The HICON and the message subclass are held for the object's lifetime
-/// (CLAUDE.md: native callbacks / handles are field-held). Self-written P/Invoke
+/// (AGENTS.md: native callbacks / handles are field-held). Self-written P/Invoke
 /// rather than a NuGet, matching <see cref="ServiceSetup"/> and <c>ShellOps</c>.
 /// </summary>
 internal sealed partial class TrayIcon : IDisposable
@@ -169,7 +169,7 @@ internal sealed partial class TrayIcon : IDisposable
         var h = LoadImage(IntPtr.Zero, path, ImageIcon, 0, 0, LrLoadFromFile | LrDefaultSize);
         if (h == IntPtr.Zero)
         {
-            FileLog.Warn("tray", $"tray icon load failed: {path}");
+            FileLog.Warn("tray", "tray icon load failed");
         }
 
         return h;

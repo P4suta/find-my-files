@@ -4,42 +4,60 @@
 # silently never be cut. GitHub has no per-label lock, so instead: if anyone
 # removes `autorelease: pending` from a release-please PR, put it straight back.
 #
-# Modelled on no-automerge-on-release-pr.yml: pull_request_target so it runs from
-# main's definition with a write token, only calls the API (never checks out PR
-# code), and is scoped to release-please's own branch — safe, never touches
-# normal PRs. The human approval label `release: approved` is deliberately NOT
-# guarded: removing it (un-approving) is a legitimate act (ADR-0035).
+# The `issues` label event runs the default-branch definition for both issues and
+# pull requests, so this API-only guard needs no `pull_request_target`. It first
+# filters for a PR event, then fetches current PR state and requires the exact
+# same-repository bot branch before writing. The human approval label
+# `release: approved` is deliberately NOT guarded: removing it (un-approving) is
+# a legitimate act (ADR-0035).
 name: release-label-guard
 
 on:
-  pull_request_target:
+  issues:
     types: [unlabeled]
 
-permissions:
-  contents: read
+permissions: {}
+
+concurrency:
+  group: release-label-guard-${{ github.event.issue.number }}
+  cancel-in-progress: false
 
 jobs:
   reinstate:
-    # `github.event.label.name` on an `unlabeled` event is the label just removed.
-    # Only guard the label on an OPEN release PR: once the PR is merged/closed,
-    # release-please has already cut (or finished with) the release, and a lingering
-    # `autorelease: pending` makes it try to RE-release that merged PR — so removing
-    # the stale label from a closed PR is correct and must NOT be reinstated.
+    # Ignore ordinary issues and every label except release-please's tracking
+    # label before allocating a runner. Current branch/repository identity is
+    # checked via the API immediately before the mutation.
     if: >-
-      github.event.pull_request.state == 'open'
-      && startsWith(github.event.pull_request.head.ref, 'release-please--')
+      github.event.issue.pull_request != null
+      && github.event.issue.state == 'open'
       && github.event.label.name == 'autorelease: pending'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      pull-requests: write
+      pull-requests: write # restore the protected autorelease label
     steps:
       - name: Reinstate release-please's tracking label
         env:
           GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.number }}
+          PR: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
+
+          if [[ ! "$PR" =~ ^[0-9]+$ ]]; then
+            echo "::error::invalid pull request number"
+            exit 1
+          fi
+          current=$(gh api "repos/$REPO/pulls/$PR")
+          if [ "$(jq -r '.state' <<<"$current")" != "open" ] ||
+             [ "$(jq -r '.base.repo.full_name' <<<"$current")" != "$REPO" ] ||
+             [ "$(jq -r '.base.ref' <<<"$current")" != "main" ] ||
+             [ "$(jq -r '.head.repo.full_name // \"\"' <<<"$current")" != "$REPO" ] ||
+             [ "$(jq -r '.head.ref' <<<"$current")" != "release-please--branches--main--components--find-my-files" ]; then
+            echo "PR #$PR is not the open same-repository Release PR; no label mutation."
+            exit 0
+          fi
+
           gh pr edit "$PR" --repo "$REPO" --add-label "autorelease: pending"
           gh pr comment "$PR" --repo "$REPO" --body \
             "🔒 Restored the \`autorelease: pending\` label — release-please needs it to cut the \`vX.Y.Z\` tag and Release after merge; removing it would silently skip the release (ADR-0035). To stop a release, just don't merge (or remove \`release: approved\`)."

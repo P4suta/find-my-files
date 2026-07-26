@@ -48,7 +48,8 @@ public sealed class PipeProtocolTests
             IncludeHiddenSystem: false,
             RegexMode: true,
             Scope: RegexScope.Path);
-        var bytes = PipeProtocol.EncodeQueryReq(opts, "win");
+        const ulong presentationBasis = 0x0102_0304_0506_0708;
+        var bytes = PipeProtocol.EncodeQueryReq(opts, "win", presentationBasis);
 
         Assert.Equal(
             new byte[]
@@ -58,13 +59,25 @@ public sealed class PipeProtocolTests
                 2, 0, 0, 0, // case = Sensitive
                 0, 0, 0, 0, // include_hidden_system
                 3, 0, 0, 0, // regex_mode = whole(bit0) | path(bit1)
+                0, 0, 0, 0, // reserved
+                8, 7, 6, 5, 4, 3, 2, 1, // presentation basis
                 (byte)'w', (byte)'i', (byte)'n',
             },
             bytes);
 
-        var (options, text) = PipeProtocol.DecodeQueryReq(bytes);
+        var (options, text, decodedPresentationBasis) = PipeProtocol.DecodeQueryReq(bytes);
         Assert.Equal(opts, options);
         Assert.Equal("win", text);
+        Assert.Equal(presentationBasis, decodedPresentationBasis);
+    }
+
+    [Fact]
+    public void EncodeQueryReq_RejectsTextOverTheUtf8ByteLimit()
+    {
+        var text = new string('界', (EngineContract.MaxQueryBytes / 3) + 1);
+
+        Assert.Throws<ArgumentException>(
+            () => PipeProtocol.EncodeQueryReq(SearchOptions.Default, text));
     }
 
     [Fact]
@@ -104,10 +117,22 @@ public sealed class PipeProtocolTests
     [Fact]
     public void IndexStartReq_IsSnakeCaseJson()
     {
-        var bytes = PipeProtocol.EncodeIndexStartReq(["C:", "D:"]);
+        var bytes = PipeProtocol.EncodeIndexStartReq(["c:", "D:"]);
 
         Assert.Equal("""{"volumes":["C:","D:"]}""", Encoding.UTF8.GetString(bytes));
         Assert.Equal(["C:", "D:"], PipeProtocol.DecodeIndexStartReq(bytes));
+    }
+
+    [Fact]
+    public void IndexStartReq_RejectsMalformedAndUnboundedLists()
+    {
+        Assert.Throws<ArgumentException>(
+            () => PipeProtocol.EncodeIndexStartReq(["..\\escape"]));
+        Assert.Throws<ArgumentException>(
+            () => PipeProtocol.EncodeIndexStartReq(["C:", "c:"]));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => PipeProtocol.EncodeIndexStartReq(
+                Enumerable.Repeat("C:", EngineContract.MaxVolumes + 1).ToArray()));
     }
 
     [Fact]
@@ -158,6 +183,17 @@ public sealed class PipeProtocolTests
 
         Assert.Equal(8, bytes.Length); // just the {row_count, blob_len} header
         Assert.Empty(PipeProtocol.DecodePageResp(bytes));
+    }
+
+    [Fact]
+    public void PageResp_RejectsMoreThanTheContractRowLimit()
+    {
+        var rows = Enumerable
+            .Range(0, EngineContract.MaxPageRows + 1)
+            .Select(i => new RowData((ulong)i, (ulong)i, 0, 0, 0, "n", "C:\\"))
+            .ToArray();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => PipeProtocol.EncodePageResp(rows));
     }
 
     [Theory]

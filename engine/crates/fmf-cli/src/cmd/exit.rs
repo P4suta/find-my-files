@@ -36,8 +36,12 @@ pub const GENERIC_FAILURE: i32 = 1;
 pub fn classify(err: &(dyn Error + 'static)) -> Option<i32> {
     if let Some(e) = err.downcast_ref::<MftError>() {
         return Some(match e {
+            MftError::Cancelled => codes::CANCELLED,
             MftError::NotElevated => codes::NOT_ADMIN,
-            MftError::Ntfs(_) => codes::VOLUME,
+            MftError::Ntfs(_)
+            | MftError::Metadata(_)
+            | MftError::IncompleteMetadata(_)
+            | MftError::CorruptRecords(_) => codes::VOLUME,
         });
     }
     if let Some(e) = err.downcast_ref::<EngineCreateError>() {
@@ -50,6 +54,11 @@ pub fn classify(err: &(dyn Error + 'static)) -> Option<i32> {
         return Some(match e {
             EngineError::Parse(_) | EngineError::Compile(_) => codes::QUERY_SYNTAX,
             EngineError::Stale => codes::STALE,
+            EngineError::QueryTooLong { .. } | EngineError::PageTooLarge { .. } => {
+                codes::INVALID_ARG
+            }
+            EngineError::Cancelled => codes::CANCELLED,
+            EngineError::PageEncoding(_) | EngineError::Path(_) => codes::IO,
         });
     }
     if err.is::<ParseError>() || err.is::<CompileError>() {
@@ -84,6 +93,7 @@ pub const fn code_name(code: i32) -> &'static str {
         codes::QUERY_SYNTAX => "FMF_E_QUERY_SYNTAX",
         codes::IO => "FMF_E_IO",
         codes::LOCKED => "FMF_E_LOCKED",
+        codes::CANCELLED => "FMF_E_CANCELLED",
         codes::PANIC => "FMF_E_PANIC",
         _ => "FMF_E_UNKNOWN",
     }
@@ -168,6 +178,10 @@ mod tests {
         assert_eq!(
             status_code(boxed(MftError::NotElevated).as_ref()),
             codes::NOT_ADMIN
+        );
+        assert_eq!(
+            status_code(boxed(MftError::Cancelled).as_ref()),
+            codes::CANCELLED
         );
         assert_eq!(
             status_code(boxed(EngineCreateError::Locked(None)).as_ref()),

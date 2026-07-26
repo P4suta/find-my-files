@@ -6,6 +6,16 @@ use super::{
     merge_sorted_tail,
 };
 
+/// Changes made while converging one NTFS object's searchable file-link set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LinkReconcileStats {
+    pub added: u32,
+    pub removed: u32,
+    pub retained: u32,
+    /// At least one retained row's object-owned metadata differed.
+    pub metadata_changed: bool,
+}
+
 impl VolumeIndex {
     // ── Incremental mutation (USN batches; see module docs) ──────────────
 
@@ -21,16 +31,41 @@ impl VolumeIndex {
         }
     }
 
-    /// Insert or replace an entry for `record`. Replacement (same record
-    /// number) tombstones the old entry — this is how renames work.
+    pub(super) fn tombstone_id(&mut self, id: EntryId) {
+        debug_assert!(self.is_live(id), "a link row is tombstoned once");
+        self.flag[id as usize] |= flags::TOMBSTONE;
+        self.tombstones += 1;
+        self.dead_name_bytes += self.owned_name_bytes(id);
+    }
+
+    fn tombstone_record(&mut self, record: RecordNo) -> Option<EntryId> {
+        let ids: Vec<_> = self.entries_by_record(record).collect();
+        let first = ids.first().copied();
+        for id in ids {
+            self.tombstone_id(id);
+        }
+        first
+    }
+
+    fn tombstone_frn(&mut self, frn: Frn) -> Option<EntryId> {
+        let ids: Vec<_> = self.entries_by_frn(frn).collect();
+        let first = ids.first().copied();
+        for id in ids {
+            self.tombstone_id(id);
+        }
+        first
+    }
+
+    /// Insert or replace an NTFS object for `record`. Replacement tombstones
+    /// every directory-link row for that record, then appends one new row.
+    ///
+    /// This object-level compatibility API is useful for tests and synthetic
+    /// sources. Live USN creation uses exact link-level insertion internally so
+    /// the object's other hard-linked paths remain visible.
     /// Returns the new id. Caller must finish the batch with
     /// [`Self::merge_new_into_permutations`].
     pub fn upsert(&mut self, e: &RawEntry) -> EntryId {
-        if let Some(old) = self.entry_by_record(e.frn.record()) {
-            self.flag[old as usize] |= flags::TOMBSTONE;
-            self.tombstones += 1;
-            self.dead_name_bytes += self.owned_name_bytes(old);
-        }
+        self.tombstone_record(e.frn.record());
         // Parents are already live on the USN path; unknown ones attach to
         // root (orphan records do occur in real MFTs).
         let parent = self
@@ -39,13 +74,153 @@ impl VolumeIndex {
         self.push_raw(e, parent)
     }
 
-    /// Tombstoning is the whole deletion: the FRN index never finds dead
-    /// entries (liveness filter), so there is nothing to unmap.
+    /// USN object replacement retained for operations known to represent the
+    /// one directory row (notably directory create/rename). File-link events
+    /// use [`Self::upsert_link_usn`].
+    pub(crate) fn upsert_usn(&mut self, e: &RawEntry) -> EntryId {
+        self.tombstone_record(e.frn.record());
+        let parent = self.parent_by_frn(e.parent_frn).unwrap_or(Self::ROOT);
+        self.push_raw(e, parent)
+    }
+
+    /// Insert or refresh one exact file-link row without deleting the object's
+    /// other paths. A reused MFT record first tombstones every row belonging to
+    /// the old sequence; an exact duplicate link is replaced rather than
+    /// emitted twice.
+    pub(crate) fn upsert_link_usn(&mut self, e: &RawEntry) -> EntryId {
+        let stale: Vec<_> = self
+            .entries_by_record(e.frn.record())
+            .filter(|&id| self.frn(id) != e.frn)
+            .collect();
+        for id in stale {
+            self.tombstone_id(id);
+        }
+
+        while let Some(old) = self.entry_by_link(e.frn, e.parent_frn, e.name_utf16) {
+            self.tombstone_id(old);
+        }
+        let parent = self.parent_by_frn(e.parent_frn).unwrap_or(Self::ROOT);
+        self.push_raw(e, parent)
+    }
+
+    /// Converge one file object's rows to a complete, authoritative link set.
+    ///
+    /// The metadata source guarantees a non-empty, duplicate-free set. This
+    /// method still ignores duplicate identities defensively, preserves
+    /// matching `EntryId`s, tombstones disappeared links, appends new links, and
+    /// retires every row from an older generation if the MFT record was reused.
+    pub(crate) fn reconcile_file_links_usn(
+        &mut self,
+        frn: Frn,
+        desired: &[RawEntry<'_>],
+    ) -> LinkReconcileStats {
+        if desired.is_empty() {
+            return LinkReconcileStats::default();
+        }
+        debug_assert!(
+            desired
+                .iter()
+                .all(|entry| entry.frn == frn && !entry.is_dir),
+            "a file-link snapshot contains one object generation only"
+        );
+
+        let stale: Vec<_> = self
+            .entries_by_record(frn.record())
+            .filter(|&id| self.frn(id) != frn)
+            .collect();
+        let mut stats = LinkReconcileStats {
+            removed: stale.len() as u32,
+            ..LinkReconcileStats::default()
+        };
+        for id in stale {
+            self.tombstone_id(id);
+        }
+
+        // Encode each desired identity once. Link-count changes are rare and
+        // NTFS caps individual names at 255 UTF-16 units, so this bounded
+        // per-event scratch is preferable to another permanent index column.
+        let mut wanted: Vec<(EntryId, Vec<u8>, &RawEntry<'_>)> = Vec::with_capacity(desired.len());
+        for entry in desired {
+            let parent = self.parent_by_frn(entry.parent_frn).unwrap_or(Self::ROOT);
+            let mut name = Vec::with_capacity(entry.name_utf16.len() * 3);
+            let mut folded = Vec::with_capacity(entry.name_utf16.len() * 3);
+            wtf8::push_wtf8_pair(entry.name_utf16, &mut name, &mut folded);
+            if wanted
+                .iter()
+                .any(|(p, n, _)| *p == parent && n.as_slice() == name.as_slice())
+            {
+                continue;
+            }
+            wanted.push((parent, name, entry));
+        }
+
+        let existing: Vec<_> = self.entries_by_frn(frn).collect();
+        let mut matched = vec![false; wanted.len()];
+        for id in existing {
+            let found = wanted
+                .iter()
+                .enumerate()
+                .position(|(i, (parent, name, _))| {
+                    !matched[i] && self.parent(id) == *parent && self.name(id) == name.as_slice()
+                });
+            if let Some(i) = found {
+                matched[i] = true;
+                stats.retained += 1;
+            } else {
+                self.tombstone_id(id);
+                stats.removed += 1;
+            }
+        }
+
+        for (i, (parent, _, entry)) in wanted.iter().enumerate() {
+            if !matched[i] {
+                self.push_raw(entry, *parent);
+                stats.added += 1;
+            }
+        }
+
+        // Size/mtime and STANDARD_INFORMATION attributes belong to the object,
+        // so refresh every retained/appended path from the same snapshot.
+        let metadata = wanted[0].2;
+        let expected_mtime = crate::query::dates::mtime_ticks_to_secs(metadata.mtime);
+        stats.metadata_changed = self
+            .entries_by_frn(frn)
+            .any(|id| self.size(id) != metadata.size || self.mtime[id as usize] != expected_mtime);
+        self.update_stat_frn(frn, metadata.size, metadata.mtime);
+        stats.metadata_changed |= self
+            .update_object_attrs_frn(
+                frn,
+                metadata.is_reparse,
+                metadata.is_hidden,
+                metadata.is_system,
+            )
+            .unwrap_or(false);
+        stats
+    }
+
+    /// Tombstone every link row for a record number. The FRN index never finds
+    /// dead entries (liveness filter), so there is nothing to unmap.
     pub fn delete(&mut self, record: impl Into<RecordNo>) -> Option<EntryId> {
-        let id = self.entry_by_record(record)?;
-        self.flag[id as usize] |= flags::TOMBSTONE;
-        self.tombstones += 1;
-        self.dead_name_bytes += self.owned_name_bytes(id);
+        self.tombstone_record(record.into())
+    }
+
+    /// Tombstone every link of the exact NTFS object generation. A final
+    /// `FILE_DELETE` removes the object; removing just one hard link is handled
+    /// by [`Self::delete_link_frn`].
+    pub(crate) fn delete_frn(&mut self, frn: Frn) -> Option<EntryId> {
+        self.tombstone_frn(frn)
+    }
+
+    /// Tombstone one exact hard-link identity. Delayed events for an older
+    /// object sequence or an already-removed path are no-ops.
+    pub(crate) fn delete_link_frn(
+        &mut self,
+        frn: Frn,
+        parent_frn: Frn,
+        name_utf16: &[u16],
+    ) -> Option<EntryId> {
+        let id = self.entry_by_link(frn, parent_frn, name_utf16)?;
+        self.tombstone_id(id);
         Some(id)
     }
 
@@ -61,12 +236,14 @@ impl VolumeIndex {
         let parent = self
             .entry_by_record(new_parent_record)
             .unwrap_or(Self::ROOT);
+        let parent_changed = parent != id && self.parent[id as usize] != parent;
         if parent != id {
             self.parent[id as usize] = parent;
         }
         self.recompute_excluded(id);
         if self.is_dir(id) {
             self.dir_topology_generation += 1; // descendant paths moved
+            self.exclusion_tree_dirty |= parent_changed;
         }
         Some(id)
     }
@@ -83,6 +260,31 @@ impl VolumeIndex {
         new_parent_record: impl Into<RecordNo>,
     ) -> Option<EntryId> {
         let id = self.entry_by_record(record)?;
+        let parent = self
+            .entry_by_record(new_parent_record)
+            .unwrap_or(Self::ROOT);
+        self.rename_dir_id_in_place(id, name_utf16, parent)
+    }
+
+    /// Rename/move a directory only when the complete object identity still
+    /// matches. Both the object and its new parent are sequence-checked.
+    pub(crate) fn rename_dir_frn_in_place(
+        &mut self,
+        frn: Frn,
+        name_utf16: &[u16],
+        new_parent_frn: Frn,
+    ) -> Option<EntryId> {
+        let id = self.entry_by_frn(frn)?;
+        let parent = self.parent_by_frn(new_parent_frn).unwrap_or(Self::ROOT);
+        self.rename_dir_id_in_place(id, name_utf16, parent)
+    }
+
+    fn rename_dir_id_in_place(
+        &mut self,
+        id: EntryId,
+        name_utf16: &[u16],
+        parent: EntryId,
+    ) -> Option<EntryId> {
         let pos = self.perm_name.iter().position(|&x| x == id)?;
         self.perm_name.remove(pos);
 
@@ -94,9 +296,7 @@ impl VolumeIndex {
         wtf8::push_wtf8_pair(name_utf16, &mut orig, &mut self.dict_pool);
         self.name_id[id as usize] = self.push_dict_entry(off);
         self.orig_off[id as usize] = self.push_orig_if_differs(off, &orig);
-        let parent = self
-            .entry_by_record(new_parent_record)
-            .unwrap_or(Self::ROOT);
+        let parent_changed = parent != id && self.parent[id as usize] != parent;
         if parent != id {
             self.parent[id as usize] = parent;
         }
@@ -108,20 +308,38 @@ impl VolumeIndex {
             .unwrap_or_else(|e| e);
         self.perm_name.insert(ins, id);
         self.dir_topology_generation += 1; // descendant paths renamed
+        self.exclusion_tree_dirty |= parent_changed;
         Some(id)
     }
 
-    /// Update size/mtime in place (`USN_REASON_DATA`_* without a name change).
+    /// Update size/mtime in place for every link of the object.
     pub fn update_stat(
         &mut self,
         record: impl Into<RecordNo>,
         size: u64,
         mtime: i64,
     ) -> Option<EntryId> {
-        let id = self.entry_by_record(record)?;
+        let ids: Vec<_> = self.entries_by_record(record).collect();
+        let first = ids.first().copied();
+        for id in ids {
+            self.update_stat_id(id, size, mtime);
+        }
+        first
+    }
+
+    /// Update metadata on every link of the exact NTFS object generation.
+    pub(crate) fn update_stat_frn(&mut self, frn: Frn, size: u64, mtime: i64) -> Option<EntryId> {
+        let ids: Vec<_> = self.entries_by_frn(frn).collect();
+        let first = ids.first().copied();
+        for id in ids {
+            self.update_stat_id(id, size, mtime);
+        }
+        first
+    }
+
+    fn update_stat_id(&mut self, id: EntryId, size: u64, mtime: i64) {
         self.set_size(id, size);
         self.mtime[id as usize] = crate::query::dates::mtime_ticks_to_secs(mtime);
-        Some(id)
     }
 
     /// Merge entries `first_new..len` (already appended, unsorted) into the
@@ -130,6 +348,10 @@ impl VolumeIndex {
     /// permutation caches catch up on their next sorted query (the
     /// generation bump is their invalidation signal).
     pub fn merge_new_into_permutations(&mut self, first_new: EntryId) {
+        if self.exclusion_tree_dirty {
+            self.recompute_all_excluded();
+            self.exclusion_tree_dirty = false;
+        }
         // The FRN index rides the same batch boundary (its own watermark).
         {
             let Self {
@@ -323,21 +545,140 @@ impl VolumeIndex {
         }
     }
 
+    /// Recompute inherited HIDDEN/SYSTEM exclusion for the complete forest.
+    ///
+    /// USN applies call this at most once per batch after any directory
+    /// topology/attribute change. Each row enters and leaves the walk once, so
+    /// moving a large subtree is O(index entries), never O(records × entries).
+    /// Corrupt parent cycles are handled deterministically: the cycle is
+    /// excluded iff any member carries its own HIDDEN/SYSTEM bit, and that
+    /// state then propagates to descendants.
+    pub(crate) fn recompute_all_excluded(&mut self) {
+        const VISITING: u8 = 1;
+        const DONE: u8 = 2;
+
+        let n = self.len();
+        let mut state = vec![0u8; n];
+        let mut stack: Vec<EntryId> = Vec::new();
+
+        for start in 0..n as EntryId {
+            if state[start as usize] == DONE {
+                continue;
+            }
+            stack.clear();
+            let mut cur = start;
+            let mut inherited = false;
+
+            loop {
+                if cur == NO_PARENT || cur as usize >= n {
+                    break;
+                }
+                match state[cur as usize] {
+                    DONE => {
+                        inherited = self.is_excluded(cur);
+                        break;
+                    }
+                    VISITING => {
+                        let cycle_start = stack
+                            .iter()
+                            .position(|&id| id == cur)
+                            .expect("VISITING entries belong to the current parent walk");
+                        let cycle_excluded = stack[cycle_start..].iter().any(|&id| {
+                            self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM) != 0
+                        });
+                        for &id in &stack[cycle_start..] {
+                            if cycle_excluded {
+                                self.flag[id as usize] |= flags::EXCLUDED;
+                            } else {
+                                self.flag[id as usize] &= !flags::EXCLUDED;
+                            }
+                            state[id as usize] = DONE;
+                        }
+                        stack.truncate(cycle_start);
+                        inherited = cycle_excluded;
+                        break;
+                    }
+                    _ => {
+                        state[cur as usize] = VISITING;
+                        stack.push(cur);
+                        cur = self.parent[cur as usize];
+                    }
+                }
+            }
+
+            while let Some(id) = stack.pop() {
+                let own = self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM) != 0;
+                let excluded = own || inherited;
+                if excluded {
+                    self.flag[id as usize] |= flags::EXCLUDED;
+                } else {
+                    self.flag[id as usize] &= !flags::EXCLUDED;
+                }
+                state[id as usize] = DONE;
+                inherited = excluded;
+            }
+        }
+    }
+
     /// Update raw attribute bits (USN `BASIC_INFO_CHANGE`) and the derived
-    /// EXCLUDED bit.
+    /// EXCLUDED bit on every link of the object.
     pub fn update_attrs(
         &mut self,
         record: impl Into<RecordNo>,
         is_hidden: bool,
         is_system: bool,
     ) -> Option<EntryId> {
-        let id = self.entry_by_record(record)?;
+        let ids: Vec<_> = self.entries_by_record(record).collect();
+        let first = ids.first().copied();
+        for id in ids {
+            self.update_attrs_id(id, is_hidden, is_system);
+        }
+        first
+    }
+
+    /// Refresh every object-owned attribute represented in the index.
+    ///
+    /// Returns whether at least one live link row changed, or `None` when the
+    /// exact object generation is absent. The raw bits are shared by every
+    /// hard link; the derived `EXCLUDED` bit is recomputed per path because
+    /// each link can inherit from a different parent.
+    pub(crate) fn update_object_attrs_frn(
+        &mut self,
+        frn: Frn,
+        is_reparse: bool,
+        is_hidden: bool,
+        is_system: bool,
+    ) -> Option<bool> {
+        let ids: Vec<_> = self.entries_by_frn(frn).collect();
+        if ids.is_empty() {
+            return None;
+        }
+        let expected = if is_reparse { flags::REPARSE } else { 0 }
+            | if is_hidden { flags::HIDDEN } else { 0 }
+            | if is_system { flags::SYSTEM } else { 0 };
+        let mask = flags::REPARSE | flags::HIDDEN | flags::SYSTEM;
+        let changed = ids
+            .iter()
+            .any(|&id| self.flag[id as usize] & mask != expected);
+        for id in ids {
+            let flag = &mut self.flag[id as usize];
+            *flag = (*flag & !flags::REPARSE) | if is_reparse { flags::REPARSE } else { 0 };
+            self.update_attrs_id(id, is_hidden, is_system);
+        }
+        Some(changed)
+    }
+
+    fn update_attrs_id(&mut self, id: EntryId, is_hidden: bool, is_system: bool) {
+        let old_raw = self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM);
         let f = &mut self.flag[id as usize];
         *f = (*f & !(flags::HIDDEN | flags::SYSTEM))
             | if is_hidden { flags::HIDDEN } else { 0 }
             | if is_system { flags::SYSTEM } else { 0 };
         self.recompute_excluded(id);
-        Some(id)
+        let new_raw = self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM);
+        if self.is_dir(id) && old_raw != new_raw {
+            self.exclusion_tree_dirty = true;
+        }
     }
 }
 
@@ -345,7 +686,151 @@ impl VolumeIndex {
 mod tests {
     use super::*;
     use crate::index::VolumeIndexBuilder;
-    use crate::index::testutil::{build_sample, raw, raw_attr, u16s};
+    use crate::index::testutil::{build_hardlink_sample, build_sample, raw, raw_attr, u16s};
+
+    #[test]
+    fn link_mutations_preserve_siblings_and_object_updates_reach_all_links() {
+        let mut idx = build_hardlink_sample();
+        let object = Frn((1u64 << 48) | 0x64);
+        let parent_a = Frn((1u64 << 48) | 0x0A);
+        let parent_b = Frn((1u64 << 48) | 0x14);
+        let updated_mtime =
+            crate::query::dates::FILETIME_UNIX_EPOCH + 77 * crate::query::dates::TICKS_PER_SECOND;
+
+        let first_new = idx.len() as u32;
+        let refreshed_name = u16s("shared.txt");
+        let refreshed = RawEntry {
+            parent_frn: parent_a,
+            frn: object,
+            name_utf16: &refreshed_name,
+            is_dir: false,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 99,
+            mtime: 9,
+        };
+        idx.upsert_link_usn(&refreshed);
+        idx.merge_new_into_permutations(first_new);
+        assert_eq!(idx.entries_by_frn(object).count(), 2);
+        assert!(
+            idx.entry_by_link(object, parent_b, &u16s("alias.txt"))
+                .is_some(),
+            "refreshing one link must retain its sibling"
+        );
+
+        idx.update_stat_frn(object, 1234, updated_mtime).unwrap();
+        idx.update_object_attrs_frn(object, false, true, false)
+            .unwrap();
+        for id in idx.entries_by_frn(object) {
+            assert_eq!(idx.size(id), 1234);
+            assert_eq!(idx.mtime(id), updated_mtime);
+            assert!(idx.is_excluded(id));
+        }
+
+        assert!(
+            idx.delete_link_frn(object, parent_a, &refreshed_name)
+                .is_some()
+        );
+        let remaining: Vec<_> = idx.entries_by_frn(object).collect();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(idx.name(remaining[0]), b"alias.txt");
+
+        idx.delete_frn(object).unwrap();
+        assert_eq!(idx.entries_by_frn(object).count(), 0);
+    }
+
+    #[test]
+    fn record_reuse_retires_every_link_of_the_old_sequence() {
+        let mut idx = build_hardlink_sample();
+        let old = Frn((1u64 << 48) | 0x64);
+        assert_eq!(idx.entries_by_frn(old).count(), 2);
+
+        let name = u16s("reused.txt");
+        let new = RawEntry {
+            parent_frn: Frn((1u64 << 48) | 0x0A),
+            frn: Frn((2u64 << 48) | 0x64),
+            name_utf16: &name,
+            is_dir: false,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 1,
+            mtime: 1,
+        };
+        idx.upsert_link_usn(&new);
+
+        assert_eq!(idx.entries_by_frn(old).count(), 0);
+        assert_eq!(idx.entries_by_frn(new.frn).count(), 1);
+    }
+
+    #[test]
+    fn complete_link_snapshot_is_reconciled_by_exact_parent_and_name() {
+        let mut idx = build_hardlink_sample();
+        let object = Frn((1u64 << 48) | 0x64);
+        let parent_a = Frn((1u64 << 48) | 0x0A);
+        let parent_b = Frn((1u64 << 48) | 0x14);
+        let shared = u16s("shared.txt");
+        let third = u16s("third.txt");
+        let retained_before = idx
+            .entry_by_link(object, parent_a, &shared)
+            .expect("existing link");
+        let metadata_time =
+            crate::query::dates::FILETIME_UNIX_EPOCH + 9 * crate::query::dates::TICKS_PER_SECOND;
+        let desired = [
+            RawEntry {
+                parent_frn: parent_a,
+                frn: object,
+                name_utf16: &shared,
+                is_dir: false,
+                is_reparse: false,
+                is_hidden: false,
+                is_system: false,
+                size: 500,
+                mtime: metadata_time,
+            },
+            RawEntry {
+                parent_frn: parent_b,
+                frn: object,
+                name_utf16: &third,
+                is_dir: false,
+                is_reparse: false,
+                is_hidden: false,
+                is_system: false,
+                size: 500,
+                mtime: metadata_time,
+            },
+        ];
+
+        let first_new = idx.len() as u32;
+        let changed = idx.reconcile_file_links_usn(object, &desired);
+        idx.merge_new_into_permutations(first_new);
+        assert_eq!(
+            changed,
+            LinkReconcileStats {
+                added: 1,
+                removed: 1,
+                retained: 1,
+                metadata_changed: true,
+            }
+        );
+        assert_eq!(
+            idx.entry_by_link(object, parent_a, &shared),
+            Some(retained_before),
+            "an unchanged link keeps its EntryId"
+        );
+        assert!(
+            idx.entry_by_link(object, parent_b, &u16s("alias.txt"))
+                .is_none()
+        );
+        assert!(
+            idx.entry_by_link(object, parent_b, &third).is_some(),
+            "the authoritative new link is appended"
+        );
+        for id in idx.entries_by_frn(object) {
+            assert_eq!((idx.size(id), idx.mtime(id)), (500, metadata_time));
+        }
+    }
 
     #[test]
     fn rename_is_tombstone_plus_new_entry() {
@@ -457,7 +942,7 @@ mod tests {
         assert_eq!(idx.live_len(), 5);
         let c = idx.entry_by_record(11).unwrap();
         let mut p = Vec::new();
-        idx.append_path(c, &mut p);
+        idx.append_path(c, &mut p).unwrap();
         assert_eq!(p, b"C:\\0_first\\a.txt");
         // Name renames never touch sizes/mtimes, so the lazy size/mtime
         // orders (query::memo) stay valid without any signal from here.
@@ -496,7 +981,7 @@ mod tests {
         assert_eq!(idx.rename_dir_in_place(20, &renamed, 20), Some(sub_id));
         assert_eq!(idx.parent(sub_id), top_id);
         let mut p = Vec::new();
-        idx.append_path(sub_id, &mut p);
+        idx.append_path(sub_id, &mut p).unwrap();
         assert_eq!(p, b"C:\\top\\renamed");
         assert_perm_name_sorted(&idx);
 
@@ -546,13 +1031,13 @@ mod tests {
         idx.update_attrs(30, false, false).unwrap();
         assert!(idx.is_excluded(f_id));
 
-        // Marking a dir hidden excludes the dir itself; existing children
-        // keep their stale bit until the next rescan (pinned current
-        // behavior — same accepted-limitation class as moves, see flags doc).
+        // Marking a dir hidden updates it immediately and propagates through
+        // every existing descendant exactly once at the batch boundary.
         let plain_id = idx.entry_by_record(20).unwrap();
         idx.update_attrs(20, true, false).unwrap();
         assert!(idx.is_excluded(plain_id));
-        assert!(!idx.is_excluded(g_id));
+        idx.merge_new_into_permutations(idx.len() as u32);
+        assert!(idx.is_excluded(g_id));
 
         // New entries created under it inherit immediately.
         let h = u16s("h.txt");
@@ -560,6 +1045,13 @@ mod tests {
         let h_id = idx.upsert(&raw_attr(50, 20, &h, false, false, false));
         idx.merge_new_into_permutations(first_new);
         assert!(idx.is_excluded(h_id));
+
+        // Clearing the directory attribute clears inherited exclusion from
+        // both old and newly-created descendants at the next boundary.
+        idx.update_attrs(20, false, false).unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32);
+        assert!(!idx.is_excluded(g_id));
+        assert!(!idx.is_excluded(h_id));
     }
 
     struct Rng(u64);

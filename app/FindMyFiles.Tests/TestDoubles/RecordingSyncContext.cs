@@ -7,7 +7,7 @@ namespace FindMyFiles.Tests.TestDoubles;
 /// <see cref="SynchronizationContext.Current"/>, let a production <c>await</c> (without
 /// <c>ConfigureAwait(false)</c>) capture it, then assert the continuation was Posted
 /// here rather than run inline on whatever thread completed the awaited task.</summary>
-public sealed class RecordingSyncContext : SynchronizationContext
+internal sealed class RecordingSyncContext : SynchronizationContext
 {
     private readonly Queue<(SendOrPostCallback Callback, object? State)> _queue = new();
 

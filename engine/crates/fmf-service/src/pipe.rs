@@ -272,7 +272,7 @@ impl PipeListener {
     /// # Errors
     /// Returns the OS error if `CreateNamedPipeW`, the stop-event creation, or
     /// the connect wait fails.
-    pub fn accept(&mut self, stop: &Event) -> io::Result<Accepted> {
+    pub fn accept(&mut self, stop: &Event, on_listening: impl FnOnce()) -> io::Result<Accepted> {
         let first_flag = if self.first_created {
             0
         } else {
@@ -311,8 +311,11 @@ impl PipeListener {
         let ok = unsafe { ConnectNamedPipe(h, &raw mut ov) };
         if ok == 0 {
             match unsafe { GetLastError() } {
-                ERROR_PIPE_CONNECTED => return Ok(Accepted::Connection(stream)),
-                ERROR_IO_PENDING => {}
+                ERROR_PIPE_CONNECTED => {
+                    on_listening();
+                    return Ok(Accepted::Connection(stream));
+                }
+                ERROR_IO_PENDING => on_listening(),
                 err => return Err(io::Error::from_raw_os_error(err as i32)),
             }
             let handles = [ev.raw(), stop.raw()];
@@ -330,6 +333,8 @@ impl PipeListener {
             if ok == 0 {
                 return Err(last_error());
             }
+        } else {
+            on_listening();
         }
         Ok(Accepted::Connection(stream))
     }

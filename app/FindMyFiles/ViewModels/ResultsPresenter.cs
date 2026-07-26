@@ -14,12 +14,14 @@ namespace FindMyFiles.ViewModels;
 /// screen until the new one is ready, so nothing ever flickers). Also owns
 /// the result-count status text.
 /// </summary>
-public sealed partial class ResultsPresenter : ObservableObject
+internal sealed partial class ResultsPresenter : ObservableObject, IDisposable
 {
     private readonly IDispatcher _dispatcher;
 
     /// <summary>Lifetime-single ItemsSource — bind with x:Bind OneTime.</summary>
     public VirtualResultList ResultsSource { get; }
+
+    internal ISearchResult? PresentationBasis => ResultsSource.PresentationBasis;
 
     /// <summary>Status-bar text describing the published result — hit count
     /// (and query time when a trace is present), a query-error message, or
@@ -77,6 +79,7 @@ public sealed partial class ResultsPresenter : ObservableObject
     /// <param name="highlighter">Match highlighter applied to the published rows.</param>
     /// <param name="isCurrent">Predicate that returns false once a newer query
     /// has superseded this one.</param>
+    /// <param name="ct">Cancels prefetch when a newer query supersedes this one.</param>
     /// <exception cref="StaleResultException">
     /// The index was structurally rebuilt while prefetching — the caller
     /// decides whether to retry.
@@ -87,7 +90,8 @@ public sealed partial class ResultsPresenter : ObservableObject
         QueryTraceData? trace,
         RequeryOrigin origin,
         IHighlighter highlighter,
-        Func<bool> isCurrent)
+        Func<bool> isCurrent,
+        CancellationToken ct = default)
     {
         Debug.Assert(_dispatcher.HasThreadAccess, "PublishAsync must start on the UI thread");
 
@@ -107,7 +111,7 @@ public sealed partial class ResultsPresenter : ObservableObject
                  page++)
             {
                 var rows = await result.GetRangeAsync(
-                    (long)page * VirtualResultList.PageSize, VirtualResultList.PageSize);
+                    (long)page * VirtualResultList.PageSize, VirtualResultList.PageSize, ct);
                 seeds.Add(new PageSeed(page, rows));
             }
         }
@@ -117,9 +121,10 @@ public sealed partial class ResultsPresenter : ObservableObject
             throw;
         }
 
-        if (!isCurrent())
+        if (ct.IsCancellationRequested || !isCurrent())
         {
             result.Dispose(); // superseded while prefetching — keep the old screen
+            ct.ThrowIfCancellationRequested();
             return;
         }
 
@@ -145,20 +150,22 @@ public sealed partial class ResultsPresenter : ObservableObject
     /// <param name="highlighter">Match highlighter applied to the refreshed rows.</param>
     /// <param name="isCurrent">Predicate that returns false once a newer query
     /// has superseded this one.</param>
+    /// <param name="ct">Cancels the refresh when a newer query supersedes this one.</param>
     /// <returns>A <see cref="Task"/> representing the asynchronous refresh.</returns>
     public async Task RefreshInPlaceAsync(
         ISearchResult result,
         QueryTraceData? trace,
         RequeryOrigin origin,
         IHighlighter highlighter,
-        Func<bool> isCurrent)
+        Func<bool> isCurrent,
+        CancellationToken ct = default)
     {
         Debug.Assert(_dispatcher.HasThreadAccess, "RefreshInPlaceAsync must start on the UI thread");
 
         var count = (int)Math.Min(result.Count, int.MaxValue);
         if (count != ResultsSource.Count)
         {
-            await PublishAsync(result, trace, origin, highlighter, isCurrent);
+            await PublishAsync(result, trace, origin, highlighter, isCurrent, ct);
             return;
         }
 
@@ -173,7 +180,7 @@ public sealed partial class ResultsPresenter : ObservableObject
                  page++)
             {
                 var rows = await result.GetRangeAsync(
-                    (long)page * VirtualResultList.PageSize, VirtualResultList.PageSize);
+                    (long)page * VirtualResultList.PageSize, VirtualResultList.PageSize, ct);
                 seeds.Add(new PageSeed(page, rows));
             }
         }
@@ -183,9 +190,10 @@ public sealed partial class ResultsPresenter : ObservableObject
             throw;
         }
 
-        if (!isCurrent())
+        if (ct.IsCancellationRequested || !isCurrent())
         {
             result.Dispose(); // superseded while prefetching — keep the old screen
+            ct.ThrowIfCancellationRequested();
             return;
         }
 
@@ -223,5 +231,13 @@ public sealed partial class ResultsPresenter : ObservableObject
         }
 
         return (0, Math.Min(lastRow, (2 * VirtualResultList.PageSize) - 1), null);
+    }
+
+    /// <summary>Dispose the lifetime-single result source and detach view
+    /// subscribers. Idempotence is provided by <see cref="VirtualResultList"/>.</summary>
+    public void Dispose()
+    {
+        ResultsPublished = null;
+        ResultsSource.Dispose();
     }
 }

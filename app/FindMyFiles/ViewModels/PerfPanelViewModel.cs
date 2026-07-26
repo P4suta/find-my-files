@@ -8,7 +8,7 @@ namespace FindMyFiles.ViewModels;
 /// stats snapshot and the recent-latency history. Rendering stays in
 /// code-behind (diagnostic chrome, not app data).
 /// </summary>
-public sealed partial class PerfPanelViewModel : ObservableObject
+internal sealed partial class PerfPanelViewModel : ObservableObject, IDisposable
 {
     private const int MaxRecent = 64;
     private const int UsnTailMax = 6;
@@ -16,8 +16,10 @@ public sealed partial class PerfPanelViewModel : ObservableObject
     private const int ScanTailMax = 4;
 
     private readonly IEngineClient _engine;
+    private readonly CancellationTokenSource _lifetime = new();
     private readonly List<ulong> _recentTotalsUs = [];
     private readonly List<ulong> _recentWsBytes = [];
+    private int _disposed;
 
     /// <summary>Whether the F12 panel is showing (toggled by <see cref="Toggle"/>).</summary>
     [ObservableProperty]
@@ -82,14 +84,26 @@ public sealed partial class PerfPanelViewModel : ObservableObject
     /// <summary>Pull a fresh <see cref="Stats"/> snapshot from the engine and
     /// raise <see cref="PerfDataChanged"/>. Awaitable so a pipe round-trip
     /// doesn't block the caller.</summary>
+    /// <param name="ct">Cancels the in-flight stats request.</param>
     /// <returns>A <see cref="Task"/> that completes once the snapshot is refreshed.</returns>
-    public async Task RefreshStatsAsync()
+    public async Task RefreshStatsAsync(CancellationToken ct = default)
     {
         // No ConfigureAwait(false): Stats is bound and PerfDataChanged is contractually
         // raised on the UI thread, so the continuation must resume on the caller's
         // dispatcher (callers invoke this from the UI thread). Resuming off it would
         // update bound state from a pool thread → RPC_E_WRONG_THREAD.
-        Stats = await _engine.GetStatsAsync();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            _lifetime.Token,
+            ct);
+        try
+        {
+            Stats = await _engine.GetStatsAsync(linked.Token);
+        }
+        catch (OperationCanceledException) when (linked.IsCancellationRequested)
+        {
+            return;
+        }
+
         if (Stats is { } s)
         {
             _recentWsBytes.Add(s.CurrentWsBytes);
@@ -117,5 +131,18 @@ public sealed partial class PerfPanelViewModel : ObservableObject
         }
 
         PerfDataChanged?.Invoke();
+    }
+
+    /// <summary>Cancel in-flight stats polling and release view subscribers.</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+        PerfDataChanged = null;
     }
 }

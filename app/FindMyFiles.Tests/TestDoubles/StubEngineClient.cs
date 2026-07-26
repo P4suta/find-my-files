@@ -14,13 +14,20 @@ namespace FindMyFiles.Tests.TestDoubles;
 /// Use <see cref="FindMyFiles.Engine.FakeEngineClient"/> when a test needs a
 /// contract-conforming in-proc engine.
 /// </summary>
-public sealed class StubEngineClient : IEngineClient
+internal sealed class StubEngineClient : IEngineClient
 {
-    public sealed class PendingSearch(string query, SearchOptions options)
+    public EngineClientKind Kind { get; set; } = EngineClientKind.InProcess;
+
+    public sealed class PendingSearch(
+        string query,
+        SearchOptions options,
+        CancellationToken cancellationToken)
     {
         public string Query { get; } = query;
 
         public SearchOptions Options { get; } = options;
+
+        public CancellationToken CancellationToken { get; } = cancellationToken;
 
         public TaskCompletionSource<SearchOutcome> Tcs { get; } = new();
 
@@ -76,6 +83,12 @@ public sealed class StubEngineClient : IEngineClient
     /// Dispose paths actually unsubscribe.</summary>
     public int IndexChangedSubscribers => IndexChanged?.GetInvocationList().Length ?? 0;
 
+    public int VolumeUpdatedSubscribers => VolumeUpdated?.GetInvocationList().Length ?? 0;
+
+    public int EngineErrorSubscribers => EngineErrorOccurred?.GetInvocationList().Length ?? 0;
+
+    public int ConnectionChangedSubscribers => ConnectionChanged?.GetInvocationList().Length ?? 0;
+
     /// <summary>How many times <see cref="ListVolumesAsync"/> was called — lets a
     /// test pin that the startup sequence runs exactly once (e.g. the Loaded call
     /// and a later Connected event must not double-run it).</summary>
@@ -111,7 +124,8 @@ public sealed class StubEngineClient : IEngineClient
             throw ex;
         }
 
-        var pending = new PendingSearch(query, options);
+        ct.ThrowIfCancellationRequested();
+        var pending = new PendingSearch(query, options, ct);
         Searches.Add(pending);
         return pending.Tcs.Task;
     }

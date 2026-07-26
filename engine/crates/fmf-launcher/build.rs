@@ -3,10 +3,10 @@
 //! visually identical to the app it starts and identifiable in Explorer →
 //! Properties → Details (ProductName/ProductVersion) without running anything.
 //!
-//! Best-effort by design: if the resource compiler is unavailable the build
-//! still succeeds (the launcher just keeps the default icon/strings). A cosmetic
-//! must never break the build — and CI (windows-latest, full SDK) always has the
-//! compiler, so the shipped release artifact gets the resource regardless.
+//! Resource embedding is a release invariant, not cosmetic: Explorer identity
+//! and the application icon must be present on the shipped launcher. A local
+//! Windows debug build warns when the resource compiler is unavailable, but a
+//! release-profile or CI build fails closed. Non-Windows checks remain a no-op.
 //!
 //! The version string follows the SAME precedence as the fmf-buildstamp build.rs
 //! (env `FMF_BUILD_VERSION` verbatim, else the local `…-dev+g<sha>` default), so
@@ -24,6 +24,8 @@ fn main() {
     println!("cargo:rerun-if-changed={ICON}");
     // The version resource must be re-stamped when the build identity moves.
     println!("cargo:rerun-if-env-changed=FMF_BUILD_VERSION");
+    println!("cargo:rerun-if-env-changed=CI");
+    println!("cargo:rerun-if-env-changed=GITHUB_ACTIONS");
     println!("cargo:rerun-if-changed=../../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../../.git/index");
 
@@ -59,8 +61,34 @@ fn main() {
         res.set_version_info(winresource::VersionInfo::PRODUCTVERSION, v);
     }
     if let Err(e) = res.compile() {
-        println!("cargo:warning=fmf-launcher: version resource not embedded ({e})");
+        assert!(
+            !resource_failure_is_fatal(),
+            "fmf-launcher: failed to embed required icon/version resource \
+             in a release or CI build: {e}"
+        );
+        println!(
+            "cargo:warning=fmf-launcher: icon/version resource not embedded in \
+             local debug build ({e})"
+        );
     }
+}
+
+/// Shipping builds must never silently lose VERSIONINFO/the application icon.
+/// Cargo supplies `PROFILE`; the CI variables also make non-release verification
+/// jobs fail if their Windows SDK/resource compiler setup regresses.
+fn resource_failure_is_fatal() -> bool {
+    std::env::var("PROFILE").as_deref() == Ok("release")
+        || env_truthy("CI")
+        || env_truthy("GITHUB_ACTIONS")
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
 }
 
 /// Channel-aware build version, mirroring `fmf-buildstamp/build.rs` precedence:

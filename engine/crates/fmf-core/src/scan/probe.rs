@@ -9,8 +9,8 @@ use ntfs_reader::errors::NtfsReaderError;
 
 use crate::mft::MftError;
 
-use super::pipeline::{Chunk, SCAN_CHUNK, plan_chunks};
-use super::volume_io::mft_layout;
+use super::pipeline::{SCAN_CHUNK, plan_chunks};
+use super::volume_io::{ReadSpan, mft_layout};
 
 /// I/O strategy to measure for one $MFT read pass (ADR-0011).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,23 +86,23 @@ fn open_with_flags(volume_path: &str, flags: u32) -> std::io::Result<std::fs::Fi
 }
 
 /// Aligned (offset, length) pair covering a chunk under `NO_BUFFERING`.
-const fn aligned_span(c: &Chunk) -> (u64, usize) {
-    let start = c.phys & !(NOBUF_ALIGN as u64 - 1);
-    let end = (c.phys + c.want as u64).next_multiple_of(NOBUF_ALIGN as u64);
+const fn aligned_span(read: &ReadSpan) -> (u64, usize) {
+    let start = read.physical & !(NOBUF_ALIGN as u64 - 1);
+    let end = (read.physical + read.len as u64).next_multiple_of(NOBUF_ALIGN as u64);
     (start, (end - start) as usize)
 }
 
-fn probe_sync(volume_path: &str, chunks: &[Chunk], flags: u32) -> std::io::Result<u64> {
+fn probe_sync(volume_path: &str, reads: &[ReadSpan], flags: u32) -> std::io::Result<u64> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = open_with_flags(volume_path, flags)?;
     let no_buffering = flags & FILE_FLAG_NO_BUFFERING != 0;
     let mut buf = AlignedBuf::new(SCAN_CHUNK + 2 * NOBUF_ALIGN);
     let mut total = 0u64;
-    for c in chunks {
+    for read in reads {
         let (phys, want) = if no_buffering {
-            aligned_span(c)
+            aligned_span(read)
         } else {
-            (c.phys, c.want)
+            (read.physical, read.len)
         };
         file.seek(SeekFrom::Start(phys))?;
         file.read_exact(&mut buf.as_mut_slice()[..want])?;
@@ -125,7 +125,7 @@ struct OvSlot {
 
 fn probe_nobuf_overlapped(
     volume_path: &str,
-    chunks: &[Chunk],
+    reads: &[ReadSpan],
     queue_depth: usize,
 ) -> std::io::Result<u64> {
     use std::os::windows::io::AsRawHandle;
@@ -161,8 +161,8 @@ fn probe_nobuf_overlapped(
         return Err(std::io::Error::last_os_error());
     }
 
-    let issue = |slot: &mut OvSlot, c: &Chunk| -> std::io::Result<()> {
-        let (phys, want) = aligned_span(c);
+    let issue = |slot: &mut OvSlot, read: &ReadSpan| -> std::io::Result<()> {
+        let (phys, want) = aligned_span(read);
         slot.want = want;
         *slot.ov = unsafe { std::mem::zeroed() };
         slot.ov.Anonymous.Anonymous.Offset = (phys & 0xFFFF_FFFF) as u32;
@@ -203,14 +203,14 @@ fn probe_nobuf_overlapped(
     // parse pipeline would need anyway.
     let mut total = 0u64;
     let result = (|| -> std::io::Result<u64> {
-        for (i, c) in chunks.iter().enumerate() {
+        for (i, read) in reads.iter().enumerate() {
             let slot_idx = i % qd;
             if i >= qd {
                 total += wait(&mut slots[slot_idx])?;
             }
-            issue(&mut slots[slot_idx], c)?;
+            issue(&mut slots[slot_idx], read)?;
         }
-        let issued = chunks.len();
+        let issued = reads.len();
         for done in issued.saturating_sub(qd)..issued {
             total += wait(&mut slots[done % qd])?;
         }
@@ -257,18 +257,28 @@ pub fn io_probe(
 ) -> Result<ProbeStats, MftError> {
     let drive = drive.trim_end_matches(['\\', '/']);
     let volume_path = format!(r"\\.\{drive}");
-    let (record_size, data_size, runmap) = mft_layout(&volume_path).map_err(|e| match e {
+    let layout = mft_layout(&volume_path).map_err(|e| match e {
         NtfsReaderError::ElevationError => MftError::NotElevated,
         other => MftError::Ntfs(other),
     })?;
-    let chunks = plan_chunks(&runmap, data_size, record_size);
+    let chunks =
+        plan_chunks(&layout.runmap, layout.data_size, layout.record_size).ok_or_else(|| {
+            MftError::Ntfs(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "$MFT length is not a whole number of file records",
+                )
+                .into(),
+            )
+        })?;
+    let reads: Vec<ReadSpan> = chunks.into_iter().flat_map(|chunk| chunk.reads).collect();
 
     let t = Instant::now();
     let bytes = match mode {
-        IoProbeMode::Buffered => probe_sync(&volume_path, &chunks, 0),
-        IoProbeMode::Seq => probe_sync(&volume_path, &chunks, FILE_FLAG_SEQUENTIAL_SCAN),
-        IoProbeMode::NoBuf => probe_sync(&volume_path, &chunks, FILE_FLAG_NO_BUFFERING),
-        IoProbeMode::NoBufOverlapped => probe_nobuf_overlapped(&volume_path, &chunks, queue_depth),
+        IoProbeMode::Buffered => probe_sync(&volume_path, &reads, 0),
+        IoProbeMode::Seq => probe_sync(&volume_path, &reads, FILE_FLAG_SEQUENTIAL_SCAN),
+        IoProbeMode::NoBuf => probe_sync(&volume_path, &reads, FILE_FLAG_NO_BUFFERING),
+        IoProbeMode::NoBufOverlapped => probe_nobuf_overlapped(&volume_path, &reads, queue_depth),
     }
     .map_err(|e| MftError::Ntfs(e.into()))?;
     let elapsed = t.elapsed();

@@ -10,6 +10,7 @@ use crate::index::{EntryId, VolumeIndex};
 pub(super) struct EvalCtx {
     lower_path: Vec<u8>,
     orig_path: Vec<u8>,
+    path_chain: Vec<EntryId>,
     lower_built: bool,
     orig_built: bool,
 }
@@ -26,8 +27,7 @@ impl EvalCtx {
         if !self.lower_built {
             self.lower_path.clear();
             if id != VolumeIndex::ROOT {
-                self.lower_path
-                    .extend_from_slice(memo.lower_prefix(idx.parent(id)));
+                memo.append_lower_parent(idx, id, &mut self.lower_path, &mut self.path_chain);
             }
             self.lower_path.extend_from_slice(idx.lower_name(id));
             self.lower_built = true;
@@ -40,8 +40,7 @@ impl EvalCtx {
         if !self.orig_built {
             self.orig_path.clear();
             if id != VolumeIndex::ROOT {
-                self.orig_path
-                    .extend_from_slice(memo.orig_prefix(idx.parent(id)));
+                memo.append_orig_parent(idx, id, &mut self.orig_path, &mut self.path_chain);
             }
             self.orig_path.extend_from_slice(idx.name(id));
             self.orig_built = true;

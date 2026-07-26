@@ -5,9 +5,10 @@
 //! Mutation model (keeps the permutation arrays merge-only):
 //! - create  → append entry + merge into permutations
 //! - delete  → tombstone flag only
-//! - rename  → files: tombstone old + append new entry (same FRN);
+//! - rename  → files: tombstone the exact old link + append its new path;
 //!   dirs: in-place (children point at the `EntryId`), repositioned in `perm_name`
 //! - move    → rewrite `parent` only (no permutation depends on the path)
+//! - hard link → one live row per directory link; rows share the object's FRN
 //!
 //! Tombstones accumulate until compaction (M2), which bumps
 //! `structural_generation` and invalidates open result handles. Ordinary
@@ -24,11 +25,57 @@ pub mod testutil;
 
 pub use self::builder::{FinishTimings, VolumeIndexBuilder};
 pub use self::core::VolumeIndex;
+pub(crate) use self::mutate::LinkReconcileStats;
 
 /// Dense, append-only index into the struct-of-arrays entry columns.
+///
+/// One id identifies one searchable directory link/path. Several ids may
+/// share a full [`Frn`] when an NTFS file has hard links.
 pub type EntryId = u32;
 /// Sentinel `parent` value for an entry attached to the volume root (no parent).
 pub const NO_PARENT: EntryId = u32::MAX;
+
+/// Corruption encountered while lazily walking an entry's parent chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PathBuildError {
+    /// The requested entry id does not identify a row in the index.
+    #[error("entry {entry} is outside the index (entries={entries})")]
+    EntryOutOfRange {
+        /// Invalid entry id supplied by the caller.
+        entry: EntryId,
+        /// Current index length.
+        entries: usize,
+    },
+    /// An entry or parent id points outside the index columns.
+    #[error("entry {entry} references out-of-range parent {parent} (entries={entries})")]
+    ParentOutOfRange {
+        /// Entry whose parent was read.
+        entry: EntryId,
+        /// Invalid parent id.
+        parent: EntryId,
+        /// Current index length.
+        entries: usize,
+    },
+    /// The parent graph contains a cycle and therefore has no root path.
+    #[error("parent cycle detected while building the path for entry {entry}")]
+    ParentCycle {
+        /// Original entry whose path was requested.
+        entry: EntryId,
+    },
+    /// A corrupt parent graph would produce a path larger than any valid
+    /// Windows extended-length path.
+    #[error(
+        "path for entry {entry} exceeds the WTF-8 safety bound ({bytes} bytes > {maximum} bytes)"
+    )]
+    PathTooLong {
+        /// Original entry whose path was requested.
+        entry: EntryId,
+        /// Bytes required by the path discovered so far.
+        bytes: usize,
+        /// Maximum possible WTF-8 bytes for a valid NT path.
+        maximum: usize,
+    },
+}
 
 /// Per-entry flag bits packed into the index's `flags` column (one `u8`).
 pub mod flags {
@@ -44,10 +91,9 @@ pub mod flags {
     pub const SYSTEM: u8 = 16;
     /// Computed: this entry or any ancestor carries HIDDEN|SYSTEM.
     ///
-    /// Queries skip these by default (toggleable). Kept in sync on
-    /// insert/move; a subtree moved out of an excluded branch keeps stale
-    /// bits until the next full rescan (same accepted-limitation class as dir
-    /// renames).
+    /// Queries skip these by default (toggleable). Inserts derive it from the
+    /// resolved parent; directory moves and H/S changes mark the forest dirty,
+    /// then the USN batch boundary propagates inheritance O(n) exactly once.
     pub const EXCLUDED: u8 = 32;
 }
 
@@ -61,8 +107,9 @@ pub struct Frn(pub u64);
 
 /// An MFT record number — an [`Frn`]'s low 48 bits.
 ///
-/// The index's lookup key: liveness (not the sequence) resolves NTFS record
-/// reuse, so the key is just the record number.
+/// The compact index's lookup key. USN mutations add an exact full-[`Frn`]
+/// comparison after this lookup so delayed events cannot cross record
+/// generations.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 #[repr(transparent)]
 pub struct RecordNo(pub u64);
@@ -137,10 +184,12 @@ pub(crate) fn merge_sorted_tail(
 /// One record produced by an initial-scan source (raw $MFT today, `ReFS`
 /// enumeration in the future).
 pub struct RawEntry<'a> {
-    /// The parent directory's full reference — its `.record()` resolves the
-    /// parent (an unknown parent attaches the entry to the root).
+    /// The parent directory's full reference. The initial builder resolves its
+    /// record after the scan; incremental USN insertion requires an exact
+    /// sequence match. An unknown parent attaches the entry to the root.
     pub parent_frn: Frn,
-    /// This entry's full reference; its `.record()` is the identity key.
+    /// The underlying object's full reference. Hard-linked entries share it;
+    /// link identity additionally includes `parent_frn` + `name_utf16`.
     pub frn: Frn,
     /// The file name as raw UTF-16 code units (as stored in the MFT).
     pub name_utf16: &'a [u16],
@@ -164,10 +213,10 @@ pub struct RawEntry<'a> {
 /// memcpys. `name_wtf8`/`lower_wtf8` must come from
 /// [`crate::wtf8::push_wtf8_pair`] (equal lengths, shared offsets).
 pub struct EncodedEntry<'a> {
-    /// The parent directory's full reference — its `.record()` resolves the
-    /// parent (an unknown parent attaches the entry to the root).
+    /// The parent directory's full reference; initial-scan finish resolves it
+    /// after all records are present.
     pub parent_frn: Frn,
-    /// This entry's full reference; its `.record()` is the identity key.
+    /// The underlying object's complete record+sequence reference.
     pub frn: Frn,
     /// The file name, WTF-8 encoded (paired with `lower_wtf8`, shared offsets).
     pub name_wtf8: &'a [u8],

@@ -21,7 +21,7 @@ public sealed class PipeRealServiceContractTests(ITestOutputHelper output)
     private Process? _service;
     private string? _dataDir;
 
-    protected override async Task<IEngineClient?> AcquireClientOrSkipAsync()
+    private protected override async Task<IEngineClient?> AcquireClientOrSkipAsync()
     {
         if (!string.Equals(Environment.GetEnvironmentVariable("FMF_PIPE_TESTS"), "1", StringComparison.Ordinal))
         {

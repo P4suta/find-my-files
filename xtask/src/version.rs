@@ -1,7 +1,8 @@
 //! `xtask version --channel <dev|nightly|stable> [--date YYYYMMDD]` — print the
 //! canonical channel-aware version string. This is the single source of the
 //! *format*: CI exports the result as `FMF_BUILD_VERSION` so the fmf-buildstamp
-//! build.rs stamps it verbatim, and `xtask package` names the nightly zip from it.
+//! build.rs stamps it verbatim. `xtask publish` records that same identity in
+//! `BUILDINFO.txt`; packaging then names the zip from the assembled artifact.
 //!
 //!   dev     → 0.1.0-dev+g<sha>
 //!   nightly → 0.1.0-nightly.<date>+g<sha>
@@ -16,8 +17,12 @@
 
 use crate::{cmd, paths, semver};
 use anyhow::{bail, Context, Result};
+use regex::Regex;
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
+use std::path::Path;
 use toml_edit::DocumentMut;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -46,19 +51,47 @@ pub fn run(channel: &str, date: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// `xtask check-version <tag>`: hard-fail unless the release `tag` (`vX.Y.Z` or
-/// `X.Y.Z`) matches the committed `[workspace.package] version`. release.yml runs
-/// this on a publishing dispatch BEFORE signing/packaging, so a manual dispatch
-/// whose tag drifts from the code (the zip name, the build stamp, and the Release
-/// tag all come from that tag) is caught before it ships mislabeled artifacts.
+/// `xtask check-version <tag>`: hard-fail unless every release version authority
+/// contains the same canonical `X.Y.Z`: the tag, release-please manifest, Rust
+/// workspace, C# project and every local engine package in `Cargo.lock`.
+///
+/// release.yml runs this BEFORE signing/packaging, so a partially-applied
+/// release-please update or stale lockfile cannot ship mislabeled artifacts.
 pub fn check_release_tag(tag: &str) -> Result<()> {
-    let committed = workspace_base_version()?;
-    tag_matches(tag, &committed)
+    let root = paths::repo_root();
+    let engine = paths::engine_dir();
+
+    let engine_toml_path = paths::engine_cargo_toml();
+    let engine_toml = read_text(&engine_toml_path)?;
+    let workspace = parse_workspace_version(&engine_toml)
+        .with_context(|| format!("read version from {}", engine_toml_path.display()))?;
+    let workspace_members = workspace_member_names(&engine, &engine_toml)?;
+
+    let manifest_path = root.join(".release-please-manifest.json");
+    let manifest = parse_release_please_version(&read_text(&manifest_path)?)
+        .with_context(|| format!("read version from {}", manifest_path.display()))?;
+
+    let csproj_path = root.join("app/FindMyFiles/FindMyFiles.csproj");
+    let csproj = parse_csproj_version(&read_text(&csproj_path)?)
+        .with_context(|| format!("read version from {}", csproj_path.display()))?;
+
+    let lock_path = engine.join("Cargo.lock");
+    let lock_versions = parse_local_lock_versions(&read_text(&lock_path)?, &workspace_members)
+        .with_context(|| format!("read local workspace versions from {}", lock_path.display()))?;
+
+    validate_release_versions(tag, &manifest, &workspace, &csproj, &lock_versions)
+}
+
+fn read_text(path: &Path) -> Result<String> {
+    fs::read_to_string(path).with_context(|| format!("read {}", path.display()))
 }
 
 /// Pure comparison behind [`check_release_tag`] — unit-tested without the FS.
+#[cfg(test)]
 fn tag_matches(tag: &str, committed: &str) -> Result<()> {
     let want = semver::strip_tag_v(tag);
+    semver::validate(want).with_context(|| format!("release tag '{tag}' is not canonical"))?;
+    semver::validate(committed).context("committed workspace version is not canonical")?;
     if want != committed {
         bail!(
             "release tag '{tag}' (version {want}) does not match the committed \
@@ -66,6 +99,170 @@ fn tag_matches(tag: &str, committed: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Validate all release sources at once and report the precise drifted source.
+fn validate_release_versions(
+    tag: &str,
+    manifest: &str,
+    workspace: &str,
+    csproj: &str,
+    lock_versions: &BTreeMap<String, String>,
+) -> Result<()> {
+    let tag_version = semver::strip_tag_v(tag);
+    let authorities = [
+        ("release tag", tag_version),
+        (".release-please-manifest.json[\".\"]", manifest),
+        ("engine/Cargo.toml workspace.package.version", workspace),
+        ("app/FindMyFiles/FindMyFiles.csproj Version", csproj),
+    ];
+    for (source, version) in authorities {
+        semver::validate(version)
+            .with_context(|| format!("{source} has non-canonical version '{version}'"))?;
+    }
+    if lock_versions.is_empty() {
+        bail!("engine/Cargo.lock contains no local workspace packages");
+    }
+    for (package, version) in lock_versions {
+        semver::validate(version).with_context(|| {
+            format!("engine/Cargo.lock package '{package}' has non-canonical version '{version}'")
+        })?;
+    }
+
+    let expected = tag_version;
+    for (source, actual) in authorities.into_iter().skip(1) {
+        if actual != expected {
+            bail!(
+                "release version drift: {source} is '{actual}', but release tag \
+                 '{tag}' requires '{expected}'"
+            );
+        }
+    }
+    for (package, actual) in lock_versions {
+        if actual != expected {
+            bail!(
+                "release version drift: engine/Cargo.lock package '{package}' is \
+                 '{actual}', but release tag '{tag}' requires '{expected}'"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn parse_release_please_version(source: &str) -> Result<String> {
+    let document: Value =
+        serde_json::from_str(source).context("parse .release-please-manifest.json")?;
+    document
+        .get(".")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .context(".release-please-manifest.json has no string version at key '.'")
+}
+
+fn parse_csproj_version(source: &str) -> Result<String> {
+    let version_re =
+        Regex::new(r"(?s)<Version>\s*([^<]+?)\s*</Version>").context("compile Version regex")?;
+    let versions: Vec<String> = version_re
+        .captures_iter(source)
+        .filter_map(|capture| capture.get(1).map(|value| value.as_str().trim().to_owned()))
+        .collect();
+    match versions.as_slice() {
+        [version] => Ok(version.clone()),
+        [] => bail!("FindMyFiles.csproj has no <Version> element"),
+        _ => bail!(
+            "FindMyFiles.csproj has {} <Version> elements; exactly one is required",
+            versions.len()
+        ),
+    }
+}
+
+fn parse_workspace_version(source: &str) -> Result<String> {
+    let document: DocumentMut = source.parse().context("parse engine/Cargo.toml")?;
+    document
+        .get("workspace")
+        .and_then(|workspace| workspace.get("package"))
+        .and_then(|package| package.get("version"))
+        .and_then(toml_edit::Item::as_str)
+        .map(str::to_owned)
+        .context("engine/Cargo.toml has no [workspace.package] version")
+}
+
+/// Resolve the actual workspace package names from `workspace.members`; this
+/// avoids a second hand-maintained crate-name list that could omit a new member.
+fn workspace_member_names(engine_dir: &Path, workspace_source: &str) -> Result<Vec<String>> {
+    let document: DocumentMut = workspace_source
+        .parse()
+        .context("parse engine/Cargo.toml for workspace members")?;
+    let members = document
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml_edit::Item::as_array)
+        .context("engine/Cargo.toml has no workspace.members array")?;
+    let mut names = BTreeSet::new();
+    for member in members {
+        let rel = member
+            .as_str()
+            .context("engine/Cargo.toml workspace member is not a string")?;
+        let manifest_path = engine_dir.join(rel).join("Cargo.toml");
+        let manifest_source = read_text(&manifest_path)?;
+        let manifest: DocumentMut = manifest_source
+            .parse()
+            .with_context(|| format!("parse {}", manifest_path.display()))?;
+        let name = manifest
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(toml_edit::Item::as_str)
+            .with_context(|| format!("{} has no package.name", manifest_path.display()))?;
+        if !names.insert(name.to_owned()) {
+            bail!("duplicate workspace package name '{name}'");
+        }
+    }
+    if names.is_empty() {
+        bail!("engine/Cargo.toml workspace.members is empty");
+    }
+    Ok(names.into_iter().collect())
+}
+
+/// Read the lockfile entries for exactly the local workspace member names.
+/// `source` must be absent: accepting a registry package with a colliding name
+/// would let a missing local lock entry pass accidentally.
+fn parse_local_lock_versions(
+    source: &str,
+    workspace_members: &[String],
+) -> Result<BTreeMap<String, String>> {
+    let document: DocumentMut = source.parse().context("parse engine/Cargo.lock")?;
+    let packages = document
+        .get("package")
+        .and_then(toml_edit::Item::as_array_of_tables)
+        .context("engine/Cargo.lock has no [[package]] entries")?;
+    let mut versions = BTreeMap::new();
+    for member in workspace_members {
+        let matches: Vec<_> = packages
+            .iter()
+            .filter(|package| {
+                package.get("name").and_then(toml_edit::Item::as_str) == Some(member.as_str())
+                    && package.get("source").is_none()
+            })
+            .collect();
+        let [package] = matches.as_slice() else {
+            bail!(
+                "engine/Cargo.lock must contain exactly one source-less entry for \
+                 workspace package '{member}', found {}",
+                matches.len()
+            );
+        };
+        let version = package
+            .get("version")
+            .and_then(toml_edit::Item::as_str)
+            .with_context(|| format!("engine/Cargo.lock package '{member}' has no version"))?;
+        if versions
+            .insert(member.clone(), version.to_owned())
+            .is_some()
+        {
+            bail!("duplicate local lockfile version collected for '{member}'");
+        }
+    }
+    Ok(versions)
 }
 
 /// Pure formatter — unit-tested without touching git or the filesystem.
@@ -202,14 +399,7 @@ pub fn git_commit_date() -> Option<String> {
 fn workspace_base_version() -> Result<String> {
     let path = paths::engine_cargo_toml();
     let src = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let doc: DocumentMut = src.parse().context("parse engine/Cargo.toml")?;
-    let version = doc
-        .get("workspace")
-        .and_then(|w| w.get("package"))
-        .and_then(|p| p.get("version"))
-        .and_then(toml_edit::Item::as_str)
-        .context("engine/Cargo.toml has no [workspace.package] version")?;
-    Ok(version.to_owned())
+    parse_workspace_version(&src)
 }
 
 fn git_short_sha() -> Option<String> {
@@ -224,6 +414,123 @@ fn git_short_sha() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lock_versions(version: &str) -> BTreeMap<String, String> {
+        [
+            ("fmf-core".to_owned(), version.to_owned()),
+            ("fmf-service".to_owned(), version.to_owned()),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn all_release_authorities_must_agree() {
+        let versions = lock_versions("0.1.1");
+        validate_release_versions("v0.1.1", "0.1.1", "0.1.1", "0.1.1", &versions).unwrap();
+
+        assert!(validate_release_versions("v0.1.1", "0.1.0", "0.1.1", "0.1.1", &versions).is_err());
+        assert!(validate_release_versions("v0.1.1", "0.1.1", "0.1.0", "0.1.1", &versions).is_err());
+        assert!(validate_release_versions("v0.1.1", "0.1.1", "0.1.1", "0.1.0", &versions).is_err());
+        let drifted_lock = lock_versions("0.1.0");
+        assert!(
+            validate_release_versions("v0.1.1", "0.1.1", "0.1.1", "0.1.1", &drifted_lock).is_err()
+        );
+    }
+
+    #[test]
+    fn every_release_authority_must_be_canonical_semver() {
+        for malformed in ["01.2.3", "1.02.3", "1.2.03", "1.2.3-rc.1", "1.2"] {
+            let versions = lock_versions("1.2.3");
+            assert!(validate_release_versions(
+                &format!("v{malformed}"),
+                "1.2.3",
+                "1.2.3",
+                "1.2.3",
+                &versions
+            )
+            .is_err());
+            assert!(
+                validate_release_versions("v1.2.3", malformed, "1.2.3", "1.2.3", &versions)
+                    .is_err()
+            );
+            let malformed_lock = lock_versions(malformed);
+            assert!(validate_release_versions(
+                "v1.2.3",
+                "1.2.3",
+                "1.2.3",
+                "1.2.3",
+                &malformed_lock
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn release_source_parsers_fail_closed() {
+        assert_eq!(
+            parse_release_please_version(r#"{".":"0.1.1"}"#).unwrap(),
+            "0.1.1"
+        );
+        assert!(parse_release_please_version(r#"{"other":"0.1.1"}"#).is_err());
+        assert!(parse_release_please_version(r#"{".":1}"#).is_err());
+
+        assert_eq!(
+            parse_csproj_version("<Project><Version> 0.1.1 </Version></Project>").unwrap(),
+            "0.1.1"
+        );
+        assert!(parse_csproj_version("<Project />").is_err());
+        assert!(parse_csproj_version(
+            "<Project><Version>0.1.1</Version><Version>0.1.2</Version></Project>"
+        )
+        .is_err());
+
+        assert_eq!(
+            parse_workspace_version("[workspace.package]\nversion = \"0.1.1\"\n").unwrap(),
+            "0.1.1"
+        );
+        assert!(parse_workspace_version("[workspace]\nmembers = []\n").is_err());
+    }
+
+    #[test]
+    fn lock_parser_requires_one_source_less_entry_per_workspace_member() {
+        let members = vec!["fmf-core".to_owned(), "fmf-service".to_owned()];
+        let lock = "\
+version = 4
+
+[[package]]
+name = \"fmf-core\"
+version = \"0.1.1\"
+
+[[package]]
+name = \"fmf-service\"
+version = \"0.1.1\"
+";
+        let parsed = parse_local_lock_versions(lock, &members).unwrap();
+        assert_eq!(parsed["fmf-core"], "0.1.1");
+        assert_eq!(parsed["fmf-service"], "0.1.1");
+
+        assert!(parse_local_lock_versions(
+            "[[package]]\nname = \"fmf-core\"\nversion = \"0.1.1\"\n",
+            &members
+        )
+        .is_err());
+        assert!(parse_local_lock_versions(
+            "[[package]]\nname = \"fmf-core\"\nversion = \"0.1.1\"\n\
+             source = \"registry+https://example.invalid/index\"\n\
+             [[package]]\nname = \"fmf-service\"\nversion = \"0.1.1\"\n",
+            &members
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn committed_release_sources_and_lockfile_are_in_lockstep() {
+        let manifest =
+            fs::read_to_string(paths::repo_root().join(".release-please-manifest.json")).unwrap();
+        let version = parse_release_please_version(&manifest).unwrap();
+        check_release_tag(&format!("v{version}")).unwrap();
+    }
 
     #[test]
     fn tag_matches_accepts_equal_versions() {

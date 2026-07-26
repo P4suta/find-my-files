@@ -5,129 +5,135 @@ using Xunit;
 namespace FindMyFiles.Tests;
 
 /// <summary>Tests for <see cref="EngineClientFactory"/>'s startup transport
-/// decision — the auto-mode branch table (probe → state → elevation) and the
-/// command-line helpers. The whole-app behaviour shipped untested; a wrong
+/// decision — the auto-mode branch table and command-line helpers. A wrong
 /// transport choice disables every feature.</summary>
 public sealed class EngineClientFactoryTests
 {
     [Fact]
-    public void DecideAuto_chooses_pipe_when_the_probe_succeeds()
+    public void DecideAuto_chooses_pipe_when_running_service_answers()
     {
-        var stateCalls = 0;
         var elevCalls = 0;
 
         var choice = EngineClientFactory.DecideAuto(
+            serviceState: () => EngineServiceState.Running,
             probe: () => true,
-            serviceState: () =>
-            {
-                stateCalls++;
-                return EngineServiceState.Stopped;
-            },
             elevated: () =>
             {
                 elevCalls++;
                 return true;
             },
-            hasScopeConfig: () => false);
+            serviceCompatible: () => throw new InvalidOperationException(
+                "marker must not be consulted"));
 
         Assert.Equal(EngineChoice.Pipe, choice);
-        Assert.Equal(0, stateCalls); // a successful probe short-circuits
         Assert.Equal(0, elevCalls);
     }
 
     [Fact]
-    public void DecideAuto_chooses_empty_when_service_runs_but_rejects_us()
+    public void DecideAuto_reports_unavailable_when_service_runs_but_rejects_us()
     {
         var elevCalls = 0;
 
         var choice = EngineClientFactory.DecideAuto(
-            () => false,
             () => EngineServiceState.Running,
+            () => false,
             () =>
             {
                 elevCalls++;
                 return true;
             },
-            () => false);
+            () => throw new InvalidOperationException("marker must not be consulted"));
 
-        Assert.Equal(EngineChoice.EmptyServiceUnreachable, choice);
+        Assert.Equal(EngineChoice.UnavailableServiceRejected, choice);
         Assert.Equal(0, elevCalls); // a running service short-circuits before elevation
     }
 
     [Fact]
     public void DecideAuto_chooses_ffi_when_no_service_and_elevated()
     {
-        var scopeCalls = 0;
-
         var choice = EngineClientFactory.DecideAuto(
-            () => false,
             () => EngineServiceState.NotInstalled,
+            () => throw new InvalidOperationException("absent service must not be probed"),
             () => true,
-            () =>
-            {
-                scopeCalls++;
-                return true;
-            });
+            () => throw new InvalidOperationException("marker must not be consulted"));
 
         Assert.Equal(EngineChoice.Ffi, choice);
-        Assert.Equal(0, scopeCalls); // elevation short-circuits before scope config
     }
 
     [Fact]
     public void DecideAuto_starts_on_demand_when_service_installed_but_stopped()
     {
-        // ADR-0027: an installed-but-stopped service is started on demand,
-        // regardless of elevation. Resolve owns the start + the fall-back-on-
-        // failure path; DecideAuto only routes to StartThenPipe.
+        // ADR-0027: only a marker-compatible stopped service starts on demand.
         var elevCalls = 0;
 
         var choice = EngineClientFactory.DecideAuto(
-            () => false,
             () => EngineServiceState.Stopped,
+            () => throw new InvalidOperationException("stopped service must not be probed"),
             () =>
             {
                 elevCalls++;
                 return true;
             },
-            () => false);
+            () => true);
 
         Assert.Equal(EngineChoice.StartThenPipe, choice);
         Assert.Equal(0, elevCalls); // a stopped service is started, not bypassed for FFI
     }
 
     [Fact]
-    public void WithoutService_picks_ffi_then_scope_then_empty()
+    public void DecideAuto_rejects_stopped_service_with_obsolete_protocol_marker()
     {
-        // Elevated → FFI (even with scope configured: elevation wins).
-        Assert.Equal(EngineChoice.Ffi, EngineClientFactory.WithoutService(() => true, () => false));
-        Assert.Equal(EngineChoice.Ffi, EngineClientFactory.WithoutService(() => true, () => true));
+        var choice = EngineClientFactory.DecideAuto(
+            () => EngineServiceState.Stopped,
+            () => throw new InvalidOperationException("stopped service must not be probed"),
+            () => throw new InvalidOperationException("elevation must not be consulted"),
+            () => false);
 
-        // Not elevated → scope walk when roots exist, else the empty/setup engine.
-        Assert.Equal(
-            EngineChoice.WalkInProc, EngineClientFactory.WithoutService(() => false, () => true));
-        Assert.Equal(
-            EngineChoice.EmptyNotElevated,
-            EngineClientFactory.WithoutService(() => false, () => false));
+        Assert.Equal(EngineChoice.UnavailableServiceIncompatible, choice);
     }
 
     [Fact]
-    public void DecideAuto_chooses_empty_when_no_service_not_elevated_and_no_scope()
+    public void WithoutService_picks_ffi_or_unavailable()
     {
-        var choice = EngineClientFactory.DecideAuto(
-            () => false, () => EngineServiceState.NotInstalled, () => false, () => false);
-
-        Assert.Equal(EngineChoice.EmptyNotElevated, choice);
+        Assert.Equal(EngineChoice.Ffi, EngineClientFactory.WithoutService(() => true));
+        Assert.Equal(
+            EngineChoice.UnavailableNotElevated,
+            EngineClientFactory.WithoutService(() => false));
     }
 
     [Fact]
-    public void DecideAuto_chooses_walk_when_no_service_not_elevated_and_scope_configured()
+    public void DecideAuto_reports_unavailable_when_no_service_and_not_elevated()
     {
-        // ADR-0024: the corporate-PC path — admin forbidden, but the user picked
-        // folders to fall back on.
         var choice = EngineClientFactory.DecideAuto(
-            () => false, () => EngineServiceState.NotInstalled, () => false, () => true);
+            () => EngineServiceState.NotInstalled,
+            () => throw new InvalidOperationException("absent service must not be probed"),
+            () => false,
+            () => throw new InvalidOperationException("marker must not be consulted"));
 
-        Assert.Equal(EngineChoice.WalkInProc, choice);
+        Assert.Equal(EngineChoice.UnavailableNotElevated, choice);
+    }
+
+    [Fact]
+    public void DecideAuto_unknown_state_fails_closed_to_pipe_only()
+    {
+        var choice = EngineClientFactory.DecideAuto(
+            () => EngineServiceState.Unknown,
+            () => false,
+            () => throw new InvalidOperationException("elevation must not be consulted"),
+            () => throw new InvalidOperationException("marker must not be consulted"));
+
+        Assert.Equal(EngineChoice.UnavailableServiceRejected, choice);
+    }
+
+    [Fact]
+    public void DecideCustomPipe_probes_without_consulting_scm()
+    {
+        Assert.Equal(
+            EngineChoice.Pipe,
+            EngineClientFactory.DecideCustomPipe(() => true, () => false));
+        Assert.Equal(
+            EngineChoice.UnavailableNotElevated,
+            EngineClientFactory.DecideCustomPipe(() => false, () => false));
     }
 
     [Theory]
@@ -146,12 +152,41 @@ public sealed class EngineClientFactoryTests
         Assert.Equal(expected, EngineClientFactory.OptionValue(args, prefix));
 
     [Fact]
-    public void Resolve_empty_engine_seam_returns_the_disconnected_fake()
+    public void WithEngineMode_replaces_every_existing_override()
     {
-        // `--engine=empty` (the UI-automation seam) forces the disconnected setup
-        // state that `--fake-engine` can't reach (it returns the data-bearing fake).
-        var engine = EngineClientFactory.Resolve(["--engine=empty"]);
+        var args = EngineClientFactory.WithEngineMode(
+            ["FindMyFiles.exe", "--engine=pipe", "--other", "--ENGINE=inproc"],
+            "unavailable");
 
-        Assert.True(engine is FakeEngineClient { IsEmpty: true });
+        Assert.Equal(["FindMyFiles.exe", "--other", "--engine=unavailable"], args);
+    }
+
+    [Fact]
+    public void Resolve_unavailable_engine_seam_returns_an_explicit_unavailable_client()
+    {
+        // `--engine=unavailable` (the UI-automation seam) forces disconnected setup
+        // state that `--fake-engine` can't reach (it returns the data-bearing fake).
+        using var engine = EngineClientFactory.Resolve(["--engine=unavailable"]);
+
+        Assert.IsType<UnavailableEngineClient>(engine);
+        Assert.Equal(EngineClientKind.Unavailable, engine.Kind);
+    }
+
+    [Fact]
+    public void Resolve_rejects_an_unknown_engine_mode_instead_of_silently_using_auto()
+    {
+        var error = Assert.Throws<ArgumentException>(
+            () => EngineClientFactory.Resolve(["--engine=typo"]));
+
+        Assert.Contains("unsupported --engine mode", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Resolve_rejects_duplicate_or_conflicting_engine_overrides()
+    {
+        Assert.Throws<ArgumentException>(
+            () => EngineClientFactory.Resolve(["--engine=auto", "--ENGINE=pipe"]));
+        Assert.Throws<ArgumentException>(
+            () => EngineClientFactory.Resolve(["--fake-engine", "--engine=auto"]));
     }
 }

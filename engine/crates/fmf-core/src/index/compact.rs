@@ -16,7 +16,9 @@ use parking_lot::Mutex;
 
 use super::{EntryId, NO_PARENT, VolumeIndex};
 
-/// Below this size the garbage can't be worth a rebuild.
+/// Below this size sparse dead rows alone are not worth a rebuild. Absolute
+/// pool garbage and dictionary churn bypass this floor: both otherwise grow
+/// without bound even on permanently small volumes.
 const COMPACT_MIN_ENTRIES: usize = 100_000;
 /// Tombstone share that triggers compaction (matches the `OffsetTable`'s
 /// stale-rebuild instinct: past ~1/8 dead weight, rebuilding wins).
@@ -32,10 +34,11 @@ impl VolumeIndex {
     }
 
     fn compaction_due_past(&self, min_entries: usize) -> bool {
-        self.len() >= min_entries.max(1)
-            && (self.tombstone_ratio() > COMPACT_TOMBSTONE_RATIO
-                || self.dead_name_bytes > COMPACT_DEAD_NAME_BYTES
-                || self.dict_appends_since_dedup as usize > self.live_len() / 4)
+        let sparse_row_capacity_due =
+            self.len() >= min_entries.max(1) && self.tombstone_ratio() > COMPACT_TOMBSTONE_RATIO;
+        let absolute_pool_garbage_due = self.dead_name_bytes > COMPACT_DEAD_NAME_BYTES;
+        let dictionary_churn_due = self.dict_appends_since_dedup as usize > self.live_len() / 4;
+        sparse_row_capacity_due || absolute_pool_garbage_due || dictionary_churn_due
     }
 
     /// A compacted copy: live entries only, pools rebuilt without garbage,
@@ -80,6 +83,7 @@ impl VolumeIndex {
             content_generation: 0,
             structural_generation: 0,
             dir_topology_generation: 0,
+            exclusion_tree_dirty: false,
             tombstones: 0,
             dead_name_bytes: 0,
             dict_appends_since_dedup: 0,
@@ -131,6 +135,10 @@ impl VolumeIndex {
         // names are unchanged, so the just-remapped perm_name stays sorted.
         out.dedup_dict();
         out.dedup_orig();
+        // Reattaching children of a dead directory to ROOT changes inherited
+        // visibility just like a USN move; rebuild it while compaction is
+        // already doing an O(n) pass.
+        out.recompute_all_excluded();
         out.shrink_to_fit();
         out
     }
@@ -140,7 +148,39 @@ impl VolumeIndex {
 mod tests {
     use super::*;
     use crate::index::SortKey;
-    use crate::index::testutil::{build_sample, raw, u16s};
+    use crate::index::testutil::{build_hardlink_sample, build_sample, raw, u16s};
+
+    #[test]
+    fn compaction_preserves_distinct_paths_that_share_one_frn() {
+        let idx = build_hardlink_sample();
+        let object = crate::index::Frn((1u64 << 48) | 0x64);
+        let mut before: Vec<Vec<u8>> = idx
+            .entries_by_frn(object)
+            .map(|id| {
+                let mut path = Vec::new();
+                idx.append_path(id, &mut path).unwrap();
+                path
+            })
+            .collect();
+        before.sort();
+
+        let compacted = idx.compacted();
+        let mut after: Vec<Vec<u8>> = compacted
+            .entries_by_frn(object)
+            .map(|id| {
+                let mut path = Vec::new();
+                compacted.append_path(id, &mut path).unwrap();
+                path
+            })
+            .collect();
+        after.sort();
+
+        assert_eq!(after, before);
+        assert_eq!(
+            after,
+            [b"C:\\a\\shared.txt".to_vec(), b"C:\\b\\alias.txt".to_vec()]
+        );
+    }
 
     /// Garbage from renames + deletes, then compact: every live record
     /// resolves identically, paths and names byte-match, sorted structures
@@ -172,7 +212,7 @@ mod tests {
             .map(|&rec| {
                 let id = idx.entry_by_record(rec).unwrap();
                 let mut p = Vec::new();
-                idx.append_path(id, &mut p);
+                idx.append_path(id, &mut p).unwrap();
                 (rec, idx.name(id).to_vec(), p, idx.size(id))
             })
             .collect();
@@ -195,7 +235,7 @@ mod tests {
             });
             assert_eq!(c.name(id), &name[..], "record {rec}");
             let mut p = Vec::new();
-            c.append_path(id, &mut p);
+            c.append_path(id, &mut p).unwrap();
             assert_eq!(&p, path, "record {rec}");
             assert_eq!(c.size(id), *size, "record {rec}");
         }
@@ -224,13 +264,21 @@ mod tests {
     #[test]
     fn compaction_reattaches_orphans_of_dead_dirs() {
         let mut idx = build_sample();
+        let note_before = idx.entry_by_record(100).unwrap();
+        idx.update_attrs(50, true, false).unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32);
+        assert!(idx.is_excluded(note_before));
         idx.delete(50); // "docs", parent of record 100
         idx.merge_new_into_permutations(idx.len() as u32);
         let c = idx.compacted();
         let note = c.entry_by_record(100).unwrap();
         assert_eq!(c.parent(note), VolumeIndex::ROOT);
+        assert!(
+            !c.is_excluded(note),
+            "root reattachment clears dead-parent inheritance"
+        );
         let mut p = Vec::new();
-        c.append_path(note, &mut p);
+        c.append_path(note, &mut p).unwrap();
         assert_eq!(p, b"C:\\Note.TXT");
     }
 
@@ -246,8 +294,49 @@ mod tests {
         assert!(idx.compaction_due_past(1));
         assert!(
             !idx.compaction_due(),
-            "tiny volumes never trigger (min-entries floor)"
+            "a tiny volume with only one cheap tombstone stays below the row-capacity floor"
         );
+    }
+
+    #[test]
+    fn small_volume_directory_rename_churn_stays_bounded() {
+        let mut idx = build_sample();
+        let live = idx.live_len();
+        let mut compactions = 0;
+        let mut max_pool_bytes = 0;
+
+        // This volume never approaches 100k rows. Production's per-batch
+        // policy still has to dedup abandoned directory names, or a long-lived
+        // removable/small volume leaks forever.
+        for i in 0..256 {
+            let renamed = u16s(&format!("docs_{i:03}"));
+            idx.rename_dir_in_place(50, &renamed, 5).unwrap();
+            idx.merge_new_into_permutations(idx.len() as u32);
+            max_pool_bytes = max_pool_bytes.max(idx.stats("C:").lower_pool_bytes);
+            if idx.compaction_due() {
+                idx = idx.compacted();
+                compactions += 1;
+            }
+        }
+
+        assert!(compactions > 0, "small-volume dict churn must trigger");
+        assert_eq!(idx.len(), live);
+        assert_eq!(idx.live_len(), live);
+        assert!(
+            idx.dict_appends_since_dedup as usize <= idx.live_len() / 4,
+            "the production trigger keeps post-dedup churn bounded"
+        );
+        assert!(
+            max_pool_bytes < 1024,
+            "the pool stayed bounded instead of growing with all 256 renames"
+        );
+    }
+
+    #[test]
+    fn absolute_pool_garbage_bypasses_small_volume_row_floor() {
+        let mut idx = build_sample();
+        idx.dead_name_bytes = COMPACT_DEAD_NAME_BYTES + 1;
+        assert!(idx.compaction_due());
     }
 }
 
@@ -317,7 +406,7 @@ mod proptests {
                 .map(|&rec| {
                     let id = idx.entry_by_record(rec).expect("live record present pre-compaction");
                     let mut p = Vec::new();
-                    idx.append_path(id, &mut p);
+                    idx.append_path(id, &mut p).unwrap();
                     (rec, idx.name(id).to_vec(), p, idx.size(id))
                 })
                 .collect();
@@ -336,7 +425,7 @@ mod proptests {
                     .unwrap_or_else(|| panic!("live record {rec} lost in compaction"));
                 prop_assert_eq!(c.name(id), &name[..], "name for record {}", rec);
                 let mut p = Vec::new();
-                c.append_path(id, &mut p);
+                c.append_path(id, &mut p).unwrap();
                 prop_assert_eq!(&p, path, "path for record {}", rec);
                 prop_assert_eq!(c.size(id), *size, "size for record {}", rec);
             }

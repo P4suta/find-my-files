@@ -25,6 +25,28 @@ pub fn engine_release_dir() -> PathBuf {
     build_root().join("engine").join("release")
 }
 
+/// Criterion's canonical machine-local baseline tree. Comparison runs are
+/// staged elsewhere and seeded from this tree, so stale `new`/`change` reports
+/// can never satisfy the regression gate. Dedicated runners set
+/// `FMF_PERF_BASELINE_DIR` to an existing persistent directory outside the
+/// checkout; local development keeps the normal single `build/` output tree.
+pub fn criterion_dir() -> PathBuf {
+    std::env::var_os("FMF_PERF_BASELINE_DIR").map_or_else(
+        || build_root().join("engine").join("criterion"),
+        PathBuf::from,
+    )
+}
+
+/// Transactional performance-run scratch space under the canonical build tree.
+pub fn perf_dir() -> PathBuf {
+    build_root().join("engine").join("perf")
+}
+
+/// The committed real-volume performance baseline.
+pub fn real_baseline() -> PathBuf {
+    engine_dir().join("benches").join("baseline.json")
+}
+
 /// The distributable bundle directory assembled by `publish` — the zip root.
 /// Holds only the native launcher (`FindMyFiles.exe`) + `README.txt`; the
 /// self-contained app lives one level down in [`app_dir`].
@@ -38,6 +60,16 @@ pub fn dist_dir() -> PathBuf {
 /// directory — so only the launcher + README can sit at the root.
 pub fn app_dir() -> PathBuf {
     dist_dir().join("app")
+}
+
+/// A separately compiled publish tree with deterministic UI-test seams enabled.
+/// It can never be confused with or packaged from [`dist_dir`].
+pub fn ui_test_dist_dir() -> PathBuf {
+    build_root().join("ui-test-bundle").join("FindMyFiles")
+}
+
+pub fn ui_test_app_dir() -> PathBuf {
+    ui_test_dist_dir().join("app")
 }
 
 /// Where `package` drops the release zip + `SHA256SUMS.txt`.
@@ -76,7 +108,7 @@ pub fn signed_pe_manifest() -> PathBuf {
         .join("first-party-pes.txt")
 }
 
-/// Where `docs-assemble` stages the GitHub Pages site (`build/site/{book,doc}`).
+/// Where `docs-assemble` stages the landing page and canonical book.
 pub fn site_dir() -> PathBuf {
     build_root().join("site")
 }

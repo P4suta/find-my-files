@@ -1,8 +1,8 @@
 //! fmf — developer CLI for the find-my-files engine.
 //!
 //! The crate is a thin clap surface over fmf-core: [`command`] exposes the
-//! parser (so codegen can render shell completions and the CLI reference) and
-//! [`run`] parses argv and dispatches. Command implementations live in `cmd/`
+//! parser used by the shipped completion command and [`run`] parses argv and
+//! dispatches. Command implementations live in `cmd/`
 //! (and `bench_support` for the bench-shared pieces); all engine logic stays in
 //! fmf-core.
 
@@ -79,8 +79,8 @@ enum Command {
         /// `--format json`, which streams a document to stdout).
         #[arg(long)]
         out: Option<std::path::PathBuf>,
-        /// Compare against a previous `--out` report; exit 1 when p50 or p99
-        /// regress by more than 20%.
+        /// Compare against a previous `--out` report and enforce the absolute
+        /// index, query, ready-memory, and snapshot-restore acceptance lines.
         #[arg(long)]
         baseline: Option<std::path::PathBuf>,
     },
@@ -133,24 +133,24 @@ enum Command {
     /// `cargo bench -- --baseline <name>` and exit 1 past the threshold
     /// (criterion itself never sets an exit code on regressions).
     CriterionGate {
-        /// Criterion output directory.
-        #[arg(long, default_value = "target/criterion")]
+        /// Criterion output directory (required; `just bench-micro-check`
+        /// supplies the canonical build/engine/criterion path).
+        #[arg(long)]
         dir: std::path::PathBuf,
         /// Relative median regression threshold (0.10 = +10%).
         #[arg(long, default_value_t = 0.10)]
         threshold: f64,
     },
     /// Print a shell completion script to stdout (bash/zsh/fish/PowerShell/elvish).
-    /// Add it with e.g. `eval "$(fmf completions bash)"`, or use the pre-generated
-    /// scripts shipped under `completions/` in the release bundle.
+    /// Add it with e.g. `eval "$(fmf completions bash)"`.
     Completions {
         /// The shell to generate the completion script for.
         shell: clap_complete::Shell,
     },
 }
 
-/// The clap command tree for `fmf` — the single definition behind argv parsing,
-/// the generated shell completions, and the generated CLI reference.
+/// The clap command tree for `fmf` — the single definition behind argv parsing
+/// and generated shell completions.
 #[must_use]
 pub fn command() -> clap::Command {
     Cli::command()

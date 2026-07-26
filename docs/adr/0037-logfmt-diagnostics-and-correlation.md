@@ -2,6 +2,12 @@
 
 Date: 2026-06-30 / Status: Accepted (no wire-contract / golden / ABI change; the correlation reuses ids already on the wire)
 
+> Current-state amendment (2026-07-25): persisted diagnostics are now a strict
+> privacy boundary. Arbitrary strings are redacted at the Rust sink; C# records
+> only exception type/HRESULT/Win32 code; crash markers and panic hooks never
+> persist messages, payloads, locations, stacks, or backtraces. Diagnostic-copy
+> output applies the same redaction.
+
 ## Context
 
 Logging was already disciplined — `tracing` + a non-blocking daily appender + a `DiagLayer` fanning WARN+ to the diag ring and the UI on the engine side ([ADR-0018](0018-contract-single-source.md)'s `degrade!`), and a hand-rolled `FileLog` with crash markers and exception funnels on the app side. But against industry-standard structured logging four gaps remained:
@@ -53,11 +59,10 @@ The engine timestamp caches the local UTC offset once at process start (resolvin
 
 ## Verification
 
-- [x] Engine: `escape_value` unit tests (bare / quoting / **CRLF-injection folds to one line** / control-char `\uXXXX` / UTF-8-boundary truncation), `write_ts` RFC3339 shape, a full-line assembly test proving field order + span `qid`, and the `DiagLayer` area-precedence test. `just test` green incl. `golden_json` + `fmf-proto` golden **unmodified** (the contract-unchanged proof).
-- [x] App: `LogfmtFormatterTests` (quoting, injection, exception `err=`, field ordering, level mapping) + the `FileLog` tail tests; `just test-app` green (482).
-- [x] `just lint` (clippy all-groups deny) + `just fmt` green; C# `AnalysisMode=All` clean.
-- [ ] Manual smoke: run a search, F12 "Copy diagnostics" shows logfmt `app.log` lines with `rid`; `engine.log` shows the same logfmt with the matching `rid` (and `qid` on the pipe path).
-- [ ] Manual smoke: drive the log past the size/age caps and confirm `engine.<date>.log` stays ≤ N generations and `app_NNN.log` ≤ 5.
+Formatter tests pin quoting, CRLF neutralization, truncation, field order,
+correlation, and exception-text rejection in both languages. Crash-marker,
+diagnostic-copy, retention, and golden tests own the remaining privacy and
+contract guarantees.
 
 ## Re-examination triggers
 

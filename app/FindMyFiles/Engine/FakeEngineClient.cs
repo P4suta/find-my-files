@@ -12,12 +12,15 @@ namespace FindMyFiles.Engine;
 /// side), cancellation is honored, and <see cref="BumpEpoch"/> lets tests
 /// drive the Stale→requery recovery path without a real engine.
 /// </summary>
-public sealed class FakeEngineClient : IEngineClient
+internal sealed class FakeEngineClient : IEngineClient
 {
     private const int EntryCount = 100_000;
     private readonly List<RowData> _rows;
     private readonly HashSet<string> _invalidQueries = LoadInvalidQueries();
     private int _epoch;
+
+    /// <inheritdoc/>
+    public EngineClientKind Kind => EngineClientKind.Test;
 
     /// <inheritdoc/>
     /// <remarks>The fake never indexes, so this never fires (empty
@@ -57,33 +60,10 @@ public sealed class FakeEngineClient : IEngineClient
 
     private readonly List<ErrorEventData> _injectedErrors = [];
 
-    /// <summary>Visibly empty stand-in for the unelevated no-service start —
-    /// searching demo rows has no practical value (user verdict), so the
-    /// auto-fallback shows zero results plus the setup notification instead.
-    /// The data-bearing fake stays what <c>--fake-engine</c> is for.</summary>
-    /// <returns>A rowless fake that reports disconnected and yields no results.</returns>
-    public static FakeEngineClient CreateEmpty() => new(empty: true);
-
-    /// <summary>True for the unelevated auto-fallback instance (no rows) —
-    /// the status badge says disconnected, not fake.</summary>
-    public bool IsEmpty { get; }
-
-    /// <summary>Builds the fake. The default (<paramref name="empty"/> false)
-    /// generates the deterministic 100k-row dataset that backs
-    /// <c>--fake-engine</c>; <see cref="CreateEmpty"/> passes
-    /// <paramref name="empty"/> true for the unelevated no-service
-    /// stand-in.</summary>
-    /// <param name="empty">When true, no rows are generated (the disconnected
-    /// auto-fallback); when false, the seeded demo dataset is built.</param>
-    public FakeEngineClient(bool empty = false)
+    /// <summary>Builds the deterministic 100k-row dataset used by UI and
+    /// transport-contract tests.</summary>
+    public FakeEngineClient()
     {
-        IsEmpty = empty;
-        if (empty)
-        {
-            _rows = [];
-            return;
-        }
-
         // fake/demo sample-data generation, never security-sensitive — System.Random is intentional
 #pragma warning disable CA5394
         var rng = new Random(42);
@@ -132,7 +112,7 @@ public sealed class FakeEngineClient : IEngineClient
         {
             FileLog.Warn(
                 "fake-engine",
-                $"invalid_queries.json not loadable ({path}) — accepting every query",
+                "invalid_queries.json not loadable — accepting every query",
                 ex);
             return new HashSet<string>(StringComparer.Ordinal);
         }
@@ -144,23 +124,35 @@ public sealed class FakeEngineClient : IEngineClient
     public void BumpEpoch() => Interlocked.Increment(ref _epoch);
 
     /// <inheritdoc/>
-    public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default) =>
-        Task.FromResult<IReadOnlyList<string>>(["F:"]);
+    public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        return Task.FromResult<IReadOnlyList<string>>(["F:"]);
+    }
 
     /// <inheritdoc/>
     public Task StartIndexingAsync(
-        IReadOnlyList<string> volumes, CancellationToken ct = default) => Task.CompletedTask;
+        IReadOnlyList<string> volumes, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        _ = EngineRequest.Volumes(volumes);
+        return Task.CompletedTask;
+    }
 
     /// <inheritdoc/>
-    public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default) =>
-        Task.FromResult<IReadOnlyList<VolumeStatus>>(
+    public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        return Task.FromResult<IReadOnlyList<VolumeStatus>>(
             [new("F:", VolumeState.Ready, (ulong)_rows.Count)]);
+    }
 
     private readonly List<QueryTraceData> _traces = [];
 
     /// <inheritdoc/>
     public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         var rows = (ulong)_rows.Count;
         var indexBytes = rows * 110;
         var stats = new EngineStatsData
@@ -232,9 +224,19 @@ public sealed class FakeEngineClient : IEngineClient
     /// <inheritdoc/>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2000:_", Justification = "ownership transferred to the caller (ISearchResult), disposed by the caller / on epoch change")]
     public Task<SearchOutcome> SearchAsync(
-        string query, SearchOptions options, CancellationToken ct = default)
+        string query, SearchOptions options, CancellationToken ct = default) =>
+        SearchAsync(query, options, null, ct);
+
+    /// <inheritdoc/>
+    public Task<SearchOutcome> SearchAsync(
+        string query,
+        SearchOptions options,
+        ISearchResult? presentationBasis,
+        CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
+        query = EngineRequest.QueryText(query);
+        ValidateQueryComplexity(query);
         if (_invalidQueries.Contains(query.Trim()))
         {
             throw new QuerySyntaxException(
@@ -274,6 +276,10 @@ public sealed class FakeEngineClient : IEngineClient
             needle = needle.Replace("!!lag", string.Empty, StringComparison.Ordinal).Trim();
         }
 #endif
+        var focused = options.RegexMode
+            ? new FakeQuery(needle, [], null)
+            : ParseFakeQuery(needle);
+        needle = focused.Needle;
         IEnumerable<RowData> hits;
         if (options.RegexMode && needle.Length != 0)
         {
@@ -312,6 +318,19 @@ public sealed class FakeEngineClient : IEngineClient
                 : _rows.Where(r => r.Name.Contains(needle, StringComparison.OrdinalIgnoreCase));
         }
 
+        if (focused.ExcludedPaths.Count != 0)
+        {
+            hits = hits.Where(row => focused.ExcludedPaths.All(exclude =>
+                !row.FullPath.Contains(exclude, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        if (focused.Extensions is { } extensions)
+        {
+            hits = hits.Where(row =>
+                !row.IsDirectory
+                && extensions.Contains(Path.GetExtension(row.Name).TrimStart('.')));
+        }
+
         if (!options.IncludeHiddenSystem)
         {
             hits = hits.Where(r => (r.Flags & 4) == 0);
@@ -327,7 +346,7 @@ public sealed class FakeEngineClient : IEngineClient
         var totalUs = (ulong)(sw.Elapsed.TotalMicroseconds + 1);
         var trace = new QueryTraceData
         {
-            Query = query,
+            QueryLength = (uint)query.EnumerateRunes().Count(),
             Driver = "fake",
             ScanUs = totalUs * 7 / 10,
             MaterializeUs = totalUs * 2 / 10,
@@ -336,6 +355,8 @@ public sealed class FakeEngineClient : IEngineClient
             EntriesScanned = (ulong)_rows.Count,
             Hits = (ulong)list.Count,
             Volumes = 1,
+            Unchanged = presentationBasis is FakeResult basis
+                && basis.HasSameLiveIds(this, list),
         };
         _traces.Add(trace);
         if (_traces.Count > 256)
@@ -343,9 +364,141 @@ public sealed class FakeEngineClient : IEngineClient
             _traces.RemoveAt(0);
         }
 
-        return Task.FromResult(new SearchOutcome(
-            new FakeResult(this, Volatile.Read(ref _epoch), list, pageLag), trace));
+        FakeResult? owned = new(this, Volatile.Read(ref _epoch), list, pageLag);
+        try
+        {
+            var task = Task.FromResult(new SearchOutcome(owned, trace));
+            owned = null;
+            return task;
+        }
+        finally
+        {
+            owned?.Dispose();
+        }
     }
+
+    private static void ValidateQueryComplexity(string query)
+    {
+        var groups = 1;
+        var terms = 0;
+        var regexTerms = 0;
+        var atom = new System.Text.StringBuilder();
+        var quoted = false;
+
+        void FinishAtom()
+        {
+            if (atom.Length == 0)
+            {
+                return;
+            }
+
+            var value = atom.ToString().TrimStart('!');
+            terms += (value.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+                    || value.StartsWith("folder:", StringComparison.OrdinalIgnoreCase))
+                && value.Length > value.IndexOf(':', StringComparison.Ordinal) + 1
+                ? 2
+                : 1;
+            if (value.StartsWith("regex:", StringComparison.OrdinalIgnoreCase))
+            {
+                regexTerms++;
+            }
+
+            atom.Clear();
+        }
+
+        foreach (var ch in query)
+        {
+            if (ch == '"')
+            {
+                quoted = !quoted;
+                atom.Append(ch);
+            }
+            else if (!quoted && ch == '|')
+            {
+                FinishAtom();
+                groups++;
+            }
+            else if (!quoted && char.IsWhiteSpace(ch))
+            {
+                FinishAtom();
+            }
+            else
+            {
+                atom.Append(ch);
+            }
+        }
+
+        FinishAtom();
+        if (groups > EngineContract.MaxQueryGroups)
+        {
+            throw new QuerySyntaxException(
+                $"query has more than {EngineContract.MaxQueryGroups} OR groups");
+        }
+
+        if (terms > EngineContract.MaxQueryTerms)
+        {
+            throw new QuerySyntaxException(
+                $"query has more than {EngineContract.MaxQueryTerms} terms");
+        }
+
+        if (regexTerms > EngineContract.MaxRegexTerms)
+        {
+            throw new QuerySyntaxException(
+                $"query has more than {EngineContract.MaxRegexTerms} regex terms");
+        }
+    }
+
+    /// <summary>Parse the constrained suffix emitted by
+    /// <see cref="ViewModels.FocusedQueryRewriter"/>. The fake remains a UI
+    /// test double rather than a second query parser, but it must understand
+    /// the exact rewrite the UI sends by default or fake mode would always
+    /// return zero rows.</summary>
+    private static FakeQuery ParseFakeQuery(string query)
+    {
+        const string ExcludePrefix = " !path:\"";
+        const string ExtensionPrefix = " ext:";
+
+        var firstExclude = query.IndexOf(ExcludePrefix, StringComparison.Ordinal);
+        var firstExtension = query.IndexOf(ExtensionPrefix, StringComparison.Ordinal);
+        var suffixStart = (firstExclude, firstExtension) switch
+        {
+            (< 0, < 0) => query.Length,
+            (< 0, _) => firstExtension,
+            (_, < 0) => firstExclude,
+            _ => Math.Min(firstExclude, firstExtension),
+        };
+
+        var needle = query[..suffixStart].Trim();
+        var suffix = query[suffixStart..];
+        var excluded = new List<string>();
+        while (suffix.StartsWith(ExcludePrefix, StringComparison.Ordinal))
+        {
+            var valueStart = ExcludePrefix.Length;
+            var valueEnd = suffix.IndexOf('"', valueStart);
+            if (valueEnd < 0)
+            {
+                break;
+            }
+
+            excluded.Add(suffix[valueStart..valueEnd]);
+            suffix = suffix[(valueEnd + 1)..];
+        }
+
+        HashSet<string>? extensions = null;
+        if (suffix.StartsWith(ExtensionPrefix, StringComparison.Ordinal))
+        {
+            extensions = suffix[ExtensionPrefix.Length..]
+                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+
+        return new FakeQuery(needle, excluded, extensions);
+    }
+
+    private sealed record FakeQuery(
+        string Needle,
+        IReadOnlyList<string> ExcludedPaths,
+        HashSet<string>? Extensions);
 
     /// <inheritdoc/>
     public void Dispose()
@@ -355,12 +508,23 @@ public sealed class FakeEngineClient : IEngineClient
     private sealed class FakeResult(
         FakeEngineClient owner, int epoch, List<RowData> rows, TimeSpan pageLag) : ISearchResult
     {
+        private bool _disposed;
+
         public long Count => rows.Count;
+
+        internal bool HasSameLiveIds(FakeEngineClient expectedOwner, List<RowData> other) =>
+            !_disposed
+            && ReferenceEquals(owner, expectedOwner)
+            && epoch == Volatile.Read(ref owner._epoch)
+            && rows.Count == other.Count
+            && rows.Select(static row => row.EntryRef)
+                .SequenceEqual(other.Select(static row => row.EntryRef));
 
         public async Task<IReadOnlyList<RowData>> GetRangeAsync(
             long offset, int count, CancellationToken ct = default)
         {
             ct.ThrowIfCancellationRequested();
+            var request = EngineRequest.PageRange(offset, count);
             if (epoch != Volatile.Read(ref owner._epoch))
             {
                 throw new StaleResultException(); // BumpEpoch invalidated us
@@ -371,13 +535,14 @@ public sealed class FakeEngineClient : IEngineClient
                 await Task.Delay(pageLag, ct).ConfigureAwait(false);
             }
 
-            var start = (int)Math.Min(offset, rows.Count);
-            var n = Math.Max(0, Math.Min(count, rows.Count - start));
+            var start = (int)Math.Min(request.Offset, (ulong)rows.Count);
+            var n = Math.Min((int)request.Count, rows.Count - start);
             return rows.GetRange(start, n);
         }
 
         public void Dispose()
         {
+            _disposed = true;
         }
     }
 }

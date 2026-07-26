@@ -4,12 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    # labeled/unlabeled are added so the label-driven `release-gate` re-evaluates
-    # when `release: approved` is added/removed — without them, a label change
-    # leaves the gate's result stale (it would need a manual re-run). The heavy
-    # windows tier skips on these label events (see each job's `if`), so the cost
-    # is only the cheap ubuntu tier + the gate.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # Label-only events belong to release-gate.yml. Keeping them out of this
+    # workflow is a security invariant: a cheap label run must never replace a
+    # failed ci-required result for the same commit with a skipped/green result.
+    types: [opened, synchronize, reopened]
 
 # Cancel superseded PR runs; never cancel main (post-merge lineage/artifacts).
 concurrency:
@@ -19,9 +17,6 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0" # CI-only; does not touch local incremental (ADR-0014)
   CARGO_TERM_COLOR: always
-  # Fail the build if Cargo.lock is stale rather than silently re-resolving — the
-  # Rust counterpart to the C# RestoreLockedMode gate (docs/SUPPLY_CHAIN.md).
-  CARGO_NET_LOCKED: "true"
   DOTNET_NOLOGO: "1"
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
 
@@ -33,13 +28,15 @@ jobs:
   # Skip the heavy windows jobs on docs-only PRs (ci-required treats their
   # `skipped` as success, so branch protection still passes).
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       code: ${{ steps.f.outputs.code }}
       fuzz: ${{ steps.f.outputs.fuzz }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         id: f
         with:
@@ -48,7 +45,17 @@ jobs:
               - 'engine/**'
               - 'app/**'
               - 'contract/**'
-              - '.github/workflows/ci.yml'
+              - 'xtask/**'
+              - 'mise.toml'
+              - 'justfile'
+              - 'lefthook.yml'
+              - 'release-please-config.json'
+              - '.release-please-manifest.json'
+              - '.github/actions/**'
+              # Workflow behavior is executable release/build logic. Keep this
+              # future-proof instead of hand-maintaining an allowlist that can
+              # silently omit a newly added gate.
+              - '.github/workflows/**'
             fuzz:
               - 'engine/fuzz/**'
               - 'engine/crates/fmf-proto/**'
@@ -59,13 +66,24 @@ jobs:
 
   # ── ubuntu hygiene tier: parallel, no needs, cheap fast-fail signal ──
   hygiene:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       # Lint the workflow YAML itself: syntax, ${{ }} expression types, and
       # shellcheck over run: blocks. Catches workflow errors before a release run.
       - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+      - name: Audit GitHub Actions security
+        uses: zizmorcore/zizmor-action@6fc4b006235f201fdab3722e17240ab420d580e5 # v0.6.1
+        with:
+          version: 1.28.0
+          online-audits: false
+          persona: auditor
+          min-severity: low
+          advanced-security: false
+          annotations: true
       - uses: crate-ci/typos@bee27e3a4fd1ea2111cf90ab89cd076c870fce14 # v1.47.2 (reads root _typos.toml)
       - uses: uncenter/setup-taplo@b18c8c8302695fe63d6853bc004006215ac52b91 # v2
         with:
@@ -80,10 +98,12 @@ jobs:
         working-directory: engine
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       # Prebuilt binary (cargo install from source took minutes); advisories
       # are owned by cargo-audit.yml, so this checks bans/licenses/sources.
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
@@ -93,10 +113,12 @@ jobs:
         working-directory: engine
 
   machete:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-machete@0.9.2
@@ -105,10 +127,12 @@ jobs:
   # The only engine crates that compile off-Windows (no ntfs-reader/windows-sys):
   # a cheap Linux lint of the contract/proto layer.
   contract-lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/rust-toolchain
         with:
           components: clippy
@@ -117,58 +141,31 @@ jobs:
           workspaces: engine
           shared-key: engine-linux
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo clippy -p fmf-contract -p fmf-proto --all-targets -- -D warnings
+      - run: cargo clippy --locked -p fmf-contract -p fmf-proto --all-targets -- -D warnings
         working-directory: engine
 
   pr-title:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      pull-requests: read
+      pull-requests: read # validate the PR title through the event's API object
     steps:
       - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Defence in depth (ADR-0035): a release-please Release PR (labelled
-  # "autorelease: pending") cannot be merged until a human deliberately adds the
-  # "release: approved" label — so cutting a real release is an explicit act, not
-  # an accidental merge. Every non-release PR passes unconditionally.
-  release-gate:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      pull-requests: read
-    steps:
-      - name: Require an explicit approval label on a Release PR
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.number }}
-          REPO: ${{ github.repository }}
-        run: |
-          labels=$(gh pr view "$PR" --repo "$REPO" --json labels -q '.labels[].name')
-          if echo "$labels" | grep -qx "autorelease: pending"; then
-            if echo "$labels" | grep -qx "release: approved"; then
-              echo "Release PR carries 'release: approved' — gate open."
-            else
-              echo "::error::This is a release PR. Add the 'release: approved' label to allow merge (deliberate release; ADR-0035)."
-              exit 1
-            fi
-          else
-            echo "Not a release PR — gate passes."
-          fi
 
   # The xtask dev-tooling crate (build/release plumbing) is its own workspace of
   # pure, OS-agnostic logic, so it tests on cheap ubuntu. Always runs — xtask/
   # isn't in the `changes` filter and ci-required gates on it. Advisory scanning
   # lives in cargo-audit.yml alongside the engine's.
   xtask:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/rust-toolchain
         with:
           components: clippy, rustfmt
@@ -177,23 +174,26 @@ jobs:
           workspaces: xtask
           shared-key: xtask
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        with:
+          tool: cargo-nextest@0.9.140
       - run: cargo fmt --all --check
         working-directory: xtask
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-targets -- -D warnings
         working-directory: xtask
-      - run: cargo test
+      - run: cargo nextest run --locked --profile ci
         working-directory: xtask
 
   # ── windows engine tier: engine compiles once here, the app reuses the dll ──
   engine-build-test:
     needs: [hygiene, changes]
-    # Skip on label events (the gate re-run path) — code didn't change, so this
-    # 30-min tier would just burn time; ci-required treats the skip as success.
-    if: needs.changes.outputs.code == 'true' && github.event.action != 'labeled' && github.event.action != 'unlabeled'
-    runs-on: windows-latest
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-2025
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/rust-toolchain
         with:
           components: clippy, llvm-tools-preview
@@ -205,25 +205,32 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
-          tool: cargo-llvm-cov@0.8.7
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.140
       - name: clippy (compiles the engine; later steps reuse it)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
         working-directory: engine
       # Contract drift is gated by drift.rs inside the workspace test run below
-      # (it runs `gen-contract --check`, covering both EngineContract.g.cs and
-      # docs/contract.md), so no separate codegen + git-diff step is needed here
+      # (it runs `gen-contract --check` for EngineContract.g.cs), so no separate
+      # codegen + git-diff step is needed here
       # (ADR-0018).
       - name: test + line coverage gate
-        # Measured 79.22% (just cov); gate held ~3pt below for run-to-run headroom.
-        run: cargo llvm-cov --workspace --fail-under-lines 76 --lcov --output-path engine-lcov.info
+        # Measured 77.99% (just cov); gate held ~2pt below for tool/run headroom.
+        # LLVM instrumentation invalidates the 5 ms wall-clock pipe budget; the
+        # uninstrumented workspace run and dedicated performance gate own it.
+        run: |
+          mkdir -p ../build/coverage
+          cargo llvm-cov nextest --locked --workspace --profile ci --fail-under-lines 76 --lcov --output-path ../build/coverage/engine-lcov.info -E 'not test(page_roundtrip_stays_inside_the_latency_budget)'
+        working-directory: engine
+      - name: doctest
+        run: cargo test --locked --workspace --exclude fmf-ffi --doc
         working-directory: engine
       - name: doc (warnings = errors)
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --locked --workspace --no-deps
         working-directory: engine
         env:
           RUSTDOCFLAGS: "-D warnings"
-      - name: build engine dll + service + cli + launcher (release, for the app + artifacts)
-        run: cargo build --release -p fmf-ffi -p fmf-service -p fmf-cli -p fmf-launcher
+      - name: build shipped engine dll + service + launcher (release)
+        run: cargo build --locked --release -p fmf-ffi -p fmf-service -p fmf-launcher
         working-directory: engine
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -231,20 +238,26 @@ jobs:
           path: |
             build/engine/release/fmf_engine.dll
             build/engine/release/fmf-service.exe
-            build/engine/release/fmf.exe
             build/engine/release/fmf-launcher.exe
+          retention-days: 7
           if-no-files-found: error
+          overwrite: true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rust-coverage
-          path: engine/engine-lcov.info
+          path: build/coverage/engine-lcov.info
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: true
 
   app:
     needs: [engine-build-test]
-    runs-on: windows-latest
-    timeout-minutes: 20
+    runs-on: windows-2025
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       # Reuse the engine dll built upstream — the app job never invokes cargo.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -252,65 +265,83 @@ jobs:
           path: build/engine/release/
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.302
+      - uses: microsoft/setup-WinAppCli@cc8ea9a08b3ee3db43d5aa6bddda4a0e87d800f7 # v0.1
+        with:
+          version: v0.3.1
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           # just: the publish recipe. cargo-about: publish generates the bundle's
           # THIRD-PARTY-NOTICES.txt from the Rust crate graph. This job does not
           # use mise-action (release.yml/nightly.yml do), so cargo-about is
           # installed here directly — same version as the mise.toml pin.
-          tool: just,cargo-about@0.7.1
+          tool: just@1.54.0,cargo-about@0.7.1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('app/**/packages.lock.json') }}
           restore-keys: nuget-${{ runner.os }}-
-      # cargo-about runs offline for reproducible notices; warm the crate cache
-      # (index + sources) first since this job downloads the prebuilt engine dll
-      # rather than compiling it. `cargo fetch` doesn't build, so ambient rustc is
-      # fine — the pinned toolchain is only needed to compile the engine.
-      - name: warm cargo cache for offline notice generation
-        working-directory: engine
-        run: cargo fetch --locked
       # Publish (not bare `dotnet build`): only the publish output is a runnable
       # bundle — the WinUI component package wires WinRT.Runtime.dll, the native
-      # helpers and compiled XAML in at publish time. Reuses the same just recipe
-      # as release.yml; skip_rust=true since the engine dll/exe are prebuilt above.
+      # helpers and compiled XAML in at publish time. Reuses the same xtask-owned
+      # path as release.yml (including its locked-graph fetch for offline legal
+      # notices); skip_rust=true since the engine dll/exe are prebuilt above.
       - name: publish app (SkipRustBuild — engine binaries are prebuilt)
         run: just publish-app true
+      - name: shipping bundle startup smoke (no test seams)
+        run: just ui-test-stable-smoke
       - name: test app + coverage gate (line+branch, UI-excluded)
         run: just test-app-cov true
       - name: pipe integration (C# client × real service, unelevated)
         run: >-
           dotnet test app/FindMyFiles.Tests --settings app/FindMyFiles.Tests/pipe.runsettings
+          --results-directory build/test-results/pipe
           -p:SkipRustBuild=true -p:RestoreLockedMode=true
-      # The bundle's runnability (WinRT.Runtime.dll + engine binaries present) is
-      # now guaranteed at the source: `just publish-app` self-verifies in xtask
-      # and fails there, so a separate guard step here is redundant.
+      # Stable artifacts exclude fake/custom engine seams. Build the explicitly
+      # marked, isolated UI-test bundle for deterministic full UI automation.
+      - name: publish isolated UI-test bundle
+        run: just publish-ui-test true
+      - name: UI-test bundle automation
+        run: just ui-test-published
+      - name: upload UI automation evidence on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-automation-failure
+          path: build/ui-automation/
+          retention-days: 7
+          if-no-files-found: warn
+          overwrite: true
+      # The shipping bundle's runnability and absence of test seams are verified
+      # by xtask; the separate UI-test bundle above is never uploaded here.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: find-my-files-win-x64
           path: build/dist/FindMyFiles/
+          retention-days: 7
           if-no-files-found: error
+          overwrite: true
 
   # Informational on PRs (ADR-0013: runner thermal noise makes a hard 10% gate
   # flaky). Confirms the benches compile + run; the authoritative gate is local
   # `just perf-gate`.
   bench:
     needs: [hygiene, changes]
-    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true' && github.event.action != 'labeled' && github.event.action != 'unlabeled'
-    runs-on: windows-latest
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
+    runs-on: windows-2025
     timeout-minutes: 25
     continue-on-error: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: engine
           shared-key: engine-win
           save-if: false
-      - run: cargo bench -p fmf-core
+      - run: cargo bench --locked -p fmf-core --features testutil
         working-directory: engine
 
   # Bounded libFuzzer smoke over the untrusted-input parsers, folded into the
@@ -320,7 +351,7 @@ jobs:
   # skipped, which ci-required treats as success.
   fuzz:
     needs: changes
-    if: needs.changes.outputs.fuzz == 'true' && github.event.action != 'labeled' && github.event.action != 'unlabeled'
+    if: needs.changes.outputs.fuzz == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/fuzz.yml
@@ -332,10 +363,12 @@ jobs:
   # gate-results (which counts `cancelled` as failure) paint main spuriously red.
   ci-required:
     if: ${{ always() && github.event_name == 'pull_request' }}
-    needs: [hygiene, deny, machete, contract-lint, pr-title, release-gate, xtask, engine-build-test, app, fuzz]
-    runs-on: ubuntu-latest
+    needs: [hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app, fuzz]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: gate on needed job results
         uses: ./.github/actions/gate-results
         with:

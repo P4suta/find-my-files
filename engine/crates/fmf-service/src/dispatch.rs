@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use fmf_core::diag::error_chain;
-use fmf_core::engine::{Engine, EngineError, ResultSet};
+use fmf_core::engine::{Engine, EngineError, QueryCancellation, ResultSet};
 use fmf_core::query::QueryOptions;
 use fmf_proto::limits::MAX_RESULTS_PER_CONN;
 use fmf_proto::messages::{self, opcode};
@@ -29,6 +29,59 @@ struct ResultEntry {
     lagged: bool,
 }
 
+// Result IDs are process-global and monotonic. Per-connection registries
+// still own lifetime, while global uniqueness means an opaque handle copied
+// from another connection can never alias a local result with the same
+// small integer (ADR-0044).
+static NEXT_RESULT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Default)]
+struct QueryRegistry {
+    entries: Mutex<HashMap<u32, QueryCancellation>>,
+}
+
+impl QueryRegistry {
+    fn begin(&self, request_id: u32) -> QueryCancellation {
+        let cancellation = QueryCancellation::new();
+        let mut entries = self.entries.lock();
+        for previous in entries.values() {
+            previous.cancel();
+        }
+        entries.clear();
+        entries.insert(request_id, cancellation.clone());
+        cancellation
+    }
+
+    fn cancel(&self, request_id: u32) {
+        if let Some(cancellation) = self.entries.lock().get(&request_id) {
+            cancellation.cancel();
+        }
+    }
+
+    fn finish(&self, request_id: u32, cancellation: &QueryCancellation) {
+        let mut entries = self.entries.lock();
+        if entries
+            .get(&request_id)
+            .is_some_and(|current| current.is_same_query(cancellation))
+        {
+            entries.remove(&request_id);
+        }
+    }
+
+    fn cancel_all(&self) {
+        let mut entries = self.entries.lock();
+        for cancellation in entries.values() {
+            cancellation.cancel();
+        }
+        entries.clear();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.lock().len()
+    }
+}
+
 /// Per-connection dispatch state: owns the live result handles and the
 /// hello/version handshake for one pipe client.
 pub struct Connection {
@@ -38,8 +91,8 @@ pub struct Connection {
     /// installed services.
     pub faults: Faults,
     results: Mutex<HashMap<u64, ResultEntry>>,
-    next_result_id: AtomicU64,
     use_clock: AtomicU64,
+    queries: QueryRegistry,
     /// True once a valid Hello with a matching protocol version arrived;
     /// any other opcode before that is a protocol violation (Drop).
     pub hello_done: AtomicBool,
@@ -74,24 +127,26 @@ impl Connection {
             engine,
             faults,
             results: Mutex::new(HashMap::new()),
-            next_result_id: AtomicU64::new(1),
             use_clock: AtomicU64::new(0),
+            queries: QueryRegistry::default(),
             hello_done: AtomicBool::new(false),
             active_connections,
         }
     }
 
-    /// Handle one request opcode inside a `catch_unwind` firewall: a panic
-    /// answers `FMF_E_PANIC` and the connection survives, mirroring the FFI
-    /// `guard`.
-    ///
-    /// `request_id` is the client's per-request id from the frame header; it
-    /// rides as the `qid` correlation field on every log line this request
-    /// produces, so `engine.log` and the UI's `app.log` share it (the id is
-    /// already on the wire — the contract is unchanged; ADR-0037).
-    pub fn dispatch(&self, op: u16, request_id: u32, payload: &[u8]) -> Outcome {
+    /// Dispatch with the cancellation lifecycle registered by the pipe
+    /// reader before the request entered the worker queue.
+    pub(crate) fn dispatch_with_query(
+        &self,
+        op: u16,
+        request_id: u32,
+        payload: &[u8],
+        cancellation: Option<&QueryCancellation>,
+    ) -> Outcome {
         let _qid = tracing::info_span!("req", qid = request_id).entered();
-        let result = catch_unwind(AssertUnwindSafe(|| self.dispatch_inner(op, payload)));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.dispatch_inner(op, payload, cancellation)
+        }));
         match result {
             Ok(outcome) => outcome,
             Err(_) => Outcome::Reply(
@@ -101,7 +156,12 @@ impl Connection {
         }
     }
 
-    fn dispatch_inner(&self, op: u16, payload: &[u8]) -> Outcome {
+    fn dispatch_inner(
+        &self,
+        op: u16,
+        payload: &[u8],
+        cancellation: Option<&QueryCancellation>,
+    ) -> Outcome {
         // Hello must come first; anything else on a fresh connection is a
         // protocol violation.
         if !self.hello_done.load(Ordering::Relaxed) && op != opcode::HELLO {
@@ -154,8 +214,27 @@ impl Connection {
             opcode::INDEX_START => {
                 match messages::decode_json::<messages::IndexStartReq>("IndexStart", payload) {
                     Ok(req) => {
-                        self.engine.index_start(&req.volumes);
-                        Outcome::Reply(codes::OK, Vec::new())
+                        if req.volumes.len() > fmf_proto::limits::MAX_VOLUMES as usize {
+                            return Outcome::Reply(
+                                codes::INVALID_ARG,
+                                format!(
+                                    "volume count {} exceeds the contract maximum {}",
+                                    req.volumes.len(),
+                                    fmf_proto::limits::MAX_VOLUMES
+                                )
+                                .into_bytes(),
+                            );
+                        }
+                        match self.engine.index_start(&req.volumes) {
+                            Ok(()) => Outcome::Reply(codes::OK, Vec::new()),
+                            Err(error) => {
+                                tracing::warn!(%error, "IndexStart volume selection rejected");
+                                Outcome::Reply(
+                                    codes::INVALID_ARG,
+                                    b"invalid IndexStart volume selection".to_vec(),
+                                )
+                            }
+                        }
                     }
                     // The serde detail (field names, byte offsets) is internal
                     // shape — log it for F12/engine.log, hand the client a
@@ -180,7 +259,15 @@ impl Connection {
                     .collect();
                 Self::reply_json("IndexStatus", &status)
             }
-            opcode::QUERY => self.query(payload),
+            opcode::QUERY => {
+                let Some(cancellation) = cancellation else {
+                    return Outcome::Reply(
+                        codes::INVALID_ARG,
+                        b"query cancellation lifecycle is missing".to_vec(),
+                    );
+                };
+                self.query(payload, cancellation)
+            }
             opcode::RESULT_PAGE => self.result_page(payload),
             opcode::RESULT_FREE => match messages::decode_result_free(payload) {
                 Ok(id) => {
@@ -190,10 +277,6 @@ impl Connection {
                 Err(_) => Outcome::Drop,
             },
             opcode::STATS => Self::reply_json("Stats", &self.engine.metrics_snapshot()),
-            opcode::FLUSH_RESERVED => Outcome::Reply(
-                codes::INVALID_ARG,
-                b"Flush is reserved and unimplemented on the pipe (ARCHITECTURE.md op 11)".to_vec(),
-            ),
             opcode::SERVICE_INFO => Self::reply_json(
                 "ServiceInfo",
                 &messages::ServiceInfoResp {
@@ -213,18 +296,74 @@ impl Connection {
         }
     }
 
-    fn query(&self, payload: &[u8]) -> Outcome {
+    /// Register a query before it enters the bounded work queue. Every older
+    /// queued/running query is cancelled first (latest-query-wins).
+    pub(crate) fn begin_query(&self, request_id: u32) -> QueryCancellation {
+        self.queries.begin(request_id)
+    }
+
+    /// Cancel one live/queued query. Unknown IDs are an idempotent no-op on
+    /// this one-way control path.
+    pub(crate) fn cancel_query(&self, request_id: u32) {
+        self.queries.cancel(request_id);
+    }
+
+    /// Remove a completed request without letting an old reused request ID
+    /// erase a newer lifecycle.
+    pub(crate) fn finish_query(&self, request_id: u32, cancellation: &QueryCancellation) {
+        self.queries.finish(request_id, cancellation);
+    }
+
+    /// Cancel and forget all requests on disconnect.
+    pub(crate) fn cancel_all_queries(&self) {
+        self.queries.cancel_all();
+    }
+
+    fn query(&self, payload: &[u8], cancellation: &QueryCancellation) -> Outcome {
         let Ok((opt, text)) = messages::decode_query_req(payload) else {
             return Outcome::Drop;
         };
         if let Some(outcome) = self.faults.on_query(text) {
             return outcome;
         }
-        let q: QueryOptions = opt.into();
-        match self.engine.query(text, &q) {
-            Ok((set, trace)) => {
+        let q = match QueryOptions::try_from(opt) {
+            Ok(options) => options,
+            Err(e) => return Outcome::Reply(codes::INVALID_ARG, e.to_string().into_bytes()),
+        };
+        let basis = if opt.presentation_basis == 0 {
+            None
+        } else {
+            let mut results = self.results.lock();
+            results.get_mut(&opt.presentation_basis).map(|entry| {
+                entry.last_used = self.use_clock.fetch_add(1, Ordering::Relaxed);
+                Arc::clone(&entry.set)
+            })
+        };
+        match self
+            .engine
+            .query_cancellable(text, &q, cancellation, basis.as_deref())
+        {
+            Ok((set, mut trace)) => {
+                if cancellation.is_cancelled() {
+                    return Outcome::Reply(codes::CANCELLED, b"query cancelled".to_vec());
+                }
+                // The basis must remain registered through completion. A
+                // concurrent ResultFree/eviction turns unchanged off.
+                if let Some(basis) = basis.as_ref() {
+                    trace.unchanged &= self
+                        .results
+                        .lock()
+                        .get(&opt.presentation_basis)
+                        .is_some_and(|entry| Arc::ptr_eq(&entry.set, basis));
+                }
                 let count = set.len() as u64;
-                let id = self.next_result_id.fetch_add(1, Ordering::Relaxed);
+                let id = NEXT_RESULT_ID.fetch_add(1, Ordering::Relaxed);
+                if id == 0 {
+                    return Outcome::Reply(
+                        codes::IO,
+                        b"result handle namespace exhausted".to_vec(),
+                    );
+                }
                 fmf_core::diag::log_query_served(id, &trace);
                 let lagged = self.faults.lag_marker(text);
                 let mut results = self.results.lock();
@@ -271,6 +410,12 @@ impl Connection {
             Err(e @ (EngineError::Parse(_) | EngineError::Compile(_))) => {
                 Outcome::Reply(codes::QUERY_SYNTAX, error_chain(&e).into_bytes())
             }
+            Err(e @ EngineError::QueryTooLong { .. }) => {
+                Outcome::Reply(codes::INVALID_ARG, e.to_string().into_bytes())
+            }
+            Err(EngineError::Cancelled) => {
+                Outcome::Reply(codes::CANCELLED, b"query cancelled".to_vec())
+            }
             Err(e) => Outcome::Reply(codes::STALE, error_chain(&e).into_bytes()),
         }
     }
@@ -303,13 +448,73 @@ impl Connection {
         }
         // Row+blob packing is fmf-core's single implementation
         // (ResultSet::fill_page); this layer only frames it.
-        match set.fill_page(req.offset as usize, req.count as usize) {
-            Ok((rows, blob)) => Outcome::Reply(codes::OK, messages::encode_page(&rows, &blob)),
+        let Ok(offset) = usize::try_from(req.offset) else {
+            return Outcome::Reply(
+                codes::INVALID_ARG,
+                b"result page offset exceeds the supported address space".to_vec(),
+            );
+        };
+        match set.fill_page(offset, req.count as usize) {
+            Ok((rows, blob)) => match messages::encode_page(&rows, &blob) {
+                Ok(payload) => Outcome::Reply(codes::OK, payload),
+                Err(error) => Outcome::Reply(codes::IO, error.to_string().into_bytes()),
+            },
             Err(EngineError::Stale) => Outcome::Reply(
                 codes::STALE,
                 b"structural generation moved; re-run the query".to_vec(),
             ),
+            Err(e @ EngineError::PageTooLarge { .. }) => {
+                Outcome::Reply(codes::INVALID_ARG, e.to_string().into_bytes())
+            }
             Err(e) => Outcome::Reply(codes::IO, e.to_string().into_bytes()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QueryRegistry;
+
+    #[test]
+    fn latest_query_cancels_running_or_queued_predecessor() {
+        let registry = QueryRegistry::default();
+        let older = registry.begin(10);
+        let newest = registry.begin(11);
+        assert!(older.is_cancelled());
+        assert!(!newest.is_cancelled());
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn explicit_cancel_is_idempotent_and_scoped_to_request_id() {
+        let registry = QueryRegistry::default();
+        let query = registry.begin(20);
+        registry.cancel(999);
+        assert!(!query.is_cancelled());
+        registry.cancel(20);
+        registry.cancel(20);
+        assert!(query.is_cancelled());
+        assert_eq!(registry.len(), 1, "worker cleanup owns removal");
+    }
+
+    #[test]
+    fn old_worker_cleanup_cannot_remove_reused_request_id() {
+        let registry = QueryRegistry::default();
+        let old = registry.begin(7);
+        let current = registry.begin(7);
+        registry.finish(7, &old);
+        assert_eq!(registry.len(), 1);
+        assert!(!current.is_cancelled());
+        registry.finish(7, &current);
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn disconnect_cancels_all_without_leaked_ids() {
+        let registry = QueryRegistry::default();
+        let query = registry.begin(42);
+        registry.cancel_all();
+        assert!(query.is_cancelled());
+        assert_eq!(registry.len(), 0);
     }
 }

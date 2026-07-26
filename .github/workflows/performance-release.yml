@@ -1,0 +1,149 @@
+name: performance-release
+run-name: performance-release ${{ github.event.workflow_run.head_sha }}
+
+# Deliberately separate from performance-gate.yml. The elevated self-hosted
+# runner executes repository code with read-only authority. Only after GitHub has
+# recorded that entire workflow as successful does this hosted, no-checkout job
+# receive the narrow permission needed to dispatch the release workflow.
+on: # zizmor: ignore[dangerous-triggers] intentional no-checkout privilege split described above
+  workflow_run:
+    workflows: [performance-gate]
+    types: [completed]
+
+permissions: {}
+
+# A release commit may briefly produce more than one completion event (for
+# example a manual re-run). Serialize the API-only decision so two hosted jobs
+# cannot both observe "not dispatched yet" and race each other.
+concurrency:
+  group: performance-release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch-release:
+    if: >-
+      ${{
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'workflow_dispatch'
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write # dispatch release.yml after validating the performance run
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Validate evidence and dispatch the matching draft
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]] ||
+             [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::invalid performance source identity"
+            exit 1
+          fi
+
+          source_run=$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN_ID")
+          expected_workflow_id=$(
+            gh api "repos/$REPO/actions/workflows/performance-gate.yml" --jq '.id'
+          )
+          if [ "$(jq -r '.event' <<<"$source_run")" != "workflow_dispatch" ] ||
+             [ "$(jq -r '.status' <<<"$source_run")" != "completed" ] ||
+             [ "$(jq -r '.conclusion' <<<"$source_run")" != "success" ] ||
+             [ "$(jq -r '.head_sha' <<<"$source_run")" != "$SOURCE_SHA" ] ||
+             [ "$(jq -r '.workflow_id' <<<"$source_run")" != "$expected_workflow_id" ] ||
+             [ "$(jq -r '.repository.full_name' <<<"$source_run")" != "$REPO" ]; then
+            echo "::error::performance source run identity is not trustworthy"
+            exit 1
+          fi
+
+          artifacts=$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100")
+          evidence_count=$(jq '
+            [
+              .artifacts[] |
+              select(
+                .name == "performance-gate-evidence" and
+                (.expired | not)
+              )
+            ] |
+            length
+          ' <<<"$artifacts")
+          if [ "$evidence_count" -ne 1 ]; then
+            echo "::error::performance run has no unique, unexpired evidence artifact"
+            exit 1
+          fi
+
+          run_title=$(jq -r '.display_title' <<<"$source_run")
+          if [[ "$run_title" =~ ^performance-gate\ (v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            tag="${BASH_REMATCH[1]}"
+          else
+            echo "::error::performance run title is not bound to an exact semver tag"
+            exit 1
+          fi
+          if [ "$(jq -r '.head_branch' <<<"$source_run")" != "$tag" ]; then
+            echo "::error::performance run ref is not the measured tag $tag"
+            exit 1
+          fi
+          tag_sha=$(gh api "repos/$REPO/commits/$tag" --jq '.sha')
+          if [ "$tag_sha" != "$SOURCE_SHA" ]; then
+            echo "::error::$tag resolves to $tag_sha, not measured commit $SOURCE_SHA"
+            exit 1
+          fi
+          lineage=$(gh api "repos/$REPO/compare/$tag_sha...main" --jq '.status')
+          if [ "$lineage" != "ahead" ] && [ "$lineage" != "identical" ]; then
+            echo "::error::$tag is not on main's protected lineage"
+            exit 1
+          fi
+
+          release_pages=$(gh api --paginate "repos/$REPO/releases?per_page=100")
+          matches=$(jq -s --arg sha "$SOURCE_SHA" --arg tag "$tag" '
+            add |
+            map(select(
+              .draft == true and
+              .tag_name == $tag and
+              .target_commitish == $sha
+            ))
+          ' <<<"$release_pages")
+          draft_count=$(jq 'length' <<<"$matches")
+          if [ "$draft_count" -eq 0 ]; then
+            published=$(gh api "repos/$REPO/releases/tags/$tag")
+            if [ "$(jq -r '.draft' <<<"$published")" = "false" ] &&
+               [ "$(jq -r '.prerelease' <<<"$published")" = "false" ] &&
+               [ "$(jq -r '.immutable' <<<"$published")" = "true" ] &&
+               [ "$(jq -r '.tag_name' <<<"$published")" = "$tag" ] &&
+               [ "$(jq -r '.name' <<<"$published")" = "$tag" ] &&
+               [ "$(jq -r '.target_commitish' <<<"$published")" = "$SOURCE_SHA" ]; then
+              echo "Immutable release $tag is already published — no duplicate dispatch."
+              exit 0
+            fi
+            echo "::error::$tag has neither the expected draft nor a completed immutable release"
+            exit 1
+          fi
+          if [ "$draft_count" -ne 1 ]; then
+            echo "::error::$tag must identify exactly one draft release"
+            exit 1
+          fi
+
+          title="release publish $tag"
+          runs=$(gh run list --repo "$REPO" --workflow release.yml \
+            --commit "$tag_sha" --event workflow_dispatch --limit 20 \
+            --json displayTitle,status,conclusion,databaseId)
+          existing=$(jq -r --arg title "$title" '
+            .[] |
+            select(.displayTitle == $title) |
+            select(.status != "completed" or .conclusion == "success") |
+            .databaseId
+          ' <<<"$runs" | head -n 1)
+          if [ -n "$existing" ]; then
+            echo "Release run $existing already owns $tag — no duplicate dispatch."
+            exit 0
+          fi
+
+          gh workflow run release.yml --repo "$REPO" --ref "$tag" \
+            -f tag_name="$tag" -f publish=true \
+            -f performance_run_id="$SOURCE_RUN_ID"

@@ -6,7 +6,7 @@ namespace FindMyFiles.Highlighting;
 /// free of WinUI so it runs headless. Ranges are clamped to the string, so a
 /// stale or out-of-bounds range can never throw.
 /// </summary>
-public static class HighlightSegmenter
+internal static class HighlightSegmenter
 {
     /// <summary>
     /// Cut <paramref name="text"/> at the boundaries of <paramref name="ranges"/>

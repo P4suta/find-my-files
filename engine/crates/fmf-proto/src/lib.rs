@@ -9,5 +9,6 @@ pub mod messages;
 
 pub use fmf_contract::versions::{
     ABI_VERSION, PIPE_NAME, PIPE_NAME_SHORT, PROTOCOL_VERSION, SERVICE_NAME,
+    SERVICE_PROTOCOL_MARKER,
 };
 pub use fmf_contract::{codes, limits};

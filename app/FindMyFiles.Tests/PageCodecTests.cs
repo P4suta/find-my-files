@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using System.Globalization;
 using System.Text;
 using FindMyFiles.Engine;
 using Xunit;
@@ -6,7 +8,7 @@ namespace FindMyFiles.Tests;
 
 public sealed class PageCodecTests
 {
-    /// <summary>The same row fmf-proto's `page_roundtrip_pins_the_48_byte_row`
+    /// <summary>The same row fmf-proto's `page_roundtrip_pins_the_56_byte_row`
     /// pins on the Rust side — layout drift fails one suite or the other.</summary>
     private static readonly byte[] GoldenRow =
     [
@@ -17,8 +19,9 @@ public sealed class PageCodecTests
         0, 0, 0, 0, // name_off = 0
         0x09, 0, 0, 0, // parent_path_off = 9
         0x01, 0, 0, 0, // flags = 1 (directory)
-        0x09, 0, // name_len = 9
-        0x03, 0, // parent_path_len = 3
+        0x09, 0, 0, 0, // name_len = 9
+        0x03, 0, 0, 0, // parent_path_len = 3
+        0, 0, 0, 0, // reserved = 0
     ];
 
     [Fact]
@@ -66,12 +69,40 @@ public sealed class PageCodecTests
     [Fact]
     public void MisalignedRowBytes_AreRejected()
     {
-        var ex = Assert.Throws<ArgumentException>(() => PageCodec.Decode(new byte[47], []));
+        var malformedLength = PageCodec.RowSize - 1;
+        var ex = Assert.Throws<ArgumentException>(
+            () => PageCodec.Decode(new byte[malformedLength], []));
 
         // The diagnostic names the offending length and the row stride, so a
         // truncated buffer is debuggable from the message alone.
-        Assert.Contains("47", ex.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            malformedLength.ToString(CultureInfo.InvariantCulture),
+            ex.Message,
+            StringComparison.Ordinal);
         Assert.Contains($"multiple of {PageCodec.RowSize}", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ParentPathLongerThanU16_RoundTripsWithoutTruncation()
+    {
+        var parent = "C:\\" + new string('x', ushort.MaxValue);
+        var expected = new RowData(1, 1, 0, 0, 0, "n", parent);
+
+        var encoded = PipeProtocol.EncodePageResp([expected]);
+        var actual = Assert.Single(PipeProtocol.DecodePageResp(encoded));
+
+        Assert.Equal(expected, actual);
+        Assert.True(Wtf8.Encode(actual.ParentPath).Length > ushort.MaxValue);
+    }
+
+    [Fact]
+    public void BlobWindowOutsidePayload_IsRejected()
+    {
+        var rowBytes = new byte[PageCodec.RowSize];
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            rowBytes.AsSpan(EngineContract.RowOffsets.NameLen), 1);
+
+        Assert.Throws<InvalidDataException>(() => PageCodec.Decode(rowBytes, []));
     }
 
     [Fact]

@@ -6,6 +6,7 @@
 // canonical FFI contract) rather than per-function doc comments.
 #![allow(clippy::missing_safety_doc)]
 
+mod allocation;
 /// Heap-allocated JSON blob exchanged with C# (engine stats) and its free function.
 pub mod blob;
 /// Per-thread last-error storage and the panic/error guard wrapping every entry point.
@@ -14,6 +15,9 @@ pub mod error;
 pub mod events;
 /// Engine handle lifecycle: ABI version, create, flush and destroy.
 pub mod handle;
+mod opaque;
+/// Pre-registered cooperative query-cancellation controls.
+pub mod query_control;
 /// Query execution and paged result retrieval, plus their free functions.
 pub mod results;
 /// Volume enumeration, indexing start and indexing-status queries.
@@ -30,8 +34,8 @@ pub use volumes::FmfVolumeStatus;
 // Status codes radiate from the contract (ADR-0018); the FMF_-prefixed
 // names are this crate's public Rust spelling of the same table.
 pub use fmf_contract::codes::{
-    INVALID_ARG as FMF_E_INVALID_ARG, IO as FMF_E_IO, LOCKED as FMF_E_LOCKED,
-    NOT_ADMIN as FMF_E_NOT_ADMIN, OK as FMF_OK, PANIC as FMF_E_PANIC,
+    CANCELLED as FMF_E_CANCELLED, INVALID_ARG as FMF_E_INVALID_ARG, IO as FMF_E_IO,
+    LOCKED as FMF_E_LOCKED, NOT_ADMIN as FMF_E_NOT_ADMIN, OK as FMF_OK, PANIC as FMF_E_PANIC,
     QUERY_SYNTAX as FMF_E_QUERY_SYNTAX, STALE as FMF_E_STALE, VOLUME as FMF_E_VOLUME,
 };
 
@@ -62,29 +66,27 @@ mod export_pins {
             crate::volumes::fmf_list_volumes;
         let _: unsafe extern "C" fn(*mut c_void, *const *const c_char, u32) -> i32 =
             crate::volumes::fmf_index_start;
-        let _: unsafe extern "C" fn(
-            *mut c_void,
-            *const *const c_char,
-            u32,
-            *const *const c_char,
-            u32,
-        ) -> i32 = crate::volumes::fmf_index_start_scope;
         let _: unsafe extern "C" fn(*mut c_void, *mut FmfVolumeStatus, u32, *mut u32) -> i32 =
             crate::volumes::fmf_index_status;
-        let _: unsafe extern "C" fn(*mut FmfBlob) -> i32 = crate::blob::fmf_blob_free;
+        let _: extern "C" fn(u64) -> i32 = crate::blob::fmf_blob_free;
         let _: unsafe extern "C" fn(*mut c_void, *mut *mut FmfBlob) -> i32 =
             crate::blob::fmf_engine_stats;
         let _: unsafe extern "C" fn(
             *mut c_void,
             *const c_char,
             *const FmfQueryOptions,
+            u64,
             *mut *mut c_void,
             *mut u64,
             *mut *mut FmfBlob,
         ) -> i32 = crate::results::fmf_query;
+        let _: unsafe extern "C" fn(*mut c_void, *mut u64) -> i32 =
+            crate::query_control::fmf_query_control_create;
+        let _: extern "C" fn(u64) -> i32 = crate::query_control::fmf_query_control_cancel;
+        let _: extern "C" fn(u64) -> i32 = crate::query_control::fmf_query_control_free;
         let _: unsafe extern "C" fn(*mut c_void, u64, u32, *mut *mut FmfPage) -> i32 =
             crate::results::fmf_result_page;
-        let _: unsafe extern "C" fn(*mut FmfPage) -> i32 = crate::results::fmf_page_free;
+        let _: extern "C" fn(u64) -> i32 = crate::results::fmf_page_free;
         let _: unsafe extern "C" fn(*mut c_void) -> i32 = crate::results::fmf_result_free;
         let _: unsafe extern "C" fn(*mut u8, *mut u32) -> i32 = crate::error::fmf_last_error;
     }

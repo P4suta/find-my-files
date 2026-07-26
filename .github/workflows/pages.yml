@@ -1,10 +1,8 @@
 name: Deploy GitHub Pages
 
-# Publishes the landing page (site/) plus generated documentation:
+# Publishes the landing page plus the canonical design book:
 #   /        — landing page (site/index.html, ja/en)
 #   /book/   — mdBook design docs rendered from docs/ (ARCHITECTURE + ADRs)
-#   /doc/    — rustdoc API reference (cargo doc)
-#   /api/    — C# API reference (DefaultDocumentation -> mdBook; app/FindMyFiles)
 # Requires Settings > Pages > Source = "GitHub Actions" (set once after publish).
 
 on:
@@ -13,10 +11,9 @@ on:
     paths:
       - "site/**"
       - "docs/**"
-      - "engine/**"
-      - "app/**"
       - "xtask/**"
-      - ".config/dotnet-tools.json"
+      - "mise.toml"
+      - "justfile"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -32,55 +29,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build:
     permissions:
-      contents: read # checkout
-      pages: write # publish to GitHub Pages
-      id-token: write # OIDC token the Pages deploy environment requires
-    # windows-latest because rustdoc must compile the Windows-only crates
-    # (fmf-core → ntfs-reader / windows-sys, fmf-service) that fail to
-    # `cargo doc` on Linux. mdBook builds fine here too, so one job suffices.
-    runs-on: windows-latest
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Same pinned toolchain and mdBook as local.
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          install: true
+      - name: Build mdBook design docs (docs/ -> build/docs-book)
+        run: mise exec cargo:mdbook --command "mdbook build docs"
+
+      - name: Assemble site (landing + canonical book)
+        run: just docs-assemble
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: build/site
+
+  # Keep Pages write authority and OIDC away from repository build code. This
+  # runner receives only upload-pages-artifact's completed static-site archive
+  # and executes pinned official Pages actions.
+  deploy:
+    needs: build
+    permissions:
+      pages: write # deploy the verified Pages artifact
+      id-token: write # authenticate the deployment to GitHub Pages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      # Same pinned toolchain as local (rust 1.96 / dotnet 10 / just / mdbook).
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
-        with:
-          install: true
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: engine
-
-      - name: Build mdBook design docs (docs/ -> build/docs-book)
-        run: mdbook build docs
-
-      - name: Build rustdoc (engine -> build/engine/doc)
-        # --document-private-items: internal crates, so docs target maintainers
-        # (and it resolves intra-doc links to non-pub helpers). --target-dir:
-        # cargo discovers .cargo/config.toml from the CWD, not --manifest-path,
-        # so route the output to build/engine/doc explicitly (ADR-0021).
-        run: cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml --target-dir build/engine
-
-      - name: Build C# API reference (DefaultDocumentation -> mdBook -> _site)
-        # Builds FindMyFiles.dll + its XML doc file (the csproj builds the Rust
-        # FFI itself), restores the pinned DefaultDocumentation local tool, then
-        # reads the assembly via IL and renders Markdown to HTML with mdBook —
-        # works with the .NET 10 SDK where DocFX's Roslyn path fails (#40). See
-        # `just doc-csharp`.
-        run: just doc-csharp
-
-      # Stage book + doc + api into site/ next to the landing page (xtask: just
-      # docs-assemble), verifying all source trees exist first.
-      - name: Assemble site (landing + book + doc + api)
-        run: just docs-assemble
-
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with:
-          path: build/site
       - id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

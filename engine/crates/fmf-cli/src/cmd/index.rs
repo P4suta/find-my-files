@@ -100,7 +100,7 @@ pub fn index(
                 let mut path = Vec::new();
                 for &id in r.ids.iter().take(20) {
                     path.clear();
-                    idx.append_path(id, &mut path);
+                    idx.append_path(id, &mut path)?;
                     out.write_all(&path)?;
                     out.write_all(b"\n")?;
                 }
@@ -124,11 +124,11 @@ pub fn index(
 /// Scan, then tail the journal. The checkpoint is taken *before* the scan so
 /// changes made during the scan are replayed, not lost (ARCHITECTURE.md).
 pub fn watch(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
-    use fmf_core::usn::{ReadOutcome, UsnJournal, VolumeStatFetcher, apply_batch};
+    use fmf_core::usn::{MetadataSource, ReadOutcome, UsnJournal, apply_batch};
 
     let mut journal = UsnJournal::open(drive, None)?;
     let mut idx = build_index(drive, ctx)?;
-    let fetch = VolumeStatFetcher::open(drive)?;
+    let fetch = MetadataSource::open_volume(drive)?;
     if ctx.human_chrome() {
         eprintln!(
             "watching {drive} (journal id {:#x}, from usn {}) — Ctrl+C to stop",

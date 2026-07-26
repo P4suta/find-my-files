@@ -14,19 +14,19 @@ By SLSA, **every distributed artifact — nightlies included — should carry bu
 
 Give nightly the **same supply-chain artefacts as a release, minus signing**:
 
-1. **CycloneDX 1.6 SBOMs (Rust + C#) + the osv-scanner gate** run in `nightly.yml`, exactly as in `release.yml`. A known-vulnerable dependency in the resolved closure fails the nightly too (don't ship a vulnerable nightly).
-2. **Keyless build-provenance attestation** over the zip + `SHA256SUMS.txt`, and an **SBOM attestation** per SBOM (provenance + 2 × SBOM = 3 attestations), via the build job's `id-token: write` / `attestations: write` permissions. No secrets, no approval gate.
+1. **CycloneDX 1.6 SBOMs (Rust + C#) + the osv-scanner gate** run in `nightly.yml`, exactly as in `release.yml`. A known-vulnerable dependency in either release dependency graph fails the nightly too (don't ship a vulnerable nightly).
+2. **Keyless build-provenance attestation** over the zip + `SHA256SUMS.txt`, and an **SBOM attestation** per SBOM (provenance + 2 × SBOM = 3 attestations). The Windows build/test job is Contents-read only; a separate job downloads the completed immutable Actions artifact and alone receives `id-token: write` / `attestations: write`. No secrets, no approval gate.
 3. The SBOMs are **added to the 14-day artifact** so a tester gets them alongside the zip.
 4. **Signing is unchanged** — still tag-driven, approval-gated, stable-only (ADR-0029). A nightly stays unsigned; the only remaining stable-only gate is the Authenticode signature.
 
-To avoid drift, SBOM generation + the osv-scanner gate are extracted into a **composite action** (`.github/actions/sbom-scan`) shared by both `release.yml` (its `build` job) and `nightly.yml`, so the pinned tool versions (`cargo-sbom` 0.10.0, `CycloneDX` 6.2.0, `osv-scanner` 2.3.6) live in one place. Only the non-sensitive `build` job of `release.yml` is touched; its `sign`/`publish` jobs are unchanged. The attestation steps stay in each workflow (they depend on job-level OIDC permissions a composite action can't grant).
+To avoid drift, SBOM generation + the osv-scanner gate are extracted into a **composite action** (`.github/actions/sbom-scan`) shared by both `release.yml` (its `build` job) and `nightly.yml`, so the pinned tool versions (`cargo-sbom` 0.10.0, `CycloneDX` 6.2.0, `osv-scanner` 2.3.6) live in one place. Attestation remains in dedicated workflow jobs because OIDC permissions are job-level and must not coexist with repository build/test code.
 
 ## Rationale
 
 - **SLSA expects provenance on every distributed build.** Keyless attestation is free and unattended — there was no cost reason to withhold it from nightly. This closes the real standards gap.
 - **Signing is the legitimate stable-only gate**, not SBOM/provenance: eSigner has a quota and a human approval gate (ADR-0029); attestation/SBOM have neither.
 - **Composite action over copy-paste**: two workflows pinning `cargo-sbom`/`CycloneDX`/`osv-scanner` independently would drift; one shared action keeps them identical (the project already uses composite actions for single-source, e.g. `rust-toolchain`).
-- **Refactor only the `build` job**: the SBOM steps have no secrets and no approval gate, so extracting them carries none of the risk of touching `sign`/`publish`.
+- **Separate the OIDC boundary**: an immutable artifact handoff is cheap on a nightly and prevents build/test code from ever seeing attestation-write authority.
 
 ## Trade-off
 

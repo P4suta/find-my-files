@@ -3,21 +3,57 @@
 //! this pass resolves names without disk reads; anything missing (cache
 //! cap, torn records) falls back to a targeted read of the live volume.
 
-use ntfs_reader::api::{
-    NtfsAttributeListEntry, NtfsAttributeType, NtfsFileName, NtfsFileNamespace,
-};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use ntfs_reader::api::{NtfsAttributeType, NtfsFileName, NtfsFileNamespace};
 use ntfs_reader::file::NtfsFile;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::mft::pick_name;
-
+use super::attribute_list::{
+    ListEntry, ListStreamError, StreamRun, close_extent_runs, covered_prefix, decode_extent_runs,
+    parse_list_entries, visit_list_stream,
+};
 use super::parse::{ParsedBatch, RecordArena};
+use super::record::attributes_complete;
 use super::volume_io::{RunMap, apply_fixup, open_raw_volume};
+use crate::mft::is_searchable_namespace;
+use crate::usn::MetadataSource;
+use crate::usn::apply::LinkSnapshot;
 
-/// Upper bound on cached name-bearing extension records (~1KiB each, so
-/// ≤128MiB transient). A real C: has tens of thousands; past the cap the
-/// deferred pass falls back to disk reads for the remainder.
-pub(super) const EXT_NAME_CACHE_CAP: usize = 128 << 10;
+/// Hard byte ceiling shared by cached attribute-list base records and
+/// name-bearing extension records. A normal NTFS record is 1KiB, but using a
+/// byte bound (rather than a record count) keeps transient RAM ≤128MiB on
+/// volumes with larger records too. Spills retain only the record number and
+/// are read on demand during the deferred pass.
+pub(super) const DEFERRED_RECORD_ARENA_MAX_BYTES: usize = 128 << 20;
+
+pub(super) struct DeferredContext<'a> {
+    pub(super) volume_path: &'a str,
+    pub(super) runmap: &'a RunMap,
+    pub(super) record_size: usize,
+    pub(super) cluster_size: u64,
+    pub(super) volume_size: u64,
+    pub(super) extensions: &'a FxHashMap<u64, u32>,
+    pub(super) arena: &'a RecordArena,
+    pub(super) metadata: &'a MetadataSource,
+    pub(super) stop: &'a Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeferredError {
+    Cancelled,
+    Incomplete(u64),
+}
+
+#[derive(Clone, Copy)]
+struct ResolveSources<'a> {
+    extensions: &'a FxHashMap<u64, u32>,
+    arena: &'a RecordArena,
+    cluster_size: u64,
+    volume_size: u64,
+    stop: &'a AtomicBool,
+}
 
 /// Random access to single records for the deferred attribute-list pass.
 struct RecordReader<'a> {
@@ -29,16 +65,15 @@ struct RecordReader<'a> {
 
 impl RecordReader<'_> {
     fn read_record(&mut self, number: u64) -> Option<&[u8]> {
-        use std::io::{Read, Seek, SeekFrom};
-        let logical = number * self.record_size as u64;
-        let (phys, contig) = self.map.physical(logical)?;
-        if (contig as usize) < self.record_size {
-            return None;
-        }
+        let logical = number.checked_mul(self.record_size as u64)?;
         self.buf.resize(self.record_size, 0);
-        self.file.seek(SeekFrom::Start(phys)).ok()?;
-        self.file.read_exact(&mut self.buf).ok()?;
-        if !NtfsFile::is_valid(&self.buf) || !apply_fixup(&mut self.buf) {
+        self.map
+            .read_exact_logical(&mut self.file, logical, &mut self.buf)
+            .ok()?;
+        if !NtfsFile::is_valid(&self.buf)
+            || !apply_fixup(&mut self.buf)
+            || !attributes_complete(&self.buf)
+        {
             return None;
         }
         Some(&self.buf)
@@ -82,9 +117,8 @@ impl<'a> LazyRecordReader<'a> {
                         buf: Vec::new(),
                     });
                 }
-                Err(e) => {
+                Err(_) => {
                     self.failed = true;
-                    tracing::warn!(error = %e, "deferred-pass fallback volume handle unavailable");
                 }
             }
         }
@@ -100,69 +134,310 @@ impl<'a> LazyRecordReader<'a> {
     }
 }
 
-/// Resolve the display name of a record whose $`FILE_NAME` lives in extension
-/// records (resident $`ATTRIBUTE_LIST` → referenced records). Targets come
-/// from the streamed extension-record cache; anything missing (cache cap,
-/// torn records) falls back to a targeted disk read. Mirrors ntfs-reader's
-/// `get_best_file_name` without needing the whole MFT in RAM.
-fn resolve_attr_list_name(
-    base: &NtfsFile,
-    ext: &FxHashMap<u64, u32>,
-    arena: &RecordArena,
-    rr: &mut LazyRecordReader,
-) -> Option<NtfsFileName> {
-    let attr = base.get_attribute(NtfsAttributeType::AttributeList)?;
-    if attr.header.is_non_resident != 0 {
-        return None; // rare; counted as skipped
-    }
-    let header = attr.resident_header()?;
-    let data = attr.data();
-    let start = header.value_offset as usize;
-    let end = start.checked_add(header.value_length as usize)?;
-    if end > data.len() {
-        return None;
-    }
-    let list = &data[start..end];
+/// Lazily opened raw-volume reader for non-resident attribute-list streams.
+/// One instance is reused by a rayon chunk, so the normal resident path opens
+/// no extra handle.
+struct LazyStreamReader<'a> {
+    volume_path: &'a str,
+    inner: Option<std::fs::File>,
+    failed: bool,
+    failures: u64,
+}
 
-    let mut best: Option<NtfsFileName> = None;
-    let mut off = 0usize;
-    while off + size_of::<NtfsAttributeListEntry>() <= list.len() {
-        // `list` is a &[u8] and an entry sits at an arbitrary byte offset, so the
-        // address is not guaranteed aligned for NtfsAttributeListEntry — read it
-        // out unaligned instead of forming a misaligned reference (UB). The loop
-        // guard above keeps the read within `list`.
-        let entry = unsafe {
-            std::ptr::read_unaligned(list.as_ptr().add(off).cast::<NtfsAttributeListEntry>())
-        };
-        let len = entry.length as usize;
-        if len < size_of::<NtfsAttributeListEntry>() || off + len > list.len() {
-            break;
+impl<'a> LazyStreamReader<'a> {
+    const fn new(volume_path: &'a str) -> Self {
+        Self {
+            volume_path,
+            inner: None,
+            failed: false,
+            failures: 0,
         }
-        if entry.type_id == NtfsAttributeType::FileName as u32 {
-            let target = entry.reference();
-            if target != base.number {
-                let picked = match ext.get(&target) {
-                    Some(&slot) => pick_name(&NtfsFile::new(target, arena.get(slot))),
-                    None => rr
-                        .read_record(target)
-                        .and_then(|bytes| pick_name(&NtfsFile::new(target, bytes))),
-                };
-                if let Some(name) = picked {
-                    let ns = name.header.namespace;
-                    if ns == NtfsFileNamespace::Win32 as u8
-                        || ns == NtfsFileNamespace::Win32AndDos as u8
-                    {
-                        return Some(name);
-                    }
-                    if best.is_none() {
-                        best = Some(name);
-                    }
+    }
+
+    fn visit(
+        &mut self,
+        runs: &[StreamRun],
+        data_size: u64,
+        stop: &AtomicBool,
+        prefix: bool,
+        visit: impl FnMut(ListEntry),
+    ) -> Option<()> {
+        if stop.load(Ordering::Relaxed) || covered_prefix(runs) < data_size {
+            return None;
+        }
+        if data_size == 0 {
+            return Some(());
+        }
+        if self.inner.is_none() && !self.failed {
+            match open_raw_volume(self.volume_path) {
+                Ok(file) => self.inner = Some(file),
+                Err(_) => {
+                    self.failed = true;
                 }
             }
         }
-        off += len.next_multiple_of(8);
+        let Some(file) = self.inner.as_mut() else {
+            self.failures += 1;
+            return None;
+        };
+        match visit_list_stream(file, runs, data_size, stop, prefix, visit) {
+            Ok(()) => Some(()),
+            Err(ListStreamError::Io) => {
+                self.failures += 1;
+                None
+            }
+            Err(ListStreamError::Invalid | ListStreamError::Cancelled) => None,
+        }
     }
-    best
+}
+
+fn file_matches_reference(file: &NtfsFile<'_>, expected: u64) -> bool {
+    file.reference_number() == expected
+}
+
+const fn extension_belongs_to(file: &NtfsFile<'_>, base_reference: u64) -> bool {
+    let actual = file.header.base_reference;
+    actual == base_reference
+}
+
+fn decode_extension_extent(
+    number: u64,
+    bytes: &[u8],
+    entry: ListEntry,
+    expected_base_reference: Option<u64>,
+    cluster_size: u64,
+    volume_size: u64,
+) -> Option<Vec<StreamRun>> {
+    let file = NtfsFile::new(number, bytes);
+    if !file_matches_reference(&file, entry.target_reference)
+        || expected_base_reference
+            .is_some_and(|base_reference| !extension_belongs_to(&file, base_reference))
+    {
+        return None;
+    }
+    let mut found = None;
+    file.attributes(|attr| {
+        if found.is_some()
+            || attr.header.type_id != NtfsAttributeType::AttributeList as u32
+            || attr.header.id != entry.id
+            || attr.header.is_non_resident == 0
+        {
+            return;
+        }
+        let Some(header) = attr.nonresident_header() else {
+            return;
+        };
+        if u64::try_from(header.lowest_vcn).ok() != Some(entry.starting_vcn) {
+            return;
+        }
+        found = decode_extent_runs(attr, cluster_size, volume_size).map(|(_, runs)| runs);
+    });
+    found
+}
+
+enum AttributeListSource<'a> {
+    Resident(&'a [u8]),
+    NonResident {
+        data_size: u64,
+        runs: Vec<StreamRun>,
+    },
+}
+
+fn load_attribute_list<'a>(
+    base: &'a NtfsFile<'a>,
+    sources: &ResolveSources<'a>,
+    record_reader: &mut LazyRecordReader<'_>,
+    stream_reader: &mut LazyStreamReader<'_>,
+) -> Option<AttributeListSource<'a>> {
+    let attr = base.get_attribute(NtfsAttributeType::AttributeList)?;
+    if attr.header.is_non_resident == 0 {
+        return attr.get_resident().map(AttributeListSource::Resident);
+    }
+
+    let base_reference = base.reference_number();
+    let base_attr_id = attr.header.id;
+    let base_lowest_vcn = u64::try_from(attr.nonresident_header()?.lowest_vcn).ok()?;
+    let (data_size, base_runs) =
+        decode_extent_runs(&attr, sources.cluster_size, sources.volume_size)?;
+    let base_extent = ListEntry {
+        type_id: NtfsAttributeType::AttributeList as u32,
+        starting_vcn: base_lowest_vcn,
+        target_reference: base_reference,
+        id: base_attr_id,
+    };
+    let runs = close_extent_runs(
+        base_runs,
+        data_size,
+        base_extent,
+        |runs, prefix_len| {
+            let mut entries = Vec::new();
+            stream_reader.visit(runs, prefix_len, sources.stop, true, |entry| {
+                if entry.type_id == NtfsAttributeType::AttributeList as u32 {
+                    entries.push(entry);
+                }
+            })?;
+            Some(entries)
+        },
+        |entry| {
+            if sources.stop.load(Ordering::Relaxed) {
+                return None;
+            }
+            let number = entry.target_record();
+            if number == base.number {
+                decode_extension_extent(
+                    number,
+                    base.data,
+                    entry,
+                    None,
+                    sources.cluster_size,
+                    sources.volume_size,
+                )
+            } else {
+                match sources.extensions.get(&number) {
+                    Some(&slot) => decode_extension_extent(
+                        number,
+                        sources.arena.get(slot),
+                        entry,
+                        Some(base_reference),
+                        sources.cluster_size,
+                        sources.volume_size,
+                    ),
+                    None => record_reader.read_record(number).and_then(|bytes| {
+                        decode_extension_extent(
+                            number,
+                            bytes,
+                            entry,
+                            Some(base_reference),
+                            sources.cluster_size,
+                            sources.volume_size,
+                        )
+                    }),
+                }
+            }
+        },
+    )?;
+    Some(AttributeListSource::NonResident { data_size, runs })
+}
+
+fn file_name_for_entry(file: &NtfsFile<'_>, id: u16) -> Option<NtfsFileName> {
+    let mut found = None;
+    file.attributes(|attr| {
+        if found.is_none()
+            && attr.header.type_id == NtfsAttributeType::FileName as u32
+            && attr.header.id == id
+        {
+            found = attr.as_name();
+        }
+    });
+    found
+}
+
+fn resolve_file_name_entry(
+    base: &NtfsFile<'_>,
+    entry: ListEntry,
+    ext: &FxHashMap<u64, u32>,
+    arena: &RecordArena,
+    rr: &mut LazyRecordReader<'_>,
+) -> Option<NtfsFileName> {
+    let number = entry.target_record();
+    if number == base.number {
+        return file_name_for_entry(base, entry.id);
+    }
+    let base_reference = base.reference_number();
+    let pick = |bytes: &[u8]| {
+        let target = NtfsFile::new(number, bytes);
+        if !file_matches_reference(&target, entry.target_reference)
+            || !extension_belongs_to(&target, base_reference)
+        {
+            return None;
+        }
+        file_name_for_entry(&target, entry.id)
+    };
+    match ext.get(&number) {
+        Some(&slot) => pick(arena.get(slot)),
+        None => rr.read_record(number).and_then(pick),
+    }
+}
+
+/// Resolve every searchable hard-link name of a record whose `$FILE_NAME`
+/// attributes may live in extension records. Resident and non-resident
+/// (including split-extent) lists share the checked parser. One unresolved
+/// entry fails the whole object closed instead of publishing a partial set.
+fn resolve_attr_list_names(
+    base: &NtfsFile,
+    sources: &ResolveSources<'_>,
+    rr: &mut LazyRecordReader,
+    stream_reader: &mut LazyStreamReader,
+) -> Option<Vec<NtfsFileName>> {
+    if sources.stop.load(Ordering::Relaxed) {
+        return None;
+    }
+    let source = load_attribute_list(base, sources, rr, stream_reader)?;
+    let mut names = Vec::new();
+    let mut seen_entries = FxHashSet::default();
+    let mut base_name_ids = FxHashSet::default();
+    base.attributes(|attribute| {
+        if attribute.header.type_id == NtfsAttributeType::FileName as u32 {
+            base_name_ids.insert(attribute.header.id);
+        }
+    });
+    let mut valid = true;
+    {
+        let mut consider = |entry: ListEntry| {
+            if sources.stop.load(Ordering::Relaxed)
+                || entry.type_id != NtfsAttributeType::FileName as u32
+                || !seen_entries.insert((entry.target_reference, entry.id))
+            {
+                return;
+            }
+            let Some(name) =
+                resolve_file_name_entry(base, entry, sources.extensions, sources.arena, rr)
+            else {
+                valid = false;
+                return;
+            };
+            if name.header.name_length == 0 {
+                valid = false;
+                return;
+            }
+            let namespace = name.header.namespace;
+            if is_searchable_namespace(namespace) {
+                names.push(name);
+            } else if namespace != NtfsFileNamespace::Dos as u8 {
+                valid = false;
+            }
+        };
+        match source {
+            AttributeListSource::Resident(list) => {
+                for entry in parse_list_entries(list, false)? {
+                    consider(entry);
+                }
+            }
+            AttributeListSource::NonResident { data_size, runs } => {
+                stream_reader.visit(&runs, data_size, sources.stop, false, &mut consider)?;
+            }
+        }
+    }
+    let base_reference = base.reference_number();
+    if !base_name_ids
+        .iter()
+        .all(|id| seen_entries.contains(&(base_reference, *id)))
+    {
+        valid = false;
+    }
+    if sources.stop.load(Ordering::Relaxed) || !valid {
+        return None;
+    }
+    let mut unique = FxHashSet::default();
+    names.retain(|name| {
+        let data = name.data;
+        let units = name.header.name_length as usize;
+        unique.insert((
+            name.header.parent_directory_reference,
+            data[..units].to_vec(),
+        ))
+    });
+    (!names.is_empty()).then_some(names)
 }
 
 /// Resolve deferred $`ATTRIBUTE_LIST` names in parallel — almost entirely
@@ -171,30 +446,100 @@ fn resolve_attr_list_name(
 /// (ADR-0011). Chunk order is preserved, so `EntryId` assignment matches a
 /// serial loop.
 pub(super) fn resolve_deferred(
-    volume_path: &str,
-    runmap: &RunMap,
-    record_size: usize,
-    ext: &FxHashMap<u64, u32>,
-    arena: &RecordArena,
-    deferred: &[(u64, u32)],
-) -> Vec<ParsedBatch> {
+    context: DeferredContext<'_>,
+    deferred: &[(u64, Option<u32>)],
+) -> Result<Vec<ParsedBatch>, DeferredError> {
     use rayon::prelude::*;
     const DEFER_CHUNK: usize = 256;
 
-    deferred
+    let DeferredContext {
+        volume_path,
+        runmap,
+        record_size,
+        cluster_size,
+        volume_size,
+        extensions,
+        arena,
+        metadata,
+        stop,
+    } = context;
+    if stop.load(Ordering::Relaxed) {
+        return Err(DeferredError::Cancelled);
+    }
+    let results: Vec<Result<ParsedBatch, DeferredError>> = deferred
         .par_chunks(DEFER_CHUNK)
         .map(|chunk| {
             let mut out = ParsedBatch::default();
-            let mut rr = LazyRecordReader::new(volume_path, runmap, record_size);
-            for &(number, slot) in chunk {
-                let f = NtfsFile::new(number, arena.get(slot));
-                match resolve_attr_list_name(&f, ext, arena, &mut rr) {
-                    Some(name) => out.push_named(&f, &name),
-                    None => out.deferred_unresolved += 1,
+            // A spilled base record must stay borrowed while its attribute
+            // list resolves extension records. Separate readers prevent an
+            // extension read from overwriting the base reader's buffer.
+            let mut base_rr = LazyRecordReader::new(volume_path, runmap, record_size);
+            let mut extension_rr = LazyRecordReader::new(volume_path, runmap, record_size);
+            let mut stream_reader = LazyStreamReader::new(volume_path);
+            let sources = ResolveSources {
+                extensions,
+                arena,
+                cluster_size,
+                volume_size,
+                stop,
+            };
+            for &(reference, slot) in chunk {
+                if stop.load(Ordering::Relaxed) {
+                    return Err(DeferredError::Cancelled);
+                }
+                let number = reference & 0x0000_FFFF_FFFF_FFFF;
+                let bytes = match slot {
+                    Some(slot) => Some(arena.get(slot)),
+                    None => base_rr.read_record(number),
+                };
+                let Some(bytes) = bytes else {
+                    let snapshot = metadata.links(reference);
+                    if stop.load(Ordering::Relaxed) {
+                        return Err(DeferredError::Cancelled);
+                    }
+                    if matches!(snapshot, LinkSnapshot::Gone) {
+                        continue;
+                    }
+                    return Err(DeferredError::Incomplete(reference));
+                };
+                let f = NtfsFile::new(number, bytes);
+                if f.reference_number() != reference {
+                    return Err(DeferredError::Incomplete(reference));
+                }
+                let resolved =
+                    resolve_attr_list_names(&f, &sources, &mut extension_rr, &mut stream_reader);
+                if let Some(names) = resolved {
+                    for name in names {
+                        out.push_named(&f, &name);
+                    }
+                } else {
+                    if stop.load(Ordering::Relaxed) {
+                        return Err(DeferredError::Cancelled);
+                    }
+                    let snapshot = metadata.links(reference);
+                    if stop.load(Ordering::Relaxed) {
+                        return Err(DeferredError::Cancelled);
+                    }
+                    match snapshot {
+                        LinkSnapshot::Present(links) if !links.is_empty() => {
+                            for link in links {
+                                out.push_link(&f, link.parent_frn, &link.name);
+                            }
+                        }
+                        LinkSnapshot::Gone => {}
+                        LinkSnapshot::Present(_) | LinkSnapshot::Failed => {
+                            return Err(DeferredError::Incomplete(reference));
+                        }
+                    }
                 }
             }
-            out.deferred_name_read_failures = rr.failures;
-            out
+            out.deferred_name_read_failures =
+                base_rr.failures + extension_rr.failures + stream_reader.failures;
+            Ok(out)
         })
-        .collect()
+        .collect();
+    if stop.load(Ordering::Relaxed) {
+        return Err(DeferredError::Cancelled);
+    }
+    results.into_iter().collect()
 }

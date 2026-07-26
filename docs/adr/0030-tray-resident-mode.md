@@ -36,17 +36,16 @@ While tray-resident, both the UI process and the service (the index — ~110 B/f
 
 - **No wire-contract / golden / ABI change.** One additive `AppSettings` field (`close_to_tray`), picked up automatically by the source-generated `AppSettingsJsonContext` as snake_case JSON — mirrors ADR-0027's additive-`service.json` posture.
 - **The process entry point changes**: `DISABLE_XAML_GENERATED_MAIN` plus a hand-written `Program.cs`. The `App` ctor order (`ApplyLanguageOverride → InitializeComponent → ExceptionPolicy.Install`) is preserved unchanged; `Program.Main` only wraps `Application.Start`.
-- **New Win32 interop surface** (`Shell_NotifyIcon`, `SetWindowSubclass`, `TrackPopupMenuEx`), pinned to System32 like every existing import. The `SUBCLASSPROC` delegate, the HICON, and the tray identity are held in fields for the process lifetime (CLAUDE.md "FFI-callback delegates are field-held" — GC reclaim would dangle the native pointer). `OnActivated` (single-instance redirect) fires on a background thread, so it marshals to the UI thread via the cached `App.DispatcherQueue` before any window work.
+- **New Win32 interop surface** (`Shell_NotifyIcon`, `SetWindowSubclass`, `TrackPopupMenuEx`), pinned to System32 like every existing import. The `SUBCLASSPROC` delegate, the HICON, and the tray identity are held in fields for the process lifetime (AGENTS.md "FFI-callback delegates are field-held" — GC reclaim would dangle the native pointer). `OnActivated` (single-instance redirect) fires on a background thread, so it marshals to the UI thread via the cached `App.DispatcherQueue` before any window work.
 - **Testability**: the view-shell pieces (`Program`, `TrayIcon`, `WindowSubclass`, `TrayMenu`) are `[ExcludeFromCodeCoverage]` like the other window shells (ADR-0022). The close-vs-hide decision is extracted into a pure `WindowLifecycle` function and table-tested.
 - **Security**: single-instance keying and the tray HWND are local to the unelevated app; no change to the privileged service surface (docs/SECURITY.md unaffected).
 
 ## Verification
 
-- [ ] `WindowLifecycle` close-vs-hide truth table (C# unit): normal × with `CloseToTray` on/off × explicit-exit on/off.
-- [ ] `AppSettings` `close_to_tray` round-trip (C# unit): default false → save → load.
-- [ ] UI automation: the gear-menu toggle persists; × hides the window; restore shows it; tray **Exit** ends the process.
-- [ ] Manual smoke: with the toggle on, × hides to tray (taskbar button gone); left-click restores with query/scroll state intact; right-click **Exit** fully exits; a second launch while tray-resident restores instead of duplicating; after an Explorer restart the icon reappears (`WM_TASKBARCREATED`); while tray-resident the service stays alive (F12 diagnostics / Task Manager) and self-stops ~5 min after a real exit.
-- [ ] Regression: with `close_to_tray` off (default), launch/close behaviour is byte-for-byte the current on-demand flow.
+`WindowLifecycleTests` pins the close/hide/explicit-exit table and
+`AppSettingsTests` pins the default-off persistence contract. Tray callbacks,
+Explorer restart recovery, and single-instance activation share the production
+`WindowSubclass` message path.
 
 ## Re-examination triggers
 

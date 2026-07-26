@@ -2,7 +2,7 @@ namespace FindMyFiles.Tests.TestDoubles;
 
 /// <summary>Shared polling wait for tests that observe background threads
 /// (pipe supervisor, child processes). Import via `using static`.</summary>
-public static class Polling
+internal static class Polling
 {
     public static async Task WaitUntilAsync(
         Func<bool> condition, string what, int timeoutMs = 5000)

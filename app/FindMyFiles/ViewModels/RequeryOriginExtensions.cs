@@ -1,7 +1,7 @@
 namespace FindMyFiles.ViewModels;
 
 /// <summary>Helpers over <see cref="RequeryOrigin"/>.</summary>
-public static class RequeryOriginExtensions
+internal static class RequeryOriginExtensions
 {
     /// <summary>
     /// True for origins that restore the previous viewport instead of scrolling

@@ -15,7 +15,10 @@ The initial scan reads $MFT as buffered synchronous streaming in 16MiB chunks; a
 
 ## Impact
 
-- Temporary RAM: 3×16MiB pipeline buffers + extension-record cache (cap 128Ki entries). Overflow increments the `ext_name_cache_skipped` counter + falls back to disk
+- Temporary RAM: 3×16MiB pipeline buffers + one shared deferred-record arena
+  (hard cap 128MiB across attribute-list base and extension records). Spills
+  retain only the record number, increment the deferred-cache overflow
+  counter, and fall back to targeted disk reads.
 - I/O thread startup failure increments the `scan_pipeline_fallbacks` counter + degrades to sequential reads (does not stay silent)
 - `fmf io-probe` is kept on hand as a measurement tool
 

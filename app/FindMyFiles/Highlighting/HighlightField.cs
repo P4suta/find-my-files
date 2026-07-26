@@ -4,7 +4,7 @@ namespace FindMyFiles.Highlighting;
 /// Which displayed string a highlight term is matched against — the file
 /// name leaf, or the full path (parent + name).
 /// </summary>
-public enum HighlightField
+internal enum HighlightField
 {
     /// <summary>The file/folder name (leaf).</summary>
     Name,

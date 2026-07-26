@@ -34,7 +34,7 @@ namespace FindMyFiles.Virtualization;
     "Design",
     "CA1010:Generic interface should also be implemented",
     Justification = "WinUI data virtualization requires the non-generic IList surface (microsoft-ui-xaml#1809); generic-only does not virtualize")]
-public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsRangeInfo
+internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsRangeInfo, IDisposable
 {
     internal const int PageSize = 64;
     private const int MaxCachedPages = 64; // ≈4096 rows
@@ -82,6 +82,10 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// <see cref="int.MaxValue"/> — the fixed size the ListView virtualizes
     /// against. Out-of-range indexers throw rather than fetch.</summary>
     public int Count { get; private set; }
+
+    /// <summary>The live result whose rows are currently presented. It is
+    /// passed back only as an opaque identity basis for the next query.</summary>
+    internal ISearchResult? PresentationBasis => _result;
 
     /// <summary>
     /// Visible (first, last) indexes from the most recent RangesChanged —
@@ -395,7 +399,11 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         {
             // Anything else is a real bug: log it, tell the user once (not
             // once per page — scrolling would cause a notification storm).
-            FileLog.Error("virtualization", $"page fetch failed (page {page})", ex);
+            FileLog.ErrorEvent(
+                "virtualization",
+                "page fetch failed",
+                ex,
+                ("page", page));
             if (!_fetchFailureNotified)
             {
                 _fetchFailureNotified = true;
@@ -442,6 +450,11 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
     /// </summary>
     public void Dispose()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
 
         // Cancel first so in-flight fetches stop, then dispose: _disposed is
@@ -451,6 +464,9 @@ public sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsR
         _fetchCts.Cancel();
         _fetchCts.Dispose();
         _result?.Dispose();
+        _result = null;
+        BecameStale = null;
+        CollectionChanged = null;
     }
 
     // ── IList boilerplate (read-only) ───────────────────────────────────

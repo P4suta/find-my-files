@@ -10,7 +10,7 @@ use core::mem::{align_of, offset_of, size_of};
 
 use crate::volume;
 
-/// 48-byte result row, no internal padding. Offsets index into the page's
+/// 56-byte result row, no padding. Offsets index into the page's
 /// trailing string blob (WTF-8). Mirrored by C# `LayoutKind.Explicit`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,18 +30,21 @@ pub struct FmfRow {
     /// Packed entry attribute flags (hidden/system/directory bits).
     pub flags: u32,
     /// File name length in bytes within the string blob (WTF-8).
-    pub name_len: u16,
+    pub name_len: u32,
     /// Parent path length in bytes within the string blob (WTF-8).
-    pub parent_path_len: u16,
+    pub parent_path_len: u32,
+    /// Reserved for a future additive row flag; always zero in v3.
+    #[expect(clippy::pub_underscore_fields, reason = "C ABI reserved field")]
+    pub _reserved: u32,
 }
 
 impl FmfRow {
-    /// Size of one row in bytes (48).
+    /// Size of one row in bytes (56).
     pub const LEN: usize = size_of::<Self>();
 }
 
 const _: () = {
-    assert!(size_of::<FmfRow>() == 48);
+    assert!(size_of::<FmfRow>() == 56);
     assert!(align_of::<FmfRow>() == 8);
     assert!(offset_of!(FmfRow, entry_ref) == 0);
     assert!(offset_of!(FmfRow, frn) == 8);
@@ -51,11 +54,13 @@ const _: () = {
     assert!(offset_of!(FmfRow, parent_path_off) == 36);
     assert!(offset_of!(FmfRow, flags) == 40);
     assert!(offset_of!(FmfRow, name_len) == 44);
-    assert!(offset_of!(FmfRow, parent_path_len) == 46);
+    assert!(offset_of!(FmfRow, parent_path_len) == 48);
+    assert!(offset_of!(FmfRow, _reserved) == 52);
 };
 
-/// FFI page: one contiguous engine-allocated block (row array + string
-/// blob). Pointers, so FFI-only — the pipe sends rows and blob inline.
+/// FFI page descriptor for an engine-owned row array and string blob.
+/// Pointers and the monotonic allocation-owner ID make this FFI-only — the
+/// pipe sends rows and blob inline.
 #[repr(C)]
 pub struct FmfPage {
     /// Number of rows in the `rows` array.
@@ -72,19 +77,25 @@ pub struct FmfPage {
     /// C ABI padding (reserved; always 0).
     #[expect(clippy::pub_underscore_fields, reason = "C ABI padding/reserved field")]
     pub _pad2: u32,
+    /// Monotonic allocation-owner ID passed to `fmf_page_free`.
+    ///
+    /// Zero means no allocation. IDs are never reused, so a stale descriptor
+    /// cannot free a newer allocation whose address happened to be recycled.
+    pub owner_id: u64,
 }
 
 const _: () = {
-    assert!(size_of::<FmfPage>() == 32);
+    assert!(size_of::<FmfPage>() == 40);
     assert!(align_of::<FmfPage>() == 8);
     assert!(offset_of!(FmfPage, row_count) == 0);
     assert!(offset_of!(FmfPage, rows) == 8);
     assert!(offset_of!(FmfPage, blob) == 16);
     assert!(offset_of!(FmfPage, blob_len) == 24);
+    assert!(offset_of!(FmfPage, owner_id) == 32);
 };
 
-/// Engine-allocated UTF-8 JSON payload (stats, query traces); release with
-/// `fmf_blob_free`.
+/// Engine-owned UTF-8 JSON payload (stats, query traces); release its
+/// monotonic allocation-owner ID with `fmf_blob_free`.
 #[repr(C)]
 pub struct FmfBlob {
     /// Pointer to the UTF-8 JSON payload bytes.
@@ -94,14 +105,19 @@ pub struct FmfBlob {
     /// C ABI padding (reserved; always 0).
     #[expect(clippy::pub_underscore_fields, reason = "C ABI padding/reserved field")]
     pub _pad: u32,
+    /// Monotonic allocation-owner ID passed to `fmf_blob_free`.
+    ///
+    /// Zero means no allocation. IDs are never reused.
+    pub owner_id: u64,
 }
 
 const _: () = {
-    assert!(size_of::<FmfBlob>() == 16);
+    assert!(size_of::<FmfBlob>() == 24);
     assert!(align_of::<FmfBlob>() == 8);
     assert!(offset_of!(FmfBlob, data) == 0);
     assert!(offset_of!(FmfBlob, len) == 8);
     assert!(offset_of!(FmfBlob, _pad) == 12);
+    assert!(offset_of!(FmfBlob, owner_id) == 16);
 };
 
 /// POD event payload — FFI callback argument and pipe event-push body
@@ -151,8 +167,9 @@ const _: () = {
     assert!(offset_of!(FmfEvent, volume) == 16);
 };
 
-/// Query options — 20 bytes, no padding, LE on the wire. Field values are
-/// the [`crate::options`] enums as u32.
+/// Query options — 32 bytes, LE on the wire. Field values are the
+/// [`crate::options`] enums as u32. The explicit reserved word makes the
+/// `u64` basis naturally aligned in both Rust and C.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FmfQueryOptions {
@@ -167,23 +184,33 @@ pub struct FmfQueryOptions {
     /// Packed regex mode (ADR-0023): bit0 = treat the whole query as one
     /// regex, bit1 = scope (0 = file name, 1 = full path). 0 = off (the
     /// query parses normally; `regex:` per-term syntax still works). Higher
-    /// bits are reserved 0, so a future flag keeps `LEN` at 20.
+    /// bits are reserved 0.
     pub regex_mode: u32,
+    /// Reserved; callers and wire decoders require zero.
+    #[expect(clippy::pub_underscore_fields, reason = "C ABI reserved field")]
+    pub _reserved: u32,
+    /// Optional live result handle currently presented by the caller.
+    /// Zero means no basis. The boundary validates ownership before passing
+    /// the referenced `ResultSet` to core; this opaque ID is never interpreted
+    /// by core itself.
+    pub presentation_basis: u64,
 }
 
 impl FmfQueryOptions {
-    /// Size of the options struct in bytes (20).
+    /// Size of the options struct in bytes (32).
     pub const LEN: usize = size_of::<Self>();
 }
 
 const _: () = {
-    assert!(size_of::<FmfQueryOptions>() == 20);
-    assert!(align_of::<FmfQueryOptions>() == 4);
+    assert!(size_of::<FmfQueryOptions>() == 32);
+    assert!(align_of::<FmfQueryOptions>() == 8);
     assert!(offset_of!(FmfQueryOptions, sort) == 0);
     assert!(offset_of!(FmfQueryOptions, desc) == 4);
     assert!(offset_of!(FmfQueryOptions, case_mode) == 8);
     assert!(offset_of!(FmfQueryOptions, include_hidden_system) == 12);
     assert!(offset_of!(FmfQueryOptions, regex_mode) == 16);
+    assert!(offset_of!(FmfQueryOptions, _reserved) == 20);
+    assert!(offset_of!(FmfQueryOptions, presentation_basis) == 24);
 };
 
 /// FFI volume status. `state` is [`crate::options::VolumeState`] as u32.

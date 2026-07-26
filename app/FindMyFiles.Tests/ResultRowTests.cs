@@ -77,6 +77,34 @@ public sealed class ResultRowTests
     }
 
     [Fact]
+    public void AutomationIdentity_IsStableAndNamePublishesAfterFill()
+    {
+        var row = ResultRow.CreatePlaceholder(42);
+        var automationNameChanges = 0;
+        row.PropertyChanged += (_, e) =>
+        {
+            if (string.Equals(
+                e.PropertyName,
+                nameof(ResultRow.AutomationName),
+                StringComparison.Ordinal))
+            {
+                automationNameChanges++;
+            }
+        };
+
+        Assert.Equal("ResultRow-42", row.AutomationId);
+        Assert.Empty(row.AutomationName);
+
+        row.Fill(Rows.File(7, "report.txt", 2048));
+
+        Assert.Equal("ResultRow-42", row.AutomationId);
+        Assert.Contains("report.txt", row.AutomationName, StringComparison.Ordinal);
+        Assert.Contains(row.ParentPath, row.AutomationName, StringComparison.Ordinal);
+        Assert.Contains("2 KB", row.AutomationName, StringComparison.Ordinal);
+        Assert.Equal(1, automationNameChanges);
+    }
+
+    [Fact]
     public void Fill_WithHighlighter_PopulatesNameRanges()
     {
         var row = ResultRow.CreatePlaceholder(0);

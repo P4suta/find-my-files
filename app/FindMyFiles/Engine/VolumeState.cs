@@ -2,7 +2,7 @@ namespace FindMyFiles.Engine;
 
 /// <summary>Lifecycle of a volume's index (wire values of fmf-core's
 /// <c>VolumeState</c>), reported via <see cref="IEngineClient.VolumeUpdated"/>.</summary>
-public enum VolumeState
+internal enum VolumeState
 {
     /// <summary>Initial scan in progress; results are incomplete.</summary>
     Scanning = 0,

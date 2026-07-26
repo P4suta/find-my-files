@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::path::Path;
 
 use anyhow::{bail, Result};
 use toml_edit::DocumentMut;
@@ -52,17 +53,13 @@ impl Check {
     fn info(name: &str, detail: &str) -> Self {
         Self::new(Status::Info, name, detail)
     }
-    fn warn(name: &str, detail: &str) -> Self {
-        Self::new(Status::Warn, name, detail)
-    }
     fn fail(name: &str, detail: &str) -> Self {
         Self::new(Status::Fail, name, detail)
     }
 }
 
-// Pull the bare-name tool pins out of a mise.toml `[tools]` table (rust, dotnet,
-// just, lefthook). Keys carrying a backend prefix (`cargo:`, `github:`) and
-// non-string values are skipped — doctor only probes tools it can run directly.
+// Pull every string tool pin out of mise.toml. Backend-qualified tools are kept:
+// a required cargo subcommand must not disappear behind a falsely green doctor.
 fn parse_mise_pins(mise_toml: &str) -> BTreeMap<String, String> {
     let mut pins = BTreeMap::new();
     let Ok(doc) = mise_toml.parse::<DocumentMut>() else {
@@ -72,9 +69,6 @@ fn parse_mise_pins(mise_toml: &str) -> BTreeMap<String, String> {
         return pins;
     };
     for (key, value) in tools {
-        if key.contains(':') {
-            continue;
-        }
         if let Some(v) = value.as_str() {
             pins.insert(key.to_owned(), v.to_owned());
         }
@@ -95,26 +89,38 @@ fn version_satisfies(pin: &str, actual: &str) -> bool {
     true
 }
 
-// The first whitespace-separated token that starts with a digit — pulls
-// "1.95.0" out of "rustc 1.95.0 (hash 2026-..)" and leaves "10.0.118" intact.
+// The first whitespace-separated version token. Accept Node-style `v24.1.0`
+// as well as `rustc 1.95.0` and return the numeric part.
 fn first_version_token(raw: &str) -> Option<&str> {
-    raw.split_whitespace()
-        .find(|tok| tok.as_bytes().first().is_some_and(u8::is_ascii_digit))
+    raw.split_whitespace().find_map(|tok| {
+        let numeric = tok.strip_prefix('v').unwrap_or(tok);
+        numeric
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_digit)
+            .then_some(numeric)
+    })
 }
 
 // Probe one tool: compare the version it reports against its mise pin.
-fn tool_check(name: &str, program: &str, args: &[&str], pins: &BTreeMap<String, String>) -> Check {
-    let Some(pin) = pins.get(name) else {
-        return Check::warn(name, "not pinned in mise.toml");
+fn tool_check(
+    name: &str,
+    pin_key: &str,
+    program: &str,
+    args: &[&str],
+    pins: &BTreeMap<String, String>,
+) -> Check {
+    let Some(pin) = pins.get(pin_key) else {
+        return Check::fail(name, "not pinned in mise.toml");
     };
     let Some(raw) = cmd::capture(&paths::repo_root(), program, args) else {
-        return Check::warn(
+        return Check::fail(
             name,
             &format!("pinned {pin}, but `{program}` is not on PATH — run `mise install`"),
         );
     };
     let Some(actual) = first_version_token(&raw) else {
-        return Check::warn(
+        return Check::fail(
             name,
             &format!("pinned {pin}, but `{program}` reported an unparsable version"),
         );
@@ -122,7 +128,7 @@ fn tool_check(name: &str, program: &str, args: &[&str], pins: &BTreeMap<String, 
     if version_satisfies(pin, actual) {
         Check::ok(name, &format!("{actual} (pin {pin})"))
     } else {
-        Check::warn(
+        Check::fail(
             name,
             &format!("pinned {pin}, found {actual} — run `mise install`"),
         )
@@ -147,23 +153,96 @@ fn elevation_detail() -> String {
     "n/a (non-Windows host)".to_owned()
 }
 
-// ADR-0021: every build artifact lives under build/. A resurrected engine/target
-// or xtask/target is a regression worth flagging.
-fn build_layout_check() -> Check {
-    let root = paths::repo_root();
-    let strays: Vec<&str> = ["engine/target", "xtask/target"]
-        .into_iter()
-        .filter(|&rel| root.join(rel).exists())
+// ADR-0021: every generated artifact except C# obj lives under build/. The
+// required `build/` ignore rule also matches nested directories, and the WinUI
+// project's local ignore file masks its conventional output directories, so
+// doctor probes these paths directly instead of relying on `git status`.
+const MISPLACED_OUTPUT_PATHS: &[&str] = &[
+    "target",
+    "engine/target",
+    "xtask/target",
+    "engine/fuzz/target",
+    "engine/engine-lcov.info",
+    "engine/mutants.out",
+    "engine/mutants.out.old",
+    "docfx/build",
+    "app/FindMyFiles.Tests/build",
+    "app/FindMyFiles.Tests/coverage.json",
+    "app/FindMyFiles.Tests/TestResults",
+    "app/FindMyFiles.Tests/StrykerOutput",
+    "app/FindMyFiles.Tests/UiAutomation/artifacts",
+];
+
+const APP_LOCAL_OUTPUT_DIR_NAMES: &[&str] = &[
+    "bin",
+    "debug",
+    "release",
+    "artifacts",
+    "log",
+    "logs",
+    "AppPackages",
+    "BundleArtifacts",
+    "publish",
+    "PublishScripts",
+    "Generated Files",
+];
+
+fn is_app_local_output_dir(name: &str) -> bool {
+    APP_LOCAL_OUTPUT_DIR_NAMES
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        || name
+            .get(.."testresult".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("testresult"))
+}
+
+fn build_layout_strays(root: &Path) -> Vec<String> {
+    let mut strays: Vec<String> = MISPLACED_OUTPUT_PATHS
+        .iter()
+        .filter(|rel| root.join(rel).exists())
+        .map(|rel| (*rel).to_owned())
         .collect();
+
+    let app_dir = root.join("app").join("FindMyFiles");
+    if let Ok(entries) = std::fs::read_dir(app_dir) {
+        for entry in entries.filter_map(Result::ok) {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if is_app_local_output_dir(&name) {
+                strays.push(format!("app/FindMyFiles/{name}"));
+            }
+        }
+    }
+
+    strays.sort();
+    strays.dedup();
+    strays
+}
+
+fn build_layout_check_at(root: &Path) -> Check {
+    let strays = build_layout_strays(root);
     if strays.is_empty() {
-        Check::ok("build/ layout", "no stray target/ dirs (ADR-0021)")
+        Check::ok(
+            "build/ layout",
+            "no generated output outside build/ (ADR-0021)",
+        )
     } else {
-        let dirs = strays.join(", ");
+        let paths = strays.join(", ");
         Check::fail(
             "build/ layout",
-            &format!("stray cargo target dir(s): {dirs} — delete; output belongs under build/ (ADR-0021)"),
+            &format!(
+                "stray generated path(s): {paths} — delete; output belongs under build/ (ADR-0021)"
+            ),
         )
     }
+}
+
+fn build_layout_check() -> Check {
+    let root = paths::repo_root();
+    build_layout_check_at(&root)
 }
 
 fn render(checks: &[Check]) -> String {
@@ -212,13 +291,94 @@ pub fn run() -> Result<()> {
     };
     let mut checks = vec![mise];
 
-    for (name, program, args) in [
-        ("rust", "rustc", &["--version"][..]),
-        ("dotnet", "dotnet", &["--version"][..]),
-        ("just", "just", &["--version"][..]),
-        ("lefthook", "lefthook", &["version"][..]),
+    for (name, pin_key, program, args) in [
+        ("rust", "rust", "rustc", &["--version"][..]),
+        ("dotnet", "dotnet", "dotnet", &["--version"][..]),
+        (
+            "node",
+            "node",
+            "mise",
+            &["exec", "node", "--command", "node --version"][..],
+        ),
+        (
+            "winapp",
+            "npm:@microsoft/winappcli",
+            "winapp",
+            &["--version"][..],
+        ),
+        ("just", "just", "just", &["--version"][..]),
+        ("lefthook", "lefthook", "lefthook", &["version"][..]),
+        (
+            "cargo-llvm-cov",
+            "cargo:cargo-llvm-cov",
+            "cargo",
+            &["llvm-cov", "--version"][..],
+        ),
+        (
+            "cargo-nextest",
+            "cargo:cargo-nextest",
+            "cargo",
+            &["nextest", "--version"][..],
+        ),
+        (
+            "cargo-deny",
+            "cargo:cargo-deny",
+            "cargo",
+            &["deny", "--version"][..],
+        ),
+        (
+            "cargo-machete",
+            "cargo:cargo-machete",
+            "cargo-machete",
+            &["--version"][..],
+        ),
+        (
+            "cargo-about",
+            "cargo:cargo-about",
+            "cargo",
+            &["about", "--version"][..],
+        ),
+        (
+            "cargo-mutants",
+            "cargo:cargo-mutants",
+            "cargo",
+            &["mutants", "--version"][..],
+        ),
+        ("samply", "cargo:samply", "samply", &["--version"][..]),
+        ("bacon", "cargo:bacon", "bacon", &["--version"][..]),
+        (
+            "mdbook",
+            "cargo:mdbook",
+            "mise",
+            &["exec", "cargo:mdbook", "--command", "mdbook --version"][..],
+        ),
+        ("taplo", "cargo:taplo-cli", "taplo", &["--version"][..]),
+        ("typos", "cargo:typos-cli", "typos", &["--version"][..]),
+        (
+            "committed",
+            "cargo:committed",
+            "committed",
+            &["--version"][..],
+        ),
+        (
+            "actionlint",
+            "github:rhysd/actionlint",
+            "actionlint",
+            &["--version"][..],
+        ),
+        (
+            "zizmor",
+            "github:zizmorcore/zizmor",
+            "mise",
+            &[
+                "exec",
+                "github:zizmorcore/zizmor",
+                "--command",
+                "zizmor --version",
+            ][..],
+        ),
     ] {
-        checks.push(tool_check(name, program, args, &pins));
+        checks.push(tool_check(name, pin_key, program, args, &pins));
     }
 
     checks.push(Check::info("elevation", &elevation_detail()));
@@ -248,14 +408,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_bare_pins_and_skips_backends() {
+    fn parses_bare_and_backend_pins() {
         let toml = "\
 [tools]
 rust = \"1.95\"
 dotnet = \"10\"
+node = \"24\"
+\"npm:@microsoft/winappcli\" = \"0.3.1\"
 just = \"1\"
 \"cargo:samply\" = \"0.13.1\"
+\"cargo:cargo-nextest\" = \"0.9.140\"
 \"github:rhysd/actionlint\" = \"1.7.7\"
+\"github:zizmorcore/zizmor\" = \"1.28.0\"
 
 [settings]
 cargo.binstall = true
@@ -263,10 +427,26 @@ cargo.binstall = true
         let pins = parse_mise_pins(toml);
         assert_eq!(pins.get("rust").map(String::as_str), Some("1.95"));
         assert_eq!(pins.get("dotnet").map(String::as_str), Some("10"));
+        assert_eq!(pins.get("node").map(String::as_str), Some("24"));
+        assert_eq!(
+            pins.get("npm:@microsoft/winappcli").map(String::as_str),
+            Some("0.3.1")
+        );
         assert_eq!(pins.get("just").map(String::as_str), Some("1"));
-        assert!(!pins.contains_key("cargo:samply"));
-        assert!(!pins.contains_key("github:rhysd/actionlint"));
-        assert_eq!(pins.len(), 3);
+        assert_eq!(pins.get("cargo:samply").map(String::as_str), Some("0.13.1"));
+        assert_eq!(
+            pins.get("cargo:cargo-nextest").map(String::as_str),
+            Some("0.9.140")
+        );
+        assert_eq!(
+            pins.get("github:rhysd/actionlint").map(String::as_str),
+            Some("1.7.7")
+        );
+        assert_eq!(
+            pins.get("github:zizmorcore/zizmor").map(String::as_str),
+            Some("1.28.0")
+        );
+        assert_eq!(pins.len(), 9);
     }
 
     #[test]
@@ -289,6 +469,7 @@ cargo.binstall = true
         );
         assert_eq!(first_version_token("just 1.53.0"), Some("1.53.0"));
         assert_eq!(first_version_token("10.0.118"), Some("10.0.118"));
+        assert_eq!(first_version_token("v24.4.0"), Some("24.4.0"));
         assert_eq!(first_version_token("no version here"), None);
     }
 
@@ -296,9 +477,9 @@ cargo.binstall = true
     fn overall_is_the_worst_status() {
         let ok = vec![Check::ok("a", ""), Check::info("b", "")];
         assert_eq!(overall(&ok), Status::Ok);
-        let warn = vec![Check::ok("a", ""), Check::warn("b", "")];
+        let warn = vec![Check::ok("a", ""), Check::new(Status::Warn, "b", "")];
         assert_eq!(overall(&warn), Status::Warn);
-        let fail = vec![Check::warn("a", ""), Check::fail("b", "")];
+        let fail = vec![Check::new(Status::Warn, "a", ""), Check::fail("b", "")];
         assert_eq!(overall(&fail), Status::Fail);
     }
 
@@ -310,5 +491,92 @@ cargo.binstall = true
         assert!(out.contains("[FAIL]"));
         assert!(out.contains("alpha"));
         assert!(out.contains("broken"));
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("xtask-doctor-{tag}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn build_layout_allows_root_build_and_csharp_obj() {
+        let root = scratch("layout-allowed");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("build").join("engine")).unwrap();
+        std::fs::create_dir_all(root.join("app").join("FindMyFiles").join("obj")).unwrap();
+        std::fs::create_dir_all(root.join("app").join("FindMyFiles.Tests").join("obj")).unwrap();
+
+        let check = build_layout_check_at(&root);
+
+        assert_eq!(check.status, Status::Ok);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn build_layout_detects_nested_build_directories_hidden_by_ignore_rule() {
+        let root = scratch("layout-nested-build");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("docfx").join("build")).unwrap();
+        let coverage = root
+            .join("app")
+            .join("FindMyFiles.Tests")
+            .join("build")
+            .join("cov.xml");
+        std::fs::create_dir_all(coverage.parent().unwrap()).unwrap();
+        std::fs::write(coverage, b"coverage").unwrap();
+
+        let check = build_layout_check_at(&root);
+
+        assert_eq!(check.status, Status::Fail);
+        assert!(check.detail.contains("docfx/build"));
+        assert!(check.detail.contains("app/FindMyFiles.Tests/build"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn build_layout_detects_app_local_outputs_but_not_obj() {
+        let root = scratch("layout-app-output");
+        let _ = std::fs::remove_dir_all(&root);
+        let app = root.join("app").join("FindMyFiles");
+        for name in [
+            "Bin",
+            "Debug",
+            "Release",
+            "artifacts",
+            "Logs",
+            "AppPackages",
+            "BundleArtifacts",
+            "publish",
+            "PublishScripts",
+            "Generated Files",
+            "TestResults-2026",
+        ] {
+            std::fs::create_dir_all(app.join(name)).unwrap();
+        }
+        std::fs::create_dir_all(app.join("obj")).unwrap();
+
+        let check = build_layout_check_at(&root);
+
+        assert_eq!(check.status, Status::Fail);
+        for name in [
+            "Bin",
+            "Debug",
+            "Release",
+            "artifacts",
+            "Logs",
+            "AppPackages",
+            "BundleArtifacts",
+            "publish",
+            "PublishScripts",
+            "Generated Files",
+            "TestResults-2026",
+        ] {
+            assert!(
+                check.detail.contains(&format!("app/FindMyFiles/{name}")),
+                "missing {name} from {}",
+                check.detail
+            );
+        }
+        assert!(!check.detail.contains("app/FindMyFiles/obj"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

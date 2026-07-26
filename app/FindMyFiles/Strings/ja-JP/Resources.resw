@@ -82,44 +82,31 @@
   <data name="About_EngineVersion" xml:space="preserve"><value>エンジン: v{0}</value></data>
   <data name="AboutVersionMismatch.Title" xml:space="preserve"><value>バージョン不一致</value></data>
   <data name="AboutVersionMismatch.Message" xml:space="preserve"><value>アプリとエンジンのビルドが異なります。アプリを再起動するか、両方が一致するよう更新してください。</value></data>
-  <data name="DiagCard.Header" xml:space="preserve"><value>診断情報を表示/隠す</value></data>
+  <data name="DiagCard.Header" xml:space="preserve"><value>診断</value></data>
+  <data name="DiagCard.Description" xml:space="preserve"><value>ログ、エンジンの状態、パフォーマンス指標を確認します。</value></data>
   <data name="ServiceCard.Header" xml:space="preserve"><value>サービスの管理…</value></data>
+  <data name="ServiceCard.Description" xml:space="preserve"><value>検索サービスの修復、再起動、アンインストールを行います。</value></data>
   <data name="LangMenu.Header" xml:space="preserve"><value>言語</value></data>
   <data name="LangSystem.Content" xml:space="preserve"><value>システム既定</value></data>
   <data name="MnuOpen.Text" xml:space="preserve"><value>開く</value></data>
   <data name="MnuOpenPath.Text" xml:space="preserve"><value>フォルダーを開いてファイルを選択</value></data>
   <data name="MnuCopyPath.Text" xml:space="preserve"><value>パスをコピー</value></data>
-  <data name="SetupTitle.Text" xml:space="preserve"><value>ファイル検索をはじめましょう</value></data>
-  <data name="SetupBody.Text" xml:space="preserve"><value>全ドライブをまるごと索引するのが最速で、何でも見つかります。最初に一度だけ管理者の許可で準備します。</value></data>
+  <data name="SetupTitle.Text" xml:space="preserve"><value>ファイル検索を準備しましょう</value></data>
+  <data name="SetupBody.Text" xml:space="preserve"><value>NTFS ドライブを高速に索引するため、ローカルの Windows サービスを使います。初回だけ管理者の許可で有効にします。以前の設定を修復する場合は「設定と修復」を開いてください。</value></data>
   <data name="EnableSearch.Content" xml:space="preserve"><value>検索を有効にする</value></data>
-  <data name="SetupOrDivider.Text" xml:space="preserve"><value>— または —</value></data>
-  <data name="ScopeSetupLink.Content" xml:space="preserve"><value>管理者権限がない場合はこちら</value></data>
-  <data name="ScopeDialog_SetupTitle" xml:space="preserve"><value>検索フォルダを選ぶ</value></data>
-  <data name="ScopeDialog_SetupStart" xml:space="preserve"><value>選んだフォルダで検索を始める</value></data>
-  <data name="ScopeCard.Header" xml:space="preserve"><value>検索フォルダを変更…</value></data>
-  <data name="SettingsDialog.Title" xml:space="preserve"><value>設定</value></data>
-  <data name="SettingsDialog.CloseButtonText" xml:space="preserve"><value>閉じる</value></data>
+  <data name="SetupRecovery.Content" xml:space="preserve"><value>設定と修復</value></data>
+  <data name="SettingsDialogRoot.Title" xml:space="preserve"><value>設定</value></data>
+  <data name="SettingsDialogRoot.CloseButtonText" xml:space="preserve"><value>閉じる</value></data>
   <data name="SettingsGroup_Search.Text" xml:space="preserve"><value>検索</value></data>
   <data name="SettingsGroup_General.Text" xml:space="preserve"><value>全般</value></data>
   <data name="SettingsGroup_Advanced.Text" xml:space="preserve"><value>詳細</value></data>
   <data name="SortDescendingCard.Header" xml:space="preserve"><value>降順</value></data>
-  <data name="ActionOpen.Content" xml:space="preserve"><value>開く</value></data>
-  <data name="ScopeDialog.Title" xml:space="preserve"><value>検索フォルダ</value></data>
-  <data name="ScopeDialog.PrimaryButtonText" xml:space="preserve"><value>変更して再起動</value></data>
-  <data name="ScopeDialog.CloseButtonText" xml:space="preserve"><value>キャンセル</value></data>
-  <data name="ScopeDialogBody.Text" xml:space="preserve"><value>フォルダは何個でも追加できます(それぞれを検索します)。適用すると再索引のためアプリを再起動します。</value></data>
-  <data name="ScopeDialogAddFolder.Content" xml:space="preserve"><value>フォルダを追加…</value></data>
-  <data name="Status_ModeScope" xml:space="preserve"><value>モード: 選択フォルダ</value></data>
+  <data name="DiagOpen.Content" xml:space="preserve"><value>診断を開く</value></data>
+  <data name="ServiceOpen.Content" xml:space="preserve"><value>サービスを管理</value></data>
   <data name="Status_ModePrivileged" xml:space="preserve"><value>モード: 全ドライブ</value></data>
-  <data name="Scope_OpenFailed" xml:space="preserve"><value>検索フォルダを開けませんでした</value></data>
   <data name="Settings_OpenFailed" xml:space="preserve"><value>設定を開けませんでした</value></data>
   <data name="NoResultsTitle.Text" xml:space="preserve"><value>結果が見つかりません</value></data>
   <data name="NoResults_Body" xml:space="preserve"><value>「{0}」に一致する結果はありません</value></data>
-  <data name="ScopeDialogExcludesHeader.Text" xml:space="preserve"><value>除外するサブフォルダ</value></data>
-  <data name="ScopeDialogExcludesBody.Text" xml:space="preserve"><value>上のフォルダの中で索引したくないもの(node_modules やビルド出力など)。適用すると再walkします。</value></data>
-  <data name="ScopeDialogAddExclude.Content" xml:space="preserve"><value>除外フォルダを追加…</value></data>
-  <data name="Scope_CoverageNote" xml:space="preserve"><value>選択済みのより大きなフォルダに含まれます(統合されます): {0}</value></data>
-  <data name="Scope_ExcludeNotUnderRoot" xml:space="preserve"><value>除外フォルダは検索フォルダのいずれかの中にある必要があります。</value></data>
   <data name="SvcDialog.Title" xml:space="preserve"><value>サービスの管理</value></data>
   <data name="SvcDialog.CloseButtonText" xml:space="preserve"><value>閉じる</value></data>
   <data name="SvcSubtitle.Text" xml:space="preserve"><value>fmf-engine(ファイル名検索サービス)</value></data>
@@ -131,8 +118,12 @@
   <data name="SvcRestart.Content" xml:space="preserve"><value>再起動</value></data>
   <data name="SvcRegister.Content" xml:space="preserve"><value>登録して開始</value></data>
   <data name="SvcReregister.Content" xml:space="preserve"><value>登録し直す</value></data>
-  <data name="SvcUninstall.Content" xml:space="preserve"><value>解除</value></data>
-  <data name="SvcPurgeData.Content" xml:space="preserve"><value>索引・ログも削除</value></data>
+  <data name="SvcUninstall.Content" xml:space="preserve"><value>サービスだけを解除</value></data>
+  <data name="SvcPurgeData.Content" xml:space="preserve"><value>Find My Files の全データを削除…</value></data>
+  <data name="SvcPurgeConfirmTitle.Text" xml:space="preserve"><value>Find My Files の全データを削除しますか？</value></data>
+  <data name="SvcPurgeConfirmBody.Text" xml:space="preserve"><value>サービスが登録済みなら、サービスとスケジュールタスクも解除します。%ProgramData%\find-my-files のすべてのエンジンデータと、%APPDATA%\find-my-files の UI 設定・アプリログを完全に削除します。Find My Files は終了します。</value></data>
+  <data name="SvcPurgeConfirm.Content" xml:space="preserve"><value>全データを削除</value></data>
+  <data name="SvcPurgeCancel.Content" xml:space="preserve"><value>キャンセル</value></data>
   <data name="SvcRestartApp.Content" xml:space="preserve"><value>アプリを再起動</value></data>
   <data name="CopyDiag.Content" xml:space="preserve"><value>診断情報をコピー</value></data>
   <data name="DiagLastQueryHeader.Text" xml:space="preserve"><value>直近クエリ</value></data>
@@ -158,6 +149,7 @@
   <data name="Tray_Tooltip" xml:space="preserve"><value>find-my-files</value></data>
   <data name="OptionsButton_ToolTip" xml:space="preserve"><value>設定・状態・診断(絞り込み/隠しファイル/並べ替え/件数/エンジン/診断)</value></data>
   <data name="OptionsButton_Name" xml:space="preserve"><value>設定・状態・診断</value></data>
+  <data name="ResultsList_Name" xml:space="preserve"><value>検索結果</value></data>
   <data name="DiagWindowTitle" xml:space="preserve"><value>診断</value></data>
 
   <data name="Status_Preparing" xml:space="preserve"><value>準備中…</value></data>
@@ -195,7 +187,7 @@
 
   <data name="Setup_WaitingForPermission" xml:space="preserve"><value>管理者の許可を待っています…</value></data>
   <data name="Setup_Connecting" xml:space="preserve"><value>サービスに接続しています…</value></data>
-  <data name="Setup_Failed" xml:space="preserve"><value>セットアップに失敗しました。もう一度お試しください。</value></data>
+  <data name="Setup_Failed" xml:space="preserve"><value>セットアップに失敗しました。再試行するか、「設定と修復」で診断とサービスの修復を行えます。</value></data>
   <data name="Setup_PortableLocation" xml:space="preserve"><value>設定とインデックスは {0} に保存され、このフォルダの外には何も書き込みません。</value></data>
 
   <data name="Svc_StateChecking" xml:space="preserve"><value>確認中…</value></data>
@@ -204,14 +196,23 @@
   <data name="Svc_StateStopped" xml:space="preserve"><value>停止中</value></data>
   <data name="Svc_StateRunningPid" xml:space="preserve"><value>実行中 (PID {0})</value></data>
   <data name="Svc_StateRunning" xml:space="preserve"><value>実行中</value></data>
+  <data name="Svc_StateUnavailable" xml:space="preserve"><value>サービス状態を確認できません</value></data>
   <data name="Svc_Started" xml:space="preserve"><value>サービスを開始しました</value></data>
   <data name="Svc_Stopped" xml:space="preserve"><value>サービスを停止しました</value></data>
   <data name="Svc_Restarted" xml:space="preserve"><value>サービスを再起動しました</value></data>
   <data name="Svc_Registered" xml:space="preserve"><value>サービスを登録しました</value></data>
   <data name="Svc_Uninstalled" xml:space="preserve"><value>サービスを解除しました</value></data>
+  <data name="Svc_UninstalledWithData" xml:space="preserve"><value>サービスと FindMyFiles の全データを削除しました</value></data>
+  <data name="Svc_UserDataPurgeFailed" xml:space="preserve"><value>サービスとエンジンデータは削除しましたが、UI 設定またはアプリログを削除できませんでした。使用中のファイルを閉じてから、もう一度「Find My Files の全データを削除」を選んでください。</value></data>
+  <data name="Settings_SaveFailedTitle" xml:space="preserve"><value>設定を保存できませんでした</value></data>
+  <data name="Settings_SaveFailedBody" xml:space="preserve"><value>変更を元に戻しました。%APPDATA%\find-my-files へのアクセスを確認して、もう一度お試しください。</value></data>
+  <data name="Settings_LanguageSaveFailedBody" xml:space="preserve"><value>settings.json を保存できなかったため、言語は変更されませんでした。</value></data>
+  <data name="Diag_Copied" xml:space="preserve"><value>診断情報をクリップボードにコピーしました</value></data>
   <data name="Svc_Cancelled" xml:space="preserve"><value>UAC で取り消されました</value></data>
-  <data name="Svc_Failed" xml:space="preserve"><value>失敗しました(終了コード {0})。管理者ターミナルで `fmf-service {1}` を実行すると原因を確認できます</value></data>
+  <data name="Svc_Failed" xml:space="preserve"><value>失敗しました(終了コード {0})。もう一度お試しください。繰り返す場合は「設定と修復」→「診断」を開いてください。</value></data>
   <data name="Svc_RegisteredNotConfirmed" xml:space="preserve"><value>登録しましたが、まだ接続を確認できません。「アプリを再起動」を押すか、しばらくして再度お試しください。</value></data>
+  <data name="Svc_Incompatible" xml:space="preserve"><value>インストール済みサービスの版が異なります。再登録してエンジンを更新してください。</value></data>
+  <data name="Svc_ControlFailed" xml:space="preserve"><value>サービス操作に失敗しました。再登録して権限または版を修復してください。</value></data>
   <data name="Svc_OpenFailed" xml:space="preserve"><value>サービス管理を開けませんでした</value></data>
 
   <data name="Shell_OpenFailed" xml:space="preserve"><value>開けませんでした</value></data>
@@ -225,7 +226,7 @@
 
   <data name="App_LockedTitle" xml:space="preserve"><value>検索サービスが稼働中のため in-proc エンジンを使えません</value></data>
   <data name="App_LockedBody" xml:space="preserve"><value>通常起動でサービスに接続できます。in-proc を使う場合は先にサービスを停止してください(`just service-stop`)。</value></data>
-  <data name="App_EngineInitFailedTitle" xml:space="preserve"><value>検索エンジンの初期化に失敗しました(フォールバック動作中)</value></data>
+  <data name="App_EngineInitFailedTitle" xml:space="preserve"><value>検索エンジンを利用できません</value></data>
   <data name="App_EngineInitFailedBody" xml:space="preserve"><value>{0}
 fmf-service が未起動か、インデックスを他のエンジンがロックしている可能性があります(詳細は engine.log)。</value></data>
 

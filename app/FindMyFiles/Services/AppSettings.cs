@@ -8,11 +8,9 @@ namespace FindMyFiles.Services;
 /// owns. A corrupt file degrades to defaults: warn, quarantine as .bad, and
 /// the next save starts clean.
 /// </summary>
-public sealed class AppSettings
+internal sealed class AppSettings
 {
-    /// <summary>Engine transport: "auto" (pipe probe → FFI fallback),
-    /// "pipe", or "inproc". CLI flags override this.</summary>
-    public string Engine { get; set; } = "auto";
+    private const int MaxSettingsBytes = 16 * 1024;
 
     /// <summary>UI language: "auto" (follow the OS), "ja", "en", or "zh-Hans".
     /// Applied via PrimaryLanguageOverride in the App ctor; the gear menu's
@@ -43,51 +41,8 @@ public sealed class AppSettings
     /// toggle flips it and persists here.</summary>
     public bool CloseToTray { get; set; }
 
-    /// <summary>Noise directories excluded in focused mode, each appended as
-    /// a quoted <c>!path:"…"</c> term. Plain substring match against the full
-    /// path (engine semantics) — no wildcards needed.</summary>
-    public string[] FocusedExcludePaths { get; set; } =
-    [
-        @"\windows\",
-        @"\program files",
-        @"\programdata\",
-        @"\$recycle.bin\",
-        @"\node_modules\",
-        @"\.git\",
-        @"\__pycache__\",
-    ];
-
-    /// <summary>Extension whitelist applied in focused mode as a single
-    /// OR-semantics <c>ext:a;b;…</c> term: documents, images, audio, video,
-    /// archives and launchables — what a person actually goes looking for.</summary>
-    public string[] FocusedExtensions { get; set; } =
-    [
-        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv",
-        "jpg", "jpeg", "png", "gif", "webp", "svg", "heic",
-        "mp3", "wav", "flac", "m4a",
-        "mp4", "mkv", "mov", "avi",
-        "zip", "7z", "rar",
-        "exe", "msi", "lnk",
-    ];
-
-    /// <summary>Absolute paths of the root folders to index in non-elevated
-    /// scope mode (ADR-0024). Empty = unconfigured, and the setup screen mainly
-    /// pushes the admin path (all drives, fastest). One or more entries resolve
-    /// to <c>EngineChoice.WalkInProc</c> on the next launch, so folder-walk
-    /// search works on a corporate PC where neither the service nor admin rights
-    /// are available.</summary>
-    public string[] ScopeRoots { get; set; } = [];
-
-    /// <summary>Absolute subfolder paths pruned from the scope walk (ADR-0025).
-    /// Each must lie under one of <see cref="ScopeRoots"/>; the walk skips the
-    /// matching subtree so it is never indexed. Empty = index everything under
-    /// the roots.</summary>
-    public string[] ScopeExcludes { get; set; } = [];
-
-    /// <summary>Absolute path to the user-scope settings file. Portable by
-    /// default (<c>&lt;exe&gt;\data\settings.json</c>); falls back to
-    /// <c>%APPDATA%\find-my-files\settings.json</c> when the app folder is
-    /// read-only. See <see cref="AppPaths"/>.</summary>
+    /// <summary>Absolute path to the canonical user-scope settings file at
+    /// <c>%APPDATA%\find-my-files\settings.json</c>.</summary>
     public static string SettingsPath => AppPaths.SettingsFile;
 
     /// <summary>Load settings from <see cref="SettingsPath"/>, falling back to
@@ -104,15 +59,63 @@ public sealed class AppSettings
                 return new AppSettings();
             }
 
-            return JsonSerializer.Deserialize(File.ReadAllText(path), AppSettingsJsonContext.Default.AppSettings)
+            var settings =
+                JsonSerializer.Deserialize(
+                    ReadBounded(path),
+                    AppSettingsJsonContext.Default.AppSettings)
                 ?? new AppSettings();
+            settings.Normalize();
+            return settings;
         }
         catch (Exception ex)
         {
-            FileLog.Warn("settings", $"unreadable settings.json — using defaults ({path})", ex);
+            FileLog.Warn("settings", "unreadable settings.json — using defaults", ex);
             Quarantine(path);
             return new AppSettings();
         }
+    }
+
+    private static byte[] ReadBounded(string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 4096,
+            FileOptions.SequentialScan);
+        if (stream.Length > MaxSettingsBytes)
+        {
+            throw new InvalidDataException(
+                $"settings.json exceeds {MaxSettingsBytes} bytes");
+        }
+
+        var bytes = new byte[checked((int)stream.Length)];
+        stream.ReadExactly(bytes);
+        if (stream.ReadByte() != -1)
+        {
+            throw new InvalidDataException(
+                $"settings.json exceeds {MaxSettingsBytes} bytes");
+        }
+
+        return bytes;
+    }
+
+    /// <summary>
+    /// JSON can assign null to non-nullable reference properties and older or
+    /// hand-edited files can carry unsupported scalar values. Normalize every
+    /// persisted value before it reaches WinRT or query construction.
+    /// </summary>
+    private void Normalize()
+    {
+        Language = Language switch
+        {
+            "auto" or "ja" or "en" or "zh-Hans" => Language,
+            _ => "auto",
+        };
+        RegexScope = string.Equals(RegexScope, "path", StringComparison.Ordinal)
+            ? "path"
+            : "name";
     }
 
     private static void Quarantine(string path)
@@ -128,20 +131,64 @@ public sealed class AppSettings
     }
 
     /// <summary>Persist the current settings to <see cref="SettingsPath"/>
-    /// (snake_case JSON, indented). Best-effort: a write failure is logged, not
-    /// thrown.</summary>
-    public void Save() => SaveTo(SettingsPath);
+    /// (snake_case JSON, indented). A write failure is logged and returned to
+    /// the caller so UI state cannot claim an unpersisted change succeeded.</summary>
+    /// <returns>True only after the atomic replacement completed.</returns>
+    public bool Save() => SaveTo(SettingsPath);
 
-    internal void SaveTo(string path)
+    /// <summary>Path-parameterized persistence core.</summary>
+    /// <param name="path">Absolute settings file path to replace atomically.</param>
+    /// <returns>True only after the atomic replacement completed.</returns>
+    internal bool SaveTo(string path)
     {
+        string? temp = null;
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, JsonSerializer.Serialize(this, AppSettingsJsonContext.Default.AppSettings));
+            Normalize();
+            var directory = Path.GetDirectoryName(path)
+                ?? throw new ArgumentException("settings path has no parent directory", nameof(path));
+            Directory.CreateDirectory(directory);
+
+            temp = Path.Combine(
+                directory,
+                $".{Path.GetFileName(path)}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp");
+            var json = JsonSerializer.Serialize(this, AppSettingsJsonContext.Default.AppSettings);
+            using (var stream = new FileStream(
+                temp,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 4096,
+                FileOptions.WriteThrough))
+            using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false)))
+            {
+                writer.Write(json);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(temp, path, overwrite: true);
+            temp = null;
+            return true;
         }
         catch (Exception ex)
         {
             FileLog.Warn("settings", "failed to save settings.json", ex);
+            return false;
+        }
+        finally
+        {
+            if (temp is not null)
+            {
+                try
+                {
+                    File.Delete(temp);
+                }
+                catch (Exception ex)
+                {
+                    FileLog.Warn("settings", "failed to remove temporary settings file", ex);
+                }
+            }
         }
     }
 }

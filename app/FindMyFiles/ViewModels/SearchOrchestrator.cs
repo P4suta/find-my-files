@@ -6,19 +6,26 @@ namespace FindMyFiles.ViewModels;
 
 /// <summary>
 /// When and what to search: 50ms debounce on typing (clearing is instant), a
-/// generation counter that discards superseded responses, requery triggers
-/// (index changes, stale results) and exception classification. Results are
+/// per-query cancellation plus a generation counter that discards work which
+/// ignores cancellation, requery triggers (index changes, stale results) and
+/// exception classification. Results are
 /// handed to the <see cref="ResultsPresenter"/>; failures surface through
 /// <see cref="SearchFailed"/> so the ViewModel owns the user-facing wording.
 /// All entry points run on the UI thread.
 /// </summary>
-public sealed class SearchOrchestrator
+internal sealed class SearchOrchestrator : IDisposable
 {
     private readonly IEngineClient _engine;
+    private readonly EngineEventMarshaler _engineEvents;
     private readonly ResultsPresenter _presenter;
     private readonly Func<SearchRequest> _request;
     private readonly IDispatcherTimer _debounce;
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly Action _staleHandler;
+    private readonly Action<string> _indexChangedHandler;
+    private CancellationTokenSource? _activeQuery;
     private long _generation;
+    private int _disposed;
 
     /// <summary>Focused search: when on, the user's query is rewritten with
     /// the two lists below (<see cref="FocusedQueryRewriter"/>) right before
@@ -28,11 +35,13 @@ public sealed class SearchOrchestrator
     /// <see cref="RequeryOrigin.Filter"/> (top reset).</summary>
     public bool FocusedSearch { get; set; }
 
-    /// <summary>Noise paths excluded in focused mode (settings-owned).</summary>
-    public IReadOnlyList<string> FocusedExcludePaths { get; set; } = [];
+#if FMF_TEST_SEAMS
+    /// <summary>Unit-test override for the code-owned focused policy.</summary>
+    internal IReadOnlyList<string>? FocusedExcludePathsForTests { get; set; }
 
-    /// <summary>Extension whitelist for focused mode (settings-owned).</summary>
-    public IReadOnlyList<string> FocusedExtensions { get; set; } = [];
+    /// <summary>Unit-test override for the code-owned focused policy.</summary>
+    internal IReadOnlyList<string>? FocusedExtensionsForTests { get; set; }
+#endif
 
     /// <summary>Stage trace of the last completed query (null when the
     /// engine produced none) — perf-panel food.</summary>
@@ -59,16 +68,19 @@ public sealed class SearchOrchestrator
         Func<SearchRequest> request)
     {
         _engine = engine;
+        _engineEvents = engineEvents;
         _presenter = presenter;
         _request = request;
         _debounce = dispatcher.CreateOneShotTimer(
             TimeSpan.FromMilliseconds(50),
             () => Requery(RequeryOrigin.Typing));
 
-        _presenter.ResultsSource.BecameStale += () => Requery(RequeryOrigin.Stale);
+        _staleHandler = () => Requery(RequeryOrigin.Stale);
+        _presenter.ResultsSource.BecameStale += _staleHandler;
 
         // Already on the UI thread — the marshaler is the crossing point.
-        engineEvents.IndexChanged += _ => Requery(RequeryOrigin.IndexChanged);
+        _indexChangedHandler = _ => Requery(RequeryOrigin.IndexChanged);
+        engineEvents.IndexChanged += _indexChangedHandler;
     }
 
     private bool _composing;
@@ -79,6 +91,11 @@ public sealed class SearchOrchestrator
     /// <param name="value">The current search box text after the edit.</param>
     public void NotifyTextChanged(string value)
     {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+
         if (_composing)
         {
             return; // IME composition in flight — wait for the commit
@@ -99,6 +116,11 @@ public sealed class SearchOrchestrator
     /// (romaji fragments, candidate strings) never hits the engine.</summary>
     public void NotifyCompositionStarted()
     {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+
         _composing = true;
         _debounce.Stop();
     }
@@ -108,6 +130,11 @@ public sealed class SearchOrchestrator
     /// <param name="value">The committed search box text after composition.</param>
     public void NotifyCompositionEnded(string value)
     {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+
         _composing = false;
         NotifyTextChanged(value);
     }
@@ -117,11 +144,73 @@ public sealed class SearchOrchestrator
     /// <paramref name="origin"/> records why (and lets the presenter decide
     /// whether to preserve scroll/selection).</summary>
     /// <param name="origin">Why the requery was triggered.</param>
-    public void Requery(RequeryOrigin origin) =>
-        RunQueryAsync(origin).Forget($"query.{origin}");
-
-    private async Task RunQueryAsync(RequeryOrigin origin)
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Reliability",
+        "CA2000:Dispose objects before losing scope",
+        Justification = "Ownership is transferred to RunQueryAsync, whose finally always disposes it.")]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Reliability",
+        "CA2025:Do not pass IDisposable instances into unawaited tasks",
+        Justification = "The tracked fire-and-forget task owns and disposes the per-query CTS in finally.")]
+    public void Requery(RequeryOrigin origin)
     {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+
+        CancellationTokenSource operation;
+        try
+        {
+            operation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        }
+        catch (ObjectDisposedException) when (Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            operation.Dispose();
+            return;
+        }
+
+        var previous = Interlocked.Exchange(ref _activeQuery, operation);
+        CancelNoThrow(previous);
+        RunQueryAsync(origin, operation).Forget($"query.{origin}");
+    }
+
+    private static void CancelNoThrow(CancellationTokenSource? operation)
+    {
+        try
+        {
+            operation?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Completion won the exchange/dispose race; there is no work
+            // left to cancel.
+        }
+    }
+
+    private async Task RunQueryAsync(
+        RequeryOrigin origin,
+        CancellationTokenSource operation)
+    {
+        try
+        {
+            await RunQueryCoreAsync(origin, operation.Token);
+        }
+        finally
+        {
+            Interlocked.CompareExchange(ref _activeQuery, null, operation);
+            operation.Dispose();
+        }
+    }
+
+    private async Task RunQueryCoreAsync(RequeryOrigin origin, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
         var generation = Interlocked.Increment(ref _generation);
         var request = _request();
 
@@ -135,13 +224,24 @@ public sealed class SearchOrchestrator
         }
 
         // Focused mode is a pure rewrite at the last moment — the ViewModel
-        // keeps the user's text, the engine sees the effective query, and
-        // every log/error below reports what the engine actually saw. It is
+        // keeps the user's text and the engine sees the effective query. Logs
+        // record only its scalar length, never its contents. It is
         // suppressed in regex mode: the engine treats the whole text as one
         // pattern, so appended !path:/ext: terms would corrupt the regex.
-        var query = FocusedSearch && !request.Options.RegexMode
-            ? FocusedQueryRewriter.Compose(request.Query, FocusedExcludePaths, FocusedExtensions)
-            : request.Query;
+        var query = request.Query;
+        if (FocusedSearch && !request.Options.RegexMode)
+        {
+#if FMF_TEST_SEAMS
+            query = FocusedExcludePathsForTests is { } paths
+                && FocusedExtensionsForTests is { } extensions
+                    ? FocusedQueryRewriter.Compose(query, paths, extensions)
+                    : FocusedQueryRewriter.Compose(query);
+#else
+            query = FocusedQueryRewriter.Compose(query);
+#endif
+        }
+
+        var queryLength = query.EnumerateRunes().Count();
 
         // Highlight the user's raw words, not the focused-mode rewrite: the
         // appended !path:/ext: filters are not what the user typed. In regex
@@ -158,7 +258,11 @@ public sealed class SearchOrchestrator
             // resuming on the captured dispatcher is what keeps that work on the UI
             // thread; ConfigureAwait(false) here threw RPC_E_WRONG_THREAD under the
             // in-proc engine (.editorconfig disables CA2007/MA0004 for this reason).
-            var outcome = await _engine.SearchAsync(query, request.Options);
+            var outcome = await _engine.SearchAsync(
+                query,
+                request.Options,
+                _presenter.PresentationBasis,
+                ct);
             if (generation != Interlocked.Read(ref _generation))
             {
                 outcome.Result.Dispose(); // a newer query superseded this one
@@ -175,7 +279,8 @@ public sealed class SearchOrchestrator
                     outcome.Trace,
                     origin,
                     highlighter,
-                    () => generation == Interlocked.Read(ref _generation));
+                    () => generation == Interlocked.Read(ref _generation),
+                    ct);
                 return;
             }
 
@@ -184,7 +289,12 @@ public sealed class SearchOrchestrator
                 outcome.Trace,
                 origin,
                 highlighter,
-                () => generation == Interlocked.Read(ref _generation));
+                () => generation == Interlocked.Read(ref _generation),
+                ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Page teardown or a lifetime cancellation: deliberately silent.
         }
         catch (StaleResultException)
         {
@@ -197,7 +307,11 @@ public sealed class SearchOrchestrator
             }
             else
             {
-                FileLog.Warn("query", $"result stale twice in a row for `{query}`");
+                FileLog.WarnEvent(
+                    "query",
+                    "result stale twice in a row",
+                    null,
+                    ("qlen", queryLength));
             }
         }
         catch (QuerySyntaxException e)
@@ -208,21 +322,45 @@ public sealed class SearchOrchestrator
         {
             // The pipe supervisor is already reconnecting; its synthesized
             // IndexChanged will requery once the service is back.
-            FileLog.Warn("query", $"engine unavailable for query `{query}`: {e.Message}");
+            FileLog.WarnEvent(
+                "query",
+                "engine unavailable",
+                e,
+                ("qlen", queryLength));
             _presenter.PresentEngineFailure();
             SearchFailed?.Invoke(e);
         }
         catch (EngineException e)
         {
-            FileLog.Error("query", $"engine error for query `{query}`", e);
+            FileLog.ErrorEvent("query", "engine error", e, ("qlen", queryLength));
             _presenter.PresentEngineFailure();
             SearchFailed?.Invoke(e);
         }
         catch (Exception e)
         {
             // Last line of defense: never let a query crash the app silently.
-            FileLog.Error("query", $"unexpected failure for query `{query}`", e);
+            FileLog.ErrorEvent("query", "unexpected query failure", e, ("qlen", queryLength));
             SearchFailed?.Invoke(e);
         }
+    }
+
+    /// <summary>Cancel in-flight engine/page work, stop the debounce timer and
+    /// detach both auto-requery subscriptions. Idempotent.</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _generation);
+        _debounce.Stop();
+        CancelNoThrow(Interlocked.Exchange(ref _activeQuery, null));
+        _lifetime.Cancel();
+        _presenter.ResultsSource.BecameStale -= _staleHandler;
+        _engineEvents.IndexChanged -= _indexChangedHandler;
+        TraceCaptured = null;
+        SearchFailed = null;
+        _lifetime.Dispose();
     }
 }

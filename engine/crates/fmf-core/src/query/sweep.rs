@@ -1,6 +1,7 @@
 use rayon::prelude::*;
 
 use super::compile::Driver;
+use crate::engine::{EngineError, QueryCancellation};
 use crate::index::VolumeIndex;
 
 // ── Drivers ─────────────────────────────────────────────────────────────
@@ -24,18 +25,28 @@ fn sweep_range<F, A>(
     pool_start: usize,
     hay: &[u8],
     needle_len: usize,
+    cancellation: &QueryCancellation,
     mut find: F,
     mut anchor: A,
-) where
+) -> Result<(), EngineError>
+where
     F: FnMut(&[u8]) -> Option<usize>,
     A: FnMut(usize, usize, usize) -> bool,
 {
     let mut pos = 0usize;
     let mut k = ks;
+    let mut iterations = 0usize;
     while pos < hay.len() {
+        if iterations.is_multiple_of(256) {
+            cancellation.check()?;
+        }
+        iterations += 1;
         let Some(rel) = find(&hay[pos..]) else { break };
         let hit = pool_start + pos + rel;
         while k + 1 < ke && (dict_off[k + 1] as usize) <= hit {
+            if k.is_multiple_of(1024) {
+                cancellation.check()?;
+            }
             k += 1;
         }
         let off = dict_off[k] as usize;
@@ -48,6 +59,7 @@ fn sweep_range<F, A>(
             pos = hit + 1 - pool_start;
         }
     }
+    cancellation.check()
 }
 
 /// Sweep the distinct-name dictionary and return the set of matching
@@ -58,7 +70,18 @@ fn sweep_range<F, A>(
 /// maps to exactly one `name_id` via a monotonic cursor over `dict_off`; a
 /// match spilling past a name's end (`hit + needle_len > name_end`) crosses
 /// into the next name and is rejected.
+#[cfg(test)]
 pub(super) fn driver_candidates(idx: &VolumeIndex, driver: &Driver) -> Vec<u64> {
+    driver_candidates_cancellable(idx, driver, &QueryCancellation::new())
+        .expect("fresh cancellation token cannot cancel")
+}
+
+pub(super) fn driver_candidates_cancellable(
+    idx: &VolumeIndex,
+    driver: &Driver,
+    cancellation: &QueryCancellation,
+) -> Result<Vec<u64>, EngineError> {
+    cancellation.check()?;
     // The folded dictionary is the only contiguous pool; case-exact drivers
     // sweep it with a folded needle (superset — original-case match implies
     // the folded match) and the exact comparison runs as a residual.
@@ -67,7 +90,7 @@ pub(super) fn driver_candidates(idx: &VolumeIndex, driver: &Driver) -> Vec<u64> 
     let count = dict_off.len();
     let mut set = vec![0u64; count.div_ceil(64)];
     if count == 0 || pool.is_empty() {
-        return set;
+        return Ok(set);
     }
 
     // Over-split so uneven hit densities still balance across threads.
@@ -82,7 +105,8 @@ pub(super) fn driver_candidates(idx: &VolumeIndex, driver: &Driver) -> Vec<u64> 
     // never overlap — concatenate, then flip the bits once.
     let matched: Vec<Vec<u32>> = ranges
         .into_par_iter()
-        .map(|(ks, ke)| {
+        .map(|(ks, ke)| -> Result<_, EngineError> {
+            cancellation.check()?;
             let pool_start = dict_off[ks] as usize;
             let pool_end = if ke < count {
                 dict_off[ke] as usize
@@ -109,9 +133,10 @@ pub(super) fn driver_candidates(idx: &VolumeIndex, driver: &Driver) -> Vec<u64> 
                         pool_start,
                         hay,
                         *needle_len,
+                        cancellation,
                         |h| finder.find(h),
                         |_, _, _| true,
-                    );
+                    )?;
                 }
                 Driver::Prefix { bytes, .. } => {
                     let finder = memchr::memmem::Finder::new(bytes);
@@ -124,9 +149,10 @@ pub(super) fn driver_candidates(idx: &VolumeIndex, driver: &Driver) -> Vec<u64> 
                         pool_start,
                         hay,
                         bytes.len(),
+                        cancellation,
                         |h| finder.find(h),
                         |hit, off, _| hit == off,
-                    );
+                    )?;
                 }
                 Driver::Suffixes { suffixes, .. } => {
                     // Anchored tails defeat memmem's rare-byte prefilter
@@ -135,6 +161,9 @@ pub(super) fn driver_candidates(idx: &VolumeIndex, driver: &Driver) -> Vec<u64> 
                     // per-entry property (a name can back both a dir and a
                     // file) and is applied in the materialize walk.
                     for k in ks..ke {
+                        if k.is_multiple_of(1024) {
+                            cancellation.check()?;
+                        }
                         let off = dict_off[k] as usize;
                         let end = dict_off.get(k + 1).map_or(pool.len(), |&e| e as usize);
                         let name = &pool[off..end];
@@ -145,15 +174,18 @@ pub(super) fn driver_candidates(idx: &VolumeIndex, driver: &Driver) -> Vec<u64> 
                 }
                 _ => unreachable!(),
             }
-            out
+            cancellation.check()?;
+            Ok(out)
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     for chunk in matched {
+        cancellation.check()?;
         for k in chunk {
             set[k as usize / 64] |= 1u64 << (k as usize % 64);
         }
     }
-    set
+    cancellation.check()?;
+    Ok(set)
 }
 
 /// Test whether `name_id` is present in a sweep result bitset.

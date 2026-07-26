@@ -1,11 +1,33 @@
 namespace FindMyFiles.Engine;
 
 /// <summary>
+/// Stable, implementation-independent identity of an engine session. UI and
+/// orchestration code branch on this capability metadata instead of reaching
+/// through <see cref="IEngineClient"/> to concrete transports.
+/// </summary>
+internal enum EngineClientKind
+{
+    /// <summary>No usable engine is available; the setup experience is shown.</summary>
+    Unavailable,
+
+#if FMF_TEST_SEAMS
+    /// <summary>Deterministic in-memory data used only by test-seam builds.</summary>
+    Test,
+#endif
+
+    /// <summary>The privileged Rust engine loaded in this process.</summary>
+    InProcess,
+
+    /// <summary>The privileged Rust engine hosted by the Windows service.</summary>
+    Service,
+}
+
+/// <summary>
 /// The single boundary the app uses to talk to the engine
 /// (docs/ARCHITECTURE.md). Implementations: <see cref="PipeEngineClient"/>
-/// (named pipe to fmf-service), <see cref="FfiEngineClient"/> (in-proc DLL,
-/// --engine=inproc) and <see cref="FakeEngineClient"/> (deterministic data
-/// for UI tests via --fake-engine). The shared observable behavior is
+/// (named pipe to fmf-service) and <see cref="FfiEngineClient"/> (in-proc DLL,
+/// --engine=inproc). Test-seam builds add a deterministic in-memory client.
+/// The shared observable behavior is
 /// executable: Tests/Contract/EngineClientContractTests runs the same suite
 /// against all implementations.
 ///
@@ -13,8 +35,15 @@ namespace FindMyFiles.Engine;
 /// <c>ct</c> surfaces as <see cref="OperationCanceledException"/> (or a
 /// subclass) from every async member. Data shapes live in EngineTypes.cs.
 /// </summary>
-public interface IEngineClient : IDisposable
+internal interface IEngineClient : IDisposable
 {
+    /// <summary>
+    /// What kind of engine session this client represents. This is the only
+    /// supported way for consumers to choose availability/transport-specific
+    /// presentation; concrete client type checks are forbidden.
+    /// </summary>
+    EngineClientKind Kind { get; }
+
     /// <summary>New index content was published (USN apply or scan progress).
     /// The payload is the triggering volume label. The signal to re-evaluate the
     /// displayed query. Fires from an engine thread, so marshal to the UI thread
@@ -31,9 +60,9 @@ public interface IEngineClient : IDisposable
     /// </summary>
     event Action<int>? EngineErrorOccurred;
 
-    /// <summary>InProc for Ffi/Fake (fixed, never raises
+    /// <summary>InProc for non-pipe clients (fixed, never raises
     /// <see cref="ConnectionChanged"/>); the pipe client moves through
-    /// Connecting/Connected/Reconnecting.</summary>
+    /// Connecting/Connected/Reconnecting/Faulted.</summary>
     EngineConnectionState Connection { get; }
 
     /// <summary>Fires when the current <see cref="Connection"/> transitions. In-proc
@@ -77,6 +106,24 @@ public interface IEngineClient : IDisposable
     /// <returns>The sort-ordered result handle plus an optional timing trace.</returns>
     Task<SearchOutcome> SearchAsync(
         string query, SearchOptions options, CancellationToken ct = default);
+
+    /// <summary>
+    /// Executes a query while comparing the finished ordered ID column with
+    /// the still-live result currently presented by the caller. Only an exact
+    /// match may set <see cref="QueryTraceData.Unchanged"/>.
+    /// </summary>
+    /// <param name="query">The query text to execute.</param>
+    /// <param name="options">Search options (sort order, flags).</param>
+    /// <param name="presentationBasis">Currently displayed live result, or
+    /// <c>null</c> when nothing is presented.</param>
+    /// <param name="ct">Cooperative cancellation token.</param>
+    /// <returns>The sort-ordered result handle plus an optional timing trace.</returns>
+    Task<SearchOutcome> SearchAsync(
+        string query,
+        SearchOptions options,
+        ISearchResult? presentationBasis,
+        CancellationToken ct = default) =>
+        SearchAsync(query, options, ct);
 
     /// <summary>Observability snapshot for the performance panel.</summary>
     /// <param name="ct">Cooperative cancellation token.</param>

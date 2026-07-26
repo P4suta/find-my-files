@@ -1,4 +1,4 @@
-# ADR-0029: CI signing pipeline — official SSL.com Action, build/sign/publish split, approval gate
+# ADR-0029: CI signing pipeline — official SSL.com Action, privilege-separated release jobs
 
 Date: 2026-06-25 / Status: Accepted (supersedes the *structure* around ADR-0020's signing step; provider/cert unchanged)
 
@@ -8,22 +8,22 @@ The signing *provider and certificate* stay exactly as ADR-0020 decided: SSL.com
 
 ## Decision
 
-1. **Sign with the official `SSLcom/esigner-codesign` Action (`command: batch_sign`).** This is SSL.com's recommended GitHub Actions integration: the Action downloads CodeSignTool, runs `scan_code` (pre-signing malware scan) then signs, and timestamps via SSL.com's TSA. We sign only our own five PEs, so we stage them into a flat dir (path→unique-name map to dodge the two same-named `FindMyFiles.exe`), `batch_sign` into an explicit `output_path` (the Action ignores `override`), and copy back. The Action is **SHA-pinned** (v1.3.2).
+1. **Sign with the official `SSLcom/esigner-codesign` Action (`command: batch_sign`).** This is SSL.com's recommended GitHub Actions integration: the Action downloads CodeSignTool, runs `scan_code` (pre-signing malware scan) then signs, and timestamps via SSL.com's TSA. We sign the manifest-defined first-party PE set, stage it into a flat directory with unique names, `batch_sign` into an explicit `output_path` (the Action ignores `override`), and copy back. The Action is **SHA-pinned** (v1.3.2).
 
-2. **Split `release.yml` into three jobs — `build` → `sign` → `publish` — passing the bundle as an artifact.** Only `sign` ever sees the signing secrets; `build` and `publish` run with a read-only / least-privilege token on a bundle they receive. This shrinks the credential blast radius.
+2. **Split `release.yml` into four jobs — `build` → `sign` → `package` → `publish` — using immutable Actions artifacts at each boundary.** Only `sign` sees signing secrets. `package` re-verifies and packages under a read-only token. `publish` receives only the completed zip/checksum/SBOM set and runs official pinned attestation/release actions without checkout, toolchain setup, or repository build code. This keeps signing, packaging code, and write/OIDC authority mutually isolated.
 
 3. **Gate the secrets behind an approval-gated `release` GitHub Environment on the `sign` job.** The eSigner secrets are Environment secrets (not repo-level), with required reviewers and deployment refs restricted to `v*.*.*` + `main`, so a `workflow_dispatch` from an arbitrary ref (or a compromised workflow) cannot mint signatures unattended.
 
 4. **Verify with `signtool verify /pa /tw` + a signer-subject assertion.** `/tw` makes a missing timestamp a non-zero exit (0 = chain valid + timestamped, 2 = untimestamped, 1 = invalid); the subject check (`*CN=Yasunobu Sakashita*`) refuses a valid-but-wrong certificate. `Get-AuthenticodeSignature.TimeStamperCertificate` is **not** used for the timestamp check — it is null under `-FilePath` on the runner (PowerShell#4060), so the timestamp guarantee comes from `signtool`. (CodeSignTool always timestamps, so `/tw` is green.) This is stricter than the prior `Status -eq 'Valid'`-only verify.
 
-5. **Concurrency guard** (`group: release-${{ github.ref }}`, `cancel-in-progress: false`) so two tag pushes never race and a run is never cancelled mid-sign/mid-publish.
+5. **Concurrency guard** (`group: release-${{ inputs.tag_name }}`, `cancel-in-progress: false`) so duplicate dispatches for a tag never race and a run is never cancelled mid-sign/mid-publish.
 
-Signing stays **non-blocking** (secrets absent → `::warning::`, build still publishes unsigned) and **tag-driven only** (`ci.yml` does not sign).
+Signing is **fail-closed for publication**. Missing secrets are allowed only for a `publish=false` rehearsal, which warns, remains unsigned, and creates no Release. `ci.yml` never signs.
 
 ## Rationale
 
 - **Official Action over CKA**: the Action is SSL.com's documented, supported CI integration and is **proven to sign with this exact account** (it signed successfully before this work; CKA never did — see below). It is SHA-pinnable for supply-chain integrity. CodeSignTool sends only file hashes to SSL.com (source never leaves the runner) and timestamps automatically.
-- **Three jobs over one**: defense in depth. A compromised SBOM tool or build step in `build` cannot read signing secrets it never receives; `publish`'s write/attestation token never coexists with the signing credentials.
+- **Four privilege stages over one**: defense in depth. A compromised build/SBOM step cannot read signing secrets; repository package code receives no write token; the publish write/OIDC token executes only pinned official actions over an immutable artifact handoff.
 - **`signtool /tw` over `TimeStamperCertificate`**: the runner's PowerShell returns a null timestamper under `-FilePath`, so asserting it would false-fail; `signtool` exit codes are authoritative.
 
 ## eSigner CKA: attempted and reverted
@@ -34,7 +34,7 @@ The CKA (Cloud Key Adapter) was attempted to replace the Java CodeSignTool with 
 - **x64 signtool cannot load the 32-bit `eSignerKSP`** (run `28119208195`): the cert was in `CurrentUser\My` with `HasPrivateKey=True`, yet x64 signtool still reported "No certificates were found". Switching to x86 signtool got past that.
 - **KSP credential retrieval fails at sign time** (run `28120321041`, x86): `Signing credentials not configured. Make sure certificate is issued before signing` / `SignerSign() failed (0x80090003)`. This is a CKA-internal CSC credential path, **not** an account problem.
 
-Crucially, the **official Action's `batch_sign` succeeded on the same account/cert** in run `28082306344` (`scan_code` → sign → Verify all green). So the account, PIN, and eSigner credentials are fully provisioned; only the CKA KSP path is the odd one out. This is the prior CKA proposal's own re-examination trigger ("CKA proves flaky in CI → revisit the Action") firing. The 3-job split, approval gate, hardened verify, and concurrency guard — all independent of the signing tool — were **kept**.
+Crucially, the **official Action's `batch_sign` succeeded on the same account/cert** in run `28082306344` (`scan_code` → sign → Verify all green). So the account, PIN, and eSigner credentials are fully provisioned; only the CKA KSP path is the odd one out. This is the prior CKA proposal's own re-examination trigger ("CKA proves flaky in CI → revisit the Action") firing. The privilege-separated jobs, approval gate, hardened verify, and concurrency guard — all independent of the signing tool — were **kept**.
 
 ## Rejected alternatives
 
@@ -45,10 +45,10 @@ Crucially, the **official Action's `batch_sign` succeeded on the same account/ce
 
 ## Consequences
 
-- `HAVE_SIGNING` keys on `ES_USERNAME` + `CREDENTIAL_ID` (batch_sign needs the credential_id). The `release` environment holds four secrets: `ES_USERNAME` / `ES_PASSWORD` / `CREDENTIAL_ID` / `ES_TOTP_SECRET`.
-- Every release run pauses for reviewer approval before `sign`. A `publish=false` `workflow_dispatch` is a safe signing smoke test (build + sign + verify, no Release) under immutable releases.
-- The bundle round-trips through Actions artifacts twice (build→sign→publish); a few extra minutes on a release-only workflow. The Authenticode signature lives inside the PE, so the round-trip preserves it.
-- docs/SIGNING.md is the runbook (Environment setup, secrets, renewal); ADR-0020 keeps the provider/cert rationale with a pointer here.
+- `HAVE_SIGNING` requires all four `release` environment secrets: `ES_USERNAME` / `ES_PASSWORD` / `CREDENTIAL_ID` / `ES_TOTP_SECRET`.
+- Every release run pauses for reviewer approval before `sign`. With all four secrets configured, a `publish=false` `workflow_dispatch` is a safe signing smoke test (build + sign + verify, no Release) under immutable releases; without them it is explicitly an unsigned build rehearsal.
+- The bundle/assets cross three immutable Actions-artifact boundaries (build→sign→package→publish); a few extra minutes on a release-only workflow. The Authenticode signature lives inside the PE, so the round-trips preserve it.
+- `.github/workflows/release.yml` is the executable runbook; the irreducible human approvals are summarized in `docs/RELEASING.md`.
 - A future MSIX (ADR-0028) can be signed by the same Action (`sign`/`batch_sign` accept `.msix`).
 
 ## Re-examination triggers

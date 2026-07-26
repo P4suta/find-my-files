@@ -8,11 +8,12 @@ use ntfs_reader::file::NtfsFile;
 use rustc_hash::FxHashMap;
 
 use crate::index::{EncodedEntry, Frn, VolumeIndexBuilder};
-use crate::mft::pick_name;
+use crate::mft::collect_searchable_names;
 use crate::wtf8;
 
 use super::ScanStats;
-use super::deferred::EXT_NAME_CACHE_CAP;
+use super::deferred::DEFERRED_RECORD_ARENA_MAX_BYTES;
+use super::record::attributes_complete;
 use super::volume_io::apply_fixup;
 
 /// Sub-range fed to one parse worker — small enough to spread a 16MiB chunk
@@ -38,11 +39,15 @@ impl RecordArena {
         }
     }
 
-    fn push(&mut self, rec: &[u8]) -> u32 {
+    fn try_push_bounded(&mut self, rec: &[u8], max_bytes: usize) -> Option<u32> {
         debug_assert_eq!(rec.len(), self.record_size);
-        let slot = (self.data.len() / self.record_size) as u32;
+        let end = self.data.len().checked_add(rec.len())?;
+        if end > max_bytes {
+            return None;
+        }
+        let slot = u32::try_from(self.data.len() / self.record_size).ok()?;
         self.data.extend_from_slice(rec);
-        slot
+        Some(slot)
     }
 
     pub(super) fn get(&self, slot: u32) -> &[u8] {
@@ -51,7 +56,7 @@ impl RecordArena {
     }
 }
 
-/// $`STANDARD_INFORMATION` + $DATA extract shared by every parse path.
+/// $`STANDARD_INFORMATION` + unnamed $DATA extract shared by every parse path.
 #[derive(Default, Clone, Copy)]
 struct RecordAttrs {
     size: u64,
@@ -71,7 +76,9 @@ fn extract_attrs(f: &NtfsFile) -> RecordAttrs {
                 a.is_hidden = si.file_attributes & FILE_ATTRIBUTE_HIDDEN != 0;
                 a.is_system = si.file_attributes & FILE_ATTRIBUTE_SYSTEM != 0;
             }
-        } else if att.header.type_id == NtfsAttributeType::Data as u32 {
+        } else if att.header.type_id == NtfsAttributeType::Data as u32
+            && att.header.name_length == 0
+        {
             if att.header.is_non_resident == 0 {
                 if let Some(h) = att.resident_header() {
                     a.size = h.value_length as u64;
@@ -107,16 +114,15 @@ pub(super) struct ParsedBatch {
     /// them at append time).
     rec_pool: Vec<u8>,
     deferred: Vec<(u64, std::ops::Range<usize>)>,
-    /// Extension records carrying a $`FILE_NAME` — the targets the deferred
-    /// pass will need. Keeping them now turns that pass's random disk reads
-    /// into RAM lookups (the whole $MFT just streamed through here anyway).
+    /// Extension records carrying a $`FILE_NAME` or an $`ATTRIBUTE_LIST`
+    /// extent — the targets the deferred pass will need. Keeping them now
+    /// turns that pass's random disk reads into RAM lookups.
     extensions: Vec<(u64, std::ops::Range<usize>)>,
     files: u64,
     dirs: u64,
     corrupt_records: u64,
     extension_records: u64,
     skipped_no_name: u64,
-    pub(super) deferred_unresolved: u64,
     /// Deferred-pass disk reads that failed (`LazyRecordReader`) — folded
     /// into `ScanStats::deferred_name_read_failures` at append time.
     pub(super) deferred_name_read_failures: u64,
@@ -133,6 +139,14 @@ impl ParsedBatch {
     pub(super) fn push_named(&mut self, f: &NtfsFile, name: &NtfsFileName) {
         let name_data = name.data;
         let units = name.header.name_length as usize;
+        self.push_link(
+            f,
+            name.header.parent_directory_reference,
+            &name_data[..units],
+        );
+    }
+
+    pub(super) fn push_link(&mut self, f: &NtfsFile, parent_frn: u64, name: &[u16]) {
         let a = extract_attrs(f);
         let is_dir = f.is_directory();
         if is_dir {
@@ -141,13 +155,9 @@ impl ParsedBatch {
             self.files += 1;
         }
         let name_off = self.name_pool.len() as u32;
-        wtf8::push_wtf8_pair(
-            &name_data[..units],
-            &mut self.name_pool,
-            &mut self.lower_pool,
-        );
+        wtf8::push_wtf8_pair(name, &mut self.name_pool, &mut self.lower_pool);
         self.metas.push(ParsedMeta {
-            parent_frn: name.header.parent_directory_reference,
+            parent_frn,
             frn: f.reference_number(),
             name_off,
             name_len: self.name_pool.len() as u32 - name_off,
@@ -155,6 +165,15 @@ impl ParsedBatch {
             attrs: a,
         });
     }
+}
+
+fn push_searchable_names(out: &mut ParsedBatch, file: &NtfsFile<'_>) -> Option<usize> {
+    let names = collect_searchable_names(file)?;
+    let count = names.len();
+    for name in names {
+        out.push_named(file, &name);
+    }
+    Some(count)
 }
 
 /// Validate, fix up and parse every record in `bytes` (a record-aligned
@@ -169,9 +188,20 @@ fn parse_subrange(bytes: &mut [u8], first_logical: u64, record_size: usize) -> P
         }
         let rec = &mut bytes[off..off + record_size];
         if !NtfsFile::is_valid(rec) {
+            // NTFS can leave preallocated, never-used MFT slots zeroed. Those
+            // are not records and are safe to ignore. Any non-zero slot with
+            // an invalid signature, however, may be an allocated record whose
+            // name would otherwise disappear from the published index.
+            if rec.iter().any(|&byte| byte != 0) {
+                out.corrupt_records += 1;
+            }
             continue;
         }
         if !apply_fixup(rec) {
+            out.corrupt_records += 1;
+            continue;
+        }
+        if !attributes_complete(rec) {
             out.corrupt_records += 1;
             continue;
         }
@@ -181,23 +211,28 @@ fn parse_subrange(bytes: &mut [u8], first_logical: u64, record_size: usize) -> P
         }
         if { f.header.base_reference } & 0x0000_FFFF_FFFF_FFFF != 0 {
             out.extension_records += 1;
-            if f.get_attribute(NtfsAttributeType::FileName).is_some() {
+            if f.get_attribute(NtfsAttributeType::FileName).is_some()
+                || f.get_attribute(NtfsAttributeType::AttributeList).is_some()
+            {
                 let range = out.push_record(rec);
                 out.extensions.push((number, range));
             }
             continue;
         }
 
-        let Some(name) = pick_name(&f) else {
-            if f.get_attribute(NtfsAttributeType::AttributeList).is_some() {
-                let range = out.push_record(rec);
-                out.deferred.push((number, range));
-            } else {
-                out.skipped_no_name += 1;
-            }
+        if f.get_attribute(NtfsAttributeType::AttributeList).is_some() {
+            // An attribute list can move additional hard-link FILE_NAME
+            // attributes into extension records. Defer the whole object so
+            // its link set is emitted atomically and completely.
+            let range = out.push_record(rec);
+            out.deferred.push((f.reference_number(), range));
             continue;
-        };
-        out.push_named(&f, &name);
+        }
+        match push_searchable_names(&mut out, &f) {
+            Some(0) => out.skipped_no_name += 1,
+            Some(_) => {}
+            None => out.corrupt_records += 1,
+        }
     }
     out
 }
@@ -222,17 +257,40 @@ pub(super) fn parse_chunk(
 pub(super) fn append_batches(
     b: &mut VolumeIndexBuilder,
     stats: &mut ScanStats,
-    deferred: &mut Vec<(u64, u32)>,
+    deferred: &mut Vec<(u64, Option<u32>)>,
     extensions: &mut FxHashMap<u64, u32>,
     arena: &mut RecordArena,
     batches: Vec<ParsedBatch>,
-) {
+) -> u64 {
+    append_batches_bounded(
+        b,
+        stats,
+        deferred,
+        extensions,
+        arena,
+        batches,
+        DEFERRED_RECORD_ARENA_MAX_BYTES,
+    )
+}
+
+fn append_batches_bounded(
+    b: &mut VolumeIndexBuilder,
+    stats: &mut ScanStats,
+    deferred: &mut Vec<(u64, Option<u32>)>,
+    extensions: &mut FxHashMap<u64, u32>,
+    arena: &mut RecordArena,
+    batches: Vec<ParsedBatch>,
+    max_arena_bytes: usize,
+) -> u64 {
+    let mut corrupt_records = 0u64;
     for batch in batches {
+        corrupt_records += batch.corrupt_records;
         for (number, range) in batch.extensions {
-            if extensions.len() < EXT_NAME_CACHE_CAP {
-                extensions.insert(number, arena.push(&batch.rec_pool[range]));
-            } else {
-                stats.ext_name_cache_skipped += 1;
+            match arena.try_push_bounded(&batch.rec_pool[range], max_arena_bytes) {
+                Some(slot) => {
+                    extensions.insert(number, slot);
+                }
+                None => stats.deferred_record_cache_spills += 1,
             }
         }
         for m in &batch.metas {
@@ -252,15 +310,18 @@ pub(super) fn append_batches(
         }
         stats.files += batch.files;
         stats.dirs += batch.dirs;
-        stats.corrupt_records += batch.corrupt_records;
         stats.extension_records += batch.extension_records;
         stats.skipped_no_name += batch.skipped_no_name;
-        stats.deferred_unresolved += batch.deferred_unresolved;
         stats.deferred_name_read_failures += batch.deferred_name_read_failures;
-        for (number, range) in batch.deferred {
-            deferred.push((number, arena.push(&batch.rec_pool[range])));
+        for (reference, range) in batch.deferred {
+            let slot = arena.try_push_bounded(&batch.rec_pool[range], max_arena_bytes);
+            if slot.is_none() {
+                stats.deferred_record_cache_spills += 1;
+            }
+            deferred.push((reference, slot));
         }
     }
+    corrupt_records
 }
 
 #[cfg(test)]
@@ -350,6 +411,41 @@ mod tests {
         a
     }
 
+    fn attribute_id(mut attribute: Vec<u8>, id: u16) -> Vec<u8> {
+        put_u16(&mut attribute, 14, id);
+        attribute
+    }
+
+    fn attribute_list_entry(type_id: u32, target_reference: u64, id: u16) -> Vec<u8> {
+        const HEADER: usize = 26;
+        let mut entry = vec![0u8; HEADER.next_multiple_of(8)];
+        put_u32(&mut entry, 0, type_id);
+        put_u16(&mut entry, 4, HEADER as u16);
+        put_u64(&mut entry, 16, target_reference);
+        put_u16(&mut entry, 24, id);
+        entry
+    }
+
+    /// A named resident attribute. Named $DATA is an alternate data stream,
+    /// not the unnamed default stream whose length is the file size.
+    fn named_resident_attr(type_id: u32, name: &[u16], value: &[u8]) -> Vec<u8> {
+        const NAME_OFFSET: usize = 24;
+        let value_offset = (NAME_OFFSET + name.len() * 2).next_multiple_of(8);
+        let length = (value_offset + value.len()).next_multiple_of(8);
+        let mut a = vec![0u8; length];
+        put_u32(&mut a, 0, type_id);
+        put_u32(&mut a, 4, length as u32);
+        a[9] = name.len() as u8;
+        put_u16(&mut a, 10, NAME_OFFSET as u16);
+        put_u32(&mut a, 16, value.len() as u32);
+        put_u16(&mut a, 20, value_offset as u16);
+        for (i, unit) in name.iter().enumerate() {
+            put_u16(&mut a, NAME_OFFSET + i * 2, *unit);
+        }
+        a[value_offset..value_offset + value.len()].copy_from_slice(value);
+        a
+    }
+
     /// A non-resident $DATA attribute carrying only the geometry the parser
     /// reads (`data_size` @48); no real data runs are needed.
     fn data_nonresident(data_size: u64) -> Vec<u8> {
@@ -358,7 +454,7 @@ mod tests {
         put_u32(&mut a, 0, T_DATA);
         put_u32(&mut a, 4, length as u32);
         a[8] = 1; // is_non_resident
-        put_u16(&mut a, 34, 64); // data_runs_offset (past the header; unused)
+        put_u16(&mut a, 32, 64); // data_runs_offset (past the header; unused)
         put_u64(&mut a, 48, data_size);
         a
     }
@@ -485,6 +581,36 @@ mod tests {
         parse_subrange(&mut bytes, logical_at(record), REC)
     }
 
+    #[test]
+    fn deferred_record_arena_cap_is_shared_and_base_spills_keep_only_number() {
+        let mut batch = ParsedBatch {
+            rec_pool: vec![0u8; REC * 2],
+            ..Default::default()
+        };
+        batch.extensions.push((42, 0..REC));
+        batch.deferred.push((43, REC..REC * 2));
+
+        let mut builder = VolumeIndexBuilder::new("C:", 5);
+        let mut stats = ScanStats::default();
+        let mut deferred = Vec::new();
+        let mut extensions = FxHashMap::default();
+        let mut arena = RecordArena::new(REC);
+        append_batches_bounded(
+            &mut builder,
+            &mut stats,
+            &mut deferred,
+            &mut extensions,
+            &mut arena,
+            vec![batch],
+            REC,
+        );
+
+        assert_eq!(arena.data.len(), REC, "the byte ceiling is hard");
+        assert_eq!(extensions.get(&42), Some(&0));
+        assert_eq!(deferred, vec![(43, None)]);
+        assert_eq!(stats.deferred_record_cache_spills, 1);
+    }
+
     // ── A plain file: name, counts, parent, attributes all land ──────────────
 
     #[test]
@@ -528,6 +654,36 @@ mod tests {
             .attr(resident_attr(T_DATA, &[0u8; 100]));
         let batch = parse_one(32, &rec);
         assert_eq!(batch.metas[0].attrs.size, 100);
+    }
+
+    #[test]
+    fn named_data_before_unnamed_data_does_not_change_file_size() {
+        let rec = Rec::new()
+            .attr(std_info(0, A_ARCHIVE))
+            .attr(file_name(5, NS_WIN32, &utf16("streams.bin")))
+            .attr(named_resident_attr(
+                T_DATA,
+                &utf16("Zone.Identifier"),
+                &[0u8; 17],
+            ))
+            .attr(data_nonresident(4096));
+        let batch = parse_one(32, &rec);
+        assert_eq!(batch.metas[0].attrs.size, 4096);
+    }
+
+    #[test]
+    fn named_data_after_unnamed_data_does_not_overwrite_file_size() {
+        let rec = Rec::new()
+            .attr(std_info(0, A_ARCHIVE))
+            .attr(file_name(5, NS_WIN32, &utf16("streams.bin")))
+            .attr(data_nonresident(4096))
+            .attr(named_resident_attr(
+                T_DATA,
+                &utf16("Zone.Identifier"),
+                &[0u8; 17],
+            ));
+        let batch = parse_one(32, &rec);
+        assert_eq!(batch.metas[0].attrs.size, 4096);
     }
 
     // ── $STANDARD_INFORMATION attribute bits flow into RecordAttrs ───────────
@@ -574,6 +730,22 @@ mod tests {
         let batch = parse_one(35, &rec);
         assert_eq!(batch.metas.len(), 1);
         assert_eq!(name_of(&batch, &batch.metas[0]), b"long file.txt");
+    }
+
+    #[test]
+    fn every_searchable_hard_link_in_the_base_record_is_emitted() {
+        let rec = Rec::new()
+            .attr(std_info(0, A_ARCHIVE))
+            .attr(file_name(5, NS_WIN32, &utf16("first.txt")))
+            .attr(file_name(9, NS_WIN32, &utf16("second.txt")));
+        let batch = parse_one(35, &rec);
+        assert_eq!(batch.files, 2);
+        assert_eq!(batch.metas.len(), 2);
+        assert_eq!(name_of(&batch, &batch.metas[0]), b"first.txt");
+        assert_eq!(batch.metas[0].parent_frn, 5);
+        assert_eq!(name_of(&batch, &batch.metas[1]), b"second.txt");
+        assert_eq!(batch.metas[1].parent_frn, 9);
+        assert_eq!(batch.metas[0].frn, batch.metas[1].frn);
     }
 
     #[test]
@@ -665,6 +837,20 @@ mod tests {
     }
 
     #[test]
+    fn only_zero_unallocated_slots_are_silently_skipped() {
+        let mut zero = vec![0u8; REC];
+        let zero_batch = parse_subrange(&mut zero, logical_at(41), REC);
+        assert_eq!(zero_batch.corrupt_records, 0);
+        assert!(zero_batch.metas.is_empty());
+
+        let mut invalid = vec![0u8; REC];
+        invalid[..4].copy_from_slice(b"BAAD");
+        let invalid_batch = parse_subrange(&mut invalid, logical_at(41), REC);
+        assert_eq!(invalid_batch.corrupt_records, 1);
+        assert!(invalid_batch.metas.is_empty());
+    }
+
+    #[test]
     fn extension_record_without_a_name_is_counted_only() {
         // base_reference's low 48 bits non-zero ⇒ this is a fragment of another
         // file. Without a $FILE_NAME it is just counted, never indexed.
@@ -696,9 +882,172 @@ mod tests {
             .attr(resident_attr(T_ATTR_LIST, &[0u8; 24]));
         let batch = parse_one(44, &rec);
         assert_eq!(batch.deferred.len(), 1);
-        assert_eq!(batch.deferred[0].0, 44);
+        assert_eq!(batch.deferred[0].0, frn(44));
         assert_eq!(batch.skipped_no_name, 0);
         assert_eq!(batch.metas.len(), 0);
+    }
+
+    #[test]
+    fn base_record_with_a_direct_name_and_attribute_list_is_still_deferred() {
+        let rec = Rec::new()
+            .attr(std_info(0, A_ARCHIVE))
+            .attr(file_name(5, NS_WIN32, &utf16("base-link.txt")))
+            .attr(resident_attr(T_ATTR_LIST, &[0u8; 24]));
+        let batch = parse_one(44, &rec);
+        assert_eq!(batch.deferred.len(), 1);
+        assert!(batch.metas.is_empty());
+        assert_eq!(batch.files, 0);
+    }
+
+    #[test]
+    fn deferred_attribute_list_emits_every_base_and_extension_hard_link() {
+        let base_reference = frn(70);
+        let extension_reference = frn(71);
+        let mut list = attribute_list_entry(T_FILE_NAME, base_reference, 1);
+        list.extend_from_slice(&attribute_list_entry(T_FILE_NAME, extension_reference, 2));
+        let base = Rec::new()
+            .attr(std_info(0, A_ARCHIVE))
+            .attr(attribute_id(
+                file_name(5, NS_WIN32, &utf16("base-link.txt")),
+                1,
+            ))
+            .attr(attribute_id(resident_attr(T_ATTR_LIST, &list), 3));
+        let extension = Rec::new().base(base_reference).attr(attribute_id(
+            file_name(9, NS_WIN32, &utf16("extension-link.txt")),
+            2,
+        ));
+
+        let mut builder = VolumeIndexBuilder::new("C:", 5);
+        let mut stats = ScanStats::default();
+        let mut deferred = Vec::new();
+        let mut extensions = FxHashMap::default();
+        let mut arena = RecordArena::new(REC);
+        append_batches(
+            &mut builder,
+            &mut stats,
+            &mut deferred,
+            &mut extensions,
+            &mut arena,
+            vec![parse_one(70, &base), parse_one(71, &extension)],
+        );
+
+        let runmap = super::super::volume_io::RunMap { runs: Vec::new() };
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let metadata = crate::usn::MetadataSource::none();
+        let resolved = super::super::deferred::resolve_deferred(
+            super::super::deferred::DeferredContext {
+                volume_path: "not-opened-for-resident-fixture",
+                runmap: &runmap,
+                record_size: REC,
+                cluster_size: 4096,
+                volume_size: 1 << 20,
+                extensions: &extensions,
+                arena: &arena,
+                metadata: &metadata,
+                stop: &stop,
+            },
+            &deferred,
+        )
+        .unwrap();
+        let names: Vec<Vec<u8>> = resolved
+            .iter()
+            .flat_map(|batch| batch.metas.iter().map(|meta| name_of(batch, meta).to_vec()))
+            .collect();
+        assert_eq!(
+            names,
+            [b"base-link.txt".to_vec(), b"extension-link.txt".to_vec()]
+        );
+        assert_eq!(resolved[0].files, 2);
+        assert_eq!(resolved[0].metas[0].frn, resolved[0].metas[1].frn);
+    }
+
+    #[test]
+    fn deferred_failure_uses_complete_live_links_or_fails_the_scan() {
+        use std::collections::HashMap;
+
+        let reference = frn(72);
+        let missing_extension = frn(73);
+        let mut list = attribute_list_entry(T_FILE_NAME, reference, 1);
+        list.extend_from_slice(&attribute_list_entry(T_FILE_NAME, missing_extension, 2));
+        let base = Rec::new()
+            .attr(std_info(0, A_ARCHIVE))
+            .attr(attribute_id(
+                file_name(5, NS_WIN32, &utf16("stale-base.txt")),
+                1,
+            ))
+            .attr(attribute_id(resident_attr(T_ATTR_LIST, &list), 3));
+
+        let mut builder = VolumeIndexBuilder::new("C:", 5);
+        let mut stats = ScanStats::default();
+        let mut deferred = Vec::new();
+        let mut extensions = FxHashMap::default();
+        let mut arena = RecordArena::new(REC);
+        append_batches(
+            &mut builder,
+            &mut stats,
+            &mut deferred,
+            &mut extensions,
+            &mut arena,
+            vec![parse_one(72, &base)],
+        );
+        let runmap = super::super::volume_io::RunMap { runs: Vec::new() };
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let live = crate::usn::MetadataSource::map_with_links(
+            HashMap::new(),
+            HashMap::from([(
+                reference,
+                vec![
+                    crate::usn::LinkInfo {
+                        parent_frn: 7,
+                        name: utf16("live-first.txt"),
+                    },
+                    crate::usn::LinkInfo {
+                        parent_frn: 8,
+                        name: utf16("live-second.txt"),
+                    },
+                ],
+            )]),
+        );
+        macro_rules! context {
+            ($metadata:expr) => {
+                super::super::deferred::DeferredContext {
+                    volume_path: "missing-extension-fixture",
+                    runmap: &runmap,
+                    record_size: REC,
+                    cluster_size: 4096,
+                    volume_size: 1 << 20,
+                    extensions: &extensions,
+                    arena: &arena,
+                    metadata: $metadata,
+                    stop: &stop,
+                }
+            };
+        }
+
+        let resolved =
+            super::super::deferred::resolve_deferred(context!(&live), &deferred).unwrap();
+        let names: Vec<Vec<u8>> = resolved[0]
+            .metas
+            .iter()
+            .map(|meta| name_of(&resolved[0], meta).to_vec())
+            .collect();
+        assert_eq!(
+            names,
+            [b"live-first.txt".to_vec(), b"live-second.txt".to_vec()]
+        );
+
+        let unavailable = crate::usn::MetadataSource::none();
+        assert!(matches!(
+            super::super::deferred::resolve_deferred(context!(&unavailable), &deferred),
+            Err(super::super::deferred::DeferredError::Incomplete(found))
+                if found == reference
+        ));
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(
+            super::super::deferred::resolve_deferred(context!(&live), &deferred),
+            Err(super::super::deferred::DeferredError::Cancelled)
+        ));
     }
 
     // ── Multi-record subrange & the parallel/sequential determinism oracle ───

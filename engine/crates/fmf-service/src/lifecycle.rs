@@ -38,25 +38,149 @@ pub fn stable_exe_path(data_dir: &Path) -> PathBuf {
     data_dir.join("fmf-service.exe")
 }
 
-/// Records "the service was used now" (best-effort). A write failure is a warn,
-/// never fatal — the service must keep serving.
-pub fn stamp_last_use(data_dir: &Path) {
-    let secs = SystemTime::now()
+/// Atomically records "the service was used now".
+///
+/// The complete timestamp is written and flushed to a uniquely created sibling
+/// before `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` publishes it. A crash
+/// or concurrent connection therefore leaves either the previous complete
+/// timestamp or the new one, never a truncated value.
+///
+/// # Errors
+///
+/// Returns timestamp conversion, staging-file, write/flush, replacement, or
+/// cleanup errors. Callers must surface the failure rather than letting GC
+/// mistake an old stamp for an unused installation.
+pub fn stamp_last_use(data_dir: &Path) -> std::io::Result<()> {
+    stamp_last_use_at(data_dir, SystemTime::now())
+}
+
+fn stamp_last_use_at(data_dir: &Path, used_at: SystemTime) -> std::io::Result<()> {
+    use std::io::{ErrorKind, Write as _};
+
+    let secs = used_at
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+        .map_err(|e| std::io::Error::new(ErrorKind::InvalidInput, e))?
+        .as_secs();
     let path = last_use_path(data_dir);
-    if let Err(e) = std::fs::write(&path, secs.to_string()) {
-        tracing::warn!(path = %path.display(), error = %e, "last_use stamp failed");
+    let mut staged = None;
+    for attempt in 0..16 {
+        let candidate = data_dir.join(format!(".last_use.write-{}-{attempt}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                staged = Some((candidate, file));
+                break;
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let Some((staged_path, mut staged_file)) = staged else {
+        return Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            "could not allocate a unique last_use staging file",
+        ));
+    };
+
+    let write_result = (|| {
+        staged_file.write_all(secs.to_string().as_bytes())?;
+        staged_file.flush()?;
+        staged_file.sync_all()
+    })();
+    drop(staged_file);
+    if let Err(e) = write_result {
+        return Err(cleanup_staged_file(&staged_path, e));
+    }
+
+    if let Err(e) = replace_file(&staged_path, &path) {
+        return Err(cleanup_staged_file(&staged_path, e));
+    }
+    Ok(())
+}
+
+fn cleanup_staged_file(path: &Path, original: std::io::Error) -> std::io::Error {
+    match std::fs::remove_file(path) {
+        Ok(()) => original,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => original,
+        Err(cleanup) => std::io::Error::new(
+            original.kind(),
+            format!("{original}; staging-file cleanup also failed: {cleanup}"),
+        ),
     }
 }
 
-/// Reads the last-use stamp, or `None` when it is missing/unparsable (a fresh
-/// install that has never served, or a corrupt byte).
-#[must_use]
-pub fn read_last_use(data_dir: &Path) -> Option<SystemTime> {
-    let text = std::fs::read_to_string(last_use_path(data_dir)).ok()?;
-    let secs: u64 = text.trim().parse().ok()?;
-    Some(UNIX_EPOCH + Duration::from_secs(secs))
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let from: Vec<u16> = from.as_os_str().encode_wide().chain([0]).collect();
+    let to: Vec<u16> = to.as_os_str().encode_wide().chain([0]).collect();
+    let ok = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::from_raw_os_error(
+            unsafe { GetLastError() } as i32
+        ));
+    }
+    Ok(())
+}
+
+/// Reads the last-use stamp.
+///
+/// A missing stamp is `Ok(None)`. Malformed content and every other I/O failure
+/// are errors so the GC command fails closed instead of silently classifying a
+/// damaged installation as fresh or stale.
+///
+/// # Errors
+///
+/// Returns non-`NotFound` I/O errors, `InvalidData` for malformed Unix seconds,
+/// or `InvalidData` when the timestamp cannot be represented by `SystemTime`.
+pub fn read_last_use(data_dir: &Path) -> std::io::Result<Option<SystemTime>> {
+    use std::io::Read;
+
+    const MAX_LAST_USE_BYTES: u64 = 32;
+    let path = last_use_path(data_dir);
+    let mut text = String::new();
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    file.by_ref()
+        .take(MAX_LAST_USE_BYTES + 1)
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_LAST_USE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} exceeds {MAX_LAST_USE_BYTES} bytes", path.display()),
+        ));
+    }
+    let secs = text.trim().parse::<u64>().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("malformed {}: {e}", path.display()),
+        )
+    })?;
+    let timestamp = UNIX_EPOCH
+        .checked_add(Duration::from_secs(secs))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("timestamp in {} is out of range", path.display()),
+            )
+        })?;
+    Ok(Some(timestamp))
 }
 
 /// Pure idle-stop decision (ADR-0027).
@@ -88,6 +212,7 @@ pub fn idle_should_stop(
 /// the fixed hardened-data-root copy (never user input), so it needs no escaping.
 #[must_use]
 pub fn gc_task_xml(stable_exe: &Path) -> Vec<u8> {
+    let command = xml_text(&stable_exe.display().to_string());
     let xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
          <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
@@ -95,9 +220,8 @@ pub fn gc_task_xml(stable_exe: &Path) -> Vec<u8> {
          <Triggers><CalendarTrigger><StartBoundary>2024-01-01T03:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers>\n\
          <Principals><Principal id=\"Author\"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\n\
          <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><ExecutionTimeLimit>PT5M</ExecutionTimeLimit></Settings>\n\
-         <Actions Context=\"Author\"><Exec><Command>{}</Command><Arguments>gc</Arguments></Exec></Actions>\n\
+         <Actions Context=\"Author\"><Exec><Command>{command}</Command><Arguments>gc</Arguments></Exec></Actions>\n\
          </Task>\n",
-        stable_exe.display()
     );
     // UTF-16LE + BOM (see the doc comment): the BOM is what tells schtasks to read
     // the rest as UTF-16, matching the declaration.
@@ -107,6 +231,21 @@ pub fn gc_task_xml(stable_exe: &Path) -> Vec<u8> {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
     bytes
+}
+
+fn xml_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// Pure GC decision (ADR-0027): remove an install unused for `max_idle_days`.
@@ -216,14 +355,110 @@ mod tests {
     }
 
     #[test]
+    fn gc_task_xml_escapes_the_command_as_xml_text() {
+        let bytes = gc_task_xml(Path::new(r"C:\ProgramData\A&B\fmf-service.exe"));
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let text = String::from_utf16(&units).expect("UTF-16");
+        assert!(text.contains(r"<Command>C:\ProgramData\A&amp;B\fmf-service.exe</Command>"));
+        assert!(!text.contains(r"<Command>C:\ProgramData\A&B"));
+    }
+
+    #[test]
     fn last_use_round_trips() {
         let dir = fmf_core::index::testutil::TestDir::new();
-        assert!(read_last_use(dir.path()).is_none(), "no stamp yet");
-        stamp_last_use(dir.path());
-        let t = read_last_use(dir.path()).expect("stamp then read");
+        assert!(
+            read_last_use(dir.path()).expect("read missing").is_none(),
+            "no stamp yet"
+        );
+        stamp_last_use(dir.path()).expect("stamp");
+        let t = read_last_use(dir.path())
+            .expect("read stamp")
+            .expect("stamp then read");
         let age = SystemTime::now()
             .duration_since(t)
             .expect("stamp is not in the future");
         assert!(age < Duration::from_mins(1), "stamp is ~now");
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("read data dir")
+                .all(|entry| !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".last_use.write-")),
+            "successful publication leaves no staging file"
+        );
+    }
+
+    #[test]
+    fn last_use_atomically_replaces_an_existing_stamp() {
+        let dir = fmf_core::index::testutil::TestDir::new();
+        std::fs::write(last_use_path(dir.path()), b"1").expect("old stamp");
+        let expected = UNIX_EPOCH + Duration::from_secs(123_456);
+
+        stamp_last_use_at(dir.path(), expected).expect("replace stamp");
+
+        assert_eq!(
+            read_last_use(dir.path()).expect("read"),
+            Some(expected),
+            "the complete replacement is visible"
+        );
+    }
+
+    #[test]
+    fn last_use_rejects_corruption_instead_of_treating_it_as_missing() {
+        let dir = fmf_core::index::testutil::TestDir::new();
+        std::fs::write(last_use_path(dir.path()), b"not-unix-seconds").expect("corrupt stamp");
+
+        let error = read_last_use(dir.path()).expect_err("corruption must fail closed");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn last_use_rejects_oversized_control_file() {
+        let dir = fmf_core::index::testutil::TestDir::new();
+        std::fs::write(last_use_path(dir.path()), vec![b'1'; 33]).expect("oversized stamp");
+
+        let error = read_last_use(dir.path()).expect_err("control file read must be bounded");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn last_use_propagates_non_not_found_io_errors() {
+        let dir = fmf_core::index::testutil::TestDir::new();
+        std::fs::create_dir(last_use_path(dir.path())).expect("directory at stamp path");
+
+        let error = read_last_use(dir.path()).expect_err("I/O faults must fail closed");
+
+        assert_ne!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "only a genuinely missing stamp is Ok(None)"
+        );
+    }
+
+    #[test]
+    fn failed_last_use_replace_cleans_its_staging_file() {
+        let dir = fmf_core::index::testutil::TestDir::new();
+        std::fs::create_dir(last_use_path(dir.path())).expect("blocking destination");
+
+        stamp_last_use_at(dir.path(), UNIX_EPOCH + Duration::from_secs(7))
+            .expect_err("a directory cannot be replaced by the stamp file");
+
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("read data dir")
+                .all(|entry| !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".last_use.write-")),
+            "failed publication cleans its staging file"
+        );
     }
 }

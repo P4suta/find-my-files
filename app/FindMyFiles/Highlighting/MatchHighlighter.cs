@@ -10,7 +10,7 @@ namespace FindMyFiles.Highlighting;
 /// compile.rs) for the subset that can be highlighted exactly, and drops the
 /// rest (see <see cref="CompiledHighlighter"/>).
 /// </summary>
-public static class MatchHighlighter
+internal static class MatchHighlighter
 {
     /// <summary>Highlight any non-empty literal, down to a single character.
     /// Modern search UIs (editors, browser find) light every match from the

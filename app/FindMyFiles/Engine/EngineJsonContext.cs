@@ -12,7 +12,9 @@ namespace FindMyFiles.Engine;
 /// callers route through the one definition and the snake_case casing (and the
 /// resolver) never drift.
 /// </summary>
-[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.SnakeCaseLower)]
+[JsonSourceGenerationOptions(
+    PropertyNamingPolicy = JsonKnownNamingPolicy.SnakeCaseLower,
+    UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow)]
 [JsonSerializable(typeof(QueryTraceData))]
 [JsonSerializable(typeof(EngineStatsData))]
 [JsonSerializable(typeof(ServiceInfoData))]

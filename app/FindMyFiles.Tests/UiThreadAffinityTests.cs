@@ -59,7 +59,7 @@ public sealed class UiThreadAffinityTests : IDisposable
             },
             relaunch: () => { }); // no-op: don't rebuild the page in the test
         using var vm = new MainViewModel(
-            FakeEngineClient.CreateEmpty(), dispatcher, new AppSettings(), provisioner: provisioner);
+            new UnavailableEngineClient(), dispatcher, new AppSettings(), provisioner: provisioner);
 
         var offThreadWrites = new ConcurrentQueue<string?>();
         vm.PropertyChanged += (_, e) =>

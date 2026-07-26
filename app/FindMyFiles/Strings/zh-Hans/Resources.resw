@@ -82,44 +82,31 @@
   <data name="About_EngineVersion" xml:space="preserve"><value>引擎: v{0}</value></data>
   <data name="AboutVersionMismatch.Title" xml:space="preserve"><value>版本不匹配</value></data>
   <data name="AboutVersionMismatch.Message" xml:space="preserve"><value>应用与引擎来自不同的构建。请重启应用，或更新以使两者一致。</value></data>
-  <data name="DiagCard.Header" xml:space="preserve"><value>显示/隐藏诊断信息</value></data>
+  <data name="DiagCard.Header" xml:space="preserve"><value>诊断</value></data>
+  <data name="DiagCard.Description" xml:space="preserve"><value>检查日志、引擎状态和性能计数器。</value></data>
   <data name="ServiceCard.Header" xml:space="preserve"><value>管理服务…</value></data>
+  <data name="ServiceCard.Description" xml:space="preserve"><value>修复、重启或卸载搜索服务。</value></data>
   <data name="LangMenu.Header" xml:space="preserve"><value>语言</value></data>
   <data name="LangSystem.Content" xml:space="preserve"><value>系统默认</value></data>
   <data name="MnuOpen.Text" xml:space="preserve"><value>打开</value></data>
   <data name="MnuOpenPath.Text" xml:space="preserve"><value>打开文件夹并选中文件</value></data>
   <data name="MnuCopyPath.Text" xml:space="preserve"><value>复制路径</value></data>
-  <data name="SetupTitle.Text" xml:space="preserve"><value>开始设置文件搜索</value></data>
-  <data name="SetupBody.Text" xml:space="preserve"><value>索引整个驱动器最快、最全 — 只需一次性的管理员权限设置。</value></data>
+  <data name="SetupTitle.Text" xml:space="preserve"><value>准备文件搜索</value></data>
+  <data name="SetupBody.Text" xml:space="preserve"><value>Find My Files 使用本机 Windows 服务快速索引 NTFS 驱动器。首次启用需要管理员授权。如需修复之前的设置，请打开“设置与修复”。</value></data>
   <data name="EnableSearch.Content" xml:space="preserve"><value>启用搜索</value></data>
-  <data name="SetupOrDivider.Text" xml:space="preserve"><value>— 或 —</value></data>
-  <data name="ScopeSetupLink.Content" xml:space="preserve"><value>没有管理员权限? 改为选择文件夹</value></data>
-  <data name="ScopeDialog_SetupTitle" xml:space="preserve"><value>选择搜索文件夹</value></data>
-  <data name="ScopeDialog_SetupStart" xml:space="preserve"><value>搜索这些文件夹</value></data>
-  <data name="ScopeCard.Header" xml:space="preserve"><value>更改搜索文件夹…</value></data>
-  <data name="SettingsDialog.Title" xml:space="preserve"><value>设置</value></data>
-  <data name="SettingsDialog.CloseButtonText" xml:space="preserve"><value>关闭</value></data>
+  <data name="SetupRecovery.Content" xml:space="preserve"><value>设置与修复</value></data>
+  <data name="SettingsDialogRoot.Title" xml:space="preserve"><value>设置</value></data>
+  <data name="SettingsDialogRoot.CloseButtonText" xml:space="preserve"><value>关闭</value></data>
   <data name="SettingsGroup_Search.Text" xml:space="preserve"><value>搜索</value></data>
   <data name="SettingsGroup_General.Text" xml:space="preserve"><value>常规</value></data>
   <data name="SettingsGroup_Advanced.Text" xml:space="preserve"><value>高级</value></data>
   <data name="SortDescendingCard.Header" xml:space="preserve"><value>降序</value></data>
-  <data name="ActionOpen.Content" xml:space="preserve"><value>打开</value></data>
-  <data name="ScopeDialog.Title" xml:space="preserve"><value>搜索文件夹</value></data>
-  <data name="ScopeDialog.PrimaryButtonText" xml:space="preserve"><value>应用并重启</value></data>
-  <data name="ScopeDialog.CloseButtonText" xml:space="preserve"><value>取消</value></data>
-  <data name="ScopeDialogBody.Text" xml:space="preserve"><value>可添加任意数量的文件夹(均会被搜索)。应用后将重启应用以重新索引。</value></data>
-  <data name="ScopeDialogAddFolder.Content" xml:space="preserve"><value>添加文件夹…</value></data>
-  <data name="Status_ModeScope" xml:space="preserve"><value>模式: 选定文件夹</value></data>
+  <data name="DiagOpen.Content" xml:space="preserve"><value>打开诊断</value></data>
+  <data name="ServiceOpen.Content" xml:space="preserve"><value>管理服务</value></data>
   <data name="Status_ModePrivileged" xml:space="preserve"><value>模式: 所有驱动器</value></data>
-  <data name="Scope_OpenFailed" xml:space="preserve"><value>无法打开搜索文件夹</value></data>
   <data name="Settings_OpenFailed" xml:space="preserve"><value>无法打开设置</value></data>
   <data name="NoResultsTitle.Text" xml:space="preserve"><value>未找到结果</value></data>
   <data name="NoResults_Body" xml:space="preserve"><value>未找到与“{0}”匹配的结果</value></data>
-  <data name="ScopeDialogExcludesHeader.Text" xml:space="preserve"><value>跳过这些子文件夹</value></data>
-  <data name="ScopeDialogExcludesBody.Text" xml:space="preserve"><value>上述文件夹中你不想索引的部分(例如 node_modules 或构建输出)。应用后将重新遍历。</value></data>
-  <data name="ScopeDialogAddExclude.Content" xml:space="preserve"><value>添加要跳过的文件夹…</value></data>
-  <data name="Scope_CoverageNote" xml:space="preserve"><value>已包含在选定的更大文件夹中(将被合并): {0}</value></data>
-  <data name="Scope_ExcludeNotUnderRoot" xml:space="preserve"><value>要跳过的文件夹必须位于某个搜索文件夹之内。</value></data>
   <data name="SvcDialog.Title" xml:space="preserve"><value>管理服务</value></data>
   <data name="SvcDialog.CloseButtonText" xml:space="preserve"><value>关闭</value></data>
   <data name="SvcSubtitle.Text" xml:space="preserve"><value>fmf-engine(文件名搜索服务)</value></data>
@@ -131,8 +118,12 @@
   <data name="SvcRestart.Content" xml:space="preserve"><value>重启</value></data>
   <data name="SvcRegister.Content" xml:space="preserve"><value>注册并启动</value></data>
   <data name="SvcReregister.Content" xml:space="preserve"><value>重新注册</value></data>
-  <data name="SvcUninstall.Content" xml:space="preserve"><value>卸载</value></data>
-  <data name="SvcPurgeData.Content" xml:space="preserve"><value>同时删除索引和日志</value></data>
+  <data name="SvcUninstall.Content" xml:space="preserve"><value>仅卸载服务</value></data>
+  <data name="SvcPurgeData.Content" xml:space="preserve"><value>删除 Find My Files 的所有数据…</value></data>
+  <data name="SvcPurgeConfirmTitle.Text" xml:space="preserve"><value>要删除 Find My Files 的所有数据吗？</value></data>
+  <data name="SvcPurgeConfirmBody.Text" xml:space="preserve"><value>如果服务已注册，此操作也会移除服务和计划任务。它将永久删除 %ProgramData%\find-my-files 中的所有引擎数据，以及 %APPDATA%\find-my-files 中的界面设置和应用日志。Find My Files 随后会关闭。</value></data>
+  <data name="SvcPurgeConfirm.Content" xml:space="preserve"><value>删除所有数据</value></data>
+  <data name="SvcPurgeCancel.Content" xml:space="preserve"><value>取消</value></data>
   <data name="SvcRestartApp.Content" xml:space="preserve"><value>重启应用</value></data>
   <data name="CopyDiag.Content" xml:space="preserve"><value>复制诊断信息</value></data>
   <data name="DiagLastQueryHeader.Text" xml:space="preserve"><value>最近的查询</value></data>
@@ -158,6 +149,7 @@
   <data name="Tray_Tooltip" xml:space="preserve"><value>find-my-files</value></data>
   <data name="OptionsButton_ToolTip" xml:space="preserve"><value>设置、状态、诊断(精简/隐藏文件/排序/数量/引擎/诊断)</value></data>
   <data name="OptionsButton_Name" xml:space="preserve"><value>设置、状态、诊断</value></data>
+  <data name="ResultsList_Name" xml:space="preserve"><value>搜索结果</value></data>
   <data name="DiagWindowTitle" xml:space="preserve"><value>诊断</value></data>
 
   <data name="Status_Preparing" xml:space="preserve"><value>正在准备…</value></data>
@@ -195,7 +187,7 @@
 
   <data name="Setup_WaitingForPermission" xml:space="preserve"><value>正在等待管理员授权…</value></data>
   <data name="Setup_Connecting" xml:space="preserve"><value>正在连接服务…</value></data>
-  <data name="Setup_Failed" xml:space="preserve"><value>设置失败，请重试。</value></data>
+  <data name="Setup_Failed" xml:space="preserve"><value>设置失败。请重试，或打开“设置与修复”进行诊断和服务修复。</value></data>
   <data name="Setup_PortableLocation" xml:space="preserve"><value>所有内容都保存在 {0}，不会在此文件夹之外写入任何内容。</value></data>
 
   <data name="Svc_StateChecking" xml:space="preserve"><value>正在检查…</value></data>
@@ -204,14 +196,23 @@
   <data name="Svc_StateStopped" xml:space="preserve"><value>已停止</value></data>
   <data name="Svc_StateRunningPid" xml:space="preserve"><value>运行中 (PID {0})</value></data>
   <data name="Svc_StateRunning" xml:space="preserve"><value>运行中</value></data>
+  <data name="Svc_StateUnavailable" xml:space="preserve"><value>无法读取服务状态</value></data>
   <data name="Svc_Started" xml:space="preserve"><value>服务已启动</value></data>
   <data name="Svc_Stopped" xml:space="preserve"><value>服务已停止</value></data>
   <data name="Svc_Restarted" xml:space="preserve"><value>服务已重启</value></data>
   <data name="Svc_Registered" xml:space="preserve"><value>服务已注册</value></data>
   <data name="Svc_Uninstalled" xml:space="preserve"><value>服务已卸载</value></data>
+  <data name="Svc_UninstalledWithData" xml:space="preserve"><value>服务和所有 FindMyFiles 数据已删除</value></data>
+  <data name="Svc_UserDataPurgeFailed" xml:space="preserve"><value>服务和引擎数据已删除，但无法删除界面设置或应用日志。请关闭正在使用这些文件的程序，然后再次选择“删除 Find My Files 的所有数据”。</value></data>
+  <data name="Settings_SaveFailedTitle" xml:space="preserve"><value>未能保存设置</value></data>
+  <data name="Settings_SaveFailedBody" xml:space="preserve"><value>更改已撤销。请检查对 %APPDATA%\find-my-files 的访问权限，然后重试。</value></data>
+  <data name="Settings_LanguageSaveFailedBody" xml:space="preserve"><value>由于无法保存 settings.json，语言未更改。</value></data>
+  <data name="Diag_Copied" xml:space="preserve"><value>诊断信息已复制到剪贴板</value></data>
   <data name="Svc_Cancelled" xml:space="preserve"><value>已在 UAC 提示处取消</value></data>
-  <data name="Svc_Failed" xml:space="preserve"><value>失败(退出代码 {0})。在管理员终端运行 `fmf-service {1}` 可查看原因</value></data>
+  <data name="Svc_Failed" xml:space="preserve"><value>操作失败(退出代码 {0})。请重试。如果问题仍然存在，请打开“设置与修复”→“诊断”。</value></data>
   <data name="Svc_RegisteredNotConfirmed" xml:space="preserve"><value>已注册，但尚未确认连接。请按“重启应用”，或稍后重试。</value></data>
+  <data name="Svc_Incompatible" xml:space="preserve"><value>已安装服务的版本不匹配。请重新注册以更新引擎。</value></data>
+  <data name="Svc_ControlFailed" xml:space="preserve"><value>服务操作失败。请重新注册以修复权限或版本。</value></data>
   <data name="Svc_OpenFailed" xml:space="preserve"><value>无法打开服务管理</value></data>
 
   <data name="Shell_OpenFailed" xml:space="preserve"><value>无法打开</value></data>
@@ -225,7 +226,7 @@
 
   <data name="App_LockedTitle" xml:space="preserve"><value>搜索服务正在运行，无法使用进程内引擎</value></data>
   <data name="App_LockedBody" xml:space="preserve"><value>正常启动即可连接服务。若要使用进程内引擎，请先停止服务(`just service-stop`)。</value></data>
-  <data name="App_EngineInitFailedTitle" xml:space="preserve"><value>搜索引擎初始化失败(正在以回退模式运行)</value></data>
+  <data name="App_EngineInitFailedTitle" xml:space="preserve"><value>搜索引擎不可用</value></data>
   <data name="App_EngineInitFailedBody" xml:space="preserve"><value>{0}
 fmf-service 可能未运行，或索引被其他引擎锁定(详见 engine.log)。</value></data>
 

@@ -13,7 +13,7 @@ namespace FindMyFiles.Tests.TestDoubles;
 /// is detectable. That is the bug class that ships RPC_E_WRONG_THREAD crashes
 /// (the orphaned-window setup bug), which ManualDispatcher structurally can't see.
 /// </summary>
-public sealed class DedicatedThreadDispatcher : IDispatcher, IDisposable
+internal sealed class DedicatedThreadDispatcher : IDispatcher, IDisposable
 {
     private readonly BlockingCollection<Action> _queue = new();
     private readonly Thread _thread;

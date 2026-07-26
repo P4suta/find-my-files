@@ -21,7 +21,7 @@ public sealed partial class DiagnosticsWindow : Window
     /// <see cref="PerfPanel"/>, then sizes (DPI-correct, before first paint) and
     /// centers the window on its display.</summary>
     /// <param name="perf">The shared diagnostics ViewModel owned by the main view.</param>
-    public DiagnosticsWindow(PerfPanelViewModel perf)
+    internal DiagnosticsWindow(PerfPanelViewModel perf)
     {
         InitializeComponent();
         Title = Loc.Get("DiagWindowTitle");
@@ -30,6 +30,7 @@ public sealed partial class DiagnosticsWindow : Window
         SetTitleBar(DiagTitleBar);
         AppWindow.SetIcon("Assets/AppIcon.ico");
         DiagPerfPanel.ViewModel = perf;
+        Closed += (_, _) => DiagPerfPanel.Dispose();
 
         // DPI-correct, flicker-free sizing (ctor runs before first paint).
         var hwnd = Win32Interop.GetWindowFromWindowId(AppWindow.Id);

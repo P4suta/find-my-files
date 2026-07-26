@@ -12,11 +12,29 @@ namespace FindMyFiles.Tests;
 /// resolves the method name as the symbol through the case-sensitive
 /// GetProcAddress — so a single PascalCased name (e.g. an analyzer renaming
 /// <c>fmf_set_event_callback</c> to <c>Fmf_set_event_callback</c>) silently
-/// breaks in-proc / scope mode with <see cref="EntryPointNotFoundException"/>,
+/// breaks in-proc mode with <see cref="EntryPointNotFoundException"/>,
 /// invisible to the fake-backed suite which never loads the DLL. Pinning the
 /// entry-point shape here makes such drift fail the build, not a user's search.</summary>
 public sealed class NativeEngineBindingTests
 {
+    [Fact]
+    public void Ffi_client_rejects_an_incompatible_dll_before_structured_calls()
+    {
+        FfiEngineClient.EnsureCompatibleAbi(EngineContract.AbiVersion);
+
+        var ex = Assert.Throws<EngineUnavailableException>(
+            () => FfiEngineClient.EnsureCompatibleAbi(EngineContract.AbiVersion + 1));
+
+        Assert.Contains(
+            $"expects {EngineContract.AbiVersion}",
+            ex.Message,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"reports {EngineContract.AbiVersion + 1}",
+            ex.Message,
+            StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Every_fmf_engine_entry_point_is_lowercase_snake_case()
     {
@@ -37,6 +55,20 @@ public sealed class NativeEngineBindingTests
         var detail = "fmf_engine entry points must match the DLL's lowercase exports "
             + "(GetProcAddress is case-sensitive): " + string.Join(", ", bad);
         Assert.True(bad.Count == 0, detail);
+    }
+
+    [Theory]
+    [InlineData("fmf_blob_free")]
+    [InlineData("fmf_page_free")]
+    public void Allocation_free_exports_take_owner_ids_only(string methodName)
+    {
+        var method = typeof(NativeEngine).GetMethod(
+            methodName,
+            BindingFlags.Static | BindingFlags.NonPublic);
+
+        Assert.NotNull(method);
+        var parameter = Assert.Single(method!.GetParameters());
+        Assert.Equal(typeof(ulong), parameter.ParameterType);
     }
 
     private static bool IsLowerSnakeFmf(string name) =>

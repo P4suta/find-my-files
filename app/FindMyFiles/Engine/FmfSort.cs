@@ -1,7 +1,7 @@
 namespace FindMyFiles.Engine;
 
 /// <summary>Result sort key (wire values of fmf-core's <c>SortKey</c>).</summary>
-public enum FmfSort
+internal enum FmfSort
 {
     /// <summary>Sort by file name.</summary>
     Name = 0,

@@ -4,7 +4,7 @@ namespace FindMyFiles.Engine;
 /// handle are now invalid (thrown from
 /// <see cref="ISearchResult.GetRangeAsync"/>). Recovery is to re-run the
 /// query.</summary>
-public sealed class StaleResultException : Exception
+internal sealed class StaleResultException : Exception
 {
     /// <summary>Initializes with the canned message.</summary>
     public StaleResultException()

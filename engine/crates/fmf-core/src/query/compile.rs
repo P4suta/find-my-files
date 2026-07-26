@@ -54,11 +54,11 @@ pub(super) enum Matcher {
     },
     /// Anchored wildcard or user regex over the (original) name bytes.
     NameRegex {
-        re: Regex,
+        re: Wtf8Regex,
     },
     /// Unanchored wildcard/regex over the (original) full-path bytes.
     PathRegex {
-        re: Regex,
+        re: Wtf8Regex,
     },
     /// Extension equals any of these folded byte strings.
     Ext {
@@ -74,6 +74,60 @@ pub(super) enum Matcher {
         max: i64,
     },
     IsDir(bool),
+}
+
+/// A Unicode regex for ordinary names plus a mixed Unicode/WTF-8 fallback for
+/// legal NTFS names that contain a lone surrogate.
+///
+/// Making the only regex byte-oriented would let it traverse lone-surrogate
+/// bytes, but would also change `.`/`?` from one Unicode scalar to one byte and
+/// disable Unicode-aware case matching for every normal file name. Keep the
+/// existing semantics on valid UTF-8. The fallback keeps the surrounding
+/// expression Unicode-aware and makes only its any-code-point atoms byte-aware;
+/// it is consulted only for the representation the primary cannot consume.
+pub(super) struct Wtf8Regex {
+    unicode: Regex,
+    wtf8: Regex,
+    case_insensitive: bool,
+}
+
+impl Wtf8Regex {
+    #[inline]
+    pub(super) fn is_match(&self, haystack: &[u8]) -> bool {
+        if self.unicode.is_match(haystack) {
+            return true;
+        }
+        has_lone_surrogate(haystack) && self.wtf8.is_match(haystack)
+    }
+
+    #[inline]
+    pub(super) fn as_str(&self) -> &str {
+        self.unicode.as_str()
+    }
+
+    pub(super) fn same_pattern(&self, other: &Self) -> bool {
+        self.case_insensitive == other.case_insensitive
+            && self.unicode.as_str() == other.unicode.as_str()
+            && self.wtf8.as_str() == other.wtf8.as_str()
+    }
+}
+
+/// The index stores canonical WTF-8, whose only departure from valid UTF-8 is
+/// ED A0..BF 80..BF (a UTF-16 surrogate). Avoid a second full UTF-8 decoder
+/// pass on every ordinary regex miss; memchr makes the overwhelmingly common
+/// "no ED byte" case a vectorized scan.
+fn has_lone_surrogate(bytes: &[u8]) -> bool {
+    let mut offset = 0usize;
+    while let Some(relative) = memchr::memchr(0xED, &bytes[offset..]) {
+        let lead = offset + relative;
+        if bytes.get(lead + 1..lead + 3).is_some_and(|tail| {
+            (0xA0..=0xBF).contains(&tail[0]) && (0x80..=0xBF).contains(&tail[1])
+        }) {
+            return true;
+        }
+        offset = lead + 1;
+    }
+    false
 }
 
 impl Matcher {
@@ -251,6 +305,62 @@ fn wildcard_to_regex_body(pattern: &str) -> String {
     out
 }
 
+// The ordinary dot keeps the caller's Unicode/newline flags. Its local byte
+// alternative adds exactly the one code-point range UTF-8 excludes but WTF-8
+// admits: an encoded UTF-16 surrogate.
+const WTF8_DOT: &str = r"(?:.|(?-u:\xED[\xA0-\xBF][\x80-\xBF]))";
+
+fn wildcard_to_wtf8_regex_body(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() * 2);
+    for c in pattern.chars() {
+        match c {
+            '*' => {
+                out.push_str(WTF8_DOT);
+                out.push('*');
+            }
+            '?' => out.push_str(WTF8_DOT),
+            c => out.push_str(&regex::escape(&c.to_string())),
+        }
+    }
+    out
+}
+
+/// Replace regex dot atoms outside character classes with one canonical
+/// WTF-8 code point. The surrounding pattern stays in Unicode mode, so
+/// literals, Unicode classes, and case folding retain their normal semantics;
+/// only this atom locally admits lone-surrogate bytes.
+fn regex_to_wtf8_fallback(body: &str) -> String {
+    use regex_syntax::ast::{Ast, parse::Parser};
+
+    fn replace_dots(ast: &mut Ast, replacement: &Ast) {
+        match ast {
+            Ast::Dot(_) => *ast = replacement.clone(),
+            Ast::Repetition(repetition) => replace_dots(&mut repetition.ast, replacement),
+            Ast::Group(group) => replace_dots(&mut group.ast, replacement),
+            Ast::Alternation(alternation) => {
+                for child in &mut alternation.asts {
+                    replace_dots(child, replacement);
+                }
+            }
+            Ast::Concat(concat) => {
+                for child in &mut concat.asts {
+                    replace_dots(child, replacement);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let Ok(mut ast) = Parser::new().parse(body) else {
+        return body.to_string();
+    };
+    let replacement = Parser::new()
+        .parse(WTF8_DOT)
+        .expect("the static WTF-8 atom is valid regex syntax");
+    replace_dots(&mut ast, &replacement);
+    ast.to_string()
+}
+
 /// Compile-time bounds on a user regex (ADR-0023). The `regex` crate matches
 /// in guaranteed linear time (finite automata, no backtracking) — so there is
 /// no `ReDoS` *execution* blowup — but a pathological pattern can still demand a
@@ -262,17 +372,47 @@ fn wildcard_to_regex_body(pattern: &str) -> String {
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 const REGEX_DFA_SIZE_LIMIT: usize = 1 << 20;
 
-fn build_regex(body: &str, ci: bool, pattern_for_err: &str) -> Result<Regex, CompileError> {
-    RegexBuilder::new(body)
+fn regex_builder(body: &str, ci: bool) -> RegexBuilder {
+    let mut builder = RegexBuilder::new(body);
+    builder
         .case_insensitive(ci)
         .dot_matches_new_line(true)
         .size_limit(REGEX_SIZE_LIMIT)
-        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT);
+    builder
+}
+
+fn build_regex_with_wtf8_fallback(
+    body: &str,
+    wtf8_body: &str,
+    ci: bool,
+    pattern_for_err: &str,
+) -> Result<Wtf8Regex, CompileError> {
+    let unicode = regex_builder(body, ci)
         .build()
         .map_err(|source| CompileError::Regex {
             pattern: pattern_for_err.to_string(),
             source,
-        })
+        })?;
+    // A query has one meaning for every legal NTFS name. If the expanded WTF-8
+    // program exceeds the same hard compilation bound, reject the whole query
+    // instead of silently returning incomplete results for lone-surrogate names.
+    let wtf8 = regex_builder(wtf8_body, ci)
+        .build()
+        .map_err(|source| CompileError::Regex {
+            pattern: pattern_for_err.to_string(),
+            source,
+        })?;
+    Ok(Wtf8Regex {
+        unicode,
+        wtf8,
+        case_insensitive: ci,
+    })
+}
+
+fn build_regex(body: &str, ci: bool, pattern_for_err: &str) -> Result<Wtf8Regex, CompileError> {
+    let wtf8_body = regex_to_wtf8_fallback(body);
+    build_regex_with_wtf8_fallback(body, &wtf8_body, ci, pattern_for_err)
 }
 
 fn compile_term(
@@ -310,14 +450,19 @@ fn compile_term(
             }
             WildShape::General => {
                 let body = format!("^{}$", wildcard_to_regex_body(s));
+                let wtf8_body = format!("^{}$", wildcard_to_wtf8_regex_body(s));
                 Matcher::NameRegex {
-                    re: build_regex(&body, insensitive(s, case), s)?,
+                    re: build_regex_with_wtf8_fallback(&body, &wtf8_body, insensitive(s, case), s)?,
                 }
             }
         },
-        Term::PathWildcard(s) => Matcher::PathRegex {
-            re: build_regex(&wildcard_to_regex_body(s), insensitive(s, case), s)?,
-        },
+        Term::PathWildcard(s) => {
+            let body = wildcard_to_regex_body(s);
+            let wtf8_body = wildcard_to_wtf8_regex_body(s);
+            Matcher::PathRegex {
+                re: build_regex_with_wtf8_fallback(&body, &wtf8_body, insensitive(s, case), s)?,
+            }
+        }
         Term::Regex(s) => Matcher::NameRegex {
             re: build_regex(s, insensitive(s, case), s)?,
         },
@@ -479,7 +624,7 @@ fn regex_prefilter_enabled() -> bool {
 /// the `NameRegex` residual re-checks every candidate exactly. Returns `None`
 /// when no usable literal exists (`\d+`, a leading `.*`, an alternation with
 /// no common factor); the caller then falls back to a full scan.
-fn regex_name_prefilter(re: &Regex) -> Option<Driver> {
+fn regex_name_prefilter(re: &Wtf8Regex) -> Option<Driver> {
     use regex_syntax::hir::literal::{ExtractKind, Extractor};
 
     let hir = regex_syntax::parse(re.as_str()).ok()?;
@@ -728,6 +873,86 @@ mod tests {
         assert!(
             matches!(result, Err(CompileError::Regex { .. })),
             "a 1 MiB+ regex program must be refused, not compiled"
+        );
+    }
+
+    #[test]
+    fn wtf8_fallback_compile_failure_rejects_the_whole_query() {
+        let result = build_regex_with_wtf8_fallback("ordinary", "(", false, "ordinary");
+        assert!(
+            matches!(result, Err(CompileError::Regex { .. })),
+            "a missing fallback must never silently narrow results"
+        );
+    }
+
+    #[test]
+    fn regex_identity_includes_fallback_and_case_mode() {
+        let base = build_regex_with_wtf8_fallback("^A.B$", "^A.B$", false, "^A.B$").unwrap();
+        let different_fallback =
+            build_regex_with_wtf8_fallback("^A.B$", "^A(?:.)B$", false, "^A.B$").unwrap();
+        let different_case =
+            build_regex_with_wtf8_fallback("^A.B$", "^A.B$", true, "^A.B$").unwrap();
+
+        assert!(!base.same_pattern(&different_fallback));
+        assert!(!base.same_pattern(&different_case));
+    }
+
+    #[test]
+    fn regex_keeps_unicode_semantics_and_can_cross_a_lone_surrogate() {
+        let one_scalar = build_regex(r"^.$", false, r"^.$").unwrap();
+        assert!(
+            one_scalar.is_match("日".as_bytes()),
+            "normal names keep Unicode-scalar dot semantics"
+        );
+        let escaped_dot = build_regex(r"^\.$", false, r"^\.$").unwrap();
+        let class_dot = build_regex(r"^[.]$", false, r"^[.]$").unwrap();
+        assert!(escaped_dot.is_match(b"."));
+        assert!(class_dot.is_match(b"."));
+
+        let case_insensitive = build_regex(r"^Σ$", true, r"^Σ$").unwrap();
+        assert!(
+            case_insensitive.is_match("σ".as_bytes()),
+            "normal names keep Unicode-aware case matching"
+        );
+
+        // "A<lone high surrogate>B" in canonical WTF-8. The primary Unicode
+        // regex cannot traverse ED A0 80, but the mixed fallback can.
+        let wtf8 = [b'A', 0xED, 0xA0, 0x80, b'B'];
+        assert!(!escaped_dot.is_match(&wtf8[1..4]));
+        assert!(!class_dot.is_match(&wtf8[1..4]));
+        assert!(has_lone_surrogate(&wtf8));
+        assert!(
+            !has_lone_surrogate(&[0xED, 0x9F, 0xBF]),
+            "the valid scalar immediately below the surrogate range"
+        );
+        let spanning = build_regex(r"^A.*B$", false, r"^A.*B$").unwrap();
+        assert!(
+            spanning.is_match(&wtf8),
+            "a legal NTFS name must not become invisible to regex"
+        );
+        assert!(
+            one_scalar.is_match(&wtf8[1..4]),
+            "raw regex dot must consume one lone-surrogate code point"
+        );
+
+        let mut greek_wtf8 = "σ".as_bytes().to_vec();
+        greek_wtf8.extend_from_slice(&wtf8[1..]);
+        let unicode_case_across_surrogate = build_regex(r"^Σ.*B$", true, r"^Σ.*B$").unwrap();
+        assert!(
+            unicode_case_across_surrogate.is_match(&greek_wtf8),
+            "fallback must retain Unicode case folding around a surrogate"
+        );
+
+        let wildcard = build_regex_with_wtf8_fallback(
+            &format!("^{}$", wildcard_to_regex_body("A?B")),
+            &format!("^{}$", wildcard_to_wtf8_regex_body("A?B")),
+            false,
+            "A?B",
+        )
+        .unwrap();
+        assert!(
+            wildcard.is_match(&wtf8),
+            "wildcard ? must consume one WTF-8 code point, not one byte"
         );
     }
 }

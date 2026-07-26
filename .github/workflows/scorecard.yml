@@ -11,13 +11,18 @@ on:
   push:
     branches: [main]
 
-# Least privilege at the top; the job below grants only what Scorecard needs.
-permissions: read-all
+concurrency:
+  group: scorecard-${{ github.event_name }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+# Deny every implicit scope; the job below grants only what Scorecard needs.
+permissions: {}
 
 jobs:
   analysis:
     name: Scorecard analysis
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       security-events: write # upload the SARIF result to code scanning
       id-token: write # publish results to the public Scorecard API (badge)

@@ -16,16 +16,18 @@
 //!   appends the worker batches in chunk order, so `EntryId` assignment is
 //!   deterministic.
 
+pub(crate) mod attribute_list;
 mod deferred;
 mod parse;
 mod pipeline;
 mod probe;
+pub(crate) mod record;
 mod volume_io;
-pub mod walk;
-mod walk_id;
 
 pub use probe::{IoProbeMode, ProbeStats, io_probe};
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use ntfs_reader::api::ROOT_RECORD;
@@ -35,10 +37,11 @@ use rustc_hash::FxHashMap;
 use crate::index::{VolumeIndex, VolumeIndexBuilder};
 use crate::mft::{MftError, peak_working_set};
 
-use deferred::resolve_deferred;
+use deferred::{DeferredContext, DeferredError, resolve_deferred};
 use parse::{RecordArena, append_batches, parse_chunk};
-use pipeline::{plan_chunks, run_chunk_pipeline};
+use pipeline::{PipelineOutcome, plan_chunks, run_chunk_pipeline};
 use volume_io::mft_layout;
+pub(crate) use volume_io::{apply_fixup, open_raw_volume};
 
 /// Statistics from a full index build.
 #[derive(Debug, Default)]
@@ -58,14 +61,14 @@ pub struct ScanStats {
     pub deferred_names: u64,
     /// Builder finish: parent resolution + EXCLUDED propagation.
     pub elapsed_build_ms: u64,
-    /// Builder finish: the three permutation sorts.
+    /// Builder finish: the name-permutation sort.
     pub elapsed_sort_ms: u64,
     /// 1 when the read-ahead I/O thread could not start and the scan
     /// degraded to inline sequential reads.
     pub pipeline_fallbacks: u64,
-    /// Files indexed (count).
+    /// Searchable file-link rows indexed.
     pub files: u64,
-    /// Directories indexed (count).
+    /// Searchable directory-link rows indexed.
     pub dirs: u64,
     /// Records dropped because no usable name could be resolved (count).
     pub skipped_no_name: u64,
@@ -76,31 +79,14 @@ pub struct ScanStats {
     /// Extension records (`base_reference` != 0) — parts of other files,
     /// correctly not indexed standalone.
     pub extension_records: u64,
-    /// Records failing signature/fixup validation.
-    pub corrupt_records: u64,
-    /// Deferred $`ATTRIBUTE_LIST` records whose name never resolved.
-    pub deferred_unresolved: u64,
-    /// Name-bearing extension records past the in-RAM cache cap (those
-    /// targets fall back to disk reads in the deferred pass).
-    pub ext_name_cache_skipped: u64,
-    /// Deferred-pass targeted disk reads that failed — each one is a name
-    /// that stays unresolved until the next rescan.
+    /// Name/attribute-list-bearing extension records past the in-RAM cache
+    /// cap (those targets fall back to disk reads in the deferred pass).
+    /// Base/extension records spilled from the shared 128MiB deferred arena.
+    /// Only their record numbers remain; the deferred pass reads them lazily.
+    pub deferred_record_cache_spills: u64,
+    /// Deferred-pass targeted MFT reads that failed before the authoritative
+    /// live-metadata fallback ran.
     pub deferred_name_read_failures: u64,
-    /// Scope-mode (folder-walk, ADR-0024) only: directories enumerated.
-    pub walk_dirs: u64,
-    /// Scope-mode only: files enumerated.
-    pub walk_files: u64,
-    /// Scope-mode only: wall-clock of the enumeration phase (ms).
-    pub elapsed_walk_ms: u64,
-    /// Scope-mode only: roots/dirs/entries skipped because they could not be
-    /// read (permission, vanished). The worker maps this to a counter + warn.
-    pub walk_read_errors: u64,
-    /// Scope-mode only: subtrees not descended because they hit `MAX_DEPTH`.
-    pub walk_depth_truncated: u64,
-    /// Scope-mode only: directories (and their subtrees) skipped because they
-    /// matched a user exclude (ADR-0025). Normal behaviour, not a degradation —
-    /// surfaced in the scan-complete log, never a degrade counter.
-    pub walk_excluded_pruned: u64,
 }
 
 /// Full initial scan: stream the volume's $MFT and build the in-memory
@@ -112,6 +98,26 @@ pub struct ScanStats {
 /// open the raw volume, or [`MftError::Ntfs`] if opening the volume or
 /// reading the $MFT fails.
 pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
+    scan_volume_cancellable(drive, &Arc::new(AtomicBool::new(false)))
+}
+
+/// Full initial scan with cooperative shutdown.
+///
+/// Cancellation is checked
+/// between bounded raw reads, parsed chunks, deferred records, and builder
+/// stages. A cancelled scan never returns or publishes a partial index.
+///
+/// # Errors
+///
+/// Returns [`MftError::Cancelled`] when `stop` is set, in addition to the
+/// errors documented by [`scan_volume`].
+pub fn scan_volume_cancellable(
+    drive: &str,
+    stop: &Arc<AtomicBool>,
+) -> Result<(VolumeIndex, ScanStats), MftError> {
+    if stop.load(Ordering::Relaxed) {
+        return Err(MftError::Cancelled);
+    }
     let drive = drive.trim_end_matches(['\\', '/']);
     let volume_path = format!(r"\\.\{drive}");
     let mut stats = ScanStats {
@@ -120,79 +126,115 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
     };
 
     let t0 = Instant::now();
-    let (record_size, data_size, runmap) = mft_layout(&volume_path).map_err(|e| match e {
+    let layout = mft_layout(&volume_path).map_err(|e| match e {
         NtfsReaderError::ElevationError => MftError::NotElevated,
         other => MftError::Ntfs(other),
     })?;
-    stats.mft_bytes = data_size;
+    if stop.load(Ordering::Relaxed) {
+        return Err(MftError::Cancelled);
+    }
+    stats.mft_bytes = layout.data_size;
 
-    let chunks = plan_chunks(&runmap, data_size, record_size);
+    let chunks =
+        plan_chunks(&layout.runmap, layout.data_size, layout.record_size).ok_or_else(|| {
+            MftError::Ntfs(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "$MFT length is not a whole number of file records",
+                )
+                .into(),
+            )
+        })?;
     let mut b = VolumeIndexBuilder::new(drive, ROOT_RECORD);
-    let mut deferred: Vec<(u64, u32)> = Vec::new();
+    let mut deferred: Vec<(u64, Option<u32>)> = Vec::new();
     let mut extensions: FxHashMap<u64, u32> = FxHashMap::default();
-    let mut arena = RecordArena::new(record_size);
+    let mut arena = RecordArena::new(layout.record_size);
     let mut parse_time = Duration::ZERO;
+    let mut corrupt_records = 0u64;
 
-    let (read_time, fallbacks) = run_chunk_pipeline(&volume_path, &chunks, &mut |i, bytes| {
+    let pipeline = run_chunk_pipeline(&volume_path, &chunks, stop, &mut |i, bytes| {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         let t = Instant::now();
-        let batches = parse_chunk(bytes, chunks[i].logical, record_size);
-        append_batches(
-            &mut b,
-            &mut stats,
-            &mut deferred,
-            &mut extensions,
-            &mut arena,
-            batches,
-        );
+        let batches = parse_chunk(bytes, chunks[i].logical, layout.record_size);
+        if !stop.load(Ordering::Relaxed) {
+            corrupt_records += append_batches(
+                &mut b,
+                &mut stats,
+                &mut deferred,
+                &mut extensions,
+                &mut arena,
+                batches,
+            );
+        }
         parse_time += t.elapsed();
     })
     .map_err(MftError::Ntfs)?;
+    let PipelineOutcome::Complete {
+        read_time,
+        fallbacks,
+    } = pipeline
+    else {
+        return Err(MftError::Cancelled);
+    };
     stats.elapsed_mft_load_ms = read_time.as_millis() as u64;
     stats.elapsed_parse_ms = parse_time.as_millis() as u64;
     stats.pipeline_fallbacks = fallbacks;
+    if corrupt_records > 0 {
+        return Err(MftError::CorruptRecords(corrupt_records));
+    }
 
     // Deferred pass: names hiding behind $ATTRIBUTE_LIST, resolved in
     // parallel from the streamed extension-record cache (ADR-0011).
     let t_deferred = Instant::now();
     stats.deferred_names = deferred.len() as u64;
-    let batches = resolve_deferred(
-        &volume_path,
-        &runmap,
-        record_size,
-        &extensions,
-        &arena,
-        &deferred,
-    );
-    append_batches(
+    let batches = if deferred.is_empty() {
+        Vec::new()
+    } else {
+        let metadata =
+            crate::usn::MetadataSource::open_volume_cancellable(drive, Arc::clone(stop))?;
+        resolve_deferred(
+            DeferredContext {
+                volume_path: &volume_path,
+                runmap: &layout.runmap,
+                record_size: layout.record_size,
+                cluster_size: layout.cluster_size,
+                volume_size: layout.volume_size,
+                extensions: &extensions,
+                arena: &arena,
+                metadata: &metadata,
+                stop,
+            },
+            &deferred,
+        )
+        .map_err(|error| match error {
+            DeferredError::Cancelled => MftError::Cancelled,
+            DeferredError::Incomplete(reference) => MftError::IncompleteMetadata(reference),
+        })?
+    };
+    corrupt_records += append_batches(
         &mut b,
         &mut stats,
         &mut Vec::new(),
         &mut FxHashMap::default(),
-        &mut RecordArena::new(record_size),
+        &mut RecordArena::new(layout.record_size),
         batches,
+    );
+    debug_assert_eq!(
+        corrupt_records, 0,
+        "deferred batches are built only from already-validated records"
     );
     stats.elapsed_deferred_ms = t_deferred.elapsed().as_millis() as u64;
     drop(extensions);
     drop(deferred);
     drop(arena);
-    // Cache overflow (`ext_name_cache_skipped`) and failed deferred reads
-    // (`deferred_name_read_failures`) are returned in ScanStats only; the
-    // volume worker maps them into counters + warn at its single mapping
-    // point (engine/worker.rs).
+    // Shared-arena spills and failed targeted reads remain observable even
+    // when the authoritative live fallback completed the object.
 
-    // Degradations are normal in small numbers; make them visible either way.
-    if stats.corrupt_records > 0 {
-        tracing::warn!(volume = %drive, count = stats.corrupt_records, "corrupt MFT records skipped");
-    }
-    if stats.deferred_unresolved > 0 {
-        tracing::warn!(
-            volume = %drive,
-            count = stats.deferred_unresolved,
-            "attribute-list names unresolved"
-        );
-    }
-
-    let (idx, finish) = b.finish_timed();
+    let Some((idx, finish)) = b.finish_timed_cancellable(stop) else {
+        return Err(MftError::Cancelled);
+    };
     stats.elapsed_build_ms = finish.build_ms;
     stats.elapsed_sort_ms = finish.sort_ms;
     stats.elapsed_total_ms = t0.elapsed().as_millis() as u64;
@@ -204,8 +246,8 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
 mod tests {
     use super::*;
 
-    /// Equivalence gate against the whole-load reference path. Run from an
-    /// elevated shell: `FMF_ADMIN_TESTS=1` cargo test -- --ignored streaming
+    /// Equivalence gate against the whole-load reference path.
+    /// Run with `just test-admin` from an elevated terminal.
     /// The volume is live, so a small drift tolerance is allowed.
     #[test]
     #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
@@ -229,58 +271,38 @@ mod tests {
             old_stats.dirs,
         );
 
-        // Sampled records must agree on name and size where both saw them.
-        // Reparse points are excluded: pick_name keeps their names on
-        // purpose while the reference's get_best_file_name skips them, so
-        // the two resolvers legitimately disagree there (and on this class
-        // only — see the module docs of `pick_name`).
+        // Sampled link paths must agree exactly where both live scans saw the
+        // object. Comparing the full path (not one representative FRN row)
+        // exercises every hard-link identity.
         let mut checked = 0u64;
         let mut matched = 0u64;
         let mut size_matched = 0u64;
         let mut mismatches: Vec<String> = Vec::new();
-        for sample in (0..old_idx.len() as u32).step_by(997) {
-            let old_rec = old_idx.frn(sample).record();
-            let (Some(o), Some(n)) = (
-                old_idx.entry_by_record(old_rec),
-                new_idx.entry_by_record(old_rec),
-            ) else {
-                continue;
-            };
-            if old_idx.is_reparse(o) || new_idx.is_reparse(n) {
-                continue;
-            }
+        for old_entry in (0..old_idx.len() as u32).step_by(997) {
             checked += 1;
-            if old_idx.name(o) == new_idx.name(n) {
+            let mut old_path = Vec::new();
+            old_idx
+                .append_path(old_entry, &mut old_path)
+                .expect("reference sample path is valid");
+            let new_entry = new_idx
+                .entries_by_frn(old_idx.frn(old_entry))
+                .find(|&candidate| {
+                    let mut candidate_path = Vec::new();
+                    new_idx
+                        .append_path(candidate, &mut candidate_path)
+                        .is_ok_and(|()| candidate_path == old_path)
+                });
+            if let Some(new_entry) = new_entry {
                 matched += 1;
-            } else {
-                use std::os::windows::ffi::OsStringExt;
-
-                // The resolvers legitimately disagree on attribute-list
-                // names: get_best_file_name returns the *first* $FILE_NAME
-                // of a target record (often the DOS 8.3 short name) and the
-                // first Win32 link of hardlinked files, while pick_name
-                // scans for the best Win32 name. Arbitrate with the disk:
-                // if the streaming-derived full path exists, the streaming
-                // name is right.
-                let mut p = Vec::new();
-                new_idx.append_path(n, &mut p);
-                let mut units = Vec::new();
-                crate::wtf8::wtf8_to_utf16(&p, &mut units);
-                let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&units));
-                if std::fs::symlink_metadata(&path).is_ok() {
-                    matched += 1;
-                } else if mismatches.len() < 16 {
-                    mismatches.push(format!(
-                        "record {}: reference `{}` vs streaming `{}` (path gone: {})",
-                        old_rec.0,
-                        String::from_utf8_lossy(old_idx.name(o)),
-                        String::from_utf8_lossy(new_idx.name(n)),
-                        path.display(),
-                    ));
+                if old_idx.size(old_entry) == new_idx.size(new_entry) {
+                    size_matched += 1;
                 }
-            }
-            if old_idx.size(o) == new_idx.size(n) {
-                size_matched += 1;
+            } else if mismatches.len() < 16 {
+                mismatches.push(format!(
+                    "FRN {} missing path `{}`",
+                    old_idx.frn(old_entry).0,
+                    String::from_utf8_lossy(&old_path),
+                ));
             }
         }
         assert!(checked > 100, "sample too small: {checked}");

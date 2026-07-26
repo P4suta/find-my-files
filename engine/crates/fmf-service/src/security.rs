@@ -8,7 +8,9 @@
 
 use std::io;
 
-use windows_sys::Win32::Foundation::{GetLastError, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{
+    ERROR_INSUFFICIENT_BUFFER, ERROR_NONE_MAPPED, GetLastError, HANDLE, LocalFree,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -19,6 +21,67 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 
 fn last_error() -> io::Error {
     io::Error::from_raw_os_error(unsafe { GetLastError() } as i32)
+}
+
+/// Strict decimal SID grammar accepted in service-owned configuration and on
+/// the elevation command line. Account existence/type is a separate check in
+/// [`validate_user_sid`].
+#[must_use]
+pub fn is_canonical_sid(value: &str) -> bool {
+    const MAX_IDENTIFIER_AUTHORITY: u64 = 0x0000_FFFF_FFFF_FFFF;
+    const MAX_SUB_AUTHORITIES: usize = 15;
+
+    fn canonical_decimal(component: &str) -> bool {
+        !component.is_empty()
+            && (component.len() == 1 || !component.starts_with('0'))
+            && component.bytes().all(|byte| byte.is_ascii_digit())
+    }
+
+    if value.len() > 184 {
+        return false;
+    }
+    let mut components = value.split('-');
+    if components.next() != Some("S") || components.next() != Some("1") {
+        return false;
+    }
+    let Some(authority) = components.next() else {
+        return false;
+    };
+    if !canonical_decimal(authority) {
+        return false;
+    }
+    let Ok(authority) = authority.parse::<u64>() else {
+        return false;
+    };
+    if authority > MAX_IDENTIFIER_AUTHORITY {
+        return false;
+    }
+
+    let mut count = 0usize;
+    for component in components {
+        count += 1;
+        if count > MAX_SUB_AUTHORITIES
+            || !canonical_decimal(component)
+            || component.parse::<u32>().is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[derive(Debug)]
+enum LookupFailure {
+    Resize,
+    Unmapped,
+}
+
+fn classify_lookup_failure(code: u32) -> io::Result<LookupFailure> {
+    match code {
+        ERROR_INSUFFICIENT_BUFFER => Ok(LookupFailure::Resize),
+        ERROR_NONE_MAPPED => Ok(LookupFailure::Unmapped),
+        other => Err(io::Error::from_raw_os_error(other as i32)),
+    }
 }
 
 /// `D:P(A;;GA;;;SY)(A;;GRGW;;;<sid>)…` — SYSTEM gets full control, each
@@ -132,8 +195,7 @@ pub fn current_user_sid() -> io::Result<String> {
 /// — is refused. Malformed/unresolvable → `Ok(false)`.
 ///
 /// # Errors
-/// Only genuine API faults are `Err` (the caller logs and ignores either way
-/// — install must not die on a bad SID).
+/// Genuine account-lookup API faults are `Err`; install fails closed.
 pub fn validate_user_sid(sid_str: &str) -> io::Result<bool> {
     use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
     use windows_sys::Win32::Security::{LookupAccountSidW, PSID, SID_NAME_USE, SidTypeUser};
@@ -146,6 +208,9 @@ pub fn validate_user_sid(sid_str: &str) -> io::Result<bool> {
         }
     }
 
+    if !is_canonical_sid(sid_str) {
+        return Ok(false);
+    }
     let wide: Vec<u16> = sid_str.encode_utf16().chain([0]).collect();
     let mut psid: PSID = std::ptr::null_mut();
     if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &raw mut psid) } == 0 {
@@ -158,37 +223,67 @@ pub fn validate_user_sid(sid_str: &str) -> io::Result<bool> {
     let mut name_len = 0u32;
     let mut domain_len = 0u32;
     let mut use_kind: SID_NAME_USE = 0;
-    unsafe {
+    let first_ok = unsafe {
         LookupAccountSidW(
             std::ptr::null(),
             owned.0,
             std::ptr::null_mut(),
             &raw mut name_len,
             std::ptr::null_mut(),
-            &raw mut domain_len,
-            &raw mut use_kind,
-        );
-    }
-    if name_len == 0 {
-        return Ok(false); // unresolvable → not a real account
-    }
-    let mut name = vec![0u16; name_len as usize];
-    let mut domain = vec![0u16; domain_len as usize];
-    let ok = unsafe {
-        LookupAccountSidW(
-            std::ptr::null(),
-            owned.0,
-            name.as_mut_ptr(),
-            &raw mut name_len,
-            domain.as_mut_ptr(),
             &raw mut domain_len,
             &raw mut use_kind,
         )
     };
-    if ok == 0 {
-        return Ok(false);
+    if first_ok != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "LookupAccountSidW unexpectedly succeeded without output buffers",
+        ));
     }
-    Ok(use_kind == SidTypeUser)
+    match classify_lookup_failure(unsafe { GetLastError() })? {
+        LookupFailure::Unmapped => return Ok(false),
+        LookupFailure::Resize => {}
+    }
+    if name_len == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "LookupAccountSidW requested an empty account-name buffer",
+        ));
+    }
+
+    // Account metadata can change between the sizing and fill calls. Retry a
+    // bounded number of times when Windows reports a larger required buffer;
+    // every other OS fault is propagated unchanged.
+    for _ in 0..4 {
+        let mut name = vec![0u16; name_len as usize];
+        let mut domain = vec![0u16; domain_len as usize];
+        let domain_ptr = if domain.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            domain.as_mut_ptr()
+        };
+        let ok = unsafe {
+            LookupAccountSidW(
+                std::ptr::null(),
+                owned.0,
+                name.as_mut_ptr(),
+                &raw mut name_len,
+                domain_ptr,
+                &raw mut domain_len,
+                &raw mut use_kind,
+            )
+        };
+        if ok != 0 {
+            return Ok(use_kind == SidTypeUser);
+        }
+        match classify_lookup_failure(unsafe { GetLastError() })? {
+            LookupFailure::Unmapped => return Ok(false),
+            LookupFailure::Resize => {}
+        }
+    }
+    Err(io::Error::other(
+        "LookupAccountSidW buffer requirements changed repeatedly",
+    ))
 }
 
 struct OwnedToken(HANDLE);
@@ -217,7 +312,7 @@ unsafe fn sid_to_string(sid: windows_sys::Win32::Security::PSID) -> io::Result<S
 /// snapshots inside hold every file name on the machine (SECURITY.md threat 7).
 #[must_use]
 pub fn data_dir_sddl() -> String {
-    "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string()
+    "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string()
 }
 
 /// logs/ keeps user read so the unelevated F12 "copy diagnostics" can tail
@@ -228,7 +323,7 @@ pub fn data_dir_sddl() -> String {
 /// its own diagnostics.
 #[must_use]
 pub fn logs_dir_sddl(user_sids: &[&str]) -> String {
-    let mut s = String::from("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+    let mut s = String::from("O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
     for sid in user_sids {
         s.push_str("(A;OICI;GR;;;");
         s.push_str(sid);
@@ -237,17 +332,17 @@ pub fn logs_dir_sddl(user_sids: &[&str]) -> String {
     s
 }
 
-/// The protected DACLs `install` applies across the data tree.
+/// The owner/group/DACL descriptors `install` applies across the data tree.
 ///
 /// Returned as `(subdir, sddl)` pairs (`""` = the data root). Centralized here so
 /// the threat 7 invariant — `index/` (machine-wide file-name snapshots) is
 /// SYSTEM+Administrators only, never world-readable — is unit-pinned next to the
 /// SDDL builders, without needing an elevated install to verify it. `install`
 /// applies `index/` EXPLICITLY rather than relying on inheritance: it is created
-/// inheriting `%ProgramData%`'s Users ACE, and `set_dir_dacl`'s `SetFileSecurityW`
-/// does not re-propagate the root DACL onto an already-existing child.
+/// inheriting `%ProgramData%`'s Users ACE, and `SetFileSecurityW` does not
+/// re-propagate the root DACL onto an already-existing child.
 #[must_use]
-pub fn data_tree_dacls(log_readers: &[&str]) -> Vec<(&'static str, String)> {
+pub fn data_tree_security_descriptors(log_readers: &[&str]) -> Vec<(&'static str, String)> {
     vec![
         ("", data_dir_sddl()),
         ("index", data_dir_sddl()),
@@ -322,24 +417,103 @@ pub fn set_service_dacl(service_name: &str, sddl: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Applies an SDDL-described protected DACL to a directory (install-time).
+/// Applies an SDDL-described owner, group, and protected DACL to one object.
+///
+/// Setting the owner is essential: a standard user who pre-created the
+/// machine-wide directory must not remain owner and use `WRITE_DAC` owner
+/// rights to re-open a path that stores a `LocalSystem` executable.
 ///
 /// # Errors
 /// Returns the OS error if the SDDL fails to convert or `SetFileSecurityW`
 /// fails.
-pub fn set_dir_dacl(path: &std::path::Path, sddl: &str) -> io::Result<()> {
-    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, SetFileSecurityW};
+pub fn set_path_security(path: &std::path::Path, sddl: &str) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        SetFileSecurityW,
+    };
 
+    reject_reparse_point(path)?;
     let sec = PipeSecurity::from_sddl(sddl)?;
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .to_string_lossy()
-        .encode_utf16()
-        .chain([0])
-        .collect();
-    let ok = unsafe { SetFileSecurityW(wide.as_ptr(), DACL_SECURITY_INFORMATION, sec.descriptor) };
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let information =
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let ok = unsafe { SetFileSecurityW(wide.as_ptr(), information, sec.descriptor) };
     if ok == 0 {
         return Err(last_error());
+    }
+    Ok(())
+}
+
+/// Refuses an existing reparse point before elevated file-system operations.
+///
+/// # Errors
+/// Returns metadata errors or `InvalidData` for any reparse point.
+pub fn reject_reparse_point(path: &std::path::Path) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("refusing reparse point {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+/// Validates the fixed paths an installed service may open as `LocalSystem`.
+///
+/// Missing children are allowed so normal recovery can recreate them; the
+/// machine-wide root itself must exist and no existing fixed child may be a
+/// reparse point.
+///
+/// # Errors
+/// Returns `NotFound` for a missing root, metadata errors, or `InvalidData` for
+/// any reparse point.
+pub fn validate_installed_data_paths(data_dir: &std::path::Path) -> io::Result<()> {
+    reject_reparse_point(data_dir)?;
+    for child in ["index", "logs", "service.json", "last_use"] {
+        let path = data_dir.join(child);
+        match reject_reparse_point(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Applies a protected DACL to a directory and every existing descendant.
+///
+/// Reparse points are rejected rather than followed: an old writable install
+/// must not be able to redirect elevated ACL repair outside the data root.
+///
+/// # Errors
+/// Returns the first metadata, enumeration, SDDL, or ACL error.
+pub fn set_tree_security(path: &std::path::Path, sddl: &str) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&current)?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "refusing ACL traversal through reparse point {}",
+                    current.display()
+                ),
+            ));
+        }
+        set_path_security(&current, sddl)?;
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(&current)? {
+                pending.push(entry?.path());
+            }
+        }
     }
     Ok(())
 }
@@ -487,6 +661,39 @@ mod tests {
     }
 
     #[test]
+    fn canonical_sid_parser_pins_numeric_widths_and_component_count() {
+        assert!(is_canonical_sid("S-1-5"));
+        assert!(is_canonical_sid(
+            "S-1-5-21-1654600493-3733564142-2704359447-1001"
+        ));
+        for invalid in [
+            "s-1-5-18",
+            "S-2-5-18",
+            "S-1-05-18",
+            "S-1-5-21-abc",
+            "S-1-281474976710656-18",
+            "S-1-5-4294967296",
+            "S-1-5-1-2-3-4-5-6-7-8-9-10-11-12-13-14-15-16",
+        ] {
+            assert!(!is_canonical_sid(invalid), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn account_lookup_only_classifies_documented_probe_failures() {
+        assert!(matches!(
+            classify_lookup_failure(ERROR_INSUFFICIENT_BUFFER).expect("resize"),
+            LookupFailure::Resize
+        ));
+        assert!(matches!(
+            classify_lookup_failure(ERROR_NONE_MAPPED).expect("unmapped"),
+            LookupFailure::Unmapped
+        ));
+        let error = classify_lookup_failure(5).expect_err("access denied is a real fault");
+        assert_eq!(error.raw_os_error(), Some(5));
+    }
+
+    #[test]
     fn logs_dir_sddl_grants_read_per_user() {
         let one = logs_dir_sddl(&["S-1-5-21-1-2-3-1001"]);
         assert!(one.contains("(A;OICI;FA;;;SY)"), "SYSTEM full control");
@@ -505,7 +712,7 @@ mod tests {
 
     #[test]
     fn data_tree_hardens_index_like_root_with_no_users() {
-        let t = data_tree_dacls(&["S-1-5-21-1-2-3-1001"]);
+        let t = data_tree_security_descriptors(&["S-1-5-21-1-2-3-1001"]);
         let find = |k: &str| t.iter().find(|(s, _)| *s == k).map(|(_, v)| v.clone());
         // threat 7: index/ — machine-wide file-name snapshots — gets the SAME
         // protected SYSTEM+Admins-only DACL as the data root. Regressing this
@@ -513,6 +720,11 @@ mod tests {
         // name on the machine to any local user.
         assert_eq!(find("index").as_deref(), Some(data_dir_sddl().as_str()));
         assert_eq!(find("").as_deref(), Some(data_dir_sddl().as_str()));
+        assert!(
+            data_dir_sddl().starts_with("O:BAG:BAD:P"),
+            "Administrators own the protected tree"
+        );
+        PipeSecurity::from_sddl(&data_dir_sddl()).expect("data security descriptor converts");
         let index = find("index").expect("index/ must be in the hardened tree");
         for forbidden in [";;;WD)", ";;;AU)", ";;;BU)"] {
             assert!(
@@ -525,6 +737,23 @@ mod tests {
             find("logs")
                 .unwrap()
                 .contains("(A;OICI;GR;;;S-1-5-21-1-2-3-1001)")
+        );
+    }
+
+    #[test]
+    fn installed_data_path_validation_allows_missing_children_not_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        validate_installed_data_paths(dir.path()).expect("ordinary data root");
+        std::fs::create_dir(dir.path().join("index")).expect("index");
+        std::fs::write(dir.path().join("service.json"), b"{}").expect("config");
+        validate_installed_data_paths(dir.path()).expect("ordinary fixed children");
+
+        let missing = dir.path().join("missing");
+        assert_eq!(
+            validate_installed_data_paths(&missing)
+                .expect_err("missing machine root")
+                .kind(),
+            io::ErrorKind::NotFound
         );
     }
 }

@@ -20,8 +20,6 @@
       <a href="#scope">Scope</a>
       <a href="#perf">Performance</a>
       <a href="../book/">Docs</a>
-      <a href="../doc/">Rust API</a>
-      <a href="../api/">C# API</a>
       <a href="../">JA</a>
       <a href="https://github.com/P4suta/find-my-files">GitHub</a>
     </nav>
@@ -95,11 +93,11 @@
   <section id="arch">
     <div class="wrap">
       <h2>Architecture</h2>
-      <p class="section-sub">Default is an unprivileged UI plus the service. Without the service, it falls back to an elevated in-process engine.</p>
+      <p class="section-sub">Default is an unprivileged UI plus the service. Without the service, an unprivileged launch opens setup; only an already-elevated launch falls back in-process.</p>
 <pre class="arch">WinUI 3 app (C#, unprivileged) ──named pipe──▶  <b>fmf-service</b> (Rust, LocalSystem)
    └─ IEngineClient boundary                       └─ <b>fmf-core</b>: $MFT scan, USN tailing,
        ├─ PipeEngineClient (default)                  in-memory index, query engine
-       └─ FfiEngineClient ──P/Invoke──▶  <b>fmf_engine.dll</b> (elevated in-proc fallback)</pre>
+       └─ FfiEngineClient ──P/Invoke──▶  <b>fmf_engine.dll</b> (elevated launch only)</pre>
     </div>
   </section>
 

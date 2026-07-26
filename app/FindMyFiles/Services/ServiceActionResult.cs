@@ -9,4 +9,4 @@ namespace FindMyFiles.Services;
 /// <param name="ExitCode">fmf-service.exe exit code, or -1 if it could not be
 /// launched, timed out, or the UAC prompt was declined.</param>
 [StructLayout(LayoutKind.Auto)]
-public readonly record struct ServiceActionResult(ServiceActionOutcome Outcome, int ExitCode);
+internal readonly record struct ServiceActionResult(ServiceActionOutcome Outcome, int ExitCode);

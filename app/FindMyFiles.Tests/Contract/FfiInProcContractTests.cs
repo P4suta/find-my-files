@@ -18,7 +18,7 @@ public sealed class FfiInProcContractTests(ITestOutputHelper output)
     private readonly ITestOutputHelper _output = output;
     private string? _indexDir;
 
-    protected override Task<IEngineClient?> AcquireClientOrSkipAsync()
+    private protected override Task<IEngineClient?> AcquireClientOrSkipAsync()
     {
         if (!string.Equals(Environment.GetEnvironmentVariable("FMF_ADMIN_TESTS"), "1", StringComparison.Ordinal))
         {

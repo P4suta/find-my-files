@@ -34,10 +34,13 @@ concurrency:
 
 jobs:
   fuzz:
-    runs-on: ubuntu-latest
-    # Force nightly for cargo-fuzz and every cargo build it spawns.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Force one dated nightly for cargo-fuzz and every cargo build it spawns.
+    # Floating `nightly` would change compiler/stdlib bytes without a source
+    # change and make a crash irreproducible.
     env:
-      RUSTUP_TOOLCHAIN: nightly
+      RUSTUP_TOOLCHAIN: nightly-2026-07-24
     strategy:
       fail-fast: false
       matrix:
@@ -53,26 +56,48 @@ jobs:
           ]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
-      # Same pinned action as the rest of CI; nightly via the toolchain input
-      # (the SHA is the stable-branch pin, but the action code is identical and
-      # `toolchain` overrides what it installs).
+      # Same pinned action as the rest of CI; a dated nightly via the toolchain
+      # input (the action code is identical and `toolchain` controls the install).
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable-branch pin
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-07-24
 
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
-          tool: cargo-fuzz
+          tool: cargo-fuzz@0.13.2
+
+      # cargo-fuzz 0.13.2 does not expose Cargo's --locked switch. Validate its
+      # standalone workspace first; with the committed lock already complete,
+      # the subsequent internal `cargo run` has nothing to re-resolve.
+      - name: Verify committed fuzz dependency graph
+        working-directory: engine
+        run: >-
+          cargo metadata --locked --manifest-path fuzz/Cargo.toml
+          --format-version 1 --no-deps > /dev/null
 
       # Run from engine/ so cargo-fuzz finds ./fuzz (no --fuzz-dir keeps this
-      # working across cargo-fuzz versions). Artifacts land under build/engine
-      # via engine/.cargo/config.toml (gitignored by build/).
+      # working across cargo-fuzz versions). Cargo target, evolving corpus and
+      # crash artifacts all land in the single build/ tree (ADR-0021).
       #
       # --target gnu is required: taiki-e/install-action ships a musl-static
       # cargo-fuzz, and cargo-fuzz defaults the fuzz target to its own build
       # triple (musl), but ASan is incompatible with static musl libc. The gnu
       # target is the runner host, so its std is already present.
+      - name: prepare fuzz output
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: mkdir -p "build/fuzz/corpus/$FUZZ_TARGET" "build/fuzz/artifacts/$FUZZ_TARGET"
       - name: fuzz ${{ matrix.target }} (60s)
         working-directory: engine
-        run: cargo fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=60
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: >-
+          cargo fuzz run "$FUZZ_TARGET"
+          --target x86_64-unknown-linux-gnu
+          "../build/fuzz/corpus/$FUZZ_TARGET"
+          --
+          "-artifact_prefix=../build/fuzz/artifacts/$FUZZ_TARGET/"
+          -max_total_time=60

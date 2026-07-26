@@ -7,14 +7,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fmf_core::engine::{Engine, EngineConfig};
+use fmf_core::engine::{Engine, EngineConfig, EngineEvent};
 use fmf_core::index::testutil::TestDir;
 use fmf_core::index::{Frn, RawEntry, VolumeIndexBuilder};
 use fmf_proto::frame::{FLAG_EVENT, FLAG_RESPONSE, FrameHeader, read_frame, write_frame};
 use fmf_proto::messages::{self, opcode};
 use fmf_proto::{PROTOCOL_VERSION, codes};
 use fmf_service::pipe::PipeStream;
-use fmf_service::server::{Server, ServerOptions};
+use fmf_service::server::{REQUEST_QUEUE_CAP, Server, ServerOptions};
 
 fn unique_name(tag: &str) -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -100,6 +100,113 @@ fn start(tag: &str, debug_faults: bool) -> Harness {
     }
 }
 
+#[test]
+fn server_start_rejects_invalid_pipe_security_synchronously() {
+    let (dir, engine) = test_engine();
+    let result = Server::start(
+        engine.clone(),
+        ServerOptions {
+            pipe_name: unique_name("bad-sddl"),
+            debug_faults: false,
+            authorized_sids: vec!["not-a-windows-sid".to_string()],
+            data_dir: dir.path().to_path_buf(),
+        },
+    );
+    let Err(error) = result else {
+        panic!("invalid pipe SDDL must fail Server::start");
+    };
+    assert!(error.raw_os_error().is_some());
+    engine.set_event_sink(None);
+}
+
+#[test]
+fn server_start_rejects_a_squatted_pipe_name_synchronously() {
+    let first = start("squatted", false);
+    let (dir, engine) = test_engine();
+    let result = Server::start(
+        engine.clone(),
+        ServerOptions {
+            pipe_name: first.pipe_name.clone(),
+            debug_faults: false,
+            authorized_sids: Vec::new(),
+            data_dir: dir.path().to_path_buf(),
+        },
+    );
+    let Err(error) = result else {
+        panic!("FILE_FLAG_FIRST_PIPE_INSTANCE collision must fail Server::start");
+    };
+    assert_eq!(error.raw_os_error(), Some(5));
+    engine.set_event_sink(None);
+}
+
+#[test]
+fn server_stop_disconnects_live_clients() {
+    let h = start("stop-live", false);
+    let mut client = Client::hello(&h.pipe_name);
+
+    h.server.stop();
+
+    let started = std::time::Instant::now();
+    read_frame(&mut client.stream).expect_err("server stop must break the client pipe");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "disconnect should be immediate"
+    );
+}
+
+#[test]
+fn server_stop_releases_a_reader_backpressured_by_slow_workers() {
+    let (dir, engine) = test_engine();
+    let pipe_name = unique_name("stop-backpressure");
+    let server = Server::start(
+        engine.clone(),
+        ServerOptions {
+            pipe_name: pipe_name.clone(),
+            debug_faults: true,
+            authorized_sids: Vec::new(),
+            data_dir: dir.path().to_path_buf(),
+        },
+    )
+    .expect("server start");
+    let mut client = Client::hello(&pipe_name);
+    let (_, Some((result_id, _))) = client.query("!!lag") else {
+        panic!("lag query failed");
+    };
+
+    // Both workers enter the 250 ms debug delay, the next REQUEST_QUEUE_CAP
+    // frames fill the bounded queue, and the final frame leaves the reader
+    // waiting in the cancellation-aware send.
+    for request_id in 0..(REQUEST_QUEUE_CAP + 3) {
+        write_frame(
+            &mut client.stream,
+            FrameHeader {
+                len: 0,
+                opcode: opcode::RESULT_PAGE,
+                flags: 0,
+                request_id: 10_000 + request_id as u32,
+                status: 0,
+            },
+            &messages::ResultPageReq {
+                result_id,
+                offset: 0,
+                count: 1,
+            }
+            .encode(),
+        )
+        .expect("pipeline slow request");
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let started = std::time::Instant::now();
+    server.stop();
+    server.join();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "disconnect must cancel a reader waiting on the full request queue"
+    );
+    engine.set_event_sink(None);
+}
+
 impl Drop for Harness {
     fn drop(&mut self) {
         self.server.stop();
@@ -115,8 +222,8 @@ struct Client {
 
 impl Client {
     fn connect(pipe_name: &str) -> Self {
-        // The instance may not exist yet right after Server::start — retry
-        // briefly (the accept loop creates it asynchronously).
+        // Server::start now returns only after the first instance is listening;
+        // keep a short retry for scheduler noise between test processes.
         for _ in 0..100 {
             if let Ok(stream) = PipeStream::connect(pipe_name) {
                 return Self {
@@ -320,21 +427,54 @@ fn oversized_frame_disconnects_and_counts() {
 }
 
 #[test]
+fn operation_specific_caps_disconnect_before_reading_the_announced_body() {
+    use std::io::Write;
+
+    let harness = start("operation-caps", false);
+    for (opcode, announced_len) in [
+        (opcode::STATS, 1),
+        (
+            opcode::QUERY,
+            messages::FmfQueryOptions::LEN as u32 + fmf_proto::limits::MAX_QUERY_BYTES + 1,
+        ),
+        (u16::MAX, 1),
+    ] {
+        let mut client = Client::hello(&harness.pipe_name);
+        let header = FrameHeader {
+            len: announced_len,
+            opcode,
+            flags: 0,
+            request_id: 99,
+            status: 0,
+        };
+        client.stream.write_all(&header.to_bytes()).unwrap();
+        assert!(
+            read_frame(&mut client.stream).is_err(),
+            "opcode {opcode} must be rejected from its header without waiting for a body"
+        );
+    }
+}
+
+#[test]
 fn subscribe_receives_engine_events() {
     let hx = start("events", false);
     let mut c = Client::hello(&hx.pipe_name);
     let (h, _) = c.request(opcode::SUBSCRIBE, &[]);
     assert_eq!(h.status, codes::OK);
 
-    // An invalid volume label fails fast in the volume thread → a
-    // VolumeFailed (kind 5) push, no elevation needed.
-    hx.engine.index_start(&["?:".to_string()]);
+    // Drive the real event fan-out deterministically without abusing
+    // IndexStart: invalid volume selections are synchronous INVALID_ARG and
+    // intentionally create no worker or VolumeFailed event.
+    hx.engine.emit_test_event(EngineEvent::VolumeFailed {
+        volume: "C:".to_string(),
+        message: "scripted".to_string(),
+    });
     let (eh, body) = c.next_event();
     assert_eq!(eh.flags & FLAG_EVENT, FLAG_EVENT);
     assert_eq!(eh.request_id, 0);
     let ev = messages::decode_event(&body).unwrap();
     assert_eq!(ev.kind, 5, "VolumeFailed");
-    assert_eq!(ev.volume_str(), "?:");
+    assert_eq!(ev.volume_str(), "C:");
     assert_eq!(
         u32::from(eh.opcode),
         ev.kind,
@@ -346,6 +486,60 @@ fn subscribe_receives_engine_events() {
     assert_eq!(h.status, codes::OK);
     let (status, _) = c.query("alpha");
     assert_eq!(status, codes::OK);
+}
+
+#[test]
+fn index_start_rejects_duplicates_and_unavailable_volumes_atomically() {
+    let hx = start("index-start-validation", false);
+    let mut c = Client::hello(&hx.pipe_name);
+    let before: Vec<_> = hx
+        .engine
+        .status()
+        .into_iter()
+        .map(|(label, _, _)| label)
+        .collect();
+    let available = Engine::list_ntfs_volumes();
+
+    if let Some(label) = available.first() {
+        let payload = messages::encode_json(
+            "IndexStart",
+            &messages::IndexStartReq {
+                volumes: vec![label.clone(), label.to_ascii_lowercase()],
+            },
+        )
+        .unwrap();
+        let (header, _) = c.request(opcode::INDEX_START, &payload);
+        assert_eq!(header.status, codes::INVALID_ARG);
+        assert_eq!(
+            hx.engine
+                .status()
+                .into_iter()
+                .map(|(label, _, _)| label)
+                .collect::<Vec<_>>(),
+            before,
+            "duplicate rejection must happen before any slot or worker is created"
+        );
+    }
+
+    let unavailable = (b'A'..=b'Z')
+        .map(|letter| format!("{}:", char::from(letter)))
+        .find(|label| !available.contains(label))
+        .expect("a test host cannot have all 26 drive letters as fixed NTFS volumes");
+    let mut volumes = available.first().cloned().into_iter().collect::<Vec<_>>();
+    volumes.push(unavailable);
+    let payload =
+        messages::encode_json("IndexStart", &messages::IndexStartReq { volumes }).unwrap();
+    let (header, _) = c.request(opcode::INDEX_START, &payload);
+    assert_eq!(header.status, codes::INVALID_ARG);
+    assert_eq!(
+        hx.engine
+            .status()
+            .into_iter()
+            .map(|(label, _, _)| label)
+            .collect::<Vec<_>>(),
+        before,
+        "one unavailable volume must reject the entire request atomically"
+    );
 }
 
 #[test]
@@ -367,15 +561,6 @@ fn result_handles_evict_least_recently_used() {
     }
     let (status, _) = c.page(first, 0, 1);
     assert_eq!(status, codes::OK, "LRU keeps the actively used result");
-}
-
-#[test]
-fn flush_opcode_is_reserved() {
-    let hx = start("flushres", false);
-    let mut c = Client::hello(&hx.pipe_name);
-    let (h, detail) = c.request(opcode::FLUSH_RESERVED, &[]);
-    assert_eq!(h.status, codes::INVALID_ARG);
-    assert!(String::from_utf8_lossy(&detail).contains("reserved"));
 }
 
 #[test]

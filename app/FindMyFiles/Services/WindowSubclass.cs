@@ -77,7 +77,7 @@ internal sealed unsafe partial class WindowSubclass : IDisposable
             }
             catch (Exception ex)
             {
-                FileLog.Warn("tray", $"window message handler failed: {ex.Message}");
+                FileLog.Warn("tray", "window message handler failed", ex);
             }
         }
 

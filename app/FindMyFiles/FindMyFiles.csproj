@@ -16,7 +16,7 @@
     <!-- Build output goes under the repo-root build/ tree, not app/FindMyFiles/bin
          (ADR-0021): one place for every artifact. Only bin moves — obj stays put
          because relocating BaseIntermediateOutputPath needs a Directory.Build.props,
-         which CLAUDE.md forbids (it would shadow winapp run's analyzer injection). -->
+         which AGENTS.md forbids (it would shadow winapp run's analyzer injection). -->
     <BaseOutputPath>..\..\build\app\FindMyFiles\</BaseOutputPath>
     <!-- i18n: resources live in Strings/{en-US,ja-JP,zh-Hans}/Resources.resw,
          merged into FindMyFiles.pri. en-US is the fallback language. The UI
@@ -56,6 +56,18 @@
     <!-- Single-instance via a hand-written Main (ADR-0030): suppress the
          XAML-generated entry point so Program.Main owns startup. -->
     <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <!-- Test-only launch seams (fake engine, unavailable engine, custom pipe, and
+         custom data directory) are absent from stable binaries by default. Published UI
+         automation builds opt in explicitly; ordinary publish never does. -->
+    <FmfTestSeams Condition="'$(FmfTestSeams)' == ''">false</FmfTestSeams>
+    <FmfArtifactKind Condition="'$(FmfArtifactKind)' == ''">shipping</FmfArtifactKind>
+    <!-- xtask publish computes Windows' Authenticode-stable PE image digest
+         for the exact fmf-service.exe before signing. The app pins it so an
+         adjacent same-user-writable helper cannot be swapped before UAC. A
+         normal developer build stays deliberately unpinned and therefore
+         cannot use the in-app elevation path. -->
+    <FmfServiceImageSha256 Condition="'$(FmfServiceImageSha256)' == ''">UNPINNED</FmfServiceImageSha256>
+    <DefineConstants Condition="'$(FmfTestSeams)' == 'true'">$(DefineConstants);FMF_TEST_SEAMS</DefineConstants>
     <!-- Maximal analyzer/style strictness (convention hardening). All .NET
          analyzer rules on, code style enforced in build, every warning an
          error. Security rules (CA2100/CA3006/CA5xxx) are pinned to error in
@@ -92,6 +104,23 @@
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
   </PropertyGroup>
+
+  <Target Name="FmfValidateArtifactKind"
+          BeforeTargets="BeforeBuild"
+          Condition="('$(FmfArtifactKind)' != 'shipping' and '$(FmfArtifactKind)' != 'ui-test')
+                     or ('$(FmfArtifactKind)' == 'shipping' and '$(FmfTestSeams)' == 'true')
+                     or ('$(FmfArtifactKind)' == 'ui-test' and '$(FmfTestSeams)' != 'true')">
+    <Error Text="Invalid artifact contract: shipping requires FmfTestSeams=false; ui-test requires FmfTestSeams=true." />
+  </Target>
+
+  <Target Name="FmfWriteTestSeamMarker"
+          AfterTargets="Publish"
+          Condition="'$(FmfArtifactKind)' == 'ui-test' and '$(FmfTestSeams)' == 'true'">
+    <WriteLinesToFile File="$(PublishDir)FMF_TEST_SEAMS"
+                      Lines="FMF_TEST_SEAMS=1"
+                      Overwrite="true"
+                      Encoding="UTF-8" />
+  </Target>
 
   <!-- Channel-aware build identity (ADR-0035), the C# half of the Rust
        fmf-buildstamp — and byte-identical in shape to it:
@@ -157,22 +186,42 @@
     <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
     <!-- Shared syntax fixture (ADR-0018): FakeEngineClient's query-syntax
          verdicts come from the same golden file the Rust parser tests pin,
-         so the fake cannot drift from the real engine's rejections. -->
+         so the fake cannot drift from the real engine's rejections. It is a
+         UI-test artifact, never shipping product content. -->
     <Content Include="..\..\contract\golden\invalid_queries.json"
              Link="golden\invalid_queries.json"
+             Condition="'$(FmfTestSeams)' == 'true'"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <ItemGroup>
-    <InternalsVisibleTo Include="FindMyFiles.Tests" />
+  <!-- The deterministic 100k-row fake is not merely unreachable in shipping:
+       remove its type and data generator from compilation altogether. Test and
+       UI-automation ProjectReferences explicitly set FmfTestSeams=true. -->
+  <ItemGroup Condition="'$(FmfTestSeams)' != 'true'">
+    <Compile Remove="Engine\FakeEngineClient.cs" />
   </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="FindMyFiles.Tests"
+                        Condition="'$(FmfTestSeams)' == 'true'" />
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>FmfServiceImageSha256</_Parameter1>
+      <_Parameter2>$(FmfServiceImageSha256)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <Target Name="FmfRequirePinnedServiceImage"
+          BeforeTargets="Publish"
+          Condition="'$(FmfServiceImageSha256)' == 'UNPINNED'">
+    <Error Text="Publish requires the Authenticode-stable fmf-service.exe image digest. Use `just publish-app`." />
+  </Target>
 
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="[10.0.28000.2270]" />
     <!-- WinUI component package instead of the Microsoft.WindowsAppSDK
          metapackage: a filename-search app needs none of the AI/ML
          (onnxruntime, DirectML) or Widgets payload the metapackage drags
@@ -181,34 +230,32 @@
          package too (packages.lock.json), so its DLLs still land in the
          publish output. We reference no WebView2 type, so xtask's publish
          step strips them from the bundle (see xtask/src/prune.rs). -->
-    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.2.1" />
-    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="[2.2.1]" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="[8.4.2]" />
     <!-- Structured logging (ADR-0037): logfmt lines via a custom ITextFormatter,
-         size-capped multi-generation retention via the File sink. Floating so
-         restore can resolve offline; pinned in packages.lock.json. NOT
+         size-capped multi-generation retention via the File sink. Exact direct
+         versions plus packages.lock.json keep every restore reproducible. NOT
          Serilog.Sinks.Async — a synchronous sink keeps the last line on a hard
          crash ("don't go silent"). -->
-    <PackageReference Include="Serilog" Version="4.*" />
-    <PackageReference Include="Serilog.Sinks.File" Version="6.*" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.4.0" />
-    <!-- Extra build-time analyzers (convention hardening). Floating 4.* so a
-         missing exact pin can't break restore offline — pin to the resolved
-         version after the next `dotnet restore`. Analyzer-only: PrivateAssets=all
-         keeps it out of the published output. -->
-    <PackageReference Include="Roslynator.Analyzers" Version="4.*">
+    <PackageReference Include="Serilog" Version="[4.3.1]" />
+    <PackageReference Include="Serilog.Sinks.File" Version="[6.0.0]" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="[0.4.0]" />
+    <!-- Extra build-time analyzers (convention hardening). Analyzer-only:
+         PrivateAssets=all keeps them out of the published output. -->
+    <PackageReference Include="Roslynator.Analyzers" Version="[4.15.0]">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <!-- Correctness-focused analyzers (MAxxxx): IFormatProvider/culture, async
          pitfalls, equality, etc. — little overlap with the rules above. -->
-    <PackageReference Include="Meziantou.Analyzer" Version="3.*">
+    <PackageReference Include="Meziantou.Analyzer" Version="[3.0.117]">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <!-- Layout/ordering/documentation analyzers (SAxxxx). 1.2.0-beta is the line
          that understands modern C# (file-scoped namespaces); the established style
          keeps the conflicting opinion rules off in .editorconfig. -->
-    <PackageReference Include="StyleCop.Analyzers" Version="1.2.0-*">
+    <PackageReference Include="StyleCop.Analyzers" Version="[1.2.0-beta.556]">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
@@ -218,7 +265,7 @@
        fmf_engine.dll. Keeping this in MSBuild means plain `dotnet build`,
        CI and the IDE all produce a correct output without wrapper scripts. -->
   <Target Name="BuildRustEngine" BeforeTargets="BeforeBuild" Condition="'$(SkipRustBuild)' != 'true'">
-    <Exec Command="cargo build --release -p fmf-ffi" WorkingDirectory="$(MSBuildThisFileDirectory)..\..\engine" />
+    <Exec Command="cargo build --locked --release -p fmf-ffi" WorkingDirectory="$(MSBuildThisFileDirectory)..\..\engine" />
   </Target>
   <ItemGroup>
     <None Include="..\..\build\engine\release\fmf_engine.dll" Link="fmf_engine.dll" CopyToOutputDirectory="PreserveNewest" />

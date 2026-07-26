@@ -9,14 +9,41 @@
 //! copies the signed PEs back over the bundle. The signing itself (Authenticode,
 //! a Windows-only API) stays in the workflow between the two.
 
-use crate::{fsx, paths, publish::FIRST_PARTY_PES};
-use anyhow::{Context, Result};
+use crate::{fsx, paths, pe_digest, publish::FIRST_PARTY_PES};
+use anyhow::{bail, Context, Result};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+
+/// Fail closed if the path map would make staging or collection ambiguous.
+///
+/// This is checked at runtime as well as by unit tests: release correctness must
+/// not depend on somebody remembering to run the test after editing the table.
+fn validate_first_party_pe_map(entries: &[(&str, &str)]) -> Result<()> {
+    if entries.is_empty() {
+        bail!("first-party PE map is empty — refusing to sign or verify zero files");
+    }
+
+    let mut sources = HashSet::with_capacity(entries.len());
+    let mut stage_names = HashSet::with_capacity(entries.len());
+    for (source, stage_name) in entries {
+        if source.is_empty() || stage_name.is_empty() {
+            bail!("first-party PE map contains an empty source or stage name");
+        }
+        if !sources.insert(*source) {
+            bail!("first-party PE map contains duplicate source path {source}");
+        }
+        if !stage_names.insert(*stage_name) {
+            bail!("first-party PE map contains duplicate stage name {stage_name}");
+        }
+    }
+    Ok(())
+}
 
 /// Populate `stage_dir` with one uniquely-named copy of each first-party PE from
 /// the bundle at `dist`. Pure w.r.t. the caller's paths so it is unit-testable.
 fn stage(dist: &Path, stage_dir: &Path) -> Result<()> {
+    validate_first_party_pe_map(FIRST_PARTY_PES)?;
     fs::create_dir_all(stage_dir)
         .with_context(|| format!("create stage dir {}", stage_dir.display()))?;
     for (src, stage_name) in FIRST_PARTY_PES {
@@ -31,12 +58,69 @@ fn stage(dist: &Path, stage_dir: &Path) -> Result<()> {
 /// Copy each signed PE from `signed_dir` (named by its stage name) back over its
 /// original path in the bundle at `dist`. The reverse of [`stage`], driven by
 /// the same map.
-fn collect(dist: &Path, signed_dir: &Path) -> Result<()> {
-    for (src, stage_name) in FIRST_PARTY_PES {
+fn collect(entries: &[(&str, &str)], dist: &Path, signed_dir: &Path) -> Result<()> {
+    for (src, stage_name) in entries {
         let from = signed_dir.join(stage_name);
         let to = dist.join(src);
         fs::copy(&from, &to)
             .with_context(|| format!("collect {} -> {}", from.display(), to.display()))?;
+    }
+    Ok(())
+}
+
+/// Prove that signing changed only Authenticode-excluded bytes for every
+/// first-party PE, then copy the signed files back and prove the destination
+/// identities again.
+///
+/// All unsigned and signed candidates are digested before the first overwrite,
+/// so a missing/substituted signer output cannot leave a partially collected
+/// bundle. The post-copy pass catches a wrong destination or copy-time drift.
+fn collect_preserving_images_with<F>(
+    entries: &[(&str, &str)],
+    dist: &Path,
+    signed_dir: &Path,
+    digest: F,
+) -> Result<()>
+where
+    F: Fn(&Path) -> Result<String>,
+{
+    validate_first_party_pe_map(entries)?;
+
+    let mut expected = Vec::with_capacity(entries.len());
+    for (source, _) in entries {
+        let path = dist.join(source);
+        expected.push(
+            digest(&path)
+                .with_context(|| format!("read unsigned image identity {}", path.display()))?,
+        );
+    }
+
+    // Preflight the complete signer output before mutating the bundle. This
+    // catches both missing files and a signer that returned different code.
+    for ((source, stage_name), expected_image) in entries.iter().zip(&expected) {
+        let path = signed_dir.join(stage_name);
+        let actual = digest(&path)
+            .with_context(|| format!("read signed image identity {}", path.display()))?;
+        if actual != *expected_image {
+            bail!(
+                "signing changed executable image {source}: expected \
+                 {expected_image}, got {actual}"
+            );
+        }
+    }
+
+    collect(entries, dist, signed_dir)?;
+
+    for ((source, _), expected_image) in entries.iter().zip(&expected) {
+        let path = dist.join(source);
+        let actual = digest(&path)
+            .with_context(|| format!("read collected image identity {}", path.display()))?;
+        if actual != *expected_image {
+            bail!(
+                "collected executable image {source} drifted: expected \
+                 {expected_image}, got {actual}"
+            );
+        }
     }
     Ok(())
 }
@@ -87,9 +171,9 @@ fn manifest_body() -> String {
 pub fn run_collect() -> Result<()> {
     let dist = paths::dist_dir();
     let signed_dir = paths::signed_dir();
-    collect(&dist, &signed_dir)?;
+    collect_preserving_images_with(FIRST_PARTY_PES, &dist, &signed_dir, pe_digest::sha256_file)?;
     println!(
-        "sign-collect: copied {} signed PE(s) back into {}",
+        "sign-collect: verified and copied {} signed PE(s) back into {}",
         FIRST_PARTY_PES.len(),
         dist.display()
     );
@@ -99,10 +183,20 @@ pub fn run_collect() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     fn scratch(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("xtask-signing-{tag}-{}", std::process::id()))
+    }
+
+    /// Test stand-in for `ImageGetDigestStream`: the simulated signature suffix is
+    /// excluded while every byte in the executable-image prefix remains covered.
+    fn simulated_image_digest(path: &Path) -> Result<String> {
+        let bytes = fs::read(path)?;
+        let image_len = bytes
+            .windows(b"\nsignature:".len())
+            .position(|window| window == b"\nsignature:")
+            .unwrap_or(bytes.len());
+        Ok(crate::checksum::sha256_hex(&bytes[..image_len]))
     }
 
     /// The whole reason the map is explicit: a flat copy-by-basename would
@@ -127,9 +221,21 @@ mod tests {
         }
     }
 
-    /// Fabricate a bundle, stage it, sign it (mutate the staged bytes), collect,
-    /// and assert every original path now carries its signed content — the
-    /// round-trip the two workflow steps perform.
+    #[test]
+    fn duplicate_or_empty_maps_fail_closed_at_runtime() {
+        assert!(validate_first_party_pe_map(&[]).is_err());
+        assert!(
+            validate_first_party_pe_map(&[("app/a.exe", "a.exe"), ("app/a.exe", "b.exe")]).is_err()
+        );
+        assert!(
+            validate_first_party_pe_map(&[("app/a.exe", "a.exe"), ("app/b.exe", "a.exe")]).is_err()
+        );
+        assert!(validate_first_party_pe_map(&[("", "a.exe")]).is_err());
+        assert!(validate_first_party_pe_map(&[("app/a.exe", "")]).is_err());
+    }
+
+    /// Fabricate a bundle, append simulated Authenticode data to every staged
+    /// image, collect, and assert every destination kept its executable identity.
     #[test]
     fn stage_sign_collect_round_trips() {
         let base = scratch("roundtrip");
@@ -148,25 +254,105 @@ mod tests {
 
         stage(&dist, &stage_dir).unwrap();
 
-        // Simulate the eSigner Action: read each staged PE, write a "signed"
-        // variant into signed/ under the same stage name.
+        // Simulate the eSigner Action: preserve the image and append certificate
+        // data that the Authenticode digest stream deliberately excludes.
         for (_, stage_name) in FIRST_PARTY_PES {
-            let staged = fs::read_to_string(stage_dir.join(stage_name)).unwrap();
+            let mut staged = fs::read(stage_dir.join(stage_name)).unwrap();
+            staged.extend_from_slice(b"\nsignature:test");
             fs::create_dir_all(&signed_dir).unwrap();
-            fs::write(
-                signed_dir.join(stage_name),
-                staged.replace("unsigned:", "signed:"),
-            )
-            .unwrap();
+            fs::write(signed_dir.join(stage_name), staged).unwrap();
         }
 
-        collect(&dist, &signed_dir).unwrap();
+        collect_preserving_images_with(FIRST_PARTY_PES, &dist, &signed_dir, simulated_image_digest)
+            .unwrap();
 
         for (src, _) in FIRST_PARTY_PES {
             assert_eq!(
                 fs::read_to_string(dist.join(src)).unwrap(),
-                format!("signed:{src}"),
+                format!("unsigned:{src}\nsignature:test"),
                 "{src} was not replaced with its signed copy"
+            );
+        }
+
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn substituted_signer_output_is_rejected_before_any_bundle_overwrite() {
+        let base = scratch("substitution");
+        let _ = fsx::force_remove_dir_all(&base);
+        let dist = base.join("dist");
+        let signed_dir = base.join("signed");
+
+        for (src, stage_name) in FIRST_PARTY_PES {
+            let destination = dist.join(src);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::write(&destination, format!("unsigned:{src}")).unwrap();
+            fs::create_dir_all(&signed_dir).unwrap();
+            fs::write(
+                signed_dir.join(stage_name),
+                format!("unsigned:{src}\nsignature:test"),
+            )
+            .unwrap();
+        }
+        let (_, first_stage_name) = FIRST_PARTY_PES[0];
+        fs::write(
+            signed_dir.join(first_stage_name),
+            b"substituted executable\nsignature:test",
+        )
+        .unwrap();
+
+        assert!(collect_preserving_images_with(
+            FIRST_PARTY_PES,
+            &dist,
+            &signed_dir,
+            simulated_image_digest,
+        )
+        .is_err());
+        for (src, _) in FIRST_PARTY_PES {
+            assert_eq!(
+                fs::read_to_string(dist.join(src)).unwrap(),
+                format!("unsigned:{src}"),
+                "preflight failure must leave {src} untouched"
+            );
+        }
+
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn missing_signer_output_is_rejected_before_any_bundle_overwrite() {
+        let base = scratch("missing-signed");
+        let _ = fsx::force_remove_dir_all(&base);
+        let dist = base.join("dist");
+        let signed_dir = base.join("signed");
+
+        for (src, stage_name) in FIRST_PARTY_PES {
+            let destination = dist.join(src);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::write(&destination, format!("unsigned:{src}")).unwrap();
+            fs::create_dir_all(&signed_dir).unwrap();
+            fs::write(
+                signed_dir.join(stage_name),
+                format!("unsigned:{src}\nsignature:test"),
+            )
+            .unwrap();
+        }
+        let (_, last_stage_name) = FIRST_PARTY_PES[FIRST_PARTY_PES.len() - 1];
+        fs::remove_file(signed_dir.join(last_stage_name)).unwrap();
+
+        assert!(collect_preserving_images_with(
+            FIRST_PARTY_PES,
+            &dist,
+            &signed_dir,
+            simulated_image_digest,
+        )
+        .is_err());
+        for (src, _) in FIRST_PARTY_PES {
+            assert_eq!(
+                fs::read_to_string(dist.join(src)).unwrap(),
+                format!("unsigned:{src}"),
+                "preflight failure must leave {src} untouched"
             );
         }
 

@@ -1,5 +1,9 @@
-//! Pure `USN_RECORD_V2` buffer parsing — no OS calls, so the whole layer is
-//! testable from raw byte fixtures (docs/ARCHITECTURE.md, CLAUDE.md elevation rules).
+//! Pure change-journal buffer parsing — no OS calls, so the whole layer is
+//! testable from raw byte fixtures (docs/ARCHITECTURE.md, AGENTS.md elevation
+//! rules).
+//!
+//! NTFS V2 records are decoded; foreign V3/V4 records are skipped only
+//! after their version-specific variable-length layout has been validated.
 //!
 //! Buffer layout returned by `FSCTL_READ_USN_JOURNAL` / `FSCTL_ENUM_USN_DATA`:
 //! a leading u64 (the next USN / next FRN to resume from), then a sequence of
@@ -25,6 +29,8 @@ pub mod reason {
     pub const RENAME_NEW_NAME: u32 = 0x0000_2000;
     /// A hard link was added or removed (`USN_REASON_HARD_LINK_CHANGE`).
     pub const HARD_LINK_CHANGE: u32 = 0x0001_0000;
+    /// Reparse-point metadata changed (`USN_REASON_REPARSE_POINT_CHANGE`).
+    pub const REPARSE_POINT_CHANGE: u32 = 0x0010_0000;
     /// Final record after a handle to the file was closed (`USN_REASON_CLOSE`).
     pub const CLOSE: u32 = 0x8000_0000;
 }
@@ -94,6 +100,42 @@ fn u64_at(b: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(a)
 }
 
+fn valid_utf16_tail(
+    record: &[u8],
+    record_length: usize,
+    fixed_header: usize,
+    length_offset: usize,
+    data_offset: usize,
+) -> bool {
+    let name_len = u16_at(record, length_offset) as usize;
+    let name_off = u16_at(record, data_offset) as usize;
+    name_off >= fixed_header
+        && name_off.is_multiple_of(2)
+        && name_len.is_multiple_of(2)
+        && name_len <= 255 * 2
+        && name_off
+            .checked_add(name_len)
+            .is_some_and(|end| end <= record_length)
+}
+
+fn valid_v4_extents(record: &[u8], record_length: usize) -> bool {
+    const V4_HEADER_BYTES: usize = 64;
+    const EXTENT_BYTES: usize = 16;
+
+    if record_length < V4_HEADER_BYTES {
+        return false;
+    }
+    let count = u16_at(record, 60) as usize;
+    let extent_size = u16_at(record, 62) as usize;
+    if count > 0 && extent_size < EXTENT_BYTES {
+        return false;
+    }
+    count
+        .checked_mul(extent_size)
+        .and_then(|bytes| V4_HEADER_BYTES.checked_add(bytes))
+        .is_some_and(|end| end <= record_length)
+}
+
 /// Parse a raw FSCTL output buffer.
 ///
 /// Returns the leading "next" cursor value, the decoded records, and whether
@@ -108,7 +150,7 @@ pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>, bool) {
     let mut records = Vec::with_capacity(buf.len() / 96);
     let mut truncated = false;
     if buf.len() < 8 {
-        return (0, records, !buf.is_empty());
+        return (0, records, true);
     }
     let next = u64_at(buf, 0);
     let mut off = 8usize;
@@ -116,17 +158,21 @@ pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>, bool) {
     while off + 60 <= buf.len() {
         let rec = &buf[off..];
         let record_length = u32_at(rec, 0) as usize;
-        if record_length < 60 || off + record_length > buf.len() {
+        let Some(record_end) = off.checked_add(record_length) else {
+            truncated = true;
+            break;
+        };
+        if record_length < 60 || !record_length.is_multiple_of(8) || record_end > buf.len() {
             truncated = true;
             break;
         }
-        let major = u16_at(rec, 4);
-        if major == 2 {
-            let name_len = u16_at(rec, 56) as usize; // bytes
-            let name_off = u16_at(rec, 58) as usize;
-            if name_off + name_len <= record_length {
+        match u16_at(rec, 4) {
+            2 if valid_utf16_tail(rec, record_length, 60, 56, 58) => {
+                let name_len = u16_at(rec, 56) as usize;
+                let name_off = u16_at(rec, 58) as usize;
+                let name_end = name_off + name_len;
                 let mut name = Vec::with_capacity(name_len / 2);
-                let nb = &rec[name_off..name_off + name_len];
+                let nb = &rec[name_off..name_end];
                 for ch in nb.chunks_exact(2) {
                     name.push(u16::from_le_bytes([ch[0], ch[1]]));
                 }
@@ -138,15 +184,27 @@ pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>, bool) {
                     attributes: u32_at(rec, 52),
                     name,
                 });
-            } else {
+            }
+            2 => {
                 // Name escapes its record: corrupt bytes. The record is
                 // dropped, but the caller must hear about it (counter +
                 // warning) — a silently lost rename means a stale index.
                 truncated = true;
             }
+            // A read can legally mix record versions. This NTFS indexer only
+            // consumes V2's 64-bit file IDs; V3/V4 framing is nevertheless
+            // validated before it is skipped. Treating a structurally valid
+            // supported foreign version as corruption would create an
+            // infinite full-rescan loop.
+            3 if record_length >= 76 && valid_utf16_tail(rec, record_length, 76, 72, 74) => {}
+            4 if valid_v4_extents(rec, record_length) => {}
+            // Unknown versions and malformed foreign records cannot be
+            // skipped safely: advancing the cursor could permanently lose a
+            // record hidden behind corrupt framing.
+            _ => truncated = true,
         }
-        // Records are 8-byte aligned; RecordLength already includes padding.
-        off += record_length.next_multiple_of(8);
+        // FSCTL records are 8-byte aligned and RecordLength includes padding.
+        off = record_end;
     }
     if off != buf.len() {
         truncated = true; // sub-record trailing garbage (< 60 bytes)
@@ -230,8 +288,80 @@ mod tests {
     }
 
     #[test]
+    fn malformed_record_fields_fail_closed() {
+        let original = encode_buffer(9, &[rec(7, 5, reason::FILE_CREATE, "abc.txt")]);
+
+        let mut odd_name_length = original.clone();
+        odd_name_length[8 + 56..8 + 58].copy_from_slice(&3u16.to_le_bytes());
+        let (_, parsed, malformed) = parse_buffer(&odd_name_length);
+        assert!(malformed);
+        assert!(parsed.is_empty());
+
+        let mut header_name_offset = original.clone();
+        header_name_offset[8 + 58..8 + 60].copy_from_slice(&58u16.to_le_bytes());
+        let (_, parsed, malformed) = parse_buffer(&header_name_offset);
+        assert!(malformed);
+        assert!(parsed.is_empty());
+
+        let mut unknown_version = original;
+        unknown_version[8 + 4..8 + 6].copy_from_slice(&99u16.to_le_bytes());
+        let (_, parsed, malformed) = parse_buffer(&unknown_version);
+        assert!(malformed);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn structurally_valid_v3_and_v4_records_are_skipped() {
+        let mut v3 = vec![0u8; 8 + 80];
+        v3[..8].copy_from_slice(&9u64.to_le_bytes());
+        v3[8..12].copy_from_slice(&80u32.to_le_bytes());
+        v3[12..14].copy_from_slice(&3u16.to_le_bytes());
+        v3[8 + 72..8 + 74].copy_from_slice(&2u16.to_le_bytes());
+        v3[8 + 74..8 + 76].copy_from_slice(&76u16.to_le_bytes());
+        v3[8 + 76..8 + 78].copy_from_slice(&u16::from(b'x').to_le_bytes());
+        let (_, parsed, malformed) = parse_buffer(&v3);
+        assert!(!malformed);
+        assert!(parsed.is_empty());
+
+        let mut v4 = vec![0u8; 8 + 80];
+        v4[..8].copy_from_slice(&10u64.to_le_bytes());
+        v4[8..12].copy_from_slice(&80u32.to_le_bytes());
+        v4[12..14].copy_from_slice(&4u16.to_le_bytes());
+        v4[8 + 60..8 + 62].copy_from_slice(&1u16.to_le_bytes());
+        v4[8 + 62..8 + 64].copy_from_slice(&16u16.to_le_bytes());
+        let (_, parsed, malformed) = parse_buffer(&v4);
+        assert!(!malformed);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn malformed_v3_and_v4_records_fail_closed() {
+        let mut short_v3 = vec![0u8; 8 + 72];
+        short_v3[..8].copy_from_slice(&9u64.to_le_bytes());
+        short_v3[8..12].copy_from_slice(&72u32.to_le_bytes());
+        short_v3[12..14].copy_from_slice(&3u16.to_le_bytes());
+        let (_, _, malformed) = parse_buffer(&short_v3);
+        assert!(malformed);
+
+        let mut truncated_extents = vec![0u8; 8 + 64];
+        truncated_extents[..8].copy_from_slice(&10u64.to_le_bytes());
+        truncated_extents[8..12].copy_from_slice(&64u32.to_le_bytes());
+        truncated_extents[12..14].copy_from_slice(&4u16.to_le_bytes());
+        truncated_extents[8 + 60..8 + 62].copy_from_slice(&1u16.to_le_bytes());
+        truncated_extents[8 + 62..8 + 64].copy_from_slice(&16u16.to_le_bytes());
+        let (_, _, malformed) = parse_buffer(&truncated_extents);
+        assert!(malformed);
+    }
+
+    #[test]
     fn empty_buffer() {
-        assert_eq!(parse_buffer(&[]).1, vec![]);
-        assert_eq!(parse_buffer(&7u64.to_le_bytes()).1, vec![]);
+        let (_, records, malformed) = parse_buffer(&[]);
+        assert!(records.is_empty());
+        assert!(malformed);
+
+        let (next, records, malformed) = parse_buffer(&0u64.to_le_bytes());
+        assert_eq!(next, 0);
+        assert!(records.is_empty());
+        assert!(!malformed);
     }
 }

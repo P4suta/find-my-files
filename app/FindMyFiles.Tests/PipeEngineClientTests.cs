@@ -90,6 +90,104 @@ public sealed class PipeEngineClientTests
     }
 
     [Fact]
+    public async Task Search_MalformedTrace_ReleasesTheDecodedServerResult()
+    {
+        const ulong resultId = 0xA11C_E001;
+        using var server = new FakePipeServer
+        {
+            Handler = (opcode, _) => opcode == PipeProtocol.Op.Query
+                ? Task.FromResult((
+                    PipeProtocol.Status.Ok,
+                    PipeProtocol.EncodeQueryResp(resultId, 1, "{")))
+                : null,
+        };
+        using var client = new PipeEngineClient(server.PipeName);
+        await WaitUntilAsync(
+            () => client.Connection == EngineConnectionState.Connected, "connected");
+
+        await Assert.ThrowsAsync<System.Text.Json.JsonException>(
+            () => client.SearchAsync("a", SearchOptions.Default));
+
+        await server.WaitForAsync(PipeProtocol.Op.ResultFree);
+        var free = server.Received.Last(r => r.Opcode == PipeProtocol.Op.ResultFree);
+        Assert.Equal(resultId, PipeProtocol.DecodeResultFreeReq(free.Payload));
+    }
+
+    [Fact]
+    public async Task Search_CountOutsideManagedRange_ReleasesTheDecodedServerResult()
+    {
+        const ulong resultId = 0xA11C_E002;
+        using var server = new FakePipeServer
+        {
+            Handler = (opcode, _) => opcode == PipeProtocol.Op.Query
+                ? Task.FromResult((
+                    PipeProtocol.Status.Ok,
+                    PipeProtocol.EncodeQueryResp(resultId, ulong.MaxValue, "{}")))
+                : null,
+        };
+        using var client = new PipeEngineClient(server.PipeName);
+        await WaitUntilAsync(
+            () => client.Connection == EngineConnectionState.Connected, "connected");
+
+        await Assert.ThrowsAsync<OverflowException>(
+            () => client.SearchAsync("a", SearchOptions.Default));
+
+        await server.WaitForAsync(PipeProtocol.Op.ResultFree);
+        var free = server.Received.Last(r => r.Opcode == PipeProtocol.Op.ResultFree);
+        Assert.Equal(resultId, PipeProtocol.DecodeResultFreeReq(free.Payload));
+    }
+
+    [Fact]
+    public async Task CancelledQuery_LateResponse_ReleasesTheOrphanedServerResult()
+    {
+        const ulong resultId = 0xA11C_E003;
+        var responseGate = new TaskCompletionSource<(int Status, byte[] Payload)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var server = new FakePipeServer
+        {
+            Handler = (opcode, _) => opcode == PipeProtocol.Op.Query
+                ? responseGate.Task
+                : null,
+        };
+        using var client = new PipeEngineClient(server.PipeName);
+        await WaitUntilAsync(
+            () => client.Connection == EngineConnectionState.Connected, "connected");
+
+        using var cts = new CancellationTokenSource();
+        var search = client.SearchAsync("a", SearchOptions.Default, cts.Token);
+        await server.WaitForAsync(PipeProtocol.Op.Query);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => search);
+
+        responseGate.SetResult((
+            PipeProtocol.Status.Ok,
+            PipeProtocol.EncodeQueryResp(resultId, 1, "{}")));
+        await server.WaitForAsync(PipeProtocol.Op.ResultFree);
+
+        var free = server.Received.Last(r => r.Opcode == PipeProtocol.Op.ResultFree);
+        Assert.Equal(resultId, PipeProtocol.DecodeResultFreeReq(free.Payload));
+    }
+
+    [Fact]
+    public async Task ResponseOpcodeMismatch_FailsRequestAndRetiresConnection()
+    {
+        using var server = new FakePipeServer();
+        using var client = new PipeEngineClient(server.PipeName);
+        await WaitUntilAsync(
+            () => client.Connection == EngineConnectionState.Connected,
+            "connected");
+
+        server.ResponseOpcode = opcode =>
+            opcode == PipeProtocol.Op.ListVolumes ? PipeProtocol.Op.Stats : opcode;
+
+        await Assert.ThrowsAsync<EngineUnavailableException>(
+            () => client.ListVolumesAsync());
+        await WaitUntilAsync(
+            () => server.ConnectionCount >= 2,
+            "protocol-violating connection retired");
+    }
+
+    [Fact]
     public async Task Disconnect_FailsPendingFast_AndStalesLiveResults()
     {
         using var server = new FakePipeServer { Rows = Rows.Many(3) };
@@ -183,7 +281,7 @@ public sealed class PipeEngineClientTests
         Assert.Equal("Connected", stats.Transport!.State);
         Assert.Equal(1, stats.Transport.Reconnects);
         Assert.Equal(4242u, stats.Transport.ServerPid);
-        Assert.Equal(1u, stats.Transport.AbiVersion);
+        Assert.Equal(EngineContract.AbiVersion, stats.Transport.AbiVersion);
     }
 
     [Fact]
@@ -203,9 +301,36 @@ public sealed class PipeEngineClientTests
 
         Assert.Equal(1, server.ConnectionCount);
         Assert.Equal(new[] { PipeProtocol.Op.Hello }, server.OpcodesOf(0)); // no Subscribe
-        Assert.NotEqual(EngineConnectionState.Connected, client.Connection);
+        Assert.Equal(EngineConnectionState.Faulted, client.Connection);
         await Assert.ThrowsAsync<EngineUnavailableException>(
             () => client.SearchAsync("a", SearchOptions.Default));
+    }
+
+    [Fact]
+    public async Task AbiMismatch_IsInformational_AndDoesNotBlockProtocolCompatiblePeer()
+    {
+        using var server = new FakePipeServer
+        {
+            AbiVersion = EngineContract.AbiVersion + 1,
+        };
+        using var client = new PipeEngineClient(server.PipeName);
+
+        await WaitUntilAsync(() => server.ConnectionCount == 1, "first connection");
+        await server.WaitForAsync(PipeProtocol.Op.Subscribe);
+        await WaitUntilAsync(
+            () => client.Connection == EngineConnectionState.Connected,
+            "connected despite ABI mismatch");
+
+        Assert.Equal(1, server.ConnectionCount);
+        Assert.Equal(
+            new[]
+            {
+                PipeProtocol.Op.Hello,
+                PipeProtocol.Op.Subscribe,
+                PipeProtocol.Op.IndexStatus,
+            },
+            server.OpcodesOf(0));
+        Assert.Equal(EngineConnectionState.Connected, client.Connection);
     }
 
     [Fact]

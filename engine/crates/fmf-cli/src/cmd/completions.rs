@@ -1,7 +1,5 @@
 //! `completions` — print a shell completion script to stdout (the gh/rustup
-//! pattern: `eval "$(fmf completions bash)"`). The release bundle also ships
-//! pre-generated scripts under `completions/`, produced by this same path so the
-//! two never drift.
+//! pattern: `eval "$(fmf completions bash)"`).
 
 use std::io;
 

@@ -18,10 +18,8 @@ namespace FindMyFiles;
 /// </summary>
 // View-shell entry point: imperative startup wiring, not unit-tested (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
-public static partial class Program
+internal static partial class Program
 {
-    private static IntPtr _redirectEvent;
-
     [STAThread]
     [System.Diagnostics.CodeAnalysis.SuppressMessage(
         "Performance",
@@ -30,12 +28,23 @@ public static partial class Program
     private static int Main()
     {
         WinRT.ComWrappersSupport.InitializeComWrappers();
+        LogSetup.Init();
 
-        if (DecideRedirection())
+        try
         {
-            // A primary instance already owns the key; we redirected our
-            // activation to it (restoring its window) and now exit.
-            return 0;
+            if (DecideRedirection())
+            {
+                // A primary instance already owns the key; we redirected our
+                // activation to it (restoring its window) and now exit.
+                LogSetup.Shutdown();
+                return 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            FileLog.Error("startup", "single-instance activation redirect failed", ex);
+            LogSetup.Shutdown();
+            return 1;
         }
 
         Application.Start(_ =>
@@ -70,39 +79,69 @@ public static partial class Program
     private static void OnActivated(object? sender, AppActivationArguments args)
     {
         // AppInstance.Activated fires on a background thread — marshal to the UI
-        // thread before touching the window (CLAUDE.md UI rule).
+        // thread before touching the window (AGENTS.md UI rule).
         _ = App.DispatcherQueue?.TryEnqueue(App.ShowFromTray);
     }
 
     private static void RedirectActivationTo(AppActivationArguments args, AppInstance keyInstance)
     {
-        _redirectEvent = CreateEvent(IntPtr.Zero, bManualReset: true, bInitialState: false, lpName: null);
-        Task.Run(() =>
+        var completed = new EventWaitHandle(
+            initialState: false,
+            EventResetMode.ManualReset);
+        var redirectTask = Task.Run(async () =>
         {
-            keyInstance.RedirectActivationToAsync(args).AsTask().Wait();
-            _ = SetEvent(_redirectEvent);
-        }).Forget("single-instance-redirect");
+            try
+            {
+                await keyInstance.RedirectActivationToAsync(args).AsTask().ConfigureAwait(false);
+            }
+            finally
+            {
+                // Wake the COM-pumping primary thread on success and failure.
+                // The task exception is rethrown below after the wait.
+                _ = completed.Set();
+            }
+        });
 
         // Pump COM while waiting so the cross-process redirect completes without
-        // deadlocking this STA.
+        // deadlocking this STA. Bound the wait so a broken AppLifecycle broker
+        // cannot leave a second launch stuck forever.
         const uint CwmoDefault = 0;
-        const uint Infinite = 0xFFFFFFFF;
-        _ = CoWaitForMultipleObjects(CwmoDefault, Infinite, 1, [_redirectEvent], out _);
+        const uint RedirectTimeoutMs = 30_000;
+        var hr = CoWaitForMultipleObjects(
+            CwmoDefault,
+            RedirectTimeoutMs,
+            1,
+            [completed.SafeWaitHandle.DangerousGetHandle()],
+            out _);
+        if (hr != 0)
+        {
+            // RedirectActivationToAsync has no cancellation token. Keep the
+            // event alive until the in-flight operation finishes.
+            redirectTask.ContinueWith(
+                static (task, state) =>
+                {
+                    _ = task.Exception;
+                    ((EventWaitHandle)state!).Dispose();
+                },
+                completed,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default).Forget("single-instance-redirect-cleanup");
+            throw Marshal.GetExceptionForHR(unchecked((int)hr))
+                ?? new InvalidOperationException(
+                    $"activation redirect wait failed (HRESULT 0x{hr:X8})",
+                    innerException: null);
+        }
+
+        try
+        {
+            redirectTask.GetAwaiter().GetResult();
+        }
+        finally
+        {
+            completed.Dispose();
+        }
     }
-
-    [LibraryImport("kernel32.dll", EntryPoint = "CreateEventW",
-        StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    private static partial IntPtr CreateEvent(
-        IntPtr lpEventAttributes,
-        [MarshalAs(UnmanagedType.Bool)] bool bManualReset,
-        [MarshalAs(UnmanagedType.Bool)] bool bInitialState,
-        string? lpName);
-
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool SetEvent(IntPtr hEvent);
 
     [LibraryImport("ole32.dll")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]

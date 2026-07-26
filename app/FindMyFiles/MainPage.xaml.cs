@@ -23,9 +23,10 @@ public sealed partial class MainPage : Page
     /// <summary>Root of the page's ViewModel graph. The sole `x:Bind` source;
     /// it ties together the search, results, notification and diagnostics-panel
     /// sub-ViewModels.</summary>
-    public MainViewModel ViewModel { get; }
+    internal MainViewModel ViewModel { get; }
 
     private readonly ResultsViewportManager _viewport;
+    private bool _disposed;
 
     /// <summary>Builds the ViewModel graph and wires view events (IME composition,
     /// drag &amp; drop, keyboard, sort headers) to the ViewModel and
@@ -43,6 +44,8 @@ public sealed partial class MainPage : Page
         ToolTipService.SetToolTip(OptionsButton, Loc.Get("OptionsButton_ToolTip"));
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
             OptionsButton, Loc.Get("OptionsButton_Name"));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            ResultsList, Loc.Get("ResultsList_Name"));
 
         _viewport = new ResultsViewportManager(ResultsList);
         ViewModel.Results.ResultsPublished += _viewport.OnResultsPublished;
@@ -57,7 +60,7 @@ public sealed partial class MainPage : Page
         // Frame does not dispose the page it replaces, so release the old view
         // model's engine-event subscriptions here. The disposal is idempotent, so
         // it coexists with the Window.Closed engine dispose in App.
-        Unloaded += (_, _) => ViewModel.Dispose();
+        Unloaded += OnUnloaded;
 
         // Empty query = large centered search bar (Empty); on input it moves up
         // and shows results (Results).
@@ -80,6 +83,20 @@ public sealed partial class MainPage : Page
         };
     }
 
+    private void OnUnloaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        Unloaded -= OnUnloaded;
+        ViewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        ViewModel.Results.ResultsPublished -= _viewport.OnResultsPublished;
+        ViewModel.Dispose();
+    }
+
     private void OnViewModelPropertyChanged(
         object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
@@ -87,6 +104,41 @@ public sealed partial class MainPage : Page
         {
             UpdateSearchState(useTransitions: true);
         }
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Performance",
+        "CA1822:Mark members as static",
+        Justification = "XAML event handlers must be instance methods")]
+    private void ResultsList_ContainerContentChanging(
+        ListViewBase sender,
+        ContainerContentChangingEventArgs args)
+    {
+        if (args.ItemContainer is not ListViewItem container || args.Item is not ResultRow row)
+        {
+            return;
+        }
+
+        // Style-setter bindings are not reliably applied to recycled WinUI
+        // ListViewItem automation peers. Bind explicitly to the current row so
+        // every realized container has a stable position ID and receives the
+        // completed screen-reader summary after its virtual page is filled.
+        container.SetBinding(
+            Microsoft.UI.Xaml.Automation.AutomationProperties.AutomationIdProperty,
+            new Microsoft.UI.Xaml.Data.Binding
+            {
+                Source = row,
+                Path = new Microsoft.UI.Xaml.PropertyPath(nameof(ResultRow.AutomationId)),
+                Mode = Microsoft.UI.Xaml.Data.BindingMode.OneWay,
+            });
+        container.SetBinding(
+            Microsoft.UI.Xaml.Automation.AutomationProperties.NameProperty,
+            new Microsoft.UI.Xaml.Data.Binding
+            {
+                Source = row,
+                Path = new Microsoft.UI.Xaml.PropertyPath(nameof(ResultRow.AutomationName)),
+                Mode = Microsoft.UI.Xaml.Data.BindingMode.OneWay,
+            });
     }
 
     /// <summary>Empty (large centered search bar only) ↔ Results (search bar on
@@ -108,9 +160,7 @@ public sealed partial class MainPage : Page
         }
     }
 
-    // Gear button → the settings / status / diagnostics dialog (the old MenuFlyout,
-    // rebuilt as a Fluent settings page). Service / scope / diagnostics open from
-    // inside it.
+    // Gear button → the settings / status / diagnostics dialog.
     private void OptionsButton_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         Views.SettingsDialog.OpenAsync(ViewModel).Forget("settings-ui");
 
@@ -118,10 +168,11 @@ public sealed partial class MainPage : Page
     private void EnableSearch_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         ViewModel.EnableSearchAsync().Forget("service-ui");
 
-    // Setup screen scope path (no admin, ADR-0024): a single link opens the
-    // scope setup dialog (folders only; excludes come later via the gear).
-    private void ScopeSetup_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
-        Views.ScopeManagerDialog.OpenAsync(ViewModel, setup: true).Forget("scope-ui");
+    // Recovery must remain reachable when no engine can be resolved. The settings
+    // surface owns diagnostics plus service repair/uninstall; unlike the search
+    // gear this button is part of the disconnected setup screen itself.
+    private void SetupRecovery_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        Views.SettingsDialog.OpenAsync(ViewModel).Forget("settings-ui");
 
     // ── Drag & drop: folder → path: filter, file → name search ──────────
     private void Page_DragOver(object sender, Microsoft.UI.Xaml.DragEventArgs e)

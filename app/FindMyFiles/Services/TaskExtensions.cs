@@ -1,11 +1,11 @@
 namespace FindMyFiles.Services;
 
 /// <summary>Extensions for safely launching fire-and-forget <see cref="Task"/>s
-/// (CLAUDE.md rule: never <c>_ = SomeAsync()</c>).</summary>
-public static class TaskExtensions
+/// (AGENTS.md rule: never <c>_ = SomeAsync()</c>).</summary>
+internal static class TaskExtensions
 {
     /// <summary>
-    /// The only sanctioned way to fire-and-forget (CLAUDE.md rule): unexpected
+    /// The only sanctioned way to fire-and-forget (AGENTS.md rule): unexpected
     /// exceptions land in the log and the notification bar instead of being
     /// silently dropped by an abandoned Task.
     /// </summary>

@@ -26,6 +26,9 @@ pub const IO: i32 = 6;
 /// The index dir's writer lock is held by another process (single-writer
 /// invariant, cross-process).
 pub const LOCKED: i32 = 7;
+/// The query was cooperatively cancelled. No result handle or partial
+/// presentation identity is published.
+pub const CANCELLED: i32 = 8;
 /// An internal panic was caught at the FFI/pipe boundary (`catch_unwind`);
 /// detail is available via `fmf_last_error`.
 pub const PANIC: i32 = 99;

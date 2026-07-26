@@ -1,0 +1,20 @@
+# Repository policy for the engine workspace (ADR-0041). Every Rust test is a
+# separate process, retries never hide flakes, and hangs fail in bounded time.
+nextest-version = "0.9.140"
+
+[store]
+dir = "../build/engine/nextest"
+
+[profile.default]
+fail-fast = false
+retries = 0
+flaky-result = "fail"
+slow-timeout = { period = "15s", terminate-after = 4 }
+leak-timeout = { period = "500ms", result = "fail" }
+global-timeout = "15m"
+
+[profile.ci]
+inherits = "default"
+
+[profile.ci.junit]
+path = "../../nextest-ci.xml"

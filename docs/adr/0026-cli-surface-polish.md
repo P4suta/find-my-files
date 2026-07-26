@@ -2,6 +2,11 @@
 
 Date: 2026-06-20 / Status: Adopted
 
+> Current-state amendment (2026-07-26): `fmf` is a developer build artifact
+> under `build/engine`, not part of the end-user ZIP. Generated CLI Markdown and
+> its drift machinery remain removed; `fmf --help` is the reference when
+> working with the developer artifact, and completions are requested on demand.
+
 ## Decision
 
 Invest in the `fmf` developer CLI's ergonomics without expanding its remit. The CLI stays a developer / diagnostic / measurement tool — the WinUI app remains the end-user product — but it gains the polish a contributor (and anyone driving the engine from a terminal) expects:
@@ -11,7 +16,9 @@ Invest in the `fmf` developer CLI's ergonomics without expanding its remit. The 
 - **`FMF_E_*` exit codes.** The top-level handler maps fmf-core's typed errors to the shared `fmf_contract::codes` table — the *same* classification the FFI boundary uses — so a script can branch on `$LASTEXITCODE` (NOT_ADMIN=3, VOLUME=4, LOCKED=7, …); clap's usage exit code (2) is untouched.
 - **TTY-aware colour** (anstream strips ANSI when redirected) over an anstyle style vocabulary in `cmd::term`, plus an `indicatif` spinner during the volume index build. Both go silent under `--quiet`/`--format json`/non-TTY.
 - **Machine-readable output.** `--format json` emits a single document on stdout (NDJSON for `watch`) for the commands that have a JSON shape (diag/bench/watch); failures emit a JSON error envelope on stderr. Every payload carries a `format_version`.
-- **Generated reference + completions.** `docs/cli.md` (committed) and the shell completions in `build/completions/` (PowerShell/bash/zsh/fish) are both rendered from the single clap command tree, exposed as `fmf_cli::command()`. The `codegen` example writes them; `--check` is a drift tripwire wired into `just check` and pre-push, exactly like the contract drift check (ADR-0018).
+- **Generated completions.** Shell completions in `build/completions/`
+  (PowerShell/bash/zsh/fish) are rendered from the shipped clap command tree.
+  `fmf --help` is the only CLI reference.
 
 To let the example and the integration tests reuse the clap surface, `fmf-cli` becomes a `lib` + `bin`: the parser and dispatch move to `lib.rs` (`command()` / `run()`), and `main.rs` is a one-line entry point. This preserves the "clap surface + dispatch only; logic in `cmd/`" rule.
 
@@ -19,7 +26,8 @@ To let the example and the integration tests reuse the clap surface, `fmf-cli` b
 
 - The two audiences the project wants to serve — people *developing* find-my-files and people *using* it from a terminal — both meet the engine through this CLI. It was the least-polished surface (no completions, no `--version`, monochrome, every failure exit 1), so the DevEx return is highest here. The contributor tooling (just/xtask) was already brought up to standard in the #54–58 pass.
 - **Reuse, don't redefine.** Exit codes and the JSON error `code` come from `fmf_contract::codes`, the machine-readable contract source; the CLI mirrors the FFI's per-call classification rather than inventing a parallel table.
-- **No new seams or ports** (ADR-0018): nothing here touches the engine's trait seams. Generated artefacts land under `build/` (ADR-0021); the one committed generated file, `docs/cli.md`, follows the same generate-commit-drift-check discipline as `contract.md`.
+- **No new seams or ports** (ADR-0018): nothing here touches the engine's trait
+  seams. Generated completions land under `build/` (ADR-0021).
 - **anstream/anstyle** already ride in via clap, so colour costs almost no new dependency surface and handles `NO_COLOR`/redirection correctly without hand-rolled TTY logic.
 
 ## Rejected alternatives
@@ -31,7 +39,7 @@ To let the example and the integration tests reuse the clap surface, `fmf-cli` b
 ## Consequences
 
 - `fmf-cli` is now lib + bin. Its unit tests run under the lib; `assert_cmd` behavioural tests cover the non-elevated surface (version/help/usage/`diag`/JSON error); volume/USN assertions stay behind `FMF_ADMIN_TESTS`.
-- `docs/cli.md` is a committed generated file: edit the clap surface, run `just cli-gen`, and `just check` / pre-push fail on drift. Completions are an ignored build output, bundled at release time.
+- The end-user bundle contains neither `fmf.exe` nor completion scripts.
 - The `--format json` payloads are a **versioned, not frozen** contract: additive fields keep `format_version`; a field changing meaning or being removed bumps it. Snapshot/behavioural tests pin the current shape.
 - New dev/runtime dependencies (anstream, anstyle, indicatif; dev-only clap_complete, clap-markdown, assert_cmd, predicates) pass `cargo deny`.
 
@@ -43,9 +51,6 @@ To let the example and the integration tests reuse the clap surface, `fmf-cli` b
 
 ## Follow-up
 
-[ADR-0039](0039-cli-devex-pass-2.md) is the second DevEx pass that makes this ADR's
-aspirations real and closes its gaps — completions are now actually generated into
-the release bundle (and a `fmf completions <shell>` subcommand prints them on demand),
-the `docs/cli.md` drift check became a `cargo test` (CI-gated, not just pre-push),
-`--format json` is honoured by every result-producing command, and `-v/--verbose` was
-added. The remit is unchanged: `fmf` stays a developer/diagnostic tool.
+[ADR-0039](0039-cli-devex-pass-2.md) distributes completions, makes
+`--format json` consistent, and adds `-v/--verbose`. The remit is unchanged:
+`fmf` stays a developer/diagnostic tool.

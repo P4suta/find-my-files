@@ -2,7 +2,7 @@
 <!--
     Design-token primitives — the raw, reusable scales. Single source of truth
     for spacing and icon sizing; call sites reference these by name so no
-    spacing/size literal is ever written inline (CLAUDE.md: 仕組みから統一).
+    spacing/size literal is ever written inline (AGENTS.md: 仕組みから統一).
 
     Layering:  Primitives (this file, raw scale)
             →  Tokens.Semantic.xaml (purpose-named dimensions + Thickness shapes)

@@ -5,7 +5,7 @@ namespace FindMyFiles.Services;
 /// <summary>
 /// In-process "soft restart": re-resolve the engine transport and rebuild the
 /// page graph <em>without</em> spawning a new process (ADR-0036). This is how a
-/// freshly registered service, an applied scope change, or an uninstall takes
+/// freshly registered service or an uninstall takes
 /// effect now that the engine is chosen once at startup — the old design
 /// relaunched the process, which collides with single-instancing (a relaunched
 /// instance redirects its activation back to the still-alive original and exits,
@@ -26,14 +26,14 @@ internal sealed class AppReload
     private readonly Action _closeDiagnostics;
 
     /// <summary>Guards against a re-navigation (or a delegate it triggers)
-    /// re-entering <see cref="Run"/> mid-cycle. Reset once the cycle completes,
+    /// re-entering <see cref="Run(string[])"/> mid-cycle. Reset once the cycle completes,
     /// so a later, independent soft restart still runs.</summary>
     private bool _running;
 
     /// <summary>Builds the orchestrator over its boundaries; <see cref="App"/>
     /// wires the production delegates once the window exists.</summary>
     /// <param name="resolve">Resolve the engine for the given args (the same
-    /// resolve-or-fallback the launch path uses).</param>
+    /// resolve-or-unavailable behavior the launch path uses).</param>
     /// <param name="getEngine">Read the current engine (to dispose after the swap).</param>
     /// <param name="setEngine">Publish the freshly resolved engine before the page rebuild.</param>
     /// <param name="renavigate">Rebuild the page graph against the new engine
@@ -65,6 +65,15 @@ internal sealed class AppReload
     /// (e.g. <c>--engine=pipe</c> after a service register).</param>
     internal void Run(string[] engineArgs)
     {
+        Run(() => _resolve(engineArgs));
+    }
+
+    /// <summary>Run a soft restart with an internal resolver that is not
+    /// representable as a production command-line switch (for example the
+    /// explicit unavailable state after the user stops the service).</summary>
+    /// <param name="resolve">Creates the next engine session.</param>
+    internal void Run(Func<IEngineClient> resolve)
+    {
         if (_running)
         {
             return;
@@ -75,9 +84,39 @@ internal sealed class AppReload
         {
             _closeDiagnostics();
             var old = _getEngine();
-            _setEngine(_resolve(engineArgs));
-            _renavigate();
-            old?.Dispose();
+            var fresh = resolve();
+            try
+            {
+                _setEngine(fresh);
+                _renavigate();
+            }
+            catch
+            {
+                // Navigation is the commit point. Restore the globally
+                // published session and dispose the unpublished replacement;
+                // the old page/engine remain a coherent pair.
+                _setEngine(old);
+                if (!ReferenceEquals(fresh, old))
+                {
+                    fresh.Dispose();
+                }
+
+                throw;
+            }
+
+            if (!ReferenceEquals(fresh, old))
+            {
+                try
+                {
+                    old.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    // The new page is already committed. A teardown failure
+                    // must not roll it back to a half-disposed old session.
+                    FileLog.Warn("app", "old engine dispose failed after reload", ex);
+                }
+            }
         }
         finally
         {

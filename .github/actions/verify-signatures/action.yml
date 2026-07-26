@@ -1,6 +1,6 @@
 name: Verify Authenticode signatures
 description: >-
-  Hard-verify that the project's own five PE files in a built bundle are
+  Hard-verify that every manifest-defined first-party PE in a built bundle is
   Authenticode-signed with a valid chain, an RFC 3161 timestamp, and the
   expected signer subject. Shared by release.yml's sign job (its post-signing
   self-check) and its publish job (a gate at the irreversible boundary, so a
@@ -8,7 +8,7 @@ description: >-
   for the verify so the two callers never drift — and, when signing secrets are
   present, a publish=false smoke test runs this exact code on the sign job, so it
   exercises the publish gate's logic too. signtool ships in the Windows SDK on
-  windows-latest; no secrets or toolchain.
+  the pinned windows-2025 runner; no secrets or toolchain.
 
 inputs:
   bundle-dir:

@@ -8,9 +8,9 @@ namespace FindMyFiles.Services;
 /// <summary>
 /// Shell-facing operations, centralized so every failure path notifies the
 /// user instead of crashing. Targets launch via explorer.exe to shed the
-/// process's elevation (CLAUDE.md UI rules).
+/// process's elevation (AGENTS.md UI rules).
 /// </summary>
-public static partial class ShellOps
+internal static partial class ShellOps
 {
     /// <summary><c>COINIT_APARTMENTTHREADED</c> — reveal runs on a dedicated STA.</summary>
     private const uint COINITAPARTMENTTHREADED = 0x2;
@@ -35,7 +35,11 @@ public static partial class ShellOps
     /// <param name="runner">Process launcher (real or a test fake).</param>
     /// <param name="fullPath">Absolute path to open.</param>
     internal static void OpenWith(IProcessRunner runner, string fullPath) =>
-        Run(Loc.Get("Shell_OpenFailed"), fullPath, () => runner.Start(BuildOpenStartInfo(fullPath)));
+        Run(
+            Loc.Get("Shell_OpenFailed"),
+            "open",
+            fullPath,
+            () => runner.Start(BuildOpenStartInfo(fullPath)));
 
     /// <summary>Builds the explorer.exe invocation for "open". Kept internal and
     /// pure so the argument-safety contract is unit-testable without launching a
@@ -85,12 +89,12 @@ public static partial class ShellOps
         {
             if (DoReveal(RealRevealApi.Instance, fullPath) is { } failure)
             {
-                ReportFailure(failureMessage, fullPath, failure);
+                ReportFailure(failureMessage, "reveal", fullPath, failure);
             }
         }
         catch (Exception ex)
         {
-            ReportFailure(failureMessage, fullPath, ex);
+            ReportFailure(failureMessage, "reveal", fullPath, ex);
         }
         finally
         {
@@ -143,8 +147,8 @@ public static partial class ShellOps
     /// window chrome is rebuilt. Goes through <see cref="AppInstance.Restart"/>
     /// (not <c>Process.Start</c> + <c>Application.Exit</c>) so the fresh instance
     /// wins single-instancing instead of redirecting back to this dying one
-    /// (ADR-0036). Every other "restart" reason — service register, scope change,
-    /// uninstall — is an in-process <see cref="AppReload"/> (App.SoftRestart). A
+    /// (ADR-0036). Every other "restart" reason — service register or uninstall —
+    /// is an in-process <see cref="AppReload"/> (App.SoftRestart). A
     /// failed restart notifies and leaves this instance running.</summary>
     public static void Relaunch() => RelaunchWith(RealAppRestart.Instance);
 
@@ -153,7 +157,11 @@ public static partial class ShellOps
     /// funneled through <see cref="Run"/> (notify, don't crash).</summary>
     /// <param name="restart">Restart step (real or a test fake).</param>
     internal static void RelaunchWith(IAppRestart restart) =>
-        Run(Loc.Get("Shell_RelaunchFailed"), "FindMyFiles", () => restart.Restart(string.Empty));
+        Run(
+            Loc.Get("Shell_RelaunchFailed"),
+            "relaunch",
+            "FindMyFiles",
+            () => restart.Restart(string.Empty));
 
     /// <summary>Put <paramref name="text"/> on the clipboard. A failure is
     /// logged and surfaced as a warning notification (clipboard access can be
@@ -171,12 +179,12 @@ public static partial class ShellOps
         }
         catch (Exception ex)
         {
-            FileLog.Warn("shell", $"clipboard copy failed ({what})", ex);
+            FileLog.WarnEvent("shell", "clipboard copy failed", ex, ("operation", what));
             Notifier.Post(NotifySeverity.Warning, Loc.Get("Shell_ClipboardFailed"), ex.Message);
         }
     }
 
-    private static void Run(string failureMessage, string path, Action action)
+    private static void Run(string failureMessage, string operation, string path, Action action)
     {
         try
         {
@@ -184,7 +192,7 @@ public static partial class ShellOps
         }
         catch (Exception ex)
         {
-            ReportFailure(failureMessage, path, ex);
+            ReportFailure(failureMessage, operation, path, ex);
         }
     }
 
@@ -193,11 +201,16 @@ public static partial class ShellOps
     /// thread as well as <see cref="Run"/> (<see cref="FileLog"/>/
     /// <see cref="Notifier"/> post from any thread).</summary>
     /// <param name="failureMessage">Localized headline.</param>
+    /// <param name="operation">Stable operation name for privacy-safe logging.</param>
     /// <param name="path">Path the operation acted on (for the log + file name).</param>
     /// <param name="ex">The failure.</param>
-    private static void ReportFailure(string failureMessage, string path, Exception ex)
+    private static void ReportFailure(
+        string failureMessage,
+        string operation,
+        string path,
+        Exception ex)
     {
-        FileLog.Warn("shell", $"shell op failed for {path}", ex);
+        FileLog.WarnEvent("shell", "shell operation failed", ex, ("operation", operation));
         Notifier.Post(
             NotifySeverity.Warning,
             $"{failureMessage}: {Path.GetFileName(path)}",

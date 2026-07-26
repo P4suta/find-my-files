@@ -212,7 +212,7 @@ fn matcher_eq(a: &Matcher, b: &Matcher) -> bool {
             },
         ) => ca == cb && ba == bb,
         (NameRegex { re: ra }, NameRegex { re: rb })
-        | (PathRegex { re: ra }, PathRegex { re: rb }) => ra.as_str() == rb.as_str(),
+        | (PathRegex { re: ra }, PathRegex { re: rb }) => ra.same_pattern(rb),
         (Ext { exts: ea }, Ext { exts: eb }) => ea == eb,
         (Size { min: ia, max: xa }, Size { min: ib, max: xb }) => ia == ib && xa == xb,
         (Mtime { min: ia, max: xa }, Mtime { min: ib, max: xb }) => ia == ib && xa == xb,
@@ -308,10 +308,42 @@ mod tests {
         assert!(subsumed("rs", "*.rs"));
         // …but a *different* wildcard never implies another one.
         assert!(!subsumed("*.rsx", "*.rs"));
+        assert!(
+            subsumed("A?B", r#"regex:"^A.B$""#),
+            "identical Unicode and WTF-8 programs are equal"
+        );
         assert!(subsumed(r"path:src", r"path:src main"));
         assert!(
             !subsumed(r"path:src", r"path:srcmain"),
             "path needs equality"
         );
+    }
+
+    #[test]
+    fn regex_equality_includes_compiler_flags() {
+        let ast = parse(r#"regex:"foo""#).unwrap();
+        let insensitive = compile(&ast, CaseMode::Insensitive, &UtcResolver).unwrap();
+        let sensitive = compile(&ast, CaseMode::Sensitive, &UtcResolver).unwrap();
+        let insensitive_opt = QueryOptions {
+            case: CaseMode::Insensitive,
+            ..Default::default()
+        };
+        let sensitive_opt = QueryOptions {
+            case: CaseMode::Sensitive,
+            ..Default::default()
+        };
+
+        assert!(!subsumes(
+            &sensitive,
+            &sensitive_opt,
+            &insensitive,
+            &insensitive_opt
+        ));
+        assert!(!subsumes(
+            &insensitive,
+            &insensitive_opt,
+            &sensitive,
+            &sensitive_opt
+        ));
     }
 }

@@ -52,3 +52,4 @@ serde_json = { workspace = true }
 [[bench]]
 name = "search"
 harness = false
+required-features = ["testutil"]

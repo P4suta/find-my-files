@@ -1,0 +1,163 @@
+name: performance-gate
+run-name: performance-gate ${{ inputs.tag_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Existing draft release tag measured by this run"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # A stable, elevated Windows host is part of the measurement instrument.
+    # Its repository variable points at a persistent, machine-local Criterion
+    # baseline outside the checkout. Before any repository tool runs, the
+    # workflow copies that baseline to per-attempt scratch and exposes only the
+    # disposable copy to benchmark code.
+    runs-on: [self-hosted, Windows, X64, fmf-perf] # zizmor: ignore[self-hosted-runner] dedicated secretless measurement host
+    timeout-minutes: 120
+    steps:
+      - name: Require an exact immutable release tag
+        shell: pwsh
+        env:
+          TAG: ${{ inputs.tag_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Performance gating requires an exact vX.Y.Z tag, got '$env:TAG'."
+          }
+          if ($env:GITHUB_REF -cne "refs/tags/$env:TAG") {
+            throw "Workflow ref '$env:GITHUB_REF' is not the requested tag '$env:TAG'."
+          }
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          clean: true
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Require a clean checkout and stage the machine baseline
+        shell: pwsh
+        env:
+          CANONICAL_BASELINE_DIR: ${{ vars.FMF_PERF_BASELINE_DIR }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dirty = @(git status --porcelain=v1 --untracked-files=normal)
+          if ($dirty.Count -ne 0) {
+            throw "The dedicated performance checkout is dirty: $($dirty -join '; ')"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CANONICAL_BASELINE_DIR)) {
+            throw "Repository variable FMF_PERF_BASELINE_DIR is required."
+          }
+          $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path.TrimEnd('\', '/')
+          $runnerTemp = (Resolve-Path -LiteralPath $env:RUNNER_TEMP).Path.TrimEnd('\', '/')
+          $baseline = (Resolve-Path -LiteralPath $env:CANONICAL_BASELINE_DIR).Path.TrimEnd('\', '/')
+          if (-not (Test-Path -LiteralPath $baseline -PathType Container)) {
+            throw "FMF_PERF_BASELINE_DIR must identify an existing directory."
+          }
+          $workspacePrefix = "$workspace$([IO.Path]::DirectorySeparatorChar)"
+          if ($baseline.Equals($workspace, [StringComparison]::OrdinalIgnoreCase) -or
+              $baseline.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "FMF_PERF_BASELINE_DIR must be outside GITHUB_WORKSPACE."
+          }
+          $runnerTempPrefix = "$runnerTemp$([IO.Path]::DirectorySeparatorChar)"
+          if ($baseline.Equals($runnerTemp, [StringComparison]::OrdinalIgnoreCase) -or
+              $baseline.StartsWith($runnerTempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "FMF_PERF_BASELINE_DIR must be persistent, not inside RUNNER_TEMP."
+          }
+          $scratch = [IO.Path]::GetFullPath(
+            (Join-Path $runnerTemp "fmf-perf-baseline-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT")
+          )
+          if (-not $scratch.StartsWith($runnerTempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing unexpected baseline scratch path '$scratch'."
+          }
+          if (Test-Path -LiteralPath $scratch) {
+            Remove-Item -LiteralPath $scratch -Recurse -Force
+          }
+          Copy-Item -LiteralPath $baseline -Destination $scratch -Recurse
+          "FMF_PERF_BASELINE_DIR=$scratch" >> $env:GITHUB_ENV
+          "FMF_PERF_BASELINE_SCRATCH=$scratch" >> $env:GITHUB_ENV
+
+      - name: Clear measurement outputs for this attempt
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path.TrimEnd('\', '/')
+          $workspacePrefix = "$workspace$([IO.Path]::DirectorySeparatorChar)"
+          $perfDir = [IO.Path]::GetFullPath((Join-Path $workspace "build/engine/perf"))
+          if (-not $perfDir.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to clear unexpected performance path '$perfDir'."
+          }
+          if (Test-Path -LiteralPath $perfDir) {
+            Remove-Item -LiteralPath $perfDir -Recurse -Force
+          }
+
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          install: true
+
+      - name: Verify the pinned measurement environment
+        run: just doctor
+
+      - name: Real-volume and microbenchmark regression gates
+        run: just perf-gate
+
+      - name: Require complete measurement evidence
+        shell: pwsh
+        run: |
+          $required = @(
+            "build/engine/perf/real-check.json",
+            "build/engine/perf/micro-check/fmf-run.json"
+          )
+          $missing = @($required | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
+          if ($missing.Count -ne 0) {
+            throw "Performance gate produced no evidence: $($missing -join ', ')"
+          }
+
+      - name: Require source cleanliness after measurement
+        shell: pwsh
+        run: |
+          $dirty = @(git status --porcelain=v1 --untracked-files=normal)
+          if ($dirty.Count -ne 0) {
+            throw "Performance execution modified source: $($dirty -join '; ')"
+          }
+
+      - name: Upload commit-bound measurement evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: performance-gate-evidence
+          path: |
+            build/engine/perf/real-check.json
+            build/engine/perf/micro-check/fmf-run.json
+          retention-days: 30
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Remove disposable baseline copy
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:FMF_PERF_BASELINE_SCRATCH)) {
+            "No disposable baseline copy was created."
+            return
+          }
+          $runnerTemp = (Resolve-Path -LiteralPath $env:RUNNER_TEMP).Path.TrimEnd('\', '/')
+          $runnerTempPrefix = "$runnerTemp$([IO.Path]::DirectorySeparatorChar)"
+          $scratch = [IO.Path]::GetFullPath($env:FMF_PERF_BASELINE_SCRATCH)
+          if (-not $scratch.StartsWith($runnerTempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to clear unexpected baseline scratch path '$scratch'."
+          }
+          if (Test-Path -LiteralPath $scratch) {
+            Remove-Item -LiteralPath $scratch -Recurse -Force
+          }

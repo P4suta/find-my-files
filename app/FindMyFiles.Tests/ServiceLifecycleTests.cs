@@ -77,14 +77,19 @@ public sealed class ServiceLifecycleTests
 
     [Theory]
     [InlineData("S-1-5")] // minimal well-formed prefix
-    [InlineData("S-1-5-21-abc")] // letters allowed — it's an injection guard, not a strict parser
-    public void Is_valid_sid_accepts_injection_safe_values(string input)
+    [InlineData("S-1-5-21-1654600493-3733564142-2704359447-1001")]
+    public void Is_valid_sid_accepts_canonical_values(string input)
     {
         Assert.True(ServiceSetup.IsValidSid(input));
     }
 
     [Theory]
     [InlineData("s-1-5-18")] // lowercase prefix — the S-1- check is case-sensitive
+    [InlineData("S-1-5-21-abc")]
+    [InlineData("S-1-05-18")]
+    [InlineData("S-2-5-18")]
+    [InlineData("S-1-281474976710656-18")] // identifier authority exceeds 48 bits
+    [InlineData("S-1-5-4294967296")] // sub-authority exceeds 32 bits
     [InlineData("S-1-5-21-1\n--owner-sid=evil")] // newline injection
     [InlineData("S-1-5-21-1\t--owner-sid=evil")] // tab injection
     [InlineData("X-1-5-18")] // wrong authority prefix

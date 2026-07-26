@@ -19,6 +19,10 @@ on:
   schedule:
     - cron: "23 4 * * 1"
 
+concurrency:
+  group: codeql-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: true
+
 # Least privilege: the token is read-only at the top level; the single job
 # requests the security-events write it needs to upload SARIF (Scorecard's
 # Token-Permissions check rewards job-scoped writes over top-level ones).
@@ -27,12 +31,15 @@ permissions:
 
 jobs:
   analyze:
-    runs-on: windows-latest
+    runs-on: windows-2025
+    timeout-minutes: 30
     permissions:
       security-events: write # upload CodeQL SARIF results
       contents: read # checkout
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -47,11 +54,11 @@ jobs:
           restore-keys: nuget-${{ runner.os }}-
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.302
 
       # fmf_engine.dll must exist before the C# build (the csproj copies it).
       - name: build engine dll
-        run: cargo build --release -p fmf-ffi
+        run: cargo build --locked --release -p fmf-ffi
         working-directory: engine
 
       - uses: github/codeql-action/init@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
@@ -60,7 +67,9 @@ jobs:
           build-mode: manual
 
       - name: build for CodeQL
-        run: dotnet build app/FindMyFiles -c Release -p:SkipRustBuild=true
+        run: >-
+          dotnet build app/FindMyFiles -c Release
+          -p:SkipRustBuild=true -p:RestoreLockedMode=true
 
       - uses: github/codeql-action/analyze@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
         with:
@@ -69,13 +78,15 @@ jobs:
   # Scans the workflow YAML itself (GITHUB_TOKEN permissions, untrusted-input,
   # etc.). build-mode none needs no toolchain, so it runs on cheap ubuntu.
   analyze-actions:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       security-events: write # upload CodeQL SARIF results
       contents: read # checkout
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: github/codeql-action/init@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
         with:
           languages: actions

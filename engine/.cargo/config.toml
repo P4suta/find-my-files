@@ -1,7 +1,7 @@
 # Build output lives under the repo-root build/ tree, not engine/target/, so all
 # artifacts (cargo, dotnet, dist, packages) sit in one place (ADR-0021). This is
 # the engine workspace's target-dir only — the xtask workspace has its own under
-# build/xtask to keep the two-workspace separation (CLAUDE.md / ADR-0018).
+# build/xtask to keep the two-workspace separation (AGENTS.md / ADR-0018).
 #
 # The path is relative to this config file's parent's parent (the directory that
 # contains the .cargo/ dir = engine/), so ../build/engine resolves to
@@ -16,4 +16,9 @@ target-dir = "../build/engine"
 # with CFG enabled so the 20% gate stays calibrated. overflow-checks (S-3)
 # stays off: +27% on single-char queries and a measured p99 past the 50 ms
 # line, while dev/test/fuzz profiles already run checked (Cargo.toml).
-rustflags = ["-C", "control-flow-guard"]
+#
+# The MSVC CRT is linked statically into the Rust artifacts. In particular the
+# service is elevated from an extracted bundle whose static DLL imports are
+# restricted to System32; it must not require a separately installed VC
+# Redistributable (or fall back to an adjacent, user-writable VCRUNTIME DLL).
+rustflags = ["-C", "control-flow-guard", "-C", "target-feature=+crt-static"]

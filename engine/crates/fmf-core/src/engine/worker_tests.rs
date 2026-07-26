@@ -23,11 +23,11 @@ use crate::index::testutil::TestDir;
 use crate::index::{Frn, RawEntry, VolumeIndex, VolumeIndexBuilder};
 use crate::query::QueryOptions;
 use crate::usn::records::reason;
-use crate::usn::{JournalGone, ReadOutcome, StatFetcher, UsnError, UsnRecord};
+use crate::usn::{JournalGone, MetadataSource, ReadOutcome, UsnError, UsnRecord};
 
 use super::seams::{JournalSource, JournalView, SnapshotStore};
 use super::worker::{
-    CompactionVerdict, FullScanReason, SnapshotDecision, TailStep, compact_recheck,
+    CompactionVerdict, FullScanReason, RescanCause, SnapshotDecision, TailStep, compact_recheck,
     journal_gone_action, snapshot_decision,
 };
 use super::{Engine, EngineConfig, EngineEvent, VolumeState};
@@ -91,14 +91,20 @@ fn journal_gone_action_maps_every_outcome() {
     let rec = usn_create(200, "x.txt");
     match journal_gone_action(Ok(ReadOutcome::Records {
         records: vec![rec.clone()],
-        truncated: true,
+        truncated: false,
     })) {
-        TailStep::Apply { records, truncated } => {
+        TailStep::Apply(records) => {
             assert_eq!(records, vec![rec]);
-            assert!(truncated, "the malformed-tail flag must survive");
         }
         _ => panic!("records must map to Apply"),
     }
+    assert!(matches!(
+        journal_gone_action(Ok(ReadOutcome::Records {
+            records: vec![usn_create(201, "dropped.txt")],
+            truncated: true,
+        })),
+        TailStep::Rescan(RescanCause::MalformedBatch)
+    ));
     for gone in [
         JournalGone::EntryDeleted,
         JournalGone::DeleteInProgress,
@@ -106,7 +112,7 @@ fn journal_gone_action_maps_every_outcome() {
         JournalGone::IdMismatch,
     ] {
         match journal_gone_action(Ok(ReadOutcome::Gone(gone))) {
-            TailStep::Rescan(g) => assert_eq!(g, gone),
+            TailStep::Rescan(RescanCause::JournalGone(g)) => assert_eq!(g, gone),
             _ => panic!("every JournalGone variant must map to Rescan"),
         }
     }
@@ -189,6 +195,9 @@ impl SnapshotStore for FakeStore {
 
 enum FakeRead {
     Batch(Vec<UsnRecord>),
+    /// Parser found a valid-looking prefix followed by a malformed record.
+    /// The cursor must not advance and the prefix must not be applied.
+    Malformed(Vec<UsnRecord>),
     Gone(JournalGone),
     /// Park (returning benign empty wakeups) until the test opens the
     /// gate — lets a test act between two scripted reads without racing
@@ -214,6 +223,8 @@ struct FakeJournal {
     reads: VecDeque<FakeRead>,
     /// All scripted stat lookups fail (the storm) when false.
     stat_ok: bool,
+    /// Opening the per-FRN metadata source itself fails.
+    stat_open_error: bool,
     query_calls: Arc<AtomicU64>,
 }
 
@@ -226,8 +237,14 @@ impl FakeJournal {
             view: None,
             reads: VecDeque::new(),
             stat_ok,
+            stat_open_error: false,
             query_calls,
         }
+    }
+
+    const fn with_stat_open_error(mut self) -> Self {
+        self.stat_open_error = true;
+        self
     }
 }
 
@@ -266,6 +283,10 @@ impl JournalSource for FakeJournal {
                     truncated: false,
                 })
             }
+            Some(FakeRead::Malformed(records)) => Ok(ReadOutcome::Records {
+                records,
+                truncated: true,
+            }),
             Some(FakeRead::Gone(gone)) => Ok(ReadOutcome::Gone(gone)),
             // The loop above consumed any leading gates.
             Some(FakeRead::Gate(_)) => unreachable!("gate handled before pop"),
@@ -294,18 +315,18 @@ impl JournalSource for FakeJournal {
         self.next_usn = usn;
     }
 
-    fn open_stat_fetcher(&self) -> Result<Box<dyn StatFetcher>, UsnError> {
-        Ok(Box::new(FakeStat { ok: self.stat_ok }))
-    }
-}
-
-struct FakeStat {
-    ok: bool,
-}
-
-impl StatFetcher for FakeStat {
-    fn stat(&self, _frn: u64) -> Option<(u64, i64)> {
-        self.ok.then_some((42, 9))
+    fn open_metadata_source(
+        &self,
+        _stop: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<MetadataSource, UsnError> {
+        if self.stat_open_error {
+            return Err(UsnError::Fsctl(5));
+        }
+        Ok(if self.stat_ok {
+            MetadataSource::constant(42, 9)
+        } else {
+            MetadataSource::none()
+        })
     }
 }
 
@@ -471,6 +492,52 @@ fn corrupt_snapshot_counts_and_degrades_to_full_scan() {
     e.shutdown();
 }
 
+/// Ready is a fully wired state: failure to open the metadata source must
+/// happen before either the restored index or a Ready event is published.
+#[test]
+fn stat_source_open_failure_never_publishes_ready_or_the_index() {
+    let label = "FMFWK_STAT:";
+    let (_dir, e) = test_engine();
+    let rx = sink_channel(&e);
+    let store = FakeStore::new(
+        vec![LoadScript::Found(
+            Box::new(vol(label, &["note.txt"])),
+            7,
+            50,
+        )],
+        false,
+    );
+    let journal = FakeJournal::new(
+        vec![Incarnation {
+            journal_id: 7,
+            next_usn: 100,
+            view: Some(JournalView {
+                journal_id: 7,
+                first_usn: 10,
+            }),
+            reads: vec![],
+        }],
+        true,
+        Arc::new(AtomicU64::new(0)),
+    )
+    .with_stat_open_error();
+    e.spawn_worker_with_seams(label, store, Box::new(journal));
+
+    let events = lifecycle_until(&rx, label, |ev| {
+        matches!(ev, EngineEvent::VolumeFailed { .. })
+    });
+    assert!(
+        matches!(events.as_slice(), [EngineEvent::VolumeFailed { .. }]),
+        "an unwired volume must never become observable as Ready: {events:?}"
+    );
+    assert_eq!(phase_of(&e, label), VolumeState::Failed);
+    assert!(
+        e.index_stats().iter().all(|stats| stats.volume != label),
+        "the restored index must not be installed before metadata wiring succeeds"
+    );
+    e.shutdown();
+}
+
 /// Journal-gone while tailing → `RescanStarted` → re-establish → Ready. The
 /// re-establish completes via the restore path (scan execution is outside
 /// the seams), which converges on the same install → checkpoint → Ready
@@ -570,6 +637,161 @@ fn journal_gone_rescans_and_returns_to_ready() {
     // repositioned the cursor to the snapshot's next_usn (400) under
     // journal id 8.
     assert_eq!(store.saved.lock().as_slice(), &[(8, 400)]);
+}
+
+/// A malformed FSCTL payload may contain a parseable prefix, but that prefix
+/// and the advertised cursor form one transaction: neither can be accepted
+/// without the complete batch. Recovery is a clean rescan.
+#[test]
+fn malformed_batch_discards_prefix_and_rescans() {
+    let label = "FMFWK_BAD_USN:";
+    let (_dir, e) = test_engine();
+    let rx = sink_channel(&e);
+    let store = FakeStore::new(
+        vec![
+            LoadScript::Found(Box::new(vol(label, &["before.txt"])), 7, 50),
+            LoadScript::Found(Box::new(vol(label, &["rebuilt.txt"])), 8, 400),
+        ],
+        false,
+    );
+    let journal = FakeJournal::new(
+        vec![
+            Incarnation {
+                journal_id: 7,
+                next_usn: 100,
+                view: Some(JournalView {
+                    journal_id: 7,
+                    first_usn: 10,
+                }),
+                reads: vec![FakeRead::Malformed(vec![usn_create(
+                    200,
+                    "must-not-land.txt",
+                )])],
+            },
+            Incarnation {
+                journal_id: 8,
+                next_usn: 600,
+                view: Some(JournalView {
+                    journal_id: 8,
+                    first_usn: 400,
+                }),
+                reads: vec![],
+            },
+        ],
+        true,
+        Arc::new(AtomicU64::new(0)),
+    );
+    e.spawn_worker_with_seams(label, store.clone(), Box::new(journal));
+
+    lifecycle_until(&rx, label, |ev| {
+        matches!(ev, EngineEvent::VolumeReady { .. })
+    });
+    let events = lifecycle_until(&rx, label, |ev| {
+        matches!(ev, EngineEvent::VolumeReady { .. })
+    });
+    assert!(matches!(
+        events.as_slice(),
+        [
+            EngineEvent::RescanStarted { .. },
+            EngineEvent::VolumeReady { entries: 2, .. }
+        ]
+    ));
+    assert_eq!(
+        e.metrics()
+            .counters
+            .usn_batches_truncated
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        e.metrics().counters.journal_rescans.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(store.removed.load(Ordering::Relaxed), 1);
+    let (dropped, _) = e
+        .query("must-not-land", &QueryOptions::default())
+        .expect("query");
+    assert_eq!(dropped.len(), 0, "malformed prefix leaked into the index");
+    let (rebuilt, _) = e.query("rebuilt", &QueryOptions::default()).expect("query");
+    assert_eq!(rebuilt.len(), 1);
+    assert_eq!(phase_of(&e, label), VolumeState::Ready);
+    e.shutdown();
+}
+
+/// A complete hard-link set is required to commit the whole journal batch.
+/// If the live metadata read fails, no cursor is checkpointed: the worker
+/// invalidates the snapshot and rebuilds from a fresh journal position.
+#[test]
+fn hard_link_refresh_failure_rejects_batch_and_rescans() {
+    let label = "FMFWK_LINK_REFRESH:";
+    let (_dir, e) = test_engine();
+    let rx = sink_channel(&e);
+    let store = FakeStore::new(
+        vec![
+            LoadScript::Found(Box::new(vol(label, &["before.txt"])), 7, 50),
+            LoadScript::Found(Box::new(vol(label, &["rebuilt.txt"])), 8, 400),
+        ],
+        false,
+    );
+    let mut hard_link = usn_create(100, "before.txt");
+    hard_link.reason = reason::HARD_LINK_CHANGE | reason::CLOSE;
+    let journal = FakeJournal::new(
+        vec![
+            Incarnation {
+                journal_id: 7,
+                next_usn: 100,
+                view: Some(JournalView {
+                    journal_id: 7,
+                    first_usn: 10,
+                }),
+                reads: vec![FakeRead::Batch(vec![hard_link])],
+            },
+            Incarnation {
+                journal_id: 8,
+                next_usn: 600,
+                view: Some(JournalView {
+                    journal_id: 8,
+                    first_usn: 400,
+                }),
+                reads: vec![],
+            },
+        ],
+        false,
+        Arc::new(AtomicU64::new(0)),
+    );
+    e.spawn_worker_with_seams(label, store.clone(), Box::new(journal));
+
+    lifecycle_until(&rx, label, |event| {
+        matches!(event, EngineEvent::VolumeReady { .. })
+    });
+    let events = lifecycle_until(&rx, label, |event| {
+        matches!(event, EngineEvent::VolumeReady { .. })
+    });
+    assert!(matches!(
+        events.as_slice(),
+        [
+            EngineEvent::RescanStarted { .. },
+            EngineEvent::VolumeReady { entries: 2, .. }
+        ]
+    ));
+    assert_eq!(
+        e.metrics()
+            .counters
+            .hard_link_refresh_failures
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        e.metrics().counters.journal_rescans.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(store.removed.load(Ordering::Relaxed), 1);
+    let (old, _) = e.query("before", &QueryOptions::default()).unwrap();
+    assert_eq!(old.len(), 0);
+    let (rebuilt, _) = e.query("rebuilt", &QueryOptions::default()).unwrap();
+    assert_eq!(rebuilt.len(), 1);
+    assert_eq!(phase_of(&e, label), VolumeState::Ready);
+    e.shutdown();
 }
 
 /// Snapshot save failure (flush and stop-save) → counted + the engine
@@ -711,49 +933,6 @@ fn stat_fetch_failure_storm_counts_and_batches_still_apply() {
         "failed stat + no prior entry → zeroed stats, not a dropped entry"
     );
     assert_eq!(phase_of(&e, label), VolumeState::Ready);
-    e.shutdown();
-}
-
-/// Scope mode (ADR-0024) end to end through the *real* worker, unprivileged:
-/// `index_start_scope` folder-walks a real tree, the no-op watcher idles, and
-/// a query returns the walked file with its reconstructed path — no $MFT, no
-/// USN, no elevation. This is the non-elevated counterpart to the admin
-/// scan-path E2E.
-#[test]
-fn scope_walk_indexes_and_serves_queries() {
-    // A real on-disk tree the walk enumerates (removed on drop).
-    struct Tree(std::path::PathBuf);
-    impl Drop for Tree {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    let (_dir, e) = test_engine();
-    let rx = sink_channel(&e);
-
-    let tree = Tree(std::env::temp_dir().join(format!("fmf-scope-e2e-{}", std::process::id())));
-    let _ = std::fs::remove_dir_all(&tree.0);
-    std::fs::create_dir_all(tree.0.join("docs")).unwrap();
-    std::fs::write(tree.0.join("docs").join("quarterly_report.txt"), b"x").unwrap();
-
-    e.index_start_scope(&[tree.0.to_str().unwrap().to_string()], &[]);
-    lifecycle_until(&rx, "scope", |ev| {
-        matches!(ev, EngineEvent::VolumeReady { .. })
-    });
-
-    let (r, _) = e.query("quarterly", &QueryOptions::default()).unwrap();
-    let rows = r.page(0, 10).unwrap();
-    assert_eq!(rows.len(), 1, "the walked file is searchable");
-    assert_eq!(rows[0].name, b"quarterly_report.txt");
-    // The path reconstructs through the synthetic-FRN parent chain: the
-    // empty scope ROOT is skipped, so the parent path ends at the real dir.
-    assert!(
-        rows[0].parent_path.ends_with(b"docs\\"),
-        "parent path: {}",
-        String::from_utf8_lossy(&rows[0].parent_path)
-    );
-
     e.shutdown();
 }
 

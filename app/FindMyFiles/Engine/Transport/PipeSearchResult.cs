@@ -14,9 +14,25 @@ internal sealed class PipeSearchResult(
 
     public long Count { get; } = count;
 
+    internal bool TryGetPresentationBasis(PipeEngineClient expectedClient, out ulong id)
+    {
+        id = 0;
+        if (_disposed
+            || !ReferenceEquals(client, expectedClient)
+            || epoch != client.CurrentEpoch)
+        {
+            return false;
+        }
+
+        id = resultId;
+        return true;
+    }
+
     public async Task<IReadOnlyList<RowData>> GetRangeAsync(
         long offset, int count, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+        var request = EngineRequest.PageRange(offset, count);
         if (_disposed || epoch != client.CurrentEpoch)
         {
             throw new StaleResultException();
@@ -30,7 +46,7 @@ internal sealed class PipeSearchResult(
                 throw new StaleResultException(); // re-check inside the guard
             }
 
-            return await client.FetchPageAsync(resultId, offset, count, ct).ConfigureAwait(false);
+            return await client.FetchPageAsync(resultId, request, epoch, ct).ConfigureAwait(false);
         }
         finally
         {

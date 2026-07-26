@@ -7,12 +7,12 @@
 
 use parking_lot::Mutex;
 
-use super::{EntryId, VolumeIndex, flags};
+use super::{EntryId, NO_PARENT, SortKey, VolumeIndex, flags};
 
 // Any semantic change to a section bumps the version in the magic: older
 // snapshots must fail the magic check and trigger a full rescan rather
 // than load with wrong semantics (ADR-0010, no backward compatibility).
-const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX07";
+const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX08";
 
 const fn pod_bytes<T: Copy>(v: &[T]) -> &[u8] {
     // Safety: T is a plain-old-data column type (u8/u16/u32/u64/i64).
@@ -272,34 +272,132 @@ impl VolumeIndex {
         // `tombstones` / `dead_name_bytes` were accumulated in the single
         // validation pass above (ADR-0032: only the per-entry original copy is
         // reclaimable; folded bytes stay shared in the dictionary).
-        let frn_index = super::frn::FrnIndex::build(&frn, &flag);
+        let entry_count = parent.len();
+        if entry_count == 0 {
+            return Err(bad("snapshot has no root entry"));
+        }
 
-        Ok((
-            Self {
-                dict_pool,
-                dict_off,
-                name_id,
-                orig_pool,
-                orig_off,
-                parent,
-                size_lo,
-                size_ovf,
-                mtime,
-                frn,
-                flag,
-                frn_index,
-                perm_name,
-                content_generation: 0,
-                structural_generation: 0,
-                dir_topology_generation: 0,
-                tombstones,
-                dead_name_bytes,
-                dict_appends_since_dedup: 0,
-                derived_cache: Mutex::new(None),
-            },
-            journal_id,
-            next_usn,
-        ))
+        let known_flags = flags::IS_DIR
+            | flags::TOMBSTONE
+            | flags::REPARSE
+            | flags::HIDDEN
+            | flags::SYSTEM
+            | flags::EXCLUDED;
+        if flag.iter().any(|bits| *bits & !known_flags != 0) {
+            return Err(bad("snapshot contains unknown entry flags"));
+        }
+        if parent[0] != NO_PARENT {
+            return Err(bad("snapshot root has a parent"));
+        }
+        if flag[0] & flags::IS_DIR == 0 || flag[0] & flags::TOMBSTONE != 0 {
+            return Err(bad("snapshot root is not a live directory"));
+        }
+
+        for (entry, &parent_id) in parent.iter().enumerate().skip(1) {
+            if parent_id == NO_PARENT {
+                return Err(bad("snapshot non-root entry has no parent"));
+            }
+            let parent_idx = parent_id as usize;
+            if parent_idx >= entry_count {
+                return Err(bad("snapshot parent is out of range"));
+            }
+            if parent_idx == entry {
+                return Err(bad("snapshot non-root entry is its own parent"));
+            }
+            if flag[parent_idx] & flags::IS_DIR == 0 {
+                return Err(bad("snapshot parent is not a directory"));
+            }
+            if flag[entry] & flags::TOMBSTONE == 0 && flag[parent_idx] & flags::TOMBSTONE != 0 {
+                return Err(bad("snapshot live entry has a tombstoned parent"));
+            }
+        }
+
+        // Three-colour parent walk: every non-root chain must terminate at the
+        // root. Completed paths are never traversed again, keeping this O(n) even
+        // for a single deep directory chain.
+        let mut parent_state = vec![0_u8; entry_count];
+        parent_state[0] = 2;
+        for start in 1..entry_count {
+            if parent_state[start] == 2 {
+                continue;
+            }
+
+            let mut entry = start;
+            while parent_state[entry] == 0 {
+                parent_state[entry] = 1;
+                entry = parent[entry] as usize;
+            }
+            if parent_state[entry] == 1 {
+                return Err(bad("snapshot parent graph contains a cycle"));
+            }
+
+            let mut entry = start;
+            while parent_state[entry] == 1 {
+                parent_state[entry] = 2;
+                entry = parent[entry] as usize;
+            }
+        }
+
+        let mut seen_name_entry = vec![false; entry_count];
+        for &entry in &perm_name {
+            let entry_idx = entry as usize;
+            if entry_idx >= entry_count {
+                return Err(bad("snapshot name permutation entry is out of range"));
+            }
+            if std::mem::replace(&mut seen_name_entry[entry_idx], true) {
+                return Err(bad("snapshot name permutation contains a duplicate"));
+            }
+        }
+        if seen_name_entry.iter().any(|seen| !seen) {
+            return Err(bad("snapshot name permutation is incomplete"));
+        }
+
+        let frn_index = super::frn::FrnIndex::build(&frn, &flag);
+        if !frn_index.has_valid_live_object_groups(&frn, &flag) {
+            return Err(bad(
+                "snapshot has conflicting live FRN generations or directory links",
+            ));
+        }
+
+        let mut index = Self {
+            dict_pool,
+            dict_off,
+            name_id,
+            orig_pool,
+            orig_off,
+            parent,
+            size_lo,
+            size_ovf,
+            mtime,
+            frn,
+            flag,
+            frn_index,
+            perm_name,
+            content_generation: 0,
+            structural_generation: 0,
+            dir_topology_generation: 0,
+            exclusion_tree_dirty: false,
+            tombstones,
+            dead_name_bytes,
+            dict_appends_since_dedup: 0,
+            derived_cache: Mutex::new(None),
+        };
+        if !index.has_unique_live_link_identities() {
+            return Err(bad("snapshot contains a duplicate live link identity"));
+        }
+        // EXCLUDED is derived state, not trusted persisted truth. Recompute on
+        // restore so snapshots written by older builds with the historical
+        // subtree-move limitation self-heal without a full MFT rescan.
+        if !index
+            .perm_name
+            .windows(2)
+            .all(|pair| index.cmp_by(SortKey::Name, pair[0], pair[1]).is_lt())
+        {
+            return Err(bad("snapshot name permutation is not strictly sorted"));
+        }
+        index.recompute_all_excluded();
+
+        Ok((index, journal_id, next_usn))
     }
 
     /// Atomic save: write to `<path>.tmp`, then rename over the target.
@@ -344,7 +442,83 @@ impl VolumeIndex {
 mod tests {
     use super::*;
 
-    use crate::index::testutil::{TestDir, build_sample};
+    use crate::index::testutil::{TestDir, build_hardlink_sample, build_sample};
+
+    #[test]
+    fn snapshot_roundtrip_preserves_all_links_for_one_frn() {
+        let idx = build_hardlink_sample();
+        let object = crate::index::Frn((1u64 << 48) | 0x64);
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 7, 9).unwrap();
+
+        let (loaded, journal_id, next_usn) =
+            VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+        assert_eq!((journal_id, next_usn), (7, 9));
+
+        let mut paths: Vec<Vec<u8>> = loaded
+            .entries_by_frn(object)
+            .map(|id| {
+                let mut path = Vec::new();
+                loaded.append_path(id, &mut path).unwrap();
+                path
+            })
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [b"C:\\a\\shared.txt".to_vec(), b"C:\\b\\alias.txt".to_vec()]
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_two_live_generations_for_one_record() {
+        let mut idx = build_hardlink_sample();
+        let object = crate::index::Frn((1u64 << 48) | 0x64);
+        let second = idx.entries_by_frn(object).nth(1).unwrap();
+        idx.frn[second as usize] = (2u64 << 48) | 0x64;
+
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 0, 0).unwrap();
+        let Err(err) = VolumeIndex::read_snapshot(&mut buf.as_slice()) else {
+            panic!("conflicting live FRN generations must be rejected");
+        };
+        assert!(err.to_string().contains("conflicting live FRN"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_live_link_identity() {
+        let mut idx = build_hardlink_sample();
+        let object = crate::index::Frn((1u64 << 48) | 0x64);
+        let links: Vec<_> = idx.entries_by_frn(object).collect();
+        let first = links[0];
+        let second = links[1];
+        idx.parent[second as usize] = idx.parent[first as usize];
+        idx.name_id[second as usize] = idx.name_id[first as usize];
+        idx.orig_off[second as usize] = idx.orig_off[first as usize];
+
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 0, 0).unwrap();
+        let Err(err) = VolumeIndex::read_snapshot(&mut buf.as_slice()) else {
+            panic!("duplicate live link identity must be rejected");
+        };
+        assert!(
+            err.to_string().contains("duplicate live link identity"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_live_child_of_tombstoned_directory() {
+        let mut idx = build_sample();
+        idx.delete(50);
+
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 0, 0).unwrap();
+        let Err(err) = VolumeIndex::read_snapshot(&mut buf.as_slice()) else {
+            panic!("live child of a dead directory must be rejected");
+        };
+        assert!(err.to_string().contains("tombstoned parent"), "{err}");
+    }
 
     #[test]
     fn snapshot_roundtrip_preserves_everything() {
@@ -377,7 +551,7 @@ mod tests {
         assert_eq!(loaded.entry_by_record(60), None);
         let note = loaded.entry_by_record(100).unwrap();
         let mut p = Vec::new();
-        loaded.append_path(note, &mut p);
+        loaded.append_path(note, &mut p).unwrap();
         assert_eq!(p, b"C:\\docs\\Note.TXT");
         assert_eq!(loaded.name_permutation(), idx.name_permutation());
         assert_eq!(loaded.size(huge_id), (5u64 << 30) + 123);
@@ -448,7 +622,7 @@ mod tests {
     }
 
     /// Section byte sizes for a structurally valid count=1 snapshot, in read
-    /// order (ADR-0033 / FMFIDX07): `dict_pool`, `dict_off`, `name_id`,
+    /// order (ADR-0033 / FMFIDX08): `dict_pool`, `dict_off`, `name_id`,
     /// `orig_pool` (empty), `orig_off` (sentinel), parent, `size_lo`,
     /// size-overflow ids/sizes (empty), mtime, frn, flag, `perm_name`.
     fn valid_sections() -> Vec<Vec<u8>> {
@@ -458,13 +632,13 @@ mod tests {
             0u32.to_le_bytes().to_vec(),     // name_id [0] (entry 0 → name 0)
             Vec::new(),                      // orig_pool (fold-identical)
             u32::MAX.to_le_bytes().to_vec(), // orig_off (sentinel)
-            vec![0u8; 4],                    // parent
+            u32::MAX.to_le_bytes().to_vec(), // parent (root has no parent)
             vec![0u8; 4],                    // size_lo (1 × u32)
             Vec::new(),                      // size overflow ids (none)
             Vec::new(),                      // size overflow sizes (none)
             vec![0u8; 4],                    // mtime (1 × u32)
             vec![0u8; 8],                    // frn
-            vec![0u8; 1],                    // flag
+            vec![flags::IS_DIR],             // flag (root is a live directory)
             vec![0u8; 4],                    // perm_name
         ]
     }
@@ -482,12 +656,140 @@ mod tests {
         expect_load_err(&craft_stream(1, &refs))
     }
 
+    fn encode_u32s(values: &[u32]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn encode_u64s(values: &[u64]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn structural_sections(count: usize) -> Vec<Vec<u8>> {
+        assert!(count > 0 && count <= 26);
+
+        let ids: Vec<u32> = (0..count as u32).collect();
+        let frns: Vec<u64> = (1..=count as u64).collect();
+        let mut parents = vec![0_u32; count];
+        parents[0] = NO_PARENT;
+
+        vec![
+            (0..count).map(|i| b'a' + i as u8).collect(),
+            encode_u32s(&ids),
+            encode_u32s(&ids),
+            Vec::new(),
+            encode_u32s(&vec![NO_PARENT; count]),
+            encode_u32s(&parents),
+            vec![0_u8; count * 4],
+            Vec::new(),
+            Vec::new(),
+            vec![0_u8; count * 4],
+            encode_u64s(&frns),
+            vec![flags::IS_DIR; count],
+            encode_u32s(&ids),
+        ]
+    }
+
+    fn read_structural(sections: Vec<Vec<u8>>, count: usize) -> std::io::Error {
+        let refs: Vec<&[u8]> = sections.iter().map(Vec::as_slice).collect();
+        expect_load_err(&craft_stream(count as u64, &refs))
+    }
+
+    #[test]
+    fn rejects_snapshot_root_with_parent() {
+        let mut sections = structural_sections(1);
+        sections[5] = 0_u32.to_le_bytes().to_vec();
+
+        let err = read_structural(sections, 1);
+        assert!(err.to_string().contains("root has a parent"));
+    }
+
+    #[test]
+    fn rejects_snapshot_non_directory_root() {
+        let mut sections = structural_sections(1);
+        sections[11] = vec![0];
+
+        let err = read_structural(sections, 1);
+        assert!(err.to_string().contains("root is not a live directory"));
+    }
+
+    #[test]
+    fn rejects_snapshot_unknown_entry_flags() {
+        let mut sections = structural_sections(1);
+        sections[11] = vec![u8::MAX];
+
+        let err = read_structural(sections, 1);
+        assert!(err.to_string().contains("unknown entry flags"));
+    }
+
+    #[test]
+    fn rejects_snapshot_parent_out_of_range() {
+        let mut sections = structural_sections(2);
+        sections[5] = [NO_PARENT, 2]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+
+        let err = read_structural(sections, 2);
+        assert!(err.to_string().contains("parent is out of range"));
+    }
+
+    #[test]
+    fn rejects_snapshot_parent_cycle() {
+        let mut sections = structural_sections(3);
+        sections[5] = [NO_PARENT, 2, 1]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+
+        let err = read_structural(sections, 3);
+        assert!(err.to_string().contains("parent graph contains a cycle"));
+    }
+
+    #[test]
+    fn rejects_snapshot_name_permutation_out_of_range() {
+        let mut sections = structural_sections(2);
+        sections[12] = [0_u32, 2].into_iter().flat_map(u32::to_le_bytes).collect();
+
+        let err = read_structural(sections, 2);
+        assert!(
+            err.to_string()
+                .contains("permutation entry is out of range")
+        );
+    }
+
+    #[test]
+    fn rejects_snapshot_name_permutation_duplicate() {
+        let mut sections = structural_sections(2);
+        sections[12] = [0_u32, 0].into_iter().flat_map(u32::to_le_bytes).collect();
+
+        let err = read_structural(sections, 2);
+        assert!(err.to_string().contains("permutation contains a duplicate"));
+    }
+
+    #[test]
+    fn rejects_snapshot_name_permutation_out_of_order() {
+        let mut sections = structural_sections(2);
+        sections[12] = [1_u32, 0].into_iter().flat_map(u32::to_le_bytes).collect();
+
+        let err = read_structural(sections, 2);
+        assert!(
+            err.to_string()
+                .contains("permutation is not strictly sorted")
+        );
+    }
+
     #[test]
     fn snapshot_wrong_magic_is_rejected() {
         let idx = build_sample();
         let mut buf = Vec::new();
         idx.write_snapshot(&mut buf, 1, 1).unwrap();
-        buf[..8].copy_from_slice(b"FMFIDX01"); // previous format version
+        buf[..8].copy_from_slice(b"FMFIDX07"); // representative-name semantics
         let err = expect_load_err(&buf);
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("magic"), "{err}");
@@ -677,8 +979,8 @@ mod proptests {
             assert_eq!(a.size(ia), b.size(ib), "size for record {rec}");
             assert_eq!(a.mtime(ia), b.mtime(ib), "mtime for record {rec}");
             let (mut pa, mut pb) = (Vec::new(), Vec::new());
-            a.append_path(ia, &mut pa);
-            b.append_path(ib, &mut pb);
+            a.append_path(ia, &mut pa).unwrap();
+            b.append_path(ib, &mut pb).unwrap();
             assert_eq!(pa, pb, "path for record {rec}");
         }
     }
@@ -709,9 +1011,8 @@ mod proptests {
         /// a valid snapshot must come back as `Ok`/`Err` — never a panic,
         /// over-read, or runaway allocation. Mutations to a section's length
         /// prefix exercise the `try_reserve`/EOF guards that sit *before* the
-        /// trailing checksum check. (Linux-buildable fuzzing of this path is
-        /// blocked by fmf-core's Windows-only deps — see fuzz/README.md; this is
-        /// the in-tree, Windows-runnable stand-in.)
+        /// trailing checksum check. fmf-core is Windows-only, so this bounded
+        /// property test is the continuously runnable in-tree mutation harness.
         #[test]
         fn read_snapshot_survives_arbitrary_mutation_without_panicking(
             entries in proptest::collection::vec(ent_strategy(), 1..6),
@@ -737,7 +1038,7 @@ mod proptests {
                     let _ = loaded.name(id);
                     if loaded.is_live(id) {
                         p.clear();
-                        loaded.append_path(id, &mut p);
+                        loaded.append_path(id, &mut p).unwrap();
                     }
                 }
             }

@@ -4,7 +4,7 @@ namespace FindMyFiles.Services;
 
 /// <summary>
 /// Production <see cref="IDispatcher"/>: a thin wrapper over the UI thread's
-/// cached <see cref="DispatcherQueue"/> (CLAUDE.md UI rules — cache on the UI
+/// cached <see cref="DispatcherQueue"/> (AGENTS.md UI rules — cache on the UI
 /// thread, TryEnqueue from background threads).
 /// </summary>
 /// <param name="queue">The UI thread's <see cref="DispatcherQueue"/>, captured
@@ -12,7 +12,7 @@ namespace FindMyFiles.Services;
 // UI-thread DispatcherQueue wrapper: exercised only on a live UI thread; the
 // ManualDispatcher fake stands in for tests (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
-public sealed class DispatcherQueueDispatcher(DispatcherQueue queue) : IDispatcher
+internal sealed class DispatcherQueueDispatcher(DispatcherQueue queue) : IDispatcher
 {
     /// <inheritdoc/>
     public bool HasThreadAccess => queue.HasThreadAccess;

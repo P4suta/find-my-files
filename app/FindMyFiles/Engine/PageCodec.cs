@@ -3,7 +3,7 @@ using System.Buffers.Binary;
 namespace FindMyFiles.Engine;
 
 /// <summary>
-/// Decodes the shared page layout — 48-byte rows + WTF-8 string blob — used
+/// Decodes the shared page layout — 56-byte rows + WTF-8 string blob — used
 /// verbatim by both the FFI <c>FmfPage</c> and the pipe ResultPage payload
 /// (docs/ARCHITECTURE.md: FmfRow layout, offsets are blob-relative).
 /// </summary>
@@ -30,10 +30,18 @@ internal static class PageCodec
                 r[EngineContract.RowOffsets.NameOff..]);
             var parentPathOff = BinaryPrimitives.ReadUInt32LittleEndian(
                 r[EngineContract.RowOffsets.ParentPathOff..]);
-            var nameLen = BinaryPrimitives.ReadUInt16LittleEndian(
+            var nameLen = BinaryPrimitives.ReadUInt32LittleEndian(
                 r[EngineContract.RowOffsets.NameLen..]);
-            var parentPathLen = BinaryPrimitives.ReadUInt16LittleEndian(
+            var parentPathLen = BinaryPrimitives.ReadUInt32LittleEndian(
                 r[EngineContract.RowOffsets.ParentPathLen..]);
+            var reserved = BinaryPrimitives.ReadUInt32LittleEndian(
+                r[EngineContract.RowOffsets.Reserved..]);
+            if (reserved != 0)
+            {
+                throw new InvalidDataException(
+                    $"row {i} has non-zero reserved field ({reserved})");
+            }
+
             rows.Add(new RowData(
                 EntryRef: BinaryPrimitives.ReadUInt64LittleEndian(
                     r[EngineContract.RowOffsets.EntryRef..]),
@@ -45,10 +53,28 @@ internal static class PageCodec
                     r[EngineContract.RowOffsets.Mtime..]),
                 Flags: BinaryPrimitives.ReadUInt32LittleEndian(
                     r[EngineContract.RowOffsets.Flags..]),
-                Name: Wtf8.Decode(blob.Slice((int)nameOff, nameLen)),
-                ParentPath: Wtf8.Decode(blob.Slice((int)parentPathOff, parentPathLen))));
+                Name: Wtf8.Decode(BlobWindow(blob, nameOff, nameLen, i, "name")),
+                ParentPath: Wtf8.Decode(
+                    BlobWindow(blob, parentPathOff, parentPathLen, i, "parent path"))));
         }
 
         return rows;
+    }
+
+    private static ReadOnlySpan<byte> BlobWindow(
+        ReadOnlySpan<byte> blob,
+        uint offset,
+        uint length,
+        int row,
+        string field)
+    {
+        var end = (ulong)offset + length;
+        if (end > (ulong)blob.Length)
+        {
+            throw new InvalidDataException(
+                $"row {row} {field} window [{offset}, {end}) exceeds blob length {blob.Length}");
+        }
+
+        return blob.Slice(checked((int)offset), checked((int)length));
     }
 }

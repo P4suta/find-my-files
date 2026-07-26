@@ -22,6 +22,8 @@ public sealed class AppReloadTests
     {
         public int Disposes { get; private set; }
 
+        public EngineClientKind Kind => EngineClientKind.InProcess;
+
 #pragma warning disable CS0067 // events are part of the interface but unused here
         public event Action<string>? IndexChanged;
 
@@ -121,5 +123,41 @@ public sealed class AppReloadTests
         // is disposed once — no recursive teardown.
         Assert.Equal(["closeDiag", "renavigate", "dispose:old"], log);
         Assert.Equal(1, old.Disposes);
+    }
+
+    [Fact]
+    public void Run_navigationFailure_RollsBackEngineAndDisposesReplacement()
+    {
+        var log = new List<string>();
+        var old = new RecordingEngine(log, "old");
+        var fresh = new RecordingEngine(log, "fresh");
+        IEngineClient current = old;
+        var reload = new AppReload(
+            resolve: _ =>
+            {
+                log.Add("resolve");
+                return fresh;
+            },
+            getEngine: () => current,
+            setEngine: engine =>
+            {
+                current = engine;
+                log.Add(engine == old ? "rollback" : "set");
+            },
+            renavigate: () =>
+            {
+                log.Add("renavigate");
+                throw new InvalidOperationException("navigation failed");
+            },
+            closeDiagnostics: () => log.Add("closeDiag"));
+
+        Assert.Throws<InvalidOperationException>(() => reload.Run(["--engine=pipe"]));
+
+        Assert.Same(old, current);
+        Assert.Equal(0, old.Disposes);
+        Assert.Equal(1, fresh.Disposes);
+        Assert.Equal(
+            ["closeDiag", "resolve", "set", "renavigate", "rollback", "dispose:fresh"],
+            log);
     }
 }

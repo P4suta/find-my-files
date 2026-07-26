@@ -65,6 +65,18 @@ public sealed class MainViewModelEventTests
     }
 
     [Fact]
+    public void Reconnecting_then_terminal_fault_does_not_claim_it_is_still_retrying()
+    {
+        _engine.RaiseConnectionChanged(EngineConnectionState.Reconnecting);
+        _dispatcher.DrainQueue();
+        Assert.Single(_vm.Notifications.Items);
+
+        _engine.RaiseConnectionChanged(EngineConnectionState.Faulted);
+        _dispatcher.DrainQueue();
+        Assert.Empty(_vm.Notifications.Items);
+    }
+
+    [Fact]
     public void A_failed_volume_pushes_an_error_notification()
     {
         _engine.RaiseVolumeUpdated(new VolumeStatus("C:", VolumeState.Failed, 0));

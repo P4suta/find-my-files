@@ -26,7 +26,7 @@ internal interface IAppRestart
 /// A success never returns (the process is gone); a non-success return is a
 /// genuine failure, surfaced as an exception so <see cref="ShellOps.Run"/>
 /// notifies the user rather than going silent.</summary>
-[ExcludeFromCodeCoverage] // thin OS-API wrapper; covered by docs/MANUAL_SMOKE.md + a real app run.
+[ExcludeFromCodeCoverage] // thin OS-API wrapper; exercised by the release UAC check.
 internal sealed class RealAppRestart : IAppRestart
 {
     /// <summary>Shared instance — the wrapper is stateless.</summary>

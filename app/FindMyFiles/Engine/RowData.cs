@@ -1,7 +1,7 @@
 namespace FindMyFiles.Engine;
 
 /// <summary>One result row decoded from a page (the C# face of fmf-core's
-/// 48-byte <c>FmfRow</c> plus its WTF-8 name/path strings). Immutable; the
+/// 56-byte <c>FmfRow</c> plus its WTF-8 name/path strings). Immutable; the
 /// UI's <c>ResultRow</c> view-model is filled from it.</summary>
 /// <param name="EntryRef">Engine-internal stable handle for the entry within
 /// its volume index (the identity used for refine/<c>unchanged</c>
@@ -19,7 +19,7 @@ namespace FindMyFiles.Engine;
 /// <param name="ParentPath">Containing directory path including its trailing
 /// separator (e.g. <c>"C:\"</c>), so <see cref="FullPath"/> is a plain
 /// concatenation.</param>
-public sealed record RowData(
+internal sealed record RowData(
     ulong EntryRef,
     ulong Frn,
     ulong Size,

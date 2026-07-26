@@ -4,10 +4,10 @@
 //! integration tests drive the same server the binary runs.
 
 pub mod config;
-pub mod dispatch;
-pub mod events;
-pub mod faults;
-pub mod host;
+mod dispatch;
+mod events;
+mod faults;
+mod host;
 pub mod lifecycle;
 pub mod pipe;
 pub mod security;

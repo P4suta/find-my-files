@@ -5,7 +5,7 @@ namespace FindMyFiles.ViewModels;
 
 /// <summary>All user-facing status wording in one place — keys resolve through
 /// <see cref="Loc"/> (Strings/&lt;lang&gt;/Resources.resw).</summary>
-public static class StatusFormatter
+internal static class StatusFormatter
 {
     /// <summary>Result-count line: the <paramref name="hits"/> count plus the
     /// elapsed query time (ms) when a <paramref name="trace"/> is present
@@ -64,15 +64,18 @@ public static class StatusFormatter
     /// right now (client type + live connection state).</summary>
     /// <param name="engine">Engine client whose type and connection state to describe.</param>
     /// <returns>Localized transport badge for the active engine.</returns>
-    public static string EngineMode(IEngineClient engine) => engine switch
+    public static string EngineMode(IEngineClient engine) => engine.Kind switch
     {
-        FakeEngineClient { IsEmpty: true } => Loc.Get("EngineMode_Disconnected"),
-        FakeEngineClient => Loc.Get("EngineMode_Fake"),
-        FfiEngineClient => Loc.Get("EngineMode_Admin"),
-        PipeEngineClient => engine.Connection switch
+        EngineClientKind.Unavailable => Loc.Get("EngineMode_Disconnected"),
+#if FMF_TEST_SEAMS
+        EngineClientKind.Test => Loc.Get("EngineMode_Fake"),
+#endif
+        EngineClientKind.InProcess => Loc.Get("EngineMode_Admin"),
+        EngineClientKind.Service => engine.Connection switch
         {
             EngineConnectionState.Connected => Loc.Get("EngineMode_Connected"),
             EngineConnectionState.Reconnecting => Loc.Get("EngineMode_Reconnecting"),
+            EngineConnectionState.Faulted => Loc.Get("EngineMode_Disconnected"),
             _ => Loc.Get("EngineMode_Connecting"),
         },
         _ => string.Empty,

@@ -4,7 +4,7 @@ namespace FindMyFiles.Services;
 /// cref="ServiceSetup.RunElevated"/>). Output is unreadable under
 /// ShellExecute, so the exit code is the only signal; a declined UAC prompt
 /// is distinguished from a genuine failure so the UI can say so.</summary>
-public enum ServiceActionOutcome
+internal enum ServiceActionOutcome
 {
     /// <summary>The elevated action exited 0 — the verb succeeded.</summary>
     Ok,

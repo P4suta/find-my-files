@@ -93,7 +93,11 @@ pub const fn raw(
     mtime: i64,
 ) -> RawEntry<'_> {
     RawEntry {
-        parent_frn: Frn(parent),
+        parent_frn: Frn(if parent == 5 {
+            parent
+        } else {
+            (1u64 << 48) | parent
+        }),
         frn: Frn((1u64 << 48) | record),
         name_utf16: name,
         is_dir,
@@ -124,6 +128,25 @@ pub fn build_sample() -> VolumeIndex {
     b.finish()
 }
 
+/// C:\ ├─ a\shared.txt
+///     └─ b\alias.txt
+///
+/// Both file rows carry the same full FRN: they are two directory links to
+/// one NTFS object and therefore must both survive every index lifecycle.
+#[must_use]
+pub fn build_hardlink_sample() -> VolumeIndex {
+    let mut b = VolumeIndexBuilder::new("C:", 5);
+    let a = u16s("a");
+    let b_name = u16s("b");
+    let shared = u16s("shared.txt");
+    let alias = u16s("alias.txt");
+    b.push(raw(10, 5, &a, true, 0, 1));
+    b.push(raw(20, 5, &b_name, true, 0, 1));
+    b.push(raw(100, 10, &shared, false, 42, 2));
+    b.push(raw(100, 20, &alias, false, 42, 2));
+    b.finish()
+}
+
 /// Build a [`RawEntry`] for attribute-filter tests: like [`raw`] but with
 /// explicit `is_hidden`/`is_system` and zeroed `size`/`mtime`.
 #[must_use]
@@ -136,7 +159,11 @@ pub const fn raw_attr(
     is_system: bool,
 ) -> RawEntry<'_> {
     RawEntry {
-        parent_frn: Frn(parent),
+        parent_frn: Frn(if parent == 5 {
+            parent
+        } else {
+            (1u64 << 48) | parent
+        }),
         frn: Frn((1u64 << 48) | record),
         name_utf16: name,
         is_dir,

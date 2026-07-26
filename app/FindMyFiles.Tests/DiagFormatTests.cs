@@ -55,11 +55,11 @@ public sealed class DiagFormatTests
 
     [Fact]
     public void Query_renders_the_empty_query_as_all() =>
-        Assert.Equal("(all)", DiagFormat.Query(new QueryTraceData { Query = string.Empty }));
+        Assert.Equal("(all)", DiagFormat.Query(new QueryTraceData()));
 
     [Fact]
-    public void Query_passes_through_the_query_text() =>
-        Assert.Equal("report", DiagFormat.Query(new QueryTraceData { Query = "report" }));
+    public void Query_renders_only_the_query_length() =>
+        Assert.Equal("6 chars", DiagFormat.Query(new QueryTraceData { QueryLength = 6 }));
 
     [Fact]
     public void Stat_tiles_are_empty_when_no_trace()
@@ -220,7 +220,7 @@ public sealed class DiagFormatTests
         Assert.Equal("[12s] ERROR usn (C:): x", DiagFormat.Error(12000, "error", "usn", "C:", "x\ny"));
 
     [Fact]
-    public void Error_omits_the_volume_when_not_scoped() =>
+    public void Error_omits_the_volume_when_not_present() =>
         Assert.Equal("[12s] WARN core: msg", DiagFormat.Error(12000, "warn", "core", null, "msg"));
 
     [Fact]
@@ -235,8 +235,8 @@ public sealed class DiagFormatTests
     {
         // ADR-0018 guard: a counter set on the generated CountersData must
         // appear via reflection with its snake_case contract name.
-        var stats = new EngineStatsData { Counters = new CountersData { WalkReadErrors = 3 } };
-        Assert.Equal("劣化: walk_read_errors=3", DiagFormat.Counters(stats));
+        var stats = new EngineStatsData { Counters = new CountersData { StatFetchFailures = 3 } };
+        Assert.Equal("劣化: stat_fetch_failures=3", DiagFormat.Counters(stats));
     }
 
     [Fact]
@@ -246,7 +246,7 @@ public sealed class DiagFormatTests
         Assert.Equal(Visibility.Visible, DiagFormat.HealthyVis(new EngineStatsData()));
         Assert.Equal(
             Visibility.Collapsed,
-            DiagFormat.HealthyVis(new EngineStatsData { Counters = new CountersData { WalkReadErrors = 1 } }));
+            DiagFormat.HealthyVis(new EngineStatsData { Counters = new CountersData { StatFetchFailures = 1 } }));
         Assert.Equal(
             Visibility.Collapsed,
             DiagFormat.HealthyVis(new EngineStatsData { RecentErrors = [new ErrorEventData()] }));
@@ -259,7 +259,7 @@ public sealed class DiagFormatTests
         Assert.Equal(Visibility.Collapsed, DiagFormat.CountersVis(new EngineStatsData()));
         Assert.Equal(
             Visibility.Visible,
-            DiagFormat.CountersVis(new EngineStatsData { Counters = new CountersData { WalkReadErrors = 1 } }));
+            DiagFormat.CountersVis(new EngineStatsData { Counters = new CountersData { StatFetchFailures = 1 } }));
     }
 
     [Fact]
@@ -284,7 +284,7 @@ public sealed class DiagFormatTests
     public void HealthSeverity_is_warning_when_only_counters_degraded() =>
         Assert.Equal(
             InfoBarSeverity.Warning,
-            DiagFormat.HealthSeverity(new EngineStatsData { Counters = new CountersData { WalkReadErrors = 1 } }));
+            DiagFormat.HealthSeverity(new EngineStatsData { Counters = new CountersData { StatFetchFailures = 1 } }));
 
     [Fact]
     public void HealthSeverity_is_error_when_recent_errors_present() =>
@@ -299,6 +299,6 @@ public sealed class DiagFormatTests
             DiagFormat.HealthSeverity(new EngineStatsData
             {
                 RecentErrors = [new ErrorEventData()],
-                Counters = new CountersData { WalkReadErrors = 1 },
+                Counters = new CountersData { StatFetchFailures = 1 },
             }));
 }

@@ -40,7 +40,7 @@ public sealed class ShellOpsTests : IDisposable
     {
         var psi = ShellOps.BuildOpenStartInfo(@"C:\x");
 
-        // De-elevation contract (CLAUDE.md UI invariants): targets open through
+        // De-elevation contract (AGENTS.md UI invariants): targets open through
         // %WINDIR%\explorer.exe, pinned by full path against binary planting.
         Assert.EndsWith(@"\explorer.exe", psi.FileName, StringComparison.OrdinalIgnoreCase);
     }

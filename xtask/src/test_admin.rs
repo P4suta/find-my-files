@@ -13,7 +13,16 @@ pub fn run() -> Result<()> {
     cmd::run_env(
         &paths::engine_dir(),
         "cargo",
-        &["test", "--workspace", "--", "--ignored"],
+        &[
+            "nextest",
+            "run",
+            "--locked",
+            "--workspace",
+            "--profile",
+            "ci",
+            "--run-ignored",
+            "ignored-only",
+        ],
         &[("FMF_ADMIN_TESTS", "1")],
     )
 }

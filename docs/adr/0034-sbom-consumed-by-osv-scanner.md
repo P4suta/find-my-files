@@ -2,28 +2,34 @@
 
 Date: 2026-06-26 / Status: Accepted (extends ADR-0029's SBOM generation with downstream consumption)
 
+> Current-state amendment (2026-07-26): the canonical Rust SBOM is generated
+> from the shipped `fmf-service` dependency closure, which covers the external
+> runtime dependencies of `fmf_engine.dll` and the launcher. CI proves the FFI
+> graph is a subset and rejects developer-only `fmf-cli` components; the
+> end-user SBOM no longer describes an unshipped workspace tool.
+
 ADR-0029 made `release.yml` generate and attest CycloneDX SBOMs (Rust via `cargo-sbom`, C# via the CycloneDX dotnet tool) and attach them to the release. But nothing *consumed* them: `cargo-audit` reads `Cargo.lock`, `cargo-deny` reads `Cargo.lock`, C# vulnerabilities go through CodeQL + Dependabot — none touch the SBOM. The SBOM was a write-only artifact whose only value was provenance/attestation and an OpenSSF Scorecard "Secured release" tick. "You can trace it — so what?" had no answer.
 
 This ADR gives the SBOM a job by feeding it to **`osv-scanner`** (OSV.dev) at two points.
 
 ## Decision
 
-1. **Release gate (`release.yml`, `build` job).** Right after the two SBOMs are generated — before sign/publish — run `osv-scanner scan source -L fmf-engine.cdx.json -L app.cdx.json --config osv-scanner.toml`. A finding (exit 1) fails the build, so a release with a known-vulnerable dependency in the **resolved shipped closure** never publishes. This is non-redundant with `cargo-audit`: the C#/.NET NuGet graph (resolved for `win-x64`) is only captured in the SBOM and is invisible to `cargo-audit`.
+1. **Release gate (`release.yml`, `build` job).** Right after the two SBOMs are generated — before sign/publish — validate CycloneDX 1.6 structure, nonempty components, and both root product identities, then run `osv-scanner scan source -L fmf-engine.cdx.json -L app.cdx.json --config osv-scanner.toml`. `cargo-sbom`'s unversioned workspace root is normalized to `fmf-engine@<build-version>`; dependency components are unchanged. The .NET generator excludes development dependencies and does not restore a new graph. A finding (exit 1) fails the build, so a release with a known-vulnerable dependency in the resolved graph never publishes.
 
-2. **Shipped-release re-scan (`sbom-monitor.yml`, weekly + `workflow_dispatch`).** Download the **latest** release's attested SBOMs and re-scan them against the *current* OSV DB. This is the only check that covers *what users already downloaded*: `cargo-audit` / `cargo-deny` / Dependabot all scan HEAD, so a CVE disclosed after a release is invisible for the shipped binary. The frozen, attested SBOM is exactly the manifest needed to answer "is the shipped `vX.Y.Z` affected?".
+2. **Shipped-release re-scan (`sbom-monitor.yml`, weekly + `workflow_dispatch`).** Require the **latest** stable release itself to be immutable, download its two canonical SBOM assets, verify their bytes against GitHub's per-asset SHA-256 digests, validate both root identities, and re-scan them against the *current* OSV DB. This is the only check that covers *what users already downloaded*: `cargo-audit` / `cargo-deny` / Dependabot all scan HEAD, so a CVE disclosed after a release is invisible for the shipped binary. A mutable release or missing, extra, empty, corrupt, or misidentified SBOM assets fail closed. Only the absence of any published release is a clean dormant state.
 
 3. **Report findings as a single idempotent issue, not SARIF.** The monitor opens/updates one issue labelled `sbom-vuln` (auto-closed when the release is clean again). We deliberately do **not** upload SARIF to Code Scanning — that surface was just decluttered (the stale-CodeQL cleanup), and "a shipped release is vulnerable → cut a patch release" is an assignable/closable *task*, which an issue models better than a code-scanning alert (which is about current code).
 
 4. **`osv-scanner.toml` at the repo root is the single ignore list.** Accepted/unfixable advisories are recorded there (the OSV counterpart to `engine/deny.toml`), honoured by both the gate and the monitor, so an upstream advisory with no fix can't permanently block releases or spam the issue. Every entry must justify itself.
 
-5. **Tooling: `osv-scanner` via the already-trusted `taiki-e/install-action` (SHA-pinned), version-pinned `@2.3.6`.** Not added to `mise.toml` — like the SBOM generators, it's CI/release-only (SUPPLY_CHAIN.md), so the dev loop stays untouched.
+5. **Tooling: `osv-scanner` via the already-trusted `taiki-e/install-action` (SHA-pinned), version-pinned `@2.3.6`.** It remains CI/release-only, so the dev loop stays untouched.
 
 ## Rationale
 
 - **osv-scanner over grype / trivy / bomber**: osv-scanner consumes CycloneDX natively, covers **both** crates.io and NuGet against one DB (OSV.dev) in a single pass, is Google-maintained, SHA-pinnable via an action the repo already uses, and uses simple exit codes (0 clean / 1 findings / 128 no-packages). grype/trivy are heavier and container-oriented; bomber is narrower. No reason to add a second ecosystem.
 - **Consume the SBOM rather than scan lockfiles again**: scanning lockfiles would just duplicate `cargo-audit` (Rust) and skip the .NET closure. Scanning the *SBOM* is what makes the artifact earn its keep and is the only way to reach the resolved NuGet/runtime graph and the *shipped* (not HEAD) state.
 - **Gate fail-fast in `build`**: the SBOM exists there, and failing before the approval-gated `sign` job wastes no reviewer time and never signs a vulnerable bundle.
-- **Dormant-first**: no release exists yet, so the monitor must no-op cleanly (notice + exit 0) rather than fail red, then activate automatically on the first release. Non-blocking scaffolding wired ahead of the external/irreversible event (first release).
+- **Dormant-first**: before any published release, the monitor no-ops cleanly (notice + exit 0) rather than failing red. The first stable release activates the strict path automatically.
 
 ## Rejected alternatives
 
@@ -37,7 +43,7 @@ This ADR gives the SBOM a job by feeding it to **`osv-scanner`** (OSV.dev) at tw
 
 - A release can now be **blocked** by an OSV finding in either ecosystem; the escape hatch is a justified `osv-scanner.toml` entry (not disabling the gate).
 - Partial overlap with `cargo-audit` on the Rust side is accepted: the gate adds the .NET closure, and the monitor adds the shipped-vs-HEAD dimension neither `cargo-audit` nor Dependabot provide.
-- One new weekly workflow (cheap ubuntu) and one extra `build`-job step on releases. The monitor needs `issues: write`; the gate adds no new permissions.
+- One new weekly workflow (cheap ubuntu) and one extra `build`-job step on releases. Only the monitor's isolated report job receives `issues: write`; release assets and osv-scanner remain in a Contents-read job. The release gate adds no new permissions.
 - The `sbom-vuln` issue is the maintainer's signal that a shipped release needs a patch release.
 
 ## Re-examination triggers

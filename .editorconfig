@@ -58,7 +58,7 @@ dotnet_diagnostic.CA1515.severity = none
 dotnet_diagnostic.CA2007.severity = none
 # Nullable reference types already enforce non-null at the public boundary.
 dotnet_diagnostic.CA1062.severity = none
-# Deliberate catch-all keeps the UI alive (CLAUDE.md「落ちない」: ShellOps.Run,
+# Deliberate catch-all keeps the UI alive (AGENTS.md「落ちない」: ShellOps.Run,
 # fire-and-forget .Forget(), Notifier). Caught exceptions are logged, not swallowed.
 dotnet_diagnostic.CA1031.severity = none
 # Internal app surface — the library-API design rules below do not apply:

@@ -25,7 +25,7 @@ namespace FindMyFiles.Services;
 /// <see cref="ReportPreviousCrash"/> on the next launch, so no crash is ever
 /// silent.
 /// </summary>
-public sealed class ExceptionPolicy
+internal sealed class ExceptionPolicy
 {
     /// <summary>XAML exceptions suppressed before declaring a storm.</summary>
     internal const int XamlStormBudget = 3;
@@ -60,13 +60,12 @@ public sealed class ExceptionPolicy
             e.Handled = true;
             Notifier.Post(
                 NotifySeverity.Error,
-                Loc.Get("Crash_UnexpectedTitle"),
-                e.Exception?.Message);
+                Loc.Get("Crash_UnexpectedTitle"));
         }
         else
         {
             // Exception storm — record and let the process die honestly.
-            FileLog.WriteCrashMarker(e.Exception?.ToString() ?? "exception storm");
+            FileLog.WriteCrashMarker(CrashReason.XamlExceptionStorm, e.Exception);
         }
     }
 
@@ -74,7 +73,7 @@ public sealed class ExceptionPolicy
     {
         var ex = e.ExceptionObject as Exception;
         FileLog.Error("appdomain", "fatal unhandled exception", ex);
-        FileLog.WriteCrashMarker(ex?.ToString() ?? "unknown fatal exception");
+        FileLog.WriteCrashMarker(CrashReason.FatalAppDomainException, ex);
     }
 
     private void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
@@ -83,8 +82,7 @@ public sealed class ExceptionPolicy
         e.SetObserved();
         Notifier.Post(
             NotifySeverity.Error,
-            Loc.Get("Crash_BackgroundTitle"),
-            e.Exception.InnerException?.Message ?? e.Exception.Message);
+            Loc.Get("Crash_BackgroundTitle"));
     }
 
     /// <summary>Surface the previous run's crash marker (if any) as a warning

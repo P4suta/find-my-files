@@ -1,42 +1,47 @@
 # ADR index
 
-- [0001](0001-filename-only-index.md) — Filename-only index (no content/property index)
-- [0002](0002-linear-sweep-no-trigram.md) — Linear pool sweep + incremental search; trigram inverted index rejected
-- [0003](0003-wtf8-length-preserving-fold.md) — Names stored as WTF-8; fold is length-preserving single-char lowercasing only
-- [0004](0004-fold-overflow-name-layout.md) — Single folded pool + original-text overflow (−16B/entry)
-- [0005](0005-frn-index-sorted-permutation.md) — FRN index is a sorted id permutation (25→12→4B/entry)
-- [0006](0006-lazy-sort-permutations.md) — size/mtime permutations are a lazy derived cache (−8B/entry)
-- [0007](0007-size-u32-overflow.md) — size column u32 + overflow map (−4B/entry)
-- [0008](0008-insertion-point-batch-merge.md) — USN batch is insertion-point merge (54.6→2.0ms@1M)
-- [0009](0009-compaction-order-preserving-remap.md) — Compaction remaps in ascending old-id order, no re-sort
-- [0010](0010-snapshot-raw-pod-no-compat.md) — Snapshot is raw POD + full validation, no backward compatibility
-- [0011](0011-scan-streaming-pipeline.md) — Streaming scan adopted; I/O multiplexing rejected (+14.4% < +30%)
-- [0012](0012-default-allocator-record-arena.md) — Default allocator + RecordArena; mimalloc rejected (WS +260MB)
-- [0013](0013-measurement-discipline.md) — Measurement discipline: cold, back-to-back, real-volume absolute gate
-- [0014](0014-build-tooling-rejections.md) — rust-lld/sccache/nextest rejected; rationale for codegen-units=1
-- [0015](0015-winui-data-virtualization.md) — WinUI 3 data virtualization (IList+INCC+IItemsRangeInfo)
-- [0016](0016-service-split-named-pipe.md) — v2 service split: fmf-service + named pipe; rejected transport options; flush public surface
-- [0017](0017-service-security-model.md) — Service security model: LocalSystem + least privilege, 4-layer pipe DACL
-- [0018](0018-contract-single-source.md) — Single source of truth for the contract (fmf-contract) + capture-first golden corpus, 2-seam ceiling
-- [0019](0019-focused-search-query-rewrite.md) — Focused search mode = UI-layer query rewrite (ext:+!path:); in-engine bits/ranking rejected
-- [0020](0020-code-signing-provider.md) — Code signing = SSL.com eSigner/individual IV; Azure (not available to Japanese individuals) and EV (immediate loss of SmartScreen trust) rejected
-- [0021](0021-build-output-layout.md) — Build output consolidated into a single build/ (per-workspace .cargo/config.toml, C# bin via BaseOutputPath, obj left in place)
-- [0022](0022-boundary-seams-behavioral-tests.md) — OS/shell/UI boundaries require testable seams + behavioral tests (lesson from reveal day-one breakage, mutation/coverage gate)
-- [0023](0023-regex-first-class.md) — First-class regex: literal-prefilter-driven + 1MiB compile cap, contract narrowed to 20B (pipe v2); trigram still rejected
-- [0024](0024-non-elevated-scope-index.md) — Non-elevated scope index mode: folder walk + ReadDirectoryChangesW as the second implementation of the 2 seams; synthetic FRN (path hash) keeps the format unchanged; a single-point revision of ADR-0001's "no folder walk"
-- [0025](0025-scope-exclude-walk-prune.md) — Scope-mode excludes prune at walk time (not query time): exclude paths flow to the folder walk and the subtree is never indexed
-- [0026](0026-cli-surface-polish.md) — `fmf` CLI gets first-class DevEx polish (--version/--color/--quiet/--format, FMF_E_* exit codes, colour+spinner, generated reference+completions); stays a developer tool, `fmf search`/TUI rejected
-- [0027](0027-on-demand-service-lifecycle.md) — On-demand service lifecycle: DEMAND_START + unelevated start/stop (service-object DACL) + idle self-stop (5 min) + daily idle GC (7 days, stable exe copy); amends ADR-0016's resident-service decision; trades a per-session cold start for zero idle footprint
-- [0028](0028-msix-packaging-hybrid.md) — MSIX packaging (**Rejected 2026-07-07**): hybrid (packaged UI + unpackaged service) was built + validated, but MSIX has **no viable distribution path** for this app — signing dead-ends (CodeSignTool can't sign MSIX; eSigner CKA fails in CI with `0x80090003`; jsign is OSS, rejected on the official-tooling policy) and the Microsoft Store is structurally unfit for a LocalSystem-service app (~15% cert odds; MFT/USN tools ship their own installers). The signed portable zip (ADR-0021) stays the single channel; implementation preserved on tag `archive/msix-attempt-2026-07`. Re-examination: Azure Trusted Signing for JP individuals, a working IV×MSIX recipe, or dropping the service dependency
-- [0029](0029-ci-signing-cka-pipeline.md) — CI signing pipeline: official `SSLcom/esigner-codesign` Action (`batch_sign`) inside a `build`→`sign`→`publish` job split with secrets in an approval-gated `release` environment + hardened verify (`signtool /pa /tw` timestamp + signer-CN) + concurrency guard. The eSigner CKA + standard-`signtool` alternative was trialled and **reverted** (fails in CI). Azure Trusted Signing (individual onboarding paused) and SignPath migration rejected
-- [0030](0030-tray-resident-mode.md) — Tray-resident mode: close-to-tray keeps the app hot (instant re-show) + single-instance; engine unchanged
-- [0031](0031-mtime-u32-unix-seconds.md) — mtime stored as a u32 Unix-seconds column (−4B/entry); range covers 1970–2106
-- [0032](0032-name-dictionary-encoding.md) — Name dictionary-encoding: dedup repeated filename components into a dictionary
-- [0033](0033-phase3-memory-latency-levers.md) — Phase 3 memory/latency levers (gapless FMFIDX07, original-text dictionary, apply_batch decoration); soft-prefetch trialled and rejected (thermal confound)
-- [0034](0034-sbom-consumed-by-osv-scanner.md) — SBOMs consumed by osv-scanner: release gate (blocks publishing a known-vulnerable resolved closure, incl. .NET) + weekly re-scan of the latest release's SBOM (shipped-artifact monitoring); grype/trivy and SARIF-to-Code-Scanning rejected
-- [0035](0035-automated-versioning-with-release-please-and-build-channels.md) — Automated versioning via release-please (Conventional Commits → Release PR → vX.Y.Z tag bumps Cargo.toml/Cargo.lock + csproj + CHANGELOG) + dev/nightly/stable build-time stamping (fmf-buildstamp/InformationalVersion); nightly = unsigned 14-day artifact; in-tree git-cliff+xtask, release-plz, and nbgv+vergen rejected; dormant until a GitHub App (in a main-only `release-please` environment) is configured
-- [0036](0036-in-process-soft-restart-and-single-instance-safe-relaunch.md) — Engine-transport changes (onboarding, scope, service manage) re-resolve in-process (App.SoftRestart/AppReload: re-resolve engine + rebuild the page, no new process) instead of relaunching, which single-instancing (ADR-0030) defeated by redirecting the relaunch back to the dying original; the language switch keeps a true restart via single-instance-safe AppInstance.Restart; UnregisterKey-before-spawn and in-place engine swap rejected
-- [0037](0037-logfmt-diagnostics-and-correlation.md) — logfmt line schema for both languages (quoting = log-injection defence, 1 KiB cap), retention caps (engine `max_log_files` 14/7, app 5×5MB), and cross-process correlation via the existing `request_id` (qid) + result handle (rid) with **no contract/golden change**; query text never logged (redaction); C# adopts Serilog (direct, no DI); OTLP/collectors, NDJSON, contract-`qid`, MS.Extensions.Logging, and Sinks.Async rejected
-- [0038](0038-build-identity-discoverability.md) — radiate the existing `FMF_BUILD_VERSION`/fmf-buildstamp identity to the artifact surface (in-bundle `BUILDINFO.txt`, launcher Win32 VERSIONINFO, in-app About + app↔engine base-mismatch warning) and standardise release artifacts (`SHA256SUMS.txt` → coreutils `sha256sum -c`, dated nightly artifact); fixes identity drift (`fmf diag`→buildstamp, C# `+g<7>`/clean-stable matching Rust) with **no contract/golden/ABI change**; shared buildmeta crate, versioned folder, SBOMs-in-SHA256SUMS, and structured version logfmt fields rejected/deferred
-- [0039](0039-cli-devex-pass-2.md) — second `fmf` DevEx pass within ADR-0026's remit: completions actually distributed in the bundle + a `fmf completions <shell>` subcommand, `docs/cli.md` drift promoted to a `cargo test` (CI-gated, not just pre-push), `--format json` honoured by every result-producing command, `-v/--verbose`, and `bench --json`→`--out`; man page rejected (Windows-only, no reader); `fmf search`/TUI still deferred to ADR-0026
-- [0040](0040-nightly-supply-chain-parity.md) — nightly gets the full supply chain **minus signing**: CycloneDX SBOMs + osv-scanner gate + keyless build-provenance & SBOM attestations (so a nightly is `gh attestation verify`-able), via a shared `.github/actions/sbom-scan` composite (single-sourced with release.yml's build job); signing stays tag-driven/approval-gated/stable-only (ADR-0029); SLSA = provenance on every distributed artifact; signing nightlies and duplicating the SBOM steps rejected
+- [0001](0001-filename-only-index.md) Filename-only index
+- [0002](0002-linear-sweep-no-trigram.md) Linear sweep, no trigram index
+- [0003](0003-wtf8-length-preserving-fold.md) WTF-8 length-preserving fold
+- [0004](0004-fold-overflow-name-layout.md) Fold-overflow name layout
+- [0005](0005-frn-index-sorted-permutation.md) FRN sorted permutation
+- [0006](0006-lazy-sort-permutations.md) Lazy sort permutations
+- [0007](0007-size-u32-overflow.md) u32 size with overflow map
+- [0008](0008-insertion-point-batch-merge.md) Insertion-point batch merge
+- [0009](0009-compaction-order-preserving-remap.md) Order-preserving compaction
+- [0010](0010-snapshot-raw-pod-no-compat.md) Validated raw snapshot, no compatibility
+- [0011](0011-scan-streaming-pipeline.md) Streaming scan pipeline
+- [0012](0012-default-allocator-record-arena.md) Default allocator and record arena
+- [0013](0013-measurement-discipline.md) Measurement discipline
+- [0014](0014-build-tooling-rejections.md) Build-tooling rejections
+- [0015](0015-winui-data-virtualization.md) WinUI data virtualization
+- [0016](0016-service-split-named-pipe.md) Service split over named pipe
+- [0017](0017-service-security-model.md) Service security model
+- [0018](0018-contract-single-source.md) Contract single source
+- [0019](0019-focused-search-query-rewrite.md) Focused-search query rewrite
+- [0020](0020-code-signing-provider.md) Code-signing provider
+- [0021](0021-build-output-layout.md) Unified build-output layout
+- [0022](0022-boundary-seams-behavioral-tests.md) Boundary seams and behavioral tests
+- [0023](0023-regex-first-class.md) First-class regex
+- [0024](0024-non-elevated-scope-index.md) Removed non-elevated scope index
+- [0025](0025-scope-exclude-walk-prune.md) Removed scope exclusion
+- [0026](0026-cli-surface-polish.md) CLI surface
+- [0027](0027-on-demand-service-lifecycle.md) On-demand service lifecycle
+- [0028](0028-msix-packaging-hybrid.md) MSIX hybrid rejected
+- [0029](0029-ci-signing-cka-pipeline.md) CI signing pipeline
+- [0030](0030-tray-resident-mode.md) Tray-resident mode
+- [0031](0031-mtime-u32-unix-seconds.md) u32 Unix-seconds mtime
+- [0032](0032-name-dictionary-encoding.md) Name dictionary encoding
+- [0033](0033-phase3-memory-latency-levers.md) Memory/latency levers
+- [0034](0034-sbom-consumed-by-osv-scanner.md) SBOM vulnerability gate
+- [0035](0035-automated-versioning-with-release-please-and-build-channels.md) Automated versioning and channels
+- [0036](0036-in-process-soft-restart-and-single-instance-safe-relaunch.md) In-process engine restart
+- [0037](0037-logfmt-diagnostics-and-correlation.md) Private correlated diagnostics
+- [0038](0038-build-identity-discoverability.md) Build identity
+- [0039](0039-cli-devex-pass-2.md) CLI DevEx pass 2
+- [0040](0040-nightly-supply-chain-parity.md) Nightly supply-chain parity
+- [0041](0041-nextest-bounded-test-execution.md) Bounded nextest execution
+- [0042](0042-u32-result-row-string-lengths.md) Lossless result-row string lengths
+- [0043](0043-ffi-allocation-owner-ids.md) Monotonic FFI allocation-owner IDs
+- [0044](0044-cooperative-query-cancellation-and-presentation-basis.md) Cooperative query cancellation and presentation basis
+- [0045](0045-elevated-service-dependent-load-policy.md) Elevated service dependent-load policy

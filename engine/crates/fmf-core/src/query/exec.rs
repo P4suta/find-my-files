@@ -12,28 +12,28 @@ use rayon::prelude::*;
 use super::QueryOptions;
 use super::compile::{CompiledGroup, CompiledQuery, Driver};
 use super::matchers::{EvalCtx, terms_match, terms_match_iter};
-use super::memo::{DirPathsLower, DirPathsOrig, MtimePerm, PathMemos, SizePerm};
-use super::sweep::{driver_candidates, name_id_in_set};
+use super::memo::{DirTopology, MtimePerm, PathMemos, SizePerm};
+use super::sweep::{driver_candidates_cancellable, name_id_in_set};
+use crate::engine::{EngineError, QueryCancellation};
 use crate::index::{EntryId, SortKey, VolumeIndex};
 
-/// Build (or incrementally extend) exactly the dir-path memos this query
-/// reads — `None` pools cost nothing, which is the whole point of keeping
-/// folded and original-case memos in separate cache slots.
-fn path_memos(idx: &VolumeIndex, q: &CompiledQuery) -> PathMemos {
-    PathMemos {
-        lower: q.needs_folded_paths.then(|| {
-            idx.cached_derived_or_update(|prev| match prev {
-                Some(p) => DirPathsLower::extend_from(idx, p),
-                None => DirPathsLower::build(idx),
+/// Build (or incrementally extend) the compact directory topology only when
+/// this query reads a path. Name bytes remain in the index pools; duplicating
+/// every full prefix here would become quadratic for a deep directory chain.
+fn path_memos(
+    idx: &VolumeIndex,
+    q: &CompiledQuery,
+    cancellation: &QueryCancellation,
+) -> Result<PathMemos, EngineError> {
+    let topology = (q.needs_folded_paths || q.needs_orig_paths)
+        .then(|| {
+            idx.cached_derived_or_try_update(|prev| match prev {
+                Some(p) => DirTopology::extend_from_cancellable(idx, p, cancellation),
+                None => DirTopology::build_cancellable(idx, cancellation),
             })
-        }),
-        orig: q.needs_orig_paths.then(|| {
-            idx.cached_derived_or_update(|prev| match prev {
-                Some(p) => DirPathsOrig::extend_from(idx, p),
-                None => DirPathsOrig::build(idx),
-            })
-        }),
-    }
+        })
+        .transpose()?;
+    Ok(PathMemos { topology })
 }
 
 /// One volume's query result: the matching ids plus the index generations
@@ -78,6 +78,18 @@ pub fn search(
     q: &CompiledQuery,
     opt: &QueryOptions,
 ) -> (SearchResult, SearchMetrics) {
+    search_cancellable(idx, q, opt, &QueryCancellation::new())
+        .expect("fresh cancellation token cannot cancel")
+}
+
+/// Cooperative counterpart of [`search`].
+pub fn search_cancellable(
+    idx: &VolumeIndex,
+    q: &CompiledQuery,
+    opt: &QueryOptions,
+    cancellation: &QueryCancellation,
+) -> Result<(SearchResult, SearchMetrics), EngineError> {
+    cancellation.check()?;
     // `driver` is filled in per branch below: the empty-query fast path labels
     // itself "perm-walk", so computing `q.driver_label()` (a Vec + String) up
     // front would just be discarded there — defer it to the non-empty path.
@@ -93,23 +105,23 @@ pub fn search(
     {
         metrics.driver = "perm-walk".to_string();
         metrics.memo_us = stage.lap();
-        let ids = materialize_filtered(idx, opt, |_ctx, id| {
+        let ids = materialize_filtered(idx, opt, cancellation, |_ctx, id| {
             idx.is_live(id) && !(skip_excluded && idx.is_excluded(id))
-        });
+        })?;
         metrics.entries_scanned = idx.len() as u64;
         metrics.materialize_us = stage.lap();
-        return (
+        return Ok((
             SearchResult {
                 ids,
                 content_generation: idx.content_generation(),
                 structural_generation: idx.structural_generation(),
             },
             metrics,
-        );
+        ));
     }
 
     metrics.driver = q.driver_label();
-    let memo = path_memos(idx, q);
+    let memo = path_memos(idx, q, cancellation)?;
     metrics.memo_us = stage.lap();
 
     // Each literal-driver group sweeps the dictionary into a name_id bitset;
@@ -117,11 +129,13 @@ pub fn search(
     let sets: Vec<Option<Vec<u64>>> = q
         .groups
         .iter()
-        .map(|g| match g.driver {
-            Driver::MatchAll | Driver::FullScan => None,
-            _ => Some(driver_candidates(idx, &g.driver)),
+        .map(|g| -> Result<_, EngineError> {
+            Ok(match g.driver {
+                Driver::MatchAll | Driver::FullScan => None,
+                _ => Some(driver_candidates_cancellable(idx, &g.driver, cancellation)?),
+            })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     metrics.scan_us = stage.lap();
 
     // When any group is a full scan / match-all (no sweep set), the name_id
@@ -137,7 +151,7 @@ pub fn search(
     // of entries before they ever touch `flag` (ADR-0033). The survivors then
     // pay the liveness/exclusion gate and the full per-group match — which
     // reuses the `nid` computed here instead of re-gathering it per group.
-    let ids = materialize_filtered(idx, opt, |ctx, id| {
+    let ids = materialize_filtered(idx, opt, cancellation, |ctx, id| {
         let nid = idx.name_id_of(id);
         if !has_unset
             && !sets
@@ -153,18 +167,19 @@ pub fn search(
             .iter()
             .zip(&sets)
             .any(|(g, set)| group_matches(idx, &memo, ctx, g, set.as_deref(), nid, id))
-    });
+    })?;
     metrics.entries_scanned = idx.len() as u64;
     metrics.materialize_us = stage.lap();
 
-    (
+    cancellation.check()?;
+    Ok((
         SearchResult {
             ids,
             content_generation: idx.content_generation(),
             structural_generation: idx.structural_generation(),
         },
         metrics,
-    )
+    ))
 }
 
 /// Incremental refinement: when the previous query's result provably
@@ -173,13 +188,27 @@ pub fn search(
 /// instead of sweeping pools and walking the whole permutation. `prev_ids`
 /// are already in the requested order, so the filtered subsequence is the
 /// answer — O(previous hits) instead of O(index).
+#[cfg(test)]
 pub fn refine(
     idx: &VolumeIndex,
     q: &CompiledQuery,
     opt: &QueryOptions,
     prev_ids: &[EntryId],
 ) -> (SearchResult, SearchMetrics) {
+    refine_cancellable(idx, q, opt, prev_ids, &QueryCancellation::new())
+        .expect("fresh cancellation token cannot cancel")
+}
+
+/// Cooperative counterpart of `refine`.
+pub fn refine_cancellable(
+    idx: &VolumeIndex,
+    q: &CompiledQuery,
+    opt: &QueryOptions,
+    prev_ids: &[EntryId],
+    cancellation: &QueryCancellation,
+) -> Result<(SearchResult, SearchMetrics), EngineError> {
     const REFINE_CHUNK: usize = 4096;
+    cancellation.check()?;
     let mut metrics = SearchMetrics {
         driver: q.driver_label(),
         ..Default::default()
@@ -187,43 +216,50 @@ pub fn refine(
     let mut stage = crate::metrics::Stage::start();
     let skip_excluded = !opt.include_hidden_system;
 
-    let memo = path_memos(idx, q);
+    let memo = path_memos(idx, q, cancellation)?;
     metrics.memo_us = stage.lap();
 
     let chunks: Vec<Vec<EntryId>> = prev_ids
         .par_chunks(REFINE_CHUNK)
-        .map(|chunk| {
+        .map(|chunk| -> Result<_, EngineError> {
+            cancellation.check()?;
             let mut ctx = EvalCtx::default();
-            chunk
-                .iter()
-                .copied()
-                .filter(|&id| {
-                    idx.is_live(id)
-                        && !(skip_excluded && idx.is_excluded(id))
-                        && q.groups
-                            .iter()
-                            .any(|g| terms_match_iter(idx, &memo, &mut ctx, g.all_terms(), id))
-                })
-                .collect()
+            let mut out = Vec::new();
+            for (position, &id) in chunk.iter().enumerate() {
+                if position.is_multiple_of(512) {
+                    cancellation.check()?;
+                }
+                if idx.is_live(id)
+                    && !(skip_excluded && idx.is_excluded(id))
+                    && q.groups
+                        .iter()
+                        .any(|g| terms_match_iter(idx, &memo, &mut ctx, g.all_terms(), id))
+                {
+                    out.push(id);
+                }
+            }
+            Ok(out)
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     metrics.entries_scanned = prev_ids.len() as u64;
     metrics.scan_us = stage.lap();
 
     let mut ids = Vec::with_capacity(chunks.iter().map(Vec::len).sum());
     for c in &chunks {
+        cancellation.check()?;
         ids.extend_from_slice(c);
     }
     metrics.materialize_us = stage.lap();
 
-    (
+    cancellation.check()?;
+    Ok((
         SearchResult {
             ids,
             content_generation: idx.content_generation(),
             structural_generation: idx.structural_generation(),
         },
         metrics,
-    )
+    ))
 }
 
 /// Does `id` satisfy AND group `g`? A literal-driver group: its name is in the
@@ -261,8 +297,9 @@ fn group_matches(
 fn materialize_filtered(
     idx: &VolumeIndex,
     opt: &QueryOptions,
+    cancellation: &QueryCancellation,
     keep: impl Fn(&mut EvalCtx, EntryId) -> bool + Sync,
-) -> Vec<EntryId> {
+) -> Result<Vec<EntryId>, EngineError> {
     // Fine-grained chunks: at 2^17 a 1M-entry walk only fans out 8 ways and
     // the walk becomes the latency floor for every query.
     const MAT_CHUNK: usize = 1 << 14;
@@ -272,37 +309,46 @@ fn materialize_filtered(
     let perm: &[EntryId] = match opt.sort {
         SortKey::Name => idx.name_permutation(),
         SortKey::Size => {
-            size_perm = SizePerm::get(idx);
+            size_perm = SizePerm::get_cancellable(idx, cancellation)?;
             &size_perm.0.ids
         }
         SortKey::Mtime => {
-            mtime_perm = MtimePerm::get(idx);
+            mtime_perm = MtimePerm::get_cancellable(idx, cancellation)?;
             &mtime_perm.0.ids
         }
     };
     let chunks: Vec<Vec<EntryId>> = perm
         .par_chunks(MAT_CHUNK)
-        .map(|chunk| {
+        .map(|chunk| -> Result<_, EngineError> {
+            cancellation.check()?;
             let mut ctx = EvalCtx::default();
-            chunk
-                .iter()
-                .copied()
-                .filter(|&id| keep(&mut ctx, id))
-                .collect()
+            let mut out = Vec::new();
+            for (position, &id) in chunk.iter().enumerate() {
+                if position.is_multiple_of(1024) {
+                    cancellation.check()?;
+                }
+                if keep(&mut ctx, id) {
+                    out.push(id);
+                }
+            }
+            Ok(out)
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let total = chunks.iter().map(Vec::len).sum();
     let mut ids = Vec::with_capacity(total);
     if opt.desc {
         for c in chunks.iter().rev() {
+            cancellation.check()?;
             ids.extend(c.iter().rev());
         }
     } else {
         for c in &chunks {
+            cancellation.check()?;
             ids.extend_from_slice(c);
         }
     }
-    ids
+    cancellation.check()?;
+    Ok(ids)
 }
 
 #[cfg(test)]
@@ -435,6 +481,32 @@ mod tests {
     fn regex_term() {
         let idx = sample();
         assert_eq!(names(&idx, "regex:^ma.n\\.rs$"), vec!["main.rs"]);
+    }
+
+    #[test]
+    fn regex_and_wildcard_match_a_lone_surrogate_name() {
+        let mut builder = VolumeIndexBuilder::new("C:", 5);
+        let name = [b'A' as u16, 0xD800, b'B' as u16];
+        builder.push(RawEntry {
+            parent_frn: Frn(5),
+            frn: Frn((1u64 << 48) | 0x000A),
+            name_utf16: &name,
+            is_dir: false,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 1,
+            mtime: 1,
+        });
+        let idx = builder.finish();
+
+        for query in [r#"regex:"^A.*B$""#, "A?B"] {
+            let ast = parse(query).unwrap();
+            let compiled = compile(&ast, CaseMode::Sensitive, &UtcResolver).unwrap();
+            let result = search(&idx, &compiled, &QueryOptions::default()).0;
+            assert_eq!(result.ids.len(), 1, "query `{query}` lost the WTF-8 name");
+            assert_eq!(idx.name(result.ids[0]), [b'A', 0xED, 0xA0, 0x80, b'B']);
+        }
     }
 
     /// The literal prefilter must never lose a match: a regex query through

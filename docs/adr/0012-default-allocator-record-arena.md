@@ -14,7 +14,7 @@ Do not swap out the global allocator; keep the default. Scan temporaries (the ma
 
 ## Impact
 
-- RAM measurement is on the engine process WorkingSet basis (CLAUDE.md performance pass line), so the allocator's OS-return behavior lands directly on the gate — fix the premise that "small self-accounting" alone is not enough
+- RAM measurement is on the engine process WorkingSet basis (AGENTS.md performance pass line), so the allocator's OS-return behavior lands directly on the gate — fix the premise that "small self-accounting" alone is not enough
 
 ## Re-examination trigger
 

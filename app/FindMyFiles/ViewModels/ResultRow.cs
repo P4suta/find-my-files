@@ -67,6 +67,20 @@ public sealed partial class ResultRow : ObservableObject
     /// after a position-preserving requery (best effort).</summary>
     public ulong EntryRef { get; private set; }
 
+    /// <summary>Stable UI Automation identity for the virtual result position.
+    /// The ListView container is recycled, so this travels with the row rather
+    /// than being assigned to a physical container.</summary>
+    public string AutomationId => $"ResultRow-{Index}";
+
+    /// <summary>Screen-reader summary of the visible row. Empty placeholders
+    /// stay unnamed; <see cref="Fill"/> raises one notification after every
+    /// visible field has been populated so automation never observes a
+    /// half-filled row.</summary>
+    public string AutomationName => IsPlaceholder
+        ? string.Empty
+        : string.Join(", ", new[] { Name, ParentPath, SizeText, DateText }
+            .Where(value => !string.IsNullOrEmpty(value)));
+
     /// <summary>Make an empty row for <paramref name="index"/> — the
     /// virtualized list's only constructor, called for every slot before any
     /// data is fetched.</summary>
@@ -80,7 +94,7 @@ public sealed partial class ResultRow : ObservableObject
     /// <see cref="IsPlaceholder"/>. In place — the bound instance is reused.</summary>
     /// <param name="data">The engine page hit supplying this row's identity and fields.</param>
     /// <param name="highlighter">Active-query highlighter, or null when no query is set.</param>
-    public void Fill(RowData data, IHighlighter? highlighter = null)
+    internal void Fill(RowData data, IHighlighter? highlighter = null)
     {
         EntryRef = data.EntryRef;
         FullPath = data.FullPath;
@@ -96,6 +110,7 @@ public sealed partial class ResultRow : ObservableObject
             : string.Empty;
         Glyph = data.IsDirectory ? "" : ""; // Folder : Page
         ApplyHighlight(highlighter, data);
+        OnPropertyChanged(nameof(AutomationName));
     }
 
     /// <summary>Compute this row's name/path highlight ranges for the active

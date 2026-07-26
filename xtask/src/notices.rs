@@ -5,10 +5,11 @@
 //! license text shipped, MIT wants the copyright + permission notice preserved.
 //! Two families of dependency need covering:
 //!
-//!   1. The Rust crates statically linked into `fmf_engine.dll`, `fmf.exe`,
-//!      `fmf-service.exe` and the launcher — enumerated mechanically by
-//!      `cargo-about` (config: `engine/about.toml`, template: `engine/about.hbs`),
-//!      whose rendered text is passed in here as `rust_notices`.
+//!   1. The Rust crates statically linked into `fmf_engine.dll`,
+//!      `fmf-service.exe` and the launcher. Their external runtime dependencies
+//!      are a subset of the service's dependency closure, which `cargo-about`
+//!      enumerates mechanically (config: `engine/about.toml`, template:
+//!      `engine/about.hbs`); its rendered text is passed in as `rust_notices`.
 //!   2. The .NET runtime + `NuGet` components the `WinUI` app publishes — a
 //!      small, slow-moving, curated set (below), because they are not in the
 //!      Cargo graph cargo-about walks.
@@ -92,7 +93,7 @@ pub fn assemble(rust_notices: &str) -> String {
     out.push_str(RULE);
     out.push('\n');
     out.push_str(
-        "PART 2 — Rust crates (statically linked into fmf_engine.dll, fmf.exe,\n\
+        "PART 2 — Rust crates (statically linked into fmf_engine.dll,\n\
          \x20        fmf-service.exe and the launcher)\n",
     );
     out.push_str(RULE);
@@ -110,6 +111,22 @@ pub fn assemble(rust_notices: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+    use std::fs;
+    use toml_edit::DocumentMut;
+
+    fn external_runtime_dependencies(manifest: &std::path::Path) -> BTreeSet<String> {
+        let source = fs::read_to_string(manifest).unwrap();
+        let document = source.parse::<DocumentMut>().unwrap();
+        document
+            .get("dependencies")
+            .and_then(toml_edit::Item::as_table_like)
+            .unwrap()
+            .iter()
+            .map(|(name, _)| name.to_owned())
+            .filter(|name| !name.starts_with("fmf-"))
+            .collect()
+    }
 
     #[test]
     fn dotnet_section_names_every_shipped_component() {
@@ -143,6 +160,22 @@ mod tests {
             assert!(
                 !DOTNET_SECTION.contains(absent),
                 "{absent} is not redistributed and must not appear in the notice"
+            );
+        }
+    }
+
+    #[test]
+    fn service_dependency_closure_covers_every_shipped_rust_payload() {
+        let crates = crate::paths::engine_dir().join("crates");
+        let service = external_runtime_dependencies(&crates.join("fmf-service").join("Cargo.toml"));
+        for payload in ["fmf-ffi", "fmf-launcher"] {
+            let dependencies =
+                external_runtime_dependencies(&crates.join(payload).join("Cargo.toml"));
+            let missing: Vec<_> = dependencies.difference(&service).collect();
+            assert!(
+                missing.is_empty(),
+                "{payload} has external runtime dependencies outside the canonical \
+                 shipped service graph: {missing:?}"
             );
         }
     }

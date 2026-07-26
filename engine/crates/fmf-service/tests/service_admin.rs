@@ -124,8 +124,7 @@ fn service_e2e_flush_survives_kill_and_restores() {
     let data_dir = TestDir::new();
     // Short flush interval: durability must not depend on a graceful stop.
     let mut f = std::fs::File::create(data_dir.join("service.json")).unwrap();
-    f.write_all(br#"{ "volumes": ["C:"], "flush_interval_secs": 10 }"#)
-        .unwrap();
+    f.write_all(br#"{ "flush_interval_secs": 10 }"#).unwrap();
     drop(f);
     let pipe_name = format!(r"\\.\pipe\fmf-svc-e2e-{}", std::process::id());
 

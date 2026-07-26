@@ -1,5 +1,5 @@
 //! `bench` — the fixed real-volume benchmark set + the baseline regression
-//! gate (discipline: ADR-0013, engine/benches/README.md).
+//! gate (discipline: ADR-0013).
 
 use std::time::Instant;
 
@@ -7,7 +7,10 @@ use fmf_core::query::QueryOptions;
 
 use super::ctx::Ctx;
 use super::{build_index, run_query, term};
-use crate::bench_support::{BENCH_QUERIES, BenchReport, QueryBench, bench_restore, median};
+use crate::bench_support::{
+    BENCH_QUERIES, BenchReport, QueryBench, bench_restore, entry_count_within_baseline,
+    index_budget_ms, median, working_set_within_budget,
+};
 
 pub fn bench(
     drive: &str,
@@ -15,12 +18,21 @@ pub fn bench(
     baseline: Option<&std::path::Path>,
     ctx: Ctx,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let index_started = Instant::now();
     let idx = build_index(drive, ctx)?;
+    let index_ms = index_started.elapsed().as_millis() as u64;
+    // The application prewarms the ready index. Capture the process working set
+    // at the same point so the ≤110 B/entry gate includes derived caches, not
+    // only the raw columns.
+    fmf_core::query::prewarm(&idx);
+    let working_set_bytes = fmf_core::mft::current_working_set();
     let opt = QueryOptions::default();
 
     let mut report = BenchReport {
         volume: drive.to_string(),
         entries: idx.len() as u64,
+        index_ms,
+        working_set_bytes,
         peak_working_set_bytes: 0,
         queries: Vec::new(),
         restore: None,
@@ -89,6 +101,16 @@ pub fn bench(
         // the baseline verdict below stay on text/stderr.
         super::json::emit(&report)?;
     } else {
+        println!("initial index {} ms", report.index_ms);
+        println!(
+            "ready working set {:.1} MiB ({:.1} B/entry)",
+            report.working_set_bytes as f64 / (1024.0 * 1024.0),
+            if report.entries == 0 {
+                0.0
+            } else {
+                report.working_set_bytes as f64 / report.entries as f64
+            }
+        );
         println!(
             "peak working set {:.1} MiB",
             report.peak_working_set_bytes as f64 / (1024.0 * 1024.0)
@@ -117,16 +139,36 @@ pub fn bench(
         const RESTORE_BUDGET_MS: u64 = 1_000;
         let old: BenchReport = serde_json::from_str(&std::fs::read_to_string(path)?)?;
         // Entry-count drift past ±10% invalidates the baseline (ADR-0013).
-        if report.entries.abs_diff(old.entries) > old.entries / 10 {
+        if !entry_count_within_baseline(report.entries, old.entries) {
             anstream::eprintln!(
                 "{} entries drifted {}→{} (>10%) since the baseline was recorded — \
-                 regression verdicts are unreliable; consider `just bench-baseline`",
-                term::paint(term::WARN, "WARNING"),
+                 refusing an unreliable verdict; run `just bench-baseline` deliberately",
+                term::paint(term::ERROR, "STALE BASELINE"),
                 old.entries,
                 report.entries
             );
+            return Err("benchmark corpus drifted beyond the baseline window".into());
         }
         let mut regressed = false;
+        let index_budget = index_budget_ms(report.entries);
+        if report.index_ms > index_budget {
+            anstream::eprintln!(
+                "{} initial index {}ms > {}ms acceptance line for {} entries",
+                term::paint(term::ERROR, "OVER BUDGET"),
+                report.index_ms,
+                index_budget,
+                report.entries
+            );
+            regressed = true;
+        }
+        if !working_set_within_budget(&report) {
+            anstream::eprintln!(
+                "{} ready working set {:.1} B/entry > 110 B/entry acceptance line",
+                term::paint(term::ERROR, "OVER BUDGET"),
+                report.working_set_bytes as f64 / report.entries as f64
+            );
+            regressed = true;
+        }
         // Coarse smoke alarm: relative p50 gate at +50%; the fine-grained
         // per-change gate is `just bench-micro-check` (ADR-0013).
         let gate = |new: u64, old: u64, floor: u64| new > (old.max(floor) * 3) / 2;

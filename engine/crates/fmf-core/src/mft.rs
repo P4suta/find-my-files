@@ -12,14 +12,21 @@ use ntfs_reader::volume::Volume;
 use thiserror::Error;
 
 use crate::index::{Frn, RawEntry, VolumeIndex, VolumeIndexBuilder};
+use crate::usn::MetadataSource;
+use crate::usn::apply::LinkSnapshot;
 
 // The production scanner (and the ScanStats both scanners fill) lives in
 // crate::scan; re-exported here so callers keep one import path.
+pub(crate) use crate::scan::scan_volume_cancellable;
 pub use crate::scan::{ScanStats, scan_volume};
 
 /// Failure modes of a raw $MFT volume scan.
 #[derive(Debug, Error)]
 pub enum MftError {
+    /// The owning volume worker requested shutdown. No partial index is
+    /// returned or installed.
+    #[error("volume scan cancelled")]
+    Cancelled,
     /// The process lacks the privileges to open the raw volume (MFT/USN reads
     /// require an elevated process; run from an administrator terminal).
     #[error("volume scan requires an elevated process (run from an administrator terminal)")]
@@ -27,6 +34,18 @@ pub enum MftError {
     /// An error surfaced by the underlying ntfs-reader (volume open or $MFT read).
     #[error("ntfs-reader: {0}")]
     Ntfs(#[from] NtfsReaderError),
+    /// The independent reference scanner could not open or query its live
+    /// per-record NTFS metadata source.
+    #[error("volume metadata: {0}")]
+    Metadata(#[from] crate::usn::UsnError),
+    /// Neither the streamed MFT view nor the live exact-FRN fallback could
+    /// prove a complete hard-link set. No partial index is published.
+    #[error("incomplete metadata for file reference {0}")]
+    IncompleteMetadata(u64),
+    /// One or more non-empty MFT slots failed signature, fixup, or complete
+    /// attribute-chain validation. Publishing would make files disappear.
+    #[error("{0} corrupt MFT record(s); refusing to publish a partial index")]
+    CorruptRecords(u64),
 }
 
 /// Measurements from a full $MFT scan of one volume.
@@ -44,16 +63,16 @@ pub struct SpikeStats {
     pub mft_bytes: u64,
     /// Total number of $MFT records walked (in-use and free), a count.
     pub total_records: u64,
-    /// Number of named file records indexed, a count.
+    /// Searchable file-link rows observed in base records.
     pub files: u64,
-    /// Number of named directory records indexed, a count.
+    /// Searchable directory-link rows observed in base records.
     pub dirs: u64,
-    /// Number of records whose name is a reparse point (junction/symlink), a count.
+    /// Searchable link rows marked as reparse points (junction/symlink).
     pub reparse_points: u64,
-    /// Records where the base record holds no usable $`FILE_NAME` (needs
-    /// attribute-list handling in M0).
+    /// Records where the base record holds no usable `$FILE_NAME`; the
+    /// production scanner resolves these through `$ATTRIBUTE_LIST`.
     pub no_name_in_base_record: u64,
-    /// Sum of name lengths across all named records, in UTF-16 code units.
+    /// Sum of name lengths across all searchable link rows, in UTF-16 code units.
     pub name_utf16_units_total: u64,
     /// Longest single name encountered, in UTF-16 code units.
     pub max_name_utf16_units: u64,
@@ -72,25 +91,66 @@ impl SpikeStats {
     }
 }
 
-/// Pick the display name: prefer Win32 / Win32+DOS
-/// namespaces, fall back to POSIX, ignore DOS-only short names. Unlike
-/// ntfs-reader's `get_best_file_name`, reparse-point names are kept —
-/// junctions and symlinks are indexed as plain entries.
-pub(crate) fn pick_name(file: &NtfsFile) -> Option<NtfsFileName> {
-    let mut best: Option<NtfsFileName> = None;
-    file.attributes(|att| {
-        if att.header.type_id != NtfsAttributeType::FileName as u32 {
+pub(crate) const fn is_searchable_namespace(namespace: u8) -> bool {
+    namespace == NtfsFileNamespace::Win32 as u8
+        || namespace == NtfsFileNamespace::Win32AndDos as u8
+        || namespace == NtfsFileNamespace::Posix as u8
+}
+
+pub(crate) struct SearchableNames {
+    first: Option<NtfsFileName>,
+    additional: Vec<NtfsFileName>,
+}
+
+impl SearchableNames {
+    pub(crate) fn len(&self) -> usize {
+        usize::from(self.first.is_some()) + self.additional.len()
+    }
+
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.first.is_none()
+    }
+}
+
+impl IntoIterator for SearchableNames {
+    type Item = NtfsFileName;
+    type IntoIter =
+        std::iter::Chain<std::option::IntoIter<NtfsFileName>, std::vec::IntoIter<NtfsFileName>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.first.into_iter().chain(self.additional)
+    }
+}
+
+pub(crate) fn collect_searchable_names(file: &NtfsFile<'_>) -> Option<SearchableNames> {
+    let mut names = SearchableNames {
+        first: None,
+        additional: Vec::new(),
+    };
+    let mut valid = true;
+    file.attributes(|attribute| {
+        if attribute.header.type_id != NtfsAttributeType::FileName as u32 {
             return;
         }
-        let Some(name) = att.as_name() else { return };
-        let ns = name.header.namespace;
-        let win32 =
-            ns == NtfsFileNamespace::Win32 as u8 || ns == NtfsFileNamespace::Win32AndDos as u8;
-        if win32 || (ns == NtfsFileNamespace::Posix as u8 && best.is_none()) {
-            best = Some(name);
+        let Some(name) = attribute.as_name() else {
+            valid = false;
+            return;
+        };
+        if name.header.name_length == 0 {
+            valid = false;
+            return;
+        }
+        if is_searchable_namespace(name.header.namespace) {
+            if names.first.is_none() {
+                names.first = Some(name);
+            } else {
+                names.additional.push(name);
+            }
+        } else if name.header.namespace != NtfsFileNamespace::Dos as u8 {
+            valid = false;
         }
     });
-    best
+    valid.then_some(names)
 }
 
 /// Scan one volume's $MFT end to end and report measurements.
@@ -124,29 +184,34 @@ pub fn spike_scan(drive: &str) -> Result<SpikeStats, MftError> {
     let t2 = Instant::now();
     let mut std_info_seen = 0u64;
     for file in mft.files() {
-        let Some(name) = pick_name(&file) else {
+        let Some(names) = collect_searchable_names(&file) else {
             stats.no_name_in_base_record += 1;
             continue;
         };
-
-        let len = name.header.name_length as u64;
-        stats.name_utf16_units_total += len;
-        stats.max_name_utf16_units = stats.max_name_utf16_units.max(len);
-
-        if file.is_directory() {
-            stats.dirs += 1;
-        } else {
-            stats.files += 1;
+        if names.is_empty() {
+            stats.no_name_in_base_record += 1;
+            continue;
         }
-        if name.is_reparse_point() {
-            stats.reparse_points += 1;
+        let is_dir = file.is_directory();
+        for name in names {
+            let len = name.header.name_length as u64;
+            stats.name_utf16_units_total += len;
+            stats.max_name_utf16_units = stats.max_name_utf16_units.max(len);
+            if is_dir {
+                stats.dirs += 1;
+            } else {
+                stats.files += 1;
+            }
+            if name.is_reparse_point() {
+                stats.reparse_points += 1;
+            }
         }
         if file.reference_number() >> 48 != 0 {
             stats.frn_sequence_nonzero += 1;
         }
 
-        // Touch $STANDARD_INFORMATION and $DATA the way the real indexer will,
-        // so iteration cost is representative.
+        // Touch `$STANDARD_INFORMATION` and `$DATA` the way the real indexer
+        // does, so the measurement covers the same attribute walk.
         file.attributes(|att| {
             if att.header.type_id == NtfsAttributeType::StandardInformation as u32
                 && att.as_standard_info().is_some()
@@ -193,9 +258,11 @@ pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), Mf
     let t1 = Instant::now();
     let mft = Mft::new(volume)?;
     stats.elapsed_mft_load_ms = t1.elapsed().as_millis() as u64;
+    let metadata = MetadataSource::open_volume(drive)?;
     stats.mft_bytes = mft.data.len() as u64;
 
     let mut b = VolumeIndexBuilder::new(drive, ROOT_RECORD);
+    let mut corrupt_records = 0u64;
     for file in mft.files() {
         // files() yields extension records too (no base_reference filter in
         // ntfs-reader). They are parts of other files; indexing them would
@@ -205,17 +272,41 @@ pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), Mf
             stats.extension_records += 1;
             continue;
         }
-        // Names of heavily fragmented files live in extension records via
-        // $ATTRIBUTE_LIST — fall back to ntfs-reader's resolver for those
-        // (~4% of records on a real C:).
-        let Some(name) = pick_name(&file).or_else(|| file.get_best_file_name(&mft)) else {
+        let frn = file.reference_number();
+        let mut links = Vec::new();
+        if file
+            .get_attribute(NtfsAttributeType::AttributeList)
+            .is_some()
+        {
+            match metadata.links(frn) {
+                LinkSnapshot::Present(found) if !found.is_empty() => {
+                    links.extend(found.into_iter().map(|link| (link.parent_frn, link.name)));
+                }
+                LinkSnapshot::Gone => continue,
+                LinkSnapshot::Present(_) | LinkSnapshot::Failed => {
+                    return Err(MftError::IncompleteMetadata(frn));
+                }
+            }
+        } else {
+            let Some(names) = collect_searchable_names(&file) else {
+                corrupt_records += 1;
+                continue;
+            };
+            if !names.is_empty() {
+                for name in names {
+                    let data = name.data;
+                    let units = name.header.name_length as usize;
+                    links.push((
+                        name.header.parent_directory_reference,
+                        data[..units].to_vec(),
+                    ));
+                }
+            }
+        }
+        if links.is_empty() {
             stats.skipped_no_name += 1;
             continue;
-        };
-        // Copy fields out of the packed structs before borrowing.
-        let name_data = name.data;
-        let name_len = name.header.name_length as usize;
-        let parent_frn = name.header.parent_directory_reference;
+        }
 
         let mut size = 0u64;
         let mut mtime = 0i64;
@@ -232,7 +323,9 @@ pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), Mf
                     is_hidden = si.file_attributes & FILE_ATTRIBUTE_HIDDEN != 0;
                     is_system = si.file_attributes & FILE_ATTRIBUTE_SYSTEM != 0;
                 }
-            } else if att.header.type_id == NtfsAttributeType::Data as u32 {
+            } else if att.header.type_id == NtfsAttributeType::Data as u32
+                && att.header.name_length == 0
+            {
                 if att.header.is_non_resident == 0 {
                     if let Some(h) = att.resident_header() {
                         size = h.value_length as u64;
@@ -244,24 +337,29 @@ pub fn scan_volume_reference(drive: &str) -> Result<(VolumeIndex, ScanStats), Mf
         });
 
         let is_dir = file.is_directory();
-        if is_dir {
-            stats.dirs += 1;
-        } else {
-            stats.files += 1;
+        for (parent_frn, name) in links {
+            if is_dir {
+                stats.dirs += 1;
+            } else {
+                stats.files += 1;
+            }
+            b.push(RawEntry {
+                parent_frn: Frn(parent_frn),
+                frn: Frn(frn),
+                name_utf16: &name,
+                is_dir,
+                is_reparse,
+                is_hidden,
+                is_system,
+                size,
+                mtime,
+            });
         }
-        b.push(RawEntry {
-            parent_frn: Frn(parent_frn),
-            frn: Frn(file.reference_number()),
-            name_utf16: &name_data[..name_len],
-            is_dir,
-            is_reparse,
-            is_hidden,
-            is_system,
-            size,
-            mtime,
-        });
     }
 
+    if corrupt_records > 0 {
+        return Err(MftError::CorruptRecords(corrupt_records));
+    }
     let idx = b.finish();
     stats.elapsed_total_ms = t0.elapsed().as_millis() as u64;
     stats.peak_working_set_bytes = peak_working_set();

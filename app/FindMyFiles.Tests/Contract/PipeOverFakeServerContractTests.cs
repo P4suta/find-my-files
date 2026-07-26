@@ -20,7 +20,7 @@ public sealed class PipeOverFakeServerContractTests(ITestOutputHelper output)
 {
     private FakePipeServer? _server;
 
-    protected override async Task<IEngineClient?> AcquireClientOrSkipAsync()
+    private protected override async Task<IEngineClient?> AcquireClientOrSkipAsync()
     {
         var invalid = GoldenInvalidQueries().ToHashSet(StringComparer.Ordinal);
         _server = new FakePipeServer
@@ -30,7 +30,7 @@ public sealed class PipeOverFakeServerContractTests(ITestOutputHelper output)
             {
                 if (opcode == PipeProtocol.Op.Query)
                 {
-                    var (_, text) = PipeProtocol.DecodeQueryReq(payload);
+                    var (_, text, _) = PipeProtocol.DecodeQueryReq(payload);
                     if (invalid.Contains(text))
                     {
                         return Task.FromResult((
@@ -59,7 +59,7 @@ public sealed class PipeOverFakeServerContractTests(ITestOutputHelper output)
 
     protected override bool IsInProcTransport => false;
 
-    protected override async Task<bool> TryForceStaleAsync(IEngineClient client)
+    private protected override async Task<bool> TryForceStaleAsync(IEngineClient client)
     {
         var pipe = (PipeEngineClient)client;
         var epochBefore = pipe.CurrentEpoch;

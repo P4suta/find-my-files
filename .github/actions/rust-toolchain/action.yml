@@ -3,12 +3,12 @@
 # provision via mise-action) instead of a floating `stable` that can drift ahead of
 # the pin between a CI run and the shipped build.
 #
-# mise.toml is the single source of truth for this repo's toolchain (CLAUDE.md
+# mise.toml is the single source of truth for this repo's toolchain (AGENTS.md
 # deliberately keeps no rust-toolchain.toml, to avoid double management). This
 # composite reads the `rust` pin from there and hands it to dtolnay/rust-toolchain,
 # so a bump lives in exactly one place — no per-workflow mirror to keep in sync.
-# (fuzz.yml is the one exception: it needs `nightly` for cargo-fuzz, so it keeps a
-# direct dtolnay step with an explicit `toolchain: nightly`.)
+# (fuzz.yml is the one exception: it needs nightly-only sanitizer support, so it
+# keeps a direct dtolnay step with an explicitly dated nightly.)
 name: Rust toolchain (mise-pinned)
 description: Install the Rust toolchain version pinned in mise.toml.
 inputs:

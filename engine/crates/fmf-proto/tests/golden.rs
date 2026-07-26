@@ -7,7 +7,7 @@
 //! changes only:
 //!
 //! ```text
-//! FMF_BLESS=1 cargo test -p fmf-proto --test golden
+//! just contract-bless
 //! ```
 //!
 //! A normal run never writes — it fails on any byte that drifted.
@@ -203,6 +203,8 @@ fn corpus() -> Vec<Case> {
                     case_mode: 2,
                     include_hidden_system: 1,
                     regex_mode: 3,
+                    _reserved: 0,
+                    presentation_basis: 0x0102_0304_0506_0708,
                 },
                 "日本語 ext:txt",
             ),
@@ -252,7 +254,7 @@ fn corpus() -> Vec<Case> {
             FLAG_RESPONSE,
             9,
             0,
-            &encode_page(&[], &[]),
+            &encode_page(&[], &[]).expect("empty page encodes"),
         ),
     );
     // Blob layout convention: per row, name bytes then parent bytes,
@@ -277,8 +279,9 @@ fn corpus() -> Vec<Case> {
                     name_off,
                     parent_path_off: parent_off,
                     flags,
-                    name_len: name.len() as u16,
-                    parent_path_len: parent.len() as u16,
+                    name_len: name.len() as u32,
+                    parent_path_len: parent.len() as u32,
+                    _reserved: 0,
                 });
             };
         push_row(
@@ -309,7 +312,7 @@ fn corpus() -> Vec<Case> {
                 FLAG_RESPONSE,
                 10,
                 0,
-                &encode_page(&rows, &blob),
+                &encode_page(&rows, &blob).expect("golden page encodes"),
             ),
         );
     }
@@ -496,7 +499,10 @@ fn corpus_frames_decode_back() {
             }
             (opcode::RESULT_PAGE, true) => {
                 let page = fmf_proto::messages::decode_page(payload).unwrap();
-                assert_eq!(encode_page(&page.rows, page.blob), payload);
+                assert_eq!(
+                    encode_page(&page.rows, page.blob).expect("golden page re-encodes"),
+                    payload
+                );
             }
             (opcode::RESULT_FREE, false) => {
                 let id = fmf_proto::messages::decode_result_free(payload).unwrap();

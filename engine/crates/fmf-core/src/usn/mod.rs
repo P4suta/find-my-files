@@ -9,7 +9,7 @@ pub mod records;
 #[cfg(windows)]
 pub mod session;
 
-pub use apply::{BatchStats, NullStatFetcher, StatFetcher, apply_batch};
+pub use apply::{BatchStats, LinkInfo, MetadataSource, apply_batch};
 pub use records::{UsnRecord, parse_buffer, reason};
 #[cfg(windows)]
-pub use session::{JournalGone, ReadOutcome, UsnError, UsnJournal, VolumeStatFetcher};
+pub use session::{JournalGone, ReadOutcome, UsnError, UsnJournal};

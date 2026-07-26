@@ -22,8 +22,8 @@ pub const RESULT_PAGE: u16 = 8;
 pub const RESULT_FREE: u16 = 9;
 /// `Stats`: return the engine's metrics snapshot (maps to `fmf_engine_stats`).
 pub const STATS: u16 = 10;
-/// Number reserved, deliberately unimplemented (client-driven flush is a
-/// local-DoS lever — ADR-0016).
-pub const FLUSH_RESERVED: u16 = 11;
 /// `ServiceInfo`: return service-specific runtime info (`uptime_ms` / connections / version).
 pub const SERVICE_INFO: u16 = 12;
+/// `QueryCancel`: one-way control frame. The zero-payload frame's
+/// `request_id` identifies the query request to cancel.
+pub const QUERY_CANCEL: u16 = 13;

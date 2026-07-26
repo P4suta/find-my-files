@@ -8,7 +8,7 @@
     screenshot) and asserts on AutomationIds declared in app/FindMyFiles/
     MainPage.xaml. Two launch modes are exercised:
 
-      --engine=empty  forces the disconnected first-run setup screen
+      --engine=unavailable  forces the disconnected first-run setup screen
                       (Slice A; FakeEngineClient.CreateEmpty, IsDisconnected=true).
       --fake-engine   loads deterministic 100k-row data (seed 42) so search,
                       sort, option-toggle and fault-injection scenarios are
@@ -27,8 +27,7 @@
 .NOTES
     The `winapp ui` CLI is the project's UI automation harness. If a primitive is
     unavailable on this machine the per-test try/catch records a FAIL with the
-    underlying error rather than aborting the run, and a single TODO marker calls
-    out where a harness-specific shim would slot in. Verb reference:
+    underlying error rather than aborting the run. Verb reference:
         winapp ui --cli-schema
         winapp ui <verb> --help
 #>
@@ -41,7 +40,7 @@ param(
     [int]$AppPid,
 
     # Path to the published FindMyFiles.exe; the script launches it itself. Used
-    # for the --engine=empty setup-screen phase, which needs its own process.
+    # for the --engine=unavailable setup-screen phase, which needs its own process.
     [Parameter(Mandatory, ParameterSetName = 'Exe')]
     [string]$ExePath,
 
@@ -49,8 +48,14 @@ param(
     # default because a Release bundle compiles those branches out.
     [switch]$IncludeFaults,
 
-    # Where screenshots + the results JSON land.
-    [string]$OutDir = (Join-Path $PSScriptRoot 'artifacts')
+    # Exercise the actual shipping binary with no test-only command-line seams.
+    # This is intentionally a tiny launch/UIA smoke; deterministic interaction
+    # coverage runs against the separately compiled test-seam bundle.
+    [switch]$StableSmoke,
+
+    # Where screenshots + the results JSON land. Resolve from the script so a
+    # standalone invocation still obeys ADR-0021 regardless of the current dir.
+    [string]$OutDir = (Join-Path $PSScriptRoot '..\..\..\build\ui-automation')
 )
 
 $ErrorActionPreference = 'Continue'
@@ -59,19 +64,20 @@ $script:fail = 0
 $script:results = @()
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+$script:OutRoot = (Resolve-Path -LiteralPath $OutDir).Path
+$script:DataDir = Join-Path $script:OutRoot ("state-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $script:DataDir | Out-Null
+$script:LogSource = Join-Path $script:DataDir 'logs'
 
 # ── Harness shim ──────────────────────────────────────────────────────────────
 # Single chokepoint for the UI automation CLI. Every scenario goes through here,
 # so if this machine's harness binary is named/invoked differently, this is the
 # ONE place to adapt.
 #
-# TODO(harness): confirm the automation CLI entrypoint on this machine. The
-# project standard is `winapp ui <verb>`. If `winapp` is not on PATH, set
-# $env:FMF_UI_CLI to the full path of the automation exe (it must accept the same
-# `ui <verb>` verbs documented by `winapp ui --cli-schema`), or replace the
-# invocation below with the local equivalent. Nothing else in this file knows the
-# CLI name.
 $script:UiCli = if ($env:FMF_UI_CLI) { $env:FMF_UI_CLI } else { 'winapp' }
+if (-not (Get-Command -Name $script:UiCli -ErrorAction SilentlyContinue)) {
+    throw "UI automation harness '$script:UiCli' is unavailable; run `just doctor`."
+}
 
 function Invoke-Ui {
     # Simple (non-advanced) function on purpose. A [Parameter()] block would make
@@ -88,6 +94,9 @@ function Test-UI {
     # Inside $Script use `throw` to fail a single test — NOT `exit`, which would
     # terminate the whole suite. A non-zero $LASTEXITCODE from the CLI is a fail.
     try {
+        # A pure PowerShell assertion does not update LASTEXITCODE. Reset it so
+        # a failed CLI probe cannot poison the following in-process check.
+        $global:LASTEXITCODE = 0
         $output = & $Script 2>&1
         if ($LASTEXITCODE -eq 0) {
             $script:pass++
@@ -105,18 +114,66 @@ function Test-UI {
     }
 }
 
+function Assert-AccessibleElement {
+    param(
+        [string]$Selector,
+        [int]$ProcessId,
+        [string]$WindowHandle
+    )
+    $cliArgs = @('get-property', $Selector, '--json')
+    if ($WindowHandle) {
+        $cliArgs += @('-w', $WindowHandle)
+    } else {
+        $cliArgs += @('-a', $ProcessId)
+    }
+    $element = Invoke-Ui @cliArgs 2>$null | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $null -eq $element) {
+        throw "'$Selector' was not readable through UI Automation"
+    }
+    if ([string]::IsNullOrWhiteSpace($element.properties.AutomationId)) {
+        throw "'$Selector' has no AutomationId"
+    }
+    if ([string]::IsNullOrWhiteSpace($element.properties.Name)) {
+        throw "'$Selector' has no accessible Name"
+    }
+}
+
 # Launch the published exe with the given args and return its PID. Used for the
-# setup-screen phase, which needs its own --engine=empty process.
+# setup-screen phase, which needs its own --engine=unavailable process.
 function Start-App {
     param([string]$Exe, [string[]]$AppArgs)
     if (-not (Test-Path $Exe)) {
         throw "FindMyFiles.exe not found at '$Exe' — run `just publish` first."
     }
-    $p = Start-Process -FilePath $Exe -ArgumentList $AppArgs -PassThru
+    # Every launched process receives a unique test-owned state root. This keeps
+    # local settings and a previously published portable bundle from changing
+    # defaults or counts, and prevents the suite from touching the user's profile.
+    $arguments = @($AppArgs) + "--data-dir=$script:DataDir"
+    $p = Start-Process -FilePath $Exe -ArgumentList $arguments -PassThru
     # Give the WinUI window + the automation tree time to materialise. The first
     # wait-for in each phase has its own timeout, so this is just startup slack.
     Start-Sleep -Seconds 2
     return $p.Id
+}
+
+# Launch the real shipping artifact without --fake-engine, --engine=unavailable,
+# --data-dir, or a custom pipe. APPDATA/LOCALAPPDATA are process-local test
+# isolation, not application command-line seams, and leave the user's profile
+# untouched.
+function Start-StableApp {
+    param([string]$Exe)
+    if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) {
+        throw "Shipping FindMyFiles.exe not found at '$Exe' — run `just publish` first."
+    }
+    $localData = Join-Path $script:DataDir 'local'
+    New-Item -ItemType Directory -Force -Path $localData | Out-Null
+    $script:LogSource = Join-Path $script:DataDir 'find-my-files\logs'
+    $process = Start-Process -FilePath $Exe -PassThru -Environment @{
+        APPDATA = $script:DataDir
+        LOCALAPPDATA = $localData
+    }
+    Start-Sleep -Seconds 2
+    return $process.Id
 }
 
 # Tear an app instance down WITHOUT leaving a DWM ghost window. A bare
@@ -137,22 +194,21 @@ function Stop-AppGracefully {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Phase A — first-run SETUP screen under --engine=empty
+# Phase A — first-run SETUP screen under --engine=unavailable
 #   IsDisconnected=true collapses the search UI (IsReady=false) and centres the
-#   setup StackPanel. Asserts the two CTAs the user can act on:
-#     EnableSearch   (AccentButton — register the service / privileged path)
-#     ScopeSetupLink (HyperlinkButton — no-admin scope path → ScopeManagerDialog)
+#   setup StackPanel. The service registration button is deliberately the only
+#   production ingest path; the former no-admin directory-walk CTA must stay gone.
 # ──────────────────────────────────────────────────────────────────────────────
 function Invoke-SetupPhase {
     param([string]$Exe)
-    Write-Host "`n=== Phase A: first-run setup (--engine=empty) ===" -ForegroundColor Cyan
+    Write-Host "`n=== Phase A: first-run setup (--engine=unavailable) ===" -ForegroundColor Cyan
 
     $setupPid = $null
     try {
-        $setupPid = Start-App -Exe $Exe -AppArgs @('--engine=empty')
+        $setupPid = Start-App -Exe $Exe -AppArgs @('--engine=unavailable')
     } catch {
         $script:fail++
-        $script:results += @{ name = 'Setup: launch --engine=empty'; status = 'FAIL'; detail = "$_" }
+        $script:results += @{ name = 'Setup: launch --engine=unavailable'; status = 'FAIL'; detail = "$_" }
         Write-Host "  FAIL: Setup launch — $_" -ForegroundColor Red
         return
     }
@@ -160,25 +216,57 @@ function Invoke-SetupPhase {
     Test-UI 'Setup: EnableSearch button present' {
         Invoke-Ui wait-for 'EnableSearch' -a $setupPid -t 5000
     }
-    Test-UI 'Setup: ScopeSetupLink present' {
-        Invoke-Ui wait-for 'ScopeSetupLink' -a $setupPid -t 3000
+    Test-UI 'Setup: legacy directory-scan fallback absent' {
+        Invoke-Ui wait-for 'ScopeSetupLink' -a $setupPid --gone -t 3000
     }
     Test-UI 'Setup: EnableSearch is enabled (SetupNotBusy)' {
         Invoke-Ui wait-for 'EnableSearch' -a $setupPid -p IsEnabled --value 'True' -t 3000
+    }
+    Test-UI 'Setup: primary action has accessible identity and name' {
+        Assert-AccessibleElement -Selector 'EnableSearch' -ProcessId $setupPid
+        $global:LASTEXITCODE = 0
+    }
+    Test-UI 'Setup: recovery action is present and enabled' {
+        Invoke-Ui wait-for 'SetupRecovery' -a $setupPid -p IsEnabled --value 'True' -t 3000
+    }
+    Test-UI 'Setup: recovery action has accessible identity and name' {
+        Assert-AccessibleElement -Selector 'SetupRecovery' -ProcessId $setupPid
+        $global:LASTEXITCODE = 0
     }
     # Search UI is collapsed on the setup screen (IsReady=false): SearchBox must
     # NOT be interactable. wait-for --gone is the disconnected-state invariant.
     Test-UI 'Setup: SearchBox collapsed while disconnected' {
         Invoke-Ui wait-for 'SearchBox' -a $setupPid --gone -t 3000
     }
-    # The no-admin path: clicking the link opens ScopeManagerDialog (folder-only).
-    Test-UI 'Setup: ScopeSetupLink opens the scope dialog' {
-        Invoke-Ui invoke 'ScopeSetupLink' -a $setupPid
-    }
-    Test-UI 'Setup: ScopeManagerDialog appears' {
-        Invoke-Ui wait-for 'ScopeManagerDialog' -a $setupPid -t 3000
-    }
     Invoke-Ui screenshot -a $setupPid -o (Join-Path $OutDir 'A-setup.png') 2>$null
+
+    Test-UI 'Setup: recovery opens settings while disconnected' {
+        Invoke-Ui invoke 'SetupRecovery' -a $setupPid | Out-Null
+        Invoke-Ui wait-for 'SettingsDialog' -a $setupPid -t 3000
+    }
+    Test-UI 'Setup: diagnostics and service management stay published' {
+        Assert-AccessibleElement -Selector 'DiagToggle' -ProcessId $setupPid
+        Assert-AccessibleElement -Selector 'ServiceManageMenu' -ProcessId $setupPid
+        $global:LASTEXITCODE = 0
+    }
+    Invoke-Ui screenshot -a $setupPid -o (Join-Path $OutDir 'A-recovery-settings.png') 2>$null
+
+    Test-UI 'Setup: diagnostics is reachable' {
+        Invoke-Ui invoke 'DiagToggle' -a $setupPid | Out-Null
+        Invoke-Ui wait-for 'PerfPanel' -a $setupPid -t 5000
+    }
+    Test-UI 'Setup: service manager is reachable' {
+        Invoke-Ui invoke 'SetupRecovery' -a $setupPid | Out-Null
+        Invoke-Ui wait-for 'SettingsDialog' -a $setupPid -t 3000 | Out-Null
+        Invoke-Ui invoke 'ServiceManageMenu' -a $setupPid | Out-Null
+        Invoke-Ui wait-for 'ServiceManagerDialog' -a $setupPid -t 5000
+    }
+    Test-UI 'Setup: full cleanup retry is reachable while unregistered' {
+        Assert-AccessibleElement -Selector 'SvcPurgeData' -ProcessId $setupPid
+        $global:LASTEXITCODE = 0
+    }
+    Invoke-Ui screenshot -a $setupPid -o (Join-Path $OutDir 'A-recovery-service.png') 2>$null
+    Invoke-Ui invoke 'CloseButton' -a $setupPid 2>$null | Out-Null
 
     Stop-AppGracefully $setupPid
 }
@@ -211,6 +299,38 @@ function Get-StatusCountText {
     return $v.text
 }
 
+function Get-ResultRow {
+    param([int]$Index)
+    $result = Invoke-Ui get-property "ResultRow-$Index" -a $AppPid --json 2>$null |
+        ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $null -eq $result) {
+        throw "ResultRow-$Index was not readable through UI Automation"
+    }
+    return $result
+}
+
+function Get-VisibleResultRows {
+    $result = Invoke-Ui search 'ResultRow-' -a $AppPid --json --max 100 2>$null |
+        ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $null -eq $result) {
+        throw 'result rows were not searchable through UI Automation'
+    }
+    return @($result.matches | Where-Object { -not $_.isOffscreen })
+}
+
+function Wait-ResultRowNameChange {
+    param([int]$Index, [string]$Previous, [int]$TimeoutMs = 5000)
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    do {
+        $name = (Get-ResultRow -Index $Index).properties.Name
+        if (-not [string]::IsNullOrWhiteSpace($name) -and $name -ne $Previous) {
+            return $name
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "ResultRow-$Index did not change from '$Previous' within ${TimeoutMs}ms"
+}
+
 function Invoke-SearchPhase {
     Write-Host "`n=== Phase B: search interactions (--fake-engine) ===" -ForegroundColor Cyan
 
@@ -223,6 +343,12 @@ function Invoke-SearchPhase {
     Test-UI 'Search: OptionsButton present' {
         Invoke-Ui wait-for 'OptionsButton' -a $AppPid -t 3000
     }
+    Test-UI 'Accessibility: main interactive surfaces are named' {
+        foreach ($selector in @('SearchBox', 'OptionsButton', 'ResultsList')) {
+            Assert-AccessibleElement -Selector $selector -ProcessId $AppPid
+        }
+        $global:LASTEXITCODE = 0
+    }
 
     # Type a needle that matches a deterministic subset. SearchText binds with
     # UpdateSourceTrigger=PropertyChanged, so set-value drives the live filter
@@ -233,20 +359,68 @@ function Invoke-SearchPhase {
     Test-UI 'Search: SearchBox holds the typed text' {
         Invoke-Ui wait-for 'SearchBox' -a $AppPid --value 'file_0' -t 2000
     }
+    Test-UI 'Search: first result row is filled and visible to UIA' {
+        Invoke-Ui wait-for 'ResultRow-0' -a $AppPid --value 'file_0' --contains -t 5000
+    }
+    Test-UI 'Search: result row exposes stable accessible semantics' {
+        $row = Get-ResultRow -Index 0
+        $properties = $row.properties
+        if ($properties.AutomationId -ne 'ResultRow-0') {
+            throw "unexpected row AutomationId '$($properties.AutomationId)'"
+        }
+        if ($properties.ControlType -ne 'ListItem' -or $properties.ClassName -ne 'ListViewItem') {
+            throw "row is not a ListViewItem ($($properties.ControlType)/$($properties.ClassName))"
+        }
+        if ($properties.Name -notlike '*file_0*') {
+            throw "row has no populated accessible name ('$($properties.Name)')"
+        }
+        if ($properties.IsEnabled -ne 'True' -or
+            $properties.IsOffscreen -ne 'False' -or
+            $properties.IsKeyboardFocusable -ne 'True') {
+            throw "row is not enabled, visible, and keyboard-focusable: $($properties | ConvertTo-Json -Compress)"
+        }
+        $global:LASTEXITCODE = 0
+    }
+    Test-UI 'Search: result row accepts keyboard focus' {
+        Invoke-Ui focus 'ResultRow-0' -a $AppPid | Out-Null
+        $focused = Invoke-Ui get-focused -a $AppPid --json 2>$null | ConvertFrom-Json
+        if ($focused.element.automationId -ne 'ResultRow-0') {
+            throw "focus remained on '$($focused.element.automationId)'"
+        }
+        $global:LASTEXITCODE = 0
+    }
 
-    # StatusCount must change away from the empty-query state. Capture it now so
-    # later toggles can assert it moved. CountText is a localized string, so we
-    # assert non-empty rather than a brittle exact integer.
-    $countAfterType = $null
+    # StatusCount is localized, so the row assertions above prove non-zero data;
+    # here we only require that the status surface itself is populated.
     Test-UI 'Search: StatusCount reflects the query (non-empty)' {
-        $script:countAfterType = Get-StatusCountText
-        if ([string]::IsNullOrWhiteSpace($script:countAfterType)) {
+        $countText = Get-StatusCountText
+        if ([string]::IsNullOrWhiteSpace($countText)) {
             throw 'StatusCount text was empty after typing a query'
         }
+        $global:LASTEXITCODE = 0
     }
 
     # Capture the open settings dialog for a visual check of the SettingsCard surface.
     Open-Settings
+    Test-UI 'Accessibility: settings controls have identities and names' {
+        foreach ($selector in @(
+            'OptFocused',
+            'OptSystem',
+            'OptRegex',
+            'RegexScopeName',
+            'RegexScopePath',
+            'SortName',
+            'SortSize',
+            'SortDate',
+            'SortDescending',
+            'LangCombo',
+            'OptCloseToTray',
+            'DiagToggle',
+            'ServiceManageMenu')) {
+            Assert-AccessibleElement -Selector $selector -ProcessId $AppPid
+        }
+        $global:LASTEXITCODE = 0
+    }
     Invoke-Ui screenshot -a $AppPid -o (Join-Path $OutDir 'B-settings.png') 2>$null
     Close-Settings
 
@@ -258,15 +432,26 @@ function Invoke-SearchPhase {
         param([string]$SortId)
         Open-Settings
         Invoke-Ui invoke $SortId -a $AppPid
+        if ($LASTEXITCODE -eq 0) {
+            Invoke-Ui wait-for $SortId -a $AppPid -p IsSelected --value 'True' -t 2000 | Out-Null
+        }
         $code = $LASTEXITCODE
         Close-Settings
         $global:LASTEXITCODE = $code
     }
     Test-UI 'Sort: SortName applies' { Invoke-Sort 'SortName' }
-    Test-UI 'Sort: SortSize applies (reorders by size)' { Invoke-Sort 'SortSize' }
-    Test-UI 'Sort: SortDate applies (reorders by date)' { Invoke-Sort 'SortDate' }
-    Test-UI 'Sort: ResultsList still populated after reorders' {
-        Invoke-Ui wait-for 'ResultsList' -a $AppPid -t 2000
+    $script:nameSortedFirst = (Get-ResultRow -Index 0).properties.Name
+    Test-UI 'Sort: SortSize changes the first result' {
+        Invoke-Sort 'SortSize'
+        if ($LASTEXITCODE -ne 0) { return }
+        $script:sizeSortedFirst = Wait-ResultRowNameChange -Index 0 -Previous $script:nameSortedFirst
+        $global:LASTEXITCODE = 0
+    }
+    Test-UI 'Sort: SortDate changes the first result again' {
+        Invoke-Sort 'SortDate'
+        if ($LASTEXITCODE -ne 0) { return }
+        $null = Wait-ResultRowNameChange -Index 0 -Previous $script:sizeSortedFirst
+        $global:LASTEXITCODE = 0
     }
 
     # ── OptRegex toggle: switches the fake into .NET-regex filtering. The needle
@@ -297,36 +482,88 @@ function Invoke-SearchPhase {
         $global:LASTEXITCODE = $code
     }
 
-    # ── OptSystem toggle: hidden_sys_* rows (every 97th) are excluded by default.
-    #    Search a needle that ONLY matches hidden/system rows; turning OptSystem
-    #    on must change the count from the excluded state to a non-empty match.
-    Test-UI 'OptSystem: search a hidden/system-only needle' {
-        Invoke-Ui set-value 'SearchBox' 'hidden_sys' -a $AppPid
-    }
-    $countSysOff = $null
-    Test-UI 'OptSystem: count with system files hidden (default off)' {
-        $script:countSysOff = Get-StatusCountText
-        if ($null -eq $script:countSysOff) { throw 'no StatusCount read (system off)' }
-    }
-    Test-UI 'OptSystem: toggle on' {
+    # ── OptSystem toggle: focused search intentionally rejects .dat, so disable
+    #    it first. hidden_sys_* then proves the hidden/system predicate itself.
+    Test-UI 'OptFocused: toggle off for the system-file scenario' {
         Open-Settings
-        Invoke-Ui invoke 'OptSystem' -a $AppPid
+        Invoke-Ui invoke 'OptFocused' -a $AppPid
+        if ($LASTEXITCODE -eq 0) {
+            Invoke-Ui wait-for 'OptFocused' -a $AppPid --value 'Off' -t 2000 | Out-Null
+        }
         $code = $LASTEXITCODE
         Close-Settings
         $global:LASTEXITCODE = $code
     }
-    Test-UI 'OptSystem: count changes when system files are included' {
-        $countSysOn = Get-StatusCountText
-        if ($countSysOn -eq $script:countSysOff) {
-            throw "StatusCount unchanged by OptSystem ('$countSysOn') — hidden/system rows were not surfaced"
+    Test-UI 'OptSystem: search a hidden/system-only needle' {
+        Invoke-Ui set-value 'SearchBox' 'hidden_sys' -a $AppPid
+    }
+    Test-UI 'OptSystem: system rows are absent while off' {
+        Invoke-Ui wait-for 'ResultRow-0' -a $AppPid --gone -t 5000
+        if ($LASTEXITCODE -eq 0) {
+            Invoke-Ui wait-for 'NoResultsTitle' -a $AppPid -t 3000
         }
     }
-    # Reset for the next phase (toggle system off again; clear the box).
+    Test-UI 'OptSystem: toggle on' {
+        Open-Settings
+        Invoke-Ui invoke 'OptSystem' -a $AppPid
+        if ($LASTEXITCODE -eq 0) {
+            Invoke-Ui wait-for 'OptSystem' -a $AppPid --value 'On' -t 2000 | Out-Null
+        }
+        $code = $LASTEXITCODE
+        Close-Settings
+        $global:LASTEXITCODE = $code
+    }
+    Test-UI 'OptSystem: system rows appear with populated names' {
+        Invoke-Ui wait-for 'ResultRow-0' -a $AppPid --value 'hidden_sys' --contains -t 5000
+    }
+    # Reset every option changed by this phase.
     Open-Settings
     Invoke-Ui invoke 'OptSystem' -a $AppPid 2>$null | Out-Null
+    Invoke-Ui invoke 'OptFocused' -a $AppPid 2>$null | Out-Null
     Close-Settings
     Invoke-Ui set-value 'SearchBox' '' -a $AppPid 2>$null | Out-Null
     Invoke-Ui screenshot -a $AppPid -o (Join-Path $OutDir 'B-search.png') 2>$null
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase B2 — service-management surface (read-only)
+#   Opens the dialog and verifies its state/action wiring without invoking any
+#   lifecycle mutation or UAC prompt. The visible action depends on local SCM
+#   state, so accept Register (absent) or Re-register (installed/unreadable).
+# ──────────────────────────────────────────────────────────────────────────────
+function Invoke-ServiceSurfacePhase {
+    Write-Host "`n=== Phase B2: service-management surface (read-only) ===" -ForegroundColor Cyan
+
+    Test-UI 'Service UI: open from settings' {
+        Open-Settings
+        Invoke-Ui invoke 'ServiceManageMenu' -a $AppPid | Out-Null
+        Invoke-Ui wait-for 'ServiceManagerDialog' -a $AppPid -t 5000
+    }
+    Test-UI 'Service UI: state is populated' {
+        $state = Invoke-Ui get-value 'SvcState' -a $AppPid --json 2>$null | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($state.text)) {
+            throw 'service state text was empty'
+        }
+        $global:LASTEXITCODE = 0
+    }
+    Test-UI 'Service UI: visible repair action is accessible' {
+        $found = $false
+        foreach ($selector in @('SvcRegister', 'SvcReregister')) {
+            Invoke-Ui wait-for $selector -a $AppPid -t 500 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Assert-AccessibleElement -Selector $selector -ProcessId $AppPid
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) {
+            throw 'neither Register nor Re-register was visible'
+        }
+        $global:LASTEXITCODE = 0
+    }
+    Invoke-Ui screenshot -a $AppPid -o (Join-Path $OutDir 'B-service.png') 2>$null
+    Invoke-Ui invoke 'CloseButton' -a $AppPid 2>$null | Out-Null
+    Start-Sleep -Milliseconds 200
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -342,13 +579,16 @@ function Invoke-ScrollPhase {
     # virtualization pages.
     Test-UI 'Scroll: broad query populates the list' {
         Invoke-Ui set-value 'SearchBox' 'file_' -a $AppPid
-        Start-Sleep -Milliseconds 500
-        Invoke-Ui wait-for 'ResultsList' -a $AppPid -t 3000
+        Invoke-Ui wait-for 'ResultRow-0' -a $AppPid --value 'file_' --contains -t 5000
     }
     # Target the main window by HWND for the scroll (winapp auto-picks the wrong
     # window when several are open).
     $mainHwnd = (Invoke-Ui list-windows -a $AppPid --json 2>$null | ConvertFrom-Json |
         Where-Object { $_.title -eq 'FindMyFiles' } | Select-Object -First 1).hwnd
+    $beforeRows = Get-VisibleResultRows
+    $beforeMax = ($beforeRows | ForEach-Object {
+        [int]($_.automationId -replace '^ResultRow-', '')
+    } | Measure-Object -Maximum).Maximum
     Invoke-Ui screenshot -a $AppPid -o (Join-Path $OutDir 'C-prescroll.png') 2>$null
     # Scroll the list down repeatedly to force page fetches beyond the first
     # realized window.
@@ -360,17 +600,22 @@ function Invoke-ScrollPhase {
         # scroll's exit code is what Test-UI checks; force success of the loop.
         $global:LASTEXITCODE = 0
     }
-    # The list must survive the deep scroll — still present, not blanked out or
-    # errored. NOTE: we deliberately do NOT assert on individual row elements
-    # here. The ListView is UIA-virtualized (rows are realized lazily and are
-    # absent from the UIA tree until a UIA client realizes them), so
-    # `winapp ui inspect` returns an empty subtree for it even targeted by HWND —
-    # there is no winapp-visible per-row element to assert on. Row-content
-    # correctness (no blank/placeholder rows) is covered by the engine +
-    # VirtualResultList unit tests; this phase guards that scrolling the realized
-    # list does not crash or clear it.
-    Test-UI 'Scroll: list survives deep scroll (still present)' {
-        Invoke-Ui wait-for 'ResultsList' -w $mainHwnd -t 2000
+    Test-UI 'Scroll: newly realized rows are populated and advanced' {
+        $afterRows = Get-VisibleResultRows
+        if ($afterRows.Count -eq 0) { throw 'no visible result rows after scrolling' }
+        $blank = @($afterRows | Where-Object {
+            [string]::IsNullOrWhiteSpace($_.name) -or $_.name -notlike '*file_*'
+        })
+        if ($blank.Count -gt 0) {
+            throw "$($blank.Count) visible row(s) were blank or stale after scrolling"
+        }
+        $afterMax = ($afterRows | ForEach-Object {
+            [int]($_.automationId -replace '^ResultRow-', '')
+        } | Measure-Object -Maximum).Maximum
+        if ($afterMax -le $beforeMax) {
+            throw "virtualized viewport did not advance (before=$beforeMax, after=$afterMax)"
+        }
+        $global:LASTEXITCODE = 0
     }
 
     # ── No-results empty state: a needle that matches nothing shows the overlay;
@@ -378,19 +623,18 @@ function Invoke-ScrollPhase {
     #    (not a virtualized row), so winapp can see it.
     Test-UI 'NoResults: empty state shows for a no-match query' {
         Invoke-Ui set-value 'SearchBox' 'zzz_nomatch_zzz' -a $AppPid
-        Start-Sleep -Milliseconds 500
-        Invoke-Ui wait-for 'NoResultsTitle' -w $mainHwnd -t 3000
+        Invoke-Ui wait-for 'ResultRow-0' -w $mainHwnd --gone -t 5000
+        if ($LASTEXITCODE -eq 0) {
+            Invoke-Ui wait-for 'NoResultsTitle' -w $mainHwnd -t 3000
+        }
     }
     Invoke-Ui screenshot -a $AppPid -o (Join-Path $OutDir 'C-noresults.png') 2>$null
-    Test-UI 'NoResults: empty state clears with the query' {
-        # Clearing the box → empty query → the overlay must go (HasNoResults=false
-        # and the results row collapses to EmptyState). Robust regardless of which
-        # fake needles match. Invert a short present-wait: it must NOT find it.
-        Invoke-Ui set-value 'SearchBox' '' -a $AppPid
-        Start-Sleep -Milliseconds 500
-        Invoke-Ui wait-for 'NoResultsTitle' -w $mainHwnd -t 800 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) { throw 'no-results overlay still present after clearing the query' }
-        $global:LASTEXITCODE = 0
+    Test-UI 'NoResults: matching query restores rows and clears the overlay' {
+        Invoke-Ui set-value 'SearchBox' 'file_0' -a $AppPid
+        Invoke-Ui wait-for 'ResultRow-0' -w $mainHwnd --value 'file_0' --contains -t 5000
+        if ($LASTEXITCODE -eq 0) {
+            Invoke-Ui wait-for 'NoResultsTitle' -w $mainHwnd --gone -t 3000
+        }
     }
     Invoke-Ui screenshot -a $AppPid -o (Join-Path $OutDir 'C-scroll.png') 2>$null
     Invoke-Ui set-value 'SearchBox' '' -a $AppPid 2>$null | Out-Null
@@ -485,9 +729,30 @@ Write-Host 'FindMyFiles UI automation smoke suite' -ForegroundColor Cyan
 
 $ownsApp = $false
 try {
-    if ($PSCmdlet.ParameterSetName -eq 'Exe') {
+    if ($StableSmoke) {
+        if ($PSCmdlet.ParameterSetName -ne 'Exe') {
+            throw '-StableSmoke requires -ExePath.'
+        }
+        Write-Host "`n=== Shipping artifact smoke (no test seams) ===" -ForegroundColor Cyan
+        $script:AppPid = Start-StableApp -Exe $ExePath
+        $ownsApp = $true
+        Test-UI 'Shipping artifact exposes actionable WinUI content' {
+            # Layout-only panels are intentionally omitted from UIA's control
+            # view. Accept the primary control from either real startup state.
+            $setupProbe = Invoke-Ui wait-for 'EnableSearch' -a $script:AppPid -t 5000 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Invoke-Ui wait-for 'SearchBox' -a $script:AppPid -t 10000
+            }
+        }
+        Test-UI 'Shipping artifact remains alive after initialization' {
+            if (-not (Get-Process -Id $script:AppPid -ErrorAction SilentlyContinue)) {
+                throw 'Shipping app exited during initialization.'
+            }
+        }
+        Invoke-Ui screenshot -a $script:AppPid -o (Join-Path $OutDir 'stable-smoke.png') 2>$null
+    } elseif ($PSCmdlet.ParameterSetName -eq 'Exe') {
         # Standalone mode: drive both the setup screen and the fake-engine phases off
-        # one published exe path. Phase A spins its own --engine=empty process; the
+        # one published exe path. Phase A spins its own --engine=unavailable process; the
         # rest share a --fake-engine process.
         Invoke-SetupPhase -Exe $ExePath
         $script:AppPid = Start-App -Exe $ExePath -AppArgs @('--fake-engine')
@@ -495,24 +760,27 @@ try {
     } else {
         # PID mode (the `just ui-test` recipe): the recipe already launched the exe
         # under --fake-engine and handed us its PID. The setup phase needs its own
-        # --engine=empty process; if ExePath wasn't supplied we skip it and note why.
+        # --engine=unavailable process; if ExePath wasn't supplied we skip it and note why.
         if ($ExePath) {
             Invoke-SetupPhase -Exe $ExePath
         } else {
-            Write-Host "`n=== Phase A skipped (no -ExePath; PID mode can't relaunch --engine=empty) ===" -ForegroundColor Yellow
-            $script:results += @{ name = 'Setup phase'; status = 'SKIP'; detail = 'pass -ExePath to exercise --engine=empty' }
+            Write-Host "`n=== Phase A skipped (no -ExePath; PID mode can't relaunch --engine=unavailable) ===" -ForegroundColor Yellow
+            $script:results += @{ name = 'Setup phase'; status = 'SKIP'; detail = 'pass -ExePath to exercise --engine=unavailable' }
         }
         $ownsApp = $false
     }
 
-    Invoke-SearchPhase
-    Invoke-ScrollPhase
-    Invoke-DiagPhase
-    if ($IncludeFaults) {
-        Invoke-FaultPhase
-    } else {
-        Write-Host "`n=== Phase E skipped (pass -IncludeFaults; requires a DEBUG bundle) ===" -ForegroundColor Yellow
-        $script:results += @{ name = 'Fault phase'; status = 'SKIP'; detail = 'requires DEBUG --fake-engine; pass -IncludeFaults' }
+    if (-not $StableSmoke) {
+        Invoke-SearchPhase
+        Invoke-ServiceSurfacePhase
+        Invoke-ScrollPhase
+        Invoke-DiagPhase
+        if ($IncludeFaults) {
+            Invoke-FaultPhase
+        } else {
+            Write-Host "`n=== Phase E skipped (pass -IncludeFaults; requires a DEBUG bundle) ===" -ForegroundColor Yellow
+            $script:results += @{ name = 'Fault phase'; status = 'SKIP'; detail = 'requires DEBUG --fake-engine; pass -IncludeFaults' }
+        }
     }
 }
 finally {
@@ -520,6 +788,34 @@ finally {
     # run never leaves an orphaned process or a ghost Alt+Tab window behind.
     if ($ownsApp -and $script:AppPid) {
         Stop-AppGracefully $script:AppPid
+    }
+    # Preserve the test-owned app log before deleting its isolated state. UIA
+    # failures often happen after the window has disappeared, and a screenshot
+    # alone cannot explain startup/XAML/dispatcher failures. This contains no
+    # user profile state: every process in the suite receives DataDir above.
+    $logSource = $script:LogSource
+    $logArtifact = Join-Path $script:OutRoot 'logs'
+    if (Test-Path -LiteralPath $logArtifact) {
+        $resolvedLogArtifact = [IO.Path]::GetFullPath($logArtifact)
+        $resolvedRootPrefix = [IO.Path]::GetFullPath($script:OutRoot).TrimEnd(
+            [IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        if ($resolvedLogArtifact.StartsWith(
+            $resolvedRootPrefix,
+            [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $resolvedLogArtifact -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if (Test-Path -LiteralPath $logSource) {
+        Copy-Item -LiteralPath $logSource -Destination $logArtifact -Recurse -Force
+    }
+    # Delete only the exact, unique directory created under this run's artifact
+    # root. The containment check prevents an accidental broad recursive delete.
+    $resolvedData = [IO.Path]::GetFullPath($script:DataDir)
+    $resolvedRoot = [IO.Path]::GetFullPath($script:OutRoot).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if ($resolvedData.StartsWith($resolvedRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        (Split-Path -Leaf $resolvedData).StartsWith('state-', [StringComparison]::Ordinal)) {
+        Remove-Item -LiteralPath $resolvedData -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 

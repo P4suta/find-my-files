@@ -51,6 +51,18 @@ public sealed class VirtualResultListTests
     }
 
     [Fact]
+    public void Dispose_is_idempotent_and_releases_owned_result()
+    {
+        var result = new StubSearchResult(Rows.Many(3));
+        _list.Reassign(result, []);
+
+        _list.Dispose();
+        _list.Dispose();
+
+        Assert.True(result.Disposed);
+    }
+
+    [Fact]
     public void Indexer_UnseededPage_HandsOutPlaceholders_AndNeverFetches()
     {
         var rows = Rows.Many(100);

@@ -1,20 +1,21 @@
 # release-please — the version/CHANGELOG/tag bot (ADR-0035).
 #
 # Conventional Commits land on main → this action keeps a "Release PR" open that
-# bumps engine/Cargo.toml + engine/Cargo.lock (rust release-type) and the C# csproj
-# (extra-files generic updater), and updates CHANGELOG.md. Merging that PR makes
-# release-please create the GitHub Release as a DRAFT (config "draft": true); this
-# workflow then dispatches release.yml, which builds → signs → attaches assets to
-# the draft → publishes it (publishing creates the `vX.Y.Z` tag). The draft-first
-# order is what makes assets land before the release becomes immutable.
+# bumps engine/Cargo.toml + engine/Cargo.lock and the C# csproj, and updates
+# CHANGELOG.md. Merging that PR makes release-please create both the `vX.Y.Z`
+# tag (`force-tag-creation`: true) and a DRAFT GitHub Release. This workflow then
+# dispatches performance-gate.yml at that exact tag. Only the separate
+# performance-release.yml workflow, triggered after that run has completed
+# successfully, may dispatch release.yml. The measurement, checkout, environment
+# approval, and provenance therefore all identify the same immutable commit.
 # Humans never hand-pick or hand-edit a version.
 #
 # Runs as a GitHub App: a short-lived installation token (actions/create-github-app-token)
 # from two secrets — RELEASE_PLEASE_CLIENT_ID and RELEASE_PLEASE_PRIVATE_KEY — lets
 # release-please push the release commit + open the PR with a signed identity. With
-# those secrets unset the job runs green and no-ops: the scaffolding ships now, the
-# App lights it up later. (The release.yml dispatch uses GITHUB_TOKEN — a
-# workflow_dispatch is the one event GITHUB_TOKEN may start.) See docs/RELEASING.md.
+# either secret missing, an ordinary bot run fails visibly instead of silently
+# abandoning release maintenance. Release mutation and workflow dispatch are
+# separate jobs with separate least-privilege tokens. See docs/RELEASING.md.
 
 name: release-please
 
@@ -22,6 +23,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Recovery only: re-run the gate for an existing vX.Y.Z draft"
+        required: false
+        type: string
 
 # Never cancel a release-cut in flight; only one runs per ref anyway.
 concurrency:
@@ -33,37 +39,52 @@ permissions:
 
 jobs:
   release-please:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # The App private key lives in this environment's secrets. Configure the
-    # environment with a deployment-branch policy of `main` only, so a workflow on
-    # any other branch (or a malicious workflow edit on a feature branch) cannot
-    # read the credential — repository secrets, by contrast, are readable from a
-    # push to any branch. Deliberately set NO required reviewers: release-please
-    # must run unattended (the human gate is merging the Release PR; signing's
-    # approval gate is the separate `release` environment in release.yml). ADR-0035.
+    # The App identity is stored once in the repository-level
+    # RELEASE_PLEASE_CLIENT_ID / RELEASE_PLEASE_PRIVATE_KEY secrets because the
+    # publication job consumes the same identity. This environment retains a
+    # deployment-branch policy of `main` only and deliberately has NO required
+    # reviewers: release-please must run unattended (the human gate is merging
+    # the Release PR; signing/publication approvals live in the separate
+    # `release` environment in release.yml). ADR-0035.
     environment: release-please
-    permissions:
-      contents: write # create the release commit and the draft GitHub Release
-      pull-requests: write # open / maintain the Release PR
-      actions: write # dispatch release.yml once the draft release is created
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      sha: ${{ steps.rp.outputs.sha }}
+      pr_branch: ${{ steps.rp_branch.outputs.branch }}
+    permissions: {}
     env:
       # Server-side boolean — never exposes the secret values.
       HAS_APP: ${{ secrets.RELEASE_PLEASE_CLIENT_ID != '' && secrets.RELEASE_PLEASE_PRIVATE_KEY != '' }}
+      # A tag input means "recover dispatch only"; do not also run the version bot.
+      RUN_BOT: ${{ github.event_name == 'push' || inputs.tag_name == '' }}
     steps:
-      # Mint a short-lived installation token scoped to this repo. Its pushes (the
-      # vX.Y.Z tag) DO trigger release.yml, unlike GITHUB_TOKEN's.
+      - name: Require the release-please App configuration
+        if: env.RUN_BOT == 'true' && env.HAS_APP != 'true'
+        run: |
+          echo "::error::Both RELEASE_PLEASE_CLIENT_ID and RELEASE_PLEASE_PRIVATE_KEY are required."
+          exit 1
+
+      # Mint a short-lived installation token scoped to this repo. It lets
+      # release-please write the release commit/tag and maintain its PR/release;
+      # release.yml itself remains workflow_dispatch-only.
       - name: Mint GitHub App token
         id: app-token
-        if: env.HAS_APP == 'true'
+        if: env.HAS_APP == 'true' && env.RUN_BOT == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.RELEASE_PLEASE_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PLEASE_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
 
       - name: release-please (active)
         id: rp
-        if: env.HAS_APP == 'true'
+        if: env.HAS_APP == 'true' && env.RUN_BOT == 'true'
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ steps.app-token.outputs.token }}
@@ -87,57 +108,287 @@ jobs:
         env:
           PR_JSON: ${{ steps.rp.outputs.pr }}
         run: echo "branch=$(printf '%s' "$PR_JSON" | jq -r '.headBranchName')" >> "$GITHUB_OUTPUT"
-      - name: Check out the Release PR branch
-        if: ${{ steps.rp_branch.outputs.branch != '' }}
+
+  # Mutable Release PR code may calculate the lockfile, but it receives no App
+  # write token. Its only output is one inert Cargo.lock artifact plus the exact
+  # branch-head SHA observed before any branch-controlled action ran.
+  sync-release-lock:
+    needs: release-please
+    if: >-
+      ${{
+        needs.release-please.result == 'success' &&
+        needs.release-please.outputs.pr_branch != ''
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      head_sha: ${{ steps.head.outputs.sha }}
+    steps:
+      - name: Check out the mutable Release PR branch without write credentials
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ steps.rp_branch.outputs.branch }}
-          token: ${{ steps.app-token.outputs.token }}
-      - name: Set up Rust (only to sync the lock)
-        if: ${{ steps.rp_branch.outputs.branch != '' }}
-        uses: ./.github/actions/rust-toolchain
-      - name: Sync Cargo.lock to the bumped workspace version
-        if: ${{ steps.rp_branch.outputs.branch != '' }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPO: ${{ github.repository }}
-          BRANCH: ${{ steps.rp_branch.outputs.branch }}
+          ref: ${{ needs.release-please.outputs.pr_branch }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      # Capture the checkout identity before executing even the branch-local
+      # toolchain action. The later API-only job uses this as an atomic CAS.
+      - name: Pin the checked-out Release PR head
+        id: head
+        shell: bash
         run: |
-          cargo update --workspace --manifest-path engine/Cargo.toml
-          if git diff --quiet -- engine/Cargo.lock; then
-            echo "Cargo.lock already in sync."
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::invalid Release PR head '$sha'"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Rust only to calculate Cargo.lock
+        uses: ./.github/actions/rust-toolchain
+
+      - name: Calculate Cargo.lock for the bumped workspace version
+        shell: bash
+        run: cargo update --workspace --manifest-path engine/Cargo.toml
+
+      - name: Stage the single-file write candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/release-lock
+          cp engine/Cargo.lock build/release-lock/Cargo.lock
+
+      - name: Upload the lockfile candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-lock-candidate
+          path: build/release-lock/Cargo.lock
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
+
+  # A fresh runner receives the candidate as data, mints the App token only
+  # after download, and performs one atomic GraphQL commit. No checkout, local
+  # action, toolchain, gh executable, or mutable-branch process shares the token.
+  commit-release-lock:
+    needs: [release-please, sync-release-lock]
+    if: >-
+      ${{
+        always() &&
+        needs.release-please.result == 'success' &&
+        needs.sync-release-lock.result == 'success' &&
+        needs.release-please.outputs.pr_branch != ''
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: release-please
+    permissions: {}
+    steps:
+      - name: Download the lockfile candidate before minting write authority
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-lock-candidate
+          path: build/release-lock
+
+      - name: Mint short-lived App token for the atomic commit
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_PLEASE_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Commit only Cargo.lock with an atomic branch-head guard
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          BRANCH: ${{ needs.release-please.outputs.pr_branch }}
+          EXPECTED_HEAD: ${{ needs.sync-release-lock.outputs.head_sha }}
+          LOCK_PATH: build/release-lock/Cargo.lock
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fs = require("fs");
+            const branch = process.env.BRANCH;
+            const expectedHead = process.env.EXPECTED_HEAD;
+            const lockPath = process.env.LOCK_PATH;
+
+            if (branch !== "release-please--branches--main--components--find-my-files") {
+              core.setFailed(`refusing unexpected release-please branch '${branch}'`);
+              return;
+            }
+            if (!/^[0-9a-f]{40}$/.test(expectedHead)) {
+              core.setFailed(`invalid expected head '${expectedHead}'`);
+              return;
+            }
+
+            const stat = fs.lstatSync(lockPath);
+            if (!stat.isFile() || stat.size === 0 || stat.size > 10 * 1024 * 1024) {
+              core.setFailed(`invalid Cargo.lock candidate (${stat.size} bytes)`);
+              return;
+            }
+            const candidate = fs.readFileSync(lockPath);
+            const currentRef = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `heads/${branch}`,
+            });
+            if (currentRef.data.object.sha !== expectedHead) {
+              core.setFailed(
+                `Release PR head moved from ${expectedHead} to ${currentRef.data.object.sha}; retry`,
+              );
+              return;
+            }
+            const current = await github.rest.repos.getContent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              path: "engine/Cargo.lock",
+              ref: expectedHead,
+            });
+            if (Array.isArray(current.data) || current.data.type !== "file") {
+              core.setFailed("engine/Cargo.lock is not a file at the expected head");
+              return;
+            }
+            const existing = Buffer.from(
+              current.data.content.replace(/\s/g, ""),
+              "base64",
+            );
+            if (candidate.equals(existing)) {
+              core.info("Cargo.lock already matches the calculated candidate.");
+              return;
+            }
+
+            const mutation = `
+              mutation($input: CreateCommitOnBranchInput!) {
+                createCommitOnBranch(input: $input) {
+                  commit { oid url }
+                }
+              }
+            `;
+            const result = await github.graphql(mutation, {
+              input: {
+                branch: {
+                  repositoryNameWithOwner: `${context.repo.owner}/${context.repo.repo}`,
+                  refName: branch,
+                },
+                message: {
+                  headline: "chore: sync Cargo.lock to the release version",
+                },
+                fileChanges: {
+                  additions: [{
+                    path: "engine/Cargo.lock",
+                    contents: candidate.toString("base64"),
+                  }],
+                },
+                expectedHeadOid: expectedHead,
+              },
+            });
+            core.info(
+              `Committed Cargo.lock as ${result.createCommitOnBranch.commit.oid}`,
+            );
+
+  # Keep dispatch authority away from the job that checks out and executes the
+  # mutable Release PR branch. This job can start only the secretless performance
+  # workflow; publication authority lives in performance-release.yml and is never
+  # present on the elevated self-hosted measurement runner.
+  dispatch-performance-gate:
+    needs: release-please
+    if: >-
+      ${{
+        needs.release-please.result == 'success' &&
+        github.ref == 'refs/heads/main' &&
+        (
+          needs.release-please.outputs.release_created == 'true' ||
+          inputs.tag_name != ''
+        )
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write # dispatch the exact-tag performance gate
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag_name || needs.release-please.outputs.tag_name }}
+      EXPECTED_SHA: ${{ needs.release-please.outputs.sha }}
+    steps:
+      - name: Validate draft identity and dispatch the exact tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::performance dispatch requires an exact vX.Y.Z tag, got '$TAG'"
+            exit 1
+          fi
+
+          tag_sha=$(gh api "repos/$REPO/commits/$TAG" --jq '.sha')
+          if [ -n "$EXPECTED_SHA" ] && [ "$tag_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::release-please SHA $EXPECTED_SHA does not match $TAG ($tag_sha)"
+            exit 1
+          fi
+          lineage=$(gh api "repos/$REPO/compare/$tag_sha...main" --jq '.status')
+          if [ "$lineage" != "ahead" ] && [ "$lineage" != "identical" ]; then
+            echo "::error::$TAG is not on main's protected lineage (compare status: $lineage)"
+            exit 1
+          fi
+
+          release_title="release publish $TAG"
+          release_runs=$(gh run list --repo "$REPO" --workflow release.yml \
+            --commit "$tag_sha" --event workflow_dispatch --limit 20 \
+            --json displayTitle,status,conclusion,databaseId)
+          existing_release=$(jq -r --arg title "$release_title" '
+            .[] |
+            select(.displayTitle == $title) |
+            select(.status != "completed" or .conclusion == "success") |
+            .databaseId
+          ' <<<"$release_runs" | head -n 1)
+          if [ -n "$existing_release" ]; then
+            echo "Release run $existing_release already owns $TAG — no duplicate gate."
             exit 0
           fi
-          # Commit via the Contents API, not `git push`: the repo's
-          # require-signed-commits ruleset rejects an unsigned bot commit, but a
-          # commit created through the API is signed by GitHub (the same way
-          # release-please's own commits are). One file, on the Release PR branch.
-          gh api --method PUT "repos/$REPO/contents/engine/Cargo.lock" \
-            -f message="chore: sync Cargo.lock to the release version" \
-            -f branch="$BRANCH" \
-            -f sha="$(git rev-parse "HEAD:engine/Cargo.lock")" \
-            -f content="$(base64 -w0 engine/Cargo.lock)"
 
-      # release-please created the GitHub Release as a DRAFT (config "draft": true).
-      # Draft releases don't fire `release` events and don't create the git tag, so
-      # we explicitly kick off release.yml to build → sign → attach assets to the
-      # draft → publish it (publishing is what creates the tag). A GITHUB_TOKEN
-      # dispatch IS allowed to start a workflow_dispatch run (the documented
-      # recursion-guard exception), so this needs no App token. ADR-0035.
-      - name: Trigger the signed-release build
-        if: ${{ env.HAS_APP == 'true' && steps.rp.outputs.release_created == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ steps.rp.outputs.tag_name }}
-          SHA: ${{ steps.rp.outputs.sha }}
-        run: |
-          gh workflow run release.yml --repo "$REPO" --ref main \
-            -f tag_name="$TAG" -f sha="$SHA" -f publish=true
+          release_pages=$(gh api --paginate "repos/$REPO/releases?per_page=100")
+          release_matches=$(jq -s --arg tag "$TAG" '
+            add |
+            map(select(.draft == true and .tag_name == $tag))
+          ' <<<"$release_pages")
+          if [ "$(jq 'length' <<<"$release_matches")" -ne 1 ]; then
+            echo "::error::$TAG must identify exactly one draft release"
+            exit 1
+          fi
+          release_json=$(jq -c '.[0]' <<<"$release_matches")
+          if [ "$(jq -r '.draft' <<<"$release_json")" != "true" ]; then
+            echo "::error::$TAG must already have a draft release"
+            exit 1
+          fi
+          if [ "$(jq -r '.tag_name' <<<"$release_json")" != "$TAG" ]; then
+            echo "::error::draft release tag identity drifted from $TAG"
+            exit 1
+          fi
 
-      - name: release-please (dormant — App not configured)
-        if: env.HAS_APP != 'true'
-        run: |
-          echo "::notice::release-please is dormant — set the RELEASE_PLEASE_CLIENT_ID and"
-          echo "RELEASE_PLEASE_PRIVATE_KEY secrets (a GitHub App) to activate."
-          echo "See docs/RELEASING.md and ADR-0035."
+          target=$(jq -r '.target_commitish' <<<"$release_json")
+          if [[ ! "$target" =~ ^[0-9a-f]{40}$ ]] || [ "$target" != "$tag_sha" ]; then
+            echo "::error::draft target $target must be the exact $TAG commit $tag_sha, not a mutable ref"
+            exit 1
+          fi
+
+          gate_title="performance-gate $TAG"
+          gate_runs=$(gh run list --repo "$REPO" --workflow performance-gate.yml \
+            --commit "$tag_sha" --event workflow_dispatch --limit 20 \
+            --json displayTitle,status,databaseId)
+          active_gate=$(jq -r --arg title "$gate_title" '
+            .[] |
+            select(.displayTitle == $title and .status != "completed") |
+            .databaseId
+          ' <<<"$gate_runs" | head -n 1)
+          if [ -n "$active_gate" ]; then
+            echo "Performance run $active_gate already owns $TAG — no duplicate dispatch."
+            exit 0
+          fi
+
+          gh workflow run performance-gate.yml --repo "$REPO" --ref "$TAG" \
+            -f tag_name="$TAG"

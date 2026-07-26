@@ -14,7 +14,7 @@ namespace FindMyFiles.Engine;
 /// for the subscription lifetime (the GC-rooting rule for callback delegates,
 /// satisfied structurally).
 /// </summary>
-public sealed class EngineEventMarshaler : IDisposable
+internal sealed class EngineEventMarshaler : IDisposable
 {
     private readonly IEngineClient _engine;
     private readonly Action<string> _onIndexChanged;

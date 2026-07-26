@@ -74,7 +74,7 @@ public sealed class MainViewModelConnectionTests
             register: () => Task.FromResult(ServiceActionOutcome.Ok),
             relaunch: () => relaunches++);
         using var vm = new MainViewModel(
-            FakeEngineClient.CreateEmpty(), _dispatcher, new AppSettings(), provisioner: provisioner);
+            new UnavailableEngineClient(), _dispatcher, new AppSettings(), provisioner: provisioner);
 
         await vm.EnableSearchAsync();
 
@@ -91,7 +91,7 @@ public sealed class MainViewModelConnectionTests
             register: () => Task.FromResult(ServiceActionOutcome.Cancelled),
             relaunch: () => relaunches++);
         using var vm = new MainViewModel(
-            FakeEngineClient.CreateEmpty(), _dispatcher, new AppSettings(), provisioner: provisioner);
+            new UnavailableEngineClient(), _dispatcher, new AppSettings(), provisioner: provisioner);
 
         await vm.EnableSearchAsync();
 
@@ -108,7 +108,7 @@ public sealed class MainViewModelConnectionTests
             register: () => Task.FromResult(ServiceActionOutcome.Failed),
             relaunch: () => relaunches++);
         using var vm = new MainViewModel(
-            FakeEngineClient.CreateEmpty(), _dispatcher, new AppSettings(), provisioner: provisioner);
+            new UnavailableEngineClient(), _dispatcher, new AppSettings(), provisioner: provisioner);
 
         await vm.EnableSearchAsync();
 

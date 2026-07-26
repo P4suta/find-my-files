@@ -52,12 +52,15 @@ public static class DiagFormat
     /// <returns>The labelled generation.</returns>
     public static string Gen(ulong generation) => "gen " + generation.ToString(Inv);
 
-    /// <summary>The most recent query text shown on its own line above the stat
-    /// tiles (<c>"(all)"</c> for the empty query).</summary>
+    /// <summary>Privacy-safe query summary shown above the stat tiles.</summary>
     /// <param name="t">The last query trace, or null when none was emitted.</param>
-    /// <returns>The query text, or empty when <paramref name="t"/> is null.</returns>
+    /// <returns>The query length, or empty when <paramref name="t"/> is null.</returns>
     public static string Query(QueryTraceData? t) =>
-        t is null ? string.Empty : (string.IsNullOrEmpty(t.Query) ? "(all)" : t.Query);
+        t is null
+            ? string.Empty
+            : t.QueryLength == 0
+                ? "(all)"
+                : t.QueryLength.ToString(Inv) + " chars";
 
     /// <summary>End-to-end time as the "時間" stat-tile value (e.g. <c>"6.05 ms"</c>).</summary>
     /// <param name="t">The last query trace, or null when none was emitted.</param>
