@@ -154,6 +154,14 @@ pub fn idle_should_stop(
 /// process token is reduced to `SeChangeNotifyPrivilege`, matching the service.
 /// The `stable_exe` path is the fixed hardened-data-root copy (never user input),
 /// so it needs no escaping.
+/// No `RequiredPrivileges`/`ProcessTokenSidType`: those are `IPrincipal2`
+/// properties, and the schema `schtasks /Create /XML` validates against has no
+/// such elements at any `Task version` — measured, both are rejected with "the
+/// task XML contains an unexpected node" on 1.3 and 1.4 alike. Narrowing the GC
+/// task's token needs COM registration (`ITaskService` + `IPrincipal2`) rather
+/// than a richer document. The *service* still has its privilege set narrowed
+/// via `ChangeServiceConfig2(SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO)`, which is
+/// a different mechanism and does work.
 #[must_use]
 pub fn gc_task_xml(stable_exe: &Path) -> Vec<u8> {
     let command = xml_text(&stable_exe.display().to_string());
@@ -163,7 +171,7 @@ pub fn gc_task_xml(stable_exe: &Path) -> Vec<u8> {
          <Task version=\"1.3\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
          <RegistrationInfo><SecurityDescriptor>{security_descriptor}</SecurityDescriptor><Description>find-my-files engine on-demand GC (ADR-0027)</Description></RegistrationInfo>\n\
          <Triggers><CalendarTrigger><StartBoundary>2024-01-01T03:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers>\n\
-         <Principals><Principal id=\"Author\"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel><RequiredPrivileges><Privilege>SeChangeNotifyPrivilege</Privilege></RequiredPrivileges></Principal></Principals>\n\
+         <Principals><Principal id=\"Author\"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\n\
          <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><ExecutionTimeLimit>PT5M</ExecutionTimeLimit></Settings>\n\
          <Actions Context=\"Author\"><Exec><Command>{command}</Command><Arguments>gc</Arguments></Exec></Actions>\n\
          </Task>\n",
@@ -309,12 +317,17 @@ mod tests {
             "with the gc verb"
         );
         assert!(text.contains("<UserId>S-1-5-18</UserId>"), "as SYSTEM");
-        assert!(
-            text.contains(
-                "<RequiredPrivileges><Privilege>SeChangeNotifyPrivilege</Privilege></RequiredPrivileges>"
-            ),
-            "the SYSTEM GC process receives only its traversal privilege"
-        );
+        // Tripwire, not a feature check. These elements were present here and
+        // made every real registration fail while this very test stayed green:
+        // a string assertion cannot tell a valid element from one the schema
+        // rejects. `gc_task_xml_registers_with_schtasks` is what proves the
+        // document is accepted; this only stops them creeping back.
+        for unsupported in ["RequiredPrivileges", "ProcessTokenSidType"] {
+            assert!(
+                !text.contains(unsupported),
+                "{unsupported} is an IPrincipal2 property that the schtasks XML schema rejects"
+            );
+        }
         assert!(
             text.contains(
                 "<SecurityDescriptor>O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)</SecurityDescriptor>"

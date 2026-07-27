@@ -1653,12 +1653,18 @@ fn rename_handle_relative_with_replace(
         .len()
         .checked_mul(size_of::<u16>())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rename name is too long"))?;
-    // FILE_RENAME_INFO ends in a one-element variable-length array. The
-    // information length is the fixed prefix through FileName plus exactly the
-    // byte count declared in FileNameLength; trailing struct padding is not
-    // part of the variable-length record consumed by the filesystem.
+    // FILE_RENAME_INFO ends in a one-element variable-length array. Reserve the
+    // declared name *plus a terminating NUL*: measured behaviour is that the
+    // name is consumed past `FileNameLength` up to the first zero unit, so an
+    // unterminated buffer appends whatever follows it in memory to the created
+    // name. That went unnoticed because the `usize`-backed allocation rounds up
+    // to a word, which supplies a stray zero for some lengths and none for
+    // others — the bug is name-length dependent, not absent.
+    // `FileNameLength` itself stays the name without the terminator, as
+    // documented.
     let buffer_bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName)
         .checked_add(name_bytes)
+        .and_then(|bytes| bytes.checked_add(size_of::<u16>()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rename buffer overflow"))?;
     let word_bytes = size_of::<usize>();
     let mut buffer = vec![0usize; buffer_bytes.div_ceil(word_bytes)];
@@ -1667,10 +1673,12 @@ fn rename_handle_relative_with_replace(
     // `buffer_bytes` covers the complete fixed structure plus every UTF-16 name
     // byte, and each field is written without first forming an unaligned ref.
     unsafe {
-        // The backing allocation is zeroed, so writing FileRenameInfo's
-        // BOOLEAN member also leaves the rest of its union padding zero.
+        // Write the union through its widest member. Writing `ReplaceIfExists`
+        // instead copies the union's full four bytes from a value whose other
+        // three are uninitialized, handing them to the kernel; `Flags` covers
+        // all four, and its low byte is the BOOLEAN the filesystem reads.
         std::ptr::addr_of_mut!((*info).Anonymous).write(FILE_RENAME_INFO_0 {
-            ReplaceIfExists: replace,
+            Flags: u32::from(replace),
         });
         std::ptr::addr_of_mut!((*info).RootDirectory).write(std::ptr::null_mut());
         std::ptr::addr_of_mut!((*info).FileNameLength).write(
@@ -2027,13 +2035,80 @@ pub fn verify_gc_task_security() -> io::Result<()> {
         READ_CONTROL_ACCESS | FILE_READ_ATTRIBUTES_ACCESS,
         windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
     )?;
-    if !handle_security_matches(&locked.file, gc_task_sddl())? {
+    let actual = handle_security_sddl(&locked.file)?;
+    if !gc_task_security_is_acceptable(&actual) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "GC task owner/group/DACL does not match its protected registration descriptor",
+            format!(
+                "GC task security admits a principal other than SYSTEM/Administrators, \
+                 or is not protected: {:?}",
+                actual.trim_end_matches('\0')
+            ),
         ));
     }
     Ok(())
+}
+
+/// Whether the registered GC task's descriptor still admits nobody but SYSTEM
+/// and Administrators.
+///
+/// Deliberately a property, not an equality. The task file's descriptor is
+/// written by the Task Scheduler, not by this process: the registration XML
+/// asks for one and the registrar is free to add ACEs of its own — an `SY` read
+/// grant has been observed on a real install and *not* on an otherwise identical
+/// re-registration. Comparing against a fixed literal therefore fails on an
+/// accident of the registrar rather than on any weakening, which is what broke
+/// `install` outright.
+///
+/// What actually matters is unchanged and is what this checks: Administrators
+/// own the object, the DACL is protected so nothing is inherited into it, and
+/// every ACE is an allow grant to SYSTEM or Administrators. A standard user
+/// gaining any access to a task that runs as SYSTEM is the escalation; an extra
+/// SYSTEM ACE is not.
+fn gc_task_security_is_acceptable(sddl: &str) -> bool {
+    const ADMINISTRATORS: [&str; 2] = ["BA", "S-1-5-32-544"];
+    const SYSTEM: [&str; 2] = ["SY", "S-1-5-18"];
+
+    let sddl = sddl.trim_end_matches('\0');
+    let Some(rest) = sddl.strip_prefix("O:") else {
+        return false;
+    };
+    let Some((owner, rest)) = rest.split_once("G:") else {
+        return false;
+    };
+    let Some((group, dacl)) = rest.split_once("D:") else {
+        return false;
+    };
+    if !ADMINISTRATORS.contains(&owner) || !ADMINISTRATORS.contains(&group) {
+        return false;
+    }
+    // A SACL, if Windows ever emitted one here, would follow the DACL; this
+    // function is only ever handed OWNER|GROUP|DACL, so its presence means the
+    // string is not the shape assumed and the check must fail closed.
+    let Some((flags, aces)) = dacl.split_once('(') else {
+        return false;
+    };
+    if !flags.contains('P') || flags.contains("S:") {
+        return false;
+    }
+    let mut remaining = format!("({aces}");
+    while !remaining.is_empty() {
+        let Some(stripped) = remaining.strip_prefix('(') else {
+            return false;
+        };
+        let Some((ace, tail)) = stripped.split_once(')') else {
+            return false;
+        };
+        let fields: Vec<&str> = ace.split(';').collect();
+        let [ace_type, _flags, _rights, _object, _inherited, trustee] = fields[..] else {
+            return false;
+        };
+        if ace_type != "A" || !(SYSTEM.contains(&trustee) || ADMINISTRATORS.contains(&trustee)) {
+            return false;
+        }
+        remaining = tail.to_string();
+    }
+    true
 }
 
 /// The owner/group/DACL descriptors `install` applies across the data tree.
@@ -2716,6 +2791,110 @@ mod tests {
             std::fs::read(index.join("c.fmfidx")).expect("index payload still readable"),
             b"payload"
         );
+    }
+
+    /// Both descriptors below were observed on this machine from the *same*
+    /// registration XML — the registrar appended an `SY` read ACE on one install
+    /// and not on a re-registration. That is why this is a property check.
+    #[test]
+    fn gc_task_security_accepts_registrar_variation_but_no_other_principal() {
+        for accepted in [
+            "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)",
+            "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;SY)",
+            "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)",
+            gc_task_sddl(),
+            "O:S-1-5-32-544G:S-1-5-32-544D:PAI(A;;FA;;;S-1-5-18)(A;;FA;;;S-1-5-32-544)",
+            // A trailing NUL is how the readback arrives from Windows.
+            "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)\0",
+        ] {
+            assert!(
+                gc_task_security_is_acceptable(accepted),
+                "must accept {accepted:?}"
+            );
+        }
+
+        for rejected in [
+            // Any other principal on a task that runs as SYSTEM is the escalation.
+            "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)",
+            "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)",
+            "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;S-1-5-21-1-2-3-1001)",
+            // Unprotected: the descriptor could then be widened by inheritance.
+            "O:BAG:BAD:AI(A;;FA;;;SY)(A;;FA;;;BA)",
+            // Owned or grouped by anyone else.
+            "O:BUG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)",
+            "O:BAG:BUD:PAI(A;;FA;;;SY)(A;;FA;;;BA)",
+            // Deny ACEs are not part of the shape this accepts.
+            "O:BAG:BAD:PAI(D;;FA;;;SY)(A;;FA;;;BA)",
+            // Malformed rather than merely different — must fail closed.
+            "O:BAG:BAD:PAI(A;;FA;;;SY",
+            "not-a-descriptor",
+            "",
+        ] {
+            assert!(
+                !gc_task_security_is_acceptable(rejected),
+                "must reject {rejected:?}"
+            );
+        }
+    }
+
+    /// A handle-relative rename must produce *exactly* the requested leaf.
+    ///
+    /// Found on a real install: the quarantined root landed on disk as
+    /// `.find-my-files.untrusted-7156-0` followed by four UTF-16 units of
+    /// unrelated process memory. The caller's reported path and the object that
+    /// exists then disagree, and install fails looking for a name that is not
+    /// there — which is how it surfaced.
+    ///
+    /// Every leaf length is swept, because the defect is length-dependent: the
+    /// `usize`-backed buffer rounds up to a word, so some lengths happen to
+    /// leave a stray zero after the name and terminate correctly while others
+    /// do not. Testing one name proves nothing about another.
+    #[test]
+    fn handle_relative_rename_produces_exactly_the_requested_leaf() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        let anchor = tempfile::tempdir().expect("anchor");
+        let parent = open_checked(
+            anchor.path(),
+            Some(ObjectKind::Directory),
+            FILE_READ_ATTRIBUTES_ACCESS | FILE_ADD_SUBDIRECTORY_ACCESS | FILE_TRAVERSE_ACCESS,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        )
+        .expect("parent handle");
+
+        let mut leaves: Vec<String> = (1..=40).map(|len| "a".repeat(len)).collect();
+        leaves.push(".find-my-files.untrusted-7156-0".to_string());
+        leaves.push(".fmf-stage-1-2".to_string());
+
+        for leaf in leaves {
+            let source_path = anchor.path().join("source");
+            std::fs::create_dir(&source_path).expect("source directory");
+            let source = open_checked(
+                &source_path,
+                Some(ObjectKind::Directory),
+                DELETE_ACCESS | FILE_READ_ATTRIBUTES_ACCESS,
+                FILE_SHARE_READ,
+            )
+            .expect("source handle");
+
+            rename_handle_relative_with_replace(&source.file, &parent.file, &leaf, false)
+                .unwrap_or_else(|error| panic!("rename to {leaf:?}: {error}"));
+            drop(source);
+
+            let found: Vec<String> = std::fs::read_dir(anchor.path())
+                .expect("list anchor")
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                found,
+                vec![leaf.clone()],
+                "the renamed object must carry exactly the requested leaf, with nothing appended"
+            );
+            std::fs::remove_dir(anchor.path().join(&leaf)).expect("clean up");
+        }
     }
 
     /// The recursion bound is the property that matters: an unbounded walk is a

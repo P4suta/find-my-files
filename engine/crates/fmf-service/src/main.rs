@@ -393,6 +393,10 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
         &service_info,
         ServiceAccess::CHANGE_CONFIG
             | ServiceAccess::DELETE
+            // Required by ChangeServiceConfig2(SERVICE_CONFIG_FAILURE_ACTIONS)
+            // because the recovery actions are SC_ACTION_RESTART: the handle
+            // that configures a restart action must itself be able to start.
+            | ServiceAccess::START
             | ServiceAccess::WRITE_DAC
             | ServiceAccess::WRITE_OWNER
             | ServiceAccess::READ_CONTROL,
@@ -417,6 +421,11 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
         service
             .set_description(fmf_proto::SERVICE_PROTOCOL_MARKER)
             .map_err(|e| format!("service protocol marker: {}", error_chain(&e)))?;
+        // SC_ACTION_RESTART is what makes SERVICE_START a *required* right on the
+        // handle here, over and above SERVICE_CHANGE_CONFIG — see the access
+        // mask requested at `create_service`. Without it this call is denied
+        // while the description write just above, needing only CHANGE_CONFIG,
+        // succeeds.
         service
             .update_failure_actions(ServiceFailureActions {
                 reset_period: windows_service::service::ServiceFailureResetPeriod::After(
@@ -432,7 +441,7 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
                     3
                 ]),
             })
-            .map_err(|e| format!("failure actions: {e}"))?;
+            .map_err(|e| format!("failure actions: {}", error_chain(&e)))?;
 
         // 5. Raw config2: strip privileges, stretch the preshutdown window
         //    (modern default is only 10s — docs/RESEARCH.md).

@@ -95,8 +95,51 @@ fn hello(s: &mut PipeStream, id: u32) {
     assert_eq!(h.status, codes::OK);
 }
 
+/// `VolumeStatusWire` carries no reason for a `Failed` state, so a bare
+/// assertion reports only that the scan failed. The reason is in the service's
+/// own rolling log, and the `TestDir` holding it is deleted as the panic
+/// unwinds — read it *before* asserting or it is gone.
+///
+/// This exists because that failure is intermittent. A run that fails without
+/// saying why costs a whole elevated session to chase; one that prints the log
+/// tail is a diagnosis.
+fn service_log_tail(data_dir: &std::path::Path) -> String {
+    let Ok(entries) = std::fs::read_dir(data_dir.join("logs")) else {
+        return "<no logs directory>".to_string();
+    };
+    let newest = entries
+        .flatten()
+        .filter(|entry| entry.path().is_file())
+        .max_by_key(|entry| {
+            entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        });
+    let Some(newest) = newest else {
+        return "<logs directory is empty>".to_string();
+    };
+    match std::fs::read_to_string(newest.path()) {
+        Ok(text) => {
+            let lines: Vec<&str> = text.lines().collect();
+            let tail = lines.len().saturating_sub(40);
+            format!(
+                "--- tail of {} ---\n{}",
+                newest.path().display(),
+                lines[tail..].join("\n")
+            )
+        }
+        Err(error) => format!("<log unreadable: {error}>"),
+    }
+}
+
 /// Polls `IndexStatus` until C: is Ready; returns the entry count.
-fn wait_ready(s: &mut PipeStream, next_id: &mut u32, deadline: Duration) -> u64 {
+fn wait_ready(
+    s: &mut PipeStream,
+    next_id: &mut u32,
+    deadline: Duration,
+    data_dir: &std::path::Path,
+) -> u64 {
     let begin = Instant::now();
     loop {
         *next_id += 1;
@@ -105,14 +148,22 @@ fn wait_ready(s: &mut PipeStream, next_id: &mut u32, deadline: Duration) -> u64 
         let status: Vec<messages::VolumeStatusWire> =
             messages::decode_json("IndexStatus", &p).expect("decode IndexStatus");
         if let Some(v) = status.iter().find(|v| v.volume == "C:") {
-            assert_ne!(v.state, 3, "C: indexing failed");
+            assert_ne!(
+                v.state,
+                3,
+                "C: indexing failed after {:?} with {} entries\n{}",
+                begin.elapsed(),
+                v.entries,
+                service_log_tail(data_dir)
+            );
             if v.state == 1 {
                 return v.entries;
             }
         }
         assert!(
             begin.elapsed() < deadline,
-            "C: not Ready within {deadline:?}"
+            "C: not Ready within {deadline:?}; last status {status:?}\n{}",
+            service_log_tail(data_dir)
         );
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -135,7 +186,7 @@ fn service_e2e_flush_survives_kill_and_restores() {
     let mut s = connect_with_retry(&pipe_name, Duration::from_secs(30));
     let mut id = 0u32;
     hello(&mut s, 0);
-    let entries = wait_ready(&mut s, &mut id, Duration::from_mins(10));
+    let entries = wait_ready(&mut s, &mut id, Duration::from_mins(10), data_dir.path());
     assert!(entries > 10_000, "suspiciously small C: index: {entries}");
 
     id += 1;
@@ -170,7 +221,7 @@ fn service_e2e_flush_survives_kill_and_restores() {
     let mut id2 = 0u32;
     hello(&mut s2, 0);
     let restore_begin = Instant::now();
-    let restored = wait_ready(&mut s2, &mut id2, Duration::from_mins(1));
+    let restored = wait_ready(&mut s2, &mut id2, Duration::from_mins(1), data_dir.path());
     let ready_in = restore_begin.elapsed();
     assert!(restored > 10_000);
     // The M2 gate is restore→ready ≤2s engine-side; over a child process +

@@ -75,6 +75,14 @@ const ADMIN_TESTS: &[AdminTest] = &[
         binary_id: "fmf-service",
         name: "pipe::admin_security_tests::named_pipe_security_boundaries_are_enforced_on_real_tokens_and_transports",
     },
+    // Registers a real Scheduled Task: the only way to prove the GC task
+    // document is one the registrar accepts. A string assertion over the same
+    // XML stayed green for an element `schtasks` rejects outright.
+    AdminTest {
+        source: "engine/crates/fmf-service/tests/lifecycle_admin.rs",
+        binary_id: "fmf-service::lifecycle_admin",
+        name: "gc_task_xml_registers_with_schtasks",
+    },
     AdminTest {
         source: "engine/crates/fmf-service/tests/security_admin.rs",
         binary_id: "fmf-service::security_admin",
