@@ -1,5 +1,6 @@
 # Required scheduled sentinel for the elevated-only surface: real C: MFT scan,
-# USN tailing, streaming/reference equivalence, and service durability/restore.
+# USN tailing, streaming/reference equivalence, service durability/restore,
+# and real-token/local-user/remote-transport named-pipe isolation.
 # windows-2025 is elevated; sustained green runs promoted this from an
 # informational experiment into both a failing nightly signal and a stable
 # release gate.
@@ -20,7 +21,7 @@ permissions:
 jobs:
   admin-tests:
     runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -28,24 +29,20 @@ jobs:
       - uses: ./.github/actions/rust-toolchain
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.140,just@1.54.0
+          fallback: none
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: engine
           shared-key: engine-win # shared with ci.yml/codeql to reuse deps
-      - name: elevated real-volume suite
-        run: >-
-          cargo nextest run --locked --workspace --profile ci
-          --run-ignored ignored-only
-        working-directory: engine
-        env:
-          FMF_ADMIN_TESTS: "1"
+      - name: elevated real-volume and machine-security suite
+        run: just test-admin
       - name: Upload nextest evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-admin-nextest
-          path: build/engine/nextest-ci.xml
+          path: build/engine/nextest/admin/admin.xml
           retention-days: 14
           if-no-files-found: error
           overwrite: true

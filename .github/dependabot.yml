@@ -1,8 +1,11 @@
 version: 2
 updates:
-  # Rust workspace (manifest + Cargo.lock live under engine/).
+  # Shipped Rust workspace plus the deliberately standalone fuzz workspace;
+  # each owns a Cargo.lock and therefore needs an explicit update root.
   - package-ecosystem: cargo
-    directory: /engine
+    directories:
+      - /engine
+      - /engine/fuzz
     schedule:
       interval: weekly
       day: monday
@@ -76,9 +79,13 @@ updates:
     commit-message:
       prefix: build
 
-  # The workflow actions themselves.
+  # Workflow actions plus dependencies used by repository-local composite
+  # actions. GitHub's root sentinel scans .github/workflows; each immediate
+  # action directory is also a manifest location and must be included explicitly.
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/*
     schedule:
       interval: weekly
       day: monday

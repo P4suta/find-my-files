@@ -2,7 +2,7 @@ name: Deploy GitHub Pages
 
 # Publishes the landing page plus the canonical design book:
 #   /        — landing page (site/index.html, ja/en)
-#   /book/   — mdBook design docs rendered from docs/ (ARCHITECTURE + ADRs)
+#   /book/   — mdBook design docs rendered from docs/ (ADRs, security, research)
 # Requires Settings > Pages > Source = "GitHub Actions" (set once after publish).
 
 on:
@@ -39,12 +39,14 @@ jobs:
         with:
           persist-credentials: false
 
-      # Same pinned toolchain and mdBook as local.
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: ./.github/actions/rust-toolchain
+      # Install only the two release-archive binaries this job executes.
+      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
-          install: true
+          tool: just@1.54.0,mdbook@0.5.3
+          fallback: none
       - name: Build mdBook design docs (docs/ -> build/docs-book)
-        run: mise exec cargo:mdbook --command "mdbook build docs"
+        run: mdbook build docs
 
       - name: Assemble site (landing + canonical book)
         run: just docs-assemble

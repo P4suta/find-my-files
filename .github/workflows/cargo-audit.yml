@@ -29,6 +29,7 @@ jobs:
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-audit@0.22.2
+          fallback: none
       - name: cargo audit (engine)
         run: cargo audit
         working-directory: engine

@@ -1,11 +1,19 @@
-# Dispatched by performance-release.yml after an exact-tag gate completes,
-# then split at each
+# Called from the trusted default-branch performance-release.yml only after an
+# exact-tag gate completes, then split at each
 # privilege boundary so sensitive authority touches the smallest possible surface:
 #
-#   build   -> assembles the distributable bundle (`just publish`) + SBOMs and
-#              uploads them as artifacts. Holds NO secrets, read-only token.
-#   sign-stage -> secretless repository code maps first-party PEs into one flat
-#                 immutable artifact (`just sign-stage`).
+#   build   -> assembles and exactly seals the unsigned distributable bundle,
+#              then uploads the bundle and its manifest together. Holds NO
+#              secrets and only a read token.
+#   sbom    -> independently verifies that sealed artifact, derives the exact
+#              two publication SBOMs, scans disposable copies, and re-verifies
+#              both the source artifact and canonical BOM pair.
+#   mutation -> trusted controller code/policy from the immutable workflow commit
+#               mutates the exact target in separate secretless jobs, then a
+#               fresh runner independently revalidates both evidence sets.
+#   sign-stage -> fresh secretless runner, with no checkout or repository code,
+#                 copies exactly five literal first-party PEs from the sealed
+#                 bundle into one flat immutable artifact.
 #   sign       -> NO checkout/toolchain/repository code. It only downloads that
 #                 flat artifact, invokes the commit-pinned SSL.com Action, and
 #                 uploads the result. This is the only job that sees signing
@@ -15,63 +23,59 @@
 #                   the release-candidate bundle.
 #   package -> under a read-only token, re-verifies the artifact handoff, zips +
 #              checksums it (`just package`), and uploads one immutable asset set.
-#   publish -> downloads only that completed asset set; official pinned actions
-#              write keyless build-provenance + SBOM attestations (Sigstore via
-#              OIDC) and attach/publish the release-please draft. It checks out
-#              and executes no repository build code. Runs only when publish=true.
+#   publish -> downloads only that completed asset set; trusted workflow code
+#              binds exact target/controller/release/performance identities and
+#              all asset/manifest digests into a custom keyless attestation, adds
+#              SBOM attestations, then publishes the exact numeric draft ID. It
+#              checks out and executes no repository build code.
 #
 # Auth: a short-lived Release Please App token publishes the release; SSL.com
 # eSigner uses four `release` environment secrets (ES_USERNAME / ES_PASSWORD /
-# CREDENTIAL_ID / ES_TOTP_SECRET). The same environment holds the App client ID
-# and private key.
+# CREDENTIAL_ID / ES_TOTP_SECRET). The App credentials remain scoped to the
+# `release-please` environment and are referenced only by publication.
 # Signing is gated at publish: a real run (publish=true) re-verifies the bundle is
-# validly signed and FAILS before creating the (immutable) Release if it is not, so
-# a missing/misconfigured secret can never ship an unsigned release unnoticed. A
-# publish=false rehearsal may run unsigned with an explicit warning (it creates no
-# Release). Human procedure lives in docs/RELEASING.md; rationale is
+# validly signed and FAILS before publishing the existing draft if it is not, so
+# a missing/misconfigured secret can never ship an unsigned release unnoticed.
+# Human procedure lives in docs/RELEASING.md; rationale is
 # in docs/adr/0020-code-signing-provider.md (provider/cert) and
 # docs/adr/0029-ci-signing-cka-pipeline.md (official Action, this split pipeline;
 # records why the eSigner CKA + standard signtool alternative was rejected).
 #
-# A manual run (workflow_dispatch) with publish=false builds and, when all four
-# eSigner secrets are configured, signs + verifies, but creates no
-# Release/attestations. Without the secrets it is an explicitly unsigned build
-# rehearsal.
-#
 # Verify a download with `gh attestation verify <zip> --repo P4suta/find-my-files`.
 name: release
-run-name: release ${{ inputs.publish && 'publish' || 'rehearsal' }} ${{ inputs.tag_name }}
+run-name: release publish ${{ inputs.tag_name }} ${{ inputs.commit_sha }}
 
 on:
-  # Dispatched by performance-release.yml only after GitHub records the
-  # exact-tag performance workflow as successful. We trigger on neither the
-  # `release` event (a draft fires none) nor the tag push (dispatch-only means a
-  # stray tag starts nothing). release-please materializes the `vX.Y.Z` tag at
-  # merge; the publish job attaches assets to that draft and publishes it in the
-  # asset-before-publish order immutable releases require. Also runnable by hand
-  # for a signing smoke test (publish=false).
-  workflow_dispatch:
+  # `workflow_run` loads performance-release.yml from the default branch; its
+  # API-only authorization job calls this reusable workflow from the same trusted
+  # controller commit. A tag can therefore identify build data, never workflow
+  # code. There is intentionally no workflow_dispatch or tag-push entry point.
+  workflow_call:
     inputs:
       tag_name:
-        description: "Version tag to publish (e.g. v0.1.1), or a rehearsal label when publish=false"
+        description: "Exact Release Please version tag to publish"
+        required: true
+        type: string
+      commit_sha:
+        description: "Exact immutable tag commit to build and publish"
         required: true
         type: string
       performance_run_id:
-        description: "Exact successful performance-gate run (required when publish=true)"
-        required: false
-        default: ""
+        description: "Exact successful performance-gate run"
+        required: true
+        type: string
+      release_id:
+        description: "Exact existing Release Please draft release ID"
+        required: true
         type: string
       publish:
-        description: "Publish the GitHub Release (false = rehearse; sign/verify only when credentials exist)"
-        required: false
-        default: false
+        description: "Must be true; retained as an explicit irreversible-action signal"
+        required: true
         type: boolean
-
 # Stable releases are globally serialized so two tags cannot both pass the
-# monotonic-version preflight and race to become Latest. Rehearsals remain
-# independent by their caller-provided label.
+# monotonic-version preflight and race to become Latest.
 concurrency:
-  group: release-${{ inputs.publish && 'stable-publication' || inputs.tag_name }}
+  group: release-stable-publication
   cancel-in-progress: false
 
 # Least privilege: read-only at the top level; each job requests only the scopes
@@ -82,43 +86,77 @@ permissions:
 env:
   # The version tag (vX.Y.Z) — reused for stamping, zip naming, and the release.
   TAG: ${{ inputs.tag_name }}
-  # Our SSL.com IV certificate's subject — asserted at verify time (both the sign
-  # self-check and the publish gate) so a different (even validly-chained)
-  # certificate cannot pass silently. Workflow-level so both jobs share one value.
-  SIGNER_SUBJECT_CONTAINS: "CN=Yasunobu Sakashita"
+  # Repository code is always checked out by immutable SHA, never by a tag or
+  # the trusted controller's GITHUB_SHA.
+  TARGET_SHA: ${{ inputs.commit_sha }}
+  # Release IDs are immutable database identities; tag/name lookups are never
+  # used as mutation targets because a draft can be deleted and replaced.
+  RELEASE_ID: ${{ inputs.release_id }}
+  # Exact public identity of the current SSL.com IV leaf certificate. These are
+  # intentionally committed (not secrets): renewal/rotation requires an explicit
+  # reviewed allowlist change instead of accepting any valid certificate with the
+  # same human-readable CN.
+  SIGNER_COMMON_NAME: "Yasunobu Sakashita"
+  SIGNER_SUBJECT: "CN=Yasunobu Sakashita, O=Yasunobu Sakashita, L=Ichikawa Shi, S=Chiba Prefecture, C=JP"
+  SIGNER_ISSUER: "CN=SSL.com Code Signing Intermediate CA RSA R1, O=SSL Corp, L=Houston, S=Texas, C=US"
+  SIGNER_CERTIFICATE_SHA256: "73cc44cc8e626416cced3a437f374fb46ee64237cc9040299bd426417885d3a7"
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 1) Build the distributable bundle + SBOMs. No secrets here.
+  # 1) Build and exactly seal the unsigned distributable bundle. No secrets.
   # ---------------------------------------------------------------------------
   build:
     runs-on: windows-2025
-    timeout-minutes: 60 # verify + admin suite + shipping/test publishes + UI/SBOM
+    timeout-minutes: 60 # verify + admin suite + shipping/test publishes + UI
     permissions:
       actions: read # validate and download the exact performance evidence run
       contents: read
+    outputs:
+      version: ${{ steps.release-version.outputs.version }}
     steps:
-      # A real release is dispatched *at* the already-created tag. Bind the
-      # workflow event, remote tag, draft release, and draft target to one SHA
-      # before executing any repository-local build code.
-      - name: Bind build to the exact draft release
-        if: ${{ inputs.publish }}
+      # The trusted controller is on main; the Release Please tag is inert data.
+      # Bind both controller and target before executing repository-local code.
+      - name: Bind trusted controller to the exact draft release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          REQUESTED_PUBLISH: ${{ inputs.publish }}
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:REQUESTED_PUBLISH -cne "true") {
+            throw "The credentialed release workflow has no rehearsal mode; publish must be true."
+          }
           if ($env:TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
             throw "Publishing requires an exact vX.Y.Z tag, got '$env:TAG'."
           }
-          if ($env:GITHUB_REF -cne "refs/tags/$env:TAG") {
-            throw "Workflow ref '$env:GITHUB_REF' is not the release tag refs/tags/$env:TAG."
+          if ($env:GITHUB_REF -cne "refs/heads/main") {
+            throw "Release controller ref '$env:GITHUB_REF' is not protected main."
+          }
+          $controllerSha = $env:GITHUB_SHA.ToLowerInvariant()
+          if ($controllerSha -cnotmatch '^[0-9a-f]{40}$') {
+            throw "Release controller SHA '$controllerSha' is not an immutable commit identity."
+          }
+          $workflowSha = $env:GITHUB_WORKFLOW_SHA.ToLowerInvariant()
+          if ($workflowSha -cnotmatch '^[0-9a-f]{40}$') {
+            throw "Release workflow SHA '$workflowSha' is not an immutable commit identity."
+          }
+          if ($controllerSha -cne $workflowSha) {
+            throw "Caller and workflow commits differ: $controllerSha versus $workflowSha."
+          }
+          $controllerLineage = (
+            gh api "repos/$env:REPO/compare/$controllerSha...main" --jq ".status"
+          ).Trim()
+          if ($controllerLineage -cne "ahead" -and $controllerLineage -cne "identical") {
+            throw "Release controller $controllerSha is not on main's protected lineage."
+          }
+          if ($env:TARGET_SHA -cnotmatch '^[0-9a-f]{40}$') {
+            throw "Release target '$env:TARGET_SHA' is not an immutable commit identity."
           }
           $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
-          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant()) {
-            throw "Tag $env:TAG resolves to $tagSha, but this workflow owns $env:GITHUB_SHA."
+          if ($tagSha -cne $env:TARGET_SHA) {
+            throw "Tag $env:TAG resolves to $tagSha, not requested target $env:TARGET_SHA."
           }
           $lineage = (
             gh api "repos/$env:REPO/compare/$tagSha...main" --jq ".status"
@@ -126,33 +164,26 @@ jobs:
           if ($lineage -cne "ahead" -and $lineage -cne "identical") {
             throw "Release tag $env:TAG is not on main's protected lineage (compare status: $lineage)."
           }
-          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
-            "repos/$env:REPO/releases?per_page=100" |
-            ConvertFrom-Json -Depth 20
-          $matches = @(
-            foreach ($page in $pages) {
-              foreach ($candidate in $page) {
-                if ($candidate.draft -and
-                    -not $candidate.prerelease -and
-                    $candidate.tag_name -ceq $env:TAG -and
-                    $candidate.name -ceq $env:TAG) {
-                  $candidate
-                }
-              }
-            }
-          )
-          if ($matches.Count -ne 1) {
-            throw "$env:TAG must identify exactly one existing draft release."
+          if ($env:RELEASE_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw "Release ID '$env:RELEASE_ID' is not an exact numeric identity."
           }
-          $release = $matches[0]
+          $release = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/releases/$env:RELEASE_ID" |
+            ConvertFrom-Json -Depth 20
+          if ([long]$release.id -ne [long]$env:RELEASE_ID -or
+              -not $release.draft -or
+              $release.prerelease -or
+              $release.tag_name -cne $env:TAG -or
+              $release.name -cne $env:TAG) {
+            throw "Release $env:RELEASE_ID is not the exact expected $env:TAG draft."
+          }
           $targetSha = [string]$release.target_commitish
           if ($targetSha -cnotmatch '^[0-9a-f]{40}$' -or $targetSha -cne $tagSha) {
             throw "Draft target '$targetSha' must be the exact tag commit $tagSha, not a mutable ref."
           }
-          "Bound $env:TAG, workflow, and draft target to $tagSha."
+          "Bound trusted controller $controllerSha to source $tagSha and release $env:RELEASE_ID / $env:TAG."
 
       - name: Require the exact successful performance gate for this tag
-        if: ${{ inputs.publish }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -168,17 +199,25 @@ jobs:
             "repos/$env:REPO/actions/runs/$env:PERFORMANCE_RUN_ID" |
             ConvertFrom-Json -Depth 20
           $expectedWorkflowId = [long]((
-            gh api "repos/$env:REPO/actions/workflows/performance-gate.yml" --jq ".id"
+            gh api "repos/$env:REPO/actions/workflows/performance-controller.yml" --jq ".id"
           ).Trim())
+          $controllerSha = [string]$run.head_sha
           if ([long]$run.id -ne [long]$env:PERFORMANCE_RUN_ID -or
               [long]$run.workflow_id -ne $expectedWorkflowId -or
               $run.repository.full_name -cne $env:REPO -or
-              $run.event -cne "workflow_dispatch" -or
+              $run.event -cne "workflow_run" -or
               $run.status -cne "completed" -or
               $run.conclusion -cne "success" -or
-              $run.head_sha -cne $env:GITHUB_SHA -or
-              $run.display_title -cne "performance-gate $env:TAG") {
-            throw "Performance run $env:PERFORMANCE_RUN_ID is not the exact successful gate for $env:TAG at $env:GITHUB_SHA."
+              $run.head_branch -cne "main" -or
+              $controllerSha -cnotmatch '^[0-9a-f]{40}$' -or
+              $run.display_title -cne "performance-gate $env:TAG $env:TARGET_SHA release $env:RELEASE_ID") {
+            throw "Performance run $env:PERFORMANCE_RUN_ID is not the trusted-main gate for $env:TAG at $env:TARGET_SHA."
+          }
+          $controllerLineage = (
+            gh api "repos/$env:REPO/compare/$controllerSha...main" --jq ".status"
+          ).Trim()
+          if ($controllerLineage -cne "ahead" -and $controllerLineage -cne "identical") {
+            throw "Performance controller $controllerSha is not on main's protected lineage."
           }
           $artifacts = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
             "repos/$env:REPO/actions/runs/$env:PERFORMANCE_RUN_ID/artifacts?per_page=100" |
@@ -193,26 +232,43 @@ jobs:
           if ($evidence.Count -ne 1) {
             throw "Performance run $env:PERFORMANCE_RUN_ID has no unique, unexpired evidence artifact."
           }
-          "Bound performance run $env:PERFORMANCE_RUN_ID to $env:TAG at $env:GITHUB_SHA."
+          "Bound performance run $env:PERFORMANCE_RUN_ID to $env:TAG at $env:TARGET_SHA."
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ inputs.commit_sha }}
 
-      # Provisions the repository-declared toolchain (rust / dotnet / just) from
-      # mise.toml so every release job uses the same versions.
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      # This is the only release job that needs the complete build/test/UI
+      # toolchain. Use first-party or repository-verified setup boundaries; the
+      # later signing handoff jobs stay deliberately smaller.
+      - uses: ./.github/actions/rust-toolchain
         with:
-          install: true
+          components: clippy, rustfmt
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: 10.0.302
+      - uses: ./.github/actions/setup-winapp
+        id: winapp
+      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        with:
+          tool: |
+            just@1.54.0
+            cargo-about@0.7.1
+            cargo-nextest@0.9.140
+            cargo-deny@0.19.9
+            cargo-machete@0.9.2
+            taplo-cli@0.10.0
+            typos@1.47.2
+          fallback: none
 
       # A manual dispatch could point a vX.Y.Z tag at a commit whose committed
       # [workspace.package] version differs — and TAG drives the zip name, the
       # build stamp, and the Release tag, so a mismatch would ship vX.Y.Z-named
       # artifacts built from another version. Fail before signing/packaging.
-      # Same gate as the tag-shape check above (a publish=false branch smoke test
-      # is exempt). Logic lives in xtask (unit-tested); TAG flows via env.
+      # Same gate as the tag-shape check above. Logic lives in xtask
+      # (unit-tested); TAG flows via env.
       - name: Verify tag matches the committed version
-        if: ${{ inputs.publish }}
         run: just check-version $env:TAG
 
       # Stamp the build as a clean stable release. Without these, the
@@ -221,33 +277,30 @@ jobs:
       # FMF_BUILD_VERSION (Rust) = the bare tag version; FmfChannel=stable (C#,
       # read by MSBuild as a property) suppresses the channel suffix. (ADR-0035)
       - name: Stamp stable build version
-        if: ${{ inputs.publish }}
+        id: release-version
         shell: bash
         run: |
-          echo "FMF_BUILD_VERSION=${TAG#v}" >> "$GITHUB_ENV"
-          echo "FmfChannel=stable" >> "$GITHUB_ENV"
-
-      - name: Stamp rehearsal as a development build
-        if: ${{ !inputs.publish }}
-        shell: pwsh
-        run: |
-          $version = (just version --channel dev).Trim()
-          if ([string]::IsNullOrWhiteSpace($version)) {
-            throw "xtask returned an empty development version."
-          }
-          "FMF_BUILD_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "FmfChannel=dev" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          version="${TAG#v}"
+          {
+            echo "FMF_BUILD_VERSION=$version"
+            echo "FMF_SOURCE_COMMIT=$TARGET_SHA"
+            echo "FmfChannel=stable"
+          } >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       # Re-prove the exact release ref instead of assuming an earlier branch CI
-      # result still covers a manually-dispatched tag/sha.
+      # result still covers the authorized tag/sha. Workflow hygiene has already
+      # run against trusted main; this Windows build runs every source gate except
+      # the Linux-only actionlint/zizmor boundary.
       - name: Verify source and deterministic test suites
-        run: just verify
+        run: just verify-release-source
 
       # windows-2025 runs elevated. This suite has been stable in the nightly
       # sentinel and covers the otherwise-unreachable real C: MFT scan, live USN
-      # journal, streaming/reference equivalence, and service durability/restore.
+      # journal, streaming/reference equivalence, service durability/restore,
+      # and real-token/local-user/remote-transport named-pipe isolation.
       # It is a release gate before any signing approval or secret is touched.
-      - name: Elevated real-volume MFT, USN, and service suite
+      - name: Elevated real-volume and machine-security suite
         run: just test-admin
 
       - name: Upload admin nextest evidence
@@ -255,7 +308,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-admin-nextest
-          path: build/engine/nextest-ci.xml
+          path: build/engine/nextest/admin/admin.xml
           retention-days: 14
           if-no-files-found: error
           overwrite: true
@@ -263,10 +316,44 @@ jobs:
       - name: Build distributable bundle
         run: just publish
 
+      # This shell is part of the protected controller workflow, not the tagged
+      # checkout. It proves target-controlled build code recorded the same full
+      # source identity later pinned in the custom release predicate.
+      - name: Bind shipped BUILDINFO to the exact source commit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $lines = @(
+            Get-Content -LiteralPath build/dist/FindMyFiles/BUILDINFO.txt |
+              Where-Object { $_ -like "commit:*" }
+          )
+          if ($lines.Count -ne 1) {
+            throw "BUILDINFO must contain exactly one commit field."
+          }
+          $sourceCommit = $lines[0].Substring("commit:".Length).Trim()
+          if ($sourceCommit -cne $env:TARGET_SHA) {
+            throw "BUILDINFO source '$sourceCommit' is not release target $env:TARGET_SHA."
+          }
+
+      # Pin every byte and path before executing the bundle. The exact manifest
+      # also asserts that every first-party PE has no certificate table.
+      - name: Seal and verify exact unsigned bundle
+        run: |
+          just bundle-seal unsigned
+          just bundle-verify unsigned
+
+      - name: Require pristine unsigned first-party binaries
+        uses: ./.github/actions/verify-signatures
+        with:
+          bundle-dir: build/dist/FindMyFiles
+          expected-state: unsigned
+
       # Exercise the exact shipping app without test-only CLI arguments before
       # moving to the separate seam-enabled full UI suite.
       - name: Shipping bundle startup smoke (no test seams)
         run: just ui-test-stable-smoke
+        env:
+          FMF_UI_CLI: ${{ steps.winapp.outputs.cli-path }}
 
       # Shipping artifacts intentionally exclude fake/custom engine seams.
       # Generate the separately marked test bundle for deterministic UI
@@ -276,6 +363,8 @@ jobs:
 
       - name: UI-test bundle automation
         run: just ui-test-published
+        env:
+          FMF_UI_CLI: ${{ steps.winapp.outputs.cli-path }}
 
       - name: Upload UI automation evidence on failure
         if: ${{ failure() }}
@@ -287,59 +376,120 @@ jobs:
           if-no-files-found: warn
           overwrite: true
 
-      # SBOMs (CycloneDX 1.6) + the osv-scanner release gate, shared with
-      # nightly.yml via a composite action so the tool versions never drift
-      # (ADR-0040). Runs after the build so the resolved graphs match what
-      # shipped; the .NET/NuGet graph is only visible here (not to cargo-audit).
-      # Fail-fast before sign/publish. The SBOMs are attached + attested below.
-      - name: Generate SBOMs and scan (release gate)
-        uses: ./.github/actions/sbom-scan
+      # Startup/UI automation must not have touched the sealed shipping tree.
+      - name: Reverify unsigned bundle after runtime tests
+        run: just bundle-verify unsigned
 
-      - name: Upload unsigned bundle
+      - name: Upload sealed unsigned bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
-          path: build/dist/FindMyFiles
+          path: |
+            build/dist/FindMyFiles
+            build/dist/FindMyFiles.unsigned.manifest.json
           retention-days: 14
           if-no-files-found: error
+          include-hidden-files: true
           overwrite: true
 
-      - name: Upload SBOMs
+  # ---------------------------------------------------------------------------
+  # 1b) Re-run both exact-identity mutation gates against the immutable release
+  #     source through the trusted reusable controller. Controller code, policy,
+  #     baselines, and tool manifests come from this workflow's protected-main
+  #     commit; the tag commit is a separate data checkout. Target execution has
+  #     no environment, OIDC, write token, cache, or secret. A fresh job reverifies
+  #     the complete evidence before signing can start.
+  # ---------------------------------------------------------------------------
+  mutation:
+    permissions:
+      actions: read # let the fresh nested verifier bind this run's raw artifacts
+      contents: read
+    uses: ./.github/workflows/mutation-controller.yml
+    with:
+      controller_sha: ${{ github.workflow_sha }}
+      target_sha: ${{ inputs.commit_sha }}
+
+  # ---------------------------------------------------------------------------
+  # 1c) Derive and scan SBOMs from the sealed artifact on a fresh runner.
+  #     The canonical BOMs never cross the scanner boundary.
+  # ---------------------------------------------------------------------------
+  sbom:
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      FMF_BUILD_VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.commit_sha }}
+
+      - uses: ./.github/actions/rust-toolchain
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: 10.0.302
+      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        with:
+          tool: just@1.54.0
+          fallback: none
+
+      - name: Download sealed unsigned bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: build/dist
+
+      - name: Verify exact unsigned SBOM source artifact
+        run: just bundle-verify unsigned
+
+      # Recreate only the locked package inventory needed to reconcile the
+      # already-built artifact. No second publish is allowed in this job.
+      - name: Restore locked NuGet SBOM evidence
+        run: dotnet restore app/FindMyFiles/FindMyFiles.csproj --locked-mode --runtime win-x64
+
+      # cargo-sbom's raw wrappers and scanner scratch stay job-local. xtask
+      # produces and validates the canonical pair in build/sbom.
+      - name: Generate SBOMs and scan disposable copies (release gate)
+        uses: ./.github/actions/sbom-scan
+
+      - name: Reverify source artifact and canonical SBOM pair
+        run: |
+          just bundle-verify unsigned
+          just sbom-verify $env:FMF_BUILD_VERSION
+
+      - name: Upload exact SBOM pair
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom
-          path: build/sbom
+          path: |
+            build/sbom/fmf-engine.cdx.json
+            build/sbom/app.cdx.json
           retention-days: 14
           if-no-files-found: error
           overwrite: true
 
   # ---------------------------------------------------------------------------
-  # 2a) Secretless staging. Repository code may run here, but no signing
-  #     credential is present on this runner.
+  # 2a) Secretless trusted staging. No checkout, local Action, toolchain, or
+  #     target-controlled executable runs on this fresh runner. The protected
+  #     workflow copies exactly five literal files from the immutable artifact.
   # ---------------------------------------------------------------------------
   sign-stage:
-    needs: build
+    needs: [build, sbom, mutation]
     runs-on: windows-2025
     timeout-minutes: 15
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
-        with:
-          install: true
-
-      - name: Download unsigned bundle
+      - name: Download sealed unsigned bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist
-          path: build/dist/FindMyFiles
+          path: build/dist
 
       - name: Revalidate draft identity before staging
-        if: ${{ inputs.publish }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -347,54 +497,104 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          if ($env:GITHUB_REF -cne "refs/tags/$env:TAG") {
-            throw "Signing workflow ref '$env:GITHUB_REF' is not refs/tags/$env:TAG."
+          if ($env:GITHUB_REF -cne "refs/heads/main") {
+            throw "Signing controller ref '$env:GITHUB_REF' is not protected main."
           }
           $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
-          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant()) {
-            throw "Tag $env:TAG moved from workflow SHA $env:GITHUB_SHA to $tagSha."
+          if ($tagSha -cne $env:TARGET_SHA) {
+            throw "Tag $env:TAG moved from approved target $env:TARGET_SHA to $tagSha."
           }
-          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
-            "repos/$env:REPO/releases?per_page=100" |
+          if ($env:RELEASE_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw "Release ID '$env:RELEASE_ID' is not an exact numeric identity."
+          }
+          $release = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/releases/$env:RELEASE_ID" |
             ConvertFrom-Json -Depth 20
-          $matches = @(
-            foreach ($page in $pages) {
-              foreach ($candidate in $page) {
-                if ($candidate.draft -and
-                    -not $candidate.prerelease -and
-                    $candidate.tag_name -ceq $env:TAG -and
-                    $candidate.name -ceq $env:TAG) {
-                  $candidate
-                }
-              }
-            }
-          )
-          if ($matches.Count -ne 1) {
-            throw "$env:TAG no longer identifies one expected draft release."
+          if ([long]$release.id -ne [long]$env:RELEASE_ID -or
+              -not $release.draft -or
+              $release.prerelease -or
+              $release.tag_name -cne $env:TAG -or
+              $release.name -cne $env:TAG) {
+            throw "Release $env:RELEASE_ID is no longer the expected $env:TAG draft."
           }
-          $release = $matches[0]
           $targetSha = [string]$release.target_commitish
           if ($targetSha -cnotmatch '^[0-9a-f]{40}$' -or $targetSha -cne $tagSha) {
             throw "Draft target '$targetSha' must remain the exact tag commit $tagSha."
           }
 
-      # The path -> unique-stage-name map lives only in xtask. The signing runner
-      # receives this flat artifact as inert bytes and never receives the repo.
-      - name: Stage first-party binaries for signing
-        run: just sign-stage
-
-      # upload-artifact omits empty directories. Carry one inert non-PE marker so
-      # the credential runner can materialize the required empty output directory
-      # without executing a shell or pre-populating it with colliding PE names.
-      - name: Materialize the signing output-directory marker
+      - name: Materialize exact credential-boundary signing input
         shell: pwsh
-        run: Set-Content -LiteralPath build/signed/OUTPUT_DIRECTORY.txt -Value "secretless stage"
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ((Test-Path -LiteralPath build/sign-stage) -or
+              (Test-Path -LiteralPath build/signed)) {
+            throw "Signing staging/output paths must not pre-exist on the fresh runner."
+          }
+          New-Item -ItemType Directory -Path build/sign-stage | Out-Null
+          New-Item -ItemType Directory -Path build/signed | Out-Null
+          $stageRoot = (Resolve-Path -LiteralPath build/sign-stage).Path
+          $distRoot = (Resolve-Path -LiteralPath build/dist/FindMyFiles).Path
+          $map = [ordered]@{
+            "FindMyFiles.exe" = "FindMyFiles.exe"
+            "app-FindMyFiles.exe" = "app/FindMyFiles.exe"
+            "app-FindMyFiles.dll" = "app/FindMyFiles.dll"
+            "fmf-service.exe" = "app/fmf-service.exe"
+            "fmf_engine.dll" = "app/fmf_engine.dll"
+          }
+          foreach ($stageName in $map.Keys) {
+            $sourcePath = Join-Path $distRoot $map[$stageName]
+            $source = Get-Item -LiteralPath $sourcePath -Force
+            if ($source.PSIsContainer -or
+                (($source.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+                $source.Length -le 0) {
+              throw "Signing source '$($map[$stageName])' is not a nonempty regular file."
+            }
+            $signature = Get-AuthenticodeSignature -FilePath $sourcePath
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned -or
+                $null -ne $signature.SignerCertificate) {
+              throw "Signing source '$($map[$stageName])' is already signed."
+            }
+            Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $stageRoot $stageName)
+          }
+          $entries = @(Get-ChildItem -LiteralPath $stageRoot -Force)
+          $unsafe = @(
+            $entries | Where-Object {
+              $_.PSIsContainer -or
+              (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+              $_.Length -le 0
+            }
+          )
+          if ($unsafe.Count -ne 0) {
+            throw "Signing input contains a directory, reparse point, or empty file."
+          }
+          $actual = @($entries.Name | Sort-Object)
+          $expected = @($map.Keys | Sort-Object)
+          if (Compare-Object $expected $actual) {
+            throw "Signing input does not match the exact five-name allowlist."
+          }
+          foreach ($stageName in $map.Keys) {
+            $stagePath = Join-Path $stageRoot $stageName
+            $sourcePath = Join-Path $distRoot $map[$stageName]
+            $stageHash = (Get-FileHash -LiteralPath $stagePath -Algorithm SHA256).Hash
+            $sourceHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
+            if ($stageHash -cne $sourceHash) {
+              throw "Signing input '$stageName' is not a byte copy of '$($map[$stageName])'."
+            }
+          }
+          # upload-artifact omits empty directories. This inert non-PE marker lets
+          # the credential island materialize an isolated output directory.
+          Set-Content -LiteralPath build/signed/OUTPUT_DIRECTORY.txt -Value "secretless stage"
 
       - name: Upload flat signing input
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: first-party-pes-unsigned
-          path: build/sign-stage
+          path: |
+            build/sign-stage/FindMyFiles.exe
+            build/sign-stage/app-FindMyFiles.exe
+            build/sign-stage/app-FindMyFiles.dll
+            build/sign-stage/fmf-service.exe
+            build/sign-stage/fmf_engine.dll
           retention-days: 14
           if-no-files-found: error
           overwrite: true
@@ -409,9 +609,9 @@ jobs:
           overwrite: true
 
   # ---------------------------------------------------------------------------
-  # 2b) Credential island. Deliberately no checkout, mise, shell, local action,
-  #     or repository executable. Only pinned artifact actions and SSL.com code
-  #     share this runner with the eSigner credentials.
+  # 2b) Credential island. Deliberately no checkout, toolchain, shell, local
+  #     action, or repository executable. Only pinned artifact actions and
+  #     SSL.com code share this runner with the eSigner credentials.
   # ---------------------------------------------------------------------------
   sign:
     needs: sign-stage
@@ -419,16 +619,6 @@ jobs:
     timeout-minutes: 20
     environment: release
     permissions: {}
-    outputs:
-      signed: ${{ steps.esign.outcome == 'success' }}
-    env:
-      HAVE_SIGNING: >-
-        ${{
-          secrets.ES_USERNAME != '' &&
-          secrets.ES_PASSWORD != '' &&
-          secrets.CREDENTIAL_ID != '' &&
-          secrets.ES_TOTP_SECRET != ''
-        }}
     steps:
       - name: Download flat signing input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -446,10 +636,8 @@ jobs:
           path: build/signed
 
       - name: Sign staged binaries (SSL.com eSigner)
-        id: esign
-        # A publish with missing credentials intentionally enters the Action with
-        # empty required inputs and fails closed. An unsigned rehearsal skips it.
-        if: ${{ env.HAVE_SIGNING == 'true' || inputs.publish }}
+        # Missing credentials enter the Action as empty required inputs and fail
+        # closed; the production workflow has no unsigned mode.
         uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
         with:
           command: batch_sign
@@ -472,21 +660,15 @@ jobs:
           malware_block: "true"
 
       - name: Upload signed result
-        if: ${{ steps.esign.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: first-party-pes-result
-          path: build/signed
-          retention-days: 14
-          if-no-files-found: error
-          overwrite: true
-
-      - name: Pass through unsigned rehearsal result
-        if: ${{ !inputs.publish && steps.esign.outcome != 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: first-party-pes-result
-          path: build/sign-stage
+          path: |
+            build/signed/FindMyFiles.exe
+            build/signed/app-FindMyFiles.exe
+            build/signed/app-FindMyFiles.dll
+            build/signed/fmf-service.exe
+            build/signed/fmf_engine.dll
           retention-days: 14
           if-no-files-found: error
           overwrite: true
@@ -505,16 +687,13 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ inputs.commit_sha }}
 
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
-        with:
-          install: true
-
-      - name: Download unsigned bundle
+      - name: Download sealed unsigned bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist
-          path: build/dist/FindMyFiles
+          path: build/dist
 
       - name: Download isolated signing result
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -522,68 +701,140 @@ jobs:
           name: first-party-pes-result
           path: build/signed
 
+      # This check is protected workflow code and runs before any target-controlled
+      # executable or local Action receives the result. It prevents artifact path
+      # tricks or an unexpected signer output from reaching collection code.
+      - name: Require the exact signed-result file set
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = (Resolve-Path -LiteralPath build/signed).Path
+          $expected = @(
+            "FindMyFiles.exe"
+            "app-FindMyFiles.exe"
+            "app-FindMyFiles.dll"
+            "fmf-service.exe"
+            "fmf_engine.dll"
+          ) | Sort-Object -CaseSensitive
+          $entries = @(Get-ChildItem -LiteralPath $root -Force -Recurse)
+          if ($entries.Count -ne $expected.Count) {
+            throw "Signed-result artifact must contain exactly five flat files."
+          }
+          $actual = @()
+          foreach ($entry in $entries) {
+            if ($entry.PSIsContainer -or
+                (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+                $entry.Length -le 0 -or
+                $entry.DirectoryName -cne $root) {
+              throw "Signed result '$($entry.FullName)' is not a nonempty flat regular file."
+            }
+            $actual += $entry.Name
+          }
+          $actual = @($actual | Sort-Object -CaseSensitive)
+          for ($index = 0; $index -lt $expected.Count; $index++) {
+            if ($actual[$index] -cne $expected[$index]) {
+              throw "Signed-result file set differs at '$($actual[$index])' versus '$($expected[$index])'."
+            }
+          }
+
+      # Target-controlled setup/code begins only after the signer result crossed
+      # the protected workflow's exact regular-file allowlist above.
+      - uses: ./.github/actions/rust-toolchain
+      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        with:
+          tool: just@1.54.0
+          fallback: none
+
+      - name: Verify exact unsigned bundle before collection
+        run: just bundle-verify unsigned
+
       - name: Copy signed binaries back into the bundle
         run: just sign-collect
+
+      # Compare the collected candidate to the sealed unsigned source before
+      # trusting or blessing any signed bytes. Only terminal Authenticode
+      # certificate tables on the exact signing map may differ.
+      - name: Verify signing-only bundle transition
+        run: just bundle-verify-signed-transition
 
       # The committed manifest is derived from xtask's FIRST_PARTY_PES map. This
       # verifies every mapped destination after the artifact boundary.
       - name: Verify signatures
-        if: ${{ needs.sign.outputs.signed == 'true' }}
         uses: ./.github/actions/verify-signatures
         with:
           bundle-dir: build/dist/FindMyFiles
-          signer-subject-contains: ${{ env.SIGNER_SUBJECT_CONTAINS }}
+          expected-state: signed
+          signer-common-name: ${{ env.SIGNER_COMMON_NAME }}
+          signer-subject: ${{ env.SIGNER_SUBJECT }}
+          signer-issuer: ${{ env.SIGNER_ISSUER }}
+          signer-certificate-sha256: ${{ env.SIGNER_CERTIFICATE_SHA256 }}
 
-      - name: Warn if unsigned
-        if: ${{ !inputs.publish && needs.sign.outputs.signed != 'true' }}
-        run: echo "::warning::Signing secrets absent - rehearsal artifact remains unsigned; a real publish fails closed. See docs/RELEASING.md."
+      - name: Seal and verify exact signed bundle
+        run: |
+          just bundle-seal signed
+          just bundle-verify signed
 
-      - name: Upload release-candidate bundle
+      - name: Upload sealed release-candidate bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          # A rehearsal without credentials is intentionally unsigned, so do
-          # not encode a false signature claim in the artifact name.
           name: dist-candidate
-          path: build/dist/FindMyFiles
+          path: |
+            build/dist/FindMyFiles
+            build/dist/FindMyFiles.unsigned.manifest.json
+            build/dist/FindMyFiles.signed.manifest.json
           retention-days: 14
           if-no-files-found: error
+          include-hidden-files: true
           overwrite: true
 
   # ---------------------------------------------------------------------------
   # 3) Verify + package the signed candidate under a read-only token.
   # ---------------------------------------------------------------------------
   package:
-    needs: sign-collect
+    needs: [build, sbom, sign-collect]
     if: ${{ inputs.publish }}
     runs-on: windows-2025
     timeout-minutes: 15
     permissions:
       contents: read
+    env:
+      FMF_BUILD_VERSION: ${{ needs.build.outputs.version }}
     steps:
       # The repo is needed for `just package` (xtask) + the toolchain.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ inputs.commit_sha }}
 
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: ./.github/actions/rust-toolchain
+      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
-          install: true
+          tool: just@1.54.0
+          fallback: none
 
       - name: Download release-candidate bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist-candidate
-          path: build/dist/FindMyFiles
+          path: build/dist
+
+      - name: Verify exact signed bundle handoff
+        run: |
+          just bundle-verify-signed-transition
+          just bundle-verify signed
 
       # A real publish must ship signed binaries. The sign job already fails closed
       # and verifies in-place; repeat the same manifest/chain/timestamp/signer check
-      # after the artifact handoff, before packaging. A credentialled publish=false
-      # rehearsal exercises this shared verifier in the sign job.
+      # after the artifact handoff, before packaging.
       - name: Require the bundle to be signed before publishing
         uses: ./.github/actions/verify-signatures
         with:
           bundle-dir: build/dist/FindMyFiles
-          signer-subject-contains: ${{ env.SIGNER_SUBJECT_CONTAINS }}
+          expected-state: signed
+          signer-common-name: ${{ env.SIGNER_COMMON_NAME }}
+          signer-subject: ${{ env.SIGNER_SUBJECT }}
+          signer-issuer: ${{ env.SIGNER_ISSUER }}
+          signer-certificate-sha256: ${{ env.SIGNER_CERTIFICATE_SHA256 }}
 
       - name: Download SBOMs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -591,12 +842,20 @@ jobs:
           name: sbom
           path: build/sbom
 
+      - name: Verify exact SBOM handoff
+        run: just sbom-verify $env:FMF_BUILD_VERSION
+
       # Zip + checksum the (now-signed) bundle. Logic + output names live in xtask
       # (just package): find-my-files-v<version>-win-x64.zip + SHA256SUMS.txt under
       # build/package/. `just package` requires a vX.Y.Z TAG.
       - name: Package (zip + checksums)
         # TAG via env (pwsh syntax), not ${{ }} interpolation into the run body.
         run: just package $env:TAG
+
+      - name: Reverify sealed inputs after packaging
+        run: |
+          just bundle-verify signed
+          just sbom-verify $env:FMF_BUILD_VERSION
 
       - name: Revalidate draft identity before asset handoff
         shell: pwsh
@@ -606,32 +865,26 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          if ($env:GITHUB_REF -cne "refs/tags/$env:TAG") {
-            throw "Publish workflow ref '$env:GITHUB_REF' is not refs/tags/$env:TAG."
+          if ($env:GITHUB_REF -cne "refs/heads/main") {
+            throw "Publish controller ref '$env:GITHUB_REF' is not protected main."
           }
           $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
-          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant()) {
-            throw "Tag $env:TAG moved from workflow SHA $env:GITHUB_SHA to $tagSha."
+          if ($tagSha -cne $env:TARGET_SHA) {
+            throw "Tag $env:TAG moved from approved target $env:TARGET_SHA to $tagSha."
           }
-          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
-            "repos/$env:REPO/releases?per_page=100" |
+          if ($env:RELEASE_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw "Release ID '$env:RELEASE_ID' is not an exact numeric identity."
+          }
+          $release = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/releases/$env:RELEASE_ID" |
             ConvertFrom-Json -Depth 20
-          $matches = @(
-            foreach ($page in $pages) {
-              foreach ($candidate in $page) {
-                if ($candidate.draft -and
-                    -not $candidate.prerelease -and
-                    $candidate.tag_name -ceq $env:TAG -and
-                    $candidate.name -ceq $env:TAG) {
-                  $candidate
-                }
-              }
-            }
-          )
-          if ($matches.Count -ne 1) {
-            throw "$env:TAG no longer identifies one expected draft release."
+          if ([long]$release.id -ne [long]$env:RELEASE_ID -or
+              -not $release.draft -or
+              $release.prerelease -or
+              $release.tag_name -cne $env:TAG -or
+              $release.name -cne $env:TAG) {
+            throw "Release $env:RELEASE_ID is no longer the expected $env:TAG draft."
           }
-          $release = $matches[0]
           $targetSha = [string]$release.target_commitish
           if ($targetSha -cnotmatch '^[0-9a-f]{40}$' -or $targetSha -cne $tagSha) {
             throw "Draft target '$targetSha' must remain the exact tag commit $tagSha."
@@ -642,28 +895,46 @@ jobs:
         with:
           name: release-assets
           path: |
-            build/package/find-my-files-*-win-x64.zip
+            build/package/find-my-files-${{ inputs.tag_name }}-win-x64.zip
             build/package/SHA256SUMS.txt
             build/sbom/fmf-engine.cdx.json
             build/sbom/app.cdx.json
+            build/dist/FindMyFiles.unsigned.manifest.json
+            build/dist/FindMyFiles.signed.manifest.json
           retention-days: 14
           if-no-files-found: error
+          include-hidden-files: true
           overwrite: true
 
   # ---------------------------------------------------------------------------
-  # 4) Attest + publish official actions only. No checkout, build code, secrets,
-  #    or package tooling shares the write/OIDC token.
+  # 4) Human publication approval. This job deliberately holds no artifact,
+  #    checkout, secret, write token, or repository code.
   # ---------------------------------------------------------------------------
-  publish:
+  publish-approval:
     needs: package
     if: ${{ inputs.publish }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    # Second approval gate on the irreversible step (ADR-0035): the GitHub Release
-    # is immutable, so publishing requires its own explicit human approval in the
-    # `release` environment, distinct from the `sign` approval ("sign this?" vs
-    # "release this to the world?"). Defence in depth against an accidental release.
+    timeout-minutes: 5
     environment: release
+    permissions: {}
+    steps:
+      - name: Record publication approval
+        shell: bash
+        run: echo "Publication approved for $TAG at $TARGET_SHA."
+
+  # ---------------------------------------------------------------------------
+  # 5) Attest + publish on a fresh no-checkout runner. Only protected inline
+  #    validation and pinned official actions share the App/OIDC authority; no
+  #    repository build code, signing secret, or package tooling is present.
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: publish-approval
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # App credentials exist only in this environment. The preceding secretless
+    # `publish-approval` job retains the distinct human "release this?" decision.
+    environment: release-please
     permissions:
       actions: read # download the immutable release-assets handoff
       contents: read # identity checks; only the short-lived App token mutates
@@ -676,26 +947,20 @@ jobs:
           name: release-assets
           path: build
 
-      # GitHub requires a token with Workflows:write when publishing a Release
-      # whose target commit changes workflow files relative to the default
-      # branch. The built-in GITHUB_TOKEN cannot receive that permission. These
-      # App credentials are the same repository-level secrets consumed by
-      # release-please.yml; the protected `release` environment still gates this
-      # irreversible publication job.
-      - name: Mint short-lived publication App token
-        id: publication-token
+      # Immutable-release configuration needs Administration:read. Keep that
+      # read-only authority separate from the later publication token.
+      - name: Mint short-lived immutable-settings App token
+        id: immutable-settings-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.RELEASE_PLEASE_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PLEASE_PRIVATE_KEY }}
           permission-administration: read
-          permission-contents: write
-          permission-workflows: write
 
       - name: Require immutable releases before attestations
         shell: pwsh
         env:
-          GH_TOKEN: ${{ steps.publication-token.outputs.token }}
+          GH_TOKEN: ${{ steps.immutable-settings-token.outputs.token }}
           REPO: ${{ github.repository }}
         run: |
           $ErrorActionPreference = "Stop"
@@ -715,57 +980,241 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          if ($env:GITHUB_REF -cne "refs/tags/$env:TAG") {
-            throw "Publish workflow ref '$env:GITHUB_REF' is not refs/tags/$env:TAG."
+          if ($env:GITHUB_REF -cne "refs/heads/main") {
+            throw "Publish controller ref '$env:GITHUB_REF' is not protected main."
+          }
+          $controllerSha = ([string]$env:GITHUB_SHA).ToLowerInvariant()
+          $workflowSha = ([string]$env:GITHUB_WORKFLOW_SHA).ToLowerInvariant()
+          if ($controllerSha -cnotmatch '^[0-9a-f]{40}$' -or
+              $workflowSha -cnotmatch '^[0-9a-f]{40}$' -or
+              $controllerSha -cne $workflowSha) {
+            throw "Attestation controller/workflow identity is not one exact commit."
+          }
+          $controllerLineage = (
+            gh api "repos/$env:REPO/compare/$controllerSha...main" --jq ".status"
+          ).Trim()
+          if ($controllerLineage -cne "ahead" -and $controllerLineage -cne "identical") {
+            throw "Attestation controller $controllerSha left protected main's lineage."
           }
           $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
-          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant()) {
-            throw "Tag $env:TAG moved from workflow SHA $env:GITHUB_SHA to $tagSha."
+          if ($tagSha -cne $env:TARGET_SHA) {
+            throw "Tag $env:TAG moved from approved target $env:TARGET_SHA to $tagSha."
           }
-          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
-            "repos/$env:REPO/releases?per_page=100" |
+          if ($env:RELEASE_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw "Release ID '$env:RELEASE_ID' is not an exact numeric identity."
+          }
+          $release = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/releases/$env:RELEASE_ID" |
             ConvertFrom-Json -Depth 20
-          $matches = @(
-            foreach ($page in $pages) {
-              foreach ($candidate in $page) {
-                if ($candidate.draft -and
-                    -not $candidate.prerelease -and
-                    $candidate.tag_name -ceq $env:TAG -and
-                    $candidate.name -ceq $env:TAG) {
-                  $candidate
-                }
-              }
-            }
-          )
-          if ($matches.Count -ne 1) {
-            throw "$env:TAG no longer identifies one expected draft release."
+          if ([long]$release.id -ne [long]$env:RELEASE_ID -or
+              -not $release.draft -or
+              $release.prerelease -or
+              $release.tag_name -cne $env:TAG -or
+              $release.name -cne $env:TAG) {
+            throw "Release $env:RELEASE_ID is no longer the expected $env:TAG draft."
           }
-          $release = $matches[0]
           $targetSha = [string]$release.target_commitish
           if ($targetSha -cnotmatch '^[0-9a-f]{40}$' -or $targetSha -cne $tagSha) {
             throw "Draft target '$targetSha' must remain the exact tag commit $tagSha."
           }
 
-      # Build provenance + SBOM attestations for the published artifacts. Keyless
-      # via the workflow's OIDC token (no stored secrets).
+      # Generate the release predicate on this fresh, no-checkout runner. The
+      # predicate distinguishes trusted controller code from the older immutable
+      # release source and pins every public asset plus both bundle manifests.
+      - name: Generate and verify exact release predicate
+        id: release-predicate
+        shell: python
+        env:
+          REPO: ${{ github.repository }}
+          PERFORMANCE_RUN_ID: ${{ inputs.performance_run_id }}
+          CONTROLLER_RUN_ID: ${{ github.run_id }}
+          CONTROLLER_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          import hashlib
+          import json
+          import os
+          import re
+          import stat
+          from pathlib import Path
+
+          def require_exact_int(name):
+              value = os.environ[name]
+              if re.fullmatch(r"[1-9][0-9]*", value) is None:
+                  raise ValueError(f"{name} is not an exact positive integer")
+              return int(value)
+
+          def require_sha(name):
+              value = os.environ[name]
+              if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+                  raise ValueError(f"{name} is not an exact lowercase commit SHA")
+              return value
+
+          def load_strict_json(path):
+              def pairs(items):
+                  result = {}
+                  for key, value in items:
+                      if key in result:
+                          raise ValueError(f"duplicate JSON key {key!r} in {path}")
+                      result[key] = value
+                  return result
+              with path.open("r", encoding="utf-8", newline="") as handle:
+                  return json.load(handle, object_pairs_hook=pairs)
+
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open("rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          target_sha = require_sha("TARGET_SHA")
+          controller_sha = require_sha("GITHUB_SHA")
+          workflow_sha = require_sha("GITHUB_WORKFLOW_SHA")
+          if controller_sha != workflow_sha:
+              raise ValueError("controller and workflow commits differ")
+          release_id = require_exact_int("RELEASE_ID")
+          performance_run_id = require_exact_int("PERFORMANCE_RUN_ID")
+          controller_run_id = require_exact_int("CONTROLLER_RUN_ID")
+          controller_attempt = require_exact_int("CONTROLLER_RUN_ATTEMPT")
+          tag = os.environ["TAG"]
+          repo = os.environ["REPO"]
+          if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) is None:
+              raise ValueError("TAG is not exact vX.Y.Z")
+          if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None:
+              raise ValueError("REPO is not owner/name")
+
+          expected_zip = Path("build/package") / f"find-my-files-{tag}-win-x64.zip"
+          checksum_path = Path("build/package/SHA256SUMS.txt")
+          rust_sbom = Path("build/sbom/fmf-engine.cdx.json")
+          app_sbom = Path("build/sbom/app.cdx.json")
+          unsigned_manifest = Path("build/dist/FindMyFiles.unsigned.manifest.json")
+          signed_manifest = Path("build/dist/FindMyFiles.signed.manifest.json")
+          expected_paths = {
+              expected_zip,
+              checksum_path,
+              rust_sbom,
+              app_sbom,
+              unsigned_manifest,
+              signed_manifest,
+          }
+
+          build_root = Path("build")
+          actual_paths = set()
+          for path in build_root.rglob("*"):
+              metadata = path.lstat()
+              if stat.S_ISLNK(metadata.st_mode):
+                  raise ValueError(f"release handoff contains symlink {path}")
+              if stat.S_ISREG(metadata.st_mode):
+                  if metadata.st_size <= 0:
+                      raise ValueError(f"release handoff contains empty file {path}")
+                  actual_paths.add(path)
+              elif not stat.S_ISDIR(metadata.st_mode):
+                  raise ValueError(f"release handoff contains non-regular entry {path}")
+          if actual_paths != expected_paths:
+              missing = sorted(str(path) for path in expected_paths - actual_paths)
+              extra = sorted(str(path) for path in actual_paths - expected_paths)
+              raise ValueError(f"release handoff mismatch: missing={missing}, extra={extra}")
+
+          zip_digest = sha256(expected_zip)
+          with checksum_path.open("r", encoding="ascii", newline="") as handle:
+              checksum_text = handle.read()
+          checksum_match = re.fullmatch(
+              rf"([0-9a-f]{{64}})  ({re.escape(expected_zip.name)})\r?\n",
+              checksum_text,
+          )
+          if checksum_match is None or checksum_match.group(1) != zip_digest:
+              raise ValueError("SHA256SUMS.txt is not the exact coreutils record for the zip")
+
+          manifest_records = []
+          for state_name, path in (
+              ("unsigned", unsigned_manifest),
+              ("signed", signed_manifest),
+          ):
+              document = load_strict_json(path)
+              if set(document) != {"schema_version", "source_commit", "state", "files"}:
+                  raise ValueError(f"{path} has a non-canonical root schema")
+              if (
+                  document["schema_version"] != 2
+                  or document["source_commit"] != target_sha
+                  or document["state"] != state_name
+                  or not isinstance(document["files"], list)
+                  or not document["files"]
+              ):
+                  raise ValueError(f"{path} is not bound to {target_sha} / {state_name}")
+              manifest_records.append(
+                  {
+                      "name": path.name,
+                      "state": state_name,
+                      "sha256": sha256(path),
+                  }
+              )
+
+          public_assets = [expected_zip, checksum_path, app_sbom, rust_sbom]
+          asset_records = [
+              {"name": path.name, "sha256": sha256(path)}
+              for path in sorted(public_assets, key=lambda item: item.name)
+          ]
+          predicate = {
+              "schemaVersion": 1,
+              "source": {
+                  "repository": f"https://github.com/{repo}",
+                  "ref": f"refs/tags/{tag}",
+                  "commit": target_sha,
+              },
+              "release": {
+                  "id": release_id,
+                  "tag": tag,
+                  "performanceRunId": performance_run_id,
+              },
+              "controller": {
+                  "repository": f"https://github.com/{repo}",
+                  "ref": os.environ["GITHUB_REF"],
+                  "commit": controller_sha,
+                  "workflowCommit": workflow_sha,
+                  "runId": controller_run_id,
+                  "runAttempt": controller_attempt,
+              },
+              "assets": asset_records,
+              "bundleManifests": manifest_records,
+          }
+          predicate_path = Path(os.environ["RUNNER_TEMP"]) / "fmf-release-predicate-v1.json"
+          predicate_path.write_text(
+              json.dumps(predicate, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+              newline="\n",
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
+              output.write(f"zip_path={expected_zip.as_posix()}\n")
+              output.write(f"predicate_path={predicate_path.as_posix()}\n")
+          print(
+              f"Bound release {release_id}, {tag}, {target_sha} to "
+              f"{len(asset_records)} public assets and two bundle manifests."
+          )
+
+      # Exact release identity + SBOM attestations for the published artifacts.
+      # Keyless via the workflow's OIDC token (no stored secrets).
       # Verify: gh attestation verify <zip> --repo P4suta/find-my-files
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+      - name: Attest exact release identity
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-path: |
-            build/package/find-my-files-*-win-x64.zip
+            ${{ steps.release-predicate.outputs.zip_path }}
             build/package/SHA256SUMS.txt
+            build/sbom/app.cdx.json
+            build/sbom/fmf-engine.cdx.json
+          predicate-type: https://github.com/P4suta/find-my-files/attestations/release/v1
+          predicate-path: ${{ steps.release-predicate.outputs.predicate_path }}
 
       - name: Attest Rust SBOM
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
-          subject-path: build/package/find-my-files-*-win-x64.zip
+          subject-path: ${{ steps.release-predicate.outputs.zip_path }}
           sbom-path: build/sbom/fmf-engine.cdx.json
 
       - name: Attest C# SBOM
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
-          subject-path: build/package/find-my-files-*-win-x64.zip
+          subject-path: ${{ steps.release-predicate.outputs.zip_path }}
           sbom-path: build/sbom/app.cdx.json
 
       # Close the time-of-check/time-of-publish window. If the tag or draft moved
@@ -779,86 +1228,104 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          if ($env:GITHUB_REF -cne "refs/tags/$env:TAG") {
-            throw "Publish workflow ref '$env:GITHUB_REF' is not refs/tags/$env:TAG."
+          if ($env:GITHUB_REF -cne "refs/heads/main") {
+            throw "Publish controller ref '$env:GITHUB_REF' is not protected main."
           }
           $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
-          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant()) {
-            throw "Tag $env:TAG moved from workflow SHA $env:GITHUB_SHA to $tagSha."
+          if ($tagSha -cne $env:TARGET_SHA) {
+            throw "Tag $env:TAG moved from approved target $env:TARGET_SHA to $tagSha."
           }
-          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
-            "repos/$env:REPO/releases?per_page=100" |
+          if ($env:RELEASE_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw "Release ID '$env:RELEASE_ID' is not an exact numeric identity."
+          }
+          $release = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/releases/$env:RELEASE_ID" |
             ConvertFrom-Json -Depth 20
-          $matches = @(
-            foreach ($page in $pages) {
-              foreach ($candidate in $page) {
-                if ($candidate.draft -and
-                    -not $candidate.prerelease -and
-                    $candidate.tag_name -ceq $env:TAG -and
-                    $candidate.name -ceq $env:TAG) {
-                  $candidate
-                }
-              }
-            }
-          )
-          if ($matches.Count -ne 1) {
-            throw "$env:TAG no longer identifies one expected draft release."
+          if ([long]$release.id -ne [long]$env:RELEASE_ID -or
+              -not $release.draft -or
+              $release.prerelease -or
+              $release.tag_name -cne $env:TAG -or
+              $release.name -cne $env:TAG) {
+            throw "Release $env:RELEASE_ID is no longer the expected $env:TAG draft."
           }
-          $release = $matches[0]
           $targetSha = [string]$release.target_commitish
           if ($targetSha -cnotmatch '^[0-9a-f]{40}$' -or $targetSha -cne $tagSha) {
             throw "Draft target '$targetSha' must remain the exact tag commit $tagSha."
           }
 
-      # release-please created the vX.Y.Z tag and draft together. Upload all
-      # assets before publishing: immutable releases cannot be modified later.
-      # `--clobber` makes a retry deterministic for the four expected names, but
-      # an unexpected pre-existing asset fails closed instead of being published.
+      # Mint publication authority only after artifact download, identity
+      # checks, and every attestation have completed. Publishing an existing
+      # draft and uploading assets never edits Actions files, so the token has
+      # no Workflows permission.
+      - name: Mint short-lived publication App token
+        id: publication-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_PLEASE_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_PRIVATE_KEY }}
+          permission-contents: write
+
+      # release-please created the vX.Y.Z tag and draft together. Every read,
+      # asset deletion/upload, and final publication addresses its immutable
+      # numeric release ID; tag/name are validation fields, never mutation keys.
       - name: Upload, verify, and publish the draft release
         shell: pwsh
         env:
           GH_TOKEN: ${{ steps.publication-token.outputs.token }}
+          SETTINGS_TOKEN: ${{ steps.immutable-settings-token.outputs.token }}
           REPO: ${{ github.repository }}
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
 
-          $zips = @(
-            Get-ChildItem -LiteralPath build/package -Filter "find-my-files-*-win-x64.zip" -File
-          )
-          if ($zips.Count -ne 1) {
-            throw "Expected exactly one packaged zip, found $($zips.Count)."
+          $zipPath = (Resolve-Path -LiteralPath "build/package/find-my-files-$env:TAG-win-x64.zip").Path
+          $zip = Get-Item -LiteralPath $zipPath -Force
+          if ($zip.PSIsContainer -or
+              (($zip.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+              $zip.Length -le 0) {
+            throw "Expected packaged zip is not a nonempty regular file."
           }
           $localByName = @{}
-          $localByName[$zips[0].Name] = $zips[0].FullName
+          $localByName[$zip.Name] = $zip.FullName
           $localByName["SHA256SUMS.txt"] = (Resolve-Path -LiteralPath "build/package/SHA256SUMS.txt").Path
           $localByName["app.cdx.json"] = (Resolve-Path -LiteralPath "build/sbom/app.cdx.json").Path
           $localByName["fmf-engine.cdx.json"] = (Resolve-Path -LiteralPath "build/sbom/fmf-engine.cdx.json").Path
-          $expected = @($localByName.Keys) | Sort-Object
-
-          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
-            "repos/$env:REPO/releases?per_page=100" |
-            ConvertFrom-Json -Depth 20
-          $matches = @(
-            foreach ($page in $pages) {
-              foreach ($candidate in $page) {
-                if ($candidate.draft -and
-                    -not $candidate.prerelease -and
-                    $candidate.tag_name -ceq $env:TAG -and
-                    $candidate.name -ceq $env:TAG) {
-                  $candidate
-                }
+          $expected = @($localByName.Keys) | Sort-Object -CaseSensitive
+          $assertExactNames = {
+            param(
+              [string[]]$ExpectedNames,
+              [string[]]$ActualNames,
+              [string]$Context
+            )
+            $orderedActual = @($ActualNames | Sort-Object -CaseSensitive)
+            if ($ExpectedNames.Count -ne $orderedActual.Count) {
+              throw "$Context asset count differs: expected $($ExpectedNames.Count), got $($orderedActual.Count)."
+            }
+            for ($index = 0; $index -lt $ExpectedNames.Count; $index++) {
+              if ($ExpectedNames[$index] -cne $orderedActual[$index]) {
+                throw "$Context asset name differs at '$($orderedActual[$index])' versus '$($ExpectedNames[$index])'."
               }
             }
-          )
-          if ($matches.Count -ne 1) {
-            throw "$env:TAG no longer identifies one expected draft release."
           }
-          $release = $matches[0]
+          foreach ($name in $expected) {
+            if ($name -cnotmatch '^[A-Za-z0-9._-]+$') {
+              throw "Unsafe release asset name '$name'."
+            }
+          }
+
+          if ($env:RELEASE_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw "Release ID '$env:RELEASE_ID' is not an exact numeric identity."
+          }
+          $release = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/releases/$env:RELEASE_ID" |
+            ConvertFrom-Json -Depth 20
           $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
-          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant() -or
+          if ([long]$release.id -ne [long]$env:RELEASE_ID -or
+              $tagSha -cne $env:TARGET_SHA -or
               -not $release.draft -or
+              $release.prerelease -or
               $release.tag_name -cne $env:TAG -or
+              $release.name -cne $env:TAG -or
               [string]$release.target_commitish -cne $tagSha) {
             throw "Draft release identity no longer matches the workflow's immutable tag commit."
           }
@@ -871,46 +1338,64 @@ jobs:
             throw "Draft contains unexpected assets: $($unexpected -join ', ')."
           }
 
-          gh release upload $env:TAG `
-            $localByName[$zips[0].Name] `
-            $localByName["SHA256SUMS.txt"] `
-            $localByName["app.cdx.json"] `
-            $localByName["fmf-engine.cdx.json"] `
-            --repo $env:REPO `
-            --clobber
-
-          $pages = gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp `
-            "repos/$env:REPO/releases?per_page=100" |
-            ConvertFrom-Json -Depth 20
-          $matches = @(
-            foreach ($page in $pages) {
-              foreach ($candidate in $page) {
-                if ($candidate.draft -and
-                    -not $candidate.prerelease -and
-                    $candidate.tag_name -ceq $env:TAG -and
-                    $candidate.name -ceq $env:TAG) {
-                  $candidate
-                }
-              }
+          # A retry keeps byte-identical assets. Any existing mismatch is a
+          # security-relevant drift and fails closed; there is no clobber path.
+          foreach ($asset in @($release.assets)) {
+            if ([string]$asset.id -cnotmatch '^[1-9][0-9]*$') {
+              throw "Draft asset '$($asset.name)' has no exact numeric ID."
             }
-          )
-          if ($matches.Count -ne 1) {
-            throw "$env:TAG no longer identifies one expected draft release."
+            $localDigest = "sha256:$((Get-FileHash -LiteralPath $localByName[$asset.name] -Algorithm SHA256).Hash.ToLowerInvariant())"
+            if ($asset.state -cne "uploaded" -or
+                [string]$asset.digest -cne $localDigest) {
+              throw "Existing draft asset '$($asset.name)' is not byte-identical; refusing replacement."
+            }
           }
-          $release = $matches[0]
+
+          $release = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/releases/$env:RELEASE_ID" |
+            ConvertFrom-Json -Depth 20
           $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
-          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant() -or
+          if ([long]$release.id -ne [long]$env:RELEASE_ID -or
+              $tagSha -cne $env:TARGET_SHA -or
               -not $release.draft -or
+              $release.prerelease -or
               $release.tag_name -cne $env:TAG -or
+              $release.name -cne $env:TAG -or
+              [string]$release.target_commitish -cne $tagSha) {
+            throw "Draft release identity changed before exact-ID asset upload."
+          }
+          $present = @($release.assets | ForEach-Object { $_.name })
+          foreach ($name in $expected) {
+            if ($present -ccontains $name) {
+              continue
+            }
+            gh api --hostname uploads.github.com --method POST `
+              -H "Accept: application/vnd.github+json" `
+              -H "X-GitHub-Api-Version: 2026-03-10" `
+              -H "Content-Type: application/octet-stream" `
+              --input $localByName[$name] `
+              "repos/$env:REPO/releases/$env:RELEASE_ID/assets?name=$name" |
+              Out-Null
+          }
+
+          $release = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/releases/$env:RELEASE_ID" |
+            ConvertFrom-Json -Depth 20
+          $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
+          if ([long]$release.id -ne [long]$env:RELEASE_ID -or
+              $tagSha -cne $env:TARGET_SHA -or
+              -not $release.draft -or
+              $release.prerelease -or
+              $release.tag_name -cne $env:TAG -or
+              $release.name -cne $env:TAG -or
               [string]$release.target_commitish -cne $tagSha) {
             throw "Draft release identity changed while assets were uploaded."
           }
-          $actual = @($release.assets | ForEach-Object { $_.name }) | Sort-Object
-          if (Compare-Object $expected $actual) {
-            throw "Draft asset set does not exactly match the release candidate."
-          }
+          $actual = @($release.assets | ForEach-Object { $_.name })
+          & $assertExactNames $expected $actual "Draft"
           foreach ($asset in $release.assets) {
-            if ($asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+            if ($asset.state -cne "uploaded" -or
+                $asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
               throw "Draft asset '$($asset.name)' has no valid SHA-256 digest."
             }
             $localDigest = "sha256:$((Get-FileHash -LiteralPath $localByName[$asset.name] -Algorithm SHA256).Hash.ToLowerInvariant())"
@@ -919,6 +1404,12 @@ jobs:
             }
           }
 
+          # This list is used only for monotonic version policy. Release identity
+          # and every mutation remain fixed to RELEASE_ID.
+          $pages = gh api --paginate --slurp `
+            -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/releases?per_page=100" |
+            ConvertFrom-Json -Depth 20
           $currentVersion = [Version]$env:TAG.Substring(1)
           $newerStable = @(
             foreach ($page in $pages) {
@@ -935,19 +1426,58 @@ jobs:
           if ($newerStable.Count -ne 0) {
             throw "Refusing out-of-order stable publication; newer release(s) exist: $($newerStable -join ', ')."
           }
-          $settings = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+          $settings = gh api `
+            -H "Authorization: Bearer $env:SETTINGS_TOKEN" `
+            -H "X-GitHub-Api-Version: 2026-03-10" `
             "repos/$env:REPO/immutable-releases" |
             ConvertFrom-Json -Depth 10
           if (-not $settings.enabled) {
             throw "Repository immutable releases were disabled before publication."
           }
-          gh release edit $env:TAG `
-            --repo $env:REPO `
-            --draft=false `
-            --prerelease=false `
-            --latest `
-            --title $env:TAG `
-            --verify-tag
+
+          # Final authority check: no network call is allowed between this exact
+          # draft/asset snapshot and the numeric-ID PATCH below.
+          $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
+          $release = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/releases/$env:RELEASE_ID" |
+            ConvertFrom-Json -Depth 20
+          if ([long]$release.id -ne [long]$env:RELEASE_ID -or
+              $tagSha -cne $env:TARGET_SHA -or
+              -not $release.draft -or
+              $release.prerelease -or
+              $release.tag_name -cne $env:TAG -or
+              $release.name -cne $env:TAG -or
+              [string]$release.target_commitish -cne $tagSha) {
+            throw "Draft release identity changed immediately before publication."
+          }
+          $actual = @($release.assets | ForEach-Object { $_.name })
+          & $assertExactNames $expected $actual "Pre-publication draft"
+          foreach ($asset in $release.assets) {
+            if ($asset.state -cne "uploaded" -or
+                $asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+              throw "Pre-publication asset '$($asset.name)' has invalid state or digest."
+            }
+            $localDigest = "sha256:$((Get-FileHash -LiteralPath $localByName[$asset.name] -Algorithm SHA256).Hash.ToLowerInvariant())"
+            if ([string]$asset.digest -cne $localDigest) {
+              throw "Pre-publication asset '$($asset.name)' differs from the approved candidate."
+            }
+          }
+          $published = gh api --method PATCH `
+            -H "X-GitHub-Api-Version: 2026-03-10" `
+            -F draft=false `
+            -F prerelease=false `
+            -f make_latest=true `
+            -f name="$env:TAG" `
+            "repos/$env:REPO/releases/$env:RELEASE_ID" |
+            ConvertFrom-Json -Depth 20
+          if ([long]$published.id -ne [long]$env:RELEASE_ID -or
+              $published.draft -or
+              $published.prerelease -or
+              $published.tag_name -cne $env:TAG -or
+              $published.name -cne $env:TAG -or
+              [string]$published.target_commitish -cne $env:TARGET_SHA) {
+            throw "Exact-ID publication returned a different release identity."
+          }
 
       - name: Verify the published release is immutable and complete
         shell: pwsh
@@ -957,46 +1487,57 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:RELEASE_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw "Release ID '$env:RELEASE_ID' is not an exact numeric identity."
+          }
           $release = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
-            "repos/$env:REPO/releases/tags/$env:TAG" |
+            "repos/$env:REPO/releases/$env:RELEASE_ID" |
             ConvertFrom-Json -Depth 20
-          if ($release.draft -or
+          if ([long]$release.id -ne [long]$env:RELEASE_ID -or
+              $release.draft -or
               $release.prerelease -or
               $release.name -cne $env:TAG -or
               -not $release.immutable) {
             throw "$env:TAG was not published as an immutable release."
           }
           $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
-          if ($tagSha -cne $env:GITHUB_SHA.ToLowerInvariant() -or
+          if ($tagSha -cne $env:TARGET_SHA -or
               $release.tag_name -cne $env:TAG -or
               [string]$release.target_commitish -cne $tagSha) {
             throw "Published release identity no longer matches the workflow's immutable tag commit."
           }
 
-          $zips = @(
-            Get-ChildItem -LiteralPath build/package -Filter "find-my-files-*-win-x64.zip" -File
-          )
-          if ($zips.Count -ne 1) {
-            throw "Expected exactly one packaged zip, found $($zips.Count)."
+          $zipPath = (Resolve-Path -LiteralPath "build/package/find-my-files-$env:TAG-win-x64.zip").Path
+          $zip = Get-Item -LiteralPath $zipPath -Force
+          if ($zip.PSIsContainer -or
+              (($zip.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+              $zip.Length -le 0) {
+            throw "Expected packaged zip is not a nonempty regular file."
           }
           $expected = @(
-            $zips[0].Name
+            $zip.Name
             "SHA256SUMS.txt"
             "app.cdx.json"
             "fmf-engine.cdx.json"
-          ) | Sort-Object
-          $actual = @($release.assets | ForEach-Object { $_.name }) | Sort-Object
-          if (Compare-Object $expected $actual) {
-            throw "Published asset set does not exactly match the release candidate."
+          ) | Sort-Object -CaseSensitive
+          $actual = @($release.assets | ForEach-Object { $_.name }) | Sort-Object -CaseSensitive
+          if ($expected.Count -ne $actual.Count) {
+            throw "Published asset count does not exactly match the release candidate."
+          }
+          for ($index = 0; $index -lt $expected.Count; $index++) {
+            if ($expected[$index] -cne $actual[$index]) {
+              throw "Published asset name differs at '$($actual[$index])' versus '$($expected[$index])'."
+            }
           }
 
           $localByName = @{}
-          $localByName[$zips[0].Name] = $zips[0].FullName
+          $localByName[$zip.Name] = $zip.FullName
           $localByName["SHA256SUMS.txt"] = (Resolve-Path -LiteralPath "build/package/SHA256SUMS.txt").Path
           $localByName["app.cdx.json"] = (Resolve-Path -LiteralPath "build/sbom/app.cdx.json").Path
           $localByName["fmf-engine.cdx.json"] = (Resolve-Path -LiteralPath "build/sbom/fmf-engine.cdx.json").Path
           foreach ($asset in $release.assets) {
-            if ($asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+            if ($asset.state -cne "uploaded" -or
+                $asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
               throw "Published asset '$($asset.name)' has no valid SHA-256 digest."
             }
             $localDigest = "sha256:$((Get-FileHash -LiteralPath $localByName[$asset.name] -Algorithm SHA256).Hash.ToLowerInvariant())"

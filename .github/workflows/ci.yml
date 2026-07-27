@@ -56,6 +56,11 @@ jobs:
               # future-proof instead of hand-maintaining an allowlist that can
               # silently omit a newly added gate.
               - '.github/workflows/**'
+            # fmf-core is listed because its cfg-gate-free parsers are what the
+            # fuzz targets build against. `ondisk` (the NTFS grammar) is now
+            # reachable from Linux too (ADR-0047) but has no target yet, so this
+            # filter is broader than the coverage it triggers — deliberately, so
+            # a grammar change never merges without the existing targets running.
             fuzz:
               - 'engine/fuzz/**'
               - 'engine/crates/fmf-proto/**'
@@ -74,21 +79,22 @@ jobs:
           persist-credentials: false
       # Lint the workflow YAML itself: syntax, ${{ }} expression types, and
       # shellcheck over run: blocks. Catches workflow errors before a release run.
-      - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
-      # The repository intentionally allowlists a small set of setup actions.
-      # Install the repository-pinned zizmor binary through the already-allowed
-      # mise action instead of widening that policy for a second setup wrapper.
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - uses: ./.github/actions/setup-actionlint
+        id: actionlint
+      - run: '"$ACTIONLINT"'
+        env:
+          ACTIONLINT: ${{ steps.actionlint.outputs.executable }}
+      # CI uses the ecosystem-standard checksummed release installer directly;
+      # mise remains the local developer environment manager. The doctor checks
+      # that both lanes pin the same tool versions.
+      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
-          install: false
+          tool: zizmor@1.28.0,typos-cli@1.47.2,taplo-cli@0.10.0
+          fallback: none
       - name: Audit GitHub Actions security
-        run: |
-          mise install github:zizmorcore/zizmor
-          mise exec github:zizmorcore/zizmor -- zizmor --offline --persona auditor --min-severity low .
-      - uses: crate-ci/typos@bee27e3a4fd1ea2111cf90ab89cd076c870fce14 # v1.47.2 (reads root _typos.toml)
-      - uses: uncenter/setup-taplo@b18c8c8302695fe63d6853bc004006215ac52b91 # v2
-        with:
-          version: "0.10.0"
+        run: zizmor --offline --strict-collection --persona auditor --min-severity low .
+      - name: Check spelling
+        run: typos
       # fmt --check from the repo root enforces TOML *formatting* (taplo.toml),
       # not just validity, across every crate + the root configs.
       - run: taplo fmt --check
@@ -110,6 +116,7 @@ jobs:
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-deny@0.19.9
+          fallback: none
       - run: cargo deny check bans licenses sources
         working-directory: engine
 
@@ -123,10 +130,16 @@ jobs:
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-machete@0.9.2
+          fallback: none
       - run: cargo machete engine
 
-  # The only engine crates that compile off-Windows (no ntfs-reader/windows-sys):
-  # a cheap Linux lint of the contract/proto layer.
+  # A cheap Linux lint of the contract/proto layer. These are not the only
+  # crates that build off-Windows: fmf-core's windows-sys dependency is
+  # cfg-gated, so its pure parsers (ondisk / query / index::snapshot /
+  # usn::records / wtf8) compile on Linux too — that is what the `fuzz` job
+  # below exercises (ADR-0047). fmf-core is deliberately not linted here: the
+  # Linux view of it is a strict subset of the Windows `engine-build-test`
+  # clippy run, so adding it would only duplicate that gate.
   contract-lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -178,12 +191,22 @@ jobs:
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-nextest@0.9.140
+          fallback: none
       - run: cargo fmt --all --check
         working-directory: xtask
       - run: cargo clippy --locked --all-targets -- -D warnings
         working-directory: xtask
       - run: cargo nextest run --locked --profile ci
         working-directory: xtask
+      - name: Upload xtask nextest JUnit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xtask-nextest-junit
+          path: build/xtask/nextest/ci/junit.xml
+          retention-days: 14
+          if-no-files-found: warn
+          overwrite: true
 
   # ── windows engine tier: engine compiles once here, the app reuses the dll ──
   engine-build-test:
@@ -207,6 +230,7 @@ jobs:
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.140
+          fallback: none
       - name: clippy (compiles the engine; later steps reuse it)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
         working-directory: engine
@@ -214,14 +238,28 @@ jobs:
       # (it runs `gen-contract --check` for EngineContract.g.cs), so no separate
       # codegen + git-diff step is needed here
       # (ADR-0018).
+      - name: uninstrumented pipe page latency gate
+        run: cargo nextest run --locked --workspace --profile ci-latency -E 'test(page_roundtrip_stays_inside_the_latency_budget)'
+        working-directory: engine
       - name: test + line coverage gate
         # Measured 77.99% (just cov); gate held ~2pt below for tool/run headroom.
         # LLVM instrumentation invalidates the 5 ms wall-clock pipe budget; the
-        # uninstrumented workspace run and dedicated performance gate own it.
+        # uninstrumented step above owns it.
         run: |
           mkdir -p ../build/coverage
-          cargo llvm-cov nextest --locked --workspace --profile ci --fail-under-lines 76 --lcov --output-path ../build/coverage/engine-lcov.info -E 'not test(page_roundtrip_stays_inside_the_latency_budget)'
+          cargo llvm-cov nextest --locked --workspace --profile ci-coverage --fail-under-lines 76 --lcov --output-path ../build/coverage/engine-lcov.info -E 'not test(page_roundtrip_stays_inside_the_latency_budget)'
         working-directory: engine
+      - name: Upload engine nextest JUnit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-nextest-junit
+          path: |
+            build/engine/nextest/ci-latency/latency.xml
+            build/engine/nextest/ci-coverage/coverage.xml
+          retention-days: 14
+          if-no-files-found: warn
+          overwrite: true
       - name: doctest
         run: cargo test --locked --workspace --exclude fmf-ffi --doc
         working-directory: engine
@@ -259,7 +297,15 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      # Reuse the engine dll built upstream — the app job never invokes cargo.
+      # Reuse the engine binaries built upstream. The publish recipes still run
+      # the independent xtask workspace, so provision and cache Rust for xtask
+      # without rebuilding the engine.
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: xtask
+          shared-key: app-xtask
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: engine-release
@@ -267,20 +313,14 @@ jobs:
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           dotnet-version: 10.0.302
-      # Keep the GitHub Actions allowlist narrow: WinAppCli is already pinned in
-      # mise.toml and is provisioned through the allowlisted mise setup action.
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
-        with:
-          install: false
-      - name: Install pinned WinAppCli
-        run: mise install node "npm:@microsoft/winappcli"
+      - uses: ./.github/actions/setup-winapp
+        id: winapp
       - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           # just: the publish recipe. cargo-about: publish generates the bundle's
-          # THIRD-PARTY-NOTICES.txt from the Rust crate graph. This job does not
-          # use mise-action (release.yml/nightly.yml do), so cargo-about is
-          # installed here directly — same version as the mise.toml pin.
+          # THIRD-PARTY-NOTICES.txt from the Rust crate graph.
           tool: just@1.54.0,cargo-about@0.7.1
+          fallback: none
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.nuget/packages
@@ -295,6 +335,8 @@ jobs:
         run: just publish-app true
       - name: shipping bundle startup smoke (no test seams)
         run: just ui-test-stable-smoke
+        env:
+          FMF_UI_CLI: ${{ steps.winapp.outputs.cli-path }}
       - name: test app + coverage gate (line+branch, UI-excluded)
         run: just test-app-cov true
       - name: pipe integration (C# client × real service, unelevated)
@@ -308,6 +350,8 @@ jobs:
         run: just publish-ui-test true
       - name: UI-test bundle automation
         run: just ui-test-published
+        env:
+          FMF_UI_CLI: ${{ steps.winapp.outputs.cli-path }}
       - name: upload UI automation evidence on failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -327,15 +371,15 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  # Informational on PRs (ADR-0013: runner thermal noise makes a hard 10% gate
-  # flaky). Confirms the benches compile + run; the authoritative gate is local
-  # `just perf-gate`.
+  # Required compile/run smoke on PRs. Hosted-runner timing is intentionally
+  # not judged here (ADR-0013); the authoritative regression verdict is the
+  # instrument-bound `just perf-gate`. A broken benchmark binary or crashing
+  # benchmark is nevertheless a release-blocking defect.
   bench:
     needs: [hygiene, changes]
     if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
     runs-on: windows-2025
     timeout-minutes: 25
-    continue-on-error: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -368,7 +412,7 @@ jobs:
   # gate-results (which counts `cancelled` as failure) paint main spuriously red.
   ci-required:
     if: ${{ always() && github.event_name == 'pull_request' }}
-    needs: [hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app, fuzz]
+    needs: [hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app, bench, fuzz]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

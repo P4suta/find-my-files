@@ -10,4 +10,4 @@
 - [ ] If the contract changed: ran `just contract-gen` and committed the regenerated bindings
 - [ ] No hand-edits to `app/FindMyFiles/Engine/Generated/` (regenerate instead)
 
-See [CONTRIBUTING.md](../CONTRIBUTING.md).
+See the [README](../README.md) for setup; `just --list` for the task menu.

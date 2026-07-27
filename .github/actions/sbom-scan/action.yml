@@ -1,182 +1,98 @@
 name: Generate SBOMs and scan for vulnerabilities
 description: >-
-  Generate the Rust + C# CycloneDX 1.6 SBOMs into build/sbom/ and gate on
-  known-vulnerable dependencies in the resolved release dependency graphs (osv-scanner over
-  the SBOMs — the only view of the .NET/NuGet graph cargo-audit can't see). The
-  single source shared by release.yml (release gate) and nightly.yml so the tool
-  versions never drift. Requires the toolchain (mise: rust + dotnet) already
-  installed and `just publish` already run (NuGet restored). No secrets needed.
+  Generate deterministic, artifact-derived Rust + .NET CycloneDX 1.6 SBOMs
+  into build/sbom/ and gate on known-vulnerable dependencies. Requires pinned
+  Rust/.NET toolchains, a validated distribution tree, and locked NuGet restore
+  evidence. No secrets needed.
 
 runs:
   using: composite
   steps:
-    # SBOM tooling (release/nightly-only; deliberately not in mise.toml's dev
-    # loop). Version-pinned; both crates.io and NuGet verify package integrity
-    # against their immutable indexes, so a pinned version is fetched
-    # reproducibly. Keep the .NET tool in a private runner-temp directory and
-    # invoke its shim explicitly; no environment file or global PATH mutation.
-    - name: Install SBOM tools
-      shell: pwsh
-      run: |
-        cargo install cargo-sbom --locked --version 0.10.0
-        $toolPath = Join-Path $env:RUNNER_TEMP "fmf-dotnet-tools"
-        dotnet tool install CycloneDX --tool-path $toolPath --version 6.2.0
-
-    # SBOMs (CycloneDX 1.6 JSON), generated after the build so the resolved
-    # graphs match what shipped. fmf-service's dependency closure is the
-    # canonical Rust payload graph: it covers every external runtime dependency
-    # of fmf_engine.dll and the launcher as well, without pulling the
-    # developer-only fmf-cli into the end-user SBOM. Generate an fmf-ffi view
-    # alongside it only for the subset assertion below. The Rust step uses bash
-    # because pwsh's `>` would emit UTF-16.
-    - name: Generate Rust SBOM (CycloneDX)
-      working-directory: engine
-      shell: bash
-      run: |
-        mkdir -p ../build/sbom
-        # cargo-sbom 0.10.0 has no --locked switch. Prove the committed graph is
-        # already complete before invoking it, so the generator cannot silently
-        # repair a stale Cargo.lock and describe dependencies we did not review.
-        cargo metadata --locked --format-version 1 --no-deps > /dev/null
-        cargo sbom --cargo-package fmf-service --output-format cyclone_dx_json_1_6 > ../build/sbom/fmf-engine.cdx.json
-        cargo sbom --cargo-package fmf-ffi --output-format cyclone_dx_json_1_6 > "$RUNNER_TEMP/fmf-ffi.cdx.json"
-
-    - name: Generate C# SBOM (CycloneDX)
-      shell: pwsh
-      run: |
-        $cycloneDx = Join-Path $env:RUNNER_TEMP "fmf-dotnet-tools\dotnet-CycloneDX.exe"
-        & $cycloneDx app/FindMyFiles/FindMyFiles.csproj `
-          --output build/sbom --filename app.cdx.json `
-          --output-format Json --spec-version 1.6 --runtime win-x64 `
-          --set-name FindMyFiles --set-version "$env:FMF_BUILD_VERSION" `
-          --exclude-dev --disable-package-restore
-
-    # Do not let a scanner consume syntactically valid but anonymous, empty, or
-    # stale output. FMF_BUILD_VERSION is the same identity embedded in the bundle
-    # and BUILDINFO.txt by release/nightly.
-    - name: Validate SBOM identity and structure
+    # cargo-sbom supplies one raw runtime graph for each shipped Rust entry
+    # point. It is an exceptional exact-version registry install: crates.io
+    # verifies the package checksum and `--locked` fixes its dependency graph.
+    # Install under runner temp so it never becomes ambient runner state.
+    - name: Install cargo-sbom
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
-        if ([string]::IsNullOrWhiteSpace($env:FMF_BUILD_VERSION)) {
-          throw "FMF_BUILD_VERSION is required before SBOM generation."
+        $PSNativeCommandUseErrorActionPreference = $true
+        $cargoRoot = Join-Path $env:RUNNER_TEMP "fmf-cargo-sbom"
+        cargo install cargo-sbom --locked --version 0.10.0 --root $cargoRoot
+        $cargoSbom = Join-Path $cargoRoot "bin\cargo-sbom.exe"
+        if (-not (Test-Path -LiteralPath $cargoSbom -PathType Leaf)) {
+          throw "cargo-sbom installation did not produce $cargoSbom"
         }
 
-        $expectedFiles = @("app.cdx.json", "fmf-engine.cdx.json")
-        $actualFiles = @(
-          Get-ChildItem -LiteralPath build/sbom -Filter *.cdx.json -File |
-            Select-Object -ExpandProperty Name |
-            Sort-Object
-        )
-        $difference = Compare-Object ($expectedFiles | Sort-Object) $actualFiles
-        if ($difference) {
-          throw "Expected exactly app.cdx.json and fmf-engine.cdx.json; found: $($actualFiles -join ', ')."
-        }
-
-        # cargo-sbom identifies the workspace root as an unversioned "engine"
-        # application. Normalize that generated root to the stable product
-        # identity used by the release asset; dependency components are left
-        # untouched.
-        $enginePath = "build/sbom/fmf-engine.cdx.json"
-        $engine = Get-Content -LiteralPath $enginePath -Raw |
-          ConvertFrom-Json -Depth 100
-        if ($null -eq $engine.metadata.component) {
-          throw "fmf-engine.cdx.json has no root component to identify."
-        }
-        $engine.metadata.component.name = "fmf-engine"
-        $engine.metadata.component |
-          Add-Member -NotePropertyName version -NotePropertyValue $env:FMF_BUILD_VERSION -Force
-        $engine.metadata.component |
-          Add-Member -NotePropertyName "bom-ref" -NotePropertyValue "fmf-engine@$env:FMF_BUILD_VERSION" -Force
-
-        # fmf-service deliberately owns the canonical shipped Rust dependency
-        # closure. Prove that fmf_engine.dll has introduced no external crate
-        # outside it; otherwise one SBOM could silently omit a shipped
-        # dependency and this job must stop until the model is extended.
-        $ffi = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "fmf-ffi.cdx.json") -Raw |
-          ConvertFrom-Json -Depth 100
-        $engineComponents = @{}
-        foreach ($component in @($engine.components)) {
-          $engineComponents["$($component.name)@$($component.version)"] = $true
-        }
-        $missingFfiComponents = @(
-          foreach ($component in @($ffi.components)) {
-            if ($component.name -notlike "fmf-*" -and
-                -not $engineComponents.ContainsKey("$($component.name)@$($component.version)")) {
-              "$($component.name)@$($component.version)"
-            }
-          }
-        )
-        if ($missingFfiComponents.Count -ne 0) {
-          throw "fmf-ffi has dependencies outside the canonical shipped Rust SBOM: $($missingFfiComponents -join ', ')."
-        }
-
-        $developerOnly = @("fmf-cli", "indicatif", "clap_complete")
-        $leakedDeveloperComponents = @(
-          $engine.components |
-            Where-Object { $_.name -in $developerOnly } |
-            Select-Object -ExpandProperty name
-        )
-        if ($leakedDeveloperComponents.Count -ne 0) {
-          throw "Developer-only components leaked into the end-user Rust SBOM: $($leakedDeveloperComponents -join ', ')."
-        }
-        $engine | ConvertTo-Json -Depth 100 |
-          Set-Content -LiteralPath $enginePath -Encoding utf8
-
-        foreach ($name in $expectedFiles) {
-          $path = Join-Path build/sbom $name
-          $bom = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 100
-          if ($bom.bomFormat -cne "CycloneDX" -or $bom.specVersion -cne "1.6") {
-            throw "$name is not a CycloneDX 1.6 document."
-          }
-          if (@($bom.components).Count -eq 0) {
-            throw "$name has no components."
-          }
-        }
-
-        $app = Get-Content -LiteralPath build/sbom/app.cdx.json -Raw |
-          ConvertFrom-Json -Depth 100
-        if ($app.metadata.component.type -cne "application") {
-          throw "app.cdx.json root type is '$($app.metadata.component.type)', expected application."
-        }
-        if ($app.metadata.component.name -cne "FindMyFiles") {
-          throw "app.cdx.json root name is '$($app.metadata.component.name)', expected FindMyFiles."
-        }
-        if ($app.metadata.component.version -cne $env:FMF_BUILD_VERSION) {
-          throw "app.cdx.json version '$($app.metadata.component.version)' does not match '$env:FMF_BUILD_VERSION'."
-        }
-        $appBomRef = $app.metadata.component."bom-ref"
-        if ($appBomRef -cne "FindMyFiles@$env:FMF_BUILD_VERSION") {
-          throw "app.cdx.json has an unexpected root bom-ref '$appBomRef'."
-        }
-        $engine = Get-Content -LiteralPath $enginePath -Raw |
-          ConvertFrom-Json -Depth 100
-        if ($engine.metadata.component.type -cne "application") {
-          throw "fmf-engine.cdx.json root type is '$($engine.metadata.component.type)', expected application."
-        }
-        if ($engine.metadata.component.name -cne "fmf-engine") {
-          throw "fmf-engine.cdx.json root name is '$($engine.metadata.component.name)', expected fmf-engine."
-        }
-        if ($engine.metadata.component.version -cne $env:FMF_BUILD_VERSION) {
-          throw "fmf-engine.cdx.json version '$($engine.metadata.component.version)' does not match '$env:FMF_BUILD_VERSION'."
-        }
-        $engineBomRef = $engine.metadata.component."bom-ref"
-        if ($engineBomRef -cne "fmf-engine@$env:FMF_BUILD_VERSION") {
-          throw "fmf-engine.cdx.json has an unexpected root bom-ref '$engineBomRef'."
-        }
-
-    # Gate on known-vulnerable deps in the resolved release dependency graphs.
-    # The .NET/NuGet graph here is only visible via the SBOM, never to
-    # cargo-audit (which reads Cargo.lock). Accepted/unfixable advisories:
-    # osv-scanner.toml (ADR-0034).
     - name: Install osv-scanner
       uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
       with:
         tool: osv-scanner@2.3.6
+        fallback: none
+
+    # cargo-sbom writes nondeterministic wrappers (timestamp, UUID, operator).
+    # Keep those documents job-local. xtask validates their exact 0.10 shape,
+    # extracts all three selected package roots, merges by bom-ref, and writes
+    # the only publishable engine document. The private install directory is
+    # added only to this process PATH; it never mutates GITHUB_PATH.
+    - name: Generate and normalize artifact-derived SBOMs
+      working-directory: engine
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $PSNativeCommandUseErrorActionPreference = $true
+        $cargoRoot = Join-Path $env:RUNNER_TEMP "fmf-cargo-sbom"
+        $env:PATH = "$(Join-Path $cargoRoot 'bin');$env:PATH"
+        $rawDirectory = Join-Path $env:RUNNER_TEMP "fmf-sbom-raw"
+        if (Test-Path -LiteralPath $rawDirectory) {
+          throw "Raw cargo-sbom directory already exists: $rawDirectory"
+        }
+        New-Item -ItemType Directory -Path $rawDirectory | Out-Null
+        # cargo-sbom 0.10.0 has no --locked switch. Prove Cargo.lock is already
+        # complete so the generator cannot repair or mutate the reviewed graph.
+        cargo metadata --locked --format-version 1 --no-deps | Out-Null
+        cargo sbom --cargo-package fmf-service --output-format cyclone_dx_json_1_6 |
+          Out-File -LiteralPath (Join-Path $rawDirectory "fmf-service.cdx.json") -Encoding utf8NoBOM
+        cargo sbom --cargo-package fmf-ffi --output-format cyclone_dx_json_1_6 |
+          Out-File -LiteralPath (Join-Path $rawDirectory "fmf-ffi.cdx.json") -Encoding utf8NoBOM
+        cargo sbom --cargo-package fmf-launcher --output-format cyclone_dx_json_1_6 |
+          Out-File -LiteralPath (Join-Path $rawDirectory "fmf-launcher.cdx.json") -Encoding utf8NoBOM
+        Set-Location ..
+        just sbom $env:FMF_BUILD_VERSION $rawDirectory
+
+    # The canonical pair is immutable evidence, not scanner scratch space.
+    # Validate it before crossing into the third-party scanner boundary.
+    - name: Verify the canonical SBOM pair before scanning
+      shell: pwsh
+      run: just sbom-verify $env:FMF_BUILD_VERSION
+
+    # Gate on known-vulnerable dependencies in the exact shipped graphs. The
+    # app BOM is derived from dist + deps/assets + restored NuGet archives, so
+    # build/analyzer/pruned packages cannot create false positives and
+    # self-contained runtime packs cannot disappear. Only disposable copies
+    # cross into the scanner; build/sbom remains the sealed publication input.
     - name: Scan SBOMs for known vulnerabilities (gate)
       shell: pwsh
-      run: >-
-        osv-scanner scan source
-        -L build/sbom/fmf-engine.cdx.json
-        -L build/sbom/app.cdx.json
-        --config osv-scanner.toml
+      run: |
+        $ErrorActionPreference = "Stop"
+        $PSNativeCommandUseErrorActionPreference = $true
+        $scanDirectory = Join-Path $env:RUNNER_TEMP (
+          "fmf-sbom-scan-{0}-{1}-{2}" -f
+            $env:GITHUB_RUN_ID,
+            $env:GITHUB_RUN_ATTEMPT,
+            $env:GITHUB_JOB
+        )
+        if (Test-Path -LiteralPath $scanDirectory) {
+          throw "Disposable SBOM scan directory already exists: $scanDirectory"
+        }
+        New-Item -ItemType Directory -Path $scanDirectory | Out-Null
+        Copy-Item -LiteralPath build/sbom/fmf-engine.cdx.json -Destination $scanDirectory
+        Copy-Item -LiteralPath build/sbom/app.cdx.json -Destination $scanDirectory
+        osv-scanner scan source `
+          -L (Join-Path $scanDirectory "fmf-engine.cdx.json") `
+          -L (Join-Path $scanDirectory "app.cdx.json") `
+          --config osv-scanner.toml
+
+    - name: Verify the canonical SBOM pair after scanning
+      shell: pwsh
+      run: just sbom-verify $env:FMF_BUILD_VERSION

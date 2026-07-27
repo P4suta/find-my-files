@@ -1,54 +1,115 @@
-# Mutation testing (cargo-mutants, ADR-0022). Coverage answers "is this line
-# run?"; mutation answers "would a test NOTICE if it broke?" — the sharper
-# question for the fmf-core soundness surfaces. Curated to the highest-risk
-# files via engine/mutants.toml so a run finishes in minutes, not hours.
+# Weekly/manual exact-identity mutation audit (ADR-0022).
 #
-# Informational by design (ADR-0013: measure before gating). fmf-core is
-# Windows-only (ntfs-reader/windows-sys), so this runs on windows-2025, not
-# the ubuntu lanes. It does NOT block merges: there is a small, documented
-# residue of provably-equivalent mutants in wtf8.rs (bitwise `|` vs `^` over
-# disjoint operands; match arms unreachable behind the ASCII fast path), so a
-# zero-survivor exit is not expected. Reviewers read the uploaded survivor list
-# and diff it against that known-equivalent baseline — a NEW survivor outside it
-# means a test that no longer bites.
+# A valid audit binds its controller to the protected default-branch workflow
+# commit. A manual run from main may name a different exact repository commit as
+# inert target data (for example, a reviewed PR head); dispatches from any other
+# ref fail before target execution. The verified receipt records both identities;
+# consumers accept it only together with this run's protected-main identity.
 name: mutants
+run-name: mutation audit ${{ github.event.inputs.target_sha || github.workflow_sha }}
 
 on:
   schedule:
-    - cron: "53 4 * * 1" # Monday 04:53 UTC, alongside the other weekly scans
+    - cron: "53 4 * * 1" # Monday 04:53 UTC
   workflow_dispatch:
+    inputs:
+      target_sha:
+        description: "Optional exact 40-character repository commit SHA (defaults to controller)"
+        required: false
+        type: string
 
 concurrency:
-  group: mutants-${{ github.ref || github.run_id }}
+  group: mutation-audit-${{ github.event.inputs.target_sha || github.workflow_sha }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  mutants:
-    runs-on: windows-2025
-    timeout-minutes: 90
-    continue-on-error: true # informational — never gates a merge
+  authorize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      controller_sha: ${{ steps.identity.outputs.controller_sha }}
+      target_sha: ${{ steps.identity.outputs.target_sha }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Bind protected-main controller and exact target
+        id: identity
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          CONTROLLER_REF: ${{ github.ref }}
+          CONTROLLER_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          REQUESTED_TARGET: ${{ github.event.inputs.target_sha || '' }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
         with:
-          persist-credentials: false
-      - uses: ./.github/actions/rust-toolchain
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: engine
-          shared-key: engine-win # reuse the ci.yml/codeql dependency cache
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
-        with:
-          tool: cargo-mutants@27.1.0,just@1.54.0
-      - name: mutate the curated soundness surfaces
-        run: just mutants --config mutants.toml
-      - name: upload survivor list
-        if: always() # the run "fails" on the known-equivalent residue
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: mutants-out
-          path: build/mutants/
-          retention-days: 30
-          overwrite: true
+          github-token: ${{ github.token }}
+          script: |
+            const event = process.env.EVENT_NAME;
+            const ref = process.env.CONTROLLER_REF;
+            const controller = String(process.env.CONTROLLER_SHA ?? "");
+            const workflow = String(process.env.WORKFLOW_SHA ?? "");
+            const requested = String(process.env.REQUESTED_TARGET ?? "");
+            const repository = process.env.REPO;
+            if (event !== "schedule" && event !== "workflow_dispatch") {
+              throw new Error(`Unsupported mutation audit event '${event}'.`);
+            }
+            if (ref !== "refs/heads/main") {
+              throw new Error(`Mutation audit controller must run from protected main, got '${ref}'.`);
+            }
+            if (
+              !/^[0-9a-f]{40}$/.test(controller) ||
+              !/^[0-9a-f]{40}$/.test(workflow) ||
+              controller !== workflow
+            ) {
+              throw new Error("Caller and workflow are not one immutable controller commit.");
+            }
+            const parts = String(repository).split("/");
+            if (parts.length !== 2 || parts.some((part) => part.length === 0)) {
+              throw new Error(`Invalid repository identity '${repository}'.`);
+            }
+            const [owner, repo] = parts;
+            const { data: repositoryRecord } = await github.rest.repos.get({ owner, repo });
+            if (repositoryRecord.default_branch !== "main") {
+              throw new Error(
+                `Mutation controller requires default branch 'main', got '${repositoryRecord.default_branch}'.`,
+              );
+            }
+            const { data: lineage } = await github.rest.repos.compareCommitsWithBasehead({
+              owner,
+              repo,
+              basehead: `${controller}...main`,
+            });
+            if (lineage.status !== "ahead" && lineage.status !== "identical") {
+              throw new Error(
+                `Controller ${controller} is not on main's protected lineage (${lineage.status}).`,
+              );
+            }
+            const target = requested.length === 0 ? controller : requested;
+            if (!/^[0-9a-f]{40}$/.test(target)) {
+              throw new Error(`Mutation target '${target}' is not an exact lowercase commit SHA.`);
+            }
+            const { data: targetCommit } = await github.rest.repos.getCommit({
+              owner,
+              repo,
+              ref: target,
+            });
+            if (String(targetCommit.sha).toLowerCase() !== target) {
+              throw new Error(`Repository did not resolve the exact target commit ${target}.`);
+            }
+            core.setOutput("controller_sha", controller);
+            core.setOutput("target_sha", target);
+            core.info(`Authorized trusted mutation controller ${controller} for target ${target}.`);
+
+  mutation:
+    needs: authorize
+    permissions:
+      actions: read # let the fresh nested verifier bind this run's raw artifacts
+      contents: read
+    uses: ./.github/workflows/mutation-controller.yml
+    with:
+      controller_sha: ${{ needs.authorize.outputs.controller_sha }}
+      target_sha: ${{ needs.authorize.outputs.target_sha }}

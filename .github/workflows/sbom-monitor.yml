@@ -156,6 +156,7 @@ jobs:
         uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: osv-scanner@2.3.6
+          fallback: none
 
       - name: Re-scan release SBOMs against today's OSV DB
         id: scan

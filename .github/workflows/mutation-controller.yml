@@ -1,0 +1,554 @@
+# Trusted exact-identity mutation controller (ADR-0022).
+#
+# This reusable workflow is loaded from the same immutable commit as its caller.
+# The controller checkout supplies xtask, policy, baselines, tool manifests, and
+# local setup code. The separately checked-out target is data under test: none
+# of its workflows, Actions, just recipes, xtask code, mutation configuration,
+# or accepted-survivor baselines are executed or trusted.
+#
+# Target tests necessarily execute target-controlled code on a secretless,
+# hosted, disposable runner. Raw results therefore cross a second boundary:
+# a fresh job that never executes target code re-checks the exact source, policy,
+# tool, and report digests with the trusted controller before the gate passes.
+# This is tamper-evident CI evidence, not a sandbox or a cryptographic claim that
+# a deliberately hostile test process executed honestly; release targets are
+# separately restricted to protected-main lineage.
+name: mutation-controller
+
+on:
+  workflow_call:
+    inputs:
+      controller_sha:
+        description: "Exact trusted commit containing this workflow and mutation policy"
+        required: true
+        type: string
+      target_sha:
+        description: "Exact repository commit whose code and tests are mutated"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: windows-2025
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - name: Bind this job to the trusted reusable workflow
+        shell: pwsh
+        env:
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF -cne "refs/heads/main") {
+            throw "Mutation controller must be called from protected main, got '$env:GITHUB_REF'."
+          }
+          foreach ($identity in @($env:CONTROLLER_SHA, $env:TARGET_SHA, $env:WORKFLOW_SHA)) {
+            if ($identity -cnotmatch '^[0-9a-f]{40}$') {
+              throw "Mutation identity '$identity' is not an exact lowercase commit SHA."
+            }
+          }
+          if ($env:GITHUB_SHA -cne $env:CONTROLLER_SHA -or
+              $env:WORKFLOW_SHA -cne $env:CONTROLLER_SHA) {
+            throw "Caller, controller input, and reusable workflow are not one immutable commit."
+          }
+
+      - name: Check out the immutable trusted controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.controller_sha }}
+          path: controller
+
+      - name: Check out the exact target as data
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.target_sha }}
+          path: target
+
+      - name: Verify isolated clean checkouts before target code runs
+        shell: pwsh
+        env:
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\', '/')
+          $separator = [IO.Path]::DirectorySeparatorChar
+          function Assert-Checkout([string]$Relative, [string]$Expected) {
+            $root = [IO.Path]::GetFullPath((Join-Path $workspace $Relative)).TrimEnd('\', '/')
+            if (-not $root.StartsWith("$workspace$separator", [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Checkout '$root' escaped the Actions workspace."
+            }
+            $items = @(Get-Item -LiteralPath $root -Force) +
+              @(Get-ChildItem -LiteralPath $root -Force -Recurse)
+            if (@($items | Where-Object {
+                ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+              }).Count -ne 0) {
+              throw "Checkout '$Relative' contains a reparse point."
+            }
+            $actual = (git -C $root rev-parse HEAD).Trim().ToLowerInvariant()
+            if ($actual -cne $Expected) {
+              throw "Checkout '$Relative' is $actual, expected $Expected."
+            }
+            $dirty = @(git -C $root status --porcelain=v1 --untracked-files=all)
+            if ($dirty.Count -ne 0) {
+              throw "Checkout '$Relative' is dirty before mutation: $($dirty -join '; ')"
+            }
+          }
+          Assert-Checkout "controller" $env:CONTROLLER_SHA
+          Assert-Checkout "target" $env:TARGET_SHA
+
+      - id: rust-pin
+        name: Read the trusted Rust pin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $line = Get-Content -LiteralPath "controller/mise.toml" |
+            Where-Object { $_ -cmatch '^rust\s*=\s*"[0-9]+\.[0-9]+(?:\.[0-9]+)?"\s*$' }
+          if (@($line).Count -ne 1 -or $line -cnotmatch '"([^"]+)"') {
+            throw "controller/mise.toml must contain exactly one reviewable Rust pin."
+          }
+          "version=$($Matches[1])" >> $env:GITHUB_OUTPUT
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable action; exact toolchain input
+        with:
+          toolchain: ${{ steps.rust-pin.outputs.version }}
+
+      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        with:
+          tool: |
+            cargo-mutants@27.1.0
+            cargo-nextest@0.9.140
+          fallback: none
+
+      - name: Run the trusted Rust mutation controller against target data
+        shell: pwsh
+        working-directory: controller/xtask
+        env:
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          TARGET_ROOT: ${{ github.workspace }}\target
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo run --locked --release -- mutation-rust `
+            --target-root $env:TARGET_ROOT `
+            --target-sha $env:TARGET_SHA `
+            --controller-sha $env:CONTROLLER_SHA `
+            --run-id $env:RUN_ID `
+            --run-attempt $env:RUN_ATTEMPT `
+            --shard-index $env:SHARD_INDEX `
+            --shard-count 16
+
+      - name: Upload complete Rust mutation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-rust-raw-${{ matrix.shard }}
+          path: controller/build/mutation/rust/shard-${{ matrix.shard }}-of-16/
+          retention-days: 30
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true
+
+  csharp:
+    runs-on: windows-2025
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - name: Bind this job to the trusted reusable workflow
+        shell: pwsh
+        env:
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF -cne "refs/heads/main") {
+            throw "Mutation controller must be called from protected main, got '$env:GITHUB_REF'."
+          }
+          foreach ($identity in @($env:CONTROLLER_SHA, $env:TARGET_SHA, $env:WORKFLOW_SHA)) {
+            if ($identity -cnotmatch '^[0-9a-f]{40}$') {
+              throw "Mutation identity '$identity' is not an exact lowercase commit SHA."
+            }
+          }
+          if ($env:GITHUB_SHA -cne $env:CONTROLLER_SHA -or
+              $env:WORKFLOW_SHA -cne $env:CONTROLLER_SHA) {
+            throw "Caller, controller input, and reusable workflow are not one immutable commit."
+          }
+
+      - name: Check out the immutable trusted controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.controller_sha }}
+          path: controller
+
+      - name: Check out the exact target as data
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.target_sha }}
+          path: target
+
+      - name: Verify isolated clean checkouts before target code runs
+        shell: pwsh
+        env:
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\', '/')
+          $separator = [IO.Path]::DirectorySeparatorChar
+          function Assert-Checkout([string]$Relative, [string]$Expected) {
+            $root = [IO.Path]::GetFullPath((Join-Path $workspace $Relative)).TrimEnd('\', '/')
+            if (-not $root.StartsWith("$workspace$separator", [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Checkout '$root' escaped the Actions workspace."
+            }
+            $items = @(Get-Item -LiteralPath $root -Force) +
+              @(Get-ChildItem -LiteralPath $root -Force -Recurse)
+            if (@($items | Where-Object {
+                ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+              }).Count -ne 0) {
+              throw "Checkout '$Relative' contains a reparse point."
+            }
+            $actual = (git -C $root rev-parse HEAD).Trim().ToLowerInvariant()
+            if ($actual -cne $Expected) {
+              throw "Checkout '$Relative' is $actual, expected $Expected."
+            }
+            $dirty = @(git -C $root status --porcelain=v1 --untracked-files=all)
+            if ($dirty.Count -ne 0) {
+              throw "Checkout '$Relative' is dirty before mutation: $($dirty -join '; ')"
+            }
+          }
+          Assert-Checkout "controller" $env:CONTROLLER_SHA
+          Assert-Checkout "target" $env:TARGET_SHA
+
+      - id: rust-pin
+        name: Read the trusted Rust pin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $line = Get-Content -LiteralPath "controller/mise.toml" |
+            Where-Object { $_ -cmatch '^rust\s*=\s*"[0-9]+\.[0-9]+(?:\.[0-9]+)?"\s*$' }
+          if (@($line).Count -ne 1 -or $line -cnotmatch '"([^"]+)"') {
+            throw "controller/mise.toml must contain exactly one reviewable Rust pin."
+          }
+          "version=$($Matches[1])" >> $env:GITHUB_OUTPUT
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable action; exact toolchain input
+        with:
+          toolchain: ${{ steps.rust-pin.outputs.version }}
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Run the trusted C# mutation controller against target data
+        shell: pwsh
+        working-directory: controller/xtask
+        env:
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          TARGET_ROOT: ${{ github.workspace }}\target
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo run --locked --release -- mutation-csharp `
+            --target-root $env:TARGET_ROOT `
+            --target-sha $env:TARGET_SHA `
+            --controller-sha $env:CONTROLLER_SHA `
+            --run-id $env:RUN_ID `
+            --run-attempt $env:RUN_ATTEMPT `
+            --shard-index $env:SHARD_INDEX `
+            --shard-count 16
+
+      - name: Upload complete C# mutation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-csharp-raw-${{ matrix.shard }}
+          path: controller/build/mutation/csharp/shard-${{ matrix.shard }}-of-16/
+          retention-days: 30
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true
+
+  verify:
+    needs: [rust, csharp]
+    if: ${{ always() }}
+    runs-on: windows-2025
+    timeout-minutes: 60
+    permissions:
+      actions: read # enumerate and bind the exact immutable producer artifacts
+      contents: read
+    steps:
+      - name: Refuse missing or failed producer jobs
+        shell: pwsh
+        env:
+          RUST_RESULT: ${{ needs.rust.result }}
+          CSHARP_RESULT: ${{ needs.csharp.result }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:RUST_RESULT -cne "success" -or $env:CSHARP_RESULT -cne "success") {
+            throw "Raw mutation jobs did not both complete successfully."
+          }
+
+      - name: Bind this verifier to the trusted reusable workflow
+        shell: pwsh
+        env:
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF -cne "refs/heads/main") {
+            throw "Mutation verifier must be called from protected main, got '$env:GITHUB_REF'."
+          }
+          foreach ($identity in @($env:CONTROLLER_SHA, $env:TARGET_SHA, $env:WORKFLOW_SHA)) {
+            if ($identity -cnotmatch '^[0-9a-f]{40}$') {
+              throw "Mutation identity '$identity' is not an exact lowercase commit SHA."
+            }
+          }
+          if ($env:GITHUB_SHA -cne $env:CONTROLLER_SHA -or
+              $env:WORKFLOW_SHA -cne $env:CONTROLLER_SHA) {
+            throw "Caller, controller input, and verifier workflow are not one immutable commit."
+          }
+
+      - name: Check out the immutable trusted controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.controller_sha }}
+          path: controller
+
+      - name: Check out the exact target as inert verification data
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.target_sha }}
+          path: target
+
+      - name: Bind the exact immutable raw artifact set
+        id: artifacts
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const repository = process.env.REPO;
+            const runIdText = process.env.RUN_ID;
+            const controller = process.env.CONTROLLER_SHA;
+            if (!/^[1-9][0-9]*$/.test(runIdText)) {
+              throw new Error(`Invalid workflow run id '${runIdText}'.`);
+            }
+            const parts = String(repository).split("/");
+            if (parts.length !== 2 || parts.some((part) => part.length === 0)) {
+              throw new Error(`Invalid repository identity '${repository}'.`);
+            }
+            const [owner, repo] = parts;
+            const run_id = Number(runIdText);
+            if (!Number.isSafeInteger(run_id) || run_id <= 0) {
+              throw new Error(`Workflow run id '${runIdText}' is outside the exact integer range.`);
+            }
+            const expected = new Set();
+            for (const language of ["rust", "csharp"]) {
+              for (let shard = 0; shard < 16; shard += 1) {
+                expected.add(`mutation-${language}-raw-${shard}`);
+              }
+            }
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              {
+                owner,
+                repo,
+                run_id,
+                per_page: 100,
+                headers: { "X-GitHub-Api-Version": "2026-03-10" },
+              },
+            );
+            const relevant = artifacts.filter((artifact) =>
+              /^mutation-(rust|csharp)-raw-/.test(String(artifact.name)),
+            );
+            if (relevant.length !== expected.size) {
+              throw new Error(
+                `Expected ${expected.size} raw mutation artifacts, got ${relevant.length}.`,
+              );
+            }
+            const byName = new Map();
+            const artifactIds = new Set();
+            for (const artifact of relevant) {
+              const name = String(artifact.name);
+              if (!expected.has(name) || byName.has(name)) {
+                throw new Error(`Unexpected or duplicate raw mutation artifact '${name}'.`);
+              }
+              if (
+                !Number.isSafeInteger(artifact.id) ||
+                artifact.id <= 0 ||
+                !Number.isSafeInteger(artifact.size_in_bytes) ||
+                artifact.size_in_bytes <= 0 ||
+                artifact.expired !== false ||
+                !/^sha256:[0-9a-f]{64}$/.test(String(artifact.digest)) ||
+                Number(artifact.workflow_run?.id) !== run_id ||
+                String(artifact.workflow_run?.head_sha).toLowerCase() !== controller
+              ) {
+                throw new Error(`Raw mutation artifact '${name}' has invalid immutable metadata.`);
+              }
+              if (artifactIds.has(artifact.id)) {
+                throw new Error(`Raw mutation artifact '${name}' reuses artifact id ${artifact.id}.`);
+              }
+              artifactIds.add(artifact.id);
+              byName.set(name, artifact);
+            }
+            for (const name of expected) {
+              if (!byName.has(name)) {
+                throw new Error(`Missing raw mutation artifact '${name}'.`);
+              }
+            }
+            const ids = (language) =>
+              [...byName.entries()]
+                .filter(([name]) => name.startsWith(`mutation-${language}-raw-`))
+                .sort(([left], [right]) => left.localeCompare(right, "en"))
+                .map(([, artifact]) => String(artifact.id))
+                .join(",");
+            core.setOutput("rust_ids", ids("rust"));
+            core.setOutput("csharp_ids", ids("csharp"));
+
+      - name: Download Rust mutation evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.artifacts.outputs.rust_ids }}
+          path: evidence/rust
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Download C# mutation evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.artifacts.outputs.csharp_ids }}
+          path: evidence/csharp
+          merge-multiple: false
+          digest-mismatch: error
+
+      - name: Verify clean, exact, non-reparse source and controller trees
+        shell: pwsh
+        env:
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\', '/')
+          $separator = [IO.Path]::DirectorySeparatorChar
+          function Assert-Checkout([string]$Relative, [string]$Expected) {
+            $root = [IO.Path]::GetFullPath((Join-Path $workspace $Relative)).TrimEnd('\', '/')
+            if (-not $root.StartsWith("$workspace$separator", [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Checkout '$root' escaped the Actions workspace."
+            }
+            $items = @(Get-Item -LiteralPath $root -Force) +
+              @(Get-ChildItem -LiteralPath $root -Force -Recurse)
+            if (@($items | Where-Object {
+                ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+              }).Count -ne 0) {
+              throw "Checkout '$Relative' contains a reparse point."
+            }
+            $actual = (git -C $root rev-parse HEAD).Trim().ToLowerInvariant()
+            if ($actual -cne $Expected) {
+              throw "Checkout '$Relative' is $actual, expected $Expected."
+            }
+            $dirty = @(git -C $root status --porcelain=v1 --untracked-files=all)
+            if ($dirty.Count -ne 0) {
+              throw "Checkout '$Relative' is dirty during independent verification."
+            }
+          }
+          Assert-Checkout "controller" $env:CONTROLLER_SHA
+          Assert-Checkout "target" $env:TARGET_SHA
+
+      - id: rust-pin
+        name: Read the trusted Rust pin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $line = Get-Content -LiteralPath "controller/mise.toml" |
+            Where-Object { $_ -cmatch '^rust\s*=\s*"[0-9]+\.[0-9]+(?:\.[0-9]+)?"\s*$' }
+          if (@($line).Count -ne 1 -or $line -cnotmatch '"([^"]+)"') {
+            throw "controller/mise.toml must contain exactly one reviewable Rust pin."
+          }
+          "version=$($Matches[1])" >> $env:GITHUB_OUTPUT
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable action; exact toolchain input
+        with:
+          toolchain: ${{ steps.rust-pin.outputs.version }}
+
+      - name: Independently verify both mutation evidence sets
+        shell: pwsh
+        working-directory: controller/xtask
+        env:
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          CSHARP_EVIDENCE_ROOT: ${{ github.workspace }}\evidence\csharp
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          RUST_EVIDENCE_ROOT: ${{ github.workspace }}\evidence\rust
+          TARGET_ROOT: ${{ github.workspace }}\target
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo run --locked --release -- mutation-verify-rust `
+            --target-root $env:TARGET_ROOT `
+            --evidence-root $env:RUST_EVIDENCE_ROOT `
+            --target-sha $env:TARGET_SHA `
+            --controller-sha $env:CONTROLLER_SHA `
+            --run-id $env:RUN_ID `
+            --run-attempt $env:RUN_ATTEMPT `
+            --shard-count 16
+          cargo run --locked --release -- mutation-verify-csharp `
+            --target-root $env:TARGET_ROOT `
+            --evidence-root $env:CSHARP_EVIDENCE_ROOT `
+            --target-sha $env:TARGET_SHA `
+            --controller-sha $env:CONTROLLER_SHA `
+            --run-id $env:RUN_ID `
+            --run-attempt $env:RUN_ATTEMPT `
+            --shard-count 16
+
+      - name: Upload independently verified mutation evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-verified
+          path: |
+            evidence/rust/
+            evidence/csharp/
+            controller/build/mutation/verified/
+          retention-days: 30
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true

@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thanks for filing a bug. Logs first help a lot:
-        `%ProgramData%\find-my-files\logs\engine.log` (engine) and
+        `%ProgramData%\find-my-files\logs\` (rolling `engine.<date>.log`) and
         `%APPDATA%\find-my-files\logs\app.log` (app), plus the in-app F12
         diagnostics panel.
   - type: textarea
@@ -58,5 +58,5 @@ body:
     id: logs
     attributes:
       label: Relevant log excerpts
-      description: From engine.log / app.log or the F12 panel.
+      description: From the rolling engine logs / app.log or the F12 panel.
       render: shell

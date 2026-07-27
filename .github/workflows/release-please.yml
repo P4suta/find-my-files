@@ -4,9 +4,13 @@
 # bumps engine/Cargo.toml + engine/Cargo.lock and the C# csproj, and updates
 # CHANGELOG.md. Merging that PR makes release-please create both the `vX.Y.Z`
 # tag (`force-tag-creation`: true) and a DRAFT GitHub Release. This workflow then
-# dispatches performance-gate.yml at that exact tag. Only the separate
+# dispatches the hosted-only `main` copy of performance-gate-request.yml with that
+# exact tag and commit as inert inputs. The default-branch workflow_run controller
+# in performance-controller.yml is the only workflow that may assign the self-hosted
+# instrument. Only the separate
 # performance-release.yml workflow, triggered after that run has completed
-# successfully, may dispatch release.yml. The measurement, checkout, environment
+# successfully, may invoke the trusted reusable release.yml. The measurement,
+# checkout, environment
 # approval, and provenance therefore all identify the same immutable commit.
 # Humans never hand-pick or hand-edit a version.
 #
@@ -41,18 +45,18 @@ jobs:
   release-please:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # The App identity is stored once in the repository-level
-    # RELEASE_PLEASE_CLIENT_ID / RELEASE_PLEASE_PRIVATE_KEY secrets because the
-    # publication job consumes the same identity. This environment retains a
+    # The App identity lives only in this environment; the publication job enters
+    # the same environment to mint its own narrower token. This environment has a
     # deployment-branch policy of `main` only and deliberately has NO required
     # reviewers: release-please must run unattended (the human gate is merging
     # the Release PR; signing/publication approvals live in the separate
-    # `release` environment in release.yml). ADR-0035.
+    # `release` environment in the reusable release.yml). ADR-0035.
     environment: release-please
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
       tag_name: ${{ steps.rp.outputs.tag_name }}
       sha: ${{ steps.rp.outputs.sha }}
+      upload_url: ${{ steps.rp.outputs.upload_url }}
       pr_branch: ${{ steps.rp_branch.outputs.branch }}
     permissions: {}
     env:
@@ -69,7 +73,7 @@ jobs:
 
       # Mint a short-lived installation token scoped to this repo. It lets
       # release-please write the release commit/tag and maintain its PR/release;
-      # release.yml itself remains workflow_dispatch-only.
+      # credentialed release.yml remains reusable-only from the trusted controller.
       - name: Mint GitHub App token
         id: app-token
         if: env.HAS_APP == 'true' && env.RUN_BOT == 'true'
@@ -80,7 +84,6 @@ jobs:
           permission-contents: write
           permission-issues: write
           permission-pull-requests: write
-          permission-workflows: write
 
       - name: release-please (active)
         id: rp
@@ -307,15 +310,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      actions: write # dispatch the exact-tag performance gate
+      actions: write # dispatch the trusted-main performance gate
       contents: read
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       TAG: ${{ inputs.tag_name || needs.release-please.outputs.tag_name }}
       EXPECTED_SHA: ${{ needs.release-please.outputs.sha }}
+      CREATED_UPLOAD_URL: ${{ needs.release-please.outputs.upload_url }}
     steps:
-      - name: Validate draft identity and dispatch the exact tag
+      - name: Resolve the exact draft identity
+        id: draft
         shell: bash
         run: |
           set -euo pipefail
@@ -326,6 +331,10 @@ jobs:
           fi
 
           tag_sha=$(gh api "repos/$REPO/commits/$TAG" --jq '.sha')
+          if [[ ! "$tag_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::$TAG did not resolve to an immutable commit SHA"
+            exit 1
+          fi
           if [ -n "$EXPECTED_SHA" ] && [ "$tag_sha" != "$EXPECTED_SHA" ]; then
             echo "::error::release-please SHA $EXPECTED_SHA does not match $TAG ($tag_sha)"
             exit 1
@@ -336,37 +345,52 @@ jobs:
             exit 1
           fi
 
-          release_title="release publish $TAG"
-          release_runs=$(gh run list --repo "$REPO" --workflow release.yml \
-            --commit "$tag_sha" --event workflow_dispatch --limit 20 \
-            --json displayTitle,status,conclusion,databaseId)
-          existing_release=$(jq -r --arg title "$release_title" '
-            .[] |
-            select(.displayTitle == $title) |
-            select(.status != "completed" or .conclusion == "success") |
-            .databaseId
-          ' <<<"$release_runs" | head -n 1)
-          if [ -n "$existing_release" ]; then
-            echo "Release run $existing_release already owns $TAG — no duplicate gate."
-            exit 0
+          # Normal cuts bind directly to release-please's documented upload_url
+          # output. Only the explicit recovery path may resolve a draft by listing
+          # releases, and it does so once before fixing the numeric database ID.
+          if [ -n "$CREATED_UPLOAD_URL" ]; then
+            upload_prefix="https://uploads.github.com/repos/$REPO/releases/"
+            upload_suffix='/assets{?name,label}'
+            if [[ "$CREATED_UPLOAD_URL" != "$upload_prefix"*"$upload_suffix" ]]; then
+              echo "::error::release-please returned an unexpected upload_url"
+              exit 1
+            fi
+            release_id=${CREATED_UPLOAD_URL#"$upload_prefix"}
+            release_id=${release_id%"$upload_suffix"}
+          else
+            if [ -n "$EXPECTED_SHA" ]; then
+              echo "::error::a newly created release has no release-please upload_url"
+              exit 1
+            fi
+            release_pages=$(gh api --paginate "repos/$REPO/releases?per_page=100")
+            release_matches=$(jq -s --arg tag "$TAG" --arg sha "$tag_sha" '
+              add |
+              map(select(
+                .draft == true and
+                .prerelease == false and
+                .tag_name == $tag and
+                .name == $tag and
+                .target_commitish == $sha
+              ))
+            ' <<<"$release_pages")
+            if [ "$(jq 'length' <<<"$release_matches")" -ne 1 ]; then
+              echo "::error::recovery requires exactly one matching draft release"
+              exit 1
+            fi
+            release_id=$(jq -r '.[0].id' <<<"$release_matches")
+          fi
+          if [[ ! "$release_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::draft has no exact numeric release ID"
+            exit 1
           fi
 
-          release_pages=$(gh api --paginate "repos/$REPO/releases?per_page=100")
-          release_matches=$(jq -s --arg tag "$TAG" '
-            add |
-            map(select(.draft == true and .tag_name == $tag))
-          ' <<<"$release_pages")
-          if [ "$(jq 'length' <<<"$release_matches")" -ne 1 ]; then
-            echo "::error::$TAG must identify exactly one draft release"
-            exit 1
-          fi
-          release_json=$(jq -c '.[0]' <<<"$release_matches")
-          if [ "$(jq -r '.draft' <<<"$release_json")" != "true" ]; then
-            echo "::error::$TAG must already have a draft release"
-            exit 1
-          fi
-          if [ "$(jq -r '.tag_name' <<<"$release_json")" != "$TAG" ]; then
-            echo "::error::draft release tag identity drifted from $TAG"
+          release_json=$(gh api "repos/$REPO/releases/$release_id")
+          if [ "$(jq -r '.id | tostring' <<<"$release_json")" != "$release_id" ] ||
+             [ "$(jq -r '.draft' <<<"$release_json")" != "true" ] ||
+             [ "$(jq -r '.prerelease' <<<"$release_json")" != "false" ] ||
+             [ "$(jq -r '.tag_name' <<<"$release_json")" != "$TAG" ] ||
+             [ "$(jq -r '.name' <<<"$release_json")" != "$TAG" ]; then
+            echo "::error::release $release_id is not the exact expected draft"
             exit 1
           fi
 
@@ -375,20 +399,80 @@ jobs:
             echo "::error::draft target $target must be the exact $TAG commit $tag_sha, not a mutable ref"
             exit 1
           fi
+          {
+            echo "tag_sha=$tag_sha"
+            echo "release_id=$release_id"
+          } >>"$GITHUB_OUTPUT"
 
-          gate_title="performance-gate $TAG"
-          gate_runs=$(gh run list --repo "$REPO" --workflow performance-gate.yml \
-            --commit "$tag_sha" --event workflow_dispatch --limit 20 \
-            --json displayTitle,status,databaseId)
-          active_gate=$(jq -r --arg title "$gate_title" '
+      - name: Revalidate, deduplicate, and dispatch trusted measurement
+        shell: bash
+        env:
+          TAG_SHA: ${{ steps.draft.outputs.tag_sha }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+             [[ ! "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::resolved draft identity outputs are invalid"
+            exit 1
+          fi
+          live_tag_sha=$(gh api "repos/$REPO/commits/$TAG" --jq '.sha')
+          release_json=$(gh api "repos/$REPO/releases/$RELEASE_ID")
+          if [ "$live_tag_sha" != "$TAG_SHA" ] ||
+             [ "$(jq -r '.id | tostring' <<<"$release_json")" != "$RELEASE_ID" ] ||
+             [ "$(jq -r '.draft' <<<"$release_json")" != "true" ] ||
+             [ "$(jq -r '.prerelease' <<<"$release_json")" != "false" ] ||
+             [ "$(jq -r '.tag_name' <<<"$release_json")" != "$TAG" ] ||
+             [ "$(jq -r '.name' <<<"$release_json")" != "$TAG" ] ||
+             [ "$(jq -r '.target_commitish' <<<"$release_json")" != "$TAG_SHA" ]; then
+            echo "::error::exact draft identity changed before dispatch"
+            exit 1
+          fi
+
+          tag_sha=$TAG_SHA
+          release_id=$RELEASE_ID
+          release_title="performance-release performance-gate $TAG $tag_sha release $release_id"
+          release_runs=$(gh run list --repo "$REPO" --workflow performance-release.yml \
+            --branch main --event workflow_run --limit 50 \
+            --json displayTitle,status,conclusion,databaseId)
+          existing_release=$(jq -r --arg title "$release_title" '
             .[] |
-            select(.displayTitle == $title and .status != "completed") |
+            select(.displayTitle == $title) |
+            select(.status != "completed" or .conclusion == "success") |
             .databaseId
-          ' <<<"$gate_runs" | head -n 1)
-          if [ -n "$active_gate" ]; then
-            echo "Performance run $active_gate already owns $TAG — no duplicate dispatch."
+          ' <<<"$release_runs" | head -n 1)
+          if [ -n "$existing_release" ]; then
+            echo "Release run $existing_release already owns release $release_id — no duplicate gate."
             exit 0
           fi
 
-          gh workflow run performance-gate.yml --repo "$REPO" --ref "$TAG" \
-            -f tag_name="$TAG"
+          gate_title="performance-gate $TAG $tag_sha release $release_id"
+          request_runs=$(gh run list --repo "$REPO" --workflow performance-gate-request.yml \
+            --branch main --event workflow_dispatch --limit 50 \
+            --json displayTitle,status,conclusion,databaseId)
+          active_request=$(jq -r --arg title "$gate_title" '
+            .[] |
+            select(.displayTitle == $title and .status != "completed") |
+            .databaseId
+          ' <<<"$request_runs" | head -n 1)
+          if [ -n "$active_request" ]; then
+            echo "Performance request $active_request already owns $TAG — no duplicate dispatch."
+            exit 0
+          fi
+
+          gate_runs=$(gh run list --repo "$REPO" --workflow performance-controller.yml \
+            --branch main --event workflow_run --limit 50 \
+            --json displayTitle,status,conclusion,databaseId)
+          existing_gate=$(jq -r --arg title "$gate_title" '
+            .[] |
+            select(.displayTitle == $title) |
+            select(.status != "completed" or .conclusion == "success") |
+            .databaseId
+          ' <<<"$gate_runs" | head -n 1)
+          if [ -n "$existing_gate" ]; then
+            echo "Performance gate $existing_gate already owns $TAG — no duplicate dispatch."
+            exit 0
+          fi
+
+          gh workflow run performance-gate-request.yml --repo "$REPO" --ref main \
+            -f tag_name="$TAG" -f commit_sha="$tag_sha" -f release_id="$release_id"
