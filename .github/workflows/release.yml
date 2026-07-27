@@ -250,7 +250,7 @@ jobs:
           dotnet-version: 10.0.302
       - uses: ./.github/actions/setup-winapp
         id: winapp
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: |
             just@1.54.0
@@ -431,7 +431,7 @@ jobs:
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           dotnet-version: 10.0.302
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: just@1.54.0
           fallback: none
@@ -740,7 +740,7 @@ jobs:
       # Target-controlled setup/code begins only after the signer result crossed
       # the protected workflow's exact regular-file allowlist above.
       - uses: ./.github/actions/rust-toolchain
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: just@1.54.0
           fallback: none
@@ -807,7 +807,7 @@ jobs:
           ref: ${{ inputs.commit_sha }}
 
       - uses: ./.github/actions/rust-toolchain
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: just@1.54.0
           fallback: none

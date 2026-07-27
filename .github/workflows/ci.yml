@@ -87,7 +87,7 @@ jobs:
       # CI uses the ecosystem-standard checksummed release installer directly;
       # mise remains the local developer environment manager. The doctor checks
       # that both lanes pin the same tool versions.
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: zizmor@1.28.0,typos-cli@1.47.2,taplo-cli@0.10.0
           fallback: none
@@ -113,7 +113,7 @@ jobs:
           persist-credentials: false
       # Prebuilt binary (cargo install from source took minutes); advisories
       # are owned by cargo-audit.yml, so this checks bans/licenses/sources.
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-deny@0.19.9
           fallback: none
@@ -127,7 +127,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-machete@0.9.2
           fallback: none
@@ -188,7 +188,7 @@ jobs:
           workspaces: xtask
           shared-key: xtask
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-nextest@0.9.140
           fallback: none
@@ -227,7 +227,7 @@ jobs:
           shared-key: engine-win # shared with codeql/nightly to reuse deps
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.140
           fallback: none
@@ -315,7 +315,7 @@ jobs:
           dotnet-version: 10.0.302
       - uses: ./.github/actions/setup-winapp
         id: winapp
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           # just: the publish recipe. cargo-about: publish generates the bundle's
           # THIRD-PARTY-NOTICES.txt from the Rust crate graph.
