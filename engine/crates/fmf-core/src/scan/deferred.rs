@@ -17,7 +17,7 @@ use crate::ondisk::ntfs::{NtfsAttributeType, NtfsFile, NtfsFileName, NtfsFileNam
 use crate::ondisk::record::attributes_complete;
 
 use super::parse::{ParsedBatch, RecordArena, extract_attrs};
-use super::volume_io::{RunMap, open_raw_volume};
+use super::volume_io::{RunMap, SectorAlignedReader, open_raw_volume};
 use crate::mft::{IncompleteCause, IncompleteObject, is_searchable_namespace};
 use crate::usn::MetadataSource;
 use crate::usn::apply::LinkSnapshot;
@@ -205,15 +205,19 @@ impl<'a> LazyRecordReader<'a> {
 /// no extra handle.
 struct LazyStreamReader<'a> {
     volume_path: &'a str,
+    /// The volume's logical sector size — the granularity every read against
+    /// the raw handle must respect. See [`SectorAlignedReader`].
+    sector_size: usize,
     inner: Option<std::fs::File>,
     failed: bool,
     failures: u64,
 }
 
 impl<'a> LazyStreamReader<'a> {
-    const fn new(volume_path: &'a str) -> Self {
+    const fn new(volume_path: &'a str, sector_size: usize) -> Self {
         Self {
             volume_path,
+            sector_size,
             inner: None,
             failed: false,
             failures: 0,
@@ -242,14 +246,22 @@ impl<'a> LazyStreamReader<'a> {
                 }
             }
         }
+        let sector_size = self.sector_size;
         let Some(file) = self.inner.as_mut() else {
             self.failures += 1;
             return None;
         };
-        match visit_list_stream(file, runs, data_size, stop, prefix, visit) {
+        let mut aligned = SectorAlignedReader::new(file, sector_size);
+        match visit_list_stream(&mut aligned, runs, data_size, stop, prefix, visit) {
             Ok(()) => Some(()),
-            Err(ListStreamError::Io) => {
+            Err(ListStreamError::Io(error)) => {
                 self.failures += 1;
+                tracing::warn!(
+                    os = error.raw_os_error().unwrap_or(-1),
+                    data_size,
+                    runs = runs.len(),
+                    "non-resident $ATTRIBUTE_LIST stream read failed"
+                );
                 None
             }
             Err(ListStreamError::Invalid | ListStreamError::Cancelled) => None,
@@ -302,6 +314,47 @@ fn decode_extension_extent(
     found
 }
 
+/// Why the $MFT alone could not yield an object's complete name set.
+///
+/// Not an error on its own: every arm falls back to the live link query, which
+/// is authoritative. It is recorded so that when the live query *also* fails —
+/// the one case where the object is genuinely lost — the report can say which
+/// half broke. Losing that was what made this path unexplainable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NameGiveUp {
+    Cancelled,
+    NoAttributeList,
+    ResidentBodyMissing,
+    NonResidentHeaderUnusable,
+    ExtentRunsUndecodable,
+    ExtentClosureIncomplete,
+    ListEntriesInvalid,
+    EntryUnresolvable,
+    EmptyName,
+    UnsearchableNamespace,
+    BaseNameNotListed,
+}
+
+impl NameGiveUp {
+    /// A `snake_case`-free tag: the diagnostic sink only passes values made of
+    /// ASCII alphanumerics and `-_.:`.
+    const fn as_tag(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::NoAttributeList => "no-attribute-list",
+            Self::ResidentBodyMissing => "resident-body-missing",
+            Self::NonResidentHeaderUnusable => "nonresident-header-unusable",
+            Self::ExtentRunsUndecodable => "extent-runs-undecodable",
+            Self::ExtentClosureIncomplete => "extent-closure-incomplete",
+            Self::ListEntriesInvalid => "list-entries-invalid",
+            Self::EntryUnresolvable => "entry-unresolvable",
+            Self::EmptyName => "empty-name",
+            Self::UnsearchableNamespace => "unsearchable-namespace",
+            Self::BaseNameNotListed => "base-name-not-listed",
+        }
+    }
+}
+
 enum AttributeListSource<'a> {
     Resident(&'a [u8]),
     NonResident {
@@ -315,17 +368,28 @@ fn load_attribute_list<'a>(
     sources: &ResolveSources<'a>,
     record_reader: &mut LazyRecordReader<'_>,
     stream_reader: &mut LazyStreamReader<'_>,
-) -> Option<AttributeListSource<'a>> {
-    let attr = base.get_attribute(NtfsAttributeType::AttributeList)?;
+) -> Result<AttributeListSource<'a>, NameGiveUp> {
+    let attr = base
+        .get_attribute(NtfsAttributeType::AttributeList)
+        .ok_or(NameGiveUp::NoAttributeList)?;
     if attr.header.is_non_resident == 0 {
-        return attr.get_resident().map(AttributeListSource::Resident);
+        return attr
+            .get_resident()
+            .map(AttributeListSource::Resident)
+            .ok_or(NameGiveUp::ResidentBodyMissing);
     }
 
     let base_reference = base.reference_number();
     let base_attr_id = attr.header.id;
-    let base_lowest_vcn = u64::try_from(attr.nonresident_header()?.lowest_vcn).ok()?;
-    let (data_size, base_runs) =
-        decode_extent_runs(&attr, sources.cluster_size, sources.volume_size)?;
+    let base_lowest_vcn = attr
+        .nonresident_header()
+        .and_then(|header| u64::try_from(header.lowest_vcn).ok())
+        .ok_or(NameGiveUp::NonResidentHeaderUnusable)?;
+    let Some((data_size, base_runs)) =
+        decode_extent_runs(&attr, sources.cluster_size, sources.volume_size)
+    else {
+        return Err(NameGiveUp::ExtentRunsUndecodable);
+    };
     let base_extent = ListEntry::unnamed(
         NtfsAttributeType::AttributeList as u32,
         base_lowest_vcn,
@@ -385,8 +449,9 @@ fn load_attribute_list<'a>(
                 }
             }
         },
-    )?;
-    Some(AttributeListSource::NonResident { data_size, runs })
+    )
+    .ok_or(NameGiveUp::ExtentClosureIncomplete)?;
+    Ok(AttributeListSource::NonResident { data_size, runs })
 }
 
 #[derive(Clone)]
@@ -457,9 +522,9 @@ fn resolve_attr_list_names(
     sources: &ResolveSources<'_>,
     rr: &mut LazyRecordReader,
     stream_reader: &mut LazyStreamReader,
-) -> Option<Vec<ResolvedFileName>> {
+) -> Result<Vec<ResolvedFileName>, NameGiveUp> {
     if sources.stop.load(Ordering::Relaxed) {
-        return None;
+        return Err(NameGiveUp::Cancelled);
     }
     let source = load_attribute_list(base, sources, rr, stream_reader)?;
     let mut names = Vec::new();
@@ -470,7 +535,7 @@ fn resolve_attr_list_names(
             base_name_ids.insert(attribute.header.id);
         }
     });
-    let mut valid = true;
+    let mut give_up = None;
     {
         let mut consider = |entry: ListEntry| {
             if sources.stop.load(Ordering::Relaxed)
@@ -487,28 +552,32 @@ fn resolve_attr_list_names(
                 sources.sector_size,
                 rr,
             ) else {
-                valid = false;
+                give_up = Some(NameGiveUp::EntryUnresolvable);
                 return;
             };
             if name.utf16le.is_empty() {
-                valid = false;
+                give_up = Some(NameGiveUp::EmptyName);
                 return;
             }
             let namespace = name.namespace;
             if is_searchable_namespace(namespace) {
                 names.push(name);
             } else if namespace != NtfsFileNamespace::Dos as u8 {
-                valid = false;
+                give_up = Some(NameGiveUp::UnsearchableNamespace);
             }
         };
         match source {
             AttributeListSource::Resident(list) => {
-                for entry in parse_list_entries(list, false)? {
+                for entry in
+                    parse_list_entries(list, false).ok_or(NameGiveUp::ListEntriesInvalid)?
+                {
                     consider(entry);
                 }
             }
             AttributeListSource::NonResident { data_size, runs } => {
-                stream_reader.visit(&runs, data_size, sources.stop, false, &mut consider)?;
+                stream_reader
+                    .visit(&runs, data_size, sources.stop, false, &mut consider)
+                    .ok_or(NameGiveUp::ListEntriesInvalid)?;
             }
         }
     }
@@ -517,19 +586,25 @@ fn resolve_attr_list_names(
         .iter()
         .all(|id| seen_entries.contains(&(base_reference, *id)))
     {
-        valid = false;
+        give_up = Some(NameGiveUp::BaseNameNotListed);
     }
-    if sources.stop.load(Ordering::Relaxed) || !valid {
-        return None;
+    if sources.stop.load(Ordering::Relaxed) {
+        return Err(NameGiveUp::Cancelled);
+    }
+    if let Some(reason) = give_up {
+        return Err(reason);
     }
     let mut unique = FxHashSet::default();
     if names
         .iter()
         .any(|name| !unique.insert((name.parent_reference, name.utf16le.clone())))
     {
-        return None;
+        return Err(NameGiveUp::EntryUnresolvable);
     }
-    (!names.is_empty()).then_some(names)
+    if names.is_empty() {
+        return Err(NameGiveUp::EmptyName);
+    }
+    Ok(names)
 }
 
 /// Resolve deferred $`ATTRIBUTE_LIST` names in parallel — almost entirely
@@ -566,7 +641,7 @@ pub(super) fn resolve_deferred(
             let mut readers = ChunkReaders {
                 base: LazyRecordReader::new(volume_path, runmap, record_size, sector_size),
                 extension: LazyRecordReader::new(volume_path, runmap, record_size, sector_size),
-                stream: LazyStreamReader::new(volume_path),
+                stream: LazyStreamReader::new(volume_path, sector_size),
             };
             let sources = ResolveSources {
                 extensions,
@@ -668,7 +743,7 @@ fn resolve_chunk(
         };
         let resolved =
             resolve_attr_list_names(&f, sources, &mut readers.extension, &mut readers.stream);
-        if let Some(names) = resolved {
+        if let Ok(names) = resolved {
             for name in names {
                 if !out.push_utf16le_link_with_attrs(
                     &f,
@@ -703,6 +778,15 @@ fn resolve_chunk(
                 }
                 LinkSnapshot::Gone => {}
                 LinkSnapshot::Present(_) | LinkSnapshot::Failed => {
+                    // Both halves failed, so this object really is lost — the
+                    // one moment the $MFT-side reason is worth reporting. On a
+                    // normal fallback it is noise: the live query is
+                    // authoritative and answering it is the expected outcome.
+                    tracing::warn!(
+                        reason = resolved.err().unwrap_or(NameGiveUp::Cancelled).as_tag(),
+                        reference,
+                        "no name source could complete this object"
+                    );
                     return Err(ChunkGiveUp::incomplete(
                         reference,
                         IncompleteCause::LinkSetUnavailable,

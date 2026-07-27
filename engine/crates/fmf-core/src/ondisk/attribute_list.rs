@@ -191,7 +191,13 @@ fn partial_runs_are_valid(runs: &[StreamRun], data_size: u64) -> bool {
         let Some(end) = run.logical.checked_add(run.len) else {
             return false;
         };
-        if run.logical < previous_end || run.logical >= data_size {
+        // A run may legitimately start at or past `data_size`. Mapping pairs
+        // describe the ALLOCATED extent, and NTFS allocates whole clusters and
+        // does not shrink the allocation when a stream shrinks — a 96-byte list
+        // holding two clusters is ordinary. Those tail runs are never read;
+        // `RunReader` bounds itself by `data_size`. Rejecting them here failed
+        // the whole volume on real NTFS.
+        if run.logical < previous_end {
             return false;
         }
         previous_end = end;
@@ -213,11 +219,10 @@ fn complete_runs_are_valid(runs: &[StreamRun], data_size: u64) -> bool {
         let Some(end) = logical.checked_add(run.len) else {
             return false;
         };
-        if logical >= data_size {
-            return false;
-        }
         logical = end;
     }
+    // Contiguous from zero (checked above) and covering the whole stream. Runs
+    // that continue past `data_size` are the allocated tail, not corruption.
     logical >= data_size
 }
 
@@ -587,8 +592,10 @@ pub fn close_extent_runs(
 /// Why streaming a non-resident `$ATTRIBUTE_LIST` stopped.
 #[derive(Debug)]
 pub enum ListStreamError {
-    /// The underlying reader failed.
-    Io,
+    /// The underlying reader failed. Carries the cause: a raw-volume read can
+    /// be refused for reasons that are not I/O faults at all, and collapsing
+    /// them into a bare marker is what made this path unexplainable.
+    Io(std::io::Error),
     /// The bytes do not form a well-formed entry sequence.
     Invalid,
     /// The caller's stop flag was set.
@@ -596,8 +603,8 @@ pub enum ListStreamError {
 }
 
 impl From<std::io::Error> for ListStreamError {
-    fn from(_: std::io::Error) -> Self {
-        Self::Io
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
     }
 }
 
@@ -746,6 +753,36 @@ mod tests {
     use super::super::ntfs::NtfsAttributeType;
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn runs_may_extend_past_the_stream_because_ntfs_allocates_whole_clusters() {
+        // Mapping pairs describe the ALLOCATED extent. NTFS allocates whole
+        // clusters and does not release the tail when a stream shrinks, so a
+        // 96-byte $ATTRIBUTE_LIST holding two 4KiB clusters is ordinary. The
+        // tail run is never read — `RunReader` bounds itself by `data_size` —
+        // but rejecting it failed a real C: outright.
+        let runs = vec![
+            StreamRun {
+                logical: 0,
+                physical: Some(1 << 20),
+                len: 4096,
+            },
+            StreamRun {
+                logical: 4096,
+                physical: Some(2 << 20),
+                len: 4096,
+            },
+        ];
+        assert!(partial_runs_are_valid(&runs, 96));
+        assert!(complete_runs_are_valid(&runs, 96));
+        // A gap before the stream is covered is still a rejection.
+        let holed = vec![StreamRun {
+            logical: 4096,
+            physical: Some(1 << 20),
+            len: 4096,
+        }];
+        assert!(!partial_runs_are_valid(&holed, 96));
+    }
 
     fn put_u16(data: &mut [u8], off: usize, value: u16) {
         data[off..off + 2].copy_from_slice(&value.to_le_bytes());

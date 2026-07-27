@@ -21,6 +21,8 @@ const APP_CSPROJ: &str = include_str!("../../app/FindMyFiles/FindMyFiles.csproj"
 const QUERY_MOD: &str = include_str!("../../engine/crates/fmf-core/src/query/mod.rs");
 const JUSTFILE: &str = include_str!("../../justfile");
 const LEFTHOOK: &str = include_str!("../../lefthook.yml");
+const DEFERRED: &str = include_str!("../../engine/crates/fmf-core/src/scan/deferred.rs");
+const USN_SESSION: &str = include_str!("../../engine/crates/fmf-core/src/usn/session.rs");
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -358,5 +360,37 @@ fn task_definitions_never_depend_on_one_shell() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn raw_volume_streams_are_read_through_the_sector_aligned_adapter() {
+    // A Windows volume handle refuses any read whose offset or length is not a
+    // multiple of the logical sector size, with ERROR_INVALID_PARAMETER, before
+    // the device is touched. `$MFT` record reads satisfy that by construction;
+    // `visit_list_stream` does not, because it walks a non-resident
+    // `$ATTRIBUTE_LIST` entry by entry and an entry header is 26 bytes.
+    //
+    // Passing the handle straight in therefore fails 100% of the time on real
+    // NTFS while every `Cursor`-based test passes, which is exactly how it
+    // reached a released branch: a real C: could not be indexed at all. The
+    // adapter is easy to forget on a new call site, so require it here.
+    for (name, source) in [
+        ("scan/deferred.rs", DEFERRED),
+        ("usn/session.rs", USN_SESSION),
+    ] {
+        let calls = source.matches("visit_list_stream(").count();
+        let wrapped = source.matches("SectorAlignedReader::new(").count();
+        assert!(
+            calls > 0,
+            "{name} is pinned here because it streams attribute lists; \
+             if that moved, move this guard with it"
+        );
+        assert_eq!(
+            calls, wrapped,
+            "{name} calls visit_list_stream {calls} time(s) but wraps a reader \
+             in SectorAlignedReader {wrapped} time(s); every raw-volume stream \
+             read must go through the adapter"
+        );
     }
 }

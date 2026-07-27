@@ -317,6 +317,102 @@ pub fn open_raw_volume(volume_path: &str) -> std::io::Result<std::fs::File> {
     open_shared_read(volume_path)
 }
 
+/// Read arbitrary byte ranges from a raw volume handle.
+///
+/// A volume handle only accepts reads whose offset *and length* are multiples
+/// of the logical sector size; anything else fails with
+/// `ERROR_INVALID_PARAMETER` (87) before it ever reaches the device.
+///
+/// Whole `$MFT` records satisfy that by construction, which is why the record
+/// readers use the handle directly. Streamed NTFS structures do not: a
+/// non-resident `$ATTRIBUTE_LIST` is walked entry by entry, and an entry header
+/// is 26 bytes.
+///
+/// So every such read is widened to the sectors containing it and sliced back
+/// down. One sector is buffered, which also collapses the entry-header and
+/// entry-body reads of the same entry into a single device read.
+pub struct SectorAlignedReader<'a, R> {
+    file: &'a mut R,
+    sector_size: u64,
+    position: u64,
+    buf: Vec<u8>,
+    /// Volume offset of `buf[0]`; `None` while the buffer holds nothing.
+    buf_start: Option<u64>,
+}
+
+impl<'a, R: std::io::Read + std::io::Seek> SectorAlignedReader<'a, R> {
+    /// `sector_size` must be the volume's logical sector size, and is rounded
+    /// up to a sane floor so a bogus value cannot produce a zero-length read.
+    pub fn new(file: &'a mut R, sector_size: usize) -> Self {
+        let sector_size = (sector_size as u64).max(512);
+        Self {
+            file,
+            sector_size,
+            position: 0,
+            buf: Vec::new(),
+            buf_start: None,
+        }
+    }
+
+    fn fill(&mut self) -> std::io::Result<()> {
+        use std::io::SeekFrom;
+
+        let aligned = self.position - (self.position % self.sector_size);
+        let len = usize::try_from(self.sector_size)
+            .map_err(|_| std::io::Error::other("sector size exceeds this process address space"))?;
+        self.buf.resize(len, 0);
+        self.file.seek(SeekFrom::Start(aligned))?;
+        self.file.read_exact(&mut self.buf)?;
+        self.buf_start = Some(aligned);
+        Ok(())
+    }
+}
+
+impl<R: std::io::Read + std::io::Seek> std::io::Read for SectorAlignedReader<'_, R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        let covers = self.buf_start.is_some_and(|start| {
+            self.position >= start && self.position - start < self.buf.len() as u64
+        });
+        if !covers {
+            self.fill()?;
+        }
+        let start = self.buf_start.unwrap_or(self.position);
+        let offset = usize::try_from(self.position - start).map_err(|_| {
+            std::io::Error::other("sector offset exceeds this process address space")
+        })?;
+        let available = self.buf.len() - offset;
+        let take = available.min(out.len());
+        out[..take].copy_from_slice(&self.buf[offset..offset + take]);
+        self.position += take as u64;
+        Ok(take)
+    }
+}
+
+impl<R: std::io::Read + std::io::Seek> std::io::Seek for SectorAlignedReader<'_, R> {
+    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+        use std::io::SeekFrom;
+
+        // Only absolute seeks are meaningful against a volume: the callers
+        // address physical offsets they decoded from a run list.
+        self.position = match from {
+            SeekFrom::Start(offset) => offset,
+            SeekFrom::Current(delta) => self
+                .position
+                .checked_add_signed(delta)
+                .ok_or_else(|| std::io::Error::other("seek before the start of the volume"))?,
+            SeekFrom::End(_) => {
+                return Err(std::io::Error::other(
+                    "seeking from the end of a volume is not supported",
+                ));
+            }
+        };
+        Ok(self.position)
+    }
+}
+
 pub(super) fn open_shared_read(path: &str) -> std::io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     const FILE_SHARE_READ: u32 = 0x1;
@@ -864,6 +960,99 @@ pub(super) fn mft_layout(volume_path: &str) -> Result<MftLayout, NtfsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in for the real thing: a Windows volume handle rejects any read
+    /// whose offset or length is not a multiple of the logical sector size,
+    /// with `ERROR_INVALID_PARAMETER` (87), before the device is touched.
+    ///
+    /// Every earlier test of this code used a `Cursor`, which accepts any
+    /// offset and length — so it validated a world in which the constraint
+    /// does not exist. A non-resident `$ATTRIBUTE_LIST` is read entry by entry
+    /// and an entry header is 26 bytes, so on a real volume that path failed
+    /// 100% of the time and took the whole index with it.
+    struct SectorStrictVolume {
+        data: Vec<u8>,
+        sector_size: usize,
+        position: u64,
+    }
+
+    impl std::io::Read for SectorStrictVolume {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let sector = self.sector_size as u64;
+            if !self.position.is_multiple_of(sector) || !out.len().is_multiple_of(self.sector_size)
+            {
+                return Err(std::io::Error::from_raw_os_error(87));
+            }
+            let start = usize::try_from(self.position).expect("fixture offset fits");
+            let end = (start + out.len()).min(self.data.len());
+            if start >= self.data.len() {
+                return Ok(0);
+            }
+            let len = end - start;
+            out[..len].copy_from_slice(&self.data[start..end]);
+            self.position += len as u64;
+            Ok(len)
+        }
+    }
+
+    impl std::io::Seek for SectorStrictVolume {
+        fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.position = match from {
+                std::io::SeekFrom::Start(offset) => offset,
+                _ => return Err(std::io::Error::from_raw_os_error(87)),
+            };
+            Ok(self.position)
+        }
+    }
+
+    #[test]
+    fn sector_aligned_reader_serves_unaligned_ranges_from_a_strict_volume() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut volume = SectorStrictVolume {
+            data: (0..2048u32).map(|byte| byte as u8).collect(),
+            sector_size: 512,
+            position: 0,
+        };
+
+        // The exact shape that failed on a real C:: a 26-byte entry header at
+        // an offset inside a sector, then the entry body, then a read that
+        // straddles the sector boundary.
+        let mut reader = SectorAlignedReader::new(&mut volume, 512);
+        reader.seek(SeekFrom::Start(600)).expect("absolute seek");
+        let mut header = [0u8; 26];
+        reader
+            .read_exact(&mut header)
+            .expect("unaligned header read");
+        assert_eq!(header[0], 600u32 as u8);
+        assert_eq!(header[25], 625u32 as u8);
+
+        let mut straddle = [0u8; 40];
+        reader.seek(SeekFrom::Start(1000)).expect("absolute seek");
+        reader
+            .read_exact(&mut straddle)
+            .expect("read across a sector boundary");
+        for (index, byte) in straddle.iter().enumerate() {
+            assert_eq!(*byte, (1000 + index) as u8, "byte {index}");
+        }
+    }
+
+    #[test]
+    fn a_strict_volume_rejects_the_unaligned_read_the_adapter_exists_to_avoid() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        // Proves the fixture models the constraint rather than assuming it:
+        // reading the same 26 bytes straight from the handle fails with 87.
+        let mut volume = SectorStrictVolume {
+            data: vec![0u8; 2048],
+            sector_size: 512,
+            position: 0,
+        };
+        volume.seek(SeekFrom::Start(600)).expect("absolute seek");
+        let mut header = [0u8; 26];
+        let error = volume.read_exact(&mut header).expect_err("must be refused");
+        assert_eq!(error.raw_os_error(), Some(87));
+    }
 
     fn put_u32(data: &mut [u8], offset: usize, value: u32) {
         data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());

@@ -40,7 +40,7 @@ use crate::ondisk::attribute_list::{
 use crate::ondisk::fixup::apply_fixup;
 use crate::ondisk::ntfs::{NtfsAttributeType, NtfsFile, NtfsFileNamespace};
 use crate::ondisk::record::attributes_complete;
-use crate::scan::{open_raw_volume, volume_geometry};
+use crate::scan::{SectorAlignedReader, open_raw_volume, volume_geometry};
 use crate::volume_label::VolumeLabel;
 
 /// Hard failure from the OS-facing journal/volume layer (unrecoverable here;
@@ -578,8 +578,9 @@ impl VolumeMetadataFetcher {
             base_extent,
             |runs, prefix_len| {
                 let mut entries = Vec::new();
+                let mut stream = self.stream.lock();
                 visit_list_stream(
-                    &mut *self.stream.lock(),
+                    &mut SectorAlignedReader::new(&mut *stream, self.sector_size),
                     runs,
                     prefix_len,
                     &self.stop,
@@ -611,8 +612,9 @@ impl VolumeMetadataFetcher {
             },
         )?;
         let mut entries = Vec::new();
+        let mut stream = self.stream.lock();
         visit_list_stream(
-            &mut *self.stream.lock(),
+            &mut SectorAlignedReader::new(&mut *stream, self.sector_size),
             &runs,
             data_size,
             &self.stop,

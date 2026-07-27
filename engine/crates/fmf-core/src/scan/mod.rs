@@ -40,7 +40,7 @@ use deferred::{DeferredContext, DeferredError, resolve_deferred};
 use parse::{RecordArena, append_batches, parse_chunk};
 use pipeline::{PipelineOutcome, plan_chunks, run_chunk_pipeline};
 use volume_io::mft_layout;
-pub(crate) use volume_io::{open_raw_volume, volume_geometry};
+pub(crate) use volume_io::{SectorAlignedReader, open_raw_volume, volume_geometry};
 
 /// Statistics from a full index build.
 #[derive(Debug, Default)]
