@@ -30,6 +30,13 @@ const MAX_FILE_RECORD_BYTES: u64 = 64 << 10;
 
 /// Record number of the volume's root directory.
 pub const ROOT_RECORD: u64 = 5;
+/// Record number of `\$Extend`.
+///
+/// It is the one metadata file that is a directory with children of its own.
+/// Those children (`$Quota`, `$ObjId`, `$Reparse`, `$UsnJrnl`, `$RmMetadata`)
+/// live at or above [`FIRST_NORMAL_RECORD`], so they are indexed — and a parent
+/// that is not indexed is a parent that cannot resolve.
+pub const EXTEND_RECORD: u64 = 11;
 /// First record number that is not an NTFS metadata file.
 pub const FIRST_NORMAL_RECORD: u64 = 24;
 

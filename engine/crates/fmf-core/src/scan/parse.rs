@@ -13,7 +13,7 @@ use super::ScanStats;
 use super::deferred::DEFERRED_RECORD_ARENA_MAX_BYTES;
 use crate::ondisk::fixup::apply_fixup;
 use crate::ondisk::ntfs::{
-    FIRST_NORMAL_RECORD, NtfsAttribute, NtfsAttributeType, NtfsFile, NtfsFileName,
+    EXTEND_RECORD, FIRST_NORMAL_RECORD, NtfsAttribute, NtfsAttributeType, NtfsFile, NtfsFileName,
 };
 use crate::ondisk::record::attributes_complete;
 
@@ -301,8 +301,15 @@ fn parse_subrange(
     let mut out = ParsedBatch::default();
     for off in (0..bytes.len()).step_by(record_size) {
         let number = (first_logical + off as u64) / record_size as u64;
-        if number < FIRST_NORMAL_RECORD {
-            continue; // metafiles; the builder seeds the root itself
+        // Metafiles; the builder seeds the root itself. `\$Extend` is the one
+        // exception: it is a directory whose children sit above the threshold
+        // and are indexed, so skipping it would publish rows whose exact parent
+        // resolves to nothing — and the builder turns one unresolved parent
+        // into a whole-volume failure. It is also transitive: `$RmMetadata` is
+        // itself a directory, so dropping `\$Extend` orphans its grandchildren
+        // too. Indexing `\$Extend` lets the whole subtree resolve to the root.
+        if number < FIRST_NORMAL_RECORD && number != EXTEND_RECORD {
+            continue;
         }
         let rec = &mut bytes[off..off + record_size];
         if !NtfsFile::is_valid(rec, sector_size) {
@@ -981,10 +988,36 @@ mod tests {
             Rec::new()
                 .attr(std_info(0, A_ARCHIVE))
                 .attr(file_name(5, NS_WIN32, &utf16("$Secure")));
-        let batch = parse_one(11, &rec); // record 11 < 24
+        let batch = parse_one(9, &rec); // record 9 ($Secure) < 24
         assert_eq!(batch.metas.len(), 0);
         assert_eq!(batch.files, 0);
         assert_eq!(batch.skipped_no_name, 0, "skipped before name handling");
+    }
+
+    #[test]
+    fn extend_is_indexed_so_its_children_have_a_parent_to_resolve() {
+        // `\$Extend` (record 11) is the one metafile that must NOT be skipped.
+        // Its children — $Quota (24), $ObjId (25), $Reparse (26), $UsnJrnl,
+        // $RmMetadata — live at or above FIRST_NORMAL_RECORD and are indexed,
+        // and $RmMetadata is itself a directory, so the subtree extends further
+        // still. Skipping record 11 leaves every one of those rows naming a
+        // parent that resolves to nothing, and the strict builder turns a
+        // single unresolved exact parent into a whole-volume failure. A real C:
+        // failed exactly this way: "entry 1 (Frn(281474976710680)) has
+        // unresolved exact parent Frn(3096224743817227)" — $Extend\$Quota
+        // pointing at $Extend.
+        let rec =
+            Rec::new()
+                .attr(std_info(0, A_ARCHIVE))
+                .attr(file_name(5, NS_WIN32, &utf16("$Extend")));
+        let batch = parse_one(11, &rec);
+        assert_eq!(batch.metas.len(), 1, "$Extend must be indexed");
+        assert_eq!(name_of(&batch, &batch.metas[0]), b"$Extend");
+        assert_eq!(
+            batch.metas[0].parent_frn,
+            frn(5),
+            "$Extend hangs off the root the builder seeds"
+        );
     }
 
     #[test]
