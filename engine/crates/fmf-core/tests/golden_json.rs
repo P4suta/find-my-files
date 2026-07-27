@@ -241,6 +241,7 @@ fn metrics_snapshot_json_shape_is_pinned() {
         current_ws_bytes: 90,
         current_private_bytes: 91,
         counters: CountersSnapshot {
+            scan_unresolved_parents: 60,
             stat_fetch_failures: 61,
             usn_batches_truncated: 62,
             snapshot_load_failures: 63,

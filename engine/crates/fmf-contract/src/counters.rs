@@ -15,6 +15,7 @@
 /// Both the C# `CountersData` and fmf-core's `CountersSnapshot` serde keys are
 /// pinned against this list.
 pub const COUNTER_NAMES: &[&str] = &[
+    "scan_unresolved_parents",
     "stat_fetch_failures",
     "usn_batches_truncated",
     "snapshot_load_failures",

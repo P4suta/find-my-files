@@ -328,6 +328,17 @@ impl Engine {
                                     "deferred-name MFT reads failed — authoritative live metadata fallback was used"
                                 );
                             }
+                            if stats.unresolved_parents > 0 {
+                                Counters::add(
+                                    &self.metrics.counters.scan_unresolved_parents,
+                                    stats.unresolved_parents,
+                                );
+                                tracing::warn!(
+                                    volume = %label,
+                                    dropped = stats.unresolved_parents,
+                                    "rows dropped: the scan never saw their parent — the journal replay restores whichever still exist"
+                                );
+                            }
                             if stats.deferred_stat_failures > 0 {
                                 Counters::add(
                                     &self.metrics.counters.stat_fetch_failures,

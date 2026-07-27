@@ -138,6 +138,10 @@ pub struct FinishTimings {
     pub build_ms: u64,
     /// The name-permutation sort.
     pub sort_ms: u64,
+    /// Rows dropped because the scan never saw their parent directory. Zero on
+    /// a quiet volume; non-zero means the volume changed under the scan. A
+    /// *systematic* count is a defect, so this is surfaced, not swallowed.
+    pub unresolved_parents: u64,
 }
 
 impl VolumeIndexBuilder {
@@ -197,6 +201,37 @@ impl VolumeIndexBuilder {
         None
     }
 
+    /// Drop the rows whose parent the scan never saw, and report how many.
+    ///
+    /// Marked by parent resolution as [`NO_PARENT`] — a value only the root may
+    /// legitimately carry. Publishing them is impossible (no parent, no path)
+    /// and rejecting the volume for them is worse: the journal cursor predates
+    /// the scan, so the replay that follows re-adds whichever of them still
+    /// exist, with the parent it has by then.
+    fn tombstone_unresolved_parents(&mut self) -> u64 {
+        let mut dropped = 0u64;
+        // A dropped directory orphans whatever resolved to it, so this runs to
+        // a fixed point rather than once. Each round removes at least one row
+        // and rows are finite, so it terminates; in practice it is one round
+        // plus the depth of whatever subtree came and went during the scan.
+        loop {
+            let doomed: Vec<EntryId> = (1..self.idx.len() as EntryId)
+                .filter(|&id| self.idx.is_live(id))
+                .filter(|&id| {
+                    let parent = self.idx.parent(id);
+                    parent == NO_PARENT || !self.idx.is_live(parent)
+                })
+                .collect();
+            if doomed.is_empty() {
+                return dropped;
+            }
+            dropped += doomed.len() as u64;
+            for id in doomed {
+                self.idx.tombstone_id(id);
+            }
+        }
+    }
+
     fn validate_strict_parent_graph(&self) -> Result<(), IndexBuildError> {
         const VISITING: u8 = 1;
         const DONE: u8 = 2;
@@ -207,6 +242,13 @@ impl VolumeIndexBuilder {
         let mut stack = Vec::new();
         for start in 1..count as EntryId {
             if state[start as usize] == DONE {
+                continue;
+            }
+            // Tombstoned rows are not part of the published forest — their
+            // parent is deliberately `NO_PARENT`, which is not an entry id and
+            // must never be followed.
+            if !self.idx.is_live(start) {
+                state[start as usize] = DONE;
                 continue;
             }
             stack.clear();
@@ -483,19 +525,35 @@ impl VolumeIndexBuilder {
                                 });
                             }
                         }
-                        *resolved = directory.ok_or(if exact_non_directory {
-                            IndexBuildError::ParentNotDirectory {
-                                entry: i as EntryId,
-                                child,
-                                parent: wanted,
+                        match directory {
+                            Some(id) => *resolved = id,
+                            None if exact_non_directory => {
+                                return Err(IndexBuildError::ParentNotDirectory {
+                                    entry: i as EntryId,
+                                    child,
+                                    parent: wanted,
+                                });
                             }
-                        } else {
-                            IndexBuildError::UnresolvedParent {
-                                entry: i as EntryId,
-                                child,
-                                parent: wanted,
-                            }
-                        })?;
+                            // A $MFT scan is not an atomic snapshot: it reads
+                            // record slots in order while the volume keeps
+                            // changing, so a child can legitimately name a
+                            // parent directory this pass never saw — created
+                            // after its own slot was read, or deleted before it
+                            // was. Rejecting the volume for that discards
+                            // millions of correct rows over a handful of
+                            // transient ones, and the recovery it forgoes is
+                            // already built: the journal cursor is taken
+                            // *before* the scan, so replaying the scan window
+                            // re-adds anything that genuinely still exists.
+                            //
+                            // Marked here and tombstoned below, never silently:
+                            // a systematic source of unresolved parents is a
+                            // real defect (that is how the `$Extend` records
+                            // were caught), so the count is a counter and a
+                            // warning, and the elevated real-volume gate
+                            // asserts it stays zero.
+                            None => *resolved = NO_PARENT,
+                        }
                         Ok(())
                     })?,
                 FinalizeMode::SyntheticFixture => parent
@@ -532,15 +590,17 @@ impl VolumeIndexBuilder {
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        let had_duplicate_links = if self.mode == FinalizeMode::SyntheticFixture {
+        let needs_compaction = if self.mode == FinalizeMode::SyntheticFixture {
             tracing::debug!(area = "index", msg = "finish: parents resolved");
             self.tombstone_synthetic_duplicate_links()
         } else {
+            timings.unresolved_parents = self.tombstone_unresolved_parents();
+            tracing::debug!(area = "index", msg = "finish: parents resolved");
             if let Some(object) = self.duplicate_link_object() {
                 return Err(IndexBuildError::DuplicateLink { object });
             }
             self.validate_strict_parent_graph()?;
-            false
+            timings.unresolved_parents > 0
         };
         tracing::debug!(area = "index", msg = "finish: parent graph validated");
 
@@ -621,7 +681,7 @@ impl VolumeIndexBuilder {
         // allocation-free; only a corrupt/redundant source pays one compact
         // copy so the published initial index contains no defensive
         // tombstones or duplicate query rows.
-        let idx = if had_duplicate_links {
+        let idx = if needs_compaction {
             self.idx.compacted()
         } else {
             self.idx
@@ -742,25 +802,37 @@ mod tests {
         assert_eq!(index.parent(directory), VolumeIndex::ROOT);
     }
 
+    /// A parent the scan never saw is a race with the live volume, not
+    /// corruption: the $MFT is read slot by slot while files come and go, and
+    /// the journal cursor taken before the scan replays whatever moved. Those
+    /// rows are dropped and counted. A parent that exists but is *not a
+    /// directory* is a different claim — nothing about a live volume produces
+    /// it — so that still refuses the whole index.
     #[test]
-    fn strict_builder_rejects_missing_stale_and_non_directory_parents() {
+    fn strict_builder_drops_rows_whose_parent_the_scan_never_saw() {
         let name = u16s("child");
 
         let mut missing = VolumeIndexBuilder::new_strict("C:", full(5)).expect("exact NTFS root");
         missing.push(strict_entry(20, full(999), &name, false));
-        assert!(matches!(
-            missing.finish_strict(),
-            Err(IndexBuildError::UnresolvedParent { .. })
-        ));
+        let (index, finish) = missing
+            .finish_timed_cancellable(&AtomicBool::new(false))
+            .expect("a missing parent must not reject the volume")
+            .expect("not cancelled");
+        assert_eq!(finish.unresolved_parents, 1);
+        assert_eq!(index.live_len(), 1, "only the root survives");
 
+        // A stale generation is the same case: the exact parent identity the
+        // child names no longer exists.
         let mut stale = VolumeIndexBuilder::new_strict("C:", full(5)).expect("exact NTFS root");
         let directory = u16s("dir");
         stale.push(strict_entry(10, full(5), &directory, true));
         stale.push(strict_entry(20, stale_generation(10), &name, false));
-        assert!(matches!(
-            stale.finish_strict(),
-            Err(IndexBuildError::UnresolvedParent { .. })
-        ));
+        let (index, finish) = stale
+            .finish_timed_cancellable(&AtomicBool::new(false))
+            .expect("a stale parent generation must not reject the volume")
+            .expect("not cancelled");
+        assert_eq!(finish.unresolved_parents, 1);
+        assert_eq!(index.live_len(), 2, "root and the surviving directory");
 
         let mut file_parent =
             VolumeIndexBuilder::new_strict("C:", full(5)).expect("exact NTFS root");
@@ -771,6 +843,30 @@ mod tests {
             file_parent.finish_strict(),
             Err(IndexBuildError::ParentNotDirectory { .. })
         ));
+    }
+
+    /// Dropping a directory orphans everything under it, so the sweep has to
+    /// run to a fixed point — otherwise a child keeps a parent id pointing at a
+    /// tombstone and the published index is not a rooted forest.
+    #[test]
+    fn dropping_an_orphan_directory_drops_its_whole_subtree() {
+        let mut b = VolumeIndexBuilder::new_strict("C:", full(5)).expect("exact NTFS root");
+        // 10 hangs off a parent this scan never saw; 20 and 30 hang off 10.
+        b.push(strict_entry(10, full(999), &u16s("gone"), true));
+        b.push(strict_entry(20, full(10), &u16s("mid"), true));
+        b.push(strict_entry(30, full(20), &u16s("leaf"), false));
+        // 40 is rooted and must survive untouched.
+        b.push(strict_entry(40, full(5), &u16s("kept"), false));
+
+        let (index, finish) = b
+            .finish_timed_cancellable(&AtomicBool::new(false))
+            .expect("an orphaned subtree must not reject the volume")
+            .expect("not cancelled");
+        assert_eq!(
+            finish.unresolved_parents, 3,
+            "the directory and both descendants"
+        );
+        assert_eq!(index.live_len(), 2, "root plus the rooted row");
     }
 
     #[test]

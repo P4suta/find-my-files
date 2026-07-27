@@ -222,6 +222,10 @@ impl Histogram {
 /// otherwise vanish into fallback paths. Zero-cost atomics, always on.
 #[derive(Debug, Default)]
 pub struct Counters {
+    /// Rows dropped by an initial scan because it never saw their parent
+    /// directory — the volume changed under the scan. A systematic count is a
+    /// defect, not churn, so it is a counter rather than a silent recovery.
+    pub scan_unresolved_parents: std::sync::atomic::AtomicU64,
     /// Times a per-entry size/mtime stat fetch failed.
     pub stat_fetch_failures: std::sync::atomic::AtomicU64,
     /// Times a USN batch was truncated (records dropped before apply).
@@ -272,6 +276,10 @@ pub struct Counters {
 /// Plain-integer, JSON-serializable copy of `Counters` for the FFI/UI.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct CountersSnapshot {
+    /// Rows dropped by an initial scan because it never saw their parent
+    /// directory — the volume changed under the scan. A systematic count is a
+    /// defect, not churn, so it is a counter rather than a silent recovery.
+    pub scan_unresolved_parents: u64,
     /// Times a per-entry size/mtime stat fetch failed.
     pub stat_fetch_failures: u64,
     /// Times a USN batch was truncated (records dropped before apply).
@@ -342,6 +350,7 @@ impl Counters {
     pub fn snapshot(&self) -> CountersSnapshot {
         use std::sync::atomic::Ordering::Relaxed;
         CountersSnapshot {
+            scan_unresolved_parents: self.scan_unresolved_parents.load(Relaxed),
             stat_fetch_failures: self.stat_fetch_failures.load(Relaxed),
             usn_batches_truncated: self.usn_batches_truncated.load(Relaxed),
             snapshot_load_failures: self.snapshot_load_failures.load(Relaxed),

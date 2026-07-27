@@ -86,6 +86,11 @@ pub struct ScanStats {
     /// Deferred-pass targeted MFT reads that failed before the authoritative
     /// live-metadata fallback ran.
     pub deferred_name_read_failures: u64,
+    /// Rows dropped because the scan never saw their parent directory: a
+    /// child observed while its parent's record slot was already behind the
+    /// read head, or a directory removed mid-scan. The journal cursor predates
+    /// the scan, so the replay restores whichever still exist.
+    pub unresolved_parents: u64,
     /// Deferred-pass objects the live metadata source could not size, so the
     /// row was published with the size its base record proves. Non-zero on
     /// every real volume: NTFS metadata files past `FIRST_NORMAL_RECORD`

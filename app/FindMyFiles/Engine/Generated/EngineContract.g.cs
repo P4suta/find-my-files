@@ -168,6 +168,7 @@ internal enum EngineErrorSeverity : ulong
 /// counter-name registry; nonzero values surface in the F12 panel.</summary>
 public sealed class CountersData
 {
+    public ulong ScanUnresolvedParents { get; set; }
     public ulong StatFetchFailures { get; set; }
     public ulong UsnBatchesTruncated { get; set; }
     public ulong SnapshotLoadFailures { get; set; }
