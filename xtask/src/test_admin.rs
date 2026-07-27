@@ -48,6 +48,14 @@ const ADMIN_TESTS: &[AdminTest] = &[
         binary_id: "fmf-core",
         name: "engine::tests::engine_e2e_scan_query_snapshot_restore",
     },
+    // Reinjects the real defect shape — a parent whose $MFT slot the scan never
+    // read — into a scan of the live C:, and proves the drop is subtree-scoped,
+    // counted, and reported.
+    AdminTest {
+        source: "engine/crates/fmf-core/src/scan/mod.rs",
+        binary_id: "fmf-core",
+        name: "scan::tests::a_suppressed_parent_record_drops_its_subtree_not_the_volume",
+    },
     AdminTest {
         source: "engine/crates/fmf-core/src/scan/mod.rs",
         binary_id: "fmf-core",

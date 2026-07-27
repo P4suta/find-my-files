@@ -5,7 +5,7 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::index::{EncodedEntry, Frn, VolumeIndexBuilder};
+use crate::index::{EncodedEntry, Frn, RecordNo, VolumeIndexBuilder};
 use crate::mft::collect_searchable_names;
 use crate::wtf8;
 
@@ -194,6 +194,40 @@ pub(super) struct ParsedBatch {
 }
 
 impl ParsedBatch {
+    /// Test seam: behave exactly as if the scan never read this $MFT slot —
+    /// its rows, its deferred entry, and its cached extension bytes.
+    ///
+    /// The pooled name/record bytes are left in place; nothing references them
+    /// once the metas that indexed them are gone, and the surviving metas'
+    /// offsets must not move.
+    pub(super) fn suppress_record(&mut self, record: RecordNo) {
+        // Split borrows: `retain` holds `metas` while the counters are
+        // decremented, so they cannot both go through `self`.
+        let Self {
+            metas,
+            deferred,
+            extensions,
+            files,
+            dirs,
+            ..
+        } = self;
+        metas.retain(|m| {
+            if Frn(m.frn).record() != record {
+                return true;
+            }
+            if m.is_dir {
+                *dirs -= 1;
+            } else {
+                *files -= 1;
+            }
+            false
+        });
+        // `deferred` is keyed by the full reference, `extensions` by the bare
+        // record number — the shapes the parse loop pushes.
+        deferred.retain(|(reference, _)| Frn(*reference).record() != record);
+        extensions.retain(|(number, _)| RecordNo(*number) != record);
+    }
+
     fn push_record(&mut self, bytes: &[u8]) -> std::ops::Range<usize> {
         let start = self.rec_pool.len();
         self.rec_pool.extend_from_slice(bytes);
@@ -777,6 +811,54 @@ mod tests {
         assert_eq!(extensions.get(&42), Some(&0));
         assert_eq!(deferred, vec![(43, None)]);
         assert_eq!(stats.deferred_record_cache_spills, 1);
+    }
+
+    #[test]
+    fn suppress_record_removes_every_trace_of_one_mft_slot() {
+        // The seam `scan_volume_impl` reinjects a never-read parent slot
+        // through. Afterwards the batch must be indistinguishable from one
+        // parsed without that slot ever existing — rows, counters, deferred
+        // entry and cached extension bytes alike.
+        let mut bytes = Vec::new();
+        for rec in [
+            Rec::new()
+                .dir()
+                .attr(std_info(0, 0))
+                .attr(file_name(5, NS_WIN32, &utf16("keep-dir"))),
+            Rec::new()
+                .attr(std_info(0, A_ARCHIVE))
+                .attr(file_name(5, NS_WIN32, &utf16("victim-a.txt")))
+                .attr(file_name(9, NS_WIN32, &utf16("victim-b.txt"))),
+            Rec::new().attr(std_info(0, A_ARCHIVE)).attr(file_name(
+                5,
+                NS_WIN32,
+                &utf16("keep.txt"),
+            )),
+        ] {
+            bytes.extend_from_slice(&rec.build());
+        }
+        let mut batch = parse_subrange(&mut bytes, logical_at(80), REC, 512);
+        // The deferred/extension caches are keyed independently of the metas,
+        // so they need their own removal: leaving either behind would let the
+        // deferred pass resurrect the row from live metadata.
+        batch.deferred.push((frn(81), 0..0));
+        batch.deferred.push((frn(82), 0..0));
+        batch.extensions.push((81, 0..0));
+        batch.extensions.push((80, 0..0));
+        assert_eq!(batch.metas.len(), 4);
+        assert_eq!((batch.dirs, batch.files), (1, 3));
+
+        batch.suppress_record(Frn(frn(81)).record());
+
+        let names: Vec<&[u8]> = batch.metas.iter().map(|m| name_of(&batch, m)).collect();
+        assert_eq!(names, [b"keep-dir".as_slice(), b"keep.txt".as_slice()]);
+        assert_eq!(
+            (batch.dirs, batch.files),
+            (1, 1),
+            "both link rows of the suppressed record must leave the counters"
+        );
+        assert_eq!(batch.deferred, vec![(frn(82), 0..0)]);
+        assert_eq!(batch.extensions, vec![(80, 0..0)]);
     }
 
     // ── A plain file: name, counts, parent, attributes all land ──────────────

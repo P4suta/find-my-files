@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
 
-use crate::index::{Frn, VolumeIndex, VolumeIndexBuilder};
+use crate::index::{Frn, RecordNo, VolumeIndex, VolumeIndexBuilder};
 use crate::mft::{MftError, peak_working_set};
 use crate::volume_label::VolumeLabel;
 
@@ -108,7 +108,7 @@ pub struct ScanStats {
 /// open the raw volume, or [`MftError::Ntfs`] if opening the volume or
 /// reading the $MFT fails.
 pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
-    scan_volume_cancellable(drive, &Arc::new(AtomicBool::new(false)))
+    scan_volume_impl(drive, &Arc::new(AtomicBool::new(false)), None)
 }
 
 /// Full initial scan with cooperative shutdown.
@@ -124,6 +124,24 @@ pub fn scan_volume(drive: &str) -> Result<(VolumeIndex, ScanStats), MftError> {
 pub fn scan_volume_cancellable(
     drive: &str,
     stop: &Arc<AtomicBool>,
+) -> Result<(VolumeIndex, ScanStats), MftError> {
+    scan_volume_impl(drive, stop, None)
+}
+
+/// The one scan body, plus the seam that lets a test reinject the defect this
+/// engine actually survives in the field.
+///
+/// `suppress_record` makes the pipeline behave exactly as if the given $MFT
+/// slot had never been read — the shape of a directory whose record sits
+/// behind the read head by the time its children are seen. Everything after
+/// the filter is the real production path (strict finalize included), so the
+/// test that uses it exercises the drop-and-count behaviour rather than a
+/// simulation of it. `None` on both public entry points: no `cfg(test)`, so
+/// the shipped code and the tested code are the same code.
+fn scan_volume_impl(
+    drive: &str,
+    stop: &Arc<AtomicBool>,
+    suppress_record: Option<RecordNo>,
 ) -> Result<(VolumeIndex, ScanStats), MftError> {
     if stop.load(Ordering::Relaxed) {
         return Err(MftError::Cancelled);
@@ -162,12 +180,17 @@ pub fn scan_volume_cancellable(
             return;
         }
         let t = Instant::now();
-        let batches = parse_chunk(
+        let mut batches = parse_chunk(
             bytes,
             chunks[i].logical,
             layout.record_size,
             layout.sector_size,
         );
+        if let Some(record) = suppress_record {
+            for batch in &mut batches {
+                batch.suppress_record(record);
+            }
+        }
         if !stop.load(Ordering::Relaxed) {
             corrupt_records += append_batches(
                 &mut b,
@@ -204,7 +227,7 @@ pub fn scan_volume_cancellable(
     // parallel from the streamed extension-record cache (ADR-0011).
     let t_deferred = Instant::now();
     stats.deferred_names = deferred.len() as u64;
-    let batches = if deferred.is_empty() {
+    let mut batches = if deferred.is_empty() {
         Vec::new()
     } else {
         tracing::debug!(
@@ -240,6 +263,14 @@ pub fn scan_volume_cancellable(
             DeferredError::Incomplete(reference) => MftError::IncompleteMetadata(reference),
         })?
     };
+    if let Some(record) = suppress_record {
+        // The deferred pass reaches live metadata, which can name an object
+        // whose record slot the (suppressed) scan never read. Filter here too,
+        // so the slot stays unseen on every path into the builder.
+        for batch in &mut batches {
+            batch.suppress_record(record);
+        }
+    }
     corrupt_records += append_batches(
         &mut b,
         &mut stats,
@@ -392,5 +423,109 @@ mod tests {
             "sampled live-link mismatch: {matched}/{comparable} ({unavailable} unavailable)\n{}",
             mismatches.join("\n")
         );
+    }
+
+    /// Reinject the defect, on the real volume, through the real pipeline.
+    ///
+    /// The failure this engine had to survive was never hypothetical: a child
+    /// row naming a parent directory whose $MFT slot the scan never read. Its
+    /// first form cost a whole C: (`\$Extend`'s children, unresolvable because
+    /// record 11 was skipped as a metafile). The fix drops those rows and
+    /// counts them; the risk is that the fix is *silent* — a lossy scan and a
+    /// perfect one look identical from outside unless the count is wired all
+    /// the way out.
+    ///
+    /// So: pick the busiest directory on the live C:, tell the scanner to
+    /// behave as if that one MFT slot had never been read
+    /// (`ParsedBatch::suppress_record` — the only seam, and it is a filter on
+    /// input, not a branch in the logic), and run the *production* path over
+    /// it: real chunk pipeline, real deferred pass, real `StrictProduction`
+    /// finalize, real compaction. Then assert what a user would care about —
+    /// the volume still publishes, the suppressed row is gone, its subtree went
+    /// with it *and was counted*, the rest of C: survived, and what remains is
+    /// still a rooted forest.
+    ///
+    /// This is also the end-to-end proof of the stats wiring: with
+    /// `ScanStats::unresolved_parents` unassigned (as it was before) the count
+    /// reads 0 and this test fails on a volume that just lost a subtree —
+    /// exactly the way production failed to notice.
+    #[test]
+    #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
+    fn a_suppressed_parent_record_drops_its_subtree_not_the_volume() {
+        require_admin_gate();
+
+        let (baseline, baseline_stats) = scan_volume("C:").expect("baseline streaming scan");
+        assert_eq!(
+            baseline_stats.unresolved_parents, 0,
+            "the baseline must be clean or the reinjected count means nothing"
+        );
+
+        // One O(n) pass: direct children per parent. The root is excluded —
+        // its record is seeded by the builder rather than parsed, so
+        // suppressing it would prove nothing.
+        let mut child_count = vec![0u32; baseline.len()];
+        for entry in 1..baseline.len() as u32 {
+            if !baseline.is_live(entry) {
+                continue;
+            }
+            let parent = baseline.parent(entry);
+            if parent == crate::index::NO_PARENT
+                || parent == VolumeIndex::ROOT
+                || !baseline.is_live(parent)
+            {
+                continue;
+            }
+            child_count[parent as usize] += 1;
+        }
+        let (target, direct_children) = child_count
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by_key(|&(_, count)| count)
+            .expect("the baseline index has entries");
+        let target = target as u32;
+        let direct_children = u64::from(direct_children);
+        assert!(
+            direct_children > 100,
+            "busiest directory `{}` has only {direct_children} direct children — too small to \
+             tell a dropped subtree from noise",
+            String::from_utf8_lossy(baseline.name(target))
+        );
+        let record = baseline.frn(target).record();
+
+        let (suppressed, stats) =
+            scan_volume_impl("C:", &Arc::new(AtomicBool::new(false)), Some(record))
+                .expect("losing one directory's record must cost that subtree, not the volume");
+
+        assert!(
+            suppressed.entry_by_record(record).is_none(),
+            "the suppressed $MFT slot must not appear in the index at all"
+        );
+        // A live volume never reproduces a count exactly (the machine keeps
+        // working while both scans run), and the drop is transitive, so the
+        // floor is the direct children alone, halved for churn.
+        assert!(
+            stats.unresolved_parents >= direct_children / 2,
+            "dropping `{}` ({direct_children} direct children) reported only {} unresolved \
+             parents — the count is not reaching ScanStats",
+            String::from_utf8_lossy(baseline.name(target)),
+            stats.unresolved_parents
+        );
+        assert!(
+            suppressed.live_len() as u64 + stats.unresolved_parents + 1
+                >= baseline.live_len() as u64 / 2,
+            "the volume was lost wholesale: {} live + {} dropped against a {} live baseline",
+            suppressed.live_len(),
+            stats.unresolved_parents,
+            baseline.live_len()
+        );
+        for entry in (1..suppressed.len() as u32).step_by(997) {
+            assert_ne!(
+                suppressed.parent(entry),
+                crate::index::NO_PARENT,
+                "what survives the drop pass must still be a rooted forest — entry {entry} has \
+                 no parent"
+            );
+        }
     }
 }
