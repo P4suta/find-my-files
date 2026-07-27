@@ -99,6 +99,30 @@ pub enum IndexBuildError {
     },
 }
 
+impl IndexBuildError {
+    /// A stable, non-sensitive discriminant for logs.
+    ///
+    /// The finalize error is stringified into `MftError::Ntfs` at the scan
+    /// boundary, and the formatter redacts error bodies, so a rejected volume
+    /// index used to be indistinguishable in a log from any other NTFS failure.
+    /// The variant alone says which invariant refused, and carries nothing
+    /// about the machine.
+    #[must_use]
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::InvalidRootReference { .. } => "invalid-root-reference",
+            Self::InvalidObjectReference { .. } => "invalid-object-reference",
+            Self::AmbiguousObjectIdentity => "ambiguous-object-identity",
+            Self::SelfParent { .. } => "self-parent",
+            Self::UnresolvedParent { .. } => "unresolved-parent",
+            Self::ParentNotDirectory { .. } => "parent-not-directory",
+            Self::AmbiguousParent { .. } => "ambiguous-parent",
+            Self::ParentCycle { .. } => "parent-cycle",
+            Self::DuplicateLink { .. } => "duplicate-link",
+        }
+    }
+}
+
 /// Two-pass builder for the initial scan: collect everything, then resolve
 /// parents and sort the permutations (scan order ≠ parent-before-child).
 pub struct VolumeIndexBuilder {

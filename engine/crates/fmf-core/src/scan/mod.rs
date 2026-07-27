@@ -265,9 +265,20 @@ pub fn scan_volume_cancellable(
         volume = drive,
         msg = "scan phase: builder finish"
     );
-    let Some((idx, finish)) = b
-        .finish_timed_cancellable(stop)
-        .map_err(|error| MftError::Ntfs(error.to_string()))?
+    let Some((idx, finish)) = b.finish_timed_cancellable(stop).map_err(|error| {
+        // Log here, where the error still has a type: the scan boundary
+        // stringifies it into `Ntfs`, and the formatter redacts bodies, so
+        // this is the last point at which *which invariant refused* can be
+        // recorded at all.
+        tracing::error!(
+            area = "index",
+            volume = drive,
+            reason = error.reason(),
+            error = %error,
+            "index build rejected the scanned volume"
+        );
+        MftError::Ntfs(error.to_string())
+    })?
     else {
         return Err(MftError::Cancelled);
     };

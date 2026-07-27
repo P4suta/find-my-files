@@ -369,7 +369,18 @@ impl Engine {
                             );
                             idx
                         }
-                        Err(crate::mft::MftError::Cancelled) => return,
+                        Err(crate::mft::MftError::Cancelled) => {
+                            // Only reachable with `stop` set, but say so: a
+                            // volume that returns here stays `Scanning`, and a
+                            // silent exit from that state is indistinguishable
+                            // from a hang.
+                            tracing::debug!(
+                                area = "scan",
+                                volume = %label,
+                                "scan cancelled — volume left unscanned"
+                            );
+                            return;
+                        }
                         Err(e) => {
                             if let crate::mft::MftError::CorruptRecords(count) = &e {
                                 Counters::add(&self.metrics.counters.corrupt_mft_records, *count);
@@ -379,6 +390,22 @@ impl Engine {
                                     "corrupt MFT records — partial index rejected"
                                 );
                             }
+                            // Every other failure used to reach a client only as
+                            // a `VolumeFailed` event, which is dropped outright
+                            // when nothing is connected — precisely the case
+                            // during service startup, where the scan runs before
+                            // any client arrives. The volume then sat `Failed`
+                            // with the log showing nothing at all, which is how
+                            // an intermittent scan failure came to look like a
+                            // deadlock: the worker had returned, the process was
+                            // idle, and no evidence survived anywhere.
+                            tracing::error!(
+                                area = "scan",
+                                volume = %label,
+                                reason = e.reason(),
+                                error = %crate::diag::error_chain(&e),
+                                "volume scan failed — index rejected"
+                            );
                             *slot.phase.lock() = VolumeState::Failed;
                             self.emit(EngineEvent::VolumeFailed {
                                 volume: label,

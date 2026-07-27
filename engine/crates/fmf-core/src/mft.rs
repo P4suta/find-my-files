@@ -42,6 +42,27 @@ pub enum MftError {
     CorruptRecords(u64),
 }
 
+impl MftError {
+    /// A stable, non-sensitive discriminant for logs.
+    ///
+    /// The formatter redacts `error` bodies on purpose — they carry paths and
+    /// device text — which left a failed scan indistinguishable from any other
+    /// failed scan in a persisted log. This is the part that is safe to keep:
+    /// enough to route the incident without recording anything about the
+    /// machine it happened on.
+    #[must_use]
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::NotElevated => "not-elevated",
+            Self::Ntfs(_) => "ntfs-grammar",
+            Self::Metadata(_) => "metadata-source",
+            Self::IncompleteMetadata(_) => "incomplete-metadata",
+            Self::CorruptRecords(_) => "corrupt-records",
+        }
+    }
+}
+
 /// Why one object could not be completed during the deferred
 /// $`ATTRIBUTE_LIST` name-resolution pass.
 ///
