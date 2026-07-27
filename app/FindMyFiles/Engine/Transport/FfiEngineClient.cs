@@ -19,6 +19,7 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
 
     private readonly long _registeredGeneration;
     private readonly FfiEngineSafeHandle _handle;
+    private readonly object _resultOwner = new();
     private readonly ConcurrentDictionary<ulong, byte> _activeQueryControls = new();
     private long _liveGeneration;
     private int _disposed;
@@ -33,7 +34,7 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
     public event Action<VolumeStatus>? VolumeUpdated;
 
     /// <inheritdoc/>
-    public event Action<int>? EngineErrorOccurred;
+    public event Action<EngineErrorSeverity>? EngineErrorOccurred;
 
     /// <summary>In-proc: no transport, no state transitions.</summary>
     public EngineConnectionState Connection => EngineConnectionState.InProc;
@@ -179,7 +180,9 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
                         new VolumeStatus(volume, VolumeState.Failed, 0));
                     break;
                 case EventKind.EngineError:
-                    InvokeHandlers(EngineErrorOccurred, (int)entries);
+                    InvokeHandlers(
+                        EngineErrorOccurred,
+                        EngineErrorSeverityWire.Decode(entries));
                     break;
                 default:
                     FileLog.WarnEvent(
@@ -408,15 +411,9 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
     {
         ct.ThrowIfCancellationRequested();
         var checkedQuery = EngineRequest.QueryText(query);
-        if (presentationBasis is not null and not FfiSearchResult)
-        {
-            throw new ArgumentException(
-                "presentation basis belongs to a different engine transport",
-                nameof(presentationBasis));
-        }
-
         var engineAdded = false;
         var basisAdded = false;
+        FfiSearchResult? heldBasis = null;
         ulong controlId = 0;
         CancellationTokenRegistration cancellationRegistration = default;
         _handle.DangerousAddRef(ref engineAdded);
@@ -443,14 +440,12 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
             ulong basisId = 0;
             if (presentationBasis is FfiSearchResult ffiBasis)
             {
-                try
+                if (ffiBasis.TryAcquirePresentationBasis(
+                    _resultOwner,
+                    out basisAdded,
+                    out basisId))
                 {
-                    ffiBasis.DangerousAddRef(ref basisAdded);
-                    basisId = unchecked((ulong)ffiBasis.DangerousGetHandle().ToInt64());
-                }
-                catch (ObjectDisposedException)
-                {
-                    basisAdded = false;
+                    heldBasis = ffiBasis;
                 }
             }
 
@@ -501,7 +496,10 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
                     }
 
                     var resultId = unchecked((ulong)result.ToInt64());
-                    owned = FfiSearchResult.TakeOwnership(ref result, count);
+                    owned = FfiSearchResult.TakeOwnership(
+                        ref result,
+                        count,
+                        _resultOwner);
                     var ownedTrace = trace;
                     trace = null;
                     traceOwnerId = 0;
@@ -571,9 +569,9 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
                 _ = NativeEngine.fmf_query_control_free(controlId);
             }
 
-            if (basisAdded && presentationBasis is FfiSearchResult ffiBasis)
+            if (basisAdded)
             {
-                ffiBasis.DangerousRelease();
+                heldBasis!.DangerousRelease();
             }
 
             if (engineAdded)

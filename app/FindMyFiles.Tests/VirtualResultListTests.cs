@@ -158,6 +158,56 @@ public sealed class VirtualResultListTests
         }
     }
 
+    [Fact]
+    public void OldEpochFailure_CannotConsumeCurrentEpochFailureNotice()
+    {
+        SyncContext.RunContinuationsInline();
+        var mine = new List<AppNotification>();
+        var expected = Loc.Get("Virtualization_PageFetchFailed");
+        void Handler(AppNotification notification)
+        {
+            if (string.Equals(notification.Message, expected, StringComparison.Ordinal))
+            {
+                mine.Add(notification);
+            }
+        }
+
+        Notifier.Posted += Handler;
+        try
+        {
+            var oldGate = new TaskCompletionSource();
+            var old = new StubSearchResult(Rows.Many(10, "old"))
+            {
+                Gate = oldGate,
+                ThrowOnFetch = new InvalidOperationException("old failure"),
+            };
+            _list.Reassign(old, []);
+            _list.EnsureRange(0, 9);
+
+            var currentGate = new TaskCompletionSource();
+            var current = new StubSearchResult(Rows.Many(10, "current"))
+            {
+                Gate = currentGate,
+                ThrowOnFetch = new InvalidOperationException("current failure"),
+            };
+            _list.Reassign(current, []);
+            _list.EnsureRange(0, 9);
+
+            oldGate.SetResult();
+            _dispatcher.DrainQueue();
+            Assert.Empty(mine);
+
+            currentGate.SetResult();
+            _dispatcher.DrainQueue();
+            var notification = Assert.Single(mine);
+            Assert.Equal("current failure", notification.Detail);
+        }
+        finally
+        {
+            Notifier.Posted -= Handler;
+        }
+    }
+
     // The two-layer protection against fetches of a dead epoch is pinned by
     // two tests: the one above lets the old fetch COMPLETE WITH DATA (stub
     // ignores ct) and proves the epoch check drops it; the one below makes

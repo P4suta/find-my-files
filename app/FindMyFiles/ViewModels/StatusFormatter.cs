@@ -66,6 +66,7 @@ internal static class StatusFormatter
     /// <returns>Localized transport badge for the active engine.</returns>
     public static string EngineMode(IEngineClient engine) => engine.Kind switch
     {
+        EngineClientKind.Resolving => Loc.Get("EngineMode_Connecting"),
         EngineClientKind.Unavailable => Loc.Get("EngineMode_Disconnected"),
 #if FMF_TEST_SEAMS
         EngineClientKind.Test => Loc.Get("EngineMode_Fake"),

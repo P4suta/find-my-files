@@ -61,6 +61,23 @@ public sealed class ServiceManagerViewModelTests
     }
 
     [Fact]
+    public void Lifecycle_control_does_not_require_the_elevated_helper_binary()
+    {
+        var viewModel = new ServiceManagerViewModel(
+            queryState: () => EngineServiceState.Stopped,
+            locateServiceExe: () => null);
+
+        viewModel.Refresh();
+
+        Assert.True(viewModel.IsStopped);
+        Assert.True(viewModel.CanStart);
+        Assert.False(viewModel.CanRegister);
+        Assert.False(viewModel.CanReregister);
+        Assert.False(viewModel.CanUninstall);
+        Assert.False(viewModel.CanPurgeData);
+    }
+
+    [Fact]
     public void Purge_requires_a_known_state_but_not_an_installed_service()
     {
         var viewModel = new ServiceManagerViewModel(

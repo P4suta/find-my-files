@@ -1,9 +1,12 @@
 namespace FindMyFiles.ViewModels;
 
 /// <summary>
-/// Why a requery ran. Reset origins land the user at the top of the list;
-/// position-preserving origins restore the previous viewport
-/// (docs/ARCHITECTURE.md "two requery families").
+/// Why a requery ran. There are exactly two families and every member below
+/// belongs to one of them: an origin the user caused resets the viewport to the
+/// top of the list, while an origin the engine caused restores the previous top
+/// visible row (and re-selects best-effort, only when a seed row's EntryRef
+/// still matches) — an index update must never scroll the list out from under
+/// the user.
 /// </summary>
 internal enum RequeryOrigin
 {

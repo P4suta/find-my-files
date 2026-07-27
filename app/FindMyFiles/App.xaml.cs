@@ -8,10 +8,10 @@ namespace FindMyFiles;
 
 /// <summary>
 /// Application entry point and process-wide composition root. `OnLaunched`
-/// resolves the engine boundary (<see cref="EngineClient"/>) and stands up the
-/// single <see cref="MainWindow"/>. On fatal init failure it falls back to
-/// an explicit unavailable engine state to avoid crashing silently or showing
-/// demo data as if it were real.
+/// stands up the single <see cref="MainWindow"/> immediately, then resolves the
+/// engine boundary (<see cref="EngineClient"/>) off the UI STA and commits it
+/// through the in-process page reload. On fatal init failure it falls back to
+/// an explicit unavailable engine state.
 /// </summary>
 // View/startup shell: imperative UI wiring + composition root, not unit-tested (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
@@ -54,6 +54,13 @@ public partial class App : Application
     /// <summary>The in-process soft-restart orchestrator (ADR-0036), wired in
     /// <see cref="OnLaunched"/> once the window exists. Null only before launch.</summary>
     private static AppReload? _reload;
+
+    /// <summary>Lifetime of the one background initial engine resolution.
+    /// Service-control polling is bounded but synchronous Win32 work, so
+    /// cancellation suppresses a late commit rather than aborting native calls.</summary>
+    private static CancellationTokenSource? _initialResolution;
+
+    private static int _shuttingDown;
 
     /// <summary>Open or close the diagnostics window, sharing the supplied
     /// <see cref="PerfPanelViewModel"/> (the single `MainViewModel.Perf`
@@ -133,7 +140,7 @@ public partial class App : Application
             ("os_build", Environment.OSVersion.Version.Build));
 
         var cmdLine = Environment.GetCommandLineArgs();
-        EngineClient = ResolveEngineOrUnavailable(cmdLine);
+        EngineClient = new ResolvingEngineClient();
 
         ExceptionPolicy.ReportPreviousCrash();
 
@@ -141,6 +148,9 @@ public partial class App : Application
         Window = new MainWindow();
         Window.Closed += (_, _) =>
         {
+            Interlocked.Exchange(ref _shuttingDown, 1);
+            CancelInitialResolution();
+
             // Close the diagnostics window first so no orphan top-level window
             // survives shutdown (mandatory correction 1).
             _diagWindow?.Close();
@@ -174,6 +184,71 @@ public partial class App : Application
             setEngine: engine => EngineClient = engine,
             renavigate: () => ((MainWindow)Window).ReloadMainPage(),
             closeDiagnostics: () => _diagWindow?.Close());
+
+        var initialResolution = new CancellationTokenSource();
+        _initialResolution = initialResolution;
+        ResolveInitialEngineAsync(cmdLine, initialResolution)
+            .Forget("app.engine-resolution");
+    }
+
+    private static async Task ResolveInitialEngineAsync(
+        string[] args,
+        CancellationTokenSource lifetime)
+    {
+        IEngineClient? resolved = null;
+        try
+        {
+            resolved = await EngineClientFactory.ResolveAsync(
+                () => ResolveEngineOrUnavailable(args),
+                lifetime.Token).ConfigureAwait(false);
+            if (lifetime.IsCancellationRequested
+                || Volatile.Read(ref _shuttingDown) != 0)
+            {
+                resolved.Dispose();
+                return;
+            }
+
+            var completion = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (lifetime.IsCancellationRequested
+                        || Volatile.Read(ref _shuttingDown) != 0
+                        || _reload is null)
+                    {
+                        resolved.Dispose();
+                        completion.TrySetResult();
+                        return;
+                    }
+
+                    try
+                    {
+                        var committed = resolved;
+                        resolved = null;
+                        _reload.Run(() => committed);
+                        completion.TrySetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        completion.TrySetException(ex);
+                    }
+                }))
+            {
+                resolved.Dispose();
+                return;
+            }
+
+            await completion.Task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+            resolved?.Dispose();
+        }
+        finally
+        {
+            Interlocked.CompareExchange(ref _initialResolution, null, lifetime);
+            lifetime.Dispose();
+        }
     }
 
     /// <summary>Resolve the engine transport, returning an unavailable client
@@ -191,10 +266,11 @@ public partial class App : Application
         }
         catch (EngineException ex) when (ex.Code == EngineContract.Status.Locked)
         {
-            // The service is up and holds the writer lock — in-proc cannot
-            // start here. Say exactly that instead of the generic failure
-            // (ARCHITECTURE.md FMF_E_LOCKED guidance). The factory's QueryState
-            // guard means we rarely reach this — it's the backstop.
+            // The service is up and holds the index_dir writer lock, which is
+            // the cross-process single-writer invariant — in-proc cannot start
+            // here. Say exactly that (stop the service first) instead of the
+            // generic failure. The factory's QueryState guard means we rarely
+            // reach this — it's the backstop.
             FileLog.Error("app", "engine init: index locked by the running service", ex);
             Notifier.Post(
                 NotifySeverity.Error,
@@ -221,8 +297,11 @@ public partial class App : Application
     /// lifecycle changes and the manual "restart app" button — anything that only
     /// needs the once-at-startup transport choice re-made. Marshals onto the UI
     /// thread (callers may resume off it after an elevated step).</summary>
-    internal static void SoftRestart() =>
+    internal static void SoftRestart()
+    {
+        CancelInitialResolution();
         OnUiThread(() => _reload?.Run(Environment.GetCommandLineArgs()));
+    }
 
     /// <summary>In-process soft restart forcing the pipe transport, used right
     /// after a successful in-app service registration: the rebuilt page binds the
@@ -231,15 +310,24 @@ public partial class App : Application
     /// short probe can miss the not-yet-answering service and report it unavailable.
     /// Replaces the old process relaunch, which single-instancing defeated
     /// (ADR-0036).</summary>
-    internal static void SoftRestartIntoPipe() =>
+    internal static void SoftRestartIntoPipe()
+    {
+        CancelInitialResolution();
         OnUiThread(() => _reload?.Run(
             EngineClientFactory.WithEngineMode(Environment.GetCommandLineArgs(), "pipe")));
+    }
 
     /// <summary>Rebuild the page on the disconnected setup engine after the
     /// user explicitly stops an installed service. Auto mode is intentionally
     /// bypassed; it would immediately start that same on-demand service again.</summary>
-    internal static void SoftRestartIntoUnavailable() =>
+    internal static void SoftRestartIntoUnavailable()
+    {
+        CancelInitialResolution();
         OnUiThread(() => _reload?.Run(() => new UnavailableEngineClient()));
+    }
+
+    private static void CancelInitialResolution() =>
+        Volatile.Read(ref _initialResolution)?.Cancel();
 
     /// <summary>Run <paramref name="action"/> on the cached UI dispatcher — inline
     /// when already on it, marshaled otherwise (a soft restart touches the Frame and
@@ -278,7 +366,10 @@ public partial class App : Application
     /// <returns>True to cancel the close (now hidden to tray); false to exit.</returns>
     internal static bool HandleMainWindowClosing()
     {
-        if (WindowLifecycle.ShouldHideToTray(AppSettings.Load().CloseToTray, _explicitExit))
+        if (WindowLifecycle.ShouldHideToTray(
+                AppSettings.Load().CloseToTray,
+                _explicitExit,
+                _tray?.IsAvailable == true))
         {
             Window.AppWindow.Hide();
             return true;

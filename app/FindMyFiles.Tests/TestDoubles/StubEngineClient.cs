@@ -59,7 +59,7 @@ internal sealed class StubEngineClient : IEngineClient
 
     public event Action<VolumeStatus>? VolumeUpdated;
 
-    public event Action<int>? EngineErrorOccurred;
+    public event Action<EngineErrorSeverity>? EngineErrorOccurred;
 
     public event Action<EngineConnectionState>? ConnectionChanged;
 
@@ -74,7 +74,8 @@ internal sealed class StubEngineClient : IEngineClient
 
     public void RaiseVolumeUpdated(VolumeStatus status) => VolumeUpdated?.Invoke(status);
 
-    public void RaiseEngineError(int severity) => EngineErrorOccurred?.Invoke(severity);
+    public void RaiseEngineError(EngineErrorSeverity severity) =>
+        EngineErrorOccurred?.Invoke(severity);
 
     public void RaiseConnectionChanged(EngineConnectionState state) =>
         ConnectionChanged?.Invoke(state);
@@ -113,8 +114,12 @@ internal sealed class StubEngineClient : IEngineClient
     /// block's engine-version path.</summary>
     public EngineStatsData? Stats { get; set; }
 
+    public Exception? ThrowOnStats { get; set; }
+
     public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default) =>
-        Task.FromResult(Stats);
+        ThrowOnStats is { } ex
+            ? Task.FromException<EngineStatsData?>(ex)
+            : Task.FromResult(Stats);
 
     public Task<SearchOutcome> SearchAsync(
         string query, SearchOptions options, CancellationToken ct = default)

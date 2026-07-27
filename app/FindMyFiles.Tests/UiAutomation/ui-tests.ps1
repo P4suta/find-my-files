@@ -69,12 +69,180 @@ $script:DataDir = Join-Path $script:OutRoot ("state-" + [guid]::NewGuid().ToStri
 New-Item -ItemType Directory -Path $script:DataDir | Out-Null
 $script:LogSource = Join-Path $script:DataDir 'logs'
 
+# `get-focused` is a global UIA query: it cannot report an element in a window
+# that never became foreground. Test runners commonly launch pwsh from a
+# different foreground process, so ordinary SetForegroundWindow is rejected by
+# Windows' foreground lock. Join only the caller, current foreground, and exact
+# target HWND input queues for the activation operation, then detach every join
+# in a finally block. No child element receives focus here: the assertion still
+# verifies the app's production title-bar-to-primary-action handoff.
+if (-not ('FindMyFiles.UiTests.NativeWindow' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace FindMyFiles.UiTests
+{
+    public static class NativeWindow
+    {
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern uint GetWindowThreadProcessId(
+            IntPtr window,
+            out uint processId);
+
+        [DllImport("kernel32.dll")]
+        public static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool AttachThreadInput(
+            uint attachThread,
+            uint attachToThread,
+            bool attach);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ShowWindowAsync(IntPtr window, int command);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool BringWindowToTop(IntPtr window);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetForegroundWindow(IntPtr window);
+    }
+}
+'@
+}
+
+function Activate-AppWindow {
+    param(
+        [Parameter(Mandatory)]
+        [System.Diagnostics.Process]$Process,
+        [int]$TimeoutMs = 5000
+    )
+
+    $processId = $Process.Id
+    $windowDeadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    $window = [IntPtr]::Zero
+    do {
+        if ($Process.HasExited) {
+            throw "process $processId exited before its main window was created"
+        }
+        $Process.Refresh()
+        $window = $Process.MainWindowHandle
+        if ($window -ne [IntPtr]::Zero) {
+            break
+        }
+        Start-Sleep -Milliseconds 25
+    } while ([DateTime]::UtcNow -lt $windowDeadline)
+
+    if ($window -eq [IntPtr]::Zero) {
+        throw "process $processId did not publish a main window within ${TimeoutMs}ms"
+    }
+
+    $windowProcessId = [uint32]0
+    $targetThread = [FindMyFiles.UiTests.NativeWindow]::GetWindowThreadProcessId(
+        $window,
+        [ref]$windowProcessId)
+    if ($targetThread -eq 0 -or $windowProcessId -ne $processId) {
+        throw "main HWND $window is not owned by process $processId"
+    }
+
+    $callerThread = [FindMyFiles.UiTests.NativeWindow]::GetCurrentThreadId()
+    $foregroundWindow = [FindMyFiles.UiTests.NativeWindow]::GetForegroundWindow()
+    $foregroundProcessId = [uint32]0
+    $foregroundThread = if ($foregroundWindow -eq [IntPtr]::Zero) {
+        [uint32]0
+    }
+    else {
+        [FindMyFiles.UiTests.NativeWindow]::GetWindowThreadProcessId(
+            $foregroundWindow,
+            [ref]$foregroundProcessId)
+    }
+
+    $threadsToAttach = @($foregroundThread, $targetThread) |
+        Where-Object { $_ -ne 0 -and $_ -ne $callerThread } |
+        Select-Object -Unique
+    $attachedThreads = [System.Collections.Generic.List[uint32]]::new()
+
+    try {
+        foreach ($thread in $threadsToAttach) {
+            if (-not [FindMyFiles.UiTests.NativeWindow]::AttachThreadInput(
+                $callerThread,
+                $thread,
+                $true)) {
+                $nativeError =
+                    [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw "could not attach to input thread $thread (Win32 $nativeError)"
+            }
+            $attachedThreads.Add($thread)
+        }
+
+        # Revalidate the HWND ownership immediately before changing foreground
+        # state. This closes the exit/PID/HWND reuse window after the first check.
+        if ($Process.HasExited) {
+            throw "process $processId exited before activation"
+        }
+        $confirmedProcessId = [uint32]0
+        $confirmedThread =
+            [FindMyFiles.UiTests.NativeWindow]::GetWindowThreadProcessId(
+                $window,
+                [ref]$confirmedProcessId)
+        if (($confirmedThread -ne $targetThread) -or
+            ($confirmedProcessId -ne $processId)) {
+            throw "main HWND $window changed ownership before activation"
+        }
+
+        # SW_RESTORE (9) is safe for normal and minimized windows. Its return
+        # value describes prior visibility, so only the foreground operations
+        # below are success predicates.
+        [void][FindMyFiles.UiTests.NativeWindow]::ShowWindowAsync($window, 9)
+        $broughtToTop =
+            [FindMyFiles.UiTests.NativeWindow]::BringWindowToTop($window)
+        $madeForeground =
+            [FindMyFiles.UiTests.NativeWindow]::SetForegroundWindow($window)
+        if (-not $broughtToTop -or -not $madeForeground) {
+            $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw "Windows rejected activation for HWND $window (Win32 $nativeError)"
+        }
+    }
+    finally {
+        for ($index = $attachedThreads.Count - 1; $index -ge 0; $index--) {
+            [void][FindMyFiles.UiTests.NativeWindow]::AttachThreadInput(
+                $callerThread,
+                $attachedThreads[$index],
+                $false)
+        }
+    }
+
+    $activationDeadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    do {
+        if ([FindMyFiles.UiTests.NativeWindow]::GetForegroundWindow() -eq $window) {
+            return
+        }
+        Start-Sleep -Milliseconds 25
+    } while ([DateTime]::UtcNow -lt $activationDeadline)
+
+    throw "HWND $window for process $processId did not become foreground within ${TimeoutMs}ms"
+}
+
 # ── Harness shim ──────────────────────────────────────────────────────────────
 # Single chokepoint for the UI automation CLI. Every scenario goes through here,
 # so if this machine's harness binary is named/invoked differently, this is the
-# ONE place to adapt.
+# ONE place to adapt. CI passes the verified runner-temp executable explicitly;
+# local development resolves the mise-provisioned binary from PATH.
 #
-$script:UiCli = if ($env:FMF_UI_CLI) { $env:FMF_UI_CLI } else { 'winapp' }
+$script:UiCli = if ($env:FMF_UI_CLI) {
+    $env:FMF_UI_CLI
+}
+else {
+    'winapp'
+}
 if (-not (Get-Command -Name $script:UiCli -ErrorAction SilentlyContinue)) {
     throw "UI automation harness '$script:UiCli' is unavailable; run `just doctor`."
 }
@@ -150,6 +318,7 @@ function Start-App {
     # defaults or counts, and prevents the suite from touching the user's profile.
     $arguments = @($AppArgs) + "--data-dir=$script:DataDir"
     $p = Start-Process -FilePath $Exe -ArgumentList $arguments -PassThru
+    Activate-AppWindow -Process $p
     # Give the WinUI window + the automation tree time to materialise. The first
     # wait-for in each phase has its own timeout, so this is just startup slack.
     Start-Sleep -Seconds 2
@@ -172,6 +341,7 @@ function Start-StableApp {
         APPDATA = $script:DataDir
         LOCALAPPDATA = $localData
     }
+    Activate-AppWindow -Process $process
     Start-Sleep -Seconds 2
     return $process.Id
 }
@@ -237,6 +407,12 @@ function Invoke-SetupPhase {
     # NOT be interactable. wait-for --gone is the disconnected-state invariant.
     Test-UI 'Setup: SearchBox collapsed while disconnected' {
         Invoke-Ui wait-for 'SearchBox' -a $setupPid --gone -t 3000
+    }
+    Test-UI 'Setup: focus moves to the visible primary recovery action' {
+        $focused = Invoke-Ui get-focused -a $setupPid --json 2>$null | ConvertFrom-Json
+        if ($focused.element.automationId -ne 'EnableSearch') {
+            throw "focus remained on '$($focused.element.automationId)'"
+        }
     }
     Invoke-Ui screenshot -a $setupPid -o (Join-Path $OutDir 'A-setup.png') 2>$null
 

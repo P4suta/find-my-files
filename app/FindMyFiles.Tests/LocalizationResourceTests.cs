@@ -34,6 +34,7 @@ public sealed class LocalizationResourceTests
     [InlineData("SetupRecovery.Content")]
     [InlineData("DiagCard.Description")]
     [InlineData("ServiceCard.Description")]
+    [InlineData("Svc_IdentityUnavailable")]
     [InlineData("Svc_UserDataPurgeFailed")]
     public void Recovery_surface_copy_is_localized_in_every_locale(string key)
     {

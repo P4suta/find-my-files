@@ -19,10 +19,22 @@ namespace FindMyFiles.Services;
 /// </summary>
 internal sealed class AppReload
 {
+    /// <summary>Dismissers for the modal surfaces currently on screen, in the
+    /// order they opened. A <c>ContentDialog</c> lives in the XamlRoot's popup
+    /// layer, <em>not</em> in the root Frame, so re-navigating the Frame leaves it
+    /// floating above the rebuilt page still bound to the torn-down page's view
+    /// models (its engine disposed, its <see cref="ViewModels.PerfPanelViewModel"/>
+    /// dead). Dialogs register themselves for the duration of their <c>ShowAsync</c>
+    /// so a soft restart can take them down with the page they belong to.
+    /// <para>UI thread only: registration happens in the dialogs' UI-thread open
+    /// paths and <see cref="Run(Func{IEngineClient})"/> is marshaled onto the same
+    /// thread by <c>App</c>, so no lock is needed.</para></summary>
+    private static readonly List<Action> Modals = [];
+
     private readonly Func<string[], IEngineClient> _resolve;
     private readonly Func<IEngineClient> _getEngine;
     private readonly Action<IEngineClient> _setEngine;
-    private readonly Action _renavigate;
+    private readonly Func<bool> _renavigate;
     private readonly Action _closeDiagnostics;
 
     /// <summary>Guards against a re-navigation (or a delegate it triggers)
@@ -44,7 +56,7 @@ internal sealed class AppReload
         Func<string[], IEngineClient> resolve,
         Func<IEngineClient> getEngine,
         Action<IEngineClient> setEngine,
-        Action renavigate,
+        Func<bool> renavigate,
         Action closeDiagnostics)
     {
         _resolve = resolve;
@@ -52,6 +64,20 @@ internal sealed class AppReload
         _setEngine = setEngine;
         _renavigate = renavigate;
         _closeDiagnostics = closeDiagnostics;
+    }
+
+    /// <summary>Register <paramref name="dismiss"/> as an open modal surface for
+    /// as long as the returned token is alive; a soft restart invokes every
+    /// registered dismisser before it rebuilds the page. Callers open with
+    /// <c>using var _ = AppReload.TrackModal(...)</c> around their <c>ShowAsync</c>,
+    /// so the registration disappears however the dialog closes.</summary>
+    /// <param name="dismiss">Closes the surface (UI thread). Must tolerate being
+    /// called when the surface is already closing.</param>
+    /// <returns>A token that deregisters the surface when disposed.</returns>
+    internal static IDisposable TrackModal(Action dismiss)
+    {
+        Modals.Add(dismiss);
+        return new ModalRegistration(dismiss);
     }
 
     /// <summary>Run one soft restart: close diagnostics → resolve the new engine →
@@ -82,13 +108,18 @@ internal sealed class AppReload
         _running = true;
         try
         {
+            DismissModals();
             _closeDiagnostics();
             var old = _getEngine();
             var fresh = resolve();
             try
             {
                 _setEngine(fresh);
-                _renavigate();
+                if (!_renavigate())
+                {
+                    throw new InvalidOperationException(
+                        "MainPage navigation was rejected");
+                }
             }
             catch
             {
@@ -121,6 +152,49 @@ internal sealed class AppReload
         finally
         {
             _running = false;
+        }
+    }
+
+    /// <summary>Close every registered modal surface before the page is rebuilt.
+    /// Iterates a snapshot because a dismisser deregisters itself (directly or
+    /// through the continuation its close resumes), and contains its own failures:
+    /// a dialog that refuses to close must not abort the engine swap that is
+    /// already under way.</summary>
+    private static void DismissModals()
+    {
+        if (Modals.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var dismiss in Modals.ToArray())
+        {
+            try
+            {
+                dismiss();
+            }
+            catch (Exception ex)
+            {
+                FileLog.Warn("app", "modal dismissal failed during reload", ex);
+            }
+        }
+    }
+
+    /// <summary>The token handed to a tracked modal surface; disposing it takes
+    /// the surface out of the dismissal set exactly once.</summary>
+    private sealed class ModalRegistration : IDisposable
+    {
+        private Action? _dismiss;
+
+        internal ModalRegistration(Action dismiss) => _dismiss = dismiss;
+
+        public void Dispose()
+        {
+            if (_dismiss is { } dismiss)
+            {
+                _dismiss = null;
+                Modals.Remove(dismiss);
+            }
         }
     }
 }

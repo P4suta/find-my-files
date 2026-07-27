@@ -7,6 +7,9 @@ namespace FindMyFiles.Engine;
 /// </summary>
 internal enum EngineClientKind
 {
+    /// <summary>Startup is resolving the real session off the UI thread.</summary>
+    Resolving,
+
     /// <summary>No usable engine is available; the setup experience is shown.</summary>
     Unavailable,
 
@@ -23,10 +26,11 @@ internal enum EngineClientKind
 }
 
 /// <summary>
-/// The single boundary the app uses to talk to the engine
-/// (docs/ARCHITECTURE.md). Implementations: <see cref="PipeEngineClient"/>
-/// (named pipe to fmf-service) and <see cref="FfiEngineClient"/> (in-proc DLL,
-/// --engine=inproc). Test-seam builds add a deterministic in-memory client.
+/// The single boundary the app uses to talk to the engine: no other app code
+/// may reach an engine transport (ADR-0016). Implementations:
+/// <see cref="PipeEngineClient"/> (named pipe to fmf-service) and
+/// <see cref="FfiEngineClient"/> (in-proc DLL, --engine=inproc).
+/// Test-seam builds add a deterministic in-memory client.
 /// The shared observable behavior is
 /// executable: Tests/Contract/EngineClientContractTests runs the same suite
 /// against all implementations.
@@ -55,19 +59,20 @@ internal interface IEngineClient : IDisposable
     event Action<VolumeStatus>? VolumeUpdated;
 
     /// <summary>
-    /// The engine recorded a diagnostic (1=warn 2=error 3=panic). Details
-    /// live in <see cref="EngineStatsData.RecentErrors"/> — pull on demand.
+    /// The engine recorded a diagnostic. Details live in
+    /// <see cref="EngineStatsData.RecentErrors"/> — pull on demand.
     /// </summary>
-    event Action<int>? EngineErrorOccurred;
+    event Action<EngineErrorSeverity>? EngineErrorOccurred;
 
-    /// <summary>InProc for non-pipe clients (fixed, never raises
-    /// <see cref="ConnectionChanged"/>); the pipe client moves through
-    /// Connecting/Connected/Reconnecting/Faulted.</summary>
+    /// <summary><see cref="EngineConnectionState.Connecting"/> during initial
+    /// background resolution, <see cref="EngineConnectionState.Unavailable"/>
+    /// when no engine exists, <see cref="EngineConnectionState.InProc"/> for
+    /// FFI/test clients, or the live pipe supervisor state.</summary>
     EngineConnectionState Connection { get; }
 
-    /// <summary>Fires when the current <see cref="Connection"/> transitions. In-proc
-    /// implementations never fire (always <see cref="EngineConnectionState.InProc"/>).
-    /// Fires from the pipe client's supervisor thread → marshal.</summary>
+    /// <summary>Fires when the current <see cref="Connection"/> transitions.
+    /// Fixed-state implementations never fire. The pipe implementation fires
+    /// from its supervisor thread → marshal.</summary>
     event Action<EngineConnectionState>? ConnectionChanged;
 
     /// <summary>Returns the labels of the indexed volumes (those the engine

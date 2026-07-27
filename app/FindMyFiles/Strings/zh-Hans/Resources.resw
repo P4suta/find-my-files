@@ -60,6 +60,7 @@
   </resheader>
 
   <!-- ===== XAML (x:Uid) ===== -->
+  <data name="Common_Retry" xml:space="preserve"><value>重试</value></data>
   <data name="Search_Placeholder" xml:space="preserve"><value>按文件名搜索…</value></data>
   <data name="Search_PlaceholderRegexName" xml:space="preserve"><value>用正则表达式匹配文件名…</value></data>
   <data name="Search_PlaceholderRegexPath" xml:space="preserve"><value>用正则表达式匹配完整路径…</value></data>
@@ -179,7 +180,7 @@
   <data name="Notify_ReconnectingBody" xml:space="preserve"><value>连接恢复后结果会自动更新</value></data>
   <data name="Notify_IndexStartFailedTitle" xml:space="preserve"><value>无法启动索引</value></data>
   <data name="Notify_VolumeIndexFailedTitle" xml:space="preserve"><value>无法为 {0} 建立索引</value></data>
-  <data name="Notify_VolumeIndexFailedBody" xml:space="preserve"><value>详情请见 设置→诊断 面板或 engine.log</value></data>
+  <data name="Notify_VolumeIndexFailedBody" xml:space="preserve"><value>详情请见“设置→诊断”面板或引擎日志文件夹</value></data>
   <data name="Notify_SearchFailedTitle" xml:space="preserve"><value>搜索失败</value></data>
   <data name="Notify_SearchUnexpectedTitle" xml:space="preserve"><value>搜索时发生意外错误</value></data>
   <data name="Notify_EnginePanicTitle" xml:space="preserve"><value>引擎内部发生严重错误</value></data>
@@ -210,6 +211,7 @@
   <data name="Diag_Copied" xml:space="preserve"><value>诊断信息已复制到剪贴板</value></data>
   <data name="Svc_Cancelled" xml:space="preserve"><value>已在 UAC 提示处取消</value></data>
   <data name="Svc_Failed" xml:space="preserve"><value>操作失败(退出代码 {0})。请重试。如果问题仍然存在，请打开“设置与修复”→“诊断”。</value></data>
+  <data name="Svc_IdentityUnavailable" xml:space="preserve"><value>Windows 无法识别你的帐户，因此安装程序在请求管理员权限前已停止。请注销并重新登录，然后重试。</value></data>
   <data name="Svc_RegisteredNotConfirmed" xml:space="preserve"><value>已注册，但尚未确认连接。请按“重启应用”，或稍后重试。</value></data>
   <data name="Svc_Incompatible" xml:space="preserve"><value>已安装服务的版本不匹配。请重新注册以更新引擎。</value></data>
   <data name="Svc_ControlFailed" xml:space="preserve"><value>服务操作失败。请重新注册以修复权限或版本。</value></data>
@@ -219,16 +221,20 @@
   <data name="Shell_RevealFailed" xml:space="preserve"><value>无法打开文件夹</value></data>
   <data name="Shell_RelaunchFailed" xml:space="preserve"><value>无法重启</value></data>
   <data name="Shell_ClipboardFailed" xml:space="preserve"><value>复制到剪贴板失败</value></data>
+  <data name="Shell_UnsafeIndexedName" xml:space="preserve"><value>该名称无法唯一对应到 Windows 路径</value></data>
+  <data name="Shell_ReparsePointBlocked" xml:space="preserve"><value>对通过联接或符号链接重定向的路径已禁用 Shell 操作</value></data>
+  <data name="Shell_IdentityChanged" xml:space="preserve"><value>该路径已不再指向索引中的文件</value></data>
   <data name="Shell_HintMoved" xml:space="preserve"><value>文件可能已被移动或删除</value></data>
   <data name="Shell_HintAccessDenied" xml:space="preserve"><value>访问被拒绝 — 请检查权限</value></data>
   <data name="Shell_HintCancelled" xml:space="preserve"><value>操作已在 UAC 中取消</value></data>
   <data name="Shell_HintMovedRecently" xml:space="preserve"><value>文件可能刚刚被移动或删除</value></data>
+  <data name="Shell_HintPathTooLong" xml:space="preserve"><value>路径过长 — 请在 Windows 设置中启用长路径</value></data>
 
   <data name="App_LockedTitle" xml:space="preserve"><value>搜索服务正在运行，无法使用进程内引擎</value></data>
   <data name="App_LockedBody" xml:space="preserve"><value>正常启动即可连接服务。若要使用进程内引擎，请先停止服务(`just service-stop`)。</value></data>
   <data name="App_EngineInitFailedTitle" xml:space="preserve"><value>搜索引擎不可用</value></data>
   <data name="App_EngineInitFailedBody" xml:space="preserve"><value>{0}
-fmf-service 可能未运行，或索引被其他引擎锁定(详见 engine.log)。</value></data>
+fmf-service 可能未运行，或索引被其他引擎锁定(详见引擎日志文件夹)。</value></data>
 
   <data name="Crash_UnexpectedTitle" xml:space="preserve"><value>发生意外错误</value></data>
   <data name="Crash_BackgroundTitle" xml:space="preserve"><value>后台任务失败</value></data>

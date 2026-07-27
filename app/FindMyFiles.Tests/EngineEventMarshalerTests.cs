@@ -28,14 +28,14 @@ public sealed class EngineEventMarshalerTests
         // UI queue runs — the marshaling is the whole point.
         _engine.RaiseVolumeUpdated(new VolumeStatus("C:", VolumeState.Ready, 42));
         _engine.RaiseIndexChanged("C:");
-        _engine.RaiseEngineError(2);
+        _engine.RaiseEngineError(EngineErrorSeverity.Error);
         _engine.RaiseConnectionChanged(EngineConnectionState.Reconnecting);
         Assert.Empty(log);
 
         // One drain delivers all four, payloads intact, FIFO order kept.
         _dispatcher.DrainQueue();
         Assert.Equal(
-            ["volume C: Ready 42", "index C:", "error 2", "connection Reconnecting"],
+            ["volume C: Ready 42", "index C:", "error Error", "connection Reconnecting"],
             log);
     }
 

@@ -5,12 +5,25 @@ namespace FindMyFiles.Services;
 /// <summary>
 /// User-scope settings at %APPDATA%\find-my-files\settings.json — UI-owned,
 /// deliberately separate from the machine-scope service.json the service
-/// owns. A corrupt file degrades to defaults: warn, quarantine as .bad, and
-/// the next save starts clean.
+/// owns. A file whose <em>content</em> is unusable degrades to defaults: warn,
+/// quarantine as .bad, and the next save starts clean. A file we merely failed
+/// to <em>read</em> (sharing violation from a backup/sync/AV pass, denied ACL)
+/// is never touched: the session runs on defaults and saving is refused, so a
+/// one-second lock cannot erase everything the user configured.
 /// </summary>
 internal sealed class AppSettings
 {
     private const int MaxSettingsBytes = 16 * 1024;
+
+    /// <summary>Read attempts before an unreadable file is declared unavailable.
+    /// A sharing violation from a backup/indexer/AV pass clears in milliseconds,
+    /// so a couple of retries recovers the real settings instead of silently
+    /// running the session on defaults.</summary>
+    private const int ReadAttempts = 3;
+
+    /// <summary>Backoff between the read attempts above. Startup calls this on
+    /// the UI thread, so the worst case stays under a frame budget.</summary>
+    private const int ReadRetryDelayMs = 20;
 
     /// <summary>UI language: "auto" (follow the OS), "ja", "en", or "zh-Hans".
     /// Applied via PrimaryLanguageOverride in the App ctor; the gear menu's
@@ -45,33 +58,87 @@ internal sealed class AppSettings
     /// <c>%APPDATA%\find-my-files\settings.json</c>.</summary>
     public static string SettingsPath => AppPaths.SettingsFile;
 
+    /// <summary>True when an existing settings.json could not be read at load
+    /// time (I/O or access failure, not bad content). Such an instance holds
+    /// defaults that were never the user's choice, so <see cref="SaveTo"/>
+    /// refuses to persist them over the file it could not read.</summary>
+    internal bool ReadUnavailable { get; private set; }
+
     /// <summary>Load settings from <see cref="SettingsPath"/>, falling back to
-    /// defaults (and quarantining the file) if it is missing or corrupt.</summary>
+    /// defaults if the file is missing, unreadable or corrupt. Only corrupt
+    /// <em>content</em> is quarantined as <c>.bad</c>.</summary>
     /// <returns>The loaded settings, or a fresh default instance.</returns>
     public static AppSettings Load() => LoadFrom(SettingsPath);
 
-    internal static AppSettings LoadFrom(string path)
+    internal static AppSettings LoadFrom(string path) => LoadFrom(path, Thread.Sleep);
+
+    /// <summary>Load core, parameterised over the retry backoff so the transient
+    /// I/O path is unit-testable without real waits.</summary>
+    /// <param name="path">Absolute settings file path to read.</param>
+    /// <param name="wait">Backoff between read attempts, in milliseconds.</param>
+    /// <returns>The loaded settings, or a fresh default instance.</returns>
+    internal static AppSettings LoadFrom(string path, Action<int> wait)
     {
-        try
+        for (var attempt = 1; ; attempt++)
         {
-            if (!File.Exists(path))
+            try
             {
+                if (!File.Exists(path))
+                {
+                    return new AppSettings();
+                }
+
+                var settings =
+                    JsonSerializer.Deserialize(
+                        ReadBounded(path),
+                        AppSettingsJsonContext.Default.AppSettings)
+                    ?? new AppSettings();
+                settings.Normalize();
+                return settings;
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidDataException)
+            {
+                // The bytes reached us and are not settings we can use: bad JSON,
+                // an unmapped member, or past the size bound. Quarantining is
+                // safe here because the content is already lost to us, and .bad
+                // keeps it recoverable by hand.
+                //
+                // UnmappedMemberHandling.Disallow means a version DOWNGRADE lands
+                // here too (an old build reading a newer file). That is deliberate:
+                // the old build cannot round-trip keys it does not know, so saving
+                // over the file would drop them anyway. Quarantine at least keeps
+                // the newer file intact under .bad for the newer build to restore,
+                // and the mismatch shows up in the log instead of silently
+                // discarding half the schema on the next save.
+                FileLog.Warn("settings", "corrupt settings.json — quarantining, using defaults", ex);
+                Quarantine(path);
                 return new AppSettings();
             }
-
-            var settings =
-                JsonSerializer.Deserialize(
-                    ReadBounded(path),
-                    AppSettingsJsonContext.Default.AppSettings)
-                ?? new AppSettings();
-            settings.Normalize();
-            return settings;
-        }
-        catch (Exception ex)
-        {
-            FileLog.Warn("settings", "unreadable settings.json — using defaults", ex);
-            Quarantine(path);
-            return new AppSettings();
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                // Raced with a delete between File.Exists and the open: nothing
+                // to preserve and nothing to quarantine.
+                return new AppSettings();
+            }
+            catch (IOException) when (attempt < ReadAttempts)
+            {
+                // We never saw the content, so we cannot call it corrupt. A
+                // backup/sync/AV pass holding the file for a moment must not cost
+                // the user every setting they have — wait it out first.
+                wait(ReadRetryDelayMs);
+            }
+            catch (Exception ex)
+            {
+                // Unreadable for a reason retrying will not fix (denied, gone
+                // sideways, or something we did not anticipate). Same rule: the
+                // content was never in our hands, so the file is left untouched
+                // and this session runs on defaults it must not persist.
+                FileLog.Warn(
+                    "settings",
+                    "settings.json unreadable — defaults for this session, saving disabled",
+                    ex);
+                return new AppSettings { ReadUnavailable = true };
+            }
         }
     }
 
@@ -132,15 +199,28 @@ internal sealed class AppSettings
 
     /// <summary>Persist the current settings to <see cref="SettingsPath"/>
     /// (snake_case JSON, indented). A write failure is logged and returned to
-    /// the caller so UI state cannot claim an unpersisted change succeeded.</summary>
+    /// the caller so UI state cannot claim an unpersisted change succeeded.
+    /// Refused outright when <see cref="ReadUnavailable"/> is set.</summary>
     /// <returns>True only after the atomic replacement completed.</returns>
     public bool Save() => SaveTo(SettingsPath);
 
     /// <summary>Path-parameterized persistence core.</summary>
     /// <param name="path">Absolute settings file path to replace atomically.</param>
-    /// <returns>True only after the atomic replacement completed.</returns>
+    /// <returns>True only after the atomic replacement completed; false when the
+    /// write failed or the instance holds fallback defaults
+    /// (<see cref="ReadUnavailable"/>).</returns>
     internal bool SaveTo(string path)
     {
+        if (ReadUnavailable)
+        {
+            // These values are defaults we fell back to, not the user's. Writing
+            // them would finish the destruction the failed read started.
+            FileLog.Warn(
+                "settings",
+                "refusing to overwrite settings.json that could not be read");
+            return false;
+        }
+
         string? temp = null;
         try
         {

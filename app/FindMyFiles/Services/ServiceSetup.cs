@@ -6,13 +6,27 @@ namespace FindMyFiles.Services;
 
 /// <summary>
 /// In-app service setup — the GUI half ADR-0016 left to a terminal: detects
-/// the fmf-engine SCM registration (read-only, works unelevated) and drives
-/// fmf-service.exe install/start so the one-time elevation never needs
-/// PowerShell. Mutations are strictly user-initiated (the notification
-/// button); install is idempotent on the service side.
+/// the fmf-engine SCM registration, controls an installed service directly
+/// through its narrowly delegated SCM rights, and uses the pinned
+/// fmf-service.exe only for one-time elevated setup/removal. Mutations are
+/// strictly user-initiated; install is idempotent on the service side.
 /// </summary>
 internal static partial class ServiceSetup
 {
+    private const uint ServiceStopped = 1;
+    private const uint ServiceStartPending = 2;
+    private const uint ServiceStopPending = 3;
+    private const uint ServiceRunning = 4;
+    private const uint ServiceContinuePending = 5;
+    private const uint ServicePausePending = 6;
+    private const uint ServicePaused = 7;
+    private const int ErrorServiceAlreadyRunning = 1056;
+    private const int ErrorServiceCannotAcceptControl = 1061;
+    private const int ErrorServiceNotActive = 1062;
+    private const int ServiceControlPollAttempts = 150;
+    private static readonly TimeSpan ServiceControlPollInterval =
+        TimeSpan.FromMilliseconds(100);
+
     /// <summary>True when *this* process is already running with an
     /// Administrator token — the in-proc engine path needs it, and when set the
     /// in-app install/start verbs can skip their own UAC prompt.</summary>
@@ -167,7 +181,6 @@ internal static partial class ServiceSetup
         const uint ScManagerConnect = 0x0001;
         const uint ServiceQueryStatus = 0x0004;
         const int ScStatusProcessInfo = 0;
-        const uint ServiceRunning = 4;
         var scm = OpenSCManager(null, null, ScManagerConnect);
         if (scm == IntPtr.Zero)
         {
@@ -297,80 +310,285 @@ internal static partial class ServiceSetup
     }
 
     /// <summary>Starts the installed service WITHOUT elevation (on-demand
-    /// lifecycle, ADR-0027): runs <c>fmf-service start</c> as the plain user,
-    /// which succeeds because install granted this user SID SERVICE_START on the
-    /// service object. No UAC, no window. Returns true once the start request was
-    /// accepted; the caller must still verify that the current protocol pipe
-    /// appears. False on any failure —
+    /// lifecycle, ADR-0027) by calling SCM directly with only
+    /// SERVICE_START|SERVICE_QUERY_STATUS. No helper process, UAC, executable
+    /// lookup, or command-line surface is involved. Returns true once SCM
+    /// reaches RUNNING; the caller must still verify that the current protocol
+    /// pipe appears. False on any failure —
     /// including an older install that never granted the right — so the caller
     /// falls back to the setup screen, whose re-register migrates it. Blocking;
     /// call off the UI thread.</summary>
     /// <returns>True when the unelevated start request succeeded.</returns>
-    public static bool TryStartUnelevated() => TryControlUnelevated("start");
+    public static bool TryStartUnelevated() =>
+        TryControlUnelevated(ScmControlVerb.Start);
 
-    /// <summary>Stops the installed service without elevation using the
-    /// install-time SERVICE_STOP grant. Used to unwind an obsolete service that
-    /// started successfully but never exposed this build's protocol pipe.</summary>
+    /// <summary>Stops the installed service directly through SCM without
+    /// elevation using only the install-time SERVICE_STOP|SERVICE_QUERY_STATUS
+    /// grant. Used to unwind an obsolete service that started successfully but
+    /// never exposed this build's protocol pipe.</summary>
     /// <returns>True when the stop completed successfully.</returns>
-    public static bool TryStopUnelevated() => TryControlUnelevated("stop");
+    public static bool TryStopUnelevated() =>
+        TryControlUnelevated(ScmControlVerb.Stop);
 
-    /// <summary>Restarts the installed service without elevation using only the
-    /// install-time SERVICE_STOP and SERVICE_START grants.</summary>
+    /// <summary>Restarts the installed service directly through SCM without
+    /// elevation using only the install-time START/STOP/QUERY grants.</summary>
     /// <returns>True when stop + start completed successfully.</returns>
-    public static bool TryRestartUnelevated() => TryControlUnelevated("restart");
+    public static bool TryRestartUnelevated() =>
+        TryControlUnelevated(ScmControlVerb.Restart);
 
-    private static bool TryControlUnelevated(string verb)
+    private static bool TryControlUnelevated(ScmControlVerb verb)
     {
-        var exe = LocateServiceExe(AppContext.BaseDirectory);
-        if (exe is null)
+        try
+        {
+            return TryControlUnelevatedCore(verb);
+        }
+        catch (Exception ex)
+        {
+            FileLog.Warn(
+                "service-setup",
+                $"unelevated SCM {verb} failed",
+                ex);
+            return false;
+        }
+    }
+
+    private static bool TryControlUnelevatedCore(ScmControlVerb verb)
+    {
+        const uint ScManagerConnect = 0x0001;
+        const uint ServiceQueryStatus = 0x0004;
+        const uint ServiceStart = 0x0010;
+        const uint ServiceStop = 0x0020;
+
+        var scm = OpenSCManager(null, null, ScManagerConnect);
+        if (scm == IntPtr.Zero)
         {
             FileLog.Event(
                 "service-setup",
-                "fmf-service.exe not found — cannot control service",
-                ("verb", verb));
+                "could not open SCM for unelevated service control",
+                ("verb", verb.ToString()),
+                ("win32", Marshal.GetLastWin32Error()));
             return false;
         }
 
         try
         {
-            using var p = Process.Start(new ProcessStartInfo
+            var verbAccess = verb switch
             {
-                FileName = exe,
-                Arguments = verb,
-                UseShellExecute = false, // no runas: relies on the narrow service-object grant
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            });
-            if (p is null)
-            {
-                return false;
-            }
-
-            if (!p.WaitForExit(15_000))
+                ScmControlVerb.Start => ServiceStart,
+                ScmControlVerb.Stop => ServiceStop,
+                ScmControlVerb.Restart => ServiceStart | ServiceStop,
+                _ => 0u,
+            };
+            var access = ServiceQueryStatus | verbAccess;
+            var service = OpenService(scm, EngineContract.ServiceName, access);
+            if (service == IntPtr.Zero)
             {
                 FileLog.Event(
                     "service-setup",
-                    "unelevated service control timed out",
-                    ("verb", verb));
-                TryTerminateTimedOutProcess(p, "unelevated");
+                    "could not open service for unelevated control",
+                    ("verb", verb.ToString()),
+                    ("win32", Marshal.GetLastWin32Error()));
                 return false;
             }
 
-            // start/stop are idempotent. Non-zero means the SCM refused (an old
-            // DACL, missing service, etc.); the caller falls back to setup.
-            FileLog.Event(
-                "service-setup",
-                "unelevated service control completed",
-                ("verb", verb),
-                ("exit_code", p.ExitCode));
-            return p.ExitCode == 0;
+            try
+            {
+                var success = DriveServiceControl(
+                    verb,
+                    () => QueryServiceStatus(service, out var status)
+                        ? status.CurrentState
+                        : null,
+                    () => StartServiceNative(service, 0, IntPtr.Zero)
+                        ? 0
+                        : Marshal.GetLastWin32Error(),
+                    () => ControlServiceNative(service, 1, out _)
+                        ? 0
+                        : Marshal.GetLastWin32Error(),
+                    ServiceControlPollAttempts,
+                    () => Thread.Sleep(ServiceControlPollInterval));
+                FileLog.Event(
+                    "service-setup",
+                    "unelevated SCM control completed",
+                    ("verb", verb.ToString()),
+                    ("success", success));
+                return success;
+            }
+            finally
+            {
+                CloseServiceHandle(service);
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            FileLog.Warn("service-setup", $"unelevated service {verb} failed", ex);
+            CloseServiceHandle(scm);
+        }
+    }
+
+    internal enum ScmControlVerb
+    {
+        Start,
+        Stop,
+        Restart,
+    }
+
+    /// <summary>Deterministic bounded SCM lifecycle state machine. Native
+    /// wrappers supply states and Win32 result codes; one shared poll budget
+    /// covers the whole restart, preventing stop+start from each consuming a
+    /// full timeout.</summary>
+    /// <param name="verb">Target lifecycle operation.</param>
+    /// <param name="queryState">Returns the latest SCM state, or null on query failure.</param>
+    /// <param name="start">Issues StartService and returns zero or a Win32 error.</param>
+    /// <param name="stop">Issues SERVICE_CONTROL_STOP and returns zero or a Win32 error.</param>
+    /// <param name="maxPollAttempts">Shared maximum status queries for the whole operation.</param>
+    /// <param name="wait">Bounded delay between status queries.</param>
+    /// <returns>True only when the requested terminal state is observed.</returns>
+    internal static bool DriveServiceControl(
+        ScmControlVerb verb,
+        Func<uint?> queryState,
+        Func<int> start,
+        Func<int> stop,
+        int maxPollAttempts,
+        Action wait)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxPollAttempts);
+        var remaining = maxPollAttempts;
+        return verb switch
+        {
+            ScmControlVerb.Start =>
+                DriveToRunning(queryState, start, wait, ref remaining),
+            ScmControlVerb.Stop =>
+                DriveToStopped(queryState, stop, wait, ref remaining),
+            ScmControlVerb.Restart =>
+                DriveToStopped(queryState, stop, wait, ref remaining)
+                && DriveToRunning(queryState, start, wait, ref remaining),
+            _ => false,
+        };
+    }
+
+    private static bool DriveToRunning(
+        Func<uint?> queryState,
+        Func<int> start,
+        Action wait,
+        ref int remaining)
+    {
+        var startIssued = false;
+        while (TryReadState(queryState, ref remaining, out var state))
+        {
+            switch (state)
+            {
+                case ServiceRunning:
+                    return true;
+                case ServiceStopped when startIssued:
+                    return false; // accepted start terminated before RUNNING
+                case ServiceStopped:
+                {
+                    var error = start();
+                    if (error is not 0 and not ErrorServiceAlreadyRunning)
+                    {
+                        return false;
+                    }
+
+                    startIssued = true;
+                    break;
+                }
+
+                case ServiceStartPending:
+                case ServiceStopPending:
+                    break;
+                default:
+                    return false; // paused/malformed state is not a usable pipe host
+            }
+
+            if (!WaitForNextPoll(wait, remaining))
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool DriveToStopped(
+        Func<uint?> queryState,
+        Func<int> stop,
+        Action wait,
+        ref int remaining)
+    {
+        var stopIssued = false;
+        while (TryReadState(queryState, ref remaining, out var state))
+        {
+            switch (state)
+            {
+                case ServiceStopped:
+                    return true;
+                case ServiceStopPending:
+                case ServiceStartPending:
+                    break;
+                case ServiceRunning:
+                case ServiceContinuePending:
+                case ServicePausePending:
+                case ServicePaused:
+                    if (!stopIssued)
+                    {
+                        var error = stop();
+                        if (error == ErrorServiceCannotAcceptControl)
+                        {
+                            break; // transition raced us; query and retry
+                        }
+
+                        if (error is not 0 and not ErrorServiceNotActive)
+                        {
+                            return false;
+                        }
+
+                        stopIssued = true;
+                    }
+
+                    break;
+                default:
+                    return false;
+            }
+
+            if (!WaitForNextPoll(wait, remaining))
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryReadState(
+        Func<uint?> queryState,
+        ref int remaining,
+        out uint state)
+    {
+        state = 0;
+        if (remaining <= 0)
+        {
             return false;
         }
+
+        remaining--;
+        var current = queryState();
+        if (current is null)
+        {
+            return false;
+        }
+
+        state = current.Value;
+        return true;
+    }
+
+    private static bool WaitForNextPoll(Action wait, int remaining)
+    {
+        if (remaining <= 0)
+        {
+            return false;
+        }
+
+        wait();
+        return true;
     }
 
     /// <summary>
@@ -468,8 +686,9 @@ internal static partial class ServiceSetup
     /// <summary>The current user's SID string, forwarded to
     /// `fmf-service install --owner-sid` so OTS elevation (a *different*
     /// admin account) does not lock this user out of the pipe (threat 1).
-    /// Null when unavailable — install then authorizes only the elevated
-    /// account.</summary>
+    /// Null when unavailable. Callers must fail closed rather than starting an
+    /// owner-less setup: under over-the-shoulder elevation the administrator is
+    /// a different identity and the daily user would be locked out.</summary>
     /// <returns>The current user's SID string, or null when it cannot be read.</returns>
     public static string? CurrentUserSid()
     {
@@ -483,6 +702,32 @@ internal static partial class ServiceSetup
             FileLog.Warn("service-setup", "current user SID query failed", ex);
             return null;
         }
+    }
+
+    /// <summary>Build the one supported setup command line for the current daily
+    /// user. There is deliberately no owner-less fallback: failing to bind the
+    /// unelevated identity before UAC would install a service that the caller
+    /// cannot connect to or control.</summary>
+    /// <param name="arguments">The injection-safe setup arguments on success.</param>
+    /// <returns>True only when the current user's SID can be captured and validated.</returns>
+    public static bool TryCreateSetupArguments(out string arguments) =>
+        TryCreateSetupArguments(CurrentUserSid(), out arguments);
+
+    /// <summary>Pure setup-argument builder used by the fail-closed boundary and
+    /// its tests.</summary>
+    /// <param name="sid">Candidate daily-user SID.</param>
+    /// <param name="arguments">The exact setup arguments, or empty on failure.</param>
+    /// <returns>True only for a command-line-safe canonical SID.</returns>
+    internal static bool TryCreateSetupArguments(string? sid, out string arguments)
+    {
+        if (!IsValidSid(sid))
+        {
+            arguments = string.Empty;
+            return false;
+        }
+
+        arguments = $"setup --owner-sid={sid}";
+        return true;
     }
 
     /// <summary>A canonical decimal SID string: revision 1, a 48-bit identifier
@@ -534,6 +779,20 @@ internal static partial class ServiceSetup
     [LibraryImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool QueryServiceStatus(IntPtr service, out ServiceStatus status);
+
+    [LibraryImport("advapi32.dll", EntryPoint = "StartServiceW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool StartServiceNative(
+        IntPtr service,
+        uint argumentCount,
+        IntPtr argumentVectors);
+
+    [LibraryImport("advapi32.dll", EntryPoint = "ControlService", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ControlServiceNative(
+        IntPtr service,
+        uint control,
+        out ServiceStatus status);
 
     [LibraryImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

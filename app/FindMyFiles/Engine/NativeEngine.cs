@@ -4,8 +4,10 @@ namespace FindMyFiles.Engine;
 
 /// <summary>
 /// Raw bindings and ABI-boundary validation for fmf_engine.dll. The DLL name
-/// is fixed (AGENTS.md); the struct layouts mirror docs/ARCHITECTURE.md
-/// exactly. Engine behavior remains outside this interop boundary.
+/// is fixed (AGENTS.md); every struct layout, status code and limit used here
+/// is radiated from the fmf-contract crate into
+/// <see cref="EngineContract"/> (ADR-0018), never hand-written. Engine
+/// behavior remains outside this interop boundary.
 /// </summary>
 internal static partial class NativeEngine
 {
@@ -56,8 +58,10 @@ internal static partial class NativeEngine
     [LibraryImport("fmf_engine")]
     internal static partial int fmf_engine_destroy(IntPtr handle);
 
-    // Save-now for Ready, dirty volumes. The UI never calls this on its own;
-    // it exists for in-proc parity with the service path (ARCHITECTURE.md).
+    // Save-now for Ready, dirty volumes. The UI never calls this on its own:
+    // the pipe deliberately exposes no flush opcode (a client-driven flush is a
+    // local DoS on the index read lock — ADR-0016), so saving stays a
+    // service-internal schedule. This export exists for in-proc parity only.
     [LibraryImport("fmf_engine")]
     internal static partial int fmf_flush(IntPtr handle);
 

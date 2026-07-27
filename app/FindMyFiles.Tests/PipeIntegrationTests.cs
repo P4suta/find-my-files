@@ -7,8 +7,10 @@ using static FindMyFiles.Tests.TestDoubles.Polling;
 namespace FindMyFiles.Tests;
 
 /// <summary>
-/// C# client × real fmf-service integration (docs/ARCHITECTURE.md pipe test
-/// gates). Gated on FMF_PIPE_TESTS=1 (`just test-pipe`, which builds the
+/// C# client × real fmf-service integration — the widest pipe gate that still
+/// runs unelevated (protocol round-trip and Rust loopback run unconditionally
+/// under `just test`; real volumes need FMF_ADMIN_TESTS=1).
+/// Gated on FMF_PIPE_TESTS=1 (`just test-pipe`, which builds the
 /// service first); without it the test reports and returns green so plain
 /// `just test-app` stays hermetic. The service runs unelevated on a unique
 /// pipe name with --no-index and a throwaway data dir — no real volumes, no

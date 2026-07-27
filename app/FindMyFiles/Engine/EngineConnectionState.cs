@@ -4,6 +4,9 @@ namespace FindMyFiles.Engine;
 /// always InProc; the pipe client reports its supervisor state.</summary>
 internal enum EngineConnectionState
 {
+    /// <summary>No engine is available. Setup or repair must create a new client.</summary>
+    Unavailable,
+
     /// <summary>In-process engine (FFI): no transport, so always connected.</summary>
     InProc,
 

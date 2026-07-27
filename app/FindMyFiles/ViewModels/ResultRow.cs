@@ -8,7 +8,7 @@ namespace FindMyFiles.ViewModels;
 /// <summary>
 /// One list row. Created as a placeholder by the virtualized list and filled
 /// in place when its page arrives — the same instance stays bound, so no
-/// container regeneration happens (docs/ARCHITECTURE.md).
+/// container regeneration happens (ADR-0015).
 /// </summary>
 public sealed partial class ResultRow : ObservableObject
 {
@@ -67,6 +67,12 @@ public sealed partial class ResultRow : ObservableObject
     /// after a position-preserving requery (best effort).</summary>
     public ulong EntryRef { get; private set; }
 
+    /// <summary>
+    /// Exact NTFS file reference (record plus sequence). Shell actions verify
+    /// the path against this identity before dispatch.
+    /// </summary>
+    public ulong Frn { get; private set; }
+
     /// <summary>Stable UI Automation identity for the virtual result position.
     /// The ListView container is recycled, so this travels with the row rather
     /// than being assigned to a physical container.</summary>
@@ -97,6 +103,7 @@ public sealed partial class ResultRow : ObservableObject
     internal void Fill(RowData data, IHighlighter? highlighter = null)
     {
         EntryRef = data.EntryRef;
+        Frn = data.Frn;
         FullPath = data.FullPath;
         IsPlaceholder = false;
         Name = data.Name;

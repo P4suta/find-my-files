@@ -25,8 +25,8 @@ internal sealed class PipeConnection : IDisposable
     // the EngineUnavailableException translation PipeConnectionTests pins).
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2213:Disposable fields should be disposed", Justification = "SemaphoreSlim allocates no handle unless AvailableWaitHandle is used (it is not); disposing it breaks write-after-dispose normalization")]
     private readonly SemaphoreSlim _writeLock = new(1, 1);
-    private readonly Action<ushort, byte[]> _onEvent;
-    private readonly Action<uint, ushort, int, byte[]> _onResponse;
+    private readonly Action<int, ushort, byte[]> _onEvent;
+    private readonly Action<int, uint, ushort, int, byte[]> _onResponse;
     private volatile bool _disposed;
 
     /// <summary>Generation id of this connection (monotonic, never reused).
@@ -43,8 +43,8 @@ internal sealed class PipeConnection : IDisposable
     internal PipeConnection(
         NamedPipeClientStream stream,
         int epoch,
-        Action<ushort, byte[]> onEvent,
-        Action<uint, ushort, int, byte[]> onResponse,
+        Action<int, ushort, byte[]> onEvent,
+        Action<int, uint, ushort, int, byte[]> onResponse,
         CancellationToken ct)
     {
         _stream = stream;
@@ -105,14 +105,14 @@ internal sealed class PipeConnection : IDisposable
                 {
                     case PipeProtocol.FlagEvent
                         when h.RequestId == 0 && h.StatusCode == PipeProtocol.Status.Ok:
-                        _onEvent(h.Opcode, payload);
+                        _onEvent(Epoch, h.Opcode, payload);
                         break;
                     case PipeProtocol.FlagEvent:
                         throw new InvalidDataException(
                             $"event frame has request/status fields "
                             + $"({h.RequestId}/{h.StatusCode})");
                     case PipeProtocol.FlagResponse when h.RequestId != 0:
-                        _onResponse(h.RequestId, h.Opcode, h.StatusCode, payload);
+                        _onResponse(Epoch, h.RequestId, h.Opcode, h.StatusCode, payload);
                         break;
                     case PipeProtocol.FlagResponse:
                         throw new InvalidDataException("response frame has request id 0");

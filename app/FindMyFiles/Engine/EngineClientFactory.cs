@@ -3,7 +3,14 @@ using FindMyFiles.Services;
 namespace FindMyFiles.Engine;
 
 /// <summary>Outcome of the auto-mode engine decision (no explicit
-/// <c>--engine</c> / settings) — which transport to construct.</summary>
+/// <c>--engine</c> / settings) — which transport to construct.
+/// <para>Deliberately has no in-proc member: auto mode never selects the in-proc
+/// engine, whatever the process token looks like. The in-proc engine creates
+/// <c>%ProgramData%\find-my-files</c> itself, without the hardened descriptor
+/// that only service install applies (docs/SECURITY.md threat 7), so an elevated
+/// launch without a service would silently publish the machine index — every file
+/// name on the box — under <c>C:\ProgramData</c>'s inherited permissive ACL.
+/// Only the explicit <c>--engine=inproc</c> developer path builds it.</para></summary>
 internal enum EngineChoice
 {
     /// <summary>The service pipe answered the probe.</summary>
@@ -14,9 +21,6 @@ internal enum EngineChoice
     /// <see cref="EngineClientFactory.Resolve"/>; never surfaced to the UI.</summary>
     StartThenPipe,
 
-    /// <summary>No live service and the process is elevated — in-proc FFI.</summary>
-    Ffi,
-
     /// <summary>Service is running but rejected our token (stale authorized-SID
     /// list) — expose the explicit unavailable state; setup owns recovery.</summary>
     UnavailableServiceRejected,
@@ -25,9 +29,11 @@ internal enum EngineChoice
     /// do not start it; the setup screen re-registers it.</summary>
     UnavailableServiceIncompatible,
 
-    /// <summary>No live service and not elevated — expose the explicit unavailable
-    /// state (no auto-runas); setup offers the one-click install.</summary>
-    UnavailableNotElevated,
+    /// <summary>No service to talk to — expose the explicit unavailable state
+    /// (no auto-runas, no in-proc fallback); the setup screen offers the one-click
+    /// install, which is exactly what an elevated first launch needs (ADR-0027:
+    /// elevate once to install, then run unelevated).</summary>
+    UnavailableNoService,
 }
 
 /// <summary>
@@ -35,6 +41,9 @@ internal enum EngineChoice
 /// (<c>--engine=pipe|inproc</c>) then auto.
 /// Auto checks the SCM first: a definitively absent/stopped service never pays
 /// a pipe timeout; a live or unreadable service gets one bounded Hello probe.
+/// Auto only ever resolves to the pipe or to the explicit unavailable state —
+/// the in-proc engine is reachable exclusively through <c>--engine=inproc</c>
+/// (see <see cref="EngineChoice"/>).
 /// Deterministic fake/unavailable engines and custom pipe names exist only when the
 /// app is compiled with <c>FMF_TEST_SEAMS</c>; stable artifacts contain no
 /// parser or string surface for those test-only switches.
@@ -44,10 +53,9 @@ internal static class EngineClientFactory
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromMilliseconds(250);
 
     /// <summary>Called once at startup; resolves and returns a single engine
-    /// implementation by the priority above. When in-proc is unavailable (no
-    /// service plus not elevated), returns an explicit
-    /// <see cref="UnavailableEngineClient"/> and steers the UI to the
-    /// setup screen (no auto-runas).</summary>
+    /// implementation by the priority above. When no service can serve us,
+    /// returns an explicit <see cref="UnavailableEngineClient"/> and steers the
+    /// UI to the setup screen (no auto-runas, no in-proc fallback).</summary>
     /// <param name="args">Process command-line args (production reads only
     /// <c>--engine=pipe|inproc</c>).</param>
     /// <returns>The single chosen <see cref="IEngineClient"/> implementation instance.</returns>
@@ -105,7 +113,7 @@ internal static class EngineClientFactory
 
         if (string.Equals(mode, "inproc", StringComparison.OrdinalIgnoreCase))
         {
-            FileLog.Info("app", "engine: in-proc FFI (explicit)");
+            WarnExplicitInProcIsUnhardened();
             return new FfiEngineClient();
         }
 
@@ -120,20 +128,17 @@ internal static class EngineClientFactory
         // so probe it directly. The default path queries SCM first and only pays
         // the 250ms Hello budget when a service may actually be alive.
         var probe = () => PipeEngineClient.Probe(pipeName, ProbeTimeout);
-        var elevated = ServiceSetup.IsProcessElevated;
 #if FMF_TEST_SEAMS
         var choice = pipeOverride is not null
-            ? DecideCustomPipe(probe, elevated)
+            ? DecideCustomPipe(probe)
             : DecideAuto(
                 ServiceSetup.QueryState,
                 probe,
-                elevated,
                 ServiceSetup.IsInstalledServiceCompatible);
 #else
         var choice = DecideAuto(
             ServiceSetup.QueryState,
             probe,
-            elevated,
             ServiceSetup.IsInstalledServiceCompatible);
 #endif
 
@@ -163,13 +168,6 @@ internal static class EngineClientFactory
             return new PipeEngineClient(pipeName);
         }
 
-        if (choice == EngineChoice.Ffi)
-        {
-            // Service absent or stopped → the writer lock is free for in-proc.
-            FileLog.Info("app", "engine: in-proc FFI (no live service, process is elevated)");
-            return new FfiEngineClient();
-        }
-
         if (choice == EngineChoice.UnavailableServiceRejected)
         {
             // Running, but our token isn't on its authorized-SID list (a stale
@@ -189,25 +187,78 @@ internal static class EngineClientFactory
             return new UnavailableEngineClient();
         }
 
-        // UnavailableNotElevated: no live service and not elevated. In-proc would
-        // fail at the MFT read; setup offers the one-click install.
-        FileLog.Warn("app", "engine: unavailable (no service answered, not elevated)");
+        // UnavailableNoService: nothing is registered to talk to. Elevation is
+        // deliberately not a fallback — an elevated launch lands on the same setup
+        // screen, whose one-click install is the *supported* use of that token
+        // (ADR-0027). `elevated` below is a support-diagnostic field only; it is
+        // not an input to any decision above.
+        FileLog.WarnEvent(
+            "app",
+            "engine: unavailable (no service registered) — setup required",
+            ex: null,
+            ("elevated", ServiceSetup.IsProcessElevated()));
         return new UnavailableEngineClient();
+    }
+
+    /// <summary>The explicit <c>--engine=inproc</c> developer path bypasses the
+    /// service, so nothing has applied the hardened descriptor that service
+    /// install puts on <c>%ProgramData%\find-my-files</c>: when this process is
+    /// the first to create the tree, it inherits <c>C:\ProgramData</c>'s
+    /// permissive ACL and the machine index — every file name on the box
+    /// (docs/SECURITY.md threat 7) — becomes readable, and its directory
+    /// pre-creatable, by every local standard user. Accepted for a path a
+    /// developer opts into by hand, but never silently: say so on the way in,
+    /// and say whether an install has ever hardened the root.</summary>
+    private static void WarnExplicitInProcIsUnhardened()
+    {
+        const string message =
+            "engine: in-proc FFI (explicit --engine=inproc) — the machine index is "
+            + "outside the service-hardened data root";
+        FileLog.WarnEvent(
+            "app",
+            message,
+            ex: null,
+            ("service_installed", ServiceSetup.QueryState() != EngineServiceState.NotInstalled));
+    }
+
+    /// <summary>Resolves the engine on a worker so synchronous SCM and pipe
+    /// probes can never delay first-window activation or block the UI STA.</summary>
+    /// <param name="args">Process engine-selection arguments.</param>
+    /// <param name="ct">Cancels work that has not started; callers discard and
+    /// dispose a result completed after cancellation.</param>
+    /// <returns>The asynchronously resolved engine session.</returns>
+    internal static Task<IEngineClient> ResolveAsync(
+        string[] args,
+        CancellationToken ct = default) =>
+        ResolveAsync(() => Resolve(args), ct);
+
+    /// <summary>Injected resolver seam for proving resolution never runs on the
+    /// calling/UI thread.</summary>
+    /// <param name="resolve">Synchronous engine resolution.</param>
+    /// <param name="ct">Cancels work that has not started.</param>
+    /// <returns>The asynchronously resolved engine session.</returns>
+    internal static Task<IEngineClient> ResolveAsync(
+        Func<IEngineClient> resolve,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(resolve);
+        return Task.Run(resolve, ct);
     }
 
     /// <summary>The default-service auto decision. Query SCM first so absent and
     /// stopped services avoid a doomed pipe timeout. A non-stopped or unreadable
-    /// service probes the pipe and fails closed when it cannot be reached.</summary>
+    /// service probes the pipe and fails closed when it cannot be reached.
+    /// <para>Elevation is deliberately not a parameter: no combination of SCM
+    /// state and token can make auto mode build the in-proc engine over an
+    /// unhardened <c>%ProgramData%</c> tree (see <see cref="EngineChoice"/>).</para></summary>
     /// <param name="serviceState">SCM state of the engine service.</param>
     /// <param name="probe">Pipe probe — did a Hello round-trip succeed?</param>
-    /// <param name="elevated">Whether this process is elevated.</param>
     /// <param name="serviceCompatible">Whether a stopped installation carries
     /// this build's exact SCM protocol marker.</param>
     /// <returns>The transport to construct.</returns>
     internal static EngineChoice DecideAuto(
         Func<EngineServiceState> serviceState,
         Func<bool> probe,
-        Func<bool> elevated,
         Func<bool> serviceCompatible)
     {
         return serviceState() switch
@@ -216,7 +267,7 @@ internal static class EngineClientFactory
                 probe() ? EngineChoice.Pipe : EngineChoice.UnavailableServiceRejected,
             EngineServiceState.Stopped when serviceCompatible() => EngineChoice.StartThenPipe,
             EngineServiceState.Stopped => EngineChoice.UnavailableServiceIncompatible,
-            EngineServiceState.NotInstalled => WithoutService(elevated),
+            EngineServiceState.NotInstalled => EngineChoice.UnavailableNoService,
             _ => EngineChoice.UnavailableServiceRejected,
         };
     }
@@ -226,21 +277,10 @@ internal static class EngineClientFactory
     /// consult. A failed bounded probe falls back to the ordinary no-service
     /// path.</summary>
     /// <param name="probe">Custom-pipe Hello probe.</param>
-    /// <param name="elevated">Whether this process is elevated.</param>
     /// <returns>The transport to construct.</returns>
-    internal static EngineChoice DecideCustomPipe(
-        Func<bool> probe,
-        Func<bool> elevated) =>
-        probe() ? EngineChoice.Pipe : WithoutService(elevated);
+    internal static EngineChoice DecideCustomPipe(Func<bool> probe) =>
+        probe() ? EngineChoice.Pipe : EngineChoice.UnavailableNoService;
 #endif
-
-    /// <summary>The transport when no service is available: in-proc FFI if
-    /// elevated, otherwise the explicit unavailable state that leads to one-time
-    /// service setup. Also used when an on-demand start cannot be performed.</summary>
-    /// <param name="elevated">Whether this process is elevated.</param>
-    /// <returns>The transport to construct when the service is absent/unstartable.</returns>
-    internal static EngineChoice WithoutService(Func<bool> elevated) =>
-        elevated() ? EngineChoice.Ffi : EngineChoice.UnavailableNotElevated;
 
 #if FMF_TEST_SEAMS
     internal static bool HasFlag(string[] args, string flag) =>

@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using FindMyFiles.Converters;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
 using Microsoft.UI.Xaml;
@@ -147,26 +148,41 @@ public sealed partial class PerfPanel : UserControl, IDisposable
         var statsJson = ViewModel?.Stats is { } s
             ? DiagnosticSanitizer.SerializeStats(s)
             : "(no stats yet)";
-        var dump =
-            $"find-my-files diagnostics {DateTimeOffset.Now:O}\n" +
-            $"app: v{BuildInfo.Version}  os: {Environment.OSVersion.VersionString}\n" +
-            $"engine log: %ProgramData%\\find-my-files\\logs\\engine.log\n" +
-            $"app log: %APPDATA%\\find-my-files\\logs\\app.log\n\n=== engine stats ===\n{statsJson}\n\n" +
-            $"=== app.log (redacted tail) ===\n{FileLog.SafeTail(50)}\n";
+        var dump = DiagFormat.DiagnosticCopy(
+            DateTimeOffset.Now,
+            BuildInfo.Version,
+            Environment.OSVersion.VersionString,
+            DiagFormat.EngineLogDirectoryDisplay(ViewModel?.Stats),
+            statsJson,
+            FileLog.SafeTail(50));
         ShellOps.CopyText(dump, "diagnostics");
         Notifier.Post(NotifySeverity.Info, Loc.Get("Diag_Copied"));
     }
 
-    /// <summary>Open the engine's log folder (%ProgramData%\find-my-files\logs)
-    /// in Explorer via <see cref="ShellOps"/> (unelevated). Quick path to the
-    /// engine.log the InfoBar points at.</summary>
+    /// <summary>Open the live engine's log folder in Explorer via
+    /// <see cref="ShellOps"/> (unelevated). Which folder that is depends on the
+    /// transport (<see cref="DiagFormat.EngineLogSubPath"/>): the service logs
+    /// under its data root, the in-proc engine under <c>index\logs</c>.
+    /// <para>Explorer runs unelevated by design, and an installed machine keeps
+    /// <c>index\</c> SYSTEM+Administrators only, so the in-proc folder can be
+    /// unreadable from here. Report that instead of handing Explorer a path it
+    /// will refuse — the notification still names the folder so it can be opened
+    /// from an elevated shell or pasted into a bug report.</para></summary>
     private void OpenEngineLog_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         var folder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "find-my-files",
-            "logs");
-        ShellOps.Open(folder);
+            DiagFormat.EngineLogSubPath(ViewModel?.Stats));
+
+        // Directory.Exists is false for both "not there yet" and "denied", which
+        // are exactly the two cases where launching Explorer helps nobody.
+        if (!Directory.Exists(folder))
+        {
+            Notifier.Post(NotifySeverity.Warning, Loc.Get("Shell_OpenFailed"), folder);
+            return;
+        }
+
+        ShellOps.OpenTrusted(folder);
     }
 
     /// <summary>Open the app's log folder (the directory holding app.log) in
@@ -176,7 +192,7 @@ public sealed partial class PerfPanel : UserControl, IDisposable
         var folder = Path.GetDirectoryName(FileLog.LogPath);
         if (!string.IsNullOrEmpty(folder))
         {
-            ShellOps.Open(folder);
+            ShellOps.OpenTrusted(folder);
         }
     }
 

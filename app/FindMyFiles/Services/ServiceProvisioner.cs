@@ -99,8 +99,14 @@ internal sealed class ServiceProvisioner
             return ServiceActionOutcome.Failed;
         }
 
-        var sid = ServiceSetup.CurrentUserSid();
-        var args = ServiceSetup.IsValidSid(sid) ? $"setup --owner-sid={sid}" : "setup";
+        if (!ServiceSetup.TryCreateSetupArguments(out var args))
+        {
+            FileLog.Warn(
+                "service-ui",
+                "current user SID unavailable or invalid — refusing owner-less elevated setup");
+            return ServiceActionOutcome.IdentityUnavailable;
+        }
+
         var result = await Task.Run(() => ServiceSetup.RunElevated(exe, args)).ConfigureAwait(false);
         FileLog.Event(
             "service-ui",

@@ -1,8 +1,10 @@
 using FindMyFiles.Controls;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
 using Windows.System;
@@ -27,6 +29,7 @@ public sealed partial class MainPage : Page
 
     private readonly ResultsViewportManager _viewport;
     private bool _disposed;
+    private bool _initialPrimaryFocusPending = true;
 
     /// <summary>Builds the ViewModel graph and wires view events (IME composition,
     /// drag &amp; drop, keyboard, sort headers) to the ViewModel and
@@ -46,6 +49,8 @@ public sealed partial class MainPage : Page
             OptionsButton, Loc.Get("OptionsButton_Name"));
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
             ResultsList, Loc.Get("ResultsList_Name"));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            SetupTitleText, Loc.GetXaml("SetupTitle", "Text"));
 
         _viewport = new ResultsViewportManager(ResultsList);
         ViewModel.Results.ResultsPublished += _viewport.OnResultsPublished;
@@ -69,16 +74,13 @@ public sealed partial class MainPage : Page
         {
             UpdateSearchState(useTransitions: false);
 
-            // Disconnected → the search box is collapsed; focus the setup CTA.
-            if (ViewModel.IsReady)
-            {
-                SearchBox.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
-            }
-            else
-            {
-                EnableSearchButton.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
-            }
-
+            // Loaded precedes WinUI's final custom-title-bar focus assignment on
+            // some launches. Defer one dispatcher turn so our primary control is
+            // the last intentional focus decision, not transient window chrome.
+            DispatcherQueue.TryEnqueue(
+                () => UpdateAvailabilityFocusAndAnnouncement(
+                    announceSetup: ViewModel.IsDisconnected,
+                    forcePrimaryFocus: true));
             ViewModel.StartAsync().Forget("startup");
         };
     }
@@ -104,6 +106,128 @@ public sealed partial class MainPage : Page
         {
             UpdateSearchState(useTransitions: true);
         }
+        else if (string.Equals(
+            e.PropertyName,
+            nameof(MainViewModel.IsDisconnected),
+            StringComparison.Ordinal))
+        {
+            // Defer until x:Bind has applied both sides' Visibility. Moving
+            // focus before the old subtree collapses can leave the UIA focus
+            // on an element that no longer exists visually.
+            DispatcherQueue.TryEnqueue(
+                () => UpdateAvailabilityFocusAndAnnouncement(announceSetup: true));
+        }
+        else if (string.Equals(
+            e.PropertyName,
+            nameof(MainViewModel.CanSearch),
+            StringComparison.Ordinal))
+        {
+            DispatcherQueue.TryEnqueue(
+                () => UpdateAvailabilityFocusAndAnnouncement(announceSetup: false));
+        }
+    }
+
+    private void UpdateAvailabilityFocusAndAnnouncement(
+        bool announceSetup,
+        bool forcePrimaryFocus = false)
+    {
+        if (_disposed || XamlRoot is null)
+        {
+            return;
+        }
+
+        var focused = FocusManager.GetFocusedElement(XamlRoot) as Microsoft.UI.Xaml.DependencyObject;
+        var mustMovePrimaryFocus =
+            forcePrimaryFocus || _initialPrimaryFocusPending;
+        var focusMoved = false;
+        var focusTarget = string.Empty;
+        if (ViewModel.IsDisconnected)
+        {
+            if (mustMovePrimaryFocus
+                || focused is null
+                || IsInside(focused, NotifyBar)
+                || IsInside(focused, SearchArea)
+                || IsInside(focused, ResultsArea))
+            {
+                focusTarget = "enable-search";
+                focusMoved =
+                    EnableSearchButton.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
+            }
+
+            if (announceSetup)
+            {
+                var peer = FrameworkElementAutomationPeer.FromElement(SetupTitleText)
+                    ?? FrameworkElementAutomationPeer.CreatePeerForElement(SetupTitleText);
+                peer.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+            }
+        }
+        else if (mustMovePrimaryFocus
+            || focused is null
+            || IsInside(focused, SetupArea)
+            || (ViewModel.CanSearch && ReferenceEquals(focused, OptionsButton)))
+        {
+            if (ViewModel.CanSearch)
+            {
+                focusTarget = "search";
+                focusMoved = SearchBox.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
+            }
+            else
+            {
+                focusTarget = "options";
+                focusMoved = OptionsButton.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
+            }
+        }
+        else if (!ViewModel.CanSearch && ReferenceEquals(focused, SearchBox))
+        {
+            focusTarget = "options";
+            focusMoved = OptionsButton.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
+        }
+
+        if (focusTarget.Length > 0)
+        {
+            FileLog.Event(
+                "focus",
+                "primary focus attempted",
+                ("target", focusTarget),
+                ("moved", focusMoved),
+                ("initial_pending", _initialPrimaryFocusPending),
+                ("previous_type", focused?.GetType().Name ?? "none"),
+                ("disconnected", ViewModel.IsDisconnected),
+                ("can_search", ViewModel.CanSearch));
+        }
+
+        // Resolving starts before either availability surface is focusable.
+        // Preserve the one-shot handoff across those expected failed attempts;
+        // after the first real primary control accepts focus, later state
+        // transitions resume the normal "preserve user focus" policy above.
+        if (focusMoved)
+        {
+            _initialPrimaryFocusPending = false;
+        }
+    }
+
+    /// <summary>Called by the window after activation when global focus is still
+    /// on window chrome. Content/dialog focus never enters this path.</summary>
+    internal void FocusPrimaryAction() =>
+        UpdateAvailabilityFocusAndAnnouncement(
+            announceSetup: false,
+            forcePrimaryFocus: true);
+
+    private static bool IsInside(
+        Microsoft.UI.Xaml.DependencyObject element,
+        Microsoft.UI.Xaml.DependencyObject root)
+    {
+        for (Microsoft.UI.Xaml.DependencyObject? current = element;
+             current is not null;
+             current = VisualTreeHelper.GetParent(current))
+        {
+            if (ReferenceEquals(current, root))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage(

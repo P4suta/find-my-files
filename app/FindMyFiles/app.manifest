@@ -25,6 +25,15 @@
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
       <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <!-- The engine indexes paths up to 32767 UTF-16 units, so the UI must be
+           able to act on them. This file REPLACES the .NET apphost manifest
+           (csproj <ApplicationManifest>), which carries longPathAware=true;
+           without re-declaring it here the raw CreateFileW that pins a result
+           before "open"/"reveal" fails with ERROR_PATH_NOT_FOUND past
+           MAX_PATH. Effective only when the machine policy
+           HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled
+           is 1 - both halves are required. -->
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
     </windowsSettings>
   </application>
 </assembly>

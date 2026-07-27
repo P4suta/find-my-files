@@ -1,3 +1,4 @@
+using System.Globalization;
 using FindMyFiles.Converters;
 using FindMyFiles.Engine;
 using Microsoft.UI.Xaml;
@@ -14,6 +15,82 @@ namespace FindMyFiles.Tests;
 /// </summary>
 public sealed class DiagFormatTests
 {
+    [Fact]
+    public void DiagnosticCopy_points_to_the_rolling_engine_log_directory()
+    {
+        var dump = DiagFormat.DiagnosticCopy(
+            DateTimeOffset.Parse(
+                "2026-07-26T12:34:56+09:00",
+                CultureInfo.InvariantCulture),
+            "1.2.3",
+            "Windows test",
+            DiagFormat.EngineLogDirectoryDisplay(PipeStats()),
+            """{"ready":true}""",
+            "safe-tail");
+
+        Assert.Contains(
+            @"engine logs: %ProgramData%\find-my-files\logs (rolling engine.<date>.log)",
+            dump,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            @"%ProgramData%\find-my-files\logs\engine.log",
+            dump,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            @"app log: %APPDATA%\find-my-files\logs\app.log",
+            dump,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DiagnosticCopy_reports_the_in_proc_engine_log_directory()
+    {
+        // The in-proc engine derives its log dir from the index dir
+        // (resolve_log_dir(None, index_dir)), so naming the service's directory
+        // here sends the reader to an empty folder.
+        var dump = DiagFormat.DiagnosticCopy(
+            DateTimeOffset.Parse(
+                "2026-07-26T12:34:56+09:00",
+                CultureInfo.InvariantCulture),
+            "1.2.3",
+            "Windows test",
+            DiagFormat.EngineLogDirectoryDisplay(new EngineStatsData()),
+            """{"ready":true}""",
+            "safe-tail");
+
+        Assert.Contains(
+            @"engine logs: %ProgramData%\find-my-files\index\logs (rolling engine.<date>.log)",
+            dump,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EngineLogSubPath_follows_the_live_transport()
+    {
+        // Only the pipe client fills Transport, so it is the discriminator.
+        Assert.Equal(
+            Path.Combine("find-my-files", "logs"),
+            DiagFormat.EngineLogSubPath(PipeStats()));
+        Assert.Equal(
+            Path.Combine("find-my-files", "index", "logs"),
+            DiagFormat.EngineLogSubPath(new EngineStatsData()));
+    }
+
+    [Fact]
+    public void EngineLogSubPath_names_the_service_before_the_first_poll() =>
+        Assert.Equal(
+            Path.Combine("find-my-files", "logs"),
+            DiagFormat.EngineLogSubPath(null));
+
+    [Fact]
+    public void EngineLogDirectoryDisplay_is_symbolic() =>
+        Assert.Equal(
+            @"%ProgramData%\find-my-files\logs",
+            DiagFormat.EngineLogDirectoryDisplay(PipeStats()));
+
+    private static EngineStatsData PipeStats() =>
+        new() { Transport = new TransportStatsData { State = "Connected" } };
+
     [Theory]
     [InlineData(0UL, "0")]
     [InlineData(1000UL, "1,000")]

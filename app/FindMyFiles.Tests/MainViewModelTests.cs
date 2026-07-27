@@ -137,6 +137,21 @@ public sealed class MainViewModelTests
     }
 
     [Fact]
+    public async Task RefreshVersions_logs_and_stays_empty_when_stats_fail()
+    {
+        using var vm = Vm(new StubEngineClient
+        {
+            ThrowOnStats = new EngineUnavailableException("offline"),
+        });
+
+        var error = await Record.ExceptionAsync(vm.RefreshVersionsAsync);
+
+        Assert.Null(error);
+        Assert.False(vm.HasEngineVersion);
+        Assert.False(vm.HasVersionMismatch);
+    }
+
+    [Fact]
     public void Dispose_is_idempotent_cancels_search_and_detaches_engine_events()
     {
         SyncContext.RunContinuationsInline();

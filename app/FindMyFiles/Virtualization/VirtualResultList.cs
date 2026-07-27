@@ -397,27 +397,29 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         }
         catch (Exception ex)
         {
-            // Anything else is a real bug: log it, tell the user once (not
-            // once per page — scrolling would cause a notification storm).
-            FileLog.ErrorEvent(
-                "virtualization",
-                "page fetch failed",
-                ex,
-                ("page", page));
-            if (!_fetchFailureNotified)
-            {
-                _fetchFailureNotified = true;
-                Notifier.Post(
-                    NotifySeverity.Error,
-                    Loc.Get("Virtualization_PageFetchFailed"),
-                    ex.Message);
-            }
-
             _dispatcher.TryEnqueue(() =>
             {
-                if (epoch == _epoch)
+                // Failure state is epoch-owned just like page data. An old
+                // fetch must not consume the current epoch's once-only notice
+                // latch (and thereby hide the current result's real failure).
+                if (epoch != _epoch || _disposed)
                 {
-                    _inFlight.Remove(page);
+                    return;
+                }
+
+                _inFlight.Remove(page);
+                FileLog.ErrorEvent(
+                    "virtualization",
+                    "page fetch failed",
+                    ex,
+                    ("page", page));
+                if (!_fetchFailureNotified)
+                {
+                    _fetchFailureNotified = true;
+                    Notifier.Post(
+                        NotifySeverity.Error,
+                        Loc.Get("Virtualization_PageFetchFailed"),
+                        ex.Message);
                 }
             });
         }

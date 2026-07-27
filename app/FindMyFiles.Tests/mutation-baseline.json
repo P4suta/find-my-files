@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "tool": {
+    "name": "dotnet-stryker",
+    "version": "4.16.0"
+  },
+  "examined_files": [
+    "app/FindMyFiles/Engine/EngineClientFactory.cs",
+    "app/FindMyFiles/Engine/EngineErrorSeverityWire.cs",
+    "app/FindMyFiles/Engine/PageCodec.cs",
+    "app/FindMyFiles/Engine/PipeProtocol.cs",
+    "app/FindMyFiles/Engine/Transport/PipeConnection.cs",
+    "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+    "app/FindMyFiles/Engine/Transport/ResultLeaseGate.cs",
+    "app/FindMyFiles/Engine/Wtf8.cs",
+    "app/FindMyFiles/Services/ServiceProvisioner.cs",
+    "app/FindMyFiles/Services/ServiceSetup.cs",
+    "app/FindMyFiles/Services/ShellOps.cs",
+    "app/FindMyFiles/ViewModels/MainViewModel.cs",
+    "app/FindMyFiles/ViewModels/SearchOrchestrator.cs"
+  ],
+  "accepted_equivalents": []
+}

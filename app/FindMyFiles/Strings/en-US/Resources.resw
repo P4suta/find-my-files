@@ -60,6 +60,7 @@
   </resheader>
 
   <!-- ===== XAML (x:Uid) ===== -->
+  <data name="Common_Retry" xml:space="preserve"><value>Retry</value></data>
   <data name="Search_Placeholder" xml:space="preserve"><value>Search by file name…</value></data>
   <data name="Search_PlaceholderRegexName" xml:space="preserve"><value>Regex over file name…</value></data>
   <data name="Search_PlaceholderRegexPath" xml:space="preserve"><value>Regex over full path…</value></data>
@@ -179,7 +180,7 @@
   <data name="Notify_ReconnectingBody" xml:space="preserve"><value>Results refresh automatically once the connection recovers</value></data>
   <data name="Notify_IndexStartFailedTitle" xml:space="preserve"><value>Couldn't start indexing</value></data>
   <data name="Notify_VolumeIndexFailedTitle" xml:space="preserve"><value>Failed to index {0}</value></data>
-  <data name="Notify_VolumeIndexFailedBody" xml:space="preserve"><value>See Settings → Diagnostics or engine.log for details</value></data>
+  <data name="Notify_VolumeIndexFailedBody" xml:space="preserve"><value>See Settings → Diagnostics or the engine logs folder for details</value></data>
   <data name="Notify_SearchFailedTitle" xml:space="preserve"><value>Search failed</value></data>
   <data name="Notify_SearchUnexpectedTitle" xml:space="preserve"><value>An unexpected error occurred during search</value></data>
   <data name="Notify_EnginePanicTitle" xml:space="preserve"><value>The engine panicked internally</value></data>
@@ -210,6 +211,7 @@
   <data name="Diag_Copied" xml:space="preserve"><value>Diagnostics copied to the clipboard</value></data>
   <data name="Svc_Cancelled" xml:space="preserve"><value>Cancelled at the UAC prompt</value></data>
   <data name="Svc_Failed" xml:space="preserve"><value>Failed (exit code {0}). Try again. If it keeps failing, open Settings and repair → Diagnostics.</value></data>
+  <data name="Svc_IdentityUnavailable" xml:space="preserve"><value>Windows could not identify your account, so setup was stopped before requesting administrator access. Sign out and back in, then try again.</value></data>
   <data name="Svc_RegisteredNotConfirmed" xml:space="preserve"><value>Registered, but the connection isn't confirmed yet. Press “Restart app” or try again shortly.</value></data>
   <data name="Svc_Incompatible" xml:space="preserve"><value>This installed service is from a different version. Re-register it to update the engine.</value></data>
   <data name="Svc_ControlFailed" xml:space="preserve"><value>The service action failed. Re-register the service to repair its permissions or version.</value></data>
@@ -219,16 +221,20 @@
   <data name="Shell_RevealFailed" xml:space="preserve"><value>Couldn't open the folder</value></data>
   <data name="Shell_RelaunchFailed" xml:space="preserve"><value>Couldn't restart</value></data>
   <data name="Shell_ClipboardFailed" xml:space="preserve"><value>Couldn't copy to the clipboard</value></data>
+  <data name="Shell_UnsafeIndexedName" xml:space="preserve"><value>This name has no unambiguous Windows path spelling</value></data>
+  <data name="Shell_ReparsePointBlocked" xml:space="preserve"><value>Shell actions are disabled for paths that redirect through a junction or symbolic link</value></data>
+  <data name="Shell_IdentityChanged" xml:space="preserve"><value>This path no longer points to the indexed file</value></data>
   <data name="Shell_HintMoved" xml:space="preserve"><value>The file may have been moved or deleted</value></data>
   <data name="Shell_HintAccessDenied" xml:space="preserve"><value>Access denied — check permissions</value></data>
   <data name="Shell_HintCancelled" xml:space="preserve"><value>The operation was cancelled in UAC</value></data>
   <data name="Shell_HintMovedRecently" xml:space="preserve"><value>The file may have just been moved or deleted</value></data>
+  <data name="Shell_HintPathTooLong" xml:space="preserve"><value>The path is too long — turn on long paths in Windows settings</value></data>
 
   <data name="App_LockedTitle" xml:space="preserve"><value>Can't use the in-proc engine while the service is running</value></data>
   <data name="App_LockedBody" xml:space="preserve"><value>You can connect to the service with a normal launch. To use in-proc, stop the service first (`just service-stop`).</value></data>
   <data name="App_EngineInitFailedTitle" xml:space="preserve"><value>Search engine unavailable</value></data>
   <data name="App_EngineInitFailedBody" xml:space="preserve"><value>{0}
-The fmf-service may not be running, or another engine may be holding the index (see engine.log).</value></data>
+The fmf-service may not be running, or another engine may be holding the index (see the engine logs folder).</value></data>
 
   <data name="Crash_UnexpectedTitle" xml:space="preserve"><value>An unexpected error occurred</value></data>
   <data name="Crash_BackgroundTitle" xml:space="preserve"><value>A background task failed</value></data>

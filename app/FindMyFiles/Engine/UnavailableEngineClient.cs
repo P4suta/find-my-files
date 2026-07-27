@@ -12,7 +12,7 @@ internal sealed class UnavailableEngineClient : IEngineClient
     public EngineClientKind Kind => EngineClientKind.Unavailable;
 
     /// <inheritdoc/>
-    public EngineConnectionState Connection => EngineConnectionState.InProc;
+    public EngineConnectionState Connection => EngineConnectionState.Unavailable;
 
     /// <inheritdoc/>
     public event Action<string>? IndexChanged
@@ -29,7 +29,7 @@ internal sealed class UnavailableEngineClient : IEngineClient
     }
 
     /// <inheritdoc/>
-    public event Action<int>? EngineErrorOccurred
+    public event Action<EngineErrorSeverity>? EngineErrorOccurred
     {
         add { }
         remove { }
@@ -46,7 +46,7 @@ internal sealed class UnavailableEngineClient : IEngineClient
     public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
-        return Task.FromResult<IReadOnlyList<string>>([]);
+        return Task.FromException<IReadOnlyList<string>>(Unavailable());
     }
 
     /// <inheritdoc/>
@@ -56,14 +56,14 @@ internal sealed class UnavailableEngineClient : IEngineClient
     {
         _ = EngineRequest.Volumes(volumes);
         ct.ThrowIfCancellationRequested();
-        return Task.CompletedTask;
+        return Task.FromException(Unavailable());
     }
 
     /// <inheritdoc/>
     public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
-        return Task.FromResult<IReadOnlyList<VolumeStatus>>([]);
+        return Task.FromException<IReadOnlyList<VolumeStatus>>(Unavailable());
     }
 
     /// <inheritdoc/>
@@ -73,8 +73,7 @@ internal sealed class UnavailableEngineClient : IEngineClient
         CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
-        return Task.FromException<SearchOutcome>(
-            new EngineUnavailableException("engine is unavailable"));
+        return Task.FromException<SearchOutcome>(Unavailable());
     }
 
     /// <inheritdoc/>
@@ -88,4 +87,7 @@ internal sealed class UnavailableEngineClient : IEngineClient
     public void Dispose()
     {
     }
+
+    private static EngineUnavailableException Unavailable() =>
+        new("engine is unavailable");
 }

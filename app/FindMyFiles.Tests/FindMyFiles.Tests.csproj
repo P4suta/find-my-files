@@ -10,6 +10,10 @@
     <BaseOutputPath>..\..\build\app\FindMyFiles.Tests\</BaseOutputPath>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Mirrors the app: the LibraryImport source generator emits unsafe stubs
+         (SYSLIB1062). NativeJunction needs its own P/Invoke to build a real
+         name-surrogate reparse point for the ShellOps verifier tests. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- Same maximal analyzer/style strictness as the app (convention
          hardening); test-specific noise is relaxed in .editorconfig. -->
     <EnableNETAnalyzers>true</EnableNETAnalyzers>

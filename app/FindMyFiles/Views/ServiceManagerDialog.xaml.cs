@@ -23,6 +23,11 @@ public sealed partial class ServiceManagerDialog : ContentDialog
     /// this instance's async action via <c>Forget</c>.</summary>
     internal ServiceManagerViewModel VM { get; }
 
+    /// <summary>Set when a soft restart closed this dialog, so the post-close
+    /// transport re-check below is skipped — that restart already re-resolved
+    /// the engine, and running a second one is pure churn.</summary>
+    private bool _dismissedForReload;
+
     /// <summary>Creates the ViewModel and runs the initial state `Refresh`. The only public
     /// entry point is <see cref="OpenAsync"/>; direct constructor calls are not expected.</summary>
     public ServiceManagerDialog()
@@ -56,13 +61,24 @@ public sealed partial class ServiceManagerDialog : ContentDialog
         try
         {
             var dialog = new ServiceManagerDialog { XamlRoot = root };
-            await dialog.ShowAsync();
+
+            // Its own actions (register, uninstall) trigger the in-process soft
+            // restart, which rebuilds the page under this dialog — and a
+            // ContentDialog lives in the XamlRoot's popup layer, not in the root
+            // Frame, so the re-navigation leaves it floating above the fresh page
+            // on the torn-down page's view models. Registered for exactly as long
+            // as it is on screen (ADR-0036).
+            using (AppReload.TrackModal(dialog.DismissForReload))
+            {
+                await dialog.ShowAsync();
+            }
 
             // If the service was uninstalled/stopped while this instance was
             // running on the pipe, its connection is dead and can't recover — soft
             // restart so the app re-resolves the engine in-process and lands on the
             // setup screen (the mirror of register's soft restart, ADR-0036).
-            if (!dialog.VM.FullUninstallCompleted
+            if (!dialog._dismissedForReload
+                && !dialog.VM.FullUninstallCompleted
                 && App.EngineClient.Kind == EngineClientKind.Service)
             {
                 var state = ServiceSetup.QueryState();
@@ -85,6 +101,14 @@ public sealed partial class ServiceManagerDialog : ContentDialog
         {
             _open = false;
         }
+    }
+
+    /// <summary>Close this dialog because the page graph is being rebuilt
+    /// (soft restart, ADR-0036) — usually by one of its own actions.</summary>
+    private void DismissForReload()
+    {
+        _dismissedForReload = true;
+        Hide();
     }
 
     private void Start_Click(object sender, RoutedEventArgs e) =>

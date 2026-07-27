@@ -18,7 +18,6 @@ internal sealed partial class TrayIcon : IDisposable
     private const uint CallbackMessage = 0x8000 + 1; // WM_APP + 1
 
     private const uint NimAdd = 0x0;
-    private const uint NimModify = 0x1;
     private const uint NimDelete = 0x2;
     private const uint NifMessage = 0x1;
     private const uint NifIcon = 0x2;
@@ -38,9 +37,13 @@ internal sealed partial class TrayIcon : IDisposable
     private readonly Action _onExit;
     private readonly uint _taskbarCreated;
     private readonly WindowSubclass _subclass;
+    private readonly RegistrationState _registration = new();
     private IntPtr _hIcon;
-    private bool _added;
     private bool _disposed;
+
+    /// <summary>Whether Explorer currently confirms that the notification
+    /// icon exists. Closing may hide the last window only while this is true.</summary>
+    internal bool IsAvailable => !_disposed && _registration.IsAvailable;
 
     /// <summary>Creates and shows the tray icon for <paramref name="hwnd"/>.</summary>
     /// <param name="hwnd">The main window handle the icon is bound to.</param>
@@ -69,7 +72,7 @@ internal sealed partial class TrayIcon : IDisposable
 
         _disposed = true;
 
-        if (_added)
+        if (_registration.IsAvailable)
         {
             var data = new NotifyIconData
             {
@@ -78,9 +81,9 @@ internal sealed partial class TrayIcon : IDisposable
                 Uid = TrayUid,
             };
             _ = Shell_NotifyIcon(NimDelete, ref data);
-            _added = false;
         }
 
+        _registration.MarkUnavailable();
         _subclass.Dispose();
 
         if (_hIcon != IntPtr.Zero)
@@ -96,7 +99,7 @@ internal sealed partial class TrayIcon : IDisposable
         {
             // Explorer restarted — the icon was lost; re-add it. Not exclusively
             // ours, so don't consume the broadcast.
-            _added = false;
+            _registration.MarkUnavailable();
             Add();
             return false;
         }
@@ -137,6 +140,12 @@ internal sealed partial class TrayIcon : IDisposable
 
     private unsafe void Add()
     {
+        if (_hIcon == IntPtr.Zero)
+        {
+            _registration.RecordAttempt(succeeded: false);
+            return;
+        }
+
         var data = new NotifyIconData
         {
             CbSize = (uint)sizeof(NotifyIconData),
@@ -153,14 +162,32 @@ internal sealed partial class TrayIcon : IDisposable
             data.SzTip[i] = _tooltip[i];
         }
 
-        if (Shell_NotifyIcon(_added ? NimModify : NimAdd, ref data))
+        if (Shell_NotifyIcon(NimAdd, ref data))
         {
-            _added = true;
+            _registration.RecordAttempt(succeeded: true);
         }
         else
         {
+            // Fail closed: without a confirmed icon the last window must not
+            // disappear into an unreachable "tray" state.
+            _registration.RecordAttempt(succeeded: false);
             FileLog.Warn("tray", "Shell_NotifyIcon add/modify failed");
         }
+    }
+
+    /// <summary>State machine for Explorer-owned icon registration. Kept
+    /// separate from P/Invoke so failure/restart/recovery transitions are
+    /// deterministic unit-testable policy, not an assumed shell side effect.</summary>
+    internal sealed class RegistrationState
+    {
+        private int _available;
+
+        internal bool IsAvailable => Volatile.Read(ref _available) != 0;
+
+        internal void RecordAttempt(bool succeeded) =>
+            Volatile.Write(ref _available, succeeded ? 1 : 0);
+
+        internal void MarkUnavailable() => Volatile.Write(ref _available, 0);
     }
 
     private static IntPtr LoadTrayIcon()

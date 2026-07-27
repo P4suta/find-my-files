@@ -16,6 +16,7 @@ internal sealed class FakeEngineClient : IEngineClient
 {
     private const int EntryCount = 100_000;
     private readonly List<RowData> _rows;
+    private readonly HashSet<ulong> _hiddenSystemEntries = [];
     private readonly HashSet<string> _invalidQueries = LoadInvalidQueries();
     private int _epoch;
 
@@ -55,7 +56,7 @@ internal sealed class FakeEngineClient : IEngineClient
     /// <inheritdoc/>
     /// <remarks>Only the DEBUG <c>!!warn</c> fault injection raises this; in
     /// Release builds it never fires.</remarks>
-    public event Action<int>? EngineErrorOccurred;
+    public event Action<EngineErrorSeverity>? EngineErrorOccurred;
 #pragma warning restore CS0067
 
     private readonly List<ErrorEventData> _injectedErrors = [];
@@ -83,12 +84,18 @@ internal sealed class FakeEngineClient : IEngineClient
                 : isDir
                     ? $"folder_{i:D6}"
                     : $"file_{i:D6}_{(char)('a' + rng.Next(26))}.{exts[rng.Next(exts.Length)]}";
+            var entryRef = (ulong)i;
+            if (isHiddenSystem)
+            {
+                _hiddenSystemEntries.Add(entryRef);
+            }
+
             _rows.Add(new RowData(
-                EntryRef: (ulong)i,
+                EntryRef: entryRef,
                 Frn: (uint)i | (1UL << 48),
                 Size: isDir ? 0UL : (ulong)rng.Next(0, 1 << 24),
                 Mtime: baseTime + ((long)i * 10_000_000),
-                Flags: (isDir ? 1u : 0u) | (isHiddenSystem ? 4u : 0u),
+                Flags: isDir ? EngineContract.RowFlags.Directory : 0,
                 Name: name,
                 ParentPath: dirs[rng.Next(dirs.Length)]));
         }
@@ -260,7 +267,7 @@ internal sealed class FakeEngineClient : IEngineClient
                 Volume = "F:",
                 Message = "fault injection: simulated warning",
             });
-            EngineErrorOccurred?.Invoke(1);
+            EngineErrorOccurred?.Invoke(EngineErrorSeverity.Warn);
         }
 #endif
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -333,7 +340,7 @@ internal sealed class FakeEngineClient : IEngineClient
 
         if (!options.IncludeHiddenSystem)
         {
-            hits = hits.Where(r => (r.Flags & 4) == 0);
+            hits = hits.Where(r => !_hiddenSystemEntries.Contains(r.EntryRef));
         }
 
         var sorted = options.Sort switch

@@ -107,10 +107,21 @@ public sealed partial class SettingsDialog : ContentDialog
         {
             var dialog = new SettingsDialog(vm) { XamlRoot = root };
 
+            // An in-process soft restart (ADR-0036) rebuilds the page under this
+            // dialog. A ContentDialog is hosted in the XamlRoot's popup layer, not
+            // in the root Frame, so re-navigating the Frame does not touch it: it
+            // would float above the fresh page still driving the torn-down page's
+            // view model (disposed engine, dead Perf). Registered for exactly as
+            // long as it is on screen, so the restart takes it down with the page
+            // it belongs to.
+
             // Populate the About block's engine version as the dialog appears
             // (best-effort; the bound rows fill in when it resolves).
             vm.RefreshVersionsAsync().Forget("settings-version");
-            await dialog.ShowAsync();
+            using (AppReload.TrackModal(dialog.DismissForReload))
+            {
+                await dialog.ShowAsync();
+            }
 
             // Closed now — safe to open the next surface (another ContentDialog
             // would throw while this one is still up).
@@ -125,6 +136,17 @@ public sealed partial class SettingsDialog : ContentDialog
         {
             _open = false;
         }
+    }
+
+    /// <summary>Close this dialog because the page graph is being rebuilt
+    /// (soft restart, ADR-0036). Any queued follow-up surface is dropped first:
+    /// it would open against the very view models the restart is disposing —
+    /// e.g. the diagnostics window on a dead <c>PerfPanelViewModel</c>, whose
+    /// 1 Hz poll would then fail forever.</summary>
+    private void DismissForReload()
+    {
+        _pendingAction = null;
+        Hide();
     }
 
     private void RegexScopeName_Click(object sender, RoutedEventArgs e) =>

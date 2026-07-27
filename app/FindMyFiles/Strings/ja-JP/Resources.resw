@@ -60,6 +60,7 @@
   </resheader>
 
   <!-- ===== XAML (x:Uid) ===== -->
+  <data name="Common_Retry" xml:space="preserve"><value>再試行</value></data>
   <data name="Search_Placeholder" xml:space="preserve"><value>ファイル名で検索…</value></data>
   <data name="Search_PlaceholderRegexName" xml:space="preserve"><value>ファイル名を正規表現で検索…</value></data>
   <data name="Search_PlaceholderRegexPath" xml:space="preserve"><value>フルパスを正規表現で検索…</value></data>
@@ -179,7 +180,7 @@
   <data name="Notify_ReconnectingBody" xml:space="preserve"><value>接続が回復すると結果は自動的に更新されます</value></data>
   <data name="Notify_IndexStartFailedTitle" xml:space="preserve"><value>インデックスを開始できませんでした</value></data>
   <data name="Notify_VolumeIndexFailedTitle" xml:space="preserve"><value>{0} のインデックスに失敗しました</value></data>
-  <data name="Notify_VolumeIndexFailedBody" xml:space="preserve"><value>詳細は 設定→診断 パネルまたは engine.log を参照</value></data>
+  <data name="Notify_VolumeIndexFailedBody" xml:space="preserve"><value>詳細は 設定→診断 パネルまたはエンジンログフォルダーを参照</value></data>
   <data name="Notify_SearchFailedTitle" xml:space="preserve"><value>検索に失敗しました</value></data>
   <data name="Notify_SearchUnexpectedTitle" xml:space="preserve"><value>検索中に予期しないエラーが発生しました</value></data>
   <data name="Notify_EnginePanicTitle" xml:space="preserve"><value>エンジン内部でパニックが発生しました</value></data>
@@ -210,6 +211,7 @@
   <data name="Diag_Copied" xml:space="preserve"><value>診断情報をクリップボードにコピーしました</value></data>
   <data name="Svc_Cancelled" xml:space="preserve"><value>UAC で取り消されました</value></data>
   <data name="Svc_Failed" xml:space="preserve"><value>失敗しました(終了コード {0})。もう一度お試しください。繰り返す場合は「設定と修復」→「診断」を開いてください。</value></data>
+  <data name="Svc_IdentityUnavailable" xml:space="preserve"><value>Windows でユーザーを特定できなかったため、管理者権限を要求する前にセットアップを中止しました。サインアウトしてから再度サインインし、もう一度お試しください。</value></data>
   <data name="Svc_RegisteredNotConfirmed" xml:space="preserve"><value>登録しましたが、まだ接続を確認できません。「アプリを再起動」を押すか、しばらくして再度お試しください。</value></data>
   <data name="Svc_Incompatible" xml:space="preserve"><value>インストール済みサービスの版が異なります。再登録してエンジンを更新してください。</value></data>
   <data name="Svc_ControlFailed" xml:space="preserve"><value>サービス操作に失敗しました。再登録して権限または版を修復してください。</value></data>
@@ -219,16 +221,20 @@
   <data name="Shell_RevealFailed" xml:space="preserve"><value>フォルダーを開けませんでした</value></data>
   <data name="Shell_RelaunchFailed" xml:space="preserve"><value>再起動できませんでした</value></data>
   <data name="Shell_ClipboardFailed" xml:space="preserve"><value>クリップボードへのコピーに失敗しました</value></data>
+  <data name="Shell_UnsafeIndexedName" xml:space="preserve"><value>この名前は Windows のパスとして一意に解釈できません</value></data>
+  <data name="Shell_ReparsePointBlocked" xml:space="preserve"><value>ジャンクションやシンボリックリンクで別の場所を指すパスではシェル操作を無効にしています</value></data>
+  <data name="Shell_IdentityChanged" xml:space="preserve"><value>このパスは索引済みのファイルを指していません</value></data>
   <data name="Shell_HintMoved" xml:space="preserve"><value>ファイルが移動・削除された可能性があります</value></data>
   <data name="Shell_HintAccessDenied" xml:space="preserve"><value>アクセスが拒否されました — 権限を確認してください</value></data>
   <data name="Shell_HintCancelled" xml:space="preserve"><value>UAC で操作が取り消されました</value></data>
   <data name="Shell_HintMovedRecently" xml:space="preserve"><value>ファイルが移動・削除された直後の可能性があります</value></data>
+  <data name="Shell_HintPathTooLong" xml:space="preserve"><value>パスが長すぎます — Windows の設定で長いパスを有効にしてください</value></data>
 
   <data name="App_LockedTitle" xml:space="preserve"><value>検索サービスが稼働中のため in-proc エンジンを使えません</value></data>
   <data name="App_LockedBody" xml:space="preserve"><value>通常起動でサービスに接続できます。in-proc を使う場合は先にサービスを停止してください(`just service-stop`)。</value></data>
   <data name="App_EngineInitFailedTitle" xml:space="preserve"><value>検索エンジンを利用できません</value></data>
   <data name="App_EngineInitFailedBody" xml:space="preserve"><value>{0}
-fmf-service が未起動か、インデックスを他のエンジンがロックしている可能性があります(詳細は engine.log)。</value></data>
+fmf-service が未起動か、インデックスを他のエンジンがロックしている可能性があります(詳細はエンジンログフォルダー)。</value></data>
 
   <data name="Crash_UnexpectedTitle" xml:space="preserve"><value>予期しないエラーが発生しました</value></data>
   <data name="Crash_BackgroundTitle" xml:space="preserve"><value>バックグラウンド処理でエラーが発生しました</value></data>

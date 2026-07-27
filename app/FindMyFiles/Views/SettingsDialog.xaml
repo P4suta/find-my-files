@@ -151,7 +151,7 @@
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                     Style="{ThemeResource CaptionTextBlockStyle}"
                     Text="{x:Bind VM.ModeText, Mode=OneTime}"
-                    Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsReady), Mode=OneTime}" />
+                    Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsReady), Mode=OneWay}" />
                 <TextBlock
                     AutomationProperties.AutomationId="StatusState"
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"

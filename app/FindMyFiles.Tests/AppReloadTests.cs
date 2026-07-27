@@ -29,7 +29,7 @@ public sealed class AppReloadTests
 
         public event Action<VolumeStatus>? VolumeUpdated;
 
-        public event Action<int>? EngineErrorOccurred;
+        public event Action<EngineErrorSeverity>? EngineErrorOccurred;
 
         public event Action<EngineConnectionState>? ConnectionChanged;
 #pragma warning restore CS0067
@@ -79,7 +79,11 @@ public sealed class AppReloadTests
                 log.Add("set");
                 current = e;
             },
-            renavigate: () => log.Add("renavigate"),
+            renavigate: () =>
+            {
+                log.Add("renavigate");
+                return true;
+            },
             closeDiagnostics: () => log.Add("closeDiag"));
 
         reload.Run(["--engine=pipe"]);
@@ -91,6 +95,92 @@ public sealed class AppReloadTests
         Assert.Same(fresh, current);
         Assert.Equal(1, old.Disposes);
         Assert.Equal(0, fresh.Disposes); // the live engine is never disposed
+    }
+
+    [Fact]
+    public void Run_dismisses_open_modals_before_the_page_is_rebuilt()
+    {
+        // A ContentDialog is hosted in the XamlRoot's popup layer, not in the root
+        // Frame, so re-navigating the Frame leaves it on screen bound to the page
+        // this restart is tearing down (disposed engine, disposed Perf view model).
+        // It has to go down with its page, and before the rebuild.
+        var log = new List<string>();
+        var old = new RecordingEngine(log, "old");
+        var fresh = new RecordingEngine(log, "fresh");
+        IEngineClient current = old;
+        var reload = new AppReload(
+            resolve: _ => fresh,
+            getEngine: () => current,
+            setEngine: e => current = e,
+            renavigate: () =>
+            {
+                log.Add("renavigate");
+                return true;
+            },
+            closeDiagnostics: () => log.Add("closeDiag"));
+
+        using (AppReload.TrackModal(() => log.Add("dismiss:settings")))
+        using (AppReload.TrackModal(() => log.Add("dismiss:service")))
+        {
+            reload.Run(["--engine=pipe"]);
+        }
+
+        Assert.Equal(
+            ["dismiss:settings", "dismiss:service", "closeDiag", "renavigate", "dispose:old"],
+            log);
+    }
+
+    [Fact]
+    public void Run_leaves_closed_modals_alone()
+    {
+        // The registration token is released when the dialog's ShowAsync returns,
+        // however it closed. A stale entry would call Hide on a dead dialog on
+        // every future soft restart.
+        var log = new List<string>();
+        var old = new RecordingEngine(log, "old");
+        IEngineClient current = old;
+        var reload = new AppReload(
+            resolve: _ => current,
+            getEngine: () => current,
+            setEngine: e => current = e,
+            renavigate: () => true,
+            closeDiagnostics: () => { });
+
+        var registration = AppReload.TrackModal(() => log.Add("dismiss"));
+        registration.Dispose();
+        registration.Dispose(); // idempotent: must not unregister someone else
+        reload.Run(["--engine=pipe"]);
+
+        Assert.Empty(log); // nothing dismissed, and the same engine is kept
+    }
+
+    [Fact]
+    public void Run_completes_even_when_a_modal_refuses_to_close()
+    {
+        // Teardown of a UI surface is best-effort; the engine swap is not. A dialog
+        // that throws on Hide must not strand the app on a half-resolved engine.
+        var log = new List<string>();
+        var old = new RecordingEngine(log, "old");
+        var fresh = new RecordingEngine(log, "fresh");
+        IEngineClient current = old;
+        var reload = new AppReload(
+            resolve: _ => fresh,
+            getEngine: () => current,
+            setEngine: e => current = e,
+            renavigate: () =>
+            {
+                log.Add("renavigate");
+                return true;
+            },
+            closeDiagnostics: () => log.Add("closeDiag"));
+
+        using (AppReload.TrackModal(() => throw new InvalidOperationException("stuck")))
+        {
+            reload.Run(["--engine=pipe"]);
+        }
+
+        Assert.Equal(["closeDiag", "renavigate", "dispose:old"], log);
+        Assert.Same(fresh, current);
     }
 
     [Fact]
@@ -113,6 +203,7 @@ public sealed class AppReloadTests
                 // teardown.
                 log.Add("renavigate");
                 reload.Run(["--engine=pipe"]);
+                return true;
             },
             closeDiagnostics: () => log.Add("closeDiag"));
 
@@ -158,6 +249,40 @@ public sealed class AppReloadTests
         Assert.Equal(1, fresh.Disposes);
         Assert.Equal(
             ["closeDiag", "resolve", "set", "renavigate", "rollback", "dispose:fresh"],
+            log);
+    }
+
+    [Fact]
+    public void Run_navigationRejected_RollsBackEngineAndDisposesReplacement()
+    {
+        var log = new List<string>();
+        var old = new RecordingEngine(log, "old");
+        var fresh = new RecordingEngine(log, "fresh");
+        IEngineClient current = old;
+        var reload = new AppReload(
+            resolve: _ => fresh,
+            getEngine: () => current,
+            setEngine: engine =>
+            {
+                current = engine;
+                log.Add(engine == old ? "rollback" : "set");
+            },
+            renavigate: () =>
+            {
+                log.Add("renavigate:false");
+                return false;
+            },
+            closeDiagnostics: () => log.Add("closeDiag"));
+
+        var error = Assert.Throws<InvalidOperationException>(
+            () => reload.Run(["--engine=pipe"]));
+
+        Assert.Contains("rejected", error.Message, StringComparison.Ordinal);
+        Assert.Same(old, current);
+        Assert.Equal(0, old.Disposes);
+        Assert.Equal(1, fresh.Disposes);
+        Assert.Equal(
+            ["closeDiag", "set", "renavigate:false", "rollback", "dispose:fresh"],
             log);
     }
 }

@@ -106,6 +106,19 @@ public sealed class PageCodecTests
     }
 
     [Fact]
+    public void UnknownRowFlag_IsRejected()
+    {
+        var rowBytes = new byte[PageCodec.RowSize];
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            rowBytes.AsSpan(EngineContract.RowOffsets.Flags),
+            EngineContract.RowFlags.KnownMask << 1);
+
+        var ex = Assert.Throws<InvalidDataException>(() => PageCodec.Decode(rowBytes, []));
+
+        Assert.Contains("unknown flags", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void MultipleRows_EachReadsItsOwnSliceAndBlobWindow()
     {
         // Two distinct rows back-to-back: the per-row offset (i * RowSize) and

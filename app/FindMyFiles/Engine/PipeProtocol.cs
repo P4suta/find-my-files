@@ -8,8 +8,9 @@ namespace FindMyFiles.Engine;
 /// <summary>
 /// Wire codec for the fmf-service named pipe: 16-byte LE frame header +
 /// length-prefixed payload, binary hot path, JSON cold path. Pure functions
-/// and constants only — docs/ARCHITECTURE.md "Pipe protocol" is canonical,
-/// and the Rust twin (fmf-proto) pins identical golden bytes.
+/// and constants only — the canonical wire definition is the fmf-contract
+/// crate radiated into <see cref="EngineContract"/> (ADR-0018), and the Rust
+/// twin (fmf-proto) pins byte-identical golden frames from contract/golden/.
 /// </summary>
 internal static class PipeProtocol
 {

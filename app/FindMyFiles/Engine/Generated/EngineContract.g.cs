@@ -83,6 +83,13 @@ internal static class EngineContract
     }
 
     public const int RowSize = 56;
+    /// <summary>Canonical FmfRow.Flags values; unknown bits are reserved zero.</summary>
+    public static class RowFlags
+    {
+        public const uint Directory = 1;
+        public const uint KnownMask = 1;
+    }
+
     public static class RowOffsets
     {
         public const int EntryRef = 0;
@@ -104,9 +111,40 @@ internal static class EngineContract
     public const int BlobSize = 24;
 }
 
+/// <summary>Result sort key carried in FmfQueryOptions.SortKey.</summary>
+internal enum FmfSort : uint
+{
+    Name = 0,
+    Size = 1,
+    Mtime = 2,
+}
+
+/// <summary>Case-matching mode carried in FmfQueryOptions.CaseMode.</summary>
+internal enum FmfCase : uint
+{
+    Smart = 0,
+    Insensitive = 1,
+    Sensitive = 2,
+}
+
+/// <summary>Whole-query regex haystack carried in regex_mode bit 1.</summary>
+internal enum RegexScope : uint
+{
+    Name = 0,
+    Path = 1,
+}
+
+/// <summary>Lifecycle state carried in FmfVolumeStatus.State.</summary>
+internal enum VolumeState : uint
+{
+    Scanning = 0,
+    Ready = 1,
+    Rescanning = 2,
+    Failed = 3,
+}
+
 /// <summary>Event kinds — FFI FmfEvent.Kind and pipe event-push opcodes
-/// carry the same values. EngineError rides severity in Entries
-/// (1=warn 2=error 3=panic).</summary>
+/// carry the same values.</summary>
 internal enum EventKind : uint
 {
     Progress = 1,
@@ -115,6 +153,14 @@ internal enum EventKind : uint
     RescanStarted = 4,
     VolumeFailed = 5,
     EngineError = 6,
+}
+
+/// <summary>Severity carried in FmfEvent.Entries for EngineError.</summary>
+internal enum EngineErrorSeverity : ulong
+{
+    Warn = 1,
+    Error = 2,
+    Panic = 3,
 }
 
 /// <summary>Degradation counters of the stats JSON (snake_case keys —
@@ -139,6 +185,7 @@ public sealed class CountersData
     public ulong PipeResultsEvicted { get; set; }
     public ulong TraceSerializeFailures { get; set; }
     public ulong HardLinkRefreshFailures { get; set; }
+    public ulong UsnIndexRejections { get; set; }
 }
 
 // ── Native PODs (LayoutKind.Explicit: offsets are the Rust offset_of!

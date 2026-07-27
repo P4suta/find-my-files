@@ -47,12 +47,13 @@
         <!--  通知バナー(Row 0)。検索バーと横位置(MaxWidth/Margin)を揃える。
               専用行なので結果リストとは重ならず、EmptyState でも表示される。  -->
         <ItemsControl
+            x:Name="NotifyBar"
             Grid.Row="0"
             MaxWidth="{StaticResource ContentMaxWidth}"
             Margin="{StaticResource ContentGutterMargin}"
             AutomationProperties.AutomationId="NotifyBar"
             ItemsSource="{x:Bind ViewModel.Notifications.Items, Mode=OneTime}"
-            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady), Mode=OneTime}">
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady), Mode=OneWay}">
             <ItemsControl.ItemTemplate>
                 <DataTemplate x:DataType="svc:AppNotification">
                     <InfoBar
@@ -77,12 +78,13 @@
         <!--  検索バー(Row 0)。Empty では行が * で縦中央、Results では Auto で上。
               位置変化は RepositionThemeTransition で滑らかに。  -->
         <Grid
+            x:Name="SearchArea"
             Grid.Row="1"
             MaxWidth="{StaticResource ContentMaxWidth}"
             Margin="{StaticResource ContentGutterMargin}"
             VerticalAlignment="Center"
             ColumnSpacing="{StaticResource SpacingSmall}"
-            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady), Mode=OneTime}">
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady), Mode=OneWay}">
             <Grid.Transitions>
                 <TransitionCollection>
                     <RepositionThemeTransition />
@@ -92,14 +94,15 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <!--  Search box: a plain TextBox on purpose (AutoSuggestBox's accept semantics fight live filtering — docs/ARCHITECTURE.md).  -->
+            <!--  Search box: a plain TextBox on purpose. AutoSuggestBox's accept/commit semantics fight live filtering — every keystroke is already a query here, so there is nothing to accept.  -->
             <TextBox
                 x:Name="SearchBox"
                 Grid.Column="0"
                 AutomationProperties.AutomationId="SearchBox"
-                AutomationProperties.Name="{x:Bind ViewModel.SearchPlaceholder, Mode=OneWay}"
+                AutomationProperties.Name="{x:Bind ViewModel.SearchInputPlaceholder, Mode=OneWay}"
+                IsEnabled="{x:Bind ViewModel.CanSearch, Mode=OneWay}"
                 KeyDown="SearchBox_KeyDown"
-                PlaceholderText="{x:Bind ViewModel.SearchPlaceholder, Mode=OneWay}"
+                PlaceholderText="{x:Bind ViewModel.SearchInputPlaceholder, Mode=OneWay}"
                 Style="{StaticResource LauncherSearchBoxStyle}"
                 Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}">
                 <!--  Google 風に常時1pxの丸枠だけにする。TextBox 既定は (1) Focused で青い2px
@@ -136,7 +139,7 @@
             Grid.Row="2"
             MaxWidth="{StaticResource ContentMaxWidth}"
             Margin="{StaticResource ResultsAreaMargin}"
-            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady), Mode=OneTime}">
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady), Mode=OneWay}">
 
             <!--  Results. ItemsPanel stays ItemsStackPanel (AGENTS.md UI固定則).
                   ItemsSource is bound OneTime by design: the VirtualResultList
@@ -267,24 +270,28 @@
 
         <!--  サービス未接続時のセットアップ画面。検索バー等は IsReady で畳まれ、
               これが画面中央に出る。主ボタンはワンクリックで登録→自動再起動。
-              IsDisconnected は起動時固定なので OneTime。  -->
+              致命的な pipe fault でもこの修復画面へ遷移する。  -->
         <StackPanel
+            x:Name="SetupArea"
             Grid.Row="0"
             Grid.RowSpan="3"
             MaxWidth="{StaticResource SetupMaxWidth}"
             Padding="{StaticResource PageContentPadding}"
             HorizontalAlignment="Center"
             VerticalAlignment="Center"
+            AutomationProperties.AutomationId="SetupArea"
             Spacing="{StaticResource SpacingLarge}"
-            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsDisconnected), Mode=OneTime}">
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsDisconnected), Mode=OneWay}">
             <FontIcon
                 HorizontalAlignment="Center"
                 FontSize="{StaticResource IconSizeXLarge}"
                 Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                 Glyph="&#xE721;" />
             <TextBlock
+                x:Name="SetupTitleText"
                 x:Uid="SetupTitle"
                 HorizontalAlignment="Center"
+                AutomationProperties.LiveSetting="Assertive"
                 Style="{ThemeResource SubtitleTextBlockStyle}"
                 TextAlignment="Center" />
             <TextBlock

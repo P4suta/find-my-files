@@ -68,6 +68,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     /// filter change (the same text now means something different).</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SearchPlaceholder))]
+    [NotifyPropertyChangedFor(nameof(SearchInputPlaceholder))]
     public partial bool RegexMode { get; set; }
 
     /// <summary>Which haystack the whole-query regex matches (name/path). Only
@@ -75,6 +76,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     /// independently so it survives toggling regex off and on.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SearchPlaceholder))]
+    [NotifyPropertyChangedFor(nameof(SearchInputPlaceholder))]
     public partial RegexScopeKind RegexScope { get; set; }
 
     /// <summary>Tray-resident mode (ADR-0030): the gear-menu toggle. When on,
@@ -92,18 +94,31 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             : "Search_PlaceholderRegexName")
         : Loc.Get("Search_Placeholder");
 
+    /// <summary>The accessible search hint. While the pipe is warming up the
+    /// disabled box explains that state instead of accepting a doomed query.</summary>
+    public string SearchInputPlaceholder =>
+        CanSearch ? SearchPlaceholder : Loc.Get("Status_Preparing");
+
     // ── Disconnected setup screen (explicit unavailable engine state) ──
 
     /// <summary>True when no engine transport is currently available
     /// — the page shows the setup screen instead of a search box that can only
-    /// return zero rows. Fixed for this page's lifetime — registering re-resolves
-    /// the engine by rebuilding the page (App.SoftRestart, ADR-0036), so this
-    /// fresh-page property is re-evaluated and x:Bind OneTime is enough.</summary>
-    public bool IsDisconnected => _engine.Kind == EngineClientKind.Unavailable;
+    /// return zero rows. A fatal pipe identity/protocol failure also transitions
+    /// here so repair is actionable without continuing on a broken transport.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsReady))]
+    public partial bool IsDisconnected { get; set; }
 
     /// <summary>Inverse of <see cref="IsDisconnected"/> — true when the search
     /// UI (box + result list) should be shown instead of the setup screen.</summary>
     public bool IsReady => !IsDisconnected;
+
+    /// <summary>True only while requests can reach an engine. The search box is
+    /// disabled during initial connect and reconnect, while settings and repair
+    /// remain available.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SearchInputPlaceholder))]
+    public partial bool CanSearch { get; set; }
 
     /// <summary>The current index mode for the status submenu's info row
     /// (all NTFS drives). Fixed for this page's lifetime (ADR-0036),
@@ -153,6 +168,15 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
+        }
+        catch (Exception ex)
+        {
+            if (Volatile.Read(ref _disposed) == 0)
+            {
+                EngineVersion = string.Empty;
+            }
+
+            FileLog.Warn("engine", "engine version unavailable", ex);
         }
     }
 
@@ -219,6 +243,11 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         Func<bool>? saveSettings = null)
     {
         _engine = engine;
+        IsDisconnected = engine.Kind == EngineClientKind.Unavailable
+            || engine.Connection is EngineConnectionState.Unavailable
+                or EngineConnectionState.Faulted;
+        CanSearch = engine.Connection is EngineConnectionState.InProc
+            or EngineConnectionState.Connected;
         _settings = settings ?? AppSettings.Load();
         _saveSettings = saveSettings ?? _settings.Save;
         _provisioner = provisioner ?? ServiceProvisioner.Real;
@@ -260,16 +289,24 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     /// Non-Info notifications never auto-dissolve (NotificationCenter).</summary>
     private AppNotification? _reconnectBanner;
 
+    /// <summary>The actionable startup failure currently shown. Held by
+    /// reference so a connect-driven retry or button retry replaces/removes
+    /// the exact notification instead of accumulating stale errors.</summary>
+    private AppNotification? _startupFailureNotification;
+
     /// <summary>True once <see cref="RunStartupAsync"/> has successfully run.
     /// Guards against the Loaded call and the first Connected event both running
     /// startup; cleared on a startup failure so a later connect can retry.</summary>
     private bool _started;
 
-    private void OnEngineErrorOccurred(int severity) =>
+    private void OnEngineErrorOccurred(EngineErrorSeverity severity) =>
         HandleEngineErrorAsync(severity).Forget("engine.error");
 
     private void OnConnectionChanged(EngineConnectionState state)
     {
+        CanSearch = state is EngineConnectionState.Connected
+            or EngineConnectionState.InProc;
+
         if (state == EngineConnectionState.Reconnecting)
         {
             if (_reconnectBanner is null)
@@ -284,7 +321,8 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
-        if (state == EngineConnectionState.Faulted)
+        if (state is EngineConnectionState.Faulted
+            or EngineConnectionState.Unavailable)
         {
             // A fatal identity/protocol mismatch stops the supervisor. Do not
             // leave the persistent "reconnecting" banner claiming recovery is
@@ -296,6 +334,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
                 _reconnectBanner = null;
             }
 
+            IsDisconnected = true;
             return;
         }
 
@@ -304,6 +343,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
+        IsDisconnected = false;
         if (_reconnectBanner is not null)
         {
             Notifications.Remove(_reconnectBanner);
@@ -344,9 +384,18 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         // sits in. Hold "preparing" and let the first Connected event
         // (OnConnectionChanged) run the startup. Only a never-connected pipe reports
         // Connecting — FFI / fake / connected-pipe report InProc or Connected.
-        if (_engine.Connection == EngineConnectionState.Connecting)
+        if (_engine.Connection is EngineConnectionState.Connecting
+            or EngineConnectionState.Reconnecting)
         {
             StatusText = Loc.Get("Status_Preparing");
+            return;
+        }
+
+        if (_engine.Connection is EngineConnectionState.Faulted
+            or EngineConnectionState.Unavailable)
+        {
+            IsDisconnected = true;
+            StatusText = Loc.Get("Status_ServiceUnregistered");
             return;
         }
 
@@ -382,6 +431,11 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             // "preparing" and show "ready" when already Ready; later
             // Scanning→Ready transitions are picked up by OnVolumeUpdated.
             StatusText = StatusFormatter.Overall(await _engine.GetStatusAsync(ct), volumes);
+            if (_startupFailureNotification is not null)
+            {
+                Notifications.Remove(_startupFailureNotification);
+                _startupFailureNotification = null;
+            }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -392,11 +446,33 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             _started = false; // let a later Connected retry the startup
             FileLog.Error("engine", "startup indexing failed", ex);
             StatusText = Loc.Get("Status_IndexStartFailed");
-            Notifications.Push(new AppNotification(
-                NotifySeverity.Error, Loc.Get("Notify_IndexStartFailedTitle"), ex.Message));
+            if (_startupFailureNotification is not null)
+            {
+                Notifications.Remove(_startupFailureNotification);
+            }
+
+            _startupFailureNotification = new AppNotification(
+                NotifySeverity.Error,
+                Loc.Get("Notify_IndexStartFailedTitle"),
+                ex.Message,
+                Loc.Get("Common_Retry"),
+                RetryStartup);
+            Notifications.Push(_startupFailureNotification);
+            return;
         }
 
         Search.Requery(RequeryOrigin.Initial);
+    }
+
+    private void RetryStartup()
+    {
+        if (_startupFailureNotification is not null)
+        {
+            Notifications.Remove(_startupFailureNotification);
+            _startupFailureNotification = null;
+        }
+
+        RunStartupAsync().Forget("engine.startup-retry");
     }
 
     /// <summary>Setup screen's one-click action: register the service elevated,
@@ -438,6 +514,9 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
                     break;
                 case ServiceActionOutcome.Cancelled:
                     SetupStatus = string.Empty;
+                    break;
+                case ServiceActionOutcome.IdentityUnavailable:
+                    SetupStatus = Loc.Get("Svc_IdentityUnavailable");
                     break;
                 default:
                     SetupStatus = Loc.Get("Setup_Failed");
@@ -670,8 +749,8 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     };
 
     /// <summary>Engine diagnostics: pull the detail text behind the POD event.</summary>
-    /// <param name="severity">The reported error severity (≥2 surfaces a notification, ≥3 is a panic).</param>
-    private async Task HandleEngineErrorAsync(int severity)
+    /// <param name="severity">The generated contract severity reported by the engine.</param>
+    private async Task HandleEngineErrorAsync(EngineErrorSeverity severity)
     {
         // EngineEventMarshaler already marshaled this onto the UI thread; stay there
         // (no ConfigureAwait) — RefreshStatsAsync sets bound Perf state and the
@@ -682,12 +761,15 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
-        if (severity >= 2)
+        if (severity is EngineErrorSeverity.Error or EngineErrorSeverity.Panic)
         {
             var last = Perf.Stats?.RecentErrors.LastOrDefault();
+            var title = severity == EngineErrorSeverity.Panic
+                ? Loc.Get("Notify_EnginePanicTitle")
+                : Loc.Get("Notify_EngineErrorTitle");
             Notifications.Push(new AppNotification(
                 NotifySeverity.Error,
-                severity >= 3 ? Loc.Get("Notify_EnginePanicTitle") : Loc.Get("Notify_EngineErrorTitle"),
+                title,
                 last is null ? null : $"[{last.Area}] {Truncate(last.Message, 200)}"));
         }
     }

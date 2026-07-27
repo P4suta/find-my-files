@@ -8,7 +8,7 @@ namespace FindMyFiles.Services;
 /// <summary>
 /// Serilog text formatter that renders each event as one logfmt line —
 /// <c>ts level area key=value … msg="…"</c> — matching the Rust engine's
-/// <c>engine.log</c> so the two logs interleave and parse identically
+/// the rolling engine logs so the two streams interleave and parse identically
 /// (ADR-0037). The quoting rules double as the log-injection defence: any
 /// value carrying CR/LF or control characters is escaped, so it can never
 /// forge a second log line.

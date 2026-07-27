@@ -78,4 +78,46 @@ public sealed class PerfPanelViewModelTests
         Assert.Null(_vm.Stats);
         Assert.Equal(1, raised);
     }
+
+    [Fact]
+    public async Task RefreshStatsAsync_after_dispose_is_a_silent_no_op()
+    {
+        // The poll and the panel teardown race by construction (a 1 Hz timer tick
+        // that is already in flight when the window closes). Reading the disposed
+        // lifetime token used to throw ObjectDisposedException, which the
+        // fire-and-forget funnel turns into a user-visible error notification.
+        _vm.Dispose();
+
+        await _vm.RefreshStatsAsync();
+
+        Assert.Null(_vm.Stats);
+    }
+
+    [Fact]
+    public async Task RefreshStatsAsync_contains_engine_failures()
+    {
+        // Stats are diagnostics: an unreachable engine must not produce an error
+        // notification every second. The failure is logged, not thrown.
+        var raised = 0;
+        _vm.PerfDataChanged += () => raised++;
+        _engine.ThrowOnStats = new InvalidOperationException("engine down");
+
+        await _vm.RefreshStatsAsync();
+
+        Assert.Null(_vm.Stats);
+        Assert.Equal(0, raised); // nothing moved, so nothing is announced
+    }
+
+    [Fact]
+    public async Task RefreshStatsAsync_contains_a_cancellation_it_did_not_request()
+    {
+        // An engine-side cancellation (its own internal deadline) is still just an
+        // abandoned poll — it must not escape merely because *our* linked source
+        // was never cancelled.
+        _engine.ThrowOnStats = new OperationCanceledException();
+
+        await _vm.RefreshStatsAsync();
+
+        Assert.Null(_vm.Stats);
+    }
 }

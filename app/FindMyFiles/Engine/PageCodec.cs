@@ -3,9 +3,11 @@ using System.Buffers.Binary;
 namespace FindMyFiles.Engine;
 
 /// <summary>
-/// Decodes the shared page layout — 56-byte rows + WTF-8 string blob — used
-/// verbatim by both the FFI <c>FmfPage</c> and the pipe ResultPage payload
-/// (docs/ARCHITECTURE.md: FmfRow layout, offsets are blob-relative).
+/// Decodes the shared page layout — densely packed fixed-size rows followed by
+/// one WTF-8 string blob — used verbatim by both the FFI <c>FmfPage</c> and the
+/// pipe ResultPage payload. Every row's name/parent-path offset is relative to
+/// the start of that blob, not to the row or the frame. Row size and field
+/// offsets come from <see cref="EngineContract.RowOffsets"/>.
 /// </summary>
 internal static class PageCodec
 {
@@ -34,6 +36,15 @@ internal static class PageCodec
                 r[EngineContract.RowOffsets.NameLen..]);
             var parentPathLen = BinaryPrimitives.ReadUInt32LittleEndian(
                 r[EngineContract.RowOffsets.ParentPathLen..]);
+            var flags = BinaryPrimitives.ReadUInt32LittleEndian(
+                r[EngineContract.RowOffsets.Flags..]);
+            var unknownFlags = flags & ~EngineContract.RowFlags.KnownMask;
+            if (unknownFlags != 0)
+            {
+                throw new InvalidDataException(
+                    $"row {i} has unknown flags (0x{unknownFlags:X8})");
+            }
+
             var reserved = BinaryPrimitives.ReadUInt32LittleEndian(
                 r[EngineContract.RowOffsets.Reserved..]);
             if (reserved != 0)
@@ -51,8 +62,7 @@ internal static class PageCodec
                     r[EngineContract.RowOffsets.Size..]),
                 Mtime: BinaryPrimitives.ReadInt64LittleEndian(
                     r[EngineContract.RowOffsets.Mtime..]),
-                Flags: BinaryPrimitives.ReadUInt32LittleEndian(
-                    r[EngineContract.RowOffsets.Flags..]),
+                Flags: flags,
                 Name: Wtf8.Decode(BlobWindow(blob, nameOff, nameLen, i, "name")),
                 ParentPath: Wtf8.Decode(
                     BlobWindow(blob, parentPathOff, parentPathLen, i, "parent path"))));

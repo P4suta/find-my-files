@@ -113,7 +113,7 @@ internal sealed class ResultsViewportManager
     {
         if (SelectedRow() is { IsPlaceholder: false } row)
         {
-            ShellOps.Reveal(row.FullPath);
+            ShellOps.RevealIndexed(row.FullPath, row.Frn);
         }
     }
 
@@ -143,7 +143,7 @@ internal sealed class ResultsViewportManager
     {
         if (row is { IsPlaceholder: false })
         {
-            ShellOps.Open(row.FullPath);
+            ShellOps.OpenIndexed(row.FullPath, row.Frn);
         }
     }
 

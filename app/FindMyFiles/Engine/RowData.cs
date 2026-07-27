@@ -13,8 +13,8 @@ namespace FindMyFiles.Engine;
 /// <param name="Mtime">Last-modified time as a Windows <c>FILETIME</c>
 /// (100 ns ticks since 1601-01-01 UTC); 0 means unknown/unset and renders as
 /// an empty timestamp.</param>
-/// <param name="Flags">Bit field of NTFS attributes; bit 0 is the directory
-/// flag (see <see cref="IsDirectory"/>).</param>
+/// <param name="Flags">Contract presentation flags; currently only bit 0
+/// (directory) is defined. Unknown bits are reserved zero.</param>
 /// <param name="Name">Leaf file or directory name.</param>
 /// <param name="ParentPath">Containing directory path including its trailing
 /// separator (e.g. <c>"C:\"</c>), so <see cref="FullPath"/> is a plain
@@ -30,7 +30,7 @@ internal sealed record RowData(
 {
     /// <summary>True when this row is a directory (bit 0 of
     /// <see cref="Flags"/>).</summary>
-    public bool IsDirectory => (Flags & 1) != 0;
+    public bool IsDirectory => (Flags & EngineContract.RowFlags.Directory) != 0;
 
     /// <summary>The full path, <see cref="ParentPath"/> (which already ends in
     /// a separator) concatenated with <see cref="Name"/>.</summary>

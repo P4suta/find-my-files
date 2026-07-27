@@ -61,6 +61,141 @@ public sealed class ServiceSetupTests
             ServiceSetup.MapServiceState(raw));
 
     [Fact]
+    public void DirectScmStart_IsIdempotentWhenAlreadyRunning()
+    {
+        var starts = 0;
+        var result = ServiceSetup.DriveServiceControl(
+            ServiceSetup.ScmControlVerb.Start,
+            () => 4,
+            () =>
+            {
+                starts++;
+                return 0;
+            },
+            () => throw new InvalidOperationException(),
+            maxPollAttempts: 2,
+            () => throw new InvalidOperationException());
+
+        Assert.True(result);
+        Assert.Equal(0, starts);
+    }
+
+    [Fact]
+    public void DirectScmStart_ToleratesAnotherCallerWinningTheRace()
+    {
+        var states = new Queue<uint?>([1, 2, 4]);
+        var starts = 0;
+        var waits = 0;
+        var result = ServiceSetup.DriveServiceControl(
+            ServiceSetup.ScmControlVerb.Start,
+            () => states.Dequeue(),
+            () =>
+            {
+                starts++;
+                return 1056; // ERROR_SERVICE_ALREADY_RUNNING
+            },
+            () => throw new InvalidOperationException(),
+            maxPollAttempts: 3,
+            () => waits++);
+
+        Assert.True(result);
+        Assert.Equal(1, starts);
+        Assert.Equal(2, waits);
+    }
+
+    [Fact]
+    public void DirectScmStop_ToleratesAnotherCallerWinningTheRace()
+    {
+        var states = new Queue<uint?>([4, 3, 1]);
+        var stops = 0;
+        var result = ServiceSetup.DriveServiceControl(
+            ServiceSetup.ScmControlVerb.Stop,
+            () => states.Dequeue(),
+            () => throw new InvalidOperationException(),
+            () =>
+            {
+                stops++;
+                return 1062; // ERROR_SERVICE_NOT_ACTIVE
+            },
+            maxPollAttempts: 3,
+            () => { });
+
+        Assert.True(result);
+        Assert.Equal(1, stops);
+    }
+
+    [Fact]
+    public void DirectScmRestart_UsesOneBoundedStopThenStartSequence()
+    {
+        var states = new Queue<uint?>([4, 3, 1, 1, 2, 4]);
+        var starts = 0;
+        var stops = 0;
+        var waits = 0;
+        var result = ServiceSetup.DriveServiceControl(
+            ServiceSetup.ScmControlVerb.Restart,
+            () => states.Dequeue(),
+            () =>
+            {
+                starts++;
+                return 0;
+            },
+            () =>
+            {
+                stops++;
+                return 0;
+            },
+            maxPollAttempts: 6,
+            () => waits++);
+
+        Assert.True(result);
+        Assert.Equal(1, stops);
+        Assert.Equal(1, starts);
+        Assert.Equal(4, waits);
+        Assert.Empty(states);
+    }
+
+    [Fact]
+    public void DirectScmControl_TimesOutWithinTheSharedPollBudget()
+    {
+        var queries = 0;
+        var waits = 0;
+        var result = ServiceSetup.DriveServiceControl(
+            ServiceSetup.ScmControlVerb.Start,
+            () =>
+            {
+                queries++;
+                return 2; // SERVICE_START_PENDING forever
+            },
+            () => throw new InvalidOperationException(),
+            () => throw new InvalidOperationException(),
+            maxPollAttempts: 3,
+            () => waits++);
+
+        Assert.False(result);
+        Assert.Equal(3, queries);
+        Assert.Equal(2, waits);
+    }
+
+    [Fact]
+    public void DirectScmControl_FailsClosedOnAccessOrQueryFailure()
+    {
+        Assert.False(ServiceSetup.DriveServiceControl(
+            ServiceSetup.ScmControlVerb.Start,
+            () => 1,
+            () => 5, // ERROR_ACCESS_DENIED
+            () => 0,
+            maxPollAttempts: 2,
+            () => { }));
+        Assert.False(ServiceSetup.DriveServiceControl(
+            ServiceSetup.ScmControlVerb.Stop,
+            () => null,
+            () => 0,
+            () => 0,
+            maxPollAttempts: 2,
+            () => { }));
+    }
+
+    [Fact]
     public void LocateServiceExe_PrefersBundled_ThenDevTree_ElseNull()
     {
         var root = Directory.CreateTempSubdirectory("fmf-setup-test");
@@ -114,6 +249,26 @@ public sealed class ServiceSetupTests
         Assert.NotNull(sid);
         Assert.StartsWith("S-1-", sid, StringComparison.Ordinal);
         Assert.True(ServiceSetup.IsValidSid(sid), "own SID must survive the injection guard");
+    }
+
+    [Fact]
+    public void TryCreateSetupArguments_BindsTheExactValidatedOwner()
+    {
+        const string sid = "S-1-5-21-1654600493-3733564142-2704359447-1001";
+
+        Assert.True(ServiceSetup.TryCreateSetupArguments(sid, out var arguments));
+        Assert.Equal($"setup --owner-sid={sid}", arguments);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not-a-sid")]
+    [InlineData("S-1-5-21-1 --owner-sid=S-1-1-0")]
+    public void TryCreateSetupArguments_HasNoOwnerlessFallback(string? sid)
+    {
+        Assert.False(ServiceSetup.TryCreateSetupArguments(sid, out var arguments));
+        Assert.Empty(arguments);
     }
 
     [Fact]

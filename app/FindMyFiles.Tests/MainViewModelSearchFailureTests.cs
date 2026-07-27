@@ -43,8 +43,8 @@ public sealed class MainViewModelSearchFailureTests
         _vm.Notifications.Items.Any(n => n.Severity == NotifySeverity.Error);
 
     [Theory]
-    [InlineData(3)]
-    [InlineData(1)]
+    [InlineData((int)EngineConnectionState.Connecting)]
+    [InlineData((int)EngineConnectionState.Reconnecting)]
     public void Settling_connection_suppresses_the_search_failure_notification(
         int connectionValue)
     {
@@ -57,8 +57,8 @@ public sealed class MainViewModelSearchFailureTests
     }
 
     [Theory]
-    [InlineData(0)]
-    [InlineData(2)]
+    [InlineData((int)EngineConnectionState.InProc)]
+    [InlineData((int)EngineConnectionState.Connected)]
     public void Usable_connection_surfaces_the_search_failure_notification(
         int connectionValue)
     {

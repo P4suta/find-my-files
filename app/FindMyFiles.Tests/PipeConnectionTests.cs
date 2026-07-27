@@ -28,7 +28,7 @@ public sealed class PipeConnectionTests
     }
 
     private static PipeConnection Wrap(NamedPipeClientStream client, int epoch = 1) =>
-        new(client, epoch, (_, _) => { }, (_, _, _, _) => { }, CancellationToken.None);
+        new(client, epoch, (_, _, _) => { }, (_, _, _, _, _) => { }, CancellationToken.None);
 
     [Fact]
     public async Task WriteAfterDispose_IsNormalizedToEngineUnavailable()
@@ -100,8 +100,8 @@ public sealed class PipeConnectionTests
             using var conn = new PipeConnection(
                 client,
                 1,
-                (_, _) => Interlocked.Increment(ref dispatched),
-                (_, _, _, _) => Interlocked.Increment(ref dispatched),
+                (_, _, _) => Interlocked.Increment(ref dispatched),
+                (_, _, _, _, _) => Interlocked.Increment(ref dispatched),
                 CancellationToken.None);
 
             await server.WriteAsync(PipeProtocol.EncodeFrame(

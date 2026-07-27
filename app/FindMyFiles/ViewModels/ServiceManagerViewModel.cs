@@ -14,8 +14,8 @@ namespace FindMyFiles.ViewModels;
 /// </summary>
 internal sealed partial class ServiceManagerViewModel : ObservableObject
 {
-    /// <summary>fmf-service.exe (bundle or dev tree), resolved once. Null
-    /// disables every action and the state line says why.</summary>
+    /// <summary>fmf-service.exe (bundle or dev tree), resolved once. Needed only
+    /// for elevated setup/removal; ordinary lifecycle control calls SCM directly.</summary>
     private readonly string? _exe;
 
     /// <summary>The wait-for-pipe-then-relaunch step after a successful elevated
@@ -159,15 +159,6 @@ internal sealed partial class ServiceManagerViewModel : ObservableObject
     /// read-only P/Invoke (no elevation) — safe on the UI thread.</summary>
     public void Refresh()
     {
-        if (_exe is null)
-        {
-            StateText = Loc.Get("Svc_ExeNotFound");
-            IsRunning = IsStopped = IsNotInstalled = IsUnknown = IsInstalled = false;
-            CanStart = CanStop = CanRestart = CanUninstall = CanPurgeData =
-                CanRegister = CanReregister = false;
-            return;
-        }
-
         ApplyState(_queryState());
     }
 
@@ -228,8 +219,16 @@ internal sealed partial class ServiceManagerViewModel : ObservableObject
     /// <returns>A task that completes when the elevated <c>setup</c> verb finishes.</returns>
     public Task RegisterAsync()
     {
-        var sid = ServiceSetup.CurrentUserSid();
-        var args = ServiceSetup.IsValidSid(sid) ? $"setup --owner-sid={sid}" : "setup";
+        if (!ServiceSetup.TryCreateSetupArguments(out var args))
+        {
+            FileLog.Warn(
+                "service-ui",
+                "current user SID unavailable or invalid — refusing owner-less elevated setup");
+            ResultSeverity = NotifySeverity.Error;
+            ResultText = Loc.Get("Svc_IdentityUnavailable");
+            return Task.CompletedTask;
+        }
+
         return RunElevatedAsync(args, Loc.Get("Svc_Registered"));
     }
 
@@ -334,7 +333,7 @@ internal sealed partial class ServiceManagerViewModel : ObservableObject
         string okText,
         bool verifyPipe)
     {
-        if (_exe is null || Busy)
+        if (Busy)
         {
             return;
         }

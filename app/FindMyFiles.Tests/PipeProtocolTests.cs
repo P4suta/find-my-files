@@ -103,6 +103,28 @@ public sealed class PipeProtocolTests
         Assert.Contains(PipeProtocol.MaxPayloadLen.ToString(), ex.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(0UL)]
+    [InlineData(4UL)]
+    [InlineData(ulong.MaxValue)]
+    public void EngineErrorSeverityWire_RejectsValuesOutsideTheContract(ulong value) =>
+        Assert.Throws<InvalidDataException>(() => EngineErrorSeverityWire.Decode(value));
+
+    [Fact]
+    public void EngineErrorSeverityWire_AcceptsEveryContractValue()
+    {
+        EngineErrorSeverity[] severities =
+        [
+            EngineErrorSeverity.Warn,
+            EngineErrorSeverity.Error,
+            EngineErrorSeverity.Panic,
+        ];
+        foreach (var severity in severities)
+        {
+            Assert.Equal(severity, EngineErrorSeverityWire.Decode((ulong)severity));
+        }
+    }
+
     [Fact]
     public void VolumeStatusJson_IsSnakeCase_AndRoundTrips()
     {
