@@ -189,6 +189,11 @@ pub fn scan_volume_cancellable(
     if corrupt_records > 0 {
         return Err(MftError::CorruptRecords(corrupt_records));
     }
+    tracing::debug!(
+        area = "scan",
+        volume = drive,
+        msg = "scan phase: mft read complete"
+    );
 
     // Deferred pass: names hiding behind $ATTRIBUTE_LIST, resolved in
     // parallel from the streamed extension-record cache (ADR-0011).
@@ -197,8 +202,19 @@ pub fn scan_volume_cancellable(
     let batches = if deferred.is_empty() {
         Vec::new()
     } else {
+        tracing::debug!(
+            area = "scan",
+            volume = drive,
+            objects = deferred.len(),
+            msg = "scan phase: opening live metadata"
+        );
         let metadata =
             crate::usn::MetadataSource::open_volume_cancellable(drive, Arc::clone(stop))?;
+        tracing::debug!(
+            area = "scan",
+            volume = drive,
+            msg = "scan phase: resolving deferred names"
+        );
         resolve_deferred(
             DeferredContext {
                 volume_path: &volume_path,
@@ -232,12 +248,23 @@ pub fn scan_volume_cancellable(
         "deferred batches are built only from already-validated records"
     );
     stats.elapsed_deferred_ms = t_deferred.elapsed().as_millis() as u64;
+    tracing::debug!(
+        area = "scan",
+        volume = drive,
+        ms = stats.elapsed_deferred_ms,
+        msg = "scan phase: deferred complete"
+    );
     drop(extensions);
     drop(deferred);
     drop(arena);
     // Shared-arena spills and failed targeted reads remain observable even
     // when the authoritative live fallback completed the object.
 
+    tracing::debug!(
+        area = "scan",
+        volume = drive,
+        msg = "scan phase: builder finish"
+    );
     let Some((idx, finish)) = b
         .finish_timed_cancellable(stop)
         .map_err(|error| MftError::Ntfs(error.to_string()))?
