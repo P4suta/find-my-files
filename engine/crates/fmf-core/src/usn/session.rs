@@ -37,7 +37,6 @@ use crate::ondisk::attribute_list::{
     ListEntry, StreamRun, close_extent_runs, decode_extent_runs, parse_list_entries,
     visit_list_stream,
 };
-use crate::ondisk::fixup::apply_fixup;
 use crate::ondisk::ntfs::{NtfsAttributeType, NtfsFile, NtfsFileNamespace};
 use crate::ondisk::record::attributes_complete;
 use crate::scan::{SectorAlignedReader, open_raw_volume, volume_geometry};
@@ -490,11 +489,21 @@ impl VolumeMetadataFetcher {
         {
             return FileRecordLookup::Failed;
         }
-        let mut record = output[record_offset..record_offset + record_len].to_vec();
-        if !NtfsFile::is_valid(&record, self.sector_size)
-            || !apply_fixup(&mut record, self.sector_size)
-            || !attributes_complete(&record)
-        {
+        // NOT fixed up here, unlike every record this engine reads off the raw
+        // volume. `FSCTL_GET_NTFS_FILE_RECORD` hands back the record with the
+        // update-sequence array already substituted back, so the sector tails
+        // hold their original bytes rather than the update sequence number.
+        // Running `apply_fixup` over that fails its verification step by
+        // construction — it is checking for a USN that the OS already removed.
+        //
+        // This made the live metadata source fail for *every* object on real
+        // NTFS: `read_file_record` always returned `Failed`, so `links()` never
+        // produced an authoritative set and the deferred pass had no fallback.
+        // The integrity the fixup exists to prove — that no sector of the
+        // record came from a torn write — has already been proven by the
+        // filesystem before it answered the FSCTL.
+        let record = output[record_offset..record_offset + record_len].to_vec();
+        if !NtfsFile::is_valid(&record, self.sector_size) || !attributes_complete(&record) {
             return FileRecordLookup::Failed;
         }
         let Some(file) = NtfsFile::parse(record_number, &record, self.sector_size) else {
