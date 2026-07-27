@@ -373,6 +373,11 @@ fn service_main(_args: Vec<OsString>) {
             eprintln!("fmf-service: bootstrap service.json read failed: {error}");
             config::ServiceConfig::default()
         });
+    // Load-bearing, not belt-and-braces: `open_and_harden_machine` above walks
+    // the whole tree with the *root* descriptor, which flattens logs/'s narrower
+    // policy. Without this re-application the unelevated F12 diagnostics read is
+    // gone. Pinned by
+    // `security::tests::root_walk_flattens_per_path_policy_and_must_be_followed_by_reapplication`.
     if !cfg.authorized_sids.is_empty() {
         let readers: Vec<_> = cfg.authorized_sids.iter().map(String::as_str).collect();
         if let Err(e) = data_root.harden_tree("logs", &security::logs_dir_sddl(&readers)) {

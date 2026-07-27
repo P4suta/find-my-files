@@ -372,11 +372,10 @@ impl TrustedDataRoot {
         sddl: &str,
         quarantined_root: Option<PathBuf>,
     ) -> io::Result<Self> {
-        // Set a non-inheriting quarantine DACL first. SetSecurityInfo propagates
-        // inheritable ACEs to existing descendants; applying the final OI/CI
-        // descriptor before traversal could touch a junction target before we
-        // reject that reparse point.
-        set_handle_security(&root.file, &quarantine_sddl(sddl)?)?;
+        // Subtree first, root last, and no DACL is touched on the way down.
+        // Every object ends up carrying its own protected descriptor, so a
+        // parent's inheritable ACEs never decide a child's access — see
+        // `harden_descendants`.
         harden_descendants(path, sddl)?;
         set_handle_security(&root.file, sddl)?;
         if !handle_security_matches(&root.file, sddl)? {
@@ -1434,52 +1433,33 @@ fn harden_path(path: &Path, expected: Option<ObjectKind>, sddl: &str) -> io::Res
         windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
     )?;
     if locked.kind == ObjectKind::Directory {
-        set_handle_security(&locked.file, &quarantine_sddl(sddl)?)?;
         harden_descendants(path, sddl)?;
-        // Only now may inheritable ACEs propagate: the complete descendant set
-        // was opened without following reparse points and every object has a
-        // protected DACL of its own.
     }
+    // Only now may an inheritable ACE reach this level: the complete descendant
+    // set has been opened without following reparse points, and every object
+    // below already carries a protected DACL of its own.
     set_handle_security(&locked.file, sddl)?;
     Ok(locked)
 }
 
-fn quarantine_sddl(final_sddl: &str) -> io::Result<String> {
-    use windows_sys::Win32::Security::{
-        GetSecurityDescriptorGroup, GetSecurityDescriptorOwner, PSID,
-    };
-
-    // Preserve the exact owner/group selected by the final policy while
-    // removing every inheritance flag from the temporary DACL. Production
-    // therefore remains BA-owned; the arbitrary-parent test seam can exercise
-    // the same transition under its real non-elevated owner without pretending
-    // that it may assign the Administrators SID.
-    let descriptor = PipeSecurity::from_sddl(final_sddl)?;
-    let mut owner: PSID = std::ptr::null_mut();
-    let mut group: PSID = std::ptr::null_mut();
-    let mut defaulted = 0;
-    if unsafe {
-        GetSecurityDescriptorOwner(descriptor.descriptor, &raw mut owner, &raw mut defaulted)
-    } == 0
-        || unsafe {
-            GetSecurityDescriptorGroup(descriptor.descriptor, &raw mut group, &raw mut defaulted)
-        } == 0
-    {
-        return Err(last_error());
-    }
-    if owner.is_null() || group.is_null() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "filesystem SDDL must contain owner and group",
-        ));
-    }
-    let owner = unsafe { sid_to_string(owner)? };
-    let group = unsafe { sid_to_string(group)? };
-    Ok(format!(
-        "O:{owner}G:{group}D:P(A;;FA;;;SY)(A;;FA;;;{owner})"
-    ))
-}
-
+/// Applies the protected descriptor to every existing object below `path`,
+/// bottom-up, on handles that were opened without following reparse points.
+///
+/// Nothing is written on the way down. A directory receives its descriptor only
+/// after its whole subtree has been opened, type-checked, and given a protected
+/// descriptor of its own, so an inheritable ACE can never reach a level that has
+/// not been proven free of reparse points. The result is a tree in which no
+/// object's access depends on what it inherits, which is what
+/// [`data_tree_security_descriptors`] states as the invariant.
+///
+/// An earlier revision wrote a non-inheriting "quarantine" descriptor to each
+/// directory on the way down, intending to lock attackers out for the duration
+/// of the walk. Both halves of that were measured and neither held: the
+/// descriptor removes the inherited ACEs of every child — plain files included —
+/// so the walk denied itself access to `index/c.fmfidx`, while the junction
+/// propagation the ordering existed to prevent never reaches the target at all.
+/// Pinned by `hardening_walk_survives_a_production_shaped_tree` and
+/// `planted_junction_target_is_never_reached_by_propagation`.
 fn harden_descendants(path: &Path, sddl: &str) -> io::Result<()> {
     struct Frame {
         locked: Option<LockedObject>,
@@ -1535,7 +1515,6 @@ fn harden_descendants(path: &Path, sddl: &str) -> io::Result<()> {
                 windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
             )?;
             if locked.kind == ObjectKind::Directory {
-                set_handle_security(&locked.file, &quarantine_sddl(sddl)?)?;
                 let entries = std::fs::read_dir(&child)?;
                 stack.push(Frame {
                     locked: Some(locked),
@@ -2549,5 +2528,332 @@ mod tests {
                 io::ErrorKind::InvalidInput
             );
         }
+    }
+
+    // --- managed-tree hardening (DEV-323) ------------------------------------
+    //
+    // These run unelevated. The arbitrary-parent seam takes any owner, so the
+    // whole walk executes under the real process SID; elevation would only
+    // change the owner to Administrators. That matters, because the defect
+    // these pin was invisible for exactly as long as the only tests that
+    // reached the walk needed an elevated session to run at all.
+
+    fn own_tree_sddl() -> String {
+        let user = current_user_sid().expect("own sid");
+        format!("O:{user}G:{user}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{user})")
+    }
+
+    /// Reads a descriptor with `READ_CONTROL` only. The owner keeps that right
+    /// implicitly even when the DACL grants nothing, so a stripped object stays
+    /// *observable* instead of merely inaccessible.
+    fn read_sddl(path: &Path) -> String {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let locked = open_checked(
+            path,
+            None,
+            READ_CONTROL_ACCESS,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        )
+        .unwrap_or_else(|error| panic!("read security of {}: {error}", path.display()));
+        handle_security_sddl(&locked.file)
+            .expect("descriptor converts")
+            .trim_end_matches('\0')
+            .to_string()
+    }
+
+    /// Attempts exactly the open the hardening walk performs.
+    fn walk_open(path: &Path) -> io::Result<LockedObject> {
+        open_checked(
+            path,
+            None,
+            SECURITY_WRITE_ACCESS | FILE_LIST_DIRECTORY_ACCESS,
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+        )
+    }
+
+    /// Plants an NTFS junction at `link` pointing at `target`.
+    ///
+    /// Deliberately not `symlink_dir`: a symlink needs `SeCreateSymbolicLink`
+    /// or Developer Mode, while any standard user can create a junction. The
+    /// unprivileged one is the case the threat model cares about, and it is the
+    /// one an elevation-gated test would never have covered.
+    fn create_junction(link: &Path, target: &Path) -> io::Result<()> {
+        use std::os::windows::io::FromRawHandle as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING,
+        };
+        use windows_sys::Win32::System::IO::DeviceIoControl;
+        use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+
+        const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+        std::fs::create_dir(link)?;
+
+        let substitute: Vec<u16> = format!(r"\??\{}", target.display())
+            .encode_utf16()
+            .collect();
+        let print: Vec<u16> = target.display().to_string().encode_utf16().collect();
+        let substitute_bytes = u16::try_from(substitute.len() * 2).expect("substitute name fits");
+        let print_bytes = u16::try_from(print.len() * 2).expect("print name fits");
+
+        let mut path_buffer: Vec<u16> = substitute;
+        path_buffer.push(0);
+        path_buffer.extend_from_slice(&print);
+        path_buffer.push(0);
+
+        let mut buffer: Vec<u8> = Vec::new();
+        buffer.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+        let data_length = 8 + u16::try_from(path_buffer.len() * 2).expect("reparse data fits");
+        buffer.extend_from_slice(&data_length.to_le_bytes());
+        buffer.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+        buffer.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
+        buffer.extend_from_slice(&substitute_bytes.to_le_bytes());
+        buffer.extend_from_slice(&(substitute_bytes + 2).to_le_bytes()); // PrintNameOffset
+        buffer.extend_from_slice(&print_bytes.to_le_bytes());
+        for unit in path_buffer {
+            buffer.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        let wide: Vec<u16> = link.as_os_str().encode_wide().chain([0]).collect();
+        // SAFETY: `wide` is NUL-terminated and outlives the call; the optional
+        // pointers are null and the handle is checked before ownership.
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_WRITE_ACCESS,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(last_error());
+        }
+        // SAFETY: one owned kernel handle, transferred exactly once to `File`
+        // for CloseHandle-on-drop.
+        let file = unsafe { std::fs::File::from_raw_handle(handle.cast()) };
+        let mut returned = 0u32;
+        // SAFETY: `buffer` is a correctly laid out mount-point REPARSE_DATA_BUFFER
+        // whose declared length matches its allocation; no output is requested.
+        let ok = unsafe {
+            DeviceIoControl(
+                raw_handle(&file),
+                FSCTL_SET_REPARSE_POINT,
+                buffer.as_ptr().cast(),
+                u32::try_from(buffer.len()).expect("reparse buffer fits"),
+                std::ptr::null_mut(),
+                0,
+                &raw mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(last_error());
+        }
+        Ok(())
+    }
+
+    /// The shape every install *after the first one* walks, and the shape no
+    /// previously passing test built: a child directory that holds only files.
+    /// Every earlier test created an empty root, so `harden_descendants`
+    /// iterated nothing and the walk was never executed at all.
+    #[test]
+    fn hardening_walk_survives_a_production_shaped_tree() {
+        let sddl = own_tree_sddl();
+        let anchor = tempfile::tempdir().expect("anchor");
+        let root = anchor.path().join("find-my-files");
+
+        let trusted =
+            TrustedDataRoot::create_or_replace_for_test(&root, &sddl).expect("fresh root");
+        let provenance = trusted.provenance_for_test();
+        drop(trusted);
+
+        let index = root.join("index");
+        std::fs::create_dir(&index).expect("index");
+        std::fs::write(index.join("c.fmfidx"), b"payload").expect("index payload");
+        std::fs::write(index.join(".writer.lock"), b"").expect("writer lock");
+        std::fs::create_dir(index.join("nested")).expect("nested");
+        std::fs::write(index.join("nested").join("deep.bin"), b"deep").expect("deep payload");
+        std::fs::write(root.join("service.json"), b"{}").expect("service.json");
+
+        let trusted = TrustedDataRoot::open_verified_for_test(&root, provenance, &sddl)
+            .expect("a populated managed tree must harden without denying the walk its own access");
+
+        // The second site: `ensure_directory` hardens one child subtree through
+        // `harden_path`, which is what the real install calls for `index/`.
+        trusted
+            .ensure_directory("index", &sddl)
+            .expect("re-hardening an existing populated child must succeed");
+
+        for relative in [
+            Path::new("index"),
+            Path::new("index/c.fmfidx"),
+            Path::new("index/.writer.lock"),
+            Path::new("index/nested"),
+            Path::new("index/nested/deep.bin"),
+            Path::new("service.json"),
+        ] {
+            let path = root.join(relative);
+            walk_open(&path).unwrap_or_else(|error| {
+                panic!(
+                    "{} is unreachable after hardening: {error}",
+                    relative.display()
+                )
+            });
+            let actual = read_sddl(&path);
+            assert!(
+                actual.contains("D:P"),
+                "{} must carry its own protected DACL, not depend on inheritance: {actual}",
+                relative.display()
+            );
+        }
+
+        assert_eq!(
+            std::fs::read(index.join("c.fmfidx")).expect("index payload still readable"),
+            b"payload"
+        );
+    }
+
+    /// The recursion bound is the property that matters: an unbounded walk is a
+    /// stack-overflow denial of service against a `LocalSystem` service.
+    ///
+    /// Its elevated sibling asserted this and never reached the depth check —
+    /// the walk denied itself access first, and `PermissionDenied` was mistaken
+    /// for the bound holding. Proving it unelevated means every PR proves it.
+    #[test]
+    fn depth_bound_is_what_stops_the_walk() {
+        let sddl = own_tree_sddl();
+        let anchor = tempfile::tempdir().expect("anchor");
+        let root = anchor.path().join("find-my-files");
+        let trusted =
+            TrustedDataRoot::create_or_replace_for_test(&root, &sddl).expect("fresh root");
+        let provenance = trusted.provenance_for_test();
+        drop(trusted);
+
+        let mut cursor = root.clone();
+        for _ in 0..=MAX_MANAGED_TREE_DEPTH {
+            cursor.push("d");
+            std::fs::create_dir(&cursor).expect("deep directory");
+        }
+
+        let error = TrustedDataRoot::open_verified_for_test(&root, provenance, &sddl)
+            .expect_err("the depth limit must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("{MAX_MANAGED_TREE_DEPTH}-level")),
+            "the depth bound, not an access failure, must be what refuses: {error}"
+        );
+    }
+
+    /// The root-level walk applies one descriptor to the whole tree, so it
+    /// flattens `logs/`'s narrower policy along with everything else.
+    ///
+    /// That is never a widening — `data_dir_sddl` is the strictest of the set —
+    /// but it does mean the re-application of `data_tree_security_descriptors`
+    /// after `open_and_harden_machine` is load-bearing, not belt-and-braces:
+    /// without it the unelevated F12 diagnostics read is gone. Pinned here so
+    /// that coupling cannot be deleted as redundant.
+    #[test]
+    fn root_walk_flattens_per_path_policy_and_must_be_followed_by_reapplication() {
+        let user = current_user_sid().expect("own sid");
+        let root_sddl = own_tree_sddl();
+        let logs_sddl = format!("{root_sddl}(A;OICI;GR;;;{user})");
+
+        let anchor = tempfile::tempdir().expect("anchor");
+        let root = anchor.path().join("find-my-files");
+        let trusted =
+            TrustedDataRoot::create_or_replace_for_test(&root, &root_sddl).expect("fresh root");
+        let provenance = trusted.provenance_for_test();
+        trusted
+            .ensure_directory("logs", &logs_sddl)
+            .expect("logs with its own reader ACE");
+        std::fs::write(root.join("logs").join("engine.log"), b"line").expect("log file");
+        trusted
+            .harden_tree("logs", &logs_sddl)
+            .expect("apply the logs policy to the file too");
+        drop(trusted);
+
+        // Count ACEs naming the user rather than matching `GR`: a generic right
+        // is mapped to specific rights when it lands on a real object, so the
+        // literal does not survive application.
+        let log_file = root.join("logs").join("engine.log");
+        let user_aces = |path: &Path| read_sddl(path).matches(&format!(";;;{user})")).count();
+        assert_eq!(
+            user_aces(&log_file),
+            2,
+            "precondition: the log file carries both the owner grant and the reader grant"
+        );
+
+        // A service start re-verifies the root with the *root* descriptor.
+        let trusted = TrustedDataRoot::open_verified_for_test(&root, provenance, &root_sddl)
+            .expect("root verification");
+        assert_eq!(
+            user_aces(&log_file),
+            1,
+            "the root-level walk is expected to flatten logs/ — if this ever stops \
+             being true, the re-application below is no longer load-bearing"
+        );
+
+        // …which is exactly why the caller re-applies the per-path policy.
+        trusted.harden_tree("logs", &logs_sddl).expect("re-apply");
+        assert_eq!(
+            user_aces(&log_file),
+            2,
+            "re-application must restore the unelevated diagnostics read"
+        );
+    }
+
+    /// The junction-propagation threat, measured rather than assumed.
+    ///
+    /// The walk's ordering exists to stop an inheritable DACL from reaching a
+    /// planted junction's target. This pins both halves: applying that DACL to
+    /// a root containing a junction leaves the target untouched, and the walk
+    /// rejects the junction instead of descending through it.
+    #[test]
+    fn planted_junction_target_is_never_reached_by_propagation() {
+        let sddl = own_tree_sddl();
+        let anchor = tempfile::tempdir().expect("anchor");
+        let outside = tempfile::tempdir().expect("outside");
+        let outside_file = outside.path().join("sentinel");
+        std::fs::write(&outside_file, b"outside").expect("sentinel");
+
+        let root = anchor.path().join("find-my-files");
+        create_directory_new_with_security(&root, &sddl).expect("root");
+        let link = root.join("index");
+        create_junction(&link, outside.path()).expect("plant a junction");
+
+        let before_dir = read_sddl(outside.path());
+        let before_file = read_sddl(&outside_file);
+
+        let root_locked = open_root(&root).expect("open_root");
+        set_handle_security(&root_locked.file, &sddl).expect("apply the inheritable descriptor");
+        assert_eq!(
+            read_sddl(outside.path()),
+            before_dir,
+            "propagation must not cross a junction into its target directory"
+        );
+        assert_eq!(
+            read_sddl(&outside_file),
+            before_file,
+            "propagation must not cross a junction into the target's contents"
+        );
+        drop(root_locked);
+
+        let error =
+            harden_descendants(&root, &sddl).expect_err("a planted junction must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("reparse point"), "{error}");
+        assert_eq!(
+            std::fs::read(&outside_file).expect("target contents survive"),
+            b"outside"
+        );
+
+        std::fs::remove_dir(&link).expect("remove the junction, not its target");
     }
 }
