@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::index::{EntryId, VolumeIndex, flags};
+use crate::index::{EntryId, VolumeIndex};
 
 use super::EngineError;
 use super::volume::VolumeSlot;
@@ -15,7 +15,7 @@ pub struct Row {
     pub size: u64,
     /// Last-modified time, Windows FILETIME (100 ns ticks since 1601-01-01 UTC).
     pub mtime: i64,
-    /// Bitflags: bit0 = directory, bit1 = deleted-since-query (UI marker).
+    /// Contract row flags. Currently only bit0 (directory) is defined.
     pub flags: u32,
     /// File name, WTF-8 bytes (no path separators).
     pub name: Vec<u8>,
@@ -23,9 +23,10 @@ pub struct Row {
     pub parent_path: Vec<u8>,
 }
 
-/// Materialized, sort-ordered result. Pages are O(1) slices; reads stay
-/// valid across content mutations and fail with `Stale` only after a
-/// structural change (compaction/rescan).
+/// Materialized, sort-ordered result with O(1) page slices.
+///
+/// Reads stay valid across compatible content mutations and fail with `Stale`
+/// after a structural change or when a referenced row was deleted.
 pub struct ResultSet {
     pub(super) slots: Vec<Arc<VolumeSlot>>,
     pub(super) structural: Vec<u64>,
@@ -139,6 +140,9 @@ impl ResultSet {
 
         for &(volume, id) in &self.rows[start..end] {
             let index = guards[volume as usize].as_ref().ok_or(EngineError::Stale)?;
+            if !index.is_live(id) {
+                return Err(EngineError::Stale);
+            }
             let name = index.name(id);
             let mut parent_path = Vec::new();
             index.append_parent_path(id, &mut parent_path)?;
@@ -204,6 +208,9 @@ impl ResultSet {
         }
         for &(v, id) in &self.rows[start..end] {
             let idx = guards[v as usize].as_ref().ok_or(EngineError::Stale)?;
+            if !idx.is_live(id) {
+                return Err(EngineError::Stale);
+            }
             let mut parent_path = Vec::new();
             idx.append_parent_path(id, &mut parent_path)?;
             out.push(Row {
@@ -221,17 +228,9 @@ impl ResultSet {
 }
 
 fn idx_flags(idx: &VolumeIndex, id: EntryId) -> u32 {
-    let mut f = 0u32;
     if idx.is_dir(id) {
-        f |= 1;
+        fmf_contract::pod::row_flags::DIRECTORY
+    } else {
+        0
     }
-    if !idx.is_live(id) {
-        f |= 2; // deleted-since-query marker for the UI
-    }
-    f
 }
-
-// Reuse the flags module so the constant meanings stay in one place.
-const _: () = {
-    assert!(flags::IS_DIR == 1);
-};

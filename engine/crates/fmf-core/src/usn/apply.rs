@@ -2,7 +2,7 @@
 //! link-row index.
 //!
 //! Reason flags are aggregated per FRN first (a rename storm touching one
-//! file collapses to one final state — docs/ARCHITECTURE.md), then ops run in
+//! file collapses to one final state), then ops run in
 //! first-touch order so that `mkdir a; touch a\b` resolves parents. Hard-link
 //! changes reconcile an authoritative complete set; one event name is never
 //! mistaken for the object's only path.
@@ -138,7 +138,7 @@ impl MetadataSource {
         })
     }
 
-    fn stat(&self, frn: u64) -> Option<(u64, i64)> {
+    pub(crate) fn stat(&self, frn: u64) -> Option<(u64, i64)> {
         match &self.kind {
             MetadataSourceKind::None => None,
             MetadataSourceKind::Constant(value) => Some(*value),
@@ -180,6 +180,11 @@ pub struct BatchStats {
     /// rescan; checkpointing past one of these would make stale links
     /// permanent.
     pub hard_link_refresh_failures: u32,
+    /// Records the live index refused because applying them would have broken
+    /// a topology invariant (parent cycle, unresolved or non-directory parent,
+    /// ambiguous hard link). The record is dropped rather than half-applied
+    /// and the batch is rescanned.
+    pub index_rejections: u32,
     /// The batch could not be applied atomically and must not be checkpointed.
     pub rescan_required: bool,
 }
@@ -200,13 +205,57 @@ const STAT_REASONS: u32 = reason::DATA_OVERWRITE
     | reason::BASIC_INFO_CHANGE
     | reason::REPARSE_POINT_CHANGE;
 
+/// Everything one journal batch reads — from the volume and from the
+/// pre-mutation index — resolved before the index write lock is taken.
+///
+/// Those reads are blocking `DeviceIoControl` round-trips: a complete
+/// hard-link set per link-affecting object, then size/mtime per object.
+/// Performing them inside the mutation would hold the single-writer lock
+/// across raw-volume I/O and stall every concurrent query for its duration,
+/// against a search budget measured in single-digit milliseconds. Splitting
+/// the phases makes that structural rather than conventional:
+/// [`apply_planned`] takes no [`MetadataSource`], so it cannot do I/O at all.
+///
+/// Planning reads the index only to *classify* records — is this rename
+/// ambiguous, does this exact link already exist — never to decide a row's
+/// final value, and the index has a single writer: the volume worker that
+/// runs both phases back to back. Nothing can mutate between them. Even if a
+/// future caller broke that, every planned decision is re-validated by the
+/// mutation itself (`upsert_*` / `reconcile_*` return `IndexMutationError`),
+/// which rejects the batch and rescans rather than applying a stale one.
+pub(crate) struct BatchPlan {
+    /// Distinct objects in first-touch order (parents before their children).
+    order: Vec<Frn>,
+    /// Per-object collapsed reason flags and record positions.
+    agg: FxHashMap<Frn, Agg>,
+    /// Authoritative link sets read for link-affecting file events.
+    link_snapshots: FxHashMap<Frn, LinkSnapshot>,
+    /// Prefetched size/mtime. A missing key is exactly what
+    /// [`MetadataSource::stat`] reports as `None`: no answer available.
+    stat_snapshots: FxHashMap<Frn, (u64, i64)>,
+    /// Preflight rejections. Non-zero means the batch is already inapplicable
+    /// and [`apply_planned`] mutates nothing.
+    preflight_failures: u32,
+}
+
 /// Apply one journal batch. Bumps the content generation exactly once.
 pub fn apply_batch(
     idx: &mut VolumeIndex,
     records: &[UsnRecord],
     fetch: &MetadataSource,
 ) -> BatchStats {
-    let mut stats = BatchStats::default();
+    let plan = plan_batch(idx, records, fetch);
+    apply_planned(idx, records, plan)
+}
+
+/// Read-only phase: collapse the batch, then resolve every volume read it
+/// will need. Safe to run under a shared index lock (see [`BatchPlan`]).
+#[must_use]
+pub(crate) fn plan_batch(
+    idx: &VolumeIndex,
+    records: &[UsnRecord],
+    fetch: &MetadataSource,
+) -> BatchPlan {
     let mut order: Vec<Frn> = Vec::new();
     let mut agg: FxHashMap<Frn, Agg> = FxHashMap::default();
 
@@ -238,6 +287,7 @@ pub fn apply_batch(
     // an authoritative complete set. Preflighting those cases prevents a
     // failed lookup from committing a valid prefix of the batch.
     let mut link_snapshots = FxHashMap::default();
+    let mut preflight_failures = 0u32;
     for key in &order {
         let a = &agg[key];
         let link_affecting = a.reasons
@@ -249,8 +299,7 @@ pub fn apply_batch(
         let last = &records[a.last];
         if last.is_dir() {
             if a.reasons & reason::HARD_LINK_CHANGE != 0 {
-                stats.hard_link_refresh_failures += 1;
-                stats.ignored += 1;
+                preflight_failures += 1;
             }
             continue;
         }
@@ -266,12 +315,64 @@ pub fn apply_batch(
             && idx.entries_by_frn(*key).count() > 1
             && !exact_rename_old;
         if !complete && (a.reasons & reason::HARD_LINK_CHANGE != 0 || ambiguous_rename) {
-            stats.hard_link_refresh_failures += 1;
-            stats.ignored += 1;
+            preflight_failures += 1;
         }
         link_snapshots.insert(*key, snapshot);
     }
-    if stats.hard_link_refresh_failures > 0 {
+
+    // Size/mtime for every object whose mutation can consume one: an
+    // authoritative link set was read (the reconcile arm), or a
+    // create/rename/stat record that is not an outright delete. A handful of
+    // these are resolved and then dropped by a record the index turns out to
+    // reject — an over-fetch off the lock, never an under-fetch, which would
+    // silently turn a readable value into a `stat_failures` bump.
+    let mut stat_snapshots = FxHashMap::default();
+    if preflight_failures == 0 {
+        for key in &order {
+            let a = &agg[key];
+            let has_links = matches!(
+                link_snapshots.get(key),
+                Some(LinkSnapshot::Present(links)) if !links.is_empty()
+            );
+            let mutates_stat = a.reasons & reason::FILE_DELETE == 0
+                && a.reasons & (reason::FILE_CREATE | reason::RENAME_NEW_NAME | STAT_REASONS) != 0;
+            if (has_links || mutates_stat)
+                && let Some(value) = fetch.stat(records[a.last].frn)
+            {
+                stat_snapshots.insert(*key, value);
+            }
+        }
+    }
+
+    BatchPlan {
+        order,
+        agg,
+        link_snapshots,
+        stat_snapshots,
+        preflight_failures,
+    }
+}
+
+/// Mutation phase: apply a [`BatchPlan`] under the index write lock. Performs
+/// no I/O — every volume answer it needs is already in the plan.
+pub(crate) fn apply_planned(
+    idx: &mut VolumeIndex,
+    records: &[UsnRecord],
+    plan: BatchPlan,
+) -> BatchStats {
+    let BatchPlan {
+        order,
+        agg,
+        mut link_snapshots,
+        stat_snapshots,
+        preflight_failures,
+    } = plan;
+    let mut stats = BatchStats::default();
+    if preflight_failures > 0 {
+        // Preflighting these prevents a failed lookup from committing a valid
+        // prefix of the batch: nothing has been mutated yet.
+        stats.hard_link_refresh_failures = preflight_failures;
+        stats.ignored = preflight_failures;
         stats.rescan_required = true;
         return stats;
     }
@@ -285,12 +386,14 @@ pub fn apply_batch(
             & (reason::FILE_CREATE | reason::RENAME_NEW_NAME | reason::HARD_LINK_CHANGE)
             != 0;
         if link_affecting && !last.is_dir() {
-            let snapshot = link_snapshots
-                .remove(&key)
-                .unwrap_or_else(|| fetch.links(last.frn));
+            // The plan resolves a snapshot for exactly this arm's records, so
+            // a miss means the plan and the mutation disagree about the batch.
+            // `Failed` is the conservative reading: it rejects a hard-link
+            // change and otherwise falls back to the event's own identity.
+            let snapshot = link_snapshots.remove(&key).unwrap_or(LinkSnapshot::Failed);
             match snapshot {
                 LinkSnapshot::Present(links) if !links.is_empty() => {
-                    let fetched = fetch.stat(last.frn);
+                    let fetched = stat_snapshots.get(&key).copied();
                     if fetched.is_none() {
                         stats.stat_failures += 1;
                     }
@@ -312,12 +415,23 @@ pub fn apply_batch(
                             mtime,
                         })
                         .collect();
-                    let LinkReconcileStats {
+                    let Ok(LinkReconcileStats {
                         added,
                         removed,
                         retained,
                         metadata_changed,
-                    } = idx.reconcile_file_links_usn(key, &entries);
+                    }) = idx.reconcile_file_links_usn(key, &entries)
+                    else {
+                        // The live index refused the reconciled link set
+                        // (cycle, unresolved parent, ambiguous link).
+                        // Keeping the partial result would leave paths
+                        // pointing at the wrong parent, so reject this
+                        // record and force a rescan instead.
+                        stats.index_rejections += 1;
+                        stats.ignored += 1;
+                        stats.rescan_required = true;
+                        continue;
+                    };
                     stats.created_or_renamed += added;
                     stats.deleted += removed;
                     if fetched.is_some() && retained > 0 {
@@ -374,7 +488,18 @@ pub fn apply_batch(
                 && idx.is_dir(old)
                 && last.is_dir()
             {
-                idx.rename_dir_frn_in_place(key, &last.name, Frn(last.parent_frn));
+                if idx
+                    .rename_dir_frn_in_place(key, &last.name, Frn(last.parent_frn))
+                    .is_err()
+                {
+                    // Children point at this EntryId, so a half-applied
+                    // directory rename would reparent an entire subtree onto a
+                    // wrong path. Drop the record and rescan.
+                    stats.index_rejections += 1;
+                    stats.ignored += 1;
+                    stats.rescan_required = true;
+                    continue;
+                }
                 idx.update_object_attrs_frn(
                     key,
                     last.is_reparse(),
@@ -396,7 +521,7 @@ pub fn apply_batch(
             }
             // Carry size/mtime over from the previous entry when the volume
             // can't answer (file already gone, or replay without fixtures).
-            let fetched = fetch.stat(last.frn);
+            let fetched = stat_snapshots.get(&key).copied();
             if fetched.is_none() {
                 stats.stat_failures += 1;
             }
@@ -414,7 +539,7 @@ pub fn apply_batch(
                 mtime,
             };
 
-            if !last.is_dir() && a.reasons & reason::RENAME_NEW_NAME != 0 {
+            let upserted = if !last.is_dir() && a.reasons & reason::RENAME_NEW_NAME != 0 {
                 let before = idx.entries_by_frn(key).count();
                 let removed = a.rename_old.and_then(|old| {
                     let old = &records[old];
@@ -430,14 +555,22 @@ pub fn apply_batch(
                     continue;
                 }
                 if removed.is_none() && before == 1 {
-                    idx.upsert_usn(&entry);
+                    idx.upsert_usn(&entry)
                 } else {
-                    idx.upsert_link_usn(&entry);
+                    idx.upsert_link_usn(&entry)
                 }
             } else if last.is_dir() {
-                idx.upsert_usn(&entry);
+                idx.upsert_usn(&entry)
             } else {
-                idx.upsert_link_usn(&entry);
+                idx.upsert_link_usn(&entry)
+            };
+            if upserted.is_err() {
+                // Same reasoning as the reconcile path above: a rejected
+                // topology must not be checkpointed as if it had applied.
+                stats.index_rejections += 1;
+                stats.ignored += 1;
+                stats.rescan_required = true;
+                continue;
             }
             stats.created_or_renamed += 1;
         } else if a.reasons & STAT_REASONS != 0 {
@@ -451,7 +584,7 @@ pub fn apply_batch(
             let attrs_changed = idx
                 .update_object_attrs_frn(key, last.is_reparse(), last.is_hidden(), last.is_system())
                 .unwrap_or(false);
-            if let Some((size, mtime)) = fetch.stat(last.frn) {
+            if let Some((size, mtime)) = stat_snapshots.get(&key).copied() {
                 if idx.update_stat_frn(key, size, mtime).is_some() {
                     stats.stat_updated += 1;
                 } else {
@@ -468,7 +601,17 @@ pub fn apply_batch(
         }
     }
 
-    idx.merge_new_into_permutations(first_new);
+    if idx.merge_new_into_permutations(first_new).is_err() {
+        // The batch boundary found the resulting live topology invalid. It
+        // still completed — permutations merged, generation bumped, derived
+        // caches invalidated — precisely so the index stays readable and
+        // self-consistent while the rescan runs (see
+        // `VolumeIndex::merge_new_into_permutations`). What must not happen is
+        // checkpointing past records whose effect the index cannot vouch for,
+        // so the cursor stays put and the volume rebuilds from scratch.
+        stats.index_rejections += 1;
+        stats.rescan_required = true;
+    }
     stats
 }
 
@@ -512,7 +655,7 @@ mod tests {
     const FT1: i64 = 132_854_688_000_000_000;
 
     fn base_index() -> VolumeIndex {
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         let docs: Vec<u16> = "docs".encode_utf16().collect();
         let note: Vec<u16> = "note.txt".encode_utf16().collect();
         b.push(RawEntry {
@@ -564,6 +707,86 @@ mod tests {
                 stats: HashMap::new(),
                 links: HashMap::from([(frn, snapshot)]),
             },
+        }
+    }
+
+    /// The mutation phase runs under the index write lock, where a blocking
+    /// raw-volume read would stall every concurrent query. Its signature
+    /// already forbids one, but that only helps if planning actually resolved
+    /// everything: the source here is *dropped* before a single row is
+    /// mutated, so any value the plan failed to prefetch shows up as a
+    /// carried-over/zeroed column rather than as a silent extra `stat` call.
+    /// One record per branch that can consume a stat — reconciled link set,
+    /// create, in-place stat update.
+    #[test]
+    fn planning_carries_every_volume_answer_the_mutation_needs() {
+        let mut idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let parent_a = frn(1, 10);
+        let parent_b = frn(1, 20);
+        let created = frn(1, 200);
+        let batch = [
+            rec_full(
+                object,
+                parent_a,
+                reason::HARD_LINK_CHANGE | reason::CLOSE,
+                0x20,
+                "shared.txt",
+            ),
+            rec_full(
+                created,
+                parent_b,
+                reason::FILE_CREATE | reason::CLOSE,
+                0x20,
+                "created.txt",
+            ),
+        ];
+
+        let plan = {
+            let fetch = MetadataSource::map_with_links(
+                HashMap::from([(object, (500, FT1)), (created, (700, FT1))]),
+                HashMap::from([(
+                    object,
+                    vec![
+                        LinkInfo {
+                            parent_frn: parent_a,
+                            name: u16s("shared.txt"),
+                        },
+                        LinkInfo {
+                            parent_frn: parent_b,
+                            name: u16s("alias.txt"),
+                        },
+                    ],
+                )]),
+            );
+            plan_batch(&idx, &batch, &fetch)
+        };
+        let stats = apply_planned(&mut idx, &batch, plan);
+
+        assert_eq!(stats.stat_failures, 0, "no branch fell back to a live read");
+        assert_eq!(stats.stat_updated, 1, "the retained links were refreshed");
+        for id in idx.entries_by_frn(Frn(object)) {
+            assert_eq!((idx.size(id), idx.mtime(id)), (500, FT1));
+        }
+        let new_id = idx.entry_by_frn(Frn(created)).expect("the create applied");
+        assert_eq!((idx.size(new_id), idx.mtime(new_id)), (700, FT1));
+
+        // Third branch: an in-place stat update of an existing object.
+        let touch = [rec_full(
+            object,
+            parent_a,
+            reason::DATA_EXTEND | reason::CLOSE,
+            0x20,
+            "shared.txt",
+        )];
+        let plan = {
+            let fetch = MetadataSource::constant(9_001, FT0);
+            plan_batch(&idx, &touch, &fetch)
+        };
+        let stats = apply_planned(&mut idx, &touch, plan);
+        assert_eq!((stats.stat_updated, stats.stat_failures), (1, 0));
+        for id in idx.entries_by_frn(Frn(object)) {
+            assert_eq!((idx.size(id), idx.mtime(id)), (9_001, FT0));
         }
     }
 
@@ -1117,7 +1340,7 @@ mod tests {
     }
 
     fn exclusion_index() -> VolumeIndex {
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         let hidden: Vec<u16> = "hidden".encode_utf16().collect();
         let visible: Vec<u16> = "visible".encode_utf16().collect();
         let subtree: Vec<u16> = "subtree".encode_utf16().collect();

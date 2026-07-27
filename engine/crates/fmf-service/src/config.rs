@@ -1,9 +1,16 @@
-//! Machine-wide service config: `%ProgramData%\find-my-files\service.json`
-//! (docs/ARCHITECTURE.md "Pipe protocol" §machine-wide settings).
+//! Machine-wide service config: `%ProgramData%\find-my-files\service.json`.
 //!
-//! Owned by the service; `install` (P4) seeds it with the captured user SID.
+//! Owned by the service and kept separate from the per-user UI settings in
+//! `%APPDATA%`; `install` seeds it with the captured user SID.
+//!
+//! The schema is closed (`deny_unknown_fields`): an unknown or obsolete key
+//! makes the installed service refuse to start rather than run on a
+//! half-understood configuration — a silently ignored `authorized_sids`
+//! spelling would be a security hole, not a typo.
 
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(test)]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -139,8 +146,17 @@ impl ServiceConfig {
     /// # Errors
     /// Returns `NotFound`, I/O, or `InvalidData` for malformed JSON.
     pub fn try_load(path: &Path) -> std::io::Result<Self> {
+        Self::try_load_file(std::fs::File::open(path)?)
+    }
+
+    /// Reads and validates one persisted config from an already verified file
+    /// handle. Privileged callers use this to avoid reopening a checked path.
+    ///
+    /// # Errors
+    /// Returns I/O or `InvalidData` for an oversized or malformed config.
+    pub fn try_load_file(mut file: std::fs::File) -> std::io::Result<Self> {
         let mut bytes = Vec::new();
-        std::fs::File::open(path)?
+        Read::by_ref(&mut file)
             .take(MAX_SERVICE_CONFIG_BYTES + 1)
             .read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_SERVICE_CONFIG_BYTES {
@@ -153,6 +169,16 @@ impl ServiceConfig {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Serializes a validated config for publication by a trusted filesystem
+    /// boundary.
+    ///
+    /// # Errors
+    /// Returns `InvalidData` for an invalid setting or a serialization error.
+    pub fn to_json_bytes(&self) -> std::io::Result<Vec<u8>> {
+        self.validate()?;
+        serde_json::to_vec_pretty(self).map_err(std::io::Error::other)
     }
 
     /// Console/dev policy: a missing or corrupt config warns and uses defaults.
@@ -181,17 +207,15 @@ impl ServiceConfig {
         }
     }
 
-    /// Writes through a sibling temporary file and atomically replaces the
-    /// destination, so power loss cannot leave a partially serialized config.
-    ///
-    /// # Errors
-    /// Propagates serialization, create/write/sync, cleanup, or replace errors.
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        self.validate()?;
+    /// Test-only path writer. Production machine configuration is published
+    /// exclusively through `TrustedDataRoot::atomic_write`, which binds creation
+    /// and replacement to the verified root handle.
+    #[cfg(test)]
+    pub(crate) fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        let json = self.to_json_bytes()?;
         let temporary = path.with_extension("json.tmp");
         match std::fs::remove_file(&temporary) {
             Ok(()) => {}
@@ -218,6 +242,7 @@ impl ServiceConfig {
     }
 }
 
+#[cfg(test)]
 fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::GetLastError;

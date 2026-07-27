@@ -132,7 +132,8 @@
     "deferred_name_read_failures": 74,
     "pipe_results_evicted": 75,
     "trace_serialize_failures": 76,
-    "hard_link_refresh_failures": 77
+    "hard_link_refresh_failures": 77,
+    "usn_index_rejections": 78
   },
   "recent_errors": [
     {

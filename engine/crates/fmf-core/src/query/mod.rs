@@ -1,5 +1,5 @@
 //! Query engine: text → AST → compiled matchers → parallel scan →
-//! materialized, sort-ordered result (docs/ARCHITECTURE.md).
+//! materialized, sort-ordered result.
 //!
 //! Syntax (core):
 //! `space`=AND, `|`=OR (weakest), `!`=NOT, `"..."`=phrase, `*`/`?` wildcards
@@ -27,7 +27,7 @@ pub use dates::{DateResolver, UtcResolver};
 pub use exec::{SearchMetrics, SearchResult, search};
 pub(crate) use exec::{refine_cancellable, search_cancellable};
 pub use fmf_contract::options::RegexScope;
-pub use memo::{derived_cache_bytes, prewarm};
+pub use memo::derived_cache_bytes;
 pub(crate) use subsume::subsumes;
 
 use crate::index::SortKey;

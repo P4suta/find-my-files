@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 
 use super::{QueryCancellation, QueryCancelled};
-use crate::index::{EntryId, SortKey, VolumeIndex};
+use crate::index::{DerivedValidity, EntryId, SortKey, VolumeIndex};
 
 // ── Lazy sort permutations (generation-cached) ──────────────────────────
 
@@ -10,20 +10,35 @@ use crate::index::{EntryId, SortKey, VolumeIndex};
 /// insertion-point in-place merge the name permutation uses, through the
 /// same `cmp_by` order (ADR-0006).
 ///
-/// Never persisted: a snapshot restore re-sorts on first use, which also
-/// resets any staleness in-place stat updates accumulated.
+/// Existing-row stat changes force a full lazy rebuild before the next
+/// size/mtime query; append-only batches retain the incremental extension.
+/// Never persisted: a snapshot restore re-sorts on first use.
 #[derive(Clone)]
 pub(super) struct SortPerm {
     pub(super) ids: Vec<EntryId>,
     /// Entries `[0, covers)` are placed; a generation step sorts and
     /// merges only the ids past the watermark.
     covers: u32,
+    /// Exact stat-column revision used to order `ids`.
+    stat_generation: u64,
 }
 
 /// Size order — its own derived-cache slot (TypeId-keyed).
 pub(super) struct SizePerm(pub(super) SortPerm);
 /// Mtime order — separate slot.
 pub(super) struct MtimePerm(pub(super) SortPerm);
+
+impl DerivedValidity for SizePerm {
+    fn is_current(&self, index: &VolumeIndex) -> bool {
+        self.0.is_current(index)
+    }
+}
+
+impl DerivedValidity for MtimePerm {
+    fn is_current(&self, index: &VolumeIndex) -> bool {
+        self.0.is_current(index)
+    }
+}
 
 impl SizePerm {
     #[cfg(test)]
@@ -55,6 +70,12 @@ impl SizePerm {
 }
 
 impl MtimePerm {
+    #[cfg(test)]
+    pub(super) fn get(idx: &VolumeIndex) -> std::sync::Arc<Self> {
+        Self::get_cancellable(idx, &QueryCancellation::new())
+            .expect("fresh cancellation token cannot cancel")
+    }
+
     pub(super) fn get_cancellable(
         idx: &VolumeIndex,
         cancellation: &QueryCancellation,
@@ -101,6 +122,15 @@ impl From<MtimePerm> for SortPerm {
 }
 
 impl SortPerm {
+    /// Reusable exactly when the stat columns still carry the revision this
+    /// order was computed from *and* every row is placed. The watermark half
+    /// is what stops a cache hit from answering with fewer ids than the index
+    /// holds — the same completeness rule `extend_cancellable` enforces, now
+    /// also on the path that never calls it.
+    const fn is_current(&self, index: &VolumeIndex) -> bool {
+        self.stat_generation == index.stat_generation() && self.covers as usize == index.len()
+    }
+
     #[cfg(test)]
     fn build(idx: &VolumeIndex, key: SortKey) -> Self {
         Self::build_cancellable(idx, key, &QueryCancellation::new())
@@ -116,6 +146,7 @@ impl SortPerm {
         Ok(Self {
             ids,
             covers: idx.len() as u32,
+            stat_generation: idx.stat_generation(),
         })
     }
 
@@ -133,6 +164,9 @@ impl SortPerm {
     ) -> Result<Self, QueryCancelled> {
         cancellation.check()?;
         let n = idx.len() as u32;
+        if perm.stat_generation != idx.stat_generation() {
+            return Self::build_cancellable(idx, key, cancellation);
+        }
         // Entries are append-only within a structural generation — a
         // regressed watermark means the cache got crossed with a different
         // index. Rebuilding recovers; the fact must not vanish.
@@ -256,6 +290,18 @@ pub(super) struct DirTopology {
     covers_entries: usize,
     /// The dir-topology generation this cache is valid for.
     topo_generation: u64,
+}
+
+impl DerivedValidity for DirTopology {
+    /// Same two-part rule as [`SortPerm::is_current`]: the topology revision
+    /// must match and every row must have a sanitized parent. The second half
+    /// is load-bearing — `append_parent_path` indexes `parents` by `EntryId`,
+    /// so answering a query from a topology that predates appended rows is an
+    /// out-of-bounds panic, not a merely stale path.
+    fn is_current(&self, index: &VolumeIndex) -> bool {
+        self.topo_generation == index.dir_topology_generation()
+            && self.covers_entries == index.len()
+    }
 }
 
 impl DirTopology {
@@ -494,15 +540,6 @@ impl PathMemos {
     }
 }
 
-/// Build the pool offset table ahead of the first query — the engine calls
-/// this once a volume turns Ready so no keystroke pays the cold cost.
-///
-/// Prewarm derived caches at Ready. A no-op since ADR-0032 removed the
-/// offset-table cache (the name dictionary is resident from build/restore):
-/// the lazy sort and compact path topology are intentionally built on demand —
-/// most sessions never sort by size/mtime or issue a path query.
-pub const fn prewarm(_idx: &VolumeIndex) {}
-
 /// Bytes currently held by this index's derived caches (dir-path memos and
 /// the lazy sort permutations), for the RAM accounting in `IndexStats`.
 /// Probes only — never builds.
@@ -527,10 +564,31 @@ mod tests {
     use super::*;
     use crate::index::VolumeIndexBuilder;
     use crate::index::testutil::{build_sample, raw, u16s};
+    use crate::query::{CaseMode, QueryOptions, UtcResolver, compile, parse, search};
+
+    /// Resolve a query the way production does. `query::search` (through
+    /// `exec::path_memos`) is the only place the cached directory topology is
+    /// consulted, so a test that calls `DirTopology::build`/`extend_from`
+    /// directly never reaches the cache-*hit* branch — the one branch that
+    /// runs no builder and therefore validates nothing on its own.
+    fn search_sorted(idx: &VolumeIndex, text: &str, sort: SortKey) -> Vec<EntryId> {
+        let ast = parse(text).expect("test query parses");
+        let compiled = compile(&ast, CaseMode::Smart, &UtcResolver).expect("test query compiles");
+        search(
+            idx,
+            &compiled,
+            &QueryOptions {
+                sort,
+                ..Default::default()
+            },
+        )
+        .0
+        .ids
+    }
 
     /// A 60-deep directory chain plus a multibyte directory and files.
     fn deep_index() -> VolumeIndex {
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         for i in 0..60u64 {
             let name = u16s(&format!("d{i:02}"));
             let parent = if i == 0 { 5 } else { 99 + i };
@@ -621,7 +679,7 @@ mod tests {
     #[test]
     fn very_deep_chain_uses_linear_cache_and_keeps_the_complete_path() {
         const DEPTH: u64 = 10_000;
-        let mut builder = VolumeIndexBuilder::new("C:", 5);
+        let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
         let component = u16s("x");
         for offset in 0..DEPTH {
             let record = 10 + offset;
@@ -658,34 +716,39 @@ mod tests {
         // and a nested dir under the *new* dir (parent inside the batch).
         let first_new = idx.len() as u32;
         let new_dir = u16s("new_dir");
-        idx.upsert(&raw(500, 110, &new_dir, true, 0, 1));
+        idx.upsert_synthetic(&raw(500, 110, &new_dir, true, 0, 1));
         let new_file = u16s("new_file.txt");
-        idx.upsert(&raw(501, 500, &new_file, false, 1, 2));
+        idx.upsert_synthetic(&raw(501, 500, &new_file, false, 1, 2));
         let nested = u16s("nested");
-        idx.upsert(&raw(502, 500, &nested, true, 0, 3));
-        idx.merge_new_into_permutations(first_new);
+        idx.upsert_synthetic(&raw(502, 500, &nested, true, 0, 3));
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
         let topology = DirTopology::extend_from(&idx, Arc::new(topology));
         assert_same_as_fresh(&idx, &topology, "append generation");
 
         // Gen step 2: in-place dir rename — topology bump, extend must
         // rebuild and descendants must reflect the new name.
         let renamed = u16s("renamed_mid");
-        idx.rename_dir_in_place(110, &renamed, 109).unwrap();
-        idx.merge_new_into_permutations(idx.len() as u32);
+        idx.rename_dir_synthetic_in_place(110, &renamed, 109)
+            .unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
         let topology = DirTopology::extend_from(&idx, Arc::new(topology));
         assert_same_as_fresh(&idx, &topology, "rename generation");
 
         // Gen step 3: dir move (reparent) — also a topology bump.
-        idx.reparent(500, 100).unwrap();
-        idx.merge_new_into_permutations(idx.len() as u32);
+        idx.reparent_synthetic(500, 100).unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
         let topology = DirTopology::extend_from(&idx, Arc::new(topology));
         assert_same_as_fresh(&idx, &topology, "reparent generation");
 
         // File-only batches keep the fast path: same topology generation.
         let first_new = idx.len() as u32;
         let f2 = u16s("plain.txt");
-        idx.upsert(&raw(503, 100, &f2, false, 1, 4));
-        idx.merge_new_into_permutations(first_new);
+        idx.upsert_synthetic(&raw(503, 100, &f2, false, 1, 4));
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
         let topo_before = idx.dir_topology_generation();
         let topology = DirTopology::extend_from(&idx, Arc::new(topology));
         assert_eq!(idx.dir_topology_generation(), topo_before);
@@ -697,12 +760,15 @@ mod tests {
         let mut idx = deep_index();
         // In-place rename of a mid-chain dir: every descendant path shifts.
         let renamed = u16s("Renamed_D10");
-        idx.rename_dir_in_place(110, &renamed, 109).unwrap();
-        idx.merge_new_into_permutations(idx.len() as u32);
+        idx.rename_dir_synthetic_in_place(110, &renamed, 109)
+            .unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
         assert_memo_matches_oracle(&idx);
         // Move a subtree (d30 under d02): depths change levels.
-        idx.reparent(130, 102).unwrap();
-        idx.merge_new_into_permutations(idx.len() as u32);
+        idx.reparent_synthetic(130, 102).unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
         assert_memo_matches_oracle(&idx);
     }
 
@@ -723,12 +789,12 @@ mod tests {
             // Distinct post-1970 mtimes so the lazy Mtime permutation exercises
             // a real ordering across generations (ADR-0031).
             let mtime = crate::query::dates::FILETIME_UNIX_EPOCH + (g as i64 + 1) * 864_000_000_000;
-            idx.upsert(&raw(record, 50, &name, false, size, mtime));
+            idx.upsert_synthetic(&raw(record, 50, &name, false, size, mtime));
             if g % 3 == 0 {
                 idx.delete(200 + g / 2);
             }
-            idx.merge_new_into_permutations(first_new);
-
+            idx.merge_new_into_permutations(first_new)
+                .expect("fixture topology remains valid");
             size_perm = SortPerm::extend(&idx, size_perm, SortKey::Size);
             mtime_perm = SortPerm::extend(&idx, mtime_perm, SortKey::Mtime);
             assert_eq!(
@@ -744,31 +810,71 @@ mod tests {
         }
     }
 
-    /// The cached lazy permutation survives stat updates as a complete
-    /// permutation (stale positions are pinned behavior), and `get`
-    /// caches within a generation / extends across one.
     #[test]
-    fn size_perm_get_caches_and_stays_complete_under_stat_updates() {
+    fn size_and_mtime_perms_rebuild_when_existing_keys_reverse_order() {
         let mut idx = build_sample();
-        let p1 = SizePerm::get(&idx);
-        let p2 = SizePerm::get(&idx);
-        assert!(Arc::ptr_eq(&p1, &p2), "same generation must cache-hit");
-        drop((p1, p2));
+        let note = idx.entry_by_record(100).unwrap();
+        let big = idx.entry_by_record(60).unwrap();
 
-        idx.update_stat(100, 999_999, 1).unwrap();
-        idx.merge_new_into_permutations(idx.len() as u32);
-        let p3 = SizePerm::get(&idx);
-        let mut seen: Vec<u32> = p3.0.ids.clone();
-        seen.sort_unstable();
-        assert_eq!(seen, (0..idx.len() as u32).collect::<Vec<_>>());
+        let size_before = SizePerm::get(&idx);
+        assert!(
+            position(&size_before.0.ids, note) < position(&size_before.0.ids, big),
+            "fixture must initially order Note.TXT before big.bin by size"
+        );
+        assert!(
+            Arc::ptr_eq(&size_before, &SizePerm::get(&idx)),
+            "unchanged stat generation must cache-hit"
+        );
+
+        // No content-generation boundary here: mutation-time invalidation is
+        // required so an interleaved query cannot observe a stale order.
+        idx.update_stat(100, 999_999, 300).unwrap();
+        let size_after = SizePerm::get(&idx);
+        assert!(
+            position(&size_after.0.ids, big) < position(&size_after.0.ids, note),
+            "an existing row whose size crosses another row must be repositioned"
+        );
+        assert_eq!(
+            size_after.0.ids,
+            SortPerm::build(&idx, SortKey::Size).ids,
+            "cached size order must equal a fresh exact sort"
+        );
+
+        let epoch = crate::query::dates::FILETIME_UNIX_EPOCH;
+        idx.update_stat(100, 999_999, epoch + 10 * 10_000_000)
+            .unwrap();
+        idx.update_stat(60, 99_999, epoch + 20 * 10_000_000)
+            .unwrap();
+        let mtime_before = MtimePerm::get(&idx);
+        assert!(
+            position(&mtime_before.0.ids, note) < position(&mtime_before.0.ids, big),
+            "fixture must initially order Note.TXT before big.bin by mtime"
+        );
+
+        idx.update_stat(100, 999_999, epoch + 30 * 10_000_000)
+            .unwrap();
+        let mtime_after = MtimePerm::get(&idx);
+        assert!(
+            position(&mtime_after.0.ids, big) < position(&mtime_after.0.ids, note),
+            "an existing row whose mtime crosses another row must be repositioned"
+        );
+        assert_eq!(
+            mtime_after.0.ids,
+            SortPerm::build(&idx, SortKey::Mtime).ids,
+            "cached mtime order must equal a fresh exact sort"
+        );
+    }
+
+    fn position(ids: &[EntryId], wanted: EntryId) -> usize {
+        ids.iter()
+            .position(|&id| id == wanted)
+            .expect("permutation must contain every entry")
     }
 
     #[test]
     fn dir_topology_is_lazy_and_accounted_once() {
         let idx = build_sample();
-        // Nothing is cached until a path query builds it — `prewarm` is a
-        // no-op since ADR-0032 removed the offset-table cache.
-        prewarm(&idx);
+        // Nothing is cached until a path query builds it.
         assert!(idx.derived_probe::<DirTopology>().is_none());
         assert_eq!(
             derived_cache_bytes(&idx),
@@ -776,13 +882,57 @@ mod tests {
             "no derived caches until a query"
         );
 
-        let _ = idx.cached_derived_or_update(|prev| match prev {
-            Some(p) => DirTopology::extend_from(&idx, p),
-            None => DirTopology::build(&idx),
-        });
+        // A name-only query still builds nothing.
+        let _ = search_sorted(&idx, "note", SortKey::Name);
+        assert!(idx.derived_probe::<DirTopology>().is_none());
+
+        let _ = search_sorted(&idx, "path:c", SortKey::Name);
         assert!(
             derived_cache_bytes(&idx) > 0,
             "the topology joins derived-cache accounting"
+        );
+    }
+
+    /// A derived-cache *hit* runs no builder, so the only thing standing
+    /// between a query and an out-of-bounds `parents` index is
+    /// `DerivedValidity::is_current`. Rows can outlive the content generation
+    /// they were appended under (a USN batch the index rejected used to leave
+    /// exactly that state behind), and the topology is keyed by that
+    /// generation — so its own coverage watermark has to be the thing that
+    /// catches it.
+    #[test]
+    fn cached_dir_topology_is_revalidated_against_rows_appended_without_a_generation_bump() {
+        let mut idx = deep_index();
+        // Prime the cache through the production entry point.
+        assert!(!search_sorted(&idx, "path:日本語 note", SortKey::Name).is_empty());
+        let cached = idx
+            .derived_probe::<DirTopology>()
+            .expect("a path query caches the topology");
+        assert_eq!(cached.covers_entries, idx.len());
+
+        let generation = idx.content_generation();
+        let name = u16s("appended-note.txt");
+        idx.upsert_synthetic(&raw(900, 300, &name, false, 5, 7));
+        assert_eq!(
+            idx.content_generation(),
+            generation,
+            "no batch boundary ran, so the cache key did not move"
+        );
+        assert!(idx.len() > cached.covers_entries);
+
+        // Size order materializes ids the name permutation does not carry
+        // yet, so the path matcher reaches the appended row.
+        let appended = idx.entry_by_record(900).expect("the appended row is live");
+        assert_eq!(
+            search_sorted(&idx, "path:日本語 appended-note", SortKey::Size),
+            vec![appended]
+        );
+        assert_eq!(
+            idx.derived_probe::<DirTopology>()
+                .expect("the topology stays cached")
+                .covers_entries,
+            idx.len(),
+            "the rejected value was extended, not returned as-is"
         );
     }
 
@@ -791,13 +941,13 @@ mod tests {
         // Corrupt USN records can produce a parent cycle (a→b→a). Cycle
         // members must come out root-attached, with paths intact — not
         // abort via a u32::MAX depth poisoning the level-table size.
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         let (da, db, f) = (u16s("a"), u16s("b"), u16s("f.txt"));
         b.push(raw(10, 5, &da, true, 0, 1));
         b.push(raw(20, 10, &db, true, 0, 2));
         b.push(raw(30, 20, &f, false, 1, 3));
         let mut idx = b.finish();
-        idx.reparent(10, 20).unwrap(); // a under b while b is under a — cycle
+        idx.reparent_synthetic(10, 20).unwrap(); // a under b while b is under a — cycle
         let a = idx.entry_by_record(10).unwrap();
         let bb = idx.entry_by_record(20).unwrap();
         let file = idx.entry_by_record(30).unwrap();

@@ -15,16 +15,22 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::metrics::{Counters, ScanTrace, UsnTrace};
-use crate::usn::{JournalGone, ReadOutcome, UsnError, UsnRecord, apply_batch};
+use crate::usn::apply::{apply_planned, plan_batch};
+use crate::usn::{JournalGone, ReadOutcome, UsnError, UsnRecord};
 
 use super::seams::{JournalSource, JournalView, WinJournalSource};
 use super::volume::{JournalCheckpoint, VolumeSlot};
 use super::{Engine, EngineEvent, VolumeState};
 
 /// Engine-side debounce for `IndexChanged` — the only event-rate throttle in
-/// the whole change path (the tail loop's ≤250ms idle-edge read park is a
-/// discovery-latency floor, not a rate throttle; docs/ARCHITECTURE.md latency
-/// budget).
+/// the whole change path, deliberately placed here so no consumer adds a
+/// second one.
+///
+/// The tail loop's ≤250ms idle-edge read park is a discovery-latency floor,
+/// not a throttle. Together with a ≤100ms batch commit, a ≤100ms UI re-query
+/// and ≤100ms of render, this 200ms is what keeps the worst-case
+/// change-to-screen latency inside the ≤1s acceptance criterion (≤500ms once
+/// the volume is busy, since a busy tail loop never parks).
 const INDEX_CHANGED_DEBOUNCE: Duration = Duration::from_millis(200);
 
 /// How the worker establishes a volume's index at the top of its loop.
@@ -111,6 +117,10 @@ pub(super) enum RescanCause {
     /// The Ready-state index unexpectedly disappeared before a journal batch
     /// could be applied. Advancing its checkpoint would lose the batch.
     IndexUnavailable,
+    /// The live index refused a journal record because applying it would have
+    /// broken a topology invariant. Checkpointing past it would leave the
+    /// index permanently disagreeing with the volume.
+    IndexRejected,
 }
 
 /// Pure decision: classify one blocking-read outcome into the worker's
@@ -179,7 +189,7 @@ impl Engine {
             *slot.phase.lock() = VolumeState::Failed;
             self.emit(EngineEvent::VolumeFailed {
                 volume: slot.label.clone(),
-                message: "internal panic — engine.log に詳細".to_string(),
+                message: "internal panic — エンジンログに詳細".to_string(),
             });
         }
     }
@@ -405,12 +415,6 @@ impl Engine {
                 volume: label.clone(),
                 entries,
             });
-            // Prewarm the query accelerators (dir-path memo, offset table)
-            // so the first keystroke never pays the cold-cache cost.
-            if let Some(idx) = slot.index.read().as_ref() {
-                crate::query::prewarm(idx);
-            }
-
             // 2. Tail the journal until stop or a condition requiring a clean
             // rebuild.
             let mut buf = Vec::new();
@@ -454,6 +458,22 @@ impl Engine {
                             continue;
                         }
                         let mut rescan = None;
+                        let stage = crate::metrics::Stage::start();
+                        // Resolve the batch's volume reads (complete hard-link
+                        // sets, size/mtime) under a *shared* lock. They are
+                        // blocking raw-volume round-trips; running them inside
+                        // the write guard below would block every concurrent
+                        // query for as long as the disk takes, which the
+                        // single-digit-millisecond search budget cannot absorb.
+                        // This worker is the index's only writer, so nothing
+                        // can mutate between the two phases.
+                        let Some(plan) = ({
+                            let index = slot.index.read();
+                            index.as_ref().map(|idx| plan_batch(idx, &rs, &fetch))
+                        }) else {
+                            begin_rescan(RescanCause::IndexUnavailable);
+                            break;
+                        };
                         {
                             let mut index = slot.index.write();
                             let Some(idx) = index.as_mut() else {
@@ -461,8 +481,7 @@ impl Engine {
                                 begin_rescan(RescanCause::IndexUnavailable);
                                 break;
                             };
-                            let stage = crate::metrics::Stage::start();
-                            let s = apply_batch(idx, &rs, &fetch);
+                            let s = apply_planned(idx, &rs, plan);
                             if s.stat_failures > 0 {
                                 crate::degrade!(
                                     self.metrics.counters.stat_fetch_failures,
@@ -481,8 +500,21 @@ impl Engine {
                                     "hard-link refresh failed; journal batch rejected"
                                 );
                             }
+                            if s.index_rejections > 0 {
+                                crate::degrade!(
+                                    self.metrics.counters.usn_index_rejections,
+                                    count = u64::from(s.index_rejections),
+                                    volume = %label,
+                                    rejections = s.index_rejections,
+                                    "journal records would have broken an index invariant; batch rejected"
+                                );
+                            }
                             if s.rescan_required {
-                                rescan = Some(RescanCause::MetadataRefreshFailed);
+                                rescan = Some(if s.index_rejections > 0 {
+                                    RescanCause::IndexRejected
+                                } else {
+                                    RescanCause::MetadataRefreshFailed
+                                });
                             }
                             self.metrics.record_usn(UsnTrace {
                                 volume: label.clone(),
@@ -576,9 +608,6 @@ impl Engine {
             return;
         }
         slot.install_index(compacted.0);
-        if let Some(idx) = slot.index.read().as_ref() {
-            crate::query::prewarm(idx);
-        }
     }
 }
 

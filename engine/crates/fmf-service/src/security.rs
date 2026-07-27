@@ -7,9 +7,16 @@
 //! `pipe_security_attributes`.
 
 use std::io;
+use std::io::Seek as _;
+use std::io::Write as _;
+use std::os::windows::ffi::OsStrExt as _;
+use std::os::windows::io::AsRawHandle as _;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, ERROR_NONE_MAPPED, GetLastError, HANDLE, LocalFree,
+    ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER,
+    ERROR_NONE_MAPPED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -149,6 +156,1686 @@ impl Drop for PipeSecurity {
     fn drop(&mut self) {
         unsafe { LocalFree(self.descriptor) };
     }
+}
+
+const DELETE_ACCESS: u32 = 0x0001_0000;
+const READ_CONTROL_ACCESS: u32 = 0x0002_0000;
+const WRITE_DAC_ACCESS: u32 = 0x0004_0000;
+const WRITE_OWNER_ACCESS: u32 = 0x0008_0000;
+const GENERIC_READ_ACCESS: u32 = 0x8000_0000;
+const GENERIC_WRITE_ACCESS: u32 = 0x4000_0000;
+const FILE_LIST_DIRECTORY_ACCESS: u32 = 0x0000_0001;
+const FILE_ADD_FILE_ACCESS: u32 = 0x0000_0002;
+const FILE_ADD_SUBDIRECTORY_ACCESS: u32 = 0x0000_0004;
+const FILE_TRAVERSE_ACCESS: u32 = 0x0000_0020;
+const FILE_READ_ATTRIBUTES_ACCESS: u32 = 0x0000_0080;
+const SECURITY_WRITE_ACCESS: u32 =
+    READ_CONTROL_ACCESS | WRITE_DAC_ACCESS | WRITE_OWNER_ACCESS | FILE_READ_ATTRIBUTES_ACCESS;
+const MAX_MANAGED_TREE_DEPTH: usize = 64;
+const MAX_MANAGED_TREE_OBJECTS: usize = 100_000;
+const PROVENANCE_KEY: &str = r"SOFTWARE\find-my-files";
+const PROVENANCE_VALUE: &str = "DataRootIdentityV1";
+const PROVENANCE_MAGIC: &[u8; 4] = b"FMR1";
+
+static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObjectKind {
+    File,
+    Directory,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObjectIdentity {
+    volume_serial: u32,
+    file_id: u64,
+}
+
+#[cfg(any(test, debug_assertions))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Opaque exact-object identity used only by the arbitrary-parent test seam.
+pub struct TestRootProvenance(ObjectIdentity);
+
+#[derive(Debug)]
+struct LockedObject {
+    file: std::fs::File,
+    identity: ObjectIdentity,
+    kind: ObjectKind,
+}
+
+/// An exact, non-reparse, singly-linked source file whose write/delete sharing
+/// is excluded for the lifetime of this guard.
+#[derive(Debug)]
+pub struct TrustedSourceFile(LockedObject);
+
+impl TrustedSourceFile {
+    /// Pins a regular source file before a privileged copy.
+    ///
+    /// # Errors
+    /// Returns `InvalidData` for a reparse point/type mismatch/hard link,
+    /// `SharingViolation` when a writer/deleter already has the file open, or
+    /// the underlying Win32 error.
+    pub fn open(path: &Path) -> io::Result<Self> {
+        open_checked(
+            path,
+            Some(ObjectKind::File),
+            GENERIC_READ_ACCESS | FILE_READ_ATTRIBUTES_ACCESS,
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+        )
+        .map(Self)
+    }
+}
+
+/// A verified, pinned `%ProgramData%\find-my-files` tree.
+///
+/// Construction opens the Known-Folder-resolved `ProgramData` directory and
+/// the fixed `find-my-files` child with `FILE_FLAG_OPEN_REPARSE_POINT`. The
+/// construction first excludes write/delete sharing so every pre-existing data
+/// or delete mutation handle fails closed. After the exact owner/group/DACL is
+/// installed and read back, the same object identity is reopened for operation
+/// with write sharing (needed by child renames) but still without delete
+/// sharing. The protected DACL denies unprivileged writers, while the live
+/// delete lease prevents replacement of the fixed root name. Security-only
+/// handles are neutralized by requiring protected object-identity provenance or
+/// rotating the old object out of the privileged fixed name.
+///
+/// Existing descendants are likewise locked before their owner/group/DACL is
+/// changed on that same handle. Reparse points and multiply-linked files are
+/// rejected rather than followed.
+#[derive(Debug)]
+pub struct TrustedDataRoot {
+    root: LockedObject,
+    program_data_guard: std::fs::File,
+    path: PathBuf,
+    quarantined_root: Option<PathBuf>,
+}
+
+impl TrustedDataRoot {
+    /// Creates or opens the fixed Known-Folder-resolved machine data root.
+    ///
+    /// An existing object is reused only when its NTFS identity matches the
+    /// identity pinned in the protected HKLM provenance key. A provenance-less
+    /// object is renamed out of the privileged fixed name without modifying its
+    /// ACL or walking its descendants; a fresh protected directory is then
+    /// created. This is deliberately stricter than repairing an arbitrary
+    /// pre-existing `ProgramData` child in place: changing a DACL does not revoke
+    /// a standard user's already-open `WRITE_DAC`/`WRITE_OWNER` handle.
+    ///
+    /// # Errors
+    /// Returns Known Folder, registry, reparse/type/link, sharing, or ACL errors.
+    pub fn create_or_harden_machine(sddl: &str) -> io::Result<Self> {
+        let path = crate::config::default_data_dir()?;
+        let expected = read_root_provenance()?;
+        Self::create_or_harden_at(&path, sddl, expected, true)
+    }
+
+    /// Opens the existing fixed machine root only when its current NTFS object
+    /// identity matches the protected HKLM provenance record.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for an absent root, `PermissionDenied` for missing or
+    /// mismatched provenance, or the same fail-closed errors as
+    /// [`Self::create_or_harden_machine`].
+    pub fn open_and_harden_machine(sddl: &str) -> io::Result<Self> {
+        let path = crate::config::default_data_dir()?;
+        let expected = read_root_provenance()?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "machine data root has no protected provenance record",
+            )
+        })?;
+        let (program_data_path, _) = validate_machine_root_path(&path)?;
+        let program_data = open_checked(
+            program_data_path,
+            Some(ObjectKind::Directory),
+            FILE_READ_ATTRIBUTES_ACCESS | FILE_ADD_SUBDIRECTORY_ACCESS | FILE_TRAVERSE_ACCESS,
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
+        )?;
+        let root = open_root(&path)?;
+        if root.identity != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "machine data root identity does not match protected provenance",
+            ));
+        }
+        if !handle_security_matches(&root.file, sddl)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "machine data root has an unexpected owner/group/DACL",
+            ));
+        }
+        Self::lock_and_harden(&path, program_data.file, root, sddl, None)
+    }
+
+    fn create_or_harden_at(
+        path: &Path,
+        sddl: &str,
+        expected: Option<ObjectIdentity>,
+        persist_provenance: bool,
+    ) -> io::Result<Self> {
+        let (program_data_path, _) = validate_machine_root_path(path)?;
+        let program_data = open_checked(
+            program_data_path,
+            Some(ObjectKind::Directory),
+            FILE_READ_ATTRIBUTES_ACCESS | FILE_ADD_SUBDIRECTORY_ACCESS | FILE_TRAVERSE_ACCESS,
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
+        )?;
+        let (root, quarantined_root) = match open_root(path) {
+            Ok(root) => {
+                // Provenance identifies the object, but it does not prove that
+                // its security descriptor still excludes an untrusted principal.
+                // Never repair a drifted root in place: a WRITE_DAC/WRITE_OWNER
+                // handle opened while it was weak would survive that repair.
+                let reusable =
+                    expected == Some(root.identity) && handle_security_matches(&root.file, sddl)?;
+                if reusable {
+                    (root, None)
+                } else {
+                    let quarantined_leaf =
+                        quarantine_untrusted_root(root.file, &program_data.file)?;
+                    (
+                        create_root_from_staging(path, sddl, &program_data.file)?,
+                        Some(program_data_path.join(quarantined_leaf)),
+                    )
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                // A reparse point or wrong-kind object is still safe to remove
+                // from the privileged fixed name: open the link/object itself,
+                // rename that exact handle, and never inspect its descendants.
+                let untrusted = open_untrusted_object_for_quarantine(path)?;
+                let quarantined_leaf = quarantine_untrusted_root(untrusted, &program_data.file)?;
+                (
+                    create_root_from_staging(path, sddl, &program_data.file)?,
+                    Some(program_data_path.join(quarantined_leaf)),
+                )
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (
+                create_root_from_staging(path, sddl, &program_data.file)?,
+                None,
+            ),
+            Err(error) => return Err(error),
+        };
+        let trusted = Self::lock_and_harden(path, program_data.file, root, sddl, quarantined_root)?;
+        if persist_provenance {
+            write_root_provenance(trusted.root.identity)?;
+        }
+        Ok(trusted)
+    }
+
+    fn lock_and_harden(
+        path: &Path,
+        program_data: std::fs::File,
+        root: LockedObject,
+        sddl: &str,
+        quarantined_root: Option<PathBuf>,
+    ) -> io::Result<Self> {
+        // Set a non-inheriting quarantine DACL first. SetSecurityInfo propagates
+        // inheritable ACEs to existing descendants; applying the final OI/CI
+        // descriptor before traversal could touch a junction target before we
+        // reject that reparse point.
+        set_handle_security(&root.file, &quarantine_sddl(sddl)?)?;
+        harden_descendants(path, sddl)?;
+        set_handle_security(&root.file, sddl)?;
+        if !handle_security_matches(&root.file, sddl)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "machine data root did not retain its final owner/group/DACL",
+            ));
+        }
+        let identity = root.identity;
+        // The strict admission lease intentionally denies write sharing, which
+        // also blocks this process's atomic child rename. Once the protected
+        // DACL is exact, release that admission-only lease and reopen the same
+        // identity with write sharing. An unprivileged process cannot enter the
+        // gap because the final DACL is already active; identity and DACL are
+        // both revalidated before the operational handle is published.
+        drop(root);
+        let root = open_operational_root(path)?;
+        if root.identity != identity || !handle_security_matches(&root.file, sddl)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "machine data root changed during strict-to-operational handoff",
+            ));
+        }
+        Ok(Self {
+            root,
+            program_data_guard: program_data,
+            path: path.to_path_buf(),
+            quarantined_root,
+        })
+    }
+
+    /// Explicit arbitrary-parent seam for adversarial integration tests. It is
+    /// absent from release builds and never consults or mutates HKLM.
+    ///
+    /// # Errors
+    /// Returns the same validation, sharing, creation, and ACL failures as the
+    /// production constructor, except registry provenance is deliberately absent.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn create_or_replace_for_test(path: &Path, sddl: &str) -> io::Result<Self> {
+        Self::create_or_harden_at(path, sddl, None, false)
+    }
+
+    /// Captures the current exact root identity for a subsequent test-only
+    /// provenance-verified reopen.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn provenance_for_test(&self) -> TestRootProvenance {
+        TestRootProvenance(self.root.identity)
+    }
+
+    /// Explicit arbitrary-parent reopen seam for adversarial integration tests.
+    ///
+    /// # Errors
+    /// Returns provenance mismatch, validation, sharing, traversal, or ACL errors.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn open_verified_for_test(
+        path: &Path,
+        provenance: TestRootProvenance,
+        sddl: &str,
+    ) -> io::Result<Self> {
+        Self::create_or_harden_at(path, sddl, Some(provenance.0), false)
+    }
+
+    /// Returns the verified root path for APIs that only accept a path.
+    ///
+    /// The returned name is safe to use only while this guard remains alive:
+    /// its root and `ProgramData` handles prevent replacement, and construction
+    /// has removed every untrusted mutation handle from the protected tree.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns the old provenance-less root name when install quarantined one.
+    /// The fixed privileged name already refers to a fresh protected object;
+    /// this path is informational and must never be trusted or traversed.
+    #[must_use]
+    pub fn quarantined_root(&self) -> Option<&Path> {
+        self.quarantined_root.as_deref()
+    }
+
+    /// Reapplies owner/group/protected-DACL policy to the already pinned root.
+    ///
+    /// # Errors
+    /// Returns SDDL conversion or `SetSecurityInfo` errors.
+    pub fn set_root_security(&self, sddl: &str) -> io::Result<()> {
+        set_handle_security(&self.root.file, sddl)
+    }
+
+    /// Creates one fixed direct child directory if absent and hardens its
+    /// complete existing subtree on verified handles.
+    ///
+    /// # Errors
+    /// Returns invalid-leaf, creation, type/reparse/link, sharing, or ACL errors.
+    pub fn ensure_directory(&self, leaf: &str, sddl: &str) -> io::Result<()> {
+        let path = self.child_path(leaf)?;
+        create_directory_with_security(&path, sddl)?;
+        let locked = harden_path(&path, Some(ObjectKind::Directory), sddl)?;
+        drop(locked);
+        Ok(())
+    }
+
+    /// Hardens one existing direct child directory and every descendant.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for an absent child or a fail-closed validation/ACL
+    /// error for the verified subtree.
+    pub fn harden_tree(&self, leaf: &str, sddl: &str) -> io::Result<()> {
+        let path = self.child_path(leaf)?;
+        let locked = harden_path(&path, Some(ObjectKind::Directory), sddl)?;
+        drop(locked);
+        Ok(())
+    }
+
+    /// Hardens one direct child file when it exists.
+    ///
+    /// # Errors
+    /// Returns validation/sharing/ACL errors. A missing file is a successful
+    /// no-op.
+    pub fn harden_file_if_exists(&self, leaf: &str, sddl: &str) -> io::Result<()> {
+        let path = self.child_path(leaf)?;
+        match harden_path(&path, Some(ObjectKind::File), sddl) {
+            Ok(locked) => {
+                drop(locked);
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Opens one direct child file for an exact, locked read.
+    ///
+    /// The returned `File` is the same handle whose type, reparse state, and
+    /// link count were verified; callers never reopen the path.
+    ///
+    /// # Errors
+    /// Returns open, sharing, type/reparse, or hard-link errors.
+    pub fn open_file_read(&self, leaf: &str) -> io::Result<std::fs::File> {
+        let path = self.child_path(leaf)?;
+        Ok(open_checked(
+            &path,
+            Some(ObjectKind::File),
+            GENERIC_READ_ACCESS | FILE_READ_ATTRIBUTES_ACCESS,
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+        )?
+        .file)
+    }
+
+    /// Reports whether an existing direct child file is the same NTFS object
+    /// as `other` (volume serial + file ID).
+    ///
+    /// # Errors
+    /// Returns validation or open errors other than a missing child.
+    pub fn child_is_same_file(&self, leaf: &str, other: &TrustedSourceFile) -> io::Result<bool> {
+        let child_path = self.child_path(leaf)?;
+        let child = match open_checked(
+            &child_path,
+            Some(ObjectKind::File),
+            FILE_READ_ATTRIBUTES_ACCESS,
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+        ) {
+            Ok(child) => child,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(child.identity == other.0.identity)
+    }
+
+    /// Atomically publishes `bytes` as one direct child using a new,
+    /// protected staging-file handle and a handle-relative rename.
+    ///
+    /// # Errors
+    /// Returns leaf/target validation, create/write/sync/ACL/rename, or exact
+    /// staging-handle cleanup errors.
+    pub fn atomic_write(&self, leaf: &str, bytes: &[u8], sddl: &str) -> io::Result<()> {
+        self.atomic_replace_with(leaf, sddl, |file| file.write_all(bytes))
+    }
+
+    /// Atomically copies `source` into one direct child using a new,
+    /// protected staging-file handle and a handle-relative rename.
+    ///
+    /// # Errors
+    /// Returns source/target validation, I/O, ACL, rename, or cleanup errors.
+    pub fn atomic_copy(
+        &self,
+        leaf: &str,
+        source: &TrustedSourceFile,
+        sddl: &str,
+    ) -> io::Result<()> {
+        self.atomic_replace_with(leaf, sddl, |destination| {
+            // `try_clone` duplicates this exact file object; it never resolves
+            // the source path again after trust validation.
+            let mut source = source.0.file.try_clone()?;
+            source.rewind()?;
+            io::copy(&mut source, destination)?;
+            Ok(())
+        })
+    }
+
+    fn atomic_replace_with(
+        &self,
+        leaf: &str,
+        sddl: &str,
+        write: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let target = self.child_path(leaf)?;
+        validate_replace_target(&target)?;
+        let (staging_leaf, mut staging) = self.create_staging_file(sddl)?;
+        let result = (|| {
+            write(&mut staging)?;
+            staging.flush()?;
+            staging.sync_all()?;
+            rename_handle_relative(&staging, &self.root.file, leaf)?;
+            Ok(())
+        })();
+        if let Err(primary) = result {
+            return match delete_handle(&staging) {
+                Ok(()) => Err(primary),
+                Err(cleanup) => Err(io::Error::new(
+                    primary.kind(),
+                    format!(
+                        "{primary}; exact staging-handle cleanup for {staging_leaf} also failed: {cleanup}"
+                    ),
+                )),
+            };
+        }
+        // The staging handle was deliberately opened with no sharing. After
+        // rename it names the published target, so release it before reporting
+        // success; otherwise an immediate reader would correctly receive
+        // ERROR_SHARING_VIOLATION while this function's scope is still alive.
+        drop(staging);
+        Ok(())
+    }
+
+    fn create_staging_file(&self, sddl: &str) -> io::Result<(String, std::fs::File)> {
+        for _ in 0..32 {
+            let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
+            let leaf = format!(".fmf-stage-{}-{nonce}", std::process::id());
+            let path = self.path.join(&leaf);
+            match create_new_file(&path, sddl) {
+                Ok(file) => return Ok((leaf, file)),
+                Err(error)
+                    if error.raw_os_error().is_some_and(|code| {
+                        [ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS].contains(&(code as u32))
+                    }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique protected staging file",
+        ))
+    }
+
+    /// Deletes one direct child file through the exact verified handle.
+    ///
+    /// # Errors
+    /// Returns validation, sharing, or `SetFileInformationByHandle` errors. A
+    /// missing file is a successful no-op.
+    pub fn remove_file_if_exists(&self, leaf: &str) -> io::Result<()> {
+        let path = self.child_path(leaf)?;
+        match delete_path(&path, Some(ObjectKind::File)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Recursively deletes one direct child directory without following any
+    /// reparse point; every removal is bound to its verified handle.
+    ///
+    /// # Errors
+    /// Returns validation, enumeration, sharing, or exact-handle delete errors.
+    /// A missing directory is a successful no-op.
+    pub fn remove_tree_if_exists(&self, leaf: &str) -> io::Result<()> {
+        let path = self.child_path(leaf)?;
+        match delete_path(&path, Some(ObjectKind::Directory)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Deletes every descendant and finally marks the verified machine root
+    /// itself for deletion on handle close.
+    ///
+    /// # Errors
+    /// Returns the first fail-closed traversal or exact-handle delete error.
+    pub fn purge(self) -> io::Result<()> {
+        delete_descendants(&self.path)?;
+        delete_handle(&self.root.file)?;
+        let Self {
+            root,
+            program_data_guard,
+            path: _,
+            quarantined_root: _,
+        } = self;
+        drop(root);
+        drop(program_data_guard);
+        Ok(())
+    }
+
+    fn child_path(&self, leaf: &str) -> io::Result<PathBuf> {
+        validate_leaf(leaf)?;
+        Ok(self.path.join(leaf))
+    }
+}
+
+fn validate_machine_root_path(path: &Path) -> io::Result<(&Path, &std::ffi::OsStr)> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "machine data root must be an absolute normalized path",
+        ));
+    }
+    let leaf = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "machine data root has no leaf")
+    })?;
+    if !leaf.to_string_lossy().eq_ignore_ascii_case("find-my-files") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "machine data root leaf must be find-my-files",
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "machine data root has no ProgramData parent",
+        )
+    })?;
+    Ok((parent, leaf))
+}
+
+fn open_root(path: &Path) -> io::Result<LockedObject> {
+    // FILE_SHARE_READ permits scanners/diagnostics but deliberately excludes
+    // write and delete sharing. Security-only handles do not participate in
+    // Win32 share checks; protected provenance, rather than an in-place DACL
+    // rewrite, is what makes those already-granted handles harmless.
+    open_checked(
+        path,
+        Some(ObjectKind::Directory),
+        SECURITY_WRITE_ACCESS
+            | DELETE_ACCESS
+            | FILE_LIST_DIRECTORY_ACCESS
+            | FILE_ADD_FILE_ACCESS
+            | FILE_ADD_SUBDIRECTORY_ACCESS
+            | FILE_TRAVERSE_ACCESS,
+        windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+    )
+}
+
+fn open_operational_root(path: &Path) -> io::Result<LockedObject> {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+    open_checked(
+        path,
+        Some(ObjectKind::Directory),
+        SECURITY_WRITE_ACCESS
+            | DELETE_ACCESS
+            | FILE_LIST_DIRECTORY_ACCESS
+            | FILE_ADD_FILE_ACCESS
+            | FILE_ADD_SUBDIRECTORY_ACCESS
+            | FILE_TRAVERSE_ACCESS,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+    )
+}
+
+fn quarantine_untrusted_root(
+    root: std::fs::File,
+    program_data: &std::fs::File,
+) -> io::Result<String> {
+    for _ in 0..32 {
+        let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
+        let leaf = format!(".find-my-files.untrusted-{}-{nonce}", std::process::id());
+        match rename_handle_relative_with_replace(&root, program_data, &leaf, false) {
+            Ok(()) => return Ok(leaf),
+            Err(error)
+                if error.raw_os_error().is_some_and(|code| {
+                    [ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS].contains(&(code as u32))
+                }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique quarantine name for an untrusted machine root",
+    ))
+}
+
+fn create_root_from_staging(
+    path: &Path,
+    sddl: &str,
+    program_data: &std::fs::File,
+) -> io::Result<LockedObject> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "machine data root has no ProgramData parent",
+        )
+    })?;
+    let target_leaf = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "machine data root leaf is not valid Unicode",
+            )
+        })?;
+
+    for _ in 0..32 {
+        let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
+        let staging_leaf = format!(".find-my-files.new-{}-{nonce}", std::process::id());
+        let staging_path = parent.join(&staging_leaf);
+        match create_directory_new_with_security(&staging_path, sddl) {
+            Ok(()) => {}
+            Err(error)
+                if error.raw_os_error().is_some_and(|code| {
+                    [ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS].contains(&(code as u32))
+                }) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+
+        // The directory was protected at creation. Pin that exact object before
+        // giving it the privileged fixed name, then publish it relative to the
+        // already pinned ProgramData handle without replacement.
+        let root = open_root(&staging_path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "open protected root staging directory {}: {error}",
+                    staging_path.display()
+                ),
+            )
+        })?;
+        if !handle_security_matches(&root.file, sddl)? {
+            let primary = io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "new machine data root did not retain its creation security descriptor",
+            );
+            return match delete_handle(&root.file) {
+                Ok(()) => Err(primary),
+                Err(cleanup) => Err(io::Error::new(
+                    primary.kind(),
+                    format!("{primary}; exact staging-root cleanup also failed: {cleanup}"),
+                )),
+            };
+        }
+        if let Err(primary) =
+            rename_handle_relative_with_replace(&root.file, program_data, target_leaf, false)
+        {
+            return match delete_handle(&root.file) {
+                Ok(()) => Err(primary),
+                Err(cleanup) => Err(io::Error::new(
+                    primary.kind(),
+                    format!("{primary}; exact staging-root cleanup also failed: {cleanup}"),
+                )),
+            };
+        }
+        return Ok(root);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique protected machine-root staging directory",
+    ))
+}
+
+fn open_untrusted_object_for_quarantine(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::io::FromRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: `wide` is NUL-terminated and lives through the call; all optional
+    // pointers are null, and the returned handle is checked before ownership.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            DELETE_ACCESS | FILE_READ_ATTRIBUTES_ACCESS,
+            FILE_SHARE_READ,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(last_error());
+    }
+    // SAFETY: a successful CreateFileW returns one owned kernel handle, which is
+    // transferred exactly once to `File` for CloseHandle-on-drop.
+    Ok(unsafe { std::fs::File::from_raw_handle(handle.cast()) })
+}
+
+struct OwnedRegistryKey(windows_sys::Win32::System::Registry::HKEY);
+
+impl Drop for OwnedRegistryKey {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper is constructed only from a successful registry
+        // open/create and owns that non-null HKEY exactly once.
+        unsafe {
+            windows_sys::Win32::System::Registry::RegCloseKey(self.0);
+        }
+    }
+}
+
+fn provenance_wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain([0]).collect()
+}
+
+const fn provenance_key_sddl() -> &'static str {
+    "O:BAG:BAD:P(A;;KA;;;SY)(A;;KA;;;BA)"
+}
+
+fn security_descriptor_sddl(
+    descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR,
+) -> io::Result<String> {
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    };
+
+    let information =
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    security_descriptor_sddl_for(descriptor, information)
+}
+
+fn security_descriptor_sddl_for(
+    descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR,
+    information: windows_sys::Win32::Security::OBJECT_SECURITY_INFORMATION,
+) -> io::Result<String> {
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+    };
+
+    let mut text: *mut u16 = std::ptr::null_mut();
+    let mut len = 0u32;
+    // SAFETY: callers pass a live self-relative descriptor; output pointers
+    // refer to initialized locals and the API allocates `text` with LocalAlloc.
+    if unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            information,
+            &raw mut text,
+            &raw mut len,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    if text.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "security descriptor conversion returned null",
+        ));
+    }
+    // SAFETY: success guarantees `text` addresses at least `len` UTF-16 code
+    // units and the allocation remains live until LocalFree below.
+    let result =
+        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len as usize) });
+    // SAFETY: `text` is the still-owned LocalAlloc result from the successful
+    // conversion call above.
+    unsafe { LocalFree(text.cast()) };
+    Ok(result)
+}
+
+fn handle_security_sddl(file: &std::fs::File) -> io::Result<String> {
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+
+    let information =
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `file` owns a live handle with READ_CONTROL; unused component
+    // outputs are null and `descriptor` is a valid out-pointer.
+    let status = unsafe {
+        GetSecurityInfo(
+            raw_handle(file),
+            SE_FILE_OBJECT,
+            information,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    if descriptor.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "GetSecurityInfo returned a null security descriptor",
+        ));
+    }
+    let result = security_descriptor_sddl(descriptor);
+    // SAFETY: GetSecurityInfo allocated this non-null descriptor with LocalAlloc
+    // and ownership has not escaped this function.
+    unsafe { LocalFree(descriptor.cast()) };
+    result
+}
+
+fn handle_security_matches(file: &std::fs::File, sddl: &str) -> io::Result<bool> {
+    let actual = handle_security_sddl(file)?;
+    let expected_descriptor = PipeSecurity::from_sddl(sddl)?;
+    let expected = security_descriptor_sddl(expected_descriptor.descriptor)?;
+    Ok(normalize_auto_inherited_control(&actual) == normalize_auto_inherited_control(&expected))
+}
+
+fn normalize_auto_inherited_control(sddl: &str) -> std::borrow::Cow<'_, str> {
+    // SetSecurityInfo marks a directory DACL `AI` after it has propagated the
+    // explicitly supplied OI/CI ACEs. CreateDirectoryW does not, even when both
+    // calls receive the same descriptor. `AI` records that completed operation;
+    // it neither changes an ACE nor permits future inheritance while `P` is set.
+    //
+    // Normalize only that one documented, canonical control spelling. Owner,
+    // group, protected state, every ACE, and every other control bit still have
+    // to match byte-for-byte in the canonical SDDL emitted by Windows.
+    if sddl.contains("D:PAI(") {
+        std::borrow::Cow::Owned(sddl.replacen("D:PAI(", "D:P(", 1))
+    } else {
+        std::borrow::Cow::Borrowed(sddl)
+    }
+}
+
+fn verify_provenance_key_security(
+    key: windows_sys::Win32::System::Registry::HKEY,
+) -> io::Result<()> {
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    };
+    use windows_sys::Win32::System::Registry::RegGetKeySecurity;
+
+    let information =
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mut bytes = 0u32;
+    // SAFETY: `key` is a live HKEY opened with READ_CONTROL; a null buffer with
+    // zero capacity is the documented size-query form.
+    let status =
+        unsafe { RegGetKeySecurity(key, information, std::ptr::null_mut(), &raw mut bytes) };
+    if status != ERROR_INSUFFICIENT_BUFFER {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    if bytes == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "provenance-key security query returned an empty required size",
+        ));
+    }
+    let word_bytes = size_of::<usize>();
+    let mut buffer = vec![0usize; (bytes as usize).div_ceil(word_bytes)];
+    // SAFETY: the usize-backed buffer is suitably aligned and at least `bytes`
+    // bytes long; the HKEY and out-size pointer remain valid through the call.
+    let status =
+        unsafe { RegGetKeySecurity(key, information, buffer.as_mut_ptr().cast(), &raw mut bytes) };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let actual = security_descriptor_sddl(buffer.as_mut_ptr().cast())?;
+    let expected_descriptor = PipeSecurity::from_sddl(provenance_key_sddl())?;
+    let expected = security_descriptor_sddl(expected_descriptor.descriptor)?;
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "protected data-root provenance key has an unexpected owner/group/DACL",
+        ));
+    }
+    Ok(())
+}
+
+fn read_root_provenance() -> io::Result<Option<ObjectIdentity>> {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_WOW64_64KEY, REG_BINARY, RegOpenKeyExW,
+        RegQueryValueExW,
+    };
+
+    const ENCODED_LEN: usize = 16;
+
+    let key_name = provenance_wide(PROVENANCE_KEY);
+    let value_name = provenance_wide(PROVENANCE_VALUE);
+    let mut raw_key = std::ptr::null_mut();
+    // SAFETY: `key_name` is NUL-terminated; `raw_key` is a valid out-pointer and
+    // the predefined HKLM handle is borrowed, not closed by us.
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            key_name.as_ptr(),
+            0,
+            KEY_QUERY_VALUE | KEY_WOW64_64KEY | READ_CONTROL_ACCESS,
+            &raw mut raw_key,
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    if raw_key.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "RegOpenKeyExW succeeded with a null key handle",
+        ));
+    }
+    let key = OwnedRegistryKey(raw_key);
+    verify_provenance_key_security(key.0)?;
+    let mut value_type = 0;
+    let mut size = 0u32;
+    // SAFETY: `key` is live, `value_name` is NUL-terminated, and null data with a
+    // valid size pointer is the documented value-size query.
+    let status = unsafe {
+        RegQueryValueExW(
+            key.0,
+            value_name.as_ptr(),
+            std::ptr::null(),
+            &raw mut value_type,
+            std::ptr::null_mut(),
+            &raw mut size,
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    if value_type != REG_BINARY || size as usize != ENCODED_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "machine data-root provenance has an invalid registry type or length",
+        ));
+    }
+    let mut encoded = [0u8; ENCODED_LEN];
+    // SAFETY: `encoded` is exactly the previously validated size and all out
+    // pointers remain valid; RegQueryValueExW respects the supplied capacity.
+    let status = unsafe {
+        RegQueryValueExW(
+            key.0,
+            value_name.as_ptr(),
+            std::ptr::null(),
+            &raw mut value_type,
+            encoded.as_mut_ptr(),
+            &raw mut size,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    if value_type != REG_BINARY || size as usize != ENCODED_LEN || &encoded[..4] != PROVENANCE_MAGIC
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "machine data-root provenance changed while being read",
+        ));
+    }
+    let mut volume_serial = [0u8; 4];
+    volume_serial.copy_from_slice(&encoded[4..8]);
+    let mut file_id = [0u8; 8];
+    file_id.copy_from_slice(&encoded[8..16]);
+    Ok(Some(ObjectIdentity {
+        volume_serial: u32::from_le_bytes(volume_serial),
+        file_id: u64::from_le_bytes(file_id),
+    }))
+}
+
+fn write_root_provenance(identity: ObjectIdentity) -> io::Result<()> {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_BINARY,
+        REG_CREATED_NEW_KEY, REG_OPENED_EXISTING_KEY, REG_OPTION_NON_VOLATILE, RegCreateKeyExW,
+        RegSetValueExW,
+    };
+
+    let descriptor = PipeSecurity::from_sddl(provenance_key_sddl())?;
+    let attributes = descriptor.attributes();
+    let key_name = provenance_wide(PROVENANCE_KEY);
+    let value_name = provenance_wide(PROVENANCE_VALUE);
+    let mut raw_key = std::ptr::null_mut();
+    let mut disposition = 0;
+    // SAFETY: all strings are NUL-terminated, the security descriptor outlives
+    // the call, and both registry outputs point to initialized storage.
+    let status = unsafe {
+        RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            key_name.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY | READ_CONTROL_ACCESS,
+            &raw const attributes,
+            &raw mut raw_key,
+            &raw mut disposition,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    if raw_key.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "RegCreateKeyExW succeeded with a null key handle",
+        ));
+    }
+    let key = OwnedRegistryKey(raw_key);
+    if ![REG_CREATED_NEW_KEY, REG_OPENED_EXISTING_KEY].contains(&disposition) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "RegCreateKeyExW returned an unknown provenance-key disposition",
+        ));
+    }
+    // Never "repair" an existing registry boundary in place. Like a filesystem
+    // DACL, that would not revoke already-open security handles. Exact owner,
+    // group, protected-DACL and ACE equality is required before trusting it.
+    verify_provenance_key_security(key.0)?;
+
+    let mut encoded = [0u8; 16];
+    encoded[..4].copy_from_slice(PROVENANCE_MAGIC);
+    encoded[4..8].copy_from_slice(&identity.volume_serial.to_le_bytes());
+    encoded[8..16].copy_from_slice(&identity.file_id.to_le_bytes());
+    // SAFETY: the HKEY is live, the value name is NUL-terminated, and `encoded`
+    // remains a readable 16-byte buffer for the duration of the call.
+    let status = unsafe {
+        RegSetValueExW(
+            key.0,
+            value_name.as_ptr(),
+            0,
+            REG_BINARY,
+            encoded.as_ptr(),
+            encoded.len() as u32,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    Ok(())
+}
+
+fn validate_leaf(leaf: &str) -> io::Result<()> {
+    let mut components = Path::new(leaf).components();
+    let valid = matches!(components.next(), Some(Component::Normal(_)))
+        && components.next().is_none()
+        && !leaf.contains(':');
+    if valid {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing non-leaf machine-data name {leaf:?}"),
+        ))
+    }
+}
+
+fn raw_handle(file: &std::fs::File) -> HANDLE {
+    file.as_raw_handle().cast()
+}
+
+fn open_checked(
+    path: &Path,
+    expected: Option<ObjectKind>,
+    access: u32,
+    share: u32,
+) -> io::Result<LockedObject> {
+    use std::os::windows::io::FromRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            access,
+            share,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(last_error());
+    }
+    let file = unsafe { std::fs::File::from_raw_handle(handle.cast()) };
+    inspect_handle(path, file, expected)
+}
+
+fn inspect_handle(
+    path: &Path,
+    file: std::fs::File,
+    expected: Option<ObjectKind>,
+) -> io::Result<LockedObject> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        GetFileInformationByHandle,
+    };
+
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(raw_handle(&file), &raw mut info) } == 0 {
+        return Err(last_error());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("refusing reparse point {}", path.display()),
+        ));
+    }
+    let kind = if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        ObjectKind::Directory
+    } else {
+        ObjectKind::File
+    };
+    if let Some(expected) = expected
+        && expected != kind
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} has type {kind:?}, expected {expected:?}",
+                path.display()
+            ),
+        ));
+    }
+    if kind == ObjectKind::File && info.nNumberOfLinks != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing multiply-linked file {} ({} links)",
+                path.display(),
+                info.nNumberOfLinks
+            ),
+        ));
+    }
+    Ok(LockedObject {
+        file,
+        identity: ObjectIdentity {
+            volume_serial: info.dwVolumeSerialNumber,
+            file_id: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        },
+        kind,
+    })
+}
+
+fn set_handle_security(file: &std::fs::File, sddl: &str) -> io::Result<()> {
+    use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
+        GetSecurityDescriptorGroup, GetSecurityDescriptorOwner, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSID,
+    };
+
+    let descriptor = PipeSecurity::from_sddl(sddl)?;
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut group: PSID = std::ptr::null_mut();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut defaulted = 0;
+    let mut present = 0;
+    if unsafe {
+        GetSecurityDescriptorOwner(descriptor.descriptor, &raw mut owner, &raw mut defaulted)
+    } == 0
+        || unsafe {
+            GetSecurityDescriptorGroup(descriptor.descriptor, &raw mut group, &raw mut defaulted)
+        } == 0
+        || unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor.descriptor,
+                &raw mut present,
+                &raw mut dacl,
+                &raw mut defaulted,
+            )
+        } == 0
+    {
+        return Err(last_error());
+    }
+    if owner.is_null() || group.is_null() || present == 0 || dacl.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "filesystem SDDL must contain owner, group, and a non-null DACL",
+        ));
+    }
+    let information = OWNER_SECURITY_INFORMATION
+        | GROUP_SECURITY_INFORMATION
+        | DACL_SECURITY_INFORMATION
+        | PROTECTED_DACL_SECURITY_INFORMATION;
+    let status = unsafe {
+        SetSecurityInfo(
+            raw_handle(file),
+            SE_FILE_OBJECT,
+            information,
+            owner,
+            group,
+            dacl,
+            std::ptr::null(),
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    Ok(())
+}
+
+fn create_directory_with_security(path: &Path, sddl: &str) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+
+    let descriptor = PipeSecurity::from_sddl(sddl)?;
+    let attributes = descriptor.attributes();
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } != 0 {
+        return Ok(());
+    }
+    let error = last_error();
+    if matches!(
+        error.raw_os_error().map(|code| code as u32),
+        Some(ERROR_ALREADY_EXISTS)
+    ) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+fn create_directory_new_with_security(path: &Path, sddl: &str) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+
+    let descriptor = PipeSecurity::from_sddl(sddl)?;
+    let attributes = descriptor.attributes();
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+fn harden_path(path: &Path, expected: Option<ObjectKind>, sddl: &str) -> io::Result<LockedObject> {
+    let locked = open_checked(
+        path,
+        expected,
+        SECURITY_WRITE_ACCESS | FILE_LIST_DIRECTORY_ACCESS,
+        windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+    )?;
+    if locked.kind == ObjectKind::Directory {
+        set_handle_security(&locked.file, &quarantine_sddl(sddl)?)?;
+        harden_descendants(path, sddl)?;
+        // Only now may inheritable ACEs propagate: the complete descendant set
+        // was opened without following reparse points and every object has a
+        // protected DACL of its own.
+    }
+    set_handle_security(&locked.file, sddl)?;
+    Ok(locked)
+}
+
+fn quarantine_sddl(final_sddl: &str) -> io::Result<String> {
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorGroup, GetSecurityDescriptorOwner, PSID,
+    };
+
+    // Preserve the exact owner/group selected by the final policy while
+    // removing every inheritance flag from the temporary DACL. Production
+    // therefore remains BA-owned; the arbitrary-parent test seam can exercise
+    // the same transition under its real non-elevated owner without pretending
+    // that it may assign the Administrators SID.
+    let descriptor = PipeSecurity::from_sddl(final_sddl)?;
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut group: PSID = std::ptr::null_mut();
+    let mut defaulted = 0;
+    if unsafe {
+        GetSecurityDescriptorOwner(descriptor.descriptor, &raw mut owner, &raw mut defaulted)
+    } == 0
+        || unsafe {
+            GetSecurityDescriptorGroup(descriptor.descriptor, &raw mut group, &raw mut defaulted)
+        } == 0
+    {
+        return Err(last_error());
+    }
+    if owner.is_null() || group.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "filesystem SDDL must contain owner and group",
+        ));
+    }
+    let owner = unsafe { sid_to_string(owner)? };
+    let group = unsafe { sid_to_string(group)? };
+    Ok(format!(
+        "O:{owner}G:{group}D:P(A;;FA;;;SY)(A;;FA;;;{owner})"
+    ))
+}
+
+fn harden_descendants(path: &Path, sddl: &str) -> io::Result<()> {
+    struct Frame {
+        locked: Option<LockedObject>,
+        entries: Option<std::fs::ReadDir>,
+        depth: usize,
+    }
+
+    let mut object_count = 1usize;
+    let mut stack = vec![Frame {
+        locked: None,
+        entries: Some(std::fs::read_dir(path)?),
+        depth: 0,
+    }];
+    while !stack.is_empty() {
+        let next = {
+            let frame = stack.last_mut().ok_or_else(|| {
+                io::Error::other("managed-tree hardening stack unexpectedly became empty")
+            })?;
+            match frame.entries.as_mut() {
+                Some(entries) => entries.next().transpose()?,
+                None => None,
+            }
+        };
+        if let Some(entry) = next {
+            object_count = object_count.checked_add(1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "managed tree object count overflow",
+                )
+            })?;
+            if object_count > MAX_MANAGED_TREE_OBJECTS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "managed tree exceeds the {MAX_MANAGED_TREE_OBJECTS}-object safety limit"
+                    ),
+                ));
+            }
+            let depth = stack
+                .last()
+                .map_or(1, |frame| frame.depth.saturating_add(1));
+            if depth > MAX_MANAGED_TREE_DEPTH {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("managed tree exceeds the {MAX_MANAGED_TREE_DEPTH}-level safety limit"),
+                ));
+            }
+            let child = entry.path();
+            let locked = open_checked(
+                &child,
+                None,
+                SECURITY_WRITE_ACCESS | FILE_LIST_DIRECTORY_ACCESS,
+                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+            )?;
+            if locked.kind == ObjectKind::Directory {
+                set_handle_security(&locked.file, &quarantine_sddl(sddl)?)?;
+                let entries = std::fs::read_dir(&child)?;
+                stack.push(Frame {
+                    locked: Some(locked),
+                    entries: Some(entries),
+                    depth,
+                });
+            } else {
+                set_handle_security(&locked.file, sddl)?;
+            }
+            continue;
+        }
+
+        let mut frame = stack.pop().ok_or_else(|| {
+            io::Error::other("managed-tree hardening stack unexpectedly became empty")
+        })?;
+        drop(frame.entries.take());
+        if let Some(locked) = frame.locked {
+            set_handle_security(&locked.file, sddl)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_replace_target(path: &Path) -> io::Result<()> {
+    match open_checked(
+        path,
+        Some(ObjectKind::File),
+        FILE_READ_ATTRIBUTES_ACCESS,
+        windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+    ) {
+        Ok(locked) => {
+            drop(locked);
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn create_new_file(path: &Path, sddl: &str) -> io::Result<std::fs::File> {
+    use std::os::windows::io::FromRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_FLAG_WRITE_THROUGH,
+    };
+
+    let descriptor = PipeSecurity::from_sddl(sddl)?;
+    let attributes = descriptor.attributes();
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_WRITE_ACCESS | DELETE_ACCESS | SECURITY_WRITE_ACCESS,
+            0,
+            &raw const attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(last_error());
+    }
+    let file = unsafe { std::fs::File::from_raw_handle(handle.cast()) };
+    let locked = inspect_handle(path, file, Some(ObjectKind::File))?;
+    set_handle_security(&locked.file, sddl)?;
+    Ok(locked.file)
+}
+
+fn rename_handle_relative(
+    source: &std::fs::File,
+    root: &std::fs::File,
+    target_leaf: &str,
+) -> io::Result<()> {
+    rename_handle_relative_with_replace(source, root, target_leaf, true)
+}
+
+fn rename_handle_relative_with_replace(
+    source: &std::fs::File,
+    root: &std::fs::File,
+    target_leaf: &str,
+    replace: bool,
+) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_NAME_NORMALIZED, FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileRenameInfo,
+        GetFinalPathNameByHandleW, SetFileInformationByHandle, VOLUME_NAME_DOS,
+    };
+    const MAX_FINAL_PATH_UNITS: u32 = 32_768;
+
+    validate_leaf(target_leaf)?;
+    // Resolve the destination prefix from the already verified parent handle,
+    // never from an attacker-controlled path. The parent handle was opened
+    // without FILE_SHARE_DELETE, so its DOS name cannot be renamed or replaced
+    // between this query and the rename operation.
+    let required = unsafe {
+        GetFinalPathNameByHandleW(
+            raw_handle(root),
+            std::ptr::null_mut(),
+            0,
+            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+        )
+    };
+    if required == 0 {
+        return Err(last_error());
+    }
+    if required > MAX_FINAL_PATH_UNITS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "verified parent path exceeds the Windows extended-path limit",
+        ));
+    }
+    let mut name = vec![0u16; required as usize];
+    let written = unsafe {
+        GetFinalPathNameByHandleW(
+            raw_handle(root),
+            name.as_mut_ptr(),
+            required,
+            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+        )
+    };
+    if written == 0 {
+        return Err(last_error());
+    }
+    if written >= required {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "verified parent path changed while its replacement guard was held",
+        ));
+    }
+    name.truncate(written as usize);
+    if !name.ends_with(&[b'\\' as u16]) {
+        name.push(b'\\' as u16);
+    }
+    name.extend(target_leaf.encode_utf16());
+    let name_bytes = name
+        .len()
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rename name is too long"))?;
+    // FILE_RENAME_INFO ends in a one-element variable-length array. The
+    // information length is the fixed prefix through FileName plus exactly the
+    // byte count declared in FileNameLength; trailing struct padding is not
+    // part of the variable-length record consumed by the filesystem.
+    let buffer_bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName)
+        .checked_add(name_bytes)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rename buffer overflow"))?;
+    let word_bytes = size_of::<usize>();
+    let mut buffer = vec![0usize; buffer_bytes.div_ceil(word_bytes)];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: the usize-backed allocation satisfies FILE_RENAME_INFO alignment;
+    // `buffer_bytes` covers the complete fixed structure plus every UTF-16 name
+    // byte, and each field is written without first forming an unaligned ref.
+    unsafe {
+        // The backing allocation is zeroed, so writing FileRenameInfo's
+        // BOOLEAN member also leaves the rest of its union padding zero.
+        std::ptr::addr_of_mut!((*info).Anonymous).write(FILE_RENAME_INFO_0 {
+            ReplaceIfExists: replace,
+        });
+        std::ptr::addr_of_mut!((*info).RootDirectory).write(std::ptr::null_mut());
+        std::ptr::addr_of_mut!((*info).FileNameLength).write(
+            u32::try_from(name_bytes).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "rename name exceeds u32")
+            })?,
+        );
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            name.len(),
+        );
+    }
+    // SAFETY: source/root are live owned handles; the initialized aligned
+    // buffer remains valid for exactly the checked byte count through the call.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            raw_handle(source),
+            FileRenameInfo,
+            buffer.as_ptr().cast(),
+            u32::try_from(buffer_bytes).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "rename buffer exceeds u32")
+            })?,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+fn delete_path(path: &Path, expected: Option<ObjectKind>) -> io::Result<()> {
+    let locked = open_checked(
+        path,
+        expected,
+        DELETE_ACCESS | FILE_READ_ATTRIBUTES_ACCESS | FILE_LIST_DIRECTORY_ACCESS,
+        windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+    )?;
+    if locked.kind == ObjectKind::Directory {
+        delete_descendants(path)?;
+    }
+    delete_handle(&locked.file)?;
+    drop(locked);
+    Ok(())
+}
+
+fn delete_descendants(path: &Path) -> io::Result<()> {
+    struct Frame {
+        locked: Option<LockedObject>,
+        entries: Option<std::fs::ReadDir>,
+        depth: usize,
+    }
+
+    let mut object_count = 1usize;
+    let mut stack = vec![Frame {
+        locked: None,
+        entries: Some(std::fs::read_dir(path)?),
+        depth: 0,
+    }];
+    while !stack.is_empty() {
+        let next = {
+            let frame = stack.last_mut().ok_or_else(|| {
+                io::Error::other("managed-tree deletion stack unexpectedly became empty")
+            })?;
+            match frame.entries.as_mut() {
+                Some(entries) => entries.next().transpose()?,
+                None => None,
+            }
+        };
+        if let Some(entry) = next {
+            object_count = object_count.checked_add(1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "managed tree object count overflow",
+                )
+            })?;
+            if object_count > MAX_MANAGED_TREE_OBJECTS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "managed tree exceeds the {MAX_MANAGED_TREE_OBJECTS}-object deletion limit"
+                    ),
+                ));
+            }
+            let depth = stack
+                .last()
+                .map_or(1, |frame| frame.depth.saturating_add(1));
+            if depth > MAX_MANAGED_TREE_DEPTH {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "managed tree exceeds the {MAX_MANAGED_TREE_DEPTH}-level deletion limit"
+                    ),
+                ));
+            }
+            let child = entry.path();
+            let locked = open_checked(
+                &child,
+                None,
+                DELETE_ACCESS | FILE_READ_ATTRIBUTES_ACCESS | FILE_LIST_DIRECTORY_ACCESS,
+                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+            )?;
+            if locked.kind == ObjectKind::Directory {
+                let entries = std::fs::read_dir(&child)?;
+                stack.push(Frame {
+                    locked: Some(locked),
+                    entries: Some(entries),
+                    depth,
+                });
+            } else {
+                delete_handle(&locked.file)?;
+            }
+            continue;
+        }
+
+        let mut frame = stack.pop().ok_or_else(|| {
+            io::Error::other("managed-tree deletion stack unexpectedly became empty")
+        })?;
+        drop(frame.entries.take());
+        if let Some(locked) = frame.locked {
+            delete_handle(&locked.file)?;
+        }
+    }
+    Ok(())
+}
+
+fn delete_handle(file: &std::fs::File) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
+    };
+
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    if unsafe {
+        SetFileInformationByHandle(
+            raw_handle(file),
+            FileDispositionInfo,
+            (&raw const disposition).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    Ok(())
 }
 
 /// The current process token's user SID as a string ("S-1-5-21-…") —
@@ -316,7 +2003,7 @@ pub fn data_dir_sddl() -> String {
 }
 
 /// logs/ keeps user read so the unelevated F12 "copy diagnostics" can tail
-/// engine.log.
+/// the rolling engine logs.
 ///
 /// Each authorized user (the installing admin *and* a forwarded owner SID
 /// under OTS elevation) gets read, so the daily user is never locked out of
@@ -332,15 +2019,52 @@ pub fn logs_dir_sddl(user_sids: &[&str]) -> String {
     s
 }
 
+/// Protected Task Scheduler object descriptor for the SYSTEM-run daily GC.
+///
+/// The creating administrator is deliberately not the owner: otherwise the
+/// same person's filtered unelevated token could retain implicit owner control
+/// over a task that executes as SYSTEM. The descriptor is embedded in the task
+/// XML so it applies atomically at registration, not in a racy post-create fix.
+#[must_use]
+pub const fn gc_task_sddl() -> &'static str {
+    "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"
+}
+
+/// Verifies the exact Task Scheduler file created for the daily SYSTEM GC.
+///
+/// The path is resolved internally from the trusted System directory and the
+/// fixed task name; callers cannot redirect this privileged check.
+///
+/// # Errors
+/// Returns Known Folder, type/reparse/link, sharing, ACL-read, or exact
+/// owner/group/DACL mismatch errors.
+pub fn verify_gc_task_security() -> io::Result<()> {
+    let path = crate::config::system_dir()?
+        .join("Tasks")
+        .join(crate::lifecycle::GC_TASK_NAME);
+    let locked = open_checked(
+        &path,
+        Some(ObjectKind::File),
+        READ_CONTROL_ACCESS | FILE_READ_ATTRIBUTES_ACCESS,
+        windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+    )?;
+    if !handle_security_matches(&locked.file, gc_task_sddl())? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "GC task owner/group/DACL does not match its protected registration descriptor",
+        ));
+    }
+    Ok(())
+}
+
 /// The owner/group/DACL descriptors `install` applies across the data tree.
 ///
 /// Returned as `(subdir, sddl)` pairs (`""` = the data root). Centralized here so
 /// the threat 7 invariant — `index/` (machine-wide file-name snapshots) is
 /// SYSTEM+Administrators only, never world-readable — is unit-pinned next to the
 /// SDDL builders, without needing an elevated install to verify it. `install`
-/// applies `index/` EXPLICITLY rather than relying on inheritance: it is created
-/// inheriting `%ProgramData%`'s Users ACE, and `SetFileSecurityW` does not
-/// re-propagate the root DACL onto an already-existing child.
+/// applies `index/` explicitly so the invariant does not depend on inheritance
+/// history or propagation behavior.
 #[must_use]
 pub fn data_tree_security_descriptors(log_readers: &[&str]) -> Vec<(&'static str, String)> {
     vec![
@@ -352,9 +2076,11 @@ pub fn data_tree_security_descriptors(log_readers: &[&str]) -> Vec<(&'static str
 
 /// The service-object DACL (ADR-0027): SYSTEM/Admins full, each user start/stop.
 ///
-/// `D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(…;;;BA)(A;;CCLCSWRPWPLORC;;;<sid>)…`
-/// — SYSTEM and Administrators keep full control, each authorized user gets
-/// query-config/status + start + stop + interrogate + read, nobody else.
+/// `O:BAG:BAD:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(…;;;BA)(A;;CCLCSWRPWPLORC;;;<sid>)…`
+/// — Administrators owns the object (so a split-token installer is not an
+/// implicit unelevated owner), SYSTEM and Administrators keep full control, and
+/// each authorized user gets query-config/status + start + stop + interrogate +
+/// read, nobody else.
 ///
 /// The user ACE deliberately omits change-config (`DC`), delete (`SD`),
 /// write-DAC (`WD`) and write-owner (`WO`): granting any of those to a standard
@@ -366,7 +2092,7 @@ pub fn service_sddl(user_sids: &[String]) -> String {
     // SERVICE_ALL_ACCESS in SDDL rights letters (matches Windows' default SY/BA
     // ACEs); the per-user set is query+start+stop+interrogate+read only.
     const FULL: &str = "CCDCLCSWRPWPDTLOCRSDRCWDWO";
-    let mut s = format!("D:P(A;;{FULL};;;SY)(A;;{FULL};;;BA)");
+    let mut s = format!("O:BAG:BAD:P(A;;{FULL};;;SY)(A;;{FULL};;;BA)");
     for sid in user_sids {
         s.push_str("(A;;CCLCSWRPWPLORC;;;");
         s.push_str(sid);
@@ -375,145 +2101,145 @@ pub fn service_sddl(user_sids: &[String]) -> String {
     s
 }
 
-/// Sets the service-object DACL from an SDDL string (install-time, elevated).
+/// Applies the protected service-object DACL to an exact open service handle.
 ///
-/// The only way an authorized user gains unelevated start/stop on the on-demand
-/// service (ADR-0027). Build `sddl` via [`service_sddl`]; never hand-roll it.
-///
-/// # Errors
-/// Returns the OS error if the SCM/service cannot be opened with `WRITE_DAC`,
-/// the SDDL fails to convert, or `SetServiceObjectSecurity` fails.
-pub fn set_service_dacl(service_name: &str, sddl: &str) -> io::Result<()> {
-    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
-    use windows_sys::Win32::System::Services::{
-        CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT,
-        SetServiceObjectSecurity,
-    };
-    // Standard rights (windows-sys does not surface these as named consts here).
-    const WRITE_DAC: u32 = 0x0004_0000;
-    const READ_CONTROL: u32 = 0x0002_0000;
-
-    let sec = PipeSecurity::from_sddl(sddl)?;
-    let name: Vec<u16> = service_name.encode_utf16().chain([0]).collect();
-    unsafe {
-        let scm = OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT);
-        if scm.is_null() {
-            return Err(last_error());
-        }
-        let svc = OpenServiceW(scm, name.as_ptr(), WRITE_DAC | READ_CONTROL);
-        if svc.is_null() {
-            let e = last_error();
-            CloseServiceHandle(scm);
-            return Err(e);
-        }
-        let ok = SetServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, sec.descriptor);
-        let err = last_error();
-        CloseServiceHandle(svc);
-        CloseServiceHandle(scm);
-        if ok == 0 {
-            return Err(err);
-        }
-    }
-    Ok(())
-}
-
-/// Applies an SDDL-described owner, group, and protected DACL to one object.
-///
-/// Setting the owner is essential: a standard user who pre-created the
-/// machine-wide directory must not remain owner and use `WRITE_DAC` owner
-/// rights to re-open a path that stores a `LocalSystem` executable.
+/// The Administrators owner/group are applied at the same boundary. Callers
+/// must have requested `WRITE_OWNER | WRITE_DAC` on that handle before any
+/// maintenance transition. This is the only service-security mutation API, so
+/// callers cannot race a name-based reopen onto a different service object.
 ///
 /// # Errors
-/// Returns the OS error if the SDDL fails to convert or `SetFileSecurityW`
-/// fails.
-pub fn set_path_security(path: &std::path::Path, sddl: &str) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
+/// Returns SDDL conversion, descriptor-component extraction, set/query, or
+/// exact read-back mismatch errors.
+pub fn set_service_handle_security(
+    service: &windows_service::service::Service,
+    sddl: &str,
+) -> io::Result<()> {
+    use windows_sys::Win32::Security::Authorization::{SE_SERVICE, SetSecurityInfo};
     use windows_sys::Win32::Security::{
-        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-        SetFileSecurityW,
+        ACL, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
+        GetSecurityDescriptorGroup, GetSecurityDescriptorOwner, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSID,
     };
 
-    reject_reparse_point(path)?;
-    let sec = PipeSecurity::from_sddl(sddl)?;
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-    let information =
-        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
-    let ok = unsafe { SetFileSecurityW(wide.as_ptr(), information, sec.descriptor) };
-    if ok == 0 {
+    let descriptor = PipeSecurity::from_sddl(sddl)?;
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut group: PSID = std::ptr::null_mut();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut present = 0;
+    let mut defaulted = 0;
+    // SAFETY: `descriptor` is a live descriptor created by the SDDL converter;
+    // all outputs refer to initialized local pointer/BOOL storage.
+    if unsafe {
+        GetSecurityDescriptorOwner(descriptor.descriptor, &raw mut owner, &raw mut defaulted)
+    } == 0
+        || unsafe {
+            GetSecurityDescriptorGroup(descriptor.descriptor, &raw mut group, &raw mut defaulted)
+        } == 0
+        || unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor.descriptor,
+                &raw mut present,
+                &raw mut dacl,
+                &raw mut defaulted,
+            )
+        } == 0
+    {
         return Err(last_error());
     }
-    Ok(())
-}
-
-/// Refuses an existing reparse point before elevated file-system operations.
-///
-/// # Errors
-/// Returns metadata errors or `InvalidData` for any reparse point.
-pub fn reject_reparse_point(path: &std::path::Path) -> io::Result<()> {
-    use std::os::windows::fs::MetadataExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    if owner.is_null() || group.is_null() || present == 0 || dacl.is_null() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("refusing reparse point {}", path.display()),
+            "service SDDL must contain owner, group, and a non-null DACL",
         ));
     }
-    Ok(())
-}
-
-/// Validates the fixed paths an installed service may open as `LocalSystem`.
-///
-/// Missing children are allowed so normal recovery can recreate them; the
-/// machine-wide root itself must exist and no existing fixed child may be a
-/// reparse point.
-///
-/// # Errors
-/// Returns `NotFound` for a missing root, metadata errors, or `InvalidData` for
-/// any reparse point.
-pub fn validate_installed_data_paths(data_dir: &std::path::Path) -> io::Result<()> {
-    reject_reparse_point(data_dir)?;
-    for child in ["index", "logs", "service.json", "last_use"] {
-        let path = data_dir.join(child);
-        match reject_reparse_point(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
+    // SAFETY: callers retain a live service handle with WRITE_OWNER|WRITE_DAC;
+    // owner/group/DACL point inside `descriptor`, which remains live through
+    // this synchronous call. The null SACL matches the selected information.
+    let status = unsafe {
+        SetSecurityInfo(
+            service.raw_handle().cast(),
+            SE_SERVICE,
+            OWNER_SECURITY_INFORMATION
+                | GROUP_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION,
+            owner,
+            group,
+            dacl,
+            std::ptr::null(),
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
     }
+    verify_service_handle_security(service, sddl)?;
     Ok(())
 }
 
-/// Applies a protected DACL to a directory and every existing descendant.
-///
-/// Reparse points are rejected rather than followed: an old writable install
-/// must not be able to redirect elevated ACL repair outside the data root.
-///
-/// # Errors
-/// Returns the first metadata, enumeration, SDDL, or ACL error.
-pub fn set_tree_security(path: &std::path::Path, sddl: &str) -> io::Result<()> {
-    use std::os::windows::fs::MetadataExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+fn verify_service_handle_security(
+    service: &windows_service::service::Service,
+    sddl: &str,
+) -> io::Result<()> {
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    };
+    use windows_sys::Win32::System::Services::QueryServiceObjectSecurity;
 
-    let mut pending = vec![path.to_path_buf()];
-    while let Some(current) = pending.pop() {
-        let metadata = std::fs::symlink_metadata(&current)?;
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "refusing ACL traversal through reparse point {}",
-                    current.display()
-                ),
-            ));
-        }
-        set_path_security(&current, sddl)?;
-        if metadata.is_dir() {
-            for entry in std::fs::read_dir(&current)? {
-                pending.push(entry?.path());
-            }
-        }
+    let information =
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mut bytes = 0u32;
+    // SAFETY: the retained service handle has READ_CONTROL; null/zero is the
+    // documented size-query form and `bytes` is a valid out-pointer.
+    if unsafe {
+        QueryServiceObjectSecurity(
+            service.raw_handle(),
+            information,
+            std::ptr::null_mut(),
+            0,
+            &raw mut bytes,
+        )
+    } != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "service security query unexpectedly succeeded without a buffer",
+        ));
+    }
+    let error = last_error();
+    if error.raw_os_error().map(|code| code as u32) != Some(ERROR_INSUFFICIENT_BUFFER) {
+        return Err(error);
+    }
+    if bytes == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "service security query returned an empty required size",
+        ));
+    }
+    let word_bytes = size_of::<usize>();
+    let mut buffer = vec![0usize; (bytes as usize).div_ceil(word_bytes)];
+    // SAFETY: the usize-backed buffer is aligned for a security descriptor and
+    // contains at least the byte count returned by the size query.
+    if unsafe {
+        QueryServiceObjectSecurity(
+            service.raw_handle(),
+            information,
+            buffer.as_mut_ptr().cast(),
+            bytes,
+            &raw mut bytes,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    let actual = security_descriptor_sddl_for(buffer.as_mut_ptr().cast(), information)?;
+    let expected_descriptor = PipeSecurity::from_sddl(sddl)?;
+    let expected = security_descriptor_sddl_for(expected_descriptor.descriptor, information)?;
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "service owner/group/DACL read-back did not match the requested protected descriptor",
+        ));
     }
     Ok(())
 }
@@ -525,6 +2251,11 @@ pub fn set_tree_security(path: &std::path::Path, sddl: &str) -> io::Result<()> {
 /// # Errors
 /// Returns the OS error if impersonating the pipe client or reading its token
 /// fails. A successfully read token that is not authorized returns `Ok(false)`.
+///
+/// If `RevertToSelf` fails, continuing this process could run later privileged
+/// service work under the untrusted client token. Windows explicitly requires
+/// fail-stop handling for that condition, so this function aborts the process;
+/// SCM recovery then treats it as a service failure.
 pub fn verify_client(pipe: &crate::pipe::PipeStream, authorized: &[String]) -> io::Result<bool> {
     use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
     use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
@@ -567,10 +2298,25 @@ pub fn verify_client(pipe: &crate::pipe::PipeStream, authorized: &[String]) -> i
                 || authorized.iter().any(|a| a == &sid))
         }
     })();
-    unsafe {
-        windows_sys::Win32::Security::RevertToSelf();
+    let reverted = unsafe { windows_sys::Win32::Security::RevertToSelf() };
+    if impersonation_revert_disposition(reverted != 0) == ImpersonationRevertDisposition::Abort {
+        std::process::abort();
     }
     result
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImpersonationRevertDisposition {
+    Return,
+    Abort,
+}
+
+const fn impersonation_revert_disposition(reverted: bool) -> ImpersonationRevertDisposition {
+    if reverted {
+        ImpersonationRevertDisposition::Return
+    } else {
+        ImpersonationRevertDisposition::Abort
+    }
 }
 
 #[cfg(test)]
@@ -597,17 +2343,54 @@ mod tests {
     }
 
     #[test]
+    fn impersonation_reversion_failure_is_pinned_to_process_abort() {
+        assert_eq!(
+            impersonation_revert_disposition(true),
+            ImpersonationRevertDisposition::Return
+        );
+        assert_eq!(
+            impersonation_revert_disposition(false),
+            ImpersonationRevertDisposition::Abort
+        );
+    }
+
+    #[test]
+    fn filesystem_readback_normalizes_only_windows_auto_inherited_history() {
+        let expected = "O:BAG:BAD:P(A;OICI;FA;;;SY)\0";
+        let propagated = "O:BAG:BAD:PAI(A;OICI;FA;;;SY)\0";
+        assert_eq!(
+            normalize_auto_inherited_control(expected),
+            normalize_auto_inherited_control(propagated)
+        );
+
+        for materially_different in [
+            "O:BAG:BAD:(A;OICI;FA;;;SY)\0",
+            "O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;GR;;;BU)\0",
+            "O:BAG:BAD:PAI(A;OICIID;FA;;;SY)\0",
+            "O:SYG:BAD:PAI(A;OICI;FA;;;SY)\0",
+        ] {
+            assert_ne!(
+                normalize_auto_inherited_control(expected),
+                normalize_auto_inherited_control(materially_different),
+                "{materially_different} must remain a mismatch"
+            );
+        }
+    }
+
+    #[test]
     fn service_sddl_grants_user_start_stop_not_config_or_delete() {
         // SYSTEM + Administrators full control; no user → just those two ACEs.
         const FULL: &str = "CCDCLCSWRPWPDTLOCRSDRCWDWO";
         assert_eq!(
             service_sddl(&[]),
-            format!("D:P(A;;{FULL};;;SY)(A;;{FULL};;;BA)")
+            format!("O:BAG:BAD:P(A;;{FULL};;;SY)(A;;{FULL};;;BA)")
         );
         let one = service_sddl(&["S-1-5-21-1-2-3-1001".to_string()]);
         assert_eq!(
             one,
-            format!("D:P(A;;{FULL};;;SY)(A;;{FULL};;;BA)(A;;CCLCSWRPWPLORC;;;S-1-5-21-1-2-3-1001)")
+            format!(
+                "O:BAG:BAD:P(A;;{FULL};;;SY)(A;;{FULL};;;BA)(A;;CCLCSWRPWPLORC;;;S-1-5-21-1-2-3-1001)"
+            )
         );
 
         // The user ACE grants start (RP) and stop (WP) — the whole point — but
@@ -625,6 +2408,7 @@ mod tests {
         }
         // And it converts to a real security descriptor.
         PipeSecurity::from_sddl(&one).expect("service SDDL converts");
+        PipeSecurity::from_sddl(gc_task_sddl()).expect("GC task SDDL converts");
     }
 
     #[test]
@@ -741,19 +2525,29 @@ mod tests {
     }
 
     #[test]
-    fn installed_data_path_validation_allows_missing_children_not_root() {
+    fn trusted_root_and_child_names_are_fixed() {
         let dir = tempfile::tempdir().expect("tempdir");
-        validate_installed_data_paths(dir.path()).expect("ordinary data root");
-        std::fs::create_dir(dir.path().join("index")).expect("index");
-        std::fs::write(dir.path().join("service.json"), b"{}").expect("config");
-        validate_installed_data_paths(dir.path()).expect("ordinary fixed children");
-
-        let missing = dir.path().join("missing");
+        validate_machine_root_path(&dir.path().join("find-my-files")).expect("fixed machine root");
         assert_eq!(
-            validate_installed_data_paths(&missing)
-                .expect_err("missing machine root")
+            validate_machine_root_path(&dir.path().join("other"))
+                .expect_err("wrong leaf")
                 .kind(),
-            io::ErrorKind::NotFound
+            io::ErrorKind::InvalidInput
         );
+        assert_eq!(
+            validate_machine_root_path(Path::new("find-my-files"))
+                .expect_err("relative root")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        for valid in ["index", "logs", "service.json", "fmf-service.exe"] {
+            validate_leaf(valid).expect(valid);
+        }
+        for invalid in ["", ".", "..", r"index\escape", "C:escape", "file:stream"] {
+            assert_eq!(
+                validate_leaf(invalid).expect_err(invalid).kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
     }
 }

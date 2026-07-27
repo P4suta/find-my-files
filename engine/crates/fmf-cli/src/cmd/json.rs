@@ -9,7 +9,7 @@ use std::error::Error;
 use serde::Serialize;
 
 /// The JSON shape version stamped into every `--format json` payload.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// `value` as a JSON object with a `format_version` field merged in. `value`
 /// must serialise to a JSON object (the only shape the CLI emits at top level).

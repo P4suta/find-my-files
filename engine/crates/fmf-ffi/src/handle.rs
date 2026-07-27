@@ -66,6 +66,11 @@ impl EngineHandle {
             self.lifecycle_idle.wait(&mut state);
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn is_accepting_for_test(&self) -> bool {
+        self.lifecycle.lock().accepting
+    }
 }
 
 static ENGINES: LazyLock<Mutex<HashMap<usize, Arc<EngineHandle>>>> =
@@ -94,6 +99,13 @@ pub const extern "C" fn fmf_abi_version() -> u32 {
 // ── Lifecycle ───────────────────────────────────────────────────────────
 
 /// `config_json`: {"`index_dir"`: "C:\\`ProgramData`\\find-my-files\\index"}
+///
+/// # Safety
+///
+/// `config_json` must point to readable, NUL-terminated UTF-8 for this call.
+/// `out` must be aligned and writable as one pointer, and must not overlap the
+/// configuration string. On entry the function stores null in `out`; a
+/// successful call replaces it with a registry-owned opaque handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_engine_create(
     config_json: *const c_char,
@@ -104,11 +116,12 @@ pub unsafe extern "C" fn fmf_engine_create(
             set_error("out handle is null");
             return FMF_E_INVALID_ARG;
         }
+        unsafe { *out = std::ptr::null_mut() };
         let json = match unsafe { utf8_arg(config_json) } {
             Ok(s) => s,
             Err(c) => return c,
         };
-        let parsed: EngineCreateConfig = match serde_json::from_str(json) {
+        let parsed: EngineCreateConfig = match serde_json::from_str(&json) {
             Ok(v) => v,
             Err(e) => {
                 set_error(format!("config json: {e}"));
@@ -159,9 +172,13 @@ pub unsafe extern "C" fn fmf_engine_create(
     })
 }
 
-/// Saves every Ready, dirty volume now (docs/ARCHITECTURE.md `fmf_flush`).
+/// Snapshot-saves every Ready volume that is dirty (its content generation
+/// advanced since the last save) and returns once they are written.
+///
+/// Deliberately has no pipe opcode: the service flushes on its own schedule
+/// and at stop, so no client can turn this into a disk-write amplifier.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fmf_flush(h: *mut c_void) -> i32 {
+pub extern "C" fn fmf_flush(h: *mut c_void) -> i32 {
     guard(|| {
         let handle = match engine(h) {
             Ok(e) => e,
@@ -176,9 +193,13 @@ pub unsafe extern "C" fn fmf_flush(h: *mut c_void) -> i32 {
     })
 }
 
-/// Detaches the event sink, shuts the engine down, and frees the handle. Safety: see docs/ARCHITECTURE.md.
+/// Destroys an engine handle after draining its admitted work.
+///
+/// This detaches the event sink, waits for admitted calls and callbacks, shuts
+/// the engine down, and invalidates the opaque handle. Concurrent calls already
+/// admitted may finish; later and duplicate uses fail closed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fmf_engine_destroy(h: *mut c_void) -> i32 {
+pub extern "C" fn fmf_engine_destroy(h: *mut c_void) -> i32 {
     guard(|| {
         if callback_active_on_current_thread() {
             set_error("fmf_engine_destroy cannot be called from an engine event callback");
@@ -190,6 +211,11 @@ pub unsafe extern "C" fn fmf_engine_destroy(h: *mut c_void) -> i32 {
         };
         crate::query_control::cancel_engine(handle.id);
         handle.begin_destroy();
+        // A control creation admitted just before `begin_destroy` can insert
+        // after the first sweep. The lifecycle barrier above waits for every
+        // such call to retire; sweep once more so destruction leaves no
+        // engine-owned control orphaned in the process-global registry.
+        crate::query_control::cancel_engine(handle.id);
         clear_event_callback(&handle);
         crate::results::purge_engine(handle.id);
         handle.engine.shutdown();

@@ -9,8 +9,8 @@
 //! and the FRN index copy over in O(n) with **no re-sort** (ADR-0009).
 //!
 //! Swap-in goes through `VolumeSlot::install_index`, which bumps the
-//! structural generation: open result handles go hard-stale and the UI
-//! re-issues its query (docs/ARCHITECTURE.md, generation 2-tier).
+//! structural generation: renumbering makes every held `EntryId` meaningless,
+//! so open result handles go hard stale and the client re-issues its query.
 
 use parking_lot::Mutex;
 
@@ -82,6 +82,7 @@ impl VolumeIndex {
             perm_name: Vec::with_capacity(live as usize),
             content_generation: 0,
             structural_generation: 0,
+            stat_generation: 0,
             dir_topology_generation: 0,
             exclusion_tree_dirty: false,
             tombstones: 0,
@@ -194,18 +195,20 @@ mod tests {
         for i in 0..4u64 {
             let first_new = idx.len() as u32;
             let name = u16s(&format!("storm_{i}.TXT"));
-            idx.upsert(&raw(100, 50, &name, false, i, i as i64));
-            idx.merge_new_into_permutations(first_new);
+            idx.upsert_synthetic(&raw(100, 50, &name, false, i, i as i64));
+            idx.merge_new_into_permutations(first_new)
+                .expect("fixture topology remains valid");
         }
         let first_new = idx.len() as u32;
         let huge = u16s("Huge.ISO");
-        idx.upsert(&raw(700, 50, &huge, false, (7u64 << 30) + 5, 9));
-        idx.merge_new_into_permutations(first_new);
+        idx.upsert_synthetic(&raw(700, 50, &huge, false, (7u64 << 30) + 5, 9));
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
         idx.delete(60);
         let dir2 = u16s("docs_v2");
-        idx.rename_dir_in_place(50, &dir2, 5);
-        idx.merge_new_into_permutations(idx.len() as u32);
-
+        idx.rename_dir_synthetic_in_place(50, &dir2, 5);
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
         let live_before = idx.live_len();
         let expect: Vec<(u64, Vec<u8>, Vec<u8>, u64)> = [5u64, 50, 100, 700]
             .iter()
@@ -266,10 +269,12 @@ mod tests {
         let mut idx = build_sample();
         let note_before = idx.entry_by_record(100).unwrap();
         idx.update_attrs(50, true, false).unwrap();
-        idx.merge_new_into_permutations(idx.len() as u32);
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
         assert!(idx.is_excluded(note_before));
         idx.delete(50); // "docs", parent of record 100
-        idx.merge_new_into_permutations(idx.len() as u32);
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
         let c = idx.compacted();
         let note = c.entry_by_record(100).unwrap();
         assert_eq!(c.parent(note), VolumeIndex::ROOT);
@@ -310,8 +315,9 @@ mod tests {
         // removable/small volume leaks forever.
         for i in 0..256 {
             let renamed = u16s(&format!("docs_{i:03}"));
-            idx.rename_dir_in_place(50, &renamed, 5).unwrap();
-            idx.merge_new_into_permutations(idx.len() as u32);
+            idx.rename_dir_synthetic_in_place(50, &renamed, 5).unwrap();
+            idx.merge_new_into_permutations(idx.len() as u32)
+                .expect("fixture topology remains valid");
             max_pool_bytes = max_pool_bytes.max(idx.stats("C:").lower_pool_bytes);
             if idx.compaction_due() {
                 idx = idx.compacted();
@@ -368,7 +374,7 @@ mod proptests {
         ) {
             // Records 10.. under the root; build a clean index first.
             let n = names.len();
-            let mut b = VolumeIndexBuilder::new("C:", 5);
+            let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
             for (i, &name_idx) in names.iter().enumerate() {
                 let nm = u16s(&format!("{}_{i}", NAMES[name_idx]));
                 b.push(raw(10 + i as u64, 5, &nm, false, (i as u64) * 1000, i as i64));
@@ -388,14 +394,13 @@ mod proptests {
             // tombstone, so compaction's pool rebuild is exercised too.
             if rename_one {
                 let first_new = idx.len() as u32;
-                idx.upsert(&raw(10, 5, &u16s("renamed_kept"), false, 4242, 7));
-                idx.merge_new_into_permutations(first_new);
+                idx.upsert_synthetic(&raw(10, 5, &u16s("renamed_kept"), false, 4242, 7));
+                idx.merge_new_into_permutations(first_new).expect("fixture topology remains valid");
             }
             for &rec in &dead {
                 idx.delete(rec);
             }
-            idx.merge_new_into_permutations(idx.len() as u32);
-
+            idx.merge_new_into_permutations(idx.len() as u32).expect("fixture topology remains valid");
             // Live records are the volume root (record 5, seeded by the
             // builder) plus the known set 10..10+n minus the deleted ones —
             // capture each one's observable (name, path, size) by record.

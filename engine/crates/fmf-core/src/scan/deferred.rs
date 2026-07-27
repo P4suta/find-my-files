@@ -6,18 +6,19 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ntfs_reader::api::{NtfsAttributeType, NtfsFileName, NtfsFileNamespace};
-use ntfs_reader::file::NtfsFile;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::attribute_list::{
+use crate::ondisk::attribute_list::{
     ListEntry, ListStreamError, StreamRun, close_extent_runs, covered_prefix, decode_extent_runs,
     parse_list_entries, visit_list_stream,
 };
-use super::parse::{ParsedBatch, RecordArena};
-use super::record::attributes_complete;
-use super::volume_io::{RunMap, apply_fixup, open_raw_volume};
-use crate::mft::is_searchable_namespace;
+use crate::ondisk::fixup::apply_fixup;
+use crate::ondisk::ntfs::{NtfsAttributeType, NtfsFile, NtfsFileName, NtfsFileNamespace};
+use crate::ondisk::record::attributes_complete;
+
+use super::parse::{ParsedBatch, RecordArena, extract_attrs};
+use super::volume_io::{RunMap, open_raw_volume};
+use crate::mft::{IncompleteCause, IncompleteObject, is_searchable_namespace};
 use crate::usn::MetadataSource;
 use crate::usn::apply::LinkSnapshot;
 
@@ -32,6 +33,7 @@ pub(super) struct DeferredContext<'a> {
     pub(super) volume_path: &'a str,
     pub(super) runmap: &'a RunMap,
     pub(super) record_size: usize,
+    pub(super) sector_size: usize,
     pub(super) cluster_size: u64,
     pub(super) volume_size: u64,
     pub(super) extensions: &'a FxHashMap<u64, u32>,
@@ -43,13 +45,68 @@ pub(super) struct DeferredContext<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DeferredError {
     Cancelled,
-    Incomplete(u64),
+    Incomplete(IncompleteObject),
+}
+
+/// A chunk's give-up, before the chunk's read-failure tally is attached.
+///
+/// Separate from [`DeferredError`] on purpose: the tally lives in the chunk's
+/// readers, which stay mutably borrowed for as long as the resolution loop
+/// holds record bytes. Splitting the loop into its own function ends those
+/// borrows at exactly one place — where the counters are read and stamped onto
+/// the outcome, success or failure alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChunkGiveUp {
+    /// `None` marks cancellation; no object is at fault.
+    object: Option<(u64, IncompleteCause)>,
+}
+
+impl ChunkGiveUp {
+    const CANCELLED: Self = Self { object: None };
+
+    const fn incomplete(reference: u64, cause: IncompleteCause) -> Self {
+        Self {
+            object: Some((reference, cause)),
+        }
+    }
+
+    const fn into_error(self, name_read_failures: u64) -> DeferredError {
+        match self.object {
+            None => DeferredError::Cancelled,
+            Some((reference, cause)) => DeferredError::Incomplete(IncompleteObject {
+                reference,
+                cause,
+                name_read_failures,
+            }),
+        }
+    }
+}
+
+/// The three lazily-opened volume readers one deferred chunk shares.
+struct ChunkReaders<'a> {
+    /// A spilled base record must stay borrowed while its attribute list
+    /// resolves extension records, so the two record readers are separate:
+    /// an extension read must not overwrite the base reader's buffer.
+    base: LazyRecordReader<'a>,
+    extension: LazyRecordReader<'a>,
+    stream: LazyStreamReader<'a>,
+}
+
+impl ChunkReaders<'_> {
+    /// Targeted volume reads this chunk failed. Each one is a name that stays
+    /// unresolved until the next rescan, so it is reported on every exit
+    /// path — a chunk that gives up is precisely the one whose read failures
+    /// explain the give-up.
+    const fn name_read_failures(&self) -> u64 {
+        self.base.failures + self.extension.failures + self.stream.failures
+    }
 }
 
 #[derive(Clone, Copy)]
 struct ResolveSources<'a> {
     extensions: &'a FxHashMap<u64, u32>,
     arena: &'a RecordArena,
+    sector_size: usize,
     cluster_size: u64,
     volume_size: u64,
     stop: &'a AtomicBool,
@@ -60,6 +117,7 @@ struct RecordReader<'a> {
     file: std::fs::File,
     map: &'a RunMap,
     record_size: usize,
+    sector_size: usize,
     buf: Vec<u8>,
 }
 
@@ -70,8 +128,8 @@ impl RecordReader<'_> {
         self.map
             .read_exact_logical(&mut self.file, logical, &mut self.buf)
             .ok()?;
-        if !NtfsFile::is_valid(&self.buf)
-            || !apply_fixup(&mut self.buf)
+        if !NtfsFile::is_valid(&self.buf, self.sector_size)
+            || !apply_fixup(&mut self.buf, self.sector_size)
             || !attributes_complete(&self.buf)
         {
             return None;
@@ -86,6 +144,7 @@ struct LazyRecordReader<'a> {
     volume_path: &'a str,
     map: &'a RunMap,
     record_size: usize,
+    sector_size: usize,
     inner: Option<RecordReader<'a>>,
     failed: bool,
     /// Failed `read_record` calls — each one is a name that stays
@@ -95,11 +154,17 @@ struct LazyRecordReader<'a> {
 }
 
 impl<'a> LazyRecordReader<'a> {
-    const fn new(volume_path: &'a str, map: &'a RunMap, record_size: usize) -> Self {
+    const fn new(
+        volume_path: &'a str,
+        map: &'a RunMap,
+        record_size: usize,
+        sector_size: usize,
+    ) -> Self {
         LazyRecordReader {
             volume_path,
             map,
             record_size,
+            sector_size,
             inner: None,
             failed: false,
             failures: 0,
@@ -114,6 +179,7 @@ impl<'a> LazyRecordReader<'a> {
                         file,
                         map: self.map,
                         record_size: self.record_size,
+                        sector_size: self.sector_size,
                         buf: Vec::new(),
                     });
                 }
@@ -191,7 +257,7 @@ impl<'a> LazyStreamReader<'a> {
     }
 }
 
-fn file_matches_reference(file: &NtfsFile<'_>, expected: u64) -> bool {
+const fn file_matches_reference(file: &NtfsFile<'_>, expected: u64) -> bool {
     file.reference_number() == expected
 }
 
@@ -205,10 +271,11 @@ fn decode_extension_extent(
     bytes: &[u8],
     entry: ListEntry,
     expected_base_reference: Option<u64>,
+    sector_size: usize,
     cluster_size: u64,
     volume_size: u64,
 ) -> Option<Vec<StreamRun>> {
-    let file = NtfsFile::new(number, bytes);
+    let file = NtfsFile::parse(number, bytes, sector_size)?;
     if !file_matches_reference(&file, entry.target_reference)
         || expected_base_reference
             .is_some_and(|base_reference| !extension_belongs_to(&file, base_reference))
@@ -259,12 +326,12 @@ fn load_attribute_list<'a>(
     let base_lowest_vcn = u64::try_from(attr.nonresident_header()?.lowest_vcn).ok()?;
     let (data_size, base_runs) =
         decode_extent_runs(&attr, sources.cluster_size, sources.volume_size)?;
-    let base_extent = ListEntry {
-        type_id: NtfsAttributeType::AttributeList as u32,
-        starting_vcn: base_lowest_vcn,
-        target_reference: base_reference,
-        id: base_attr_id,
-    };
+    let base_extent = ListEntry::unnamed(
+        NtfsAttributeType::AttributeList as u32,
+        base_lowest_vcn,
+        base_reference,
+        base_attr_id,
+    );
     let runs = close_extent_runs(
         base_runs,
         data_size,
@@ -289,6 +356,7 @@ fn load_attribute_list<'a>(
                     base.data,
                     entry,
                     None,
+                    sources.sector_size,
                     sources.cluster_size,
                     sources.volume_size,
                 )
@@ -299,6 +367,7 @@ fn load_attribute_list<'a>(
                         sources.arena.get(slot),
                         entry,
                         Some(base_reference),
+                        sources.sector_size,
                         sources.cluster_size,
                         sources.volume_size,
                     ),
@@ -308,6 +377,7 @@ fn load_attribute_list<'a>(
                             bytes,
                             entry,
                             Some(base_reference),
+                            sources.sector_size,
                             sources.cluster_size,
                             sources.volume_size,
                         )
@@ -319,14 +389,32 @@ fn load_attribute_list<'a>(
     Some(AttributeListSource::NonResident { data_size, runs })
 }
 
-fn file_name_for_entry(file: &NtfsFile<'_>, id: u16) -> Option<NtfsFileName> {
+#[derive(Clone)]
+struct ResolvedFileName {
+    parent_reference: u64,
+    namespace: u8,
+    utf16le: Vec<u8>,
+}
+
+impl From<NtfsFileName<'_>> for ResolvedFileName {
+    fn from(name: NtfsFileName<'_>) -> Self {
+        Self {
+            parent_reference: name.header.parent_directory_reference,
+            namespace: name.header.namespace,
+            utf16le: name.utf16le.to_vec(),
+        }
+    }
+}
+
+fn file_name_for_entry(file: &NtfsFile<'_>, entry: ListEntry) -> Option<ResolvedFileName> {
     let mut found = None;
     file.attributes(|attr| {
         if found.is_none()
             && attr.header.type_id == NtfsAttributeType::FileName as u32
-            && attr.header.id == id
+            && attr.header.id == entry.id
+            && attr.header.name_length == entry.name_length
         {
-            found = attr.as_name();
+            found = attr.as_name().map(ResolvedFileName::from);
         }
     });
     found
@@ -337,21 +425,22 @@ fn resolve_file_name_entry(
     entry: ListEntry,
     ext: &FxHashMap<u64, u32>,
     arena: &RecordArena,
+    sector_size: usize,
     rr: &mut LazyRecordReader<'_>,
-) -> Option<NtfsFileName> {
+) -> Option<ResolvedFileName> {
     let number = entry.target_record();
     if number == base.number {
-        return file_name_for_entry(base, entry.id);
+        return file_name_for_entry(base, entry);
     }
     let base_reference = base.reference_number();
     let pick = |bytes: &[u8]| {
-        let target = NtfsFile::new(number, bytes);
+        let target = NtfsFile::parse(number, bytes, sector_size)?;
         if !file_matches_reference(&target, entry.target_reference)
             || !extension_belongs_to(&target, base_reference)
         {
             return None;
         }
-        file_name_for_entry(&target, entry.id)
+        file_name_for_entry(&target, entry)
     };
     match ext.get(&number) {
         Some(&slot) => pick(arena.get(slot)),
@@ -368,7 +457,7 @@ fn resolve_attr_list_names(
     sources: &ResolveSources<'_>,
     rr: &mut LazyRecordReader,
     stream_reader: &mut LazyStreamReader,
-) -> Option<Vec<NtfsFileName>> {
+) -> Option<Vec<ResolvedFileName>> {
     if sources.stop.load(Ordering::Relaxed) {
         return None;
     }
@@ -390,17 +479,22 @@ fn resolve_attr_list_names(
             {
                 return;
             }
-            let Some(name) =
-                resolve_file_name_entry(base, entry, sources.extensions, sources.arena, rr)
-            else {
+            let Some(name) = resolve_file_name_entry(
+                base,
+                entry,
+                sources.extensions,
+                sources.arena,
+                sources.sector_size,
+                rr,
+            ) else {
                 valid = false;
                 return;
             };
-            if name.header.name_length == 0 {
+            if name.utf16le.is_empty() {
                 valid = false;
                 return;
             }
-            let namespace = name.header.namespace;
+            let namespace = name.namespace;
             if is_searchable_namespace(namespace) {
                 names.push(name);
             } else if namespace != NtfsFileNamespace::Dos as u8 {
@@ -429,14 +523,12 @@ fn resolve_attr_list_names(
         return None;
     }
     let mut unique = FxHashSet::default();
-    names.retain(|name| {
-        let data = name.data;
-        let units = name.header.name_length as usize;
-        unique.insert((
-            name.header.parent_directory_reference,
-            data[..units].to_vec(),
-        ))
-    });
+    if names
+        .iter()
+        .any(|name| !unique.insert((name.parent_reference, name.utf16le.clone())))
+    {
+        return None;
+    }
     (!names.is_empty()).then_some(names)
 }
 
@@ -456,6 +548,7 @@ pub(super) fn resolve_deferred(
         volume_path,
         runmap,
         record_size,
+        sector_size,
         cluster_size,
         volume_size,
         extensions,
@@ -470,76 +563,187 @@ pub(super) fn resolve_deferred(
         .par_chunks(DEFER_CHUNK)
         .map(|chunk| {
             let mut out = ParsedBatch::default();
-            // A spilled base record must stay borrowed while its attribute
-            // list resolves extension records. Separate readers prevent an
-            // extension read from overwriting the base reader's buffer.
-            let mut base_rr = LazyRecordReader::new(volume_path, runmap, record_size);
-            let mut extension_rr = LazyRecordReader::new(volume_path, runmap, record_size);
-            let mut stream_reader = LazyStreamReader::new(volume_path);
+            let mut readers = ChunkReaders {
+                base: LazyRecordReader::new(volume_path, runmap, record_size, sector_size),
+                extension: LazyRecordReader::new(volume_path, runmap, record_size, sector_size),
+                stream: LazyStreamReader::new(volume_path),
+            };
             let sources = ResolveSources {
                 extensions,
                 arena,
+                sector_size,
                 cluster_size,
                 volume_size,
                 stop,
             };
-            for &(reference, slot) in chunk {
-                if stop.load(Ordering::Relaxed) {
-                    return Err(DeferredError::Cancelled);
+            let outcome = resolve_chunk(chunk, &sources, metadata, &mut readers, &mut out);
+            // One read of the counters, after every borrow the loop held has
+            // ended, on both exit paths.
+            let name_read_failures = readers.name_read_failures();
+            match outcome {
+                Ok(()) => {
+                    out.deferred_name_read_failures = name_read_failures;
+                    Ok(out)
                 }
-                let number = reference & 0x0000_FFFF_FFFF_FFFF;
-                let bytes = match slot {
-                    Some(slot) => Some(arena.get(slot)),
-                    None => base_rr.read_record(number),
-                };
-                let Some(bytes) = bytes else {
-                    let snapshot = metadata.links(reference);
-                    if stop.load(Ordering::Relaxed) {
-                        return Err(DeferredError::Cancelled);
-                    }
-                    if matches!(snapshot, LinkSnapshot::Gone) {
-                        continue;
-                    }
-                    return Err(DeferredError::Incomplete(reference));
-                };
-                let f = NtfsFile::new(number, bytes);
-                if f.reference_number() != reference {
-                    return Err(DeferredError::Incomplete(reference));
-                }
-                let resolved =
-                    resolve_attr_list_names(&f, &sources, &mut extension_rr, &mut stream_reader);
-                if let Some(names) = resolved {
-                    for name in names {
-                        out.push_named(&f, &name);
-                    }
-                } else {
-                    if stop.load(Ordering::Relaxed) {
-                        return Err(DeferredError::Cancelled);
-                    }
-                    let snapshot = metadata.links(reference);
-                    if stop.load(Ordering::Relaxed) {
-                        return Err(DeferredError::Cancelled);
-                    }
-                    match snapshot {
-                        LinkSnapshot::Present(links) if !links.is_empty() => {
-                            for link in links {
-                                out.push_link(&f, link.parent_frn, &link.name);
-                            }
-                        }
-                        LinkSnapshot::Gone => {}
-                        LinkSnapshot::Present(_) | LinkSnapshot::Failed => {
-                            return Err(DeferredError::Incomplete(reference));
-                        }
-                    }
-                }
+                Err(give_up) => Err(give_up.into_error(name_read_failures)),
             }
-            out.deferred_name_read_failures =
-                base_rr.failures + extension_rr.failures + stream_reader.failures;
-            Ok(out)
         })
         .collect();
     if stop.load(Ordering::Relaxed) {
         return Err(DeferredError::Cancelled);
     }
     results.into_iter().collect()
+}
+
+/// Resolve one chunk's objects into `out`. Split out of `resolve_deferred` so
+/// that its borrows of `readers` end before the caller reads their failure
+/// counters — see [`ChunkGiveUp`].
+fn resolve_chunk(
+    chunk: &[(u64, Option<u32>)],
+    sources: &ResolveSources<'_>,
+    metadata: &MetadataSource,
+    readers: &mut ChunkReaders<'_>,
+    out: &mut ParsedBatch,
+) -> Result<(), ChunkGiveUp> {
+    let stop = sources.stop;
+    let sector_size = sources.sector_size;
+    for &(reference, slot) in chunk {
+        if stop.load(Ordering::Relaxed) {
+            return Err(ChunkGiveUp::CANCELLED);
+        }
+        let number = reference & 0x0000_FFFF_FFFF_FFFF;
+        let bytes = match slot {
+            Some(slot) => Some(sources.arena.get(slot)),
+            None => readers.base.read_record(number),
+        };
+        let Some(bytes) = bytes else {
+            let snapshot = metadata.links(reference);
+            if stop.load(Ordering::Relaxed) {
+                return Err(ChunkGiveUp::CANCELLED);
+            }
+            if matches!(snapshot, LinkSnapshot::Gone) {
+                continue;
+            }
+            return Err(ChunkGiveUp::incomplete(
+                reference,
+                IncompleteCause::RecordUnreadable,
+            ));
+        };
+        let Some(f) = NtfsFile::parse(number, bytes, sector_size) else {
+            return Err(ChunkGiveUp::incomplete(
+                reference,
+                IncompleteCause::MalformedRecord,
+            ));
+        };
+        if f.reference_number() != reference {
+            return Err(ChunkGiveUp::incomplete(
+                reference,
+                IncompleteCause::ReferenceMismatch,
+            ));
+        }
+        let Some(attrs) = extract_attrs(&f) else {
+            return Err(ChunkGiveUp::incomplete(
+                reference,
+                IncompleteCause::AttributesMissing,
+            ));
+        };
+        let Some((size, mtime)) = metadata.stat(reference) else {
+            return Err(ChunkGiveUp::incomplete(
+                reference,
+                IncompleteCause::StatUnavailable,
+            ));
+        };
+        let attrs = attrs.with_stat(size, mtime);
+        let resolved =
+            resolve_attr_list_names(&f, sources, &mut readers.extension, &mut readers.stream);
+        if let Some(names) = resolved {
+            for name in names {
+                if !out.push_utf16le_link_with_attrs(
+                    &f,
+                    name.parent_reference,
+                    &name.utf16le,
+                    attrs,
+                ) {
+                    return Err(ChunkGiveUp::incomplete(
+                        reference,
+                        IncompleteCause::LinkRejected,
+                    ));
+                }
+            }
+        } else {
+            if stop.load(Ordering::Relaxed) {
+                return Err(ChunkGiveUp::CANCELLED);
+            }
+            let snapshot = metadata.links(reference);
+            if stop.load(Ordering::Relaxed) {
+                return Err(ChunkGiveUp::CANCELLED);
+            }
+            match snapshot {
+                LinkSnapshot::Present(links) if !links.is_empty() => {
+                    for link in links {
+                        if !out.push_link(&f, link.parent_frn, &link.name, attrs) {
+                            return Err(ChunkGiveUp::incomplete(
+                                reference,
+                                IncompleteCause::LinkRejected,
+                            ));
+                        }
+                    }
+                }
+                LinkSnapshot::Gone => {}
+                LinkSnapshot::Present(_) | LinkSnapshot::Failed => {
+                    return Err(ChunkGiveUp::incomplete(
+                        reference,
+                        IncompleteCause::LinkSetUnavailable,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The failure tally used to be summed after the resolution loop and
+    /// therefore only on the loop's *success* path — it was discarded exactly
+    /// when it was needed. A give-up must carry both the reason it gave up on
+    /// and the volume reads that failed getting there.
+    #[test]
+    fn a_give_up_reports_its_cause_and_the_reads_that_failed() {
+        let reference = (1u64 << 48) | 0x4D;
+        let runmap = super::super::volume_io::RunMap { runs: Vec::new() };
+        let arena = RecordArena::new(1024);
+        let extensions = FxHashMap::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        // Neither an arena slot nor an openable volume, so the targeted base
+        // record read is attempted and fails.
+        let context = DeferredContext {
+            volume_path: "no-such-volume-for-this-fixture",
+            runmap: &runmap,
+            record_size: 1024,
+            sector_size: 512,
+            cluster_size: 4096,
+            volume_size: 1 << 20,
+            extensions: &extensions,
+            arena: &arena,
+            metadata: &MetadataSource::none(),
+            stop: &stop,
+        };
+
+        let Err(error) = resolve_deferred(context, &[(reference, None)]) else {
+            panic!("an unreadable base record cannot resolve");
+        };
+
+        let DeferredError::Incomplete(object) = error else {
+            panic!("an unreadable base record is not a cancellation: {error:?}");
+        };
+        assert_eq!(object.reference, reference);
+        assert_eq!(object.cause, IncompleteCause::RecordUnreadable);
+        assert_eq!(
+            object.name_read_failures, 1,
+            "the failed volume read survives the give-up"
+        );
+    }
 }

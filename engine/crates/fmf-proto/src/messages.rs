@@ -1,14 +1,18 @@
 //! Payload codecs.
 //!
-//! Binary payloads are little-endian, padding free,
-//! concatenated in documented order; cold-path payloads are UTF-8 JSON with
-//! `snake_case` fields (docs/ARCHITECTURE.md "Pipe protocol" §Opcode table
-//! — the canonical table). The types themselves come from `fmf_contract`;
-//! only the byte logic lives here.
+//! Binary payloads are little-endian, padding free, and concatenated in the
+//! order each codec below documents; cold-path payloads are UTF-8 JSON with
+//! `snake_case` field names (serde's default — do not add renames). The types
+//! themselves come from `fmf_contract` (see [`opcode`] for which payload
+//! belongs to which operation); only the byte logic lives here.
+//!
+//! A volume is identified everywhere by its drive-label string (`"C:"`),
+//! never a GUID.
 
 use serde::{Deserialize, Serialize};
 
 pub use fmf_contract::opcodes as opcode;
+use fmf_contract::pod::row_flags;
 pub use fmf_contract::pod::{FmfEvent, FmfQueryOptions, FmfRow};
 
 /// Why a payload failed to decode (or encode, for JSON).
@@ -422,6 +426,11 @@ fn validate_page(rows: &[FmfRow], blob: &[u8]) -> Result<(), WireError> {
         });
     }
     for row in rows {
+        if row.flags & !row_flags::KNOWN_MASK != 0 {
+            return Err(WireError::InvalidPageRow(
+                "unknown row flag bits must be zero",
+            ));
+        }
         if row._reserved != 0 {
             return Err(WireError::InvalidPageRow("reserved field must be zero"));
         }
@@ -672,6 +681,33 @@ mod tests {
         invalid.parent_path_len += 1;
         assert!(matches!(
             encode_page(&[invalid], &blob),
+            Err(WireError::InvalidPageRow(_))
+        ));
+    }
+
+    #[test]
+    fn page_rejects_unknown_row_flags_on_encode_and_decode() {
+        let row = FmfRow {
+            entry_ref: 1,
+            frn: 1,
+            size: 0,
+            mtime: 0,
+            name_off: 0,
+            parent_path_off: 0,
+            flags: row_flags::KNOWN_MASK << 1,
+            name_len: 0,
+            parent_path_len: 0,
+            _reserved: 0,
+        };
+        assert!(matches!(
+            encode_page(&[row], &[]),
+            Err(WireError::InvalidPageRow(_))
+        ));
+
+        let mut bytes = encode_page(&[FmfRow { flags: 0, ..row }], &[]).unwrap();
+        bytes[8 + 40..8 + 44].copy_from_slice(&row.flags.to_le_bytes());
+        assert!(matches!(
+            decode_page(&bytes),
             Err(WireError::InvalidPageRow(_))
         ));
     }

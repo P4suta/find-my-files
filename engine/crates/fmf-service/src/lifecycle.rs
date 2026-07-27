@@ -38,102 +38,28 @@ pub fn stable_exe_path(data_dir: &Path) -> PathBuf {
     data_dir.join("fmf-service.exe")
 }
 
-/// Atomically records "the service was used now".
-///
-/// The complete timestamp is written and flushed to a uniquely created sibling
-/// before `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` publishes it. A crash
-/// or concurrent connection therefore leaves either the previous complete
-/// timestamp or the new one, never a truncated value.
+/// Atomically records "the service was used now" through the already verified
+/// machine-root handle. No path-only staging or replacement API is used.
 ///
 /// # Errors
 ///
-/// Returns timestamp conversion, staging-file, write/flush, replacement, or
-/// cleanup errors. Callers must surface the failure rather than letting GC
-/// mistake an old stamp for an unused installation.
-pub fn stamp_last_use(data_dir: &Path) -> std::io::Result<()> {
-    stamp_last_use_at(data_dir, SystemTime::now())
+/// Returns timestamp conversion or trusted-root publication errors. Callers
+/// must surface the failure rather than letting GC mistake an old stamp for an
+/// unused installation.
+pub fn stamp_last_use(root: &crate::security::TrustedDataRoot) -> std::io::Result<()> {
+    stamp_last_use_with_sddl(root, SystemTime::now(), &crate::security::data_dir_sddl())
 }
 
-fn stamp_last_use_at(data_dir: &Path, used_at: SystemTime) -> std::io::Result<()> {
-    use std::io::{ErrorKind, Write as _};
-
+fn stamp_last_use_with_sddl(
+    root: &crate::security::TrustedDataRoot,
+    used_at: SystemTime,
+    sddl: &str,
+) -> std::io::Result<()> {
     let secs = used_at
         .duration_since(UNIX_EPOCH)
-        .map_err(|e| std::io::Error::new(ErrorKind::InvalidInput, e))?
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
         .as_secs();
-    let path = last_use_path(data_dir);
-    let mut staged = None;
-    for attempt in 0..16 {
-        let candidate = data_dir.join(format!(".last_use.write-{}-{attempt}", std::process::id()));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(file) => {
-                staged = Some((candidate, file));
-                break;
-            }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
-    }
-    let Some((staged_path, mut staged_file)) = staged else {
-        return Err(std::io::Error::new(
-            ErrorKind::AlreadyExists,
-            "could not allocate a unique last_use staging file",
-        ));
-    };
-
-    let write_result = (|| {
-        staged_file.write_all(secs.to_string().as_bytes())?;
-        staged_file.flush()?;
-        staged_file.sync_all()
-    })();
-    drop(staged_file);
-    if let Err(e) = write_result {
-        return Err(cleanup_staged_file(&staged_path, e));
-    }
-
-    if let Err(e) = replace_file(&staged_path, &path) {
-        return Err(cleanup_staged_file(&staged_path, e));
-    }
-    Ok(())
-}
-
-fn cleanup_staged_file(path: &Path, original: std::io::Error) -> std::io::Error {
-    match std::fs::remove_file(path) {
-        Ok(()) => original,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => original,
-        Err(cleanup) => std::io::Error::new(
-            original.kind(),
-            format!("{original}; staging-file cleanup also failed: {cleanup}"),
-        ),
-    }
-}
-
-fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::GetLastError;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let from: Vec<u16> = from.as_os_str().encode_wide().chain([0]).collect();
-    let to: Vec<u16> = to.as_os_str().encode_wide().chain([0]).collect();
-    let ok = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        return Err(std::io::Error::from_raw_os_error(
-            unsafe { GetLastError() } as i32
-        ));
-    }
-    Ok(())
+    root.atomic_write("last_use", secs.to_string().as_bytes(), sddl)
 }
 
 /// Reads the last-use stamp.
@@ -147,40 +73,54 @@ fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Returns non-`NotFound` I/O errors, `InvalidData` for malformed Unix seconds,
 /// or `InvalidData` when the timestamp cannot be represented by `SystemTime`.
 pub fn read_last_use(data_dir: &Path) -> std::io::Result<Option<SystemTime>> {
-    use std::io::Read;
-
-    const MAX_LAST_USE_BYTES: u64 = 32;
     let path = last_use_path(data_dir);
-    let mut text = String::new();
-    let mut file = match std::fs::File::open(&path) {
+    let file = match std::fs::File::open(&path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
+    read_last_use_file(file, &path).map(Some)
+}
+
+/// Reads a last-use stamp from an already verified file handle.
+///
+/// # Errors
+/// Returns I/O errors, `InvalidData` for malformed/oversized Unix seconds, or
+/// `InvalidData` when the timestamp cannot be represented by `SystemTime`.
+pub fn read_last_use_file(
+    mut file: std::fs::File,
+    display_path: &Path,
+) -> std::io::Result<SystemTime> {
+    use std::io::Read;
+
+    const MAX_LAST_USE_BYTES: u64 = 32;
+    let mut text = String::new();
     file.by_ref()
         .take(MAX_LAST_USE_BYTES + 1)
         .read_to_string(&mut text)?;
     if text.len() as u64 > MAX_LAST_USE_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("{} exceeds {MAX_LAST_USE_BYTES} bytes", path.display()),
+            format!(
+                "{} exceeds {MAX_LAST_USE_BYTES} bytes",
+                display_path.display()
+            ),
         ));
     }
     let secs = text.trim().parse::<u64>().map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("malformed {}: {e}", path.display()),
+            format!("malformed {}: {e}", display_path.display()),
         )
     })?;
-    let timestamp = UNIX_EPOCH
+    UNIX_EPOCH
         .checked_add(Duration::from_secs(secs))
         .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("timestamp in {} is out of range", path.display()),
+                format!("timestamp in {} is out of range", display_path.display()),
             )
-        })?;
-    Ok(Some(timestamp))
+        })
 }
 
 /// Pure idle-stop decision (ADR-0027).
@@ -208,17 +148,22 @@ pub fn idle_should_stop(
 /// when the bytes are UTF-8. UTF-16LE+BOM is the form Windows itself exports, so
 /// the definition loads on every locale. `<Command>`/`<Arguments>` are separate
 /// elements, sidestepping `/TR` command-line quoting; the action runs the stable
-/// binary copy with the `gc` verb as SYSTEM (`S-1-5-18`). The `stable_exe` path is
-/// the fixed hardened-data-root copy (never user input), so it needs no escaping.
+/// binary copy with the `gc` verb as SYSTEM (`S-1-5-18`). The fixed descriptor
+/// from [`crate::security::gc_task_sddl`] is embedded in registration metadata
+/// so owner/group/DACL hardening is atomic with task creation. The `stable_exe`
+/// process token is reduced to `SeChangeNotifyPrivilege`, matching the service.
+/// The `stable_exe` path is the fixed hardened-data-root copy (never user input),
+/// so it needs no escaping.
 #[must_use]
 pub fn gc_task_xml(stable_exe: &Path) -> Vec<u8> {
     let command = xml_text(&stable_exe.display().to_string());
+    let security_descriptor = xml_text(crate::security::gc_task_sddl());
     let xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
-         <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
-         <RegistrationInfo><Description>find-my-files engine on-demand GC (ADR-0027)</Description></RegistrationInfo>\n\
+         <Task version=\"1.3\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
+         <RegistrationInfo><SecurityDescriptor>{security_descriptor}</SecurityDescriptor><Description>find-my-files engine on-demand GC (ADR-0027)</Description></RegistrationInfo>\n\
          <Triggers><CalendarTrigger><StartBoundary>2024-01-01T03:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers>\n\
-         <Principals><Principal id=\"Author\"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\n\
+         <Principals><Principal id=\"Author\"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel><RequiredPrivileges><Privilege>SeChangeNotifyPrivilege</Privilege></RequiredPrivileges></Principal></Principals>\n\
          <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><ExecutionTimeLimit>PT5M</ExecutionTimeLimit></Settings>\n\
          <Actions Context=\"Author\"><Exec><Command>{command}</Command><Arguments>gc</Arguments></Exec></Actions>\n\
          </Task>\n",
@@ -267,6 +212,18 @@ pub fn gc_should_remove(now: SystemTime, last_use: Option<SystemTime>, max_idle_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_root() -> (tempfile::TempDir, crate::security::TrustedDataRoot, String) {
+        let anchor = tempfile::tempdir().expect("anchor");
+        let sid = crate::security::current_user_sid().expect("current SID");
+        let sddl = format!("O:{sid}G:BUD:P(A;OICI;FA;;;{sid})");
+        let root = crate::security::TrustedDataRoot::create_or_replace_for_test(
+            &anchor.path().join("find-my-files"),
+            &sddl,
+        )
+        .expect("trusted test root");
+        (anchor, root, sddl)
+    }
 
     #[test]
     fn idle_stop_requires_seen_idle_and_not_indexing() {
@@ -352,6 +309,18 @@ mod tests {
             "with the gc verb"
         );
         assert!(text.contains("<UserId>S-1-5-18</UserId>"), "as SYSTEM");
+        assert!(
+            text.contains(
+                "<RequiredPrivileges><Privilege>SeChangeNotifyPrivilege</Privilege></RequiredPrivileges>"
+            ),
+            "the SYSTEM GC process receives only its traversal privilege"
+        );
+        assert!(
+            text.contains(
+                "<SecurityDescriptor>O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)</SecurityDescriptor>"
+            ),
+            "task owner/group/DACL are fixed at registration"
+        );
     }
 
     #[test]
@@ -368,13 +337,13 @@ mod tests {
 
     #[test]
     fn last_use_round_trips() {
-        let dir = fmf_core::index::testutil::TestDir::new();
+        let (_anchor, root, sddl) = test_root();
         assert!(
-            read_last_use(dir.path()).expect("read missing").is_none(),
+            read_last_use(root.path()).expect("read missing").is_none(),
             "no stamp yet"
         );
-        stamp_last_use(dir.path()).expect("stamp");
-        let t = read_last_use(dir.path())
+        stamp_last_use_with_sddl(&root, SystemTime::now(), &sddl).expect("stamp");
+        let t = read_last_use(root.path())
             .expect("read stamp")
             .expect("stamp then read");
         let age = SystemTime::now()
@@ -382,27 +351,28 @@ mod tests {
             .expect("stamp is not in the future");
         assert!(age < Duration::from_mins(1), "stamp is ~now");
         assert!(
-            std::fs::read_dir(dir.path())
+            std::fs::read_dir(root.path())
                 .expect("read data dir")
                 .all(|entry| !entry
                     .expect("entry")
                     .file_name()
                     .to_string_lossy()
-                    .starts_with(".last_use.write-")),
+                    .starts_with(".fmf-stage-")),
             "successful publication leaves no staging file"
         );
     }
 
     #[test]
     fn last_use_atomically_replaces_an_existing_stamp() {
-        let dir = fmf_core::index::testutil::TestDir::new();
-        std::fs::write(last_use_path(dir.path()), b"1").expect("old stamp");
+        let (_anchor, root, sddl) = test_root();
+        root.atomic_write("last_use", b"1", &sddl)
+            .expect("old stamp");
         let expected = UNIX_EPOCH + Duration::from_secs(123_456);
 
-        stamp_last_use_at(dir.path(), expected).expect("replace stamp");
+        stamp_last_use_with_sddl(&root, expected, &sddl).expect("replace stamp");
 
         assert_eq!(
-            read_last_use(dir.path()).expect("read"),
+            read_last_use(root.path()).expect("read"),
             Some(expected),
             "the complete replacement is visible"
         );
@@ -444,20 +414,21 @@ mod tests {
 
     #[test]
     fn failed_last_use_replace_cleans_its_staging_file() {
-        let dir = fmf_core::index::testutil::TestDir::new();
-        std::fs::create_dir(last_use_path(dir.path())).expect("blocking destination");
+        let (_anchor, root, sddl) = test_root();
+        root.ensure_directory("last_use", &sddl)
+            .expect("blocking destination");
 
-        stamp_last_use_at(dir.path(), UNIX_EPOCH + Duration::from_secs(7))
+        stamp_last_use_with_sddl(&root, UNIX_EPOCH + Duration::from_secs(7), &sddl)
             .expect_err("a directory cannot be replaced by the stamp file");
 
         assert!(
-            std::fs::read_dir(dir.path())
+            std::fs::read_dir(root.path())
                 .expect("read data dir")
                 .all(|entry| !entry
                     .expect("entry")
                     .file_name()
                     .to_string_lossy()
-                    .starts_with(".last_use.write-")),
+                    .starts_with(".fmf-stage-")),
             "failed publication cleans its staging file"
         );
     }

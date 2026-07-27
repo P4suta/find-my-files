@@ -1,8 +1,10 @@
-//! Wire enumerations of `FmfQueryOptions` and `FmfVolumeStatus.state`
-//! (docs/ARCHITECTURE.md opcode table).
+//! Wire enumerations of `FmfQueryOptions` and `FmfVolumeStatus.state`.
 //!
 //! These are the canonical values; fmf-core uses these enums directly (no
-//! wire↔engine mapping layer).
+//! wire↔engine mapping layer). Both boundaries reject an unknown
+//! discriminant, a non-Boolean value in a Boolean field, and any nonzero
+//! reserved word or reserved `regex_mode` bit with
+//! [`crate::codes::INVALID_ARG`] — neither ever coerces one to a default.
 
 /// Which result column results are ordered by (`FmfQueryOptions.sort_key`).
 #[repr(u32)]
@@ -54,41 +56,4 @@ pub enum RegexScope {
     Name = 0,
     /// Match against the full path.
     Path = 1,
-}
-
-// Wire u32 → enum, defaulting unknown values like the boundaries always
-// did (pure value conversion — the one place the mapping table lives).
-impl SortKey {
-    /// Decode a wire `u32` into a `SortKey`, defaulting unknown values to `Name`.
-    #[must_use]
-    pub const fn from_u32(v: u32) -> Self {
-        match v {
-            1 => Self::Size,
-            2 => Self::Mtime,
-            _ => Self::Name,
-        }
-    }
-}
-
-impl CaseMode {
-    /// Decode a wire `u32` into a `CaseMode`, defaulting unknown values to `Smart`.
-    #[must_use]
-    pub const fn from_u32(v: u32) -> Self {
-        match v {
-            1 => Self::Insensitive,
-            2 => Self::Sensitive,
-            _ => Self::Smart,
-        }
-    }
-}
-
-impl RegexScope {
-    /// Decode a wire `u32` into a `RegexScope`, defaulting unknown values to `Name`.
-    #[must_use]
-    pub const fn from_u32(v: u32) -> Self {
-        match v {
-            1 => Self::Path,
-            _ => Self::Name,
-        }
-    }
 }

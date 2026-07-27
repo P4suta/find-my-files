@@ -1,8 +1,12 @@
 //! 16-byte little-endian frame header + length-prefixed payload.
 //!
-//! (docs/ARCHITECTURE.md "Pipe protocol" §Frame). The header type and
-//! its byte conversion live in `fmf_contract::pod`; this module adds the
-//! stream I/O and the `MAX_PAYLOAD_LEN` policy.
+//! The header type and its byte conversion live in `fmf_contract::pod`; this
+//! module adds the stream I/O and the [`MAX_PAYLOAD_LEN`] policy.
+//!
+//! Requests are multiplexed by `request_id` and may complete out of order.
+//! `status` is meaningful only on a response, and any malformed frame —
+//! unknown opcode, truncation, or a length past the operation's cap — is a
+//! disconnect plus a counter, never a partial parse.
 
 use std::io::{Read, Write};
 

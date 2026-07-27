@@ -1,7 +1,10 @@
 //! Unelevated loopback tests: a real named pipe (unique name per test), the
 //! real server, an injected Ready volume — no real volume, no admin. The
-//! byte-level expectations mirror docs/ARCHITECTURE.md "Pipe protocol";
-//! the C# client test suite pins the same golden frames.
+//! byte-level expectations are the server-side half of the contract that the
+//! C# client suite pins from the other side, against the same golden frames.
+//!
+//! These run unconditionally under `just test`, which is the point: the wire
+//! is the part most likely to drift and the part least in need of elevation.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -42,7 +45,7 @@ fn test_engine() -> (TestDir, Arc<Engine>) {
         index_dir: dir.path().to_path_buf(),
     })
     .expect("engine");
-    let mut b = VolumeIndexBuilder::new("C:", 5);
+    let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
     let alpha: Vec<u16> = "alpha.txt".encode_utf16().collect();
     b.push(RawEntry {
         parent_frn: Frn(5),
@@ -88,7 +91,8 @@ fn start(tag: &str, debug_faults: bool) -> Harness {
             pipe_name: pipe_name.clone(),
             debug_faults,
             authorized_sids: Vec::new(),
-            data_dir: dir.path().to_path_buf(),
+            data_root: None,
+            client_verifier: fmf_service::security::verify_client,
         },
     )
     .expect("server start");
@@ -102,14 +106,15 @@ fn start(tag: &str, debug_faults: bool) -> Harness {
 
 #[test]
 fn server_start_rejects_invalid_pipe_security_synchronously() {
-    let (dir, engine) = test_engine();
+    let (_dir, engine) = test_engine();
     let result = Server::start(
         engine.clone(),
         ServerOptions {
             pipe_name: unique_name("bad-sddl"),
             debug_faults: false,
             authorized_sids: vec!["not-a-windows-sid".to_string()],
-            data_dir: dir.path().to_path_buf(),
+            data_root: None,
+            client_verifier: fmf_service::security::verify_client,
         },
     );
     let Err(error) = result else {
@@ -122,14 +127,15 @@ fn server_start_rejects_invalid_pipe_security_synchronously() {
 #[test]
 fn server_start_rejects_a_squatted_pipe_name_synchronously() {
     let first = start("squatted", false);
-    let (dir, engine) = test_engine();
+    let (_dir, engine) = test_engine();
     let result = Server::start(
         engine.clone(),
         ServerOptions {
             pipe_name: first.pipe_name.clone(),
             debug_faults: false,
             authorized_sids: Vec::new(),
-            data_dir: dir.path().to_path_buf(),
+            data_root: None,
+            client_verifier: fmf_service::security::verify_client,
         },
     );
     let Err(error) = result else {
@@ -156,7 +162,7 @@ fn server_stop_disconnects_live_clients() {
 
 #[test]
 fn server_stop_releases_a_reader_backpressured_by_slow_workers() {
-    let (dir, engine) = test_engine();
+    let (_dir, engine) = test_engine();
     let pipe_name = unique_name("stop-backpressure");
     let server = Server::start(
         engine.clone(),
@@ -164,7 +170,8 @@ fn server_stop_releases_a_reader_backpressured_by_slow_workers() {
             pipe_name: pipe_name.clone(),
             debug_faults: true,
             authorized_sids: Vec::new(),
-            data_dir: dir.path().to_path_buf(),
+            data_root: None,
+            client_verifier: fmf_service::security::verify_client,
         },
     )
     .expect("server start");
@@ -253,9 +260,11 @@ impl Client {
         c
     }
 
-    /// Sends one request and waits for its response, buffering any event
-    /// pushes that arrive in between.
-    fn request(&mut self, op: u16, payload: &[u8]) -> (FrameHeader, Vec<u8>) {
+    /// Writes one request frame and returns its `request_id` *without*
+    /// waiting for the response. Needed wherever the test has to keep several
+    /// requests in flight (pipelining, worker parking); the reply is picked up
+    /// later with [`Client::await_response`].
+    fn send(&mut self, op: u16, payload: &[u8]) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
         write_frame(
@@ -270,6 +279,49 @@ impl Client {
             payload,
         )
         .expect("write request");
+        id
+    }
+
+    /// Writes the one-way `QueryCancel` control frame (opcode 13, ADR-0044):
+    /// zero payload, no response, and `request_id` naming the query request to
+    /// abort — so, unlike [`Client::send`], it does not consume a fresh id.
+    fn send_query_cancel(&mut self, request_id: u32) {
+        write_frame(
+            &mut self.stream,
+            FrameHeader {
+                len: 0,
+                opcode: opcode::QUERY_CANCEL,
+                flags: 0,
+                request_id,
+                status: 0,
+            },
+            &[],
+        )
+        .expect("write QueryCancel");
+    }
+
+    /// Reads until the response for `request_id` arrives, buffering event
+    /// pushes and discarding the pipelined replies of other requests (the two
+    /// workers answer out of order by design).
+    fn await_response(&mut self, request_id: u32) -> (FrameHeader, Vec<u8>) {
+        loop {
+            let (h, p) = read_frame(&mut self.stream).expect("read response");
+            if h.flags & FLAG_EVENT != 0 {
+                self.events.push_back((h, p));
+                continue;
+            }
+            assert_eq!(h.flags & FLAG_RESPONSE, FLAG_RESPONSE);
+            if h.request_id == request_id {
+                return (h, p);
+            }
+        }
+    }
+
+    /// Sends one request and waits for its response, buffering any event
+    /// pushes that arrive in between. Strict: nothing else may be in flight,
+    /// so any other response frame is a correlation bug.
+    fn request(&mut self, op: u16, payload: &[u8]) -> (FrameHeader, Vec<u8>) {
+        let id = self.send(op, payload);
         loop {
             let (h, p) = read_frame(&mut self.stream).expect("read response");
             if h.flags & FLAG_EVENT != 0 {
@@ -433,6 +485,9 @@ fn operation_specific_caps_disconnect_before_reading_the_announced_body() {
     let harness = start("operation-caps", false);
     for (opcode, announced_len) in [
         (opcode::STATS, 1),
+        // QueryCancel is zero-payload by contract (ADR-0044); a body announced
+        // on it is as malformed as one on Stats.
+        (opcode::QUERY_CANCEL, 1),
         (
             opcode::QUERY,
             messages::FmfQueryOptions::LEN as u32 + fmf_proto::limits::MAX_QUERY_BYTES + 1,
@@ -596,7 +651,7 @@ fn drop_fault_severs_the_connection() {
 
 #[test]
 fn page_roundtrip_stays_inside_the_latency_budget() {
-    // Latency budget (ARCHITECTURE.md): ResultPage 64 rows p99 <=5ms. Loopback
+    // Latency budget (ADR-0016): ResultPage 64 rows p99 <=5ms. Loopback
     // RTT is normally ~0.1-0.3ms — 5ms is a comfortable absolute line even
     // under thermal drift; breaking it here points to a design problem
     // (serialization, excessive copying).
@@ -635,4 +690,138 @@ fn lag_fault_delays_pages_not_queries() {
         begin.elapsed() >= std::time::Duration::from_millis(240),
         "!!lag pages must stall ~250ms"
     );
+}
+
+/// `QueryCancel` (opcode 13, ADR-0044) is the only frame the reader executes
+/// itself instead of queueing, so it can overtake a query that is still
+/// waiting for a worker. This test creates exactly that situation and pins
+/// the effect.
+///
+/// The observation is a *frame*, not a timeout: a cancelled query is answered
+/// with `FMF_E_CANCELLED` + the `query cancelled` detail. Asserting the detail
+/// separates the explicit cancel from the latest-query-wins supersede path,
+/// which answers the same status with `query superseded`.
+///
+/// Both workers are parked in the 250 ms `!!lag` page sleep first, so the
+/// target query is still queued — not dispatched — when the cancel frame is
+/// read. The bounded retry covers only the one thing the test cannot control,
+/// the OS scheduling the workers into that sleep; a cancel that does nothing
+/// answers `OK` on every attempt and still fails in bounded time.
+#[test]
+fn query_cancel_aborts_a_query_that_is_still_queued() {
+    let hx = start("query-cancel", true);
+    let mut c = Client::hello(&hx.pipe_name);
+    let (_, Some((lagged, _))) = c.query("!!lag") else {
+        panic!("lag query failed");
+    };
+
+    for _ in 0..3 {
+        // One lagged page per worker (REQUEST_QUEUE_CAP is one slot per
+        // worker, so it is also the worker count). Each dequeue costs the
+        // worker a 250 ms sleep inside result_page.
+        for _ in 0..REQUEST_QUEUE_CAP {
+            c.send(
+                opcode::RESULT_PAGE,
+                &messages::ResultPageReq {
+                    result_id: lagged,
+                    offset: 0,
+                    count: 1,
+                }
+                .encode(),
+            );
+        }
+        // The workers only have to be *scheduled*; they then hold the sleep
+        // for 250 ms, which is the margin the two frames below race against.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let query_id = c.send(
+            opcode::QUERY,
+            &messages::encode_query_req(messages::FmfQueryOptions::default(), "alpha"),
+        );
+        c.send_query_cancel(query_id);
+
+        let (header, detail) = c.await_response(query_id);
+        if header.status == codes::CANCELLED {
+            assert_eq!(
+                String::from_utf8_lossy(&detail),
+                "query cancelled",
+                "explicit QueryCancel, not the latest-query-wins supersede path"
+            );
+            return;
+        }
+        assert_eq!(
+            header.status,
+            codes::OK,
+            "a query is either served or cancelled"
+        );
+    }
+    panic!("QueryCancel never aborted a query that was still queued behind parked workers");
+}
+
+/// The reader executes `QueryCancel` before the dispatcher's handshake gate
+/// can see it, so the gate is duplicated there. An un-greeted client must be
+/// disconnected rather than allowed to poke the query registry.
+#[test]
+fn query_cancel_before_hello_drops_the_connection() {
+    let hx = start("cancel-nohello", false);
+    let mut c = Client::connect(&hx.pipe_name);
+    c.send_query_cancel(1);
+
+    // Follow with a request the server *would* answer if it had not hung up.
+    // That turns a missing gate into an immediate failed assertion instead of
+    // a blocking read only the harness timeout could end. The write itself may
+    // already fail against the severed pipe — that is the passing case too.
+    let _ = write_frame(
+        &mut c.stream,
+        FrameHeader {
+            len: 0,
+            opcode: opcode::HELLO,
+            flags: 0,
+            request_id: 2,
+            status: 0,
+        },
+        &messages::HelloReq {
+            protocol_version: PROTOCOL_VERSION,
+        }
+        .encode(),
+    );
+    if let Ok((header, _)) = read_frame(&mut c.stream) {
+        panic!(
+            "server must disconnect instead of serving an un-greeted client; \
+             got opcode {} status {}",
+            header.opcode, header.status
+        );
+    }
+}
+
+/// One-way means one-way: a `QueryCancel` naming a request id that was never
+/// issued — or one that already completed — must write nothing back and must
+/// not disturb the connection. `request` asserts the next response correlates
+/// to *its* id and opcode, so a stray reply to any of the four control frames
+/// below fails the test.
+#[test]
+fn query_cancel_without_a_live_query_is_a_silent_no_op() {
+    let hx = start("cancel-unknown", false);
+    let mut c = Client::hello(&hx.pipe_name);
+
+    // Never-issued ids: the registry has nothing to cancel.
+    c.send_query_cancel(0);
+    c.send_query_cancel(u32::MAX);
+
+    let query_id = c.send(
+        opcode::QUERY,
+        &messages::encode_query_req(messages::FmfQueryOptions::default(), "alpha"),
+    );
+    let (header, body) = c.await_response(query_id);
+    assert_eq!(header.status, codes::OK);
+    let (head, _) = messages::QueryRespHead::decode(&body).expect("decode QueryRespHead");
+    assert_eq!(head.count, 1, "a stray cancel must not touch other queries");
+
+    // Already finished: the worker's guard removed the lifecycle, so this is
+    // the same no-op — and repeating it pins idempotence.
+    c.send_query_cancel(query_id);
+    c.send_query_cancel(query_id);
+
+    let (status, _) = c.query("beta");
+    assert_eq!(status, codes::OK, "the connection keeps serving");
 }

@@ -1,8 +1,10 @@
 //! Event fan-out: one engine sink → per-subscriber bounded queues.
 //!
-//! A slow or dead reader must never block the volume threads that emit events
-//! (docs/ARCHITECTURE.md "Pipe protocol" §event push): the queue is
-//! bounded at 256 and overflow drops the *oldest* event, counted and warned.
+//! A slow or dead reader must never block the volume threads that emit
+//! events, so each subscriber gets a bounded queue plus a writer thread and
+//! overflow drops the *oldest* event, counted and warned. Dropping is safe
+//! because every event in this class is a hint to re-query, not a delta: the
+//! next successful query carries whatever the dropped event announced.
 
 use std::collections::VecDeque;
 use std::sync::Arc;

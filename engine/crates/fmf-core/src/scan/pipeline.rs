@@ -9,9 +9,8 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use ntfs_reader::errors::NtfsReaderError;
-
-use super::volume_io::{ReadSpan, RunMap, open_raw_volume};
+use super::volume_io::{ReadSpan, RunMap, open_shared_read};
+use crate::ondisk::ntfs::NtfsError;
 
 pub(super) const SCAN_CHUNK: usize = 16 << 20;
 /// Chunk buffers cycling between the I/O thread and the parser (one being
@@ -97,13 +96,13 @@ pub(super) fn run_chunk_pipeline(
     chunks: &[Chunk],
     stop: &Arc<AtomicBool>,
     on_chunk: &mut dyn FnMut(usize, &mut [u8]),
-) -> Result<PipelineOutcome, NtfsReaderError> {
+) -> Result<PipelineOutcome, NtfsError> {
     use std::sync::mpsc::{self, RecvTimeoutError};
 
     if stop.load(Ordering::Relaxed) {
         return Ok(PipelineOutcome::Cancelled);
     }
-    let mut file = open_raw_volume(volume_path)?;
+    let mut file = open_shared_read(volume_path)?;
     let plan = chunks.to_vec();
     let (full_tx, full_rx) =
         mpsc::sync_channel::<std::io::Result<(usize, Vec<u8>)>>(PIPELINE_BUFFERS);
@@ -151,7 +150,7 @@ pub(super) fn run_chunk_pipeline(
         // handle moved into the dead closure, so open a fresh one. The
         // worker records the returned fallback count and emits the one
         // diagnostic for the scan.
-        let mut file = open_raw_volume(volume_path)?;
+        let mut file = open_shared_read(volume_path)?;
         let mut buf = vec![0u8; SCAN_CHUNK];
         let mut read_time = Duration::ZERO;
         for (i, c) in chunks.iter().enumerate() {
@@ -174,7 +173,7 @@ pub(super) fn run_chunk_pipeline(
         });
     };
 
-    let mut result: Result<(), NtfsReaderError> = Ok(());
+    let mut result: Result<(), NtfsError> = Ok(());
     let mut received = 0usize;
     let mut cancelled = false;
     while received < chunks.len() {

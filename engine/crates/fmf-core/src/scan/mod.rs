@@ -2,9 +2,11 @@
 //!
 //! The $MFT's data runs are read in 16MiB aligned chunks through our own
 //! volume handle, records are fixed up and parsed per chunk, and the
-//! buffers are recycled — peak RAM is bounded at a few chunks. ntfs-reader
-//! provides the bootstrap (boot-sector geometry + record 0's data runs) and
-//! the per-record attribute parsing types.
+//! buffers are recycled — peak RAM is bounded at a few chunks. Boot-sector,
+//! record, and attribute bytes are decoded by the alignment-independent
+//! parsers in [`crate::ondisk`]; untrusted disk bytes are never cast to Rust
+//! references. This module owns only acquisition and orchestration, which is
+//! why the grammar it drives is not gated to Windows with it (ADR-0047).
 //!
 //! Two layers of overlap (entry order stays byte-for-byte identical to a
 //! sequential scan):
@@ -16,12 +18,10 @@
 //!   appends the worker batches in chunk order, so `EntryId` assignment is
 //!   deterministic.
 
-pub(crate) mod attribute_list;
 mod deferred;
 mod parse;
 mod pipeline;
 mod probe;
-pub(crate) mod record;
 mod volume_io;
 
 pub use probe::{IoProbeMode, ProbeStats, io_probe};
@@ -30,18 +30,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use ntfs_reader::api::ROOT_RECORD;
-use ntfs_reader::errors::NtfsReaderError;
 use rustc_hash::FxHashMap;
 
-use crate::index::{VolumeIndex, VolumeIndexBuilder};
+use crate::index::{Frn, VolumeIndex, VolumeIndexBuilder};
 use crate::mft::{MftError, peak_working_set};
+use crate::volume_label::VolumeLabel;
 
 use deferred::{DeferredContext, DeferredError, resolve_deferred};
 use parse::{RecordArena, append_batches, parse_chunk};
 use pipeline::{PipelineOutcome, plan_chunks, run_chunk_pipeline};
 use volume_io::mft_layout;
-pub(crate) use volume_io::{apply_fixup, open_raw_volume};
+pub(crate) use volume_io::{open_raw_volume, volume_geometry};
 
 /// Statistics from a full index build.
 #[derive(Debug, Default)]
@@ -118,18 +117,18 @@ pub fn scan_volume_cancellable(
     if stop.load(Ordering::Relaxed) {
         return Err(MftError::Cancelled);
     }
-    let drive = drive.trim_end_matches(['\\', '/']);
-    let volume_path = format!(r"\\.\{drive}");
+    let label = VolumeLabel::parse(drive).ok_or_else(|| {
+        MftError::Ntfs("volume label must be exactly one ASCII drive letter and ':'".to_string())
+    })?;
+    let drive = label.as_str();
+    let volume_path = label.raw_path();
     let mut stats = ScanStats {
         volume: drive.to_string(),
         ..Default::default()
     };
 
     let t0 = Instant::now();
-    let layout = mft_layout(&volume_path).map_err(|e| match e {
-        NtfsReaderError::ElevationError => MftError::NotElevated,
-        other => MftError::Ntfs(other),
-    })?;
+    let layout = mft_layout(&volume_path).map_err(MftError::from)?;
     if stop.load(Ordering::Relaxed) {
         return Err(MftError::Cancelled);
     }
@@ -137,15 +136,10 @@ pub fn scan_volume_cancellable(
 
     let chunks =
         plan_chunks(&layout.runmap, layout.data_size, layout.record_size).ok_or_else(|| {
-            MftError::Ntfs(
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "$MFT length is not a whole number of file records",
-                )
-                .into(),
-            )
+            MftError::Ntfs("$MFT length is not a whole number of file records".to_string())
         })?;
-    let mut b = VolumeIndexBuilder::new(drive, ROOT_RECORD);
+    let mut b = VolumeIndexBuilder::new_strict(drive, Frn(layout.root_reference))
+        .map_err(|error| MftError::Ntfs(error.to_string()))?;
     let mut deferred: Vec<(u64, Option<u32>)> = Vec::new();
     let mut extensions: FxHashMap<u64, u32> = FxHashMap::default();
     let mut arena = RecordArena::new(layout.record_size);
@@ -157,7 +151,12 @@ pub fn scan_volume_cancellable(
             return;
         }
         let t = Instant::now();
-        let batches = parse_chunk(bytes, chunks[i].logical, layout.record_size);
+        let batches = parse_chunk(
+            bytes,
+            chunks[i].logical,
+            layout.record_size,
+            layout.sector_size,
+        );
         if !stop.load(Ordering::Relaxed) {
             corrupt_records += append_batches(
                 &mut b,
@@ -170,7 +169,7 @@ pub fn scan_volume_cancellable(
         }
         parse_time += t.elapsed();
     })
-    .map_err(MftError::Ntfs)?;
+    .map_err(MftError::from)?;
     let PipelineOutcome::Complete {
         read_time,
         fallbacks,
@@ -199,6 +198,7 @@ pub fn scan_volume_cancellable(
                 volume_path: &volume_path,
                 runmap: &layout.runmap,
                 record_size: layout.record_size,
+                sector_size: layout.sector_size,
                 cluster_size: layout.cluster_size,
                 volume_size: layout.volume_size,
                 extensions: &extensions,
@@ -232,7 +232,10 @@ pub fn scan_volume_cancellable(
     // Shared-arena spills and failed targeted reads remain observable even
     // when the authoritative live fallback completed the object.
 
-    let Some((idx, finish)) = b.finish_timed_cancellable(stop) else {
+    let Some((idx, finish)) = b
+        .finish_timed_cancellable(stop)
+        .map_err(|error| MftError::Ntfs(error.to_string()))?
+    else {
         return Err(MftError::Cancelled);
     };
     stats.elapsed_build_ms = finish.build_ms;
@@ -246,77 +249,83 @@ pub fn scan_volume_cancellable(
 mod tests {
     use super::*;
 
-    /// Equivalence gate against the whole-load reference path.
-    /// Run with `just test-admin` from an elevated terminal.
-    /// The volume is live, so a small drift tolerance is allowed.
+    #[test]
+    fn privileged_scan_and_probe_reject_non_drive_paths_before_os_access() {
+        for invalid in [r"\\.\C:", r"C:\", "C:/", "CC:", "1:", "../C:", " C:"] {
+            assert!(matches!(scan_volume(invalid), Err(MftError::Ntfs(_))));
+            assert!(matches!(
+                io_probe(invalid, IoProbeMode::Buffered, 1),
+                Err(MftError::Ntfs(_))
+            ));
+        }
+    }
+
+    /// Fails closed. `#[ignore]` is what *skips* this test; reaching the body
+    /// without the arming variable means the harness was invoked outside
+    /// `just test-admin`, and a silent early return would be indistinguishable
+    /// from a real-volume run that actually happened.
+    fn require_admin_gate() {
+        assert_eq!(
+            std::env::var("FMF_ADMIN_TESTS").as_deref(),
+            Ok("1"),
+            "this ignored real-volume test must run only through `just test-admin`"
+        );
+    }
+
+    /// Cross-check the streamed raw-$MFT index against exact live-record
+    /// lookups obtained through `FSCTL_GET_NTFS_FILE_RECORD`.  The two paths
+    /// share only the checked byte grammar; their acquisition and traversal
+    /// are independent.
     #[test]
     #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
-    fn streaming_scan_matches_reference() {
-        if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
-            eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
-            return;
-        }
-        let (new_idx, new_stats) = scan_volume("C:").expect("streaming scan");
-        let (old_idx, old_stats) = crate::mft::scan_volume_reference("C:").expect("reference");
+    fn streaming_scan_matches_live_exact_records() {
+        use crate::usn::apply::LinkSnapshot;
 
-        let drift = (new_idx.len() as i64 - old_idx.len() as i64).unsigned_abs();
-        assert!(
-            drift < old_idx.len() as u64 / 500,
-            "entry counts diverged: streaming {} vs reference {} (files {}/{} dirs {}/{})",
-            new_idx.len(),
-            old_idx.len(),
-            new_stats.files,
-            old_stats.files,
-            new_stats.dirs,
-            old_stats.dirs,
-        );
-
-        // Sampled link paths must agree exactly where both live scans saw the
-        // object. Comparing the full path (not one representative FRN row)
-        // exercises every hard-link identity.
+        require_admin_gate();
+        let (index, _) = scan_volume("C:").expect("streaming scan");
+        let live = crate::usn::MetadataSource::open_volume("C:").expect("live metadata source");
         let mut checked = 0u64;
         let mut matched = 0u64;
-        let mut size_matched = 0u64;
+        let mut unavailable = 0u64;
         let mut mismatches: Vec<String> = Vec::new();
-        for old_entry in (0..old_idx.len() as u32).step_by(997) {
+        for entry in (1..index.len() as u32).step_by(997) {
             checked += 1;
-            let mut old_path = Vec::new();
-            old_idx
-                .append_path(old_entry, &mut old_path)
-                .expect("reference sample path is valid");
-            let new_entry = new_idx
-                .entries_by_frn(old_idx.frn(old_entry))
-                .find(|&candidate| {
-                    let mut candidate_path = Vec::new();
-                    new_idx
-                        .append_path(candidate, &mut candidate_path)
-                        .is_ok_and(|()| candidate_path == old_path)
-                });
-            if let Some(new_entry) = new_entry {
-                matched += 1;
-                if old_idx.size(old_entry) == new_idx.size(new_entry) {
-                    size_matched += 1;
+            let reference = index.frn(entry).0;
+            let parent = index.parent(entry);
+            if parent == crate::index::NO_PARENT {
+                continue;
+            }
+            let parent_reference = index.frn(parent).0;
+            match live.links(reference) {
+                LinkSnapshot::Present(links) => {
+                    let found = links.iter().any(|link| {
+                        if link.parent_frn != parent_reference {
+                            return false;
+                        }
+                        let mut original = Vec::new();
+                        let mut folded = Vec::new();
+                        crate::wtf8::push_wtf8_pair(&link.name, &mut original, &mut folded);
+                        original == index.name(entry)
+                    });
+                    if found {
+                        matched += 1;
+                    } else if mismatches.len() < 16 {
+                        mismatches.push(format!(
+                            "FRN {reference} no longer has indexed parent/name `{}`",
+                            String::from_utf8_lossy(index.name(entry)),
+                        ));
+                    }
                 }
-            } else if mismatches.len() < 16 {
-                mismatches.push(format!(
-                    "FRN {} missing path `{}`",
-                    old_idx.frn(old_entry).0,
-                    String::from_utf8_lossy(&old_path),
-                ));
+                LinkSnapshot::Gone | LinkSnapshot::Failed => unavailable += 1,
             }
         }
         assert!(checked > 100, "sample too small: {checked}");
+        let comparable = checked.saturating_sub(unavailable);
+        assert!(comparable > 100, "too few live records were comparable");
         assert!(
-            matched as f64 / checked as f64 > 0.999,
-            "sampled name mismatch: {matched}/{checked}\n{}",
+            matched as f64 / comparable as f64 > 0.999,
+            "sampled live-link mismatch: {matched}/{comparable} ({unavailable} unavailable)\n{}",
             mismatches.join("\n")
-        );
-        // Sizes drift legitimately: the volume is live and the two scans run
-        // a minute apart, so actively-written files differ. Names only move
-        // on renames — hence the looser size bar.
-        assert!(
-            size_matched as f64 / checked as f64 > 0.99,
-            "sampled size mismatch: {size_matched}/{checked}"
         );
     }
 }

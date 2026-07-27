@@ -3,7 +3,7 @@
 // Header (magic, version, journal checkpoint) + raw little-endian column
 // dumps + trailing xxhash64. Machine-local cache only — corruption or any
 // mismatch falls back to a full rescan, so the format favors speed over
-// portability (docs/ARCHITECTURE.md).
+// portability and carries no backward compatibility (ADR-0010).
 
 use parking_lot::Mutex;
 
@@ -375,6 +375,7 @@ impl VolumeIndex {
             perm_name,
             content_generation: 0,
             structural_generation: 0,
+            stat_generation: 0,
             dir_topology_generation: 0,
             exclusion_tree_dirty: false,
             tombstones,
@@ -527,7 +528,7 @@ mod tests {
         // A ≥4GiB file exercises the size-overflow sections.
         let first_new = idx.len() as u32;
         let huge = crate::index::testutil::u16s("huge.iso");
-        let huge_id = idx.upsert(&crate::index::testutil::raw(
+        let huge_id = idx.upsert_synthetic(&crate::index::testutil::raw(
             777,
             50,
             &huge,
@@ -535,8 +536,8 @@ mod tests {
             (5u64 << 30) + 123,
             1,
         ));
-        idx.merge_new_into_permutations(first_new);
-
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
         let mut buf = Vec::new();
         idx.write_snapshot(&mut buf, 0xDEAD_BEEF_u64, 12345)
             .unwrap();
@@ -949,7 +950,7 @@ mod proptests {
 
     /// Build an index whose records are `10, 11, …`, all under the root.
     fn build(entries: &[Ent]) -> VolumeIndex {
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         for (i, e) in entries.iter().enumerate() {
             let units: Vec<u16> = e.name.encode_utf16().collect();
             let record = i as u64 + 10;

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "tool": {
+    "name": "cargo-mutants",
+    "version": "27.1.0"
+  },
+  "examined_files": [
+    "engine/crates/fmf-core/src/index/compact.rs",
+    "engine/crates/fmf-core/src/index/mutate.rs",
+    "engine/crates/fmf-core/src/ondisk/attribute_list.rs",
+    "engine/crates/fmf-core/src/ondisk/fixup.rs",
+    "engine/crates/fmf-core/src/ondisk/ntfs.rs",
+    "engine/crates/fmf-core/src/ondisk/record.rs",
+    "engine/crates/fmf-core/src/query/compile.rs",
+    "engine/crates/fmf-core/src/query/exec.rs",
+    "engine/crates/fmf-core/src/query/subsume.rs",
+    "engine/crates/fmf-core/src/scan/parse.rs",
+    "engine/crates/fmf-core/src/usn/apply.rs",
+    "engine/crates/fmf-core/src/wtf8.rs"
+  ],
+  "accepted_equivalents": []
+}

@@ -11,48 +11,42 @@ use super::ctx::Ctx;
 use super::{build_index, run_query};
 
 pub fn spike(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
-    let s = fmf_core::mft::spike_scan(drive)?;
-    let named = s.files + s.dirs;
+    let (_, s) = fmf_core::mft::scan_volume(drive)?;
     if ctx.is_json() {
         return super::json::emit(&serde_json::json!({
             "volume": s.volume,
-            "elapsed_volume_open_ms": s.elapsed_volume_open_ms,
-            "elapsed_mft_load_ms": s.elapsed_mft_load_ms,
+            "elapsed_total_ms": s.elapsed_total_ms,
+            "elapsed_read_ms": s.elapsed_mft_load_ms,
+            "elapsed_parse_ms": s.elapsed_parse_ms,
+            "elapsed_deferred_ms": s.elapsed_deferred_ms,
+            "elapsed_build_ms": s.elapsed_build_ms,
+            "elapsed_sort_ms": s.elapsed_sort_ms,
             "mft_bytes": s.mft_bytes,
-            "elapsed_iterate_ms": s.elapsed_iterate_ms,
-            "total_records": s.total_records,
             "files": s.files,
             "dirs": s.dirs,
-            "reparse_points": s.reparse_points,
-            "no_name_in_base_record": s.no_name_in_base_record,
-            "avg_name_utf16_units": s.avg_name_utf16_units(),
-            "max_name_utf16_units": s.max_name_utf16_units,
-            "frn_sequence_nonzero": s.frn_sequence_nonzero,
-            "named_records": named,
+            "deferred_names": s.deferred_names,
+            "extension_records": s.extension_records,
+            "pipeline_fallbacks": s.pipeline_fallbacks,
             "peak_working_set_bytes": s.peak_working_set_bytes,
         }));
     }
     println!("volume               : {}", s.volume);
-    println!("open volume          : {} ms", s.elapsed_volume_open_ms);
+    println!("total                 : {} ms", s.elapsed_total_ms);
     println!(
-        "load $MFT            : {} ms  ({:.1} MiB)",
+        "read $MFT            : {} ms  ({:.1} MiB)",
         s.elapsed_mft_load_ms,
         s.mft_bytes as f64 / (1024.0 * 1024.0)
     );
-    println!("iterate records      : {} ms", s.elapsed_iterate_ms);
-    println!("total records        : {}", s.total_records);
+    println!("parse records        : {} ms", s.elapsed_parse_ms);
+    println!("deferred links       : {} ms", s.elapsed_deferred_ms);
+    println!(
+        "build / sort         : {} / {} ms",
+        s.elapsed_build_ms, s.elapsed_sort_ms
+    );
     println!("files / dirs         : {} / {}", s.files, s.dirs);
-    println!("reparse points       : {}", s.reparse_points);
-    println!("no-name base records : {}", s.no_name_in_base_record);
-    println!(
-        "avg/max name length  : {:.1} / {} UTF-16 units",
-        s.avg_name_utf16_units(),
-        s.max_name_utf16_units
-    );
-    println!(
-        "FRN sequence nonzero : {} / {}",
-        s.frn_sequence_nonzero, named
-    );
+    println!("deferred records     : {}", s.deferred_names);
+    println!("extension records    : {}", s.extension_records);
+    println!("pipeline fallbacks   : {}", s.pipeline_fallbacks);
     println!(
         "peak working set     : {:.1} MiB",
         s.peak_working_set_bytes as f64 / (1024.0 * 1024.0)
@@ -122,7 +116,7 @@ pub fn index(
 }
 
 /// Scan, then tail the journal. The checkpoint is taken *before* the scan so
-/// changes made during the scan are replayed, not lost (ARCHITECTURE.md).
+/// changes made during the scan are replayed, not lost.
 pub fn watch(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
     use fmf_core::usn::{MetadataSource, ReadOutcome, UsnJournal, apply_batch};
 

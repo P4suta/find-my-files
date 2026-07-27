@@ -2,8 +2,8 @@
 //!
 //! Owns one `VolumeIndex` per NTFS volume, drives initial scans and USN
 //! tailing threads, and answers queries with a k-way-merged, sort-ordered
-//! result set (docs/ARCHITECTURE.md). This is the layer the FFI exposes 1:1
-//! — and the layer a v2 service would host.
+//! result set. This is the layer both boundaries expose 1:1 — the in-process
+//! FFI (`fmf-ffi`) and the named-pipe service (`fmf-service`).
 
 mod results;
 mod seams;
@@ -22,6 +22,7 @@ pub use results::{ResultSet, Row};
 
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(any(test, feature = "testutil"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
@@ -190,9 +191,14 @@ impl From<query::QueryCancelled> for EngineError {
     }
 }
 
-/// Why `Engine::new` refused to start. `Locked` is the cross-process arm of
-/// the single-writer invariant (FFI: `FMF_E_LOCKED`, docs/ARCHITECTURE.md
-/// Pipe protocol §single-writer exclusion).
+/// Why `Engine::new` refused to start.
+///
+/// `Locked` is the cross-process arm of the single-writer invariant: the
+/// index directory holds one `.writer.lock` opened for the engine's lifetime,
+/// so a second engine over the same directory — typically an `--engine=inproc`
+/// UI started while the service runs — fails here rather than corrupting the
+/// snapshot. Both boundaries surface it as `FMF_E_LOCKED`
+/// ([`fmf_contract::codes::LOCKED`]).
 #[derive(Debug, Error)]
 pub enum EngineCreateError {
     #[error(
@@ -322,7 +328,15 @@ impl Engine {
     }
 
     fn emit(&self, ev: EngineEvent) {
-        if let Some(s) = self.sink.read().clone() {
+        // Release the read guard *before* invoking the sink. A callback is
+        // allowed to re-enter the FFI, and anything it reaches that logs a
+        // degradation lands in `diag::record`, whose engine-installed sink
+        // calls `emit` again on the same thread. `parking_lot`'s `RwLock` is
+        // not reentrant and blocks new readers once a writer is queued, so a
+        // concurrent `set_event_sink` would deadlock both threads if this
+        // guard were still held across the call.
+        let sink = self.sink.read().clone();
+        if let Some(s) = sink {
             s(&ev);
         }
     }

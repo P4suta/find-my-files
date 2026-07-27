@@ -263,6 +263,10 @@ pub struct Counters {
     /// A required complete hard-link set could not be read or validated; the
     /// journal batch was rejected and a full rescan requested.
     pub hard_link_refresh_failures: std::sync::atomic::AtomicU64,
+    /// The live index refused a journal record because applying it would have
+    /// broken a topology invariant; the record was dropped and a full rescan
+    /// requested rather than half-applying it.
+    pub usn_index_rejections: std::sync::atomic::AtomicU64,
 }
 
 /// Plain-integer, JSON-serializable copy of `Counters` for the FFI/UI.
@@ -311,6 +315,10 @@ pub struct CountersSnapshot {
     /// A required complete hard-link set could not be read or validated; the
     /// journal batch was rejected and a full rescan requested.
     pub hard_link_refresh_failures: u64,
+    /// The live index refused a journal record because applying it would have
+    /// broken a topology invariant; the record was dropped and a full rescan
+    /// requested rather than half-applying it.
+    pub usn_index_rejections: u64,
 }
 
 /// The query layer has no `MetricsHub` handle (its degradations normally go
@@ -351,6 +359,7 @@ impl Counters {
             pipe_results_evicted: self.pipe_results_evicted.load(Relaxed),
             trace_serialize_failures: self.trace_serialize_failures.load(Relaxed),
             hard_link_refresh_failures: self.hard_link_refresh_failures.load(Relaxed),
+            usn_index_rejections: self.usn_index_rejections.load(Relaxed),
         }
     }
 }

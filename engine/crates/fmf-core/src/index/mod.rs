@@ -1,6 +1,5 @@
 //! In-memory per-volume index: struct-of-arrays, two string pools with shared
-//! offsets, FRN map, and pre-sorted permutations for instant sorting
-//! (docs/ARCHITECTURE.md).
+//! offsets, FRN map, and pre-sorted permutations for instant sorting.
 //!
 //! Mutation model (keeps the permutation arrays merge-only):
 //! - create  → append entry + merge into permutations
@@ -23,9 +22,29 @@ mod snapshot;
 #[cfg(any(test, feature = "testutil"))]
 pub mod testutil;
 
-pub use self::builder::{FinishTimings, VolumeIndexBuilder};
+pub use self::builder::{FinalizeMode, FinishTimings, IndexBuildError, VolumeIndexBuilder};
 pub use self::core::VolumeIndex;
 pub(crate) use self::mutate::LinkReconcileStats;
+
+/// The validity predicate every content-derived cache value must supply.
+///
+/// [`VolumeIndex`]'s derived cache is keyed by `content_generation`, but that
+/// key alone is too coarse for values carrying a stricter one: the size/mtime
+/// permutations are ordered by `stat_generation` and the path topology by
+/// `dir_topology_generation`, and both are only as complete as the entry
+/// watermark they were built against. Making the predicate a property of the
+/// cached *type* rather than an argument each call site remembers to pass is
+/// what keeps that discipline symmetric — a new derived value cannot be added
+/// without stating when it may be reused, and a cache hit can never skip the
+/// check the incremental builder would have performed.
+///
+/// Deliberately crate-internal and not a port: it describes cache freshness
+/// inside the index, not an OS seam. The engine's trait seams remain exactly
+/// `SnapshotStore` and `JournalSource` (ADR-0018).
+pub(crate) trait DerivedValidity {
+    /// True when `self` may be handed to a query against `index` unchanged.
+    fn is_current(&self, index: &VolumeIndex) -> bool;
+}
 
 /// Dense, append-only index into the struct-of-arrays entry columns.
 ///
@@ -149,11 +168,10 @@ fn reserve_bounded<T>(v: &mut Vec<T>, additional: usize) {
 /// points move once with `copy_within` — O(batch·log n) comparisons +
 /// O(moved) memmove + no allocation (ADR-0008).
 ///
-/// Old elements are never reordered, and on a sorted array the strict
-/// total order (`cmp` id tie-break) makes the result the unique sorted
-/// merge. Arrays ordered by size/mtime can be locally stale-sorted
-/// (in-place `update_stat` never repositions an entry); placement there is
-/// deterministic best-effort.
+/// Old elements are never reordered, and on a sorted array the strict total
+/// order (`cmp` id tie-break) makes the result the unique sorted merge. Callers
+/// must rebuild a permutation before using this append-only operation if an
+/// existing element's sort key changed.
 pub(crate) fn merge_sorted_tail(
     perm: &mut Vec<EntryId>,
     batch: &[EntryId],
@@ -185,8 +203,9 @@ pub(crate) fn merge_sorted_tail(
 /// enumeration in the future).
 pub struct RawEntry<'a> {
     /// The parent directory's full reference. The initial builder resolves its
-    /// record after the scan; incremental USN insertion requires an exact
-    /// sequence match. An unknown parent attaches the entry to the root.
+    /// record after the scan; production scan and incremental USN insertion
+    /// both require one exact live directory generation. Unknown parents make
+    /// the build/batch fail and trigger a clean rescan.
     pub parent_frn: Frn,
     /// The underlying object's full reference. Hard-linked entries share it;
     /// link identity additionally includes `parent_frn` + `name_utf16`.

@@ -10,6 +10,22 @@ use core::mem::{align_of, offset_of, size_of};
 
 use crate::volume;
 
+/// Canonical `FmfRow.flags` values. Unknown bits are reserved and producers
+/// write them as zero.
+///
+/// This set is deliberately minimal: a flag belongs here only when the client
+/// must *render* the row differently. Hidden/system is query policy
+/// (`include_hidden_system` decides whether such an entry is a result at all),
+/// not row presentation state, so it is intentionally absent — adding it would
+/// invite the UI to re-filter rows the engine already decided on, splitting one
+/// rule across two processes.
+pub mod row_flags {
+    /// The row represents a directory rather than a file.
+    pub const DIRECTORY: u32 = 1 << 0;
+    /// Mask of every row flag understood by this protocol version.
+    pub const KNOWN_MASK: u32 = DIRECTORY;
+}
+
 /// 56-byte result row, no padding. Offsets index into the page's
 /// trailing string blob (WTF-8). Mirrored by C# `LayoutKind.Explicit`.
 #[repr(C)]
@@ -27,7 +43,7 @@ pub struct FmfRow {
     pub name_off: u32,
     /// Byte offset of the parent path into the page's trailing string blob.
     pub parent_path_off: u32,
-    /// Packed entry attribute flags (hidden/system/directory bits).
+    /// Entry presentation flags ([`row_flags`]); every unknown bit is zero.
     pub flags: u32,
     /// File name length in bytes within the string blob (WTF-8).
     pub name_len: u32,

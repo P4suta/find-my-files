@@ -61,15 +61,25 @@ pub(crate) fn guard_cleanup<F: FnOnce() -> i32>(f: F) -> i32 {
     code
 }
 
-pub(crate) unsafe fn utf8_arg<'a>(p: *const c_char) -> Result<&'a str, i32> {
+/// Copies one required UTF-8 C string into Rust-owned storage.
+///
+/// # Safety
+///
+/// `p` must point to readable, NUL-terminated bytes for the duration of this
+/// call. The bytes through the first NUL must remain allocated and must not be
+/// mutated concurrently.
+pub(crate) unsafe fn utf8_arg(p: *const c_char) -> Result<String, i32> {
     if p.is_null() {
         set_error("null string argument");
         return Err(FMF_E_INVALID_ARG);
     }
-    unsafe { CStr::from_ptr(p) }.to_str().map_err(|_| {
-        set_error("argument is not valid UTF-8");
-        FMF_E_INVALID_ARG
-    })
+    unsafe { CStr::from_ptr(p) }
+        .to_str()
+        .map(str::to_owned)
+        .map_err(|_| {
+            set_error("argument is not valid UTF-8");
+            FMF_E_INVALID_ARG
+        })
 }
 
 // ── Diagnostics ─────────────────────────────────────────────────────────
@@ -79,6 +89,12 @@ pub(crate) unsafe fn utf8_arg<'a>(p: *const c_char) -> Result<&'a str, i32> {
 /// `len` is in/out (capacity → required/written bytes, excluding NUL). A null
 /// buffer probes the size; a real buffer must hold `required + 1` bytes or the
 /// call fails without a partial write.
+///
+/// # Safety
+///
+/// `len` must be aligned, readable, and writable as one `u32`. When `buf` is
+/// non-null, its initial value must describe a writable allocation of at least
+/// that many bytes, valid for this call. The two regions must not overlap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_last_error(buf: *mut u8, len: *mut u32) -> i32 {
     if len.is_null() {

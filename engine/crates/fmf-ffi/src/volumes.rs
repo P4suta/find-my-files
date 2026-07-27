@@ -13,7 +13,14 @@ use crate::{FMF_E_INVALID_ARG, FMF_E_IO, FMF_OK};
 pub use fmf_contract::pod::FmfVolumeStatus;
 
 /// Enumerate the NTFS volumes available for indexing, writing up to `cap`
-/// entries into `buf` and the total count into `count`. Safety: see docs/ARCHITECTURE.md.
+/// entries into `buf` and the total count into `count`.
+///
+/// # Safety
+///
+/// `count` must be aligned and writable as one `u32`. When `buf` is non-null,
+/// it must be aligned and writable for `cap` consecutive `FmfVolumeStatus`
+/// values. `count` is initialized to zero before handle validation. Those
+/// regions must not overlap and must remain valid for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_list_volumes(
     h: *mut c_void,
@@ -22,6 +29,11 @@ pub unsafe extern "C" fn fmf_list_volumes(
     count: *mut u32,
 ) -> i32 {
     guard(|| {
+        if count.is_null() {
+            set_error("fmf_list_volumes requires a non-null count pointer");
+            return FMF_E_INVALID_ARG;
+        }
+        unsafe { *count = 0 };
         let handle = match engine(h) {
             Ok(e) => e,
             Err(c) => return c,
@@ -30,10 +42,6 @@ pub unsafe extern "C" fn fmf_list_volumes(
             Ok(active) => active,
             Err(c) => return c,
         };
-        if count.is_null() {
-            set_error("fmf_list_volumes requires a non-null count pointer");
-            return FMF_E_INVALID_ARG;
-        }
         let vols = Engine::list_ntfs_volumes();
         let Ok(total) = u32::try_from(vols.len()) else {
             set_error("volume count exceeds the ABI's u32 length limit");
@@ -57,7 +65,13 @@ pub unsafe extern "C" fn fmf_list_volumes(
 }
 
 /// Begin indexing the `n` volume labels pointed to by `volumes` on the engine
-/// behind handle `h`. Safety: see docs/ARCHITECTURE.md.
+/// behind handle `h`.
+///
+/// # Safety
+///
+/// For nonzero `n`, `volumes` must address `n` readable, aligned C-string
+/// pointers. Every element must point to readable, NUL-terminated UTF-8 and
+/// the array and strings must remain immutable for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_index_start(
     h: *mut c_void,
@@ -87,7 +101,7 @@ pub unsafe extern "C" fn fmf_index_start(
         let mut labels = Vec::with_capacity(n as usize);
         for i in 0..n as usize {
             match unsafe { utf8_arg(*volumes.add(i)) } {
-                Ok(s) => labels.push(s.to_string()),
+                Ok(s) => labels.push(s),
                 Err(c) => return c,
             }
         }
@@ -102,7 +116,14 @@ pub unsafe extern "C" fn fmf_index_start(
 }
 
 /// Report per-volume indexing status for the engine behind handle `h`, writing
-/// up to `cap` entries into `buf` and the total count into `count`. Safety: see docs/ARCHITECTURE.md.
+/// up to `cap` entries into `buf` and the total count into `count`.
+///
+/// # Safety
+///
+/// `count` must be aligned and writable as one `u32`. When `buf` is non-null,
+/// it must be aligned and writable for `cap` consecutive `FmfVolumeStatus`
+/// values. `count` is initialized to zero before handle validation. Those
+/// regions must not overlap and must remain valid for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_index_status(
     h: *mut c_void,
@@ -111,6 +132,11 @@ pub unsafe extern "C" fn fmf_index_status(
     count: *mut u32,
 ) -> i32 {
     guard(|| {
+        if count.is_null() {
+            set_error("fmf_index_status requires a non-null count pointer");
+            return FMF_E_INVALID_ARG;
+        }
+        unsafe { *count = 0 };
         let handle = match engine(h) {
             Ok(e) => e,
             Err(c) => return c,
@@ -119,10 +145,6 @@ pub unsafe extern "C" fn fmf_index_status(
             Ok(active) => active,
             Err(c) => return c,
         };
-        if count.is_null() {
-            set_error("fmf_index_status requires a non-null count pointer");
-            return FMF_E_INVALID_ARG;
-        }
         let status = handle.engine.status();
         let Ok(total) = u32::try_from(status.len()) else {
             set_error("index status count exceeds the ABI's u32 length limit");

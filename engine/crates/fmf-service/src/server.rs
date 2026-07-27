@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -97,6 +97,17 @@ fn dequeue_request(rx: &Receiver<Request>, cancel_rx: &Receiver<()>) -> Option<R
     }
 }
 
+/// Connect-time client verification (docs/SECURITY.md layer 4 of the 4-layer
+/// defense), as a function so the accept loop's failure handling is testable
+/// unelevated.
+///
+/// Production always passes [`crate::security::verify_client`] — every
+/// construction site names its verifier explicitly so a substitution cannot
+/// slip in by defaulting. `Ok(false)` rejects one client; `Err` means the
+/// verification API itself failed and the accept loop fails closed (see
+/// [`Server::is_accepting`]).
+pub type ClientVerifier = fn(&PipeStream, &[String]) -> io::Result<bool>;
+
 /// Configuration for starting the pipe [`Server`].
 pub struct ServerOptions {
     /// Named-pipe name the listener binds and accepts connections on.
@@ -108,17 +119,39 @@ pub struct ServerOptions {
     /// defense). Empty =
     /// no check (console/test mode); the installed service always fills it.
     pub authorized_sids: Vec<String>,
-    /// Data root for the machine-wide `last_use` stamp (ADR-0027): each accepted
-    /// connection refreshes it so the GC ages out only a genuinely unused install.
-    pub data_dir: std::path::PathBuf,
+    /// Verified machine root used for the `last_use` stamp. Installed service
+    /// mode always supplies it; console/test mode deliberately omits GC state.
+    pub data_root: Option<Arc<crate::security::TrustedDataRoot>>,
+    /// Connect-time token check. Always [`crate::security::verify_client`]
+    /// outside tests.
+    pub client_verifier: ClientVerifier,
 }
 
 /// Running pipe server: owns the accept thread and its stop event.
 pub struct Server {
     stop: Arc<Event>,
     active: Arc<std::sync::atomic::AtomicUsize>,
+    accepting: Arc<AtomicBool>,
     connections: Arc<ConnectionRegistry>,
     accept_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Out-of-band signals the accept thread owns: the one-shot readiness channel
+/// [`Server::start`] blocks on, and the liveness flag it clears on the way out.
+struct AcceptSignals {
+    ready_tx: mpsc::SyncSender<io::Result<()>>,
+    accepting: Arc<AtomicBool>,
+}
+
+/// Clears the accepting flag on *every* accept-loop exit — clean stop, fatal
+/// error, or panic. A listener that is gone must be observable; a service that
+/// keeps reporting Running with nothing behind the pipe is unrecoverable.
+struct AcceptingGuard(Arc<AtomicBool>);
+
+impl Drop for AcceptingGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Default)]
@@ -190,12 +223,17 @@ impl Server {
         // the per-connection guard when its thread exits. Held by the Server so
         // serve()'s idle self-stop (ADR-0027) can read it.
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepting = Arc::new(AtomicBool::new(true));
         let connections = Arc::new(ConnectionRegistry::default());
         let accept_stop = stop.clone();
         let accept_active = active.clone();
         let accept_engine = engine.clone();
         let accept_connections = connections.clone();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let signals = AcceptSignals {
+            ready_tx,
+            accepting: accepting.clone(),
+        };
         let accept_thread = match std::thread::Builder::new()
             .name("fmf-pipe-accept".to_string())
             .spawn(move || {
@@ -206,7 +244,7 @@ impl Server {
                     &accept_stop,
                     accept_active,
                     accept_connections,
-                    ready_tx,
+                    signals,
                 );
             }) {
             Ok(thread) => thread,
@@ -220,6 +258,7 @@ impl Server {
             Ok(Ok(())) => Ok(Arc::new(Self {
                 stop,
                 active,
+                accepting,
                 connections,
                 accept_thread: Some(accept_thread),
             })),
@@ -267,6 +306,19 @@ impl Server {
         self.active.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// False once the accept thread has let go of the listener — a clean
+    /// [`Server::stop`], a fail-closed exit (a broken client-verification API),
+    /// or a panicked accept thread.
+    ///
+    /// `serve()` polls this: without a listener the pipe is unreachable, so
+    /// staying up would report Running with nothing to connect to. Stopping the
+    /// process instead lets the SCM report Stopped and the next on-demand start
+    /// rebuild the listener (ADR-0027).
+    #[must_use]
+    pub fn is_accepting(&self) -> bool {
+        self.accepting.load(Ordering::Acquire)
+    }
+
     /// Blocks until the accept and connection threads have exited.
     pub fn join(mut self: Arc<Self>) {
         if let Some(s) = Arc::get_mut(&mut self) {
@@ -304,8 +356,14 @@ fn accept_loop(
     stop: &Event,
     active: Arc<std::sync::atomic::AtomicUsize>,
     connections: Arc<ConnectionRegistry>,
-    ready_tx: mpsc::SyncSender<io::Result<()>>,
+    signals: AcceptSignals,
 ) {
+    let AcceptSignals {
+        ready_tx,
+        accepting,
+    } = signals;
+    // Every `return` below — and a panic — must publish "no listener here".
+    let _accepting_guard = AcceptingGuard(accepting);
     let mut ready_tx = Some(ready_tx);
     let security = if opts.authorized_sids.is_empty() {
         None
@@ -340,22 +398,39 @@ fn accept_loop(
             Ok(Accepted::Stopped) => return,
             Ok(Accepted::Connection(stream)) => {
                 // Defense in depth behind the DACL: verify the client token.
-                if matches!(
-                    crate::security::verify_client(&stream, &opts.authorized_sids),
-                    Ok(true)
-                ) {
-                } else {
-                    Counters::bump(&engine.metrics().counters.pipe_connections_rejected);
-                    tracing::warn!("pipe client token rejected");
-                    stream.disconnect();
-                    continue;
+                match (opts.client_verifier)(&stream, &opts.authorized_sids) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        Counters::bump(&engine.metrics().counters.pipe_connections_rejected);
+                        tracing::warn!("pipe client token rejected");
+                        stream.disconnect();
+                        continue;
+                    }
+                    Err(error) => {
+                        // Fail closed: a verification API that cannot answer must
+                        // not be treated as "authorized". Dropping the listener
+                        // is only safe because it is *observable* — the guard
+                        // above clears `is_accepting`, and `serve()` turns that
+                        // into a graceful service stop (flush + SCM Stopped) so
+                        // the next on-demand start recovers.
+                        Counters::bump(&engine.metrics().counters.pipe_connections_rejected);
+                        tracing::error!(
+                            %error,
+                            "pipe client token verification failed — dropping the listener; \
+                             the service will stop and recover on the next start"
+                        );
+                        stream.disconnect();
+                        return;
+                    }
                 }
                 // An authorized client connected — refresh the use stamp so the
                 // GC ages out only a genuinely unused install (ADR-0027).
-                if let Err(e) = crate::lifecycle::stamp_last_use(&opts.data_dir) {
+                if let Some(data_root) = &opts.data_root
+                    && let Err(e) = crate::lifecycle::stamp_last_use(data_root)
+                {
                     Counters::bump(&engine.metrics().counters.pipe_connections_rejected);
                     tracing::error!(
-                        path = %crate::lifecycle::last_use_path(&opts.data_dir).display(),
+                        path = %crate::lifecycle::last_use_path(data_root.path()).display(),
                         error = %e,
                         "last_use publication failed — rejecting connection"
                     );

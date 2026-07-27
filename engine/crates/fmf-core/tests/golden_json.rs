@@ -16,12 +16,27 @@ use fmf_core::metrics::{
 };
 use fmf_core::query::{CaseMode, UtcResolver, compile, parse};
 
+const MUTATION_SOURCE_ROOT_ENV: &str = "FMF_MUTATION_SOURCE_ROOT";
+
 fn golden_dir() -> PathBuf {
+    if let Some(source_root) = std::env::var_os(MUTATION_SOURCE_ROOT_ENV) {
+        let source_root = PathBuf::from(source_root);
+        assert!(
+            source_root.is_absolute(),
+            "{MUTATION_SOURCE_ROOT_ENV} must be an absolute trusted source root"
+        );
+        return source_root.join("contract/golden");
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../contract/golden")
 }
 
 fn bless_mode() -> bool {
-    std::env::var("FMF_BLESS").as_deref() == Ok("1")
+    let requested = std::env::var("FMF_BLESS").as_deref() == Ok("1");
+    assert!(
+        !(requested && std::env::var_os(MUTATION_SOURCE_ROOT_ENV).is_some()),
+        "the mutation scratch tree may only read the canonical golden corpus"
+    );
+    requested
 }
 
 fn check_file(file: &str, bytes: &[u8]) {
@@ -39,8 +54,9 @@ fn check_file(file: &str, bytes: &[u8]) {
     });
     assert_eq!(
         on_disk, bytes,
-        "{file}: golden JSON drifted. If intentional: docs/ARCHITECTURE.md \
-         first, then FMF_BLESS=1 (ADR-0018)."
+        "{file}: golden JSON drifted. If intentional: change fmf-contract \
+         first, then re-capture with `just contract-bless` (FMF_BLESS=1) and \
+         regenerate the C# bindings with `just contract-gen` (ADR-0018)."
     );
 }
 
@@ -242,6 +258,7 @@ fn metrics_snapshot_json_shape_is_pinned() {
             pipe_results_evicted: 75,
             trace_serialize_failures: 76,
             hard_link_refresh_failures: 77,
+            usn_index_rejections: 78,
         },
         recent_errors: vec![ErrorEvent {
             seq: 81,

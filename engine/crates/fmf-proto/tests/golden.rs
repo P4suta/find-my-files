@@ -434,8 +434,9 @@ fn check_file(file: &str, bytes: &[u8]) {
     assert_eq!(
         on_disk, bytes,
         "{file}: golden bytes drifted from the current codec. If the \
-         contract change is intentional: update docs/ARCHITECTURE.md first, \
-         then re-capture with FMF_BLESS=1 (ADR-0018)."
+         contract change is intentional: update fmf-contract first, then \
+         re-capture with `just contract-bless` (FMF_BLESS=1) and regenerate \
+         the C# bindings with `just contract-gen` (ADR-0018)."
     );
 }
 
@@ -515,6 +516,110 @@ fn corpus_frames_decode_back() {
             }
             other => panic!("{}: unhandled corpus case {other:?}", c.file),
         }
+    }
+}
+
+/// `fmf-contract`'s opcode table, read as *text* so the set is exhaustive by
+/// construction: a new `pub const … : u16 = …;` shows up here the moment it is
+/// declared, which is what makes [`every_opcode_is_captured_or_excluded`] a
+/// real gate rather than a hand-maintained list that drifts.
+const OPCODE_SOURCE: &str = include_str!("../../fmf-contract/src/opcodes.rs");
+
+/// Opcodes deliberately shipped without a captured frame, each with the reason
+/// it earns the exemption. Adding an entry is the explicit alternative to
+/// blessing a case — never the quiet default.
+const UNCAPTURED_OPCODES: &[(&str, &str)] = &[
+    // Request payload is empty and the response is the metrics snapshot, whose
+    // authoritative shape is already pinned byte-for-byte by
+    // contract/golden/stats_snapshot.json (fmf-core's golden_json test) and
+    // re-read from C# by GoldenCorpusTests. A frame case would add only the
+    // 16-byte header, a layout every other case already pins.
+    (
+        "STATS",
+        "payload-free request; response shape pinned by stats_snapshot.json",
+    ),
+    // One-way control frame: zero payload, no response, so the capture would
+    // again be header-only. Its behaviour — abort a queued/running query,
+    // silent no-op for an unknown id, pre-Hello disconnect, zero-payload cap —
+    // is pinned by fmf-service's pipe_loopback suite, where it is observable.
+    (
+        "QUERY_CANCEL",
+        "one-way zero-payload control frame; behaviour pinned by pipe_loopback",
+    ),
+];
+
+fn declared_opcodes() -> Vec<(&'static str, u16)> {
+    OPCODE_SOURCE
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("pub const ")?;
+            let (name, rest) = rest.split_once(": u16 = ")?;
+            let value = rest.trim().strip_suffix(';')?.trim().parse().ok()?;
+            Some((name, value))
+        })
+        .collect()
+}
+
+/// Every declared opcode must own at least one corpus frame, or be named in
+/// [`UNCAPTURED_OPCODES`] with a reason. Without this, a protocol bump can add
+/// an opcode and stay entirely outside the golden corpus — `manifest.json`
+/// only proves manifest/disk symmetry, which a brand new opcode satisfies
+/// trivially by contributing nothing to either side.
+#[test]
+fn every_opcode_is_captured_or_excluded() {
+    let declared = declared_opcodes();
+    // The parse is text-based, so prove it still sees the table: two anchors
+    // cross-checked against the compiled constants, plus the known count.
+    for (name, expected) in [
+        ("HELLO", opcode::HELLO),
+        ("QUERY_CANCEL", opcode::QUERY_CANCEL),
+    ] {
+        assert_eq!(
+            declared.iter().find(|(n, _)| *n == name).map(|&(_, v)| v),
+            Some(expected),
+            "opcode source parse missed {name} — the `pub const NAME: u16 = N;` \
+             shape in fmf-contract/src/opcodes.rs changed and this test went blind"
+        );
+    }
+    assert!(
+        declared.len() >= 12,
+        "opcode source parse found only {} constants",
+        declared.len()
+    );
+
+    // Event pushes reuse kinds 1..=6 in the opcode field, so counting them
+    // would credit request opcodes they have nothing to do with.
+    let captured: std::collections::BTreeSet<u16> = corpus()
+        .iter()
+        .filter_map(|c| {
+            let header_bytes: [u8; HEADER_LEN] = c.bytes[..HEADER_LEN].try_into().unwrap();
+            let header = decode_header(&header_bytes).unwrap();
+            (header.flags & FLAG_EVENT == 0).then_some(header.opcode)
+        })
+        .collect();
+
+    for (name, value) in &declared {
+        let excused = UNCAPTURED_OPCODES.iter().any(|(n, _)| n == name);
+        assert!(
+            captured.contains(value) != excused,
+            "opcode {name} ({value}): {}",
+            if excused {
+                "listed in UNCAPTURED_OPCODES but the corpus captures it — drop the stale entry"
+            } else {
+                "no corpus case. Add one to `corpus()` and re-capture with \
+                 `just contract-bless`, or add a reasoned entry to UNCAPTURED_OPCODES. \
+                 Note that a new case also needs a handler in the C# GoldenCorpusTests \
+                 switch, which fails closed on unknown opcodes"
+            }
+        );
+    }
+
+    for (name, reason) in UNCAPTURED_OPCODES {
+        assert!(
+            declared.iter().any(|(n, _)| n == name),
+            "UNCAPTURED_OPCODES names {name}, which is no longer a declared opcode"
+        );
+        assert!(!reason.is_empty(), "{name}: an exclusion must state why");
     }
 }
 

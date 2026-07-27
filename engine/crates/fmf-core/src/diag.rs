@@ -32,9 +32,9 @@ impl Severity {
     #[must_use]
     pub const fn as_u64(self) -> u64 {
         match self {
-            Self::Warn => 1,
-            Self::Error => 2,
-            Self::Panic => 3,
+            Self::Warn => fmf_contract::events::SEVERITY_WARN,
+            Self::Error => fmf_contract::events::SEVERITY_ERROR,
+            Self::Panic => fmf_contract::events::SEVERITY_PANIC,
         }
     }
 }
@@ -541,7 +541,7 @@ pub fn install_panic_hook() {
 /// when that dir existed but was not writable. The machine service does not rely
 /// on this fallback — it passes its own `%ProgramData%\find-my-files\logs`
 /// explicitly. The one implementation of this rule — every entry point resolves
-/// through here (ADR-0018; the rule's prose lives in docs/ARCHITECTURE.md).
+/// through here (ADR-0018).
 #[must_use]
 pub fn resolve_log_dir(
     explicit: Option<std::path::PathBuf>,
@@ -721,6 +721,19 @@ pub fn init_logging(log_dir: Option<&std::path::Path>, level: &str, max_log_file
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn severity_wire_values_come_from_the_contract() {
+        assert_eq!(Severity::Warn.as_u64(), fmf_contract::events::SEVERITY_WARN);
+        assert_eq!(
+            Severity::Error.as_u64(),
+            fmf_contract::events::SEVERITY_ERROR
+        );
+        assert_eq!(
+            Severity::Panic.as_u64(),
+            fmf_contract::events::SEVERITY_PANIC
+        );
+    }
 
     /// Single test for the global pipeline (ring/sinks/hook are process-wide
     /// state; parallel tests would interleave).

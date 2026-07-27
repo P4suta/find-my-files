@@ -1,5 +1,9 @@
 //! Event kinds — FFI callback `FmfEvent.kind` and pipe event-push opcodes
-//! carry the same values (docs/ARCHITECTURE.md Events section).
+//! carry the same values.
+//!
+//! On the pipe an event frame puts the kind in the *opcode* field, so its
+//! numbering overlaps [`crate::opcodes`]. A receiver must therefore branch on
+//! the event bit in `flags` before it looks at the opcode.
 
 /// `u32` on the wire and in the FFI POD.
 #[repr(u32)]

@@ -40,8 +40,10 @@ pub struct QueryBench {
     pub p50_memo_us: u64,
     pub p50_scan_us: u64,
     pub p50_materialize_us: u64,
-    /// First iteration of the run. Single sample: recorded for diagnosis, never
-    /// gated (the ready-state memory capture prewarms fixed derived caches).
+    /// First iteration of the run. Single sample: recorded for diagnosis,
+    /// never gated — it also pays for building this query's lazy derived
+    /// caches, so it measures a different thing than the steady-state
+    /// percentiles beside it.
     #[serde(default)]
     pub cold_us: u64,
 }
@@ -65,7 +67,9 @@ pub struct BenchReport {
     /// Wall time for the real-volume initial index build.
     #[serde(default)]
     pub index_ms: u64,
-    /// Ready-state process working set, captured after query caches are prewarmed.
+    /// Ready-state process working set, captured once the index is built and
+    /// before any query has caused a lazy derived cache to be built. This is
+    /// the steady state the B/entry gate is defined against.
     #[serde(default)]
     pub working_set_bytes: u64,
     pub peak_working_set_bytes: u64,

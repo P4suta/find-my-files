@@ -23,8 +23,30 @@ struct QueryControl {
 static CONTROLS: LazyLock<Mutex<HashMap<u64, QueryControl>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+fn register(engine_id: usize) -> Result<u64, i32> {
+    let id = opaque::next_id("query control")? as u64;
+    CONTROLS.lock().insert(
+        id,
+        QueryControl {
+            engine_id,
+            cancellation: QueryCancellation::new(),
+        },
+    );
+    Ok(id)
+}
+
+#[cfg(test)]
+pub(crate) fn register_for_test(engine_id: usize) -> Result<u64, i32> {
+    register(engine_id)
+}
+
 /// Create a query control owned by `h`. The returned nonzero ID is passed to
 /// `fmf_query`, then freed after callback deregistration and query completion.
+///
+/// # Safety
+///
+/// `out_control_id` must be aligned and writable as one `u64` for this call.
+/// It is initialized to zero before the engine handle is validated.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_query_control_create(h: *mut c_void, out_control_id: *mut u64) -> i32 {
     guard(|| {
@@ -41,17 +63,10 @@ pub unsafe extern "C" fn fmf_query_control_create(h: *mut c_void, out_control_id
             Ok(active) => active,
             Err(code) => return code,
         };
-        let id = match opaque::next_id("query control") {
-            Ok(id) => id as u64,
+        let id = match register(handle.id) {
+            Ok(id) => id,
             Err(code) => return code,
         };
-        CONTROLS.lock().insert(
-            id,
-            QueryControl {
-                engine_id: handle.id,
-                cancellation: QueryCancellation::new(),
-            },
-        );
         unsafe { *out_control_id = id };
         FMF_OK
     })

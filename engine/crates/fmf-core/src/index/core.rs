@@ -5,13 +5,14 @@ use parking_lot::Mutex;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use super::frn::FrnIndex;
-use super::{EntryId, Frn, NO_PARENT, RecordNo, SortKey, flags};
+use super::{DerivedValidity, EntryId, Frn, NO_PARENT, RecordNo, SortKey, flags};
 
 /// In-memory per-volume index.
 ///
 /// Struct-of-arrays entry columns, two string pools sharing one offset/length
-/// table, an FRN index, and the always-sorted name permutation
-/// (docs/ARCHITECTURE.md). One instance per indexed volume.
+/// table, an FRN index, and the always-sorted name permutation. One instance
+/// per indexed volume, owned by that volume's worker thread — the single
+/// writer.
 ///
 /// An entry row is one directory link, not necessarily one NTFS object:
 /// hard-linked paths have distinct [`EntryId`] values and share a full FRN.
@@ -54,6 +55,11 @@ pub struct VolumeIndex {
     pub(super) perm_name: Vec<EntryId>,
     pub(super) content_generation: u64,
     pub(super) structural_generation: u64,
+    /// Bumped whenever an existing row's size or mtime changes. Unlike the
+    /// batch-scoped content generation, this moves at the mutation itself so
+    /// a size/mtime query can never reuse an already-misordered lazy
+    /// permutation, even inside the batch that changed the stat columns.
+    pub(super) stat_generation: u64,
     /// Bumped whenever an existing directory's name or parent changes —
     /// the two mutations that invalidate memoized descendant paths in ways
     /// an append-only extension cannot express. Plain appends/deletes/stat
@@ -282,18 +288,10 @@ impl VolumeIndex {
         self.entries_by_frn(frn).next()
     }
 
-    /// Resolve a parent reference to its directory row.
-    ///
-    /// The seeded root stores only record number 5, so its sequence is
-    /// intentionally accepted by record number. Every other parent requires
-    /// the complete sequence to prevent a recycled directory from capturing a
-    /// delayed link event.
-    pub(crate) fn parent_by_frn(&self, parent_frn: Frn) -> Option<EntryId> {
-        self.entries_by_frn(parent_frn)
-            .find(|&id| self.is_dir(id))
-            .or_else(|| {
-                (self.frn(Self::ROOT).record() == parent_frn.record()).then_some(Self::ROOT)
-            })
+    /// Whether this index was created by the explicit synthetic-fixture
+    /// constructor. Production roots always carry a non-zero sequence.
+    pub(crate) fn is_synthetic_fixture(&self) -> bool {
+        self.frn(Self::ROOT).0 >> 48 == 0
     }
 
     /// Find one exact directory link: object generation + parent + original
@@ -304,11 +302,18 @@ impl VolumeIndex {
         parent_frn: Frn,
         name_wtf8: &[u8],
     ) -> Option<EntryId> {
-        // Unknown parents are attached to ROOT on insertion, so identity
-        // lookup applies the same orphan policy and can refresh that row.
-        let parent = self.parent_by_frn(parent_frn).unwrap_or(Self::ROOT);
-        self.entries_by_frn(frn)
-            .find(|&id| self.parent(id) == parent && self.name(id) == name_wtf8)
+        self.entries_by_frn(frn).find(|&id| {
+            let parent = self.parent(id);
+            if parent == NO_PARENT || parent as usize >= self.len() {
+                return false;
+            }
+            let stored = self.frn(parent);
+            let parent_matches = stored == parent_frn
+                || (parent == Self::ROOT
+                    && self.is_synthetic_fixture()
+                    && stored.record() == parent_frn.record());
+            parent_matches && self.name(id) == name_wtf8
+        })
     }
 
     /// UTF-16 convenience form for USN records.
@@ -393,14 +398,28 @@ impl VolumeIndex {
         self.orig_off[id as usize] == u32::MAX
     }
 
-    /// The content generation — bumped by every USN batch; open result
-    /// handles stay readable across it (docs/ARCHITECTURE.md, generation 2-tier).
+    /// The content generation — bumped by every USN batch.
+    ///
+    /// This is the cheap tier of the two-tier generation scheme: rows may have
+    /// appeared, changed or been tombstoned, but no [`EntryId`] means something
+    /// different than it did, so an open result set stays readable across the
+    /// bump and only its derived caches need revalidating. See
+    /// [`Self::structural_generation`] for the expensive tier.
+    ///
+    /// Neither generation is persisted in a snapshot: result handles never
+    /// leave the process, so in-process monotonicity is the whole requirement
+    /// (ADR-0010).
     pub const fn content_generation(&self) -> u64 {
         self.content_generation
     }
 
-    /// The structural generation — bumped only by compaction/rebuild, which
-    /// hard-stales open result handles (docs/ARCHITECTURE.md, generation 2-tier).
+    /// The structural generation — bumped only by compaction or a full
+    /// rebuild, i.e. exactly when [`EntryId`] values are renumbered or reused.
+    ///
+    /// An id an old result set still holds would then address an unrelated
+    /// entry, so a mismatch is unrecoverable for that result: it goes hard
+    /// stale, page fetches answer `Stale`, and the client re-issues the query.
+    /// Contrast [`Self::content_generation`], which an open result survives.
     pub const fn structural_generation(&self) -> u64 {
         self.structural_generation
     }
@@ -409,34 +428,31 @@ impl VolumeIndex {
         self.dir_topology_generation
     }
 
+    pub(crate) const fn stat_generation(&self) -> u64 {
+        self.stat_generation
+    }
+
     /// Carry the structural generation across a rebuild: a freshly built
     /// index replacing one whose generation was `prev` must read as strictly
-    /// newer, so open result handles go hard-stale (docs/ARCHITECTURE.md,
-    /// generation 2-tier). Compaction (M2) will reuse this.
+    /// newer, so open result handles go hard stale (see
+    /// [`Self::structural_generation`]).
     pub(crate) const fn bump_structural_from(&mut self, prev: u64) {
         self.structural_generation = prev + 1;
     }
 
-    /// Return the cached content-derived value of type `T`. On a generation
-    /// change `build` receives the previous generation's value so it can
-    /// extend it incrementally instead of rebuilding from scratch; all cached
-    /// types are invalidated together on a generation change.
-    #[cfg(test)]
-    pub(crate) fn cached_derived_or_update<T, F>(&self, build: F) -> Arc<T>
-    where
-        T: Any + Send + Sync,
-        F: FnOnce(Option<Arc<T>>) -> T,
-    {
-        self.with_derived(build)
-    }
-
-    /// Fallible counterpart of `Self::cached_derived_or_update`.
+    /// Return the cached content-derived value of type `T`, rebuilding or
+    /// incrementally extending it whenever the cached one is not
+    /// [`DerivedValidity::is_current`] for this index.
     ///
-    /// A failed/cancelled build publishes nothing and retains the previous
-    /// generation value for a later incremental retry.
+    /// A rejected value — stale by its own key, or simply not covering every
+    /// row yet — becomes the incremental builder's previous input, as does the
+    /// value cached under the preceding content generation. A failed or
+    /// cancelled build publishes nothing: the last completed value stays
+    /// available (and still rejected), so the next call retries instead of
+    /// answering from data that was never validated.
     pub(crate) fn cached_derived_or_try_update<T, E, F>(&self, build: F) -> Result<Arc<T>, E>
     where
-        T: Any + Send + Sync,
+        T: Any + Send + Sync + DerivedValidity,
         F: FnOnce(Option<Arc<T>>) -> Result<T, E>,
     {
         let key = std::any::TypeId::of::<T>();
@@ -450,18 +466,28 @@ impl VolumeIndex {
             cache.prev = std::mem::take(&mut cache.current);
             cache.generation = self.content_generation;
         }
-        if let Some(v) = cache.current.get(&key)
-            && let Ok(t) = v.clone().downcast::<T>()
-        {
-            return Ok(t);
-        }
-        // Clone instead of remove: a cancelled build must leave the previous
-        // completed value available to the next attempt.
-        let previous = cache
-            .prev
+
+        let current = cache
+            .current
             .get(&key)
             .cloned()
-            .and_then(|v| v.downcast::<T>().ok());
+            .and_then(|value| value.downcast::<T>().ok());
+        if let Some(value) = current.as_ref()
+            && value.is_current(self)
+        {
+            return Ok(value.clone());
+        }
+
+        // Prefer a rejected value from this generation. Otherwise retain the
+        // normal previous-generation extension path. Clone instead of remove:
+        // a cancelled build must leave the last completed value retryable.
+        let previous = current.or_else(|| {
+            cache
+                .prev
+                .get(&key)
+                .cloned()
+                .and_then(|value| value.downcast::<T>().ok())
+        });
         let value = Arc::new(build(previous)?);
         cache.prev.remove(&key);
         cache.current.insert(key, value.clone());
@@ -482,34 +508,6 @@ impl VolumeIndex {
             .clone()
             .downcast::<T>()
             .ok()
-    }
-
-    #[cfg(test)]
-    fn with_derived<T, F>(&self, build: F) -> Arc<T>
-    where
-        T: Any + Send + Sync,
-        F: FnOnce(Option<Arc<T>>) -> T,
-    {
-        let key = std::any::TypeId::of::<T>();
-        let mut guard = self.derived_cache.lock();
-        let cache = guard.get_or_insert_with(|| DerivedCache {
-            generation: self.content_generation,
-            current: DerivedMap::default(),
-            prev: DerivedMap::default(),
-        });
-        if cache.generation != self.content_generation {
-            cache.prev = std::mem::take(&mut cache.current);
-            cache.generation = self.content_generation;
-        }
-        if let Some(v) = cache.current.get(&key)
-            && let Ok(t) = v.clone().downcast::<T>()
-        {
-            return t;
-        }
-        let previous = cache.prev.remove(&key).and_then(|v| v.downcast::<T>().ok());
-        let t = Arc::new(build(previous));
-        cache.current.insert(key, t.clone());
-        t
     }
 
     /// Per-column memory accounting for the perf panel / `fmf stats`.
@@ -942,7 +940,7 @@ mod tests {
 
     #[test]
     fn parent_path_has_no_fixed_depth_truncation() {
-        let mut builder = VolumeIndexBuilder::new("C:", 5);
+        let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
         let mut parent = 5;
         let mut expected = String::from("C:\\");
         for depth in 0..130u64 {
@@ -968,7 +966,7 @@ mod tests {
 
     #[test]
     fn parent_cycle_is_an_explicit_error_before_output_changes() {
-        let mut builder = VolumeIndexBuilder::new("C:", 5);
+        let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
         let a = u16s("a");
         let b = u16s("b");
         builder.push(raw(10, 11, &a, true, 0, 0));
@@ -986,7 +984,7 @@ mod tests {
 
     #[test]
     fn corrupt_acyclic_path_above_the_nt_limit_is_bounded_before_output_changes() {
-        let mut builder = VolumeIndexBuilder::new("C:", 5);
+        let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
         let component = vec![b'x' as u16; 255];
         let mut parent = 5;
         for record in 10..400 {

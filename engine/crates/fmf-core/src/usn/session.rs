@@ -11,9 +11,6 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ntfs_reader::api::{NtfsAttributeType, NtfsFileNamespace};
-use ntfs_reader::file::NtfsFile;
-use ntfs_reader::volume::Volume;
 use parking_lot::Mutex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
@@ -36,12 +33,15 @@ use windows_sys::Win32::System::Ioctl::{
 use super::apply::{LinkInfo, LinkSnapshot};
 use super::records::{UsnRecord, parse_buffer};
 use crate::mft::is_searchable_namespace;
-use crate::scan::attribute_list::{
+use crate::ondisk::attribute_list::{
     ListEntry, StreamRun, close_extent_runs, decode_extent_runs, parse_list_entries,
     visit_list_stream,
 };
-use crate::scan::record::attributes_complete;
-use crate::scan::{apply_fixup, open_raw_volume};
+use crate::ondisk::fixup::apply_fixup;
+use crate::ondisk::ntfs::{NtfsAttributeType, NtfsFile, NtfsFileNamespace};
+use crate::ondisk::record::attributes_complete;
+use crate::scan::{open_raw_volume, volume_geometry};
+use crate::volume_label::VolumeLabel;
 
 /// Hard failure from the OS-facing journal/volume layer (unrecoverable here;
 /// distinct from the recoverable journal-gone conditions in [`JournalGone`]).
@@ -137,8 +137,8 @@ fn wide(s: &str) -> Vec<u16> {
         .collect()
 }
 
-fn open_volume_handle(drive: &str) -> Result<OwnedHandle, UsnError> {
-    let path = format!(r"\\.\{}", drive.trim_end_matches(['\\', '/']));
+fn open_volume_handle(label: VolumeLabel) -> Result<OwnedHandle, UsnError> {
+    let path = label.raw_path();
     let wpath = wide(&path);
     unsafe {
         let h = CreateFileW(
@@ -167,7 +167,8 @@ impl UsnJournal {
     /// Returns [`UsnError::OpenVolume`] if the volume handle cannot be opened,
     /// or [`UsnError::Fsctl`] if creating or querying the journal fails.
     pub fn open(drive: &str, start_usn: Option<i64>) -> Result<Self, UsnError> {
-        let handle = open_volume_handle(drive)?;
+        let label = VolumeLabel::parse(drive).ok_or(UsnError::Fsctl(ERROR_INVALID_PARAMETER))?;
+        let handle = open_volume_handle(label)?;
         let data = Self::query_or_create(&handle)?;
         let next = match start_usn {
             Some(usn) => usn,
@@ -353,6 +354,7 @@ pub(super) struct VolumeMetadataFetcher {
     handle: OwnedHandle,
     stream: Mutex<std::fs::File>,
     record_size: usize,
+    sector_size: usize,
     cluster_size: u64,
     volume_size: u64,
     stop: Arc<AtomicBool>,
@@ -372,11 +374,11 @@ impl VolumeMetadataFetcher {
     /// Returns [`UsnError::OpenVolume`] if either read-only volume handle
     /// cannot be opened, or [`UsnError::Fsctl`] if NTFS geometry is invalid.
     pub(super) fn open(drive: &str, stop: Arc<AtomicBool>) -> Result<Self, UsnError> {
-        let drive = drive.trim_end_matches(['\\', '/']);
-        let volume_path = format!(r"\\.\{drive}");
-        let handle = open_volume_handle(drive)?;
+        let label = VolumeLabel::parse(drive).ok_or(UsnError::Fsctl(ERROR_INVALID_PARAMETER))?;
+        let volume_path = label.raw_path();
+        let handle = open_volume_handle(label)?;
         let geometry =
-            Volume::new(&volume_path).map_err(|_| UsnError::Fsctl(ERROR_INVALID_PARAMETER))?;
+            volume_geometry(&volume_path).map_err(|_| UsnError::Fsctl(ERROR_INVALID_PARAMETER))?;
         let stream = open_raw_volume(&volume_path).map_err(|error| {
             let code = error
                 .raw_os_error()
@@ -388,6 +390,8 @@ impl VolumeMetadataFetcher {
             handle,
             stream: Mutex::new(stream),
             record_size: usize::try_from(geometry.file_record_size)
+                .map_err(|_| UsnError::Fsctl(ERROR_INVALID_PARAMETER))?,
+            sector_size: usize::try_from(geometry.sector_size)
                 .map_err(|_| UsnError::Fsctl(ERROR_INVALID_PARAMETER))?,
             cluster_size: geometry.cluster_size,
             volume_size: geometry.volume_size,
@@ -487,13 +491,15 @@ impl VolumeMetadataFetcher {
             return FileRecordLookup::Failed;
         }
         let mut record = output[record_offset..record_offset + record_len].to_vec();
-        if !NtfsFile::is_valid(&record)
-            || !apply_fixup(&mut record)
+        if !NtfsFile::is_valid(&record, self.sector_size)
+            || !apply_fixup(&mut record, self.sector_size)
             || !attributes_complete(&record)
         {
             return FileRecordLookup::Failed;
         }
-        let file = NtfsFile::new(record_number, &record);
+        let Some(file) = NtfsFile::parse(record_number, &record, self.sector_size) else {
+            return FileRecordLookup::Failed;
+        };
         if !file.is_used() || file.reference_number() != full_reference {
             return FileRecordLookup::Gone;
         }
@@ -514,7 +520,7 @@ impl VolumeMetadataFetcher {
         entry: ListEntry,
         expected_base: Option<u64>,
     ) -> Option<Vec<StreamRun>> {
-        let file = NtfsFile::new(number, bytes);
+        let file = NtfsFile::parse(number, bytes, self.sector_size)?;
         if file.reference_number() != entry.target_reference {
             return None;
         }
@@ -560,12 +566,12 @@ impl VolumeMetadataFetcher {
         let base_lowest_vcn = u64::try_from(attr.nonresident_header()?.lowest_vcn).ok()?;
         let (data_size, base_runs) =
             decode_extent_runs(&attr, self.cluster_size, self.volume_size)?;
-        let base_extent = ListEntry {
-            type_id: NtfsAttributeType::AttributeList as u32,
-            starting_vcn: base_lowest_vcn,
-            target_reference: base_reference,
-            id: base_attr_id,
-        };
+        let base_extent = ListEntry::unnamed(
+            NtfsAttributeType::AttributeList as u32,
+            base_lowest_vcn,
+            base_reference,
+            base_attr_id,
+        );
         let runs = close_extent_runs(
             base_runs,
             data_size,
@@ -621,9 +627,14 @@ impl VolumeMetadataFetcher {
         let mut saw_requested = false;
         let mut valid = true;
         file.attributes(|attr| {
-            if attr.header.type_id != NtfsAttributeType::FileName as u32
-                || id.is_some_and(|wanted| attr.header.id != wanted)
-            {
+            if attr.header.type_id != NtfsAttributeType::FileName as u32 {
+                return;
+            }
+            if attr.header.name_length != 0 || attr.header.flags != 0 {
+                valid = false;
+                return;
+            }
+            if id.is_some_and(|wanted| attr.header.id != wanted) {
                 return;
             }
             saw_requested = true;
@@ -639,17 +650,13 @@ impl VolumeMetadataFetcher {
                 valid = false;
                 return;
             }
-            let units = name.header.name_length as usize;
-            if units == 0 {
+            if name.utf16le.is_empty() {
                 valid = false;
                 return;
             }
-            // `NtfsFileName` is packed. Copying the field by value first
-            // avoids forming an unaligned reference into the packed value.
-            let name_data = name.data;
             out.push(LinkInfo {
                 parent_frn: name.header.parent_directory_reference,
-                name: name_data[..units].to_vec(),
+                name: name.to_utf16(),
             });
         });
         valid && (id.is_none() || saw_requested)
@@ -657,7 +664,7 @@ impl VolumeMetadataFetcher {
 
     fn links_inner(&self, full_reference: u64, base_bytes: &[u8]) -> Option<Vec<LinkInfo>> {
         let number = full_reference & FILE_REFERENCE_RECORD_MASK;
-        let base = NtfsFile::new(number, base_bytes);
+        let base = NtfsFile::parse(number, base_bytes, self.sector_size)?;
         let base_link = base.header.base_reference;
         if base_link != 0 {
             return None;
@@ -702,7 +709,11 @@ impl VolumeMetadataFetcher {
                 if let Entry::Vacant(slot) = record_cache.entry(target_number) {
                     slot.insert(self.read_required_record(entry.target_reference)?);
                 }
-                let target = NtfsFile::new(target_number, record_cache.get(&target_number)?);
+                let target = NtfsFile::parse(
+                    target_number,
+                    record_cache.get(&target_number)?,
+                    self.sector_size,
+                )?;
                 let target_base = target.header.base_reference;
                 if target.reference_number() != entry.target_reference
                     || target_base != full_reference
@@ -773,16 +784,25 @@ mod tests {
         assert!(malformed);
     }
 
+    /// Fails closed. `#[ignore]` is what *skips* these tests; reaching the
+    /// body without the arming variable means the harness was invoked outside
+    /// `just test-admin`, and a silent early return would be indistinguishable
+    /// from a real-volume run that actually happened.
+    fn require_admin_gate() {
+        assert_eq!(
+            std::env::var("FMF_ADMIN_TESTS").as_deref(),
+            Ok("1"),
+            "this ignored real-volume test must run only through `just test-admin`"
+        );
+    }
+
     /// Live smoke for the OS-facing session: open the C: journal, query it,
     /// and complete one blocking read. Run from an elevated shell:
     /// Run with `just test-admin` from an elevated terminal.
     #[test]
     #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
     fn usn_journal_live_open_query_and_one_read() {
-        if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
-            eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
-            return;
-        }
+        require_admin_gate();
         let mut journal = UsnJournal::open("C:", None).expect("open C: journal (elevated?)");
         assert_ne!(journal.journal_id, 0);
 
@@ -834,10 +854,7 @@ mod tests {
     #[test]
     #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
     fn usn_quiet_journal_read_returns_bounded() {
-        if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
-            eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
-            return;
-        }
+        require_admin_gate();
         let mut journal = UsnJournal::open("C:", None).expect("open C: journal (elevated?)");
         let data = journal.query().expect("FSCTL_QUERY_USN_JOURNAL");
         // Position at the journal tip: no history to drain, nothing to wait
@@ -869,10 +886,7 @@ mod tests {
     #[test]
     #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
     fn live_metadata_returns_the_complete_hard_link_set() {
-        if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
-            eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
-            return;
-        }
+        require_admin_gate();
         let dir = TestDir::new();
         let first = dir.join("hard-link-first.txt");
         let second = dir.join("hard-link-second.txt");

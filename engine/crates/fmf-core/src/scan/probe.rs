@@ -5,12 +5,11 @@
 
 use std::time::Instant;
 
-use ntfs_reader::errors::NtfsReaderError;
-
 use crate::mft::MftError;
 
 use super::pipeline::{SCAN_CHUNK, plan_chunks};
 use super::volume_io::{ReadSpan, mft_layout};
+use crate::ondisk::ntfs::NtfsError;
 
 /// I/O strategy to measure for one $MFT read pass (ADR-0011).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,21 +254,14 @@ pub fn io_probe(
     mode: IoProbeMode,
     queue_depth: usize,
 ) -> Result<ProbeStats, MftError> {
-    let drive = drive.trim_end_matches(['\\', '/']);
-    let volume_path = format!(r"\\.\{drive}");
-    let layout = mft_layout(&volume_path).map_err(|e| match e {
-        NtfsReaderError::ElevationError => MftError::NotElevated,
-        other => MftError::Ntfs(other),
+    let label = crate::volume_label::VolumeLabel::parse(drive).ok_or_else(|| {
+        MftError::Ntfs("volume label must be exactly one ASCII drive letter and ':'".to_string())
     })?;
+    let volume_path = label.raw_path();
+    let layout = mft_layout(&volume_path).map_err(MftError::from)?;
     let chunks =
         plan_chunks(&layout.runmap, layout.data_size, layout.record_size).ok_or_else(|| {
-            MftError::Ntfs(
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "$MFT length is not a whole number of file records",
-                )
-                .into(),
-            )
+            MftError::Ntfs("$MFT length is not a whole number of file records".to_string())
         })?;
     let reads: Vec<ReadSpan> = chunks.into_iter().flat_map(|chunk| chunk.reads).collect();
 
@@ -280,7 +272,8 @@ pub fn io_probe(
         IoProbeMode::NoBuf => probe_sync(&volume_path, &reads, FILE_FLAG_NO_BUFFERING),
         IoProbeMode::NoBufOverlapped => probe_nobuf_overlapped(&volume_path, &reads, queue_depth),
     }
-    .map_err(|e| MftError::Ntfs(e.into()))?;
+    .map_err(NtfsError::from)
+    .map_err(MftError::from)?;
     let elapsed = t.elapsed();
     Ok(ProbeStats {
         bytes,

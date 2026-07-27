@@ -12,12 +12,16 @@ use fmf_proto::messages::{self, opcode};
 use fmf_proto::{PROTOCOL_VERSION, codes};
 use fmf_service::pipe::PipeStream;
 
-fn admin_gate() -> bool {
-    if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
-        eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
-        return false;
-    }
-    true
+/// Fails closed. `#[ignore]` is what *skips* this test; reaching the body
+/// without the arming variable means the harness was invoked outside
+/// `just test-admin`, and a silent early return would be indistinguishable
+/// from a durability proof that actually ran.
+fn require_admin_gate() {
+    assert_eq!(
+        std::env::var("FMF_ADMIN_TESTS").as_deref(),
+        Ok("1"),
+        "this ignored real-volume test must run only through `just test-admin`"
+    );
 }
 
 struct Child(std::process::Child);
@@ -117,9 +121,7 @@ fn wait_ready(s: &mut PipeStream, next_id: &mut u32, deadline: Duration) -> u64 
 #[test]
 #[ignore = "requires elevation + a real C: scan; gated by FMF_ADMIN_TESTS=1 (just test-admin)"]
 fn service_e2e_flush_survives_kill_and_restores() {
-    if !admin_gate() {
-        return;
-    }
+    require_admin_gate();
     // Fresh per-run data dir (TestDir) → guaranteed full-scan cold start.
     let data_dir = TestDir::new();
     // Short flush interval: durability must not depend on a graceful stop.

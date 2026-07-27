@@ -11,6 +11,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::index::{EntryId, VolumeIndex};
 use crate::metrics::Counters;
 use crate::query::{CompiledQuery, QueryOptions};
+use crate::volume_label::VolumeLabel;
 
 use super::seams::SnapshotStore;
 use super::{Engine, VolumeState};
@@ -81,10 +82,12 @@ impl VolumeSlot {
 
     /// Install a freshly built index. Replacing an existing one is a
     /// structural change (journal-gone full rescan): the new index inherits
-    /// the previous `structural_generation + 1` so open `ResultSet`s go
-    /// hard-stale (docs/ARCHITECTURE.md, 2-layer generation). A first install
-    /// (initial scan or snapshot restore) keeps the value the index was
-    /// built with.
+    /// the previous `structural_generation + 1` so open `ResultSet`s go hard
+    /// stale. A first install (initial scan or snapshot restore) keeps the
+    /// value the index was built with — there are no handles to invalidate.
+    ///
+    /// Every index replacement goes through here, which is what makes the
+    /// generation bump impossible to forget.
     pub(super) fn install_index(&self, mut idx: VolumeIndex) {
         let mut guard = self.index.write();
         if let Some(prev) = guard.as_ref() {
@@ -184,8 +187,7 @@ pub(super) fn snapshot_path(index_dir: &std::path::Path, label: &str) -> std::pa
 /// bearing `..\` or path separators from steering `snapshot_path` outside the
 /// index directory.
 pub(super) fn is_valid_volume_label(label: &str) -> bool {
-    let b = label.as_bytes();
-    b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+    VolumeLabel::parse(label).is_some()
 }
 
 /// Validate one whole `IndexStart` request before the engine creates any
@@ -196,15 +198,15 @@ pub(super) fn validate_index_start_volumes(
 ) -> Result<Vec<String>, super::IndexStartError> {
     let available: Vec<String> = available
         .iter()
-        .filter(|label| is_valid_volume_label(label))
-        .map(|label| label.to_ascii_uppercase())
+        .filter_map(|label| VolumeLabel::parse(label))
+        .map(|label| label.to_string())
         .collect();
     let mut canonical = Vec::with_capacity(requested.len());
     for (position, label) in requested.iter().enumerate() {
-        if !is_valid_volume_label(label) {
+        let Some(label) = VolumeLabel::parse(label) else {
             return Err(super::IndexStartError::MalformedLabel { position });
-        }
-        let label = label.to_ascii_uppercase();
+        };
+        let label = label.to_string();
         if canonical.contains(&label) {
             return Err(super::IndexStartError::DuplicateLabel { label });
         }

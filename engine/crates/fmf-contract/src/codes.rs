@@ -1,5 +1,5 @@
 //! Status codes — one table shared verbatim by the FFI return values and
-//! the pipe frame header (docs/ARCHITECTURE.md error code table).
+//! the pipe frame header's `status` field.
 //!
 //! **Append only; renumbering is a breaking protocol change.** Downstream,
 //! fmf-ffi's `contract_tests` pin these against literals as an independent

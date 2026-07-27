@@ -122,8 +122,18 @@ pub(crate) fn clear_event_callback(handle: &EngineHandle) {
 /// Successful replacement or
 /// clearing is a quiescence barrier: the old callback cannot run after this
 /// function returns. Lifecycle mutation from inside a callback is rejected to
-/// avoid self-wait deadlock. Returns `FMF_OK` or an error code. Safety: see
-/// docs/ARCHITECTURE.md.
+/// avoid self-wait deadlock. Returns `FMF_OK` or an error code.
+///
+/// # Safety
+///
+/// When `cb` is non-null, it must remain callable with the C ABI from any
+/// thread until a later replacement, clear, or engine destruction returns.
+/// Each `ev` passed to it is borrowed only for that callback invocation and
+/// must not be retained. `user` is returned verbatim to every invocation, so
+/// any pointee or managed delegate/GC handle it represents must remain alive
+/// for the same interval. Invocations may overlap: `cb` and every state object
+/// reachable through `user` must support concurrent access or synchronize it
+/// internally. The callback must not unwind across the ABI boundary.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_set_event_callback(
     h: *mut c_void,

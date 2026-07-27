@@ -4,6 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use super::term;
 
 /// Single machine-readable report contract shared with xtask's transactional
@@ -21,6 +23,32 @@ struct MedianEstimate {
     point: f64,
     lower: f64,
     upper: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct CriterionCase {
+    id: String,
+    enforced: bool,
+    actual: f64,
+    baseline: f64,
+    delta: f64,
+    delta_ratio: f64,
+    delta_ci_lower_ratio: f64,
+    delta_ci_upper_ratio: f64,
+    threshold_metric: &'static str,
+    threshold_value: f64,
+    verdict: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct CriterionEvidence {
+    schema: u32,
+    kind: &'static str,
+    expected_cases: Vec<String>,
+    cases: Vec<CriterionCase>,
+    finite: bool,
+    passed: bool,
+    errors: Vec<String>,
 }
 
 fn expected_report_ids() -> BTreeSet<&'static str> {
@@ -171,75 +199,183 @@ fn is_regression(estimate: MedianEstimate, threshold: f64) -> bool {
     estimate.lower > threshold
 }
 
-pub fn criterion_gate(
-    dir: &Path,
-    threshold: f64,
-    ctx: super::ctx::Ctx,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn read_median(path: &Path, id: &str, role: &str) -> Result<MedianEstimate, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        format!(
+            "failed to read Criterion {role} for `{id}` at {}: {e}",
+            path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "invalid Criterion {role} JSON for `{id}` at {}: {e}",
+            path.display()
+        )
+    })?;
+    parse_median_estimate(&value).map_err(|e| format!("invalid Criterion {role} for `{id}`: {e}"))
+}
+
+fn expected_case_names() -> Vec<String> {
+    expected_report_ids()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn evaluate(dir: &Path, threshold: f64) -> Result<CriterionEvidence, String> {
     if !threshold.is_finite() || threshold < 0.0 {
         return Err(format!(
             "criterion regression threshold must be a finite non-negative ratio, got {threshold}"
-        )
-        .into());
+        ));
     }
 
     let mut reports = BTreeMap::new();
-    collect_change_reports(dir, dir, &mut reports)?;
+    collect_change_reports(dir, dir, &mut reports).map_err(|error| error.to_string())?;
     validate_report_ids(&reports.keys().cloned().collect())?;
 
     let gated = gated_report_ids();
-    let mut checked = 0u32;
-    let mut regressions = Vec::new();
-    for (name, path) in &reports {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read Criterion report {}: {e}", path.display()))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| format!("invalid Criterion JSON in {}: {e}", path.display()))?;
-        let median = parse_median_estimate(&value)
-            .map_err(|e| format!("invalid Criterion report for `{name}`: {e}"))?;
-
-        if !gated.contains(name.as_str()) {
-            continue;
+    let mut cases = Vec::with_capacity(reports.len());
+    for name in expected_report_ids() {
+        let change_path = reports
+            .get(name)
+            .ok_or_else(|| format!("missing Criterion change report for `{name}`"))?;
+        let bench_dir = change_path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| format!("malformed Criterion report path {}", change_path.display()))?;
+        let change = read_median(change_path, name, "change estimate")?;
+        let actual = read_median(
+            &bench_dir.join("new").join("estimates.json"),
+            name,
+            "actual estimate",
+        )?;
+        let baseline = read_median(
+            &bench_dir.join("committed").join("estimates.json"),
+            name,
+            "baseline estimate",
+        )?;
+        if actual.point < 0.0 || baseline.point < 0.0 {
+            return Err(format!(
+                "Criterion actual/baseline median for `{name}` must be non-negative"
+            ));
         }
-        checked += 1;
-        // A noisy point estimate is not a regression. The whole 95% median
-        // interval must clear the effect-size threshold.
-        if is_regression(median, threshold) {
-            if ctx.human_chrome() {
-                anstream::eprintln!(
-                    "{} {name} median {:+.1}% (95% CI {:+.1}%..{:+.1}%)",
-                    term::paint(term::ERROR, "REGRESSION"),
-                    median.point * 100.0,
-                    median.lower * 100.0,
-                    median.upper * 100.0
-                );
+        let enforced = gated.contains(name);
+        let regressed = enforced && is_regression(change, threshold);
+        cases.push(CriterionCase {
+            id: name.to_owned(),
+            enforced,
+            actual: actual.point,
+            baseline: baseline.point,
+            delta: actual.point - baseline.point,
+            delta_ratio: change.point,
+            delta_ci_lower_ratio: change.lower,
+            delta_ci_upper_ratio: change.upper,
+            threshold_metric: "delta_ci_lower_ratio",
+            threshold_value: threshold,
+            verdict: if !enforced {
+                "informational"
+            } else if regressed {
+                "fail"
+            } else {
+                "pass"
+            },
+        });
+    }
+    let finite = cases.iter().all(|case| {
+        [
+            case.actual,
+            case.baseline,
+            case.delta,
+            case.delta_ratio,
+            case.delta_ci_lower_ratio,
+            case.delta_ci_upper_ratio,
+            case.threshold_value,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+    });
+    let passed = finite && cases.iter().all(|case| case.verdict != "fail");
+    Ok(CriterionEvidence {
+        schema: 1,
+        kind: "micro-verdict",
+        expected_cases: expected_case_names(),
+        cases,
+        finite,
+        passed,
+        errors: Vec::new(),
+    })
+}
+
+fn failure_evidence(error: &str) -> CriterionEvidence {
+    CriterionEvidence {
+        schema: 1,
+        kind: "micro-verdict",
+        expected_cases: expected_case_names(),
+        cases: Vec::new(),
+        finite: false,
+        passed: false,
+        errors: vec![error.to_owned()],
+    }
+}
+
+fn write_evidence(
+    path: &Path,
+    evidence: &CriterionEvidence,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut bytes = serde_json::to_vec_pretty(evidence)?;
+    bytes.push(b'\n');
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+pub fn criterion_gate(
+    dir: &Path,
+    threshold: f64,
+    evidence_path: Option<&Path>,
+    ctx: super::ctx::Ctx,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let decision = match evaluate(dir, threshold) {
+        Ok(decision) => decision,
+        Err(error) => {
+            let decision = failure_evidence(&error);
+            if let Some(path) = evidence_path {
+                write_evidence(path, &decision)?;
             }
-            regressions.push((name, median));
+            if ctx.is_json() {
+                super::json::emit(&decision)?;
+            }
+            return Err(error.into());
+        }
+    };
+    if let Some(path) = evidence_path {
+        write_evidence(path, &decision)?;
+    }
+
+    let regressions: Vec<_> = decision
+        .cases
+        .iter()
+        .filter(|case| case.verdict == "fail")
+        .collect();
+    if ctx.human_chrome() {
+        for case in &regressions {
+            anstream::eprintln!(
+                "{} {} median {:+.1}% (95% CI {:+.1}%..{:+.1}%)",
+                term::paint(term::ERROR, "REGRESSION"),
+                case.id,
+                case.delta_ratio * 100.0,
+                case.delta_ci_lower_ratio * 100.0,
+                case.delta_ci_upper_ratio * 100.0
+            );
         }
     }
 
     if ctx.is_json() {
-        let regressions_json: Vec<_> = regressions
-            .iter()
-            .map(|(name, median)| {
-                serde_json::json!({
-                    "bench": name,
-                    "median": median.point,
-                    "median_ci_lower": median.lower,
-                    "median_ci_upper": median.upper,
-                })
-            })
-            .collect();
-        super::json::emit(&serde_json::json!({
-            "expected_reports": reports.len(),
-            "checked": checked,
-            "informational": INFORMATIONAL_BENCHES.len(),
-            "threshold": threshold,
-            "confidence_level": 0.95,
-            "regressions": regressions_json,
-            "passed": regressions.is_empty(),
-        }))?;
+        super::json::emit(&decision)?;
     } else {
+        let checked = decision.cases.iter().filter(|case| case.enforced).count();
         println!(
             "criterion-gate: {checked} gated benches compared, {} informational reports \
              verified, threshold {:+.0}% (95% CI lower bound)",
@@ -247,7 +383,13 @@ pub fn criterion_gate(
             threshold * 100.0
         );
     }
-    if !regressions.is_empty() {
+    if !decision.passed {
+        if regressions.is_empty() && ctx.human_chrome() {
+            anstream::eprintln!(
+                "{} criterion evidence contains non-finite data",
+                term::paint(term::ERROR, "INVALID")
+            );
+        }
         return Err("micro-benchmark regression vs criterion baseline".into());
     }
     Ok(())
@@ -288,8 +430,8 @@ mod tests {
         );
         assert!(informational.is_subset(&expected));
         assert!(gated.is_disjoint(&informational));
-        assert_eq!(gated.len(), 26);
-        assert_eq!(expected.len(), 28);
+        assert_eq!(gated.len(), 27);
+        assert_eq!(expected.len(), 29);
         assert!(!gated.contains("query/regex_scan"));
         assert!(!gated.contains("build/finish_1m"));
     }
@@ -348,5 +490,80 @@ mod tests {
 
         assert!(parse_median_estimate(&estimate(0.20, 0.30, 0.40)).is_err());
         assert!(parse_median_estimate(&serde_json::json!({})).is_err());
+    }
+
+    fn write_estimate(path: &Path, point: f64, lower: f64, upper: f64) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            serde_json::to_vec(&estimate(point, lower, upper)).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn complete_report_set(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "fmf-criterion-evidence-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for id in expected_report_ids() {
+            let bench = root.join(id);
+            write_estimate(
+                &bench.join("committed").join("estimates.json"),
+                100.0,
+                99.0,
+                101.0,
+            );
+            write_estimate(
+                &bench.join("new").join("estimates.json"),
+                105.0,
+                104.0,
+                106.0,
+            );
+            write_estimate(
+                &bench.join("change").join("estimates.json"),
+                0.05,
+                0.04,
+                0.06,
+            );
+        }
+        root
+    }
+
+    #[test]
+    fn evidence_has_the_full_case_set_and_preserves_failing_verdicts() {
+        let root = complete_report_set("complete");
+        let passing = evaluate(&root, 0.10).unwrap();
+        assert_eq!(passing.expected_cases, expected_case_names());
+        assert_eq!(passing.cases.len(), 29);
+        assert!(passing.finite);
+        assert!(passing.passed);
+        assert_eq!(
+            passing.cases.iter().filter(|case| !case.enforced).count(),
+            INFORMATIONAL_BENCHES.len()
+        );
+
+        write_estimate(
+            &root
+                .join("query/common")
+                .join("change")
+                .join("estimates.json"),
+            0.20,
+            0.11,
+            0.30,
+        );
+        let failing = evaluate(&root, 0.10).unwrap();
+        assert!(!failing.passed);
+        assert_eq!(
+            failing
+                .cases
+                .iter()
+                .find(|case| case.id == "query/common")
+                .unwrap()
+                .verdict,
+            "fail"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

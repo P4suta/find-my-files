@@ -27,15 +27,10 @@ confidence-threshold = 0.8
 unused-allowed-license = "allow"
 
 [bans]
-# Any new duplicate version is a dependency-policy failure. The sole known
-# transitive exception is pinned exactly below, so broad drift cannot hide here.
+# Any duplicate version is a dependency-policy failure.
 multiple-versions = "deny"
 wildcards = "deny"
 allow-wildcard-paths = true
-# ntfs-reader 0.4.5 still uses binread 2's proc-macro stack (syn 1); the rest
-# of the graph is on syn 2. Pin the sole known transitive duplicate exactly so
-# cargo-deny remains quiet while any new duplicate still reports.
-skip = [{ name = "syn", version = "=1.0.109" }]
 
 [sources]
 unknown-registry = "deny"

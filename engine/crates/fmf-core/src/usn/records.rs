@@ -1,6 +1,9 @@
 //! Pure change-journal buffer parsing — no OS calls, so the whole layer is
-//! testable from raw byte fixtures (docs/ARCHITECTURE.md, AGENTS.md elevation
-//! rules).
+//! testable from raw byte fixtures.
+//!
+//! That split is deliberate: reading a real journal needs elevation, so
+//! keeping the grammar OS-free is what lets the USN logic be covered by
+//! unelevated `cargo test` (see AGENTS.md).
 //!
 //! NTFS V2 records are decoded; foreign V3/V4 records are skipped only
 //! after their version-specific variable-length layout has been validated.

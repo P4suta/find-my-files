@@ -73,7 +73,18 @@ pub(crate) fn purge_engine(engine_id: usize) {
 /// Writes the result-set handle to `out_handle`, the match count to `out_count`,
 /// and (when `out_trace` is non-null) a `FmfBlob` holding the stage-breakdown
 /// trace as JSON. Returns `FMF_OK` on success or an `FMF_E_*` code.
-/// Safety: see docs/ARCHITECTURE.md.
+///
+/// # Safety
+///
+/// `query_utf8` must point to readable, NUL-terminated UTF-8 and `options`
+/// must point to one aligned, initialized `FmfQueryOptions`; both stay
+/// immutable for this call. `out_handle` and `out_count` must be aligned and
+/// writable for one value each. A non-null `out_trace` must likewise be
+/// writable for one pointer. Once the required output pointers are validated,
+/// all outputs are initialized to null/zero before any other argument or handle
+/// validation. All input/output regions must be disjoint. The result handle
+/// remains registry-owned until `fmf_result_free`; a returned trace remains
+/// valid until its `owner_id` is passed to `fmf_blob_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_query(
     h: *mut c_void,
@@ -85,8 +96,8 @@ pub unsafe extern "C" fn fmf_query(
     out_trace: *mut *mut FmfBlob, // nullable: stage breakdown as JSON
 ) -> i32 {
     guard(|| {
-        if out_handle.is_null() || out_count.is_null() || options.is_null() {
-            set_error("fmf_query requires non-null options, out_handle, and out_count");
+        if out_handle.is_null() || out_count.is_null() {
+            set_error("fmf_query requires non-null out_handle and out_count");
             return FMF_E_INVALID_ARG;
         }
         unsafe {
@@ -95,6 +106,10 @@ pub unsafe extern "C" fn fmf_query(
             if !out_trace.is_null() {
                 *out_trace = std::ptr::null_mut();
             }
+        }
+        if options.is_null() {
+            set_error("fmf_query requires non-null options");
+            return FMF_E_INVALID_ARG;
         }
         let handle = match engine(h) {
             Ok(e) => e,
@@ -136,7 +151,7 @@ pub unsafe extern "C" fn fmf_query(
         });
         match handle
             .engine
-            .query_cancellable(text, &opt, &cancellation, basis.as_deref())
+            .query_cancellable(&text, &opt, &cancellation, basis.as_deref())
         {
             Ok((rs, mut trace)) => {
                 if cancellation.is_cancelled() {
@@ -240,20 +255,19 @@ fn insert_page(mut owned: Box<PageOwned>) -> Result<*mut FmfPage, i32> {
     } else {
         owned.blob.as_ptr()
     };
-    let page_ptr = std::ptr::from_mut(&mut owned.page);
     let mut pages = PAGES.lock();
     match pages.entry(owner_id) {
-        Entry::Vacant(entry) => {
-            entry.insert(owned);
-        }
+        // Derive the pointer from the stored box, after the move. The heap
+        // address is stable either way, but a pointer derived before moving a
+        // `Box` carries a tag the move invalidates under Stacked/Tree Borrows.
+        Entry::Vacant(entry) => Ok(std::ptr::from_mut(&mut entry.insert(owned).page)),
         Entry::Occupied(_) => {
             set_error(format!(
                 "duplicate result-page allocation owner id: {owner_id}"
             ));
-            return Err(FMF_E_IO);
+            Err(FMF_E_IO)
         }
     }
-    Ok(page_ptr)
 }
 
 /// Materializes a window of rows from a result-set handle into a freshly
@@ -262,7 +276,13 @@ fn insert_page(mut owned: Box<PageOwned>) -> Result<*mut FmfPage, i32> {
 /// Fills `count` rows starting at `offset` and writes the owning page pointer to
 /// `out`; free it with `fmf_page_free`. Returns `FMF_OK`, or `FMF_E_STALE` if the
 /// structural generation moved (re-run the query), or another `FMF_E_*` code.
-/// Safety: see docs/ARCHITECTURE.md.
+///
+/// # Safety
+///
+/// `out` must be aligned and writable as one `*mut FmfPage` for this call. It
+/// is initialized to null. On success the descriptor, rows, and string blob are
+/// immutable registry-owned borrows until its `owner_id` is passed exactly
+/// once to `fmf_page_free`; they must not be read concurrently with that free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_result_page(
     r: *mut c_void,
@@ -356,9 +376,10 @@ pub extern "C" fn fmf_page_free(owner_id: u64) -> i32 {
 }
 
 /// Frees a result-set handle previously returned by `fmf_query`. Null is a
-/// no-op. Returns `FMF_OK`. Safety: see docs/ARCHITECTURE.md.
+/// no-op. Unknown, foreign, stale, and duplicate opaque IDs fail closed without
+/// dereferencing the pointer value.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fmf_result_free(r: *mut c_void) -> i32 {
+pub extern "C" fn fmf_result_free(r: *mut c_void) -> i32 {
     guard(|| {
         if r.is_null() {
             return FMF_OK;

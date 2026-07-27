@@ -36,33 +36,41 @@ pub(super) enum Matcher {
     NameSub {
         finder: memmem::Finder<'static>,
         folded: bool,
+        canonical: bool,
     },
     /// Name starts with the bytes (`lit*`).
     NamePrefix {
         bytes: Vec<u8>,
         folded: bool,
+        canonical: bool,
     },
     /// Name ends with the bytes (`*.lit`).
     NameSuffix {
         bytes: Vec<u8>,
         folded: bool,
+        canonical: bool,
     },
     /// Substring in the full path.
     PathSub {
         finder: memmem::Finder<'static>,
         folded: bool,
+        canonical: bool,
     },
-    /// Anchored wildcard or user regex over the (original) name bytes.
+    /// Anchored wildcard or user regex over the name bytes. Ordinary
+    /// wildcards set `canonical`; explicit regex syntax deliberately does not.
     NameRegex {
         re: Wtf8Regex,
+        canonical: bool,
     },
-    /// Unanchored wildcard/regex over the (original) full-path bytes.
+    /// Unanchored wildcard/regex over full-path bytes.
     PathRegex {
         re: Wtf8Regex,
+        canonical: bool,
     },
     /// Extension equals any of these folded byte strings.
     Ext {
         exts: Vec<Vec<u8>>,
+        canonical: bool,
     },
     Size {
         min: u64,
@@ -112,7 +120,7 @@ impl Wtf8Regex {
     }
 }
 
-/// The index stores canonical WTF-8, whose only departure from valid UTF-8 is
+/// The index stores well-formed WTF-8, whose only departure from valid UTF-8 is
 /// ED A0..BF 80..BF (a UTF-16 surrogate). Avoid a second full UTF-8 decoder
 /// pass on every ordinary regex miss; memchr makes the overwhelmingly common
 /// "no ED byte" case a vectorized scan.
@@ -180,13 +188,16 @@ pub(super) enum Driver {
     Sub {
         finder: memmem::Finder<'static>,
         needle_len: usize,
+        canonical: bool,
     },
     Prefix {
         bytes: Vec<u8>,
+        canonical: bool,
     },
     Suffixes {
         suffixes: Vec<Vec<u8>>,
         files_only: bool,
+        canonical: bool,
     },
 }
 
@@ -195,9 +206,27 @@ impl Driver {
         match self {
             Self::FullScan => "full-scan",
             Self::MatchAll => "match-all",
+            Self::Sub {
+                canonical: true, ..
+            }
+            | Self::Prefix {
+                canonical: true, ..
+            }
+            | Self::Suffixes {
+                canonical: true, ..
+            } => "canonical-scan",
             Self::Sub { .. } => "pool-scan",
             Self::Prefix { .. } => "prefix",
             Self::Suffixes { .. } => "suffix",
+        }
+    }
+
+    pub(super) const fn canonical(&self) -> bool {
+        match self {
+            Self::Sub { canonical, .. }
+            | Self::Prefix { canonical, .. }
+            | Self::Suffixes { canonical, .. } => *canonical,
+            Self::FullScan | Self::MatchAll => false,
         }
     }
 }
@@ -213,8 +242,8 @@ pub(super) struct CompiledGroup {
     /// subsumption sees every condition (subsume.rs), and so the exec can
     /// verify it per candidate when the sweep was a superset (below).
     pub driver_term: Option<CTerm>,
-    /// False when the source term is case-exact: the folded sweep then
-    /// over-approximates and `driver_term` must be verified per candidate.
+    /// False when the folded sweep is only a superset: case-exact terms and
+    /// canonical completion both require `driver_term` verification.
     pub driver_exact: bool,
 }
 
@@ -226,7 +255,7 @@ impl CompiledGroup {
     }
 
     /// The conditions the sweep did *not* fully check: the residuals, plus
-    /// the driver's source term when the sweep was a folded superset.
+    /// the driver's source term when candidate generation was a superset.
     pub(super) fn residual_terms(&self) -> impl Iterator<Item = &CTerm> {
         self.driver_term
             .iter()
@@ -243,8 +272,9 @@ pub struct CompiledQuery {
     pub(super) needs_orig_paths: bool,
 }
 
-/// Smart-case decision for one needle.
-fn insensitive(needle: &str, case: CaseMode) -> bool {
+/// Smart-case decision for regex syntax, whose spelling is intentionally not
+/// normalized.
+fn regex_insensitive(needle: &str, case: CaseMode) -> bool {
     match case {
         CaseMode::Insensitive => true,
         CaseMode::Sensitive => false,
@@ -252,17 +282,54 @@ fn insensitive(needle: &str, case: CaseMode) -> bool {
     }
 }
 
-fn fold_needle(needle: &str, case: CaseMode) -> (Vec<u8>, bool) {
-    if insensitive(needle, case) {
-        (wtf8::fold_str(needle).into_bytes(), true)
-    } else {
-        (needle.as_bytes().to_vec(), false)
+/// Smart-case decision for ordinary text. Canonically equivalent query
+/// spellings must choose the same case domain (for example `K` and `K`).
+fn literal_insensitive(needle: &str, case: CaseMode) -> bool {
+    match case {
+        CaseMode::Insensitive => true,
+        CaseMode::Sensitive => false,
+        CaseMode::Smart if needle.is_ascii() => !wtf8::has_uppercase(needle),
+        CaseMode::Smart => {
+            let canonical = wtf8::normalize_str(needle, false);
+            let canonical = std::str::from_utf8(&canonical)
+                .expect("normalizing a query string preserves valid UTF-8");
+            !wtf8::has_uppercase(canonical)
+        }
     }
 }
 
-fn substring_finder(needle: &str, case: CaseMode) -> (memmem::Finder<'static>, bool) {
-    let (bytes, folded) = fold_needle(needle, case);
-    (memmem::Finder::new(&bytes).into_owned(), folded)
+/// NFC leaves ASCII unchanged, but three non-ASCII characters have canonical
+/// singleton decompositions into ASCII in the locked Unicode table: Greek
+/// question mark → `;`, Greek varia → `` ` ``, and Kelvin sign → `K`. Those
+/// literals (`k` too in a folded domain) must inspect non-ASCII spellings.
+fn needs_canonical_view(needle: &str, folded: bool) -> bool {
+    !needle.is_ascii()
+        || needle.bytes().any(|b| {
+            b == b';'
+                || b == b'`'
+                || if folded {
+                    b.eq_ignore_ascii_case(&b'k')
+                } else {
+                    b == b'K'
+                }
+        })
+}
+
+fn fold_needle(needle: &str, case: CaseMode) -> (Vec<u8>, bool, bool) {
+    let folded = literal_insensitive(needle, case);
+    let canonical = needs_canonical_view(needle, folded);
+    if canonical {
+        (wtf8::normalize_str(needle, folded), folded, true)
+    } else if folded {
+        (wtf8::fold_str(needle).into_bytes(), true, false)
+    } else {
+        (needle.as_bytes().to_vec(), false, false)
+    }
+}
+
+fn substring_finder(needle: &str, case: CaseMode) -> (memmem::Finder<'static>, bool, bool) {
+    let (bytes, folded, canonical) = fold_needle(needle, case);
+    (memmem::Finder::new(&bytes).into_owned(), folded, canonical)
 }
 
 /// `lit*` / `*lit` / `*lit*` style patterns collapse to anchored byte
@@ -428,50 +495,99 @@ fn compile_term(
     let matcher = match term {
         Term::Name(s) if s.is_empty() => Matcher::True,
         Term::Name(s) => {
-            let (finder, folded) = substring_finder(s, case);
-            Matcher::NameSub { finder, folded }
+            let (finder, folded, canonical) = substring_finder(s, case);
+            Matcher::NameSub {
+                finder,
+                folded,
+                canonical,
+            }
         }
         Term::Path(s) => {
-            let (finder, folded) = substring_finder(s, case);
-            Matcher::PathSub { finder, folded }
+            let (finder, folded, canonical) = substring_finder(s, case);
+            Matcher::PathSub {
+                finder,
+                folded,
+                canonical,
+            }
         }
         Term::Wildcard(s) => match classify_wildcard(s) {
             WildShape::Prefix(lit) => {
-                let (bytes, folded) = fold_needle(&lit, case);
-                Matcher::NamePrefix { bytes, folded }
+                let (bytes, folded, canonical) = fold_needle(&lit, case);
+                Matcher::NamePrefix {
+                    bytes,
+                    folded,
+                    canonical,
+                }
             }
             WildShape::Suffix(lit) => {
-                let (bytes, folded) = fold_needle(&lit, case);
-                Matcher::NameSuffix { bytes, folded }
+                let (bytes, folded, canonical) = fold_needle(&lit, case);
+                Matcher::NameSuffix {
+                    bytes,
+                    folded,
+                    canonical,
+                }
             }
             WildShape::Inner(lit) => {
-                let (finder, folded) = substring_finder(&lit, case);
-                Matcher::NameSub { finder, folded }
+                let (finder, folded, canonical) = substring_finder(&lit, case);
+                Matcher::NameSub {
+                    finder,
+                    folded,
+                    canonical,
+                }
             }
             WildShape::General => {
-                let body = format!("^{}$", wildcard_to_regex_body(s));
-                let wtf8_body = format!("^{}$", wildcard_to_wtf8_regex_body(s));
+                let folded = literal_insensitive(s, case);
+                let canonical = needs_canonical_view(s, folded);
+                let pattern = if canonical {
+                    String::from_utf8(wtf8::normalize_str(s, false))
+                        .expect("a normalized query pattern remains valid UTF-8")
+                } else {
+                    s.clone()
+                };
+                let body = format!("^{}$", wildcard_to_regex_body(&pattern));
+                let wtf8_body = format!("^{}$", wildcard_to_wtf8_regex_body(&pattern));
                 Matcher::NameRegex {
-                    re: build_regex_with_wtf8_fallback(&body, &wtf8_body, insensitive(s, case), s)?,
+                    re: build_regex_with_wtf8_fallback(&body, &wtf8_body, folded, s)?,
+                    canonical,
                 }
             }
         },
         Term::PathWildcard(s) => {
-            let body = wildcard_to_regex_body(s);
-            let wtf8_body = wildcard_to_wtf8_regex_body(s);
+            let folded = literal_insensitive(s, case);
+            let canonical = needs_canonical_view(s, folded);
+            let pattern = if canonical {
+                String::from_utf8(wtf8::normalize_str(s, false))
+                    .expect("a normalized query pattern remains valid UTF-8")
+            } else {
+                s.clone()
+            };
+            let body = wildcard_to_regex_body(&pattern);
+            let wtf8_body = wildcard_to_wtf8_regex_body(&pattern);
             Matcher::PathRegex {
-                re: build_regex_with_wtf8_fallback(&body, &wtf8_body, insensitive(s, case), s)?,
+                re: build_regex_with_wtf8_fallback(&body, &wtf8_body, folded, s)?,
+                canonical,
             }
         }
         Term::Regex(s) => Matcher::NameRegex {
-            re: build_regex(s, insensitive(s, case), s)?,
+            re: build_regex(s, regex_insensitive(s, case), s)?,
+            canonical: false,
         },
-        Term::Ext(exts) => Matcher::Ext {
-            exts: exts
-                .iter()
-                .map(|e| wtf8::fold_str(e).into_bytes())
-                .collect(),
-        },
+        Term::Ext(exts) => {
+            let canonical = exts.iter().any(|e| needs_canonical_view(e, true));
+            Matcher::Ext {
+                exts: exts
+                    .iter()
+                    .map(|e| {
+                        if canonical {
+                            wtf8::normalize_str(e, true)
+                        } else {
+                            wtf8::fold_str(e).into_bytes()
+                        }
+                    })
+                    .collect(),
+                canonical,
+            }
+        }
         Term::Size { min, max } => Matcher::Size {
             min: *min,
             max: *max,
@@ -495,14 +611,17 @@ fn compile_term(
         Matcher::NameSub {
             finder,
             folded: false,
+            ..
         } => unstable(finder.needle()),
         Matcher::NamePrefix {
             bytes,
             folded: false,
+            ..
         }
         | Matcher::NameSuffix {
             bytes,
             folded: false,
+            ..
         } => unstable(bytes),
         _ => false,
     };
@@ -525,7 +644,7 @@ fn driver_score(t: &CTerm) -> Option<usize> {
             Some(bytes.len() * 2)
         }
         // The sweep needle is ".<ext>" — score like the other literals.
-        Matcher::Ext { exts } if !exts.is_empty() => {
+        Matcher::Ext { exts, .. } if !exts.is_empty() => {
             Some(exts.iter().map(|e| (e.len() + 1) * 2).min().unwrap_or(0))
         }
         _ => None,
@@ -535,54 +654,73 @@ fn driver_score(t: &CTerm) -> Option<usize> {
 /// Fold a case-exact needle for the superset sweep. Needles always
 /// originate from the query `&str`, so the bytes are valid UTF-8; the
 /// fold's length preservation keeps prefix/suffix anchors sound.
-fn fold_exact_needle(bytes: &[u8]) -> Vec<u8> {
+fn fold_exact_needle(bytes: &[u8], canonical: bool) -> Vec<u8> {
     let s = std::str::from_utf8(bytes).expect("query needles are valid UTF-8");
-    wtf8::fold_str(s).into_bytes()
+    if canonical {
+        wtf8::normalize_str(s, true)
+    } else {
+        wtf8::fold_str(s).into_bytes()
+    }
 }
 
 /// Build the sweep driver from a term, leaving the term intact (kept as
 /// `CompiledGroup::driver_term`). Returns the driver and whether it fully
-/// checks the term — false for a case-exact term: the sweep folds its
-/// needle (sound: an original-case match always implies the folded match)
-/// and the exact comparison runs as a residual.
+/// checks the term. Case-exact terms fold their needle, and canonical terms
+/// union raw and normalized spellings; both are sound supersets whose source
+/// matcher runs again as a residual.
 fn driver_for(t: &CTerm) -> (Driver, bool) {
     match &t.matcher {
-        Matcher::NameSub { finder, folded } => {
+        Matcher::NameSub {
+            finder,
+            folded,
+            canonical,
+        } => {
             let needle = if *folded {
                 finder.needle().to_vec()
             } else {
-                fold_exact_needle(finder.needle())
+                fold_exact_needle(finder.needle(), *canonical)
             };
             (
                 Driver::Sub {
                     needle_len: needle.len(),
                     finder: memmem::Finder::new(&needle).into_owned(),
+                    canonical: *canonical,
                 },
-                *folded,
+                *folded && !*canonical,
             )
         }
-        Matcher::NamePrefix { bytes, folded } => (
+        Matcher::NamePrefix {
+            bytes,
+            folded,
+            canonical,
+        } => (
             Driver::Prefix {
                 bytes: if *folded {
                     bytes.clone()
                 } else {
-                    fold_exact_needle(bytes)
+                    fold_exact_needle(bytes, *canonical)
                 },
+                canonical: *canonical,
             },
-            *folded,
+            *folded && !*canonical,
         ),
-        Matcher::NameSuffix { bytes, folded } => (
+        Matcher::NameSuffix {
+            bytes,
+            folded,
+            canonical,
+        } => (
             Driver::Suffixes {
                 suffixes: vec![if *folded {
                     bytes.clone()
                 } else {
-                    fold_exact_needle(bytes)
+                    fold_exact_needle(bytes, *canonical)
                 }],
                 files_only: false,
+                canonical: *canonical,
             },
-            *folded,
+            *folded && !*canonical,
         ),
-        Matcher::Ext { exts } => (
+        Matcher::Ext { exts, canonical } => (
             Driver::Suffixes {
                 suffixes: exts
                     .iter()
@@ -594,8 +732,9 @@ fn driver_for(t: &CTerm) -> (Driver, bool) {
                     })
                     .collect(),
                 files_only: true,
+                canonical: *canonical,
             },
-            true,
+            !*canonical,
         ),
         _ => unreachable!("driver_score gated"),
     }
@@ -654,6 +793,7 @@ fn regex_name_prefilter(re: &Wtf8Regex) -> Option<Driver> {
     Some(Driver::Sub {
         needle_len: needle.len(),
         finder: memmem::Finder::new(&needle).into_owned(),
+        canonical: false,
     })
 }
 
@@ -668,7 +808,10 @@ fn regex_prefilter_driver(terms: &[CTerm]) -> Driver {
         .iter()
         .filter(|t| !t.negated)
         .find_map(|t| match &t.matcher {
-            Matcher::NameRegex { re } => regex_name_prefilter(re),
+            Matcher::NameRegex {
+                re,
+                canonical: false,
+            } => regex_name_prefilter(re),
             _ => None,
         })
         .unwrap_or(Driver::FullScan)
@@ -690,10 +833,22 @@ pub fn compile_whole_regex(
     case: CaseMode,
     scope: RegexScope,
 ) -> Result<CompiledQuery, CompileError> {
-    let re = build_regex(text, insensitive(text, case), text)?;
+    let re = build_regex(text, regex_insensitive(text, case), text)?;
     let (matcher, needs_orig_paths) = match scope {
-        RegexScope::Name => (Matcher::NameRegex { re }, false),
-        RegexScope::Path => (Matcher::PathRegex { re }, true),
+        RegexScope::Name => (
+            Matcher::NameRegex {
+                re,
+                canonical: false,
+            },
+            false,
+        ),
+        RegexScope::Path => (
+            Matcher::PathRegex {
+                re,
+                canonical: false,
+            },
+            true,
+        ),
     };
     let term = CTerm {
         negated: false,
@@ -802,6 +957,7 @@ impl CompiledQuery {
 mod tests {
     use super::super::parse;
     use super::*;
+    use unicode_normalization::UnicodeNormalization;
 
     fn prefilter_needle(pattern: &str) -> Option<Vec<u8>> {
         let re = build_regex(pattern, false, pattern).unwrap();
@@ -839,6 +995,47 @@ mod tests {
             None,
             "no common factor across the alternation"
         );
+    }
+
+    #[test]
+    fn ascii_canonical_alias_trigger_covers_the_locked_unicode_table() {
+        // `needs_canonical_view` keeps every other ASCII literal on the raw
+        // hot path. Pin that optimization to the exact Unicode table shipped
+        // by the locked normalization crate instead of reasoning only from
+        // decomposition metadata: inspect each scalar's actual NFC output.
+        let mut aliases = Vec::new();
+        for cp in 0x80..=char::MAX as u32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            let normalized: String = c.to_string().nfc().collect();
+            let ascii: String = normalized.chars().filter(char::is_ascii).collect();
+            if !ascii.is_empty() {
+                aliases.push((c, ascii));
+            }
+        }
+        assert_eq!(
+            aliases,
+            vec![
+                ('\u{037e}', ";".to_string()),
+                ('\u{1fef}', "`".to_string()),
+                ('\u{212a}', "K".to_string())
+            ]
+        );
+
+        for b in 0u8..=0x7F {
+            let needle = char::from(b).to_string();
+            assert_eq!(
+                needs_canonical_view(&needle, false),
+                matches!(b, b';' | b'`' | b'K'),
+                "case-exact ASCII trigger drifted for 0x{b:02X}"
+            );
+            assert_eq!(
+                needs_canonical_view(&needle, true),
+                matches!(b, b';' | b'`' | b'K' | b'k'),
+                "folded ASCII trigger drifted for 0x{b:02X}"
+            );
+        }
     }
 
     #[test]

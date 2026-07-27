@@ -127,7 +127,7 @@ fn replay(
 
 /// C:\ ├─ docs\ (rec 10) │ └─ note.txt (rec 11, 100B) ├─ archive\ (rec 20).
 fn base_index() -> VolumeIndex {
-    let mut b = VolumeIndexBuilder::new("C:", 5);
+    let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
     let mut push = |record: u64, parent: u64, name: &str, is_dir: bool, size: u64, mtime: i64| {
         let units: Vec<u16> = name.encode_utf16().collect();
         b.push(RawEntry {
@@ -232,7 +232,7 @@ struct Node {
 /// exactly as an initial enumeration would, so the result is independent of
 /// the journal path that `replay` exercises.
 fn fresh_scan(nodes: &[Node]) -> VolumeIndex {
-    let mut b = VolumeIndexBuilder::new("C:", 5);
+    let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
     for n in nodes {
         let units: Vec<u16> = n.name.encode_utf16().collect();
         b.push(RawEntry {

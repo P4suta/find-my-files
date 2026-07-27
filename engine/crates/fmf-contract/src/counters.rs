@@ -32,4 +32,5 @@ pub const COUNTER_NAMES: &[&str] = &[
     "pipe_results_evicted",
     "trace_serialize_failures",
     "hard_link_refresh_failures",
+    "usn_index_rejections",
 ];

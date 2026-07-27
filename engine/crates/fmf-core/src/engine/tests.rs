@@ -4,7 +4,7 @@ use crate::index::{Frn, RawEntry, SortKey, VolumeIndexBuilder};
 use crate::query::QueryOptions;
 
 fn vol(label: &str, names: &[(&str, u64)]) -> VolumeIndex {
-    let mut b = VolumeIndexBuilder::new(label, 5);
+    let mut b = VolumeIndexBuilder::new_synthetic(label, 5);
     for (i, (name, size)) in names.iter().enumerate() {
         let units: Vec<u16> = name.encode_utf16().collect();
         b.push(RawEntry {
@@ -90,7 +90,7 @@ fn fill_page_rejects_before_crossing_the_encoded_payload_budget() {
 
 #[test]
 fn fill_page_preserves_a_valid_parent_path_longer_than_u16() {
-    let mut builder = VolumeIndexBuilder::new("C:", 5);
+    let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
     let component = vec![b'x' as u16; 255];
     let mut parent = 5;
     for record in 10..270 {
@@ -301,11 +301,27 @@ fn rebuilt_volume_hard_stales_open_results() {
     // Journal gone → full rescan: C:'s index is rebuilt from scratch and
     // swapped into the slot. The open ResultSet still holds C: entry ids
     // from the old index — without a structural bump it would silently
-    // serve rows for unrelated entries (docs/ARCHITECTURE.md: full rescan
-    // hard-stales open handles).
+    // serve rows for unrelated entries.
     e.replace_ready_volume("C:", vol("C:", &[("omega.txt", 1), ("zeta.txt", 2)]));
 
     assert!(matches!(r.page(0, 10), Err(EngineError::Stale)));
+}
+
+#[test]
+fn deleted_result_entry_stales_page_instead_of_emitting_a_dead_row() {
+    let (_dir, e) = engine_with_two_volumes();
+    let result = e.query("alpha", &QueryOptions::default()).unwrap().0;
+    assert_eq!(result.page(0, 1).unwrap()[0].name, b"alpha.txt");
+
+    {
+        let volumes = e.volumes.read();
+        let slot = volumes.iter().find(|slot| slot.label == "C:").unwrap();
+        let mut guard = slot.index.write();
+        guard.as_mut().unwrap().delete(100);
+    }
+
+    assert!(matches!(result.page(0, 1), Err(EngineError::Stale)));
+    assert!(matches!(result.fill_page(0, 1), Err(EngineError::Stale)));
 }
 
 #[test]
@@ -353,7 +369,8 @@ fn idle_requery_of_identical_results_reports_unchanged() {
         let mut g = slot.index.write();
         let idx = g.as_mut().unwrap();
         let n = idx.len() as u32;
-        idx.merge_new_into_permutations(n);
+        idx.merge_new_into_permutations(n)
+            .expect("fixture topology remains valid");
     }
     let cancellation = QueryCancellation::new();
     let (same, t2) = e
@@ -373,7 +390,7 @@ fn idle_requery_of_identical_results_reports_unchanged() {
         let idx = g.as_mut().unwrap();
         let first_new = idx.len() as u32;
         let units: Vec<u16> = "epsilon.txt".encode_utf16().collect();
-        idx.upsert(&RawEntry {
+        idx.upsert_synthetic(&RawEntry {
             parent_frn: Frn(5),
             frn: Frn((1 << 48) | 0x3E7),
             name_utf16: &units,
@@ -384,7 +401,8 @@ fn idle_requery_of_identical_results_reports_unchanged() {
             size: 5,
             mtime: 5,
         });
-        idx.merge_new_into_permutations(first_new);
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
     }
     let (r3, t3) = e
         .query_cancellable("txt", &opt, &cancellation, Some(&same))
@@ -479,16 +497,25 @@ fn second_engine_on_same_index_dir_is_locked() {
     .expect("lock must free on drop");
 }
 
+/// Fails closed. `#[ignore]` is what *skips* this test; reaching the body
+/// without the arming variable means the harness was invoked outside
+/// `just test-admin`, and a silent early return would be indistinguishable
+/// from a real-volume run that actually happened.
+fn require_admin_gate() {
+    assert_eq!(
+        std::env::var("FMF_ADMIN_TESTS").as_deref(),
+        Ok("1"),
+        "this ignored real-volume test must run only through `just test-admin`"
+    );
+}
+
 #[test]
 #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
 fn engine_e2e_scan_query_snapshot_restore() {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
-        eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
-        return;
-    }
+    require_admin_gate();
 
     // Fresh per-run index dir → guaranteed full-scan path (no stale snapshot).
     let dir = TestDir::new();

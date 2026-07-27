@@ -355,7 +355,7 @@ fn sink_channel(e: &Arc<Engine>) -> mpsc::Receiver<EngineEvent> {
 }
 
 fn vol(label: &str, names: &[&str]) -> VolumeIndex {
-    let mut b = VolumeIndexBuilder::new(label, 5);
+    let mut b = VolumeIndexBuilder::new_synthetic(label, 5);
     for (i, name) in names.iter().enumerate() {
         let units: Vec<u16> = name.encode_utf16().collect();
         b.push(RawEntry {

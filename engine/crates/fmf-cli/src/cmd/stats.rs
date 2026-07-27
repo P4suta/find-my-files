@@ -15,9 +15,6 @@ pub fn stats(
     ctx: Ctx,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let idx = build_index(drive, ctx)?;
-    // Mirror the engine's Ready state (offset table prewarmed) so the
-    // accounting reflects what the app actually holds.
-    query::prewarm(&idx);
     let mut s = idx.stats(drive);
     s.add_derived_bytes(query::derived_cache_bytes(&idx));
     // The B/file RAM gate reads the steady working set, not the scan peak.
@@ -177,8 +174,9 @@ fn compute_name_stats(idx: &VolumeIndex) -> NameStats {
     }
 }
 
-/// A byte-trigram index estimate over the live folded names (criterion (2) of
-/// the n-gram go/no-go in ARCHITECTURE.md). Read-only; nothing is built.
+/// A byte-trigram index estimate over the live folded names — the measured
+/// input to re-examination trigger (2) of ADR-0002 (no trigram index).
+/// Read-only; nothing is built.
 #[derive(serde::Serialize)]
 struct TrigramEstimate {
     distinct: u64,
@@ -392,7 +390,7 @@ mod tests {
 
     #[test]
     fn name_stats_counts_fold_dup_lengths_and_big_sizes() {
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         // (name, size): two duplicates, one cased, one Japanese, plus a
         // lone-surrogate name pushed below. Root "C:" folds to "c:" and
         // counts as a differing entry of length 2.
@@ -444,7 +442,7 @@ mod tests {
 
     #[test]
     fn dict_estimate_projects_dedup_savings() {
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         // Three identical folded names + one differing-case name. Root "C:"
         // folds to "c:" (len 2) and is its own distinct entry.
         let names: &[&str] = &["report.log", "report.log", "report.log", "BIG_FILE.DAT"];
@@ -481,7 +479,7 @@ mod tests {
 
     #[test]
     fn orig_estimate_projects_original_dedup() {
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         // Four "README" + one "Makefile": all differ from their fold, and the
         // duplicated originals dedup. Root "C:" differs too ("c:").
         let names: &[&str] = &["README", "README", "README", "README", "Makefile"];

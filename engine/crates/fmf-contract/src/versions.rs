@@ -1,5 +1,9 @@
-//! Version pins and the pipe name. An incompatible wire change bumps the
-//! pipe name itself, not just a number — see ARCHITECTURE.md.
+//! Version pins and the pipe name.
+//!
+//! An incompatible wire change bumps the pipe *name*, not just a number: a
+//! stale server is then unreachable instead of misreading a newer request's
+//! bytes under its old layout. The history below records what each bump was
+//! for; it is append-only.
 
 // v2: FmfQueryOptions grew `regex_mode` (16→20 B) — an incompatible wire
 // change, so the pipe name moves to -v2 (a stale v1 service then can't be

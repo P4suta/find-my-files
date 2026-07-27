@@ -74,22 +74,37 @@ fn color_flag_rejects_an_invalid_value() {
 fn diag_runs_unelevated_and_reports_the_version() {
     // `diag` reads versions/log paths/the diag ring — no volume, no admin. It
     // reports the channel-aware build identity (same as `--version`).
-    fmf()
+    let assert = fmf()
+        .env("ProgramData", r"C:\TestProgramData")
         .arg("diag")
         .assert()
-        .success()
-        .stdout(predicate::str::contains(fmf_buildstamp::VERSION));
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains(fmf_buildstamp::VERSION));
+    assert!(stdout.contains(
+        r"engine logs: C:\TestProgramData\find-my-files\logs (rolling engine.<date>.log)"
+    ));
+    assert!(!stdout.contains(r"\logs\engine.log"));
 }
 
 #[test]
 fn diag_json_is_a_versioned_object() {
-    let assert = fmf().args(["--format", "json", "diag"]).assert().success();
+    let assert = fmf()
+        .env("ProgramData", r"C:\TestProgramData")
+        .args(["--format", "json", "diag"])
+        .assert()
+        .success();
     let v: serde_json::Value =
         serde_json::from_slice(&assert.get_output().stdout).expect("diag --format json is JSON");
-    assert_eq!(v["format_version"].as_u64(), Some(1));
+    assert_eq!(v["format_version"].as_u64(), Some(2));
     // The channel-aware build identity, not the bare CARGO_PKG_VERSION — must
     // agree with `fmf --version` (both read fmf_buildstamp::VERSION).
     assert_eq!(v["version"].as_str(), Some(fmf_buildstamp::VERSION));
+    assert_eq!(
+        v["engine_log_dir"].as_str(),
+        Some(r"C:\TestProgramData\find-my-files\logs")
+    );
+    assert!(v.get("engine_log").is_none());
     assert!(v["recent_errors"].is_array());
 }
 
@@ -109,7 +124,7 @@ fn json_format_errors_are_structured() {
         .find(|l| !l.trim().is_empty())
         .expect("stderr is not empty");
     let v: serde_json::Value = serde_json::from_str(last).expect("error line is JSON");
-    assert_eq!(v["format_version"].as_u64(), Some(1));
+    assert_eq!(v["format_version"].as_u64(), Some(2));
     assert!(v["error"]["code_num"].is_i64());
     assert!(v["error"]["message"].is_string());
 }

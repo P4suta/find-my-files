@@ -1,5 +1,7 @@
-//! Opcode → Engine mapping (docs/ARCHITECTURE.md "Pipe protocol"
-//! §opcode table — the canonical table; this is its server half).
+//! Opcode → Engine mapping: the server half of `fmf_contract::opcodes`.
+//!
+//! Deliberately a mapping and nothing else — the arm for an opcode validates
+//! its payload against the contract limits and calls one `Engine` method.
 //!
 //! Every request runs inside a `catch_unwind` firewall: a panic answers
 //! `FMF_E_PANIC` and the connection survives, mirroring the FFI `guard`.
@@ -151,7 +153,7 @@ impl Connection {
             Ok(outcome) => outcome,
             Err(_) => Outcome::Reply(
                 codes::PANIC,
-                b"panic inside fmf-service dispatch \xe2\x80\x94 engine.log".to_vec(),
+                b"panic inside fmf-service dispatch \xe2\x80\x94 see engine logs".to_vec(),
             ),
         }
     }
@@ -237,7 +239,7 @@ impl Connection {
                         }
                     }
                     // The serde detail (field names, byte offsets) is internal
-                    // shape — log it for F12/engine.log, hand the client a
+                    // shape — log it for F12/the engine logs, hand the client a
                     // generic verdict rather than echoing our payload layout.
                     Err(e) => {
                         tracing::warn!(error = %e, "IndexStart payload rejected");

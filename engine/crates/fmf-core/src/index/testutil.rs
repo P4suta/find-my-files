@@ -7,7 +7,25 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{Frn, RawEntry, VolumeIndex, VolumeIndexBuilder};
+use super::{EntryId, Frn, RawEntry, VolumeIndex, VolumeIndexBuilder};
+
+/// Publish appended entries into the sort permutations and bump the content
+/// generation, for a fixture index.
+///
+/// `VolumeIndex::merge_new_into_permutations` is crate-internal so that
+/// production callers can only reach it through the USN batch path, which
+/// decides what a rejected topology means. A fixture that fails that
+/// validation is simply a broken fixture, so this panics instead of handing
+/// the caller an error it has no way to act on.
+///
+/// # Panics
+///
+/// If the fixture's parent graph no longer forms a valid live topology.
+pub fn merge_new_into_permutations(index: &mut VolumeIndex, first_new: EntryId) {
+    index
+        .merge_new_into_permutations(first_new)
+        .expect("fixture topology remains valid");
+}
 
 /// RAII per-test directory: `{build/engine}/test-tmp/fmf-<pid>-<seq>`,
 /// created by [`TestDir::new`], removed (best-effort) on drop.
@@ -118,7 +136,7 @@ pub fn u16s(s: &str) -> Vec<u16> {
 /// C:\ ├─ docs\ ├─ note.txt   docs comes *after* its child in scan order.
 #[must_use]
 pub fn build_sample() -> VolumeIndex {
-    let mut b = VolumeIndexBuilder::new("C:", 5);
+    let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
     let note = u16s("Note.TXT");
     let docs = u16s("docs");
     let big = u16s("big.bin");
@@ -135,7 +153,7 @@ pub fn build_sample() -> VolumeIndex {
 /// one NTFS object and therefore must both survive every index lifecycle.
 #[must_use]
 pub fn build_hardlink_sample() -> VolumeIndex {
-    let mut b = VolumeIndexBuilder::new("C:", 5);
+    let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
     let a = u16s("a");
     let b_name = u16s("b");
     let shared = u16s("shared.txt");

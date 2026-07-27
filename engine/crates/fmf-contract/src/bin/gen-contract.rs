@@ -13,9 +13,9 @@ use std::mem::{offset_of, size_of};
 use std::path::PathBuf;
 
 use fmf_contract::pod::{
-    FmfBlob, FmfEvent, FmfPage, FmfQueryOptions, FmfRow, FmfVolumeStatus, FrameHeader,
+    FmfBlob, FmfEvent, FmfPage, FmfQueryOptions, FmfRow, FmfVolumeStatus, FrameHeader, row_flags,
 };
-use fmf_contract::{codes, counters, limits, opcodes, versions};
+use fmf_contract::{codes, counters, events, limits, opcodes, options, versions};
 
 fn pascal(snake: &str) -> String {
     snake
@@ -201,6 +201,19 @@ fn render() -> String {
         "    public const int RowSize = {};",
         size_of::<FmfRow>()
     ));
+    w("    /// <summary>Canonical FmfRow.Flags values; unknown bits are reserved zero.</summary>");
+    w("    public static class RowFlags");
+    w("    {");
+    w(&format!(
+        "        public const uint Directory = {};",
+        row_flags::DIRECTORY
+    ));
+    w(&format!(
+        "        public const uint KnownMask = {};",
+        row_flags::KNOWN_MASK
+    ));
+    w("    }");
+    w("");
     w("    public static class RowOffsets");
     w("    {");
     w(&format!(
@@ -267,17 +280,80 @@ fn render() -> String {
     ));
     w("}");
     w("");
+    w("/// <summary>Result sort key carried in FmfQueryOptions.SortKey.</summary>");
+    w("internal enum FmfSort : uint");
+    w("{");
+    for (name, value) in [
+        ("Name", options::SortKey::Name as u32),
+        ("Size", options::SortKey::Size as u32),
+        ("Mtime", options::SortKey::Mtime as u32),
+    ] {
+        w(&format!("    {name} = {value},"));
+    }
+    w("}");
+    w("");
+    w("/// <summary>Case-matching mode carried in FmfQueryOptions.CaseMode.</summary>");
+    w("internal enum FmfCase : uint");
+    w("{");
+    for (name, value) in [
+        ("Smart", options::CaseMode::Smart as u32),
+        ("Insensitive", options::CaseMode::Insensitive as u32),
+        ("Sensitive", options::CaseMode::Sensitive as u32),
+    ] {
+        w(&format!("    {name} = {value},"));
+    }
+    w("}");
+    w("");
+    w("/// <summary>Whole-query regex haystack carried in regex_mode bit 1.</summary>");
+    w("internal enum RegexScope : uint");
+    w("{");
+    for (name, value) in [
+        ("Name", options::RegexScope::Name as u32),
+        ("Path", options::RegexScope::Path as u32),
+    ] {
+        w(&format!("    {name} = {value},"));
+    }
+    w("}");
+    w("");
+    w("/// <summary>Lifecycle state carried in FmfVolumeStatus.State.</summary>");
+    w("internal enum VolumeState : uint");
+    w("{");
+    for (name, value) in [
+        ("Scanning", options::VolumeState::Scanning as u32),
+        ("Ready", options::VolumeState::Ready as u32),
+        ("Rescanning", options::VolumeState::Rescanning as u32),
+        ("Failed", options::VolumeState::Failed as u32),
+    ] {
+        w(&format!("    {name} = {value},"));
+    }
+    w("}");
+    w("");
     w("/// <summary>Event kinds — FFI FmfEvent.Kind and pipe event-push opcodes");
-    w("/// carry the same values. EngineError rides severity in Entries");
-    w("/// (1=warn 2=error 3=panic).</summary>");
+    w("/// carry the same values.</summary>");
     w("internal enum EventKind : uint");
     w("{");
-    w("    Progress = 1,");
-    w("    VolumeReady = 2,");
-    w("    IndexChanged = 3,");
-    w("    RescanStarted = 4,");
-    w("    VolumeFailed = 5,");
-    w("    EngineError = 6,");
+    for (name, value) in [
+        ("Progress", events::EventKind::Progress as u32),
+        ("VolumeReady", events::EventKind::VolumeReady as u32),
+        ("IndexChanged", events::EventKind::IndexChanged as u32),
+        ("RescanStarted", events::EventKind::RescanStarted as u32),
+        ("VolumeFailed", events::EventKind::VolumeFailed as u32),
+        ("EngineError", events::EventKind::EngineError as u32),
+    ] {
+        w(&format!("    {name} = {value},"));
+    }
+    w("}");
+    w("");
+    w("/// <summary>Severity carried in FmfEvent.Entries for EngineError.</summary>");
+    w("internal enum EngineErrorSeverity : ulong");
+    w("{");
+    for (name, value) in [
+        ("Warn", events::SEVERITY_WARN),
+        ("Error", events::SEVERITY_ERROR),
+        ("Panic", events::SEVERITY_PANIC),
+    ] {
+        w(&format!("    {name} = {value},"));
+    }
     w("}");
     w("");
     w("/// <summary>Degradation counters of the stats JSON (snake_case keys —");

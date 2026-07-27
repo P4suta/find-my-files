@@ -52,20 +52,18 @@ pub(crate) fn blob_from_json(json: String) -> Result<*mut FmfBlob, i32> {
     } else {
         owned.bytes.as_ptr()
     };
-    let ptr = std::ptr::from_mut(&mut owned.blob);
     let mut blobs = BLOBS.lock();
     match blobs.entry(owner_id) {
-        Entry::Vacant(entry) => {
-            entry.insert(owned);
-        }
+        // Derive the pointer from the stored box, after the move — see the
+        // same reasoning in `results.rs`.
+        Entry::Vacant(entry) => Ok(std::ptr::from_mut(&mut entry.insert(owned).blob)),
         Entry::Occupied(_) => {
             set_error(format!(
                 "duplicate JSON blob allocation owner id: {owner_id}"
             ));
-            return Err(FMF_E_IO);
+            Err(FMF_E_IO)
         }
     }
-    Ok(ptr)
 }
 
 /// Frees the JSON blob identified by the monotonic owner ID returned in its
@@ -90,9 +88,21 @@ pub extern "C" fn fmf_blob_free(owner_id: u64) -> i32 {
 
 /// Full observability snapshot (recent query traces, latency histogram,
 /// USN feed, per-volume index stats) as JSON.
+///
+/// # Safety
+///
+/// `out` must be aligned and writable as one `*mut FmfBlob` for this call. It
+/// is initialized to null; on success the returned descriptor and its bytes
+/// remain borrowed from the native registry until its `owner_id` is passed
+/// exactly once to `fmf_blob_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_engine_stats(h: *mut c_void, out: *mut *mut FmfBlob) -> i32 {
     guard(|| {
+        if out.is_null() {
+            set_error("fmf_engine_stats requires a non-null out pointer");
+            return FMF_E_INVALID_ARG;
+        }
+        unsafe { *out = std::ptr::null_mut() };
         let handle = match engine(h) {
             Ok(e) => e,
             Err(c) => return c,
@@ -101,11 +111,6 @@ pub unsafe extern "C" fn fmf_engine_stats(h: *mut c_void, out: *mut *mut FmfBlob
             Ok(active) => active,
             Err(c) => return c,
         };
-        if out.is_null() {
-            set_error("fmf_engine_stats requires a non-null out pointer");
-            return FMF_E_INVALID_ARG;
-        }
-        unsafe { *out = std::ptr::null_mut() };
         match serde_json::to_string(&handle.engine.metrics_snapshot()) {
             Ok(json) => match blob_from_json(json) {
                 Ok(blob) => {

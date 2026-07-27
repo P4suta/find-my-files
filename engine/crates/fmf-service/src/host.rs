@@ -1,8 +1,9 @@
 //! Engine bring-up for the service.
 //!
-//! The lock-loser path retries with backoff instead of dying (an in-proc UI
-//! may legitimately hold the index; docs/ARCHITECTURE.md "Pipe protocol"
-//! §single-writer exclusion).
+//! The lock-loser path retries with backoff instead of dying: an
+//! `--engine=inproc` UI may legitimately hold the index directory's writer
+//! lock, and that is a transient condition ending when the user closes it —
+//! not a reason to fail the service permanently.
 
 use std::path::PathBuf;
 use std::sync::Arc;

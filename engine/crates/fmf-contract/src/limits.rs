@@ -1,5 +1,10 @@
-//! Contractual bounds (docs/ARCHITECTURE.md). These are protocol facts both
-//! sides must agree on, not tunables.
+//! Contractual bounds — protocol facts both sides must agree on, not tunables.
+//!
+//! A boundary rejects a larger semantic value with
+//! [`crate::codes::INVALID_ARG`], and the pipe reader applies the
+//! operation-specific cap derived from these *before* it allocates or reads a
+//! payload. [`MAX_PAYLOAD_LEN`] bounds response frames and is not a
+//! request-allocation allowance.
 
 /// Hard cap on a single pipe frame's payload; announcing more is a protocol
 /// violation (connection dropped).

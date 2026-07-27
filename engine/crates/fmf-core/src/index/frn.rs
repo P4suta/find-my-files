@@ -240,7 +240,7 @@ mod tests {
                 let record = 100 + rng() % 40;
                 if rng() % 3 < 2 {
                     let name = u16s(&format!("f{}.txt", rng() % 1000));
-                    idx.upsert(&raw(record, 50, &name, false, 1, 1));
+                    idx.upsert_synthetic(&raw(record, 50, &name, false, 1, 1));
                 } else {
                     idx.delete(record);
                 }
@@ -253,7 +253,8 @@ mod tests {
             batch.sort_unstable();
             forward_merge_reference(&mut ref_keys, &mut ref_ids, &batch);
 
-            idx.merge_new_into_permutations(first_new);
+            idx.merge_new_into_permutations(first_new)
+                .expect("fixture topology remains valid");
             assert_eq!(idx.frn_index.ids, ref_ids);
             let derived_keys: Vec<RecordNo> = idx
                 .frn_index
@@ -276,13 +277,14 @@ mod tests {
         let mut last = None;
         for i in 0..5u64 {
             let name = u16s(&format!("storm_{i}.txt"));
-            last = Some(idx.upsert(&raw(100, 50, &name, false, 1, i as i64)));
+            last = Some(idx.upsert_synthetic(&raw(100, 50, &name, false, 1, i as i64)));
         }
         let tail_hit = idx.entry_by_record(100).unwrap();
         assert_eq!(Some(tail_hit), last, "tail scan must see the newest");
         assert_eq!(idx.name(tail_hit), b"storm_4.txt");
 
-        idx.merge_new_into_permutations(first_new);
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
         assert_eq!(idx.entry_by_record(100), last, "sorted lookup agrees");
         assert_eq!(idx.live_len(), live_before, "storm nets zero live change");
     }
@@ -293,14 +295,16 @@ mod tests {
     fn record_reuse_after_delete_resolves_to_the_new_entry() {
         let mut idx = build_sample();
         idx.delete(60).unwrap();
-        idx.merge_new_into_permutations(idx.len() as u32);
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
         assert_eq!(idx.entry_by_record(60), None, "deleted record misses");
 
         let first_new = idx.len() as u32;
         let name = u16s("reborn.txt");
-        let id = idx.upsert(&raw(60, 50, &name, false, 7, 7));
+        let id = idx.upsert_synthetic(&raw(60, 50, &name, false, 7, 7));
         assert_eq!(idx.entry_by_record(60), Some(id), "tail finds the rebirth");
-        idx.merge_new_into_permutations(first_new);
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
         assert_eq!(idx.entry_by_record(60), Some(id), "merge keeps it");
         assert_eq!(idx.name(id), b"reborn.txt");
     }
@@ -312,11 +316,12 @@ mod tests {
         let mut idx = build_sample();
         let first_new = idx.len() as u32;
         let name = u16s("flash.tmp");
-        idx.upsert(&raw(777, 50, &name, false, 1, 1));
+        idx.upsert_synthetic(&raw(777, 50, &name, false, 1, 1));
         assert!(idx.entry_by_record(777).is_some());
         idx.delete(777).unwrap();
         assert_eq!(idx.entry_by_record(777), None, "gone in the tail");
-        idx.merge_new_into_permutations(first_new);
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
         assert_eq!(idx.entry_by_record(777), None, "gone after the merge");
     }
 
@@ -334,14 +339,16 @@ mod tests {
         let third = u16s("third.txt");
         let entry = raw(100, 10, &third, false, 42, 3);
         let first_new = idx.len() as u32;
-        idx.upsert_link_usn(&entry);
+        idx.upsert_link_usn(&entry)
+            .expect("fixture parent is exact");
         assert_eq!(
             idx.entries_by_frn(object).count(),
             3,
             "the unmerged tail participates in the same FRN range"
         );
 
-        idx.merge_new_into_permutations(first_new);
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
         let mut names: Vec<_> = idx
             .entries_by_frn(object)
             .map(|id| idx.name(id).to_vec())

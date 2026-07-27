@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn merge_rejects_a_rebuilt_index_before_dereferencing_old_ids() {
-        let mut old_builder = VolumeIndexBuilder::new("C:", 5);
+        let mut old_builder = VolumeIndexBuilder::new_synthetic("C:", 5);
         let name = "old.txt".encode_utf16().collect::<Vec<_>>();
         old_builder.push(RawEntry {
             parent_frn: Frn(5),
@@ -326,7 +326,7 @@ mod tests {
         let captured_structural = old.structural_generation();
         let old_id = old.len() as EntryId - 1;
 
-        let mut replacement = VolumeIndexBuilder::new("C:", 5).finish();
+        let mut replacement = VolumeIndexBuilder::new_synthetic("C:", 5).finish();
         replacement.bump_structural_from(captured_structural);
         assert!(
             old_id as usize >= replacement.len(),

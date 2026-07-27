@@ -5,6 +5,7 @@ post_usn/apply_batch_1k
 post_usn/first_query_path
 post_usn/first_query_sorted_size
 post_usn/first_query_win
+query/canonical_nfd_miss
 query/case_sensitive
 query/common
 query/composite_path

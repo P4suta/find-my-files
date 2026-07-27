@@ -3,11 +3,6 @@
 
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 
-use ntfs_reader::api::NtfsAttributeType;
-use ntfs_reader::errors::NtfsReaderError;
-use ntfs_reader::file::NtfsFile;
-use ntfs_reader::mft::Mft;
-use ntfs_reader::volume::Volume;
 use windows_sys::Win32::Foundation::{
     ERROR_MORE_DATA, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
 };
@@ -17,17 +12,35 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::{
-    FSCTL_GET_RETRIEVAL_POINTERS, RETRIEVAL_POINTERS_BUFFER, RETRIEVAL_POINTERS_BUFFER_0,
+    FSCTL_GET_NTFS_VOLUME_DATA, FSCTL_GET_RETRIEVAL_POINTERS, NTFS_EXTENDED_VOLUME_DATA,
+    NTFS_VOLUME_DATA_BUFFER, RETRIEVAL_POINTERS_BUFFER, RETRIEVAL_POINTERS_BUFFER_0,
     STARTING_VCN_INPUT_BUFFER,
 };
 
-use super::attribute_list::{StreamRun, decode_extent_runs};
-use super::record::attributes_complete;
+use crate::ondisk::attribute_list::{StreamRun, decode_extent_runs};
+use crate::ondisk::fixup::{apply_fixup, fixup_layout};
+use crate::ondisk::ntfs::{
+    NtfsAttributeType, NtfsError, NtfsFile, VolumeGeometry, decode_boot_sector,
+};
+use crate::ondisk::record::attributes_complete;
+use crate::volume_label::VolumeLabel;
 
-const SECTOR: usize = 512;
+const BOOT_SECTOR_BYTES: usize = 512;
 const RETRIEVAL_OUTPUT_BYTES: usize = 64 << 10;
 const RETRIEVAL_EXTENTS_OFFSET: usize = std::mem::offset_of!(RETRIEVAL_POINTERS_BUFFER, Extents);
 const RETRIEVAL_EXTENT_BYTES: usize = size_of::<RETRIEVAL_POINTERS_BUFFER_0>();
+
+#[repr(C)]
+#[derive(Default)]
+struct NtfsVolumeOutput {
+    basic: NTFS_VOLUME_DATA_BUFFER,
+    extended: NTFS_EXTENDED_VOLUME_DATA,
+}
+
+struct ValidatedVolumeGeometry {
+    boot: VolumeGeometry,
+    mft_valid_data_length: u64,
+}
 
 /// Logical-byte → physical-byte mapping of the $MFT data stream.
 #[derive(Clone)]
@@ -40,10 +53,84 @@ pub(super) struct RunMap {
 /// attributes encountered during the scan.
 pub(super) struct MftLayout {
     pub(super) record_size: usize,
+    pub(super) sector_size: usize,
+    pub(super) root_reference: u64,
     pub(super) data_size: u64,
     pub(super) runmap: RunMap,
     pub(super) cluster_size: u64,
     pub(super) volume_size: u64,
+}
+
+fn validate_root_record(file: &NtfsFile<'_>) -> bool {
+    if file.number != crate::ondisk::ntfs::ROOT_RECORD
+        || !file.is_used()
+        || !file.is_directory()
+        || file.header.base_reference != 0
+        || file.reference_number() >> 48 == 0
+    {
+        return false;
+    }
+    let root_reference = file.reference_number();
+    let mut standard_information = 0usize;
+    let mut file_names = 0usize;
+    let mut valid = true;
+    file.attributes(|attribute| match attribute.header.type_id {
+        type_id if type_id == NtfsAttributeType::StandardInformation as u32 => {
+            if attribute.header.name_length != 0
+                || attribute.header.flags != 0
+                || attribute.header.is_non_resident != 0
+                || attribute.as_standard_info().is_none()
+            {
+                valid = false;
+            } else {
+                standard_information += 1;
+            }
+        }
+        type_id if type_id == NtfsAttributeType::FileName as u32 => {
+            if attribute.header.name_length != 0 || attribute.header.flags != 0 {
+                valid = false;
+                return;
+            }
+            let Some(name) = attribute.as_name() else {
+                valid = false;
+                return;
+            };
+            if name.header.parent_directory_reference == root_reference {
+                file_names += 1;
+            } else {
+                valid = false;
+            }
+        }
+        _ => {}
+    });
+    valid && standard_information == 1 && file_names == 1
+}
+
+fn read_root_reference(
+    reader: &mut std::fs::File,
+    runmap: &RunMap,
+    record_size: usize,
+    sector_size: usize,
+) -> Result<u64, NtfsError> {
+    let mut record = vec![0u8; record_size];
+    let logical = crate::ondisk::ntfs::ROOT_RECORD
+        .checked_mul(record_size as u64)
+        .ok_or(NtfsError::InvalidData("root record offset overflow"))?;
+    runmap.read_exact_logical(reader, logical, &mut record)?;
+    if !NtfsFile::is_valid(&record, sector_size)
+        || !apply_fixup(&mut record, sector_size)
+        || !attributes_complete(&record)
+    {
+        return Err(NtfsError::InvalidData("invalid NTFS root record"));
+    }
+    let file = NtfsFile::parse(crate::ondisk::ntfs::ROOT_RECORD, &record, sector_size).ok_or(
+        NtfsError::InvalidData("NTFS root record could not be decoded"),
+    )?;
+    validate_root_record(&file)
+        .then_some(file.reference_number())
+        .ok_or(NtfsError::InvalidData(
+            "record 5 is not the exact in-use NTFS root directory",
+        ))
 }
 
 impl RunMap {
@@ -225,6 +312,12 @@ pub(super) struct ReadSpan {
 }
 
 pub fn open_raw_volume(volume_path: &str) -> std::io::Result<std::fs::File> {
+    raw_volume_label(volume_path)
+        .ok_or_else(|| invalid_data("raw volume path is not canonical \\\\.\\X: form"))?;
+    open_shared_read(volume_path)
+}
+
+pub(super) fn open_shared_read(path: &str) -> std::io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     const FILE_SHARE_READ: u32 = 0x1;
     const FILE_SHARE_WRITE: u32 = 0x2;
@@ -232,15 +325,17 @@ pub fn open_raw_volume(volume_path: &str) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .open(volume_path)
+        .open(path)
+}
+
+fn raw_volume_label(volume_path: &str) -> Option<VolumeLabel> {
+    let drive = volume_path.strip_prefix(r"\\.\")?;
+    let label = VolumeLabel::parse(drive)?;
+    (drive == label.as_str()).then_some(label)
 }
 
 fn volume_root_path(volume_path: &str) -> Option<String> {
-    let drive = volume_path.strip_prefix(r"\\.\").filter(|drive| {
-        let bytes = drive.as_bytes();
-        bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
-    })?;
-    Some(format!("{drive}\\"))
+    raw_volume_label(volume_path).map(VolumeLabel::root_path)
 }
 
 fn open_volume_hint(volume_path: &str) -> std::io::Result<std::fs::File> {
@@ -257,58 +352,6 @@ fn open_volume_hint(volume_path: &str) -> std::io::Result<std::fs::File> {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(root)
-}
-
-/// Apply the NTFS update sequence array in place. Returns false when the
-/// sector check bytes don't match (torn/corrupt record).
-pub fn apply_fixup(data: &mut [u8]) -> bool {
-    let Some((uso, usl)) = fixup_layout(data) else {
-        return false;
-    };
-    let usn = [data[uso], data[uso + 1]];
-    let fixups: Vec<[u8; 2]> = (1..usl)
-        .map(|i| {
-            let usa_off = uso + i * 2;
-            [data[usa_off], data[usa_off + 1]]
-        })
-        .collect();
-
-    // Validate every sector before mutating any of them. Besides keeping a
-    // failed record untouched, copying the USA first prevents a malicious USA
-    // range that overlaps a sector tail from changing a later replacement.
-    for sector in 1..usl {
-        let sector_off = sector * SECTOR - 2;
-        if data[sector_off..sector_off + 2] != usn {
-            return false;
-        }
-    }
-    for (sector, fixup) in fixups.into_iter().enumerate() {
-        let sector_off = (sector + 1) * SECTOR - 2;
-        data[sector_off..sector_off + 2].copy_from_slice(&fixup);
-    }
-    true
-}
-
-fn fixup_layout(data: &[u8]) -> Option<(usize, usize)> {
-    if data.len() < SECTOR || !data.len().is_multiple_of(SECTOR) {
-        return None;
-    }
-    let uso = u16::from_le_bytes([data[4], data[5]]) as usize;
-    let usl = u16::from_le_bytes([data[6], data[7]]) as usize;
-    let expected_usl = data.len().checked_div(SECTOR)?.checked_add(1)?;
-    let usa_bytes = usl.checked_mul(2)?;
-    let usa_end = uso.checked_add(usa_bytes)?;
-    let attributes_offset = u16::from_le_bytes([data[20], data[21]]) as usize;
-    if uso < 8
-        || !uso.is_multiple_of(2)
-        || usl != expected_usl
-        || usa_end > data.len()
-        || usa_end > attributes_offset
-        || attributes_offset >= data.len()
-    {
-        return None;
-    }
-    Some((uso, usl))
 }
 
 fn le_u32(data: &[u8], offset: usize) -> Option<u32> {
@@ -555,7 +598,7 @@ fn decode_record_zero_runs(
     file: &NtfsFile<'_>,
     cluster_size: u64,
     volume_size: u64,
-) -> Result<(u64, RunMap), NtfsReaderError> {
+) -> Result<(u64, RunMap), NtfsError> {
     let mut data_size = None;
     let mut stream_runs = Vec::new();
     let mut invalid = false;
@@ -589,22 +632,18 @@ fn decode_record_zero_runs(
         stream_runs.extend(runs);
     });
     if invalid {
-        return Err(NtfsReaderError::InvalidDataRun {
-            details: "invalid unnamed $MFT data extent",
-        });
+        return Err(NtfsError::InvalidData("invalid unnamed $MFT data extent"));
     }
     let data_size = data_size.ok_or_else(|| {
-        NtfsReaderError::MissingMftAttribute(
-            "unnamed non-resident Data extent at VCN 0".to_string(),
-        )
+        NtfsError::MissingMftAttribute("unnamed non-resident Data extent at VCN 0".to_string())
     })?;
-    let map = RunMap::from_stream_runs(&stream_runs).ok_or(NtfsReaderError::InvalidDataRun {
-        details: "$MFT data stream contains a sparse extent",
-    })?;
+    let map = RunMap::from_stream_runs(&stream_runs).ok_or(NtfsError::InvalidData(
+        "$MFT data stream contains a sparse extent",
+    ))?;
     if !map.is_valid_partial_mft(volume_size) {
-        return Err(NtfsReaderError::InvalidDataRun {
-            details: "$MFT data extents overlap or lie outside the volume",
-        });
+        return Err(NtfsError::InvalidData(
+            "$MFT data extents overlap or lie outside the volume",
+        ));
     }
     Ok((data_size, map))
 }
@@ -640,14 +679,128 @@ fn retrieval_fallback(
 
 /// Volume geometry + the $MFT data-run map — the bootstrap shared by the
 /// full scan and the I/O probe (record 0 → the $MFT's own data runs).
-pub(super) fn mft_layout(volume_path: &str) -> Result<MftLayout, NtfsReaderError> {
-    let volume = Volume::new(volume_path)?;
-    let record_size =
-        usize::try_from(volume.file_record_size).map_err(|_| NtfsReaderError::InvalidDataRun {
-            details: "$MFT record size exceeds this process address space",
-        })?;
-    if record_size < SECTOR
-        || !record_size.is_multiple_of(SECTOR)
+fn classify_volume_open(error: std::io::Error) -> NtfsError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        NtfsError::Elevation
+    } else {
+        NtfsError::Io(error)
+    }
+}
+
+fn query_ntfs_volume_data(
+    file: &std::fs::File,
+) -> std::io::Result<(NTFS_VOLUME_DATA_BUFFER, NTFS_EXTENDED_VOLUME_DATA)> {
+    let mut output = NtfsVolumeOutput::default();
+    let mut returned = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            raw(file),
+            FSCTL_GET_NTFS_VOLUME_DATA,
+            std::ptr::null(),
+            0,
+            (&raw mut output).cast(),
+            size_of::<NtfsVolumeOutput>() as u32,
+            &raw mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::from_raw_os_error(unsafe {
+            GetLastError() as i32
+        }));
+    }
+    let required = size_of::<NTFS_VOLUME_DATA_BUFFER>()
+        .checked_add(size_of::<NTFS_EXTENDED_VOLUME_DATA>())
+        .ok_or_else(|| invalid_data("NTFS volume-data ABI size overflow"))?;
+    if usize::try_from(returned)
+        .ok()
+        .is_none_or(|size| size < required)
+        || std::mem::offset_of!(NtfsVolumeOutput, extended) != size_of::<NTFS_VOLUME_DATA_BUFFER>()
+        || usize::try_from(output.extended.ByteCount).ok()
+            != Some(size_of::<NTFS_EXTENDED_VOLUME_DATA>())
+    {
+        return Err(invalid_data(
+            "FSCTL_GET_NTFS_VOLUME_DATA omitted required extended geometry",
+        ));
+    }
+    Ok((output.basic, output.extended))
+}
+
+fn validate_os_geometry(
+    boot: VolumeGeometry,
+    basic: NTFS_VOLUME_DATA_BUFFER,
+    extended: NTFS_EXTENDED_VOLUME_DATA,
+) -> Option<u64> {
+    if extended.MajorVersion != 3 || !matches!(extended.MinorVersion, 0 | 1) {
+        return None;
+    }
+    let sectors = u64::try_from(basic.NumberSectors).ok()?;
+    let clusters = u64::try_from(basic.TotalClusters).ok()?;
+    let mft_lcn = u64::try_from(basic.MftStartLcn).ok()?;
+    let mft_valid = u64::try_from(basic.MftValidDataLength).ok()?;
+    let sector_size = u64::from(basic.BytesPerSector);
+    let cluster_size = u64::from(basic.BytesPerCluster);
+    let record_size = u64::from(basic.BytesPerFileRecordSegment);
+    let physical_sector = u64::from(extended.BytesPerPhysicalSector);
+    let os_volume_size = sectors.checked_mul(sector_size)?;
+    let cluster_covered = clusters.checked_mul(cluster_size)?;
+    if sector_size != boot.sector_size
+        || cluster_size != boot.cluster_size
+        || record_size != boot.file_record_size
+        || os_volume_size != boot.volume_size
+        || mft_lcn.checked_mul(cluster_size)? != boot.mft_position
+        || physical_sector < sector_size
+        || !physical_sector.is_power_of_two()
+        || !physical_sector.is_multiple_of(sector_size)
+        || cluster_covered > os_volume_size
+        || os_volume_size.checked_sub(cluster_covered)? >= cluster_size
+        || mft_valid < record_size
+        || mft_valid > os_volume_size
+        || !mft_valid.is_multiple_of(record_size)
+    {
+        return None;
+    }
+    Some(mft_valid)
+}
+
+fn read_geometry(file: &mut std::fs::File) -> Result<ValidatedVolumeGeometry, NtfsError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut boot = [0u8; BOOT_SECTOR_BYTES];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut boot)?;
+    let boot = decode_boot_sector(&boot)
+        .ok_or(NtfsError::InvalidData("invalid NTFS boot-sector geometry"))?;
+    let (basic, extended) = query_ntfs_volume_data(file)?;
+    let mft_valid_data_length =
+        validate_os_geometry(boot, basic, extended).ok_or(NtfsError::InvalidData(
+            "boot-sector and FSCTL NTFS geometry disagree or volume version is unsupported",
+        ))?;
+    Ok(ValidatedVolumeGeometry {
+        boot,
+        mft_valid_data_length,
+    })
+}
+
+pub fn volume_geometry(volume_path: &str) -> Result<VolumeGeometry, NtfsError> {
+    let mut file = open_raw_volume(volume_path).map_err(classify_volume_open)?;
+    read_geometry(&mut file).map(|geometry| geometry.boot)
+}
+
+pub(super) fn mft_layout(volume_path: &str) -> Result<MftLayout, NtfsError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut reader = open_raw_volume(volume_path).map_err(classify_volume_open)?;
+    let validated = read_geometry(&mut reader)?;
+    let volume = validated.boot;
+    let record_size = usize::try_from(volume.file_record_size).map_err(|_| {
+        NtfsError::InvalidData("$MFT record size exceeds this process address space")
+    })?;
+    let sector_size = usize::try_from(volume.sector_size).map_err(|_| {
+        NtfsError::InvalidData("NTFS sector size exceeds this process address space")
+    })?;
+    if record_size < sector_size
+        || !record_size.is_multiple_of(sector_size)
         || volume.cluster_size == 0
         || volume.volume_size == 0
         || volume
@@ -655,25 +808,30 @@ pub(super) fn mft_layout(volume_path: &str) -> Result<MftLayout, NtfsReaderError
             .checked_add(volume.file_record_size)
             .is_none_or(|end| end > volume.volume_size)
     {
-        return Err(NtfsReaderError::InvalidDataRun {
-            details: "invalid NTFS boot-sector geometry",
-        });
+        return Err(NtfsError::InvalidData("invalid NTFS boot-sector geometry"));
     }
-    let mut reader = ntfs_reader::aligned_reader::open_volume(std::path::Path::new(volume_path))
-        .map_err(NtfsReaderError::from)?;
-    let rec0 = Mft::get_record_fs(&mut reader, volume.file_record_size, volume.mft_position)?;
-    if fixup_layout(&rec0).is_none() || !attributes_complete(&rec0) {
-        return Err(NtfsReaderError::InvalidDataRun {
-            details: "record 0 has an invalid fixup or attribute layout",
-        });
+    let mut rec0 = vec![0u8; record_size];
+    reader.seek(SeekFrom::Start(volume.mft_position))?;
+    reader.read_exact(&mut rec0)?;
+    if !NtfsFile::is_valid(&rec0, sector_size) || !apply_fixup(&mut rec0, sector_size) {
+        return Err(NtfsError::InvalidData("invalid $MFT record zero"));
     }
-    let f0 = NtfsFile::new(0, &rec0);
+    if fixup_layout(&rec0, sector_size).is_none() || !attributes_complete(&rec0) {
+        return Err(NtfsError::InvalidData(
+            "record 0 has an invalid fixup or attribute layout",
+        ));
+    }
+    let f0 = NtfsFile::parse(0, &rec0, sector_size)
+        .ok_or(NtfsError::InvalidData("record 0 could not be decoded"))?;
     let (size, record_zero_map) =
         decode_record_zero_runs(&f0, volume.cluster_size, volume.volume_size)?;
+    if size != validated.mft_valid_data_length {
+        return Err(NtfsError::InvalidData(
+            "$MFT data size disagrees with FSCTL valid-data length",
+        ));
+    }
     if !valid_mft_size(size, volume.file_record_size, volume.volume_size) {
-        return Err(NtfsReaderError::InvalidDataRun {
-            details: "$MFT logical file size is invalid",
-        });
+        return Err(NtfsError::InvalidData("$MFT logical file size is invalid"));
     }
     let runmap = if record_zero_map.is_complete_mft(size, volume.volume_size) {
         record_zero_map
@@ -687,10 +845,13 @@ pub(super) fn mft_layout(volume_path: &str) -> Result<MftLayout, NtfsReaderError
             volume.volume_size,
             &record_zero_map,
         )
-        .map_err(NtfsReaderError::from)?
+        .map_err(NtfsError::from)?
     };
+    let root_reference = read_root_reference(&mut reader, &runmap, record_size, sector_size)?;
     Ok(MftLayout {
         record_size,
+        sector_size,
+        root_reference,
         data_size: size,
         runmap,
         cluster_size: volume.cluster_size,
@@ -701,27 +862,6 @@ pub(super) fn mft_layout(volume_path: &str) -> Result<MftLayout, NtfsReaderError
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Build a `len`-byte record with an update-sequence array at `uso`
-    /// carrying `usn` plus `fixups` (the bytes that belong at each sector
-    /// tail), and write the `usn` sentinel into each sector tail so a correct
-    /// `apply_fixup` succeeds and restores the `fixups`.
-    fn record_with_usa(len: usize, uso: usize, usn: u16, fixups: &[u16]) -> Vec<u8> {
-        let mut r = vec![0u8; len];
-        let usl = (fixups.len() + 1) as u16;
-        let attributes_offset = (uso + usize::from(usl) * 2).next_multiple_of(8);
-        r[4..6].copy_from_slice(&(uso as u16).to_le_bytes());
-        r[6..8].copy_from_slice(&usl.to_le_bytes());
-        r[20..22].copy_from_slice(&(attributes_offset as u16).to_le_bytes());
-        r[uso..uso + 2].copy_from_slice(&usn.to_le_bytes());
-        for (i, f) in fixups.iter().enumerate() {
-            let off = uso + (i + 1) * 2;
-            r[off..off + 2].copy_from_slice(&f.to_le_bytes());
-            let tail = (i + 1) * SECTOR - 2;
-            r[tail..tail + 2].copy_from_slice(&usn.to_le_bytes());
-        }
-        r
-    }
 
     fn put_u32(data: &mut [u8], offset: usize, value: u32) {
         data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -750,70 +890,63 @@ mod tests {
     #[test]
     fn volume_hint_is_a_canonical_file_system_root_not_a_dasd_handle() {
         assert_eq!(volume_root_path(r"\\.\C:"), Some("C:\\".to_string()));
-        assert_eq!(volume_root_path(r"\\.\z:"), Some("z:\\".to_string()));
+        assert_eq!(volume_root_path(r"\\.\Z:"), Some("Z:\\".to_string()));
+        assert_eq!(volume_root_path(r"\\.\z:"), None);
         assert_eq!(volume_root_path("C:"), None);
         assert_eq!(volume_root_path(r"\\.\C:\"), None);
         assert_eq!(volume_root_path(r"\\.\Volume{not-in-mvp}"), None);
     }
 
     #[test]
-    fn rejects_a_buffer_too_small_for_a_header() {
-        assert!(!apply_fixup(&mut [0u8; 47]));
+    fn raw_open_rejects_every_noncanonical_path_before_touching_the_os() {
+        for invalid in [
+            "C:",
+            r"\\.\c:",
+            r"\\.\C:\",
+            r"\\.\PhysicalDrive0",
+            r"\\server\share",
+        ] {
+            assert_eq!(
+                open_raw_volume(invalid)
+                    .expect_err("noncanonical raw path must fail")
+                    .kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
     }
 
     #[test]
-    fn rejects_an_update_sequence_length_below_two() {
-        let mut r = vec![0u8; 1024];
-        r[4..6].copy_from_slice(&48u16.to_le_bytes()); // uso
-        r[6..8].copy_from_slice(&1u16.to_le_bytes()); // usl = 1 (no fixups)
-        assert!(!apply_fixup(&mut r));
-    }
+    fn os_and_boot_geometry_must_match_and_version_must_be_supported() {
+        let boot = VolumeGeometry {
+            sector_size: 512,
+            cluster_size: 4096,
+            volume_size: 1_024_000,
+            file_record_size: 1024,
+            mft_position: 16_384,
+        };
+        let mut basic = NTFS_VOLUME_DATA_BUFFER {
+            NumberSectors: 2000,
+            TotalClusters: 250,
+            BytesPerSector: 512,
+            BytesPerCluster: 4096,
+            BytesPerFileRecordSegment: 1024,
+            MftValidDataLength: 102_400,
+            MftStartLcn: 4,
+            ..Default::default()
+        };
+        let mut extended = NTFS_EXTENDED_VOLUME_DATA {
+            MajorVersion: 3,
+            MinorVersion: 1,
+            BytesPerPhysicalSector: 4096,
+            ..Default::default()
+        };
+        assert_eq!(validate_os_geometry(boot, basic, extended), Some(102_400));
 
-    #[test]
-    fn rejects_a_usa_that_does_not_cover_every_sector_exactly() {
-        let mut too_few = record_with_usa(1024, 48, 0x0001, &[0xAAAA]);
-        assert!(!apply_fixup(&mut too_few));
-
-        let mut too_many = vec![0u8; 1024];
-        too_many[4..6].copy_from_slice(&48u16.to_le_bytes());
-        too_many[6..8].copy_from_slice(&4u16.to_le_bytes());
-        assert!(!apply_fixup(&mut too_many));
-    }
-
-    #[test]
-    fn rejects_a_usa_that_runs_past_the_buffer() {
-        let mut r = vec![0u8; 1024];
-        r[4..6].copy_from_slice(&1020u16.to_le_bytes()); // uso near the end
-        r[6..8].copy_from_slice(&8u16.to_le_bytes()); // uso + usl*2 > len
-        assert!(!apply_fixup(&mut r));
-    }
-
-    #[test]
-    fn rejects_a_misaligned_or_header_overlapping_usa() {
-        let mut overlaps_header = record_with_usa(1024, 48, 0x0001, &[0xAAAA, 0xBBBB]);
-        overlaps_header[4..6].copy_from_slice(&6u16.to_le_bytes());
-        assert!(!apply_fixup(&mut overlaps_header));
-
-        let mut misaligned = record_with_usa(1024, 49, 0x0001, &[0xAAAA, 0xBBBB]);
-        assert!(!apply_fixup(&mut misaligned));
-    }
-
-    #[test]
-    fn applies_the_update_sequence_and_restores_sector_tails() {
-        // Two sectors ⇒ two fixups; the tails currently hold the sentinel and
-        // must come back as 0xAAAA and 0xBBBB after the fixup.
-        let mut r = record_with_usa(1024, 48, 0x0001, &[0xAAAA, 0xBBBB]);
-        assert!(apply_fixup(&mut r));
-        assert_eq!(u16::from_le_bytes([r[510], r[511]]), 0xAAAA);
-        assert_eq!(u16::from_le_bytes([r[1022], r[1023]]), 0xBBBB);
-    }
-
-    #[test]
-    fn rejects_a_torn_record_whose_sector_tail_lost_the_sentinel() {
-        let mut r = record_with_usa(1024, 48, 0x0001, &[0xAAAA, 0xBBBB]);
-        // Corrupt the second sector tail so it no longer matches the USN.
-        r[1022] = 0x99;
-        assert!(!apply_fixup(&mut r));
+        extended.MajorVersion = 4;
+        assert_eq!(validate_os_geometry(boot, basic, extended), None);
+        extended.MajorVersion = 3;
+        basic.BytesPerFileRecordSegment = 2048;
+        assert_eq!(validate_os_geometry(boot, basic, extended), None);
     }
 
     #[test]

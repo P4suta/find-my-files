@@ -4,8 +4,9 @@
 //! entry when its `name_id` is in some group's set and that group's residual
 //! matchers pass. Groups without a usable literal evaluate their residuals
 //! over every entry, and the empty query walks the permutation directly.
-//! Results materialize as O(1)-pageable, sort-ordered id arrays
-//! (docs/ARCHITECTURE.md "query-time materialization").
+//! Results materialize as O(1)-pageable, sort-ordered id arrays: the sort is
+//! finalized once, at query time, so every later page fetch is a slice and a
+//! column click is simply a re-issued query.
 
 use rayon::prelude::*;
 
@@ -123,7 +124,8 @@ pub fn search_cancellable(
     let memo = path_memos(idx, q, cancellation)?;
     metrics.memo_us = stage.lap();
 
-    // Each literal-driver group sweeps the dictionary into a name_id bitset;
+    // Each literal-driver group sweeps the dictionary into a name_id bitset
+    // (canonical drivers union their non-ASCII completion pass);
     // MatchAll/FullScan groups carry no set (their residuals run per entry).
     let sets: Vec<Option<Vec<u64>>> = q
         .groups
@@ -263,8 +265,9 @@ pub fn refine_cancellable(
 
 /// Does `id` satisfy AND group `g`? A literal-driver group: its name is in the
 /// sweep `set`, the suffix `files_only` constraint holds, and the residual
-/// matchers — including the driver term when the folded sweep over-approximated
-/// (`residual_terms`) — pass. MatchAll/FullScan: the group's terms pass.
+/// matchers — including the driver term when candidate generation
+/// over-approximated (`residual_terms`) — pass. MatchAll/FullScan: the group's
+/// terms pass.
 fn group_matches(
     idx: &VolumeIndex,
     memo: &PathMemos,
@@ -368,6 +371,12 @@ mod tests {
             .collect()
     }
 
+    fn run_ids(idx: &VolumeIndex, query: &str, opt: QueryOptions) -> Vec<EntryId> {
+        let ast = parse(query).unwrap();
+        let q = compile(&ast, opt.case, &UtcResolver).unwrap();
+        search(idx, &q, &opt).0.ids
+    }
+
     fn names(idx: &VolumeIndex, query: &str) -> Vec<String> {
         run(idx, query, QueryOptions::default())
     }
@@ -384,7 +393,7 @@ mod tests {
             ("main.rs", 21, 20, false, 4096, 19_200 * day),
             ("big.BIN", 30, 5, false, 3 << 30, 19_300 * day),
         ];
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         for (name, rec, parent, is_dir, size, mtime) in entries {
             let units: Vec<u16> = name.encode_utf16().collect();
             b.push(RawEntry {
@@ -484,7 +493,7 @@ mod tests {
 
     #[test]
     fn regex_and_wildcard_match_a_lone_surrogate_name() {
-        let mut builder = VolumeIndexBuilder::new("C:", 5);
+        let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
         let name = [b'A' as u16, 0xD800, b'B' as u16];
         builder.push(RawEntry {
             parent_frn: Frn(5),
@@ -505,6 +514,197 @@ mod tests {
             let result = search(&idx, &compiled, &QueryOptions::default()).0;
             assert_eq!(result.ids.len(), 1, "query `{query}` lost the WTF-8 name");
             assert_eq!(idx.name(result.ids[0]), [b'A', 0xED, 0xA0, 0x80, b'B']);
+        }
+    }
+
+    #[test]
+    fn canonical_equivalence_covers_literals_globs_paths_case_negation_and_refine() {
+        let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
+        let entries: &[(u64, u64, &str, bool)] = &[
+            (40, 5, "Cafe\u{301}", true),
+            (41, 40, "re\u{301}sume\u{301}.txt", false),
+            (42, 5, "Café-report.txt", false),
+            (43, 5, "E\u{301}cole.TXT", false),
+            (44, 5, "archive.re\u{301}sume\u{301}", false),
+            (46, 5, "\u{212a}elvin.txt", false),
+            (47, 5, "kelvin.txt", false),
+            (48, 5, "I\u{307}stanbul.txt", false),
+        ];
+        for &(record, parent, name, is_dir) in entries {
+            let units: Vec<u16> = name.encode_utf16().collect();
+            builder.push(RawEntry {
+                parent_frn: Frn(parent),
+                frn: Frn((1 << 48) | record),
+                name_utf16: &units,
+                is_dir,
+                is_reparse: false,
+                is_hidden: false,
+                is_system: false,
+                size: 1,
+                mtime: 1,
+            });
+        }
+        // "e<lone high surrogate>◌́.txt": canonical composition must not
+        // cross the surrogate barrier.
+        let barrier_name = [
+            b'e' as u16,
+            0xD800,
+            0x0301,
+            b'.' as u16,
+            b't' as u16,
+            b'x' as u16,
+            b't' as u16,
+        ];
+        builder.push(RawEntry {
+            parent_frn: Frn(5),
+            frn: Frn((1 << 48) | 0x002D),
+            name_utf16: &barrier_name,
+            is_dir: false,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 1,
+            mtime: 1,
+        });
+        let idx = builder.finish();
+        let id = |record| idx.entry_by_record(record).unwrap();
+        let sorted = |mut ids: Vec<EntryId>| {
+            ids.sort_unstable();
+            ids
+        };
+
+        // Substring, prefix and suffix/inner optimized glob shapes all compare
+        // the same NFC view even when the stored spelling is NFD.
+        assert_eq!(
+            sorted(run_ids(&idx, "café", QueryOptions::default())),
+            sorted(vec![id(40), id(42)])
+        );
+        assert_eq!(
+            sorted(run_ids(&idx, "café*", QueryOptions::default())),
+            sorted(vec![id(40), id(42)])
+        );
+        assert_eq!(
+            run_ids(&idx, "*résumé.txt", QueryOptions::default()),
+            vec![id(41)]
+        );
+        assert_eq!(
+            run_ids(&idx, "*fé-rep*", QueryOptions::default()),
+            vec![id(42)]
+        );
+
+        // A general whole-name glob stays anchored and Unicode-scalar based,
+        // but evaluates its literals and haystack in NFC.
+        assert_eq!(
+            run_ids(&idx, "résumé.?xt", QueryOptions::default()),
+            vec![id(41)]
+        );
+
+        // Path literals normalize the complete path lazily. The NFD directory
+        // is discoverable from an NFC query without a normalized standing
+        // path cache.
+        let path_hits = run_ids(&idx, "path:café", QueryOptions::default());
+        assert!(path_hits.contains(&id(40)));
+        assert!(path_hits.contains(&id(41)));
+
+        // Case mode is still authoritative after normalization.
+        let sensitive = QueryOptions {
+            case: CaseMode::Sensitive,
+            ..Default::default()
+        };
+        assert!(run_ids(&idx, "école", sensitive).is_empty());
+        assert_eq!(run_ids(&idx, "École", sensitive), vec![id(43)]);
+        assert_eq!(
+            run_ids(&idx, "Kelvin", sensitive),
+            vec![id(46)],
+            "NFC's non-ASCII Kelvin singleton must be visible to ASCII K"
+        );
+        assert_eq!(
+            run_ids(&idx, "kelvin", sensitive),
+            vec![id(47)],
+            "canonical equivalence must not erase sensitive case"
+        );
+        let insensitive = QueryOptions {
+            case: CaseMode::Insensitive,
+            ..Default::default()
+        };
+        assert_eq!(run_ids(&idx, "éCOLE", insensitive), vec![id(43)]);
+        assert_eq!(
+            sorted(run_ids(&idx, "kelvin", insensitive)),
+            sorted(vec![id(46), id(47)])
+        );
+        assert_eq!(
+            run_ids(&idx, "İstanbul", insensitive),
+            vec![id(48)],
+            "NFC must precede the length-preserving fold on both sides"
+        );
+        assert_eq!(
+            run_ids(&idx, "\u{212a}elvin", QueryOptions::default()),
+            vec![id(46)],
+            "canonical-equivalent smart-case spellings chose different domains"
+        );
+        assert_eq!(
+            run_ids(&idx, "İstanbul", QueryOptions::default()),
+            vec![id(48)],
+            "smart case must retain canonical equivalence when NFC and fold do not commute"
+        );
+        assert_eq!(
+            run_ids(&idx, "path:İstanbul", QueryOptions::default()),
+            vec![id(48)],
+            "canonical folded paths must derive from original spelling"
+        );
+
+        // Negation and extension equality consume the same matcher as their
+        // positive form; neither may bypass canonical evaluation.
+        assert!(!run_ids(&idx, "file: !café", QueryOptions::default()).contains(&id(42)));
+        assert_eq!(
+            run_ids(&idx, "ext:résumé", QueryOptions::default()),
+            vec![id(44)]
+        );
+
+        assert!(
+            !run_ids(&idx, "é", QueryOptions::default()).contains(&id(45)),
+            "NFC composition crossed a lone-surrogate barrier"
+        );
+        assert_eq!(
+            run_ids(&idx, "\u{301}", QueryOptions::default()),
+            vec![id(45)],
+            "the combining mark after the barrier remains searchable"
+        );
+
+        // Regex is intentionally syntax over the original spelling. Glob is
+        // the canonical-equivalent text facility; silently normalizing regex
+        // would rewrite offsets, classes and user-authored syntax semantics.
+        assert!(run_ids(&idx, r#"regex:"^résumé\.txt$""#, QueryOptions::default()).is_empty());
+        let whole = super::super::compile_whole_regex(
+            r"^résumé\.txt$",
+            CaseMode::Smart,
+            super::super::RegexScope::Name,
+        )
+        .unwrap();
+        assert!(
+            search(&idx, &whole, &QueryOptions::default())
+                .0
+                .ids
+                .is_empty()
+        );
+
+        // Mixed NFC/NFD typing stays inside the canonical matcher domain. For
+        // every proven subsumption, refinement must be byte-for-byte identical
+        // to a fresh candidate sweep.
+        let sequence = ["ré", "re\u{301}s", "résu", "re\u{301}sume\u{301}"];
+        let opt = QueryOptions::default();
+        let mut previous: Option<(super::super::CompiledQuery, Vec<EntryId>)> = None;
+        for text in sequence {
+            let compiled = compile(&parse(text).unwrap(), opt.case, &UtcResolver).unwrap();
+            let fresh = search(&idx, &compiled, &opt).0.ids;
+            if let Some((prior, ids)) = &previous {
+                assert!(
+                    super::super::subsumes(prior, &opt, &compiled, &opt),
+                    "canonical incremental typing unexpectedly went cold at {text:?}"
+                );
+                assert_eq!(refine(&idx, &compiled, &opt, ids).0.ids, fresh);
+            }
+            previous = Some((compiled, fresh));
         }
     }
 
@@ -546,7 +746,7 @@ mod tests {
         ];
         let exts = [".rs", ".txt", ".PDF", ".dll", ".log", ".日", ""];
         let mut rng = Rng(0x9E37_79B9);
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         // The builder seeds the volume root ("C:"); it is a live entry a name
         // regex sees too (e.g. `.*`), so the naive oracle must include it.
         let mut made: Vec<String> = vec!["C:".to_string()];
@@ -726,7 +926,7 @@ mod tests {
 
     #[test]
     fn hidden_system_excluded_by_default_and_toggleable() {
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         let mk = |name: &str| name.encode_utf16().collect::<Vec<u16>>();
         let (bin, ghost, vis) = (mk("$Recycle.Bin"), mk("ghost.txt"), mk("visible.txt"));
         let mut push = |rec: u64, parent: u64, name: &[u16], is_dir, is_system| {
@@ -797,7 +997,7 @@ mod tests {
             "ファイル",
         ];
         let mut rng = Rng(42);
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         let mut names_made: Vec<String> = Vec::new();
         for i in 0..500u64 {
             let mut name = String::new();
@@ -825,7 +1025,7 @@ mod tests {
             let new_name = format!("renamed_{i}_abba");
             let units: Vec<u16> = new_name.encode_utf16().collect();
             let first_new = idx.len() as u32;
-            idx.upsert(&RawEntry {
+            idx.upsert_synthetic(&RawEntry {
                 parent_frn: Frn(5),
                 frn: Frn((1 << 48) | (100 + i)),
                 name_utf16: &units,
@@ -836,7 +1036,8 @@ mod tests {
                 size: i,
                 mtime: i as i64,
             });
-            idx.merge_new_into_permutations(first_new);
+            idx.merge_new_into_permutations(first_new)
+                .expect("fixture topology remains valid");
             names_made[i as usize] = new_name;
         }
 
@@ -983,7 +1184,7 @@ mod proptests {
     /// collide and the typed prefixes/suffixes actually subsume.
     const FRAGMENTS: &[&str] = &[
         "ab", "abc", "Re", "report", "Report", "ort", "tab", "TAB", "日本", "語", "𠮷", "x",
-        "main", ".rs", ".txt", ".PDF",
+        "main", "é", "e\u{301}", ".rs", ".txt", ".PDF",
     ];
 
     /// One generated index entry: a name plus the attributes the option
@@ -1025,7 +1226,7 @@ mod proptests {
     }
 
     fn build_index(entries: &[GenEntry]) -> VolumeIndex {
-        let mut b = VolumeIndexBuilder::new("C:", 5);
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
         for (i, e) in entries.iter().enumerate() {
             let units: Vec<u16> = e.name.encode_utf16().collect();
             b.push(RawEntry {
