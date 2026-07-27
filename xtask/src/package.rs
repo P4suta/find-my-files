@@ -12,8 +12,11 @@
 //! it verbatim. This prevents an environment variable from naming a zip
 //! differently from the binaries and BUILDINFO carried inside it.
 
-use crate::{checksum, fsx, paths, pe_load, publish, semver};
-use anyhow::{bail, Context, Result};
+use crate::{
+    bundle_seal::{self, BundleFileIdentity, BundleState},
+    checksum, fsx, paths, pe_load, publish, semver,
+};
+use anyhow::{bail, ensure, Context, Result};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -29,6 +32,13 @@ pub fn run(tag: Option<&str>) -> Result<()> {
             dist.display()
         );
     }
+    let bundle_state = if tag.is_some() {
+        BundleState::Signed
+    } else {
+        BundleState::Unsigned
+    };
+    let sealed_files = bundle_seal::collect_bundle_files(&dist, bundle_state)
+        .context("package refuses a non-exact or wrongly signed distribution tree")?;
     verify_release_boundary(&dist)?;
     let bundle_version = read_bundle_version(&dist)?;
     verify_shipping_readme(&dist)?;
@@ -39,7 +49,7 @@ pub fn run(tag: Option<&str>) -> Result<()> {
 
     let zip_name = format!("find-my-files-{label}-win-x64.zip");
     let zip_path = pkg.join(&zip_name);
-    write_zip(&dist, &zip_path)?;
+    write_zip(&dist, &zip_path, &sealed_files)?;
 
     // SHA256SUMS lists every distributable in build/package (currently the zip;
     // directory-driven so any future artifact dropped here is covered too) in
@@ -207,11 +217,11 @@ fn validate_artifact_version(version: &str) -> Result<()> {
     Ok(())
 }
 
-/// Start from an empty package dir. The SHA256SUMS.txt body and the release
-/// upload glob (`build/package/find-my-files-*-win-x64.zip`) are both driven by
-/// whatever files sit here, so a stale zip from an earlier version would linger
-/// into the checksums file and could be re-attached to a release. CI runs on a
-/// fresh runner where the wipe is a no-op; locally it closes the footgun.
+/// Start from an empty package dir. The SHA256SUMS.txt body is driven by whatever
+/// files sit here; a stale zip from an earlier version would otherwise linger in
+/// the checksum set even though workflows upload the exact versioned zip path.
+/// CI runs on a fresh runner where the wipe is a no-op; locally it closes the
+/// footgun.
 fn prepare_package_dir(pkg: &Path) -> Result<()> {
     fsx::force_remove_dir_all(pkg).with_context(|| format!("clean {}", pkg.display()))?;
     fs::create_dir_all(pkg).with_context(|| format!("create {}", pkg.display()))?;
@@ -220,20 +230,23 @@ fn prepare_package_dir(pkg: &Path) -> Result<()> {
 
 /// Zip the *contents* of `dist` (entries land at the zip root, matching
 /// `Compress-Archive -Path dist/FindMyFiles/*`).
-fn write_zip(dist: &Path, zip_path: &Path) -> Result<()> {
+fn write_zip(dist: &Path, zip_path: &Path, sealed_files: &[BundleFileIdentity]) -> Result<()> {
     let file = File::create(zip_path).with_context(|| format!("create {}", zip_path.display()))?;
     let mut zw = ZipWriter::new(file);
     let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
-    let mut files = fsx::collect_files(dist).with_context(|| format!("walk {}", dist.display()))?;
-    files.sort_by(|a, b| a.1.cmp(&b.1)); // deterministic entry order
-
-    for (abs, rel) in files {
-        zw.start_file(rel.as_str(), opts)
-            .with_context(|| format!("zip entry {rel}"))?;
-        let data = fs::read(&abs).with_context(|| format!("read {}", abs.display()))?;
+    for identity in sealed_files {
+        let absolute = dist.join(&identity.path);
+        let data = fs::read(&absolute).with_context(|| format!("read {}", absolute.display()))?;
+        ensure!(
+            data.len() as u64 == identity.size && checksum::sha256_hex(&data) == identity.sha256,
+            "sealed bundle file changed while packaging: {}",
+            identity.path
+        );
+        zw.start_file(identity.path.as_str(), opts)
+            .with_context(|| format!("zip entry {}", identity.path))?;
         zw.write_all(&data)
-            .with_context(|| format!("write zip entry {rel}"))?;
+            .with_context(|| format!("write zip entry {}", identity.path))?;
     }
     zw.finish().context("finalize zip")?;
     Ok(())

@@ -11,12 +11,13 @@ use crate::{cmd, fsx, paths};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
+use toml_edit::DocumentMut;
 
 const SAMPLE_COUNT: u8 = 6;
 const MONITOR_SAMPLE_COUNT: u16 = 3_600;
@@ -140,8 +141,10 @@ pub fn micro_check() -> Result<()> {
     prepare_micro_check(&canonical, &run_dir, &identity)?;
     let criterion_home = run_dir.to_string_lossy().into_owned();
     let engine = paths::engine_dir();
+    let decision_path = run_dir.join("micro-verdict.json");
+    let decision_arg = decision_path.to_string_lossy().into_owned();
 
-    let measurement = measure(|| {
+    let measured = measure_allow_failure(|| {
         cmd::run_env(
             &engine,
             "cargo",
@@ -161,11 +164,28 @@ pub fn micro_check() -> Result<()> {
             &[("CRITERION_HOME", criterion_home.as_str())],
         )
     })?;
-    write_json(
-        &run_dir.join("fmf-run.json"),
-        &measurement.to_json("micro-check"),
-    )?;
-    run_fmf(&["criterion-gate", "--dir", criterion_home.as_str()])
+    if let Some(error) = measured.operation_error {
+        return Err(error.context("Criterion measurement failed before the verdict stage"));
+    }
+
+    let verdict_error = run_fmf(&[
+        "criterion-gate",
+        "--dir",
+        criterion_home.as_str(),
+        "--evidence",
+        decision_arg.as_str(),
+    ])
+    .err();
+    let evidence = assemble_gate_evidence(
+        "micro-gate",
+        "micro-verdict",
+        &measured.measurement,
+        &decision_path,
+        verdict_error.as_ref(),
+    );
+    let evidence_path = run_dir.join("fmf-run.json");
+    write_json(&evidence_path, &evidence)?;
+    require_passing_evidence(&evidence, &evidence_path)
 }
 
 /// Record the full synthetic suite into an isolated candidate. Promotion of
@@ -284,10 +304,36 @@ pub fn real_check(drive: &str) -> Result<()> {
     let identity = RunIdentity::capture()?;
     validate_real_baseline(&baseline, &identity)?;
     let baseline_arg = baseline.to_string_lossy().into_owned();
+    let perf_dir = paths::perf_dir();
+    fs::create_dir_all(&perf_dir)
+        .with_context(|| format!("failed to create {}", perf_dir.display()))?;
+    let actual = perf_dir.join("real-actual.json");
+    let actual_arg = actual.to_string_lossy().into_owned();
+    let decision = perf_dir.join("real-verdict.json");
+    let decision_arg = decision.to_string_lossy().into_owned();
 
-    let measurement = measure(|| run_fmf(&["bench", drive, "--baseline", baseline_arg.as_str()]))?;
-    let run_record = paths::perf_dir().join("real-check.json");
-    write_json(&run_record, &measurement.to_json("real-check"))
+    let measured = measure_allow_failure(|| {
+        run_fmf(&[
+            "bench",
+            drive,
+            "--out",
+            actual_arg.as_str(),
+            "--baseline",
+            baseline_arg.as_str(),
+            "--evidence",
+            decision_arg.as_str(),
+        ])
+    })?;
+    let evidence = assemble_gate_evidence(
+        "real-gate",
+        "real-verdict",
+        &measured.measurement,
+        &decision,
+        measured.operation_error.as_ref(),
+    );
+    let run_record = perf_dir.join("real-check.json");
+    write_json(&run_record, &evidence)?;
+    require_passing_evidence(&evidence, &run_record)
 }
 
 /// Record a real-volume candidate and atomically replace the committed JSON
@@ -350,6 +396,19 @@ fn run_fmf(args: &[&str]) -> Result<()> {
 }
 
 fn measure(operation: impl FnOnce() -> Result<()>) -> Result<Measurement> {
+    let measured = measure_allow_failure(operation)?;
+    if let Some(error) = measured.operation_error {
+        return Err(error.context("measured command failed; no baseline was promoted"));
+    }
+    Ok(measured.measurement)
+}
+
+struct MeasuredOperation {
+    measurement: Measurement,
+    operation_error: Option<anyhow::Error>,
+}
+
+fn measure_allow_failure(operation: impl FnOnce() -> Result<()>) -> Result<MeasuredOperation> {
     let identity = RunIdentity::capture()?;
     let started_unix = unix_time()?;
     let preflight = sample_idle("perf-preflight")?;
@@ -359,24 +418,159 @@ fn measure(operation: impl FnOnce() -> Result<()>) -> Result<Measurement> {
     let postflight_result = sample_idle("perf-postflight");
     let finished_unix = unix_time()?;
 
-    if let Err(error) = operation_result {
-        if let Err(monitor_error) = during_result {
+    if operation_result.is_err() {
+        if let Err(monitor_error) = &during_result {
             eprintln!("perf-monitor also failed: {monitor_error:#}");
         }
-        if let Err(postflight_error) = postflight_result {
+        if let Err(postflight_error) = &postflight_result {
             eprintln!("perf-postflight also failed: {postflight_error:#}");
         }
-        return Err(error.context("measured command failed; no baseline was promoted"));
     }
 
-    Ok(Measurement {
-        started_unix,
-        finished_unix,
-        identity,
-        preflight,
-        during: during_result?,
-        postflight: postflight_result?,
+    Ok(MeasuredOperation {
+        measurement: Measurement {
+            started_unix,
+            finished_unix,
+            identity,
+            preflight,
+            during: during_result?,
+            postflight: postflight_result?,
+        },
+        operation_error: operation_result.err(),
     })
+}
+
+fn assemble_gate_evidence(
+    kind: &str,
+    verdict_kind: &str,
+    measurement: &Measurement,
+    decision_path: &Path,
+    operation_error: Option<&anyhow::Error>,
+) -> Value {
+    let mut errors = Vec::new();
+    if let Some(error) = operation_error {
+        errors.push(format!("{error:#}"));
+    }
+    let decision = match fs::read_to_string(decision_path)
+        .with_context(|| format!("failed to read {}", decision_path.display()))
+        .and_then(|text| {
+            serde_json::from_str::<Value>(&text)
+                .with_context(|| format!("invalid gate verdict {}", decision_path.display()))
+        }) {
+        Ok(decision) => decision,
+        Err(error) => {
+            errors.push(format!("{error:#}"));
+            json!({
+                "schema": 1,
+                "kind": verdict_kind,
+                "expected_cases": [],
+                "cases": [],
+                "finite": false,
+                "passed": false,
+                "errors": ["gate command did not produce a valid verdict"],
+            })
+        }
+    };
+
+    let valid_shape = decision.as_object().is_some_and(|object| object.len() == 7)
+        && decision.get("schema").and_then(Value::as_u64) == Some(1)
+        && decision.get("kind").and_then(Value::as_str) == Some(verdict_kind)
+        && decision.get("expected_cases").is_some_and(Value::is_array)
+        && decision.get("cases").is_some_and(Value::is_array)
+        && decision.get("finite").is_some_and(Value::is_boolean)
+        && decision.get("passed").is_some_and(Value::is_boolean)
+        && decision.get("errors").is_some_and(Value::is_array);
+    if !valid_shape {
+        errors.push("gate verdict does not match schema 1".to_owned());
+    }
+    let complete_cases = decision
+        .get("expected_cases")
+        .and_then(Value::as_array)
+        .zip(decision.get("cases").and_then(Value::as_array))
+        .is_some_and(|(expected, cases)| {
+            !expected.is_empty()
+                && expected.len() == cases.len()
+                && expected.iter().zip(cases).all(|(expected, case)| {
+                    expected.as_str().is_some()
+                        && expected.as_str() == case.get("id").and_then(Value::as_str)
+                })
+        });
+    if valid_shape && !complete_cases {
+        errors.push("gate verdict does not contain its exact ordered case set".to_owned());
+    }
+    if valid_shape {
+        for (index, error) in decision
+            .get("errors")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            if let Some(message) = error.as_str() {
+                errors.push(format!("gate verdict: {message}"));
+            } else {
+                errors.push(format!("gate verdict error {index} is not a string"));
+            }
+        }
+    }
+    let finite = valid_shape
+        && complete_cases
+        && decision.get("finite").and_then(Value::as_bool) == Some(true)
+        && [
+            measurement.preflight,
+            measurement.during,
+            measurement.postflight,
+        ]
+        .into_iter()
+        .all(summary_is_finite);
+    let decision_passed = decision.get("passed").and_then(Value::as_bool) == Some(true);
+    if operation_error.is_none() && !decision_passed {
+        errors.push("gate command succeeded but its verdict did not pass".to_owned());
+    }
+    if operation_error.is_some() && decision_passed {
+        errors.push("gate command failed despite claiming a passing verdict".to_owned());
+    }
+    let passed = finite && decision_passed && operation_error.is_none() && errors.is_empty();
+
+    json!({
+        "schema": 1,
+        "kind": kind,
+        "target_sha": measurement.identity.git_commit,
+        "semantic_cargo_lock_sha256": measurement.identity.cargo_lock_sha256,
+        "measurement": measurement.to_json(&format!("{kind}-measurement")),
+        "expected_cases": decision
+            .get("expected_cases")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+        "cases": decision
+            .get("cases")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+        "finite": finite,
+        "passed": passed,
+        "errors": errors,
+    })
+}
+
+fn summary_is_finite(summary: Summary) -> bool {
+    [
+        summary.mean_performance,
+        summary.mean_processor_time,
+        summary.min_performance,
+        summary.max_processor_time,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+}
+
+fn require_passing_evidence(evidence: &Value, path: &Path) -> Result<()> {
+    if evidence.get("passed").and_then(Value::as_bool) != Some(true) {
+        bail!(
+            "performance gate failed; deterministic evidence remains at {}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 impl RunIdentity {
@@ -384,7 +578,7 @@ impl RunIdentity {
         let repo = paths::repo_root();
         let git_commit = checked_output(&repo, "git", &["rev-parse", "HEAD"])?;
         let (git_dirty, git_dirty_sha256) = repository_fingerprint(&repo)?;
-        let cargo_lock_sha256 = sha256_file(&paths::engine_dir().join("Cargo.lock"))?;
+        let cargo_lock_sha256 = semantic_cargo_lock_sha256(&repo)?;
         let rustc = checked_output(&repo, "rustc", &["--version", "--verbose"])?;
         Ok(Self {
             git_commit,
@@ -455,9 +649,140 @@ fn checked_command_output(dir: &Path, program: &str, args: &[&str]) -> Result<Ve
     Ok(output.stdout)
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(hex(&Sha256::digest(bytes)))
+/// Hash the dependency graph while ignoring only the release-please-managed
+/// versions of source-less workspace packages. A version-only Release PR must
+/// not invalidate a machine baseline; registry/git sources, versions, and
+/// checksums remain byte-for-byte significant.
+fn semantic_cargo_lock_sha256(repo: &Path) -> Result<String> {
+    let metadata = checked_output(
+        repo,
+        "cargo",
+        &[
+            "metadata",
+            "--locked",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+            "engine/Cargo.toml",
+        ],
+    )?;
+    let metadata: Value =
+        serde_json::from_str(&metadata).context("cargo metadata returned invalid JSON")?;
+    let packages = metadata
+        .get("packages")
+        .and_then(Value::as_array)
+        .context("cargo metadata has no packages array")?;
+    let workspace_packages = packages
+        .iter()
+        .filter(|package| package.get("source").is_some_and(Value::is_null))
+        .map(|package| {
+            let name = package
+                .get("name")
+                .and_then(Value::as_str)
+                .context("workspace package has no name")?;
+            let version = package
+                .get("version")
+                .and_then(Value::as_str)
+                .context("workspace package has no version")?;
+            Ok((name.to_owned(), version.to_owned()))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    if workspace_packages.is_empty() {
+        bail!("cargo metadata identified no source-less workspace packages");
+    }
+
+    let lock_path = paths::engine_dir().join("Cargo.lock");
+    let text = fs::read_to_string(&lock_path)
+        .with_context(|| format!("failed to read {}", lock_path.display()))?;
+    semantic_cargo_lock_sha256_from_text(&text, &workspace_packages)
+}
+
+fn semantic_cargo_lock_sha256_from_text(
+    text: &str,
+    workspace_packages: &BTreeMap<String, String>,
+) -> Result<String> {
+    let document = text
+        .parse::<DocumentMut>()
+        .context("Cargo.lock is not valid TOML")?;
+    let packages = document
+        .get("package")
+        .and_then(toml_edit::Item::as_array_of_tables)
+        .context("Cargo.lock has no package table")?;
+    let mut found_workspace = BTreeSet::new();
+    for package in packages {
+        let name = package
+            .get("name")
+            .and_then(toml_edit::Item::as_str)
+            .context("Cargo.lock package has no name")?;
+        if package.get("source").is_none() {
+            if let Some(expected_version) = workspace_packages.get(name) {
+                let lock_version = package
+                    .get("version")
+                    .and_then(toml_edit::Item::as_str)
+                    .context("source-less workspace package has no version")?;
+                if lock_version != expected_version {
+                    bail!(
+                        "Cargo.lock workspace package {name} has version {lock_version}, \
+                        but cargo metadata reported {expected_version}"
+                    );
+                }
+                found_workspace.insert(name.to_owned());
+            }
+        }
+    }
+    let expected_workspace: BTreeSet<_> = workspace_packages.keys().cloned().collect();
+    if found_workspace != expected_workspace {
+        bail!(
+            "Cargo.lock workspace package set differs from cargo metadata: \
+             lock={found_workspace:?}, metadata={expected_workspace:?}"
+        );
+    }
+
+    // Keep every byte significant except the two exact version spellings that
+    // release-please owns. This intentionally simple canonical form can be
+    // reproduced by the hosted evidence verifier with Python's standard
+    // library; no target code or package manager is executed there.
+    let normalized_newlines = text.replace("\r\n", "\n");
+    let marker = "[[package]]";
+    let mut parts = normalized_newlines.split(marker);
+    let mut canonical = parts.next().unwrap_or_default().to_owned();
+    for suffix in parts {
+        let mut block = format!("{marker}{suffix}");
+        let parsed = block
+            .parse::<DocumentMut>()
+            .context("Cargo.lock package block is not valid TOML")?;
+        let package = parsed
+            .get("package")
+            .and_then(toml_edit::Item::as_array_of_tables)
+            .and_then(|packages| packages.get(0))
+            .context("Cargo.lock package block has no package")?;
+        let name = package
+            .get("name")
+            .and_then(toml_edit::Item::as_str)
+            .context("Cargo.lock package block has no name")?;
+        if package.get("source").is_none() {
+            if let Some(version) = workspace_packages.get(name) {
+                let exact = format!("version = \"{version}\"");
+                let replacement = "version = \"<workspace-version>\"";
+                let count = block.lines().filter(|line| *line == exact).count();
+                if count != 1 {
+                    bail!(
+                        "Cargo.lock workspace package {name} must contain one exact version line"
+                    );
+                }
+                block = block.replacen(&exact, replacement, 1);
+            }
+        }
+        canonical.push_str(&block);
+    }
+    for (name, version) in workspace_packages {
+        canonical = canonical.replace(
+            &format!("\"{name} {version}\""),
+            &format!("\"{name} <workspace-version>\""),
+        );
+    }
+    Ok(hex(&Sha256::digest(canonical.as_bytes())))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -954,6 +1279,172 @@ mod tests {
             processor: "test processor".to_owned(),
             logical_processors: "8".to_owned(),
         }
+    }
+
+    fn measured() -> Measurement {
+        let summary = Summary {
+            mean_performance: 98.0,
+            mean_processor_time: 2.0,
+            min_performance: 97.0,
+            max_processor_time: 4.0,
+        };
+        Measurement {
+            started_unix: 1,
+            finished_unix: 2,
+            identity: identity(),
+            preflight: summary,
+            during: summary,
+            postflight: summary,
+        }
+    }
+
+    fn lockfile(
+        workspace_version: &str,
+        registry_version: &str,
+        registry_checksum: &str,
+        local_helper_version: &str,
+    ) -> String {
+        format!(
+            r#"version = 4
+
+[[package]]
+name = "fmf-core"
+version = "{workspace_version}"
+
+[[package]]
+name = "local-helper"
+version = "{local_helper_version}"
+dependencies = [
+ "fmf-core {workspace_version}",
+]
+
+[[package]]
+name = "serde"
+version = "{registry_version}"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "{registry_checksum}"
+"#,
+        )
+    }
+
+    #[test]
+    fn lock_fingerprint_ignores_only_workspace_package_versions() {
+        let first = lockfile("0.1.0", "1.0.0", "abc", "2.0.0");
+        let version_bump = lockfile("0.2.0", "1.0.0", "abc", "2.0.0");
+        let workspace_v1 = BTreeMap::from([("fmf-core".to_owned(), "0.1.0".to_owned())]);
+        let workspace_v2 = BTreeMap::from([("fmf-core".to_owned(), "0.2.0".to_owned())]);
+        assert_eq!(
+            semantic_cargo_lock_sha256_from_text(&first, &workspace_v1).unwrap(),
+            semantic_cargo_lock_sha256_from_text(&version_bump, &workspace_v2).unwrap(),
+            "release-only workspace versions must not invalidate a baseline"
+        );
+
+        for changed in [
+            lockfile("0.1.0", "1.0.1", "abc", "2.0.0"),
+            lockfile("0.1.0", "1.0.0", "def", "2.0.0"),
+            lockfile("0.1.0", "1.0.0", "abc", "2.0.1"),
+            first.replace(
+                "registry+https://github.com/rust-lang/crates.io-index",
+                "git+https://github.com/serde-rs/serde?rev=deadbeef#deadbeef",
+            ),
+        ] {
+            assert_ne!(
+                semantic_cargo_lock_sha256_from_text(&first, &workspace_v1).unwrap(),
+                semantic_cargo_lock_sha256_from_text(&changed, &workspace_v1).unwrap(),
+                "dependency or non-workspace path-package drift must remain significant"
+            );
+        }
+
+        let wrong_identity = BTreeMap::from([("fmf-core".to_owned(), "9.9.9".to_owned())]);
+        assert!(
+            semantic_cargo_lock_sha256_from_text(&first, &wrong_identity).is_err(),
+            "metadata/lock disagreement must fail closed"
+        );
+        assert_eq!(
+            semantic_cargo_lock_sha256_from_text(&first, &workspace_v1).unwrap(),
+            semantic_cargo_lock_sha256_from_text(&first.replace('\n', "\r\n"), &workspace_v1)
+                .unwrap(),
+            "semantic lock identity must not depend on checkout newline conversion"
+        );
+    }
+
+    #[test]
+    fn gate_envelope_binds_identity_and_cannot_pass_a_failed_command() {
+        let base = scratch("gate-envelope");
+        let _cleanup = fsx::force_remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let decision = base.join("decision.json");
+        write_json(
+            &decision,
+            &json!({
+                "schema": 1,
+                "kind": "micro-verdict",
+                "expected_cases": ["query/common"],
+                "cases": [{"id": "query/common"}],
+                "finite": true,
+                "passed": true,
+                "errors": [],
+            }),
+        )
+        .unwrap();
+
+        let measurement = measured();
+        let passing =
+            assemble_gate_evidence("micro-gate", "micro-verdict", &measurement, &decision, None);
+        assert_eq!(passing["target_sha"], measurement.identity.git_commit);
+        assert_eq!(
+            passing["semantic_cargo_lock_sha256"],
+            measurement.identity.cargo_lock_sha256
+        );
+        assert_eq!(passing["passed"], true);
+
+        let error = anyhow::anyhow!("simulated gate exit");
+        let failed = assemble_gate_evidence(
+            "micro-gate",
+            "micro-verdict",
+            &measurement,
+            &decision,
+            Some(&error),
+        );
+        assert_eq!(failed["passed"], false);
+        assert!(failed["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty()));
+
+        write_json(
+            &decision,
+            &json!({
+                "schema": 1,
+                "kind": "micro-verdict",
+                "expected_cases": ["query/common"],
+                "cases": [{"id": "query/common"}],
+                "finite": true,
+                "passed": true,
+                "errors": ["simulated contradictory verdict"],
+            }),
+        )
+        .unwrap();
+        let contradictory =
+            assemble_gate_evidence("micro-gate", "micro-verdict", &measurement, &decision, None);
+        assert_eq!(contradictory["passed"], false);
+
+        write_json(
+            &decision,
+            &json!({
+                "schema": 1,
+                "kind": "micro-verdict",
+                "expected_cases": ["query/common", "query/other"],
+                "cases": [{"id": "query/other"}, {"id": "query/common"}],
+                "finite": true,
+                "passed": true,
+                "errors": [],
+            }),
+        )
+        .unwrap();
+        let reordered =
+            assemble_gate_evidence("micro-gate", "micro-verdict", &measurement, &decision, None);
+        assert_eq!(reordered["passed"], false);
+        fsx::force_remove_dir_all(&base).unwrap();
     }
 
     fn measurement(kind: &str, identity: &RunIdentity) -> Value {

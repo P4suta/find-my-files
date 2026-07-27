@@ -17,4 +17,5 @@ global-timeout = "5m"
 inherits = "default"
 
 [profile.ci.junit]
-path = "../../nextest-ci.xml"
+path = "junit.xml"
+report-name = "xtask"

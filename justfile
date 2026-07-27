@@ -1,8 +1,9 @@
-# find-my-files task runner. Requires: mise (rust/dotnet), see mise.toml.
+# find-my-files task runner. Local tools are managed by mise; CI installs the
+# same pinned tools through platform-standard setup actions.
 # Recipes marked (elevated) need an administrator terminal.
 #
 # `just` (no args) prints this menu, grouped by area via the [group('…')]
-# attributes below. New here? Run `just setup`, then `just check`.
+# attributes below. New here? Run `mise install`, `just setup`, then `just check`.
 
 # just defaults to `sh` even on Windows — absent in elevated PowerShell,
 # exactly where the admin recipes must run. powershell.exe always exists.
@@ -13,20 +14,25 @@ default:
 
 # ── Setup ────────────────────────────────────────────────────────────────
 
-# One-time setup: install pinned toolchain + git hooks
+# One-time repository setup after `mise install`: install git hooks.
 [group('setup')]
-[working-directory: 'engine']
 setup:
-    mise install
     lefthook install
 
-# Check the dev environment matches mise.toml (run right after `just setup`).
+# Check the dev environment matches mise.toml (run after `mise install`).
 # Logic lives in xtask (the doctor subcommand); this is a thin wrapper, and
 # --target-dir keeps xtask output under build/ (ADR-0021).
 [group('setup')]
-[doc('Check the dev environment matches the mise.toml pins (run after just setup)')]
+[doc('Check the dev environment matches the mise.toml pins (run after mise install)')]
 doctor:
     cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- doctor
+
+# Live GitHub security audit for the privileged performance instrument. Requires
+# `gh` authenticated as an organization owner; a user-owned repository fails.
+[group('setup')]
+[doc('Audit the GitHub-side setup of the privileged performance instrument (org owner only)')]
+performance-doctor:
+    cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- performance-doctor
 
 # ── Daily loop ───────────────────────────────────────────────────────────
 
@@ -57,8 +63,8 @@ build:
 [group('daily')]
 [doc('Run Rust tests with nextest plus doctests (no elevation)')]
 [working-directory: 'engine']
-test:
-    cargo nextest run --locked --workspace
+test *args="":
+    cargo nextest run --locked --workspace {{args}}
     cargo test --locked --workspace --exclude fmf-ffi --doc
 
 # C# unit tests (no elevation; never rebuilds the Rust engine)
@@ -76,13 +82,14 @@ test-app:
 test-app-cov locked="true":
     dotnet test app/FindMyFiles.Tests --results-directory build/test-results/app -p:SkipRustBuild=true -p:RestoreLockedMode={{locked}} -p:CollectCoverage=true
 
-# Elevation-gated #[ignore] tests: real-volume MFT/USN (elevated). The
+# Elevation-gated #[ignore] tests: real-volume MFT/USN and machine-security
+# boundaries (elevated). The
 # FMF_ADMIN_TESTS gate is set by xtask via Command::env on the child cargo, not
 # in the shell — powershell.exe strips the nested quotes from `cargo --config
 # 'env.X="1"'` (leaving the bare integer 1, which cargo rejects), so the value
 # must never touch a shell. Logic lives in xtask (the test-admin subcommand).
 [group('daily')]
-[doc('Run the elevated, ignore-gated real-volume MFT/USN tests')]
+[doc('Run elevated real-volume and machine-security tests')]
 [working-directory: 'xtask']
 test-admin:
     cargo run --locked -- test-admin
@@ -100,7 +107,7 @@ lint-text:
 [doc('Validate GitHub Actions syntax and security')]
 lint-actions:
     actionlint
-    mise exec github:zizmorcore/zizmor -- zizmor --offline --persona auditor --min-severity low .
+    zizmor --offline --strict-collection --persona auditor --min-severity low .
 
 [private]
 [working-directory: 'engine']
@@ -145,12 +152,33 @@ fmt-check-toml:
 [group('daily')]
 verify: fmt-check lint test test-xtask test-app deny machete
 
+# The reusable release workflow is the already-linted protected-main workflow;
+# its checkout is build input, not workflow code. Re-run every source and
+# dependency gate there without requiring the Linux-only actionlint verifier on
+# the Windows release runner.
+[private]
+verify-release-source: fmt-check lint-engine lint-xtask lint-text test test-xtask test-app deny machete
+
 # xtask is intentionally a separate binary-only workspace, so its nextest lane
 # is explicit rather than silently omitted from `verify`.
 [group('daily')]
 [working-directory: 'xtask']
 test-xtask:
     cargo nextest run --locked
+
+# Intentional dependency-update ceremony for the main engine workspace.
+[group('setup')]
+[doc('Resolve engine dependency changes into its committed lockfile')]
+[working-directory: 'engine']
+engine-lock:
+    cargo check
+
+# Intentional dependency-update ceremony for the standalone xtask workspace.
+[group('setup')]
+[doc('Resolve xtask dependency changes into its committed lockfile')]
+[working-directory: 'xtask']
+xtask-lock:
+    cargo check
 
 # Time the full pre-push gate exactly as the hook runs it — per-job timings come
 # from lefthook itself, so no shell timing logic lives in the recipe.
@@ -199,6 +227,22 @@ contract-bless:
 [working-directory: 'xtask']
 publish-app skip_rust="false":
     cargo run --locked --release -- publish --skip-rust {{skip_rust}}
+
+# Normalize the three cargo-sbom 0.10 entry-point graphs and derive the .NET
+# runtime graph from the final self-contained dist + NuGet restore evidence.
+# The raw directory is job-local and must contain exactly the three expected
+# files; all validation/serialization logic lives in xtask.
+[group('release')]
+[doc('Generate deterministic artifact-derived CycloneDX 1.6 SBOMs')]
+[working-directory: 'xtask']
+sbom version cargo_raw_dir:
+    cargo run --locked --release -- sbom "{{version}}" --cargo-raw-dir "{{cargo_raw_dir}}"
+
+[group('release')]
+[doc('Verify build/sbom is exactly the canonical final BOM pair for a version')]
+[working-directory: 'xtask']
+sbom-verify version:
+    cargo run --locked --release -- sbom-verify "{{version}}"
 
 # Compile deterministic fake/unavailable-engine seams into a physically separate,
 # non-packaged tree. Stable build/dist never contains these launch arguments.
@@ -478,6 +522,24 @@ sign-stage:
 sign-collect:
     cargo run --locked --release -- sign-collect
 
+[group('release')]
+[doc('Seal the exact unsigned or signed release bundle into a deterministic manifest')]
+[working-directory: 'xtask']
+bundle-seal state:
+    cargo run --locked --release -- bundle-seal {{state}}
+
+[group('release')]
+[doc('Verify the exact unsigned or signed bundle against its canonical manifest')]
+[working-directory: 'xtask']
+bundle-verify state:
+    cargo run --locked --release -- bundle-verify {{state}}
+
+[group('release')]
+[doc('Verify signing changed only canonical first-party PE certificate regions')]
+[working-directory: 'xtask']
+bundle-verify-signed-transition:
+    cargo run --locked --release -- bundle-verify-signed-transition
+
 # ── Docs ─────────────────────────────────────────────────────────────────
 
 # Validate the canonical prose and Rust doc comments. Only mdBook is published;
@@ -485,13 +547,13 @@ sign-collect:
 [group('docs')]
 [doc('Validate canonical docs and internal Rust doc comments')]
 doc:
-    mise exec cargo:mdbook --command "mdbook build docs"
+    mdbook build docs
     cargo doc --locked --config "build.rustdocflags=['-D','warnings']" --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml --target-dir build/engine
 
 # Live-preview the design docs at http://localhost:3000
 [group('docs')]
 doc-serve:
-    mise exec cargo:mdbook --command "mdbook serve docs --open"
+    mdbook serve docs --open
 
 # Stage landing + canonical book into build/site. Run `just doc` first.
 [group('docs')]
@@ -521,24 +583,27 @@ deny:
 machete:
     cargo machete engine
 
-# Mutation testing (Rust, ADR-0022): which tests pass even when code is broken?
-# Slow — scope it, e.g. `just mutants -p fmf-core -f src/query/exec.rs`.
-# `just mutants --list -f <file>` enumerates mutants without running them.
+# Mutation testing (Rust, ADR-0022). xtask owns the fixed cargo-mutants 27.1.0
+# invocation, requires its unmutated nextest baseline, canonicalizes exact
+# survivors, rejects timeouts/malformed reports, and compares the reviewed
+# rationale-bearing identity baseline. It intentionally accepts no CLI options.
 [group('quality')]
-[doc('Mutation testing (Rust, ADR-0022) — slow; scope it')]
-[working-directory: 'engine']
-mutants *args="":
-    cargo mutants --locked --output ../build/mutants {{args}}
+[doc('Strict Rust mutation gate (exact survivors; ADR-0022)')]
+[working-directory: 'xtask']
+mutants:
+    cargo run --locked --release -- mutation-rust
 
-# Mutation testing (C#, Stryker.NET — ADR-0022). Runs FROM the test project dir
-# so Stryker discovers FindMyFiles.Tests.csproj and auto-loads stryker-config.json
-# (the curated mutate scope) — run from the repo root it errors "no .csproj found".
-# Slow on the WinUI app — scope a single file with --mutate, e.g.
-# `just stryker --mutate "**/Services/ShellOps.cs"`. The tool is pinned in
-# .config/dotnet-tools.json (found by walking up); `dotnet tool restore` provisions it.
+# Mutation testing (C#, Stryker.NET 4.16.0 — ADR-0022). xtask first runs the
+# ordinary locked unit-test baseline, makes Stryker fail on an initial-test
+# failure, pins the exact reviewed mutate-file inventory, parses its strict JSON
+# report, rejects inconclusive/out-of-scope results, and compares exact
+# survivors. It intentionally accepts no CLI options.
 [group('quality')]
-[doc('Mutation testing (C#, Stryker.NET; ADR-0022)')]
-[working-directory: 'app/FindMyFiles.Tests']
-stryker *args="":
-    dotnet tool restore
-    dotnet stryker --output ../../build/stryker {{args}}
+[doc('Strict C# mutation gate (exact survivors; ADR-0022)')]
+[working-directory: 'xtask']
+stryker:
+    cargo run --locked --release -- mutation-csharp
+
+[group('quality')]
+[doc('Run both exact-identity mutation gates (slow)')]
+mutation: mutants stryker

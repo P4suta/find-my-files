@@ -42,6 +42,33 @@ pub fn perf_dir() -> PathBuf {
     build_root().join("engine").join("perf")
 }
 
+/// Deterministic mutation-testing evidence. Tool-native reports and the
+/// canonical gate summaries stay below this one ignored build subtree.
+pub fn mutation_dir() -> PathBuf {
+    build_root().join("mutation")
+}
+
+pub fn rust_mutation_dir() -> PathBuf {
+    mutation_dir().join("rust")
+}
+
+pub fn csharp_mutation_dir() -> PathBuf {
+    mutation_dir().join("csharp")
+}
+
+/// Reviewed exact-equivalent survivor set for cargo-mutants.
+pub fn rust_mutation_baseline() -> PathBuf {
+    engine_dir().join("mutation-baseline.json")
+}
+
+/// Reviewed exact-equivalent survivor set for Stryker.NET.
+pub fn csharp_mutation_baseline() -> PathBuf {
+    repo_root()
+        .join("app")
+        .join("FindMyFiles.Tests")
+        .join("mutation-baseline.json")
+}
+
 /// The committed real-volume performance baseline.
 pub fn real_baseline() -> PathBuf {
     engine_dir().join("benches").join("baseline.json")
@@ -54,12 +81,46 @@ pub fn dist_dir() -> PathBuf {
     build_root().join("dist").join("FindMyFiles")
 }
 
+/// Exact deterministic manifest for the unsigned distribution tree. It is a
+/// sibling of (never a member of) [`dist_dir`], so sealing does not mutate the
+/// tree whose identity it records.
+pub fn unsigned_bundle_manifest() -> PathBuf {
+    build_root()
+        .join("dist")
+        .join("FindMyFiles.unsigned.manifest.json")
+}
+
+/// Exact deterministic manifest for the signed distribution candidate.
+pub fn signed_bundle_manifest() -> PathBuf {
+    build_root()
+        .join("dist")
+        .join("FindMyFiles.signed.manifest.json")
+}
+
 /// The self-contained app payload, one level under the bundle root. The ~100
 /// publish files (apphost, runtime DLLs, engine binaries) stay co-located here
 /// because the .NET apphost resolves its DLLs / `*.deps.json` from its own
 /// directory — so only the launcher + README can sit at the root.
 pub fn app_dir() -> PathBuf {
     dist_dir().join("app")
+}
+
+/// Deterministic `CycloneDX` documents generated from the final distribution
+/// tree. Release/nightly publish exactly the two top-level `*.cdx.json` files
+/// produced here.
+pub fn sbom_dir() -> PathBuf {
+    build_root().join("sbom")
+}
+
+/// `NuGet`'s resolved restore graph for the shipping app. `obj/` intentionally
+/// stays beside the project (ADR-0021); SBOM generation reads this machine
+/// output only after `dotnet publish --locked-mode` has completed.
+pub fn app_project_assets() -> PathBuf {
+    repo_root()
+        .join("app")
+        .join("FindMyFiles")
+        .join("obj")
+        .join("project.assets.json")
 }
 
 /// A separately compiled publish tree with deterministic UI-test seams enabled.

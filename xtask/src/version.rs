@@ -318,13 +318,87 @@ pub fn parse_identity(full: &str) -> BuildIdentity {
     }
 }
 
+/// Require the immutable source identity used by release artifacts. This is
+/// deliberately stricter than the seven-character display SHA carried in local
+/// dev/nightly versions: a release source identity is exactly one lowercase
+/// forty-hex Git object name.
+pub fn validate_source_commit(commit: &str) -> Result<()> {
+    if commit.len() != 40
+        || !commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        bail!("source commit must be exactly 40 lowercase hexadecimal characters, got '{commit}'");
+    }
+    Ok(())
+}
+
+/// Resolve the immutable source identity independently of the human-facing
+/// build version. CI may pin it explicitly; local builds derive the full HEAD
+/// object name while keeping their existing short/dirty version display. A
+/// present empty, malformed, or non-Unicode override is untrusted release input
+/// and fails closed. A source tree without Git metadata may still be assembled,
+/// but its later bundle-seal boundary will reject the missing canonical commit.
+pub fn resolve_source_commit() -> Result<Option<String>> {
+    if let Some(raw) = std::env::var_os("FMF_SOURCE_COMMIT") {
+        let commit = raw
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("FMF_SOURCE_COMMIT must be valid Unicode"))?;
+        return select_source_commit(Some(&commit), None);
+    }
+    let head = git_full_sha();
+    select_source_commit(None, head.as_deref())
+}
+
+/// Pure precedence/validation core for [`resolve_source_commit`].
+fn select_source_commit(forced: Option<&str>, git_head: Option<&str>) -> Result<Option<String>> {
+    let Some((commit, source)) = forced
+        .map(|commit| (commit, "FMF_SOURCE_COMMIT"))
+        .or_else(|| git_head.map(|commit| (commit, "git rev-parse HEAD")))
+    else {
+        return Ok(None);
+    };
+    validate_source_commit(commit).with_context(|| format!("invalid {source}"))?;
+    Ok(Some(commit.to_owned()))
+}
+
+/// Extract and validate the one canonical release source identity from
+/// `BUILDINFO.txt`. Leading BOM/whitespace is accepted for the human-readable
+/// file format, but empty, malformed, uppercase, and duplicate fields are not.
+pub fn parse_buildinfo_source_commit(source: &str) -> Result<String> {
+    let commits: Vec<&str> = source
+        .lines()
+        .map(|line| line.trim_start_matches('\u{feff}').trim())
+        .filter_map(|line| line.strip_prefix("commit:").map(str::trim))
+        .collect();
+    let [commit] = commits.as_slice() else {
+        bail!(
+            "BUILDINFO.txt must contain exactly one `commit:` field (found {})",
+            commits.len()
+        );
+    };
+    validate_source_commit(commit).context("invalid BUILDINFO.txt `commit:` field")?;
+    Ok((*commit).to_owned())
+}
+
 /// Render the human-and-grep friendly `BUILDINFO.txt` body (LF; the caller adds
-/// the BOM/CRLF for Notepad). Pure: `full` is the stamped version and
-/// `commit_date` the `git show -s --format=%cs` date (`YYYY-MM-DD`), if known.
-/// For nightly the date embedded in the version wins over the commit date.
-pub fn render_buildinfo(full: &str, commit_date: Option<&str>) -> String {
+/// the BOM/CRLF for Notepad). Pure: `full` is the stamped version,
+/// `commit_date` the `git show -s --format=%cs` date (`YYYY-MM-DD`), if known,
+/// and `source_commit` the optional exact release source identity. For local
+/// builds without that override, the display SHA decoded from `full` is retained
+/// unchanged. For nightly the date embedded in the version wins over the commit
+/// date.
+pub fn render_buildinfo(
+    full: &str,
+    commit_date: Option<&str>,
+    source_commit: Option<&str>,
+) -> Result<String> {
     const SOURCE: &str = "https://github.com/P4suta/find-my-files";
     let id = parse_identity(full);
+    if let Some(commit) = source_commit {
+        validate_source_commit(commit).context("invalid BUILDINFO source commit")?;
+    }
+    let commit = source_commit.or(id.commit.as_deref());
     let date = match (id.channel, &id.date) {
         // Nightly carries its own build date (YYYYMMDD) — reformat to YYYY-MM-DD.
         ("nightly", Some(d)) if d.len() == 8 => {
@@ -336,7 +410,7 @@ pub fn render_buildinfo(full: &str, commit_date: Option<&str>) -> String {
     out.push_str("FindMyFiles\n");
     let _ = writeln!(out, "version:  {full}");
     let _ = writeln!(out, "channel:  {}", id.channel);
-    if let Some(c) = &id.commit {
+    if let Some(c) = commit {
         let _ = writeln!(out, "commit:   {c}");
     }
     if let Some(d) = &date {
@@ -344,7 +418,7 @@ pub fn render_buildinfo(full: &str, commit_date: Option<&str>) -> String {
     }
     let _ = writeln!(out, "source:   {SOURCE}");
     out.push_str("license:  Apache-2.0\n");
-    out
+    Ok(out)
 }
 
 /// Resolve the build version to stamp into the bundle's `BUILDINFO.txt`, with the
@@ -407,6 +481,15 @@ fn git_short_sha() -> Option<String> {
         &paths::repo_root(),
         "git",
         &["rev-parse", "--short=7", "HEAD"],
+    )
+    .filter(|s| !s.is_empty())
+}
+
+fn git_full_sha() -> Option<String> {
+    cmd::capture(
+        &paths::repo_root(),
+        "git",
+        &["rev-parse", "--verify", "HEAD"],
     )
     .filter(|s| !s.is_empty())
 }
@@ -656,7 +739,7 @@ version = \"0.1.1\"
         // A dirty local `just publish` stamps BUILDINFO's commit line with the same
         // `.dirty` marker the exes report — the version never disagrees.
         let full = append_dirty("0.1.0-dev+gabc1234", true);
-        let body = render_buildinfo(&full, Some("2026-07-11"));
+        let body = render_buildinfo(&full, Some("2026-07-11"), None).unwrap();
         assert!(body.contains("version:  0.1.0-dev+gabc1234.dirty\n"));
         assert!(body.contains("channel:  dev\n"));
         assert!(body.contains("commit:   abc1234.dirty\n"));
@@ -679,7 +762,8 @@ version = \"0.1.1\"
 
     #[test]
     fn buildinfo_nightly_reformats_embedded_date_over_commit_date() {
-        let body = render_buildinfo("0.1.0-nightly.20260629+gabc1234", Some("2026-06-15"));
+        let body =
+            render_buildinfo("0.1.0-nightly.20260629+gabc1234", Some("2026-06-15"), None).unwrap();
         assert!(body.starts_with("FindMyFiles\n"));
         assert!(body.contains("version:  0.1.0-nightly.20260629+gabc1234\n"));
         assert!(body.contains("channel:  nightly\n"));
@@ -691,7 +775,7 @@ version = \"0.1.1\"
 
     #[test]
     fn buildinfo_dev_uses_commit_date_and_omits_absent_fields() {
-        let body = render_buildinfo("0.1.0-dev", None);
+        let body = render_buildinfo("0.1.0-dev", None, None).unwrap();
         assert!(body.contains("channel:  dev\n"));
         // No sha, no date known → those lines are omitted, not blank.
         assert!(!body.contains("commit:"));
@@ -700,10 +784,82 @@ version = \"0.1.1\"
 
     #[test]
     fn buildinfo_stable_is_clean() {
-        let body = render_buildinfo("0.1.0", Some("2026-06-29"));
+        let body = render_buildinfo("0.1.0", Some("2026-06-29"), None).unwrap();
         assert!(body.contains("version:  0.1.0\n"));
         assert!(body.contains("channel:  stable\n"));
         assert!(body.contains("date:     2026-06-29\n"));
         assert!(!body.contains("commit:"));
+    }
+
+    #[test]
+    fn buildinfo_stable_pins_the_exact_release_source_commit() {
+        let source_commit = "0123456789abcdef0123456789abcdef01234567";
+        let body = render_buildinfo("0.1.0", Some("2026-06-29"), Some(source_commit)).unwrap();
+
+        assert!(body.contains("version:  0.1.0\n"));
+        assert!(body.contains("channel:  stable\n"));
+        assert!(body.contains(&format!("commit:   {source_commit}\n")));
+        assert_eq!(parse_buildinfo_source_commit(&body).unwrap(), source_commit);
+    }
+
+    #[test]
+    fn local_dev_buildinfo_uses_full_head_without_changing_short_dirty_version() {
+        let source_commit = "0123456789abcdef0123456789abcdef01234567";
+        let displayed = append_dirty("0.1.0-dev+g0123456", true);
+        let body = render_buildinfo(&displayed, Some("2026-06-29"), Some(source_commit)).unwrap();
+
+        assert!(body.contains("version:  0.1.0-dev+g0123456.dirty\n"));
+        assert!(body.contains(&format!("commit:   {source_commit}\n")));
+    }
+
+    #[test]
+    fn source_commit_prefers_explicit_ci_identity_then_full_git_head() {
+        let forced = "0123456789abcdef0123456789abcdef01234567";
+        let head = "89abcdef0123456789abcdef0123456789abcdef";
+
+        assert_eq!(
+            select_source_commit(Some(forced), Some(head)).unwrap(),
+            Some(forced.to_owned())
+        );
+        assert_eq!(
+            select_source_commit(None, Some(head)).unwrap(),
+            Some(head.to_owned())
+        );
+        assert_eq!(select_source_commit(None, None).unwrap(), None);
+        assert!(select_source_commit(Some(""), Some(head)).is_err());
+        assert!(
+            select_source_commit(None, Some("89ABCDEF0123456789abcdef0123456789abcdef")).is_err()
+        );
+    }
+
+    #[test]
+    fn source_commit_rejects_empty_short_uppercase_and_non_hex_values() {
+        for invalid in [
+            "",
+            "0123456",
+            "0123456789abcdef0123456789abcdef0123456A",
+            "0123456789abcdef0123456789abcdef0123456g",
+        ] {
+            assert!(validate_source_commit(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn buildinfo_source_commit_requires_exactly_one_canonical_field() {
+        let valid = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            parse_buildinfo_source_commit(&format!("\u{feff}FindMyFiles\r\ncommit:   {valid}\r\n"))
+                .unwrap(),
+            valid
+        );
+
+        for invalid in [
+            "FindMyFiles\n",
+            "FindMyFiles\ncommit:   \n",
+            "FindMyFiles\ncommit:   0123456789abcdef0123456789abcdef0123456A\n",
+            "FindMyFiles\ncommit:   0123456789abcdef0123456789abcdef01234567\ncommit:   89abcdef0123456789abcdef0123456789abcdef\n",
+        ] {
+            assert!(parse_buildinfo_source_commit(invalid).is_err());
+        }
     }
 }

@@ -128,6 +128,10 @@ impl BundleKind {
 fn run_bundle(skip_rust: bool, kind: BundleKind) -> Result<()> {
     let root = paths::repo_root();
     let (dist, app) = kind.paths();
+    // Resolve and validate the immutable source identity before removing or
+    // rebuilding anything. CI may pin the exact commit; otherwise local builds
+    // use full HEAD while their separate version display remains short/dirty.
+    let source_commit = version::resolve_source_commit()?;
 
     // Clean the whole stale bundle (launcher + README + app/ payload). Under CI
     // a fresh runner always cleans cleanly, so a failure there signals a real
@@ -211,8 +215,8 @@ fn run_bundle(skip_rust: bool, kind: BundleKind) -> Result<()> {
     verify_bundle(&app, &root.join("app/FindMyFiles"))?;
     let build_version = version::resolve_bundle_version()?;
     place_launcher_and_readme(&dist)?;
-    place_buildinfo(&dist, &build_version)?;
-    verify_bundle_identity(&dist, &build_version)?;
+    place_buildinfo(&dist, &build_version, source_commit.as_deref())?;
+    verify_bundle_identity(&dist, &build_version, source_commit.as_deref())?;
     place_legal_notices(&root, &dist)?;
 
     println!(
@@ -499,12 +503,13 @@ fn place_launcher_and_readme(dist: &Path) -> Result<()> {
 /// Drop `BUILDINFO.txt` at the bundle root so a downloaded copy stays
 /// identifiable after the zip name is lost on extraction: which channel, which
 /// version, which commit — readable in Notepad and grep-able by tooling. The
-/// label uses the SAME precedence as the shipped binaries (`FMF_BUILD_VERSION`,
-/// else the local `-dev+g<sha>` default), so the file never disagrees with what
-/// `fmf --version` reports.
-fn place_buildinfo(dist: &Path, full: &str) -> Result<()> {
+/// version label uses the SAME precedence as the shipped binaries
+/// (`FMF_BUILD_VERSION`, else the local `-dev+g<short-sha>` default). Its
+/// independent `commit:` field carries the exact full source identity from
+/// `FMF_SOURCE_COMMIT` or local HEAD.
+fn place_buildinfo(dist: &Path, full: &str, source_commit: Option<&str>) -> Result<()> {
     let commit_date = version::git_commit_date();
-    let body = version::render_buildinfo(full, commit_date.as_deref());
+    let body = version::render_buildinfo(full, commit_date.as_deref(), source_commit)?;
     // Same Notepad-friendly encoding as README.txt: UTF-8 BOM + CRLF.
     let text = format!("\u{feff}{}", body.replace('\n', "\r\n"));
     fs::write(dist.join("BUILDINFO.txt"), text).context("write BUILDINFO.txt")?;
@@ -516,11 +521,24 @@ fn place_buildinfo(dist: &Path, full: &str) -> Result<()> {
 /// channel/sha identity, while Win32 `FileVersion` carries its canonical clean
 /// `X.Y.Z` base. The build script already fails closed if the resource could not
 /// be embedded; this post-build readback catches a stale/wrong stamped launcher.
-fn verify_bundle_identity(dist: &Path, expected_full: &str) -> Result<()> {
+fn verify_bundle_identity(
+    dist: &Path,
+    expected_full: &str,
+    expected_source_commit: Option<&str>,
+) -> Result<()> {
     let buildinfo_path = dist.join("BUILDINFO.txt");
     let buildinfo = fs::read_to_string(&buildinfo_path)
         .with_context(|| format!("read {}", buildinfo_path.display()))?;
     let buildinfo_version = parse_buildinfo_version(&buildinfo)?;
+    if let Some(expected_commit) = expected_source_commit {
+        let actual_commit = version::parse_buildinfo_source_commit(&buildinfo)?;
+        if actual_commit != expected_commit {
+            bail!(
+                "bundle source identity drift: BUILDINFO commit is '{actual_commit}', \
+                 expected '{expected_commit}'"
+            );
+        }
+    }
     let launcher = win_version::read(&dist.join(ENTRY_EXE))?;
     validate_bundle_identity(
         expected_full,
@@ -627,8 +645,8 @@ fn place_legal_notices(root: &Path, dist: &Path) -> Result<()> {
 /// cold runner. The render itself remains reproducible and independent of
 /// clearlydefined.io or any other third-party service.
 ///
-/// `cargo-about` is provisioned via the `mise.toml` pin (release/nightly use
-/// mise-action; the split ci.yml `app` job installs it directly).
+/// Local development provisions `cargo-about` from the `mise.toml` pin; CI jobs
+/// install the same pinned release directly.
 ///
 /// Output goes through `-o <file>`, not stdout: cargo-about refuses a redirected
 /// stdout on Windows (PowerShell re-encodes piped bytes to UTF-16 and corrupts

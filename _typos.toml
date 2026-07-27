@@ -2,6 +2,9 @@
 [default.extend-words]
 # Deliberate test fragment for boundary-spanning pool-scan checks.
 ba = "ba"
+# Win32 spells its own error 206 `ERROR_FILENAME_EXCED_RANGE`. The name is the
+# API, so quoting it correctly means quoting the misspelling.
+EXCED = "EXCED"
 
 [files]
 # Generated output — mdBook's bundled JS/CSS (elasticlunr, highlight.js) and

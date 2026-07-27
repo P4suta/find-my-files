@@ -74,10 +74,17 @@ regex = "1"
 # ubuntu CI lane (and everywhere) without a C toolchain.
 zip = { version = "8", default-features = false, features = ["deflate"] }
 sha2 = "0.11"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+yaml-rust2 = { version = "0.11", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+] }
 
 # This is build tooling, not a hot path: optimize for fast compiles, not fast
 # runtime. (The engine workspace is the opposite — see engine/Cargo.toml.)
