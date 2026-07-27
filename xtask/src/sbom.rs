@@ -857,7 +857,7 @@ fn file_version_from_path(path: &Path) -> Result<Option<FileVersion>> {
     reason = "the Windows implementation reads a PE version resource and can fail; \
               both arms must present one signature to the caller"
 )]
-fn file_version_from_path(_path: &Path) -> Result<Option<FileVersion>> {
+const fn file_version_from_path(_path: &Path) -> Result<Option<FileVersion>> {
     Ok(None)
 }
 

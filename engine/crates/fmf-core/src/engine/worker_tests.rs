@@ -968,28 +968,78 @@ fn rows_for_prefix(e: &Engine, prefix: &str) -> Vec<(String, u64)> {
     out
 }
 
-/// Poll until `volume`'s published `scanned` count settles at `target`
-/// (the worker bumps `scanned` after every applied batch). Lets a test wait
-/// for one volume to finish its scripted batches without ordering it
-/// against the others.
-fn wait_scanned(e: &Engine, volume: &str, target: u64) {
+/// Poll until `volume` has *finished* the batch that brings its published
+/// `scanned` count to `target` — including the post-batch work the worker
+/// does after publishing that count. Lets a test wait for one volume to
+/// finish its scripted batches without ordering it against the others.
+///
+/// `scanned` alone is not that signal. The worker writes it inside the apply
+/// step and only then takes the batch checkpoint and calls `maybe_compact`
+/// (`worker.rs`). Compaction renumbers every `EntryId` and swaps the index in
+/// through `VolumeSlot::install_index`, which bumps the structural generation
+/// — and both `Engine::query`'s k-way merge and `ResultSet::page` correctly
+/// answer `Stale` when that generation moves under a captured id column.
+/// These scripts do reach the trigger: `compaction_due` puts no entry floor
+/// on the dictionary-churn term, so a handful of USN creates on a 3-5 entry
+/// restored index is already `dict_appends_since_dedup > live_len / 4`.
+/// Resuming on `scanned` therefore parked the test inside a structural
+/// replacement it never asked for.
+///
+/// Waiting for the churn flag to clear makes that ordering explicit instead
+/// of probable, and the ordering is airtight rather than merely likely:
+///
+///   * the apply writes the dictionary-churn counter and `scanned` under the
+///     *same* index write guard, so `scanned == target` can never be observed
+///     before the churn that arms the trigger is visible;
+///   * only the compacted copy landing through `install_index` clears the
+///     flag (the copy resets the tombstone, dead-byte and dict-append
+///     counters), and both that swap and this poll go through the index lock
+///     — so reading `false` here happens-after the swap;
+///   * a compacted index never re-arms the trigger, and with every scripted
+///     batch applied the journals only idle from here (an idle read applies
+///     nothing), so no further structural replacement is pending.
+///
+/// `a_churny_batch_compacts_before_the_volume_is_settled` pins the middle
+/// step, so this extra wait cannot quietly become dead weight.
+fn wait_settled(e: &Engine, volume: &str, target: u64) {
     let deadline = Instant::now() + WAIT;
     loop {
-        let now = e
-            .status()
-            .iter()
-            .find(|(v, _, _)| v == volume)
-            .map(|(_, _, n)| *n)
-            .expect("volume registered");
-        if now == target {
+        let slot = slot_of(e, volume);
+        let now = *slot.scanned.lock();
+        // Ready is part of settled: `scanned` is published before the very
+        // first `install_index`, so the count alone can be reached while the
+        // slot still has no index (and the merged query skips it).
+        let ready = *slot.phase.lock() == VolumeState::Ready;
+        let pending = compaction_pending(e, volume);
+        if now == target && ready && !pending {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "{volume}.scanned never reached {target} (now {now})"
+            "{volume} never settled at {target} entries \
+             (scanned {now}, ready {ready}, compaction pending {pending})"
         );
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+fn slot_of(e: &Engine, volume: &str) -> Arc<super::volume::VolumeSlot> {
+    e.volumes
+        .read()
+        .iter()
+        .find(|slot| slot.label == volume)
+        .cloned()
+        .expect("volume registered")
+}
+
+/// Is a structural replacement still owed on `volume`? (The half of
+/// [`wait_settled`]'s predicate that outlives the `scanned` count.)
+fn compaction_pending(e: &Engine, volume: &str) -> bool {
+    slot_of(e, volume)
+        .index
+        .read()
+        .as_ref()
+        .is_some_and(VolumeIndex::compaction_due)
 }
 
 /// A restore-then-tail script for one volume: a loadable snapshot whose
@@ -1049,6 +1099,63 @@ fn restore_and_apply_script(
         Arc::new(AtomicU64::new(0)),
     );
     (store, journal)
+}
+
+/// The premise `wait_settled` rests on: these deliberately tiny scripted
+/// volumes really do compact, so "the batch is applied" and "the volume is
+/// done changing structurally" are two different moments.
+///
+/// A restored 2-entry index plus a 2-create batch is already over the
+/// dictionary-churn trigger (`dict_appends_since_dedup` 2 > `live_len` 4 / 4)
+/// — that term carries no `COMPACT_MIN_ENTRIES` floor, by design, so a small
+/// volume's dictionary cannot leak. So the worker compacts right after the
+/// batch, and compaction is a *structural* replacement: `install_index` bumps
+/// the generation, every `EntryId` is renumbered and every open result handle
+/// hard-stales.
+///
+/// Asserting the bump here keeps `wait_settled`'s extra condition honest: if
+/// the compaction policy ever stops firing on this shape, this fails loudly
+/// instead of leaving that wait as silent dead weight.
+#[test]
+fn a_churny_batch_compacts_before_the_volume_is_settled() {
+    let label = "FMFCP1:";
+    let (_dir, e) = test_engine();
+    let _rx = sink_channel(&e);
+    let (store, journal) = restore_and_apply_script(
+        label,
+        "cp_",
+        &["seed.txt"],
+        &[&["x.txt", "y.txt"]],
+        (51, 50),
+        1000,
+        false,
+    );
+    e.spawn_worker_with_seams(label, store, Box::new(journal));
+
+    // Settled = the batch applied *and* the compaction it armed installed.
+    wait_settled(&e, label, 1 + 1 + 2);
+    let stats = e.index_stats();
+    let stats = stats.iter().find(|s| s.volume == label).unwrap();
+    assert_eq!(
+        stats.structural_generation, 1,
+        "the restored index (generation 0) must have been replaced exactly \
+         once, by the post-batch compaction"
+    );
+    // And the replacement is terminal: a compacted index re-arms no trigger,
+    // so nothing else will move under a result handle taken from here on.
+    assert!(!compaction_pending(&e, label));
+    // Compaction is invisible in the rows — it drops nothing live. (Restored
+    // entries carry the builder's size 10, USN-created ones the fake
+    // metadata source's 42.)
+    assert_eq!(
+        rows_for_prefix(&e, "cp_"),
+        vec![
+            ("cp_seed.txt".to_string(), 10),
+            ("cp_x.txt".to_string(), 42),
+            ("cp_y.txt".to_string(), 42),
+        ]
+    );
+    e.shutdown();
 }
 
 /// Invariant 1 — scheduling independence: the same per-volume scripts produce
@@ -1129,7 +1236,7 @@ fn multi_volume_results_independent_of_scheduling() {
             e.spawn_worker_with_seams(label, store, Box::new(journal));
         }
         for (i, (label, ..)) in scripts.iter().enumerate() {
-            wait_scanned(&e, label, final_counts[i]);
+            wait_settled(&e, label, final_counts[i]);
         }
         let rows = scripts
             .iter()
@@ -1212,8 +1319,8 @@ fn flush_checkpoint_never_passes_unapplied_records() {
 
     // Wait until the gated volume has applied exactly batch1 (root + seed +
     // 2) and then parked: cursor is now 50 + 2 = 52 and held there.
-    wait_scanned(&e, "FMFCK1:", 1 + 1 + 2);
-    wait_scanned(&e, "FMFCK2:", 1 + 1 + 1);
+    wait_settled(&e, "FMFCK1:", 1 + 1 + 2);
+    wait_settled(&e, "FMFCK2:", 1 + 1 + 1);
 
     // Flush both. The gated volume is frozen mid-stream: the saved cursor
     // must be 52 (applied), never 53 (which would skip-on-replay the
@@ -1234,7 +1341,7 @@ fn flush_checkpoint_never_passes_unapplied_records() {
     // flush now persists 53 — checkpoint tracking the index forward, still
     // never ahead of it.
     gate.store(true, Ordering::Relaxed);
-    wait_scanned(&e, "FMFCK1:", 1 + 1 + 3);
+    wait_settled(&e, "FMFCK1:", 1 + 1 + 3);
     let saved2 = e.flush();
     assert_eq!(
         saved2, 1,
@@ -1280,8 +1387,8 @@ fn save_failure_on_one_volume_spares_index_and_siblings() {
     e.spawn_worker_with_seams("FMFSF1:", bad_store.clone(), Box::new(bad_journal));
     e.spawn_worker_with_seams("FMFSF2:", good_store.clone(), Box::new(good_journal));
 
-    wait_scanned(&e, "FMFSF1:", 1 + 1 + 2);
-    wait_scanned(&e, "FMFSF2:", 1 + 1 + 1);
+    wait_settled(&e, "FMFSF1:", 1 + 1 + 2);
+    wait_settled(&e, "FMFSF2:", 1 + 1 + 1);
 
     // Snapshot each volume's served rows before the flush.
     let bad_before = rows_for_prefix(&e, "sa_");
@@ -1338,7 +1445,7 @@ fn journal_gone_on_one_volume_does_not_disturb_siblings() {
     e.spawn_worker_with_seams("FMFJG2:", steady_store, Box::new(steady_journal));
     // Drive the sibling to its settled state before touching the rescanner,
     // so any cross-volume disturbance would be observable as a change here.
-    wait_scanned(&e, "FMFJG2:", 1 + 1 + 1);
+    wait_settled(&e, "FMFJG2:", 1 + 1 + 1);
     let steady_before = rows_for_prefix(&e, "jb_");
     let steady_gen_before = e
         .index_stats()

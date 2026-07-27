@@ -666,7 +666,7 @@ fn reject_links_and_streams(root: &Path) -> Result<()> {
     reason = "the Windows implementation enumerates NTFS streams and can fail; \
               both arms must present one signature to the caller"
 )]
-fn reject_alternate_streams(_path: &Path) -> Result<()> {
+const fn reject_alternate_streams(_path: &Path) -> Result<()> {
     Ok(())
 }
 
