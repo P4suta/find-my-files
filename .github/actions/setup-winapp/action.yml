@@ -79,9 +79,14 @@ runs:
           }
         }
 
-        $actualVersion = ((& $commands[0].FullName --version) -join "`n").Trim()
-        if ($actualVersion -cne $env:WINAPP_VERSION) {
-          throw "Expected WinAppCli $env:WINAPP_VERSION, got '$actualVersion'."
+        # `--version` prints a banner, a telemetry notice, and a privacy URL
+        # around the number, so compare the extracted version rather than the
+        # whole output. Requiring the literal "Version <x>" label keeps an
+        # unrelated number elsewhere in the banner from satisfying the check.
+        $versionOutput = ((& $commands[0].FullName --version) -join "`n")
+        $expected = [regex]::Escape($env:WINAPP_VERSION)
+        if ($versionOutput -cnotmatch "\bVersion\s+$expected\b") {
+          throw "Expected WinAppCli $env:WINAPP_VERSION; --version reported: $versionOutput"
         }
 
         "cli-path=$actualCommand" |
