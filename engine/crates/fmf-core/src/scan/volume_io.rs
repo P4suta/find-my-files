@@ -677,8 +677,8 @@ fn retrieval_fallback(
     Ok(map)
 }
 
-/// Volume geometry + the $MFT data-run map — the bootstrap shared by the
-/// full scan and the I/O probe (record 0 → the $MFT's own data runs).
+/// Keep the elevation-vs-I/O distinction the caller reports: opening a raw
+/// volume without administrator rights is a permission failure, not a disk one.
 fn classify_volume_open(error: std::io::Error) -> NtfsError {
     if error.kind() == std::io::ErrorKind::PermissionDenied {
         NtfsError::Elevation
@@ -787,6 +787,8 @@ pub fn volume_geometry(volume_path: &str) -> Result<VolumeGeometry, NtfsError> {
     read_geometry(&mut file).map(|geometry| geometry.boot)
 }
 
+/// Volume geometry + the $MFT data-run map — the bootstrap shared by the
+/// full scan and the I/O probe (record 0 → the $MFT's own data runs).
 pub(super) fn mft_layout(volume_path: &str) -> Result<MftLayout, NtfsError> {
     use std::io::{Read, Seek, SeekFrom};
 
