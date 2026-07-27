@@ -1,11 +1,12 @@
 # ADR-0039: CLI DevEx pass 2 — completions distribution, drift-in-CI, format consistency
 
-Date: 2026-06-30 / Status: Accepted (no wire-contract / golden / ABI change; the `fmf` remit is unchanged — still a developer/diagnostic tool, [ADR-0026](0026-cli-surface-polish.md))
-
-> Current-state amendment (2026-07-26): the distribution part of this decision
-> is superseded. `fmf` remains available as a developer build artifact, but the
-> end-user ZIP contains neither `fmf.exe` nor completion scripts. Generated CLI
-> Markdown and its drift machinery remain removed; live help is the reference.
+Date: 2026-06-30 / Status: Accepted (no wire-contract / golden / ABI change; the
+`fmf` remit is unchanged — still a developer/diagnostic tool,
+[ADR-0026](0026-cli-surface-polish.md)). Decision 1's *bundling* half is
+superseded: the end-user ZIP ships neither `fmf.exe` nor completion scripts,
+because the CLI is not an end-user surface. The `fmf completions <shell>`
+subcommand — the always-fresh half of that decision — is the remaining
+distribution path, and the rest of this ADR stands.
 
 ## Context
 

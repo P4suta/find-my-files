@@ -41,7 +41,7 @@ See `docs/adr/` for design and rejection decisions and their numeric rationale.
 
 ## Rust crates (existence and maturity confirmed)
 
-- `ntfs-reader` 0.4.5 (MIT/Apache-2.0, updated 2026-03): full raw-$MFT record scan (README benchmark: Vec Cache 3.756s / HashMap 4.981s / No Cache 12.3s, environment not stated). Its convenience name selector returns one name; fmf-core instead walks the exposed raw `$FILE_NAME` attributes so every hard-linked path is retained.
+- `ntfs-reader` 0.4.5 (MIT/Apache-2.0, updated 2026-03): full raw-$MFT record scan (README benchmark: Vec Cache 3.756s / HashMap 4.981s / No Cache 12.3s, environment not stated). **Evaluated and no longer a dependency** — it is not in `engine/Cargo.lock`. Its convenience name selector surfaces a single name per record, whereas one searchable row per `$FILE_NAME` (so hard-linked paths are all retained) is the product's requirement, and the streaming/deferred-record pipeline it feeds is fmf-specific. Raw record parsing is in-house in `fmf-core/src/scan/ntfs.rs`; the benchmark above stays here as the external reference point that scan throughput is compared against.
 - `usn-journal-rs` (wangfu91, MIT, updated 2026-05): MFT enumeration + USN monitoring + FRN path resolution. Read as a reference implementation (policy: do not depend on it).
 - `windows-sys` 0.61: complete FSCTL constants, MFT_ENUM_DATA, USN_RECORD, etc. The USN wrapper is implemented in-house (~200 lines).
 - `memchr` (memmem::Finder = SIMD substring), `rayon`, `parking_lot`, `thiserror`, `tracing`, `xxhash-rust`.
@@ -63,7 +63,11 @@ A privileged-indexer → non-privileged-UI design carries an information-disclos
 - **PIPE_REJECT_REMOTE_CLIENTS** (CreateNamedPipeW dwPipeMode): officially stated as "Connections from remote clients are automatically rejected". Direct mechanism for remote rejection.
   https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew
 - **FILE_FLAG_FIRST_PIPE_INSTANCE**: creating a second instance fails with ERROR_ACCESS_DENIED (officially stated). Defends against pipe-name squatting. Same source as above.
-- **GetNamedPipeServerProcessId**: a client can get the server process PID (fake-server detection: PID → verify the token is SYSTEM).
+- **GetNamedPipeServerProcessId**: a client can get the server process PID. The
+  non-elevated UI compares it with the PID reported by
+  `QueryServiceStatusEx` for the SCM-registered `fmf-engine` service. It cannot
+  reliably open a LocalSystem process token or derive its session-0 identity,
+  so token inspection is not the trust decision.
   https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeserverprocessid
 - **Anonymous access (caution)**: the default for anonymous restriction via NullSessionPipes is **machine-type/policy dependent** (enabled on DC/standalone, Not defined on member/client). Make an explicit DACL (no anonymous ACE = default deny) the primary defense for blocking anonymous access.
   https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-access-restrict-anonymous-access-to-named-pipes-and-shares
@@ -71,6 +75,11 @@ A privileged-indexer → non-privileged-UI design carries an information-disclos
   https://learn.microsoft.com/en-us/windows/win32/secauthz/sid-attributes-in-an-access-token
 - **ImpersonateNamedPipeClient**: the server can obtain and inspect the client's token (SID matching at connect time = defense in depth against a misconfigured DACL).
   https://learn.microsoft.com/en-us/windows/win32/ipc/impersonating-a-named-pipe-client
+- **RevertToSelf failure is process-fatal**: Microsoft states that a failed
+  reversion leaves the application running as the client and that the process
+  should shut down. Returning an error and continuing the service thread is not
+  a safe recovery path.
+  https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-reverttoself
 - **SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO** (ChangeServiceConfig2): declaring required privileges makes the SCM strip undeclared privileges from the process token at startup (SeChangeNotifyPrivilege always remains; for shared-process services the union applies). Used to disarm LocalSystem.
   https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_required_privileges_infow
 - **SERVICE_CONTROL_PRESHUTDOWN (caution)**: the default grace period is **10 seconds on Windows 10 1703 and later** (3 minutes before that). Saving a large snapshot requires explicitly extending it via `SERVICE_PRESHUTDOWN_INFO` (dwPreshutdownTimeout).

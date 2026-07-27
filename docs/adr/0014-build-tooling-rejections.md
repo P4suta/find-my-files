@@ -1,8 +1,9 @@
 # ADR-0014: Build tooling rejection record and codegen-units=1
 
-The historical cargo-nextest rejection is superseded by [ADR-0041](0041-nextest-bounded-test-execution.md). The rust-lld and sccache decisions remain active.
-
-Date: 2026-06-11 / Status: Rejections recorded (codegen-units=1 accepted)
+Date: 2026-06-11 / Status: Rejections recorded (codegen-units=1 accepted).
+Partially superseded by [ADR-0041](0041-nextest-bounded-test-execution.md),
+which supersedes only the cargo-nextest rejection; the rust-lld and sccache
+rejections and the codegen-units=1 decision remain in force.
 
 ## Decision
 

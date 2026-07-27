@@ -9,8 +9,8 @@ Certificate holder: `CN=Yasunobu Sakashita` (SSL.com individual IV, code-signing
 ## Decision
 
 Authenticode signing of the distributed binaries is done with **SSL.com eSigner** (a cloud HSM signing service) + a **personal Individual Validation (IV)
-certificate**. Signing is kept as a **CI-environment-specific YAML step** in `release.yml` (workflow-dispatched at an existing tag), not placed in `xtask/`.
-A real release is **fail-closed**: all four signing secrets, a valid signature, timestamp, and expected signer are mandatory. Only `publish=false` rehearsal runs may finish unsigned, with an explicit warning and no Release.
+certificate**. Signing is kept as a **CI-environment-specific YAML step** in the trusted-`main`, reusable-only `release.yml`, not placed in `xtask/`; the Release Please tag and commit are validated inputs, never the workflow source.
+A real release is **fail-closed**: all four signing secrets, a valid signature, timestamp, and expected signer are mandatory. There is no credentialed unsigned rehearsal path.
 
 The signing targets are **only our own PEs**, including the managed application assembly. Their executable manifest lives in `xtask` and is mirrored by `.github/actions/verify-signatures/first-party-pes.txt`; counts are deliberately not duplicated in this ADR. Bundled .NET / WindowsAppSDK runtime DLLs retain their Microsoft signatures. Same-named first-party files are staged through unique names before batch signing.
 
@@ -36,7 +36,8 @@ The signing targets are **only our own PEs**, including the managed application 
 
 - The signing step in `release.yml` uses SSL.com eSigner. `HAVE_SIGNING` requires `ES_USERNAME`, `ES_PASSWORD`, `CREDENTIAL_ID`, and `ES_TOTP_SECRET`; `publish=true` fails before signing if any is absent.
 - Publicly trusted certificates expire after at most ~460 days (CA/Browser Forum 2026). Renewal updates the `release` environment secrets when the credential or TOTP changes.
-- Signing is **limited to tag-ref runs of `release.yml`**. `ci.yml` (PR/push) does not sign (do not distribute development intermediates, conserve quota, fork PRs
+- Signing is **limited to reusable `release.yml` calls from the protected-`main`
+  controller after exact tag/SHA performance evidence**. `ci.yml` (PR/push) does not sign (do not distribute development intermediates, conserve quota, fork PRs
   cannot access Secrets).
 
 ## Re-examination triggers

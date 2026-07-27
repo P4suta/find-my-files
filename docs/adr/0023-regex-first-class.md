@@ -28,7 +28,7 @@ Because this is an incompatible wire change, bump the pipe name `fmf-engine-v1`�
 
 ## Consequences
 
-- Contract evolution (ADR-0018 flow): ARCHITECTURE.md → `fmf-contract` (pod/options/versions) → `FMF_BLESS=1` golden recapture → `just contract-gen` → both-language tests green. `contract/golden/query_req_*.bin` is recaptured at 20B.
+- Contract evolution ([ADR-0018](0018-contract-single-source.md) flow): `fmf-contract` (pod/options/versions) → `FMF_BLESS=1` golden recapture → `just contract-gen` → both-language tests green. `contract/golden/query_req_*.bin` is recaptured at 20B.
 - One line in `docs/SECURITY.md` threat #5 (regex compile compute DoS → reject via limit).
 - Kill switch `FMF_REGEX_PREFILTER=0` (force fallback to full-scan; a field recovery valve of the same kind as `FMF_QUERY_CACHE`).
 - Observability: on prefilter success `QueryTrace.driver` is `pool-scan`; on extraction failure it is `full-scan`.

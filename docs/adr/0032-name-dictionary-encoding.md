@@ -1,8 +1,9 @@
 # ADR-0032: name dictionary-encoding (deduplicate the folded name pool)
 
-Date: 2026-06-26 / Status: Accepted. The separate `dict_len` column described
-below was dropped (lengths derive from the gapless `dict_off`, FMFIDX06 →
-FMFIDX07) in [ADR-0033](0033-phase3-memory-latency-levers.md).
+Date: 2026-06-26 / Status: Accepted, amended by
+[ADR-0033](0033-phase3-memory-latency-levers.md), which dropped the separate
+`dict_len` column described below (lengths derive from the gapless `dict_off`).
+The dictionary encoding itself is unchanged.
 
 ## Decision
 

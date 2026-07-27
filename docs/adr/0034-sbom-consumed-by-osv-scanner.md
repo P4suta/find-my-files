@@ -14,7 +14,7 @@ This ADR gives the SBOM a job by feeding it to **`osv-scanner`** (OSV.dev) at tw
 
 ## Decision
 
-1. **Release gate (`release.yml`, `build` job).** Right after the two SBOMs are generated — before sign/publish — validate CycloneDX 1.6 structure, nonempty components, and both root product identities, then run `osv-scanner scan source -L fmf-engine.cdx.json -L app.cdx.json --config osv-scanner.toml`. `cargo-sbom`'s unversioned workspace root is normalized to `fmf-engine@<build-version>`; dependency components are unchanged. The .NET generator excludes development dependencies and does not restore a new graph. A finding (exit 1) fails the build, so a release with a known-vulnerable dependency in the resolved graph never publishes.
+1. **Release gate (`release.yml`, isolated `sbom` job).** After `build` seals the unsigned distribution, `sbom` downloads and verifies that exact artifact, generates the two canonical CycloneDX 1.6 documents from shipped Rust and .NET dependency evidence, validates their structure and root identities, then runs `osv-scanner scan source -L fmf-engine.cdx.json -L app.cdx.json --config osv-scanner.toml` on disposable copies. A finding (exit 1) fails before `sign-stage`, so a release with a known-vulnerable dependency in the resolved graph is never signed or published.
 
 2. **Shipped-release re-scan (`sbom-monitor.yml`, weekly + `workflow_dispatch`).** Require the **latest** stable release itself to be immutable, download its two canonical SBOM assets, verify their bytes against GitHub's per-asset SHA-256 digests, validate both root identities, and re-scan them against the *current* OSV DB. This is the only check that covers *what users already downloaded*: `cargo-audit` / `cargo-deny` / Dependabot all scan HEAD, so a CVE disclosed after a release is invisible for the shipped binary. A mutable release or missing, extra, empty, corrupt, or misidentified SBOM assets fail closed. Only the absence of any published release is a clean dormant state.
 
@@ -28,7 +28,7 @@ This ADR gives the SBOM a job by feeding it to **`osv-scanner`** (OSV.dev) at tw
 
 - **osv-scanner over grype / trivy / bomber**: osv-scanner consumes CycloneDX natively, covers **both** crates.io and NuGet against one DB (OSV.dev) in a single pass, is Google-maintained, SHA-pinnable via an action the repo already uses, and uses simple exit codes (0 clean / 1 findings / 128 no-packages). grype/trivy are heavier and container-oriented; bomber is narrower. No reason to add a second ecosystem.
 - **Consume the SBOM rather than scan lockfiles again**: scanning lockfiles would just duplicate `cargo-audit` (Rust) and skip the .NET closure. Scanning the *SBOM* is what makes the artifact earn its keep and is the only way to reach the resolved NuGet/runtime graph and the *shipped* (not HEAD) state.
-- **Gate fail-fast in `build`**: the SBOM exists there, and failing before the approval-gated `sign` job wastes no reviewer time and never signs a vulnerable bundle.
+- **Gate in the isolated `sbom` job before signing**: generation and third-party scanning do not mutate the sealed unsigned bundle, and failure before the approval-gated `sign` job wastes no reviewer time or signing quota.
 - **Dormant-first**: before any published release, the monitor no-ops cleanly (notice + exit 0) rather than failing red. The first stable release activates the strict path automatically.
 
 ## Rejected alternatives
@@ -43,7 +43,7 @@ This ADR gives the SBOM a job by feeding it to **`osv-scanner`** (OSV.dev) at tw
 
 - A release can now be **blocked** by an OSV finding in either ecosystem; the escape hatch is a justified `osv-scanner.toml` entry (not disabling the gate).
 - Partial overlap with `cargo-audit` on the Rust side is accepted: the gate adds the .NET closure, and the monitor adds the shipped-vs-HEAD dimension neither `cargo-audit` nor Dependabot provide.
-- One new weekly workflow (cheap ubuntu) and one extra `build`-job step on releases. Only the monitor's isolated report job receives `issues: write`; release assets and osv-scanner remain in a Contents-read job. The release gate adds no new permissions.
+- One new weekly workflow (cheap ubuntu) and one separate Contents-read `sbom` job on releases. Only the monitor's isolated report job receives `issues: write`; release assets and osv-scanner remain read-only. The release gate adds no write permission.
 - The `sbom-vuln` issue is the maintainer's signal that a shipped release needs a patch release.
 
 ## Re-examination triggers

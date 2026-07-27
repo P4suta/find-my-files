@@ -16,7 +16,9 @@ Applying a USN batch to sorted structures (perm_name, FRN index; index/mod.rs `m
 ## Impact
 
 - Existing elements are not reordered. Because the id tie-break makes the sort result unique, byte-identity with the old code can be pinned in tests (random-batch comparison against a forward-merge reference)
-- In-place stat updates leave perm_size/perm_mtime locally stale-sorted (as before; under the purview of lazy permutation = ADR-0006)
+- In-place stat updates do not touch `perm_name`. They increment the dedicated
+  stat generation so a cached `perm_size`/`perm_mtime` is rebuilt before it can
+  serve another query (ADR-0006).
 
 ## Re-examination trigger
 

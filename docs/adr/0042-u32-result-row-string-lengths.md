@@ -1,6 +1,10 @@
 # ADR-0042: u32 result-row string lengths
 
-Date: 2026-07-26 / Status: Accepted.
+Date: 2026-07-26 / Status: Accepted. Superseded only in its version numbers by
+[ADR-0043](0043-ffi-allocation-owner-ids.md) (FFI ABI) and
+[ADR-0044](0044-cooperative-query-cancellation-and-presentation-basis.md) (pipe
+protocol and pipe name); the row layout decided here is unchanged. Current
+values are `fmf-contract::versions`, not this text.
 
 `FmfRow.name_len` and `parent_path_len` are `u32`; the row is 56 bytes with an explicit zero reserved tail word. This bumps both the FFI ABI and named-pipe protocol to 3 (`fmf-engine-v3`). Golden frames are intentionally recaptured.
 

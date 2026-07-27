@@ -11,6 +11,32 @@ The contract semantics are carried by **`contract/golden/`** at the repository r
 
 Additionally, limit the engine's internal OS-effect seams to **`SnapshotStore` / `JournalSource` (2 traits only)** (to push the volume worker's failure paths down into non-elevated, deterministic tests), and forbid additional porting beyond this cap.
 
+### Contract-change flow (one-directional radiation)
+
+`fmf-contract` is the **origin** of a contract change, never a downstream copy
+of a prose description. An intentional change radiates in exactly one direction
+and in exactly this order:
+
+1. **Edit `fmf-contract`.** The definition itself moves first — status codes,
+   opcodes, event kinds, wire PODs, QueryOptions, limits, version numbers, pipe
+   name. An incompatible wire change also moves the pipe name here, not only a
+   number.
+2. **Re-capture `contract/golden/`** under the explicit `FMF_BLESS=1` ritual
+   (`just contract-bless`). Ordinary runs never re-capture; they must match the
+   bytes already committed.
+3. **Regenerate the checked-in C# binding** with `just contract-gen`.
+4. **Require both-language suites green** — Rust (`just test`) and C#
+   (`just test-app`) pin the same corpus, plus the drift test and fmf-ffi's
+   independent literal value pins.
+
+The order is load-bearing and no step may be skipped: blessing before the
+definition moves seals the *old* bytes as the specification, and generating
+before blessing produces a binding that no captured frame proves. Prose that
+describes the contract is a **reader** of the crate, never an input to it — a
+document is allowed to fall out of date, whereas the crate cannot, because the
+generated binding, the golden corpus, and the value pins all fail when it does.
+The error-code table remains append-only with no renumbering.
+
 ## Rationale
 
 ### The duplication rationale was based on a misreading of Cargo
@@ -37,9 +63,8 @@ Generating the golden corpus "from the new contract crate" would bake generator 
 
 ## Impact
 
-- 1 new crate (fmf-contract). At adoption, **DLL name `fmf_engine`, pipe name `fmf-engine-v1`, ABI_VERSION=1, PROTOCOL_VERSION=1, FMFIDX04 were all bytes-unchanged** (no version bump). ADR-0023 later raised the pipe/ABI/protocol versions to 2; `fmf-contract` is the current-value source of truth.
+- 1 new crate (fmf-contract). At adoption, **DLL name `fmf_engine`, pipe name `fmf-engine-v1`, ABI_VERSION=1, PROTOCOL_VERSION=1, FMFIDX04 were all bytes-unchanged** (no version bump). Later ADRs have bumped these; the current values are `fmf-contract::versions`, which this ADR does not restate.
 - fmf-ffi's contract_tests is promoted from "duplicate equality pin" to "literal absolute-value pin + ABI layout pin" and lives on — an independent tripwire where a downstream test catches an accidental edit of the single source itself.
-- Canonical contract-change flow (one-directional radiation): docs/ARCHITECTURE.md (prose) → fmf-contract (definitions) → `FMF_BLESS=1` re-capture → `just contract-gen` → both-language tests green. The error-code table remains append-only / no renumbering as before.
 - C# decisions (user-confirmed): CountersData is also a generation target (counter additions auto-follow into C#); CancellationToken is fully propagated to `ISearchResult.GetRangeAsync` too (double defense with the epoch mechanism, fixed by a behavior test).
 - Migration is 11 stages (S0→S0.5→S1a→S1b→S2 strict order; S3⇔S4, S5a/S5b⇔S4/S4b may run in parallel). Each stage compiles standalone + all tests green, mergeable to main. fmf-core-touching stages (S1b/S3/S4/S4b) require `just perf-gate` green in an elevated shell as a merge condition.
 

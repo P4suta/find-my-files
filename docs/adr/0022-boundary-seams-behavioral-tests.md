@@ -1,10 +1,9 @@
 # ADR-0022: OS/shell/UI boundaries must use testable seams + behavioral tests
 
-Date: 2026-06-15 / Status: Adopted
-
-> Current-state amendment (2026-07-25): live UI automation is now a required
-> release/CI gate through `winapp ui`; it complements, rather than replaces,
-> the ViewModel/core behavioral tests below.
+Date: 2026-06-15 / Status: Adopted, extended in place — live UI automation and
+mutation testing were later promoted from supporting practice to required
+gates, which strengthens this decision rather than changing it. Tool versions
+are pinned in `mise.toml` and the tool configs, not here.
 
 ## Decision
 
@@ -22,8 +21,38 @@ Canonical patterns: `app/FindMyFiles/Engine/IEngineClient.cs` (Fake/Ffi/Pipe), `
 
 - New boundary code is required at review to have "seam + behavioral test" (construction-only tests are deemed insufficient).
 - UI-adjacent logic stays in ViewModels/core for deterministic unit coverage;
-  the published bundle is also driven end-to-end by `just ui-test`.
-- Mutation testing is used to detect vacuous tests (those that pass even when broken): Rust = `just mutants` (cargo-mutants), C# = `just stryker` (Stryker.NET). Informational for now; gated incrementally.
+  the published bundle is additionally driven end-to-end by live UI automation
+  (`just ui-test`), which is a required release/CI gate. It complements, and
+  never substitutes for, the ViewModel/core behavioral tests — an automated
+  click cannot assert an invariant the ViewModel does not expose.
+- Mutation testing is a required gate, not an advisory score, because it is the
+  only mechanism that detects vacuous tests (those that pass even when the code
+  is broken): Rust = `just mutants`, C# = `just stryker`, both = `just mutation`.
+  xtask owns the fixed invocations and canonical report parsing. The Rust run
+  is non-shuffled and must pass cargo-mutants' copied-tree baseline; C# first
+  passes the ordinary locked unit suite and Stryker's own initial run.
+- Policy is the exact canonical survivor identity, never a percentage.
+  Reviewed equivalent survivors live beside each tool config in
+  `engine/mutation-baseline.json` and
+  `app/FindMyFiles.Tests/mutation-baseline.json`, with a specific rationale per
+  accepted identity. The same files pin the exact sorted source-file inventory,
+  so a glob/config wiring omission cannot pass vacuously. For C#, xtask also
+  resolves every exact `mutate` entry and requires that set to equal the
+  baseline before Stryker starts. Stryker's whole-project JSON is accepted
+  only under a closed-world rule: outside-scope mutants must be `Ignored` for
+  the exact exclude-filter reason, and inside-scope `Ignored` is allowed only
+  for its exact redundant nested-block optimization (`Block removal mutation`
+  plus `Removed by block already covered filter`). Those optimizer identities
+  and all outside-scope status counts remain in `gate.json`; they are never
+  silently treated as killed mutants.
+- New survivors, disappeared accepted identities, and file-inventory drift all
+  require review. Malformed/missing JSON, duplicate keys or identities, an
+  unexpected exact report schema, a Stryker exit/report mismatch, Rust
+  timeouts, and C# timeout/no-coverage/non-redundant-ignored/non-terminal
+  outcomes fail.
+- The weekly/on-demand workflow runs Rust and C# independently without
+  `continue-on-error`. Stable release re-runs both gates on the exact immutable
+  source commit in a secretless job, and signing cannot start until it passes.
 - The C# coverage gate is raised incrementally from 15% (ratchet).
 
 ## Re-examination triggers

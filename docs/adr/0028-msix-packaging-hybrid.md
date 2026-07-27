@@ -1,6 +1,8 @@
 # ADR-0028: Do not distribute an MSIX
 
-Date: 2026-06-24 / Status: Rejected 2026-07-07
+Date: 2026-06-24 / Status: Accepted 2026-07-07. What was rejected is the MSIX
+hybrid the ADR was opened to evaluate; the decision recorded here — ship one
+signed ZIP and do not package — is in force.
 
 ## Decision
 
@@ -16,9 +18,6 @@ leaving the LocalSystem service outside the package.
   required by ADR-0017 and ADR-0027.
 - Maintaining a second installation shape duplicated setup, path, update, and
   uninstall behavior without improving the product.
-
-The abandoned implementation remains recoverable at
-`archive/msix-attempt-2026-07`; it is not a supported surface.
 
 ## Reconsider only when
 

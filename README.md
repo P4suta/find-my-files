@@ -15,7 +15,7 @@
 - Initial index by reading the NTFS $MFT directly (~seconds per volume)
 - Real-time NTFS updates from the USN journal
 - Multithreaded SIMD substring scan over an in-memory index (~100 MB per million files)
-- Pre-sorted indices: sorting a million results by name/size/date is instant
+- Name order is maintained continuously; size/date order is built lazily and cached
 - Native WinUI 3: Mica, consistent dark theme, Per-Monitor V2 DPI (no blur on mixed-DPI setups)
 
 ## What it deliberately does NOT do
@@ -27,10 +27,11 @@ Indexing file names only is *the* reason it's fast. Feature creep is a non-goal.
 
 Reading the NTFS Master File Table and USN journal requires elevated volume access.
 The first-run button uses one UAC prompt to register a hardened, on-demand
-`fmf-engine` service. After that the UI stays unprivileged and connects through
-an authorized-user named pipe; it may start or stop only that service, with no
-right to reconfigure or delete it. Explicit `--engine=inproc` remains an
-elevated diagnostic fallback. See [the security model](docs/SECURITY.md).
+service named `fmf-engine` (`sc query fmf-engine`), run from `fmf-service.exe`.
+After that the UI stays unprivileged and connects through an authorized-user
+named pipe; it may start or stop only that service, with no right to reconfigure
+or delete it. Explicit `--engine=inproc` remains an elevated diagnostic
+fallback. See [the security model](docs/SECURITY.md).
 
 By default, hidden/system files — and everything under hidden/system folders
 ($Recycle.Bin contents, `pagefile.sys`, `.git` internals…) — are excluded from
@@ -41,25 +42,33 @@ results. A setting brings them back instantly (they stay indexed).
 Toolchain is pinned via [mise](https://mise.jdx.dev/) (`mise.toml`), tasks run via `just`:
 
 ```
-mise install        # rust + dotnet toolchains
-just setup          # toolchain + git hooks (lefthook)
+mise install        # pinned toolchain and development tools (including just)
+just setup          # git hooks (lefthook)
+just doctor         # check the environment matches the pins
 just build          # engine (cargo, release)
-just test           # engine nextest suite + Rust doctests
 just service-dev    # run the engine service in the foreground (elevated)
 just index C:       # index a volume from the CLI (elevated terminal required)
 ```
 
+`just --list` is the entry point for every development task; each recipe carries
+its own description, so that menu — not a prose guide — is the reference. Run
+`just verify` (fmt + lint + Rust/C# tests + dependency gates) before pushing, and
+`just perf-gate` in an elevated, cool-machine shell if you touched `fmf-core`.
+Do not install project tools ad hoc: pin them in `mise.toml`, then `mise install`.
+
 `fmf --help` is the developer CLI reference. Versions are channel-aware
-(`dev`, `nightly`, `stable`).
+(`dev`, `nightly`, `stable`) and are derived automatically from
+[Conventional Commits](https://www.conventionalcommits.org/) — a lefthook
+`commit-msg` hook and a CI PR-title gate enforce the format, and nobody picks a
+version number by hand. See [docs/RELEASING.md](docs/RELEASING.md).
 
-Versioning and releases are automated from Conventional Commits — see
-[docs/RELEASING.md](docs/RELEASING.md) (and the nightly build channel).
-
-**New here?** Read [CONTRIBUTING](CONTRIBUTING.md), then the relevant
-[architecture](docs/ARCHITECTURE.md), [security model](docs/SECURITY.md), and
-[ADR](docs/adr/README.md) before changing structure. For a failure, start with
-`just doctor`, the F12 panel, `%APPDATA%\find-my-files\logs\app.log`, and
-`%ProgramData%\find-my-files\logs\engine.log`.
+**New here?** Read the [security model](docs/SECURITY.md) and the relevant
+[ADRs](docs/SUMMARY.md#design-decisions-adr) before changing structure; the engine
+contract itself is the `fmf-contract` crate, not a document. Contributions are
+Apache-2.0 and follow the [Code of Conduct](.github/CODE_OF_CONDUCT.md). For a
+failure, start with `just doctor`, the F12 panel,
+`%APPDATA%\find-my-files\logs\app.log`, and the rolling `engine.<date>.log` files
+under `%ProgramData%\find-my-files\logs\`.
 
 ## Architecture
 
@@ -70,17 +79,15 @@ WinUI 3 app (C#, unprivileged) ──named pipe──▶  fmf-service (Rust, Loc
        └─ FfiEngineClient ──P/Invoke──▶  fmf_engine.dll (in-proc fallback, elevated)
 ```
 
-See `docs/ARCHITECTURE.md` for the FFI contract and `docs/RESEARCH.md` for the verified
-technical groundwork (MFT/USN APIs, prior art, performance baselines).
+The engine contract — status codes, opcodes, wire structs, limits, protocol and
+service names — is the dependency-free `engine/crates/fmf-contract` crate. It is
+machine-readable, radiates the C# bindings, and is pinned by golden and drift
+tests (ADR-0018); there is no prose copy to consult. `docs/RESEARCH.md` holds the
+verified technical groundwork (MFT/USN APIs, prior art, performance baselines).
 
-## Documentation
-
-- **[Design docs](https://p4suta.github.io/find-my-files/book/)** — only the
-  canonical architecture, security, research, release procedure, and ADRs
-
-The design docs rebuild on every push to `main`; validate them and internal
-Rust doc comments locally with `just doc`. Implementation APIs are deliberately
-not published as a product surface.
+Canonical design docs are published in the
+[design book](https://p4suta.github.io/find-my-files/book/). Validate them and
+internal Rust docs with `just doc`; implementation APIs are not a product surface.
 
 ## License
 

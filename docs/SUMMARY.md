@@ -1,6 +1,5 @@
 # Summary
 
-- [Architecture](ARCHITECTURE.md)
 - [Security](SECURITY.md)
 - [Research](RESEARCH.md)
 - [Releasing](RELEASING.md)
@@ -31,10 +30,9 @@
 - [0022 — Boundary seams and behavioral tests](adr/0022-boundary-seams-behavioral-tests.md)
 - [0023 — First-class regex](adr/0023-regex-first-class.md)
 - [0024 — Removed non-elevated scope index](adr/0024-non-elevated-scope-index.md)
-- [0025 — Removed scope exclusion](adr/0025-scope-exclude-walk-prune.md)
 - [0026 — CLI surface](adr/0026-cli-surface-polish.md)
 - [0027 — On-demand service lifecycle](adr/0027-on-demand-service-lifecycle.md)
-- [0028 — MSIX hybrid rejected](adr/0028-msix-packaging-hybrid.md)
+- [0028 — Ship a ZIP, not an MSIX](adr/0028-msix-packaging-hybrid.md)
 - [0029 — CI signing pipeline](adr/0029-ci-signing-cka-pipeline.md)
 - [0030 — Tray-resident mode](adr/0030-tray-resident-mode.md)
 - [0031 — u32 Unix-seconds mtime](adr/0031-mtime-u32-unix-seconds.md)
@@ -52,3 +50,5 @@
 - [0043 — Monotonic FFI allocation-owner IDs](adr/0043-ffi-allocation-owner-ids.md)
 - [0044 — Cooperative query cancellation](adr/0044-cooperative-query-cancellation-and-presentation-basis.md)
 - [0045 — Elevated service dependent-load policy](adr/0045-elevated-service-dependent-load-policy.md)
+- [0046 — Change-to-screen latency budget](adr/0046-change-to-screen-latency-budget.md)
+- [0047 — NTFS grammar outside the Windows gate](adr/0047-ntfs-grammar-outside-the-windows-gate.md)

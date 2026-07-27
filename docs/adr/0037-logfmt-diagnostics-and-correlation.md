@@ -12,9 +12,9 @@ Date: 2026-06-30 / Status: Accepted (no wire-contract / golden / ABI change; the
 
 Logging was already disciplined — `tracing` + a non-blocking daily appender + a `DiagLayer` fanning WARN+ to the diag ring and the UI on the engine side ([ADR-0018](0018-contract-single-source.md)'s `degrade!`), and a hand-rolled `FileLog` with crash markers and exception funnels on the app side. But against industry-standard structured logging four gaps remained:
 
-1. **No retention cap (a real bug).** `tracing_appender::rolling::daily` never deletes old `engine.log.<date>` files — they accumulate forever. The app kept a single `.old` generation.
+1. **No retention cap (a real bug).** `tracing_appender::rolling::daily` never deleted the old dated engine-log files — they accumulated forever. The app kept a single `.old` generation.
 2. **Not structured.** Both sides wrote freeform human strings; `tracing`'s spans were wired but unused. Neither log was machine-parseable (grep/awk), and fields were not first-class.
-3. **No cross-process correlation.** A single user query produces lines in both `app.log` and `engine.log` (two processes on the pipe path, two files even in-process on the FFI path) with nothing tying them together.
+3. **No cross-process correlation.** A single user query produces lines in both `app.log` and the engine log (two processes on the pipe path, two files even in-process on the FFI path) with nothing tying them together.
 4. **No injection / redaction policy.** Query text and filenames — the product's *sensitive asset* (the whole index is filenames) — were logged verbatim, and nothing sanitised CR/LF or control characters out of values (log-injection / forged-line risk).
 
 ## Decision
@@ -53,7 +53,7 @@ The engine timestamp caches the local UTC offset once at process start (resolvin
 
 ## Consequences
 
-- **No wire-contract / golden / ABI change**; `init_diag` grows a `max_log_files` argument (internal). The engine `engine.log` filename gains a date (`engine.<date>.log`); F12 "open log folder" is unaffected, and `Tail` still reads the fixed `app.log`.
+- **No wire-contract / golden / ABI change**; `init_diag` grows a `max_log_files` argument (internal). The former fixed engine-log name gains a date (`engine.<date>.log`); F12 "open log folder" is unaffected, and `Tail` still reads the fixed `app.log`.
 - New deps: `Serilog` + `Serilog.Sinks.File` (managed-only, ~1 MB; bundle size unaffected). No new Rust dependency — the formatter is hand-rolled on `std` + the index's existing civil-date math.
 - A new counter is **not** added; no new `degrade!` path is introduced, so the `metrics.rs` / `COUNTER_NAMES` / `contract-gen` triple is untouched.
 

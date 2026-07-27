@@ -4,7 +4,7 @@ Date: 2026-06-11 / Status: Accepted (only the duplicated contract constants + va
 
 ## Decision
 
-Host the engine in a privileged service `fmf-service` (hosts fmf-core directly, LocalSystem), make the UI non-privileged (asInvoker), and connect over a named pipe. Wire definitions live in a new rlib `fmf-proto`, and `PipeEngineClient` becomes the third implementation of `IEngineClient`. The canonical spec is the "Pipe protocol" section of docs/ARCHITECTURE.md. The FFI (fmf_engine.dll) and in-proc paths persist for now (`--engine=inproc`, requires manual elevation).
+Host the engine in a privileged service `fmf-service` (hosts fmf-core directly, LocalSystem), make the UI non-privileged (asInvoker), and connect over a named pipe. Wire definitions live in a new rlib `fmf-proto`, and `PipeEngineClient` becomes the third implementation of `IEngineClient`. The canonical spec is the wire definition itself, not a prose copy of it (later moved below `fmf-proto` into the `fmf-contract` leaf crate — [ADR-0018](0018-contract-single-source.md)). The FFI (fmf_engine.dll) and in-proc paths persist for now (`--engine=inproc`, requires manual elevation).
 
 ## Rationale
 
@@ -16,7 +16,7 @@ Host the engine in a privileged service `fmf-service` (hosts fmf-core directly, 
 
 - COM / RPC (out-of-process) — registry registration, marshalling definitions, and elevation-boundary complexity; worse wire observability vs. a length-prefixed named pipe
 - gRPC / HTTP (localhost) — network stack drifts toward the "won't do" server features; dependency (tokio/tonic) clashes with fmf-core's synchronous threading; HTTP/2 overkill for local IPC
-- Shared memory + events — fastest page transfer, but self-designing lifetime/permissions/generation loses the "1 FFI function = 1 message" mapping; unneeded since the pipe round-trip has budget headroom (baseline in ARCHITECTURE.md latency-budget section)
+- Shared memory + events — fastest page transfer, but self-designing lifetime/permissions/generation loses the "1 FFI function = 1 message" mapping; unneeded since the pipe round-trip has budget headroom ([ADR-0046](0046-change-to-screen-latency-budget.md))
 - async runtime (tokio) — at most a few connections; blocking I/O + threads fit the existing design; only adds dependency and build time
 
 ### flush exposure surface (3 options)
@@ -39,10 +39,13 @@ MSIX/installer is deferred for this milestone (WindowsPackageType=None kept). Se
 - The 3 synchronous IEngineClient methods (ListVolumes/StartIndexing/GetStatus) become Task-returning (sync across the pipe = a violation of the UI-thread "must not freeze" rule)
 - The single-writer invariant extends across processes: `{index_dir}\.writer.lock` + `FMF_E_LOCKED=7`
 - Both the Rust and C# test suites pin identical golden frames (byte sequences), fixing wire drift the same way as contract_tests
-- Removal trigger for FfiEngineClient (--engine=inproc): completion of a one-release soak after service GA
+- `FfiEngineClient` (`--engine=inproc`) remains the explicit elevated diagnostic
+  fallback. The original one-release removal trigger is superseded by the
+  production transport policy: the pipe is the default and in-proc is retained
+  as an explicit elevated override rather than being removed.
 - drag-out (results→Explorer) is filed separately as a new feature outside this milestone (only the drop direction is resolved here)
 
-## Verification (measured 2026-06-11. Canonical numbers are the AGENTS.md performance pass-line and the ARCHITECTURE.md latency-budget section)
+## Verification (measured 2026-06-11. The canonical numbers are [ADR-0013](0013-measurement-discipline.md)'s pass line and [ADR-0046](0046-change-to-screen-latency-budget.md)'s latency budget)
 
 Measured: first index 2.31s/1,268,560 entries; USN→event 250.9ms;
 kill→restart→restore 1.25s; real-C search p99 ≤5.6ms; engine working set

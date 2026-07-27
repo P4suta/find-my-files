@@ -1,11 +1,10 @@
 # ADR-0026: `fmf` CLI gets first-class DevEx polish (still a developer tool)
 
-Date: 2026-06-20 / Status: Adopted
-
-> Current-state amendment (2026-07-26): `fmf` is a developer build artifact
-> under `build/engine`, not part of the end-user ZIP. Generated CLI Markdown and
-> its drift machinery remain removed; `fmf --help` is the reference when
-> working with the developer artifact, and completions are requested on demand.
+Date: 2026-06-20 / Status: Adopted. Superseded only in its distribution
+decisions by [ADR-0039](0039-cli-devex-pass-2.md): `fmf` ships as a developer
+build artifact, not inside the end-user ZIP, and the generated CLI Markdown and
+its drift machinery are gone. Everything else — the remit, the exit-code
+mapping, the JSON envelope, the flag surface — is in force.
 
 ## Decision
 
@@ -40,7 +39,7 @@ To let the example and the integration tests reuse the clap surface, `fmf-cli` b
 
 - `fmf-cli` is now lib + bin. Its unit tests run under the lib; `assert_cmd` behavioural tests cover the non-elevated surface (version/help/usage/`diag`/JSON error); volume/USN assertions stay behind `FMF_ADMIN_TESTS`.
 - The end-user bundle contains neither `fmf.exe` nor completion scripts.
-- The `--format json` payloads are a **versioned, not frozen** contract: additive fields keep `format_version`; a field changing meaning or being removed bumps it. Snapshot/behavioural tests pin the current shape.
+- The `--format json` payloads are a **versioned, not frozen** contract: additive fields keep `format_version`; a field changing meaning or being removed bumps it. Snapshot/behavioural tests pin the current shape. Version 2 replaces the misleading `diag.engine_log` file path with `diag.engine_log_dir`, matching the rolling log implementation.
 - New dev/runtime dependencies (anstream, anstyle, indicatif; dev-only clap_complete, clap-markdown, assert_cmd, predicates) pass `cargo deny`.
 
 ## Re-examination triggers

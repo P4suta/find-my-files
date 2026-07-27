@@ -48,8 +48,8 @@
       <h2>How it works</h2>
       <ul class="list">
         <li><strong>Initial index from the $MFT</strong> — reads the NTFS Master File Table directly; every file name on a volume in seconds.</li>
-        <li><strong>Updates via the USN journal</strong> — change notifications come from the USN change journal. No file watchers, no rescans; updates reach the UI in about a second.</li>
-        <li><strong>Multithreaded search</strong> — substring scan over an in-memory index. p99 ≤ 50 ms at a million files, 3+ characters.</li>
+        <li><strong>Updates via the USN journal</strong> — normal changes need neither per-file watchers nor full rescans and reach the UI in about a second. If journal continuity is lost, the index is rebuilt safely.</li>
+        <li><strong>Multithreaded search</strong> — substring scan over an in-memory index; millisecond results that keep up with typing, even at a million files.</li>
         <li><strong>Native WinUI 3</strong> — Mica, a dark theme, Per-Monitor V2 DPI.</li>
         <li><strong>Memory-lean</strong> — indexing file names only means about 100 MB per million files.</li>
         <li><strong>Privilege separation</strong> — MFT/USN access is split into a Windows service. The UI runs unprivileged and talks over a same-user-only named pipe.</li>
@@ -75,18 +75,14 @@
 
   <section id="perf">
     <div class="wrap">
-      <h2>Performance targets</h2>
-      <p class="section-sub">The numbers the final milestone must hit.</p>
-      <table class="perf">
-        <thead><tr><th>Metric</th><th>Target</th></tr></thead>
-        <tbody>
-          <tr><td class="metric">First index (real C:)</td><td><span class="num">250k ≈ 5s / 1M ≈ 60s</span></td></tr>
-          <tr><td class="metric">Search p99 (1M files, 3+ chars)</td><td><span class="num">≤ 50 ms</span></td></tr>
-          <tr><td class="metric">Change reflection (USN → UI)</td><td><span class="num">≤ 1 s</span></td></tr>
-          <tr><td class="metric">Snapshot restore → ready</td><td><span class="num">≤ 2 s</span></td></tr>
-          <tr><td class="metric">RAM (engine only, bytes/file)</td><td><span class="num">≤ 110 B</span></td></tr>
-        </tbody>
-      </table>
+      <h2>Performance</h2>
+      <p class="section-sub">No step where you wait.</p>
+      <ul class="list">
+        <li><strong>First index</strong> — seconds on a typical C: drive; later launches come straight back from a snapshot.</li>
+        <li><strong>Search</strong> — runs on every keystroke and answers in milliseconds, even at a million files.</li>
+        <li><strong>Update latency</strong> — a file you just created shows up almost immediately.</li>
+      </ul>
+      <p class="note">The exact targets and their measurement conditions are defined by the repository's regression gates and checked on every release.</p>
     </div>
   </section>
 
@@ -104,12 +100,12 @@
   <section id="start">
     <div class="wrap">
       <h2>Get started</h2>
-      <p class="section-sub">Toolchain pinned via mise, tasks run with just.</p>
-<pre class="arch">mise install        <span class="dim"># rust + dotnet</span>
-just setup          <span class="dim"># toolchain + git hooks</span>
-just build          <span class="dim"># engine (cargo, release)</span>
-just service-install  <span class="dim"># register the service (elevated, once)</span></pre>
-      <p class="note">Prebuilt binaries are on the <a href="https://github.com/P4suta/find-my-files/releases">Releases</a> page.</p>
+      <p class="section-sub">Windows 10/11 (NTFS). Unzip, run, and approve one UAC prompt the first time to register the service.</p>
+      <div class="cta">
+        <a href="https://github.com/P4suta/find-my-files/releases">Download (Releases)</a>
+        <a href="https://github.com/P4suta/find-my-files#building">Build from source</a>
+      </div>
+      <p class="note">Build-from-source instructions live in the README in the GitHub repository.</p>
     </div>
   </section>
 </main>

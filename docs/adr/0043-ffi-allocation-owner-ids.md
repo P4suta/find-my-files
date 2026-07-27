@@ -1,6 +1,10 @@
 # ADR-0043: Monotonic FFI allocation-owner IDs
 
-Date: 2026-07-26 / Status: Accepted.
+Date: 2026-07-26 / Status: Accepted. Superseded only in its version numbers by
+[ADR-0044](0044-cooperative-query-cancellation-and-presentation-basis.md), which
+raised the FFI ABI again; the owner-ID ownership rule and the descriptor layouts
+decided here are unchanged. Current values are `fmf-contract::versions`, not
+this text.
 
 `FmfPage` and `FmfBlob` carry a nonzero `owner_id: u64`. Their free exports
 accept only that ID:
