@@ -375,8 +375,11 @@ impl PipeListener {
     }
 }
 
+// `pub(crate)` only so the elevated data-root tests in `security` can reuse the
+// ephemeral-account and impersonation fixtures rather than growing a second,
+// separately-audited copy of "create a real standard user".
 #[cfg(test)]
-mod admin_security_tests {
+pub(crate) mod admin_security_tests {
     use std::io::{self, Write as _};
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
     use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -486,14 +489,14 @@ mod admin_security_tests {
         )
     }
 
-    struct TemporaryLocalUser {
+    pub struct TemporaryLocalUser {
         name_w: Vec<u16>,
         password_w: Vec<u16>,
         deleted: bool,
     }
 
     impl TemporaryLocalUser {
-        fn create() -> Self {
+        pub fn create() -> Self {
             for _ in 0..8 {
                 // Twenty characters keeps compatibility with every supported
                 // local-account API while PID + CSPRNG prevents collisions
@@ -540,7 +543,7 @@ mod admin_security_tests {
             panic!("could not allocate a unique ephemeral local-account name");
         }
 
-        fn logon(&mut self) -> OwnedHandle {
+        pub fn logon(&mut self) -> OwnedHandle {
             let domain_w = wide(&computer_name());
             let mut token = std::ptr::null_mut();
             let ok = unsafe {
@@ -575,7 +578,7 @@ mod admin_security_tests {
             status
         }
 
-        fn remove(mut self) {
+        pub fn remove(mut self) {
             let status = self.delete_inner();
             assert!(
                 status == NERR_Success || status == NERR_UserNotFound,
@@ -647,7 +650,7 @@ mod admin_security_tests {
         sid
     }
 
-    fn with_impersonated_user<T>(token: &OwnedHandle, operation: impl FnOnce() -> T) -> T {
+    pub fn with_impersonated_user<T>(token: &OwnedHandle, operation: impl FnOnce() -> T) -> T {
         let impersonated = unsafe { ImpersonateLoggedOnUser(token.as_raw_handle().cast()) };
         assert_ne!(
             impersonated,

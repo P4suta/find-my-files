@@ -320,25 +320,29 @@ fn provenance_match_never_repairs_a_drifted_root_acl_in_place() {
     );
 }
 
+/// `FILE_DELETE_CHILD` is rotated out, not failed closed — and that is the
+/// correct guarantee, not a concession.
+///
+/// Windows buckets share access into read (`FILE_READ_DATA`/`FILE_EXECUTE`),
+/// write (`FILE_WRITE_DATA`/`FILE_APPEND_DATA`) and delete (`DELETE`).
+/// `FILE_DELETE_CHILD` is in none of them, so a handle holding only that right
+/// does not participate in sharing at all and *no* share mode can exclude it.
+/// This test asserted a sharing violation and had never run; it could not have
+/// passed. Its sibling holding `DELETE` — which does participate — still does
+/// fail closed, so the two behaviours are genuinely different and
+/// `docs/SECURITY.md` threat 7 records which right gets which.
+///
+/// That rotation is *sufficient* is measured, not assumed:
+/// `security::tests::a_delete_child_handle_keeps_the_quarantined_object_and_never_reaches_the_new_root`
+/// impersonates a real standard user and shows the capability follows the
+/// object it was opened on — the squatter still deletes inside the quarantined
+/// directory and is denied on the fresh root, which admits only SYSTEM and
+/// Administrators.
 #[test]
 #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS=1"]
-fn preopened_delete_child_handle_blocks_root_adoption() {
+fn preopened_delete_child_handle_is_rotated_out_of_the_privileged_name() {
     require_admin_gate();
-    let anchor = tempfile::tempdir().expect("anchor");
-    let root = anchor.path().join("find-my-files");
-    std::fs::create_dir(&root).expect("attacker-created root");
-    let mutation = open_directory_handle(&root, FILE_DELETE_CHILD);
-    let stale_identity = file_identity(&mutation);
-
-    let error = TrustedDataRoot::create_or_replace_for_test(&root, &data_dir_sddl())
-        .expect_err("a live delete-child handle must fail closed");
-    assert_eq!(error.raw_os_error(), Some(32), "{error}");
-    let still_fixed = open_directory_handle(&root, FILE_READ_ATTRIBUTES);
-    assert_eq!(
-        file_identity(&still_fixed),
-        stale_identity,
-        "a blocked install must neither trust nor mutate the attacker object"
-    );
+    assert_preopened_security_handle_is_rotated(FILE_DELETE_CHILD, "FILE_DELETE_CHILD");
 }
 
 #[test]

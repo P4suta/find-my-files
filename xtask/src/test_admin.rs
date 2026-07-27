@@ -68,6 +68,13 @@ const ADMIN_TESTS: &[AdminTest] = &[
         binary_id: "fmf-core",
         name: "usn::session::tests::usn_quiet_journal_read_returns_bounded",
     },
+    // Impersonates a real standard user to measure what a squatter's
+    // delete-child handle can still reach after install rotates its object out.
+    AdminTest {
+        source: "engine/crates/fmf-service/src/security.rs",
+        binary_id: "fmf-service",
+        name: "security::tests::a_delete_child_handle_keeps_the_quarantined_object_and_never_reaches_the_new_root",
+    },
     // docs/SECURITY.md declares this one the required machine-security gate:
     // real Windows tokens, a real second local user, three pipe boundaries.
     AdminTest {
@@ -96,7 +103,7 @@ const ADMIN_TESTS: &[AdminTest] = &[
     AdminTest {
         source: "engine/crates/fmf-service/tests/security_admin.rs",
         binary_id: "fmf-service::security_admin",
-        name: "preopened_delete_child_handle_blocks_root_adoption",
+        name: "preopened_delete_child_handle_is_rotated_out_of_the_privileged_name",
     },
     AdminTest {
         source: "engine/crates/fmf-service/tests/security_admin.rs",

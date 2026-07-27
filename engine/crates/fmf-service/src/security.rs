@@ -2613,6 +2613,18 @@ mod tests {
     // these pin was invisible for exactly as long as the only tests that
     // reached the walk needed an elevated session to run at all.
 
+    /// Fails closed. `#[ignore]` is what *skips* an elevated test; reaching the
+    /// body without the arming variable means the harness was invoked outside
+    /// `just test-admin`, and a silent early return would be indistinguishable
+    /// from a boundary that was actually proven.
+    fn require_admin_gate() {
+        assert_eq!(
+            std::env::var("FMF_ADMIN_TESTS").as_deref(),
+            Ok("1"),
+            "this ignored machine-security test must run only through `just test-admin`"
+        );
+    }
+
     fn own_tree_sddl() -> String {
         let user = current_user_sid().expect("own sid");
         format!("O:{user}G:{user}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{user})")
@@ -2791,6 +2803,110 @@ mod tests {
             std::fs::read(index.join("c.fmfidx")).expect("index payload still readable"),
             b"payload"
         );
+    }
+
+    /// DEV-322 #1, measured rather than argued.
+    ///
+    /// A handle holding only `FILE_DELETE_CHILD` cannot be excluded by any share
+    /// mode — Windows buckets share access into read/write/delete and that right
+    /// is in none of them — so `create_or_replace_for_test` cannot fail closed
+    /// on one, and does not. The open question was whether rotating the squatted
+    /// object out of the privileged name is *sufficient*, which only a real
+    /// standard-user token can answer: in the arbitrary-parent seam this process
+    /// is the owner and holds full control, so any attempt it makes would
+    /// succeed for the wrong reason.
+    ///
+    /// The answer is that the handle is bound to the object, not the name. It
+    /// keeps its capability over the quarantined directory it was opened on, and
+    /// has none over the fresh root, whose descriptor admits only SYSTEM and
+    /// Administrators.
+    #[test]
+    #[ignore = "creates a real local account and impersonates it; gated by FMF_ADMIN_TESTS=1"]
+    fn a_delete_child_handle_keeps_the_quarantined_object_and_never_reaches_the_new_root() {
+        use std::os::windows::io::FromRawHandle as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+
+        use crate::pipe::admin_security_tests::{TemporaryLocalUser, with_impersonated_user};
+
+        const FILE_DELETE_CHILD: u32 = 0x0000_0040;
+
+        fn open_for(path: &Path, access: u32) -> io::Result<std::fs::File> {
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+            // SAFETY: `wide` is NUL-terminated and outlives the call; optional
+            // pointers are null and the handle is checked before ownership.
+            let handle = unsafe {
+                CreateFileW(
+                    wide.as_ptr(),
+                    access,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(last_error());
+            }
+            // SAFETY: one owned kernel handle, transferred exactly once.
+            Ok(unsafe { std::fs::File::from_raw_handle(handle.cast()) })
+        }
+
+        require_admin_gate();
+        let anchor = tempfile::tempdir().expect("anchor");
+        // The squatter needs somewhere it can create the fixed name. Users, not
+        // a looked-up SID: the ephemeral account is a member and this is a temp
+        // directory that exists for the length of the test.
+        set_handle_security(
+            &open_for(anchor.path(), SECURITY_WRITE_ACCESS).expect("anchor handle"),
+            "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;BU)",
+        )
+        .expect("let the ephemeral user write into the anchor");
+
+        let mut user = TemporaryLocalUser::create();
+        let token = user.logon();
+        let root = anchor.path().join("find-my-files");
+
+        // 1. The squatter creates the fixed name, puts something in it, and
+        //    keeps a delete-child handle open across the whole install.
+        let stale = with_impersonated_user(&token, || {
+            std::fs::create_dir(&root).expect("squatted root");
+            std::fs::write(root.join("loot"), b"x").expect("squatted child");
+            open_for(&root, FILE_DELETE_CHILD).expect("delete-child handle")
+        });
+
+        // 2. Install proceeds — it cannot fail closed on this right — and
+        //    rotates the squatted object out of the privileged name.
+        let trusted = TrustedDataRoot::create_or_replace_for_test(&root, &data_dir_sddl())
+            .expect("a delete-child handle cannot be excluded by share mode");
+        let quarantine = trusted
+            .quarantined_root()
+            .expect("the squatted object must be rotated out")
+            .to_path_buf();
+        trusted
+            .atomic_write("service.json", b"{}", &data_dir_sddl())
+            .expect("publish into the fresh root");
+
+        // 3. What the squatter can still do, and what it cannot.
+        with_impersonated_user(&token, || {
+            std::fs::remove_file(quarantine.join("loot"))
+                .expect("the capability follows the object it was opened on");
+
+            let denied = open_for(&root.join("service.json"), DELETE_ACCESS)
+                .expect_err("the fresh root must be unreachable");
+            assert_eq!(denied.raw_os_error(), Some(5), "{denied}");
+
+            let listing =
+                std::fs::read_dir(&root).expect_err("nor may it even enumerate the fresh root");
+            assert_eq!(listing.raw_os_error(), Some(5), "{listing}");
+        });
+
+        drop(stale);
+        drop(trusted);
+        user.remove();
     }
 
     /// Both descriptors below were observed on this machine from the *same*
