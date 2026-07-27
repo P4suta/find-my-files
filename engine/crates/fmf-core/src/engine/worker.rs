@@ -328,6 +328,17 @@ impl Engine {
                                     "deferred-name MFT reads failed — authoritative live metadata fallback was used"
                                 );
                             }
+                            if stats.deferred_stat_failures > 0 {
+                                Counters::add(
+                                    &self.metrics.counters.stat_fetch_failures,
+                                    stats.deferred_stat_failures,
+                                );
+                                tracing::warn!(
+                                    volume = %label,
+                                    failures = stats.deferred_stat_failures,
+                                    "deferred-pass size lookups failed — rows published with the size their base record proves"
+                                );
+                            }
                             self.metrics.record_scan(ScanTrace {
                                 volume: label.clone(),
                                 source: "scan".to_string(),

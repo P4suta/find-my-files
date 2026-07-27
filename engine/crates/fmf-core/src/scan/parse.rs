@@ -188,6 +188,9 @@ pub(super) struct ParsedBatch {
     /// Deferred-pass disk reads that failed (`LazyRecordReader`) — folded
     /// into `ScanStats::deferred_name_read_failures` at append time.
     pub(super) deferred_name_read_failures: u64,
+    /// Deferred-pass objects the live source could not size — folded into
+    /// `ScanStats::deferred_stat_failures` at append time.
+    pub(super) deferred_stat_failures: u64,
 }
 
 impl ParsedBatch {
@@ -439,6 +442,7 @@ fn append_batches_bounded(
         stats.extension_records += batch.extension_records;
         stats.skipped_no_name += batch.skipped_no_name;
         stats.deferred_name_read_failures += batch.deferred_name_read_failures;
+        stats.deferred_stat_failures += batch.deferred_stat_failures;
         for (reference, range) in batch.deferred {
             let slot = arena.try_push_bounded(&batch.rec_pool[range], max_arena_bytes);
             if slot.is_none() {
@@ -1207,12 +1211,39 @@ mod tests {
             [b"live-first.txt".to_vec(), b"live-second.txt".to_vec()]
         );
 
+        // An object the live source can name but cannot size is the
+        // `\$Extend\$ObjId` shape: past `FIRST_NORMAL_RECORD`, carrying an
+        // $ATTRIBUTE_LIST, and refused by `OpenFileById` on every real volume.
+        // The row must still be published — with the size its base record
+        // proves — because one unsizable object must not cost the whole index.
+        let unsizable = crate::usn::MetadataSource::map_with_links(
+            HashMap::new(),
+            HashMap::from([(
+                reference,
+                vec![crate::usn::LinkInfo {
+                    parent_frn: frn(7),
+                    name: utf16("live-first.txt"),
+                }],
+            )]),
+        );
+        let degraded =
+            super::super::deferred::resolve_deferred(context!(&unsizable), &deferred).unwrap();
+        assert_eq!(degraded[0].deferred_stat_failures, 1);
+        let degraded_names: Vec<Vec<u8>> = degraded[0]
+            .metas
+            .iter()
+            .map(|meta| name_of(&degraded[0], meta).to_vec())
+            .collect();
+        assert_eq!(degraded_names, [b"live-first.txt".to_vec()]);
+
+        // A name, by contrast, is not optional: with no authoritative link set
+        // the row cannot be published at all, so this one stays fatal.
         let unavailable = crate::usn::MetadataSource::none();
         assert!(matches!(
             super::super::deferred::resolve_deferred(context!(&unavailable), &deferred),
             Err(super::super::deferred::DeferredError::Incomplete(found))
                 if found.reference == reference
-                    && found.cause == crate::mft::IncompleteCause::StatUnavailable
+                    && found.cause == crate::mft::IncompleteCause::LinkSetUnavailable
         ));
 
         stop.store(true, std::sync::atomic::Ordering::Relaxed);

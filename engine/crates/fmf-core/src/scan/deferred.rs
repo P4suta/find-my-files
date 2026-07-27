@@ -647,13 +647,25 @@ fn resolve_chunk(
                 IncompleteCause::AttributesMissing,
             ));
         };
-        let Some((size, mtime)) = metadata.stat(reference) else {
-            return Err(ChunkGiveUp::incomplete(
-                reference,
-                IncompleteCause::StatUnavailable,
-            ));
+        // The live source is the authoritative size/mtime for a spilled $DATA,
+        // but "no size" is a property of one object and must never decide the
+        // fate of the volume. `OpenFileById` cannot open NTFS metadata files,
+        // and `\$Extend\$ObjId`/`$Quota`/`$Reparse` all live past
+        // `FIRST_NORMAL_RECORD` *and* carry an $ATTRIBUTE_LIST, so every real
+        // volume reaches this line with an unanswerable object. A file deleted
+        // between the $MFT snapshot and this query is unanswerable too.
+        //
+        // `parse.rs` already makes this trade for the non-deferred path:
+        // publish the record with the size it can prove (0) rather than refuse
+        // the index. The base record's $STANDARD_INFORMATION is present either
+        // way, so only the size degrades — the mtime stays authoritative.
+        // Counted so a flood, which is a real problem, stays visible.
+        let attrs = if let Some((size, mtime)) = metadata.stat(reference) {
+            attrs.with_stat(size, mtime)
+        } else {
+            out.deferred_stat_failures += 1;
+            attrs
         };
-        let attrs = attrs.with_stat(size, mtime);
         let resolved =
             resolve_attr_list_names(&f, sources, &mut readers.extension, &mut readers.stream);
         if let Some(names) = resolved {

@@ -86,6 +86,12 @@ pub struct ScanStats {
     /// Deferred-pass targeted MFT reads that failed before the authoritative
     /// live-metadata fallback ran.
     pub deferred_name_read_failures: u64,
+    /// Deferred-pass objects the live metadata source could not size, so the
+    /// row was published with the size its base record proves. Non-zero on
+    /// every real volume: NTFS metadata files past `FIRST_NORMAL_RECORD`
+    /// (`\$Extend\$ObjId` and friends) cannot be opened by file id. A large
+    /// count means something else — sharing violations or a failing device.
+    pub deferred_stat_failures: u64,
 }
 
 /// Full initial scan: stream the volume's $MFT and build the in-memory

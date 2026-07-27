@@ -65,8 +65,6 @@ pub enum IncompleteCause {
     /// The record parsed, but carried no usable $`STANDARD_INFORMATION` /
     /// $`FILE_NAME` attribute set.
     AttributesMissing,
-    /// The live metadata source could not answer size/mtime for the object.
-    StatUnavailable,
     /// A resolved link could not be added to the batch (over-long name, or a
     /// batch bound reached) — the object's path set would be short one entry.
     LinkRejected,
@@ -82,7 +80,6 @@ impl std::fmt::Display for IncompleteCause {
             Self::MalformedRecord => "the record failed signature/fixup/attribute validation",
             Self::ReferenceMismatch => "the record belongs to a different object generation",
             Self::AttributesMissing => "the record carries no usable attribute set",
-            Self::StatUnavailable => "the live metadata source returned no size/mtime",
             Self::LinkRejected => "a resolved link did not fit the batch",
             Self::LinkSetUnavailable => "no authoritative hard-link set is available",
         })
