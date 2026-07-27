@@ -61,6 +61,12 @@ fn build_index(drive: &str, ctx: Ctx) -> Result<VolumeIndex, Box<dyn std::error:
             s.peak_working_set_bytes as f64 / (1024.0 * 1024.0),
             per_entry
         );
+        if s.unresolved_parents > 0 {
+            eprintln!(
+                "dropped {} rows whose parent the scan never saw (a service scan's USN replay restores whichever still exist)",
+                s.unresolved_parents
+            );
+        }
     }
     Ok(idx)
 }

@@ -289,6 +289,7 @@ pub fn scan_volume_cancellable(
     };
     stats.elapsed_build_ms = finish.build_ms;
     stats.elapsed_sort_ms = finish.sort_ms;
+    stats.unresolved_parents = finish.unresolved_parents;
     stats.elapsed_total_ms = t0.elapsed().as_millis() as u64;
     stats.peak_working_set_bytes = peak_working_set();
     Ok((idx, stats))
@@ -331,7 +332,15 @@ mod tests {
         use crate::usn::apply::LinkSnapshot;
 
         require_admin_gate();
-        let (index, _) = scan_volume("C:").expect("streaming scan");
+        let (index, stats) = scan_volume("C:").expect("streaming scan");
+        assert_eq!(
+            stats.unresolved_parents, 0,
+            "this elevated gate pins the drop path quiet on a quiescent volume: a scan of an \
+             otherwise idle machine should never lose a parent. A nonzero count here means a \
+             systematic source (that is how the `$Extend` records were caught), not the handful \
+             of transient mid-scan creates/deletes the path exists for — rerun once to rule out \
+             real concurrent churn before investigating, and never relax this to a threshold."
+        );
         let live = crate::usn::MetadataSource::open_volume("C:").expect("live metadata source");
         let mut checked = 0u64;
         let mut matched = 0u64;
@@ -341,9 +350,16 @@ mod tests {
             checked += 1;
             let reference = index.frn(entry).0;
             let parent = index.parent(entry);
-            if parent == crate::index::NO_PARENT {
-                continue;
-            }
+            // Not a skip: a freshly built index cannot legally hold a
+            // non-root `NO_PARENT` row. `unresolved_parents > 0` forces
+            // compaction before publish (index/builder.rs), so every
+            // parentless row is gone by the time the index exists — the old
+            // `continue` here could only ever have masked a defect.
+            assert_ne!(
+                parent,
+                crate::index::NO_PARENT,
+                "published initial index must be a rooted forest — entry {entry} has no parent"
+            );
             let parent_reference = index.frn(parent).0;
             match live.links(reference) {
                 LinkSnapshot::Present(links) => {

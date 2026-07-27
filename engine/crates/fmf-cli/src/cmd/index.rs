@@ -27,6 +27,7 @@ pub fn spike(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
             "deferred_names": s.deferred_names,
             "extension_records": s.extension_records,
             "pipeline_fallbacks": s.pipeline_fallbacks,
+            "unresolved_parents": s.unresolved_parents,
             "peak_working_set_bytes": s.peak_working_set_bytes,
         }));
     }
@@ -47,6 +48,7 @@ pub fn spike(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
     println!("deferred records     : {}", s.deferred_names);
     println!("extension records    : {}", s.extension_records);
     println!("pipeline fallbacks   : {}", s.pipeline_fallbacks);
+    println!("unresolved parents   : {}", s.unresolved_parents);
     println!(
         "peak working set     : {:.1} MiB",
         s.peak_working_set_bytes as f64 / (1024.0 * 1024.0)

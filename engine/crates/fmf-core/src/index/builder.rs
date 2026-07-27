@@ -551,6 +551,7 @@ impl VolumeIndexBuilder {
                             // real defect (that is how the `$Extend` records
                             // were caught), so the count is a counter and a
                             // warning, and the elevated real-volume gate
+                            // `scan::tests::streaming_scan_matches_live_exact_records`
                             // asserts it stays zero.
                             None => *resolved = NO_PARENT,
                         }
