@@ -27,13 +27,6 @@ setup:
 doctor:
     cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- doctor
 
-# Live GitHub security audit for the privileged performance instrument. Requires
-# `gh` authenticated as an organization owner; a user-owned repository fails.
-[group('setup')]
-[doc('Audit the GitHub-side setup of the privileged performance instrument (org owner only)')]
-performance-doctor:
-    cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- performance-doctor
-
 # ── Daily loop ───────────────────────────────────────────────────────────
 
 # Type-check without codegen — the fast inner loop
@@ -360,7 +353,9 @@ bench-check drive="C:":
     cargo run --locked -- perf-real-check {{drive}}
 
 # (Re)record the committed real-volume baseline. The candidate carries its
-# measurement identity and is atomically promoted only after postflight.
+# measurement identity and is atomically promoted only after postflight. Since
+# ADR-0048 there is no CI baseline-proposal path: record here on the reference
+# machine and land engine/benches/baseline.json through an ordinary PR.
 [group('bench')]
 [working-directory: 'xtask']
 bench-baseline drive="C:":
@@ -386,8 +381,12 @@ bench-micro-baseline:
 bench-micro-check:
     cargo run --locked -- perf-micro-check
 
-# Full performance gate before merging fmf-core changes. Each half performs its
-# own compile/preflight/monitor/postflight sequence; just cannot dedupe it.
+# The performance gate. Run it before merging fmf-core changes AND, since
+# ADR-0048 retired the CI measurement chain, by hand on the reference machine
+# before approving a release's `sign` job — it is the release performance gate,
+# not a mechanical precondition CI can enforce (DEV-287/DEV-321). Each half
+# performs its own compile/preflight/monitor/postflight sequence; just cannot
+# dedupe it.
 [group('bench')]
 perf-gate: bench-check bench-micro-check
 
@@ -472,9 +471,10 @@ clean-temp:
 
 # NOTE: there is intentionally no `just release` recipe. Versioning, the
 # CHANGELOG and the vX.Y.Z tag are owned by release-please (Conventional Commits
-# → an auto-maintained Release PR; merging it cuts the tag, whose completed
-# exact-tag performance gate dispatches release.yml). Humans never hand-pick or
-# hand-edit a version. See ADR-0035.
+# → an auto-maintained Release PR; merging it cuts the tag, and release-please.yml
+# then dispatches release.yml from protected main with that exact tag, commit,
+# and draft release ID). Humans never hand-pick or hand-edit a version.
+# See ADR-0035 and ADR-0048.
 
 # Print the canonical channel-aware build version (the FMF_BUILD_VERSION format).
 # dev/nightly/stable; nightly needs --date. Used by nightly.yml + release.yml.
