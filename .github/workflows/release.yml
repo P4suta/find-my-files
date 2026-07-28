@@ -1,7 +1,25 @@
-# Called from the trusted default-branch performance-release.yml only after an
-# exact-tag gate completes, then split at each
+# Dispatched directly from protected main: normally by release-please.yml's
+# `dispatch-release` job right after it cuts the tag and resolves the exact draft,
+# and manually (`gh workflow run release.yml --ref main …`) only to recover a cut
+# whose automatic dispatch failed. There is no tag-push, workflow_run, or
+# rehearsal entry point.
+#
+# `workflow_dispatch` loads workflow YAML from the *selected ref*, so selecting a
+# non-main ref would execute that ref's copy of this file. The secret boundary is
+# therefore not this file: the `release` and `release-please` environments both
+# restrict deployments to protected `main`, so an off-main dispatch reaches no
+# signing credential, no App token, and no publication authority. `preflight`
+# additionally refuses any ref but `refs/heads/main` before another job starts,
+# and every later job revalidates the same identities for itself. A tag
+# identifies build data, never workflow code. (ADR-0048)
+#
+# The run is then split at each
 # privilege boundary so sensitive authority touches the smallest possible surface:
 #
+#   preflight -> API-only and secretless. Binds this dispatch to the exact tag,
+#              immutable commit, and numeric draft release before any other job
+#              starts, and records the triggering actor — the primary
+#              authorization fact of a dispatched release.
 #   build   -> assembles and exactly seals the unsigned distributable bundle,
 #              then uploads the bundle and its manifest together. Holds NO
 #              secrets and only a read token.
@@ -24,7 +42,7 @@
 #   package -> under a read-only token, re-verifies the artifact handoff, zips +
 #              checksums it (`just package`), and uploads one immutable asset set.
 #   publish -> downloads only that completed asset set; trusted workflow code
-#              binds exact target/controller/release/performance identities and
+#              binds exact target/controller/release/actor identities and
 #              all asset/manifest digests into a custom keyless attestation, adds
 #              SBOM attestations, then publishes the exact numeric draft ID. It
 #              checks out and executes no repository build code.
@@ -33,9 +51,9 @@
 # eSigner uses four `release` environment secrets (ES_USERNAME / ES_PASSWORD /
 # CREDENTIAL_ID / ES_TOTP_SECRET). The App credentials remain scoped to the
 # `release-please` environment and are referenced only by publication.
-# Signing is gated at publish: a real run (publish=true) re-verifies the bundle is
-# validly signed and FAILS before publishing the existing draft if it is not, so
-# a missing/misconfigured secret can never ship an unsigned release unnoticed.
+# Signing is gated at publish: the run re-verifies the bundle is validly signed
+# and FAILS before publishing the existing draft if it is not, so a
+# missing/misconfigured secret can never ship an unsigned release unnoticed.
 # Human procedure lives in docs/RELEASING.md; rationale is
 # in docs/adr/0020-code-signing-provider.md (provider/cert) and
 # docs/adr/0029-ci-signing-cka-pipeline.md (official Action, this split pipeline;
@@ -43,14 +61,13 @@
 #
 # Verify a download with `gh attestation verify <zip> --repo P4suta/find-my-files`.
 name: release
-run-name: release publish ${{ inputs.tag_name }} ${{ inputs.commit_sha }}
+# This exact string is the dedupe contract: release-please.yml's dispatcher lists
+# this workflow's runs and refuses to start a second one whose displayTitle already
+# owns the same tag/commit/release triple.
+run-name: release publish ${{ inputs.tag_name }} ${{ inputs.commit_sha }} release ${{ inputs.release_id }}
 
 on:
-  # `workflow_run` loads performance-release.yml from the default branch; its
-  # API-only authorization job calls this reusable workflow from the same trusted
-  # controller commit. A tag can therefore identify build data, never workflow
-  # code. There is intentionally no workflow_dispatch or tag-push entry point.
-  workflow_call:
+  workflow_dispatch:
     inputs:
       tag_name:
         description: "Exact Release Please version tag to publish"
@@ -60,18 +77,10 @@ on:
         description: "Exact immutable tag commit to build and publish"
         required: true
         type: string
-      performance_run_id:
-        description: "Exact successful performance-gate run"
-        required: true
-        type: string
       release_id:
         description: "Exact existing Release Please draft release ID"
         required: true
         type: string
-      publish:
-        description: "Must be true; retained as an explicit irreversible-action signal"
-        required: true
-        type: boolean
 # Stable releases are globally serialized so two tags cannot both pass the
 # monotonic-version preflight and race to become Latest.
 concurrency:
@@ -103,13 +112,121 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # 0) API-only, secretless admission control. A dispatched release is startable
+  #    by anyone holding Actions:write, so the cheapest possible job binds the
+  #    dispatch to one exact tag/commit/draft identity and names its actor before
+  #    the 60-minute build and the 16-shard mutation gate are allowed to run.
+  #    Every later job still revalidates these facts for itself; this job narrows
+  #    the window, it does not replace them.
+  # ---------------------------------------------------------------------------
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # The trusted controller is on main; the Release Please tag is inert data.
+      # Bind both controller and target before any repository-local code exists.
+      - name: Bind the dispatch to the exact draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Publishing requires an exact vX.Y.Z tag, got '$env:TAG'."
+          }
+          if ($env:GITHUB_REF -cne "refs/heads/main") {
+            throw "Release controller ref '$env:GITHUB_REF' is not protected main."
+          }
+          if ($env:GITHUB_EVENT_NAME -cne "workflow_dispatch") {
+            throw "Release controller event '$env:GITHUB_EVENT_NAME' is not a direct dispatch."
+          }
+          $controllerSha = $env:GITHUB_SHA.ToLowerInvariant()
+          if ($controllerSha -cnotmatch '^[0-9a-f]{40}$') {
+            throw "Release controller SHA '$controllerSha' is not an immutable commit identity."
+          }
+          $workflowSha = $env:GITHUB_WORKFLOW_SHA.ToLowerInvariant()
+          if ($workflowSha -cnotmatch '^[0-9a-f]{40}$') {
+            throw "Release workflow SHA '$workflowSha' is not an immutable commit identity."
+          }
+          if ($controllerSha -cne $workflowSha) {
+            throw "Caller and workflow commits differ: $controllerSha versus $workflowSha."
+          }
+          $controllerLineage = (
+            gh api "repos/$env:REPO/compare/$controllerSha...main" --jq ".status"
+          ).Trim()
+          if ($controllerLineage -cne "ahead" -and $controllerLineage -cne "identical") {
+            throw "Release controller $controllerSha is not on main's protected lineage."
+          }
+          if ($env:TARGET_SHA -cnotmatch '^[0-9a-f]{40}$') {
+            throw "Release target '$env:TARGET_SHA' is not an immutable commit identity."
+          }
+          $tagSha = (gh api "repos/$env:REPO/commits/$env:TAG" --jq ".sha").Trim().ToLowerInvariant()
+          if ($tagSha -cne $env:TARGET_SHA) {
+            throw "Tag $env:TAG resolves to $tagSha, not requested target $env:TARGET_SHA."
+          }
+          $lineage = (
+            gh api "repos/$env:REPO/compare/$tagSha...main" --jq ".status"
+          ).Trim()
+          if ($lineage -cne "ahead" -and $lineage -cne "identical") {
+            throw "Release tag $env:TAG is not on main's protected lineage (compare status: $lineage)."
+          }
+          if ($env:RELEASE_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw "Release ID '$env:RELEASE_ID' is not an exact numeric identity."
+          }
+          $release = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
+            "repos/$env:REPO/releases/$env:RELEASE_ID" |
+            ConvertFrom-Json -Depth 20
+          if ([long]$release.id -ne [long]$env:RELEASE_ID -or
+              -not $release.draft -or
+              $release.prerelease -or
+              $release.tag_name -cne $env:TAG -or
+              $release.name -cne $env:TAG) {
+            throw "Release $env:RELEASE_ID is not the exact expected $env:TAG draft."
+          }
+          $targetSha = [string]$release.target_commitish
+          if ($targetSha -cnotmatch '^[0-9a-f]{40}$' -or $targetSha -cne $tagSha) {
+            throw "Draft target '$targetSha' must be the exact tag commit $tagSha, not a mutable ref."
+          }
+          "Bound dispatch $controllerSha to source $tagSha and release $env:RELEASE_ID / $env:TAG."
+
+      # Under the retired workflow_run chain "who started it" was structurally
+      # irrelevant. A dispatch makes it the primary authorization fact, so it is
+      # asserted, surfaced in the run summary, and attested by the publish job.
+      - name: Record the dispatching actor
+        shell: pwsh
+        env:
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $logins = [ordered]@{
+            TRIGGERING_ACTOR = [string]$env:TRIGGERING_ACTOR
+            ACTOR            = [string]$env:ACTOR
+          }
+          foreach ($name in $logins.Keys) {
+            if ([string]::IsNullOrEmpty($logins[$name])) {
+              throw "Release dispatch has no $name identity."
+            }
+            if ($logins[$name] -cnotmatch '^[A-Za-z0-9-]+(\[bot\])?$') {
+              throw "Release dispatch $name '$($logins[$name])' is not an exact login."
+            }
+          }
+          $line = "Release $env:TAG at $env:TARGET_SHA dispatched by $env:TRIGGERING_ACTOR (actor $env:ACTOR)."
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $line
+          "::notice::$line"
+
+  # ---------------------------------------------------------------------------
   # 1) Build and exactly seal the unsigned distributable bundle. No secrets.
   # ---------------------------------------------------------------------------
   build:
+    needs: preflight
     runs-on: windows-2025
     timeout-minutes: 60 # verify + admin suite + shipping/test publishes + UI
     permissions:
-      actions: read # validate and download the exact performance evidence run
       contents: read
     outputs:
       version: ${{ steps.release-version.outputs.version }}
@@ -121,13 +238,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          REQUESTED_PUBLISH: ${{ inputs.publish }}
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          if ($env:REQUESTED_PUBLISH -cne "true") {
-            throw "The credentialed release workflow has no rehearsal mode; publish must be true."
-          }
           if ($env:TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
             throw "Publishing requires an exact vX.Y.Z tag, got '$env:TAG'."
           }
@@ -182,57 +295,6 @@ jobs:
             throw "Draft target '$targetSha' must be the exact tag commit $tagSha, not a mutable ref."
           }
           "Bound trusted controller $controllerSha to source $tagSha and release $env:RELEASE_ID / $env:TAG."
-
-      - name: Require the exact successful performance gate for this tag
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PERFORMANCE_RUN_ID: ${{ inputs.performance_run_id }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          if ($env:PERFORMANCE_RUN_ID -cnotmatch '^[1-9][0-9]*$') {
-            throw "Publishing requires an exact numeric performance_run_id."
-          }
-          $run = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
-            "repos/$env:REPO/actions/runs/$env:PERFORMANCE_RUN_ID" |
-            ConvertFrom-Json -Depth 20
-          $expectedWorkflowId = [long]((
-            gh api "repos/$env:REPO/actions/workflows/performance-controller.yml" --jq ".id"
-          ).Trim())
-          $controllerSha = [string]$run.head_sha
-          if ([long]$run.id -ne [long]$env:PERFORMANCE_RUN_ID -or
-              [long]$run.workflow_id -ne $expectedWorkflowId -or
-              $run.repository.full_name -cne $env:REPO -or
-              $run.event -cne "workflow_run" -or
-              $run.status -cne "completed" -or
-              $run.conclusion -cne "success" -or
-              $run.head_branch -cne "main" -or
-              $controllerSha -cnotmatch '^[0-9a-f]{40}$' -or
-              $run.display_title -cne "performance-gate $env:TAG $env:TARGET_SHA release $env:RELEASE_ID") {
-            throw "Performance run $env:PERFORMANCE_RUN_ID is not the trusted-main gate for $env:TAG at $env:TARGET_SHA."
-          }
-          $controllerLineage = (
-            gh api "repos/$env:REPO/compare/$controllerSha...main" --jq ".status"
-          ).Trim()
-          if ($controllerLineage -cne "ahead" -and $controllerLineage -cne "identical") {
-            throw "Performance controller $controllerSha is not on main's protected lineage."
-          }
-          $artifacts = gh api -H "X-GitHub-Api-Version: 2026-03-10" `
-            "repos/$env:REPO/actions/runs/$env:PERFORMANCE_RUN_ID/artifacts?per_page=100" |
-            ConvertFrom-Json -Depth 20
-          $evidence = @(
-            $artifacts.artifacts |
-              Where-Object {
-                $_.name -ceq "performance-gate-evidence" -and
-                -not $_.expired
-              }
-          )
-          if ($evidence.Count -ne 1) {
-            throw "Performance run $env:PERFORMANCE_RUN_ID has no unique, unexpired evidence artifact."
-          }
-          "Bound performance run $env:PERFORMANCE_RUN_ID to $env:TAG at $env:TARGET_SHA."
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -398,9 +460,12 @@ jobs:
   #     baselines, and tool manifests come from this workflow's protected-main
   #     commit; the tag commit is a separate data checkout. Target execution has
   #     no environment, OIDC, write token, cache, or secret. A fresh job reverifies
-  #     the complete evidence before signing can start.
+  #     the complete evidence before signing can start. It waits on `preflight`
+  #     (not on `build`) so a dispatch that fails admission never spends the
+  #     16-shard gate, while the two long jobs still run in parallel.
   # ---------------------------------------------------------------------------
   mutation:
+    needs: preflight
     permissions:
       actions: read # let the fresh nested verifier bind this run's raw artifacts
       contents: read
@@ -792,7 +857,6 @@ jobs:
   # ---------------------------------------------------------------------------
   package:
     needs: [build, sbom, sign-collect]
-    if: ${{ inputs.publish }}
     runs-on: windows-2025
     timeout-minutes: 15
     permissions:
@@ -912,7 +976,6 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-approval:
     needs: package
-    if: ${{ inputs.publish }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: release
@@ -929,7 +992,6 @@ jobs:
   # ---------------------------------------------------------------------------
   publish:
     needs: publish-approval
-    if: ${{ inputs.publish }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # App credentials exist only in this environment. The preceding secretless
@@ -1026,7 +1088,7 @@ jobs:
         shell: python
         env:
           REPO: ${{ github.repository }}
-          PERFORMANCE_RUN_ID: ${{ inputs.performance_run_id }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           CONTROLLER_RUN_ID: ${{ github.run_id }}
           CONTROLLER_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
@@ -1073,9 +1135,11 @@ jobs:
           if controller_sha != workflow_sha:
               raise ValueError("controller and workflow commits differ")
           release_id = require_exact_int("RELEASE_ID")
-          performance_run_id = require_exact_int("PERFORMANCE_RUN_ID")
           controller_run_id = require_exact_int("CONTROLLER_RUN_ID")
           controller_attempt = require_exact_int("CONTROLLER_RUN_ATTEMPT")
+          triggering_actor = os.environ["TRIGGERING_ACTOR"]
+          if re.fullmatch(r"[A-Za-z0-9-]+(\[bot\])?", triggering_actor) is None:
+              raise ValueError("TRIGGERING_ACTOR is not an exact login")
           tag = os.environ["TAG"]
           repo = os.environ["REPO"]
           if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) is None:
@@ -1154,8 +1218,14 @@ jobs:
               {"name": path.name, "sha256": sha256(path)}
               for path in sorted(public_assets, key=lambda item: item.name)
           ]
+          # schemaVersion 2 (ADR-0048): `release.performanceRunId` is gone with the
+          # workflow_run chain, `controller.triggeringActor` records who dispatched
+          # this release, and `controller.runId` / `controller.runAttempt` change
+          # referent — under schemaVersion 1 they identified performance-release.yml's
+          # workflow_run run, and they now identify release.yml's own dispatch run.
+          # The predicate type URL is unchanged; consumers must read schemaVersion.
           predicate = {
-              "schemaVersion": 1,
+              "schemaVersion": 2,
               "source": {
                   "repository": f"https://github.com/{repo}",
                   "ref": f"refs/tags/{tag}",
@@ -1164,7 +1234,6 @@ jobs:
               "release": {
                   "id": release_id,
                   "tag": tag,
-                  "performanceRunId": performance_run_id,
               },
               "controller": {
                   "repository": f"https://github.com/{repo}",
@@ -1173,6 +1242,7 @@ jobs:
                   "workflowCommit": workflow_sha,
                   "runId": controller_run_id,
                   "runAttempt": controller_attempt,
+                  "triggeringActor": triggering_actor,
               },
               "assets": asset_records,
               "bundleManifests": manifest_records,
