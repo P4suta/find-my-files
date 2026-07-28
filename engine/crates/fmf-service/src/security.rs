@@ -1596,6 +1596,191 @@ fn harden_path(path: &Path, expected: Option<ObjectKind>, sddl: &str) -> io::Res
     Ok(locked)
 }
 
+/// Resumable state for enumerating a directory **through its own handle**,
+/// one batch at a time.
+///
+/// This replaces `std::fs::read_dir`, which opens the directory again by path.
+/// Enumerating from the handle the walk already holds keeps the child list
+/// dependent only on the object that was verified, and — for the hardening
+/// walk specifically — stops enumeration from depending on the very ACL the
+/// walk is in the middle of rewriting.
+///
+/// The names it yields are an **untrusted hint about what to try next**. They
+/// are not evidence about what an object is; the relative open and
+/// [`inspect_handle`] remain the sole authority for that.
+struct DirectoryEnumeration {
+    /// `u64`-backed, and that is load-bearing twice over. `FILE_FULL_DIR_INFO`
+    /// carries `i64` fields, so its alignment is 8 and the API requires a
+    /// suitably aligned buffer; a `Vec<u8>` would guarantee only 1, making
+    /// every record access a genuine unaligned access rather than merely a
+    /// lint-flagged one. It is therefore also what lets the record cast
+    /// satisfy the denied `cast_ptr_alignment` lint honestly, instead of by
+    /// suppressing it.
+    buffer: Vec<u64>,
+    /// Bytes of `buffer` the kernel may have written in the current batch.
+    valid: usize,
+    /// Byte offset of the next unread record within those bytes.
+    offset: usize,
+    /// The kernel has reported `ERROR_NO_MORE_FILES`; no batch remains.
+    done: bool,
+}
+
+impl DirectoryEnumeration {
+    fn new() -> Self {
+        const BUFFER_BYTES: usize = 64 * 1024;
+
+        Self {
+            buffer: vec![0u64; BUFFER_BYTES / size_of::<u64>()],
+            valid: 0,
+            offset: 0,
+            done: false,
+        }
+    }
+}
+
+/// Yields the next child leaf name in `dir`, refilling the batch as needed and
+/// skipping the `.` and `..` entries.
+fn next_directory_entry(
+    dir: &std::fs::File,
+    state: &mut DirectoryEnumeration,
+) -> io::Result<Option<Vec<u16>>> {
+    use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FULL_DIR_INFO, FileFullDirectoryInfo, GetFileInformationByHandleEx,
+    };
+
+    const DOT: u16 = b'.' as u16;
+
+    let malformed = |reason: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("refusing malformed directory enumeration record ({reason})"),
+        )
+    };
+
+    loop {
+        if state.offset >= state.valid {
+            if state.done {
+                return Ok(None);
+            }
+            let capacity = state
+                .buffer
+                .len()
+                .checked_mul(size_of::<u64>())
+                .and_then(|bytes| u32::try_from(bytes).ok())
+                .ok_or_else(|| malformed("enumeration buffer exceeds u32"))?;
+            // SAFETY: `dir` is a live owned directory handle. The buffer is an
+            // exclusively borrowed, initialized allocation of exactly
+            // `capacity` bytes, aligned to 8 as `FILE_FULL_DIR_INFO` requires,
+            // and the kernel writes no further than the length it is given.
+            let ok = unsafe {
+                GetFileInformationByHandleEx(
+                    raw_handle(dir),
+                    FileFullDirectoryInfo,
+                    state.buffer.as_mut_ptr().cast(),
+                    capacity,
+                )
+            };
+            if ok == 0 {
+                let error = last_error();
+                if error.raw_os_error().map(|code| code as u32) == Some(ERROR_NO_MORE_FILES) {
+                    state.done = true;
+                    return Ok(None);
+                }
+                return Err(error);
+            }
+            state.valid = capacity as usize;
+            state.offset = 0;
+        }
+
+        // The kernel places every record on an 8-byte boundary. Checking that
+        // rather than assuming it is what makes the name slice below sound: it
+        // is the only step whose alignment is not otherwise self-evident.
+        if !state
+            .offset
+            .is_multiple_of(align_of::<FILE_FULL_DIR_INFO>())
+        {
+            return Err(malformed("record is misaligned"));
+        }
+        if state
+            .offset
+            .checked_add(size_of::<FILE_FULL_DIR_INFO>())
+            .is_none_or(|end| end > state.valid)
+        {
+            return Err(malformed("record header runs past the batch"));
+        }
+
+        let base = state.buffer.as_ptr().cast::<u8>();
+        // SAFETY: the bounds check above proves `offset` — and a whole record
+        // header after it — lies inside the single `buffer` allocation, and
+        // the alignment check proves the resulting address is suitably aligned
+        // for `FILE_FULL_DIR_INFO`.
+        let record = unsafe { base.add(state.offset) }.cast::<FILE_FULL_DIR_INFO>();
+        // SAFETY: `record` points at an in-bounds, initialized header. The
+        // scalars are read with `read_unaligned`, so these reads stay sound
+        // even if the alignment invariant above were ever weakened; no
+        // reference into the packed kernel buffer is formed at any point.
+        let (next_offset, name_length) = unsafe {
+            (
+                std::ptr::read_unaligned(&raw const (*record).NextEntryOffset),
+                std::ptr::read_unaligned(&raw const (*record).FileNameLength),
+            )
+        };
+
+        let name_bytes = usize::try_from(name_length)
+            .map_err(|_| malformed("name length exceeds the address space"))?;
+        if !name_bytes.is_multiple_of(size_of::<u16>()) {
+            return Err(malformed(
+                "name length is not a whole number of UTF-16 units",
+            ));
+        }
+        let name_offset = state
+            .offset
+            .checked_add(std::mem::offset_of!(FILE_FULL_DIR_INFO, FileName))
+            .ok_or_else(|| malformed("name offset overflow"))?;
+        if name_offset
+            .checked_add(name_bytes)
+            .is_none_or(|end| end > state.valid)
+        {
+            return Err(malformed("name runs past the batch"));
+        }
+
+        // `FileName` is a one-element array standing in for the variable-length
+        // tail; take its address and reinterpret it at the declared length.
+        // Deriving the pointer from the field rather than by casting a `u8`
+        // pointer keeps the cast alignment-preserving (`[u16; 1]` to `u16`).
+        //
+        // SAFETY: the two checks above prove `name_bytes` starting at the
+        // field lie inside `buffer`; the record alignment proves the address
+        // is `u16`-aligned; the memory is initialized (the allocation is
+        // zeroed and the kernel wrote over it); and the slice is copied out
+        // before `state` can be touched again, so no aliasing outlives it.
+        let name = unsafe {
+            std::slice::from_raw_parts(
+                (&raw const (*record).FileName).cast::<u16>(),
+                name_bytes / size_of::<u16>(),
+            )
+        }
+        .to_vec();
+
+        state.offset = if next_offset == 0 {
+            // Last record of this batch: force a refill on the next call.
+            state.valid
+        } else {
+            state
+                .offset
+                .checked_add(
+                    usize::try_from(next_offset).map_err(|_| malformed("offset overflow"))?,
+                )
+                .ok_or_else(|| malformed("offset overflow"))?
+        };
+
+        if name != [DOT] && name != [DOT, DOT] {
+            return Ok(Some(name));
+        }
+    }
+}
+
 /// Applies the protected descriptor to every existing object below `path`,
 /// bottom-up, on handles that were opened without following reparse points.
 ///
