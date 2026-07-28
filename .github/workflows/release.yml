@@ -296,7 +296,7 @@ jobs:
           }
           "Bound trusted controller $controllerSha to source $tagSha and release $env:RELEASE_ID / $env:TAG."
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.commit_sha }}
@@ -307,7 +307,7 @@ jobs:
       - uses: ./.github/actions/rust-toolchain
         with:
           components: clippy, rustfmt
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.302
       - uses: ./.github/actions/setup-winapp
@@ -487,13 +487,13 @@ jobs:
     env:
       FMF_BUILD_VERSION: ${{ needs.build.outputs.version }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.commit_sha }}
 
       - uses: ./.github/actions/rust-toolchain
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.302
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
@@ -749,7 +749,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.commit_sha }}
@@ -865,7 +865,7 @@ jobs:
       FMF_BUILD_VERSION: ${{ needs.build.outputs.version }}
     steps:
       # The repo is needed for `just package` (xtask) + the toolchain.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.commit_sha }}
@@ -1265,7 +1265,7 @@ jobs:
       # Keyless via the workflow's OIDC token (no stored secrets).
       # Verify: gh attestation verify <zip> --repo P4suta/find-my-files
       - name: Attest exact release identity
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: |
             ${{ steps.release-predicate.outputs.zip_path }}
@@ -1276,13 +1276,13 @@ jobs:
           predicate-path: ${{ steps.release-predicate.outputs.predicate_path }}
 
       - name: Attest Rust SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: ${{ steps.release-predicate.outputs.zip_path }}
           sbom-path: build/sbom/fmf-engine.cdx.json
 
       - name: Attest C# SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: ${{ steps.release-predicate.outputs.zip_path }}
           sbom-path: build/sbom/app.cdx.json
