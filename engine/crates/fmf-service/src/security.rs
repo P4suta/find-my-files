@@ -169,6 +169,10 @@ const FILE_ADD_FILE_ACCESS: u32 = 0x0000_0002;
 const FILE_ADD_SUBDIRECTORY_ACCESS: u32 = 0x0000_0004;
 const FILE_TRAVERSE_ACCESS: u32 = 0x0000_0020;
 const FILE_READ_ATTRIBUTES_ACCESS: u32 = 0x0000_0080;
+/// `NtCreateFile` grants no implicit synchronization. Without this right the
+/// handle cannot be waited on and `FILE_SYNCHRONOUS_IO_NONALERT` is rejected,
+/// so every relative open asks for it on top of the caller's mask.
+const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
 const SECURITY_WRITE_ACCESS: u32 =
     READ_CONTROL_ACCESS | WRITE_DAC_ACCESS | WRITE_OWNER_ACCESS | FILE_READ_ATTRIBUTES_ACCESS;
 const MAX_MANAGED_TREE_DEPTH: usize = 64;
@@ -1243,6 +1247,156 @@ fn validate_leaf(leaf: &str) -> io::Result<()> {
             format!("refusing non-leaf machine-data name {leaf:?}"),
         ))
     }
+}
+
+/// The UTF-16 counterpart of [`validate_leaf`], for names that arrive from a
+/// directory enumeration rather than from configuration.
+///
+/// Deliberately not "convert to `String` and reuse `validate_leaf`": a lossy
+/// conversion turns an unpaired surrogate into U+FFFD, so the name that got
+/// validated would not be the name that gets opened. This inspects the exact
+/// code units that will be handed to the object manager and returns their byte
+/// length for `UNICODE_STRING`.
+///
+/// Defense in depth only. A name yielded by the kernel's own enumeration of a
+/// verified directory handle is already a leaf; this refuses to be the layer
+/// that assumes it.
+fn validate_leaf_utf16(leaf: &[u16]) -> io::Result<u16> {
+    const DOT: u16 = b'.' as u16;
+    const BACKSLASH: u16 = b'\\' as u16;
+    const SLASH: u16 = b'/' as u16;
+
+    let refuse = |reason: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing non-leaf directory entry name ({reason})"),
+        )
+    };
+
+    if leaf.is_empty() {
+        return Err(refuse("empty"));
+    }
+    if leaf == [DOT] || leaf == [DOT, DOT] {
+        return Err(refuse("relative"));
+    }
+    if leaf.contains(&BACKSLASH) || leaf.contains(&SLASH) {
+        return Err(refuse("path separator"));
+    }
+    if leaf.contains(&0) {
+        return Err(refuse("embedded NUL"));
+    }
+    // `UNICODE_STRING::Length` is a byte count in a `u16`; leave room for the
+    // terminator the object manager does not need but callers may assume.
+    leaf.len()
+        .checked_mul(size_of::<u16>())
+        .filter(|bytes| *bytes <= usize::from(u16::MAX) - 1)
+        .and_then(|bytes| u16::try_from(bytes).ok())
+        .ok_or_else(|| refuse("name too long"))
+}
+
+/// Opens `leaf` **relative to an already-verified parent handle** and subjects
+/// it to exactly the checks [`open_checked`] applies.
+///
+/// This is the primitive the managed-tree walks are built on. `open_checked`
+/// hands `CreateFileW` a full path, so the kernel re-resolves every ancestor
+/// name; between the moment a walk learned a child's name and the moment it
+/// opens it, an ancestor can be repointed at another object. The reparse-point
+/// rejection catches a link, but a swap to a *non*-reparse object at the same
+/// name is invisible to it — and the walk would then apply the protected
+/// descriptor to, or delete, whatever now sits there.
+///
+/// `NtCreateFile` with `OBJECT_ATTRIBUTES.RootDirectory` set to the parent
+/// handle and a leaf-only `ObjectName` resolves nothing but the final
+/// component, against the directory *object* that handle is bound to rather
+/// than against its name. There is no ancestor chain left to swap.
+///
+/// `OBJ_DONT_REPARSE` augments — it does not replace — the existing defense:
+/// `FILE_OPEN_REPARSE_POINT` is still requested and [`inspect_handle`] remains
+/// the authority that refuses a reparse point, so the guarantee does not become
+/// contingent on a flag whose failure mode is a different error code.
+///
+/// `diagnostic` is used for error messages only and is never resolved.
+fn open_checked_at(
+    parent: &std::fs::File,
+    leaf: &[u16],
+    diagnostic: &Path,
+    expected: Option<ObjectKind>,
+    access: u32,
+    share: u32,
+) -> io::Result<LockedObject> {
+    use std::os::windows::io::FromRawHandle as _;
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT,
+        FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+    };
+    use windows_sys::Win32::Foundation::{
+        OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, RtlNtStatusToDosError,
+        STATUS_REPARSE_POINT_ENCOUNTERED, UNICODE_STRING,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let name_bytes = validate_leaf_utf16(leaf)?;
+    // `UNICODE_STRING` is *counted*: the object manager reads exactly `Length`
+    // bytes and never scans for a terminator, so `leaf` is passed as-is. This
+    // is the exact opposite of the `FILE_RENAME_INFO` buffer below, whose name
+    // is consumed past `FileNameLength` up to the first zero unit and therefore
+    // must carry one. Do not "fix" one to look like the other.
+    let name = UNICODE_STRING {
+        Length: name_bytes,
+        MaximumLength: name_bytes,
+        Buffer: leaf.as_ptr().cast_mut(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: raw_handle(parent),
+        ObjectName: &raw const name,
+        Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut handle: HANDLE = std::ptr::null_mut();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: `attributes` borrows `name`, which borrows `leaf`; all three
+    // outlive the call and none is mutated during it. `parent` is a live owned
+    // directory handle, so `RootDirectory` names an open kernel object. The two
+    // out-parameters are exclusive borrows of correctly typed local storage.
+    // The optional allocation-size and EA-buffer pointers are null, which the
+    // contract permits exactly when the EA length is zero, as it is here.
+    let status = unsafe {
+        NtCreateFile(
+            &raw mut handle,
+            access | SYNCHRONIZE_ACCESS,
+            &raw const attributes,
+            &raw mut status_block,
+            std::ptr::null(),
+            0,
+            share,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        if status == STATUS_REPARSE_POINT_ENCOUNTERED {
+            // `OBJ_DONT_REPARSE` fired before `inspect_handle` could. Report it
+            // in that layer's words so a caller — or a test — asserting on the
+            // fail-closed property does not have to know which one won the
+            // race to refuse.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("refusing reparse point {}", diagnostic.display()),
+            ));
+        }
+        // SAFETY: a pure status-code translation with no pointer arguments.
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    // SAFETY: `NtCreateFile` succeeded, so `handle` is one owned kernel handle,
+    // transferred exactly once to `File` for CloseHandle-on-drop.
+    let file = unsafe { std::fs::File::from_raw_handle(handle.cast()) };
+    inspect_handle(diagnostic, file, expected)
 }
 
 fn raw_handle(file: &std::fs::File) -> HANDLE {

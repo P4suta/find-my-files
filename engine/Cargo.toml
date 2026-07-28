@@ -108,6 +108,10 @@ fmf-core = { path = "crates/fmf-core" }
 fmf-proto = { path = "crates/fmf-proto" }
 fmf-buildstamp = { path = "crates/fmf-buildstamp" }
 windows-sys = { version = "0.61", features = [
+  # `NtCreateFile` + `OBJECT_ATTRIBUTES`: handle-relative opens of managed-tree
+  # descendants, so no walk ever re-resolves a full path (docs/SECURITY.md #7).
+  "Wdk_Foundation",
+  "Wdk_Storage_FileSystem",
   "Win32_Foundation",
   "Win32_NetworkManagement_NetManagement",
   "Win32_Storage_FileSystem",
