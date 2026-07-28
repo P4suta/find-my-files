@@ -145,7 +145,7 @@ fmt-check-toml:
 [group('daily')]
 verify: fmt-check lint test test-xtask test-app deny machete
 
-# The reusable release workflow is the already-linted protected-main workflow;
+# The dispatched release workflow is the already-linted protected-main workflow;
 # its checkout is build input, not workflow code. Re-run every source and
 # dependency gate there without requiring the Linux-only actionlint verifier on
 # the Windows release runner.

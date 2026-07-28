@@ -13,17 +13,22 @@ the human decisions that cannot be encoded safely.
    confirm the same app process/window becomes searchable without relaunching.
 4. Add `release: approved` to the final Release PR head and merge it (a later
    head update requires removing and re-adding the label). Never edit the
-   version or create a `v*` tag manually. Release Please creates the draft/tag
-   and automatically measures that immutable tag on the dedicated elevated
-   runner.
-5. Approve `sign` and then the secretless `publish-approval` job in the protected
+   version or create a `v*` tag manually. Release Please creates the draft/tag,
+   and `release-please.yml` immediately dispatches `release.yml` from protected
+   `main` with that exact tag, commit, and draft Release ID.
+5. Run `just perf-gate` on the reference machine, cold and idle, before
+   approving anything. CI cannot do this (ADR-0048): the measurement instrument
+   requires an organization runner group that a user-owned repository cannot
+   create, so this is the performance gate. A regression here stops the release.
+6. Approve `sign` and then the secretless `publish-approval` job in the protected
    `release` environment. Confirm the expected `vX.Y.Z` and immutable SHA each
    time. The subsequent API-only publication job obtains App credentials from
    `release-please`.
 
-The workflow chain is the executable specification: it binds the approved tag,
-source SHA, draft Release ID, performance evidence, and published assets, and a
-stray tag cannot publish. Do not bypass or replay individual downstream jobs.
+The workflow is the executable specification: `preflight` binds the approved
+tag, source SHA, and draft Release ID before anything else runs, every later job
+revalidates the same identities, and a stray tag cannot publish. Do not bypass
+or replay individual downstream jobs.
 
 ## Verify the published artifact
 
@@ -44,8 +49,20 @@ attestations.
 
 If automatic dispatch fails after a draft was created, dispatch
 `release-please.yml` from `main` with that existing `vX.Y.Z` tag. It validates
-the tag/draft/target, fixes the draft's numeric ID once, and safely re-runs the
-trusted-main performance chain against that exact tag commit and Release ID.
+the tag/draft/target, fixes the draft's numeric ID once, and re-dispatches
+`release.yml` for that exact tag commit and Release ID — skipping the dispatch
+if a run already owns that triple. If release-please itself is the thing that is
+broken, dispatch the release directly with the same three values:
+
+```powershell
+gh workflow run release.yml --repo P4suta/find-my-files --ref main `
+  -f tag_name=vX.Y.Z -f commit_sha=<40-hex tag commit> -f release_id=<numeric draft ID>
+```
+
+`--ref main` is not optional: `workflow_dispatch` loads workflow YAML from the
+selected ref. Any other ref is refused by `preflight` and, independently, by the
+protected-`main` deployment policy on the `release` and `release-please`
+environments.
 
 ## Nightly
 
@@ -67,24 +84,11 @@ Issues:write, and Pull requests:write. Store
 `release` environment restricted to protected `main`, with required reviewers,
 admin bypass disabled, and only the four eSigner secrets.
 
-The instrument must be the sole runner in organization runner group
-`fmf-performance`, with labels `Windows`, `X64`, and `fmf-perf`. Restrict the
-group to this repository and exactly
-`OWNER/REPO/.github/workflows/performance-controller.yml@refs/heads/main`.
-The shared `performance` environment requires a reviewer, disables admin bypass,
-allows protected branches only, and contains zero secrets. `just
-performance-doctor` audits this live configuration with organization-owner `gh`
-credentials. A user-owned repository cannot provide this boundary, so
-performance and stable publication intentionally remain unavailable until an
-organization migration and audit.
+Performance baselines are recorded by hand on the reference machine, cold and
+idle: `just bench-baseline` for the real-volume baseline and
+`just bench-micro-baseline` for the Criterion suite. The real-volume result
+(`engine/benches/baseline.json`) lands through an ordinary reviewed PR; the
+Criterion baseline is machine-local. Never hand-edit or fabricate either.
 
-The machine-bound Criterion baseline has one fixed location:
-`P:\find-my-files\performance-baseline\criterion`. Its protected
-DACL permits only SYSTEM and Administrators. Gate runs copy it to per-attempt
-scratch. A baseline request records real-volume and Criterion data on the same
-serialized instrument; a hosted API-only job can propose only
-`engine/benches/baseline.json` through a draft PR. Never hand-edit or fabricate a
-baseline.
-
-Design rationale lives in ADR-0020, ADR-0029, ADR-0034, ADR-0035, ADR-0038, and
-ADR-0040.
+Design rationale lives in ADR-0013, ADR-0020, ADR-0029, ADR-0034, ADR-0035,
+ADR-0038, ADR-0040, and ADR-0048.
