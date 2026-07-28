@@ -43,7 +43,20 @@ public sealed class MainViewModelEventTests
         await _vm.StartAsync();
 
         Assert.Equal(Loc.Get("Status_IndexStartFailed"), _vm.StatusText);
-        Assert.Contains(_vm.Notifications.Items, n => n.Severity == NotifySeverity.Error);
+        var failure = Assert.Single(
+            _vm.Notifications.Items,
+            n => n.Severity == NotifySeverity.Error);
+        Assert.Equal(Loc.Get("Common_Retry"), failure.ActionLabel);
+
+        _engine.ThrowOnStartup = null;
+        failure.Invoke();
+        Assert.True(SpinWait.SpinUntil(
+            () => _engine.ListVolumesCalls == 2,
+            TimeSpan.FromSeconds(2)));
+        Assert.Equal(
+            StatusFormatter.Overall(Array.Empty<VolumeStatus>(), StubVolumes),
+            _vm.StatusText);
+        Assert.DoesNotContain(failure, _vm.Notifications.Items);
     }
 
     [Fact]
@@ -52,6 +65,7 @@ public sealed class MainViewModelEventTests
         _engine.RaiseConnectionChanged(EngineConnectionState.Reconnecting);
         _dispatcher.DrainQueue();
         Assert.Single(_vm.Notifications.Items);
+        Assert.False(_vm.CanSearch);
         Assert.Equal(NotifySeverity.Warning, _vm.Notifications.Items[0].Severity);
 
         // A second Reconnecting must not duplicate the held banner.
@@ -62,6 +76,22 @@ public sealed class MainViewModelEventTests
         _engine.RaiseConnectionChanged(EngineConnectionState.Connected);
         _dispatcher.DrainQueue();
         Assert.Empty(_vm.Notifications.Items);
+        Assert.True(_vm.CanSearch);
+    }
+
+    [Fact]
+    public void Reconnecting_then_terminal_fault_does_not_claim_it_is_still_retrying()
+    {
+        _engine.RaiseConnectionChanged(EngineConnectionState.Reconnecting);
+        _dispatcher.DrainQueue();
+        Assert.Single(_vm.Notifications.Items);
+
+        _engine.RaiseConnectionChanged(EngineConnectionState.Faulted);
+        _dispatcher.DrainQueue();
+        Assert.Empty(_vm.Notifications.Items);
+        Assert.True(_vm.IsDisconnected);
+        Assert.False(_vm.IsReady);
+        Assert.False(_vm.CanSearch);
     }
 
     [Fact]

@@ -1,0 +1,59 @@
+# Repository policy for the engine workspace (ADR-0041). Every Rust test is a
+# separate process, retries never hide flakes, and hangs fail in bounded time.
+nextest-version = "0.9.140"
+
+[store]
+dir = "../build/engine/nextest"
+
+[profile.default]
+fail-fast = false
+retries = 0
+flaky-result = "fail"
+slow-timeout = { period = "15s", terminate-after = 4 }
+leak-timeout = { period = "500ms", result = "fail" }
+global-timeout = "15m"
+
+# Keep the 5 ms loopback budget meaningful by excluding concurrent test load.
+[[profile.default.overrides]]
+filter = "test(page_roundtrip_stays_inside_the_latency_budget)"
+threads-required = "num-test-threads"
+
+[profile.ci]
+inherits = "default"
+
+[profile.ci.junit]
+path = "junit.xml"
+report-name = "engine"
+
+# Real-volume and service-security tests intentionally wait for slow Windows
+# kernel/service transitions (individual readiness budgets reach ten minutes).
+# Keep that privileged surface isolated: one test process at a time avoids two
+# MFT scans or SCM mutations contending for the same machine, while the timeout
+# still bounds a genuinely wedged test.
+[profile.admin]
+inherits = "ci"
+test-threads = 1
+slow-timeout = { period = "12m", terminate-after = 1 }
+global-timeout = "45m"
+
+[profile.admin.junit]
+path = "admin.xml"
+report-name = "engine-admin"
+
+# CI intentionally runs the latency-sensitive test without LLVM
+# instrumentation, then the remaining suite under coverage. Separate profiles
+# give each invocation an independent store and JUnit file; neither run can
+# overwrite the other's evidence.
+[profile.ci-latency]
+inherits = "ci"
+
+[profile.ci-latency.junit]
+path = "latency.xml"
+report-name = "engine-latency"
+
+[profile.ci-coverage]
+inherits = "ci"
+
+[profile.ci-coverage.junit]
+path = "coverage.xml"
+report-name = "engine-coverage"

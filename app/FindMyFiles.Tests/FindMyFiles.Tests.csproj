@@ -6,10 +6,14 @@
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <!-- Build output under the repo-root build/ tree (ADR-0021), mirroring the
-         app. bin only — obj stays (no Directory.Build.props, per CLAUDE.md). -->
+         app. bin only — obj stays (no Directory.Build.props, per AGENTS.md). -->
     <BaseOutputPath>..\..\build\app\FindMyFiles.Tests\</BaseOutputPath>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Mirrors the app: the LibraryImport source generator emits unsafe stubs
+         (SYSLIB1062). NativeJunction needs its own P/Invoke to build a real
+         name-surrogate reparse point for the ShellOps verifier tests. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- Same maximal analyzer/style strictness as the app (convention
          hardening); test-specific noise is relaxed in .editorconfig. -->
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
@@ -40,39 +44,47 @@
          XAML, which carries no such attribute, so the % reflects the non-UI
          logic the suite can actually cover (ADR-0022). -->
     <ExcludeByFile>**/*.g.cs,**/*.g.i.cs</ExcludeByFile>
+    <!-- Every generated report belongs to the canonical build/ tree. The
+         trailing separator tells Coverlet this is a directory, not a filename
+         prefix. -->
+    <CoverletOutput>$(MSBuildThisFileDirectory)..\..\build\coverage\app\</CoverletOutput>
+    <!-- Do not ask Coverlet to inspect framework/WinAppSDK projection DLLs that
+         have no portable symbols. Only the product assembly contributes to the
+         release gate. -->
+    <Include>[FindMyFiles]*</Include>
     <!-- Gate (CI app job, via `just test-app-cov`): total line AND branch coverage
          ≥57. ThresholdStat=total applies the bar to the combined total, not per
          module. Kept here with ExcludeByFile so `dotnet test -p:CollectCoverage=true`
          enforces the identical bar locally — and so no comma-bearing prop ever rides
          a shell command line (`-p:ThresholdType=line,branch` splits at the comma in
          PowerShell → MSBuild MSB1006). Ratchet as coverage grows — raised 56→57 with
-         the connection-state-machine / event sweep (branch ~58.3%, line ~63.8%). -->
+         the release-state-machine / logging sweep (branch ~59.7%, line ~64.5%). -->
     <Threshold>57</Threshold>
     <ThresholdType>line,branch</ThresholdType>
     <ThresholdStat>total</ThresholdStat>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
-    <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="[18.7.0]" />
+    <PackageReference Include="xunit" Version="[2.9.3]" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="[3.1.5]" />
     <!-- Coverage gate: `dotnet test -p:CollectCoverage=true` exits non-zero below the
          line+branch bar set in the PropertyGroup above (CI app job runs it through
          `just test-app-cov`). -->
-    <PackageReference Include="coverlet.msbuild" Version="10.0.1">
+    <PackageReference Include="coverlet.msbuild" Version="[10.0.1]">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <!-- Match the app's extra analyzers. Floating — pin after restore. -->
-    <PackageReference Include="Roslynator.Analyzers" Version="4.*">
+    <!-- Match the app's exactly pinned analyzer toolchain. -->
+    <PackageReference Include="Roslynator.Analyzers" Version="[4.15.0]">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Meziantou.Analyzer" Version="3.*">
+    <PackageReference Include="Meziantou.Analyzer" Version="[3.0.117]">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="StyleCop.Analyzers" Version="1.2.0-*">
+    <PackageReference Include="StyleCop.Analyzers" Version="[1.2.0-beta.556]">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
@@ -93,6 +105,12 @@
     <Content Include="..\FindMyFiles\Strings\en-US\Resources.resw"
              Link="Strings_en-US.resw"
              CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\FindMyFiles\Strings\ja-JP\Resources.resw"
+             Link="Strings_ja-JP.resw"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\FindMyFiles\Strings\zh-Hans\Resources.resw"
+             Link="Strings_zh-Hans.resw"
+             CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
@@ -102,6 +120,6 @@
          invokes cargo; passing -p:SkipRustBuild=true on the CLI still works
          (global properties merge with the same value). -->
     <ProjectReference Include="..\FindMyFiles\FindMyFiles.csproj"
-                      AdditionalProperties="SkipRustBuild=true" />
+                      AdditionalProperties="SkipRustBuild=true;FmfTestSeams=true;FmfArtifactKind=ui-test" />
   </ItemGroup>
 </Project>

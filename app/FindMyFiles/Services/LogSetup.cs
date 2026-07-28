@@ -11,7 +11,7 @@ namespace FindMyFiles.Services;
 /// diagnostics home (ADR-0037); the <see cref="FileLog"/> facade routes through
 /// the logger installed here.
 /// </summary>
-public static class LogSetup
+internal static class LogSetup
 {
     /// <summary>Active-file size before rolling to <c>app_NNN.log</c>. Larger
     /// than the old 2 MiB because a logfmt line is more verbose.</summary>
@@ -39,25 +39,55 @@ public static class LogSetup
         }
 
         LevelSwitch.MinimumLevel = LevelFromEnv();
-
-        Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.ControlledBy(LevelSwitch)
-            .Enrich.FromLogContext()
-            .WriteTo.File(
-                formatter: new LogfmtFormatter(),
-                path: Path.Combine(AppPaths.LogDir, "app.log"),
-                fileSizeLimitBytes: FileSizeLimitBytes,
-                rollingInterval: RollingInterval.Infinite,
-                rollOnFileSizeLimit: true,
-                retainedFileCountLimit: RetainedFiles,
-                shared: false,
-                buffered: false)
-            .CreateLogger();
+        Log.Logger = CreateLogger(
+            AppPaths.LogDir,
+            message => System.Diagnostics.Debug.WriteLine(message));
     }
 
-    /// <summary>Flush and close the logger; call once on shutdown so the last
-    /// lines reach disk.</summary>
-    public static void Shutdown() => Log.CloseAndFlush();
+    /// <summary>Build the file logger, falling back to a no-sink logger when
+    /// diagnostics storage is unavailable. Logging must never block app start.</summary>
+    /// <param name="logDir">Directory that owns <c>app.log</c>.</param>
+    /// <param name="reportFailure">Optional privacy-safe failure observer.</param>
+    /// <returns>A usable logger in both the file and degraded cases.</returns>
+    internal static Logger CreateLogger(string logDir, Action<string>? reportFailure = null)
+    {
+        try
+        {
+            Directory.CreateDirectory(logDir);
+            return new LoggerConfiguration()
+                .MinimumLevel.ControlledBy(LevelSwitch)
+                .Enrich.FromLogContext()
+                .WriteTo.File(
+                    formatter: new LogfmtFormatter(),
+                    path: Path.Combine(logDir, "app.log"),
+                    fileSizeLimitBytes: FileSizeLimitBytes,
+                    rollingInterval: RollingInterval.Infinite,
+                    rollOnFileSizeLimit: true,
+                    retainedFileCountLimit: RetainedFiles,
+                    shared: false,
+                    buffered: false)
+                .CreateLogger();
+        }
+        catch (Exception ex)
+        {
+            // Diagnostics are a support feature, never an app-start precondition.
+            // Do not include Message/paths: Debug output can be collected too.
+            reportFailure?.Invoke(
+                $"FindMyFiles log initialization failed: {ex.GetType().FullName} 0x{ex.HResult:X8}");
+            return new LoggerConfiguration()
+                .MinimumLevel.ControlledBy(LevelSwitch)
+                .CreateLogger();
+        }
+    }
+
+    /// <summary>Flush and close the logger. Reset the initialization guard so a
+    /// failed full-purge attempt can reopen diagnostics before the app continues.
+    /// Repeated shutdown remains safe.</summary>
+    public static void Shutdown()
+    {
+        Interlocked.Exchange(ref _initialized, 0);
+        Log.CloseAndFlush();
+    }
 
     private static LogEventLevel LevelFromEnv()
     {

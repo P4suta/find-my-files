@@ -14,12 +14,12 @@ namespace FindMyFiles.Engine;
 /// for the subscription lifetime (the GC-rooting rule for callback delegates,
 /// satisfied structurally).
 /// </summary>
-public sealed class EngineEventMarshaler : IDisposable
+internal sealed class EngineEventMarshaler : IDisposable
 {
     private readonly IEngineClient _engine;
     private readonly Action<string> _onIndexChanged;
     private readonly Action<VolumeStatus> _onVolumeUpdated;
-    private readonly Action<int> _onEngineErrorOccurred;
+    private readonly Action<EngineErrorSeverity> _onEngineErrorOccurred;
     private readonly Action<EngineConnectionState> _onConnectionChanged;
 
     /// <summary>Re-raised on the UI thread from <see cref="IEngineClient.IndexChanged"/>.
@@ -32,7 +32,7 @@ public sealed class EngineEventMarshaler : IDisposable
 
     /// <summary>Re-raised on the UI thread from
     /// <see cref="IEngineClient.EngineErrorOccurred"/> (same severity, same order).</summary>
-    public event Action<int>? EngineErrorOccurred;
+    public event Action<EngineErrorSeverity>? EngineErrorOccurred;
 
     /// <summary>Re-raised on the UI thread from
     /// <see cref="IEngineClient.ConnectionChanged"/> (same payload, same order).</summary>

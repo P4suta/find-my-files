@@ -1,11 +1,37 @@
 namespace FindMyFiles.Engine;
 
 /// <summary>
-/// The single boundary the app uses to talk to the engine
-/// (docs/ARCHITECTURE.md). Implementations: <see cref="PipeEngineClient"/>
-/// (named pipe to fmf-service), <see cref="FfiEngineClient"/> (in-proc DLL,
-/// --engine=inproc) and <see cref="FakeEngineClient"/> (deterministic data
-/// for UI tests via --fake-engine). The shared observable behavior is
+/// Stable, implementation-independent identity of an engine session. UI and
+/// orchestration code branch on this capability metadata instead of reaching
+/// through <see cref="IEngineClient"/> to concrete transports.
+/// </summary>
+internal enum EngineClientKind
+{
+    /// <summary>Startup is resolving the real session off the UI thread.</summary>
+    Resolving,
+
+    /// <summary>No usable engine is available; the setup experience is shown.</summary>
+    Unavailable,
+
+#if FMF_TEST_SEAMS
+    /// <summary>Deterministic in-memory data used only by test-seam builds.</summary>
+    Test,
+#endif
+
+    /// <summary>The privileged Rust engine loaded in this process.</summary>
+    InProcess,
+
+    /// <summary>The privileged Rust engine hosted by the Windows service.</summary>
+    Service,
+}
+
+/// <summary>
+/// The single boundary the app uses to talk to the engine: no other app code
+/// may reach an engine transport (ADR-0016). Implementations:
+/// <see cref="PipeEngineClient"/> (named pipe to fmf-service) and
+/// <see cref="FfiEngineClient"/> (in-proc DLL, --engine=inproc).
+/// Test-seam builds add a deterministic in-memory client.
+/// The shared observable behavior is
 /// executable: Tests/Contract/EngineClientContractTests runs the same suite
 /// against all implementations.
 ///
@@ -13,8 +39,15 @@ namespace FindMyFiles.Engine;
 /// <c>ct</c> surfaces as <see cref="OperationCanceledException"/> (or a
 /// subclass) from every async member. Data shapes live in EngineTypes.cs.
 /// </summary>
-public interface IEngineClient : IDisposable
+internal interface IEngineClient : IDisposable
 {
+    /// <summary>
+    /// What kind of engine session this client represents. This is the only
+    /// supported way for consumers to choose availability/transport-specific
+    /// presentation; concrete client type checks are forbidden.
+    /// </summary>
+    EngineClientKind Kind { get; }
+
     /// <summary>New index content was published (USN apply or scan progress).
     /// The payload is the triggering volume label. The signal to re-evaluate the
     /// displayed query. Fires from an engine thread, so marshal to the UI thread
@@ -26,19 +59,20 @@ public interface IEngineClient : IDisposable
     event Action<VolumeStatus>? VolumeUpdated;
 
     /// <summary>
-    /// The engine recorded a diagnostic (1=warn 2=error 3=panic). Details
-    /// live in <see cref="EngineStatsData.RecentErrors"/> — pull on demand.
+    /// The engine recorded a diagnostic. Details live in
+    /// <see cref="EngineStatsData.RecentErrors"/> — pull on demand.
     /// </summary>
-    event Action<int>? EngineErrorOccurred;
+    event Action<EngineErrorSeverity>? EngineErrorOccurred;
 
-    /// <summary>InProc for Ffi/Fake (fixed, never raises
-    /// <see cref="ConnectionChanged"/>); the pipe client moves through
-    /// Connecting/Connected/Reconnecting.</summary>
+    /// <summary><see cref="EngineConnectionState.Connecting"/> during initial
+    /// background resolution, <see cref="EngineConnectionState.Unavailable"/>
+    /// when no engine exists, <see cref="EngineConnectionState.InProc"/> for
+    /// FFI/test clients, or the live pipe supervisor state.</summary>
     EngineConnectionState Connection { get; }
 
-    /// <summary>Fires when the current <see cref="Connection"/> transitions. In-proc
-    /// implementations never fire (always <see cref="EngineConnectionState.InProc"/>).
-    /// Fires from the pipe client's supervisor thread → marshal.</summary>
+    /// <summary>Fires when the current <see cref="Connection"/> transitions.
+    /// Fixed-state implementations never fire. The pipe implementation fires
+    /// from its supervisor thread → marshal.</summary>
     event Action<EngineConnectionState>? ConnectionChanged;
 
     /// <summary>Returns the labels of the indexed volumes (those the engine
@@ -77,6 +111,24 @@ public interface IEngineClient : IDisposable
     /// <returns>The sort-ordered result handle plus an optional timing trace.</returns>
     Task<SearchOutcome> SearchAsync(
         string query, SearchOptions options, CancellationToken ct = default);
+
+    /// <summary>
+    /// Executes a query while comparing the finished ordered ID column with
+    /// the still-live result currently presented by the caller. Only an exact
+    /// match may set <see cref="QueryTraceData.Unchanged"/>.
+    /// </summary>
+    /// <param name="query">The query text to execute.</param>
+    /// <param name="options">Search options (sort order, flags).</param>
+    /// <param name="presentationBasis">Currently displayed live result, or
+    /// <c>null</c> when nothing is presented.</param>
+    /// <param name="ct">Cooperative cancellation token.</param>
+    /// <returns>The sort-ordered result handle plus an optional timing trace.</returns>
+    Task<SearchOutcome> SearchAsync(
+        string query,
+        SearchOptions options,
+        ISearchResult? presentationBasis,
+        CancellationToken ct = default) =>
+        SearchAsync(query, options, ct);
 
     /// <summary>Observability snapshot for the performance panel.</summary>
     /// <param name="ct">Cooperative cancellation token.</param>

@@ -17,7 +17,69 @@ namespace FindMyFiles.Converters;
 /// </summary>
 public static class DiagFormat
 {
+    /// <summary>Machine data root holding both engine log locations below.</summary>
+    private const string DataRootLeaf = "find-my-files";
+
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+
+    /// <summary>Engine log directory of the <em>service</em> engine, relative to
+    /// %ProgramData%: the service inits diagnostics with its own data dir
+    /// (<c>&lt;data&gt;\logs</c>), the one subtree install grants the authorized
+    /// user read on.</summary>
+    internal static readonly string ServiceEngineLogSubPath = Path.Combine(DataRootLeaf, "logs");
+
+    /// <summary>Engine log directory of the <em>in-proc</em> engine, relative to
+    /// %ProgramData%. The FFI engine has no data dir, so it derives its log dir
+    /// from the index dir (<c>resolve_log_dir(None, index_dir)</c>) and writes to
+    /// <c>&lt;data&gt;\index\logs</c> — a different place from the service's, and
+    /// one an installed machine keeps SYSTEM+Administrators only.</summary>
+    internal static readonly string InProcEngineLogSubPath =
+        Path.Combine(DataRootLeaf, "index", "logs");
+
+    /// <summary>Where the engine behind <paramref name="s"/> writes its rolling
+    /// <c>engine.&lt;date&gt;.log</c>, relative to %ProgramData% — the two
+    /// engines do not share a log directory, and naming the wrong one reads as
+    /// "there are no logs". Only the pipe client fills
+    /// <see cref="EngineStatsData.Transport"/>, so it is the transport
+    /// discriminator; before the first stats poll (null) the shipped default —
+    /// the service — is named.</summary>
+    /// <param name="s">The stats snapshot, or null before the first poll.</param>
+    /// <returns>The %ProgramData%-relative engine log directory.</returns>
+    internal static string EngineLogSubPath(EngineStatsData? s) =>
+        s is null || s.Transport is not null
+            ? ServiceEngineLogSubPath
+            : InProcEngineLogSubPath;
+
+    /// <summary>The symbolic engine log directory for display and for the
+    /// copied diagnostics payload.</summary>
+    /// <param name="s">The stats snapshot, or null before the first poll.</param>
+    /// <returns>The <c>%ProgramData%\…</c> rendering of <see cref="EngineLogSubPath"/>.</returns>
+    internal static string EngineLogDirectoryDisplay(EngineStatsData? s) =>
+        Path.Combine("%ProgramData%", EngineLogSubPath(s));
+
+    /// <summary>Build the privacy-safe text copied from the diagnostics panel.
+    /// Inputs are explicit so the complete payload, including its log guidance,
+    /// remains deterministic under unit test.</summary>
+    /// <param name="capturedAt">The UTC or offset-aware capture timestamp.</param>
+    /// <param name="appVersion">The application version.</param>
+    /// <param name="osVersion">The operating-system version.</param>
+    /// <param name="engineLogDirectory">Symbolic engine log directory for the
+    /// live transport (see <see cref="EngineLogDirectoryDisplay"/>).</param>
+    /// <param name="statsJson">The already serialized engine statistics.</param>
+    /// <param name="appLogTail">The redacted tail of the application log.</param>
+    /// <returns>The complete privacy-safe diagnostic report.</returns>
+    internal static string DiagnosticCopy(
+        DateTimeOffset capturedAt,
+        string appVersion,
+        string osVersion,
+        string engineLogDirectory,
+        string statsJson,
+        string appLogTail) =>
+        $"find-my-files diagnostics {capturedAt:O}\n" +
+        $"app: v{appVersion}  os: {osVersion}\n" +
+        $"engine logs: {engineLogDirectory} (rolling engine.<date>.log)\n" +
+        $"app log: %APPDATA%\\find-my-files\\logs\\app.log\n\n=== engine stats ===\n{statsJson}\n\n" +
+        $"=== app.log (redacted tail) ===\n{appLogTail}\n";
 
     /// <summary>Group-separated integer (e.g. <c>"812,003"</c>).</summary>
     /// <param name="n">The value to format.</param>
@@ -52,12 +114,15 @@ public static class DiagFormat
     /// <returns>The labelled generation.</returns>
     public static string Gen(ulong generation) => "gen " + generation.ToString(Inv);
 
-    /// <summary>The most recent query text shown on its own line above the stat
-    /// tiles (<c>"(all)"</c> for the empty query).</summary>
+    /// <summary>Privacy-safe query summary shown above the stat tiles.</summary>
     /// <param name="t">The last query trace, or null when none was emitted.</param>
-    /// <returns>The query text, or empty when <paramref name="t"/> is null.</returns>
+    /// <returns>The query length, or empty when <paramref name="t"/> is null.</returns>
     public static string Query(QueryTraceData? t) =>
-        t is null ? string.Empty : (string.IsNullOrEmpty(t.Query) ? "(all)" : t.Query);
+        t is null
+            ? string.Empty
+            : t.QueryLength == 0
+                ? "(all)"
+                : t.QueryLength.ToString(Inv) + " chars";
 
     /// <summary>End-to-end time as the "時間" stat-tile value (e.g. <c>"6.05 ms"</c>).</summary>
     /// <param name="t">The last query trace, or null when none was emitted.</param>

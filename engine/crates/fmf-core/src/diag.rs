@@ -32,9 +32,9 @@ impl Severity {
     #[must_use]
     pub const fn as_u64(self) -> u64 {
         match self {
-            Self::Warn => 1,
-            Self::Error => 2,
-            Self::Panic => 3,
+            Self::Warn => fmf_contract::events::SEVERITY_WARN,
+            Self::Error => fmf_contract::events::SEVERITY_ERROR,
+            Self::Panic => fmf_contract::events::SEVERITY_PANIC,
         }
     }
 }
@@ -353,8 +353,21 @@ impl LogfmtVisitor {
     fn put(&mut self, name: &str, value: &str) {
         match (self.reserve, name) {
             (true, "message") => self.message = Some(value.to_string()),
-            (true, "area") => self.area = Some(value.to_string()),
-            _ => push_field(&mut self.fields, name, value),
+            (true, "area") => {
+                self.area = Some(
+                    safe_diagnostic_tag(value)
+                        .unwrap_or("[redacted]")
+                        .to_string(),
+                );
+            }
+            _ if is_safe_string_field(name) => {
+                push_field(
+                    &mut self.fields,
+                    name,
+                    safe_diagnostic_tag(value).unwrap_or("[redacted]"),
+                );
+            }
+            _ => push_field(&mut self.fields, name, "[redacted]"),
         }
     }
 
@@ -363,6 +376,36 @@ impl LogfmtVisitor {
         // Numbers and bools never need quoting; write them straight.
         let _ = write!(self.fields, " {name}={value}");
     }
+}
+
+/// String diagnostics are fail-closed: only finite identifiers are useful in
+/// persisted logs. Paths, error bodies, payloads and user data are redacted at
+/// the formatter even if a caller accidentally records them.
+fn is_safe_string_field(name: &str) -> bool {
+    matches!(
+        name,
+        "area"
+            | "cache"
+            | "channel"
+            | "driver"
+            | "mode"
+            | "qid"
+            | "reason"
+            | "rid"
+            | "source"
+            | "stage"
+            | "vol"
+            | "volume"
+    )
+}
+
+fn safe_diagnostic_tag(value: &str) -> Option<&str> {
+    (!value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'-' | b'_' | b'.' | b':')))
+    .then_some(value)
 }
 
 impl tracing::field::Visit for LogfmtVisitor {
@@ -470,28 +513,18 @@ where
 
 // ── panic hook & logging bootstrap ──────────────────────────────────────
 
-/// Route every panic (any thread) through tracing with a backtrace, so it
-/// reaches the log file, the ring and the UI. Idempotent.
+/// Route every panic (any thread) through tracing.
+///
+/// The event reaches the log file, ring and UI. Panic payloads, source
+/// locations and backtraces are
+/// deliberately not persisted because they routinely contain user paths and
+/// query text. Idempotent.
 pub fn install_panic_hook() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let payload = info
-                .payload()
-                .downcast_ref::<&str>()
-                .map(ToString::to_string)
-                .or_else(|| info.payload().downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<non-string panic payload>".to_string());
-            let location = info.location().map_or_else(
-                || "<unknown>".to_string(),
-                |l| format!("{}:{}", l.file(), l.line()),
-            );
-            let backtrace = std::backtrace::Backtrace::force_capture();
-            tracing::error!(
-                target: "panic",
-                "panic at {location}: {payload}\n{backtrace}"
-            );
+            tracing::error!(target: "panic", "panic captured");
             previous(info);
         }));
     });
@@ -502,13 +535,13 @@ pub fn install_panic_hook() {
 /// An explicit override (config key, CLI flag) wins; otherwise the log sits in
 /// a `logs` subdir of `index_dir` — the location the caller already chose to
 /// write the index, so it shares the index's writability and pollution domain
-/// (portable → `<exe>\data\index\logs`, scope → `%LOCALAPPDATA%\…\index\logs`).
+/// (for example, portable → `<exe>\data\index\logs`).
 /// There is deliberately **no machine-wide default**: falling back to
 /// `%ProgramData%` dirtied the machine for non-elevated callers and panicked
 /// when that dir existed but was not writable. The machine service does not rely
 /// on this fallback — it passes its own `%ProgramData%\find-my-files\logs`
 /// explicitly. The one implementation of this rule — every entry point resolves
-/// through here (ADR-0018; the rule's prose lives in docs/ARCHITECTURE.md).
+/// through here (ADR-0018).
 #[must_use]
 pub fn resolve_log_dir(
     explicit: Option<std::path::PathBuf>,
@@ -568,9 +601,15 @@ pub fn error_chain(e: &dyn std::error::Error) -> String {
 ///
 /// `rg degrade!` enumerates every degraded path. Batch paths (scan internals)
 /// return degradation via stats fields and the worker layer maps them to
-/// counters in one place (don't scatter the macro across the hot path).
+/// counters in one place (don't scatter the macro across the hot path). The
+/// `count = ...` form preserves an aggregate failure count while still emitting
+/// exactly one warning at that mapping point.
 #[macro_export]
 macro_rules! degrade {
+    ($counter:expr, count = $count:expr, $($arg:tt)*) => {{
+        $crate::metrics::Counters::add(&$counter, $count);
+        tracing::warn!($($arg)*);
+    }};
     ($counter:expr, $($arg:tt)*) => {{
         $crate::metrics::Counters::bump(&$counter);
         tracing::warn!($($arg)*);
@@ -594,7 +633,7 @@ pub fn log_query_served(rid: u64, trace: &crate::metrics::QueryTrace) {
         area = "query",
         rid = rid,
         hits = trace.hits,
-        qlen = trace.query.chars().count() as u64,
+        qlen = trace.query_length,
         dur_us = trace.total_us,
         volumes = trace.volumes,
         driver = %trace.driver,
@@ -683,6 +722,19 @@ pub fn init_logging(log_dir: Option<&std::path::Path>, level: &str, max_log_file
 mod tests {
     use super::*;
 
+    #[test]
+    fn severity_wire_values_come_from_the_contract() {
+        assert_eq!(Severity::Warn.as_u64(), fmf_contract::events::SEVERITY_WARN);
+        assert_eq!(
+            Severity::Error.as_u64(),
+            fmf_contract::events::SEVERITY_ERROR
+        );
+        assert_eq!(
+            Severity::Panic.as_u64(),
+            fmf_contract::events::SEVERITY_PANIC
+        );
+    }
+
     /// Single test for the global pipeline (ring/sinks/hook are process-wide
     /// state; parallel tests would interleave).
     #[test]
@@ -731,8 +783,9 @@ mod tests {
             .iter()
             .find(|e| e.severity == Severity::Panic)
             .expect("panic captured");
-        assert!(panic_ev.message.contains("test panic"));
-        assert!(panic_ev.message.contains("diag.rs") || panic_ev.message.contains("backtrace"));
+        assert_eq!(panic_ev.message, "panic captured");
+        assert!(!panic_ev.message.contains("test panic"));
+        assert!(!panic_ev.message.contains("diag.rs"));
 
         // Ring kept them too, with monotonically increasing seq.
         let ring = recent_errors();
@@ -894,5 +947,55 @@ mod tests {
             line.find("qid=").unwrap() < line.find("hits=").unwrap(),
             "span field should come before event fields: {line}"
         );
+    }
+
+    #[test]
+    fn logfmt_redacts_arbitrary_string_fields_at_the_sink() {
+        use std::io::Write;
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        const SECRET: &str = r"C:\Users\alice\secret-query.txt";
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .fmt_fields(LogfmtFields)
+                .event_format(LogfmtFormat)
+                .with_writer(VecWriter(buf.clone())),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                area = "privacy",
+                path = SECRET,
+                error = %format_args!("failed to read {SECRET}"),
+                code = 5_u64,
+                "operation failed"
+            );
+        });
+
+        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        assert!(!out.contains(SECRET), "secret crossed the log sink: {out}");
+        assert!(out.contains(" path=[redacted]"), "path marker: {out}");
+        assert!(out.contains(" error=[redacted]"), "error marker: {out}");
+        assert!(out.contains(" code=5"), "numeric evidence survives: {out}");
     }
 }

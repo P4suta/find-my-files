@@ -18,7 +18,7 @@ namespace FindMyFiles.Tests.TestDoubles;
 /// invoked outside the lock so re-entrant enqueues and concurrent producers
 /// never block on the action.</para>
 /// </summary>
-public sealed class ManualDispatcher : IDispatcher
+internal sealed class ManualDispatcher : IDispatcher
 {
     private readonly Queue<Action> _queue = new();
     private readonly System.Threading.Lock _queueLock = new();

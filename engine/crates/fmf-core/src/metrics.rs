@@ -13,8 +13,10 @@ use serde::Serialize;
 /// Stage breakdown of one query, in microseconds.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct QueryTrace {
-    /// The raw query text this trace measured.
-    pub query: String,
+    /// Unicode scalar count of the measured query. The text itself is never
+    /// retained in observability data because filenames and queries are the
+    /// product's sensitive asset (ADR-0037).
+    pub query_length: u32,
     /// Which execution strategy drove candidate generation (visualized in
     /// the perf panel): e.g. "full-scan", "pool-scan", "suffix", "perm-walk".
     pub driver: String,
@@ -220,6 +222,10 @@ impl Histogram {
 /// otherwise vanish into fallback paths. Zero-cost atomics, always on.
 #[derive(Debug, Default)]
 pub struct Counters {
+    /// Rows dropped by an initial scan because it never saw their parent
+    /// directory — the volume changed under the scan. A systematic count is a
+    /// defect, not churn, so it is a counter rather than a silent recovery.
+    pub scan_unresolved_parents: std::sync::atomic::AtomicU64,
     /// Times a per-entry size/mtime stat fetch failed.
     pub stat_fetch_failures: std::sync::atomic::AtomicU64,
     /// Times a USN batch was truncated (records dropped before apply).
@@ -228,8 +234,6 @@ pub struct Counters {
     pub snapshot_load_failures: std::sync::atomic::AtomicU64,
     /// Times a snapshot failed to save.
     pub snapshot_save_failures: std::sync::atomic::AtomicU64,
-    /// Times a deferred $`ATTRIBUTE_LIST` name could not be resolved.
-    pub deferred_names_unresolved: std::sync::atomic::AtomicU64,
     /// Times a corrupt MFT record was encountered and skipped.
     pub corrupt_mft_records: std::sync::atomic::AtomicU64,
     /// Times the USN journal was rescanned from scratch (gap recovery).
@@ -251,8 +255,8 @@ pub struct Counters {
     /// Scan: the extension-record name cache hit its capacity; remaining
     /// deferred names fall back to per-record disk reads.
     pub deferred_name_cache_overflow: std::sync::atomic::AtomicU64,
-    /// Scan: a deferred-name disk read failed (the entry keeps a
-    /// placeholder name until the next rescan).
+    /// Scan: a targeted deferred-name read failed before the authoritative
+    /// live metadata source completed the link set.
     pub deferred_name_read_failures: std::sync::atomic::AtomicU64,
     /// Pipe server: a result handle was LRU-evicted at the per-connection
     /// cap; its next page fetch answers STALE("evicted").
@@ -260,16 +264,22 @@ pub struct Counters {
     /// `QueryTrace` JSON serialization failed; the response carried an empty
     /// trace (the query itself succeeded).
     pub trace_serialize_failures: std::sync::atomic::AtomicU64,
-    /// Scope walk (ADR-0024): paths skipped because they could not be read
-    /// (permission denied or vanished mid-walk) — silent data loss otherwise.
-    pub walk_read_errors: std::sync::atomic::AtomicU64,
-    /// Scope walk: subtrees not descended because they hit the depth cap.
-    pub walk_depth_truncated: std::sync::atomic::AtomicU64,
+    /// A required complete hard-link set could not be read or validated; the
+    /// journal batch was rejected and a full rescan requested.
+    pub hard_link_refresh_failures: std::sync::atomic::AtomicU64,
+    /// The live index refused a journal record because applying it would have
+    /// broken a topology invariant; the record was dropped and a full rescan
+    /// requested rather than half-applying it.
+    pub usn_index_rejections: std::sync::atomic::AtomicU64,
 }
 
 /// Plain-integer, JSON-serializable copy of `Counters` for the FFI/UI.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct CountersSnapshot {
+    /// Rows dropped by an initial scan because it never saw their parent
+    /// directory — the volume changed under the scan. A systematic count is a
+    /// defect, not churn, so it is a counter rather than a silent recovery.
+    pub scan_unresolved_parents: u64,
     /// Times a per-entry size/mtime stat fetch failed.
     pub stat_fetch_failures: u64,
     /// Times a USN batch was truncated (records dropped before apply).
@@ -278,18 +288,12 @@ pub struct CountersSnapshot {
     pub snapshot_load_failures: u64,
     /// Times a snapshot failed to save.
     pub snapshot_save_failures: u64,
-    /// Times a deferred $`ATTRIBUTE_LIST` name could not be resolved.
-    pub deferred_names_unresolved: u64,
     /// Times a corrupt MFT record was encountered and skipped.
     pub corrupt_mft_records: u64,
     /// Times the USN journal was rescanned from scratch (gap recovery).
     pub journal_rescans: u64,
     /// Times the scan pipeline fell back to a slower path.
     pub scan_pipeline_fallbacks: u64,
-    /// Retired: ADR-0032 removed the query-layer offset table (the name
-    /// dictionary is self-indexing). Held at 0 for counter-list stability —
-    /// counters are append-only and never removed (see fmf-contract).
-    pub offset_table_rebuild_fallbacks: u64,
     /// Times a lazy permutation had to be rebuilt as a fallback.
     pub lazy_perm_rebuild_fallbacks: u64,
     /// A compacted copy was discarded because the index mutated under it —
@@ -307,8 +311,8 @@ pub struct CountersSnapshot {
     /// Scan: the extension-record name cache hit its capacity; remaining
     /// deferred names fall back to per-record disk reads.
     pub deferred_name_cache_overflow: u64,
-    /// Scan: a deferred-name disk read failed (the entry keeps a
-    /// placeholder name until the next rescan).
+    /// Scan: a targeted deferred-name read failed before the authoritative
+    /// live metadata source completed the link set.
     pub deferred_name_read_failures: u64,
     /// Pipe server: a result handle was LRU-evicted at the per-connection
     /// cap; its next page fetch answers STALE("evicted").
@@ -316,28 +320,25 @@ pub struct CountersSnapshot {
     /// `QueryTrace` JSON serialization failed; the response carried an empty
     /// trace (the query itself succeeded).
     pub trace_serialize_failures: u64,
-    /// Scope walk (ADR-0024): paths skipped because they could not be read.
-    pub walk_read_errors: u64,
-    /// Scope walk: subtrees not descended because they hit the depth cap.
-    pub walk_depth_truncated: u64,
+    /// A required complete hard-link set could not be read or validated; the
+    /// journal batch was rejected and a full rescan requested.
+    pub hard_link_refresh_failures: u64,
+    /// The live index refused a journal record because applying it would have
+    /// broken a topology invariant; the record was dropped and a full rescan
+    /// requested rather than half-applying it.
+    pub usn_index_rejections: u64,
 }
 
 /// The query layer has no `MetricsHub` handle (its degradations normally go
-/// through the diag ring — see memo.rs), so these counters are process
-/// globals folded into every snapshot.
-static OFFSET_TABLE_REBUILD_FALLBACKS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static LAZY_PERM_REBUILD_FALLBACKS: std::sync::atomic::AtomicU64 =
+/// through the diag ring — see memo.rs), so this counter is process-global
+/// and folded into every snapshot.
+pub(crate) static LAZY_PERM_REBUILD_FALLBACKS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 impl Counters {
     /// Increment a counter by one (relaxed atomic).
     pub fn bump(counter: &std::sync::atomic::AtomicU64) {
         counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub(crate) fn bump_lazy_perm_rebuild_fallbacks() {
-        LAZY_PERM_REBUILD_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Add `n` to a counter (relaxed atomic).
@@ -349,15 +350,14 @@ impl Counters {
     pub fn snapshot(&self) -> CountersSnapshot {
         use std::sync::atomic::Ordering::Relaxed;
         CountersSnapshot {
+            scan_unresolved_parents: self.scan_unresolved_parents.load(Relaxed),
             stat_fetch_failures: self.stat_fetch_failures.load(Relaxed),
             usn_batches_truncated: self.usn_batches_truncated.load(Relaxed),
             snapshot_load_failures: self.snapshot_load_failures.load(Relaxed),
             snapshot_save_failures: self.snapshot_save_failures.load(Relaxed),
-            deferred_names_unresolved: self.deferred_names_unresolved.load(Relaxed),
             corrupt_mft_records: self.corrupt_mft_records.load(Relaxed),
             journal_rescans: self.journal_rescans.load(Relaxed),
             scan_pipeline_fallbacks: self.scan_pipeline_fallbacks.load(Relaxed),
-            offset_table_rebuild_fallbacks: OFFSET_TABLE_REBUILD_FALLBACKS.load(Relaxed),
             lazy_perm_rebuild_fallbacks: LAZY_PERM_REBUILD_FALLBACKS.load(Relaxed),
             compaction_aborts: self.compaction_aborts.load(Relaxed),
             pipe_malformed_frames: self.pipe_malformed_frames.load(Relaxed),
@@ -367,8 +367,8 @@ impl Counters {
             deferred_name_read_failures: self.deferred_name_read_failures.load(Relaxed),
             pipe_results_evicted: self.pipe_results_evicted.load(Relaxed),
             trace_serialize_failures: self.trace_serialize_failures.load(Relaxed),
-            walk_read_errors: self.walk_read_errors.load(Relaxed),
-            walk_depth_truncated: self.walk_depth_truncated.load(Relaxed),
+            hard_link_refresh_failures: self.hard_link_refresh_failures.load(Relaxed),
+            usn_index_rejections: self.usn_index_rejections.load(Relaxed),
         }
     }
 }

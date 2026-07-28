@@ -1,11 +1,16 @@
 version: 2
 updates:
-  # Rust workspace (manifest + Cargo.lock live under engine/).
+  # Shipped Rust workspace plus the deliberately standalone fuzz workspace;
+  # each owns a Cargo.lock and therefore needs an explicit update root.
   - package-ecosystem: cargo
-    directory: /engine
+    directories:
+      - /engine
+      - /engine/fuzz
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       rust-deps:
@@ -22,6 +27,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       xtask-deps:
@@ -32,11 +39,27 @@ updates:
       include: scope
 
   # C# app — one nuget entry per project directory.
+  # Root .NET tool manifest (`.config/dotnet-tools.json`, currently Stryker).
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      dotnet-tools:
+        patterns: ["*"]
+    commit-message:
+      prefix: build
+
   - package-ecosystem: nuget
     directory: /app/FindMyFiles
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     groups:
       dotnet-app:
         patterns: ["*"]
@@ -48,18 +71,26 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     groups:
       dotnet-tests:
         patterns: ["*"]
     commit-message:
       prefix: build
 
-  # The workflow actions themselves.
+  # Workflow actions plus dependencies used by repository-local composite
+  # actions. GitHub's root sentinel scans .github/workflows; each immediate
+  # action directory is also a manifest location and must be included explicitly.
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/*
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]

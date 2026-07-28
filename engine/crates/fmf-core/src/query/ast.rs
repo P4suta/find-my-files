@@ -19,6 +19,15 @@ pub enum ParseError {
     /// Negation was applied to a term that cannot be negated (e.g. `!folder:foo`).
     #[error("`{0}` cannot be negated")]
     CannotNegate(String),
+    /// The query exceeded the bounded number of OR groups.
+    #[error("query has more than {0} OR groups")]
+    TooManyGroups(u32),
+    /// The query exceeded the bounded total term count.
+    #[error("query has more than {0} terms")]
+    TooManyTerms(u32),
+    /// The query exceeded the bounded number of regular-expression terms.
+    #[error("query has more than {0} regex terms")]
+    TooManyRegexTerms(u32),
 }
 
 /// A single matchable condition within an AND group of the [`Ast`].
@@ -76,6 +85,8 @@ pub struct Ast {
 /// `last_mut` access always succeeds.
 pub fn parse(input: &str) -> Result<Ast, ParseError> {
     let mut groups: Vec<Vec<Term>> = vec![Vec::new()];
+    let mut term_count = 0u32;
+    let mut regex_count = 0u32;
     let mut rest = input;
 
     loop {
@@ -84,6 +95,11 @@ pub fn parse(input: &str) -> Result<Ast, ParseError> {
             break;
         }
         if let Some(r) = rest.strip_prefix('|') {
+            if groups.len() >= fmf_contract::limits::MAX_QUERY_GROUPS as usize {
+                return Err(ParseError::TooManyGroups(
+                    fmf_contract::limits::MAX_QUERY_GROUPS,
+                ));
+            }
             groups.push(Vec::new());
             rest = r;
             continue;
@@ -102,6 +118,20 @@ pub fn parse(input: &str) -> Result<Ast, ParseError> {
         }
         let terms = terms_from_atom(&atom, negated)?;
         for t in terms {
+            term_count += 1;
+            if term_count > fmf_contract::limits::MAX_QUERY_TERMS {
+                return Err(ParseError::TooManyTerms(
+                    fmf_contract::limits::MAX_QUERY_TERMS,
+                ));
+            }
+            if is_regex_term(&t) {
+                regex_count += 1;
+                if regex_count > fmf_contract::limits::MAX_REGEX_TERMS {
+                    return Err(ParseError::TooManyRegexTerms(
+                        fmf_contract::limits::MAX_REGEX_TERMS,
+                    ));
+                }
+            }
             groups
                 .last_mut()
                 .expect("groups is seeded with one element")
@@ -110,6 +140,14 @@ pub fn parse(input: &str) -> Result<Ast, ParseError> {
     }
 
     Ok(Ast { groups })
+}
+
+fn is_regex_term(term: &Term) -> bool {
+    match term {
+        Term::Regex(_) => true,
+        Term::Not(inner) => is_regex_term(inner),
+        _ => false,
+    }
 }
 
 /// Read one atom: up to whitespace or `|`, honoring quoted sections
@@ -556,6 +594,38 @@ mod tests {
     #[test]
     fn empty_query_is_match_all() {
         assert_eq!(p("").groups, vec![Vec::<Term>::new()]);
+    }
+
+    #[test]
+    fn malicious_query_complexity_is_bounded_before_compile() {
+        let too_many_groups =
+            std::iter::repeat_n("aa", fmf_contract::limits::MAX_QUERY_GROUPS as usize + 1)
+                .collect::<Vec<_>>()
+                .join("|");
+        assert!(matches!(
+            parse(&too_many_groups),
+            Err(ParseError::TooManyGroups(_))
+        ));
+
+        let too_many_terms =
+            std::iter::repeat_n("aa", fmf_contract::limits::MAX_QUERY_TERMS as usize + 1)
+                .collect::<Vec<_>>()
+                .join(" ");
+        assert!(matches!(
+            parse(&too_many_terms),
+            Err(ParseError::TooManyTerms(_))
+        ));
+
+        let too_many_regex = std::iter::repeat_n(
+            "regex:aa",
+            fmf_contract::limits::MAX_REGEX_TERMS as usize + 1,
+        )
+        .collect::<Vec<_>>()
+        .join(" ");
+        assert!(matches!(
+            parse(&too_many_regex),
+            Err(ParseError::TooManyRegexTerms(_))
+        ));
     }
 }
 

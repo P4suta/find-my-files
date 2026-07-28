@@ -1,21 +1,22 @@
 //! The engine's only two OS-effect seams (ADR-0018 — this is the hard cap,
 //! do not add a third): snapshot persistence and the USN journal session.
 //! They exist so the volume worker's failure paths (corrupt snapshot,
-//! journal-gone, failed saves, stat-fetch storms) replay in unprivileged,
+//! journal-gone, failed saves, metadata-fetch storms) replay in unprivileged,
 //! deterministic tests (`worker_tests.rs`). The Windows implementations are
 //! thin wrappers over the exact calls the worker made before the seam was
 //! introduced — behavior-identical by construction.
 //!
 //! Granularity guard: every method here runs at establish/batch/save
-//! frequency. Nothing per-entry goes through these traits (the per-record
-//! `StatFetcher` handed out below was already a `dyn` call before the seam
-//! existed — see `usn::apply_batch`).
+//! frequency. Nothing per-entry goes through these traits; per-record object
+//! metadata and complete-link lookup use the closed concrete `MetadataSource`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crate::index::VolumeIndex;
 #[cfg(windows)]
-use crate::usn::{ReadOutcome, StatFetcher, UsnError, UsnJournal, VolumeStatFetcher};
+use crate::usn::{MetadataSource, ReadOutcome, UsnError, UsnJournal};
 
 /// Snapshot persistence for one volume (`{index_dir}\{letter}.fmfidx`).
 pub trait SnapshotStore: Send + Sync {
@@ -84,19 +85,6 @@ pub struct JournalView {
     pub(crate) first_usn: i64,
 }
 
-#[cfg(windows)]
-impl JournalView {
-    /// The synthetic view for a scope-mode (folder-walk) snapshot (ADR-0024):
-    /// journal id 0 with no retention window, so `snapshot_decision` always
-    /// restores a loaded walk snapshot — there is no USN cursor to validate.
-    pub(crate) const fn scope() -> Self {
-        Self {
-            journal_id: 0,
-            first_usn: 0,
-        }
-    }
-}
-
 /// One volume's USN journal session, reopenable across journal-gone
 /// rescans. `open` must succeed before any other method is called (the
 /// worker guarantees this; implementations may panic otherwise — the
@@ -124,13 +112,13 @@ pub trait JournalSource: Send {
     /// Reposition the cursor (a snapshot restore replays from its
     /// persisted checkpoint instead of the journal's current end).
     fn set_next_usn(&mut self, usn: i64);
-    /// Size/mtime fetcher bound to the same volume, opened once per tail
-    /// session. Per-record `stat` calls were already dynamic (`usn::apply`).
-    fn open_stat_fetcher(&self) -> Result<Box<dyn StatFetcher>, UsnError>;
+    /// Object metadata source bound to the same volume, opened once per tail
+    /// session and cooperatively cancelled with the volume worker.
+    fn open_metadata_source(&self, stop: Arc<AtomicBool>) -> Result<MetadataSource, UsnError>;
 }
 
 /// Production journal: thin wrapper over `usn::session::UsnJournal` /
-/// `VolumeStatFetcher` for one drive label.
+/// a live `MetadataSource` for one drive label.
 #[cfg(windows)]
 pub struct WinJournalSource {
     label: String,
@@ -191,7 +179,7 @@ impl JournalSource for WinJournalSource {
             .next_usn = usn;
     }
 
-    fn open_stat_fetcher(&self) -> Result<Box<dyn StatFetcher>, UsnError> {
-        Ok(Box::new(VolumeStatFetcher::open(&self.label)?))
+    fn open_metadata_source(&self, stop: Arc<AtomicBool>) -> Result<MetadataSource, UsnError> {
+        MetadataSource::open_volume_cancellable(&self.label, stop)
     }
 }

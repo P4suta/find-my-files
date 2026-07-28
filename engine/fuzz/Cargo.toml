@@ -3,8 +3,13 @@
 #   - the named-pipe wire codec (fmf-proto / fmf-contract) — the privilege
 #     boundary (non-elevated UI -> elevated fmf-service, docs/SECURITY.md);
 #   - the fmf-core decoders (query / index::snapshot / usn::records / wtf8) —
-#     now reachable because fmf-core's Windows deps (ntfs-reader / windows-sys)
-#     are `cfg(windows)`-gated, so its pure parsers build for Linux.
+#     now reachable because fmf-core's Windows dependency (windows-sys)
+#     are `cfg(windows)`-gated, so its pure parsers build for Linux;
+#   - the NTFS on-disk grammar (fmf_core::ondisk — boot sector, file records,
+#     $ATTRIBUTE_LIST, non-resident runs), the bytes a crafted VHDX or USB
+#     stick fully controls and that fmf-service parses as LocalSystem
+#     (ADR-0047). These four targets shape their input rather than passing raw
+#     bytes through: see each target's module docs for why.
 # All are proptest-covered in-tree too; libFuzzer adds coverage-guided
 # exploration with ASan over the same surfaces.
 [package]
@@ -66,6 +71,34 @@ bench = false
 [[bin]]
 name = "wtf8_decode"
 path = "fuzz_targets/wtf8_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ntfs_boot_sector"
+path = "fuzz_targets/ntfs_boot_sector.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ntfs_file_record"
+path = "fuzz_targets/ntfs_file_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ntfs_attribute_list"
+path = "fuzz_targets/ntfs_attribute_list.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ntfs_extent_runs"
+path = "fuzz_targets/ntfs_extent_runs.rs"
 test = false
 doc = false
 bench = false

@@ -1,22 +1,36 @@
-# ADR-0003: WTF-8 storage and length-preserving fold
+# ADR-0003: Lossless WTF-8 storage, length-preserving fold, canonical search
 
-Date: 2026-06-11 / Status: Accepted
+Date: 2026-06-11 (amended 2026-07-26) / Status: Accepted
 
 ## Decision
 
-Names are stored as WTF-8. The search fold applies only "single-character lowercasing that keeps the same encoded length" (wtf8.rs). No NFC/NFD normalization.
+Stored names remain byte-exact WTF-8. The folded dictionary still applies only
+single-code-point lowercase mappings of identical encoded length; this preserves
+ADR-0004's shared name-length layout and snapshot format.
 
-## Rationale
+Ordinary non-ASCII name/path literals and globs compare NFC query-time views.
+Valid scalar spans on each side of a lone surrogate normalize independently;
+the surrogate's WTF-8 bytes are an opaque barrier. Explicit regex mode continues
+to evaluate the original spelling, because normalization would change regex
+offset and syntax semantics.
 
-- NTFS names are raw UTF-16 sequences and may contain ill-formed (unpaired) surrogates. WTF-8 preserves these losslessly (FFI contract: strings are UTF-8, filenames are WTF-8; the C# side restores UTF-16 via a dedicated decode)
-- Because the fold is length-preserving, name_off / name_len can be shared between the folded pool view and the original-text view (the precondition for the fold-overflow layout = ADR-0004)
-- A match position in the folded pool maps to the same byte position in the original text (anchor-position preservation). Residual verification holds without offset conversion
+Candidate generation unions the existing raw folded-pool sweep with a
+non-ASCII dictionary completion pass. Because NFC and the length-preserving
+storage fold do not commute for every spelling, fold-nonidentical entries also
+receive an original-spelling completion pass; the source matcher is then
+verified as a residual from the original spelling. Normalization-inert ASCII
+queries take the original sweep and matcher path unchanged. ASCII `;`, `` ` ``,
+and `K` (plus folded `k`) opt into completion because the locked Unicode table
+has canonical singleton aliases for them.
+Canonical scratch is per-query/thread and retained only for reuse during that
+query; no normalized pool or snapshot column is added.
 
 ## Consequences
 
-- Lowercasing that expands to multiple characters and normalization equivalence (NFC/NFD) are not absorbed by search (known limitation)
-- The fold rule is shared between the engine core and the `fmf stats --name-stats` measurement (no rule mismatch between statistics and implementation)
-
-## Re-examination triggers
-
-- If real-world harm from NFC/NFD mismatch is reported continuously (even then storage stays WTF-8; only the fold layer is redesigned)
+- NFC, NFD, and mixed canonical spellings match for substring, prefix, suffix,
+  extension, path, and whole-name glob searches.
+- Ill-formed UTF-16 still round-trips exactly through stored WTF-8 and FFI.
+- Steady-state index RAM and the normalization-inert ASCII hot path are
+  unchanged. Canonical queries pay a bounded dictionary scan plus an
+  original-spelling pass over fold-nonidentical non-ASCII entries.
+- Multi-character lowercase expansion remains outside the storage fold.

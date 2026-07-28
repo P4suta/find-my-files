@@ -75,7 +75,6 @@ mod tests {
             "hostfxr.dll",
             "fmf_engine.dll",
             "fmf-service.exe",
-            "fmf.exe",
             "Microsoft.ui.xaml.dll",
         ] {
             assert!(!is_pruned(keep), "{keep} must be kept");

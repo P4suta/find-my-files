@@ -8,21 +8,48 @@ namespace FindMyFiles.Engine;
 internal sealed class PipeSearchResult(
     PipeEngineClient client, ulong resultId, long count, int epoch) : ISearchResult
 {
-    private int _inFlight;
-    private int _released;
-    private volatile bool _disposed;
+    private readonly ResultLeaseGate _lifetime = new();
 
     public long Count { get; } = count;
+
+    internal bool TryAcquirePresentationBasis(
+        PipeEngineClient expectedClient,
+        out ulong id,
+        out int basisEpoch,
+        out IDisposable? lease)
+    {
+        id = 0;
+        basisEpoch = 0;
+        lease = null;
+        if (!ReferenceEquals(client, expectedClient)
+            || epoch != client.CurrentEpoch
+            || !_lifetime.TryAcquire())
+        {
+            return false;
+        }
+
+        if (epoch != client.CurrentEpoch)
+        {
+            EndOperation();
+            return false;
+        }
+
+        id = resultId;
+        basisEpoch = epoch;
+        lease = new OperationLease(EndOperation);
+        return true;
+    }
 
     public async Task<IReadOnlyList<RowData>> GetRangeAsync(
         long offset, int count, CancellationToken ct = default)
     {
-        if (_disposed || epoch != client.CurrentEpoch)
+        ct.ThrowIfCancellationRequested();
+        var request = EngineRequest.PageRange(offset, count);
+        if (epoch != client.CurrentEpoch || !_lifetime.TryAcquire())
         {
             throw new StaleResultException();
         }
 
-        Interlocked.Increment(ref _inFlight);
         try
         {
             if (epoch != client.CurrentEpoch)
@@ -30,31 +57,35 @@ internal sealed class PipeSearchResult(
                 throw new StaleResultException(); // re-check inside the guard
             }
 
-            return await client.FetchPageAsync(resultId, offset, count, ct).ConfigureAwait(false);
+            return await client.FetchPageAsync(resultId, request, epoch, ct).ConfigureAwait(false);
         }
         finally
         {
-            if (Interlocked.Decrement(ref _inFlight) == 0 && _disposed)
-            {
-                MaybeRelease();
-            }
+            EndOperation();
         }
     }
 
     public void Dispose()
     {
-        _disposed = true;
-        if (Volatile.Read(ref _inFlight) == 0)
-        {
-            MaybeRelease();
-        }
-    }
-
-    private void MaybeRelease()
-    {
-        if (Interlocked.Exchange(ref _released, 1) == 0)
+        if (_lifetime.Dispose())
         {
             client.ReleaseResult(resultId, epoch);
         }
+    }
+
+    private void EndOperation()
+    {
+        if (_lifetime.Release())
+        {
+            client.ReleaseResult(resultId, epoch);
+        }
+    }
+
+    private sealed class OperationLease(Action release) : IDisposable
+    {
+        private Action? _release = release;
+
+        public void Dispose() =>
+            Interlocked.Exchange(ref _release, null)?.Invoke();
     }
 }

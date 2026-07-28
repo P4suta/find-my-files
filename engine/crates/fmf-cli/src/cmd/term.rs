@@ -15,10 +15,6 @@ use super::ctx::Ctx;
 pub const ERROR: Style = Style::new()
     .fg_color(Some(Color::Ansi(AnsiColor::Red)))
     .effects(Effects::BOLD);
-/// A recoverable warning label (yellow, bold).
-pub const WARN: Style = Style::new()
-    .fg_color(Some(Color::Ansi(AnsiColor::Yellow)))
-    .effects(Effects::BOLD);
 /// A success / within-budget label (green, bold).
 pub const OK: Style = Style::new()
     .fg_color(Some(Color::Ansi(AnsiColor::Green)))

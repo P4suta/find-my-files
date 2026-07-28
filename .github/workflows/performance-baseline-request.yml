@@ -1,0 +1,64 @@
+name: performance-baseline-request
+run-name: performance-baseline-request ${{ inputs.commit_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Exact protected-main commit to benchmark"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-baseline-request
+  cancel-in-progress: false
+
+jobs:
+  authorize-request:
+    # This workflow never reaches the self-hosted runner. Its completed run is
+    # inert input to performance-controller.yml, whose workflow_run trigger always
+    # loads the recorder definition from the default branch.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Bind the request to the current protected-main commit
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          CONTROLLER_REF: ${{ github.ref }}
+          CONTROLLER_SHA: ${{ github.sha }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const requestedSha = process.env.REQUESTED_SHA;
+            const controllerRef = process.env.CONTROLLER_REF;
+            const controllerSha = process.env.CONTROLLER_SHA;
+
+            if (!/^[0-9a-f]{40}$/.test(requestedSha)) {
+              throw new Error(`Requested SHA '${requestedSha}' is not a lowercase commit identity.`);
+            }
+            if (controllerRef !== "refs/heads/main") {
+              throw new Error(`Baseline requests must execute from protected main, got '${controllerRef}'.`);
+            }
+            if (controllerSha !== requestedSha) {
+              throw new Error(
+                `Requested baseline ${requestedSha} does not match controller ${controllerSha}.`,
+              );
+            }
+
+            const { data: comparison } =
+              await github.rest.repos.compareCommitsWithBasehead({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                basehead: `${controllerSha}...main`,
+              });
+            if (comparison.status !== "ahead" && comparison.status !== "identical") {
+              throw new Error(
+                `${controllerSha} is not on main's protected lineage ` +
+                  `(compare status: ${comparison.status}).`,
+              );
+            }
+            core.info(`Authorized baseline request for ${controllerSha}.`);

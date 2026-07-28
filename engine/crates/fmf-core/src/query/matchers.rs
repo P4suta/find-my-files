@@ -10,8 +10,17 @@ use crate::index::{EntryId, VolumeIndex};
 pub(super) struct EvalCtx {
     lower_path: Vec<u8>,
     orig_path: Vec<u8>,
+    canonical_lower_path: Vec<u8>,
+    canonical_orig_path: Vec<u8>,
+    canonical_lower_name: Vec<u8>,
+    canonical_orig_name: Vec<u8>,
+    path_chain: Vec<EntryId>,
     lower_built: bool,
     orig_built: bool,
+    canonical_lower_path_built: bool,
+    canonical_orig_path_built: bool,
+    canonical_lower_name_built: bool,
+    canonical_orig_name_built: bool,
 }
 
 impl EvalCtx {
@@ -19,6 +28,10 @@ impl EvalCtx {
     const fn reset(&mut self) {
         self.lower_built = false;
         self.orig_built = false;
+        self.canonical_lower_path_built = false;
+        self.canonical_orig_path_built = false;
+        self.canonical_lower_name_built = false;
+        self.canonical_orig_name_built = false;
     }
 
     #[inline]
@@ -26,8 +39,7 @@ impl EvalCtx {
         if !self.lower_built {
             self.lower_path.clear();
             if id != VolumeIndex::ROOT {
-                self.lower_path
-                    .extend_from_slice(memo.lower_prefix(idx.parent(id)));
+                memo.append_lower_parent(idx, id, &mut self.lower_path, &mut self.path_chain);
             }
             self.lower_path.extend_from_slice(idx.lower_name(id));
             self.lower_built = true;
@@ -40,13 +52,83 @@ impl EvalCtx {
         if !self.orig_built {
             self.orig_path.clear();
             if id != VolumeIndex::ROOT {
-                self.orig_path
-                    .extend_from_slice(memo.orig_prefix(idx.parent(id)));
+                memo.append_orig_parent(idx, id, &mut self.orig_path, &mut self.path_chain);
             }
             self.orig_path.extend_from_slice(idx.name(id));
             self.orig_built = true;
         }
         &self.orig_path
+    }
+
+    #[inline]
+    fn canonical_lower_path<'a>(
+        &'a mut self,
+        idx: &VolumeIndex,
+        memo: &PathMemos,
+        id: EntryId,
+    ) -> &'a [u8] {
+        // Canonicalize before folding. Those operations do not commute for
+        // every scalar sequence (for example `I` + U+0307 versus U+0130), so
+        // the storage-folded path is not a sound source for this view.
+        let original_is_ascii = {
+            let original = self.orig_path(idx, memo, id);
+            original.is_ascii()
+        };
+        if original_is_ascii {
+            return self.lower_path(idx, memo, id);
+        }
+        if !self.canonical_lower_path_built {
+            crate::wtf8::normalize_wtf8_into(&self.orig_path, true, &mut self.canonical_lower_path);
+            self.canonical_lower_path_built = true;
+        }
+        &self.canonical_lower_path
+    }
+
+    #[inline]
+    fn canonical_orig_path<'a>(
+        &'a mut self,
+        idx: &VolumeIndex,
+        memo: &PathMemos,
+        id: EntryId,
+    ) -> &'a [u8] {
+        let _ = self.orig_path(idx, memo, id);
+        if self.orig_path.is_ascii() {
+            return &self.orig_path;
+        }
+        if !self.canonical_orig_path_built {
+            crate::wtf8::normalize_wtf8_into(&self.orig_path, false, &mut self.canonical_orig_path);
+            self.canonical_orig_path_built = true;
+        }
+        &self.canonical_orig_path
+    }
+
+    #[inline]
+    fn canonical_lower_name<'a>(&'a mut self, idx: &'a VolumeIndex, id: EntryId) -> &'a [u8] {
+        let original = idx.name(id);
+        if original.is_ascii() {
+            return idx.lower_name(id);
+        }
+        if !self.canonical_lower_name_built {
+            // Normalize the original spelling before folding. Re-normalizing
+            // the stored lower pool would lose canonical equivalence where
+            // composition changes the length-preserving fold decision.
+            crate::wtf8::normalize_wtf8_into(original, true, &mut self.canonical_lower_name);
+            self.canonical_lower_name_built = true;
+        }
+        &self.canonical_lower_name
+    }
+
+    #[inline]
+    fn canonical_orig_name<'a>(&'a mut self, idx: &'a VolumeIndex, id: EntryId) -> &'a [u8] {
+        let original = idx.name(id);
+        if original.is_ascii() {
+            return original;
+        }
+        if !self.canonical_orig_name_built {
+            crate::wtf8::normalize_wtf8_into(original, false, &mut self.canonical_orig_name);
+            self.canonical_orig_name_built = true;
+        }
+        &self.canonical_orig_name
     }
 }
 
@@ -75,8 +157,12 @@ fn eval(idx: &VolumeIndex, memo: &PathMemos, ctx: &mut EvalCtx, t: &CTerm, id: E
         Matcher::Size { min, max } => !idx.is_dir(id) && (*min..=*max).contains(&idx.size(id)),
         Matcher::Mtime { min, max } => (*min..=*max).contains(&idx.mtime(id)),
         Matcher::IsDir(d) => idx.is_dir(id) == *d,
-        Matcher::Ext { exts } => {
-            let lower = idx.lower_name(id);
+        Matcher::Ext { exts, canonical } => {
+            let lower = if *canonical {
+                ctx.canonical_lower_name(idx, id)
+            } else {
+                idx.lower_name(id)
+            };
             match memchr::memrchr(b'.', lower) {
                 Some(p) if !idx.is_dir(id) => {
                     let ext = &lower[p + 1..];
@@ -85,8 +171,18 @@ fn eval(idx: &VolumeIndex, memo: &PathMemos, ctx: &mut EvalCtx, t: &CTerm, id: E
                 _ => false,
             }
         }
-        Matcher::NameSub { finder, folded } => {
-            let hay = if *folded {
+        Matcher::NameSub {
+            finder,
+            folded,
+            canonical,
+        } => {
+            let hay = if *canonical {
+                if *folded {
+                    ctx.canonical_lower_name(idx, id)
+                } else {
+                    ctx.canonical_orig_name(idx, id)
+                }
+            } else if *folded {
                 idx.lower_name(id)
             } else {
                 match exact_hay(idx, t, id) {
@@ -96,8 +192,18 @@ fn eval(idx: &VolumeIndex, memo: &PathMemos, ctx: &mut EvalCtx, t: &CTerm, id: E
             };
             finder.find(hay).is_some()
         }
-        Matcher::NamePrefix { bytes, folded } => {
-            let hay = if *folded {
+        Matcher::NamePrefix {
+            bytes,
+            folded,
+            canonical,
+        } => {
+            let hay = if *canonical {
+                if *folded {
+                    ctx.canonical_lower_name(idx, id)
+                } else {
+                    ctx.canonical_orig_name(idx, id)
+                }
+            } else if *folded {
                 idx.lower_name(id)
             } else {
                 match exact_hay(idx, t, id) {
@@ -107,8 +213,18 @@ fn eval(idx: &VolumeIndex, memo: &PathMemos, ctx: &mut EvalCtx, t: &CTerm, id: E
             };
             hay.starts_with(bytes)
         }
-        Matcher::NameSuffix { bytes, folded } => {
-            let hay = if *folded {
+        Matcher::NameSuffix {
+            bytes,
+            folded,
+            canonical,
+        } => {
+            let hay = if *canonical {
+                if *folded {
+                    ctx.canonical_lower_name(idx, id)
+                } else {
+                    ctx.canonical_orig_name(idx, id)
+                }
+            } else if *folded {
                 idx.lower_name(id)
             } else {
                 match exact_hay(idx, t, id) {
@@ -118,16 +234,40 @@ fn eval(idx: &VolumeIndex, memo: &PathMemos, ctx: &mut EvalCtx, t: &CTerm, id: E
             };
             hay.ends_with(bytes)
         }
-        Matcher::NameRegex { re } => re.is_match(idx.name(id)),
-        Matcher::PathSub { finder, folded } => {
-            let hay = if *folded {
+        Matcher::NameRegex { re, canonical } => {
+            let hay = if *canonical {
+                ctx.canonical_orig_name(idx, id)
+            } else {
+                idx.name(id)
+            };
+            re.is_match(hay)
+        }
+        Matcher::PathSub {
+            finder,
+            folded,
+            canonical,
+        } => {
+            let hay = if *canonical {
+                if *folded {
+                    ctx.canonical_lower_path(idx, memo, id)
+                } else {
+                    ctx.canonical_orig_path(idx, memo, id)
+                }
+            } else if *folded {
                 ctx.lower_path(idx, memo, id)
             } else {
                 ctx.orig_path(idx, memo, id)
             };
             finder.find(hay).is_some()
         }
-        Matcher::PathRegex { re } => re.is_match(ctx.orig_path(idx, memo, id)),
+        Matcher::PathRegex { re, canonical } => {
+            let hay = if *canonical {
+                ctx.canonical_orig_path(idx, memo, id)
+            } else {
+                ctx.orig_path(idx, memo, id)
+            };
+            re.is_match(hay)
+        }
     }
 }
 

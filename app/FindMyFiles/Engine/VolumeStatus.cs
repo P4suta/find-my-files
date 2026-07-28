@@ -7,4 +7,4 @@ namespace FindMyFiles.Engine;
 /// <param name="State">Where the index is in its lifecycle.</param>
 /// <param name="Entries">Indexed entry count so far (grows while
 /// <see cref="VolumeState.Scanning"/>).</param>
-public sealed record VolumeStatus(string Label, VolumeState State, ulong Entries);
+internal sealed record VolumeStatus(string Label, VolumeState State, ulong Entries);

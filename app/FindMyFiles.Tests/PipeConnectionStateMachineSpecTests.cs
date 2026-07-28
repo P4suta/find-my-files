@@ -20,10 +20,11 @@ namespace FindMyFiles.Tests;
 ///   (initial)                                  → Connecting        [no event]
 ///   Connecting    + handshake succeeds         → Connected         [emit Connected]
 ///   Connecting    + connect fails (warm-up)    → Connecting        [no event — retry]
-///   Connecting    + fatal (proto/identity)     → (terminal)        [no event, supervisor stops]
+///   Connecting    + fatal (proto/identity)     → Faulted           [emit Faulted, supervisor stops]
 ///   Connected     + connection drops           → Reconnecting      [emit Reconnecting]
 ///   Reconnecting  + handshake succeeds         → Connected         [emit Connected]
 ///   Reconnecting  + connect fails              → Reconnecting      [no event — retry]
+///   Reconnecting  + fatal (proto/identity)      → Faulted           [emit Faulted, supervisor stops]
 /// </code>
 /// Invariant proven across the suite: <c>ConnectionChanged</c> never emits the same
 /// state twice in a row (the Connecting/Reconnecting retry self-loops are silent),
@@ -157,7 +158,7 @@ public sealed class PipeConnectionStateMachineSpecTests
             events.Snapshot());
     }
 
-    // ── Connecting + fatal → terminal (never Connected, supervisor stops) ─
+    // ── Connecting + fatal → Faulted (never Connected, supervisor stops) ─
     [Fact]
     public async Task Fatal_protocol_mismatch_is_terminal_and_never_Connected()
     {
@@ -170,9 +171,43 @@ public sealed class PipeConnectionStateMachineSpecTests
         await server.WaitForAsync(PipeProtocol.Op.Hello);
         await Task.Delay(750); // a non-fatal failure would have retried by now
 
-        Assert.NotEqual(EngineConnectionState.Connected, client.Connection);
+        Assert.Equal(EngineConnectionState.Faulted, client.Connection);
         Assert.DoesNotContain(EngineConnectionState.Connected, events.Snapshot());
+        Assert.Equal([EngineConnectionState.Faulted], events.Snapshot());
         Assert.Equal(1, server.ConnectionCount); // stopped: no retry storm
+    }
+
+    // ── Reconnecting + fatal → Faulted (supervisor stops with reason) ───
+    [Fact]
+    public async Task Fatal_mismatch_after_first_success_leaves_Connected_for_Faulted()
+    {
+        using var server = new FakePipeServer();
+        var events = new Recorder();
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        events.Attach(client);
+
+        client.Start();
+        await WaitUntilAsync(() => client.Connection == EngineConnectionState.Connected, "connected");
+
+        server.ProtocolVersion = PipeProtocol.ProtocolVersion + 1;
+        server.DisconnectAll();
+        await WaitUntilAsync(() => client.Connection == EngineConnectionState.Faulted, "faulted");
+
+        Assert.Equal(
+            new[]
+            {
+                EngineConnectionState.Connected,
+                EngineConnectionState.Reconnecting,
+                EngineConnectionState.Faulted,
+            },
+            events.Snapshot());
+        Assert.Equal(2, server.ConnectionCount);
+
+        await Task.Delay(750);
+        Assert.Equal(2, server.ConnectionCount); // terminal: no third connection
+        var failure = await Assert.ThrowsAsync<EngineUnavailableException>(
+            () => client.SearchAsync("a", SearchOptions.Default));
+        Assert.Contains("protocol", failure.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     // ── Invariant: no state is ever emitted twice in a row (dedup) ──────

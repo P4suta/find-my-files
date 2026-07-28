@@ -72,13 +72,26 @@ pub fn subsumes(
 fn bridge_needle(
     n_bytes: &[u8],
     n_folded: bool,
+    n_canonical: bool,
     p_folded: bool,
+    p_canonical: bool,
 ) -> Option<std::borrow::Cow<'_, [u8]>> {
+    // Crossing canonical/raw domains is sometimes provable (for example an
+    // ASCII needle), but declining is the sound cache choice. Both canonical
+    // spellings compile to NFC bytes, so equivalent NFC/NFD typing remains
+    // refinable within the canonical domain.
+    if n_canonical != p_canonical {
+        return None;
+    }
     match (n_folded, p_folded) {
         (true, true) | (false, false) => Some(std::borrow::Cow::Borrowed(n_bytes)),
-        (false, true) => std::str::from_utf8(n_bytes)
-            .ok()
-            .map(|s| std::borrow::Cow::Owned(wtf8::fold_str(s).into_bytes())),
+        (false, true) => std::str::from_utf8(n_bytes).ok().map(|s| {
+            std::borrow::Cow::Owned(if n_canonical {
+                wtf8::normalize_str(s, true)
+            } else {
+                wtf8::fold_str(s).into_bytes()
+            })
+        }),
         (true, false) => None,
     }
 }
@@ -95,47 +108,72 @@ fn implies(n: &Matcher, p: &Matcher) -> bool {
             NameSub {
                 finder: nf,
                 folded: nfo,
+                canonical: nca,
             },
             NameSub {
                 finder: pf,
                 folded: pfo,
+                canonical: pca,
             },
-        ) => bridge_needle(nf.needle(), *nfo, *pfo)
+        ) => bridge_needle(nf.needle(), *nfo, *nca, *pfo, *pca)
             .is_some_and(|n| memchr::memmem::find(&n, pf.needle()).is_some()),
         // A prefix/suffix match still means "the name contains these bytes".
         (
-            NamePrefix { bytes, folded: nfo } | NameSuffix { bytes, folded: nfo },
+            NamePrefix {
+                bytes,
+                folded: nfo,
+                canonical: nca,
+            }
+            | NameSuffix {
+                bytes,
+                folded: nfo,
+                canonical: nca,
+            },
             NameSub {
                 finder: pf,
                 folded: pfo,
+                canonical: pca,
             },
-        ) => bridge_needle(bytes, *nfo, *pfo)
+        ) => bridge_needle(bytes, *nfo, *nca, *pfo, *pca)
             .is_some_and(|n| memchr::memmem::find(&n, pf.needle()).is_some()),
         (
             NamePrefix {
                 bytes: nb,
                 folded: nfo,
+                canonical: nca,
             },
             NamePrefix {
                 bytes: pb,
                 folded: pfo,
+                canonical: pca,
             },
-        ) => bridge_needle(nb, *nfo, *pfo).is_some_and(|n| n.starts_with(pb)),
+        ) => bridge_needle(nb, *nfo, *nca, *pfo, *pca).is_some_and(|n| n.starts_with(pb)),
         (
             NameSuffix {
                 bytes: nb,
                 folded: nfo,
+                canonical: nca,
             },
             NameSuffix {
                 bytes: pb,
                 folded: pfo,
+                canonical: pca,
             },
-        ) => bridge_needle(nb, *nfo, *pfo).is_some_and(|n| n.ends_with(pb)),
+        ) => bridge_needle(nb, *nfo, *nca, *pfo, *pca).is_some_and(|n| n.ends_with(pb)),
 
         // Set/range narrowing. Ext semantics are *equality* on the extension,
         // so subset is the only sound relation ("ext:dl" never implies
         // "ext:d" — and never reaches here because {dl} ⊄ {d}).
-        (Ext { exts: ne }, Ext { exts: pe }) => ne.iter().all(|e| pe.contains(e)),
+        (
+            Ext {
+                exts: ne,
+                canonical: nc,
+            },
+            Ext {
+                exts: pe,
+                canonical: pc,
+            },
+        ) => nc == pc && ne.iter().all(|e| pe.contains(e)),
         (
             Size {
                 min: nmin,
@@ -175,45 +213,80 @@ fn matcher_eq(a: &Matcher, b: &Matcher) -> bool {
             NameSub {
                 finder: fa,
                 folded: ca,
+                canonical: na,
             },
             NameSub {
                 finder: fb,
                 folded: cb,
+                canonical: nb,
             },
         )
         | (
             PathSub {
                 finder: fa,
                 folded: ca,
+                canonical: na,
             },
             PathSub {
                 finder: fb,
                 folded: cb,
+                canonical: nb,
             },
-        ) => ca == cb && fa.needle() == fb.needle(),
+        ) => ca == cb && na == nb && fa.needle() == fb.needle(),
         (
             NamePrefix {
                 bytes: ba,
                 folded: ca,
+                canonical: na,
             },
             NamePrefix {
                 bytes: bb,
                 folded: cb,
+                canonical: nb,
             },
         )
         | (
             NameSuffix {
                 bytes: ba,
                 folded: ca,
+                canonical: na,
             },
             NameSuffix {
                 bytes: bb,
                 folded: cb,
+                canonical: nb,
             },
-        ) => ca == cb && ba == bb,
-        (NameRegex { re: ra }, NameRegex { re: rb })
-        | (PathRegex { re: ra }, PathRegex { re: rb }) => ra.as_str() == rb.as_str(),
-        (Ext { exts: ea }, Ext { exts: eb }) => ea == eb,
+        ) => ca == cb && na == nb && ba == bb,
+        (
+            NameRegex {
+                re: ra,
+                canonical: ca,
+            },
+            NameRegex {
+                re: rb,
+                canonical: cb,
+            },
+        )
+        | (
+            PathRegex {
+                re: ra,
+                canonical: ca,
+            },
+            PathRegex {
+                re: rb,
+                canonical: cb,
+            },
+        ) => ca == cb && ra.same_pattern(rb),
+        (
+            Ext {
+                exts: ea,
+                canonical: ca,
+            },
+            Ext {
+                exts: eb,
+                canonical: cb,
+            },
+        ) => ca == cb && ea == eb,
         (Size { min: ia, max: xa }, Size { min: ib, max: xb }) => ia == ib && xa == xb,
         (Mtime { min: ia, max: xa }, Mtime { min: ib, max: xb }) => ia == ib && xa == xb,
         (IsDir(a), IsDir(b)) => a == b,
@@ -308,10 +381,42 @@ mod tests {
         assert!(subsumed("rs", "*.rs"));
         // …but a *different* wildcard never implies another one.
         assert!(!subsumed("*.rsx", "*.rs"));
+        assert!(
+            subsumed("A?B", r#"regex:"^A.B$""#),
+            "identical Unicode and WTF-8 programs are equal"
+        );
         assert!(subsumed(r"path:src", r"path:src main"));
         assert!(
             !subsumed(r"path:src", r"path:srcmain"),
             "path needs equality"
         );
+    }
+
+    #[test]
+    fn regex_equality_includes_compiler_flags() {
+        let ast = parse(r#"regex:"foo""#).unwrap();
+        let insensitive = compile(&ast, CaseMode::Insensitive, &UtcResolver).unwrap();
+        let sensitive = compile(&ast, CaseMode::Sensitive, &UtcResolver).unwrap();
+        let insensitive_opt = QueryOptions {
+            case: CaseMode::Insensitive,
+            ..Default::default()
+        };
+        let sensitive_opt = QueryOptions {
+            case: CaseMode::Sensitive,
+            ..Default::default()
+        };
+
+        assert!(!subsumes(
+            &sensitive,
+            &sensitive_opt,
+            &insensitive,
+            &insensitive_opt
+        ));
+        assert!(!subsumes(
+            &insensitive,
+            &insensitive_opt,
+            &sensitive,
+            &sensitive_opt
+        ));
     }
 }

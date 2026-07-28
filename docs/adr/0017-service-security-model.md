@@ -40,7 +40,11 @@ The standing threat-model document is docs/SECURITY.md (this ADR records the dec
 - **Reason for defense in depth**: a mistake building the SDDL string is the accident pattern of "silently wide open". Pin the
   structure of the build function with a non-elevated unit test, and place the connect-accept token check independently. Blocking
   anonymous access is primarily defended by the explicit DACL (no anonymous ACE = default deny) — do not rely on NullSessionPipes
-  defaults, which are machine-type/policy-dependent (docs/RESEARCH.md).
+  defaults, which are machine-type/policy-dependent (docs/RESEARCH.md). A normal
+  SID mismatch disconnects that client. A token API failure stops the accept
+  loop, while `RevertToSelf` failure aborts the process as required by Windows;
+  continuing could execute later privileged work under the untrusted client
+  token.
 - **Protective DACL on %ProgramData%**: under the default ACL a general user can directly read .fmfidx (which contains every file
   name) — no matter how hard the pipe is locked down, it leaks from the side. Leave user read only on logs (to keep the
   non-elevated F12 "copy diagnostic info" flow working).
@@ -59,9 +63,15 @@ The standing threat-model document is docs/SECURITY.md (this ADR records the dec
   PID comparison of the SCM-registered service (`QueryServiceStatusEx`) — the non-elevated UI cannot open a SYSTEM process's
   token (ACCESS_DENIED) and cannot get the session-0 identity. Both were blind spots not exposed in console-mode tests where
   `authorized_sids` is empty and the token check is skipped; they only appear with the installed service.
-- "reject other users" and "reject remote" cannot be auto-verified on the dev machine/CI (they need another user's token /
-  another machine) -> substituted by structure-pinning the SDDL build function + the manual checklist in SECURITY.md. Do not
-  create a pipe-creation code path that bypasses the build function (review point).
+- "Reject other users" and "reject remote" are release-gated behaviors, not a
+  manual checklist. The ignored `FMF_ADMIN_TESTS=1` machine-security test creates
+  a unique temporary local standard user through `NetUserAdd`, logs it on to
+  obtain a genuinely different `TokenUser` SID, and proves both the production
+  DACL denial and the independent `verify_client` denial behind a deliberately
+  wide test-only DACL. It first proves the host's remote transport with a
+  `PIPE_ACCEPT_REMOTE_CLIENTS` control, then requires the otherwise-identical
+  `PIPE_REJECT_REMOTE_CLIENTS` case to fail. An unavailable control is a failure,
+  not a skip. RAII deletes the temporary account on success and unwinding.
 - Residual risk (accepted): an authorized user can also search the "name and path" of files invisible under their own ACL
   (a structural property of a file-name-only index; contents are unreadable). Documented in SECURITY.md.
 

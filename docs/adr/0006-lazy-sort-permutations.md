@@ -16,7 +16,11 @@ The only always-maintained, persisted fast-sort permutation is perm_name. size/m
 ## Consequences
 
 - The first size/mtime column click accepts a one-off construction cost (~60ms-class @1M)
-- After snapshot restore, the first use re-sorts (stale order from stat updates is also reset at the same time)
+- An existing row's size/mtime change increments a dedicated stat generation.
+  The corresponding cached permutation is rejected immediately and rebuilt
+  before the next sorted query; stale order is never observable, including
+  from a query interleaved within the mutation batch.
+- After snapshot restore, the first use re-sorts.
 - Correctness is pinned by an extend oracle (byte-equality of lazy == fresh-sort). Watermark inconsistency triggers warn + `lazy_perm_rebuild_fallbacks` counter + full rebuild (does not go silent)
 
 ## Re-examination triggers

@@ -1,8 +1,11 @@
-# Bounded libFuzzer smoke over the untrusted-input parsers, on Linux. Two
+# Bounded libFuzzer smoke over the untrusted-input parsers, on Linux. Three
 # surfaces: the named-pipe wire codec (fmf-proto + fmf-contract — the
 # privilege-boundary parsers, non-elevated UI -> elevated fmf-service,
-# docs/SECURITY.md) and the fmf-core decoders (query / index::snapshot /
-# usn::records / wtf8), now buildable on Linux because fmf-core's Windows deps
+# docs/SECURITY.md), the fmf-core decoders (query / index::snapshot /
+# usn::records / wtf8), and the NTFS on-disk grammar (fmf_core::ondisk — boot
+# sector, file records, $ATTRIBUTE_LIST, non-resident runs), which a crafted
+# VHDX or USB stick fully controls and fmf-service parses as LocalSystem
+# (ADR-0047). All are buildable on Linux because fmf-core's Windows deps
 # are cfg-gated. cargo-fuzz needs nightly + libFuzzer (Linux), installed CI-only
 # here; the pinned dev toolchain stays stable (mise.toml). Each target runs for a
 # short, fixed budget so a real crash fails the run without flaking on time.
@@ -34,14 +37,21 @@ concurrency:
 
 jobs:
   fuzz:
-    runs-on: ubuntu-latest
-    # Force nightly for cargo-fuzz and every cargo build it spawns.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Force one dated nightly for cargo-fuzz and every cargo build it spawns.
+    # Floating `nightly` would change compiler/stdlib bytes without a source
+    # change and make a crash irreproducible.
     env:
-      RUSTUP_TOOLCHAIN: nightly
+      RUSTUP_TOOLCHAIN: nightly-2026-07-24
     strategy:
       fail-fast: false
       matrix:
-        # Wire codec (fmf-proto) + the fmf-core decoders now reachable on Linux.
+        # Wire codec (fmf-proto), the fmf-core decoders now reachable on Linux,
+        # and the NTFS on-disk grammar (fmf_core::ondisk, ADR-0047) — the bytes
+        # a crafted VHDX or USB stick fully controls. One job per target so each
+        # gets its own budget; they run in parallel, so adding a target costs no
+        # wall-clock time.
         target:
           [
             frame_decode,
@@ -50,29 +60,57 @@ jobs:
             index_snapshot,
             usn_records,
             wtf8_decode,
+            ntfs_boot_sector,
+            ntfs_file_record,
+            ntfs_attribute_list,
+            ntfs_extent_runs,
           ]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
-      # Same pinned action as the rest of CI; nightly via the toolchain input
-      # (the SHA is the stable-branch pin, but the action code is identical and
-      # `toolchain` overrides what it installs).
+      # Same pinned action as the rest of CI; a dated nightly via the toolchain
+      # input (the action code is identical and `toolchain` controls the install).
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable-branch pin
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-07-24
 
-      - uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
-        with:
-          tool: cargo-fuzz
+      # cargo-fuzz is not present in install-action's checksummed release
+      # manifest. Make the exceptional source build explicit: Cargo verifies the
+      # crates.io package checksum, --locked fixes its transitive graph, and the
+      # executable is isolated under runner temp.
+      - name: Install cargo-fuzz from its locked crates.io package
+        run: cargo install cargo-fuzz --locked --version 0.13.2 --root "$RUNNER_TEMP/fmf-cargo-fuzz"
+      - name: Expose the isolated cargo-fuzz subcommand
+        run: echo "$RUNNER_TEMP/fmf-cargo-fuzz/bin" >> "$GITHUB_PATH"
+
+      # cargo-fuzz 0.13.2 does not expose Cargo's --locked switch. Validate its
+      # standalone workspace first; with the committed lock already complete,
+      # the subsequent internal `cargo run` has nothing to re-resolve.
+      - name: Verify committed fuzz dependency graph
+        working-directory: engine
+        run: >-
+          cargo metadata --locked --manifest-path fuzz/Cargo.toml
+          --format-version 1 --no-deps > /dev/null
 
       # Run from engine/ so cargo-fuzz finds ./fuzz (no --fuzz-dir keeps this
-      # working across cargo-fuzz versions). Artifacts land under build/engine
-      # via engine/.cargo/config.toml (gitignored by build/).
+      # working across cargo-fuzz versions). Cargo target, evolving corpus and
+      # crash artifacts all land in the single build/ tree (ADR-0021).
       #
-      # --target gnu is required: taiki-e/install-action ships a musl-static
-      # cargo-fuzz, and cargo-fuzz defaults the fuzz target to its own build
-      # triple (musl), but ASan is incompatible with static musl libc. The gnu
-      # target is the runner host, so its std is already present.
+      # Keep the target explicit: ASan needs the runner's dynamic GNU libc.
+      - name: prepare fuzz output
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: mkdir -p "build/fuzz/corpus/$FUZZ_TARGET" "build/fuzz/artifacts/$FUZZ_TARGET"
       - name: fuzz ${{ matrix.target }} (60s)
         working-directory: engine
-        run: cargo fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=60
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: >-
+          cargo fuzz run "$FUZZ_TARGET"
+          --target x86_64-unknown-linux-gnu
+          "../build/fuzz/corpus/$FUZZ_TARGET"
+          --
+          "-artifact_prefix=../build/fuzz/artifacts/$FUZZ_TARGET/"
+          -max_total_time=60

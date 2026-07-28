@@ -14,13 +14,20 @@ namespace FindMyFiles.Tests.TestDoubles;
 /// Use <see cref="FindMyFiles.Engine.FakeEngineClient"/> when a test needs a
 /// contract-conforming in-proc engine.
 /// </summary>
-public sealed class StubEngineClient : IEngineClient
+internal sealed class StubEngineClient : IEngineClient
 {
-    public sealed class PendingSearch(string query, SearchOptions options)
+    public EngineClientKind Kind { get; set; } = EngineClientKind.InProcess;
+
+    public sealed class PendingSearch(
+        string query,
+        SearchOptions options,
+        CancellationToken cancellationToken)
     {
         public string Query { get; } = query;
 
         public SearchOptions Options { get; } = options;
+
+        public CancellationToken CancellationToken { get; } = cancellationToken;
 
         public TaskCompletionSource<SearchOutcome> Tcs { get; } = new();
 
@@ -52,7 +59,7 @@ public sealed class StubEngineClient : IEngineClient
 
     public event Action<VolumeStatus>? VolumeUpdated;
 
-    public event Action<int>? EngineErrorOccurred;
+    public event Action<EngineErrorSeverity>? EngineErrorOccurred;
 
     public event Action<EngineConnectionState>? ConnectionChanged;
 
@@ -67,7 +74,8 @@ public sealed class StubEngineClient : IEngineClient
 
     public void RaiseVolumeUpdated(VolumeStatus status) => VolumeUpdated?.Invoke(status);
 
-    public void RaiseEngineError(int severity) => EngineErrorOccurred?.Invoke(severity);
+    public void RaiseEngineError(EngineErrorSeverity severity) =>
+        EngineErrorOccurred?.Invoke(severity);
 
     public void RaiseConnectionChanged(EngineConnectionState state) =>
         ConnectionChanged?.Invoke(state);
@@ -75,6 +83,12 @@ public sealed class StubEngineClient : IEngineClient
     /// <summary>Live subscriber count per event — lets tests pin that
     /// Dispose paths actually unsubscribe.</summary>
     public int IndexChangedSubscribers => IndexChanged?.GetInvocationList().Length ?? 0;
+
+    public int VolumeUpdatedSubscribers => VolumeUpdated?.GetInvocationList().Length ?? 0;
+
+    public int EngineErrorSubscribers => EngineErrorOccurred?.GetInvocationList().Length ?? 0;
+
+    public int ConnectionChangedSubscribers => ConnectionChanged?.GetInvocationList().Length ?? 0;
 
     /// <summary>How many times <see cref="ListVolumesAsync"/> was called — lets a
     /// test pin that the startup sequence runs exactly once (e.g. the Loaded call
@@ -100,8 +114,12 @@ public sealed class StubEngineClient : IEngineClient
     /// block's engine-version path.</summary>
     public EngineStatsData? Stats { get; set; }
 
+    public Exception? ThrowOnStats { get; set; }
+
     public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default) =>
-        Task.FromResult(Stats);
+        ThrowOnStats is { } ex
+            ? Task.FromException<EngineStatsData?>(ex)
+            : Task.FromResult(Stats);
 
     public Task<SearchOutcome> SearchAsync(
         string query, SearchOptions options, CancellationToken ct = default)
@@ -111,7 +129,8 @@ public sealed class StubEngineClient : IEngineClient
             throw ex;
         }
 
-        var pending = new PendingSearch(query, options);
+        ct.ThrowIfCancellationRequested();
+        var pending = new PendingSearch(query, options, ct);
         Searches.Add(pending);
         return pending.Tcs.Task;
     }

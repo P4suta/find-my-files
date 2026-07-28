@@ -1,16 +1,13 @@
-# Install the Rust toolchain VERSION pinned in mise.toml, so CI lints/tests/builds
-# on the exact toolchain the release is built with (release.yml/pages.yml already
-# provision via mise-action) instead of a floating `stable` that can drift ahead of
-# the pin between a CI run and the shipped build.
+# Install the repository's exact Rust version through the standard dtolnay
+# action. CI does not install or execute mise; it only reads the shared version
+# declaration rather than floating on `stable`.
 #
-# mise.toml is the single source of truth for this repo's toolchain (CLAUDE.md
-# deliberately keeps no rust-toolchain.toml, to avoid double management). This
-# composite reads the `rust` pin from there and hands it to dtolnay/rust-toolchain,
-# so a bump lives in exactly one place — no per-workflow mirror to keep in sync.
-# (fuzz.yml is the one exception: it needs `nightly` for cargo-fuzz, so it keeps a
-# direct dtolnay step with an explicit `toolchain: nightly`.)
-name: Rust toolchain (mise-pinned)
-description: Install the Rust toolchain version pinned in mise.toml.
+# This composite hands that version to dtolnay/rust-toolchain, so CI remains
+# native GitHub Actions while local environment provisioning remains mise-owned.
+# (fuzz.yml is the one exception: it needs nightly-only sanitizer support, so it
+# keeps a direct dtolnay step with an explicitly dated nightly.)
+name: Rust toolchain (repository-pinned)
+description: Install the repository-pinned Rust toolchain without invoking mise.
 inputs:
   components:
     description: Comma-separated rustup components (e.g. "clippy, rustfmt").
@@ -29,7 +26,7 @@ runs:
           echo "::error::could not read the rust pin from mise.toml"; exit 1
         fi
         echo "version=$version" >> "$GITHUB_OUTPUT"
-        echo "Using mise-pinned Rust $version"
+        echo "Using repository-pinned Rust $version"
     - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable-branch pin; `toolchain` overrides what it installs
       with:
         toolchain: ${{ steps.pin.outputs.version }}

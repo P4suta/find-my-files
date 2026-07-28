@@ -5,7 +5,7 @@ namespace FindMyFiles.Services;
 /// <summary>
 /// In-process "soft restart": re-resolve the engine transport and rebuild the
 /// page graph <em>without</em> spawning a new process (ADR-0036). This is how a
-/// freshly registered service, an applied scope change, or an uninstall takes
+/// freshly registered service or an uninstall takes
 /// effect now that the engine is chosen once at startup — the old design
 /// relaunched the process, which collides with single-instancing (a relaunched
 /// instance redirects its activation back to the still-alive original and exits,
@@ -19,21 +19,33 @@ namespace FindMyFiles.Services;
 /// </summary>
 internal sealed class AppReload
 {
+    /// <summary>Dismissers for the modal surfaces currently on screen, in the
+    /// order they opened. A <c>ContentDialog</c> lives in the XamlRoot's popup
+    /// layer, <em>not</em> in the root Frame, so re-navigating the Frame leaves it
+    /// floating above the rebuilt page still bound to the torn-down page's view
+    /// models (its engine disposed, its <see cref="ViewModels.PerfPanelViewModel"/>
+    /// dead). Dialogs register themselves for the duration of their <c>ShowAsync</c>
+    /// so a soft restart can take them down with the page they belong to.
+    /// <para>UI thread only: registration happens in the dialogs' UI-thread open
+    /// paths and <see cref="Run(Func{IEngineClient})"/> is marshaled onto the same
+    /// thread by <c>App</c>, so no lock is needed.</para></summary>
+    private static readonly List<Action> Modals = [];
+
     private readonly Func<string[], IEngineClient> _resolve;
     private readonly Func<IEngineClient> _getEngine;
     private readonly Action<IEngineClient> _setEngine;
-    private readonly Action _renavigate;
+    private readonly Func<bool> _renavigate;
     private readonly Action _closeDiagnostics;
 
     /// <summary>Guards against a re-navigation (or a delegate it triggers)
-    /// re-entering <see cref="Run"/> mid-cycle. Reset once the cycle completes,
+    /// re-entering <see cref="Run(string[])"/> mid-cycle. Reset once the cycle completes,
     /// so a later, independent soft restart still runs.</summary>
     private bool _running;
 
     /// <summary>Builds the orchestrator over its boundaries; <see cref="App"/>
     /// wires the production delegates once the window exists.</summary>
     /// <param name="resolve">Resolve the engine for the given args (the same
-    /// resolve-or-fallback the launch path uses).</param>
+    /// resolve-or-unavailable behavior the launch path uses).</param>
     /// <param name="getEngine">Read the current engine (to dispose after the swap).</param>
     /// <param name="setEngine">Publish the freshly resolved engine before the page rebuild.</param>
     /// <param name="renavigate">Rebuild the page graph against the new engine
@@ -44,7 +56,7 @@ internal sealed class AppReload
         Func<string[], IEngineClient> resolve,
         Func<IEngineClient> getEngine,
         Action<IEngineClient> setEngine,
-        Action renavigate,
+        Func<bool> renavigate,
         Action closeDiagnostics)
     {
         _resolve = resolve;
@@ -52,6 +64,20 @@ internal sealed class AppReload
         _setEngine = setEngine;
         _renavigate = renavigate;
         _closeDiagnostics = closeDiagnostics;
+    }
+
+    /// <summary>Register <paramref name="dismiss"/> as an open modal surface for
+    /// as long as the returned token is alive; a soft restart invokes every
+    /// registered dismisser before it rebuilds the page. Callers open with
+    /// <c>using var _ = AppReload.TrackModal(...)</c> around their <c>ShowAsync</c>,
+    /// so the registration disappears however the dialog closes.</summary>
+    /// <param name="dismiss">Closes the surface (UI thread). Must tolerate being
+    /// called when the surface is already closing.</param>
+    /// <returns>A token that deregisters the surface when disposed.</returns>
+    internal static IDisposable TrackModal(Action dismiss)
+    {
+        Modals.Add(dismiss);
+        return new ModalRegistration(dismiss);
     }
 
     /// <summary>Run one soft restart: close diagnostics → resolve the new engine →
@@ -65,6 +91,15 @@ internal sealed class AppReload
     /// (e.g. <c>--engine=pipe</c> after a service register).</param>
     internal void Run(string[] engineArgs)
     {
+        Run(() => _resolve(engineArgs));
+    }
+
+    /// <summary>Run a soft restart with an internal resolver that is not
+    /// representable as a production command-line switch (for example the
+    /// explicit unavailable state after the user stops the service).</summary>
+    /// <param name="resolve">Creates the next engine session.</param>
+    internal void Run(Func<IEngineClient> resolve)
+    {
         if (_running)
         {
             return;
@@ -73,15 +108,93 @@ internal sealed class AppReload
         _running = true;
         try
         {
+            DismissModals();
             _closeDiagnostics();
             var old = _getEngine();
-            _setEngine(_resolve(engineArgs));
-            _renavigate();
-            old?.Dispose();
+            var fresh = resolve();
+            try
+            {
+                _setEngine(fresh);
+                if (!_renavigate())
+                {
+                    throw new InvalidOperationException(
+                        "MainPage navigation was rejected");
+                }
+            }
+            catch
+            {
+                // Navigation is the commit point. Restore the globally
+                // published session and dispose the unpublished replacement;
+                // the old page/engine remain a coherent pair.
+                _setEngine(old);
+                if (!ReferenceEquals(fresh, old))
+                {
+                    fresh.Dispose();
+                }
+
+                throw;
+            }
+
+            if (!ReferenceEquals(fresh, old))
+            {
+                try
+                {
+                    old.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    // The new page is already committed. A teardown failure
+                    // must not roll it back to a half-disposed old session.
+                    FileLog.Warn("app", "old engine dispose failed after reload", ex);
+                }
+            }
         }
         finally
         {
             _running = false;
+        }
+    }
+
+    /// <summary>Close every registered modal surface before the page is rebuilt.
+    /// Iterates a snapshot because a dismisser deregisters itself (directly or
+    /// through the continuation its close resumes), and contains its own failures:
+    /// a dialog that refuses to close must not abort the engine swap that is
+    /// already under way.</summary>
+    private static void DismissModals()
+    {
+        if (Modals.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var dismiss in Modals.ToArray())
+        {
+            try
+            {
+                dismiss();
+            }
+            catch (Exception ex)
+            {
+                FileLog.Warn("app", "modal dismissal failed during reload", ex);
+            }
+        }
+    }
+
+    /// <summary>The token handed to a tracked modal surface; disposing it takes
+    /// the surface out of the dismissal set exactly once.</summary>
+    private sealed class ModalRegistration : IDisposable
+    {
+        private Action? _dismiss;
+
+        internal ModalRegistration(Action dismiss) => _dismiss = dismiss;
+
+        public void Dispose()
+        {
+            if (_dismiss is { } dismiss)
+            {
+                _dismiss = null;
+                Modals.Remove(dismiss);
+            }
         }
     }
 }

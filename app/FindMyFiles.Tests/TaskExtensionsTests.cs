@@ -16,7 +16,7 @@ public sealed class TaskExtensionsTests
         const string marker = "forget-marker-7f3a";
         var captured = new TaskCompletionSource<AppNotification>(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        Notifier.Attach(n =>
+        using var subscription = Notifier.Attach(n =>
         {
             if (n.Detail?.Contains(marker, StringComparison.Ordinal) == true)
             {

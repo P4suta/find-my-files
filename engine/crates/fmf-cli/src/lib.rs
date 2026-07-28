@@ -1,8 +1,8 @@
 //! fmf — developer CLI for the find-my-files engine.
 //!
 //! The crate is a thin clap surface over fmf-core: [`command`] exposes the
-//! parser (so codegen can render shell completions and the CLI reference) and
-//! [`run`] parses argv and dispatches. Command implementations live in `cmd/`
+//! parser used by the shipped completion command and [`run`] parses argv and
+//! dispatches. Command implementations live in `cmd/`
 //! (and `bench_support` for the bench-shared pieces); all engine logic stays in
 //! fmf-core.
 
@@ -79,18 +79,22 @@ enum Command {
         /// `--format json`, which streams a document to stdout).
         #[arg(long)]
         out: Option<std::path::PathBuf>,
-        /// Compare against a previous `--out` report; exit 1 when p50 or p99
-        /// regress by more than 20%.
+        /// Compare against a previous `--out` report and enforce the absolute
+        /// index, query, ready-memory, and snapshot-restore acceptance lines.
         #[arg(long)]
         baseline: Option<std::path::PathBuf>,
+        /// Write the complete deterministic gate decision. Requires
+        /// `--baseline`; the file is written before a failing verdict exits.
+        #[arg(long, requires = "baseline")]
+        evidence: Option<std::path::PathBuf>,
     },
     /// Index a volume and dump per-column memory accounting as JSON.
     Stats {
         /// Volume to index and measure, e.g. `C:` (an NTFS drive root).
         drive: String,
         /// Also estimate what a trigram index would cost on this volume's
-        /// real names — input to the n-gram go/no-go criteria in
-        /// docs/ARCHITECTURE.md (read-only, nothing is built).
+        /// real names — input to the re-examination criteria of ADR-0002
+        /// (read-only, nothing is built).
         #[arg(long)]
         trigram_estimate: bool,
         /// Also dump per-name statistics over the live entries (fold
@@ -133,24 +137,28 @@ enum Command {
     /// `cargo bench -- --baseline <name>` and exit 1 past the threshold
     /// (criterion itself never sets an exit code on regressions).
     CriterionGate {
-        /// Criterion output directory.
-        #[arg(long, default_value = "target/criterion")]
+        /// Criterion output directory (required; `just bench-micro-check`
+        /// supplies the canonical build/engine/criterion path).
+        #[arg(long)]
         dir: std::path::PathBuf,
         /// Relative median regression threshold (0.10 = +10%).
         #[arg(long, default_value_t = 0.10)]
         threshold: f64,
+        /// Write the complete deterministic gate decision even when the
+        /// regression verdict makes the command exit unsuccessfully.
+        #[arg(long)]
+        evidence: Option<std::path::PathBuf>,
     },
     /// Print a shell completion script to stdout (bash/zsh/fish/PowerShell/elvish).
-    /// Add it with e.g. `eval "$(fmf completions bash)"`, or use the pre-generated
-    /// scripts shipped under `completions/` in the release bundle.
+    /// Add it with e.g. `eval "$(fmf completions bash)"`.
     Completions {
         /// The shell to generate the completion script for.
         shell: clap_complete::Shell,
     },
 }
 
-/// The clap command tree for `fmf` — the single definition behind argv parsing,
-/// the generated shell completions, and the generated CLI reference.
+/// The clap command tree for `fmf` — the single definition behind argv parsing
+/// and generated shell completions.
 #[must_use]
 pub fn command() -> clap::Command {
     Cli::command()
@@ -187,7 +195,14 @@ pub fn run() {
             drive,
             out,
             baseline,
-        } => cmd::bench::bench(&drive, out.as_deref(), baseline.as_deref(), ctx),
+            evidence,
+        } => cmd::bench::bench(
+            &drive,
+            out.as_deref(),
+            baseline.as_deref(),
+            evidence.as_deref(),
+            ctx,
+        ),
         Command::Stats {
             drive,
             trigram_estimate,
@@ -202,9 +217,11 @@ pub fn run() {
         } => cmd::io_probe::io_probe(&drive, mode, qd, runs, ctx),
         Command::Diag => cmd::diag::diag(ctx),
         Command::Watch { drive } => cmd::index::watch(&drive, ctx),
-        Command::CriterionGate { dir, threshold } => {
-            cmd::criterion_gate::criterion_gate(&dir, threshold, ctx)
-        }
+        Command::CriterionGate {
+            dir,
+            threshold,
+            evidence,
+        } => cmd::criterion_gate::criterion_gate(&dir, threshold, evidence.as_deref(), ctx),
         Command::Completions { shell } => {
             cmd::completions::completions(shell);
             Ok(())

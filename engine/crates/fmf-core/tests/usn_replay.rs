@@ -1,12 +1,12 @@
-//! USN replay integration tests (CLAUDE.md: USN logic is tested via fixture
+//! USN replay integration tests (AGENTS.md: USN logic is tested via fixture
 //! replay). Synthetic `USN_RECORD_V2` buffers are built byte-by-byte from
 //! the documented winioctl.h layout (docs/RESEARCH.md →
 //! <https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-usn_record_v2>)
 //! — independently of `records::encode_buffer` — then run through the full
 //! non-OS pipeline: raw bytes → `parse_buffer` → `apply_batch` → index.
 //!
-//! The `StatFetcher` trait is the existing test seam standing in for the
-//! OS-backed `VolumeStatFetcher` (size/mtime are absent from USN records).
+//! The closed `MetadataSource` fixture variants stand in for the live NTFS source
+//! (size/mtime are absent from USN records) without adding an OS-port trait.
 
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ use fmf_core::index::{Frn, RawEntry, VolumeIndex, VolumeIndexBuilder};
 use fmf_core::usn::records::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM, encode_buffer,
 };
-use fmf_core::usn::{StatFetcher, UsnRecord, apply_batch, parse_buffer, reason};
+use fmf_core::usn::{LinkInfo, MetadataSource, UsnRecord, apply_batch, parse_buffer, reason};
 
 /// `FILE_ATTRIBUTE_ARCHIVE` — the "plain file" attribute value.
 const ARCHIVE: u32 = 0x20;
@@ -97,18 +97,9 @@ const fn frn(record: u64) -> u64 {
     (1 << 48) | record
 }
 
-/// Canned size/mtime answers keyed by full FRN — the replay stand-in for
-/// `VolumeStatFetcher`.
-struct MapFetcher(HashMap<u64, (u64, i64)>);
-
-impl StatFetcher for MapFetcher {
-    fn stat(&self, frn: u64) -> Option<(u64, i64)> {
-        self.0.get(&frn).copied()
-    }
-}
-
-fn no_stats() -> MapFetcher {
-    MapFetcher(HashMap::new())
+/// Canned size/mtime answers keyed by full FRN.
+const fn no_stats() -> MetadataSource {
+    MetadataSource::none()
 }
 
 // Real, second-aligned FILETIMEs that round-trip through the u32-seconds
@@ -124,7 +115,7 @@ fn replay(
     idx: &mut VolumeIndex,
     next_usn: u64,
     specs: &[RecSpec],
-    fetch: &dyn StatFetcher,
+    fetch: &MetadataSource,
 ) -> fmf_core::usn::BatchStats {
     let buf = usn_buffer(next_usn, specs);
     let (next, records, truncated) = parse_buffer(&buf);
@@ -136,7 +127,7 @@ fn replay(
 
 /// C:\ ├─ docs\ (rec 10) │ └─ note.txt (rec 11, 100B) ├─ archive\ (rec 20).
 fn base_index() -> VolumeIndex {
-    let mut b = VolumeIndexBuilder::new("C:", 5);
+    let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
     let mut push = |record: u64, parent: u64, name: &str, is_dir: bool, size: u64, mtime: i64| {
         let units: Vec<u16> = name.encode_utf16().collect();
         b.push(RawEntry {
@@ -160,7 +151,8 @@ fn base_index() -> VolumeIndex {
 fn path_of(idx: &VolumeIndex, record: u64) -> String {
     let id = idx.entry_by_record(record).expect("record in index");
     let mut p = Vec::new();
-    idx.append_path(id, &mut p);
+    idx.append_path(id, &mut p)
+        .expect("fixture parent graph is valid");
     String::from_utf8(p).expect("WTF-8 paths in these fixtures are UTF-8")
 }
 
@@ -180,12 +172,51 @@ fn live_path_set(idx: &VolumeIndex) -> Vec<String> {
         .filter(|&id| idx.is_live(id))
         .map(|id| {
             let mut p = Vec::new();
-            idx.append_path(id, &mut p);
+            idx.append_path(id, &mut p)
+                .expect("fixture parent graph is valid");
             String::from_utf8(p).expect("WTF-8 paths in these fixtures are UTF-8")
         })
         .collect();
     paths.sort();
     paths
+}
+
+#[test]
+fn hard_link_change_reconciles_every_searchable_path_from_raw_usn_bytes() {
+    let mut idx = base_index();
+    let object = frn(11);
+    let event = [RecSpec {
+        usn: 1000,
+        frn: object,
+        parent_frn: frn(10),
+        reason: reason::HARD_LINK_CHANGE | reason::CLOSE,
+        attributes: ARCHIVE,
+        name: "note.txt",
+    }];
+    let source = MetadataSource::map_with_links(
+        HashMap::from([(object, (321, MT_X))]),
+        HashMap::from([(
+            object,
+            vec![
+                LinkInfo {
+                    parent_frn: frn(10),
+                    name: "note.txt".encode_utf16().collect(),
+                },
+                LinkInfo {
+                    parent_frn: frn(20),
+                    name: "alias.txt".encode_utf16().collect(),
+                },
+            ],
+        )]),
+    );
+
+    let stats = replay(&mut idx, 2000, &event, &source);
+    let paths = live_path_set(&idx);
+
+    assert_eq!(stats.hard_link_refresh_failures, 0);
+    assert_eq!(stats.created_or_renamed, 1);
+    assert!(paths.iter().any(|path| path == r"C:\docs\note.txt"));
+    assert!(paths.iter().any(|path| path == r"C:\archive\alias.txt"));
 }
 
 /// One node of an end-state tree: record number, parent record, name, dir-ness.
@@ -201,7 +232,7 @@ struct Node {
 /// exactly as an initial enumeration would, so the result is independent of
 /// the journal path that `replay` exercises.
 fn fresh_scan(nodes: &[Node]) -> VolumeIndex {
-    let mut b = VolumeIndexBuilder::new("C:", 5);
+    let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
     for n in nodes {
         let units: Vec<u16> = n.name.encode_utf16().collect();
         b.push(RawEntry {
@@ -339,8 +370,8 @@ fn create_then_delete_replay_removes_the_entry_again() {
     let mut idx = base_index();
     let live_before = idx.live_len();
 
-    // Batch 1: creation; size/mtime come from the (injected) stat fetcher.
-    let fetch = MapFetcher(HashMap::from([(frn(30), (123, MT_X))]));
+    // Batch 1: creation; size/mtime come from the injected metadata source.
+    let fetch = MetadataSource::map(HashMap::from([(frn(30), (123, MT_X))]));
     let stats = replay(
         &mut idx,
         1001,
@@ -398,7 +429,7 @@ fn basic_info_change_replay_toggles_excluded_bit() {
     };
 
     // hidden+system on → excluded; the same batch also refreshes size/mtime.
-    let fetch = MapFetcher(HashMap::from([(frn(11), (5000, MT_Y))]));
+    let fetch = MetadataSource::map(HashMap::from([(frn(11), (5000, MT_Y))]));
     let stats = replay(
         &mut idx,
         1001,
@@ -550,10 +581,14 @@ fn foreign_major_versions_are_skipped_between_v2_records() {
             name: "first.txt",
         }],
     );
-    // Minimal fake V3 record: RecordLength 80, MajorVersion 3.
+    // Minimal structurally valid V3 record: the foreign payload is skipped,
+    // but its variable UTF-16 tail still has to stay inside RecordLength.
     let mut v3 = vec![0u8; 80];
     v3[0..4].copy_from_slice(&80u32.to_le_bytes());
     v3[4..6].copy_from_slice(&3u16.to_le_bytes());
+    v3[72..74].copy_from_slice(&2u16.to_le_bytes());
+    v3[74..76].copy_from_slice(&76u16.to_le_bytes());
+    v3[76..78].copy_from_slice(&u16::from(b'x').to_le_bytes());
     buf.extend_from_slice(&v3);
     encode_record_v2(
         &mut buf,
@@ -754,7 +789,7 @@ fn frn_record_reuse_resolves_to_the_new_entry_not_the_tombstone() {
     let live_before = idx.live_len();
 
     // Batch 1: create record 30, sequence 1.
-    let fetch = MapFetcher(HashMap::from([(frn(30), (10, 11))]));
+    let fetch = MetadataSource::map(HashMap::from([(frn(30), (10, 11))]));
     replay(
         &mut idx,
         1001,
@@ -795,7 +830,7 @@ fn frn_record_reuse_resolves_to_the_new_entry_not_the_tombstone() {
     // (sequence 2 in the top 16 bits). The full FRN differs but `.record()`
     // collides with the tombstone — resolution must follow the new entry.
     let reused_frn = (2u64 << 48) | 0x1E;
-    let fetch = MapFetcher(HashMap::from([(reused_frn, (777, MT_Z))]));
+    let fetch = MetadataSource::map(HashMap::from([(reused_frn, (777, MT_Z))]));
     replay(
         &mut idx,
         3001,

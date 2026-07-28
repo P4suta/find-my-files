@@ -246,6 +246,23 @@ pub enum Accepted {
     Stopped,
 }
 
+#[derive(Clone, Copy)]
+enum RemoteClients {
+    Reject,
+    #[cfg(test)]
+    AcceptForTest,
+}
+
+impl RemoteClients {
+    const fn pipe_mode(self) -> u32 {
+        match self {
+            Self::Reject => PIPE_REJECT_REMOTE_CLIENTS,
+            #[cfg(test)]
+            Self::AcceptForTest => windows_sys::Win32::System::Pipes::PIPE_ACCEPT_REMOTE_CLIENTS,
+        }
+    }
+}
+
 impl PipeListener {
     /// Creates a listener for `path` allowing up to `instances` concurrent
     /// pipe instances; `security` is the explicit descriptor (None = process
@@ -272,7 +289,25 @@ impl PipeListener {
     /// # Errors
     /// Returns the OS error if `CreateNamedPipeW`, the stop-event creation, or
     /// the connect wait fails.
-    pub fn accept(&mut self, stop: &Event) -> io::Result<Accepted> {
+    pub fn accept(&mut self, stop: &Event, on_listening: impl FnOnce()) -> io::Result<Accepted> {
+        self.accept_with_remote_policy(stop, on_listening, RemoteClients::Reject)
+    }
+
+    #[cfg(test)]
+    fn accept_remote_for_test(
+        &mut self,
+        stop: &Event,
+        on_listening: impl FnOnce(),
+    ) -> io::Result<Accepted> {
+        self.accept_with_remote_policy(stop, on_listening, RemoteClients::AcceptForTest)
+    }
+
+    fn accept_with_remote_policy(
+        &mut self,
+        stop: &Event,
+        on_listening: impl FnOnce(),
+        remote_clients: RemoteClients,
+    ) -> io::Result<Accepted> {
         let first_flag = if self.first_created {
             0
         } else {
@@ -286,7 +321,7 @@ impl PipeListener {
             CreateNamedPipeW(
                 self.path_w.as_ptr(),
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | first_flag,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | remote_clients.pipe_mode(),
                 self.instances,
                 BUFFER_SIZE,
                 BUFFER_SIZE,
@@ -311,8 +346,11 @@ impl PipeListener {
         let ok = unsafe { ConnectNamedPipe(h, &raw mut ov) };
         if ok == 0 {
             match unsafe { GetLastError() } {
-                ERROR_PIPE_CONNECTED => return Ok(Accepted::Connection(stream)),
-                ERROR_IO_PENDING => {}
+                ERROR_PIPE_CONNECTED => {
+                    on_listening();
+                    return Ok(Accepted::Connection(stream));
+                }
+                ERROR_IO_PENDING => on_listening(),
                 err => return Err(io::Error::from_raw_os_error(err as i32)),
             }
             let handles = [ev.raw(), stop.raw()];
@@ -330,7 +368,522 @@ impl PipeListener {
             if ok == 0 {
                 return Err(last_error());
             }
+        } else {
+            on_listening();
         }
         Ok(Accepted::Connection(stream))
+    }
+}
+
+// `pub(crate)` only so the elevated data-root tests in `security` can reuse the
+// ephemeral-account and impersonation fixtures rather than growing a second,
+// separately-audited copy of "create a real standard user".
+#[cfg(test)]
+pub(crate) mod admin_security_tests {
+    use std::io::{self, Write as _};
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, GetLastError, LocalFree,
+    };
+    use windows_sys::Win32::NetworkManagement::NetManagement::{
+        NERR_Success, NERR_UserExists, NERR_UserNotFound, NetUserAdd, NetUserDel,
+        UF_NORMAL_ACCOUNT, UF_SCRIPT, USER_INFO_1, USER_PRIV_USER,
+    };
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::Cryptography::{
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
+    };
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, ImpersonateLoggedOnUser, LOGON32_LOGON_INTERACTIVE,
+        LOGON32_PROVIDER_DEFAULT, LogonUserW, RevertToSelf, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::WindowsProgramming::{
+        GetComputerNameW, MAX_COMPUTERNAME_LENGTH,
+    };
+
+    use super::{Accepted, Event, PipeListener, PipeStream};
+    use crate::security::{PipeSecurity, current_user_sid, pipe_sddl, verify_client};
+
+    const READY_TIMEOUT: Duration = Duration::from_secs(10);
+    static PIPE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn require_admin_gate() {
+        assert_eq!(
+            std::env::var("FMF_ADMIN_TESTS").as_deref(),
+            Ok("1"),
+            "this ignored machine-security test must run only through `just test-admin`"
+        );
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain([0]).collect()
+    }
+
+    fn random_bytes<const N: usize>() -> [u8; N] {
+        let mut bytes = [0u8; N];
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                bytes.as_mut_ptr(),
+                N as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        assert_eq!(status, 0, "BCryptGenRandom failed with NTSTATUS {status}");
+        bytes
+    }
+
+    fn lowercase_hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut output = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            output.push(char::from(HEX[usize::from(byte >> 4)]));
+            output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        output
+    }
+
+    fn secret_password_wide() -> Vec<u16> {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut random = random_bytes::<16>();
+        let mut password: Vec<u16> = "Fmf!9aZ-".encode_utf16().collect();
+        password.reserve(random.len() * 2 + 1);
+        for byte in &random {
+            password.push(u16::from(HEX[usize::from(byte >> 4)]));
+            password.push(u16::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        random.fill(0);
+        password.push(0);
+        password
+    }
+
+    fn computer_name() -> String {
+        let mut buffer = vec![0u16; MAX_COMPUTERNAME_LENGTH as usize + 1];
+        let mut length = buffer.len() as u32;
+        let ok = unsafe { GetComputerNameW(buffer.as_mut_ptr(), &raw mut length) };
+        assert_ne!(
+            ok,
+            0,
+            "GetComputerNameW failed: {}",
+            io::Error::last_os_error()
+        );
+        String::from_utf16(&buffer[..length as usize]).expect("computer name is valid UTF-16")
+    }
+
+    fn unique_pipe_paths(tag: &str) -> (String, String) {
+        let sequence = PIPE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let nonce = lowercase_hex(&random_bytes::<4>());
+        let short = format!(
+            "fmf-admin-{tag}-{:08x}-{sequence:016x}-{nonce}",
+            std::process::id()
+        );
+        (
+            format!(r"\\.\pipe\{short}"),
+            format!(r"\\{}\pipe\{short}", computer_name()),
+        )
+    }
+
+    pub struct TemporaryLocalUser {
+        name_w: Vec<u16>,
+        password_w: Vec<u16>,
+        deleted: bool,
+    }
+
+    impl TemporaryLocalUser {
+        pub fn create() -> Self {
+            for _ in 0..8 {
+                // Twenty characters keeps compatibility with every supported
+                // local-account API while PID + CSPRNG prevents collisions
+                // across parallel/retried test processes.
+                let name = format!(
+                    "fmft{:08x}{}",
+                    std::process::id(),
+                    lowercase_hex(&random_bytes::<4>())
+                );
+                let mut name_w = wide(&name);
+                let mut password_w = secret_password_wide();
+                let info = USER_INFO_1 {
+                    usri1_name: name_w.as_mut_ptr(),
+                    usri1_password: password_w.as_mut_ptr(),
+                    usri1_password_age: 0,
+                    usri1_priv: USER_PRIV_USER,
+                    usri1_home_dir: std::ptr::null_mut(),
+                    usri1_comment: std::ptr::null_mut(),
+                    usri1_flags: UF_SCRIPT | UF_NORMAL_ACCOUNT,
+                    usri1_script_path: std::ptr::null_mut(),
+                };
+                let mut parameter_error = 0u32;
+                let status = unsafe {
+                    NetUserAdd(
+                        std::ptr::null(),
+                        1,
+                        (&raw const info).cast(),
+                        &raw mut parameter_error,
+                    )
+                };
+                if status == NERR_Success {
+                    return Self {
+                        name_w,
+                        password_w,
+                        deleted: false,
+                    };
+                }
+                password_w.fill(0);
+                assert!(
+                    status == NERR_UserExists,
+                    "NetUserAdd failed with status {status} at USER_INFO_1 field {parameter_error}"
+                );
+            }
+            panic!("could not allocate a unique ephemeral local-account name");
+        }
+
+        pub fn logon(&mut self) -> OwnedHandle {
+            let domain_w = wide(&computer_name());
+            let mut token = std::ptr::null_mut();
+            let ok = unsafe {
+                LogonUserW(
+                    self.name_w.as_ptr(),
+                    domain_w.as_ptr(),
+                    self.password_w.as_ptr(),
+                    LOGON32_LOGON_INTERACTIVE,
+                    LOGON32_PROVIDER_DEFAULT,
+                    &raw mut token,
+                )
+            };
+            self.password_w.fill(0);
+            assert_ne!(
+                ok,
+                0,
+                "LogonUserW failed for the ephemeral standard user: {}",
+                io::Error::last_os_error()
+            );
+            unsafe { OwnedHandle::from_raw_handle(token.cast()) }
+        }
+
+        fn delete_inner(&mut self) -> u32 {
+            if self.deleted {
+                return NERR_Success;
+            }
+            let status = unsafe { NetUserDel(std::ptr::null(), self.name_w.as_ptr()) };
+            if status == NERR_Success || status == NERR_UserNotFound {
+                self.deleted = true;
+            }
+            self.password_w.fill(0);
+            status
+        }
+
+        pub fn remove(mut self) {
+            let status = self.delete_inner();
+            assert!(
+                status == NERR_Success || status == NERR_UserNotFound,
+                "NetUserDel failed with status {status}"
+            );
+        }
+    }
+
+    impl Drop for TemporaryLocalUser {
+        fn drop(&mut self) {
+            let status = self.delete_inner();
+            assert!(
+                thread::panicking() || status == NERR_Success || status == NERR_UserNotFound,
+                "NetUserDel failed with status {status}"
+            );
+        }
+    }
+
+    fn token_user_sid(token: &OwnedHandle) -> String {
+        let mut needed = 0u32;
+        let first = unsafe {
+            GetTokenInformation(
+                token.as_raw_handle().cast(),
+                TokenUser,
+                std::ptr::null_mut(),
+                0,
+                &raw mut needed,
+            )
+        };
+        assert_eq!(first, 0, "TokenUser size query unexpectedly succeeded");
+        assert_eq!(
+            unsafe { GetLastError() },
+            ERROR_INSUFFICIENT_BUFFER,
+            "TokenUser size query failed unexpectedly"
+        );
+        assert!(needed >= size_of::<TOKEN_USER>() as u32);
+        let mut buffer = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
+        let ok = unsafe {
+            GetTokenInformation(
+                token.as_raw_handle().cast(),
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                needed,
+                &raw mut needed,
+            )
+        };
+        assert_ne!(
+            ok,
+            0,
+            "read ephemeral TokenUser: {}",
+            io::Error::last_os_error()
+        );
+        let user = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<TOKEN_USER>()) };
+        let mut string_sid = std::ptr::null_mut();
+        let converted = unsafe { ConvertSidToStringSidW(user.User.Sid, &raw mut string_sid) };
+        assert_ne!(
+            converted,
+            0,
+            "stringify ephemeral TokenUser SID: {}",
+            io::Error::last_os_error()
+        );
+        let mut length = 0usize;
+        while unsafe { *string_sid.add(length) } != 0 {
+            length += 1;
+        }
+        let sid = String::from_utf16(unsafe { std::slice::from_raw_parts(string_sid, length) })
+            .expect("Windows returned a valid SID string");
+        unsafe { LocalFree(string_sid.cast()) };
+        sid
+    }
+
+    pub fn with_impersonated_user<T>(token: &OwnedHandle, operation: impl FnOnce() -> T) -> T {
+        let impersonated = unsafe { ImpersonateLoggedOnUser(token.as_raw_handle().cast()) };
+        assert_ne!(
+            impersonated,
+            0,
+            "ImpersonateLoggedOnUser failed: {}",
+            io::Error::last_os_error()
+        );
+        let outcome = catch_unwind(AssertUnwindSafe(operation));
+        let reverted = unsafe { RevertToSelf() };
+        assert_ne!(
+            reverted,
+            0,
+            "RevertToSelf failed: {}",
+            io::Error::last_os_error()
+        );
+        match outcome {
+            Ok(value) => value,
+            Err(payload) => resume_unwind(payload),
+        }
+    }
+
+    type AcceptOutcome = io::Result<Option<bool>>;
+
+    struct PendingAccept {
+        stop: Arc<Event>,
+        thread: Option<JoinHandle<AcceptOutcome>>,
+    }
+
+    impl PendingAccept {
+        fn start(
+            local_path: &str,
+            sddl: &str,
+            authorized_sids: Vec<String>,
+            accept_remote_for_control: bool,
+        ) -> Self {
+            let security = PipeSecurity::from_sddl(sddl).expect("convert test pipe SDDL");
+            let mut listener = PipeListener::new(local_path, 1, Some(security));
+            let stop = Arc::new(Event::new().expect("create stop event"));
+            let thread_stop = Arc::clone(&stop);
+            let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+            let thread = thread::Builder::new()
+                .name("fmf-admin-pipe-security".to_string())
+                .spawn(move || {
+                    let accepted = if accept_remote_for_control {
+                        listener.accept_remote_for_test(&thread_stop, || {
+                            ready_tx.send(()).expect("publish pipe readiness");
+                        })
+                    } else {
+                        listener.accept(&thread_stop, || {
+                            ready_tx.send(()).expect("publish pipe readiness");
+                        })
+                    }?;
+                    match accepted {
+                        Accepted::Connection(stream) => {
+                            let authorized = verify_client(&stream, &authorized_sids)?;
+                            if !authorized {
+                                stream.disconnect();
+                            }
+                            Ok(Some(authorized))
+                        }
+                        Accepted::Stopped => Ok(None),
+                    }
+                })
+                .expect("spawn pipe security listener");
+
+            match ready_rx.recv_timeout(READY_TIMEOUT) {
+                Ok(()) => Self {
+                    stop,
+                    thread: Some(thread),
+                },
+                Err(error) => {
+                    stop.set();
+                    let outcome = thread.join();
+                    panic!(
+                        "pipe listener did not become ready within {READY_TIMEOUT:?}: \
+                         {error}; thread outcome: {outcome:?}"
+                    );
+                }
+            }
+        }
+
+        fn finish(mut self) -> Option<bool> {
+            self.thread
+                .take()
+                .expect("accept thread is present")
+                .join()
+                .expect("accept thread did not panic")
+                .expect("accept/verify client")
+        }
+    }
+
+    impl Drop for PendingAccept {
+        fn drop(&mut self) {
+            self.stop.set();
+            if let Some(thread) = self.thread.take() {
+                let outcome = thread.join();
+                if thread::panicking() {
+                    if !matches!(outcome, Ok(Ok(None))) {
+                        eprintln!("pipe accept cleanup during unwind returned {outcome:?}");
+                    }
+                } else {
+                    assert!(
+                        matches!(outcome, Ok(Ok(None))),
+                        "cancelled accept cleanup did not stop cleanly: {outcome:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn connect_as(token: &OwnedHandle, path: &str) -> io::Result<PipeStream> {
+        with_impersonated_user(token, || PipeStream::connect(path))
+    }
+
+    #[test]
+    #[ignore = "requires elevation and creates an ephemeral local standard user; gated by FMF_ADMIN_TESTS=1"]
+    fn named_pipe_security_boundaries_are_enforced_on_real_tokens_and_transports() {
+        require_admin_gate();
+
+        let current_sid = current_user_sid().expect("current user SID");
+        let mut temporary_user = TemporaryLocalUser::create();
+        let other_token = temporary_user.logon();
+        let other_sid = token_user_sid(&other_token);
+        assert_ne!(
+            current_sid, other_sid,
+            "the adversarial connection must carry a genuinely different TokenUser SID"
+        );
+
+        // Layer 1: production SDDL denies the real second user at CreateFile,
+        // while the ordinary authorized token reaches the very same pending
+        // instance and passes the independent server-side SID check.
+        let (dacl_local, _) = unique_pipe_paths("dacl");
+        let production_sddl = pipe_sddl(std::slice::from_ref(&current_sid));
+        let dacl_accept = PendingAccept::start(
+            &dacl_local,
+            &production_sddl,
+            vec![current_sid.clone()],
+            false,
+        );
+        let denied = connect_as(&other_token, &dacl_local);
+        let Err(denied) = denied else {
+            panic!("the production pipe DACL admitted a different local user");
+        };
+        assert_eq!(
+            denied.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED as i32),
+            "a different local user must be denied by the pipe DACL"
+        );
+        let authorized_client =
+            PipeStream::connect(&dacl_local).expect("authorized same-pipe control");
+        assert_eq!(
+            dacl_accept.finish(),
+            Some(true),
+            "the authorized control must pass verify_client"
+        );
+        drop(authorized_client);
+
+        // Layer 4 independently holds if layer 1 is accidentally widened:
+        // Everyone may reach this test-only pipe at the kernel, but the real
+        // client TokenUser SID is still rejected by verify_client and the
+        // server disconnects it.
+        let (token_local, _) = unique_pipe_paths("token");
+        let deliberately_wide_sddl = "D:P(A;;GA;;;SY)(A;;GRGW;;;WD)";
+        let token_accept = PendingAccept::start(
+            &token_local,
+            deliberately_wide_sddl,
+            vec![current_sid],
+            false,
+        );
+        let mut unauthorized_client = connect_as(&other_token, &token_local)
+            .expect("wide test DACL must prove kernel-level connection first");
+        assert_eq!(
+            token_accept.finish(),
+            Some(false),
+            "verify_client must reject the different TokenUser SID"
+        );
+        assert!(
+            unauthorized_client.write_all(b"rejected").is_err(),
+            "verify_client rejection must disconnect the admitted kernel client"
+        );
+        drop(unauthorized_client);
+
+        // Layer 2 is behavioral, not a constant/SDDL assertion. First prove
+        // this host can traverse the remote named-pipe transport with the
+        // accept control. Only then test the production reject mode under the
+        // same identity, DACL, host, and API path. A broken SMB/control
+        // environment is a hard failure, never a skip.
+        let (remote_control_local, remote_control_unc) = unique_pipe_paths("remote-control");
+        let remote_control = PendingAccept::start(
+            &remote_control_local,
+            deliberately_wide_sddl,
+            Vec::new(),
+            true,
+        );
+        let remote_client = PipeStream::connect(&remote_control_unc).unwrap_or_else(|error| {
+            panic!(
+                "PIPE_ACCEPT_REMOTE_CLIENTS control could not prove remote \
+                     transport on this host: {error}"
+            );
+        });
+        assert_eq!(
+            remote_control.finish(),
+            Some(true),
+            "remote accept control must reach the server"
+        );
+        drop(remote_client);
+
+        let (remote_reject_local, remote_reject_unc) = unique_pipe_paths("remote-reject");
+        let remote_reject = PendingAccept::start(
+            &remote_reject_local,
+            deliberately_wide_sddl,
+            Vec::new(),
+            false,
+        );
+        let rejected = PipeStream::connect(&remote_reject_unc);
+        let Err(rejected) = rejected else {
+            panic!("PIPE_REJECT_REMOTE_CLIENTS admitted a remote transport");
+        };
+        assert_eq!(
+            rejected.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED as i32),
+            "remote rejection must be an explicit access denial"
+        );
+        let local_control = PipeStream::connect(&remote_reject_local)
+            .expect("local control after remote rejection");
+        assert_eq!(
+            remote_reject.finish(),
+            Some(true),
+            "the production listener must remain usable by the local authorized user"
+        );
+        drop(local_control);
+
+        drop(other_token);
+        temporary_user.remove();
     }
 }

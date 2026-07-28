@@ -1,0 +1,89 @@
+# Deliberate-release gate, intentionally independent from CI.
+#
+# Label changes re-run this workflow only. They must never create a second,
+# mostly-skipped CI run whose green ci-required check can replace a failed test
+# result for the same commit.
+name: release-gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  # Irrelevant label churn must neither cancel nor replace the required gate.
+  group: >-
+    release-gate-${{ github.event.pull_request.number }}-${{
+      (
+        (github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+        github.event.label.name != 'release: approved'
+      ) && 'ignored' || 'gate'
+    }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    # GitHub emits pull_request events for every label, with no trigger-level
+    # name filter. Give unrelated labels a different check context so they
+    # cannot replace a failed/approved required `release-gate` on the same SHA.
+    name: >-
+      ${{
+        (
+          (github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+          github.event.label.name != 'release: approved'
+        ) && 'release-gate-ignored-label' || 'release-gate'
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read # verify release-please PR labels and source branch
+    steps:
+      - name: Require explicit approval for a Release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          ACTION: ${{ github.event.action }}
+          EVENT_LABEL: ${{ github.event.label.name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if { [ "$ACTION" = "labeled" ] || [ "$ACTION" = "unlabeled" ]; } &&
+             [ "$EVENT_LABEL" != "release: approved" ]; then
+            echo "Unrelated label '$EVENT_LABEL' — required release-gate context unchanged."
+            exit 0
+          fi
+
+          metadata=$(gh pr view "$PR" --repo "$REPO" --json headRefName,labels)
+          labels=$(jq -r '.labels[].name' <<<"$metadata")
+          head_ref=$(jq -r '.headRefName' <<<"$metadata")
+          files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename')
+
+          # The pending label is mutable, so it cannot be the sole security
+          # boundary. A Release Please PR is also recognized by its version
+          # manifest diff or standard bot branch; removing one signal cannot
+          # turn it into an ordinary PR and bypass approval.
+          is_release_pr=false
+          if grep -qx "autorelease: pending" <<<"$labels" ||
+             grep -qx ".release-please-manifest.json" <<<"$files" ||
+             [[ "$head_ref" == release-please--branches--main--components--find-my-files ]]; then
+            is_release_pr=true
+          fi
+
+          if [ "$is_release_pr" = true ]; then
+            # Approval is commit-bound: only the dedicated label event may open
+            # the gate. Any opened/synchronize/reopened event stays red even if
+            # an approval label survived from an older head.
+            if [ "$ACTION" = "labeled" ] &&
+               [ "$EVENT_LABEL" = "release: approved" ] &&
+               grep -qx "release: approved" <<<"$labels"; then
+              echo "Release PR carries 'release: approved' — gate open."
+            else
+              echo "::error::Apply 'release: approved' to this Release PR head (ADR-0035)."
+              exit 1
+            fi
+          else
+            echo "Not a release PR — gate passes."
+          fi

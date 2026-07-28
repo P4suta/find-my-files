@@ -15,6 +15,7 @@ fmf-proto = { workspace = true }
 fmf-buildstamp = { workspace = true }
 clap = { workspace = true }
 parking_lot = { workspace = true }
+crossbeam-channel = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -25,3 +26,4 @@ windows-sys = { workspace = true }
 # Test-only feature union: exposes fmf-core's index::testutil (TestDir RAII)
 # to the integration tests without touching the production build.
 fmf-core = { workspace = true, features = ["testutil"] }
+tempfile = { workspace = true }

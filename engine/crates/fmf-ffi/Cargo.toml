@@ -13,6 +13,7 @@ workspace = true
 [lib]
 name = "fmf_engine"
 crate-type = ["cdylib"]
+doctest = false
 
 [dependencies]
 # A cdylib can depend on rlibs just fine (the old "cannot depend" comment
@@ -20,6 +21,7 @@ crate-type = ["cdylib"]
 fmf-contract = { workspace = true }
 fmf-core = { workspace = true }
 parking_lot = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 # degrade!(warn+カウンタ不可分)の warn 側 — 変換失敗の劣化記録のみに使う。
 tracing = { workspace = true }

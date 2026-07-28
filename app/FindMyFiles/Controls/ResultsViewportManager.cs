@@ -17,7 +17,7 @@ namespace FindMyFiles.Controls;
 /// <see cref="FindSelectionIndex"/>, <see cref="CopyablePaths"/>) are static
 /// and unit-tested without a ListView.
 /// </summary>
-public sealed class ResultsViewportManager
+internal sealed class ResultsViewportManager
 {
     private readonly ListView _list;
     private ScrollViewer? _scroller;
@@ -113,7 +113,7 @@ public sealed class ResultsViewportManager
     {
         if (SelectedRow() is { IsPlaceholder: false } row)
         {
-            ShellOps.Reveal(row.FullPath);
+            ShellOps.RevealIndexed(row.FullPath, row.Frn);
         }
     }
 
@@ -143,7 +143,7 @@ public sealed class ResultsViewportManager
     {
         if (row is { IsPlaceholder: false })
         {
-            ShellOps.Open(row.FullPath);
+            ShellOps.OpenIndexed(row.FullPath, row.Frn);
         }
     }
 

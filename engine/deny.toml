@@ -27,10 +27,8 @@ confidence-threshold = 0.8
 unused-allowed-license = "allow"
 
 [bans]
-# Transitive duplicate versions are not ours to fix (mirrors the clippy
-# multiple_crate_versions allow); a registry wildcard dep, however, is always our
-# bug. Internal path deps (fmf-contract/-core/-proto) are versionless by design.
-multiple-versions = "warn"
+# Any duplicate version is a dependency-policy failure.
+multiple-versions = "deny"
 wildcards = "deny"
 allow-wildcard-paths = true
 

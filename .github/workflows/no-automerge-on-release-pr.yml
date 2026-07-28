@@ -6,24 +6,32 @@
 # gate into a single action.
 #
 # pull_request_target so this runs from main's definition with a write token; it
-# only calls the API to disable auto-merge (never checks out PR code), and the guard
-# is scoped to release-please's own branch, so it's safe and never touches normal PRs.
+# only calls the API to disable auto-merge (never checks out PR code). The guard
+# requires the exact same-repository bot branch, so a fork cannot trigger writes
+# merely by spoofing a `release-please--*` branch name.
 name: no-automerge-on-release-pr
 
-on:
+on: # zizmor: ignore[dangerous-triggers] trusted base workflow; API-only exact-branch guard described above
   pull_request_target:
     types: [auto_merge_enabled]
 
-permissions:
-  contents: read
+concurrency:
+  group: no-automerge-release-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions: {}
 
 jobs:
   disable:
-    if: startsWith(github.event.pull_request.head.ref, 'release-please--')
-    runs-on: ubuntu-latest
+    if: >-
+      github.event.pull_request.base.repo.full_name == github.repository
+      && github.event.pull_request.base.ref == 'main'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.head.ref == 'release-please--branches--main--components--find-my-files'
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      pull-requests: write
+      pull-requests: write # disable auto-merge on the guarded release PR
     steps:
       - name: Disable auto-merge on the Release PR
         env:

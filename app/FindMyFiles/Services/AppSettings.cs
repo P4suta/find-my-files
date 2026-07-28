@@ -5,14 +5,25 @@ namespace FindMyFiles.Services;
 /// <summary>
 /// User-scope settings at %APPDATA%\find-my-files\settings.json — UI-owned,
 /// deliberately separate from the machine-scope service.json the service
-/// owns. A corrupt file degrades to defaults: warn, quarantine as .bad, and
-/// the next save starts clean.
+/// owns. A file whose <em>content</em> is unusable degrades to defaults: warn,
+/// quarantine as .bad, and the next save starts clean. A file we merely failed
+/// to <em>read</em> (sharing violation from a backup/sync/AV pass, denied ACL)
+/// is never touched: the session runs on defaults and saving is refused, so a
+/// one-second lock cannot erase everything the user configured.
 /// </summary>
-public sealed class AppSettings
+internal sealed class AppSettings
 {
-    /// <summary>Engine transport: "auto" (pipe probe → FFI fallback),
-    /// "pipe", or "inproc". CLI flags override this.</summary>
-    public string Engine { get; set; } = "auto";
+    private const int MaxSettingsBytes = 16 * 1024;
+
+    /// <summary>Read attempts before an unreadable file is declared unavailable.
+    /// A sharing violation from a backup/indexer/AV pass clears in milliseconds,
+    /// so a couple of retries recovers the real settings instead of silently
+    /// running the session on defaults.</summary>
+    private const int ReadAttempts = 3;
+
+    /// <summary>Backoff between the read attempts above. Startup calls this on
+    /// the UI thread, so the worst case stays under a frame budget.</summary>
+    private const int ReadRetryDelayMs = 20;
 
     /// <summary>UI language: "auto" (follow the OS), "ja", "en", or "zh-Hans".
     /// Applied via PrimaryLanguageOverride in the App ctor; the gear menu's
@@ -43,76 +54,135 @@ public sealed class AppSettings
     /// toggle flips it and persists here.</summary>
     public bool CloseToTray { get; set; }
 
-    /// <summary>Noise directories excluded in focused mode, each appended as
-    /// a quoted <c>!path:"…"</c> term. Plain substring match against the full
-    /// path (engine semantics) — no wildcards needed.</summary>
-    public string[] FocusedExcludePaths { get; set; } =
-    [
-        @"\windows\",
-        @"\program files",
-        @"\programdata\",
-        @"\$recycle.bin\",
-        @"\node_modules\",
-        @"\.git\",
-        @"\__pycache__\",
-    ];
-
-    /// <summary>Extension whitelist applied in focused mode as a single
-    /// OR-semantics <c>ext:a;b;…</c> term: documents, images, audio, video,
-    /// archives and launchables — what a person actually goes looking for.</summary>
-    public string[] FocusedExtensions { get; set; } =
-    [
-        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv",
-        "jpg", "jpeg", "png", "gif", "webp", "svg", "heic",
-        "mp3", "wav", "flac", "m4a",
-        "mp4", "mkv", "mov", "avi",
-        "zip", "7z", "rar",
-        "exe", "msi", "lnk",
-    ];
-
-    /// <summary>Absolute paths of the root folders to index in non-elevated
-    /// scope mode (ADR-0024). Empty = unconfigured, and the setup screen mainly
-    /// pushes the admin path (all drives, fastest). One or more entries resolve
-    /// to <c>EngineChoice.WalkInProc</c> on the next launch, so folder-walk
-    /// search works on a corporate PC where neither the service nor admin rights
-    /// are available.</summary>
-    public string[] ScopeRoots { get; set; } = [];
-
-    /// <summary>Absolute subfolder paths pruned from the scope walk (ADR-0025).
-    /// Each must lie under one of <see cref="ScopeRoots"/>; the walk skips the
-    /// matching subtree so it is never indexed. Empty = index everything under
-    /// the roots.</summary>
-    public string[] ScopeExcludes { get; set; } = [];
-
-    /// <summary>Absolute path to the user-scope settings file. Portable by
-    /// default (<c>&lt;exe&gt;\data\settings.json</c>); falls back to
-    /// <c>%APPDATA%\find-my-files\settings.json</c> when the app folder is
-    /// read-only. See <see cref="AppPaths"/>.</summary>
+    /// <summary>Absolute path to the canonical user-scope settings file at
+    /// <c>%APPDATA%\find-my-files\settings.json</c>.</summary>
     public static string SettingsPath => AppPaths.SettingsFile;
 
+    /// <summary>True when an existing settings.json could not be read at load
+    /// time (I/O or access failure, not bad content). Such an instance holds
+    /// defaults that were never the user's choice, so <see cref="SaveTo"/>
+    /// refuses to persist them over the file it could not read.</summary>
+    internal bool ReadUnavailable { get; private set; }
+
     /// <summary>Load settings from <see cref="SettingsPath"/>, falling back to
-    /// defaults (and quarantining the file) if it is missing or corrupt.</summary>
+    /// defaults if the file is missing, unreadable or corrupt. Only corrupt
+    /// <em>content</em> is quarantined as <c>.bad</c>.</summary>
     /// <returns>The loaded settings, or a fresh default instance.</returns>
     public static AppSettings Load() => LoadFrom(SettingsPath);
 
-    internal static AppSettings LoadFrom(string path)
+    internal static AppSettings LoadFrom(string path) => LoadFrom(path, Thread.Sleep);
+
+    /// <summary>Load core, parameterised over the retry backoff so the transient
+    /// I/O path is unit-testable without real waits.</summary>
+    /// <param name="path">Absolute settings file path to read.</param>
+    /// <param name="wait">Backoff between read attempts, in milliseconds.</param>
+    /// <returns>The loaded settings, or a fresh default instance.</returns>
+    internal static AppSettings LoadFrom(string path, Action<int> wait)
     {
-        try
+        for (var attempt = 1; ; attempt++)
         {
-            if (!File.Exists(path))
+            try
             {
+                if (!File.Exists(path))
+                {
+                    return new AppSettings();
+                }
+
+                var settings =
+                    JsonSerializer.Deserialize(
+                        ReadBounded(path),
+                        AppSettingsJsonContext.Default.AppSettings)
+                    ?? new AppSettings();
+                settings.Normalize();
+                return settings;
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidDataException)
+            {
+                // The bytes reached us and are not settings we can use: bad JSON,
+                // an unmapped member, or past the size bound. Quarantining is
+                // safe here because the content is already lost to us, and .bad
+                // keeps it recoverable by hand.
+                //
+                // UnmappedMemberHandling.Disallow means a version DOWNGRADE lands
+                // here too (an old build reading a newer file). That is deliberate:
+                // the old build cannot round-trip keys it does not know, so saving
+                // over the file would drop them anyway. Quarantine at least keeps
+                // the newer file intact under .bad for the newer build to restore,
+                // and the mismatch shows up in the log instead of silently
+                // discarding half the schema on the next save.
+                FileLog.Warn("settings", "corrupt settings.json — quarantining, using defaults", ex);
+                Quarantine(path);
                 return new AppSettings();
             }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                // Raced with a delete between File.Exists and the open: nothing
+                // to preserve and nothing to quarantine.
+                return new AppSettings();
+            }
+            catch (IOException) when (attempt < ReadAttempts)
+            {
+                // We never saw the content, so we cannot call it corrupt. A
+                // backup/sync/AV pass holding the file for a moment must not cost
+                // the user every setting they have — wait it out first.
+                wait(ReadRetryDelayMs);
+            }
+            catch (Exception ex)
+            {
+                // Unreadable for a reason retrying will not fix (denied, gone
+                // sideways, or something we did not anticipate). Same rule: the
+                // content was never in our hands, so the file is left untouched
+                // and this session runs on defaults it must not persist.
+                FileLog.Warn(
+                    "settings",
+                    "settings.json unreadable — defaults for this session, saving disabled",
+                    ex);
+                return new AppSettings { ReadUnavailable = true };
+            }
+        }
+    }
 
-            return JsonSerializer.Deserialize(File.ReadAllText(path), AppSettingsJsonContext.Default.AppSettings)
-                ?? new AppSettings();
-        }
-        catch (Exception ex)
+    private static byte[] ReadBounded(string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 4096,
+            FileOptions.SequentialScan);
+        if (stream.Length > MaxSettingsBytes)
         {
-            FileLog.Warn("settings", $"unreadable settings.json — using defaults ({path})", ex);
-            Quarantine(path);
-            return new AppSettings();
+            throw new InvalidDataException(
+                $"settings.json exceeds {MaxSettingsBytes} bytes");
         }
+
+        var bytes = new byte[checked((int)stream.Length)];
+        stream.ReadExactly(bytes);
+        if (stream.ReadByte() != -1)
+        {
+            throw new InvalidDataException(
+                $"settings.json exceeds {MaxSettingsBytes} bytes");
+        }
+
+        return bytes;
+    }
+
+    /// <summary>
+    /// JSON can assign null to non-nullable reference properties and older or
+    /// hand-edited files can carry unsupported scalar values. Normalize every
+    /// persisted value before it reaches WinRT or query construction.
+    /// </summary>
+    private void Normalize()
+    {
+        Language = Language switch
+        {
+            "auto" or "ja" or "en" or "zh-Hans" => Language,
+            _ => "auto",
+        };
+        RegexScope = string.Equals(RegexScope, "path", StringComparison.Ordinal)
+            ? "path"
+            : "name";
     }
 
     private static void Quarantine(string path)
@@ -128,20 +198,77 @@ public sealed class AppSettings
     }
 
     /// <summary>Persist the current settings to <see cref="SettingsPath"/>
-    /// (snake_case JSON, indented). Best-effort: a write failure is logged, not
-    /// thrown.</summary>
-    public void Save() => SaveTo(SettingsPath);
+    /// (snake_case JSON, indented). A write failure is logged and returned to
+    /// the caller so UI state cannot claim an unpersisted change succeeded.
+    /// Refused outright when <see cref="ReadUnavailable"/> is set.</summary>
+    /// <returns>True only after the atomic replacement completed.</returns>
+    public bool Save() => SaveTo(SettingsPath);
 
-    internal void SaveTo(string path)
+    /// <summary>Path-parameterized persistence core.</summary>
+    /// <param name="path">Absolute settings file path to replace atomically.</param>
+    /// <returns>True only after the atomic replacement completed; false when the
+    /// write failed or the instance holds fallback defaults
+    /// (<see cref="ReadUnavailable"/>).</returns>
+    internal bool SaveTo(string path)
     {
+        if (ReadUnavailable)
+        {
+            // These values are defaults we fell back to, not the user's. Writing
+            // them would finish the destruction the failed read started.
+            FileLog.Warn(
+                "settings",
+                "refusing to overwrite settings.json that could not be read");
+            return false;
+        }
+
+        string? temp = null;
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, JsonSerializer.Serialize(this, AppSettingsJsonContext.Default.AppSettings));
+            Normalize();
+            var directory = Path.GetDirectoryName(path)
+                ?? throw new ArgumentException("settings path has no parent directory", nameof(path));
+            Directory.CreateDirectory(directory);
+
+            temp = Path.Combine(
+                directory,
+                $".{Path.GetFileName(path)}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp");
+            var json = JsonSerializer.Serialize(this, AppSettingsJsonContext.Default.AppSettings);
+            using (var stream = new FileStream(
+                temp,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 4096,
+                FileOptions.WriteThrough))
+            using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false)))
+            {
+                writer.Write(json);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(temp, path, overwrite: true);
+            temp = null;
+            return true;
         }
         catch (Exception ex)
         {
             FileLog.Warn("settings", "failed to save settings.json", ex);
+            return false;
+        }
+        finally
+        {
+            if (temp is not null)
+            {
+                try
+                {
+                    File.Delete(temp);
+                }
+                catch (Exception ex)
+                {
+                    FileLog.Warn("settings", "failed to remove temporary settings file", ex);
+                }
+            }
         }
     }
 }

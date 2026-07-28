@@ -2,13 +2,19 @@
 
 Date: 2026-06-30 / Status: Accepted (no wire-contract / golden / ABI change; the correlation reuses ids already on the wire)
 
+> Current-state amendment (2026-07-25): persisted diagnostics are now a strict
+> privacy boundary. Arbitrary strings are redacted at the Rust sink; C# records
+> only exception type/HRESULT/Win32 code; crash markers and panic hooks never
+> persist messages, payloads, locations, stacks, or backtraces. Diagnostic-copy
+> output applies the same redaction.
+
 ## Context
 
 Logging was already disciplined — `tracing` + a non-blocking daily appender + a `DiagLayer` fanning WARN+ to the diag ring and the UI on the engine side ([ADR-0018](0018-contract-single-source.md)'s `degrade!`), and a hand-rolled `FileLog` with crash markers and exception funnels on the app side. But against industry-standard structured logging four gaps remained:
 
-1. **No retention cap (a real bug).** `tracing_appender::rolling::daily` never deletes old `engine.log.<date>` files — they accumulate forever. The app kept a single `.old` generation.
+1. **No retention cap (a real bug).** `tracing_appender::rolling::daily` never deleted the old dated engine-log files — they accumulated forever. The app kept a single `.old` generation.
 2. **Not structured.** Both sides wrote freeform human strings; `tracing`'s spans were wired but unused. Neither log was machine-parseable (grep/awk), and fields were not first-class.
-3. **No cross-process correlation.** A single user query produces lines in both `app.log` and `engine.log` (two processes on the pipe path, two files even in-process on the FFI path) with nothing tying them together.
+3. **No cross-process correlation.** A single user query produces lines in both `app.log` and the engine log (two processes on the pipe path, two files even in-process on the FFI path) with nothing tying them together.
 4. **No injection / redaction policy.** Query text and filenames — the product's *sensitive asset* (the whole index is filenames) — were logged verbatim, and nothing sanitised CR/LF or control characters out of values (log-injection / forged-line risk).
 
 ## Decision
@@ -47,17 +53,16 @@ The engine timestamp caches the local UTC offset once at process start (resolvin
 
 ## Consequences
 
-- **No wire-contract / golden / ABI change**; `init_diag` grows a `max_log_files` argument (internal). The engine `engine.log` filename gains a date (`engine.<date>.log`); F12 "open log folder" is unaffected, and `Tail` still reads the fixed `app.log`.
+- **No wire-contract / golden / ABI change**; `init_diag` grows a `max_log_files` argument (internal). The former fixed engine-log name gains a date (`engine.<date>.log`); F12 "open log folder" is unaffected, and `Tail` still reads the fixed `app.log`.
 - New deps: `Serilog` + `Serilog.Sinks.File` (managed-only, ~1 MB; bundle size unaffected). No new Rust dependency — the formatter is hand-rolled on `std` + the index's existing civil-date math.
 - A new counter is **not** added; no new `degrade!` path is introduced, so the `metrics.rs` / `COUNTER_NAMES` / `contract-gen` triple is untouched.
 
 ## Verification
 
-- [x] Engine: `escape_value` unit tests (bare / quoting / **CRLF-injection folds to one line** / control-char `\uXXXX` / UTF-8-boundary truncation), `write_ts` RFC3339 shape, a full-line assembly test proving field order + span `qid`, and the `DiagLayer` area-precedence test. `just test` green incl. `golden_json` + `fmf-proto` golden **unmodified** (the contract-unchanged proof).
-- [x] App: `LogfmtFormatterTests` (quoting, injection, exception `err=`, field ordering, level mapping) + the `FileLog` tail tests; `just test-app` green (482).
-- [x] `just lint` (clippy all-groups deny) + `just fmt` green; C# `AnalysisMode=All` clean.
-- [ ] Manual smoke: run a search, F12 "Copy diagnostics" shows logfmt `app.log` lines with `rid`; `engine.log` shows the same logfmt with the matching `rid` (and `qid` on the pipe path).
-- [ ] Manual smoke: drive the log past the size/age caps and confirm `engine.<date>.log` stays ≤ N generations and `app_NNN.log` ≤ 5.
+Formatter tests pin quoting, CRLF neutralization, truncation, field order,
+correlation, and exception-text rejection in both languages. Crash-marker,
+diagnostic-copy, retention, and golden tests own the remaining privacy and
+contract guarantees.
 
 ## Re-examination triggers
 

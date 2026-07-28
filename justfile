@@ -1,8 +1,9 @@
-# find-my-files task runner. Requires: mise (rust/dotnet), see mise.toml.
+# find-my-files task runner. Local tools are managed by mise; CI installs the
+# same pinned tools through platform-standard setup actions.
 # Recipes marked (elevated) need an administrator terminal.
 #
 # `just` (no args) prints this menu, grouped by area via the [group('…')]
-# attributes below. New here? Run `just setup`, then `just check`.
+# attributes below. New here? Run `mise install`, `just setup`, then `just check`.
 
 # just defaults to `sh` even on Windows — absent in elevated PowerShell,
 # exactly where the admin recipes must run. powershell.exe always exists.
@@ -13,92 +14,110 @@ default:
 
 # ── Setup ────────────────────────────────────────────────────────────────
 
-# One-time setup: install pinned toolchain + git hooks
+# One-time repository setup after `mise install`: install git hooks.
 [group('setup')]
-[working-directory: 'engine']
 setup:
-    mise install
     lefthook install
 
-# Check the dev environment matches mise.toml (run right after `just setup`).
+# Check the dev environment matches mise.toml (run after `mise install`).
 # Logic lives in xtask (the doctor subcommand); this is a thin wrapper, and
 # --target-dir keeps xtask output under build/ (ADR-0021).
 [group('setup')]
-[doc('Check the dev environment matches the mise.toml pins (run after just setup)')]
+[doc('Check the dev environment matches the mise.toml pins (run after mise install)')]
 doctor:
-    cargo run --manifest-path xtask/Cargo.toml --target-dir build/xtask -- doctor
+    cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- doctor
+
+# Live GitHub security audit for the privileged performance instrument. Requires
+# `gh` authenticated as an organization owner; a user-owned repository fails.
+[group('setup')]
+[doc('Audit the GitHub-side setup of the privileged performance instrument (org owner only)')]
+performance-doctor:
+    cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- performance-doctor
 
 # ── Daily loop ───────────────────────────────────────────────────────────
 
 # Type-check without codegen — the fast inner loop
 [group('daily')]
 [working-directory: 'engine']
-check: check-contract check-cli-docs
-    cargo check --workspace --all-targets
+check: check-contract
+    cargo check --locked --workspace --all-targets
 
-# Fast contract-drift tripwire (~sub-second warm): the committed C# bindings +
-# docs/contract.md still match the contract source. Same `--check` assertion as
-# drift.rs inside `cargo test`, but it compiles only the dependency-free
+# Fast contract-drift tripwire (~sub-second warm): the committed C# bindings
+# still match the contract source. Same `--check` assertion as
+# drift.rs inside the nextest suite, but it compiles only the dependency-free
 # fmf-contract leaf — so `just check` catches a forgotten `just contract-gen`
 # without waiting for the whole engine test build (ADR-0018).
 [group('daily')]
 [doc('Fast contract-drift tripwire — gen-contract --check, sub-second warm')]
 [working-directory: 'engine']
 check-contract:
-    cargo run -q -p fmf-contract --bin gen-contract -- --check
-
-# CLI-reference drift tripwire: docs/cli.md still matches the clap command tree
-# (the same generator `just cli-gen` writes). Mirrors check-contract (ADR-0018).
-[group('daily')]
-[doc('CLI-reference drift tripwire — docs/cli.md matches the clap surface')]
-[working-directory: 'engine']
-check-cli-docs:
-    cargo run -q -p fmf-cli --example codegen -- --check
+    cargo run --locked -q -p fmf-contract --bin gen-contract -- --check
 
 # Build the engine (release binaries)
 [group('daily')]
 [working-directory: 'engine']
 build:
-    cargo build --release
+    cargo build --locked --release
 
-# Run the engine unit tests (cargo, unelevated)
+# Run every Rust test through nextest, then the doctests cargo-nextest does not run.
 [group('daily')]
+[doc('Run Rust tests with nextest plus doctests (no elevation)')]
 [working-directory: 'engine']
-test:
-    cargo test --workspace
+test *args="":
+    cargo nextest run --locked --workspace {{args}}
+    cargo test --locked --workspace --exclude fmf-ffi --doc
 
 # C# unit tests (no elevation; never rebuilds the Rust engine)
 [group('daily')]
 test-app:
-    dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true
+    dotnet test app/FindMyFiles.Tests --results-directory build/test-results/app -p:SkipRustBuild=true -p:RestoreLockedMode=true
 
-# C# unit tests + coverage gate (line+branch >=55; UI is [ExcludeFromCodeCoverage]).
+# C# unit tests + coverage gate (line+branch >=57; UI is [ExcludeFromCodeCoverage]).
 # Threshold/type/stat live in the test csproj (with ExcludeByFile), so this is just
 # -p:CollectCoverage=true and no comma-bearing prop ever reaches the shell. CI runs
-# `just test-app-cov true` (locked enforces packages.lock.json); locally the bare
-# recipe reproduces the identical gate.
+# packages.lock.json is enforced locally and in CI; the parameter remains only
+# for compatibility with existing CI calls and defaults fail-closed.
 [group('daily')]
-[doc('C# unit tests + coverage gate (line+branch >=55)')]
-test-app-cov locked="false":
-    dotnet test app/FindMyFiles.Tests -p:SkipRustBuild=true -p:RestoreLockedMode={{locked}} -p:CollectCoverage=true
+[doc('C# unit tests + coverage gate (line+branch >=57)')]
+test-app-cov locked="true":
+    dotnet test app/FindMyFiles.Tests --results-directory build/test-results/app -p:SkipRustBuild=true -p:RestoreLockedMode={{locked}} -p:CollectCoverage=true
 
-# Elevation-gated #[ignore] tests: real-volume MFT/USN (elevated). The
+# Elevation-gated #[ignore] tests: real-volume MFT/USN and machine-security
+# boundaries (elevated). The
 # FMF_ADMIN_TESTS gate is set by xtask via Command::env on the child cargo, not
 # in the shell — powershell.exe strips the nested quotes from `cargo --config
 # 'env.X="1"'` (leaving the bare integer 1, which cargo rejects), so the value
 # must never touch a shell. Logic lives in xtask (the test-admin subcommand).
 [group('daily')]
-[doc('Run the elevated, ignore-gated real-volume MFT/USN tests')]
+[doc('Run elevated real-volume and machine-security tests')]
 [working-directory: 'xtask']
 test-admin:
-    cargo run -- test-admin
+    cargo run --locked -- test-admin
 
-# Clippy (deny warnings) + typos
+# Clippy both Rust workspaces (deny warnings) + repository/workflow linters.
 [group('daily')]
-[working-directory: 'engine']
-lint:
-    cargo clippy --workspace --all-targets -- -D warnings
+lint: lint-engine lint-xtask lint-text lint-actions
+
+[group('daily')]
+[doc('Check repository spelling')]
+lint-text:
     typos
+
+[group('daily')]
+[doc('Validate GitHub Actions syntax and security')]
+lint-actions:
+    actionlint
+    zizmor --offline --strict-collection --persona auditor --min-severity low .
+
+[private]
+[working-directory: 'engine']
+lint-engine:
+    cargo clippy --locked --workspace --all-targets -- -D warnings
+
+[private]
+[working-directory: 'xtask']
+lint-xtask:
+    cargo clippy --locked --all-targets -- -D warnings
 
 # Format Rust (engine + xtask workspaces) and all TOML (repo-wide, taplo.toml).
 [group('daily')]
@@ -112,14 +131,54 @@ fmt:
 # exercised by `test-app` — so `verify` below also covers C#.
 [group('daily')]
 [doc('Check Rust + TOML formatting (C# format is enforced by the build)')]
-fmt-check:
+fmt-check: fmt-check-engine fmt-check-xtask fmt-check-toml
+
+[group('daily')]
+[doc('Check engine Rust formatting')]
+fmt-check-engine:
     cargo fmt --manifest-path engine/Cargo.toml --all -- --check
+
+[group('daily')]
+[doc('Check xtask Rust formatting')]
+fmt-check-xtask:
     cargo fmt --manifest-path xtask/Cargo.toml --all -- --check
+
+[group('daily')]
+[doc('Check repository TOML formatting')]
+fmt-check-toml:
     taplo fmt --check
 
 # Everything the pre-push hook checks, in one shot
 [group('daily')]
-verify: fmt-check lint test test-app
+verify: fmt-check lint test test-xtask test-app deny machete
+
+# The reusable release workflow is the already-linted protected-main workflow;
+# its checkout is build input, not workflow code. Re-run every source and
+# dependency gate there without requiring the Linux-only actionlint verifier on
+# the Windows release runner.
+[private]
+verify-release-source: fmt-check lint-engine lint-xtask lint-text test test-xtask test-app deny machete
+
+# xtask is intentionally a separate binary-only workspace, so its nextest lane
+# is explicit rather than silently omitted from `verify`.
+[group('daily')]
+[working-directory: 'xtask']
+test-xtask:
+    cargo nextest run --locked
+
+# Intentional dependency-update ceremony for the main engine workspace.
+[group('setup')]
+[doc('Resolve engine dependency changes into its committed lockfile')]
+[working-directory: 'engine']
+engine-lock:
+    cargo check
+
+# Intentional dependency-update ceremony for the standalone xtask workspace.
+[group('setup')]
+[doc('Resolve xtask dependency changes into its committed lockfile')]
+[working-directory: 'xtask']
+xtask-lock:
+    cargo check
 
 # Time the full pre-push gate exactly as the hook runs it — per-job timings come
 # from lefthook itself, so no shell timing logic lives in the recipe.
@@ -138,25 +197,23 @@ dev:
     bacon
 
 # Regenerate app/FindMyFiles/Engine/Generated/EngineContract.g.cs from the
-# contract single source (ADR-0018). cargo test runs the drift check.
+# contract single source (ADR-0018). The nextest suite runs the drift check.
 [group('daily')]
 [doc('Regenerate the C# EngineContract bindings from the contract source (ADR-0018)')]
 [working-directory: 'engine']
 contract-gen:
-    cargo run -p fmf-contract --bin gen-contract
+    cargo run --locked -p fmf-contract --bin gen-contract
 
-# Regenerate docs/cli.md (committed) and the shell completions in
-# build/completions/ (PowerShell/bash/zsh/fish) from the clap command tree.
 [group('daily')]
-[doc('Regenerate docs/cli.md + build/completions/ from the clap surface')]
-[working-directory: 'engine']
-cli-gen:
-    cargo run -q -p fmf-cli --example codegen
+[doc('Explicitly recapture the shared wire/JSON golden corpus (intentional contract changes only)')]
+[working-directory: 'xtask']
+contract-bless:
+    cargo run --locked -- contract-bless
 
 # Assemble the distributable bundle in build/dist/FindMyFiles: PUBLISHED app (not a
 # bare `dotnet build` — the WinUI component package only wires WinRT.Runtime.dll,
 # the WinAppSDK native helpers and the compiled XAML into the *publish* output)
-# plus the engine binaries (fmf-service.exe / fmf.exe). The clean/publish/locale-
+# plus the service executable. The clean/publish/locale-
 # prune/copy/self-verify logic + the prune predicate's tests live in xtask.
 # skip_rust=true skips the in-build cargo step — for CI, where the engine
 # binaries are prebuilt and downloaded into build/engine/release/ before this
@@ -169,7 +226,30 @@ cli-gen:
 [doc('Assemble the distributable bundle into build/dist/FindMyFiles')]
 [working-directory: 'xtask']
 publish-app skip_rust="false":
-    cargo run --release -- publish --skip-rust {{skip_rust}}
+    cargo run --locked --release -- publish --skip-rust {{skip_rust}}
+
+# Normalize the three cargo-sbom 0.10 entry-point graphs and derive the .NET
+# runtime graph from the final self-contained dist + NuGet restore evidence.
+# The raw directory is job-local and must contain exactly the three expected
+# files; all validation/serialization logic lives in xtask.
+[group('release')]
+[doc('Generate deterministic artifact-derived CycloneDX 1.6 SBOMs')]
+[working-directory: 'xtask']
+sbom version cargo_raw_dir:
+    cargo run --locked --release -- sbom "{{version}}" --cargo-raw-dir "{{cargo_raw_dir}}"
+
+[group('release')]
+[doc('Verify build/sbom is exactly the canonical final BOM pair for a version')]
+[working-directory: 'xtask']
+sbom-verify version:
+    cargo run --locked --release -- sbom-verify "{{version}}"
+
+# Compile deterministic fake/unavailable-engine seams into a physically separate,
+# non-packaged tree. Stable build/dist never contains these launch arguments.
+[group('release')]
+[working-directory: 'xtask']
+publish-ui-test skip_rust="false":
+    cargo run --locked --release -- publish-ui-test --skip-rust {{skip_rust}}
 
 # Local/release publish: build the engine first, then publish (rust is already
 # built, so the in-build cargo step is skipped).
@@ -185,16 +265,17 @@ publish: build (publish-app "true")
 [doc('Run fmf-service in the foreground — the dev inner loop (elevated)')]
 [working-directory: 'engine']
 service-dev *args="":
-    cargo run --release -p fmf-service -- run {{args}}
+    cargo run --locked --release -p fmf-service -- run {{args}}
 
 # Build fmf-service (release)
 [group('service')]
 [working-directory: 'engine']
 service-build:
-    cargo build --release -p fmf-service
+    cargo build --locked --release -p fmf-service
 
-# Register the Windows service: captures your SID, hardens the data-dir
-# DACLs, delayed auto start + crash recovery (elevated)
+# Register the on-demand Windows service: captures your SID, hardens the
+# data-dir DACLs, copies the stable service binary and configures recovery
+# (elevated once).
 [group('service')]
 service-install: service-build
     build/engine/release/fmf-service.exe install
@@ -204,19 +285,20 @@ service-install: service-build
 service-uninstall *args="":
     build/engine/release/fmf-service.exe uninstall {{args}}
 
-# (elevated)
+# Unelevated after install: the per-service DACL grants start only.
 [group('service')]
 service-start:
     build/engine/release/fmf-service.exe start
 
-# (elevated)
+# Unelevated after install: the per-service DACL grants stop only.
 [group('service')]
 service-stop:
     build/engine/release/fmf-service.exe stop
 
-# Rebuild + restart the installed service (elevated)
+# Refresh the ProgramData stable copy/configuration, then restart (elevated).
+# A plain rebuild cannot update the already-installed service image.
 [group('service')]
-service-restart: service-stop service-build service-start
+service-restart: service-stop service-install service-start
 
 # SCM state + live pipe handshake (works unelevated)
 [group('service')]
@@ -226,61 +308,86 @@ service-status:
 # C# client × real fmf-service integration (FMF_PIPE_TESTS gate; no elevation)
 [group('service')]
 test-pipe: service-build
-    dotnet test app/FindMyFiles.Tests --settings app/FindMyFiles.Tests/pipe.runsettings -p:SkipRustBuild=true
+    dotnet test app/FindMyFiles.Tests --settings app/FindMyFiles.Tests/pipe.runsettings --results-directory build/test-results/pipe -p:SkipRustBuild=true -p:RestoreLockedMode=true
 
-# winapp UI-automation smoke suite (no elevation). Publishes the bundle, then
+# winapp UI-automation release suite (no elevation). Publishes the isolated
+# test-seam bundle, then
 # hands the published apphost (app/FindMyFiles.exe, NOT the root launcher — that
 # spawns-and-exits, so automation must attach to the real app) to ui-tests.ps1,
-# which launches it under --engine=empty (setup screen) and --fake-engine
+# which launches it under --engine=unavailable (setup screen) and --fake-engine
 # (search) and asserts on the AutomationIds. The script owns process lifecycle;
 # this recipe is a thin pwsh wrapper. -IncludeFaults requires a DEBUG bundle.
 [group('service')]
-[doc('winapp UI-automation smoke suite (publishes the bundle; no elevation)')]
-ui-test: publish
-    pwsh -NoProfile -ExecutionPolicy Bypass -File app/FindMyFiles.Tests/UiAutomation/ui-tests.ps1 -ExePath build/dist/FindMyFiles/app/FindMyFiles.exe
+[doc('winapp UI-automation release suite (publishes the bundle; no elevation)')]
+ui-test: publish (publish-ui-test "true") ui-test-stable-smoke ui-test-published
 
-# ── Benchmarks & gates (discipline: ADR-0013, engine/benches/README.md) ──
+# Exercise an already-assembled UI-test bundle. CI builds this separately from
+# the shippable `build/dist` tree so test-only engine/data-dir switches cannot
+# leak into release binaries.
+# it reuses the upstream engine artifacts instead of rebuilding Rust.
+[group('service')]
+[doc('Run UI automation against the existing published bundle')]
+ui-test-published:
+    pwsh -NoProfile -ExecutionPolicy Bypass -File app/FindMyFiles.Tests/UiAutomation/ui-tests.ps1 -ExePath build/ui-test-bundle/FindMyFiles/app/FindMyFiles.exe -OutDir build/ui-automation
+
+# Launch the exact shipping binary without any compile-time test seams and prove
+# its real WinUI tree initializes. Full deterministic interaction coverage uses
+# the separate bundle above.
+[group('service')]
+ui-test-stable-smoke:
+    pwsh -NoProfile -ExecutionPolicy Bypass -File app/FindMyFiles.Tests/UiAutomation/ui-tests.ps1 -StableSmoke -ExePath build/dist/FindMyFiles/app/FindMyFiles.exe -OutDir build/ui-automation-stable
+
+# ── Benchmarks & gates (discipline: ADR-0013) ───────────────────────────
 
 # Run the benchmark query set against a real volume (elevated)
 [group('bench')]
 [working-directory: 'engine']
 bench drive="C:" *args="":
-    cargo run --release -p fmf-cli -- bench {{drive}} {{args}}
+    cargo run --locked --release -p fmf-cli -- bench {{drive}} {{args}}
 
-# Real-volume regression gate vs the committed baseline (elevated, cool machine)
+# Enforce ADR-0013's cold/idle measurement precondition with Windows' own
+# processor counters. Pure procedural logic lives in xtask, not shell.
 [group('bench')]
-[working-directory: 'engine']
+[working-directory: 'xtask']
+perf-preflight:
+    cargo run --locked -- perf-preflight
+
+# Real-volume regression gate vs the committed baseline. xtask compiles first,
+# then owns preflight + whole-run monitoring + postflight as one transaction.
+[group('bench')]
+[working-directory: 'xtask']
 bench-check drive="C:":
-    cargo run --release -p fmf-cli -- bench {{drive}} --baseline benches/baseline.json
+    cargo run --locked -- perf-real-check {{drive}}
 
-# Note the machine and entry count in benches/README.md when regenerating.
-# (Re)record the committed real-volume baseline (elevated, cool machine)
+# (Re)record the committed real-volume baseline. The candidate carries its
+# measurement identity and is atomically promoted only after postflight.
 [group('bench')]
-[working-directory: 'engine']
+[working-directory: 'xtask']
 bench-baseline drive="C:":
-    cargo run --release -p fmf-cli -- bench {{drive}} --out benches/baseline.json
+    cargo run --locked -- perf-real-baseline {{drive}}
 
 # Criterion micro-benchmarks on the synthetic 1M index (no elevation)
 [group('bench')]
 [working-directory: 'engine']
 bench-micro *args="":
-    cargo bench -p fmf-core {{args}}
+    cargo bench --locked -p fmf-core --features testutil {{args}}
 
 # Lives in build/engine/criterion (machine-local; gone on cargo clean).
-# Record the local criterion baseline — start of every optimization session
+# Record a complete candidate and atomically promote the whole baseline tree.
 [group('bench')]
-[working-directory: 'engine']
+[working-directory: 'xtask']
 bench-micro-baseline:
-    cargo bench -p fmf-core --bench search -- --save-baseline committed
+    cargo run --locked -- perf-micro-baseline
 
-# Compare against the local baseline; fail on >10% median regressions
+# Compare in a fresh CRITERION_HOME. The gate requires all 28 current reports
+# and fails only when the median 95% CI lower bound exceeds +10%.
 [group('bench')]
-[working-directory: 'engine']
+[working-directory: 'xtask']
 bench-micro-check:
-    cargo bench -p fmf-core --bench search -- --baseline committed
-    cargo run --release -p fmf-cli -- criterion-gate --dir ../build/engine/criterion
+    cargo run --locked -- perf-micro-check
 
-# Full performance gate before merging fmf-core changes (elevated, cool machine)
+# Full performance gate before merging fmf-core changes. Each half performs its
+# own compile/preflight/monitor/postflight sequence; just cannot dedupe it.
 [group('bench')]
 perf-gate: bench-check bench-micro-check
 
@@ -290,32 +397,32 @@ perf-gate: bench-check bench-micro-check
 [group('volume')]
 [working-directory: 'engine']
 index drive="C:":
-    cargo run --release -p fmf-cli -- index {{drive}} --stats
+    cargo run --locked --release -p fmf-cli -- index {{drive}} --stats
 
 # Per-column memory accounting (the B/entry RAM gate figure)
 [group('volume')]
 [working-directory: 'engine']
 stats drive="C:" *args="":
-    cargo run --release -p fmf-cli -- stats {{drive}} {{args}}
+    cargo run --locked --release -p fmf-cli -- stats {{drive}} {{args}}
 
 # Name/size distribution — the input for pool/column layout decisions
 [group('volume')]
 [working-directory: 'engine']
 name-stats drive="C:":
-    cargo run --release -p fmf-cli -- stats {{drive}} --name-stats
+    cargo run --locked --release -p fmf-cli -- stats {{drive}} --name-stats
 
 # $MFT read-throughput probe per I/O strategy (verdicts: ADR-0011)
 [group('volume')]
 [working-directory: 'engine']
 io-probe drive="C:" mode="buffered" *args="":
-    cargo run --release -p fmf-cli -- io-probe {{drive}} --mode {{mode}} {{args}}
+    cargo run --locked --release -p fmf-cli -- io-probe {{drive}} --mode {{mode}} {{args}}
 
 # Machine code is identical to release — only debuginfo is upgraded.
 # Profile fmf-cli under samply (ETW; elevated), e.g. `just profile bench C:`
 [group('volume')]
 [working-directory: 'engine']
 profile *args="bench C:":
-    cargo build --profile profiling -p fmf-cli
+    cargo build --locked --profile profiling -p fmf-cli
     samply record -- ../build/engine/profiling/fmf-cli {{args}}
 
 # ── Fuzz (Linux/nightly; CI fuzz.yml runs this on every wire-codec change) ─
@@ -327,14 +434,28 @@ profile *args="bench C:":
 [group('fuzz')]
 [doc('libFuzzer over the pipe wire codec (nightly + cargo-fuzz; Linux/WSL)')]
 [working-directory: 'engine']
-fuzz target="frame_decode" secs="60":
+fuzz target="frame_decode" secs="60": fuzz-lock-check
     cargo +nightly fuzz run {{target}} -- -max_total_time={{secs}}
 
 # Compile all fuzz targets without running them (fast harness sanity check).
 [group('fuzz')]
 [working-directory: 'engine']
-fuzz-build:
+fuzz-build: fuzz-lock-check
     cargo +nightly fuzz build
+
+# cargo-fuzz 0.13.2 does not forward Cargo's --locked flag. Fail before it
+# starts unless the standalone fuzz workspace's committed lockfile is exact.
+[private]
+[working-directory: 'engine']
+fuzz-lock-check:
+    cargo metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 --no-deps
+
+# Intentional dependency-update ceremony for the standalone fuzz workspace.
+[group('fuzz')]
+[doc('Regenerate the standalone fuzz workspace lockfile intentionally')]
+[working-directory: 'engine']
+fuzz-lock:
+    cargo generate-lockfile --manifest-path fuzz/Cargo.toml
 
 # ── Hygiene ──────────────────────────────────────────────────────────────
 
@@ -345,14 +466,15 @@ fuzz-build:
 [doc('Sweep leftover TestDir fixtures (build/engine/test-tmp)')]
 [working-directory: 'xtask']
 clean-temp:
-    cargo run -- clean-temp
+    cargo run --locked -- clean-temp
 
 # ── Release ──────────────────────────────────────────────────────────────
 
 # NOTE: there is intentionally no `just release` recipe. Versioning, the
 # CHANGELOG and the vX.Y.Z tag are owned by release-please (Conventional Commits
-# → an auto-maintained Release PR; merging it cuts the tag, which fires
-# release.yml). Humans never hand-pick or hand-edit a version. See ADR-0035.
+# → an auto-maintained Release PR; merging it cuts the tag, whose completed
+# exact-tag performance gate dispatches release.yml). Humans never hand-pick or
+# hand-edit a version. See ADR-0035.
 
 # Print the canonical channel-aware build version (the FMF_BUILD_VERSION format).
 # dev/nightly/stable; nightly needs --date. Used by nightly.yml + release.yml.
@@ -361,18 +483,18 @@ clean-temp:
 [doc('Print the channel-aware build version string')]
 [working-directory: 'xtask']
 version *args="":
-    cargo run -- version {{args}}
+    cargo run --locked -- version {{args}}
 
-# Zip + checksum the assembled bundle (run AFTER publish + signing). With a
-# vX.Y.Z tag → find-my-files-v<version>-win-x64.zip; omit the tag for a nightly,
-# whose name comes from FMF_BUILD_VERSION. Both land + SHA256SUMS.txt under
+# Zip + checksum the assembled bundle (run AFTER publish + signing). The payload's
+# BUILDINFO.txt is the identity source: a vX.Y.Z tag must match it exactly; without
+# a tag, dev/nightly use that identity verbatim. Both land + SHA256SUMS.txt under
 # build/package/ — the assets release.yml attaches. --release: deflate wants a
 # non-debug build. Usage:  just package v0.2.0   (or)   just package
 [group('release')]
-[doc('Zip + checksum the assembled bundle (tag = stable, no tag = nightly)')]
+[doc('Zip + checksum the assembled bundle using its BUILDINFO identity')]
 [working-directory: 'xtask']
 package tag="":
-    cargo run --release -- package {{tag}}
+    cargo run --locked --release -- package {{tag}}
 
 # Verify a release tag (vX.Y.Z) matches the committed [workspace.package] version
 # in engine/Cargo.toml — the manual-dispatch guard release.yml runs before
@@ -382,7 +504,7 @@ package tag="":
 [doc('Verify a release tag matches the committed workspace version')]
 [working-directory: 'xtask']
 check-version tag:
-    cargo run --release -- check-version {{tag}}
+    cargo run --locked --release -- check-version {{tag}}
 
 # Stage the bundle's first-party PEs into sign-stage/ (unique names) for the
 # release signing step, and copy the signed copies back from signed/ afterwards.
@@ -392,54 +514,53 @@ check-version tag:
 [doc('Stage first-party PEs for release signing')]
 [working-directory: 'xtask']
 sign-stage:
-    cargo run --release -- sign-stage
+    cargo run --locked --release -- sign-stage
 
 [group('release')]
 [doc('Copy signed PEs back into the bundle after signing')]
 [working-directory: 'xtask']
 sign-collect:
-    cargo run --release -- sign-collect
+    cargo run --locked --release -- sign-collect
+
+[group('release')]
+[doc('Seal the exact unsigned or signed release bundle into a deterministic manifest')]
+[working-directory: 'xtask']
+bundle-seal state:
+    cargo run --locked --release -- bundle-seal {{state}}
+
+[group('release')]
+[doc('Verify the exact unsigned or signed bundle against its canonical manifest')]
+[working-directory: 'xtask']
+bundle-verify state:
+    cargo run --locked --release -- bundle-verify {{state}}
+
+[group('release')]
+[doc('Verify signing changed only canonical first-party PE certificate regions')]
+[working-directory: 'xtask']
+bundle-verify-signed-transition:
+    cargo run --locked --release -- bundle-verify-signed-transition
 
 # ── Docs ─────────────────────────────────────────────────────────────────
 
-# Build every published doc artifact: mdBook design docs (build/docs-book) +
-# rustdoc (build/engine/doc) + the C# API reference (build/docs-csharp/_site).
-# Same outputs the pages.yml workflow publishes to GitHub Pages.
-# --document-private-items: the crates are internal (no external API surface),
-# so the docs are for maintainers — private items are the interesting part, and
-# documenting them also resolves intra-doc links to non-pub helpers.
+# Validate the canonical prose and Rust doc comments. Only mdBook is published;
+# implementation API pages are intentionally not a product surface.
 [group('docs')]
-[doc('Build all published docs: mdBook + rustdoc + C# API reference')]
-doc: doc-csharp
+[doc('Validate canonical docs and internal Rust doc comments')]
+doc:
     mdbook build docs
-    cargo doc --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml --target-dir build/engine
-
-# Build the C# API reference (build/docs-csharp/_site) from the BUILT
-# FindMyFiles.dll + its XML doc. DefaultDocumentation reads the assembly via IL,
-# so it works with the current .NET 10 SDK (DocFX's Roslyn path extracts zero
-# types — docfx#11046 / #40), and emits Markdown; xtask renders it to HTML with
-# mdBook (same renderer as the design docs). The plain `dotnet build` (no
-# SkipRustBuild) lets the csproj build fmf_engine.dll itself, so this recipe is
-# self-sufficient. DefaultDocumentation is a pinned dotnet local tool.
-[group('docs')]
-[doc('Build the C# API reference (DefaultDocumentation to mdBook)')]
-doc-csharp:
-    dotnet build app/FindMyFiles -c Release
-    dotnet tool restore
-    cargo run --manifest-path xtask/Cargo.toml --target-dir build/xtask -- doc-csharp
+    cargo doc --locked --config "build.rustdocflags=['-D','warnings']" --no-deps --workspace --document-private-items --manifest-path engine/Cargo.toml --target-dir build/engine
 
 # Live-preview the design docs at http://localhost:3000
 [group('docs')]
 doc-serve:
     mdbook serve docs --open
 
-# Stage the built docs into build/site (build/site/book + build/site/doc) — the same assembly
-# pages.yml publishes. Run `just doc` first. Logic lives in xtask.
+# Stage landing + canonical book into build/site. Run `just doc` first.
 [group('docs')]
-[doc('Stage the built docs into build/site (what pages.yml publishes)')]
+[doc('Stage landing + canonical book into build/site')]
 [working-directory: 'xtask']
 docs-assemble:
-    cargo run -- docs-assemble
+    cargo run --locked -- docs-assemble
 
 # ── Quality gates (also enforced in CI) ──────────────────────────────────
 
@@ -447,7 +568,9 @@ docs-assemble:
 [group('quality')]
 [working-directory: 'engine']
 cov:
-    cargo llvm-cov --workspace --summary-only
+    # LLVM instrumentation invalidates the 5 ms wall-clock pipe budget. That
+    # test remains mandatory in ordinary nextest and the dedicated perf gates.
+    cargo llvm-cov nextest --locked --workspace --profile ci --fail-under-lines 76 --summary-only -E 'not test(page_roundtrip_stays_inside_the_latency_budget)'
 
 # License / ban / source policy (cargo-deny). Advisories live in cargo-audit.
 [group('quality')]
@@ -460,24 +583,27 @@ deny:
 machete:
     cargo machete engine
 
-# Mutation testing (Rust, ADR-0022): which tests pass even when code is broken?
-# Slow — scope it, e.g. `just mutants -p fmf-core -f src/query/exec.rs`.
-# `just mutants --list -f <file>` enumerates mutants without running them.
+# Mutation testing (Rust, ADR-0022). xtask owns the fixed cargo-mutants 27.1.0
+# invocation, requires its unmutated nextest baseline, canonicalizes exact
+# survivors, rejects timeouts/malformed reports, and compares the reviewed
+# rationale-bearing identity baseline. It intentionally accepts no CLI options.
 [group('quality')]
-[doc('Mutation testing (Rust, ADR-0022) — slow; scope it')]
-[working-directory: 'engine']
-mutants *args="":
-    cargo mutants {{args}}
+[doc('Strict Rust mutation gate (exact survivors; ADR-0022)')]
+[working-directory: 'xtask']
+mutants:
+    cargo run --locked --release -- mutation-rust
 
-# Mutation testing (C#, Stryker.NET — ADR-0022). Runs FROM the test project dir
-# so Stryker discovers FindMyFiles.Tests.csproj and auto-loads stryker-config.json
-# (the curated mutate scope) — run from the repo root it errors "no .csproj found".
-# Slow on the WinUI app — scope a single file with --mutate, e.g.
-# `just stryker --mutate "**/Services/ShellOps.cs"`. The tool is pinned in
-# .config/dotnet-tools.json (found by walking up); `dotnet tool restore` provisions it.
+# Mutation testing (C#, Stryker.NET 4.16.0 — ADR-0022). xtask first runs the
+# ordinary locked unit-test baseline, makes Stryker fail on an initial-test
+# failure, pins the exact reviewed mutate-file inventory, parses its strict JSON
+# report, rejects inconclusive/out-of-scope results, and compares exact
+# survivors. It intentionally accepts no CLI options.
 [group('quality')]
-[doc('Mutation testing (C#, Stryker.NET; ADR-0022)')]
-[working-directory: 'app/FindMyFiles.Tests']
-stryker *args="":
-    dotnet tool restore
-    dotnet stryker {{args}}
+[doc('Strict C# mutation gate (exact survivors; ADR-0022)')]
+[working-directory: 'xtask']
+stryker:
+    cargo run --locked --release -- mutation-csharp
+
+[group('quality')]
+[doc('Run both exact-identity mutation gates (slow)')]
+mutation: mutants stryker

@@ -4,15 +4,22 @@
 
 use anyhow::{bail, Result};
 
-/// Accept only strict `X.Y.Z` where each part is one-or-more ASCII digits.
+/// Accept only canonical release `SemVer` `X.Y.Z`: exactly three ASCII-decimal
+/// components, with no leading zero on a multi-digit component. Pre-release and
+/// build metadata are deliberately excluded from release-source versions.
 pub fn validate(version: &str) -> Result<()> {
     let parts: Vec<&str> = version.split('.').collect();
     let ok = parts.len() == 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.bytes().all(|b| b.is_ascii_digit())
+                && (p.len() == 1 || !p.starts_with('0'))
+        });
     if !ok {
-        bail!("version must be X.Y.Z with digit-only parts, got '{version}'");
+        bail!(
+            "version must be canonical release SemVer X.Y.Z (ASCII digits, no \
+             leading zeroes), got '{version}'"
+        );
     }
     Ok(())
 }
@@ -46,6 +53,9 @@ mod tests {
             "",
             "1.2.3-rc1",
             "1.2. 3",
+            "01.2.3",
+            "1.02.3",
+            "1.2.03",
         ] {
             assert!(validate(v).is_err(), "{v} should be rejected");
         }

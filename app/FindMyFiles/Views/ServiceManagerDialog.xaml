@@ -11,9 +11,8 @@
     DefaultButton="Close"
     mc:Ignorable="d">
 
-    <!--  fmf-engine のライフサイクル管理。各操作は Verb=runas の単発昇格
-          (ServiceSetup.RunElevated)で、アプリ本体は非昇格のまま。状態行は
-          読み取り専用 SCM クエリ(昇格不要)。  -->
+    <!--  Start/stop/restart are unelevated after the one-time registration.
+          Register/uninstall use one-action UAC; the app stays asInvoker.  -->
     <StackPanel MinWidth="{StaticResource DialogMinWidth}" Spacing="{StaticResource SpacingLarge}">
 
         <!--  状態ヘッダー: アイコン(状態色)+ 状態テキスト + 進捗リング  -->
@@ -40,6 +39,11 @@
                     Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                     Glyph="&#xE946;"
                     Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsNotInstalled), Mode=OneWay}" />
+                <FontIcon
+                    FontSize="{StaticResource IconSizeMedium}"
+                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                    Glyph="&#xE7BA;"
+                    Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsUnknown), Mode=OneWay}" />
             </Grid>
             <StackPanel Grid.Column="1" VerticalAlignment="Center">
                 <TextBlock
@@ -106,36 +110,85 @@
                 AutomationProperties.AutomationId="SvcReregister"
                 Click="Register_Click"
                 IsEnabled="{x:Bind VM.NotBusy, Mode=OneWay}"
-                Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsInstalled), Mode=OneWay}" />
+                Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.CanReregister), Mode=OneWay}" />
         </StackPanel>
 
         <!--  区切り線(削除ゾーンを明確に分離)  -->
         <Border
             Height="{StaticResource DividerHeight}"
             Background="{ThemeResource DividerStrokeColorDefaultBrush}"
-            Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.CanUninstall), Mode=OneWay}" />
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.CanPurgeData), Mode=OneWay}" />
 
-        <!--  削除  -->
-        <StackPanel Spacing="{StaticResource SpacingSmall}" Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.CanUninstall), Mode=OneWay}">
+        <!--  Full cleanup remains available after the service is gone, so a
+              failed per-user data deletion can be retried without manual steps.
+              Service-only uninstall remains installed-state-only.  -->
+        <StackPanel Spacing="{StaticResource SpacingSmall}" Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.CanPurgeData), Mode=OneWay}">
             <TextBlock
                 x:Uid="SvcGroupDelete"
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                 Style="{ThemeResource CaptionTextBlockStyle}" />
-            <StackPanel Orientation="Horizontal" Spacing="{StaticResource SpacingMedium}">
+            <StackPanel Spacing="{StaticResource SpacingSmall}">
                 <Button
                     x:Uid="SvcUninstall"
                     AutomationProperties.AutomationId="SvcUninstall"
                     Click="Uninstall_Click"
-                    IsEnabled="{x:Bind VM.NotBusy, Mode=OneWay}" />
-                <CheckBox
+                    IsEnabled="{x:Bind VM.NotBusy, Mode=OneWay}"
+                    Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.CanUninstall), Mode=OneWay}" />
+                <Button
+                    x:Name="SvcPurgeData"
                     x:Uid="SvcPurgeData"
                     AutomationProperties.AutomationId="SvcPurgeData"
-                    VerticalAlignment="Center"
-                    IsChecked="{x:Bind VM.PurgeData, Mode=TwoWay}" />
+                    Click="RequestPurge_Click"
+                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                    IsEnabled="{x:Bind VM.NotBusy, Mode=OneWay}" />
             </StackPanel>
+
+            <!--  ContentDialog cannot open another ContentDialog on the same XamlRoot.
+                  Keep the irreversible purge as an explicit, keyboard-accessible
+                  confirmation surface inside the service manager.  -->
+            <Border
+                x:Name="PurgeConfirmation"
+                AutomationProperties.AutomationId="SvcPurgeConfirmation"
+                AutomationProperties.LiveSetting="Assertive"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="{StaticResource CardBorderThickness}"
+                CornerRadius="{ThemeResource OverlayCornerRadius}"
+                Padding="{StaticResource CardPadding}"
+                Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.PurgeConfirmationVisible), Mode=OneWay}">
+                <StackPanel Spacing="{StaticResource SpacingSmall}">
+                    <TextBlock
+                        x:Name="SvcPurgeConfirmTitle"
+                        x:Uid="SvcPurgeConfirmTitle"
+                        Style="{ThemeResource BodyStrongTextBlockStyle}"
+                        TextWrapping="Wrap" />
+                    <TextBlock
+                        x:Uid="SvcPurgeConfirmBody"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Style="{ThemeResource CaptionTextBlockStyle}"
+                        TextWrapping="Wrap" />
+                    <StackPanel
+                        Margin="0,4,0,0"
+                        Orientation="Horizontal"
+                        Spacing="{StaticResource SpacingSmall}">
+                        <Button
+                            x:Name="SvcPurgeConfirm"
+                            x:Uid="SvcPurgeConfirm"
+                            AutomationProperties.AutomationId="SvcPurgeConfirm"
+                            Click="ConfirmPurge_Click"
+                            Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                            IsEnabled="{x:Bind VM.NotBusy, Mode=OneWay}" />
+                        <Button
+                            x:Uid="SvcPurgeCancel"
+                            AutomationProperties.AutomationId="SvcPurgeCancel"
+                            Click="CancelPurge_Click"
+                            IsEnabled="{x:Bind VM.NotBusy, Mode=OneWay}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
         </StackPanel>
 
-        <!--  結果(色付き InfoBar)。登録/開始成功で空エンジンのときは再起動を促す。  -->
+        <!--  結果(色付き InfoBar)。登録/開始成功後はエンジンをソフト再接続する。  -->
         <InfoBar
             AutomationProperties.AutomationId="SvcResult"
             IsClosable="False"

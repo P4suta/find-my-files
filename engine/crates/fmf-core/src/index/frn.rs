@@ -7,9 +7,11 @@
 //! ever do (never a search).
 //!
 //! Deletions never touch the array: a tombstoned entry simply fails the
-//! liveness filter at lookup time. Renames (tombstone + append, same
-//! record) and NTFS record reuse therefore leave several ids per key, of
-//! which at most one is live — the invariant the mutation API upholds.
+//! liveness filter at lookup time. Several live ids may share one full FRN:
+//! each row is one directory link, while the FRN identifies the underlying
+//! NTFS object. At most one *generation* (full FRN sequence) is live for a
+//! record number. Identity-sensitive USN callers therefore range over every
+//! live row for the key and then compare the complete FRN.
 
 use rayon::prelude::*;
 
@@ -31,6 +33,11 @@ fn is_live(flag: &[u8], id: EntryId) -> bool {
 }
 
 impl FrnIndex {
+    /// Live ids in `(record number, EntryId)` order.
+    pub(super) fn sorted_ids(&self) -> &[EntryId] {
+        &self.ids
+    }
+
     /// Build from scratch over every live entry (initial scan finish,
     /// snapshot restore).
     pub(super) fn build(frn: &[u64], flag: &[u8]) -> Self {
@@ -45,26 +52,60 @@ impl FrnIndex {
         }
     }
 
-    /// The live entry for `key` (a record number), if any.
+    /// One live entry for `key` (a record number), if any.
+    ///
+    /// This is the cheap representative lookup used for directory-parent
+    /// resolution and compatibility call sites. A file may have several live
+    /// link rows; object/link-sensitive mutations must use [`Self::lookup_all`].
     pub(super) fn lookup(&self, key: RecordNo, frn: &[u64], flag: &[u8]) -> Option<EntryId> {
-        // Unmerged tail first, newest first: within a batch the latest
-        // upsert for a record is the live one.
-        for id in (self.covers..frn.len() as u32).rev() {
-            if Frn(frn[id as usize]).record() == key && is_live(flag, id) {
-                return Some(id);
-            }
-        }
+        self.lookup_all(key, frn, flag).next()
+    }
+
+    /// Every live link row for `key`.
+    ///
+    /// The unmerged tail comes first (newest id first), followed by the
+    /// key-equal range in the sorted body. The two ranges are disjoint at
+    /// `covers`, so each id is yielded exactly once without allocating.
+    pub(super) fn lookup_all<'a>(
+        &'a self,
+        key: RecordNo,
+        frn: &'a [u64],
+        flag: &'a [u8],
+    ) -> impl Iterator<Item = EntryId> + 'a {
+        let tail = (self.covers..frn.len() as u32)
+            .rev()
+            .filter(move |&id| Frn(frn[id as usize]).record() == key && is_live(flag, id));
         let key_of = |id: EntryId| Frn(frn[id as usize]).record();
         let start = self.ids.partition_point(|&id| key_of(id) < key);
-        for &id in &self.ids[start..] {
-            if key_of(id) != key {
-                break;
+        let end = self.ids[start..].partition_point(|&id| key_of(id) == key) + start;
+        let body = self.ids[start..end]
+            .iter()
+            .copied()
+            .filter(move |&id| is_live(flag, id));
+        tail.chain(body)
+    }
+
+    /// Validate object grouping: every live row sharing a record number must
+    /// share its full sequence and kind, and directories must have one row.
+    /// Multiple same-generation file rows are the supported hard-link case.
+    pub(super) fn has_valid_live_object_groups(&self, frn: &[u64], flag: &[u8]) -> bool {
+        let mut previous: Option<(RecordNo, u64, bool)> = None;
+        for &id in &self.ids {
+            if !is_live(flag, id) {
+                continue;
             }
-            if is_live(flag, id) {
-                return Some(id);
+            let full = frn[id as usize];
+            let record = Frn(full).record();
+            let is_dir = flag[id as usize] & flags::IS_DIR != 0;
+            if let Some((previous_record, previous_full, previous_is_dir)) = previous
+                && previous_record == record
+                && (previous_full != full || previous_is_dir != is_dir || is_dir)
+            {
+                return false;
             }
+            previous = Some((record, full, is_dir));
         }
-        None
+        true
     }
 
     /// Fold the appended entries into sorted order — live ones only;
@@ -72,8 +113,8 @@ impl FrnIndex {
     /// again. In place: each batch pair binary-searches its insertion point
     /// and the segments between insertion points move once (`copy_within`)
     /// — O(batch·log n) comparisons, no reallocation (ADR-0008).
-    /// Equal keys keep old-before-new order; liveness never depends on
-    /// that order anyway (at most one live pair per key).
+    /// Equal keys keep old-before-new order; liveness and link enumeration do
+    /// not depend on the order within one record's range.
     pub(super) fn merge_appended(&mut self, frn: &[u64], flag: &[u8]) {
         let n = frn.len() as u32;
         let mut batch: Vec<(RecordNo, EntryId)> = (self.covers..n)
@@ -139,8 +180,8 @@ impl FrnIndex {
 #[cfg(test)]
 mod tests {
     use super::EntryId;
-    use crate::index::RecordNo;
-    use crate::index::testutil::{build_sample, raw, u16s};
+    use crate::index::testutil::{build_hardlink_sample, build_sample, raw, u16s};
+    use crate::index::{Frn, RecordNo};
 
     /// Reference implementation (forward full merge): equal keys take the
     /// old pair first.
@@ -199,7 +240,7 @@ mod tests {
                 let record = 100 + rng() % 40;
                 if rng() % 3 < 2 {
                     let name = u16s(&format!("f{}.txt", rng() % 1000));
-                    idx.upsert(&raw(record, 50, &name, false, 1, 1));
+                    idx.upsert_synthetic(&raw(record, 50, &name, false, 1, 1));
                 } else {
                     idx.delete(record);
                 }
@@ -212,7 +253,8 @@ mod tests {
             batch.sort_unstable();
             forward_merge_reference(&mut ref_keys, &mut ref_ids, &batch);
 
-            idx.merge_new_into_permutations(first_new);
+            idx.merge_new_into_permutations(first_new)
+                .expect("fixture topology remains valid");
             assert_eq!(idx.frn_index.ids, ref_ids);
             let derived_keys: Vec<RecordNo> = idx
                 .frn_index
@@ -235,13 +277,14 @@ mod tests {
         let mut last = None;
         for i in 0..5u64 {
             let name = u16s(&format!("storm_{i}.txt"));
-            last = Some(idx.upsert(&raw(100, 50, &name, false, 1, i as i64)));
+            last = Some(idx.upsert_synthetic(&raw(100, 50, &name, false, 1, i as i64)));
         }
         let tail_hit = idx.entry_by_record(100).unwrap();
         assert_eq!(Some(tail_hit), last, "tail scan must see the newest");
         assert_eq!(idx.name(tail_hit), b"storm_4.txt");
 
-        idx.merge_new_into_permutations(first_new);
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
         assert_eq!(idx.entry_by_record(100), last, "sorted lookup agrees");
         assert_eq!(idx.live_len(), live_before, "storm nets zero live change");
     }
@@ -252,14 +295,16 @@ mod tests {
     fn record_reuse_after_delete_resolves_to_the_new_entry() {
         let mut idx = build_sample();
         idx.delete(60).unwrap();
-        idx.merge_new_into_permutations(idx.len() as u32);
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
         assert_eq!(idx.entry_by_record(60), None, "deleted record misses");
 
         let first_new = idx.len() as u32;
         let name = u16s("reborn.txt");
-        let id = idx.upsert(&raw(60, 50, &name, false, 7, 7));
+        let id = idx.upsert_synthetic(&raw(60, 50, &name, false, 7, 7));
         assert_eq!(idx.entry_by_record(60), Some(id), "tail finds the rebirth");
-        idx.merge_new_into_permutations(first_new);
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
         assert_eq!(idx.entry_by_record(60), Some(id), "merge keeps it");
         assert_eq!(idx.name(id), b"reborn.txt");
     }
@@ -271,11 +316,51 @@ mod tests {
         let mut idx = build_sample();
         let first_new = idx.len() as u32;
         let name = u16s("flash.tmp");
-        idx.upsert(&raw(777, 50, &name, false, 1, 1));
+        idx.upsert_synthetic(&raw(777, 50, &name, false, 1, 1));
         assert!(idx.entry_by_record(777).is_some());
         idx.delete(777).unwrap();
         assert_eq!(idx.entry_by_record(777), None, "gone in the tail");
-        idx.merge_new_into_permutations(first_new);
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
         assert_eq!(idx.entry_by_record(777), None, "gone after the merge");
+    }
+
+    #[test]
+    fn duplicate_frn_range_preserves_every_hard_link_before_and_after_merge() {
+        let mut idx = build_hardlink_sample();
+        let object = Frn((1u64 << 48) | 0x64);
+        let mut names: Vec<_> = idx
+            .entries_by_frn(object)
+            .map(|id| idx.name(id).to_vec())
+            .collect();
+        names.sort();
+        assert_eq!(names, [b"alias.txt".to_vec(), b"shared.txt".to_vec()]);
+
+        let third = u16s("third.txt");
+        let entry = raw(100, 10, &third, false, 42, 3);
+        let first_new = idx.len() as u32;
+        idx.upsert_link_usn(&entry)
+            .expect("fixture parent is exact");
+        assert_eq!(
+            idx.entries_by_frn(object).count(),
+            3,
+            "the unmerged tail participates in the same FRN range"
+        );
+
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
+        let mut names: Vec<_> = idx
+            .entries_by_frn(object)
+            .map(|id| idx.name(id).to_vec())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                b"alias.txt".to_vec(),
+                b"shared.txt".to_vec(),
+                b"third.txt".to_vec()
+            ]
+        );
     }
 }

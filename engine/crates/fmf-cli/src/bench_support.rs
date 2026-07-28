@@ -40,8 +40,10 @@ pub struct QueryBench {
     pub p50_memo_us: u64,
     pub p50_scan_us: u64,
     pub p50_materialize_us: u64,
-    /// First iteration of the run — the only one that pays cold derived-cache
-    /// builds (memo/offset-table). Single sample: recorded, never gated.
+    /// First iteration of the run. Single sample: recorded for diagnosis,
+    /// never gated — it also pays for building this query's lazy derived
+    /// caches, so it measures a different thing than the steady-state
+    /// percentiles beside it.
     #[serde(default)]
     pub cold_us: u64,
 }
@@ -62,11 +64,57 @@ pub struct RestoreBench {
 pub struct BenchReport {
     pub volume: String,
     pub entries: u64,
+    /// Wall time for the real-volume initial index build.
+    #[serde(default)]
+    pub index_ms: u64,
+    /// Ready-state process working set, captured once the index is built and
+    /// before any query has caused a lazy derived cache to be built. This is
+    /// the steady state the B/entry gate is defined against.
+    #[serde(default)]
+    pub working_set_bytes: u64,
     pub peak_working_set_bytes: u64,
     pub queries: Vec<QueryBench>,
     /// Absent in baselines recorded before the restore scenario existed.
     #[serde(default)]
     pub restore: Option<RestoreBench>,
+}
+
+/// Initial-index acceptance budget: 8 s at/below 250k entries, then linearly
+/// relax to 60 s at 1M (and continue with that slope for larger real volumes).
+#[must_use]
+pub const fn index_budget_ms(entries: u64) -> u64 {
+    const BASE_ENTRIES: u64 = 250_000;
+    const BASE_MS: u64 = 8_000;
+    const EXTRA_ENTRIES: u64 = 750_000;
+    const EXTRA_MS: u64 = 52_000;
+    if entries <= BASE_ENTRIES {
+        BASE_MS
+    } else {
+        BASE_MS.saturating_add(
+            entries
+                .saturating_sub(BASE_ENTRIES)
+                .saturating_mul(EXTRA_MS)
+                / EXTRA_ENTRIES,
+        )
+    }
+}
+
+/// Ready-state process RAM acceptance line (ADR-0013 / project performance
+/// target), expressed without floating-point rounding.
+#[must_use]
+pub const fn working_set_within_budget(report: &BenchReport) -> bool {
+    report.entries == 0 || report.working_set_bytes <= report.entries.saturating_mul(110)
+}
+
+/// Whether a real-volume run is still comparable with its recorded baseline.
+///
+/// A larger corpus can make every relative timing look slower even when the
+/// implementation is unchanged, while a smaller one can hide a regression.
+/// The ±10% boundary is inclusive; anything beyond it requires an explicit
+/// baseline refresh before a verdict is meaningful.
+#[must_use]
+pub const fn entry_count_within_baseline(entries: u64, baseline_entries: u64) -> bool {
+    entries.abs_diff(baseline_entries) <= baseline_entries / 10
 }
 
 pub fn median(mut v: Vec<u64>) -> u64 {
@@ -122,4 +170,46 @@ pub fn bench_restore(idx: &VolumeIndex) -> Result<RestoreBench, Box<dyn std::err
         p50_ms: runs[RUNS / 2],
         min_ms: runs[0],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(entries: u64, working_set_bytes: u64) -> BenchReport {
+        BenchReport {
+            volume: "C:".to_owned(),
+            entries,
+            index_ms: 0,
+            working_set_bytes,
+            peak_working_set_bytes: 0,
+            queries: Vec::new(),
+            restore: None,
+        }
+    }
+
+    #[test]
+    fn index_budget_pins_acceptance_points() {
+        assert_eq!(index_budget_ms(0), 8_000);
+        assert_eq!(index_budget_ms(250_000), 8_000);
+        assert_eq!(index_budget_ms(1_000_000), 60_000);
+        assert_eq!(index_budget_ms(1_750_000), 112_000);
+    }
+
+    #[test]
+    fn working_set_gate_is_exactly_110_bytes_per_entry() {
+        assert!(working_set_within_budget(&report(1_000_000, 110_000_000)));
+        assert!(!working_set_within_budget(&report(1_000_000, 110_000_001)));
+        assert!(working_set_within_budget(&report(0, u64::MAX)));
+    }
+
+    #[test]
+    fn entry_count_drift_is_fail_closed_past_ten_percent() {
+        assert!(entry_count_within_baseline(900_000, 1_000_000));
+        assert!(entry_count_within_baseline(1_100_000, 1_000_000));
+        assert!(!entry_count_within_baseline(899_999, 1_000_000));
+        assert!(!entry_count_within_baseline(1_100_001, 1_000_000));
+        assert!(entry_count_within_baseline(0, 0));
+        assert!(!entry_count_within_baseline(1, 0));
+    }
 }

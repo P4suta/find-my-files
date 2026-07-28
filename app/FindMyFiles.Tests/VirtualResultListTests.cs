@@ -51,6 +51,18 @@ public sealed class VirtualResultListTests
     }
 
     [Fact]
+    public void Dispose_is_idempotent_and_releases_owned_result()
+    {
+        var result = new StubSearchResult(Rows.Many(3));
+        _list.Reassign(result, []);
+
+        _list.Dispose();
+        _list.Dispose();
+
+        Assert.True(result.Disposed);
+    }
+
+    [Fact]
     public void Indexer_UnseededPage_HandsOutPlaceholders_AndNeverFetches()
     {
         var rows = Rows.Many(100);
@@ -139,6 +151,56 @@ public sealed class VirtualResultListTests
             _list.EnsureRange(0, 10);
             _dispatcher.DrainQueue();
             Assert.Equal(2, mine.Count); // re-armed: the new failure surfaces too
+        }
+        finally
+        {
+            Notifier.Posted -= Handler;
+        }
+    }
+
+    [Fact]
+    public void OldEpochFailure_CannotConsumeCurrentEpochFailureNotice()
+    {
+        SyncContext.RunContinuationsInline();
+        var mine = new List<AppNotification>();
+        var expected = Loc.Get("Virtualization_PageFetchFailed");
+        void Handler(AppNotification notification)
+        {
+            if (string.Equals(notification.Message, expected, StringComparison.Ordinal))
+            {
+                mine.Add(notification);
+            }
+        }
+
+        Notifier.Posted += Handler;
+        try
+        {
+            var oldGate = new TaskCompletionSource();
+            var old = new StubSearchResult(Rows.Many(10, "old"))
+            {
+                Gate = oldGate,
+                ThrowOnFetch = new InvalidOperationException("old failure"),
+            };
+            _list.Reassign(old, []);
+            _list.EnsureRange(0, 9);
+
+            var currentGate = new TaskCompletionSource();
+            var current = new StubSearchResult(Rows.Many(10, "current"))
+            {
+                Gate = currentGate,
+                ThrowOnFetch = new InvalidOperationException("current failure"),
+            };
+            _list.Reassign(current, []);
+            _list.EnsureRange(0, 9);
+
+            oldGate.SetResult();
+            _dispatcher.DrainQueue();
+            Assert.Empty(mine);
+
+            currentGate.SetResult();
+            _dispatcher.DrainQueue();
+            var notification = Assert.Single(mine);
+            Assert.Equal("current failure", notification.Detail);
         }
         finally
         {

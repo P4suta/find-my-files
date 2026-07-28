@@ -1,8 +1,12 @@
 //! 16-byte little-endian frame header + length-prefixed payload.
 //!
-//! (docs/ARCHITECTURE.md "Pipe protocol" §Frame). The header type and
-//! its byte conversion live in `fmf_contract::pod`; this module adds the
-//! stream I/O and the `MAX_PAYLOAD_LEN` policy.
+//! The header type and its byte conversion live in `fmf_contract::pod`; this
+//! module adds the stream I/O and the [`MAX_PAYLOAD_LEN`] policy.
+//!
+//! Requests are multiplexed by `request_id` and may complete out of order.
+//! `status` is meaningful only on a response, and any malformed frame —
+//! unknown opcode, truncation, or a length past the operation's cap — is a
+//! disconnect plus a counter, never a partial parse.
 
 use std::io::{Read, Write};
 
@@ -20,10 +24,16 @@ pub const FLAG_EVENT: u16 = 1 << 1;
 /// Why a frame could not be read or written.
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
-    /// The header's payload length (bytes) exceeds [`MAX_PAYLOAD_LEN`]; a
-    /// protocol violation that tears down the connection.
-    #[error("frame payload {0} bytes exceeds the {MAX_PAYLOAD_LEN}-byte cap")]
-    TooLong(u32),
+    /// The header's payload length exceeds the applicable global or
+    /// operation-specific cap; a protocol violation that tears down the
+    /// connection.
+    #[error("frame payload {len} bytes exceeds the {maximum}-byte cap")]
+    TooLong {
+        /// Announced or supplied payload length.
+        len: u32,
+        /// Applicable cap.
+        maximum: u32,
+    },
     /// The underlying stream read or write failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -40,7 +50,10 @@ pub enum FrameError {
 pub const fn decode_header(b: &[u8; HEADER_LEN]) -> Result<FrameHeader, FrameError> {
     let h = FrameHeader::from_bytes(b);
     if h.len > MAX_PAYLOAD_LEN {
-        return Err(FrameError::TooLong(h.len));
+        return Err(FrameError::TooLong {
+            len: h.len,
+            maximum: MAX_PAYLOAD_LEN,
+        });
     }
     Ok(h)
 }
@@ -58,7 +71,10 @@ pub fn write_frame(
     payload: &[u8],
 ) -> Result<(), FrameError> {
     if payload.len() as u64 > u64::from(MAX_PAYLOAD_LEN) {
-        return Err(FrameError::TooLong(payload.len() as u32));
+        return Err(FrameError::TooLong {
+            len: payload.len() as u32,
+            maximum: MAX_PAYLOAD_LEN,
+        });
     }
     header.len = payload.len() as u32;
     w.write_all(&header.to_bytes())?;
@@ -76,9 +92,30 @@ pub fn write_frame(
 /// [`MAX_PAYLOAD_LEN`], or [`FrameError::Io`] if the reader fails or the
 /// stream ends before the full header and payload arrive.
 pub fn read_frame(r: &mut impl Read) -> Result<(FrameHeader, Vec<u8>), FrameError> {
+    read_frame_capped(r, |_| MAX_PAYLOAD_LEN)
+}
+
+/// Reads one frame while applying an operation-specific payload cap after
+/// the fixed header and before allocating the payload buffer.
+///
+/// # Errors
+///
+/// Returns [`FrameError::TooLong`] when the header exceeds the global cap or
+/// `maximum_for`'s smaller cap, or [`FrameError::Io`] for truncated/failed I/O.
+pub fn read_frame_capped(
+    r: &mut impl Read,
+    maximum_for: impl FnOnce(&FrameHeader) -> u32,
+) -> Result<(FrameHeader, Vec<u8>), FrameError> {
     let mut hb = [0u8; HEADER_LEN];
     r.read_exact(&mut hb)?;
     let header = decode_header(&hb)?;
+    let maximum = maximum_for(&header).min(MAX_PAYLOAD_LEN);
+    if header.len > maximum {
+        return Err(FrameError::TooLong {
+            len: header.len,
+            maximum,
+        });
+    }
     let mut payload = vec![0u8; header.len as usize];
     r.read_exact(&mut payload)?;
     Ok((header, payload))
@@ -123,7 +160,13 @@ mod tests {
         }
         .to_bytes();
         b[0..4].copy_from_slice(&(MAX_PAYLOAD_LEN + 1).to_le_bytes());
-        assert!(matches!(decode_header(&b), Err(FrameError::TooLong(_))));
+        assert!(matches!(
+            decode_header(&b),
+            Err(FrameError::TooLong {
+                len,
+                maximum: MAX_PAYLOAD_LEN
+            }) if len == MAX_PAYLOAD_LEN + 1
+        ));
     }
 
     #[test]
@@ -142,6 +185,24 @@ mod tests {
         assert_eq!(rh.opcode, 7);
         assert_eq!(rh.request_id, 42);
         assert_eq!(payload, b"payload");
+    }
+
+    #[test]
+    fn operation_cap_is_enforced_before_payload_allocation() {
+        let header = FrameHeader {
+            len: 9,
+            opcode: 7,
+            flags: 0,
+            request_id: 1,
+            status: 0,
+        };
+        let mut input = header.to_bytes().to_vec();
+        input.extend_from_slice(b"123456789");
+
+        assert!(matches!(
+            read_frame_capped(&mut input.as_slice(), |_| 8),
+            Err(FrameError::TooLong { len: 9, maximum: 8 })
+        ));
     }
 
     #[test]

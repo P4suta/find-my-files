@@ -90,15 +90,15 @@ public sealed class LogfmtFormatterTests
     }
 
     [Fact]
-    public void Line_appends_the_exception_as_a_single_line_err_field()
+    public void Line_never_serializes_exception_text_or_stack()
     {
         var line = Capture(LogEventLevel.Information, log => log
             .ForContext("area", "x")
             .Error(new InvalidOperationException("kaboom"), "{Msg}", "boom"));
 
         Assert.Contains(" ERROR area=x", line, StringComparison.Ordinal);
-        Assert.Contains(" err=", line, StringComparison.Ordinal);
-        Assert.Contains("kaboom", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("err=", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("kaboom", line, StringComparison.Ordinal);
         Assert.DoesNotContain('\n', line);
     }
 

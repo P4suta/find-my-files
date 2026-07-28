@@ -18,7 +18,7 @@ namespace FindMyFiles.ViewModels;
 /// <param name="LastSeededIndex">Last prefetched row index — upper bound of the
 /// selection re-find window.</param>
 [StructLayout(LayoutKind.Auto)]
-public readonly record struct ResultsPublication(
+internal readonly record struct ResultsPublication(
     RequeryOrigin Origin,
     int? RestoreIndex,
     int FirstSeededIndex,

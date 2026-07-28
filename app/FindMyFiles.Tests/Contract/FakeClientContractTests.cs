@@ -11,12 +11,12 @@ namespace FindMyFiles.Tests.Contract;
 public sealed class FakeClientContractTests(ITestOutputHelper output)
     : EngineClientContractTests(output)
 {
-    protected override Task<IEngineClient?> AcquireClientOrSkipAsync() =>
+    private protected override Task<IEngineClient?> AcquireClientOrSkipAsync() =>
         Task.FromResult<IEngineClient?>(new FakeEngineClient());
 
     protected override string ValidQuery => "file";
 
-    protected override Task<bool> TryForceStaleAsync(IEngineClient client)
+    private protected override Task<bool> TryForceStaleAsync(IEngineClient client)
     {
         ((FakeEngineClient)client).BumpEpoch();
         return Task.FromResult(true);

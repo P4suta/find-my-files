@@ -20,5 +20,7 @@ The index holds only filename, size, modified time, and attributes. No content i
 
 ## Re-examination triggers
 
-- The core (filename-only index, content index excluded) is a permanent decision (canonical source: the "do-not list" in CLAUDE.md)
-- Exception: the single point "volume-level only, no folder-walk index" was overridden by ADR-0024 (non-elevated scope index mode), justified by unlocking the non-elevated (corporate PC where elevation is forbidden) persona. The "filename-only index" core stays unchanged even under ADR-0024
+- The core (filename-only index, content index excluded) is a permanent decision (canonical source: the "do-not list" in AGENTS.md)
+- Volume-level NTFS indexing is the only production ingest path. The former
+  folder-walk exception was removed with ADR-0024 because it duplicated the
+  engine lifecycle while losing whole-volume coverage and USN replay.

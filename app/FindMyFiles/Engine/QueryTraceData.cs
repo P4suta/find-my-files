@@ -3,8 +3,9 @@ namespace FindMyFiles.Engine;
 /// <summary>Stage breakdown of one query (mirrors fmf-core metrics.rs).</summary>
 public sealed class QueryTraceData
 {
-    /// <summary>The query text exactly as the engine parsed it.</summary>
-    public string Query { get; set; } = string.Empty;
+    /// <summary>Unicode scalar count of the measured query. The query text is
+    /// deliberately absent from diagnostics and transport telemetry.</summary>
+    public uint QueryLength { get; set; }
 
     /// <summary>Which execution strategy generated the candidates (shown in
     /// the perf panel): e.g. <c>"full-scan"</c>, <c>"pool-scan"</c>,

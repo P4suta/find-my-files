@@ -12,12 +12,16 @@ use fmf_proto::messages::{self, opcode};
 use fmf_proto::{PROTOCOL_VERSION, codes};
 use fmf_service::pipe::PipeStream;
 
-fn admin_gate() -> bool {
-    if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
-        eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
-        return false;
-    }
-    true
+/// Fails closed. `#[ignore]` is what *skips* this test; reaching the body
+/// without the arming variable means the harness was invoked outside
+/// `just test-admin`, and a silent early return would be indistinguishable
+/// from a durability proof that actually ran.
+fn require_admin_gate() {
+    assert_eq!(
+        std::env::var("FMF_ADMIN_TESTS").as_deref(),
+        Ok("1"),
+        "this ignored real-volume test must run only through `just test-admin`"
+    );
 }
 
 struct Child(std::process::Child);
@@ -91,8 +95,51 @@ fn hello(s: &mut PipeStream, id: u32) {
     assert_eq!(h.status, codes::OK);
 }
 
+/// `VolumeStatusWire` carries no reason for a `Failed` state, so a bare
+/// assertion reports only that the scan failed. The reason is in the service's
+/// own rolling log, and the `TestDir` holding it is deleted as the panic
+/// unwinds — read it *before* asserting or it is gone.
+///
+/// This exists because that failure is intermittent. A run that fails without
+/// saying why costs a whole elevated session to chase; one that prints the log
+/// tail is a diagnosis.
+fn service_log_tail(data_dir: &std::path::Path) -> String {
+    let Ok(entries) = std::fs::read_dir(data_dir.join("logs")) else {
+        return "<no logs directory>".to_string();
+    };
+    let newest = entries
+        .flatten()
+        .filter(|entry| entry.path().is_file())
+        .max_by_key(|entry| {
+            entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        });
+    let Some(newest) = newest else {
+        return "<logs directory is empty>".to_string();
+    };
+    match std::fs::read_to_string(newest.path()) {
+        Ok(text) => {
+            let lines: Vec<&str> = text.lines().collect();
+            let tail = lines.len().saturating_sub(40);
+            format!(
+                "--- tail of {} ---\n{}",
+                newest.path().display(),
+                lines[tail..].join("\n")
+            )
+        }
+        Err(error) => format!("<log unreadable: {error}>"),
+    }
+}
+
 /// Polls `IndexStatus` until C: is Ready; returns the entry count.
-fn wait_ready(s: &mut PipeStream, next_id: &mut u32, deadline: Duration) -> u64 {
+fn wait_ready(
+    s: &mut PipeStream,
+    next_id: &mut u32,
+    deadline: Duration,
+    data_dir: &std::path::Path,
+) -> u64 {
     let begin = Instant::now();
     loop {
         *next_id += 1;
@@ -101,14 +148,22 @@ fn wait_ready(s: &mut PipeStream, next_id: &mut u32, deadline: Duration) -> u64 
         let status: Vec<messages::VolumeStatusWire> =
             messages::decode_json("IndexStatus", &p).expect("decode IndexStatus");
         if let Some(v) = status.iter().find(|v| v.volume == "C:") {
-            assert_ne!(v.state, 3, "C: indexing failed");
+            assert_ne!(
+                v.state,
+                3,
+                "C: indexing failed after {:?} with {} entries\n{}",
+                begin.elapsed(),
+                v.entries,
+                service_log_tail(data_dir)
+            );
             if v.state == 1 {
                 return v.entries;
             }
         }
         assert!(
             begin.elapsed() < deadline,
-            "C: not Ready within {deadline:?}"
+            "C: not Ready within {deadline:?}; last status {status:?}\n{}",
+            service_log_tail(data_dir)
         );
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -117,15 +172,12 @@ fn wait_ready(s: &mut PipeStream, next_id: &mut u32, deadline: Duration) -> u64 
 #[test]
 #[ignore = "requires elevation + a real C: scan; gated by FMF_ADMIN_TESTS=1 (just test-admin)"]
 fn service_e2e_flush_survives_kill_and_restores() {
-    if !admin_gate() {
-        return;
-    }
+    require_admin_gate();
     // Fresh per-run data dir (TestDir) → guaranteed full-scan cold start.
     let data_dir = TestDir::new();
     // Short flush interval: durability must not depend on a graceful stop.
     let mut f = std::fs::File::create(data_dir.join("service.json")).unwrap();
-    f.write_all(br#"{ "volumes": ["C:"], "flush_interval_secs": 10 }"#)
-        .unwrap();
+    f.write_all(br#"{ "flush_interval_secs": 10 }"#).unwrap();
     drop(f);
     let pipe_name = format!(r"\\.\pipe\fmf-svc-e2e-{}", std::process::id());
 
@@ -134,7 +186,7 @@ fn service_e2e_flush_survives_kill_and_restores() {
     let mut s = connect_with_retry(&pipe_name, Duration::from_secs(30));
     let mut id = 0u32;
     hello(&mut s, 0);
-    let entries = wait_ready(&mut s, &mut id, Duration::from_mins(10));
+    let entries = wait_ready(&mut s, &mut id, Duration::from_mins(10), data_dir.path());
     assert!(entries > 10_000, "suspiciously small C: index: {entries}");
 
     id += 1;
@@ -169,7 +221,7 @@ fn service_e2e_flush_survives_kill_and_restores() {
     let mut id2 = 0u32;
     hello(&mut s2, 0);
     let restore_begin = Instant::now();
-    let restored = wait_ready(&mut s2, &mut id2, Duration::from_mins(1));
+    let restored = wait_ready(&mut s2, &mut id2, Duration::from_mins(1), data_dir.path());
     let ready_in = restore_begin.elapsed();
     assert!(restored > 10_000);
     // The M2 gate is restore→ready ≤2s engine-side; over a child process +

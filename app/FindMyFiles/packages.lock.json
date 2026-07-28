@@ -4,31 +4,31 @@
     "net10.0-windows10.0.26100": {
       "CommunityToolkit.Mvvm": {
         "type": "Direct",
-        "requested": "[8.4.2, )",
+        "requested": "[8.4.2, 8.4.2]",
         "resolved": "8.4.2",
         "contentHash": "WadCzGEc2U+3e20avRLng4qNtt4zoOGWrdUISqJWrHe3/FSnrYjuM5Sb4yQb09LhkBXrrI4Zt3dLKgRMbItsrg=="
       },
       "Meziantou.Analyzer": {
         "type": "Direct",
-        "requested": "[3.*, )",
+        "requested": "[3.0.117, 3.0.117]",
         "resolved": "3.0.117",
         "contentHash": "22L/6jjjhTwOpGqN+3A4EMCWc8Kc0dAd49zINAlxjLYDxERnD1qPKDkE9Z6cZPjiOs32J9nsieyya1FO+kXHCw=="
       },
       "Microsoft.Windows.SDK.BuildTools": {
         "type": "Direct",
-        "requested": "[10.0.28000.2270, )",
+        "requested": "[10.0.28000.2270, 10.0.28000.2270]",
         "resolved": "10.0.28000.2270",
         "contentHash": "a7xlGBRfSyXQrjnzFMDd0FCOvyv9mA/oX0FNt4A5hAVvVy6w62NBxygDC/LHM1205dXH9Pv4u0D+Qr77GH8e4Q=="
       },
       "Microsoft.Windows.SDK.BuildTools.WinApp": {
         "type": "Direct",
-        "requested": "[0.4.0, )",
+        "requested": "[0.4.0, 0.4.0]",
         "resolved": "0.4.0",
         "contentHash": "5xq7u0YRQvOFT4xOfqBVgwnpUyEXMWAtCa88uY/jhK4HITivDH2iDVQtyjpqWI2DUkFyfcXPYgAxTIjmNui5eg=="
       },
       "Microsoft.WindowsAppSDK.WinUI": {
         "type": "Direct",
-        "requested": "[2.2.1, )",
+        "requested": "[2.2.1, 2.2.1]",
         "resolved": "2.2.1",
         "contentHash": "w8KuqJB7IphDRXAGNVuRq+oGeoGycc4ZAraA+OIpsGm/boEKHLkwXmzNDaNrVlnsDpjxQFWE2XVp0hXjlWJqxw==",
         "dependencies": {
@@ -40,19 +40,19 @@
       },
       "Roslynator.Analyzers": {
         "type": "Direct",
-        "requested": "[4.*, )",
+        "requested": "[4.15.0, 4.15.0]",
         "resolved": "4.15.0",
         "contentHash": "E8fu71Y+vzhniJKy1K13Rzwm8Vjcj7CDFBpflqncKUZfc3SzuF0kMBiyMmgXNPkjWTdE3Z+30HlGgYjHONZY/Q=="
       },
       "Serilog": {
         "type": "Direct",
-        "requested": "[4.*, )",
+        "requested": "[4.3.1, 4.3.1]",
         "resolved": "4.3.1",
         "contentHash": "savYe7h5yRlkqBVOwP8cIRDOdqKiPmYCU4W87JH38sBmcKD5EBoXvQIw6bNEvZ/pTe1gsiye3VFCzBsoppGkXQ=="
       },
       "Serilog.Sinks.File": {
         "type": "Direct",
-        "requested": "[6.*, )",
+        "requested": "[6.0.0, 6.0.0]",
         "resolved": "6.0.0",
         "contentHash": "lxjg89Y8gJMmFxVkbZ+qDgjl+T4yC5F7WSLTvA+5q0R04tfKVLRL/EHpYoJ/MEQd2EeCKDuylBIVnAYMotmh2A==",
         "dependencies": {
@@ -61,7 +61,7 @@
       },
       "StyleCop.Analyzers": {
         "type": "Direct",
-        "requested": "[1.2.0-*, )",
+        "requested": "[1.2.0-beta.556, 1.2.0-beta.556]",
         "resolved": "1.2.0-beta.556",
         "contentHash": "llRPgmA1fhC0I0QyFLEcjvtM2239QzKr/tcnbsjArLMJxJlu0AA5G7Fft0OI30pHF3MW63Gf4aSSsjc5m82J1Q==",
         "dependencies": {

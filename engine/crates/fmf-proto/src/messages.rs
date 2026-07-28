@@ -1,14 +1,18 @@
 //! Payload codecs.
 //!
-//! Binary payloads are little-endian, padding free,
-//! concatenated in documented order; cold-path payloads are UTF-8 JSON with
-//! `snake_case` fields (docs/ARCHITECTURE.md "Pipe protocol" §Opcode table
-//! — the canonical table). The types themselves come from `fmf_contract`;
-//! only the byte logic lives here.
+//! Binary payloads are little-endian, padding free, and concatenated in the
+//! order each codec below documents; cold-path payloads are UTF-8 JSON with
+//! `snake_case` field names (serde's default — do not add renames). The types
+//! themselves come from `fmf_contract` (see [`opcode`] for which payload
+//! belongs to which operation); only the byte logic lives here.
+//!
+//! A volume is identified everywhere by its drive-label string (`"C:"`),
+//! never a GUID.
 
 use serde::{Deserialize, Serialize};
 
 pub use fmf_contract::opcodes as opcode;
+use fmf_contract::pod::row_flags;
 pub use fmf_contract::pod::{FmfEvent, FmfQueryOptions, FmfRow};
 
 /// Why a payload failed to decode (or encode, for JSON).
@@ -39,10 +43,19 @@ pub enum WireError {
         #[source]
         source: serde_json::Error,
     },
-}
-
-fn u16_at(b: &[u8], off: usize) -> u16 {
-    u16::from_le_bytes([b[off], b[off + 1]])
+    /// A bounded payload component exceeded the machine-readable contract.
+    #[error("{what} is {got}, maximum is {maximum}")]
+    Limit {
+        /// Component that exceeded its limit.
+        what: &'static str,
+        /// Contract maximum.
+        maximum: usize,
+        /// Observed value.
+        got: usize,
+    },
+    /// A row's blob window or reserved field violated the page invariant.
+    #[error("invalid result-page row: {0}")]
+    InvalidPageRow(&'static str),
 }
 
 fn u32_at(b: &[u8], off: usize) -> u32 {
@@ -152,6 +165,8 @@ pub fn encode_query_req(opt: FmfQueryOptions, text: &str) -> Vec<u8> {
     v.extend_from_slice(&opt.case_mode.to_le_bytes());
     v.extend_from_slice(&opt.include_hidden_system.to_le_bytes());
     v.extend_from_slice(&opt.regex_mode.to_le_bytes());
+    v.extend_from_slice(&opt._reserved.to_le_bytes());
+    v.extend_from_slice(&opt.presentation_basis.to_le_bytes());
     v.extend_from_slice(text.as_bytes());
     v
 }
@@ -175,6 +190,8 @@ pub fn decode_query_req(b: &[u8]) -> Result<(FmfQueryOptions, &str), WireError> 
         case_mode: u32_at(b, 8),
         include_hidden_system: u32_at(b, 12),
         regex_mode: u32_at(b, 16),
+        _reserved: u32_at(b, 20),
+        presentation_basis: u64_at(b, 24),
     };
     let text = std::str::from_utf8(&b[FmfQueryOptions::LEN..])
         .map_err(|_| WireError::Utf8 { what: "QueryReq" })?;
@@ -279,7 +296,7 @@ impl ResultPageReq {
     }
 }
 
-/// One row on the wire — byte-for-byte the FFI `FmfRow` (48 bytes, no
+/// One row on the wire — byte-for-byte the FFI `FmfRow` (56 bytes, no
 /// padding; offsets are relative to the string blob start).
 fn write_row(v: &mut Vec<u8>, r: &FmfRow) {
     v.extend_from_slice(&r.entry_ref.to_le_bytes());
@@ -291,6 +308,7 @@ fn write_row(v: &mut Vec<u8>, r: &FmfRow) {
     v.extend_from_slice(&r.flags.to_le_bytes());
     v.extend_from_slice(&r.name_len.to_le_bytes());
     v.extend_from_slice(&r.parent_path_len.to_le_bytes());
+    v.extend_from_slice(&r._reserved.to_le_bytes());
 }
 
 fn read_row_at(b: &[u8], off: usize) -> FmfRow {
@@ -302,13 +320,14 @@ fn read_row_at(b: &[u8], off: usize) -> FmfRow {
         name_off: u32_at(b, off + 32),
         parent_path_off: u32_at(b, off + 36),
         flags: u32_at(b, off + 40),
-        name_len: u16_at(b, off + 44),
-        parent_path_len: u16_at(b, off + 46),
+        name_len: u32_at(b, off + 44),
+        parent_path_len: u32_at(b, off + 48),
+        _reserved: u32_at(b, off + 52),
     }
 }
 
 /// Decoded view of a `ResultPage` response payload:
-/// `{row_count:u32, blob_len:u32}` → rows (48 B × `row_count`) → blob.
+/// `{row_count:u32, blob_len:u32}` → rows (56 B × `row_count`) → blob.
 pub struct PageView<'a> {
     /// Decoded rows; string fields point into `blob` by offset.
     pub rows: Vec<FmfRow>,
@@ -318,16 +337,33 @@ pub struct PageView<'a> {
 
 /// Encode a result page (op 8): a `{row_count, blob_len}` header, then the
 /// fixed-size rows, then the string blob.
-#[must_use]
-pub fn encode_page(rows: &[FmfRow], blob: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(8 + rows.len() * FmfRow::LEN + blob.len());
-    v.extend_from_slice(&(rows.len() as u32).to_le_bytes());
-    v.extend_from_slice(&(blob.len() as u32).to_le_bytes());
+///
+/// # Errors
+///
+/// Returns [`WireError::Limit`] when the page exceeds a contract bound, or
+/// [`WireError::InvalidPageRow`] when a row points outside `blob` or has a
+/// non-zero reserved field.
+pub fn encode_page(rows: &[FmfRow], blob: &[u8]) -> Result<Vec<u8>, WireError> {
+    validate_page(rows, blob)?;
+    let encoded_len = page_encoded_len(rows.len(), blob.len())?;
+    let row_count = u32::try_from(rows.len()).map_err(|_| WireError::Limit {
+        what: "result-page row count",
+        maximum: u32::MAX as usize,
+        got: rows.len(),
+    })?;
+    let blob_len = u32::try_from(blob.len()).map_err(|_| WireError::Limit {
+        what: "result-page blob length",
+        maximum: u32::MAX as usize,
+        got: blob.len(),
+    })?;
+    let mut v = Vec::with_capacity(encoded_len);
+    v.extend_from_slice(&row_count.to_le_bytes());
+    v.extend_from_slice(&blob_len.to_le_bytes());
     for r in rows {
         write_row(&mut v, r);
     }
     v.extend_from_slice(blob);
-    v
+    Ok(v)
 }
 
 /// # Errors
@@ -344,18 +380,75 @@ pub fn decode_page(b: &[u8]) -> Result<PageView<'_>, WireError> {
     }
     let row_count = u32_at(b, 0) as usize;
     let blob_len = u32_at(b, 4) as usize;
-    // row_count/blob_len are u32, so `row_count * FmfRow::LEN + blob_len` cannot
-    // overflow usize on a 64-bit target; the exact-length check below (and the
-    // 16 MiB frame cap upstream) reject any header that lies about its length.
-    let expected = 8 + row_count * FmfRow::LEN + blob_len;
+    if row_count > fmf_contract::limits::MAX_PAGE_ROWS as usize {
+        return Err(WireError::Limit {
+            what: "result-page row count",
+            maximum: fmf_contract::limits::MAX_PAGE_ROWS as usize,
+            got: row_count,
+        });
+    }
+    let expected = page_encoded_len(row_count, blob_len)?;
     check_len("PageResp", b, expected)?;
     let rows = (0..row_count)
         .map(|i| read_row_at(b, 8 + i * FmfRow::LEN))
-        .collect();
-    Ok(PageView {
-        rows,
-        blob: &b[8 + row_count * FmfRow::LEN..],
-    })
+        .collect::<Vec<_>>();
+    let blob = &b[8 + row_count * FmfRow::LEN..];
+    validate_page(&rows, blob)?;
+    Ok(PageView { rows, blob })
+}
+
+fn page_encoded_len(row_count: usize, blob_len: usize) -> Result<usize, WireError> {
+    let encoded_len = row_count
+        .checked_mul(FmfRow::LEN)
+        .and_then(|rows_len| rows_len.checked_add(blob_len))
+        .and_then(|body_len| body_len.checked_add(8))
+        .ok_or(WireError::Limit {
+            what: "result-page encoded length",
+            maximum: fmf_contract::limits::MAX_PAYLOAD_LEN as usize,
+            got: usize::MAX,
+        })?;
+    if encoded_len > fmf_contract::limits::MAX_PAYLOAD_LEN as usize {
+        return Err(WireError::Limit {
+            what: "result-page encoded length",
+            maximum: fmf_contract::limits::MAX_PAYLOAD_LEN as usize,
+            got: encoded_len,
+        });
+    }
+    Ok(encoded_len)
+}
+
+fn validate_page(rows: &[FmfRow], blob: &[u8]) -> Result<(), WireError> {
+    if rows.len() > fmf_contract::limits::MAX_PAGE_ROWS as usize {
+        return Err(WireError::Limit {
+            what: "result-page row count",
+            maximum: fmf_contract::limits::MAX_PAGE_ROWS as usize,
+            got: rows.len(),
+        });
+    }
+    for row in rows {
+        if row.flags & !row_flags::KNOWN_MASK != 0 {
+            return Err(WireError::InvalidPageRow(
+                "unknown row flag bits must be zero",
+            ));
+        }
+        if row._reserved != 0 {
+            return Err(WireError::InvalidPageRow("reserved field must be zero"));
+        }
+        for (offset, len, field) in [
+            (row.name_off, row.name_len, "name window exceeds the blob"),
+            (
+                row.parent_path_off,
+                row.parent_path_len,
+                "parent-path window exceeds the blob",
+            ),
+        ] {
+            let end = u64::from(offset) + u64::from(len);
+            if end > blob.len() as u64 {
+                return Err(WireError::InvalidPageRow(field));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── ResultFree (op 9, binary) ───────────────────────────────────────────
@@ -405,6 +498,7 @@ pub fn decode_event(b: &[u8]) -> Result<FmfEvent, WireError> {
 
 /// Per-volume status as carried in the JSON volume-status message (op 5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VolumeStatusWire {
     /// Drive label, e.g. "C:" — the one volume identifier on the wire.
     pub volume: String,
@@ -417,6 +511,7 @@ pub struct VolumeStatusWire {
 
 /// Request to begin indexing a set of volumes (op 4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IndexStartReq {
     /// Drive labels to index, e.g. `["C:", "D:"]`.
     pub volumes: Vec<String>,
@@ -424,6 +519,7 @@ pub struct IndexStartReq {
 
 /// Service self-report returned by the info message (op 12).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceInfoResp {
     /// Service uptime in milliseconds.
     pub uptime_ms: u64,
@@ -479,6 +575,8 @@ mod tests {
             case_mode: 2,
             include_hidden_system: 0,
             regex_mode: 3, // whole-query regex (bit0) over the full path (bit1)
+            _reserved: 0,
+            presentation_basis: 0x0102_0304_0506_0708,
         };
         let bytes = encode_query_req(opt, "win");
         assert_eq!(
@@ -489,6 +587,8 @@ mod tests {
                 2, 0, 0, 0, // case=Sensitive
                 0, 0, 0, 0, // include_hidden_system
                 3, 0, 0, 0, // regex_mode = whole(bit0) | path(bit1)
+                0, 0, 0, 0, // reserved
+                8, 7, 6, 5, 4, 3, 2, 1, // presentation basis
                 b'w', b'i', b'n',
             ]
         );
@@ -506,7 +606,29 @@ mod tests {
     }
 
     #[test]
-    fn page_roundtrip_pins_the_48_byte_row() {
+    fn protocol_json_dtos_reject_unknown_fields() {
+        assert!(
+            decode_json::<VolumeStatusWire>(
+                "VolumeStatus",
+                br#"{"volume":"C:","state":1,"entries":2,"typo":true}"#
+            )
+            .is_err()
+        );
+        assert!(
+            decode_json::<IndexStartReq>("IndexStart", br#"{"volumes":["C:"],"typo":true}"#)
+                .is_err()
+        );
+        assert!(
+            decode_json::<ServiceInfoResp>(
+                "ServiceInfo",
+                br#"{"uptime_ms":1,"connections":1,"version":"x","typo":true}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn page_roundtrip_pins_the_56_byte_row() {
         let row = FmfRow {
             entry_ref: 1,
             frn: (1 << 48) | 0x64,
@@ -517,9 +639,10 @@ mod tests {
             flags: 1,
             name_len: 9,
             parent_path_len: 3,
+            _reserved: 0,
         };
         let blob = b"alpha.txtC:\\";
-        let bytes = encode_page(&[row], blob);
+        let bytes = encode_page(&[row], blob).unwrap();
         assert_eq!(bytes.len(), 8 + FmfRow::LEN + blob.len());
         let v = decode_page(&bytes).unwrap();
         assert_eq!(v.rows, vec![row]);
@@ -529,6 +652,64 @@ mod tests {
         let mut lying = bytes.clone();
         lying[0..4].copy_from_slice(&2u32.to_le_bytes()); // row_count=2, but only 1 row present
         assert!(decode_page(&lying).is_err());
+    }
+
+    #[test]
+    fn page_preserves_lengths_beyond_u16_and_rejects_invalid_windows() {
+        let parent = vec![b'x'; u16::MAX as usize + 1];
+        let row = FmfRow {
+            entry_ref: 1,
+            frn: 1,
+            size: 0,
+            mtime: 0,
+            name_off: 0,
+            parent_path_off: 1,
+            flags: 0,
+            name_len: 1,
+            parent_path_len: parent.len() as u32,
+            _reserved: 0,
+        };
+        let mut blob = vec![b'n'];
+        blob.extend_from_slice(&parent);
+
+        let bytes = encode_page(&[row], &blob).unwrap();
+        let decoded = decode_page(&bytes).unwrap();
+        assert_eq!(decoded.rows[0].parent_path_len, 65_536);
+        assert_eq!(decoded.blob, blob);
+
+        let mut invalid = row;
+        invalid.parent_path_len += 1;
+        assert!(matches!(
+            encode_page(&[invalid], &blob),
+            Err(WireError::InvalidPageRow(_))
+        ));
+    }
+
+    #[test]
+    fn page_rejects_unknown_row_flags_on_encode_and_decode() {
+        let row = FmfRow {
+            entry_ref: 1,
+            frn: 1,
+            size: 0,
+            mtime: 0,
+            name_off: 0,
+            parent_path_off: 0,
+            flags: row_flags::KNOWN_MASK << 1,
+            name_len: 0,
+            parent_path_len: 0,
+            _reserved: 0,
+        };
+        assert!(matches!(
+            encode_page(&[row], &[]),
+            Err(WireError::InvalidPageRow(_))
+        ));
+
+        let mut bytes = encode_page(&[FmfRow { flags: 0, ..row }], &[]).unwrap();
+        bytes[8 + 40..8 + 44].copy_from_slice(&row.flags.to_le_bytes());
+        assert!(matches!(
+            decode_page(&bytes),
+            Err(WireError::InvalidPageRow(_))
+        ));
     }
 
     #[test]

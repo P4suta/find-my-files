@@ -16,12 +16,27 @@ use fmf_core::metrics::{
 };
 use fmf_core::query::{CaseMode, UtcResolver, compile, parse};
 
+const MUTATION_SOURCE_ROOT_ENV: &str = "FMF_MUTATION_SOURCE_ROOT";
+
 fn golden_dir() -> PathBuf {
+    if let Some(source_root) = std::env::var_os(MUTATION_SOURCE_ROOT_ENV) {
+        let source_root = PathBuf::from(source_root);
+        assert!(
+            source_root.is_absolute(),
+            "{MUTATION_SOURCE_ROOT_ENV} must be an absolute trusted source root"
+        );
+        return source_root.join("contract/golden");
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../contract/golden")
 }
 
 fn bless_mode() -> bool {
-    std::env::var("FMF_BLESS").as_deref() == Ok("1")
+    let requested = std::env::var("FMF_BLESS").as_deref() == Ok("1");
+    assert!(
+        !(requested && std::env::var_os(MUTATION_SOURCE_ROOT_ENV).is_some()),
+        "the mutation scratch tree may only read the canonical golden corpus"
+    );
+    requested
 }
 
 fn check_file(file: &str, bytes: &[u8]) {
@@ -39,8 +54,9 @@ fn check_file(file: &str, bytes: &[u8]) {
     });
     assert_eq!(
         on_disk, bytes,
-        "{file}: golden JSON drifted. If intentional: docs/ARCHITECTURE.md \
-         first, then FMF_BLESS=1 (ADR-0018)."
+        "{file}: golden JSON drifted. If intentional: change fmf-contract \
+         first, then re-capture with `just contract-bless` (FMF_BLESS=1) and \
+         regenerate the C# bindings with `just contract-gen` (ADR-0018)."
     );
 }
 
@@ -114,7 +130,7 @@ fn invalid_queries_are_rejected_by_the_real_parser() {
 /// a dropped or renamed serde key cannot hide.
 fn sample_trace() -> QueryTrace {
     QueryTrace {
-        query: "win ext:txt".into(),
+        query_length: 11,
         driver: "pool-scan".into(),
         cache: "refine".into(),
         unchanged: false,
@@ -225,26 +241,25 @@ fn metrics_snapshot_json_shape_is_pinned() {
         current_ws_bytes: 90,
         current_private_bytes: 91,
         counters: CountersSnapshot {
+            scan_unresolved_parents: 60,
             stat_fetch_failures: 61,
             usn_batches_truncated: 62,
             snapshot_load_failures: 63,
             snapshot_save_failures: 64,
-            deferred_names_unresolved: 65,
-            corrupt_mft_records: 66,
-            journal_rescans: 67,
-            scan_pipeline_fallbacks: 68,
-            offset_table_rebuild_fallbacks: 69,
-            lazy_perm_rebuild_fallbacks: 70,
-            compaction_aborts: 71,
-            pipe_malformed_frames: 72,
-            pipe_events_dropped: 73,
-            pipe_connections_rejected: 74,
-            deferred_name_cache_overflow: 75,
-            deferred_name_read_failures: 76,
-            pipe_results_evicted: 77,
-            trace_serialize_failures: 78,
-            walk_read_errors: 79,
-            walk_depth_truncated: 80,
+            corrupt_mft_records: 65,
+            journal_rescans: 66,
+            scan_pipeline_fallbacks: 67,
+            lazy_perm_rebuild_fallbacks: 68,
+            compaction_aborts: 69,
+            pipe_malformed_frames: 70,
+            pipe_events_dropped: 71,
+            pipe_connections_rejected: 72,
+            deferred_name_cache_overflow: 73,
+            deferred_name_read_failures: 74,
+            pipe_results_evicted: 75,
+            trace_serialize_failures: 76,
+            hard_link_refresh_failures: 77,
+            usn_index_rejections: 78,
         },
         recent_errors: vec![ErrorEvent {
             seq: 81,

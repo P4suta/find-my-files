@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using FindMyFiles.Converters;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
 using Microsoft.UI.Xaml;
@@ -17,7 +18,7 @@ namespace FindMyFiles.Views;
 /// </summary>
 // View code-behind: imperative F12 rendering, not unit-tested (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
-public sealed partial class PerfPanel : UserControl
+public sealed partial class PerfPanel : UserControl, IDisposable
 {
     /// <summary>Backing <c>DependencyProperty</c> for <see cref="ViewModel"/>.
     /// On value swap, re-routes `PerfDataChanged`/`PropertyChanged` subscriptions from old to new.</summary>
@@ -30,13 +31,15 @@ public sealed partial class PerfPanel : UserControl
 
     /// <summary>Diagnostic ViewModel supplied by the host via `x:Bind`. Source of
     /// trace/stats update notifications; drives the 1 Hz stats poll only while the panel is open.</summary>
-    public PerfPanelViewModel? ViewModel
+    internal PerfPanelViewModel? ViewModel
     {
         get => (PerfPanelViewModel?)GetValue(ViewModelProperty);
         set => SetValue(ViewModelProperty, value);
     }
 
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _statsTimer;
+    private readonly AsyncSingleFlight _statsRefresh = new();
+    private int _tornDown;
 
     /// <summary>Builds the 1 Hz stats poll timer (runs only while `ViewModel.IsOpen` is true).
     /// The timer is not started here; it is started/stopped on open/close.</summary>
@@ -45,13 +48,7 @@ public sealed partial class PerfPanel : UserControl
         InitializeComponent();
         _statsTimer = App.DispatcherQueue.CreateTimer();
         _statsTimer.Interval = TimeSpan.FromSeconds(1);
-        _statsTimer.Tick += (_, _) =>
-        {
-            if (ViewModel is { } vm)
-            {
-                vm.RefreshStatsAsync().Forget("perf.stats");
-            }
-        };
+        _statsTimer.Tick += OnStatsTimerTick;
     }
 
     private void OnViewModelChanged(DependencyPropertyChangedEventArgs e)
@@ -90,12 +87,56 @@ public sealed partial class PerfPanel : UserControl
         if (vm.IsOpen)
         {
             _statsTimer.Start();
-            vm.RefreshStatsAsync().Forget("perf.stats");
+            RefreshStatsSingleFlight(vm);
         }
         else
         {
             _statsTimer.Stop();
         }
+    }
+
+    private void OnStatsTimerTick(
+        Microsoft.UI.Dispatching.DispatcherQueueTimer sender,
+        object args)
+    {
+        _ = sender;
+        _ = args;
+        if (ViewModel is { IsOpen: true } vm)
+        {
+            RefreshStatsSingleFlight(vm);
+        }
+    }
+
+    private void RefreshStatsSingleFlight(PerfPanelViewModel vm) =>
+        _statsRefresh.RunAsync(() => vm.RefreshStatsAsync()).Forget("perf.stats");
+
+    /// <summary>Stop the timer and detach every subscription owned by this view.
+    /// Called by <see cref="DiagnosticsWindow"/> on close; idempotent so app
+    /// shutdown and the user close button can converge safely.</summary>
+    internal void TearDown()
+    {
+        if (Interlocked.Exchange(ref _tornDown, 1) != 0)
+        {
+            return;
+        }
+
+        _statsTimer.Stop();
+        _statsTimer.Tick -= OnStatsTimerTick;
+        if (ViewModel is { } vm)
+        {
+            vm.IsOpen = false;
+        }
+
+        ClearValue(ViewModelProperty);
+        _statsRefresh.Dispose();
+    }
+
+    /// <summary>Detach the timer and ViewModel subscriptions owned by this
+    /// panel. Idempotent and called when the diagnostics window closes.</summary>
+    public void Dispose()
+    {
+        TearDown();
+        GC.SuppressFinalize(this);
     }
 
     /// <summary>
@@ -105,28 +146,43 @@ public sealed partial class PerfPanel : UserControl
     private void CopyDiag_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         var statsJson = ViewModel?.Stats is { } s
-            ? System.Text.Json.JsonSerializer.Serialize(s, DiagJsonOptions)
+            ? DiagnosticSanitizer.SerializeStats(s)
             : "(no stats yet)";
-        var dump =
-            $"find-my-files diagnostics {DateTimeOffset.Now:O}\n" +
-            $"app: v{BuildInfo.Version}  os: {Environment.OSVersion.VersionString}\n" +
-            $"engine log: %ProgramData%\\find-my-files\\logs\\engine.log\n" +
-            $"app log: {FileLog.LogPath}\n\n=== engine stats ===\n{statsJson}\n\n" +
-            $"=== app.log (tail) ===\n{FileLog.Tail(50)}\n";
+        var dump = DiagFormat.DiagnosticCopy(
+            DateTimeOffset.Now,
+            BuildInfo.Version,
+            Environment.OSVersion.VersionString,
+            DiagFormat.EngineLogDirectoryDisplay(ViewModel?.Stats),
+            statsJson,
+            FileLog.SafeTail(50));
         ShellOps.CopyText(dump, "diagnostics");
-        Notifier.Post(NotifySeverity.Info, "診断情報をクリップボードにコピーしました");
+        Notifier.Post(NotifySeverity.Info, Loc.Get("Diag_Copied"));
     }
 
-    /// <summary>Open the engine's log folder (%ProgramData%\find-my-files\logs)
-    /// in Explorer via <see cref="ShellOps"/> (unelevated). Quick path to the
-    /// engine.log the InfoBar points at.</summary>
+    /// <summary>Open the live engine's log folder in Explorer via
+    /// <see cref="ShellOps"/> (unelevated). Which folder that is depends on the
+    /// transport (<see cref="DiagFormat.EngineLogSubPath"/>): the service logs
+    /// under its data root, the in-proc engine under <c>index\logs</c>.
+    /// <para>Explorer runs unelevated by design, and an installed machine keeps
+    /// <c>index\</c> SYSTEM+Administrators only, so the in-proc folder can be
+    /// unreadable from here. Report that instead of handing Explorer a path it
+    /// will refuse — the notification still names the folder so it can be opened
+    /// from an elevated shell or pasted into a bug report.</para></summary>
     private void OpenEngineLog_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         var folder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "find-my-files",
-            "logs");
-        ShellOps.Open(folder);
+            DiagFormat.EngineLogSubPath(ViewModel?.Stats));
+
+        // Directory.Exists is false for both "not there yet" and "denied", which
+        // are exactly the two cases where launching Explorer helps nobody.
+        if (!Directory.Exists(folder))
+        {
+            Notifier.Post(NotifySeverity.Warning, Loc.Get("Shell_OpenFailed"), folder);
+            return;
+        }
+
+        ShellOps.OpenTrusted(folder);
     }
 
     /// <summary>Open the app's log folder (the directory holding app.log) in
@@ -136,7 +192,7 @@ public sealed partial class PerfPanel : UserControl
         var folder = Path.GetDirectoryName(FileLog.LogPath);
         if (!string.IsNullOrEmpty(folder))
         {
-            ShellOps.Open(folder);
+            ShellOps.OpenTrusted(folder);
         }
     }
 
@@ -274,10 +330,4 @@ public sealed partial class PerfPanel : UserControl
             LatencyHist.Children.Add(bar);
         }
     }
-
-    private static readonly System.Text.Json.JsonSerializerOptions DiagJsonOptions =
-        new(Engine.EngineJson.SnakeCase)
-        {
-            WriteIndented = true,
-        };
 }

@@ -8,12 +8,16 @@ namespace FindMyFiles.Services;
 /// <summary>
 /// Shell-facing operations, centralized so every failure path notifies the
 /// user instead of crashing. Targets launch via explorer.exe to shed the
-/// process's elevation (CLAUDE.md UI rules).
+/// process's elevation (AGENTS.md UI rules).
 /// </summary>
-public static partial class ShellOps
+internal static partial class ShellOps
 {
     /// <summary><c>COINIT_APARTMENTTHREADED</c> — reveal runs on a dedicated STA.</summary>
     private const uint COINITAPARTMENTTHREADED = 0x2;
+
+    /// <summary>Longest path <c>CreateFileW</c> accepts without long-path support:
+    /// <c>MAX_PATH</c> (260) counts the terminating NUL.</summary>
+    private const int LegacyMaxPathChars = 259;
 
     /// <summary>Full path to explorer.exe (<c>%WINDIR%\explorer.exe</c>).
     /// Launching by bare name under <c>UseShellExecute=false</c> lets
@@ -27,15 +31,53 @@ public static partial class ShellOps
     /// (with a Win32-specific hint) rather than throwing.</summary>
     /// <param name="fullPath">Absolute path to open; treated as data, never as
     /// a command line (see <see cref="BuildOpenStartInfo"/>).</param>
-    public static void Open(string fullPath) => OpenWith(RealProcessRunner.Instance, fullPath);
+    public static void OpenTrusted(string fullPath) =>
+        OpenTrustedWith(RealProcessRunner.Instance, fullPath);
+
+    /// <summary>
+    /// Open an MFT-sourced result only after the path has been pinned and its
+    /// handle identity has been matched to the exact engine FRN.
+    /// </summary>
+    /// <param name="fullPath">MFT-sourced absolute path.</param>
+    /// <param name="expectedFrn">Exact NTFS record-and-sequence identity.</param>
+    public static void OpenIndexed(string fullPath, ulong expectedFrn) =>
+        OpenIndexedWith(
+            RealIndexedShellTargetVerifier.Instance,
+            RealProcessRunner.Instance,
+            fullPath,
+            expectedFrn);
 
     /// <summary>"Open" core, parameterised over the process runner so the launch
     /// (not just <see cref="BuildOpenStartInfo"/>'s arguments) is unit-testable.
     /// Failures notify rather than throw, via <see cref="Run"/>.</summary>
     /// <param name="runner">Process launcher (real or a test fake).</param>
     /// <param name="fullPath">Absolute path to open.</param>
-    internal static void OpenWith(IProcessRunner runner, string fullPath) =>
-        Run(Loc.Get("Shell_OpenFailed"), fullPath, () => runner.Start(BuildOpenStartInfo(fullPath)));
+    internal static void OpenTrustedWith(IProcessRunner runner, string fullPath) =>
+        Run(
+            Loc.Get("Shell_OpenFailed"),
+            "open",
+            fullPath,
+            () => runner.Start(BuildOpenStartInfo(fullPath)));
+
+    /// <summary>Identity-verified indexed-result core, exposed for boundary tests.</summary>
+    /// <param name="verifier">Handle-bound path and identity verifier.</param>
+    /// <param name="runner">Process launcher.</param>
+    /// <param name="fullPath">MFT-sourced absolute path.</param>
+    /// <param name="expectedFrn">Exact NTFS record-and-sequence identity.</param>
+    internal static void OpenIndexedWith(
+        IIndexedShellTargetVerifier verifier,
+        IProcessRunner runner,
+        string fullPath,
+        ulong expectedFrn) =>
+        Run(
+            Loc.Get("Shell_OpenFailed"),
+            "open-indexed",
+            fullPath,
+            () =>
+            {
+                using var lease = verifier.VerifyAndPin(fullPath, expectedFrn);
+                runner.Start(BuildOpenStartInfo(fullPath));
+            });
 
     /// <summary>Builds the explorer.exe invocation for "open". Kept internal and
     /// pure so the argument-safety contract is unit-testable without launching a
@@ -54,21 +96,19 @@ public static partial class ShellOps
         return psi;
     }
 
-    /// <summary>Reveal a file in Explorer with it selected, via the shell API
-    /// (<c>SHParseDisplayName</c> + <c>SHOpenFolderAndSelectItems</c>) — never
-    /// <c>explorer.exe /select,&lt;path&gt;</c>, whose switch parser needs a literal
-    /// quoted path it does not escape, so a '"' in an MFT-sourced name could inject
-    /// switches. Runs on a dedicated STA thread with COM initialised: on the WinUI
-    /// UI thread (an ASTA) <c>SHOpenFolderAndSelectItems</c> returns <c>S_OK</c> but
-    /// opens nothing. Failures notify off-thread (<see cref="Notifier"/>/
-    /// <see cref="FileLog"/> are thread-safe; the ViewModel marshals the InfoBar to
-    /// the UI).</summary>
-    /// <param name="fullPath">Absolute path to reveal and select.</param>
-    public static void Reveal(string fullPath)
+    /// <summary>
+    /// Reveal an MFT-sourced result only while its exact identity and every
+    /// path component remain pinned.
+    /// </summary>
+    /// <param name="fullPath">MFT-sourced absolute path.</param>
+    /// <param name="expectedFrn">Exact NTFS record-and-sequence identity.</param>
+    public static void RevealIndexed(string fullPath, ulong expectedFrn)
     {
-        // Resolve the localized message on the UI thread, then hand off.
         string failureMessage = Loc.Get("Shell_RevealFailed");
-        var thread = new Thread(() => RevealOnSta(failureMessage, fullPath)) { IsBackground = true };
+        var thread = new Thread(() => RevealOnSta(failureMessage, fullPath, expectedFrn))
+        {
+            IsBackground = true,
+        };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
     }
@@ -78,19 +118,28 @@ public static partial class ShellOps
     /// unhandled one would tear down the process).</summary>
     /// <param name="failureMessage">Pre-resolved headline for a failure notification.</param>
     /// <param name="fullPath">Absolute path to reveal and select.</param>
-    private static void RevealOnSta(string failureMessage, string fullPath)
+    /// <param name="expectedFrn">Exact indexed identity.</param>
+    private static void RevealOnSta(
+        string failureMessage,
+        string fullPath,
+        ulong expectedFrn)
     {
         int coHr = CoInitializeEx(IntPtr.Zero, COINITAPARTMENTTHREADED);
         try
         {
-            if (DoReveal(RealRevealApi.Instance, fullPath) is { } failure)
+            var failure = DoRevealIndexed(
+                RealIndexedShellTargetVerifier.Instance,
+                RealRevealApi.Instance,
+                fullPath,
+                expectedFrn);
+            if (failure is not null)
             {
-                ReportFailure(failureMessage, fullPath, failure);
+                ReportFailure(failureMessage, "reveal", fullPath, failure);
             }
         }
         catch (Exception ex)
         {
-            ReportFailure(failureMessage, fullPath, ex);
+            ReportFailure(failureMessage, "reveal", fullPath, ex);
         }
         finally
         {
@@ -111,7 +160,7 @@ public static partial class ShellOps
     /// <param name="api">Shell calls (real or a test fake).</param>
     /// <param name="fullPath">Absolute path to reveal and select.</param>
     /// <returns>The failure exception, or <see langword="null"/> on success.</returns>
-    internal static Exception? DoReveal(IRevealApi api, string fullPath)
+    private static Exception? DoReveal(IRevealApi api, string fullPath)
     {
         int hr = api.ParseDisplayName(fullPath, out var pidl);
         if (hr != 0)
@@ -130,6 +179,32 @@ public static partial class ShellOps
         }
     }
 
+    /// <summary>
+    /// Identity-verified reveal core.  The path-component handles remain open
+    /// until the shell has parsed the PIDL and accepted the reveal request.
+    /// </summary>
+    /// <param name="verifier">Handle-bound path and identity verifier.</param>
+    /// <param name="api">Shell reveal API.</param>
+    /// <param name="fullPath">MFT-sourced absolute path.</param>
+    /// <param name="expectedFrn">Exact NTFS record-and-sequence identity.</param>
+    /// <returns>The verification or shell failure, or null on success.</returns>
+    internal static Exception? DoRevealIndexed(
+        IIndexedShellTargetVerifier verifier,
+        IRevealApi api,
+        string fullPath,
+        ulong expectedFrn)
+    {
+        try
+        {
+            using var lease = verifier.VerifyAndPin(fullPath, expectedFrn);
+            return DoReveal(api, fullPath);
+        }
+        catch (Exception ex)
+        {
+            return ex;
+        }
+    }
+
     /// <summary>Exception for a non-negative HRESULT (e.g. <c>S_FALSE</c>) that
     /// <see cref="Marshal.GetExceptionForHR(int)"/> maps to <see langword="null"/>
     /// because its severity bit is clear — yet no window was shown.</summary>
@@ -143,8 +218,8 @@ public static partial class ShellOps
     /// window chrome is rebuilt. Goes through <see cref="AppInstance.Restart"/>
     /// (not <c>Process.Start</c> + <c>Application.Exit</c>) so the fresh instance
     /// wins single-instancing instead of redirecting back to this dying one
-    /// (ADR-0036). Every other "restart" reason — service register, scope change,
-    /// uninstall — is an in-process <see cref="AppReload"/> (App.SoftRestart). A
+    /// (ADR-0036). Every other "restart" reason — service register or uninstall —
+    /// is an in-process <see cref="AppReload"/> (App.SoftRestart). A
     /// failed restart notifies and leaves this instance running.</summary>
     public static void Relaunch() => RelaunchWith(RealAppRestart.Instance);
 
@@ -153,7 +228,11 @@ public static partial class ShellOps
     /// funneled through <see cref="Run"/> (notify, don't crash).</summary>
     /// <param name="restart">Restart step (real or a test fake).</param>
     internal static void RelaunchWith(IAppRestart restart) =>
-        Run(Loc.Get("Shell_RelaunchFailed"), "FindMyFiles", () => restart.Restart(string.Empty));
+        Run(
+            Loc.Get("Shell_RelaunchFailed"),
+            "relaunch",
+            "FindMyFiles",
+            () => restart.Restart(string.Empty));
 
     /// <summary>Put <paramref name="text"/> on the clipboard. A failure is
     /// logged and surfaced as a warning notification (clipboard access can be
@@ -171,12 +250,12 @@ public static partial class ShellOps
         }
         catch (Exception ex)
         {
-            FileLog.Warn("shell", $"clipboard copy failed ({what})", ex);
+            FileLog.WarnEvent("shell", "clipboard copy failed", ex, ("operation", what));
             Notifier.Post(NotifySeverity.Warning, Loc.Get("Shell_ClipboardFailed"), ex.Message);
         }
     }
 
-    private static void Run(string failureMessage, string path, Action action)
+    private static void Run(string failureMessage, string operation, string path, Action action)
     {
         try
         {
@@ -184,7 +263,7 @@ public static partial class ShellOps
         }
         catch (Exception ex)
         {
-            ReportFailure(failureMessage, path, ex);
+            ReportFailure(failureMessage, operation, path, ex);
         }
     }
 
@@ -193,28 +272,60 @@ public static partial class ShellOps
     /// thread as well as <see cref="Run"/> (<see cref="FileLog"/>/
     /// <see cref="Notifier"/> post from any thread).</summary>
     /// <param name="failureMessage">Localized headline.</param>
+    /// <param name="operation">Stable operation name for privacy-safe logging.</param>
     /// <param name="path">Path the operation acted on (for the log + file name).</param>
     /// <param name="ex">The failure.</param>
-    private static void ReportFailure(string failureMessage, string path, Exception ex)
+    private static void ReportFailure(
+        string failureMessage,
+        string operation,
+        string path,
+        Exception ex)
     {
-        FileLog.Warn("shell", $"shell op failed for {path}", ex);
+        FileLog.WarnEvent("shell", "shell operation failed", ex, ("operation", operation));
+        var hint = Hint(ex, path);
         Notifier.Post(
             NotifySeverity.Warning,
             $"{failureMessage}: {Path.GetFileName(path)}",
-            $"{ex.Message}({Hint(ex)})");
+            hint.Length == 0 ? ex.Message : $"{ex.Message}({hint})");
     }
 
     /// <summary>Win32-error-specific hint — "access denied" must not read
-    /// like "the file vanished" (the two have opposite remedies).</summary>
+    /// like "the file vanished" (the two have opposite remedies). Every failure
+    /// resolves to some hint; the caller still tolerates an empty one and then
+    /// shows the Win32 message alone.</summary>
     /// <param name="ex">The failure whose Win32 error code selects the hint.</param>
-    private static string Hint(Exception ex) =>
-        (ex as System.ComponentModel.Win32Exception)?.NativeErrorCode switch
-        {
-            2 or 3 => Loc.Get("Shell_HintMoved"),            // FILE/PATH_NOT_FOUND
-            5 => Loc.Get("Shell_HintAccessDenied"),          // ACCESS_DENIED
-            1223 => Loc.Get("Shell_HintCancelled"),          // ERROR_CANCELLED
-            _ => Loc.Get("Shell_HintMovedRecently"),
-        };
+    /// <param name="path">The path acted on, which decides whether a
+    /// "not found" is really a length failure.</param>
+    /// <returns>The localized hint, or empty when none is defensible.</returns>
+    internal static string Hint(Exception ex, string path) =>
+        IsLengthFailure(ex, path)
+            ? Loc.Get("Shell_HintPathTooLong")
+            : (ex as System.ComponentModel.Win32Exception)?.NativeErrorCode switch
+            {
+                2 or 3 => Loc.Get("Shell_HintMoved"),            // FILE/PATH_NOT_FOUND
+                5 => Loc.Get("Shell_HintAccessDenied"),          // ACCESS_DENIED
+                1223 => Loc.Get("Shell_HintCancelled"),          // ERROR_CANCELLED
+                _ => Loc.Get("Shell_HintMovedRecently"),
+            };
+
+    /// <summary>True when the length of <paramref name="path"/> — not a missing
+    /// target — explains the failure. The engine indexes paths up to 32767 UTF-16
+    /// units, and shell actions pin them through <c>CreateFileW</c>, which answers
+    /// anything past <see cref="LegacyMaxPathChars"/> with ERROR_PATH_NOT_FOUND /
+    /// ERROR_FILENAME_EXCED_RANGE whenever long-path support is not in effect
+    /// (app.manifest declares <c>longPathAware</c>, but the machine policy
+    /// <c>LongPathsEnabled</c> has to be on as well). Telling that user the file
+    /// "may have been moved or deleted" sends them looking for a file that is
+    /// exactly where they left it, so this case gets its own hint naming the
+    /// machine setting that would fix it.</summary>
+    /// <param name="ex">The failure to classify.</param>
+    /// <param name="path">The path acted on.</param>
+    /// <returns>True when the path length explains the failure.</returns>
+    private static bool IsLengthFailure(Exception ex, string path) =>
+        ex is PathTooLongException
+        || (path.Length > LegacyMaxPathChars
+            && (ex as System.ComponentModel.Win32Exception)?.NativeErrorCode
+                is 2 or 3 or 206);
 
     // COM init for the reveal STA thread (SHOpenFolderAndSelectItems needs an
     // initialised STA). Pinned to System32 like the other shell imports.

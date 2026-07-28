@@ -20,6 +20,10 @@ public sealed record AppNotification(
     /// list can track and remove this exact entry.</summary>
     public string Id { get; } = Guid.NewGuid().ToString("N");
 
+    /// <summary>Unique UI Automation identity for this notification's optional
+    /// action button.</summary>
+    public string ActionAutomationId => $"NotificationAction-{Id}";
+
     /// <summary>x:Bind target for the InfoBar action button (no-op when the
     /// notification carries no action).</summary>
     public void Invoke() => Action?.Invoke();

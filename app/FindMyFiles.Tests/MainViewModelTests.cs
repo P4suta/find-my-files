@@ -16,9 +16,9 @@ public sealed class MainViewModelTests
         new(engine, new ManualDispatcher(), new AppSettings());
 
     [Fact]
-    public void Empty_engine_shows_the_disconnected_setup_state()
+    public void Unavailable_engine_shows_the_disconnected_setup_state()
     {
-        using var vm = Vm(FakeEngineClient.CreateEmpty());
+        using var vm = Vm(new UnavailableEngineClient());
 
         Assert.True(vm.IsDisconnected);
         Assert.False(vm.IsReady);
@@ -36,7 +36,7 @@ public sealed class MainViewModelTests
     [Fact]
     public async Task StartAsync_on_the_empty_engine_reports_unregistered_and_skips_indexing()
     {
-        using var vm = Vm(FakeEngineClient.CreateEmpty());
+        using var vm = Vm(new UnavailableEngineClient());
 
         await vm.StartAsync();
 
@@ -68,6 +68,26 @@ public sealed class MainViewModelTests
 
         Assert.Equal(FmfSort.Size, vm.Sort);
         Assert.False(vm.SortDescending);
+    }
+
+    [Fact]
+    public void Failed_settings_save_reverts_the_bound_value_and_surfaces_an_error()
+    {
+        var settings = new AppSettings { FocusedSearch = true };
+        using var vm = new MainViewModel(
+            new FakeEngineClient(),
+            new ManualDispatcher(),
+            settings,
+            saveSettings: () => false);
+
+        vm.FocusedSearch = false;
+
+        Assert.True(vm.FocusedSearch);
+        Assert.True(settings.FocusedSearch);
+        Assert.True(vm.Search.FocusedSearch);
+        var failure = Assert.Single(vm.Notifications.Items);
+        Assert.Equal(NotifySeverity.Error, failure.Severity);
+        Assert.Equal(Loc.Get("Settings_SaveFailedTitle"), failure.Message);
     }
 
     private static StubEngineClient EngineReportingVersion(string serviceVersion) =>
@@ -114,5 +134,62 @@ public sealed class MainViewModelTests
 
         Assert.False(vm.HasEngineVersion);
         Assert.False(vm.HasVersionMismatch);
+    }
+
+    [Fact]
+    public async Task RefreshVersions_logs_and_stays_empty_when_stats_fail()
+    {
+        using var vm = Vm(new StubEngineClient
+        {
+            ThrowOnStats = new EngineUnavailableException("offline"),
+        });
+
+        var error = await Record.ExceptionAsync(vm.RefreshVersionsAsync);
+
+        Assert.Null(error);
+        Assert.False(vm.HasEngineVersion);
+        Assert.False(vm.HasVersionMismatch);
+    }
+
+    [Fact]
+    public void Dispose_is_idempotent_cancels_search_and_detaches_engine_events()
+    {
+        SyncContext.RunContinuationsInline();
+        var dispatcher = new ManualDispatcher();
+        var engine = new StubEngineClient();
+        var vm = new MainViewModel(engine, dispatcher, new AppSettings());
+        vm.SearchText = "report";
+        dispatcher.FireTimers();
+        var pending = Assert.Single(engine.Searches);
+
+        vm.Dispose();
+        vm.Dispose();
+
+        Assert.True(pending.CancellationToken.IsCancellationRequested);
+        Assert.Equal(0, engine.IndexChangedSubscribers);
+        Assert.Equal(0, engine.VolumeUpdatedSubscribers);
+        Assert.Equal(0, engine.EngineErrorSubscribers);
+        Assert.Equal(0, engine.ConnectionChangedSubscribers);
+
+        engine.RaiseIndexChanged("C:");
+        dispatcher.DrainQueue();
+        Assert.Single(engine.Searches);
+    }
+
+    [Fact]
+    public void Dispose_releases_the_published_result_handle()
+    {
+        SyncContext.RunContinuationsInline();
+        var dispatcher = new ManualDispatcher();
+        var engine = new StubEngineClient();
+        var vm = new MainViewModel(engine, dispatcher, new AppSettings());
+        vm.SearchText = "report";
+        dispatcher.FireTimers();
+        var result = engine.Searches[0].CompleteWith(Rows.Many(3));
+        Assert.False(result.Disposed);
+
+        vm.Dispose();
+
+        Assert.True(result.Disposed);
     }
 }

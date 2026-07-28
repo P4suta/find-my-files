@@ -1,0 +1,93 @@
+# Install the exact Microsoft WinAppCli distribution used by UI automation.
+#
+# The repository intentionally keeps third-party Actions allowlisted. Rather
+# than broaden that policy, this local Action downloads one immutable release
+# asset and verifies its size, SHA-256 digest, every shipped PE signature, signer
+# identity, and reported version at a fixed, explicitly invoked path.
+name: Setup WinAppCli (verified)
+description: Install the pinned Microsoft WinAppCli release with fail-closed byte and signer verification.
+outputs:
+  cli-path:
+    description: Absolute path to the verified winapp.exe in runner temp.
+    value: ${{ steps.install.outputs.cli-path }}
+runs:
+  using: composite
+  steps:
+    - name: Download and verify WinAppCli
+      id: install
+      shell: pwsh
+      env:
+        WINAPP_VERSION: "0.5.0"
+        WINAPP_SHA256: 88735ce6c2582ac5fac6200194bf62467fdd72b44b2d230f3a4ed059fa79ee7d
+        WINAPP_SIZE: "37881954"
+      run: |
+        $ErrorActionPreference = "Stop"
+        $PSNativeCommandUseErrorActionPreference = $true
+
+        $assetUri = "https://github.com/microsoft/winappCli/releases/download/v$env:WINAPP_VERSION/winappcli-x64.zip"
+        $archive = Join-Path $env:RUNNER_TEMP "fmf-winappcli-$env:WINAPP_VERSION.zip"
+        $installDirectory = Join-Path $env:RUNNER_TEMP "fmf-winappcli-$env:WINAPP_VERSION"
+        if ((Test-Path -LiteralPath $installDirectory) -or
+            (Test-Path -LiteralPath $archive)) {
+          throw "Refusing to replace an existing WinAppCli staging path."
+        }
+
+        Invoke-WebRequest -Uri $assetUri -OutFile $archive
+
+        $actualSize = (Get-Item -LiteralPath $archive).Length
+        $expectedSize = [Int64]::Parse(
+          $env:WINAPP_SIZE,
+          [Globalization.CultureInfo]::InvariantCulture
+        )
+        if ($actualSize -ne $expectedSize) {
+          throw "WinAppCli archive size is $actualSize bytes; expected $expectedSize."
+        }
+
+        $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+        if ($actualHash -cne $env:WINAPP_SHA256.ToUpperInvariant()) {
+          throw "WinAppCli SHA-256 is '$actualHash'; expected '$env:WINAPP_SHA256'."
+        }
+
+        Expand-Archive -LiteralPath $archive -DestinationPath $installDirectory
+        $commands = @(Get-ChildItem -LiteralPath $installDirectory -Recurse -File -Filter winapp.exe)
+        if ($commands.Count -ne 1) {
+          throw "WinAppCli archive contained $($commands.Count) winapp.exe files; expected exactly one."
+        }
+        $expectedCommand = [IO.Path]::GetFullPath(
+          (Join-Path $installDirectory "winapp.exe")
+        )
+        $actualCommand = [IO.Path]::GetFullPath($commands[0].FullName)
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals($actualCommand, $expectedCommand)) {
+          throw "WinAppCli executable moved from its pinned archive location: '$($commands[0].FullName)'."
+        }
+
+        $peFiles = @(
+          Get-ChildItem -LiteralPath $installDirectory -Recurse -File |
+            Where-Object { $_.Extension -ieq ".exe" -or $_.Extension -ieq ".dll" }
+        )
+        if ($peFiles.Count -eq 0) {
+          throw "WinAppCli archive contained no PE files."
+        }
+        foreach ($file in $peFiles) {
+          $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+          $subject = [string]$signature.SignerCertificate.Subject
+          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+            throw "WinAppCli Authenticode status is '$($signature.Status)' for '$($file.FullName)'."
+          }
+          if ($subject -cnotmatch '(^|,\s*)O=Microsoft Corporation(,|$)') {
+            throw "WinAppCli file '$($file.FullName)' is not signed by Microsoft Corporation: '$subject'."
+          }
+        }
+
+        # `--version` prints a banner, a telemetry notice, and a privacy URL
+        # around the number, so compare the extracted version rather than the
+        # whole output. Requiring the literal "Version <x>" label keeps an
+        # unrelated number elsewhere in the banner from satisfying the check.
+        $versionOutput = ((& $commands[0].FullName --version) -join "`n")
+        $expected = [regex]::Escape($env:WINAPP_VERSION)
+        if ($versionOutput -cnotmatch "\bVersion\s+$expected\b") {
+          throw "Expected WinAppCli $env:WINAPP_VERSION; --version reported: $versionOutput"
+        }
+
+        "cli-path=$actualCommand" |
+          Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append

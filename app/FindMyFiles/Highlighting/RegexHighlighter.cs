@@ -11,7 +11,7 @@ namespace FindMyFiles.Highlighting;
 /// any mismatch with the engine's rust regex) simply yields no ranges: a row
 /// the engine returned is never hidden, only its emphasis is skipped.
 /// </summary>
-public sealed class RegexHighlighter(Regex re, RegexScope scope) : IHighlighter
+internal sealed class RegexHighlighter(Regex re, RegexScope scope) : IHighlighter
 {
     /// <inheritdoc/>
     public bool IsEmpty => false;

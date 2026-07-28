@@ -1,5 +1,5 @@
 FindMyFiles.exe
 app/FindMyFiles.exe
-app/fmf.exe
+app/FindMyFiles.dll
 app/fmf-service.exe
 app/fmf_engine.dll

@@ -35,6 +35,8 @@ public sealed class MainViewModelConnectionTests
         // Warm-up: held on "preparing", the startup work has NOT run (no bogus
         // "index start failed" from calling a not-yet-connected engine).
         Assert.Equal(Loc.Get("Status_Preparing"), vm.StatusText);
+        Assert.False(vm.CanSearch);
+        Assert.Equal(Loc.Get("Status_Preparing"), vm.SearchInputPlaceholder);
         Assert.Equal(0, engine.ListVolumesCalls);
 
         // The pipe connects — the first Connected event drives the real startup.
@@ -43,6 +45,8 @@ public sealed class MainViewModelConnectionTests
         _dispatcher.DrainQueue();
 
         Assert.Equal(1, engine.ListVolumesCalls);
+        Assert.True(vm.CanSearch);
+        Assert.Equal(vm.SearchPlaceholder, vm.SearchInputPlaceholder);
         Assert.Equal(
             StatusFormatter.Overall(Array.Empty<VolumeStatus>(), StubVolumes), vm.StatusText);
 
@@ -66,6 +70,43 @@ public sealed class MainViewModelConnectionTests
             StatusFormatter.Overall(Array.Empty<VolumeStatus>(), StubVolumes), vm.StatusText);
     }
 
+    [Theory]
+    [InlineData((int)EngineConnectionState.Connecting)]
+    [InlineData((int)EngineConnectionState.Reconnecting)]
+    public async Task StartAsync_defers_for_every_recoverable_pipe_warmup_state(
+        int stateValue)
+    {
+        var state = (EngineConnectionState)stateValue;
+        var engine = new StubEngineClient { Connection = state };
+        using var vm = new MainViewModel(engine, _dispatcher, new AppSettings());
+
+        await vm.StartAsync();
+
+        Assert.True(vm.IsReady);
+        Assert.False(vm.CanSearch);
+        Assert.Equal(Loc.Get("Status_Preparing"), vm.StatusText);
+        Assert.Equal(0, engine.ListVolumesCalls);
+    }
+
+    [Theory]
+    [InlineData((int)EngineConnectionState.Unavailable)]
+    [InlineData((int)EngineConnectionState.Faulted)]
+    public async Task StartAsync_routes_every_terminal_transport_state_to_repair(
+        int stateValue)
+    {
+        var state = (EngineConnectionState)stateValue;
+        var engine = new StubEngineClient { Connection = state };
+        using var vm = new MainViewModel(engine, _dispatcher, new AppSettings());
+
+        await vm.StartAsync();
+
+        Assert.True(vm.IsDisconnected);
+        Assert.False(vm.IsReady);
+        Assert.False(vm.CanSearch);
+        Assert.Equal(Loc.Get("Status_ServiceUnregistered"), vm.StatusText);
+        Assert.Equal(0, engine.ListVolumesCalls);
+    }
+
     [Fact]
     public async Task EnableSearchAsync_on_success_relaunches_into_the_pipe()
     {
@@ -74,7 +115,7 @@ public sealed class MainViewModelConnectionTests
             register: () => Task.FromResult(ServiceActionOutcome.Ok),
             relaunch: () => relaunches++);
         using var vm = new MainViewModel(
-            FakeEngineClient.CreateEmpty(), _dispatcher, new AppSettings(), provisioner: provisioner);
+            new UnavailableEngineClient(), _dispatcher, new AppSettings(), provisioner: provisioner);
 
         await vm.EnableSearchAsync();
 
@@ -91,7 +132,7 @@ public sealed class MainViewModelConnectionTests
             register: () => Task.FromResult(ServiceActionOutcome.Cancelled),
             relaunch: () => relaunches++);
         using var vm = new MainViewModel(
-            FakeEngineClient.CreateEmpty(), _dispatcher, new AppSettings(), provisioner: provisioner);
+            new UnavailableEngineClient(), _dispatcher, new AppSettings(), provisioner: provisioner);
 
         await vm.EnableSearchAsync();
 
@@ -108,12 +149,29 @@ public sealed class MainViewModelConnectionTests
             register: () => Task.FromResult(ServiceActionOutcome.Failed),
             relaunch: () => relaunches++);
         using var vm = new MainViewModel(
-            FakeEngineClient.CreateEmpty(), _dispatcher, new AppSettings(), provisioner: provisioner);
+            new UnavailableEngineClient(), _dispatcher, new AppSettings(), provisioner: provisioner);
 
         await vm.EnableSearchAsync();
 
         Assert.Equal(0, relaunches);
         Assert.Equal(Loc.Get("Setup_Failed"), vm.SetupStatus);
+        Assert.False(vm.SetupBusy);
+    }
+
+    [Fact]
+    public async Task EnableSearchAsync_on_identity_failure_explains_why_Uac_did_not_open()
+    {
+        var relaunches = 0;
+        var provisioner = new ServiceProvisioner(
+            register: () => Task.FromResult(ServiceActionOutcome.IdentityUnavailable),
+            relaunch: () => relaunches++);
+        using var vm = new MainViewModel(
+            new UnavailableEngineClient(), _dispatcher, new AppSettings(), provisioner: provisioner);
+
+        await vm.EnableSearchAsync();
+
+        Assert.Equal(0, relaunches);
+        Assert.Equal(Loc.Get("Svc_IdentityUnavailable"), vm.SetupStatus);
         Assert.False(vm.SetupBusy);
     }
 }

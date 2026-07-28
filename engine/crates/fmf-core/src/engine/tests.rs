@@ -4,7 +4,7 @@ use crate::index::{Frn, RawEntry, SortKey, VolumeIndexBuilder};
 use crate::query::QueryOptions;
 
 fn vol(label: &str, names: &[(&str, u64)]) -> VolumeIndex {
-    let mut b = VolumeIndexBuilder::new(label, 5);
+    let mut b = VolumeIndexBuilder::new_synthetic(label, 5);
     for (i, (name, size)) in names.iter().enumerate() {
         let units: Vec<u16> = name.encode_utf16().collect();
         b.push(RawEntry {
@@ -60,6 +60,81 @@ fn query_merges_volumes_in_name_order() {
 }
 
 #[test]
+fn query_rejects_utf8_over_the_explicit_work_budget() {
+    let (_dir, engine) = test_engine();
+    let query = "あ".repeat(fmf_contract::limits::MAX_QUERY_BYTES as usize / "あ".len() + 1);
+    assert!(matches!(
+        engine.query(&query, &QueryOptions::default()),
+        Err(EngineError::QueryTooLong {
+            actual,
+            maximum: fmf_contract::limits::MAX_QUERY_BYTES,
+        }) if actual == query.len()
+    ));
+}
+
+#[test]
+fn fill_page_rejects_before_crossing_the_encoded_payload_budget() {
+    let (_dir, engine) = engine_with_two_volumes();
+    let result = engine.query("alpha", &QueryOptions::default()).unwrap().0;
+    let (rows, blob) = result.fill_page(0, 1).unwrap();
+    let encoded_len = 8 + rows.len() * fmf_contract::pod::FmfRow::LEN + blob.len();
+
+    assert!(matches!(
+        result.fill_page_with_limit(0, 1, encoded_len - 1),
+        Err(EngineError::PageEncoding(
+            "encoded page exceeds the maximum payload length"
+        ))
+    ));
+    assert!(result.fill_page_with_limit(0, 1, encoded_len).is_ok());
+}
+
+#[test]
+fn fill_page_preserves_a_valid_parent_path_longer_than_u16() {
+    let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
+    let component = vec![b'x' as u16; 255];
+    let mut parent = 5;
+    for record in 10..270 {
+        builder.push(RawEntry {
+            parent_frn: Frn(parent),
+            frn: Frn((1 << 48) | record),
+            name_utf16: &component,
+            is_dir: true,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 0,
+            mtime: 0,
+        });
+        parent = record;
+    }
+    let leaf = "leaf.txt".encode_utf16().collect::<Vec<_>>();
+    builder.push(RawEntry {
+        parent_frn: Frn(parent),
+        frn: Frn((1 << 48) | 0x03E8),
+        name_utf16: &leaf,
+        is_dir: false,
+        is_reparse: false,
+        is_hidden: false,
+        is_system: false,
+        size: 1,
+        mtime: 0,
+    });
+
+    let (_dir, engine) = test_engine();
+    engine.insert_ready_volume("C:", builder.finish());
+    let result = engine.query("leaf", &QueryOptions::default()).unwrap().0;
+    let (rows, blob) = result.fill_page(0, 1).unwrap();
+    let row = rows[0];
+
+    assert!(row.parent_path_len > u16::MAX as u32);
+    assert_eq!(row._reserved, 0);
+    let start = row.parent_path_off as usize;
+    let end = start + row.parent_path_len as usize;
+    assert_eq!(end, blob.len());
+    assert!(blob[start..end].starts_with(b"C:\\"));
+}
+
+#[test]
 fn index_start_skips_an_already_indexed_volume() {
     let (_dir, e) = test_engine();
     e.insert_ready_volume("C:", vol("C:", &[("alpha.txt", 10)]));
@@ -68,7 +143,7 @@ fn index_start_skips_an_already_indexed_volume() {
     // the service also calls it at startup — it must be a no-op, not a second
     // slot. Duplicate slots make every query return C:'s rows once per copy
     // (the "each result appears N times" bug).
-    e.index_start(&["C:".to_string()]);
+    e.start_canonical_volumes(&["C:".to_string()]);
     assert_eq!(
         e.status().len(),
         1,
@@ -98,28 +173,97 @@ fn volume_label_validation_is_exactly_letter_colon() {
     }
 }
 
-/// `IndexStart` arrives unvalidated over the pipe. A request carrying only
-/// malformed labels must create no slots and (crucially) spawn no volume
-/// threads — the `DoS` / `snapshot_path` traversal guard. Valid-label
-/// acceptance is covered by the pure-function test above (calling `index_start`
-/// with a real "C:" here would spawn the admin-only worker — see the #[ignore]
-/// `engine_e2e` test).
+/// Invalid `IndexStart` input is a synchronous, transactional rejection: it
+/// creates no slots, worker threads, or misleading asynchronous events.
 #[test]
 fn index_start_rejects_malformed_volume_labels() {
+    use std::sync::Mutex as StdMutex;
+
     let (_dir, e) = test_engine();
-    e.index_start(&[
-        "..\\evil".to_string(),
-        "C:\\windows".to_string(),
-        "C".to_string(),
-        String::new(),
-        "CC:".to_string(),
-        "1:".to_string(),
-    ]);
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let captured = events.clone();
+    e.set_event_sink(Some(Arc::new(move |event| {
+        captured.lock().expect("event lock").push(event.clone());
+    })));
+    let error = e
+        .index_start(&[
+            "..\\evil".to_string(),
+            "C:\\windows".to_string(),
+            "C".to_string(),
+            String::new(),
+            "CC:".to_string(),
+            "1:".to_string(),
+        ])
+        .expect_err("malformed request must be rejected synchronously");
+    assert_eq!(
+        error,
+        super::IndexStartError::MalformedLabel { position: 0 }
+    );
     assert_eq!(
         e.status().len(),
         0,
         "malformed labels must not create volume slots"
     );
+    assert!(
+        events.lock().expect("event lock").is_empty(),
+        "request validation must not fabricate VolumeFailed events"
+    );
+}
+
+#[test]
+fn index_start_validation_is_canonical_unique_and_fixed_ntfs_only() {
+    use super::IndexStartError;
+    use super::volume::validate_index_start_volumes;
+
+    let available = ["C:".to_string(), "D:".to_string()];
+    assert_eq!(
+        validate_index_start_volumes(&["c:".to_string(), "D:".to_string()], &available),
+        Ok(vec!["C:".to_string(), "D:".to_string()])
+    );
+    assert_eq!(
+        validate_index_start_volumes(&["C:".to_string(), "c:".to_string()], &available),
+        Err(IndexStartError::DuplicateLabel {
+            label: "C:".to_string()
+        })
+    );
+    assert_eq!(
+        validate_index_start_volumes(&["E:".to_string()], &available),
+        Err(IndexStartError::UnavailableVolume {
+            label: "E:".to_string()
+        })
+    );
+}
+
+#[test]
+fn worker_spawn_failure_rolls_back_the_slot_and_reports_failure() {
+    use std::sync::Mutex as StdMutex;
+
+    let (dir, e) = test_engine();
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let captured = events.clone();
+    e.set_event_sink(Some(Arc::new(move |event| {
+        captured.lock().expect("event lock").push(event.clone());
+    })));
+
+    let store = Arc::new(super::seams::WinSnapshotStore::new(dir.join("c.fmfidx")));
+    let slot = Arc::new(super::volume::VolumeSlot::scanning("C:".to_owned(), store));
+    e.volumes.write().push(slot.clone());
+    e.volume_spawn_failed(
+        &slot,
+        &std::io::Error::new(std::io::ErrorKind::WouldBlock, "scripted"),
+    );
+
+    assert!(
+        e.status().is_empty(),
+        "failed provisional slot must not suppress a later retry"
+    );
+    assert!(events.lock().expect("event lock").iter().any(|event| {
+        matches!(
+            event,
+            EngineEvent::VolumeFailed { volume, message }
+                if volume == "C:" && message.contains("scripted")
+        )
+    }));
 }
 
 #[test]
@@ -157,11 +301,27 @@ fn rebuilt_volume_hard_stales_open_results() {
     // Journal gone → full rescan: C:'s index is rebuilt from scratch and
     // swapped into the slot. The open ResultSet still holds C: entry ids
     // from the old index — without a structural bump it would silently
-    // serve rows for unrelated entries (docs/ARCHITECTURE.md: full rescan
-    // hard-stales open handles).
+    // serve rows for unrelated entries.
     e.replace_ready_volume("C:", vol("C:", &[("omega.txt", 1), ("zeta.txt", 2)]));
 
     assert!(matches!(r.page(0, 10), Err(EngineError::Stale)));
+}
+
+#[test]
+fn deleted_result_entry_stales_page_instead_of_emitting_a_dead_row() {
+    let (_dir, e) = engine_with_two_volumes();
+    let result = e.query("alpha", &QueryOptions::default()).unwrap().0;
+    assert_eq!(result.page(0, 1).unwrap()[0].name, b"alpha.txt");
+
+    {
+        let volumes = e.volumes.read();
+        let slot = volumes.iter().find(|slot| slot.label == "C:").unwrap();
+        let mut guard = slot.index.write();
+        guard.as_mut().unwrap().delete(100);
+    }
+
+    assert!(matches!(result.page(0, 1), Err(EngineError::Stale)));
+    assert!(matches!(result.fill_page(0, 1), Err(EngineError::Stale)));
 }
 
 #[test]
@@ -195,14 +355,13 @@ fn typing_refines_cached_results_and_invalidation_goes_cold() {
     assert_eq!(t5.cache, "refine");
 }
 
-/// Idle USN traffic (logs, telemetry) re-queries the same text every few
-/// hundred ms. When the id lists come back identical the trace must say so —
-/// that flag is what stops the UI from repainting an unchanged screen.
+/// `unchanged` is exact identity against an explicit live presentation basis,
+/// never the engine-global refinement cache (ADR-0044).
 #[test]
 fn idle_requery_of_identical_results_reports_unchanged() {
     let (_dir, e) = engine_with_two_volumes();
     let opt = QueryOptions::default();
-    let (_, t1) = e.query("txt", &opt).unwrap();
+    let (basis, t1) = e.query("txt", &opt).unwrap();
     assert!(!t1.unchanged, "first run has no previous result");
 
     // A no-op USN batch: generation bumps, ids stay identical.
@@ -210,9 +369,13 @@ fn idle_requery_of_identical_results_reports_unchanged() {
         let mut g = slot.index.write();
         let idx = g.as_mut().unwrap();
         let n = idx.len() as u32;
-        idx.merge_new_into_permutations(n);
+        idx.merge_new_into_permutations(n)
+            .expect("fixture topology remains valid");
     }
-    let (_, t2) = e.query("txt", &opt).unwrap();
+    let cancellation = QueryCancellation::new();
+    let (same, t2) = e
+        .query_cancellable("txt", &opt, &cancellation, Some(&basis))
+        .unwrap();
     assert!(t2.unchanged, "same query, same ids");
     assert_eq!(
         t2.cache, "miss",
@@ -227,7 +390,7 @@ fn idle_requery_of_identical_results_reports_unchanged() {
         let idx = g.as_mut().unwrap();
         let first_new = idx.len() as u32;
         let units: Vec<u16> = "epsilon.txt".encode_utf16().collect();
-        idx.upsert(&RawEntry {
+        idx.upsert_synthetic(&RawEntry {
             parent_frn: Frn(5),
             frn: Frn((1 << 48) | 0x3E7),
             name_utf16: &units,
@@ -238,17 +401,50 @@ fn idle_requery_of_identical_results_reports_unchanged() {
             size: 5,
             mtime: 5,
         });
-        idx.merge_new_into_permutations(first_new);
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
     }
-    let (r3, t3) = e.query("txt", &opt).unwrap();
+    let (r3, t3) = e
+        .query_cancellable("txt", &opt, &cancellation, Some(&same))
+        .unwrap();
     assert!(!t3.unchanged, "a new hit must repaint");
     assert_eq!(r3.len(), 5);
 
-    // Different text is never "unchanged", but its stable repeat is.
-    let (_, t4) = e.query("tx", &opt).unwrap();
-    assert!(!t4.unchanged);
+    // Query text is irrelevant to presentation identity: a different query
+    // producing the same ordered IDs is safe to refresh in place.
+    let (_, t4) = e
+        .query_cancellable("tx", &opt, &cancellation, Some(&r3))
+        .unwrap();
+    assert!(t4.unchanged);
     let (_, t5) = e.query("tx", &opt).unwrap();
-    assert!(t5.unchanged, "stable repeat via the refine path");
+    assert!(!t5.unchanged, "no explicit basis means no identity claim");
+}
+
+#[test]
+fn cancelled_query_publishes_no_refine_cache_or_served_metric() {
+    let (_dir, e) = engine_with_two_volumes();
+    let opt = QueryOptions::default();
+    e.query("a", &opt).unwrap();
+    let before_metrics = e.metrics_snapshot().recent_queries.len();
+    let before_ids: Vec<_> = e
+        .volumes
+        .read()
+        .iter()
+        .map(|slot| slot.last_query.lock().as_ref().unwrap().ids.clone())
+        .collect();
+
+    let cancellation = QueryCancellation::new();
+    cancellation.cancel();
+    assert!(matches!(
+        e.query_cancellable("al", &opt, &cancellation, None),
+        Err(EngineError::Cancelled)
+    ));
+
+    assert_eq!(e.metrics_snapshot().recent_queries.len(), before_metrics);
+    for (slot, before) in e.volumes.read().iter().zip(before_ids) {
+        let cache = slot.last_query.lock();
+        assert!(Arc::ptr_eq(&cache.as_ref().unwrap().ids, &before));
+    }
 }
 
 #[test]
@@ -264,7 +460,7 @@ fn status_reports_ready_volumes() {
 
 /// Real-volume E2E: `index_start` → `VolumeReady` → query → snapshot save on
 /// shutdown → `load_from` restores the same entry count. Run from an elevated
-/// shell: `FMF_ADMIN_TESTS=1` cargo test -p fmf-core -- --ignored `engine_e2e`
+/// Run with `just test-admin` from an elevated terminal.
 #[cfg(windows)]
 #[test]
 fn flush_saves_dirty_volumes_and_skips_clean_ones() {
@@ -301,16 +497,25 @@ fn second_engine_on_same_index_dir_is_locked() {
     .expect("lock must free on drop");
 }
 
+/// Fails closed. `#[ignore]` is what *skips* this test; reaching the body
+/// without the arming variable means the harness was invoked outside
+/// `just test-admin`, and a silent early return would be indistinguishable
+/// from a real-volume run that actually happened.
+fn require_admin_gate() {
+    assert_eq!(
+        std::env::var("FMF_ADMIN_TESTS").as_deref(),
+        Ok("1"),
+        "this ignored real-volume test must run only through `just test-admin`"
+    );
+}
+
 #[test]
 #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
 fn engine_e2e_scan_query_snapshot_restore() {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    if std::env::var("FMF_ADMIN_TESTS").as_deref() != Ok("1") {
-        eprintln!("FMF_ADMIN_TESTS != 1 — skipping");
-        return;
-    }
+    require_admin_gate();
 
     // Fresh per-run index dir → guaranteed full-scan path (no stale snapshot).
     let dir = TestDir::new();
@@ -323,7 +528,8 @@ fn engine_e2e_scan_query_snapshot_restore() {
     e.set_event_sink(Some(Arc::new(move |ev| {
         let _ = tx.send(ev.clone());
     })));
-    e.index_start(&["C:".to_string()]);
+    e.index_start(&["C:".to_string()])
+        .expect("C: must be an attached fixed NTFS volume");
 
     let ready_entries = loop {
         match rx.recv_timeout(Duration::from_mins(10)) {

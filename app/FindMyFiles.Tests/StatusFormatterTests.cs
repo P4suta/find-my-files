@@ -80,12 +80,13 @@ public sealed class StatusFormatterTests
     }
 
     [Theory]
-    [InlineData(VolumeState.Scanning, "C: indexing… 1,000 items")]
-    [InlineData(VolumeState.Ready, "C: ready — 1,000 items")]
-    [InlineData(VolumeState.Rescanning, "C: rescanning…")]
-    [InlineData(VolumeState.Failed, "C: indexing failed")]
-    public void Volume_KnownStates_FormatTheStatusLine(VolumeState state, string expected)
+    [InlineData(0, "C: indexing… 1,000 items")]
+    [InlineData(1, "C: ready — 1,000 items")]
+    [InlineData(2, "C: rescanning…")]
+    [InlineData(3, "C: indexing failed")]
+    public void Volume_KnownStates_FormatTheStatusLine(int stateValue, string expected)
     {
+        var state = (VolumeState)stateValue;
         var status = new VolumeStatus("C:", state, 1000);
         Assert.Equal(expected, StatusFormatter.Volume(status, "prev"));
     }
@@ -123,9 +124,21 @@ public sealed class StatusFormatterTests
     }
 
     [Fact]
+    public void EngineMode_TerminalPipeFault_SaysDisconnected()
+    {
+        using var stub = new StubEngineClient
+        {
+            Kind = EngineClientKind.Service,
+            Connection = EngineConnectionState.Faulted,
+        };
+
+        Assert.Equal("disconnected", StatusFormatter.EngineMode(stub));
+    }
+
+    [Fact]
     public void EngineMode_UnknownClientType_IsEmpty()
     {
-        using var stub = new StubEngineClient();
+        using var stub = new StubEngineClient { Kind = (EngineClientKind)999 };
         Assert.Equal(string.Empty, StatusFormatter.EngineMode(stub));
     }
 }

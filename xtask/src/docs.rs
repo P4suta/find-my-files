@@ -1,106 +1,146 @@
-//! `xtask docs-assemble` — assemble the GitHub Pages site under build/site
-//! (replaces the Copy-Item step in pages.yml). The committed landing page
-//! (site/) is the base; the mdBook output (build/docs-book) and rustdoc
-//! (build/engine/doc) layer on top as build/site/book and build/site/doc, and
-//! the C# API reference (build/docs-csharp/_site), when present, as
-//! build/site/api (ADR-0021). pages.yml then uploads build/site as the Pages
-//! artifact.
+//! Assemble the deliberately small Pages artifact: committed landing page plus
+//! the canonical mdBook. Implementation API documentation is not published.
+
+use std::fs;
+use std::path::Path;
 
 use crate::{fsx, paths};
 use anyhow::{bail, Context, Result};
+
+fn require_nonempty(path: &Path) -> Result<()> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("missing required documentation file {}", path.display()))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        bail!(
+            "required documentation file is empty or not a file: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn assemble(landing: &Path, book: &Path, site: &Path) -> Result<()> {
+    for required in [
+        landing.join("index.html"),
+        landing.join("en").join("index.html"),
+        landing.join("style.css"),
+        book.join("index.html"),
+    ] {
+        require_nonempty(&required)?;
+    }
+
+    // Build a complete candidate next to the final directory. Publishing must
+    // never merge into an earlier site: mdBook fingerprints assets, so a merge
+    // silently retains obsolete hashes and dead pages forever.
+    let candidate = site.with_extension("candidate");
+    fsx::force_remove_dir_all(&candidate)
+        .with_context(|| format!("clear stale candidate {}", candidate.display()))?;
+
+    let copied = (|| -> Result<()> {
+        fsx::copy_dir_all(landing, &candidate)
+            .with_context(|| format!("copy {} -> {}", landing.display(), candidate.display()))?;
+        fsx::copy_dir_all(book, &candidate.join("book")).with_context(|| {
+            format!(
+                "copy {} -> {}",
+                book.display(),
+                candidate.join("book").display()
+            )
+        })?;
+        Ok(())
+    })();
+    if let Err(error) = copied {
+        let _ = fsx::force_remove_dir_all(&candidate);
+        return Err(error);
+    }
+
+    fsx::force_remove_dir_all(site)
+        .with_context(|| format!("clear previous site {}", site.display()))?;
+    fs::rename(&candidate, site).with_context(|| {
+        format!(
+            "promote complete documentation site {} -> {}",
+            candidate.display(),
+            site.display()
+        )
+    })?;
+    Ok(())
+}
 
 pub fn run() -> Result<()> {
     let root = paths::repo_root();
     let site = paths::site_dir();
 
-    // The committed landing page (site/: index.html, en/, style.css) is the
-    // base of the assembled site — copy it into build/site first, then layer
-    // the generated docs on top. site/ is source, build/site is the output.
     let landing = root.join("site");
     if !landing.is_dir() {
         bail!("missing {} — the committed landing page", landing.display());
     }
-    fsx::copy_dir_all(&landing, &site)
-        .with_context(|| format!("copy {} -> {}", landing.display(), site.display()))?;
 
-    // mdBook output + rustdoc are required (`just doc`).
-    let required = [
-        (paths::build_root().join("docs-book"), site.join("book")),
-        (
-            paths::build_root().join("engine").join("doc"),
-            site.join("doc"),
-        ),
-    ];
-    for (src, dst) in &required {
-        if !src.is_dir() {
-            bail!(
-                "missing {} — build the docs first (just doc)",
-                src.display()
-            );
-        }
-        fsx::copy_dir_all(src, dst)
-            .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
-    }
-
-    // `cargo doc` on a multi-crate workspace writes no root index.html (only
-    // per-crate dirs like fmf_core/index.html), so a bare /doc/ would 404. Drop
-    // a redirect to the core crate; rustdoc's crate dropdown reaches the rest.
-    let doc_index = site.join("doc").join("index.html");
-    std::fs::write(&doc_index, doc_index_redirect_html("fmf_core"))
-        .with_context(|| format!("write {}", doc_index.display()))?;
-
-    // The C# API reference is optional: when `just doc-csharp` (DefaultDocumentation
-    // -> mdBook) hasn't been run, or it failed, build/docs-csharp/_site is absent
-    // and we omit the api/ section with a loud warning rather than failing the
-    // whole deploy. pages.yml runs doc-csharp before this, so /api/ is populated.
-    let api_src = paths::build_root().join("docs-csharp").join("_site");
-    let api_dst = site.join("api");
-    if api_src.is_dir() {
-        fsx::copy_dir_all(&api_src, &api_dst)
-            .with_context(|| format!("copy {} -> {}", api_src.display(), api_dst.display()))?;
-        println!("docs-assemble: assembled landing + book + doc + api into build/site/");
-    } else {
-        eprintln!(
-            "docs-assemble: WARNING — {} missing; omitting the C# API reference \
-             (run `just doc-csharp` first)",
-            api_src.display()
+    let book = paths::build_root().join("docs-book");
+    if !book.is_dir() {
+        bail!(
+            "missing {} — build the docs first (just doc)",
+            book.display()
         );
-        println!("docs-assemble: assembled landing + book + doc into build/site/ (api omitted)");
     }
-    Ok(())
-}
+    assemble(&landing, &book, &site)?;
 
-/// The redirect page written at the rustdoc output root (build/site/doc/
-/// index.html). `cargo doc` on a multi-crate workspace emits no top-level
-/// index, so /doc/ would 404; this meta-refreshes to the core crate, from which
-/// rustdoc's crate dropdown reaches the rest. Returns the page so the markup is
-/// unit-tested without touching the filesystem.
-fn doc_index_redirect_html(crate_name: &str) -> String {
-    format!(
-        "<!DOCTYPE html>\n\
-         <html lang=\"en\">\n\
-         <head>\n\
-         <meta charset=\"utf-8\">\n\
-         <meta http-equiv=\"refresh\" content=\"0; url={crate_name}/index.html\">\n\
-         <link rel=\"canonical\" href=\"{crate_name}/index.html\">\n\
-         <title>find-my-files — Rust API</title>\n\
-         </head>\n\
-         <body>\n\
-         <p>Redirecting to the <a href=\"{crate_name}/index.html\">find-my-files Rust API</a>…</p>\n\
-         </body>\n\
-         </html>\n"
-    )
+    println!("docs-assemble: assembled landing + canonical book into build/site/");
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("xtask-docs-{tag}-{}", std::process::id()))
+    }
+
+    fn write_required_sources(base: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let landing = base.join("landing");
+        let book = base.join("book");
+        fs::create_dir_all(landing.join("en")).unwrap();
+        fs::create_dir_all(&book).unwrap();
+        fs::write(landing.join("index.html"), b"ja").unwrap();
+        fs::write(landing.join("en").join("index.html"), b"en").unwrap();
+        fs::write(landing.join("style.css"), b"css").unwrap();
+        fs::write(book.join("index.html"), b"book").unwrap();
+        (landing, book)
+    }
+
     #[test]
-    fn doc_redirect_points_at_the_named_crate() {
-        let html = doc_index_redirect_html("fmf_core");
-        assert!(html.starts_with("<!DOCTYPE html>"));
-        assert!(html.contains("content=\"0; url=fmf_core/index.html\""));
-        assert!(html.contains("href=\"fmf_core/index.html\""));
+    fn assembly_replaces_the_whole_site_without_stale_assets() {
+        let base = scratch("replace");
+        let _ = fsx::force_remove_dir_all(&base);
+        let (landing, book) = write_required_sources(&base);
+        let site = base.join("site");
+        fs::create_dir_all(site.join("book")).unwrap();
+        fs::write(site.join("book").join("old-hash.js"), b"stale").unwrap();
+
+        assemble(&landing, &book, &site).unwrap();
+
+        assert_eq!(fs::read(site.join("index.html")).unwrap(), b"ja");
+        assert_eq!(
+            fs::read(site.join("book").join("index.html")).unwrap(),
+            b"book"
+        );
+        assert!(!site.join("book").join("old-hash.js").exists());
+        assert!(!site.with_extension("candidate").exists());
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn missing_input_leaves_the_previous_site_untouched() {
+        let base = scratch("invalid");
+        let _ = fsx::force_remove_dir_all(&base);
+        let (landing, book) = write_required_sources(&base);
+        fs::remove_file(landing.join("style.css")).unwrap();
+        let site = base.join("site");
+        fs::create_dir_all(&site).unwrap();
+        fs::write(site.join("keep.txt"), b"old-good").unwrap();
+
+        assert!(assemble(&landing, &book, &site).is_err());
+        assert_eq!(fs::read(site.join("keep.txt")).unwrap(), b"old-good");
+        assert!(!site.with_extension("candidate").exists());
+        fsx::force_remove_dir_all(&base).unwrap();
     }
 }

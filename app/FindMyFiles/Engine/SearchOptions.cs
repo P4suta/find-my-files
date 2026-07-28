@@ -1,7 +1,8 @@
 namespace FindMyFiles.Engine;
 
 /// <summary>The knobs that shape a search, passed to
-/// <see cref="IEngineClient.SearchAsync"/> (the C# face of fmf-core's
+/// <see cref="IEngineClient.SearchAsync(string, SearchOptions, CancellationToken)"/>
+/// (the C# face of fmf-core's
 /// <c>FmfQueryOptions</c>).</summary>
 /// <param name="Sort">Which key to order results by.</param>
 /// <param name="Descending">True for descending order; false for
@@ -13,7 +14,7 @@ namespace FindMyFiles.Engine;
 /// expression (the <c>regex:</c> per-term syntax still works regardless).</param>
 /// <param name="Scope">Which haystack the whole-query regex matches against
 /// (ignored unless <paramref name="RegexMode"/>).</param>
-public sealed record SearchOptions(
+internal sealed record SearchOptions(
     FmfSort Sort,
     bool Descending,
     FmfCase Case,

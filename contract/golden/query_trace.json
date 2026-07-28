@@ -1,5 +1,5 @@
 {
-  "query": "win ext:txt",
+  "query_length": 11,
   "driver": "pool-scan",
   "cache": "refine",
   "unchanged": false,

@@ -1,10 +1,9 @@
 # cargo-mutants config (ADR-0022). Curated to the highest-risk fmf-core
-# soundness surfaces only, so a CI lane runs in minutes rather than over the
-# whole workspace. It is NOT at the default .cargo/mutants.toml path on purpose,
-# so it must be passed explicitly: `just mutants --config mutants.toml` (the
-# recipe runs from engine/, so the path is relative to it — `just mutants --list`
-# alone enumerates the *whole* workspace; the `--config` is what scopes it to the
-# 7 files below). `just mutants --config mutants.toml --in-diff <diff>` for PRs.
+# soundness surfaces only, so the exact gate runs in bounded time rather than
+# over the whole workspace. `just mutants` is the only supported entry point:
+# xtask fixes cargo-mutants 27.1.0, this config, `--baseline run`,
+# `--no-shuffle`, and the output directory. No caller-supplied option can skip
+# the clean-tree baseline or silently narrow the reviewed scope.
 #
 # Globs containing a slash match the entire repo-relative path, so the `**/`
 # prefix reaches `crates/fmf-core/src/...` from the engine workspace root. A bare
@@ -12,49 +11,73 @@
 # accidentally pulling same-named files from other crates.
 
 # Where a broken mutant is most likely to slip past the suite: query execution,
-# subsumption, compilation, the in-memory index mutate/compact paths, USN replay,
-# and the WTF-8 codec (unsafe surface).
+# subsumption, compilation, the in-memory index mutate/compact paths, raw $MFT
+# parsing, USN replay, and the WTF-8 codec.
+#
+# `ondisk/` is the NTFS byte grammar that ADR-0047 moved out from behind the
+# Windows gate: boot sector / FILE record header / attribute headers /
+# $FILE_NAME (`ntfs.rs`), the attribute-chain validator (`record.rs`),
+# $ATTRIBUTE_LIST plus non-resident run maps (`attribute_list.rs`), and the
+# update-sequence array (`fixup.rs`). An attacker who hands the machine a
+# crafted VHDX or USB stick chooses every byte these decode, and fmf-service
+# decodes them as LocalSystem, so this is the scope's whole reason to exist.
 examine_globs = [
   "**/src/query/exec.rs",
   "**/src/query/subsume.rs",
   "**/src/query/compile.rs",
   "**/src/index/mutate.rs",
   "**/src/index/compact.rs",
+  "**/src/scan/parse.rs",
   "**/src/usn/apply.rs",
   "**/src/wtf8.rs",
+  "**/src/ondisk/ntfs.rs",
+  "**/src/ondisk/record.rs",
+  "**/src/ondisk/attribute_list.rs",
+  "**/src/ondisk/fixup.rs",
 ]
 
-# `scan/parse.rs` is deliberately NOT listed above. Its byte-fixture suite
-# (`scan::parse::tests`) passes in every ordinary build — `cargo test --lib`,
-# `--release`, and even a plain `RUSTFLAGS="--cfg mutants"` run are all green —
-# so it remains the file's primary defence and is the right place to harden the
-# $MFT decoder. But under cargo-mutants' scratch-tree copy the *unmutated*
-# baseline fails: `plain_file_record_parses_name_parent_and_size` and
-# `resident_data_size_is_the_value_length` read a $DATA size of 0 instead of the
-# fixture value. Both go through ntfs-reader's `resident_header()` /
-# `nonresident_header()`, which hand back a reference into a `#[repr(packed)]`
-# attribute header; reading `value_length` / `data_size` off that reference is an
-# unaligned-reference UB in the dependency that only manifests under the codegen
-# of cargo-mutants' separate build (the mtime path uses a different accessor and
-# stays green, which is why only the two size assertions fail). A failing
-# baseline aborts the whole run before any mutant is tested, so parse.rs cannot
-# be mutation-tested here regardless — and the UB is in ntfs-reader, not our
-# code, so there is nothing to fix on our side. Coverage of the decoder is owned
-# by the in-tree fixtures, not this harness.
+# fmf-service/src/security.rs is deliberately absent, and the reason is
+# mechanical rather than a judgement about its importance. cargo-mutants drives
+# nextest with default arguments — it has no `--run-ignored`, and xtask passes
+# it no test arguments — so `#[ignore]` tests can never run under this gate.
+# security.rs's behavioural coverage is `tests/security_admin.rs`, which is
+# `#[ignore]` + `FMF_ADMIN_TESTS=1`; only the 12 in-file unit tests over the
+# pure SDDL/SID string helpers run here. Of the 408 mutants cargo-mutants
+# generates in that file, roughly 60 land in functions those unit tests reach
+# and the remaining ~85% land in Win32 handle, hardening, quarantine and
+# atomic-replace code that no test in this gate executes. Every one of those
+# would survive by construction, which teaches nothing and would bloat the
+# reviewed baseline with entries that only look like accepted equivalents.
+# Narrowing to just the pure helpers is not available either: the file-level
+# glob is all-or-nothing, `examine_re`/`exclude_re` are global rather than
+# per-file, and `#[mutants::skip]` is rejected outright by the CI runner
+# (`contains_rust_user_ignore` in xtask/src/mutation_ci.rs).
+# The same argument excludes the rest of fmf-service for a weaker reason:
+# pipe.rs / server.rs / dispatch.rs / lifecycle.rs / config.rs *are* covered
+# unelevated (tests/pipe_loopback.rs, accept_loop_loss.rs, idle_stop.rs), so
+# mutating them would give real signal — they are left out only to keep the
+# gate's runtime bounded, and they are the first candidates if it is widened.
+# Re-examination trigger: security.rs becomes mutable here the moment its
+# privileged paths gain unelevated coverage (a fake-handle seam, or a separate
+# elevated mutation gate with its own baseline), not before.
+
+# Keep each cargo-mutants sandbox's build artifacts inside the sandbox.
+# `engine/.cargo/config.toml` sets `target-dir = "../build/engine"`, which is
+# relative to the workspace root — so inside a sandbox at
+# `%TEMP%\cargo-mutants-engine-XXXX.tmp` it resolves to `%TEMP%\build\engine`,
+# a single directory shared by every sandbox and by every run. Cargo then
+# reuses one sandbox's binaries in another, which destroys the isolation the
+# sandbox exists for: measured here, a clean-tree baseline reused a previous
+# mutant's `fmf-core` test binary and failed with `assertion failed:
+# apply_fixup(...)` — the exact mutant under test — while the same source tree
+# passed 362/362 outside the sandbox. Caught and missed verdicts are both
+# unsound without this. The path is relative, so it resolves against each
+# sandbox's own root; it does not create a stray `engine/target/` in the repo.
+additional_cargo_args = ["--target-dir", "target"]
 
 # Some of these tests do real index/USN-replay work, so a mutated build can run
 # slower than the clean baseline before it's caught. Give each mutant 5x the
 # baseline test time (plus the auto lower bound) so slow-but-correct mutants
 # don't get miscounted as timeouts.
 timeout_multiplier = 5.0
-
-# Run the library unit tests plus the USN-replay integration test, but NOT the
-# `golden_json` integration test: it reads `contract/golden/*.json` from the
-# repo root via `CARGO_MANIFEST_DIR/../../../contract/golden`, which sits
-# OUTSIDE the engine workspace cargo-mutants copies into its scratch tree — so
-# it fails in the unmutated baseline ("cannot read golden file") and aborts the
-# whole run before any mutant is tested. It pins serde shapes (ADR-0018), not
-# the query/index/usn/wtf8 logic under examination here, so dropping it from the
-# mutation harness costs no kill power. `usn_replay` builds its own byte buffers
-# (no external files) and is a key killer for the index/usn mutants, so it stays.
-additional_cargo_test_args = ["--lib", "--test", "usn_replay"]
+test_tool = "nextest"

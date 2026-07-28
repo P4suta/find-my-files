@@ -1,5 +1,6 @@
 using System.IO.Pipes;
 using FindMyFiles.Engine;
+using FindMyFiles.Services;
 
 namespace FindMyFiles.Tests.TestDoubles;
 
@@ -24,7 +25,7 @@ namespace FindMyFiles.Tests.TestDoubles;
 /// <see cref="Handler"/>; tests that need the real semantics use the real
 /// service (FMF_PIPE_TESTS).
 /// </summary>
-public sealed class FakePipeServer : IDisposable
+internal sealed class FakePipeServer : IDisposable
 {
     private sealed class Conn
     {
@@ -48,12 +49,16 @@ public sealed class FakePipeServer : IDisposable
 
     public uint ProtocolVersion { get; set; } = PipeProtocol.ProtocolVersion;
 
-    public uint AbiVersion { get; set; } = 1;
+    public uint AbiVersion { get; set; } = EngineContract.AbiVersion;
 
     public uint ServerPid { get; set; } = 4242;
 
     /// <summary>Write every response one byte at a time.</summary>
     public bool ChunkedWrites { get; set; }
+
+    /// <summary>Optional malformed-response injection: maps a request opcode
+    /// to the opcode echoed in its response header.</summary>
+    public Func<ushort, ushort>? ResponseOpcode { get; set; }
 
     /// <summary>Answer for ListVolumes and IndexStatus.</summary>
     public List<VolumeStatus> Statuses { get; set; } = [new("C:", VolumeState.Ready, 42)];
@@ -80,7 +85,7 @@ public sealed class FakePipeServer : IDisposable
             _acceptGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         }
 
-        _ = Task.Run(AcceptLoopAsync);
+        Task.Run(AcceptLoopAsync).Forget("test-fake-pipe-accept");
     }
 
     /// <summary>Close the accept gate: no new pipe instance is created until
@@ -233,7 +238,7 @@ public sealed class FakePipeServer : IDisposable
             }
 
             var index = Interlocked.Increment(ref _connections) - 1;
-            _ = Task.Run(() => ServeAsync(conn, index));
+            Task.Run(() => ServeAsync(conn, index)).Forget("test-fake-pipe-connection");
         }
     }
 
@@ -257,21 +262,37 @@ public sealed class FakePipeServer : IDisposable
                     _received.Add((index, h.Opcode, payload));
                 }
 
+                // QueryCancel is a one-way control frame: the real service
+                // consumes it in the reader and never emits a response. A
+                // fake response would reuse the query request id with opcode
+                // QueryCancel, look like an opcode mismatch to the client,
+                // and tear down the connection before a late Query response
+                // can release its orphaned result.
+                if (h.Opcode == PipeProtocol.Op.QueryCancel)
+                {
+                    continue;
+                }
+
                 // Concurrent dispatch: a held response (Handler gate) must
                 // not stop the server from reading the next request.
-                _ = Task.Run(async () =>
+                Task.Run(async () =>
                 {
                     try
                     {
                         var (status, resp) = await HandleAsync(h.Opcode, payload);
                         await SendAsync(
-                            conn, h.Opcode, PipeProtocol.FlagResponse, h.RequestId, status, resp);
+                            conn,
+                            ResponseOpcode?.Invoke(h.Opcode) ?? h.Opcode,
+                            PipeProtocol.FlagResponse,
+                            h.RequestId,
+                            status,
+                            resp);
                     }
                     catch
                     {
                         // Connection torn down mid-response — fine in tests.
                     }
-                });
+                }).Forget("test-fake-pipe-response");
             }
         }
         catch

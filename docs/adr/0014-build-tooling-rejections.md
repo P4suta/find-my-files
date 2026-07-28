@@ -1,15 +1,18 @@
 # ADR-0014: Build tooling rejection record and codegen-units=1
 
-Date: 2026-06-11 / Status: Rejections recorded (codegen-units=1 accepted)
+Date: 2026-06-11 / Status: Rejections recorded (codegen-units=1 accepted).
+Partially superseded by [ADR-0041](0041-nextest-bounded-test-execution.md),
+which supersedes only the cargo-nextest rejection; the rust-lld and sccache
+rejections and the codegen-units=1 decision remain in force.
 
 ## Decision
 
-Do not adopt rust-lld, sccache, or cargo-nextest. The release profile keeps `codegen-units = 1` + `lto = "thin"` (engine/Cargo.toml).
+Do not adopt rust-lld or sccache. The release profile keeps `codegen-units = 1` + `lto = "thin"` (engine/Cargo.toml). The historical nextest rejection below is retained as evidence but is superseded by ADR-0041.
 
 ## Rationale
 
 - Fair A/B of rust-lld vs MSVC link.exe (3 crates in the engine workspace): fmf-cli incremental 1.72s vs 1.73s, full test link after fmf-core change 3.44s vs 3.46s — no difference. Zero measured improvement does not justify the risk of a non-standard linker (DLL output, CI divergence).
-- sccache rejected because it disables incremental compilation. cargo-nextest rejected because the test suite is small and shows no benefit (both A/B decisions on the same day).
+- sccache rejected because it disables incremental compilation. cargo-nextest was initially rejected because the then-small suite showed no benefit; ADR-0041 later adopted it for bounded execution and per-test attribution.
 - codegen-units=1: rustc splits codegen units per module, so splitting the query kernel into exec/sweep/matchers/memo loses inlining and produces **~10% query latency** (A/B measured in the same machine state). With 1 unit, hot-path inlining is independent of module layout.
 
 ## Consequences

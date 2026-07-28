@@ -8,7 +8,7 @@ use super::json;
 struct DiagReport {
     version: &'static str,
     arch: &'static str,
-    engine_log: String,
+    engine_log_dir: String,
     app_log: String,
     log_filter: &'static str,
     recent_errors: serde_json::Value,
@@ -16,7 +16,7 @@ struct DiagReport {
 
 pub fn diag(ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
     let program_data = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
-    let engine_log = format!(r"{program_data}\find-my-files\logs\engine.log");
+    let engine_log_dir = format!(r"{program_data}\find-my-files\logs");
     let app_log = r"%APPDATA%\find-my-files\logs\app.log".to_owned();
     let errors = fmf_core::diag::recent_errors();
 
@@ -27,7 +27,7 @@ pub fn diag(ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
             // channel/sha and disagreed with --version.
             version: fmf_buildstamp::VERSION,
             arch: std::env::consts::ARCH,
-            engine_log,
+            engine_log_dir,
             app_log,
             log_filter: "FMF_LOG",
             recent_errors: serde_json::to_value(&errors)?,
@@ -39,7 +39,7 @@ pub fn diag(ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
         fmf_buildstamp::VERSION,
         std::env::consts::ARCH
     );
-    println!("engine log : {engine_log}");
+    println!("engine logs: {engine_log_dir} (rolling engine.<date>.log)");
     println!("app log    : {app_log}");
     println!("log filter : FMF_LOG (env var, e.g. FMF_LOG=debug)");
     println!("recent in-process diagnostics ({}):", errors.len());

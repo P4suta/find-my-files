@@ -5,7 +5,7 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-public sealed class NotificationCenterTests
+public sealed class NotificationCenterTests : IDisposable
 {
     private readonly ManualDispatcher _dispatcher = new();
     private readonly NotificationCenter _center;
@@ -13,6 +13,16 @@ public sealed class NotificationCenterTests
     public NotificationCenterTests()
     {
         _center = new NotificationCenter(_dispatcher);
+    }
+
+    [Fact]
+    public void Notification_action_automation_id_is_stable_and_unique()
+    {
+        var first = new AppNotification(NotifySeverity.Info, "first");
+        var second = new AppNotification(NotifySeverity.Info, "second");
+
+        Assert.Equal($"NotificationAction-{first.Id}", first.ActionAutomationId);
+        Assert.NotEqual(first.ActionAutomationId, second.ActionAutomationId);
     }
 
     [Fact]
@@ -63,4 +73,26 @@ public sealed class NotificationCenterTests
 
         Assert.Empty(_center.Items);
     }
+
+    [Fact]
+    public void Dispose_detaches_notifier_and_stops_pending_timers()
+    {
+        Notifier.ResetForTests();
+        _center.AttachToNotifier();
+        _center.Push(new AppNotification(NotifySeverity.Info, "pending"));
+        var timer = Assert.Single(_dispatcher.Timers);
+
+        _center.Dispose();
+        _center.Dispose();
+        Notifier.Post(NotifySeverity.Error, "after-dispose");
+        _dispatcher.DrainQueue();
+
+        Assert.False(timer.IsStarted);
+        Assert.DoesNotContain(
+            _center.Items,
+            n => string.Equals(n.Message, "after-dispose", StringComparison.Ordinal));
+        Notifier.ResetForTests();
+    }
+
+    public void Dispose() => _center.Dispose();
 }

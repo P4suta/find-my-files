@@ -2,6 +2,7 @@ using FindMyFiles.Engine;
 using FindMyFiles.Services;
 using FindMyFiles.ViewModels;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace FindMyFiles.Views;
@@ -12,10 +13,9 @@ namespace FindMyFiles.Views;
 /// Toggles two-way bind to the shared <see cref="MainViewModel"/> (its
 /// OnXxxChanged handlers persist + requery); sort, regex scope and language go
 /// through the same VM methods the old menu used. Actions that open another
-/// surface (diagnostics window, service / scope dialogs) close this dialog first
+/// surface (diagnostics window or service dialog) close this dialog first
 /// and run once it is fully dismissed — only one <see cref="ContentDialog"/> may
-/// be open per <c>XamlRoot</c>. The peer of <see cref="ScopeManagerDialog"/> /
-/// <see cref="ServiceManagerDialog"/>.
+/// be open per <c>XamlRoot</c>. The peer of <see cref="ServiceManagerDialog"/>.
 /// </summary>
 // View code-behind: dialog wiring, not unit-tested (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
@@ -25,16 +25,40 @@ public sealed partial class SettingsDialog : ContentDialog
 
     /// <summary>The page's ViewModel, shared so the dialog drives the same
     /// search/filter/sort state the search box and result list read.</summary>
-    public MainViewModel VM { get; }
+    internal MainViewModel VM { get; }
 
     /// <summary>An action queued by a card that opens another surface; run after
     /// this dialog is dismissed so the next ContentDialog/window opens cleanly.</summary>
     private Action? _pendingAction;
+    private bool _restoringLanguage;
 
     private SettingsDialog(MainViewModel vm)
     {
         VM = vm;
         InitializeComponent();
+        OptFocusedCard.Header = Loc.GetXaml("OptFocused", "Header");
+        OptFocusedCard.Description = Loc.GetXaml("OptFocused", "Description");
+        OptSystemCard.Header = Loc.GetXaml("OptSystem", "Header");
+        OptRegexCard.Header = Loc.GetXaml("OptRegex", "Header");
+        OptRegexCard.Description = Loc.GetXaml("OptRegex", "Description");
+        RegexScopeCard.Header = Loc.GetXaml("RegexScopeMenu", "Header");
+        SortFieldCard.Header = Loc.GetXaml("SortHeaderItem", "Header");
+        SortDescendingCard.Header = Loc.GetXaml("SortDescendingCard", "Header");
+        LanguageCard.Header = Loc.GetXaml("LangMenu", "Header");
+        CloseToTrayCard.Header = Loc.GetXaml("OptCloseToTray", "Header");
+        CloseToTrayCard.Description = Loc.GetXaml("OptCloseToTray", "Description");
+        DiagnosticsCard.Header = Loc.GetXaml("DiagCard", "Header");
+        DiagnosticsCard.Description = Loc.GetXaml("DiagCard", "Description");
+        ServiceCard.Header = Loc.GetXaml("ServiceCard", "Header");
+        ServiceCard.Description = Loc.GetXaml("ServiceCard", "Description");
+        AutomationProperties.SetName(OptFocusedToggle, Loc.GetXaml("OptFocused", "Header"));
+        AutomationProperties.SetName(OptSystemToggle, Loc.GetXaml("OptSystem", "Header"));
+        AutomationProperties.SetName(OptRegexToggle, Loc.GetXaml("OptRegex", "Header"));
+        AutomationProperties.SetName(
+            SortDescendingToggle,
+            Loc.GetXaml("SortDescendingCard", "Header"));
+        AutomationProperties.SetName(LangCombo, Loc.GetXaml("LangMenu", "Header"));
+        AutomationProperties.SetName(CloseToTrayToggle, Loc.GetXaml("OptCloseToTray", "Header"));
 
         // Reflect persisted state into the controls that can't two-way bind
         // (radios drive VM methods, the language combo relaunches). Setting
@@ -65,7 +89,7 @@ public sealed partial class SettingsDialog : ContentDialog
     /// once the dialog has fully closed.</summary>
     /// <param name="vm">The page ViewModel to drive.</param>
     /// <returns>A <see cref="Task"/> that completes when the dialog closes.</returns>
-    public static async Task OpenAsync(MainViewModel vm)
+    internal static async Task OpenAsync(MainViewModel vm)
     {
         if (_open)
         {
@@ -83,10 +107,21 @@ public sealed partial class SettingsDialog : ContentDialog
         {
             var dialog = new SettingsDialog(vm) { XamlRoot = root };
 
+            // An in-process soft restart (ADR-0036) rebuilds the page under this
+            // dialog. A ContentDialog is hosted in the XamlRoot's popup layer, not
+            // in the root Frame, so re-navigating the Frame does not touch it: it
+            // would float above the fresh page still driving the torn-down page's
+            // view model (disposed engine, dead Perf). Registered for exactly as
+            // long as it is on screen, so the restart takes it down with the page
+            // it belongs to.
+
             // Populate the About block's engine version as the dialog appears
             // (best-effort; the bound rows fill in when it resolves).
             vm.RefreshVersionsAsync().Forget("settings-version");
-            await dialog.ShowAsync();
+            using (AppReload.TrackModal(dialog.DismissForReload))
+            {
+                await dialog.ShowAsync();
+            }
 
             // Closed now — safe to open the next surface (another ContentDialog
             // would throw while this one is still up).
@@ -101,6 +136,17 @@ public sealed partial class SettingsDialog : ContentDialog
         {
             _open = false;
         }
+    }
+
+    /// <summary>Close this dialog because the page graph is being rebuilt
+    /// (soft restart, ADR-0036). Any queued follow-up surface is dropped first:
+    /// it would open against the very view models the restart is disposing —
+    /// e.g. the diagnostics window on a dead <c>PerfPanelViewModel</c>, whose
+    /// 1 Hz poll would then fail forever.</summary>
+    private void DismissForReload()
+    {
+        _pendingAction = null;
+        Hide();
     }
 
     private void RegexScopeName_Click(object sender, RoutedEventArgs e) =>
@@ -134,7 +180,8 @@ public sealed partial class SettingsDialog : ContentDialog
     // selection never restarts.
     private void Language_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (LangCombo.SelectedItem is not FrameworkElement { Tag: string lang })
+        if (_restoringLanguage
+            || LangCombo.SelectedItem is not FrameworkElement { Tag: string lang })
         {
             return;
         }
@@ -145,12 +192,61 @@ public sealed partial class SettingsDialog : ContentDialog
             return;
         }
 
-        settings.Language = lang;
-        settings.Save();
-        ShellOps.Relaunch();
+        var previous = settings.Language;
+        if (TryPersistLanguage(settings, lang))
+        {
+            ShellOps.Relaunch();
+            return;
+        }
+
+        _restoringLanguage = true;
+        try
+        {
+            LangCombo.SelectedItem = LanguageItem(previous);
+        }
+        finally
+        {
+            _restoringLanguage = false;
+        }
+
+        Notifier.Post(
+            NotifySeverity.Error,
+            Loc.Get("Settings_SaveFailedTitle"),
+            Loc.Get("Settings_LanguageSaveFailedBody"));
     }
 
-    // The next three close this dialog, then open their surface once it is gone.
+    /// <summary>Persist a language change transactionally: a failed save restores
+    /// the in-memory value so callers never restart into a language that was not
+    /// durably selected.</summary>
+    /// <param name="settings">Settings instance to mutate.</param>
+    /// <param name="language">Normalized language tag selected by the UI.</param>
+    /// <param name="save">Optional persistence seam for tests.</param>
+    /// <returns>True only when the new value was saved.</returns>
+    internal static bool TryPersistLanguage(
+        AppSettings settings,
+        string language,
+        Func<bool>? save = null)
+    {
+        var previous = settings.Language;
+        settings.Language = language;
+        if ((save ?? settings.Save)())
+        {
+            return true;
+        }
+
+        settings.Language = previous;
+        return false;
+    }
+
+    private ComboBoxItem LanguageItem(string language) => language switch
+    {
+        "ja" => LangJa,
+        "en" => LangEn,
+        "zh-Hans" => LangZh,
+        _ => LangAuto,
+    };
+
+    // The next two close this dialog, then open their surface once it is gone.
     private void Diag_Click(object sender, RoutedEventArgs e)
     {
         _pendingAction = () => App.ToggleDiagnostics(VM.Perf);
@@ -160,12 +256,6 @@ public sealed partial class SettingsDialog : ContentDialog
     private void Service_Click(object sender, RoutedEventArgs e)
     {
         _pendingAction = () => ServiceManagerDialog.OpenAsync().Forget("service-ui");
-        Hide();
-    }
-
-    private void Scope_Click(object sender, RoutedEventArgs e)
-    {
-        _pendingAction = () => ScopeManagerDialog.OpenAsync(VM).Forget("scope-ui");
         Hide();
     }
 }

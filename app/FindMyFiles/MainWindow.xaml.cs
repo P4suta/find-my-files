@@ -22,7 +22,43 @@ public sealed partial class MainWindow : Window
         AppWindow.SetIcon("Assets/AppIcon.ico");
         AppWindow.Closing += OnClosing;
 
-        RootFrame.Navigate(typeof(MainPage));
+        if (!RootFrame.Navigate(typeof(MainPage)))
+        {
+            throw new InvalidOperationException("initial MainPage navigation was rejected");
+        }
+
+        Activated += OnWindowActivated;
+    }
+
+    private void OnWindowActivated(
+        object sender,
+        Microsoft.UI.Xaml.WindowActivatedEventArgs args)
+    {
+        if (args.WindowActivationState
+            == Microsoft.UI.Xaml.WindowActivationState.Deactivated)
+        {
+            return;
+        }
+
+        // Activation first gives WinUI's custom title bar global keyboard focus.
+        // Defer until that focus event settles, then let the page move only
+        // window-chrome focus to its state-appropriate primary action. Existing
+        // content/dialog focus is preserved across ordinary reactivation.
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (RootFrame.Content is not MainPage page
+                || AppTitleBar.XamlRoot is null)
+            {
+                return;
+            }
+
+            var focused = Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(
+                AppTitleBar.XamlRoot);
+            if (focused is null || ReferenceEquals(focused, AppTitleBar))
+            {
+                page.FocusPrimaryAction();
+            }
+        });
     }
 
     // Tray-resident mode (ADR-0030): when enabled, a close (×) hides to the tray
@@ -39,5 +75,6 @@ public sealed partial class MainWindow : Window
     /// <see cref="MainPage"/>, which reads the just-re-resolved <c>App.EngineClient</c>
     /// and rebuilds its view model. With the default <c>NavigationCacheMode</c> the
     /// old page Unloads (disposing its view model) and a new one is constructed.</summary>
-    internal void ReloadMainPage() => RootFrame.Navigate(typeof(MainPage));
+    /// <returns>True when the Frame accepted the navigation.</returns>
+    internal bool ReloadMainPage() => RootFrame.Navigate(typeof(MainPage));
 }

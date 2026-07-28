@@ -8,8 +8,9 @@ namespace FindMyFiles.Engine;
 /// <summary>
 /// Wire codec for the fmf-service named pipe: 16-byte LE frame header +
 /// length-prefixed payload, binary hot path, JSON cold path. Pure functions
-/// and constants only — docs/ARCHITECTURE.md "Pipe protocol" is canonical,
-/// and the Rust twin (fmf-proto) pins identical golden bytes.
+/// and constants only — the canonical wire definition is the fmf-contract
+/// crate radiated into <see cref="EngineContract"/> (ADR-0018), and the Rust
+/// twin (fmf-proto) pins byte-identical golden frames from contract/golden/.
 /// </summary>
 internal static class PipeProtocol
 {
@@ -39,6 +40,7 @@ internal static class PipeProtocol
         public const ushort ResultFree = EngineContract.Op.ResultFree;
         public const ushort Stats = EngineContract.Op.Stats;
         public const ushort ServiceInfo = EngineContract.Op.ServiceInfo;
+        public const ushort QueryCancel = EngineContract.Op.QueryCancel;
     }
 
     /// <summary>Status codes — the FFI error table verbatim (shared).</summary>
@@ -52,6 +54,7 @@ internal static class PipeProtocol
         public const int QuerySyntax = EngineContract.Status.QuerySyntax;
         public const int Io = EngineContract.Status.Io;
         public const int Locked = EngineContract.Status.Locked;
+        public const int Cancelled = EngineContract.Status.Cancelled;
         public const int Panic = EngineContract.Status.Panic;
     }
 
@@ -140,9 +143,14 @@ internal static class PipeProtocol
             BinaryPrimitives.ReadUInt32LittleEndian(payload[8..]));
     }
 
-    // ── Query (op 7, 20B POD options + UTF-8 text) ──────────────────────
-    public static byte[] EncodeQueryReq(SearchOptions options, string text)
+    // ── Query (op 7, 32B POD options + UTF-8 text) ──────────────────────
+    public static byte[] EncodeQueryReq(
+        SearchOptions options,
+        string text,
+        ulong presentationBasis = 0)
     {
+        text = EngineRequest.QueryText(text);
+
         // Size the frame off the UTF-8 byte count and encode the text straight
         // into it — no intermediate array + copy (this runs per keystroke).
         var b = new byte[EngineContract.QueryOptionsSize + Encoding.UTF8.GetByteCount(text)];
@@ -152,11 +160,14 @@ internal static class PipeProtocol
         BinaryPrimitives.WriteUInt32LittleEndian(
             b.AsSpan(12), options.IncludeHiddenSystem ? 1u : 0u);
         BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(16), options.RegexModeBits);
+        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(20), 0);
+        BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(24), presentationBasis);
         Encoding.UTF8.GetBytes(text, b.AsSpan(EngineContract.QueryOptionsSize));
         return b;
     }
 
-    public static (SearchOptions Options, string Text) DecodeQueryReq(ReadOnlySpan<byte> payload)
+    public static (SearchOptions Options, string Text, ulong PresentationBasis) DecodeQueryReq(
+        ReadOnlySpan<byte> payload)
     {
         var len = EngineContract.QueryOptionsSize;
         if (payload.Length < len)
@@ -166,6 +177,11 @@ internal static class PipeProtocol
         }
 
         var regexBits = BinaryPrimitives.ReadUInt32LittleEndian(payload[16..]);
+        if (BinaryPrimitives.ReadUInt32LittleEndian(payload[20..]) != 0)
+        {
+            throw new InvalidDataException("QueryReq reserved field is nonzero");
+        }
+
         var options = new SearchOptions(
             (FmfSort)BinaryPrimitives.ReadUInt32LittleEndian(payload),
             BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]) != 0,
@@ -173,7 +189,10 @@ internal static class PipeProtocol
             BinaryPrimitives.ReadUInt32LittleEndian(payload[12..]) != 0,
             (regexBits & 1u) != 0,
             (regexBits & 2u) != 0 ? RegexScope.Path : RegexScope.Name);
-        return (options, Encoding.UTF8.GetString(payload[len..]));
+        return (
+            options,
+            Encoding.UTF8.GetString(payload[len..]),
+            BinaryPrimitives.ReadUInt64LittleEndian(payload[24..]));
     }
 
     public static byte[] EncodeQueryResp(ulong resultId, ulong count, string traceJson)
@@ -220,7 +239,7 @@ internal static class PipeProtocol
             BinaryPrimitives.ReadUInt32LittleEndian(payload[16..]));
     }
 
-    /// <summary>`{row_count:u32, blob_len:u32}` + 48B rows + WTF-8 blob.</summary>
+    /// <summary>`{row_count:u32, blob_len:u32}` + 56B rows + WTF-8 blob.</summary>
     /// <param name="payload">The ResultPage response payload bytes.</param>
     /// <returns>The decoded rows from the page.</returns>
     public static List<RowData> DecodePageResp(ReadOnlySpan<byte> payload)
@@ -232,6 +251,17 @@ internal static class PipeProtocol
 
         var rowCount = BinaryPrimitives.ReadUInt32LittleEndian(payload);
         var blobLen = BinaryPrimitives.ReadUInt32LittleEndian(payload[4..]);
+        if (rowCount > (uint)EngineContract.MaxPageRows)
+        {
+            throw new InvalidDataException(
+                $"PageResp row_count {rowCount} exceeds {EngineContract.MaxPageRows}");
+        }
+
+        if ((ulong)payload.Length > EngineContract.MaxPayloadLen)
+        {
+            throw new InvalidDataException(
+                $"PageResp payload is {payload.Length} bytes, maximum is {EngineContract.MaxPayloadLen}");
+        }
 
         // Validate the declared sizes in long: the fields are u32, so
         // `rowCount * RowSize` overflows int for a hostile/buggy frame. The 16 MiB
@@ -252,17 +282,45 @@ internal static class PipeProtocol
 
     public static byte[] EncodePageResp(IReadOnlyList<RowData> rows)
     {
-        var blob = new List<byte>();
-        var rowBytes = new byte[rows.Count * RowSize];
+        ArgumentNullException.ThrowIfNull(rows);
+        if (rows.Count > EngineContract.MaxPageRows)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(rows),
+                rows.Count,
+                $"A page may contain at most {EngineContract.MaxPageRows} rows.");
+        }
+
+        var encoded = new (byte[] Name, byte[] Parent)[rows.Count];
+        long blobLength = 0;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            encoded[i] = (Wtf8.Encode(rows[i].Name), Wtf8.Encode(rows[i].ParentPath));
+            blobLength = checked(blobLength + encoded[i].Name.Length + encoded[i].Parent.Length);
+        }
+
+        var rowBytesLength = checked(rows.Count * RowSize);
+        var payloadLength = checked(8L + rowBytesLength + blobLength);
+        if (payloadLength > EngineContract.MaxPayloadLen)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(rows),
+                $"Encoded page is {payloadLength} bytes; maximum is {EngineContract.MaxPayloadLen}.");
+        }
+
+        var blob = new byte[checked((int)blobLength)];
+        var blobOffset = 0;
+        var rowBytes = new byte[rowBytesLength];
         for (var i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
-            var name = Wtf8.Encode(row.Name);
-            var parent = Wtf8.Encode(row.ParentPath);
-            var nameOff = (uint)blob.Count;
-            blob.AddRange(name);
-            var parentOff = (uint)blob.Count;
-            blob.AddRange(parent);
+            var (name, parent) = encoded[i];
+            var nameOff = checked((uint)blobOffset);
+            name.CopyTo(blob, blobOffset);
+            blobOffset += name.Length;
+            var parentOff = checked((uint)blobOffset);
+            parent.CopyTo(blob, blobOffset);
+            blobOffset += parent.Length;
 
             var r = rowBytes.AsSpan(i * RowSize, RowSize);
             BinaryPrimitives.WriteUInt64LittleEndian(
@@ -274,15 +332,17 @@ internal static class PipeProtocol
             BinaryPrimitives.WriteUInt32LittleEndian(
                 r[EngineContract.RowOffsets.ParentPathOff..], parentOff);
             BinaryPrimitives.WriteUInt32LittleEndian(r[EngineContract.RowOffsets.Flags..], row.Flags);
-            BinaryPrimitives.WriteUInt16LittleEndian(
-                r[EngineContract.RowOffsets.NameLen..], (ushort)name.Length);
-            BinaryPrimitives.WriteUInt16LittleEndian(
-                r[EngineContract.RowOffsets.ParentPathLen..], (ushort)parent.Length);
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                r[EngineContract.RowOffsets.NameLen..], checked((uint)name.Length));
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                r[EngineContract.RowOffsets.ParentPathLen..], checked((uint)parent.Length));
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                r[EngineContract.RowOffsets.Reserved..], 0);
         }
 
-        var b = new byte[8 + rowBytes.Length + blob.Count];
+        var b = new byte[checked((int)payloadLength)];
         BinaryPrimitives.WriteUInt32LittleEndian(b, (uint)rows.Count);
-        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), (uint)blob.Count);
+        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), checked((uint)blob.Length));
         rowBytes.CopyTo(b, 8);
         blob.CopyTo(b, 8 + rowBytes.Length);
         return b;
@@ -374,8 +434,13 @@ internal static class PipeProtocol
         return JsonSerializer.SerializeToUtf8Bytes(wire, EngineJson.SnakeCase);
     }
 
-    public static byte[] EncodeIndexStartReq(IReadOnlyList<string> volumes) =>
-        JsonSerializer.SerializeToUtf8Bytes(new IndexStartJson { Volumes = [.. volumes] }, EngineJson.SnakeCase);
+    public static byte[] EncodeIndexStartReq(IReadOnlyList<string> volumes)
+    {
+        var snapshot = EngineRequest.Volumes(volumes);
+        return JsonSerializer.SerializeToUtf8Bytes(
+            new IndexStartJson { Volumes = [.. snapshot] },
+            EngineJson.SnakeCase);
+    }
 
     public static IReadOnlyList<string> DecodeIndexStartReq(ReadOnlySpan<byte> payload) =>
         (JsonSerializer.Deserialize<IndexStartJson>(payload, EngineJson.SnakeCase) ?? new()).Volumes;

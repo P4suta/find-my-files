@@ -1,3 +1,4 @@
+using System.Globalization;
 using FindMyFiles.Converters;
 using FindMyFiles.Engine;
 using Microsoft.UI.Xaml;
@@ -14,6 +15,82 @@ namespace FindMyFiles.Tests;
 /// </summary>
 public sealed class DiagFormatTests
 {
+    [Fact]
+    public void DiagnosticCopy_points_to_the_rolling_engine_log_directory()
+    {
+        var dump = DiagFormat.DiagnosticCopy(
+            DateTimeOffset.Parse(
+                "2026-07-26T12:34:56+09:00",
+                CultureInfo.InvariantCulture),
+            "1.2.3",
+            "Windows test",
+            DiagFormat.EngineLogDirectoryDisplay(PipeStats()),
+            """{"ready":true}""",
+            "safe-tail");
+
+        Assert.Contains(
+            @"engine logs: %ProgramData%\find-my-files\logs (rolling engine.<date>.log)",
+            dump,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            @"%ProgramData%\find-my-files\logs\engine.log",
+            dump,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            @"app log: %APPDATA%\find-my-files\logs\app.log",
+            dump,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DiagnosticCopy_reports_the_in_proc_engine_log_directory()
+    {
+        // The in-proc engine derives its log dir from the index dir
+        // (resolve_log_dir(None, index_dir)), so naming the service's directory
+        // here sends the reader to an empty folder.
+        var dump = DiagFormat.DiagnosticCopy(
+            DateTimeOffset.Parse(
+                "2026-07-26T12:34:56+09:00",
+                CultureInfo.InvariantCulture),
+            "1.2.3",
+            "Windows test",
+            DiagFormat.EngineLogDirectoryDisplay(new EngineStatsData()),
+            """{"ready":true}""",
+            "safe-tail");
+
+        Assert.Contains(
+            @"engine logs: %ProgramData%\find-my-files\index\logs (rolling engine.<date>.log)",
+            dump,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EngineLogSubPath_follows_the_live_transport()
+    {
+        // Only the pipe client fills Transport, so it is the discriminator.
+        Assert.Equal(
+            Path.Combine("find-my-files", "logs"),
+            DiagFormat.EngineLogSubPath(PipeStats()));
+        Assert.Equal(
+            Path.Combine("find-my-files", "index", "logs"),
+            DiagFormat.EngineLogSubPath(new EngineStatsData()));
+    }
+
+    [Fact]
+    public void EngineLogSubPath_names_the_service_before_the_first_poll() =>
+        Assert.Equal(
+            Path.Combine("find-my-files", "logs"),
+            DiagFormat.EngineLogSubPath(null));
+
+    [Fact]
+    public void EngineLogDirectoryDisplay_is_symbolic() =>
+        Assert.Equal(
+            @"%ProgramData%\find-my-files\logs",
+            DiagFormat.EngineLogDirectoryDisplay(PipeStats()));
+
+    private static EngineStatsData PipeStats() =>
+        new() { Transport = new TransportStatsData { State = "Connected" } };
+
     [Theory]
     [InlineData(0UL, "0")]
     [InlineData(1000UL, "1,000")]
@@ -55,11 +132,11 @@ public sealed class DiagFormatTests
 
     [Fact]
     public void Query_renders_the_empty_query_as_all() =>
-        Assert.Equal("(all)", DiagFormat.Query(new QueryTraceData { Query = string.Empty }));
+        Assert.Equal("(all)", DiagFormat.Query(new QueryTraceData()));
 
     [Fact]
-    public void Query_passes_through_the_query_text() =>
-        Assert.Equal("report", DiagFormat.Query(new QueryTraceData { Query = "report" }));
+    public void Query_renders_only_the_query_length() =>
+        Assert.Equal("6 chars", DiagFormat.Query(new QueryTraceData { QueryLength = 6 }));
 
     [Fact]
     public void Stat_tiles_are_empty_when_no_trace()
@@ -220,7 +297,7 @@ public sealed class DiagFormatTests
         Assert.Equal("[12s] ERROR usn (C:): x", DiagFormat.Error(12000, "error", "usn", "C:", "x\ny"));
 
     [Fact]
-    public void Error_omits_the_volume_when_not_scoped() =>
+    public void Error_omits_the_volume_when_not_present() =>
         Assert.Equal("[12s] WARN core: msg", DiagFormat.Error(12000, "warn", "core", null, "msg"));
 
     [Fact]
@@ -235,8 +312,8 @@ public sealed class DiagFormatTests
     {
         // ADR-0018 guard: a counter set on the generated CountersData must
         // appear via reflection with its snake_case contract name.
-        var stats = new EngineStatsData { Counters = new CountersData { WalkReadErrors = 3 } };
-        Assert.Equal("劣化: walk_read_errors=3", DiagFormat.Counters(stats));
+        var stats = new EngineStatsData { Counters = new CountersData { StatFetchFailures = 3 } };
+        Assert.Equal("劣化: stat_fetch_failures=3", DiagFormat.Counters(stats));
     }
 
     [Fact]
@@ -246,7 +323,7 @@ public sealed class DiagFormatTests
         Assert.Equal(Visibility.Visible, DiagFormat.HealthyVis(new EngineStatsData()));
         Assert.Equal(
             Visibility.Collapsed,
-            DiagFormat.HealthyVis(new EngineStatsData { Counters = new CountersData { WalkReadErrors = 1 } }));
+            DiagFormat.HealthyVis(new EngineStatsData { Counters = new CountersData { StatFetchFailures = 1 } }));
         Assert.Equal(
             Visibility.Collapsed,
             DiagFormat.HealthyVis(new EngineStatsData { RecentErrors = [new ErrorEventData()] }));
@@ -259,7 +336,7 @@ public sealed class DiagFormatTests
         Assert.Equal(Visibility.Collapsed, DiagFormat.CountersVis(new EngineStatsData()));
         Assert.Equal(
             Visibility.Visible,
-            DiagFormat.CountersVis(new EngineStatsData { Counters = new CountersData { WalkReadErrors = 1 } }));
+            DiagFormat.CountersVis(new EngineStatsData { Counters = new CountersData { StatFetchFailures = 1 } }));
     }
 
     [Fact]
@@ -284,7 +361,7 @@ public sealed class DiagFormatTests
     public void HealthSeverity_is_warning_when_only_counters_degraded() =>
         Assert.Equal(
             InfoBarSeverity.Warning,
-            DiagFormat.HealthSeverity(new EngineStatsData { Counters = new CountersData { WalkReadErrors = 1 } }));
+            DiagFormat.HealthSeverity(new EngineStatsData { Counters = new CountersData { StatFetchFailures = 1 } }));
 
     [Fact]
     public void HealthSeverity_is_error_when_recent_errors_present() =>
@@ -299,6 +376,6 @@ public sealed class DiagFormatTests
             DiagFormat.HealthSeverity(new EngineStatsData
             {
                 RecentErrors = [new ErrorEventData()],
-                Counters = new CountersData { WalkReadErrors = 1 },
+                Counters = new CountersData { StatFetchFailures = 1 },
             }));
 }

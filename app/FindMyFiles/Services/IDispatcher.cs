@@ -7,7 +7,7 @@ namespace FindMyFiles.Services;
 /// <see cref="DispatcherQueueDispatcher"/> (production) and a manual fake in
 /// the test project.
 /// </summary>
-public interface IDispatcher
+internal interface IDispatcher
 {
     /// <summary>True when the caller is already on the UI thread.</summary>
     bool HasThreadAccess { get; }
@@ -33,7 +33,7 @@ public interface IDispatcher
 /// <summary>The one-shot timer handle returned by
 /// <see cref="IDispatcher.CreateOneShotTimer"/> — fires on the UI thread and is
 /// restartable for debounce.</summary>
-public interface IDispatcherTimer
+internal interface IDispatcherTimer
 {
     /// <summary>Arm the timer. Calling while a tick is still pending restarts
     /// the interval (debounce semantics).</summary>

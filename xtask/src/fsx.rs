@@ -5,38 +5,109 @@
 //! (`ReadyToRun` DLLs, `PreserveNewest` copies). This clears the read-only
 //! attribute and retries — matching `Remove-Item -Recurse -Force`.
 
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write as _};
+use std::path::Path;
 
-/// Collect every file under `root`, recursively, as
-/// `(absolute path, path relative to root using forward slashes)`. The relative
-/// form is the entry name for a zip; empty directories are skipped (a runnable
-/// bundle has none that matter).
-pub fn collect_files(root: &Path) -> io::Result<Vec<(PathBuf, String)>> {
-    let mut out = Vec::new();
-    walk(root, root, &mut out)?;
-    Ok(out)
-}
+/// Atomically replace `path` with `bytes`, using a same-directory temporary
+/// file and a write-through replace on Windows. An interrupted update therefore
+/// leaves either the complete old file or the complete new file, never a gap or
+/// partially written release artifact.
+pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("output path has no parent: {}", path.display()),
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    let file_name = path.file_name().and_then(OsStr::to_str).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("output filename is not Unicode: {}", path.display()),
+        )
+    })?;
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, String)>) -> io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            walk(root, &path, out)?;
-        } else {
-            let rel = path
-                .strip_prefix(root)
-                .expect("walked path is under root")
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            out.push((path, rel));
+    let mut temporary = None;
+    for suffix in 0..64_u8 {
+        let candidate = parent.join(format!(".{file_name}.tmp-{}-{suffix}", std::process::id()));
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                temporary = Some((candidate, file));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
         }
     }
+    let (temporary_path, mut file) = temporary.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique temporary output path",
+        )
+    })?;
+    let result = (|| -> io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_file(&temporary_path, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination_wide: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: both paths are live, NUL-terminated UTF-16 buffers for the
+    // duration of the synchronous call.
+    let moved = unsafe {
+        MoveFileExW(
+            source_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
+}
+
+/// True for symbolic links and every other Windows reparse-point kind
+/// (junctions, mount points, cloud placeholders, and future variants).
+#[cfg(windows)]
+pub fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+pub fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 /// Recursively copy `src` into `dst`, creating `dst` (and parents) and
@@ -153,6 +224,22 @@ mod tests {
             b"nested"
         );
 
+        force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_replaces_a_complete_existing_file() {
+        let base = scratch("atomic-write");
+        let _ = force_remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let path = base.join("artifact.json");
+        fs::write(&path, b"old").unwrap();
+
+        write_file_atomic(&path, b"new-complete-body").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new-complete-body");
+        let entries = fs::read_dir(&base).unwrap().count();
+        assert_eq!(entries, 1, "atomic replace must not leave temp files");
         force_remove_dir_all(&base).unwrap();
     }
 }

@@ -6,7 +6,7 @@ namespace FindMyFiles.Highlighting;
 /// and the whole-query <see cref="RegexHighlighter"/>; the results list and rows
 /// depend only on this seam.
 /// </summary>
-public interface IHighlighter
+internal interface IHighlighter
 {
     /// <summary>True when nothing will ever be highlighted — the caller can
     /// skip per-row work entirely.</summary>

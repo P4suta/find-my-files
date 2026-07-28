@@ -8,15 +8,17 @@ namespace FindMyFiles.Services;
 /// <summary>
 /// Serilog text formatter that renders each event as one logfmt line —
 /// <c>ts level area key=value … msg="…"</c> — matching the Rust engine's
-/// <c>engine.log</c> so the two logs interleave and parse identically
+/// the rolling engine logs so the two streams interleave and parse identically
 /// (ADR-0037). The quoting rules double as the log-injection defence: any
 /// value carrying CR/LF or control characters is escaped, so it can never
 /// forge a second log line.
 /// </summary>
-public sealed class LogfmtFormatter : ITextFormatter
+internal sealed class LogfmtFormatter : ITextFormatter
 {
     /// <summary>Cap on one field value's length, mirroring the engine's 1 KiB
-    /// cap so a pathological filename/query cannot balloon a line.</summary>
+    /// cap so a pathological external value cannot balloon a line. The
+    /// FileLog privacy boundary rejects filenames, query text, and exception
+    /// bodies before this formatter sees them.</summary>
     private const int ValueCap = 1024;
 
     /// <summary>Property holding the subsystem tag, emitted right after the
@@ -69,14 +71,6 @@ public sealed class LogfmtFormatter : ITextFormatter
             : e.RenderMessage(CultureInfo.InvariantCulture);
         sb.Append(" msg=");
         AppendValue(sb, message);
-
-        if (e.Exception is not null)
-        {
-            // The whole exception (incl. stack trace) folds onto this one line:
-            // its newlines become "\n" so the err= value stays a single record.
-            sb.Append(" err=");
-            AppendValue(sb, e.Exception.ToString());
-        }
 
         return sb.ToString();
     }

@@ -2,16 +2,21 @@
 //!
 //! NTFS file names are arbitrary u16 sequences and may contain unpaired
 //! surrogates. Storing them as lossy UTF-8 would corrupt such names and make
-//! them impossible to open from the UI (docs/ARCHITECTURE.md). WTF-8 encodes
+//! them impossible to open from the UI. WTF-8 encodes
 //! unpaired surrogates as their 3-byte sequences, is a superset of UTF-8, and
 //! round-trips back to the original UTF-16.
 //!
-//! The index keeps two pools with shared offsets (docs/ARCHITECTURE.md,
-//! ADR-0003), so the folded form of a name must have exactly the same byte
-//! length as the original. Folding therefore lowercases a code point only
-//! when the result is a single code point of identical encoded length;
-//! everything else is kept as-is. The same rule must be applied to query
-//! needles (`fold_str`) or case-insensitive matches would misalign.
+//! The index's folded dictionary and per-entry original overflow share a name
+//! length (ADR-0003/0004), so the stored folded form must have exactly the same
+//! byte length as the original. Storage folding therefore lowercases a code
+//! point only when the result is one code point of identical encoded length.
+//!
+//! Canonical equivalence is deliberately a query-time view, not another
+//! standing pool: ordinary non-ASCII literals compare NFC views while lone
+//! surrogates remain opaque barriers. This keeps the ASCII pool sweep and
+//! steady-state RAM unchanged while making NFC/NFD spellings equivalent.
+
+use unicode_normalization::UnicodeNormalization;
 
 /// Append the WTF-8 encoding of a single code point (may be a lone surrogate).
 #[inline]
@@ -58,10 +63,8 @@ fn fold_char(c: char) -> char {
 }
 
 /// Decode UTF-16 (with possible unpaired surrogates) into code points,
-/// invoking `f(cp)` for each. The single definition of the surrogate-pairing
-/// walk, shared by [`push_wtf8_pair`] and [`push_folded`] so the two can never
-/// drift. ASCII units (`u < 0x80`, never a surrogate) take a fast first arm
-/// that skips the pairing test.
+/// invoking `f(cp)` for each. ASCII units (`u < 0x80`, never a surrogate)
+/// take a fast first arm that skips the pairing test.
 #[inline]
 fn for_each_code_point(units: &[u16], mut f: impl FnMut(u32)) {
     let mut i = 0;
@@ -98,44 +101,158 @@ fn push_folded_cp(cp: u32, lower_out: &mut Vec<u8>) {
     }
 }
 
+#[inline]
+fn push_pair_cp(cp: u32, name_out: &mut Vec<u8>, lower_out: &mut Vec<u8>) {
+    if cp < 0x80 {
+        // ASCII dominates real names: one byte per pool, fold is plain
+        // ASCII lowercase — skip scalar validation and width dispatch.
+        let byte = cp as u8;
+        name_out.push(byte);
+        lower_out.push(byte.to_ascii_lowercase());
+    } else {
+        push_code_point(cp, name_out);
+        push_folded_cp(cp, lower_out);
+    }
+}
+
 /// Decode UTF-16 (with possible unpaired surrogates) and append both the
 /// WTF-8 original and its folded form. The two outputs always grow by the
 /// same number of bytes.
 pub fn push_wtf8_pair(units: &[u16], name_out: &mut Vec<u8>, lower_out: &mut Vec<u8>) {
-    for_each_code_point(units, |cp| {
-        if cp < 0x80 {
-            // ASCII dominates real names: one byte per pool, fold is plain
-            // ASCII lowercase — skip `char::from_u32` validation and the
-            // `push_code_point` width cascade.
-            let b = cp as u8;
-            name_out.push(b);
-            lower_out.push(b.to_ascii_lowercase());
-        } else {
-            push_code_point(cp, name_out);
-            push_folded_cp(cp, lower_out);
-        }
-    });
+    for_each_code_point(units, |cp| push_pair_cp(cp, name_out, lower_out));
 }
 
-/// Append only the folded form of `units` to `lower_out`.
+/// Encode a checked UTF-16LE byte slice without first materializing `u16`s.
 ///
-/// For callers that never read the original WTF-8 — the scope-mode walk
-/// (scan/walk.rs), where the builder re-derives the stored original from the
-/// UTF-16 name itself. Byte-identical to the `lower_out` [`push_wtf8_pair`]
-/// would produce.
-pub fn push_folded(units: &[u16], lower_out: &mut Vec<u8>) {
-    for_each_code_point(units, |cp| {
-        if cp < 0x80 {
-            lower_out.push((cp as u8).to_ascii_lowercase());
+/// The NTFS parser hands the initial-scan hot path a view into the record.
+/// Rejecting odd byte counts before writing keeps malformed callers atomic;
+/// valid NTFS `$FILE_NAME` payloads therefore incur no per-name scratch copy.
+pub(crate) fn push_wtf8le_pair(
+    bytes: &[u8],
+    name_out: &mut Vec<u8>,
+    lower_out: &mut Vec<u8>,
+) -> bool {
+    if !bytes.len().is_multiple_of(2) {
+        return false;
+    }
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let unit = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+        let cp = if (0xD800..=0xDBFF).contains(&unit) && offset + 3 < bytes.len() {
+            let low = u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]);
+            if (0xDC00..=0xDFFF).contains(&low) {
+                offset += 4;
+                0x1_0000 + ((u32::from(unit) - 0xD800) << 10) + (u32::from(low) - 0xDC00)
+            } else {
+                offset += 2;
+                u32::from(unit)
+            }
         } else {
-            push_folded_cp(cp, lower_out);
-        }
-    });
+            offset += 2;
+            u32::from(unit)
+        };
+        push_pair_cp(cp, name_out, lower_out);
+    }
+    true
 }
 
 /// Fold a valid UTF-8 string (query needle) with the same rule as the pool.
 pub fn fold_str(s: &str) -> String {
     s.chars().map(fold_char).collect()
+}
+
+#[inline]
+fn push_char(c: char, out: &mut Vec<u8>) {
+    let mut buf = [0u8; 4];
+    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+}
+
+/// Append one valid UTF-8 scalar span as NFC, optionally applying the index's
+/// search fold after its first normalization pass. A second NFC pass is
+/// required because Unicode casing can itself produce a decomposed sequence.
+#[inline]
+fn push_normalized_span(span: &str, folded: bool, out: &mut Vec<u8>) {
+    if folded {
+        for c in span.nfc().map(fold_char).nfc() {
+            push_char(c, out);
+        }
+    } else {
+        for c in span.nfc() {
+            push_char(c, out);
+        }
+    }
+}
+
+#[inline]
+fn surrogate_len(bytes: &[u8]) -> Option<usize> {
+    (bytes.len() >= 3
+        && bytes[0] == 0xED
+        && (0xA0..=0xBF).contains(&bytes[1])
+        && (0x80..=0xBF).contains(&bytes[2]))
+    .then_some(3)
+}
+
+/// Materialize the canonical search view of a WTF-8 byte string.
+///
+/// Valid scalar spans are normalized independently to NFC. Every encoded lone
+/// surrogate is copied byte-for-byte and terminates the normalization span on
+/// both sides, so combining marks can never compose across an ill-formed
+/// UTF-16 unit. Unexpected non-WTF-8 bytes are also copied as one-byte opaque
+/// barriers; this makes the query boundary non-panicking even if an internally
+/// corrupted snapshot reaches it.
+///
+/// ASCII is handled without invoking the Unicode tables. Callers reuse `out`,
+/// so non-ASCII evaluation adds no standing index allocation.
+pub(crate) fn normalize_wtf8_into(bytes: &[u8], folded: bool, out: &mut Vec<u8>) {
+    out.clear();
+    if bytes.is_ascii() {
+        out.reserve(bytes.len());
+        if folded {
+            out.extend(bytes.iter().map(u8::to_ascii_lowercase));
+        } else {
+            out.extend_from_slice(bytes);
+        }
+        return;
+    }
+
+    out.reserve(bytes.len());
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        match std::str::from_utf8(rest) {
+            Ok(span) => {
+                push_normalized_span(span, folded, out);
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid != 0 {
+                    let span = std::str::from_utf8(&rest[..valid])
+                        .expect("Utf8Error::valid_up_to guarantees a valid prefix");
+                    push_normalized_span(span, folded, out);
+                    rest = &rest[valid..];
+                }
+
+                if let Some(len) = surrogate_len(rest) {
+                    out.extend_from_slice(&rest[..len]);
+                    rest = &rest[len..];
+                } else {
+                    // A canonical WTF-8 name cannot reach this branch. Treat
+                    // one invalid byte as an opaque boundary instead of
+                    // panicking or dropping it.
+                    out.push(rest[0]);
+                    rest = &rest[1..];
+                }
+            }
+        }
+    }
+}
+
+/// Canonicalize one valid query string with the same view used for indexed
+/// WTF-8 names.
+pub(crate) fn normalize_str(s: &str, folded: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    push_normalized_span(s, folded, &mut out);
+    out
 }
 
 /// True if folding would change `s` — i.e. the needle benefits from the
@@ -185,6 +302,15 @@ pub fn wtf8_to_utf16(bytes: &[u8], out: &mut Vec<u16>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf16le_encoder_rejects_odd_input_without_partial_output() {
+        let mut name = vec![1];
+        let mut lower = vec![2];
+        assert!(!push_wtf8le_pair(&[b'A', 0, b'B'], &mut name, &mut lower));
+        assert_eq!(name, [1]);
+        assert_eq!(lower, [2]);
+    }
 
     fn pair(units: &[u16]) -> (Vec<u8>, Vec<u8>) {
         let (mut a, mut b) = (Vec::new(), Vec::new());
@@ -303,6 +429,58 @@ mod tests {
         assert!(!has_uppercase("日本語"));
         assert!(!has_uppercase("İ")); // unfoldable by our rule → not "uppercase" for smart case
     }
+
+    #[test]
+    fn canonical_view_equates_nfc_nfd_and_mixed_forms() {
+        let nfc = "Café/Ångström";
+        let nfd = "Cafe\u{301}/A\u{30a}ngstro\u{308}m";
+        assert_eq!(
+            normalize_str(nfc, false),
+            normalize_str(nfd, false),
+            "canonical spelling must not affect exact literal matching"
+        );
+        assert_eq!(
+            normalize_str("CAFÉ", true),
+            normalize_str("CAFE\u{301}", true),
+            "canonical spelling must not affect folded literal matching"
+        );
+    }
+
+    #[test]
+    fn lone_surrogate_is_an_opaque_normalization_barrier() {
+        // "e<lone high surrogate>◌́": the accent must not jump across the
+        // ill-formed UTF-16 unit and compose with the preceding e.
+        let units = [b'e' as u16, 0xD800, 0x0301];
+        let (name, _) = pair(&units);
+        let mut canonical = Vec::new();
+        normalize_wtf8_into(&name, false, &mut canonical);
+        assert_eq!(canonical, [b'e', 0xED, 0xA0, 0x80, 0xCC, 0x81]);
+
+        let mut back = Vec::new();
+        wtf8_to_utf16(&name, &mut back);
+        assert_eq!(
+            back, units,
+            "query-time normalization must never mutate stored WTF-8"
+        );
+    }
+
+    #[test]
+    fn canonical_view_is_idempotent_and_ascii_fast_path_is_exact() {
+        for (text, folded) in [
+            ("plain ASCII.TXT", false),
+            ("plain ASCII.TXT", true),
+            ("Café", false),
+            ("Cafe\u{301}", false),
+            ("ÉCOLE", true),
+        ] {
+            let once = normalize_str(text, folded);
+            let mut twice = Vec::new();
+            normalize_wtf8_into(&once, folded, &mut twice);
+            assert_eq!(twice, once, "{text:?} canonical view is not stable");
+        }
+        assert_eq!(normalize_str("File.TXT", false), b"File.TXT");
+        assert_eq!(normalize_str("File.TXT", true), b"file.txt");
+    }
 }
 
 #[cfg(test)]
@@ -312,7 +490,10 @@ mod proptests {
     use proptest::sample::select;
     use proptest::{prop_assert, prop_assert_eq, prop_oneof, proptest};
 
-    use super::{fold_str, has_uppercase, push_folded, push_wtf8_pair, wtf8_to_utf16};
+    use super::{
+        fold_str, has_uppercase, normalize_wtf8_into, push_wtf8_pair, push_wtf8le_pair,
+        wtf8_to_utf16,
+    };
 
     /// Code points whose folding stresses the length-preserving rule
     /// (ADR-0003): Turkish dotted I (İ lowercases to two chars → must be kept),
@@ -370,6 +551,23 @@ mod proptests {
             let (mut name, mut lower) = (Vec::new(), Vec::new());
             push_wtf8_pair(&units, &mut name, &mut lower);
             prop_assert_eq!(name.len(), lower.len());
+        }
+
+        #[test]
+        fn direct_utf16le_encoder_matches_u16_encoder(
+            units in prop_vec(any::<u16>(), 0usize..64)
+        ) {
+            let bytes: Vec<u8> = units.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+            let (mut expected_name, mut expected_lower) = (Vec::new(), Vec::new());
+            push_wtf8_pair(&units, &mut expected_name, &mut expected_lower);
+            let (mut actual_name, mut actual_lower) = (Vec::new(), Vec::new());
+            prop_assert!(push_wtf8le_pair(
+                &bytes,
+                &mut actual_name,
+                &mut actual_lower,
+            ));
+            prop_assert_eq!(actual_name, expected_name);
+            prop_assert_eq!(actual_lower, expected_lower);
         }
 
         // Same shared-offset invariant, now forced onto the hard fold cases
@@ -463,28 +661,46 @@ mod proptests {
             prop_assert!(!has_uppercase(&fold_str(&s)));
         }
 
-        // The fold-only encoder (`push_folded`, used by the scope-mode walk)
-        // must produce byte-identical output to `push_wtf8_pair`'s lower pool
-        // for ANY UTF-16 units — including lone surrogates and the tricky-fold
-        // chars — or the two scan paths would key entries differently.
+        // Canonical search views are stable for every UTF-16 sequence,
+        // including arbitrary lone surrogates. The second pass must neither
+        // panic nor move/drop an opaque barrier.
         #[test]
-        fn push_folded_matches_pair_lower(units in prop_vec(any::<u16>(), 0usize..64)) {
+        fn canonical_wtf8_view_is_idempotent_for_any_units(
+            units in prop_vec(any::<u16>(), 0usize..64),
+            folded in any::<bool>(),
+        ) {
             let (mut name, mut lower) = (Vec::new(), Vec::new());
             push_wtf8_pair(&units, &mut name, &mut lower);
-            let mut folded = Vec::new();
-            push_folded(&units, &mut folded);
-            prop_assert_eq!(folded, lower);
+            let mut once = Vec::new();
+            let mut twice = Vec::new();
+            normalize_wtf8_into(&name, folded, &mut once);
+            normalize_wtf8_into(&once, folded, &mut twice);
+            prop_assert_eq!(twice, once);
         }
 
-        // Same equivalence, forced onto the surrogate-heavy / tricky-fold
-        // generator (lone high/low surrogates, İ/ß/Ⱥ/full-width Latin).
+        // Surrogate code units remain byte-for-byte barriers in the canonical
+        // view. Compare their ordered WTF-8 triples before and after rather
+        // than decoding the normalized scalar spans, which may legitimately
+        // compose and change their UTF-16 unit count.
         #[test]
-        fn push_folded_matches_pair_lower_tricky(units in tricky_units()) {
+        fn canonical_view_preserves_every_lone_surrogate_barrier(units in tricky_units()) {
             let (mut name, mut lower) = (Vec::new(), Vec::new());
             push_wtf8_pair(&units, &mut name, &mut lower);
-            let mut folded = Vec::new();
-            push_folded(&units, &mut folded);
-            prop_assert_eq!(folded, lower);
+            let mut canonical = Vec::new();
+            normalize_wtf8_into(&name, false, &mut canonical);
+            let barriers = |bytes: &[u8]| {
+                bytes.windows(3)
+                    .filter(|w| {
+                        w[0] == 0xED
+                            && (0xA0..=0xBF).contains(&w[1])
+                            && (0x80..=0xBF).contains(&w[2])
+                    })
+                    .map(<[u8; 3]>::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("every window is exactly three bytes")
+            };
+            prop_assert_eq!(barriers(&canonical), barriers(&name));
         }
+
     }
 }

@@ -2,8 +2,11 @@ namespace FindMyFiles.Engine;
 
 /// <summary>Transport state of the engine boundary. In-proc clients are
 /// always InProc; the pipe client reports its supervisor state.</summary>
-public enum EngineConnectionState
+internal enum EngineConnectionState
 {
+    /// <summary>No engine is available. Setup or repair must create a new client.</summary>
+    Unavailable,
+
     /// <summary>In-process engine (FFI): no transport, so always connected.</summary>
     InProc,
 
@@ -15,4 +18,9 @@ public enum EngineConnectionState
 
     /// <summary>The pipe connection dropped; the supervisor is re-establishing it.</summary>
     Reconnecting,
+
+    /// <summary>The pipe failed a non-recoverable identity or protocol check.
+    /// The supervisor is stopped; a new client must be created after the
+    /// installation/version problem is repaired.</summary>
+    Faulted,
 }

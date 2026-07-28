@@ -10,7 +10,7 @@ namespace FindMyFiles.Services;
 /// local build (<c>…-dev+&lt;sha&gt;</c>) is distinguishable from a nightly
 /// (<c>…-nightly.&lt;date&gt;+&lt;sha&gt;</c>) or a clean stable release.
 /// </summary>
-public static class BuildInfo
+internal static class BuildInfo
 {
     /// <summary>
     /// The channel-aware build version, e.g. <c>0.1.0-dev+&lt;sha&gt;</c>,

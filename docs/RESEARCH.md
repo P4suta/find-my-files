@@ -14,7 +14,10 @@ Design decisions assume this file. Sources at the end of each item.
 - **FRN→path**: USN records have no path string. Hold an FRN→(name, parent FRN) map for all directories and build paths lazily by walking the parent chain up to the root (fixed at MFT record 5 on NTFS). A folder rename/move updates only that one record; no records are emitted for its children. FRN is 64-bit on NTFS (low 48 bits = record number + high 16 bits = sequence). ReFS is 128-bit (USN_RECORD_V3) — out of scope for MVP but accounted for in the ID type design.
 - **Privileges**: Opening a volume handle (`\\.\C:`) requires admin (CreateFile official Remarks: "The caller must have administrative privileges"). The undocumented `FSCTL_READ_UNPRIVILEGED_USN_JOURNAL` allows non-elevated journal reads, but it is undocumented and has no ENUM equivalent, so the initial scan requires elevation.
   https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
-- **Hard links**: Multiple $FILE_NAME attributes within a single MFT record. A USN record's file name is normally only the "first link name". → MVP uses "one representative name per FRN".
+- **Hard links**: Multiple directory entries can reference one NTFS file, and `USN_REASON_HARD_LINK_CHANGE` reports that a link was added or removed. One event name is not a complete link-set snapshot, so initial MFT parsing indexes every non-DOS `$FILE_NAME` and incremental handling reconciles the current complete set. Each path has its own EntryId while all paths share the object's full FRN.
+  https://learn.microsoft.com/en-us/windows/win32/fileio/hard-links-and-junctions
+  https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-usn_record_v3
+  https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/46021e52-29b1-475c-b6d3-fe5497d23277
 - **Symbolic links / junctions**: not followed (cycle-matching cost). Index the reparse point itself as a single entry.
 
 ## Search syntax (real-usage research)
@@ -38,7 +41,7 @@ See `docs/adr/` for design and rejection decisions and their numeric rationale.
 
 ## Rust crates (existence and maturity confirmed)
 
-- `ntfs-reader` 0.4.5 (MIT/Apache-2.0, updated 2026-03): full raw-$MFT record scan (README benchmark: Vec Cache 3.756s / HashMap 4.981s / No Cache 12.3s, environment not stated). FileInfo gives name/path/size/created/modified. **Cannot retrieve all hard-link names (one representative name)**.
+- `ntfs-reader` 0.4.5 (MIT/Apache-2.0, updated 2026-03): full raw-$MFT record scan (README benchmark: Vec Cache 3.756s / HashMap 4.981s / No Cache 12.3s, environment not stated). **Evaluated and no longer a dependency** — it is not in `engine/Cargo.lock`. Its convenience name selector surfaces a single name per record, whereas one searchable row per `$FILE_NAME` (so hard-linked paths are all retained) is the product's requirement, and the streaming/deferred-record pipeline it feeds is fmf-specific. Raw record parsing is in-house in `fmf-core/src/scan/ntfs.rs`; the benchmark above stays here as the external reference point that scan throughput is compared against.
 - `usn-journal-rs` (wangfu91, MIT, updated 2026-05): MFT enumeration + USN monitoring + FRN path resolution. Read as a reference implementation (policy: do not depend on it).
 - `windows-sys` 0.61: complete FSCTL constants, MFT_ENUM_DATA, USN_RECORD, etc. The USN wrapper is implemented in-house (~200 lines).
 - `memchr` (memmem::Finder = SIMD substring), `rayon`, `parking_lot`, `thiserror`, `tracing`, `xxhash-rust`.
@@ -60,7 +63,11 @@ A privileged-indexer → non-privileged-UI design carries an information-disclos
 - **PIPE_REJECT_REMOTE_CLIENTS** (CreateNamedPipeW dwPipeMode): officially stated as "Connections from remote clients are automatically rejected". Direct mechanism for remote rejection.
   https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew
 - **FILE_FLAG_FIRST_PIPE_INSTANCE**: creating a second instance fails with ERROR_ACCESS_DENIED (officially stated). Defends against pipe-name squatting. Same source as above.
-- **GetNamedPipeServerProcessId**: a client can get the server process PID (fake-server detection: PID → verify the token is SYSTEM).
+- **GetNamedPipeServerProcessId**: a client can get the server process PID. The
+  non-elevated UI compares it with the PID reported by
+  `QueryServiceStatusEx` for the SCM-registered `fmf-engine` service. It cannot
+  reliably open a LocalSystem process token or derive its session-0 identity,
+  so token inspection is not the trust decision.
   https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeserverprocessid
 - **Anonymous access (caution)**: the default for anonymous restriction via NullSessionPipes is **machine-type/policy dependent** (enabled on DC/standalone, Not defined on member/client). Make an explicit DACL (no anonymous ACE = default deny) the primary defense for blocking anonymous access.
   https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-access-restrict-anonymous-access-to-named-pipes-and-shares
@@ -68,6 +75,11 @@ A privileged-indexer → non-privileged-UI design carries an information-disclos
   https://learn.microsoft.com/en-us/windows/win32/secauthz/sid-attributes-in-an-access-token
 - **ImpersonateNamedPipeClient**: the server can obtain and inspect the client's token (SID matching at connect time = defense in depth against a misconfigured DACL).
   https://learn.microsoft.com/en-us/windows/win32/ipc/impersonating-a-named-pipe-client
+- **RevertToSelf failure is process-fatal**: Microsoft states that a failed
+  reversion leaves the application running as the client and that the process
+  should shut down. Returning an error and continuing the service thread is not
+  a safe recovery path.
+  https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-reverttoself
 - **SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO** (ChangeServiceConfig2): declaring required privileges makes the SCM strip undeclared privileges from the process token at startup (SeChangeNotifyPrivilege always remains; for shared-process services the union applies). Used to disarm LocalSystem.
   https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_required_privileges_infow
 - **SERVICE_CONTROL_PRESHUTDOWN (caution)**: the default grace period is **10 seconds on Windows 10 1703 and later** (3 minutes before that). Saving a large snapshot requires explicitly extending it via `SERVICE_PRESHUTDOWN_INFO` (dwPreshutdownTimeout).
@@ -99,28 +111,6 @@ The v2 service was registered SERVICE_AUTO_START (boot-resident). ADR-0027 moves
   https://docs.rs/regex/latest/regex/struct.RegexBuilder.html#method.size_limit
   https://docs.rs/regex/latest/regex/struct.RegexBuilder.html#method.dfa_size_limit
 - find-my-files uses 1 MiB each (with name length p99 ≈110B this is excessively generous; legitimate patterns never reach it, and malicious patterns are cleanly rejected with `FMF_E_QUERY_SYNTAX`). Decision and re-examination triggers are in ADR-0023.
-
-## MSIX packaging (researched 2026-06-24, premise for ADR-0028, primary sources confirmed)
-
-The hybrid "packaged UI + unpackaged service" decision (ADR-0028) rests on these. The two decisive facts are the service extension exposing none of the ADR-0017/0027 controls, and single-project MSIX holding only one executable.
-
-- **`PublishSingleFile` is unsupported for packaged and framework-dependent WinUI 3**; it works only for unpackaged + self-contained apps, and even then the native WinAppSDK helpers stay loose (fewer files, not one exe). MSIX therefore cannot use it, so the portable-zip story and a future MSIX story are independent.
-  https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/deploy-overview
-- **The MSIX service extension `desktop6:Service`** can register a service, but its only attributes are `Name` / `StartupType` (auto|manual|disabled) / `StartAccount` (localSystem|localService|networkService) / `Arguments` + child Dependencies/TriggerEvents. There is **no** attribute for a custom service-object DACL, `SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO` privilege stripping, `SERVICE_PRESHUTDOWN_INFO`, install-time SID capture, directory DACL hardening, or scheduled-task creation; install/uninstall is owned by the MSIX deployment engine (requires the `localSystemServices` restricted capability). → a *packaged* service forfeits the entire ADR-0017/0027 hardening; the service must stay unpackaged.
-  https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-desktop6-service
-- **A child process a packaged app launches from outside the package does not inherit package identity** — it runs as a normal full-trust desktop process (free to write `%ProgramData%`, register the SCM service, set DACLs, strip privileges, create scheduled tasks). Only an exe that lives *inside* the package runs with package identity, and MSIX filesystem redirection (AppData copy-on-write, VFS) applies to package-identity processes only. → the packaged UI's elevated `fmf-service install` helper keeps doing exactly what ADR-0027 does today.
-  https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-behind-the-scenes
-- **MSIX install trust comes from a publicly-trusted certificate chain, not the validation tier.** An MSIX signed by a cert chaining to a public-CA root installs by App Installer double-click without the user importing anything, **provided the manifest `Publisher` exactly equals the certificate Subject DN**. IV vs OV vs EV is irrelevant to install-trust (it affects only SmartScreen reputation). → the active SSL.com IV cert (`CN=Yasunobu Sakashita`, ADR-0020) suffices; the manifest Publisher must match it verbatim.
-  https://learn.microsoft.com/en-us/windows/msix/package/sign-msix-package-guide
-  https://learn.microsoft.com/en-us/windows/msix/package/create-certificate-package-signing
-- **winget**: the community repo (`microsoft/winget-pkgs`) accepts MSIX/MSIXBundle/MSI/exe; portable/zip is not the safe submission path, and when several installer types are offered the client prefers MSIX > MSI > exe > portable. Self-hosting needs only a YAML manifest pointing at the GitHub Release asset URL + SHA256 (no Store account). → MSIX is the channel that unlocks winget; the zip stays the portable channel.
-  https://github.com/microsoft/winget-pkgs
-- **Single-project MSIX bundles exactly one executable**; combining multiple exes (UI + CLI + service) requires a classic Windows Application Packaging Project (`.wapproj`). A native payload DLL (`fmf_engine.dll`) alongside the single app exe is fine either way. → the package carries the UI apphost + `fmf_engine.dll` only; `fmf.exe`/`fmf-service.exe` ship out-of-band.
-  https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/single-project-msix
-- **Filesystem redirection**: for a package-identity process, `%APPDATA%`/`%LOCALAPPDATA%` writes are copy-on-write redirected to `…\AppData\Local\Packages\<PackageFamilyName>\…` (AppData has no VFS — pure COW); `%ProgramData%` is neither auto-redirected nor auto-merged without the Package Support Framework. → the packaged UI must force its profile path (portable `<exe>\data` is dead under read-only `WindowsApps`), while the de-identified LocalSystem service's `%ProgramData%` tree is unaffected.
-  https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-behind-the-scenes
-- **Self-contained vs framework-dependent MSIX**: framework-dependent is smaller but needs the Windows App Runtime present on the target (no Store resolver on the sideload/winget self-host path); self-contained carries WinAppSDK in-package and installs with nothing pre-present, but is not serviceable for WinAppSDK CVEs (rebuild to patch). → self-contained chosen (matches the existing `WindowsAppSDKSelfContained=true`); framework-dependent is the package-size re-examination trigger.
-  https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/deploy-overview
 
 ## Code signing — CI integration (researched 2026-06-25, premise for ADR-0029)
 

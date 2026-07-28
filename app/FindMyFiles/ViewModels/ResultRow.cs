@@ -8,7 +8,7 @@ namespace FindMyFiles.ViewModels;
 /// <summary>
 /// One list row. Created as a placeholder by the virtualized list and filled
 /// in place when its page arrives — the same instance stays bound, so no
-/// container regeneration happens (docs/ARCHITECTURE.md).
+/// container regeneration happens (ADR-0015).
 /// </summary>
 public sealed partial class ResultRow : ObservableObject
 {
@@ -67,6 +67,26 @@ public sealed partial class ResultRow : ObservableObject
     /// after a position-preserving requery (best effort).</summary>
     public ulong EntryRef { get; private set; }
 
+    /// <summary>
+    /// Exact NTFS file reference (record plus sequence). Shell actions verify
+    /// the path against this identity before dispatch.
+    /// </summary>
+    public ulong Frn { get; private set; }
+
+    /// <summary>Stable UI Automation identity for the virtual result position.
+    /// The ListView container is recycled, so this travels with the row rather
+    /// than being assigned to a physical container.</summary>
+    public string AutomationId => $"ResultRow-{Index}";
+
+    /// <summary>Screen-reader summary of the visible row. Empty placeholders
+    /// stay unnamed; <see cref="Fill"/> raises one notification after every
+    /// visible field has been populated so automation never observes a
+    /// half-filled row.</summary>
+    public string AutomationName => IsPlaceholder
+        ? string.Empty
+        : string.Join(", ", new[] { Name, ParentPath, SizeText, DateText }
+            .Where(value => !string.IsNullOrEmpty(value)));
+
     /// <summary>Make an empty row for <paramref name="index"/> — the
     /// virtualized list's only constructor, called for every slot before any
     /// data is fetched.</summary>
@@ -80,9 +100,10 @@ public sealed partial class ResultRow : ObservableObject
     /// <see cref="IsPlaceholder"/>. In place — the bound instance is reused.</summary>
     /// <param name="data">The engine page hit supplying this row's identity and fields.</param>
     /// <param name="highlighter">Active-query highlighter, or null when no query is set.</param>
-    public void Fill(RowData data, IHighlighter? highlighter = null)
+    internal void Fill(RowData data, IHighlighter? highlighter = null)
     {
         EntryRef = data.EntryRef;
+        Frn = data.Frn;
         FullPath = data.FullPath;
         IsPlaceholder = false;
         Name = data.Name;
@@ -96,6 +117,7 @@ public sealed partial class ResultRow : ObservableObject
             : string.Empty;
         Glyph = data.IsDirectory ? "" : ""; // Folder : Page
         ApplyHighlight(highlighter, data);
+        OnPropertyChanged(nameof(AutomationName));
     }
 
     /// <summary>Compute this row's name/path highlight ranges for the active

@@ -1,8 +1,6 @@
-//! The committed generated artifacts (EngineContract.g.cs and docs/contract.md)
-//! must each equal a fresh generation — this runs inside `cargo test
-//! --workspace`, so the ordinary test gate (and the lefthook pre-push) catches
-//! a contract edit whose C# radiation or Markdown reference was not
-//! regenerated (ADR-0018).
+//! The committed C# binding must equal a fresh generation. This runs inside
+//! the canonical nextest workspace run, so the ordinary test gate catches a contract edit
+//! whose C# radiation was not regenerated (ADR-0018).
 
 #[test]
 fn generated_artifacts_match_the_contract() {

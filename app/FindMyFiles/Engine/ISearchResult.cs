@@ -1,7 +1,7 @@
 namespace FindMyFiles.Engine;
 
 /// <summary>Materialized, sort-ordered result; pages are O(1) reads.</summary>
-public interface ISearchResult : IDisposable
+internal interface ISearchResult : IDisposable
 {
     /// <summary>The settled total match count (the upper bound on rows obtainable
     /// via <see cref="GetRangeAsync"/>). This determines the virtualized list's

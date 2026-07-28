@@ -5,13 +5,17 @@ use parking_lot::Mutex;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use super::frn::FrnIndex;
-use super::{EntryId, Frn, NO_PARENT, RecordNo, SortKey, flags};
+use super::{DerivedValidity, EntryId, Frn, NO_PARENT, RecordNo, SortKey, flags};
 
 /// In-memory per-volume index.
 ///
 /// Struct-of-arrays entry columns, two string pools sharing one offset/length
-/// table, an FRN map, and the always-sorted name permutation
-/// (docs/ARCHITECTURE.md). One instance per indexed volume.
+/// table, an FRN index, and the always-sorted name permutation. One instance
+/// per indexed volume, owned by that volume's worker thread — the single
+/// writer.
+///
+/// An entry row is one directory link, not necessarily one NTFS object:
+/// hard-linked paths have distinct [`EntryId`] values and share a full FRN.
 pub struct VolumeIndex {
     /// The contiguous, sweepable **dictionary** of *distinct* folded names
     /// (ADR-0032). Each entry indexes it through `name_id`; a name's bytes are
@@ -51,11 +55,19 @@ pub struct VolumeIndex {
     pub(super) perm_name: Vec<EntryId>,
     pub(super) content_generation: u64,
     pub(super) structural_generation: u64,
+    /// Bumped whenever an existing row's size or mtime changes. Unlike the
+    /// batch-scoped content generation, this moves at the mutation itself so
+    /// a size/mtime query can never reuse an already-misordered lazy
+    /// permutation, even inside the batch that changed the stat columns.
+    pub(super) stat_generation: u64,
     /// Bumped whenever an existing directory's name or parent changes —
     /// the two mutations that invalidate memoized descendant paths in ways
     /// an append-only extension cannot express. Plain appends/deletes/stat
     /// updates leave it untouched.
     pub(super) dir_topology_generation: u64,
+    /// A directory move/rename or HIDDEN/SYSTEM change requires one O(n)
+    /// inherited-EXCLUDED propagation at the next USN batch boundary.
+    pub(super) exclusion_tree_dirty: bool,
     pub(super) tombstones: u32,
     /// Reclaimable original-spelling bytes left by tombstoned rows and
     /// in-place dir renames (folded bytes are shared in the dictionary and
@@ -120,6 +132,13 @@ fn column_size(size_lo: &[u32], size_ovf: &FxHashMap<EntryId, u64>, id: EntryId)
 }
 
 impl VolumeIndex {
+    // Windows extended-length paths contain at most 32,767 UTF-16 code
+    // units. One unit occupies at most three bytes in WTF-8 (including lone
+    // surrogates), so this bound preserves every valid NT path while
+    // preventing a corrupt acyclic parent graph from growing an unbounded
+    // temporary chain or output buffer.
+    const MAX_PATH_WTF8_BYTES: usize = 32_767 * 3;
+
     /// Total entry slots, live plus tombstoned (the column length).
     pub const fn len(&self) -> usize {
         self.name_id.len()
@@ -233,11 +252,110 @@ impl VolumeIndex {
         Frn(self.frn[id as usize])
     }
 
-    /// The live entry for a record number, if any. Pass a [`RecordNo`] (or a
+    /// One live entry for a record number, if any. Pass a [`RecordNo`] (or a
     /// raw record-number `u64`); derive one from a full reference with
     /// [`Frn::record`] — the type stops a full FRN being mistaken for a key.
+    ///
+    /// Files with hard links have multiple rows. This representative lookup
+    /// is suitable for directory-parent resolution (Windows does not permit
+    /// directory hard links); link-sensitive code must inspect every row for
+    /// the complete reference instead.
     pub fn entry_by_record(&self, record: impl Into<RecordNo>) -> Option<EntryId> {
         self.frn_index.lookup(record.into(), &self.frn, &self.flag)
+    }
+
+    /// Every live link row for a record number.
+    pub(crate) fn entries_by_record(
+        &self,
+        record: impl Into<RecordNo>,
+    ) -> impl Iterator<Item = EntryId> + '_ {
+        self.frn_index
+            .lookup_all(record.into(), &self.frn, &self.flag)
+    }
+
+    /// Every live link row whose complete record+sequence reference is `frn`.
+    pub(crate) fn entries_by_frn(&self, frn: Frn) -> impl Iterator<Item = EntryId> + '_ {
+        self.entries_by_record(frn.record())
+            .filter(move |&id| self.frn(id) == frn)
+    }
+
+    /// One live link row whose complete NTFS reference equals `frn`.
+    ///
+    /// This is a representative object lookup retained for callers that only
+    /// need to establish existence or resolve a directory. Link-sensitive
+    /// mutations use exact link-row lookup internally.
+    pub fn entry_by_frn(&self, frn: Frn) -> Option<EntryId> {
+        self.entries_by_frn(frn).next()
+    }
+
+    /// Whether this index was created by the explicit synthetic-fixture
+    /// constructor. Production roots always carry a non-zero sequence.
+    pub(crate) fn is_synthetic_fixture(&self) -> bool {
+        self.frn(Self::ROOT).0 >> 48 == 0
+    }
+
+    /// Find one exact directory link: object generation + parent + original
+    /// WTF-8 spelling. This tuple is the stable identity of a hard-link row.
+    pub(crate) fn entry_by_link_wtf8(
+        &self,
+        frn: Frn,
+        parent_frn: Frn,
+        name_wtf8: &[u8],
+    ) -> Option<EntryId> {
+        self.entries_by_frn(frn).find(|&id| {
+            let parent = self.parent(id);
+            if parent == NO_PARENT || parent as usize >= self.len() {
+                return false;
+            }
+            let stored = self.frn(parent);
+            let parent_matches = stored == parent_frn
+                || (parent == Self::ROOT
+                    && self.is_synthetic_fixture()
+                    && stored.record() == parent_frn.record());
+            parent_matches && self.name(id) == name_wtf8
+        })
+    }
+
+    /// UTF-16 convenience form for USN records.
+    pub(crate) fn entry_by_link(
+        &self,
+        frn: Frn,
+        parent_frn: Frn,
+        name_utf16: &[u16],
+    ) -> Option<EntryId> {
+        let mut name = Vec::with_capacity(name_utf16.len() * 3);
+        let mut folded = Vec::with_capacity(name_utf16.len() * 3);
+        crate::wtf8::push_wtf8_pair(name_utf16, &mut name, &mut folded);
+        self.entry_by_link_wtf8(frn, parent_frn, &name)
+    }
+
+    /// Validate that each live searchable link identity occurs exactly once.
+    ///
+    /// The FRN permutation makes rows for one record contiguous. A temporary
+    /// hash set is therefore allocated only for the uncommon multi-row group,
+    /// not for every entry in a million-row snapshot.
+    pub(super) fn has_unique_live_link_identities(&self) -> bool {
+        let ids = self.frn_index.sorted_ids();
+        let mut start = 0usize;
+        while start < ids.len() {
+            let record = self.frn(ids[start]).record();
+            let mut end = start + 1;
+            while end < ids.len() && self.frn(ids[end]).record() == record {
+                end += 1;
+            }
+            if end - start > 1 {
+                let mut seen = rustc_hash::FxHashSet::default();
+                for &id in &ids[start..end] {
+                    if self.is_live(id)
+                        && !seen.insert((self.frn(id), self.parent(id), self.name(id)))
+                    {
+                        return false;
+                    }
+                }
+            }
+            start = end;
+        }
+        true
     }
 
     // Raw dictionary access for the pool-scan query kernel (same crate only).
@@ -280,14 +398,28 @@ impl VolumeIndex {
         self.orig_off[id as usize] == u32::MAX
     }
 
-    /// The content generation — bumped by every USN batch; open result
-    /// handles stay readable across it (docs/ARCHITECTURE.md, generation 2-tier).
+    /// The content generation — bumped by every USN batch.
+    ///
+    /// This is the cheap tier of the two-tier generation scheme: rows may have
+    /// appeared, changed or been tombstoned, but no [`EntryId`] means something
+    /// different than it did, so an open result set stays readable across the
+    /// bump and only its derived caches need revalidating. See
+    /// [`Self::structural_generation`] for the expensive tier.
+    ///
+    /// Neither generation is persisted in a snapshot: result handles never
+    /// leave the process, so in-process monotonicity is the whole requirement
+    /// (ADR-0010).
     pub const fn content_generation(&self) -> u64 {
         self.content_generation
     }
 
-    /// The structural generation — bumped only by compaction/rebuild, which
-    /// hard-stales open result handles (docs/ARCHITECTURE.md, generation 2-tier).
+    /// The structural generation — bumped only by compaction or a full
+    /// rebuild, i.e. exactly when [`EntryId`] values are renumbered or reused.
+    ///
+    /// An id an old result set still holds would then address an unrelated
+    /// entry, so a mismatch is unrecoverable for that result: it goes hard
+    /// stale, page fetches answer `Stale`, and the client re-issues the query.
+    /// Contrast [`Self::content_generation`], which an open result survives.
     pub const fn structural_generation(&self) -> u64 {
         self.structural_generation
     }
@@ -296,24 +428,70 @@ impl VolumeIndex {
         self.dir_topology_generation
     }
 
+    pub(crate) const fn stat_generation(&self) -> u64 {
+        self.stat_generation
+    }
+
     /// Carry the structural generation across a rebuild: a freshly built
     /// index replacing one whose generation was `prev` must read as strictly
-    /// newer, so open result handles go hard-stale (docs/ARCHITECTURE.md,
-    /// generation 2-tier). Compaction (M2) will reuse this.
+    /// newer, so open result handles go hard stale (see
+    /// [`Self::structural_generation`]).
     pub(crate) const fn bump_structural_from(&mut self, prev: u64) {
         self.structural_generation = prev + 1;
     }
 
-    /// Return the cached content-derived value of type `T`. On a generation
-    /// change `build` receives the previous generation's value so it can
-    /// extend it incrementally instead of rebuilding from scratch; all cached
-    /// types are invalidated together on a generation change.
-    pub(crate) fn cached_derived_or_update<T, F>(&self, build: F) -> Arc<T>
+    /// Return the cached content-derived value of type `T`, rebuilding or
+    /// incrementally extending it whenever the cached one is not
+    /// [`DerivedValidity::is_current`] for this index.
+    ///
+    /// A rejected value — stale by its own key, or simply not covering every
+    /// row yet — becomes the incremental builder's previous input, as does the
+    /// value cached under the preceding content generation. A failed or
+    /// cancelled build publishes nothing: the last completed value stays
+    /// available (and still rejected), so the next call retries instead of
+    /// answering from data that was never validated.
+    pub(crate) fn cached_derived_or_try_update<T, E, F>(&self, build: F) -> Result<Arc<T>, E>
     where
-        T: Any + Send + Sync,
-        F: FnOnce(Option<Arc<T>>) -> T,
+        T: Any + Send + Sync + DerivedValidity,
+        F: FnOnce(Option<Arc<T>>) -> Result<T, E>,
     {
-        self.with_derived(build)
+        let key = std::any::TypeId::of::<T>();
+        let mut guard = self.derived_cache.lock();
+        let cache = guard.get_or_insert_with(|| DerivedCache {
+            generation: self.content_generation,
+            current: DerivedMap::default(),
+            prev: DerivedMap::default(),
+        });
+        if cache.generation != self.content_generation {
+            cache.prev = std::mem::take(&mut cache.current);
+            cache.generation = self.content_generation;
+        }
+
+        let current = cache
+            .current
+            .get(&key)
+            .cloned()
+            .and_then(|value| value.downcast::<T>().ok());
+        if let Some(value) = current.as_ref()
+            && value.is_current(self)
+        {
+            return Ok(value.clone());
+        }
+
+        // Prefer a rejected value from this generation. Otherwise retain the
+        // normal previous-generation extension path. Clone instead of remove:
+        // a cancelled build must leave the last completed value retryable.
+        let previous = current.or_else(|| {
+            cache
+                .prev
+                .get(&key)
+                .cloned()
+                .and_then(|value| value.downcast::<T>().ok())
+        });
+        let value = Arc::new(build(previous)?);
+        cache.prev.remove(&key);
+        cache.current.insert(key, value.clone());
+        Ok(value)
     }
 
     /// Read-only probe of the current generation's cached `T` — never
@@ -330,33 +508,6 @@ impl VolumeIndex {
             .clone()
             .downcast::<T>()
             .ok()
-    }
-
-    fn with_derived<T, F>(&self, build: F) -> Arc<T>
-    where
-        T: Any + Send + Sync,
-        F: FnOnce(Option<Arc<T>>) -> T,
-    {
-        let key = std::any::TypeId::of::<T>();
-        let mut guard = self.derived_cache.lock();
-        let cache = guard.get_or_insert_with(|| DerivedCache {
-            generation: self.content_generation,
-            current: DerivedMap::default(),
-            prev: DerivedMap::default(),
-        });
-        if cache.generation != self.content_generation {
-            cache.prev = std::mem::take(&mut cache.current);
-            cache.generation = self.content_generation;
-        }
-        if let Some(v) = cache.current.get(&key)
-            && let Ok(t) = v.clone().downcast::<T>()
-        {
-            return t;
-        }
-        let previous = cache.prev.remove(&key).and_then(|v| v.downcast::<T>().ok());
-        let t = Arc::new(build(previous));
-        cache.current.insert(key, t.clone());
-        t
     }
 
     /// Per-column memory accounting for the perf panel / `fmf stats`.
@@ -554,42 +705,132 @@ impl VolumeIndex {
 
     /// Append the full WTF-8 path of `id` ("C:\dir\file.txt") to `out`.
     /// Built lazily from the parent chain — paths are never stored.
-    pub fn append_path(&self, id: EntryId, out: &mut Vec<u8>) {
-        self.append_parent_path(id, out);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`super::PathBuildError`] when `id` or a parent is invalid,
+    /// the parent graph cycles, or the graph would exceed the maximum valid
+    /// NT path size.
+    pub fn append_path(&self, id: EntryId, out: &mut Vec<u8>) -> Result<(), super::PathBuildError> {
+        let original_len = out.len();
+        self.append_parent_path(id, out)?;
         if id != Self::ROOT {
+            let required = (out.len() - original_len)
+                .checked_add(self.name(id).len())
+                .ok_or(super::PathBuildError::PathTooLong {
+                    entry: id,
+                    bytes: usize::MAX,
+                    maximum: Self::MAX_PATH_WTF8_BYTES,
+                })?;
+            if required > Self::MAX_PATH_WTF8_BYTES {
+                out.truncate(original_len);
+                return Err(super::PathBuildError::PathTooLong {
+                    entry: id,
+                    bytes: required,
+                    maximum: Self::MAX_PATH_WTF8_BYTES,
+                });
+            }
             out.extend_from_slice(self.name(id));
         }
+        Ok(())
     }
 
     /// Append the path of `id`'s parent directory, including a trailing `\`.
-    pub fn append_parent_path(&self, id: EntryId, out: &mut Vec<u8>) {
-        let mut chain = [0u32; 128];
-        let mut depth = 0;
-        let mut cur = if id == Self::ROOT {
-            NO_PARENT
-        } else {
-            self.parent(id)
-        };
-        while cur != NO_PARENT && depth < chain.len() {
-            chain[depth] = cur;
-            depth += 1;
-            cur = if cur == Self::ROOT {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`super::PathBuildError`] when `id` or a parent is invalid,
+    /// the parent graph cycles, or the graph would exceed the maximum valid
+    /// NT path size.
+    pub fn append_parent_path(
+        &self,
+        id: EntryId,
+        out: &mut Vec<u8>,
+    ) -> Result<(), super::PathBuildError> {
+        if id == NO_PARENT || id as usize >= self.len() {
+            return Err(super::PathBuildError::EntryOutOfRange {
+                entry: id,
+                entries: self.len(),
+            });
+        }
+        let next = |entry: EntryId| -> Result<EntryId, super::PathBuildError> {
+            if entry == NO_PARENT {
+                return Ok(NO_PARENT);
+            }
+            if entry as usize >= self.len() {
+                return Err(super::PathBuildError::ParentOutOfRange {
+                    entry: id,
+                    parent: entry,
+                    entries: self.len(),
+                });
+            }
+            Ok(if entry == Self::ROOT {
                 NO_PARENT
             } else {
-                self.parent(cur)
-            };
-        }
-        for &c in chain[..depth].iter().rev() {
-            // The synthetic scope-mode ROOT (ADR-0024) carries no name; skip
-            // it (name + separator) so multi-root paths don't gain a leading
-            // `\`. Real $MFT entries always have a name, so this is inert for
-            // the privileged path (its ROOT is the volume label, e.g. "C:").
-            let name = self.name(c);
-            if !name.is_empty() {
-                out.extend_from_slice(name);
-                out.push(b'\\');
+                self.parent(entry)
+            })
+        };
+
+        let start = next(id)?;
+
+        // Floyd detection keeps the corruption check O(depth) without a
+        // per-row bitset sized to the whole index.
+        let mut slow = start;
+        let mut fast = start;
+        let mut path_len = 0usize;
+        loop {
+            if slow != NO_PARENT {
+                path_len = path_len.checked_add(self.name(slow).len() + 1).ok_or(
+                    super::PathBuildError::PathTooLong {
+                        entry: id,
+                        bytes: usize::MAX,
+                        maximum: Self::MAX_PATH_WTF8_BYTES,
+                    },
+                )?;
+                if path_len > Self::MAX_PATH_WTF8_BYTES {
+                    return Err(super::PathBuildError::PathTooLong {
+                        entry: id,
+                        bytes: path_len,
+                        maximum: Self::MAX_PATH_WTF8_BYTES,
+                    });
+                }
+            }
+            slow = next(slow)?;
+            fast = next(next(fast)?)?;
+            if slow == NO_PARENT || fast == NO_PARENT {
+                break;
+            }
+            if slow == fast {
+                return Err(super::PathBuildError::ParentCycle { entry: id });
             }
         }
+
+        let mut chain = Vec::new();
+        path_len = 0;
+        let mut cur = start;
+        while cur != NO_PARENT {
+            path_len = path_len.checked_add(self.name(cur).len() + 1).ok_or(
+                super::PathBuildError::PathTooLong {
+                    entry: id,
+                    bytes: usize::MAX,
+                    maximum: Self::MAX_PATH_WTF8_BYTES,
+                },
+            )?;
+            if path_len > Self::MAX_PATH_WTF8_BYTES {
+                return Err(super::PathBuildError::PathTooLong {
+                    entry: id,
+                    bytes: path_len,
+                    maximum: Self::MAX_PATH_WTF8_BYTES,
+                });
+            }
+            chain.push(cur);
+            cur = next(cur)?;
+        }
+        for &c in chain.iter().rev() {
+            out.extend_from_slice(self.name(c));
+            out.push(b'\\');
+        }
+        Ok(())
     }
 
     /// Fraction of slots that are tombstones (0.0–1.0) — the compaction
@@ -681,19 +922,102 @@ impl<'a> SortColumns<'a> {
 #[cfg(test)]
 mod tests {
 
-    use crate::index::testutil::build_sample;
+    use crate::index::testutil::{build_sample, raw, u16s};
+    use crate::index::{PathBuildError, VolumeIndexBuilder};
 
     #[test]
     fn full_path_builds_lazily() {
         let idx = build_sample();
         let note = idx.entry_by_record(100).unwrap();
         let mut p = Vec::new();
-        idx.append_path(note, &mut p);
+        idx.append_path(note, &mut p).unwrap();
         assert_eq!(p, b"C:\\docs\\Note.TXT");
 
         let mut pp = Vec::new();
-        idx.append_parent_path(note, &mut pp);
+        idx.append_parent_path(note, &mut pp).unwrap();
         assert_eq!(pp, b"C:\\docs\\");
+    }
+
+    #[test]
+    fn parent_path_has_no_fixed_depth_truncation() {
+        let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
+        let mut parent = 5;
+        let mut expected = String::from("C:\\");
+        for depth in 0..130u64 {
+            let record = 10 + depth;
+            let name = format!("d{depth:03}");
+            let units = u16s(&name);
+            builder.push(raw(record, parent, &units, true, 0, 0));
+            expected.push_str(&name);
+            expected.push('\\');
+            parent = record;
+        }
+        let leaf = u16s("leaf.txt");
+        builder.push(raw(1_000, parent, &leaf, false, 0, 0));
+        expected.push_str("leaf.txt");
+        let index = builder.finish();
+        let id = index.entry_by_record(1_000).unwrap();
+
+        let mut path = Vec::new();
+        index.append_path(id, &mut path).unwrap();
+
+        assert_eq!(path, expected.as_bytes());
+    }
+
+    #[test]
+    fn parent_cycle_is_an_explicit_error_before_output_changes() {
+        let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
+        let a = u16s("a");
+        let b = u16s("b");
+        builder.push(raw(10, 11, &a, true, 0, 0));
+        builder.push(raw(11, 10, &b, true, 0, 0));
+        let index = builder.finish();
+        let id = index.entry_by_record(10).unwrap();
+        let mut path = b"unchanged".to_vec();
+
+        assert_eq!(
+            index.append_parent_path(id, &mut path),
+            Err(PathBuildError::ParentCycle { entry: id })
+        );
+        assert_eq!(path, b"unchanged");
+    }
+
+    #[test]
+    fn corrupt_acyclic_path_above_the_nt_limit_is_bounded_before_output_changes() {
+        let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
+        let component = vec![b'x' as u16; 255];
+        let mut parent = 5;
+        for record in 10..400 {
+            builder.push(raw(record, parent, &component, true, 0, 0));
+            parent = record;
+        }
+        let leaf = u16s("leaf.txt");
+        builder.push(raw(1_000, parent, &leaf, false, 0, 0));
+        let index = builder.finish();
+        let id = index.entry_by_record(1_000).unwrap();
+        let mut path = b"unchanged".to_vec();
+
+        assert!(matches!(
+            index.append_path(id, &mut path),
+            Err(PathBuildError::PathTooLong { entry, .. }) if entry == id
+        ));
+        assert_eq!(path, b"unchanged");
+    }
+
+    #[test]
+    fn invalid_entry_is_an_error_instead_of_an_index_panic() {
+        let index = build_sample();
+        let mut path = b"unchanged".to_vec();
+        let invalid = index.len() as u32;
+
+        assert_eq!(
+            index.append_path(invalid, &mut path),
+            Err(PathBuildError::EntryOutOfRange {
+                entry: invalid,
+                entries: index.len(),
+            })
+        );
+        assert_eq!(path, b"unchanged");
     }
 
     #[test]

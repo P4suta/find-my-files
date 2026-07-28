@@ -5,24 +5,24 @@
 //! surface (the C# `CountersData` is generated from this list, and fmf-core's
 //! `golden_json` test pins its `CountersSnapshot` serde keys against it), so the
 //! list lives here even though the counters themselves are engine-internal.
-//! Append new counters at the end; never rename (F12 history and the golden
-//! `stats_snapshot.json` key on them).
+//! Intentional changes follow the canonical contract/golden/generator flow;
+//! obsolete counters are removed rather than retained as permanently-zero
+//! public fields.
 
 /// The ordered `snake_case` keys of the degradation counters.
 ///
 /// Exposed as `MetricsSnapshot.counters` in the stats JSON. Contract surface:
-/// append new names at the end, never rename. Both the C# `CountersData` and
-/// fmf-core's `CountersSnapshot` serde keys are pinned against this list.
+/// Both the C# `CountersData` and fmf-core's `CountersSnapshot` serde keys are
+/// pinned against this list.
 pub const COUNTER_NAMES: &[&str] = &[
+    "scan_unresolved_parents",
     "stat_fetch_failures",
     "usn_batches_truncated",
     "snapshot_load_failures",
     "snapshot_save_failures",
-    "deferred_names_unresolved",
     "corrupt_mft_records",
     "journal_rescans",
     "scan_pipeline_fallbacks",
-    "offset_table_rebuild_fallbacks",
     "lazy_perm_rebuild_fallbacks",
     "compaction_aborts",
     "pipe_malformed_frames",
@@ -32,6 +32,6 @@ pub const COUNTER_NAMES: &[&str] = &[
     "deferred_name_read_failures",
     "pipe_results_evicted",
     "trace_serialize_failures",
-    "walk_read_errors",
-    "walk_depth_truncated",
+    "hard_link_refresh_failures",
+    "usn_index_rejections",
 ];

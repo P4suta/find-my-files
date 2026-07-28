@@ -1,8 +1,9 @@
 //! Civil-date ↔ FILETIME conversion for `dm:` filters.
 //!
-//! `dm:` bounds are interpreted in the *local* time zone
-//! (docs/ARCHITECTURE.md C-4). The conversion is injected via
-//! [`DateResolver`] so the parser/compiler stay pure and tests can use UTC.
+//! `dm:` bounds are interpreted in the *local* time zone — a user typing a
+//! calendar date means their own day boundaries, not UTC's. The conversion is
+//! injected via [`DateResolver`] so the parser/compiler stay pure and tests
+//! can use UTC.
 
 /// FILETIME ticks (100 ns since 1601-01-01) at the Unix epoch (1970-01-01).
 pub const FILETIME_UNIX_EPOCH: i64 = 116_444_736_000_000_000;

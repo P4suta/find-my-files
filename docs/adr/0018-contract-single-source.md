@@ -5,11 +5,37 @@ The named-pipe adoption, rejected transport alternatives, flush public surface, 
 
 ## Decision
 
-Introduce a **dependency-free leaf crate `fmf-contract` (rlib)** at the bottom of the dependency graph as the machine-readable source of truth for the engine contract (status codes, opcodes, event kinds, wire PODs, QueryOptions, limits, version numbers, pipe name), radiating a single definition to all Rust consumers (fmf-core / fmf-proto / fmf-ffi / fmf-service). For C#, the `gen-contract` binary inside `fmf-contract` radiates `app/FindMyFiles/Engine/Generated/EngineContract.g.cs` (constants, enums, `[StructLayout(Explicit)]` structs, CountersData DTO) as a **checked-in generated artifact**, and `fmf-contract/tests/drift.rs` (byte match between regeneration and the committed artifact) continuously detects drift inside `cargo test --workspace`.
+Introduce a **dependency-free leaf crate `fmf-contract` (rlib)** at the bottom of the dependency graph as the machine-readable source of truth for the engine contract (status codes, opcodes, event kinds, wire PODs, QueryOptions, limits, version numbers, pipe name), radiating a single definition to all Rust consumers (fmf-core / fmf-proto / fmf-ffi / fmf-service). For C#, the `gen-contract` binary inside `fmf-contract` radiates `app/FindMyFiles/Engine/Generated/EngineContract.g.cs` (constants, enums, `[StructLayout(Explicit)]` structs, CountersData DTO) as a **checked-in generated artifact**, and `fmf-contract/tests/drift.rs` continuously detects drift in the canonical nextest suite.
 
 The contract semantics are carried by **`contract/golden/`** at the repository root (manifest + byte streams + shared JSON fixtures) as an executable specification. The corpus is **captured from the current implementation before the refactor begins** (capture-first); thereafter both Rust (fmf-proto) and the independently hand-written C# codec (PipeProtocol/PageCodec) pin the same files. Re-capture (bless) only happens via explicit invocation with `FMF_BLESS=1` — the ritual for an intentional contract change; normal test runs require a match against the existing bytes.
 
 Additionally, limit the engine's internal OS-effect seams to **`SnapshotStore` / `JournalSource` (2 traits only)** (to push the volume worker's failure paths down into non-elevated, deterministic tests), and forbid additional porting beyond this cap.
+
+### Contract-change flow (one-directional radiation)
+
+`fmf-contract` is the **origin** of a contract change, never a downstream copy
+of a prose description. An intentional change radiates in exactly one direction
+and in exactly this order:
+
+1. **Edit `fmf-contract`.** The definition itself moves first — status codes,
+   opcodes, event kinds, wire PODs, QueryOptions, limits, version numbers, pipe
+   name. An incompatible wire change also moves the pipe name here, not only a
+   number.
+2. **Re-capture `contract/golden/`** under the explicit `FMF_BLESS=1` ritual
+   (`just contract-bless`). Ordinary runs never re-capture; they must match the
+   bytes already committed.
+3. **Regenerate the checked-in C# binding** with `just contract-gen`.
+4. **Require both-language suites green** — Rust (`just test`) and C#
+   (`just test-app`) pin the same corpus, plus the drift test and fmf-ffi's
+   independent literal value pins.
+
+The order is load-bearing and no step may be skipped: blessing before the
+definition moves seals the *old* bytes as the specification, and generating
+before blessing produces a binding that no captured frame proves. Prose that
+describes the contract is a **reader** of the crate, never an input to it — a
+document is allowed to fall out of date, whereas the crate cannot, because the
+generated binding, the golden corpus, and the value pins all fail when it does.
+The error-code table remains append-only with no renumbering.
 
 ## Rationale
 
@@ -23,7 +49,7 @@ Generating the golden corpus "from the new contract crate" would bake generator 
 
 ### Generation method: explicit command + check-in + drift test (not subject to ADR-0014)
 
-`gen-contract` is not wired into MSBuild/build hooks (consistent with the no-custom-Directory.Build.props rule and ADR-0014's rejection of build complexity). Equivalent guarantees come from explicit `just contract-gen` invocation + committing the artifact + drift verification inside `cargo test --workspace` (rides on the existing lefthook pre-push / CI test job with no changes). FieldOffset and similar values are taken from the **`offset_of!` actual values of compiled Rust types**, so there is zero hand calculation and value drift is impossible in the type system. Missing enum entries are detected three ways: drift + golden + a C# startup `Marshal.SizeOf` assert.
+`gen-contract` is not wired into MSBuild/build hooks (consistent with the no-custom-Directory.Build.props rule and ADR-0014's rejection of build complexity). Equivalent guarantees come from explicit `just contract-gen` invocation + committing the artifact + drift verification inside `just test`. FieldOffset and similar values are taken from the **`offset_of!` actual values of compiled Rust types**, so there is zero hand calculation and value drift is impossible in the type system. Missing enum entries are detected three ways: drift + golden + a C# startup `Marshal.SizeOf` assert.
 
 ### Rejected alternatives
 
@@ -37,9 +63,8 @@ Generating the golden corpus "from the new contract crate" would bake generator 
 
 ## Impact
 
-- 1 new crate (fmf-contract). **DLL name `fmf_engine`, pipe name `fmf-engine-v1`, ABI_VERSION=1, PROTOCOL_VERSION=1, FMFIDX04 are all bytes-unchanged** (no version bump).
+- 1 new crate (fmf-contract). At adoption, **DLL name `fmf_engine`, pipe name `fmf-engine-v1`, ABI_VERSION=1, PROTOCOL_VERSION=1, FMFIDX04 were all bytes-unchanged** (no version bump). Later ADRs have bumped these; the current values are `fmf-contract::versions`, which this ADR does not restate.
 - fmf-ffi's contract_tests is promoted from "duplicate equality pin" to "literal absolute-value pin + ABI layout pin" and lives on — an independent tripwire where a downstream test catches an accidental edit of the single source itself.
-- Canonical contract-change flow (one-directional radiation): docs/ARCHITECTURE.md (prose) → fmf-contract (definitions) → `FMF_BLESS=1` re-capture → `just contract-gen` → both-language tests green. The error-code table remains append-only / no renumbering as before.
 - C# decisions (user-confirmed): CountersData is also a generation target (counter additions auto-follow into C#); CancellationToken is fully propagated to `ISearchResult.GetRangeAsync` too (double defense with the epoch mechanism, fixed by a behavior test).
 - Migration is 11 stages (S0→S0.5→S1a→S1b→S2 strict order; S3⇔S4, S5a/S5b⇔S4/S4b may run in parallel). Each stage compiles standalone + all tests green, mergeable to main. fmf-core-touching stages (S1b/S3/S4/S4b) require `just perf-gate` green in an elevated shell as a merge condition.
 
@@ -49,15 +74,11 @@ If the scan/ split exceeds the criterion 10% gate, **immediately roll back to fi
 
 ## Verification
 
-- [ ] S0.5: capture corpus pinned by both Rust/C# suites on the same files (non-elevated `cargo test` +
-  `just test-app`)
-- [ ] S1a: after dependency inversion, corpus match proves wire bytes unchanged. All tests pass with C# unchanged (double proof)
-- [ ] S2: byte match generated corpus == captured corpus (self-consistency trap closed) + drift test running
-- [ ] S4: `streaming_scan_matches_reference` (elevated) + perf-gate green
-- [ ] S4b: worker failure paths (snapshot corruption→rescan / journal-gone→Rescan→Ready / save failure) green
-  in non-elevated, deterministic tests; old/new behavior identical in a real C: smoke
-- [ ] S6: perf-gate + FMF_ADMIN_TESTS + FMF_PIPE_TESTS all green in an elevated shell, compared numerically
-  against this appendix's starting point
+`just test` and `just test-app` pin the same corpus and generated binding.
+Deterministic worker-failure tests run unelevated; `just test-admin` and
+`just perf-gate` cover the real-volume path before release. The stable release
+workflow independently reruns `just verify` and the elevated `just test-admin`
+suite on the exact release ref before signing.
 
 ## Re-examination triggers
 
@@ -95,7 +116,7 @@ S6b=287f659+9d7a30d (+doc convergence commit).
   USN→event 250.9ms / kill→restore 1.25s (restore p50 108ms) / search p99 ≤5.6ms /
   loopback ResultPage p99 ≤5ms / RAM ~99B/entry (WS 119.9MiB @1.27M)
 - Non-elevated gate (`just verify`) green confirmed: run right after branch creation 2026-06-11 —
-  fmt-check / clippy -D warnings / cargo test --workspace / C# 80/80 all pass
+  fmt-check / clippy -D warnings / nextest workspace suite / C# tests all pass
 
 ## Appendix: final gate judgment (2026-06-12, all stages complete)
 

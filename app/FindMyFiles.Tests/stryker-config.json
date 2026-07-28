@@ -2,6 +2,7 @@
   "stryker-config": {
     "project": "FindMyFiles.csproj",
     "test-projects": ["FindMyFiles.Tests.csproj"],
+    "concurrency": 4,
     "mutate": [
       "**/Services/ShellOps.cs",
       "**/Services/ServiceProvisioner.cs",
@@ -9,8 +10,10 @@
       "**/ViewModels/SearchOrchestrator.cs",
       "**/ViewModels/MainViewModel.cs",
       "**/Engine/EngineClientFactory.cs",
+      "**/Engine/EngineErrorSeverityWire.cs",
       "**/Engine/Transport/PipeEngineClient.cs",
       "**/Engine/Transport/PipeConnection.cs",
+      "**/Engine/Transport/ResultLeaseGate.cs",
       "**/Engine/PageCodec.cs",
       "**/Engine/PipeProtocol.cs",
       "**/Engine/Wtf8.cs"
@@ -20,6 +23,7 @@
       "low": 60,
       "break": 0
     },
-    "reporters": ["progress", "html", "cleartext"]
+    "report-file-name": "mutation-report",
+    "reporters": ["progress", "json"]
   }
 }

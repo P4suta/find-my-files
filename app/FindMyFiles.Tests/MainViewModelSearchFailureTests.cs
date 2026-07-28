@@ -43,11 +43,12 @@ public sealed class MainViewModelSearchFailureTests
         _vm.Notifications.Items.Any(n => n.Severity == NotifySeverity.Error);
 
     [Theory]
-    [InlineData(EngineConnectionState.Reconnecting)]
-    [InlineData(EngineConnectionState.Connecting)]
+    [InlineData((int)EngineConnectionState.Connecting)]
+    [InlineData((int)EngineConnectionState.Reconnecting)]
     public void Settling_connection_suppresses_the_search_failure_notification(
-        EngineConnectionState connection)
+        int connectionValue)
     {
+        var connection = (EngineConnectionState)connectionValue;
         DriveSearchFailure(connection, new EngineException("boom", 7));
 
         // The reconnect banner / "preparing" state already explains the gap, so
@@ -56,11 +57,12 @@ public sealed class MainViewModelSearchFailureTests
     }
 
     [Theory]
-    [InlineData(EngineConnectionState.InProc)]
-    [InlineData(EngineConnectionState.Connected)]
+    [InlineData((int)EngineConnectionState.InProc)]
+    [InlineData((int)EngineConnectionState.Connected)]
     public void Usable_connection_surfaces_the_search_failure_notification(
-        EngineConnectionState connection)
+        int connectionValue)
     {
+        var connection = (EngineConnectionState)connectionValue;
         DriveSearchFailure(connection, new EngineException("boom", 7));
 
         Assert.Contains(_vm.Notifications.Items, n => n.Severity == NotifySeverity.Error);

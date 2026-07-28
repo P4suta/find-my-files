@@ -92,10 +92,10 @@ oracles, the snapshot round-trips):
 
 ## Consequences
 
-- The snapshot is FMFIDX07; an FMFIDX06 (or older) file fails the magic check →
-  full rescan (ADR-0010, no compat). The `valid_sections` fixture and the
-  structural validator drop `dict_len` and derive each name's length from the
-  gapless `dict_off`.
+- The gapless layout was introduced as FMFIDX07; prior files fail the magic
+  check and trigger a full rescan, the accepted cost of ADR-0010's no-migration
+  policy. The `valid_sections` fixture and the structural validator derive each
+  name's length from the gapless `dict_off` rather than a stored length.
 - `compute_dict_estimate`'s historical projection still prints the Phase-2
   figure with the `+6·D` directory cost (`dict_off` + `dict_len`); Lever 2
   realized `+4·D`, an extra −2 B/entry. The Lever-1 estimator

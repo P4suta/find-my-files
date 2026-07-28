@@ -9,7 +9,7 @@
 # of the supply chain (ADR-0040): CycloneDX SBOMs, an osv-scanner gate, and
 # keyless build-provenance + SBOM attestations — so a nightly is verifiable with
 # `gh attestation verify`, same as a release minus the Authenticode signature.
-# See docs/SUPPLY_CHAIN.md / docs/RELEASING.md.
+# See docs/RELEASING.md and ADR-0040.
 
 name: nightly
 
@@ -18,24 +18,35 @@ on:
     - cron: "47 16 * * *" # 01:47 JST — offset from the Monday security cluster + nightly-admin (17:17)
   workflow_dispatch:
 
-# A new nightly supersedes an in-flight one; there is only ever one "latest".
+# Serialize nightlies and never cancel after artifact creation: an uploaded
+# artifact must not be stranded half-attested.
 concurrency:
   group: nightly
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: windows-latest
-    timeout-minutes: 40
+    # workflow_dispatch lets callers choose a ref. Nightly provenance must never
+    # bless a feature branch under the repository's official nightly identity.
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 55
     permissions:
       contents: read
-      id-token: write # OIDC token for keyless Sigstore attestation
-      attestations: write # write build-provenance + SBOM attestations
+    outputs:
+      built: ${{ steps.freshness.outputs.build }}
+      date: ${{ steps.identity.outputs.date }}
+      version: ${{ steps.identity.outputs.version }}
     steps:
+      # The job-level ref guard makes manual feature-branch runs inert. Keep the
+      # default event SHA here so the built bytes and provenance cannot drift if
+      # main advances after the workflow starts.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       # Don't rebuild an identical nightly: skip the scheduled run when main has
       # not moved in the last 24h (HEAD's own date is the signal — depth-1 is
@@ -53,10 +64,23 @@ jobs:
             echo "::notice::No commits to main in the last 24h — skipping nightly."
           fi
 
-      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      # CI provisions only the tools this job executes. Rust reads the repository
+      # pin, .NET uses its first-party Action, and WinAppCli is byte/signer pinned
+      # by the repository-local security boundary.
+      - uses: ./.github/actions/rust-toolchain
+        if: steps.freshness.outputs.build == 'true'
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         if: steps.freshness.outputs.build == 'true'
         with:
-          install: true
+          dotnet-version: 10.0.302
+      - uses: ./.github/actions/setup-winapp
+        id: winapp
+        if: steps.freshness.outputs.build == 'true'
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        if: steps.freshness.outputs.build == 'true'
+        with:
+          tool: just@1.54.0,cargo-about@0.7.1
+          fallback: none
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         if: steps.freshness.outputs.build == 'true'
         with:
@@ -75,6 +99,7 @@ jobs:
       # format comes from one place — `xtask version`.
       - name: Resolve nightly build version
         if: steps.freshness.outputs.build == 'true'
+        id: identity
         shell: bash
         run: |
           DATE=$(date -u +%Y%m%d)
@@ -84,11 +109,41 @@ jobs:
             echo "FmfChannel=nightly.$DATE"
             echo "NIGHTLY_DATE=$DATE"
           } >> "$GITHUB_ENV"
+          {
+            echo "date=$DATE"
+            echo "version=$VER"
+          } >> "$GITHUB_OUTPUT"
           echo "::notice::Building nightly $VER"
 
       - name: Build distributable bundle (unsigned)
         if: steps.freshness.outputs.build == 'true'
         run: just publish
+
+      - name: Shipping bundle startup smoke (no test seams)
+        if: steps.freshness.outputs.build == 'true'
+        run: just ui-test-stable-smoke
+        env:
+          FMF_UI_CLI: ${{ steps.winapp.outputs.cli-path }}
+
+      - name: Build isolated UI-test bundle
+        if: steps.freshness.outputs.build == 'true'
+        run: just publish-ui-test true
+
+      - name: UI-test bundle automation
+        if: steps.freshness.outputs.build == 'true'
+        run: just ui-test-published
+        env:
+          FMF_UI_CLI: ${{ steps.winapp.outputs.cli-path }}
+
+      - name: Upload UI automation evidence on failure
+        if: ${{ failure() && steps.freshness.outputs.build == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-ui-automation-failure
+          path: build/ui-automation/
+          retention-days: 7
+          if-no-files-found: warn
+          overwrite: true
 
       # Same supply-chain artefacts as a release, minus signing (ADR-0040): the
       # CycloneDX SBOMs + the osv-scanner gate, shared with release.yml via the
@@ -97,7 +152,7 @@ jobs:
         if: steps.freshness.outputs.build == 'true'
         uses: ./.github/actions/sbom-scan
 
-      - name: Package (tagless — zip name from FMF_BUILD_VERSION)
+      - name: Package (tagless — zip name from bundled BUILDINFO)
         if: steps.freshness.outputs.build == 'true'
         run: just package
 
@@ -108,34 +163,51 @@ jobs:
           # nightly it is (the inner zip already carries the full version string).
           name: find-my-files-nightly-${{ env.NIGHTLY_DATE }}
           path: |
-            build/package/*.zip
+            build/package/find-my-files-${{ steps.identity.outputs.version }}-win-x64.zip
             build/package/SHA256SUMS.txt
-            build/sbom/*.cdx.json
+            build/sbom/fmf-engine.cdx.json
+            build/sbom/app.cdx.json
           retention-days: 14
+          overwrite: true
           if-no-files-found: error
 
-      # Keyless build-provenance + SBOM attestations (Sigstore via OIDC, no stored
-      # secrets, no approval gate) — so a nightly is `gh attestation verify`-able,
-      # same as a release minus the Authenticode signature (ADR-0040). The 14-day
-      # artifact expires but the attestations persist in the repo.
+  # Keep OIDC + attestation writes away from repository build/test code. This
+  # job receives only the completed, immutable Actions artifact.
+  attest:
+    needs: build
+    if: needs.build.outputs.built == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read # download the completed nightly package artifact
+      contents: read
+      id-token: write # exchange OIDC identity for the artifact attestation
+      attestations: write # publish the nightly package attestation
+    steps:
+      - name: Download completed nightly artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: find-my-files-nightly-${{ needs.build.outputs.date }}
+          path: build
+
+      # Keyless build-provenance + SBOM attestations (Sigstore via OIDC, no
+      # stored secrets) make the nightly `gh attestation verify`-able. The
+      # 14-day artifact expires but attestations persist in the repository.
       - name: Attest build provenance
-        if: steps.freshness.outputs.build == 'true'
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-path: |
-            build/package/find-my-files-*-win-x64.zip
+            build/package/find-my-files-${{ needs.build.outputs.version }}-win-x64.zip
             build/package/SHA256SUMS.txt
 
       - name: Attest Rust SBOM
-        if: steps.freshness.outputs.build == 'true'
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
-          subject-path: build/package/find-my-files-*-win-x64.zip
+          subject-path: build/package/find-my-files-${{ needs.build.outputs.version }}-win-x64.zip
           sbom-path: build/sbom/fmf-engine.cdx.json
 
       - name: Attest C# SBOM
-        if: steps.freshness.outputs.build == 'true'
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
-          subject-path: build/package/find-my-files-*-win-x64.zip
+          subject-path: build/package/find-my-files-${{ needs.build.outputs.version }}-win-x64.zip
           sbom-path: build/sbom/app.cdx.json

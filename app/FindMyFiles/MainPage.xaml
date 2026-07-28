@@ -14,6 +14,7 @@
     <!--  AllowDrop: a dropped folder injects a path: filter, a dropped file searches its name (drop-in only; rows are not drag-out sources).  -->
     <Grid
         AllowDrop="True"
+        AutomationProperties.AutomationId="AppRoot"
         DragOver="Page_DragOver"
         Drop="Page_Drop">
 
@@ -46,26 +47,28 @@
         <!--  通知バナー(Row 0)。検索バーと横位置(MaxWidth/Margin)を揃える。
               専用行なので結果リストとは重ならず、EmptyState でも表示される。  -->
         <ItemsControl
+            x:Name="NotifyBar"
             Grid.Row="0"
             MaxWidth="{StaticResource ContentMaxWidth}"
             Margin="{StaticResource ContentGutterMargin}"
             AutomationProperties.AutomationId="NotifyBar"
-            ItemsSource="{x:Bind ViewModel.Notifications.Items}"
-            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady)}">
+            ItemsSource="{x:Bind ViewModel.Notifications.Items, Mode=OneTime}"
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady), Mode=OneWay}">
             <ItemsControl.ItemTemplate>
                 <DataTemplate x:DataType="svc:AppNotification">
                     <InfoBar
-                        Title="{x:Bind Message}"
+                        Title="{x:Bind Message, Mode=OneTime}"
                         Margin="{StaticResource NotificationItemMargin}"
                         Closed="Notification_Closed"
                         IsOpen="True"
-                        Message="{x:Bind Detail}"
-                        Severity="{x:Bind conv:UiConverters.ToInfoSeverity(Severity)}">
+                        Message="{x:Bind Detail, Mode=OneTime}"
+                        Severity="{x:Bind conv:UiConverters.ToInfoSeverity(Severity), Mode=OneTime}">
                         <InfoBar.ActionButton>
                             <Button
+                                AutomationProperties.AutomationId="{x:Bind ActionAutomationId, Mode=OneTime}"
                                 Click="{x:Bind Invoke}"
-                                Content="{x:Bind ActionLabel}"
-                                Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ActionLabel)}" />
+                                Content="{x:Bind ActionLabel, Mode=OneTime}"
+                                Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(ActionLabel), Mode=OneTime}" />
                         </InfoBar.ActionButton>
                     </InfoBar>
                 </DataTemplate>
@@ -75,12 +78,13 @@
         <!--  検索バー(Row 0)。Empty では行が * で縦中央、Results では Auto で上。
               位置変化は RepositionThemeTransition で滑らかに。  -->
         <Grid
+            x:Name="SearchArea"
             Grid.Row="1"
             MaxWidth="{StaticResource ContentMaxWidth}"
             Margin="{StaticResource ContentGutterMargin}"
             VerticalAlignment="Center"
             ColumnSpacing="{StaticResource SpacingSmall}"
-            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady)}">
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady), Mode=OneWay}">
             <Grid.Transitions>
                 <TransitionCollection>
                     <RepositionThemeTransition />
@@ -90,13 +94,15 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <!--  Search box: a plain TextBox on purpose (AutoSuggestBox's accept semantics fight live filtering — docs/ARCHITECTURE.md).  -->
+            <!--  Search box: a plain TextBox on purpose. AutoSuggestBox's accept/commit semantics fight live filtering — every keystroke is already a query here, so there is nothing to accept.  -->
             <TextBox
                 x:Name="SearchBox"
                 Grid.Column="0"
                 AutomationProperties.AutomationId="SearchBox"
+                AutomationProperties.Name="{x:Bind ViewModel.SearchInputPlaceholder, Mode=OneWay}"
+                IsEnabled="{x:Bind ViewModel.CanSearch, Mode=OneWay}"
                 KeyDown="SearchBox_KeyDown"
-                PlaceholderText="{x:Bind ViewModel.SearchPlaceholder, Mode=OneWay}"
+                PlaceholderText="{x:Bind ViewModel.SearchInputPlaceholder, Mode=OneWay}"
                 Style="{StaticResource LauncherSearchBoxStyle}"
                 Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}">
                 <!--  Google 風に常時1pxの丸枠だけにする。TextBox 既定は (1) Focused で青い2px
@@ -133,9 +139,9 @@
             Grid.Row="2"
             MaxWidth="{StaticResource ContentMaxWidth}"
             Margin="{StaticResource ResultsAreaMargin}"
-            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady)}">
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady), Mode=OneWay}">
 
-            <!--  Results. ItemsPanel stays ItemsStackPanel (CLAUDE.md UI固定則).
+            <!--  Results. ItemsPanel stays ItemsStackPanel (AGENTS.md UI固定則).
                   ItemsSource is bound OneTime by design: the VirtualResultList
                   instance lives as long as the page; new results arrive via a
                   seeded Reset, never by swapping the ItemsSource (ADR-0015).  -->
@@ -145,11 +151,17 @@
             <ListView
                 x:Name="ResultsList"
                 AutomationProperties.AutomationId="ResultsList"
+                ContainerContentChanging="ResultsList_ContainerContentChanging"
                 DoubleTapped="ResultsList_DoubleTapped"
-                ItemsSource="{x:Bind ViewModel.Results.ResultsSource}"
+                ItemsSource="{x:Bind ViewModel.Results.ResultsSource, Mode=OneTime}"
                 KeyDown="ResultsList_KeyDown"
                 SelectionMode="Extended"
                 ShowsScrollingPlaceholders="True">
+                <ListView.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <ItemsStackPanel />
+                    </ItemsPanelTemplate>
+                </ListView.ItemsPanel>
                 <ListView.ItemContainerTransitions>
                     <TransitionCollection>
                         <AddDeleteThemeTransition />
@@ -172,16 +184,19 @@
                             <FontIcon
                                 Grid.Column="0"
                                 VerticalAlignment="Center"
+                                AutomationProperties.AccessibilityView="Raw"
                                 FontSize="{StaticResource IconSizeLarge}"
                                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                 Glyph="{x:Bind Glyph, Mode=OneWay}" />
                             <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                 <TextBlock
+                                    AutomationProperties.AccessibilityView="Raw"
                                     Style="{StaticResource ResultNameTextStyle}"
                                     hl:HighlightText.Source="{x:Bind Name, Mode=OneWay}"
                                     hl:HighlightText.Ranges="{x:Bind NameRanges, Mode=OneWay}" />
                                 <TextBlock
                                     x:Phase="1"
+                                    AutomationProperties.AccessibilityView="Raw"
                                     Style="{StaticResource ResultPathTextStyle}"
                                     hl:HighlightText.Source="{x:Bind ParentPath, Mode=OneWay}"
                                     hl:HighlightText.Ranges="{x:Bind PathRanges, Mode=OneWay}" />
@@ -193,11 +208,13 @@
                                 <TextBlock
                                     x:Phase="2"
                                     HorizontalAlignment="Right"
+                                    AutomationProperties.AccessibilityView="Raw"
                                     Style="{StaticResource ResultMetaTextStyle}"
                                     Text="{x:Bind SizeText, Mode=OneWay}" />
                                 <TextBlock
                                     x:Phase="2"
                                     HorizontalAlignment="Right"
+                                    AutomationProperties.AccessibilityView="Raw"
                                     Style="{StaticResource ResultMetaTextStyle}"
                                     Text="{x:Bind DateText, Mode=OneWay}" />
                             </StackPanel>
@@ -251,26 +268,30 @@
             </StackPanel>
         </Grid>
 
-        <!--  未接続(空エンジン)時のセットアップ画面。検索バー等は IsReady で畳まれ、
+        <!--  サービス未接続時のセットアップ画面。検索バー等は IsReady で畳まれ、
               これが画面中央に出る。主ボタンはワンクリックで登録→自動再起動。
-              IsDisconnected は起動時固定なので OneTime。  -->
+              致命的な pipe fault でもこの修復画面へ遷移する。  -->
         <StackPanel
+            x:Name="SetupArea"
             Grid.Row="0"
             Grid.RowSpan="3"
             MaxWidth="{StaticResource SetupMaxWidth}"
             Padding="{StaticResource PageContentPadding}"
             HorizontalAlignment="Center"
             VerticalAlignment="Center"
+            AutomationProperties.AutomationId="SetupArea"
             Spacing="{StaticResource SpacingLarge}"
-            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsDisconnected)}">
+            Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsDisconnected), Mode=OneWay}">
             <FontIcon
                 HorizontalAlignment="Center"
                 FontSize="{StaticResource IconSizeXLarge}"
                 Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                 Glyph="&#xE721;" />
             <TextBlock
+                x:Name="SetupTitleText"
                 x:Uid="SetupTitle"
                 HorizontalAlignment="Center"
+                AutomationProperties.LiveSetting="Assertive"
                 Style="{ThemeResource SubtitleTextBlockStyle}"
                 TextAlignment="Center" />
             <TextBlock
@@ -278,27 +299,23 @@
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                 TextAlignment="Center"
                 TextWrapping="Wrap" />
-            <Button
-                x:Name="EnableSearchButton"
-                x:Uid="EnableSearch"
+            <StackPanel
                 HorizontalAlignment="Center"
-                AutomationProperties.AutomationId="EnableSearch"
-                Click="EnableSearch_Click"
-                IsEnabled="{x:Bind ViewModel.SetupNotBusy, Mode=OneWay}"
-                Style="{StaticResource AccentButtonStyle}" />
-            <!--  非昇格スコープ経路(ADR-0024): 管理者CTAを主役に保ち、その下に
-                  控えめなリンク1つだけ。実体(フォルダ選択)は別画面=
-                  ScopeManagerDialog に逃がし、setup画面のごちゃつきを避ける。  -->
-            <TextBlock
-                x:Uid="SetupOrDivider"
-                HorizontalAlignment="Center"
-                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                Style="{ThemeResource CaptionTextBlockStyle}" />
-            <HyperlinkButton
-                x:Uid="ScopeSetupLink"
-                HorizontalAlignment="Center"
-                AutomationProperties.AutomationId="ScopeSetupLink"
-                Click="ScopeSetup_Click" />
+                Orientation="Horizontal"
+                Spacing="{StaticResource SpacingSmall}">
+                <Button
+                    x:Name="EnableSearchButton"
+                    x:Uid="EnableSearch"
+                    AutomationProperties.AutomationId="EnableSearch"
+                    Click="EnableSearch_Click"
+                    IsEnabled="{x:Bind ViewModel.SetupNotBusy, Mode=OneWay}"
+                    Style="{StaticResource AccentButtonStyle}" />
+                <Button
+                    x:Uid="SetupRecovery"
+                    AutomationProperties.AutomationId="SetupRecovery"
+                    Click="SetupRecovery_Click"
+                    IsEnabled="{x:Bind ViewModel.SetupNotBusy, Mode=OneWay}" />
+            </StackPanel>
             <StackPanel
                 HorizontalAlignment="Center"
                 Orientation="Horizontal"

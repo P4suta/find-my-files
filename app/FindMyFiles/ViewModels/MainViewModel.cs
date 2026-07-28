@@ -1,4 +1,3 @@
-using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
@@ -14,13 +13,15 @@ namespace FindMyFiles.ViewModels;
 /// <see cref="NotificationCenter"/> (InfoBar stack) and
 /// <see cref="PerfPanelViewModel"/> (F12).
 /// </summary>
-public sealed partial class MainViewModel : ObservableObject, IDisposable
+internal sealed partial class MainViewModel : ObservableObject, IDisposable
 {
     private readonly IEngineClient _engine;
+    private readonly CancellationTokenSource _lifetime = new();
 
     /// <summary>The one place engine events cross onto the UI thread —
     /// every handler below already runs dispatched.</summary>
     private readonly EngineEventMarshaler _engineEvents;
+    private int _disposed;
 
     /// <summary>The search box text (two-way). Changes flow to the
     /// orchestrator's debounce via <c>OnSearchTextChanged</c>.</summary>
@@ -67,6 +68,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// filter change (the same text now means something different).</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SearchPlaceholder))]
+    [NotifyPropertyChangedFor(nameof(SearchInputPlaceholder))]
     public partial bool RegexMode { get; set; }
 
     /// <summary>Which haystack the whole-query regex matches (name/path). Only
@@ -74,6 +76,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// independently so it survives toggling regex off and on.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SearchPlaceholder))]
+    [NotifyPropertyChangedFor(nameof(SearchInputPlaceholder))]
     public partial RegexScopeKind RegexScope { get; set; }
 
     /// <summary>Tray-resident mode (ADR-0030): the gear-menu toggle. When on,
@@ -91,35 +94,36 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             : "Search_PlaceholderRegexName")
         : Loc.Get("Search_Placeholder");
 
-    // ── Disconnected setup screen (empty fake engine: no service yet) ──
+    /// <summary>The accessible search hint. While the pipe is warming up the
+    /// disabled box explains that state instead of accepting a doomed query.</summary>
+    public string SearchInputPlaceholder =>
+        CanSearch ? SearchPlaceholder : Loc.Get("Status_Preparing");
 
-    /// <summary>True when the engine is the empty fake (unelevated, no service)
+    // ── Disconnected setup screen (explicit unavailable engine state) ──
+
+    /// <summary>True when no engine transport is currently available
     /// — the page shows the setup screen instead of a search box that can only
-    /// return zero rows. Fixed for this page's lifetime — registering re-resolves
-    /// the engine by rebuilding the page (App.SoftRestart, ADR-0036), so this
-    /// fresh-page property is re-evaluated and x:Bind OneTime is enough.</summary>
-    public bool IsDisconnected => _engine is FakeEngineClient { IsEmpty: true };
+    /// return zero rows. A fatal pipe identity/protocol failure also transitions
+    /// here so repair is actionable without continuing on a broken transport.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsReady))]
+    public partial bool IsDisconnected { get; set; }
 
     /// <summary>Inverse of <see cref="IsDisconnected"/> — true when the search
     /// UI (box + result list) should be shown instead of the setup screen.</summary>
     public bool IsReady => !IsDisconnected;
 
-    /// <summary>True once indexing in **scope mode** (ADR-0024: a user-chosen
-    /// set of folders, not all drives). Gates the gear menu's "change search
-    /// folders" item. Fixed for this page's lifetime (a transport change rebuilds
-    /// the page, ADR-0036), so x:Bind OneTime is enough.</summary>
-    public bool IsScopeMode => IsReady && _isScopeMode();
-
-    /// <summary>True once indexing in the elevated whole-volume mode (service
-    /// or in-proc). Gates the gear menu's "manage service" item — the
-    /// complement of <see cref="IsScopeMode"/> while ready, both false while
-    /// disconnected. Fixed for this page's lifetime (ADR-0036), so x:Bind OneTime.</summary>
-    public bool IsPrivilegedMode => IsReady && !_isScopeMode();
+    /// <summary>True only while requests can reach an engine. The search box is
+    /// disabled during initial connect and reconnect, while settings and repair
+    /// remain available.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SearchInputPlaceholder))]
+    public partial bool CanSearch { get; set; }
 
     /// <summary>The current index mode for the status submenu's info row
-    /// (selected folders vs all drives). Fixed for this page's lifetime (ADR-0036),
+    /// (all NTFS drives). Fixed for this page's lifetime (ADR-0036),
     /// so x:Bind OneTime.</summary>
-    public string ModeText => Loc.Get(_isScopeMode() ? "Status_ModeScope" : "Status_ModePrivileged");
+    public string ModeText { get; } = Loc.Get("Status_ModePrivileged");
 
     /// <summary>This app's channel-aware build version line for the Settings About
     /// block (always available, from <see cref="BuildInfo"/>). Static — bound via
@@ -154,8 +158,26 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <returns>A task that completes once the engine version has been fetched.</returns>
     public async Task RefreshVersionsAsync()
     {
-        var stats = await _engine.GetStatsAsync().ConfigureAwait(true);
-        EngineVersion = stats?.Service?.Version ?? string.Empty;
+        try
+        {
+            var stats = await _engine.GetStatsAsync(_lifetime.Token).ConfigureAwait(true);
+            if (Volatile.Read(ref _disposed) == 0)
+            {
+                EngineVersion = stats?.Service?.Version ?? string.Empty;
+            }
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            if (Volatile.Read(ref _disposed) == 0)
+            {
+                EngineVersion = string.Empty;
+            }
+
+            FileLog.Warn("engine", "engine version unavailable", ex);
+        }
     }
 
     /// <summary>Setup screen progress text ("waiting for admin permission…" etc.);
@@ -174,55 +196,6 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// enabled state.</summary>
     public bool SetupNotBusy => !SetupBusy;
 
-    // ── Scope mode (ADR-0024): the no-admin path on the setup screen ──
-
-    /// <summary>Folders the user has chosen to fold-walk in scope mode, edited in
-    /// the scope dialog. Seeded from settings; <see cref="ApplyScopeChange"/>
-    /// persists them as <see cref="AppSettings.ScopeRoots"/> and relaunches.</summary>
-    public ObservableCollection<string> ScopeFolders { get; }
-
-    /// <summary>The "start scope search" button is enabled only once at least
-    /// one folder has been chosen.</summary>
-    public bool CanStartScope => ScopeFolders.Count > 0;
-
-    /// <summary>Subfolders to prune from the walk (ADR-0025), shown in the scope
-    /// manager dialog. Each must sit under a <see cref="ScopeFolders"/> root;
-    /// seeded from settings, persisted by <see cref="ApplyScopeChange"/>.</summary>
-    public ObservableCollection<string> ScopeExcludes { get; }
-
-    /// <summary>A note naming the folders already inside a larger selected one,
-    /// so the user sees the bigger set subsumes them (they merge on apply).
-    /// Empty when the selection has no nesting. Recomputed on every
-    /// <see cref="ScopeFolders"/> change.</summary>
-    public string ScopeCoverageNote
-    {
-        get
-        {
-            var kept = ScopePaths.Normalize(ScopeFolders);
-            var covered = ScopeFolders
-                .Where(f => !kept.Any(k => string.Equals(k, f, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-            return covered.Count == 0
-                ? string.Empty
-                : Loc.Get("Scope_CoverageNote", string.Join(", ", covered));
-        }
-    }
-
-    // CA1822 (mark static): a false positive for x:Bind targets — these surface
-    // static AppPaths state to the setup screen and must be instance members of
-    // the bound ViewModel for `{x:Bind ViewModel.…}` to resolve them.
-#pragma warning disable CA1822
-    /// <summary>True when app state lives next to the exe rather than the user
-    /// profile (<see cref="AppPaths"/>) — drives the setup screen's "nothing
-    /// leaves this folder" footnote. Fixed at startup, so x:Bind OneTime.</summary>
-    public bool IsPortable => AppPaths.IsPortable;
-
-    /// <summary>The portable-data-root footnote (only shown when
-    /// <see cref="IsPortable"/>).</summary>
-    public string DataLocationText =>
-        Loc.Get("Setup_PortableLocation", AppPaths.PortableRoot ?? string.Empty);
-#pragma warning restore CA1822
-
     /// <summary>How results land in the virtualized list (publish / refresh
     /// in place / empty) — the seam the orchestrator hands outcomes to.</summary>
     public ResultsPresenter Results { get; }
@@ -240,27 +213,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public PerfPanelViewModel Perf { get; }
 
     private readonly AppSettings _settings;
-
-    /// <summary>The scope-folder picker (UI boundary) — injected so the
-    /// add/dedupe logic is unit-testable without showing a real dialog.</summary>
-    private readonly Func<Task<string?>> _folderPicker;
-
-    /// <summary>The in-process soft-restart action (UI/shell boundary) — injected
-    /// so <see cref="ApplyScopeChange"/>'s persist step is testable without
-    /// rebuilding the page. Defaults to <see cref="App.SoftRestart"/>.</summary>
-    private readonly Action _relaunch;
-
-    /// <summary>Reports whether the live engine is a scope-mode walk (ADR-0024)
-    /// — injected so the mode-driven UI (<see cref="IsScopeMode"/> /
-    /// <see cref="IsPrivilegedMode"/> / <see cref="ModeText"/>) is testable with
-    /// a stub engine. Defaults to inspecting the real <see cref="FfiEngineClient"/>.</summary>
-    private readonly Func<bool> _isScopeMode;
+    private readonly Func<bool> _saveSettings;
 
     /// <summary>The "make search usable" steps (register elevated → soft restart
     /// into the pipe), injected so <see cref="EnableSearchAsync"/> is testable
     /// without elevation or rebuilding the page. Defaults to
     /// <see cref="ServiceProvisioner.Real"/>.</summary>
     private readonly ServiceProvisioner _provisioner;
+    private bool _restoringPersistedSetting;
 
     /// <summary>Builds the focused components, restores focused-search settings,
     /// and subscribes the engine events (volume updates, errors, connection
@@ -270,38 +230,27 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// and back timers.</param>
     /// <param name="settings">App settings to read/persist; loaded from disk
     /// when null.</param>
-    /// <param name="folderPicker">Scope-folder picker; defaults to the real
-    /// <see cref="ScopeFolderPicker.PickAsync"/> (tests inject a fake).</param>
-    /// <param name="relaunch">In-process soft-restart action; defaults to the real
-    /// <see cref="App.SoftRestart"/> (tests inject a no-op).</param>
-    /// <param name="isScopeMode">Reports whether the engine is a scope-mode walk;
-    /// defaults to inspecting the real <see cref="FfiEngineClient"/> (tests inject
-    /// a constant to drive the mode-dependent UI).</param>
     /// <param name="provisioner">The register→wait→relaunch steps behind the setup
     /// screen's one-click button; defaults to <see cref="ServiceProvisioner.Real"/>
     /// (tests inject fakes so <see cref="EnableSearchAsync"/> runs without UAC).</param>
+    /// <param name="saveSettings">Persistence seam; defaults to
+    /// <see cref="AppSettings.Save"/> and is injected by failure-path tests.</param>
     public MainViewModel(
         IEngineClient engine,
         IDispatcher dispatcher,
         AppSettings? settings = null,
-        Func<Task<string?>>? folderPicker = null,
-        Action? relaunch = null,
-        Func<bool>? isScopeMode = null,
-        ServiceProvisioner? provisioner = null)
+        ServiceProvisioner? provisioner = null,
+        Func<bool>? saveSettings = null)
     {
         _engine = engine;
+        IsDisconnected = engine.Kind == EngineClientKind.Unavailable
+            || engine.Connection is EngineConnectionState.Unavailable
+                or EngineConnectionState.Faulted;
+        CanSearch = engine.Connection is EngineConnectionState.InProc
+            or EngineConnectionState.Connected;
         _settings = settings ?? AppSettings.Load();
-        _folderPicker = folderPicker ?? ScopeFolderPicker.PickAsync;
-        _relaunch = relaunch ?? App.SoftRestart;
-        _isScopeMode = isScopeMode ?? (() => _engine is FfiEngineClient { IsScopeMode: true });
+        _saveSettings = saveSettings ?? _settings.Save;
         _provisioner = provisioner ?? ServiceProvisioner.Real;
-        ScopeFolders = new ObservableCollection<string>(_settings.ScopeRoots);
-        ScopeExcludes = new ObservableCollection<string>(_settings.ScopeExcludes);
-        ScopeFolders.CollectionChanged += (_, _) =>
-        {
-            OnPropertyChanged(nameof(CanStartScope));
-            OnPropertyChanged(nameof(ScopeCoverageNote));
-        };
         _engineEvents = new EngineEventMarshaler(engine, dispatcher);
         Results = new ResultsPresenter(dispatcher);
         Search = new SearchOrchestrator(
@@ -313,10 +262,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 SearchText,
                 new SearchOptions(Sort, SortDescending, FmfCase.Smart, IncludeHiddenSystem, RegexMode, RegexScope)));
 
-        // Focused-search wiring: the lists are settings-owned; the toggle
-        // state flows through OnFocusedSearchChanged (Search exists by now).
-        Search.FocusedExcludePaths = _settings.FocusedExcludePaths;
-        Search.FocusedExtensions = _settings.FocusedExtensions;
+        // Focused-search policy is code-owned; only the user-facing on/off
+        // preference is persisted.
         FocusedSearch = _settings.FocusedSearch;
 
         // Regex mode/scope restore (same ctor-time no-op requery as focused).
@@ -331,8 +278,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         Results.ResultsPublished += OnResultsPublished;
 
         _engineEvents.VolumeUpdated += OnVolumeUpdated;
-        _engineEvents.EngineErrorOccurred += severity =>
-            HandleEngineErrorAsync(severity).Forget("engine.error");
+        _engineEvents.EngineErrorOccurred += OnEngineErrorOccurred;
         _engineEvents.ConnectionChanged += OnConnectionChanged;
 
         Notifications.AttachToNotifier();
@@ -343,13 +289,24 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// Non-Info notifications never auto-dissolve (NotificationCenter).</summary>
     private AppNotification? _reconnectBanner;
 
+    /// <summary>The actionable startup failure currently shown. Held by
+    /// reference so a connect-driven retry or button retry replaces/removes
+    /// the exact notification instead of accumulating stale errors.</summary>
+    private AppNotification? _startupFailureNotification;
+
     /// <summary>True once <see cref="RunStartupAsync"/> has successfully run.
     /// Guards against the Loaded call and the first Connected event both running
     /// startup; cleared on a startup failure so a later connect can retry.</summary>
     private bool _started;
 
+    private void OnEngineErrorOccurred(EngineErrorSeverity severity) =>
+        HandleEngineErrorAsync(severity).Forget("engine.error");
+
     private void OnConnectionChanged(EngineConnectionState state)
     {
+        CanSearch = state is EngineConnectionState.Connected
+            or EngineConnectionState.InProc;
+
         if (state == EngineConnectionState.Reconnecting)
         {
             if (_reconnectBanner is null)
@@ -364,11 +321,29 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
+        if (state is EngineConnectionState.Faulted
+            or EngineConnectionState.Unavailable)
+        {
+            // A fatal identity/protocol mismatch stops the supervisor. Do not
+            // leave the persistent "reconnecting" banner claiming recovery is
+            // still in progress; the transport badge now reads disconnected
+            // and the exact cause remains in app.log.
+            if (_reconnectBanner is not null)
+            {
+                Notifications.Remove(_reconnectBanner);
+                _reconnectBanner = null;
+            }
+
+            IsDisconnected = true;
+            return;
+        }
+
         if (state != EngineConnectionState.Connected)
         {
             return;
         }
 
+        IsDisconnected = false;
         if (_reconnectBanner is not null)
         {
             Notifications.Remove(_reconnectBanner);
@@ -387,14 +362,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>Startup entry, called from the page's Loaded. Branches on engine
-    /// readiness: the empty fake shows the setup screen; a pipe client that hasn't
+    /// readiness: an unavailable client shows setup; a pipe client that hasn't
     /// connected yet stays on "preparing" and lets <see cref="OnConnectionChanged"/>
     /// drive the real startup once it connects; an already-usable engine (FFI, or a
     /// pipe that connected before Loaded) runs it now.</summary>
     /// <returns>A task that completes once startup is kicked off (or deferred to the connect).</returns>
     public async Task StartAsync()
     {
-        if (_engine is FakeEngineClient { IsEmpty: true })
+        if (IsDisconnected)
         {
             // Unelevated, no service → the page shows the setup screen
             // (IsDisconnected); don't pretend to index.
@@ -409,9 +384,18 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         // sits in. Hold "preparing" and let the first Connected event
         // (OnConnectionChanged) run the startup. Only a never-connected pipe reports
         // Connecting — FFI / fake / connected-pipe report InProc or Connected.
-        if (_engine.Connection == EngineConnectionState.Connecting)
+        if (_engine.Connection is EngineConnectionState.Connecting
+            or EngineConnectionState.Reconnecting)
         {
             StatusText = Loc.Get("Status_Preparing");
+            return;
+        }
+
+        if (_engine.Connection is EngineConnectionState.Faulted
+            or EngineConnectionState.Unavailable)
+        {
+            IsDisconnected = true;
+            StatusText = Loc.Get("Status_ServiceUnregistered");
             return;
         }
 
@@ -426,7 +410,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <returns>A task that completes once startup indexing and the initial requery are kicked off.</returns>
     private async Task RunStartupAsync()
     {
-        if (_started)
+        if (_started || Volatile.Read(ref _disposed) != 0)
         {
             return;
         }
@@ -438,25 +422,57 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             // bound StatusText and pushes notifications, so it must resume on the UI
             // thread — resuming off it throws RPC_E_WRONG_THREAD (see .editorconfig
             // CA2007/MA0004, disabled for exactly this UI-app reason).
-            var volumes = await _engine.ListVolumesAsync();
-            await _engine.StartIndexingAsync(volumes);
+            var ct = _lifetime.Token;
+            var volumes = await _engine.ListVolumesAsync(ct);
+            await _engine.StartIndexingAsync(volumes, ct);
 
             // Reflect the real state at startup (over a pipe the service may
             // already be indexed before we connect). Drop the unconditional
             // "preparing" and show "ready" when already Ready; later
             // Scanning→Ready transitions are picked up by OnVolumeUpdated.
-            StatusText = StatusFormatter.Overall(await _engine.GetStatusAsync(), volumes);
+            StatusText = StatusFormatter.Overall(await _engine.GetStatusAsync(ct), volumes);
+            if (_startupFailureNotification is not null)
+            {
+                Notifications.Remove(_startupFailureNotification);
+                _startupFailureNotification = null;
+            }
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            return;
         }
         catch (Exception ex)
         {
             _started = false; // let a later Connected retry the startup
             FileLog.Error("engine", "startup indexing failed", ex);
             StatusText = Loc.Get("Status_IndexStartFailed");
-            Notifications.Push(new AppNotification(
-                NotifySeverity.Error, Loc.Get("Notify_IndexStartFailedTitle"), ex.Message));
+            if (_startupFailureNotification is not null)
+            {
+                Notifications.Remove(_startupFailureNotification);
+            }
+
+            _startupFailureNotification = new AppNotification(
+                NotifySeverity.Error,
+                Loc.Get("Notify_IndexStartFailedTitle"),
+                ex.Message,
+                Loc.Get("Common_Retry"),
+                RetryStartup);
+            Notifications.Push(_startupFailureNotification);
+            return;
         }
 
         Search.Requery(RequeryOrigin.Initial);
+    }
+
+    private void RetryStartup()
+    {
+        if (_startupFailureNotification is not null)
+        {
+            Notifications.Remove(_startupFailureNotification);
+            _startupFailureNotification = null;
+        }
+
+        RunStartupAsync().Forget("engine.startup-retry");
     }
 
     /// <summary>Setup screen's one-click action: register the service elevated,
@@ -483,6 +499,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             switch (await _provisioner.RegisterAsync())
             {
                 case ServiceActionOutcome.Ok:
+                    if (Volatile.Read(ref _disposed) != 0)
+                    {
+                        return;
+                    }
+
                     SetupStatus = Loc.Get("Setup_Connecting");
 
                     // Re-resolve the engine in-process forcing the pipe transport
@@ -494,6 +515,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 case ServiceActionOutcome.Cancelled:
                     SetupStatus = string.Empty;
                     break;
+                case ServiceActionOutcome.IdentityUnavailable:
+                    SetupStatus = Loc.Get("Svc_IdentityUnavailable");
+                    break;
                 default:
                     SetupStatus = Loc.Get("Setup_Failed");
                     break;
@@ -504,104 +528,6 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             SetupBusy = false;
         }
     }
-
-    /// <summary>Setup screen (no-admin path): open the folder picker and add the
-    /// chosen folder to <see cref="ScopeFolders"/> (case-insensitive dedupe).
-    /// The picker is single-select, so this adds one folder per click.</summary>
-    /// <returns>A task that completes once the picked folder (if any) has been added.</returns>
-    public async Task PickScopeFoldersAsync()
-    {
-        // No ConfigureAwait(false): the picker is a genuinely async OS dialog, and the
-        // continuation mutates the bound ScopeFolders — whose CollectionChanged drives
-        // the start button's IsEnabled via x:Bind. Resuming off the dispatcher updates a
-        // control from a pool thread → COMException 0x8001010E (RPC_E_WRONG_THREAD), which
-        // .Forget swallows, so the user silently can't proceed. The UI app resumes on the
-        // dispatcher by convention (.editorconfig disables CA2007/MA0004 for this reason).
-        var path = await _folderPicker();
-        if (path is not null
-            && !ScopeFolders.Any(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)))
-        {
-            ScopeFolders.Add(path);
-        }
-    }
-
-    /// <summary>Drop one folder from the scope list (the per-row × button).</summary>
-    /// <param name="path">The folder path to remove.</param>
-    public void RemoveScopeFolder(string path) => ScopeFolders.Remove(path);
-
-    /// <summary>Manager dialog (scope mode): pick a subfolder to prune from the
-    /// walk (ADR-0025). Rejected with a notice when it is not inside one of the
-    /// chosen <see cref="ScopeFolders"/> roots (an exclude outside the indexed
-    /// set prunes nothing). Case-insensitive dedupe.</summary>
-    /// <returns>A task that completes once the picked folder (if valid) is added.</returns>
-    public async Task PickScopeExcludeAsync()
-    {
-        // No ConfigureAwait(false): the continuation mutates bound collections,
-        // so it must resume on the UI thread (see PickScopeFoldersAsync).
-        var path = await _folderPicker();
-        if (path is null)
-        {
-            return;
-        }
-
-        if (!ScopePaths.IsUnderAnyRoot(path, ScopeFolders))
-        {
-            Notifications.Push(new AppNotification(
-                NotifySeverity.Warning, Loc.Get("Scope_ExcludeNotUnderRoot"), path));
-            return;
-        }
-
-        if (!ScopeExcludes.Any(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)))
-        {
-            ScopeExcludes.Add(path);
-        }
-    }
-
-    /// <summary>Drop one excluded subfolder (the per-row × button).</summary>
-    /// <param name="path">The exclude path to remove.</param>
-    public void RemoveScopeExclude(string path) => ScopeExcludes.Remove(path);
-
-    /// <summary>Apply the current <see cref="ScopeFolders"/> as the scope: drop
-    /// roots nested under another (<see cref="ScopePaths.Normalize"/>), and if the
-    /// set actually changed, persist it as <see cref="AppSettings.ScopeRoots"/>
-    /// and relaunch (unelevated) into a fresh <c>WalkInProc</c> that folder-walks
-    /// the new set (ADR-0024). The engine has no live root-swap
-    /// (<c>index_start_scope</c> no-ops on an existing scope slot), so a relaunch
-    /// is the only way to re-walk. No-op when empty or unchanged, so re-opening
-    /// the manager and closing it without edits never restarts.</summary>
-    public void ApplyScopeChange()
-    {
-        var roots = ScopePaths.Normalize(ScopeFolders);
-        if (roots.Count == 0)
-        {
-            return;
-        }
-
-        // Keep only excludes still inside a (normalized) root — a removed root
-        // makes its excludes moot; the engine ignores non-matching ones anyway.
-        var excludes = ScopeExcludes
-            .Where(e => ScopePaths.IsUnderAnyRoot(e, roots))
-            .ToList();
-
-        if (SameSet(roots, _settings.ScopeRoots) && SameSet(excludes, _settings.ScopeExcludes))
-        {
-            return;
-        }
-
-        _settings.ScopeRoots = [.. roots];
-        _settings.ScopeExcludes = [.. excludes];
-        _settings.Save();
-        _relaunch();
-    }
-
-    /// <summary>Order- and case-insensitive set equality, so a reorder or
-    /// case-only edit counts as "unchanged" and skips the relaunch.</summary>
-    private static bool SameSet(List<string> a, string[] b) =>
-        a.Count == b.Length
-        && a.OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
-            .SequenceEqual(
-                b.OrderBy(p => p, StringComparer.OrdinalIgnoreCase),
-                StringComparer.OrdinalIgnoreCase);
 
     partial void OnSearchTextChanged(string value)
     {
@@ -630,10 +556,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     partial void OnFocusedSearchChanged(bool value)
     {
         Search.FocusedSearch = value;
-        if (_settings.FocusedSearch != value)
+        if (!_restoringPersistedSetting && _settings.FocusedSearch != value)
         {
+            var previous = _settings.FocusedSearch;
             _settings.FocusedSearch = value;
-            _settings.Save();
+            if (!_saveSettings())
+            {
+                _settings.FocusedSearch = previous;
+                RestorePersistedSetting(() => FocusedSearch = previous);
+                ReportSettingsSaveFailure();
+            }
         }
 
         Search.Requery(RequeryOrigin.Filter);
@@ -645,10 +577,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// no-op on the still-empty query.</summary>
     partial void OnRegexModeChanged(bool value)
     {
-        if (_settings.RegexMode != value)
+        if (!_restoringPersistedSetting && _settings.RegexMode != value)
         {
+            var previous = _settings.RegexMode;
             _settings.RegexMode = value;
-            _settings.Save();
+            if (!_saveSettings())
+            {
+                _settings.RegexMode = previous;
+                RestorePersistedSetting(() => RegexMode = previous);
+                ReportSettingsSaveFailure();
+            }
         }
 
         Search.Requery(RequeryOrigin.Filter);
@@ -659,10 +597,19 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     partial void OnRegexScopeChanged(RegexScopeKind value)
     {
         var s = value == RegexScopeKind.Path ? "path" : "name";
-        if (_settings.RegexScope != s)
+        if (!_restoringPersistedSetting && _settings.RegexScope != s)
         {
+            var previous = _settings.RegexScope;
             _settings.RegexScope = s;
-            _settings.Save();
+            if (!_saveSettings())
+            {
+                _settings.RegexScope = previous;
+                var previousScope = string.Equals(previous, "path", StringComparison.Ordinal)
+                    ? RegexScopeKind.Path
+                    : RegexScopeKind.Name;
+                RestorePersistedSetting(() => RegexScope = previousScope);
+                ReportSettingsSaveFailure();
+            }
         }
 
         if (RegexMode)
@@ -676,12 +623,37 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// runs once from the ctor; the save is skipped when unchanged.</summary>
     partial void OnCloseToTrayChanged(bool value)
     {
-        if (_settings.CloseToTray != value)
+        if (!_restoringPersistedSetting && _settings.CloseToTray != value)
         {
+            var previous = _settings.CloseToTray;
             _settings.CloseToTray = value;
-            _settings.Save();
+            if (!_saveSettings())
+            {
+                _settings.CloseToTray = previous;
+                RestorePersistedSetting(() => CloseToTray = previous);
+                ReportSettingsSaveFailure();
+            }
         }
     }
+
+    private void RestorePersistedSetting(Action restore)
+    {
+        _restoringPersistedSetting = true;
+        try
+        {
+            restore();
+        }
+        finally
+        {
+            _restoringPersistedSetting = false;
+        }
+    }
+
+    private void ReportSettingsSaveFailure() =>
+        Notifications.Push(new AppNotification(
+            NotifySeverity.Error,
+            Loc.Get("Settings_SaveFailedTitle"),
+            Loc.Get("Settings_SaveFailedBody")));
 
     /// <summary>Column-header click: re-clicking the active <see cref="Sort"/>
     /// column toggles <see cref="SortDescending"/>, a new column switches to it
@@ -777,19 +749,27 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     };
 
     /// <summary>Engine diagnostics: pull the detail text behind the POD event.</summary>
-    /// <param name="severity">The reported error severity (≥2 surfaces a notification, ≥3 is a panic).</param>
-    private async Task HandleEngineErrorAsync(int severity)
+    /// <param name="severity">The generated contract severity reported by the engine.</param>
+    private async Task HandleEngineErrorAsync(EngineErrorSeverity severity)
     {
         // EngineEventMarshaler already marshaled this onto the UI thread; stay there
         // (no ConfigureAwait) — RefreshStatsAsync sets bound Perf state and the
         // continuation pushes a bound Notification.
-        await Perf.RefreshStatsAsync();
-        if (severity >= 2)
+        await Perf.RefreshStatsAsync(_lifetime.Token);
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+
+        if (severity is EngineErrorSeverity.Error or EngineErrorSeverity.Panic)
         {
             var last = Perf.Stats?.RecentErrors.LastOrDefault();
+            var title = severity == EngineErrorSeverity.Panic
+                ? Loc.Get("Notify_EnginePanicTitle")
+                : Loc.Get("Notify_EngineErrorTitle");
             Notifications.Push(new AppNotification(
                 NotifySeverity.Error,
-                severity >= 3 ? Loc.Get("Notify_EnginePanicTitle") : Loc.Get("Notify_EngineErrorTitle"),
+                title,
                 last is null ? null : $"[{last.Area}] {Truncate(last.Message, 200)}"));
         }
     }
@@ -797,7 +777,27 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private static string Truncate(string s, int max) =>
         s.Length <= max ? s : s[..max] + "…";
 
-    /// <summary>Unsubscribe the engine-event marshaler — the one owned
-    /// disposable — so its handlers stop holding this view model rooted.</summary>
-    public void Dispose() => _engineEvents.Dispose();
+    /// <summary>Cancel every owned async flow, detach all event graphs and
+    /// release the lifetime-single result handle. Idempotent.</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        _lifetime.Cancel();
+        _engineEvents.VolumeUpdated -= OnVolumeUpdated;
+        _engineEvents.EngineErrorOccurred -= OnEngineErrorOccurred;
+        _engineEvents.ConnectionChanged -= OnConnectionChanged;
+        Results.ResultsPublished -= OnResultsPublished;
+        Search.TraceCaptured -= Perf.RecordTrace;
+        Search.SearchFailed -= OnSearchFailed;
+        Notifications.Dispose();
+        Search.Dispose();
+        Results.Dispose();
+        Perf.Dispose();
+        _engineEvents.Dispose();
+        _lifetime.Dispose();
+    }
 }

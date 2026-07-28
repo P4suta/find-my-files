@@ -8,9 +8,10 @@ namespace FindMyFiles;
 
 /// <summary>
 /// Application entry point and process-wide composition root. `OnLaunched`
-/// resolves the engine boundary (<see cref="EngineClient"/>) and stands up the
-/// single <see cref="MainWindow"/>. On fatal init failure it falls back to
-/// `FakeEngineClient` to avoid crashing silently.
+/// stands up the single <see cref="MainWindow"/> immediately, then resolves the
+/// engine boundary (<see cref="EngineClient"/>) off the UI STA and commits it
+/// through the in-process page reload. On fatal init failure it falls back to
+/// an explicit unavailable engine state.
 /// </summary>
 // View/startup shell: imperative UI wiring + composition root, not unit-tested (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
@@ -18,22 +19,22 @@ public partial class App : Application
 {
     /// <summary>The single top-level window. Created in `OnLaunched`; the origin
     /// for the HWND lookup via `WinRT.Interop` (<see cref="WindowHandle"/>).</summary>
-    public static Window Window { get; private set; } = null!;
+    internal static Window Window { get; private set; } = null!;
 
     /// <summary>The UI thread's <c>DispatcherQueue</c> (cached in `OnLaunched`).
     /// Marshal UI work from background threads via <c>TryEnqueue</c> on this
     /// (UI rule: cache it on the UI thread before use).</summary>
-    public static Microsoft.UI.Dispatching.DispatcherQueue DispatcherQueue { get; private set; } = null!;
+    internal static Microsoft.UI.Dispatching.DispatcherQueue DispatcherQueue { get; private set; } = null!;
 
     /// <summary>
-    /// The engine boundary. `--fake-engine` swaps in deterministic data so UI
-    /// tests and unelevated development never touch real volumes.
+    /// The engine boundary. Test-seam builds can swap in deterministic data;
+    /// stable builds resolve only the service/in-process production engines.
     /// </summary>
-    public static IEngineClient EngineClient { get; private set; } = null!;
+    internal static IEngineClient EngineClient { get; private set; } = null!;
 
     /// <summary>The main window's Win32 HWND. Passed to init of WinRT APIs that
     /// take a parent window (file pickers, etc.) — the unpackaged WinUI 3 way.</summary>
-    public static nint WindowHandle =>
+    internal static nint WindowHandle =>
         WinRT.Interop.WindowNative.GetWindowHandle(Window);
 
     /// <summary>The non-modal diagnostics window, or <c>null</c> when closed. A
@@ -54,14 +55,22 @@ public partial class App : Application
     /// <see cref="OnLaunched"/> once the window exists. Null only before launch.</summary>
     private static AppReload? _reload;
 
+    /// <summary>Lifetime of the one background initial engine resolution.
+    /// Service-control polling is bounded but synchronous Win32 work, so
+    /// cancellation suppresses a late commit rather than aborting native calls.</summary>
+    private static CancellationTokenSource? _initialResolution;
+
+    private static int _shuttingDown;
+
     /// <summary>Open or close the diagnostics window, sharing the supplied
     /// <see cref="PerfPanelViewModel"/> (the single `MainViewModel.Perf`
     /// instance). When already open, closing it is enough; the `Closed` handler
-    /// clears the reference and stops polling via <c>IsOpen</c>. When opening,
-    /// setting <c>IsOpen</c> to <see langword="true"/> starts the 1 Hz timer.
+    /// clears the reference; <see cref="PerfPanel.Dispose"/> detaches the view,
+    /// stops its timer and clears <c>IsOpen</c>. When opening, setting
+    /// <c>IsOpen</c> to <see langword="true"/> starts the 1 Hz timer.
     /// UI-thread serialized, so the open/close toggle has no race.</summary>
     /// <param name="perf">The shared performance view model to display.</param>
-    public static void ToggleDiagnostics(PerfPanelViewModel perf)
+    internal static void ToggleDiagnostics(PerfPanelViewModel perf)
     {
         if (_diagWindow is not null)
         {
@@ -73,7 +82,6 @@ public partial class App : Application
         win.Closed += (_, _) =>
         {
             _diagWindow = null;
-            perf.IsOpen = false;
         };
         _diagWindow = win;
         win.Activate();
@@ -116,17 +124,23 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            FileLog.Warn("i18n", $"language override failed: {ex.Message}");
+            FileLog.Warn("i18n", "language override failed", ex);
         }
     }
 
     /// <inheritdoc/>
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        FileLog.Info("app", $"launch v{BuildInfo.Version} os={Environment.OSVersion.VersionString}");
+        FileLog.Event(
+            "app",
+            "launch",
+            ("version", BuildInfo.Version),
+            ("os_major", Environment.OSVersion.Version.Major),
+            ("os_minor", Environment.OSVersion.Version.Minor),
+            ("os_build", Environment.OSVersion.Version.Build));
 
         var cmdLine = Environment.GetCommandLineArgs();
-        EngineClient = ResolveEngineOrFallback(cmdLine);
+        EngineClient = new ResolvingEngineClient();
 
         ExceptionPolicy.ReportPreviousCrash();
 
@@ -134,6 +148,9 @@ public partial class App : Application
         Window = new MainWindow();
         Window.Closed += (_, _) =>
         {
+            Interlocked.Exchange(ref _shuttingDown, 1);
+            CancelInitialResolution();
+
             // Close the diagnostics window first so no orphan top-level window
             // survives shutdown (mandatory correction 1).
             _diagWindow?.Close();
@@ -162,21 +179,86 @@ public partial class App : Application
         // because the rebuild re-navigates its Frame and the teardown closes the
         // diagnostics window.
         _reload = new AppReload(
-            resolve: ResolveEngineOrFallback,
+            resolve: ResolveEngineOrUnavailable,
             getEngine: () => EngineClient,
             setEngine: engine => EngineClient = engine,
             renavigate: () => ((MainWindow)Window).ReloadMainPage(),
             closeDiagnostics: () => _diagWindow?.Close());
+
+        var initialResolution = new CancellationTokenSource();
+        _initialResolution = initialResolution;
+        ResolveInitialEngineAsync(cmdLine, initialResolution)
+            .Forget("app.engine-resolution");
     }
 
-    /// <summary>Resolve the engine transport, degrading to the empty/locked fake
+    private static async Task ResolveInitialEngineAsync(
+        string[] args,
+        CancellationTokenSource lifetime)
+    {
+        IEngineClient? resolved = null;
+        try
+        {
+            resolved = await EngineClientFactory.ResolveAsync(
+                () => ResolveEngineOrUnavailable(args),
+                lifetime.Token).ConfigureAwait(false);
+            if (lifetime.IsCancellationRequested
+                || Volatile.Read(ref _shuttingDown) != 0)
+            {
+                resolved.Dispose();
+                return;
+            }
+
+            var completion = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (lifetime.IsCancellationRequested
+                        || Volatile.Read(ref _shuttingDown) != 0
+                        || _reload is null)
+                    {
+                        resolved.Dispose();
+                        completion.TrySetResult();
+                        return;
+                    }
+
+                    try
+                    {
+                        var committed = resolved;
+                        resolved = null;
+                        _reload.Run(() => committed);
+                        completion.TrySetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        completion.TrySetException(ex);
+                    }
+                }))
+            {
+                resolved.Dispose();
+                return;
+            }
+
+            await completion.Task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+            resolved?.Dispose();
+        }
+        finally
+        {
+            Interlocked.CompareExchange(ref _initialResolution, null, lifetime);
+            lifetime.Dispose();
+        }
+    }
+
+    /// <summary>Resolve the engine transport, returning an unavailable client
     /// (with the matching notification) on failure. Shared by startup
     /// (<see cref="OnLaunched"/>) and the in-process soft restart so the
-    /// fall-back wording can never drift between the two paths.</summary>
+    /// failure behavior can never drift between the two paths.</summary>
     /// <param name="args">Engine-selection args (process command line, or a
     /// soft-restart override such as <c>--engine=pipe</c>).</param>
-    /// <returns>The resolved engine, or a fake when initialization failed.</returns>
-    private static IEngineClient ResolveEngineOrFallback(string[] args)
+    /// <returns>The resolved engine, or an unavailable client when initialization failed.</returns>
+    private static IEngineClient ResolveEngineOrUnavailable(string[] args)
     {
         try
         {
@@ -184,60 +266,68 @@ public partial class App : Application
         }
         catch (EngineException ex) when (ex.Code == EngineContract.Status.Locked)
         {
-            // The service is up and holds the writer lock — in-proc cannot
-            // start here. Say exactly that instead of the generic failure
-            // (ARCHITECTURE.md FMF_E_LOCKED guidance). The factory's QueryState
-            // guard means we rarely reach this — it's the backstop.
+            // The service is up and holds the index_dir writer lock, which is
+            // the cross-process single-writer invariant — in-proc cannot start
+            // here. Say exactly that (stop the service first) instead of the
+            // generic failure. The factory's QueryState guard means we rarely
+            // reach this — it's the backstop.
             FileLog.Error("app", "engine init: index locked by the running service", ex);
             Notifier.Post(
                 NotifySeverity.Error,
                 Loc.Get("App_LockedTitle"),
                 Loc.Get("App_LockedBody"));
-            return new FakeEngineClient();
+            return new UnavailableEngineClient();
         }
         catch (Exception ex)
         {
             // Engine refused to start (DLL missing, service down, index dir
-            // locked by another engine…) — run the UI on the fake engine so
-            // the user sees an explanation instead of an instant crash.
-            FileLog.Error("app", "engine initialization failed; falling back to fake", ex);
+            // locked by another engine…) — run the recovery UI with no data so
+            // the failure can never masquerade as a successful demo search.
+            FileLog.Error("app", "engine initialization failed; using unavailable state", ex);
             Notifier.Post(
                 NotifySeverity.Error,
                 Loc.Get("App_EngineInitFailedTitle"),
                 Loc.Get("App_EngineInitFailedBody", ex.Message));
-            return new FakeEngineClient();
+            return new UnavailableEngineClient();
         }
     }
 
     /// <summary>In-process soft restart (ADR-0036): re-resolve the engine from the
-    /// current process command line and rebuild the page. Used after a scope change
-    /// or service uninstall, and the manual "restart app" button — anything that
-    /// only needs the once-at-startup transport choice re-made. Marshals onto the UI
+    /// current process command line and rebuild the page. Used after service
+    /// lifecycle changes and the manual "restart app" button — anything that only
+    /// needs the once-at-startup transport choice re-made. Marshals onto the UI
     /// thread (callers may resume off it after an elevated step).</summary>
-    public static void SoftRestart() =>
+    internal static void SoftRestart()
+    {
+        CancelInitialResolution();
         OnUiThread(() => _reload?.Run(Environment.GetCommandLineArgs()));
+    }
 
     /// <summary>In-process soft restart forcing the pipe transport, used right
     /// after a successful in-app service registration: the rebuilt page binds the
     /// retrying pipe client directly (its supervisor waits out the freshly-started
     /// service's warm-up) instead of re-running <c>auto</c> detection, whose single
-    /// short probe can miss the not-yet-answering service and fall back to the empty
-    /// engine. Replaces the old process relaunch, which single-instancing defeated
+    /// short probe can miss the not-yet-answering service and report it unavailable.
+    /// Replaces the old process relaunch, which single-instancing defeated
     /// (ADR-0036).</summary>
-    public static void SoftRestartIntoPipe() =>
-        OnUiThread(() => _reload?.Run(WithPipeEngine(Environment.GetCommandLineArgs())));
+    internal static void SoftRestartIntoPipe()
+    {
+        CancelInitialResolution();
+        OnUiThread(() => _reload?.Run(
+            EngineClientFactory.WithEngineMode(Environment.GetCommandLineArgs(), "pipe")));
+    }
 
-    /// <summary>Force <c>--engine=pipe</c> on a copy of <paramref name="args"/>,
-    /// dropping any existing <c>--engine=</c> token first (the factory's
-    /// <c>OptionValue</c> takes the first match, so a leftover <c>--engine=empty</c>
-    /// test seam would otherwise win).</summary>
-    /// <param name="args">The base args to copy and override.</param>
-    /// <returns>A new args array selecting the pipe transport.</returns>
-    private static string[] WithPipeEngine(string[] args) =>
-    [
-        .. args.Where(a => !a.StartsWith("--engine=", StringComparison.OrdinalIgnoreCase)),
-        "--engine=pipe",
-    ];
+    /// <summary>Rebuild the page on the disconnected setup engine after the
+    /// user explicitly stops an installed service. Auto mode is intentionally
+    /// bypassed; it would immediately start that same on-demand service again.</summary>
+    internal static void SoftRestartIntoUnavailable()
+    {
+        CancelInitialResolution();
+        OnUiThread(() => _reload?.Run(() => new UnavailableEngineClient()));
+    }
+
+    private static void CancelInitialResolution() =>
+        Volatile.Read(ref _initialResolution)?.Cancel();
 
     /// <summary>Run <paramref name="action"/> on the cached UI dispatcher — inline
     /// when already on it, marshaled otherwise (a soft restart touches the Frame and
@@ -265,7 +355,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            FileLog.Warn("tray", $"tray icon init failed: {ex.Message}");
+            FileLog.Warn("tray", "tray icon initialization failed", ex);
             return null;
         }
     }
@@ -276,7 +366,10 @@ public partial class App : Application
     /// <returns>True to cancel the close (now hidden to tray); false to exit.</returns>
     internal static bool HandleMainWindowClosing()
     {
-        if (WindowLifecycle.ShouldHideToTray(AppSettings.Load().CloseToTray, _explicitExit))
+        if (WindowLifecycle.ShouldHideToTray(
+                AppSettings.Load().CloseToTray,
+                _explicitExit,
+                _tray?.IsAvailable == true))
         {
             Window.AppWindow.Hide();
             return true;

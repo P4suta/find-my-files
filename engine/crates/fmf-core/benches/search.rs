@@ -9,6 +9,7 @@
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use fmf_core::engine::{Engine, EngineConfig};
+use fmf_core::index::testutil::merge_new_into_permutations;
 use fmf_core::index::{Frn, RawEntry, SortKey, VolumeIndex, VolumeIndexBuilder};
 use fmf_core::query::{self, CaseMode, QueryOptions, UtcResolver};
 
@@ -102,7 +103,7 @@ fn build_synthetic_unfinished() -> VolumeIndexBuilder {
     // volumes are full of duplicate names — desktop.ini, .gitignore, …).
     let mut pool: Vec<String> = Vec::new();
 
-    let mut b = VolumeIndexBuilder::new("C:", 5);
+    let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
     let mut record = 100u64;
     for d in 0..DIRS {
         let dir_record = record;
@@ -201,6 +202,9 @@ fn bench_queries(c: &mut Criterion) {
         // Smart case with uppercase: the original-name verification path.
         ("upper_smart", "Win"),
         ("rare", "qzx9"),
+        // Worst-case canonical completion: no hit, so neither the distinct
+        // dictionary nor original-spelling completion hides behind results.
+        ("canonical_nfd_miss", "résumé"),
         ("ext", "ext:dll"),
         ("wildcard_suffix", "*.rs"),
         ("composite_path", "size:>100mb path:windows"),
@@ -323,7 +327,7 @@ fn bench_post_usn(c: &mut Criterion) {
             || {
                 let mut i = idx.borrow_mut();
                 let len = i.len() as u32;
-                i.merge_new_into_permutations(len); // empty batch: generation++
+                merge_new_into_permutations(&mut i, len); // empty batch: generation++
             },
             |()| {
                 let i = idx.borrow();
@@ -341,7 +345,7 @@ fn bench_post_usn(c: &mut Criterion) {
             || {
                 let mut i = idx.borrow_mut();
                 let len = i.len() as u32;
-                i.merge_new_into_permutations(len);
+                merge_new_into_permutations(&mut i, len);
             },
             |()| {
                 let i = idx.borrow();
@@ -365,7 +369,7 @@ fn bench_post_usn(c: &mut Criterion) {
             || {
                 let mut i = idx.borrow_mut();
                 let len = i.len() as u32;
-                i.merge_new_into_permutations(len);
+                merge_new_into_permutations(&mut i, len);
             },
             |()| {
                 let i = idx.borrow();
@@ -397,7 +401,7 @@ fn bench_post_usn(c: &mut Criterion) {
                 let first_new = i.len() as u32;
                 for k in 0..700u64 {
                     let rec = 50_000_000 + n * 700 + k;
-                    i.upsert(&RawEntry {
+                    i.upsert_synthetic(&RawEntry {
                         parent_frn: Frn(100), // the "windows" dir
                         frn: Frn((1 << 48) | rec),
                         name_utf16: &names[(k % 16) as usize],
@@ -414,7 +418,7 @@ fn bench_post_usn(c: &mut Criterion) {
                     // hit tombstones and no-op, which real batches do too.
                     i.delete(100 + ((n * 300 + k) * 7919) % 900_000);
                 }
-                i.merge_new_into_permutations(first_new);
+                merge_new_into_permutations(&mut i, first_new);
                 std::hint::black_box(i.len());
             },
             BatchSize::PerIteration,

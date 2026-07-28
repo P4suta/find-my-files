@@ -11,18 +11,17 @@ use parking_lot::{Mutex, RwLock};
 use crate::index::{EntryId, VolumeIndex};
 use crate::metrics::Counters;
 use crate::query::{CompiledQuery, QueryOptions};
+use crate::volume_label::VolumeLabel;
 
 use super::seams::SnapshotStore;
 use super::{Engine, VolumeState};
 
-/// Last materialized per-volume result, kept for incremental refinement
-/// (query/subsume.rs) and unchanged-result detection (`QueryTrace::
-/// unchanged`). Validity = both generations still match; USN batches
+/// Last materialized per-volume result, kept only for incremental refinement
+/// (`query/subsume.rs`). Presentation identity is an explicit live result
+/// handle, never this engine-global cache (ADR-0044). Validity = both
+/// generations still match; USN batches
 /// invalidate implicitly by bumping `content_generation`.
 pub(super) struct VolumeQueryCache {
-    /// The raw query text — equality here (with `opt`) defines "the same
-    /// query" for unchanged detection; subsumption defines refinement.
-    pub(super) text: String,
     pub(super) compiled: Arc<CompiledQuery>,
     pub(super) opt: QueryOptions,
     pub(super) content_generation: u64,
@@ -40,21 +39,6 @@ pub(super) struct VolumeQueryCache {
 pub(super) struct JournalCheckpoint {
     pub(super) journal_id: u64,
     pub(super) next_usn: i64,
-}
-
-/// What drives a volume slot: the privileged $MFT scan + USN journal, or the
-/// non-elevated folder-walk + `ReadDirectoryChangesW` watcher (scope mode,
-/// ADR-0024). The worker reuses one loop for both; this picks the initial-scan
-/// source and the change source at the two branch points.
-pub(super) enum WorkerKind {
-    /// `mft::scan_volume(label)` + `WinJournalSource` — needs elevation.
-    Mft,
-    /// `scan::walk::walk_scan(roots, excludes)` + `WatcherJournalSource` — no
-    /// elevation. `excludes` prunes matching subtrees at walk time (ADR-0025).
-    Walk {
-        roots: Vec<String>,
-        excludes: Vec<String>,
-    },
 }
 
 pub(super) struct VolumeSlot {
@@ -76,28 +60,12 @@ pub(super) struct VolumeSlot {
     /// Snapshot persistence seam for this volume (ADR-0018) — production
     /// is `WinSnapshotStore` on `snapshot_path(...)`.
     pub(super) store: Arc<dyn SnapshotStore>,
-    /// Initial-scan + change source this slot drives (ADR-0024).
-    pub(super) kind: WorkerKind,
 }
 
 impl VolumeSlot {
     /// A privileged ($MFT + USN) slot in its initial Scanning state — the
     /// shape `index_start` (and the worker tests) spawn workers on.
     pub(super) fn scanning(label: String, store: Arc<dyn SnapshotStore>) -> Self {
-        Self::scanning_kind(label, store, WorkerKind::Mft)
-    }
-
-    /// A non-elevated scope-mode (folder-walk + watcher) slot (ADR-0024).
-    pub(super) fn scanning_walk(
-        label: String,
-        store: Arc<dyn SnapshotStore>,
-        roots: Vec<String>,
-        excludes: Vec<String>,
-    ) -> Self {
-        Self::scanning_kind(label, store, WorkerKind::Walk { roots, excludes })
-    }
-
-    fn scanning_kind(label: String, store: Arc<dyn SnapshotStore>, kind: WorkerKind) -> Self {
         Self {
             label,
             phase: Mutex::new(VolumeState::Scanning),
@@ -109,16 +77,17 @@ impl VolumeSlot {
             last_saved: Mutex::new(None),
             save_lock: Mutex::new(()),
             store,
-            kind,
         }
     }
 
     /// Install a freshly built index. Replacing an existing one is a
     /// structural change (journal-gone full rescan): the new index inherits
-    /// the previous `structural_generation + 1` so open `ResultSet`s go
-    /// hard-stale (docs/ARCHITECTURE.md, 2-layer generation). A first install
-    /// (initial scan or snapshot restore) keeps the value the index was
-    /// built with.
+    /// the previous `structural_generation + 1` so open `ResultSet`s go hard
+    /// stale. A first install (initial scan or snapshot restore) keeps the
+    /// value the index was built with — there are no handles to invalidate.
+    ///
+    /// Every index replacement goes through here, which is what makes the
+    /// generation bump impossible to forget.
     pub(super) fn install_index(&self, mut idx: VolumeIndex) {
         let mut guard = self.index.write();
         if let Some(prev) = guard.as_ref() {
@@ -218,6 +187,33 @@ pub(super) fn snapshot_path(index_dir: &std::path::Path, label: &str) -> std::pa
 /// bearing `..\` or path separators from steering `snapshot_path` outside the
 /// index directory.
 pub(super) fn is_valid_volume_label(label: &str) -> bool {
-    let b = label.as_bytes();
-    b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+    VolumeLabel::parse(label).is_some()
+}
+
+/// Validate one whole `IndexStart` request before the engine creates any
+/// slots. Returned labels are uppercase and unique in request order.
+pub(super) fn validate_index_start_volumes(
+    requested: &[String],
+    available: &[String],
+) -> Result<Vec<String>, super::IndexStartError> {
+    let available: Vec<String> = available
+        .iter()
+        .filter_map(|label| VolumeLabel::parse(label))
+        .map(|label| label.to_string())
+        .collect();
+    let mut canonical = Vec::with_capacity(requested.len());
+    for (position, label) in requested.iter().enumerate() {
+        let Some(label) = VolumeLabel::parse(label) else {
+            return Err(super::IndexStartError::MalformedLabel { position });
+        };
+        let label = label.to_string();
+        if canonical.contains(&label) {
+            return Err(super::IndexStartError::DuplicateLabel { label });
+        }
+        if !available.contains(&label) {
+            return Err(super::IndexStartError::UnavailableVolume { label });
+        }
+        canonical.push(label);
+    }
+    Ok(canonical)
 }

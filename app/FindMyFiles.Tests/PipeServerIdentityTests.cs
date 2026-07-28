@@ -25,6 +25,16 @@ public sealed class PipeServerIdentityTests
         // check must answer false, not throw.
         Assert.False(PipeServerIdentity.IsServiceProcess(3));
 
+    [Theory]
+    [InlineData("fmf-engine-v4", true)]
+    [InlineData(@"\\.\pipe\fmf-engine-v4", true)]
+    [InlineData("fmf-engine-v3", false)]
+    [InlineData("fmf-test-custom", false)]
+    public void Probe_requires_identity_only_for_the_production_pipe(
+        string pipeName,
+        bool expected) =>
+        Assert.Equal(expected, PipeEngineClient.ShouldVerifyServerIdentity(pipeName));
+
     [Fact]
     public void IsServiceProcess_MatchesQueriedServicePid()
     {

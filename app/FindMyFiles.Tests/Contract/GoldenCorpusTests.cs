@@ -103,8 +103,9 @@ public sealed class GoldenCorpusTests
                     PipeProtocol.DecodeIndexStartReq(payload));
             case (PipeProtocol.Op.Query, false):
                 {
-                    var (options, text) = PipeProtocol.DecodeQueryReq(payload);
-                    return PipeProtocol.EncodeQueryReq(options, text);
+                    var (options, text, presentationBasis) =
+                        PipeProtocol.DecodeQueryReq(payload);
+                    return PipeProtocol.EncodeQueryReq(options, text, presentationBasis);
                 }
 
             case (PipeProtocol.Op.Query, true):
@@ -174,7 +175,7 @@ public sealed class GoldenCorpusTests
             Load("stats_snapshot.json"), EngineJson.SnakeCase)!;
 
         var trace = Assert.Single(stats.RecentQueries);
-        Assert.Equal("win ext:txt", trace.Query);
+        Assert.Equal(11U, trace.QueryLength);
         Assert.Equal("refine", trace.Cache);
         Assert.Equal(81UL, trace.TotalUs);
         Assert.NotEqual(0UL, stats.P50Us);
@@ -207,8 +208,8 @@ public sealed class GoldenCorpusTests
         Assert.Equal(90UL, stats.CurrentWsBytes);
         Assert.Equal(91UL, stats.CurrentPrivateBytes);
         Assert.Equal(61UL, stats.Counters.StatFetchFailures);
-        Assert.Equal(67UL, stats.Counters.JournalRescans);
-        Assert.Equal(74UL, stats.Counters.PipeConnectionsRejected);
+        Assert.Equal(66UL, stats.Counters.JournalRescans);
+        Assert.Equal(72UL, stats.Counters.PipeConnectionsRejected);
         var error = Assert.Single(stats.RecentErrors);
         Assert.Equal("warn", error.Severity);
         Assert.Equal("C:", error.Volume);
@@ -221,7 +222,7 @@ public sealed class GoldenCorpusTests
         var trace = JsonSerializer.Deserialize<QueryTraceData>(
             Load("query_trace.json"), EngineJson.SnakeCase)!;
 
-        Assert.Equal("win ext:txt", trace.Query);
+        Assert.Equal(11U, trace.QueryLength);
         Assert.Equal("pool-scan", trace.Driver);
         Assert.Equal("refine", trace.Cache);
         Assert.False(trace.Unchanged);

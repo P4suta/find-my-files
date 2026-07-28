@@ -12,11 +12,40 @@ namespace FindMyFiles.ViewModels;
 /// <c>ext:</c>/<c>regex:</c> keeps its own type filter, a group mentioning
 /// <c>path:</c> or containing <c>\</c> keeps its own location.
 /// </summary>
-public static class FocusedQueryRewriter
+internal static class FocusedQueryRewriter
 {
+    private static readonly string[] DefaultExcludePaths =
+    [
+        @"\windows\",
+        @"\program files",
+        @"\programdata\",
+        @"\$recycle.bin\",
+        @"\node_modules\",
+        @"\.git\",
+        @"\__pycache__\",
+    ];
+
+    private static readonly string[] DefaultExtensions =
+    [
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv",
+        "jpg", "jpeg", "png", "gif", "webp", "svg", "heic",
+        "mp3", "wav", "flac", "m4a",
+        "mp4", "mkv", "mov", "avi",
+        "zip", "7z", "rar",
+        "exe", "msi", "lnk",
+    ];
+
     /// <summary>Values already warned about — a bad settings entry must be
     /// said once (don't go silent), not on every keystroke (2MB log rotation).</summary>
     private static readonly HashSet<string> WarnedValues = [];
+
+    /// <summary>Rewrites with the product's curated focused-search policy.
+    /// The policy is code-owned and versioned with the parser; it is not a
+    /// hidden hand-edited settings schema.</summary>
+    /// <param name="userQuery">The user's raw query text.</param>
+    /// <returns>The focused-mode query.</returns>
+    public static string Compose(string userQuery) =>
+        Compose(userQuery, DefaultExcludePaths, DefaultExtensions);
 
     /// <summary>Rewrites <paramref name="userQuery"/> for focused mode.
     /// An empty/whitespace query is returned unchanged — the "no query, no
@@ -115,7 +144,7 @@ public static class FocusedQueryRewriter
             // language — it would silently change the whole query's meaning.
             if (p.Contains('"', StringComparison.Ordinal))
             {
-                WarnOnce("focused", $"exclude path with a quote ignored: {p}");
+                WarnOnce($"exclude:{p}", "exclude_path");
                 continue;
             }
 
@@ -140,7 +169,7 @@ public static class FocusedQueryRewriter
             // tokenization; ;/, are the engine's own list separators.
             if (e.Any(char.IsWhiteSpace) || e.AsSpan().ContainsAny("\"|;,"))
             {
-                WarnOnce("focused", $"extension entry ignored: {e}");
+                WarnOnce($"extension:{e}", "extension");
                 continue;
             }
 
@@ -151,17 +180,20 @@ public static class FocusedQueryRewriter
         return valid.Count == 0 ? string.Empty : " ext:" + string.Join(';', valid);
     }
 
-    private static void WarnOnce(string area, string message)
+    private static void WarnOnce(string identity, string setting)
     {
         lock (WarnedValues)
         {
-            if (!WarnedValues.Add(message))
+            if (!WarnedValues.Add(identity))
             {
                 return;
             }
         }
 
-        FileLog.Warn(area, message + " (settings.json)");
+        FileLog.WarnEvent(
+            "focused",
+            "invalid focused-search setting ignored",
+            fields: [("setting", setting)]);
     }
 
     private static bool ContainsIgnoreCase(string haystack, string needle) =>
