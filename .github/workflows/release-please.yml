@@ -46,7 +46,7 @@ jobs:
     # deployment-branch policy of `main` only and deliberately has NO required
     # reviewers: release-please must run unattended (the human gate is merging
     # the Release PR; signing/publication approvals live in the separate
-    # `release` environment in the reusable release.yml). ADR-0035.
+    # `release` environment in the dispatched release.yml). ADR-0035.
     environment: release-please
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
@@ -69,7 +69,7 @@ jobs:
 
       # Mint a short-lived installation token scoped to this repo. It lets
       # release-please write the release commit/tag and maintain its PR/release;
-      # credentialed release.yml remains reusable-only from the trusted controller.
+      # credentialed release.yml remains dispatchable only from protected main.
       - name: Mint GitHub App token
         id: app-token
         if: env.HAS_APP == 'true' && env.RUN_BOT == 'true'

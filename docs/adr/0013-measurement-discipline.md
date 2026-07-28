@@ -59,9 +59,10 @@ mean WTF-8 length 29.7B), and `build_synthetic` asserts those ratios every run.
   The gate is now the manual `just perf-gate` on the reference machine, and the
   committed baseline is recorded with `just bench-baseline` and landed by PR.
   The measurement discipline itself — every threshold, preflight, and evidence
-  rule above — is unchanged and still enforced by xtask. The next four bullets
-  describe how CI *would* serialize the instrument if an organization ever
-  provides one.**
+  rule above — is unchanged and still enforced by xtask. The remaining bullets
+  in this section describe how CI *would* serialize the instrument, re-verify
+  its evidence, and gate publication on it if an organization ever provides
+  one.**
 - Recording and gating are serialized on the same instrument by the
   default-branch `performance-controller` workflow and protected `performance`
   environment. The controller emits a run/attempt-only runner name and label;
