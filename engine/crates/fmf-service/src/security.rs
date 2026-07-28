@@ -2630,6 +2630,45 @@ mod tests {
         format!("O:{user}G:{user}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{user})")
     }
 
+    /// The token Windows actually *prints* for this process's user, measured
+    /// by writing one ACE naming it and reading the descriptor back.
+    ///
+    /// A test must not assume the SID it wrote is the string it will read.
+    /// `ConvertSecurityDescriptorToStringSecurityDescriptor` renders
+    /// well-known accounts as two-letter SDDL aliases, and CI's Windows
+    /// runners execute as `runneradmin` — the built-in Administrator, RID 500
+    /// — so an ACE written with the raw `S-1-5-21-…` SID reads back as
+    /// `;;;LA)` and counting the SID as a substring finds nothing. On an
+    /// ordinary developer account, whose SID has no alias, the two spellings
+    /// coincide and the wrong assumption is invisible.
+    ///
+    /// The product never depends on that round trip — `handle_security_matches`
+    /// renders both sides through the same converter before comparing, so
+    /// aliases cancel. Only a test counting ACEs by substring does, so it asks
+    /// Windows once rather than assuming.
+    fn rendered_user_token() -> &'static str {
+        static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        TOKEN.get_or_init(|| {
+            let user = current_user_sid().expect("own sid");
+            let anchor = tempfile::tempdir().expect("probe anchor");
+            let probe = anchor.path().join("sid-probe");
+            // A protected DACL with exactly one ACE: nothing is inherited in,
+            // so whatever sits between the last `;;;` and its `)` is the
+            // rendering of `user` and nothing else.
+            create_directory_new_with_security(&probe, &format!("D:P(A;;FA;;;{user})"))
+                .expect("probe directory naming this process's own user");
+            let sddl = read_sddl(&probe);
+            let Some((token, _)) = sddl
+                .rsplit_once(";;;")
+                .and_then(|(_, tail)| tail.split_once(')'))
+            else {
+                panic!("probe descriptor carries no readable ACE: {sddl}");
+            };
+            assert!(!token.is_empty(), "probe ACE names nobody: {sddl}");
+            token.to_string()
+        })
+    }
+
     /// Reads a descriptor with `READ_CONTROL` only. The owner keeps that right
     /// implicitly even when the DACL grants nothing, so a stripped object stays
     /// *observable* instead of merely inaccessible.
@@ -3076,9 +3115,12 @@ mod tests {
 
         // Count ACEs naming the user rather than matching `GR`: a generic right
         // is mapped to specific rights when it lands on a real object, so the
-        // literal does not survive application.
+        // literal does not survive application. The *trustee* spelling does not
+        // survive either when the account is well-known, hence the probed
+        // token instead of the SID this test wrote (see `rendered_user_token`).
         let log_file = root.join("logs").join("engine.log");
-        let user_aces = |path: &Path| read_sddl(path).matches(&format!(";;;{user})")).count();
+        let printed = rendered_user_token();
+        let user_aces = |path: &Path| read_sddl(path).matches(&format!(";;;{printed})")).count();
         assert_eq!(
             user_aces(&log_file),
             2,
