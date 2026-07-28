@@ -169,6 +169,10 @@ const FILE_ADD_FILE_ACCESS: u32 = 0x0000_0002;
 const FILE_ADD_SUBDIRECTORY_ACCESS: u32 = 0x0000_0004;
 const FILE_TRAVERSE_ACCESS: u32 = 0x0000_0020;
 const FILE_READ_ATTRIBUTES_ACCESS: u32 = 0x0000_0080;
+/// `NtCreateFile` grants no implicit synchronization. Without this right the
+/// handle cannot be waited on and `FILE_SYNCHRONOUS_IO_NONALERT` is rejected,
+/// so every relative open asks for it on top of the caller's mask.
+const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
 const SECURITY_WRITE_ACCESS: u32 =
     READ_CONTROL_ACCESS | WRITE_DAC_ACCESS | WRITE_OWNER_ACCESS | FILE_READ_ATTRIBUTES_ACCESS;
 const MAX_MANAGED_TREE_DEPTH: usize = 64;
@@ -376,7 +380,7 @@ impl TrustedDataRoot {
         // Every object ends up carrying its own protected descriptor, so a
         // parent's inheritable ACEs never decide a child's access — see
         // `harden_descendants`.
-        harden_descendants(path, sddl)?;
+        harden_descendants(&root.file, path, sddl)?;
         set_handle_security(&root.file, sddl)?;
         if !handle_security_matches(&root.file, sddl)? {
             return Err(io::Error::new(
@@ -669,7 +673,7 @@ impl TrustedDataRoot {
     /// # Errors
     /// Returns the first fail-closed traversal or exact-handle delete error.
     pub fn purge(self) -> io::Result<()> {
-        delete_descendants(&self.path)?;
+        delete_descendants(&self.root.file, &self.path)?;
         delete_handle(&self.root.file)?;
         let Self {
             root,
@@ -1245,6 +1249,156 @@ fn validate_leaf(leaf: &str) -> io::Result<()> {
     }
 }
 
+/// The UTF-16 counterpart of [`validate_leaf`], for names that arrive from a
+/// directory enumeration rather than from configuration.
+///
+/// Deliberately not "convert to `String` and reuse `validate_leaf`": a lossy
+/// conversion turns an unpaired surrogate into U+FFFD, so the name that got
+/// validated would not be the name that gets opened. This inspects the exact
+/// code units that will be handed to the object manager and returns their byte
+/// length for `UNICODE_STRING`.
+///
+/// Defense in depth only. A name yielded by the kernel's own enumeration of a
+/// verified directory handle is already a leaf; this refuses to be the layer
+/// that assumes it.
+fn validate_leaf_utf16(leaf: &[u16]) -> io::Result<u16> {
+    const DOT: u16 = b'.' as u16;
+    const BACKSLASH: u16 = b'\\' as u16;
+    const SLASH: u16 = b'/' as u16;
+
+    let refuse = |reason: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing non-leaf directory entry name ({reason})"),
+        )
+    };
+
+    if leaf.is_empty() {
+        return Err(refuse("empty"));
+    }
+    if leaf == [DOT] || leaf == [DOT, DOT] {
+        return Err(refuse("relative"));
+    }
+    if leaf.contains(&BACKSLASH) || leaf.contains(&SLASH) {
+        return Err(refuse("path separator"));
+    }
+    if leaf.contains(&0) {
+        return Err(refuse("embedded NUL"));
+    }
+    // `UNICODE_STRING::Length` is a byte count in a `u16`; leave room for the
+    // terminator the object manager does not need but callers may assume.
+    leaf.len()
+        .checked_mul(size_of::<u16>())
+        .filter(|bytes| *bytes < usize::from(u16::MAX))
+        .and_then(|bytes| u16::try_from(bytes).ok())
+        .ok_or_else(|| refuse("name too long"))
+}
+
+/// Opens `leaf` **relative to an already-verified parent handle** and subjects
+/// it to exactly the checks [`open_checked`] applies.
+///
+/// This is the primitive the managed-tree walks are built on. `open_checked`
+/// hands `CreateFileW` a full path, so the kernel re-resolves every ancestor
+/// name; between the moment a walk learned a child's name and the moment it
+/// opens it, an ancestor can be repointed at another object. The reparse-point
+/// rejection catches a link, but a swap to a *non*-reparse object at the same
+/// name is invisible to it — and the walk would then apply the protected
+/// descriptor to, or delete, whatever now sits there.
+///
+/// `NtCreateFile` with `OBJECT_ATTRIBUTES.RootDirectory` set to the parent
+/// handle and a leaf-only `ObjectName` resolves nothing but the final
+/// component, against the directory *object* that handle is bound to rather
+/// than against its name. There is no ancestor chain left to swap.
+///
+/// `OBJ_DONT_REPARSE` augments — it does not replace — the existing defense:
+/// `FILE_OPEN_REPARSE_POINT` is still requested and [`inspect_handle`] remains
+/// the authority that refuses a reparse point, so the guarantee does not become
+/// contingent on a flag whose failure mode is a different error code.
+///
+/// `diagnostic` is used for error messages only and is never resolved.
+fn open_checked_at(
+    parent: &std::fs::File,
+    leaf: &[u16],
+    diagnostic: &Path,
+    expected: Option<ObjectKind>,
+    access: u32,
+    share: u32,
+) -> io::Result<LockedObject> {
+    use std::os::windows::io::FromRawHandle as _;
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT,
+        FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+    };
+    use windows_sys::Win32::Foundation::{
+        OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, RtlNtStatusToDosError,
+        STATUS_REPARSE_POINT_ENCOUNTERED, UNICODE_STRING,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let name_bytes = validate_leaf_utf16(leaf)?;
+    // `UNICODE_STRING` is *counted*: the object manager reads exactly `Length`
+    // bytes and never scans for a terminator, so `leaf` is passed as-is. This
+    // is the exact opposite of the `FILE_RENAME_INFO` buffer below, whose name
+    // is consumed past `FileNameLength` up to the first zero unit and therefore
+    // must carry one. Do not "fix" one to look like the other.
+    let name = UNICODE_STRING {
+        Length: name_bytes,
+        MaximumLength: name_bytes,
+        Buffer: leaf.as_ptr().cast_mut(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: raw_handle(parent),
+        ObjectName: &raw const name,
+        Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut handle: HANDLE = std::ptr::null_mut();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: `attributes` borrows `name`, which borrows `leaf`; all three
+    // outlive the call and none is mutated during it. `parent` is a live owned
+    // directory handle, so `RootDirectory` names an open kernel object. The two
+    // out-parameters are exclusive borrows of correctly typed local storage.
+    // The optional allocation-size and EA-buffer pointers are null, which the
+    // contract permits exactly when the EA length is zero, as it is here.
+    let status = unsafe {
+        NtCreateFile(
+            &raw mut handle,
+            access | SYNCHRONIZE_ACCESS,
+            &raw const attributes,
+            &raw mut status_block,
+            std::ptr::null(),
+            0,
+            share,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        if status == STATUS_REPARSE_POINT_ENCOUNTERED {
+            // `OBJ_DONT_REPARSE` fired before `inspect_handle` could. Report it
+            // in that layer's words so a caller — or a test — asserting on the
+            // fail-closed property does not have to know which one won the
+            // race to refuse.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("refusing reparse point {}", diagnostic.display()),
+            ));
+        }
+        // SAFETY: a pure status-code translation with no pointer arguments.
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    // SAFETY: `NtCreateFile` succeeded, so `handle` is one owned kernel handle,
+    // transferred exactly once to `File` for CloseHandle-on-drop.
+    let file = unsafe { std::fs::File::from_raw_handle(handle.cast()) };
+    inspect_handle(diagnostic, file, expected)
+}
+
 fn raw_handle(file: &std::fs::File) -> HANDLE {
     file.as_raw_handle().cast()
 }
@@ -1429,17 +1583,252 @@ fn harden_path(path: &Path, expected: Option<ObjectKind>, sddl: &str) -> io::Res
     let locked = open_checked(
         path,
         expected,
-        SECURITY_WRITE_ACCESS | FILE_LIST_DIRECTORY_ACCESS,
+        SECURITY_WRITE_ACCESS | FILE_LIST_DIRECTORY_ACCESS | FILE_TRAVERSE_ACCESS,
         windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
     )?;
     if locked.kind == ObjectKind::Directory {
-        harden_descendants(path, sddl)?;
+        harden_descendants(&locked.file, path, sddl)?;
     }
     // Only now may an inheritable ACE reach this level: the complete descendant
     // set has been opened without following reparse points, and every object
     // below already carries a protected DACL of its own.
     set_handle_security(&locked.file, sddl)?;
     Ok(locked)
+}
+
+/// Resumable state for enumerating a directory **through its own handle**,
+/// one batch at a time.
+///
+/// This replaces `std::fs::read_dir`, which opens the directory again by path.
+/// Enumerating from the handle the walk already holds keeps the child list
+/// dependent only on the object that was verified, and — for the hardening
+/// walk specifically — stops enumeration from depending on the very ACL the
+/// walk is in the middle of rewriting.
+///
+/// The names it yields are an **untrusted hint about what to try next**. They
+/// are not evidence about what an object is; the relative open and
+/// [`inspect_handle`] remain the sole authority for that.
+struct DirectoryEnumeration {
+    /// `u64`-backed, and that is load-bearing twice over. `FILE_FULL_DIR_INFO`
+    /// carries `i64` fields, so its alignment is 8 and the API requires a
+    /// suitably aligned buffer; a `Vec<u8>` would guarantee only 1, making
+    /// every record access a genuine unaligned access rather than merely a
+    /// lint-flagged one. It is therefore also what lets the record cast
+    /// satisfy the denied `cast_ptr_alignment` lint honestly, instead of by
+    /// suppressing it.
+    buffer: Vec<u64>,
+    /// Bytes of `buffer` the kernel may have written in the current batch.
+    valid: usize,
+    /// Byte offset of the next unread record within those bytes.
+    offset: usize,
+    /// The kernel has reported `ERROR_NO_MORE_FILES`; no batch remains.
+    done: bool,
+}
+
+impl DirectoryEnumeration {
+    fn new() -> Self {
+        const BUFFER_BYTES: usize = 64 * 1024;
+
+        Self {
+            buffer: vec![0u64; BUFFER_BYTES / size_of::<u64>()],
+            valid: 0,
+            offset: 0,
+            done: false,
+        }
+    }
+}
+
+/// Yields the next child leaf name in `dir`, refilling the batch as needed and
+/// skipping the `.` and `..` entries.
+fn next_directory_entry(
+    dir: &std::fs::File,
+    state: &mut DirectoryEnumeration,
+) -> io::Result<Option<Vec<u16>>> {
+    use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FULL_DIR_INFO, FileFullDirectoryInfo, GetFileInformationByHandleEx,
+    };
+
+    const DOT: u16 = b'.' as u16;
+
+    let malformed = |reason: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("refusing malformed directory enumeration record ({reason})"),
+        )
+    };
+
+    loop {
+        if state.offset >= state.valid {
+            if state.done {
+                return Ok(None);
+            }
+            let capacity = state
+                .buffer
+                .len()
+                .checked_mul(size_of::<u64>())
+                .and_then(|bytes| u32::try_from(bytes).ok())
+                .ok_or_else(|| malformed("enumeration buffer exceeds u32"))?;
+            // SAFETY: `dir` is a live owned directory handle. The buffer is an
+            // exclusively borrowed, initialized allocation of exactly
+            // `capacity` bytes, aligned to 8 as `FILE_FULL_DIR_INFO` requires,
+            // and the kernel writes no further than the length it is given.
+            let ok = unsafe {
+                GetFileInformationByHandleEx(
+                    raw_handle(dir),
+                    FileFullDirectoryInfo,
+                    state.buffer.as_mut_ptr().cast(),
+                    capacity,
+                )
+            };
+            if ok == 0 {
+                let error = last_error();
+                if error.raw_os_error().map(|code| code as u32) == Some(ERROR_NO_MORE_FILES) {
+                    state.done = true;
+                    return Ok(None);
+                }
+                return Err(error);
+            }
+            state.valid = capacity as usize;
+            state.offset = 0;
+        }
+
+        // The kernel places every record on an 8-byte boundary. Checking that
+        // rather than assuming it is what makes the name slice below sound: it
+        // is the only step whose alignment is not otherwise self-evident.
+        if !state
+            .offset
+            .is_multiple_of(align_of::<FILE_FULL_DIR_INFO>())
+        {
+            return Err(malformed("record is misaligned"));
+        }
+        if state
+            .offset
+            .checked_add(size_of::<FILE_FULL_DIR_INFO>())
+            .is_none_or(|end| end > state.valid)
+        {
+            return Err(malformed("record header runs past the batch"));
+        }
+
+        // Offset the `*const u64` directly and cast from that, rather than by
+        // way of a `*const u8`: going through a byte pointer would throw the
+        // alignment away and the cast would then be a genuine 1-to-8 widening,
+        // which `cast_ptr_alignment` is right to deny. From `u64` the cast
+        // preserves alignment (8 to 8) and the lint is satisfied on the merits.
+        //
+        // SAFETY: the bounds check above proves `offset` — and a whole record
+        // header after it — lies inside the single `buffer` allocation, and the
+        // alignment check proves the resulting address is suitably aligned for
+        // `FILE_FULL_DIR_INFO`.
+        let record =
+            unsafe { state.buffer.as_ptr().byte_add(state.offset) }.cast::<FILE_FULL_DIR_INFO>();
+        // SAFETY: `record` points at an in-bounds, initialized header. The
+        // scalars are read with `read_unaligned`, so these reads stay sound
+        // even if the alignment invariant above were ever weakened; no
+        // reference into the packed kernel buffer is formed at any point.
+        let (next_offset, name_length) = unsafe {
+            (
+                std::ptr::read_unaligned(&raw const (*record).NextEntryOffset),
+                std::ptr::read_unaligned(&raw const (*record).FileNameLength),
+            )
+        };
+
+        let name_bytes = usize::try_from(name_length)
+            .map_err(|_| malformed("name length exceeds the address space"))?;
+        if !name_bytes.is_multiple_of(size_of::<u16>()) {
+            return Err(malformed(
+                "name length is not a whole number of UTF-16 units",
+            ));
+        }
+        let name_offset = state
+            .offset
+            .checked_add(std::mem::offset_of!(FILE_FULL_DIR_INFO, FileName))
+            .ok_or_else(|| malformed("name offset overflow"))?;
+        if name_offset
+            .checked_add(name_bytes)
+            .is_none_or(|end| end > state.valid)
+        {
+            return Err(malformed("name runs past the batch"));
+        }
+
+        // `FileName` is a one-element array standing in for the variable-length
+        // tail; take its address and reinterpret it at the declared length.
+        // Deriving the pointer from the field rather than by casting a `u8`
+        // pointer keeps the cast alignment-preserving (`[u16; 1]` to `u16`).
+        //
+        // SAFETY: the two checks above prove `name_bytes` starting at the
+        // field lie inside `buffer`; the record alignment proves the address
+        // is `u16`-aligned; the memory is initialized (the allocation is
+        // zeroed and the kernel wrote over it); and the slice is copied out
+        // before `state` can be touched again, so no aliasing outlives it.
+        let name = unsafe {
+            std::slice::from_raw_parts(
+                (&raw const (*record).FileName).cast::<u16>(),
+                name_bytes / size_of::<u16>(),
+            )
+        }
+        .to_vec();
+
+        state.offset = if next_offset == 0 {
+            // Last record of this batch: force a refill on the next call.
+            state.valid
+        } else {
+            state
+                .offset
+                .checked_add(
+                    usize::try_from(next_offset).map_err(|_| malformed("offset overflow"))?,
+                )
+                .ok_or_else(|| malformed("offset overflow"))?
+        };
+
+        if name != [DOT] && name != [DOT, DOT] {
+            return Ok(Some(name));
+        }
+    }
+}
+
+/// A test-only seam that runs **inside** the window this whole design exists to
+/// close: after a walk has learned a child's name, before it opens it.
+///
+/// Without it the swap tests could only race the walk and hope. With it they
+/// are deterministic. It compiles out entirely outside `cfg(test)` — the
+/// shipped service carries no hook, no branch, and no thread-local.
+#[cfg(test)]
+mod walk_seam {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    type Hook = Box<dyn FnMut(&Path)>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Removes the hook on drop, so a panicking test cannot leak one into
+    /// whatever the harness runs next on this thread.
+    pub struct Installed;
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            HOOK.with(|slot| slot.borrow_mut().take());
+        }
+    }
+
+    #[must_use]
+    pub fn install(hook: impl FnMut(&Path) + 'static) -> Installed {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Installed
+    }
+
+    pub fn fire(child: &Path) {
+        // The hook runs with the slot borrowed: the seam is deliberately not
+        // reentrant, so a hook cannot arrange to fire itself.
+        HOOK.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().as_mut() {
+                hook(child);
+            }
+        });
+    }
 }
 
 /// Applies the protected descriptor to every existing object below `path`,
@@ -1460,30 +1849,50 @@ fn harden_path(path: &Path, expected: Option<ObjectKind>, sddl: &str) -> io::Res
 /// propagation the ordering existed to prevent never reaches the target at all.
 /// Pinned by `hardening_walk_survives_a_production_shaped_tree` and
 /// `planted_junction_target_is_never_reached_by_propagation`.
-fn harden_descendants(path: &Path, sddl: &str) -> io::Result<()> {
+///
+/// Every step is **handle-relative**. `root` is the verified handle for
+/// `root_path`; each level's children are enumerated from the handle held for
+/// that level, and each child is opened with [`open_checked_at`] against that
+/// same handle under a leaf-only name. No step re-resolves a full path, so the
+/// ancestor chain a child is reached through is the one already proven, not
+/// whatever the names happen to point at when the open is issued.
+///
+/// `root_path` is **diagnostic only** — it seeds the paths that appear in error
+/// messages and is never resolved.
+fn harden_descendants(root: &std::fs::File, root_path: &Path, sddl: &str) -> io::Result<()> {
+    use std::os::windows::ffi::OsStringExt as _;
+
     struct Frame {
         locked: Option<LockedObject>,
-        entries: Option<std::fs::ReadDir>,
+        entries: DirectoryEnumeration,
         depth: usize,
+        /// Diagnostic only; never resolved.
+        path: PathBuf,
     }
+
+    const ACCESS: u32 = SECURITY_WRITE_ACCESS | FILE_LIST_DIRECTORY_ACCESS | FILE_TRAVERSE_ACCESS;
 
     let mut object_count = 1usize;
     let mut stack = vec![Frame {
         locked: None,
-        entries: Some(std::fs::read_dir(path)?),
+        entries: DirectoryEnumeration::new(),
         depth: 0,
+        path: root_path.to_path_buf(),
     }];
     while !stack.is_empty() {
         let next = {
             let frame = stack.last_mut().ok_or_else(|| {
                 io::Error::other("managed-tree hardening stack unexpectedly became empty")
             })?;
-            match frame.entries.as_mut() {
-                Some(entries) => entries.next().transpose()?,
-                None => None,
-            }
+            // Disjoint field borrows: the enumeration state is advanced through
+            // the very handle whose level it belongs to.
+            let Frame {
+                locked, entries, ..
+            } = frame;
+            let parent = locked.as_ref().map_or(root, |locked| &locked.file);
+            next_directory_entry(parent, entries)?
         };
-        if let Some(entry) = next {
+        if let Some(leaf) = next {
             object_count = object_count.checked_add(1).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1507,19 +1916,29 @@ fn harden_descendants(path: &Path, sddl: &str) -> io::Result<()> {
                     format!("managed tree exceeds the {MAX_MANAGED_TREE_DEPTH}-level safety limit"),
                 ));
             }
-            let child = entry.path();
-            let locked = open_checked(
+            let frame = stack.last().ok_or_else(|| {
+                io::Error::other("managed-tree hardening stack unexpectedly became empty")
+            })?;
+            let child = frame.path.join(std::ffi::OsString::from_wide(&leaf));
+            // The window this design closes: everything between learning a name
+            // and acting on it. The seam exists so a test can actually run in it.
+            #[cfg(test)]
+            walk_seam::fire(&child);
+            let parent = frame.locked.as_ref().map_or(root, |locked| &locked.file);
+            let locked = open_checked_at(
+                parent,
+                &leaf,
                 &child,
                 None,
-                SECURITY_WRITE_ACCESS | FILE_LIST_DIRECTORY_ACCESS,
+                ACCESS,
                 windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
             )?;
             if locked.kind == ObjectKind::Directory {
-                let entries = std::fs::read_dir(&child)?;
                 stack.push(Frame {
                     locked: Some(locked),
-                    entries: Some(entries),
+                    entries: DirectoryEnumeration::new(),
                     depth,
+                    path: child,
                 });
             } else {
                 set_handle_security(&locked.file, sddl)?;
@@ -1527,10 +1946,9 @@ fn harden_descendants(path: &Path, sddl: &str) -> io::Result<()> {
             continue;
         }
 
-        let mut frame = stack.pop().ok_or_else(|| {
+        let frame = stack.pop().ok_or_else(|| {
             io::Error::other("managed-tree hardening stack unexpectedly became empty")
         })?;
-        drop(frame.entries.take());
         if let Some(locked) = frame.locked {
             set_handle_security(&locked.file, sddl)?;
         }
@@ -1714,41 +2132,68 @@ fn delete_path(path: &Path, expected: Option<ObjectKind>) -> io::Result<()> {
     let locked = open_checked(
         path,
         expected,
-        DELETE_ACCESS | FILE_READ_ATTRIBUTES_ACCESS | FILE_LIST_DIRECTORY_ACCESS,
+        DELETE_ACCESS
+            | FILE_READ_ATTRIBUTES_ACCESS
+            | FILE_LIST_DIRECTORY_ACCESS
+            | FILE_TRAVERSE_ACCESS,
         windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
     )?;
     if locked.kind == ObjectKind::Directory {
-        delete_descendants(path)?;
+        delete_descendants(&locked.file, path)?;
     }
     delete_handle(&locked.file)?;
     drop(locked);
     Ok(())
 }
 
-fn delete_descendants(path: &Path) -> io::Result<()> {
+/// Marks every object below `root` for deletion, bottom-up, on handles opened
+/// without following reparse points.
+///
+/// Handle-relative for the same reason [`harden_descendants`] is, and with more
+/// at stake: this walk unlinks what it opens, so a name repointed between
+/// enumeration and open would decide what gets deleted. `root` is the verified
+/// handle; children are enumerated from the handle held for their level and
+/// opened by leaf name against it, so no full path is ever resolved again.
+///
+/// `root_path` is **diagnostic only** — it seeds the paths that appear in error
+/// messages and is never resolved.
+fn delete_descendants(root: &std::fs::File, root_path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStringExt as _;
+
     struct Frame {
         locked: Option<LockedObject>,
-        entries: Option<std::fs::ReadDir>,
+        entries: DirectoryEnumeration,
         depth: usize,
+        /// Diagnostic only; never resolved.
+        path: PathBuf,
     }
+
+    const ACCESS: u32 = DELETE_ACCESS
+        | FILE_READ_ATTRIBUTES_ACCESS
+        | FILE_LIST_DIRECTORY_ACCESS
+        | FILE_TRAVERSE_ACCESS;
 
     let mut object_count = 1usize;
     let mut stack = vec![Frame {
         locked: None,
-        entries: Some(std::fs::read_dir(path)?),
+        entries: DirectoryEnumeration::new(),
         depth: 0,
+        path: root_path.to_path_buf(),
     }];
     while !stack.is_empty() {
         let next = {
             let frame = stack.last_mut().ok_or_else(|| {
                 io::Error::other("managed-tree deletion stack unexpectedly became empty")
             })?;
-            match frame.entries.as_mut() {
-                Some(entries) => entries.next().transpose()?,
-                None => None,
-            }
+            // Disjoint field borrows: the enumeration state is advanced through
+            // the very handle whose level it belongs to.
+            let Frame {
+                locked, entries, ..
+            } = frame;
+            let parent = locked.as_ref().map_or(root, |locked| &locked.file);
+            next_directory_entry(parent, entries)?
         };
-        if let Some(entry) = next {
+        if let Some(leaf) = next {
             object_count = object_count.checked_add(1).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1774,19 +2219,29 @@ fn delete_descendants(path: &Path) -> io::Result<()> {
                     ),
                 ));
             }
-            let child = entry.path();
-            let locked = open_checked(
+            let frame = stack.last().ok_or_else(|| {
+                io::Error::other("managed-tree deletion stack unexpectedly became empty")
+            })?;
+            let child = frame.path.join(std::ffi::OsString::from_wide(&leaf));
+            // The window this design closes: everything between learning a name
+            // and acting on it. The seam exists so a test can actually run in it.
+            #[cfg(test)]
+            walk_seam::fire(&child);
+            let parent = frame.locked.as_ref().map_or(root, |locked| &locked.file);
+            let locked = open_checked_at(
+                parent,
+                &leaf,
                 &child,
                 None,
-                DELETE_ACCESS | FILE_READ_ATTRIBUTES_ACCESS | FILE_LIST_DIRECTORY_ACCESS,
+                ACCESS,
                 windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
             )?;
             if locked.kind == ObjectKind::Directory {
-                let entries = std::fs::read_dir(&child)?;
                 stack.push(Frame {
                     locked: Some(locked),
-                    entries: Some(entries),
+                    entries: DirectoryEnumeration::new(),
                     depth,
+                    path: child,
                 });
             } else {
                 delete_handle(&locked.file)?;
@@ -1794,10 +2249,9 @@ fn delete_descendants(path: &Path) -> io::Result<()> {
             continue;
         }
 
-        let mut frame = stack.pop().ok_or_else(|| {
+        let frame = stack.pop().ok_or_else(|| {
             io::Error::other("managed-tree deletion stack unexpectedly became empty")
         })?;
-        drop(frame.entries.take());
         if let Some(locked) = frame.locked {
             delete_handle(&locked.file)?;
         }
@@ -2689,6 +3143,27 @@ mod tests {
             .to_string()
     }
 
+    /// Opens a root the way a walk's caller does, but with permissive sharing.
+    ///
+    /// The product opens it `FILE_SHARE_READ`, which is right for the product
+    /// and wrong for these tests: the swap tests must mutate the tree *while*
+    /// the walk holds the root, which is precisely the concurrency a walk in
+    /// production is entitled to exclude. Relaxing it here is what lets the
+    /// attacker exist at all; it does not weaken what is being measured, which
+    /// is what the walk does once a name has been repointed under it.
+    fn walk_root(path: &Path, access: u32) -> LockedObject {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        open_checked(
+            path,
+            Some(ObjectKind::Directory),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        )
+        .unwrap_or_else(|error| panic!("open walk root {}: {error}", path.display()))
+    }
+
     /// Attempts exactly the open the hardening walk performs.
     fn walk_open(path: &Path) -> io::Result<LockedObject> {
         open_checked(
@@ -3180,10 +3655,11 @@ mod tests {
             before_file,
             "propagation must not cross a junction into the target's contents"
         );
+        // The walk is handle-relative now, so it is driven from the root handle
+        // this test already holds rather than from the root's name.
+        let error = harden_descendants(&root_locked.file, &root, &sddl)
+            .expect_err("a planted junction must be rejected");
         drop(root_locked);
-
-        let error =
-            harden_descendants(&root, &sddl).expect_err("a planted junction must be rejected");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("reparse point"), "{error}");
         assert_eq!(
@@ -3192,5 +3668,150 @@ mod tests {
         );
 
         std::fs::remove_dir(&link).expect("remove the junction, not its target");
+    }
+
+    // --- handle-relative walks (DEV-166) -------------------------------------
+    //
+    // What these two pin, stated honestly.
+    //
+    // They pin the *fail-closed* property across a real swap performed inside
+    // the walk's own window: a child replaced after it was enumerated and
+    // before it was opened is refused, and nothing outside the managed tree is
+    // touched. That property is not new — the old path-re-opening walk also
+    // refused these two shapes, because a junction and a hard link are both
+    // things `inspect_handle` rejects on the handle.
+    //
+    // What *is* new cannot be written as an assertion, because it is the
+    // absence of an operation: no step of either walk resolves a full path any
+    // more, so an ancestor's name is never consulted a second time and a
+    // repointed ancestor has nothing left to influence. Enumeration likewise no
+    // longer depends on the ACL the hardening walk is rewriting. Those are
+    // structural, argued in the code and in docs/SECURITY.md threat 7 rather
+    // than measured here.
+    //
+    // These are unelevated on purpose. A junction and a hard link are both
+    // creatable by a standard user, so every PR runs the swap.
+
+    /// The hardening walk, with a child swapped for a junction inside the
+    /// window between enumeration and open.
+    #[test]
+    fn hardening_walk_refuses_a_child_swapped_after_enumeration() {
+        let sddl = own_tree_sddl();
+        let anchor = tempfile::tempdir().expect("anchor");
+        let outside = tempfile::tempdir().expect("outside");
+        let sentinel = outside.path().join("sentinel");
+        std::fs::write(&sentinel, b"outside").expect("sentinel");
+
+        let root = anchor.path().join("find-my-files");
+        create_directory_new_with_security(&root, &sddl).expect("root");
+        let victim = root.join("victim");
+        std::fs::write(&victim, b"victim").expect("victim");
+
+        let before_dir = read_sddl(outside.path());
+        let before_file = read_sddl(&sentinel);
+
+        let root_locked = walk_root(
+            &root,
+            SECURITY_WRITE_ACCESS | FILE_LIST_DIRECTORY_ACCESS | FILE_TRAVERSE_ACCESS,
+        );
+
+        // Fires once, after `victim` has been enumerated and before it is
+        // opened: park the real child under another name and put a junction to
+        // an outside directory in its place.
+        let swap = {
+            let victim = victim.clone();
+            let parked = root.join("parked");
+            let target = outside.path().to_path_buf();
+            let mut fired = false;
+            walk_seam::install(move |child| {
+                if fired || !child.ends_with("victim") {
+                    return;
+                }
+                fired = true;
+                std::fs::rename(&victim, &parked).expect("park the real child");
+                create_junction(&victim, &target).expect("swap a junction into the same name");
+            })
+        };
+
+        let error = harden_descendants(&root_locked.file, &root, &sddl)
+            .expect_err("a child swapped after enumeration must be refused");
+        drop(swap);
+        drop(root_locked);
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(error.to_string().contains("reparse point"), "{error}");
+        assert_eq!(
+            read_sddl(outside.path()),
+            before_dir,
+            "the swapped-in target's own descriptor must be untouched"
+        );
+        assert_eq!(
+            read_sddl(&sentinel),
+            before_file,
+            "propagation must not have reached the target's contents"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).expect("sentinel survives"),
+            b"outside"
+        );
+
+        std::fs::remove_dir(&victim).expect("remove the junction, not its target");
+    }
+
+    /// The deletion walk, with a child swapped for a second link to a file
+    /// outside the managed tree — the shape where being wrong destroys data.
+    #[test]
+    fn deletion_walk_refuses_a_child_swapped_after_enumeration() {
+        let sddl = own_tree_sddl();
+        let anchor = tempfile::tempdir().expect("anchor");
+        let outside = tempfile::tempdir().expect("outside");
+        let sentinel = outside.path().join("sentinel");
+        std::fs::write(&sentinel, b"outside").expect("sentinel");
+
+        let root = anchor.path().join("find-my-files");
+        create_directory_new_with_security(&root, &sddl).expect("root");
+        let victim = root.join("victim");
+        std::fs::write(&victim, b"victim").expect("victim");
+
+        let root_locked = walk_root(
+            &root,
+            DELETE_ACCESS
+                | FILE_READ_ATTRIBUTES_ACCESS
+                | FILE_LIST_DIRECTORY_ACCESS
+                | FILE_TRAVERSE_ACCESS,
+        );
+
+        // Both temporary directories live under `%TEMP%`, so they are on one
+        // volume and a hard link between them is possible.
+        let swap = {
+            let victim = victim.clone();
+            let target = sentinel.clone();
+            let mut fired = false;
+            walk_seam::install(move |child| {
+                if fired || !child.ends_with("victim") {
+                    return;
+                }
+                fired = true;
+                std::fs::remove_file(&victim).expect("remove the real child");
+                std::fs::hard_link(&target, &victim).expect("swap in a link to an outside file");
+            })
+        };
+
+        let error = delete_descendants(&root_locked.file, &root)
+            .expect_err("a child swapped after enumeration must be refused");
+        drop(swap);
+        drop(root_locked);
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(error.to_string().contains("multiply-linked"), "{error}");
+        assert!(
+            victim.exists(),
+            "the walk must refuse before unlinking anything"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).expect("the outside file survives"),
+            b"outside",
+            "deleting the link must never have reached the file it names"
+        );
     }
 }
