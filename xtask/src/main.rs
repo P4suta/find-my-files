@@ -29,7 +29,6 @@ mod docs;
 mod doctor;
 mod package;
 mod perf;
-mod performance_doctor;
 mod publish;
 mod signing;
 mod test_admin;
@@ -150,9 +149,6 @@ enum Commands {
         #[arg(default_value = "C:")]
         drive: String,
     },
-    /// Fail closed unless the live GitHub runner group and environment exactly
-    /// match the privileged performance-instrument policy.
-    PerformanceDoctor,
     /// Run cargo-mutants 27.1.0 with its clean-tree baseline enabled, then
     /// compare the exact missed-mutant identities with the reviewed baseline.
     MutationRust {
@@ -211,7 +207,6 @@ fn main() -> Result<()> {
         Commands::PerfMicroBaseline => perf::micro_baseline(),
         Commands::PerfRealCheck { drive } => perf::real_check(&drive),
         Commands::PerfRealBaseline { drive } => perf::real_baseline(&drive),
-        Commands::PerformanceDoctor => performance_doctor::run(),
         Commands::MutationRust { ci } => mutation_ci::run_rust(ci),
         Commands::MutationCsharp { ci } => mutation_ci::run_csharp(ci),
         Commands::MutationVerifyRust { evidence } => mutation_ci::verify_rust(evidence),

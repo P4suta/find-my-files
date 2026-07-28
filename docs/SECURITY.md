@@ -43,7 +43,12 @@ test in `build/engine/nextest/admin/admin.xml`; removing or renaming it makes th
 
 ## Distribution integrity
 
-`release.yml` isolates build, signing, and publishing into separate jobs. Only the
+`release.yml` is dispatchable only from protected `main` — the `release` and
+`release-please` environments restrict deployments to that branch, so an
+off-branch dispatch reaches no signing credential, App token, or publication
+authority — and its first job binds the dispatch to one exact tag, commit, and
+draft release ID before any other job starts (ADR-0048). It then isolates build,
+signing, and publishing into separate jobs. Only the
 approval-gated signing job receives SSL.com eSigner secrets; every first-party PE
 listed in the committed signing manifest must pass Authenticode chain, RFC 3161
 timestamp, and signer-subject verification.

@@ -102,48 +102,85 @@ fn artifact_producers_are_safe_to_rerun() {
     }
 }
 
+/// ADR-0048 replaced the four-stage `workflow_dispatch` -> `workflow_run` ->
+/// `workflow_run` -> `workflow_call` chain with one dispatch from protected
+/// main. The property the chain bought — a tag identifies build data, never
+/// workflow code — now rests on three things this test pins: the entry point is
+/// a dispatch and nothing else, `preflight` binds that dispatch before any other
+/// job runs, and the orchestrator's dedupe title is character-identical to the
+/// `run-name` release.yml renders.
 #[test]
-fn release_publication_is_bound_to_exact_performance_evidence() {
+fn release_publication_is_directly_dispatched_and_exactly_bound() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask has the repository as its parent");
-    let dispatcher = fs::read_to_string(repo.join(".github/workflows/performance-release.yml"))
-        .expect("performance dispatcher must be readable");
     let orchestrator = fs::read_to_string(repo.join(".github/workflows/release-please.yml"))
         .expect("release orchestrator must be readable");
     let release = fs::read_to_string(repo.join(".github/workflows/release.yml"))
         .expect("release workflow must be readable");
-    let request = fs::read_to_string(repo.join(".github/workflows/performance-gate-request.yml"))
-        .expect("performance request must be readable");
-    let controller = fs::read_to_string(repo.join(".github/workflows/performance-controller.yml"))
-        .expect("performance controller must be readable");
 
-    assert!(dispatcher.contains("uses: ./.github/workflows/release.yml"));
-    assert!(dispatcher.contains("commit_sha: ${{ needs.authorize-release.outputs.commit_sha }}"));
-    assert!(!dispatcher.contains("gh workflow run release.yml"));
-    assert!(dispatcher.contains(
-        "performance-gate\\ (v[0-9]+\\.[0-9]+\\.[0-9]+)\\ ([0-9a-f]{40})\\ release\\ ([1-9][0-9]*)"
-    ));
-    assert!(dispatcher.contains("'.head_branch'"));
-    assert!(dispatcher.contains("actions: read # inspect the exact completed performance run"));
-    assert!(orchestrator
-        .contains("gh workflow run performance-gate-request.yml --repo \"$REPO\" --ref main"));
-    assert!(orchestrator
-        .contains("-f tag_name=\"$TAG\" -f commit_sha=\"$tag_sha\" -f release_id=\"$release_id\""));
-    assert!(release.contains("workflow_call:"));
-    assert!(!release.contains("workflow_dispatch:"));
+    // The entry point, and the absence of everything the chain contributed.
+    assert!(release.contains("workflow_dispatch:"));
+    assert!(
+        !release.contains("workflow_call:"),
+        "release.yml is dispatched directly; a reusable entry point would restore the indirection"
+    );
+    assert!(!release.contains("performance_run_id"));
+    assert!(!release.contains("performanceRunId"));
+    assert!(!release.contains("performance-controller"));
+    assert!(
+        !release.contains("inputs.publish"),
+        "the dispatched workflow has exactly one mode and no publish toggle"
+    );
     assert!(!release.contains("Stamp rehearsal"));
     assert!(!release.contains("Pass through unsigned rehearsal"));
-    assert!(release.contains("performance_run_id:"));
-    assert!(release.contains("release_id:"));
+    assert!(release.contains("tag_name:"));
     assert!(release.contains("commit_sha:"));
-    assert!(release.contains("actions/runs/$env:PERFORMANCE_RUN_ID"));
+    assert!(release.contains("release_id:"));
+
+    // Admission control runs first and gates both long jobs.
+    let preflight = release
+        .find("\n  preflight:")
+        .expect("release.yml must open with the admission-control job");
+    let build = release
+        .find("\n  build:")
+        .expect("release.yml must have a build job");
     assert!(
-        release.contains(
-            "$run.display_title -cne \"performance-gate $env:TAG $env:TARGET_SHA release $env:RELEASE_ID\""
-        )
+        preflight < build,
+        "preflight must be declared before the job it admits"
     );
-    assert!(release.contains("$env:GITHUB_REF -cne \"refs/heads/main\""));
+    assert_eq!(
+        release.matches("needs: preflight").count(),
+        2,
+        "both build and the 16-shard mutation gate must wait on admission control"
+    );
+    assert!(release.contains("${{ github.triggering_actor }}"));
+    assert!(release.contains("GITHUB_EVENT_NAME"));
+    assert!(release.contains("$env:GITHUB_EVENT_NAME -cne \"workflow_dispatch\""));
+    assert_eq!(
+        release
+            .matches("$env:GITHUB_REF -cne \"refs/heads/main\"")
+            .count(),
+        6,
+        "preflight plus every later job must independently refuse a non-main controller ref"
+    );
+
+    // The dedupe contract: one string, pinned from both sides.
+    assert!(release.contains(
+        "run-name: release publish ${{ inputs.tag_name }} ${{ inputs.commit_sha }} release ${{ inputs.release_id }}"
+    ));
+    assert!(orchestrator
+        .contains("release_title=\"release publish $TAG $tag_sha release $release_id\""));
+    assert!(orchestrator.contains("--workflow release.yml"));
+    assert!(orchestrator.contains("--event workflow_dispatch"));
+    assert!(orchestrator.contains("gh workflow run release.yml --repo \"$REPO\" --ref main"));
+    assert!(orchestrator
+        .contains("-f tag_name=\"$TAG\" -f commit_sha=\"$tag_sha\" -f release_id=\"$release_id\""));
+    assert!(
+        !orchestrator.contains("performance-gate-request"),
+        "the retired request workflow must not be dispatched or queried"
+    );
+
     assert_eq!(
         release.matches("ref: ${{ inputs.commit_sha }}").count(),
         4,
@@ -163,7 +200,7 @@ fn release_publication_is_bound_to_exact_performance_evidence() {
     );
     assert_eq!(
         orchestrator
-            .matches("actions: write # dispatch the trusted-main performance gate")
+            .matches("actions: write # dispatch the trusted-main release workflow")
             .count(),
         1,
         "the isolated trusted-main dispatcher is the sole Actions write boundary"
@@ -172,68 +209,6 @@ fn release_publication_is_bound_to_exact_performance_evidence() {
     assert!(release.contains("-F prerelease=false"));
     assert!(release.contains("stable-publication"));
     assert!(release.contains("Refusing out-of-order stable publication"));
-    assert!(request.contains("workflow_dispatch:"));
-    assert!(!request.contains("runs-on: [self-hosted"));
-    assert!(!request.contains("runs-on: self-hosted"));
-    assert!(!request.contains("group: fmf-performance"));
-    assert!(request.contains("requestRef !== \"refs/heads/main\""));
-    assert!(request.contains("release_id:"));
-    assert!(request.contains("github.rest.repos.getRelease"));
-    assert!(!request.contains("github.rest.repos.listReleases"));
-    assert!(
-        controller.contains("workflows: [performance-gate-request, performance-baseline-request]")
-    );
-    assert!(!controller.contains("workflow_dispatch:"));
-    assert_eq!(
-        controller
-            .matches("\n      group: fmf-performance\n")
-            .count(),
-        2
-    );
-    assert_eq!(controller.matches("- fmf-jit-ephemeral").count(), 2);
-    assert_eq!(
-        controller
-            .matches("- ${{ needs.authorize.outputs.runner_label }}")
-            .count(),
-        2
-    );
-    assert_eq!(controller.matches("environment: performance").count(), 2);
-    assert!(controller.contains("group: fmf-performance-instrument"));
-    assert!(controller.contains("runner_group_name -cne \"fmf-performance\""));
-    assert!(controller.contains("repositoryRecord.owner?.type !== \"Organization\""));
-    assert!(controller.contains("P:\\find-my-files\\performance-baseline"));
-    assert!(!controller.contains("vars.FMF_PERF_BASELINE_DIR"));
-    assert!(!controller.contains(">> $env:GITHUB_ENV"));
-    assert!(controller.contains(
-        "FMF_PERF_BASELINE_DIR: ${{ runner.temp }}/fmf-perf-baseline-${{ github.run_id }}-${{ github.run_attempt }}"
-    ));
-    assert!(controller.contains(
-        "FMF_PERF_BASELINE_SCRATCH: ${{ runner.temp }}/fmf-perf-baseline-${{ github.run_id }}-${{ github.run_attempt }}"
-    ));
-    assert_eq!(
-        controller
-            .matches("FMF_PERF_BASELINE_DIR: P:\\find-my-files\\performance-baseline\\criterion")
-            .count(),
-        2
-    );
-    assert!(controller.contains("clean: true"));
-    assert!(controller.contains("runs-on: ubuntu-24.04"));
-    assert!(controller.contains("ref: ${{ needs.authorize.outputs.commit_sha }}"));
-    assert!(controller.contains("engine/benches/baseline.json"));
-    assert!(controller.contains("environment: release-please"));
-    assert!(dispatcher.contains("run-id: ${{ github.event.workflow_run.id }}"));
-    assert!(dispatcher.contains("expected_files = {\"micro.json\", \"real.json\"}"));
-    assert!(dispatcher.contains("shell: python"));
-    assert!(!dispatcher.contains("python3 - <<'PY'"));
-    assert!(dispatcher.contains("value[\"semantic_cargo_lock_sha256\"] != semantic_lock"));
-    assert!(dispatcher.contains("value[\"passed\"] is not True"));
-    assert!(dispatcher.contains("value[\"expected_cases\"] != expected"));
-    assert!(controller.contains("commit.parents.length !== 1"));
-    assert!(controller.contains("comparison.files.length !== 1"));
-    assert!(controller.contains("comparison.files[0].filename !== targetPath"));
-    assert!(controller.contains("String(pulls[0].head?.sha).toLowerCase() !== branchSha"));
-    assert!(controller.contains("release_id: ${{ steps.identity.outputs.release_id }}"));
-    assert!(controller.contains("github.rest.repos.getRelease"));
     assert!(release.contains("publish-approval:"));
     assert!(release.contains("environment: release-please"));
     assert!(!release.contains("The two repository-level App credentials"));
@@ -272,6 +247,44 @@ fn release_publication_is_bound_to_exact_performance_evidence() {
         .expect("attestations must exist");
     assert!(settings_mint < attestations);
     assert!(publication_mint > attestations);
+
+    // The alerts this change removes were structural: CodeQL's cache-poisoning
+    // query binds `workflow_run` through `runsOnDefaultBranch`, and zizmor's
+    // dangerous-triggers audit had to be suppressed wherever we used one. Both
+    // constructs are gone from the release path, so keep them gone repo-wide
+    // rather than re-earning the alerts one workflow at a time.
+    let mut dangerous_trigger_suppressions = Vec::new();
+    for entry in
+        fs::read_dir(repo.join(".github/workflows")).expect("workflow directory must be readable")
+    {
+        let path = entry.expect("workflow entry must be readable").path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("yml") {
+            continue;
+        }
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()));
+        assert!(
+            !contents.contains("\n  workflow_run:"),
+            "{} reintroduces a workflow_run trigger (ADR-0048)",
+            path.display()
+        );
+        if contents.contains("zizmor: ignore[dangerous-triggers]") {
+            dangerous_trigger_suppressions.push(
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("workflow file name")
+                    .to_owned(),
+            );
+        }
+    }
+    // The one remaining suppression is the `pull_request_target` auto-merge
+    // guard, which never checks out PR code and is unrelated to the release
+    // path. Nothing on the release path may need one.
+    assert_eq!(
+        dangerous_trigger_suppressions,
+        vec!["no-automerge-on-release-pr.yml".to_owned()],
+        "a dangerous trigger was suppressed instead of avoided"
+    );
 }
 
 #[test]
@@ -281,12 +294,6 @@ fn release_identity_signing_and_attestation_boundaries_are_fail_closed() {
         .expect("xtask has the repository as its parent");
     let orchestrator = fs::read_to_string(repo.join(".github/workflows/release-please.yml"))
         .expect("release orchestrator must be readable");
-    let request = fs::read_to_string(repo.join(".github/workflows/performance-gate-request.yml"))
-        .expect("performance request must be readable");
-    let controller = fs::read_to_string(repo.join(".github/workflows/performance-controller.yml"))
-        .expect("performance controller must be readable");
-    let dispatcher = fs::read_to_string(repo.join(".github/workflows/performance-release.yml"))
-        .expect("performance dispatcher must be readable");
     let release = fs::read_to_string(repo.join(".github/workflows/release.yml"))
         .expect("release workflow must be readable");
 
@@ -301,15 +308,6 @@ fn release_identity_signing_and_attestation_boundaries_are_fail_closed() {
             "release-please must preserve exact release identity boundary `{boundary}`"
         );
     }
-    assert!(request.contains("release ${{ inputs.release_id }}"));
-    assert!(request.contains("github.rest.repos.getRelease"));
-    assert!(controller.contains("release ([1-9][0-9]*)$"));
-    assert!(controller.contains("github.rest.repos.getRelease"));
-    assert!(dispatcher.contains("release\\ ([1-9][0-9]*)$"));
-    assert!(dispatcher.contains("repos/$REPO/releases/$RELEASE_ID"));
-    assert!(!dispatcher.contains("releases/tags/"));
-    assert!(!dispatcher.contains("releases?per_page"));
-    assert!(dispatcher.contains("release_id: ${{ needs.authorize-release.outputs.release_id }}"));
 
     let publish = release
         .split_once("\n  publish:")
@@ -349,7 +347,8 @@ fn release_identity_signing_and_attestation_boundaries_are_fail_closed() {
     for boundary in [
         "name: Generate and verify exact release predicate",
         "predicate-type: https://github.com/P4suta/find-my-files/attestations/release/v1",
-        "\"performanceRunId\": performance_run_id",
+        "\"schemaVersion\": 2",
+        "\"triggeringActor\": triggering_actor",
         "\"workflowCommit\": workflow_sha",
         "\"bundleManifests\": manifest_records",
         "document[\"source_commit\"] != target_sha",
@@ -376,99 +375,6 @@ fn release_identity_signing_and_attestation_boundaries_are_fail_closed() {
             "name: Verify the published release is immutable and complete",
         ],
     );
-}
-
-#[test]
-fn privileged_performance_runner_has_one_exact_workflow_boundary() {
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask has the repository as its parent");
-    let controller = fs::read_to_string(repo.join(".github/workflows/performance-controller.yml"))
-        .expect("performance controller must be readable");
-    let baseline_request =
-        fs::read_to_string(repo.join(".github/workflows/performance-baseline-request.yml"))
-            .expect("performance baseline request must be readable");
-    let doctor = fs::read_to_string(repo.join("xtask/src/performance_doctor.rs"))
-        .expect("performance doctor must be readable");
-
-    assert!(!controller.contains("runs-on: [self-hosted"));
-    assert!(!controller.contains("runs-on: self-hosted"));
-    assert!(doctor.contains(".github/workflows/performance-controller.yml@refs/heads/main"));
-    assert!(doctor.contains("restricted_to_workflows"));
-    assert!(doctor.contains("selected_workflows"));
-    assert!(doctor.contains("can_admins_bypass"));
-    assert!(doctor.contains("total_count"));
-    assert!(doctor.contains("fmf-jit-ephemeral"));
-    assert!(doctor.contains("busy"));
-    assert!(baseline_request.contains("group: performance-baseline-request"));
-    assert!(baseline_request.contains("cancel-in-progress: false"));
-    for boundary in [
-        "CONTROLLER_RUN_ATTEMPT",
-        "fmf-jit-run-${controllerRunId}-attempt-${controllerRunAttempt}",
-        "fmf-perf-jit-${controllerRunId}-${controllerRunAttempt}",
-        "RUNNER_NAME -cne $env:EXPECTED_RUNNER_NAME",
-        "Actions job labels do not exactly match the authorized JIT label set",
-        "configure",
-        "--ephemeral",
-        "rolling the OS/workspace",
-        "Get-Volume -FilePath $baseline",
-        "Get-TreeManifest",
-    ] {
-        assert!(
-            controller.contains(boundary),
-            "JIT performance boundary must retain `{boundary}`"
-        );
-    }
-}
-
-#[test]
-fn hosted_baseline_validation_is_complete_before_write_token_mint() {
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask has the repository as its parent");
-    let controller = fs::read_to_string(repo.join(".github/workflows/performance-controller.yml"))
-        .expect("performance controller must be readable");
-
-    let validation_job = controller
-        .find("\n  validate-baseline:")
-        .expect("read-only hosted validation job must exist");
-    let write_job = controller
-        .find("\n  propose-baseline:")
-        .expect("separate baseline write job must exist");
-    let validation = controller
-        .find("name: Validate candidate without write authority")
-        .expect("hosted candidate validation must exist");
-    let digest_binding = controller
-        .find("name: Bind write job to the validated candidate bytes")
-        .expect("write job must consume the validated digest");
-    let token_mint = controller
-        .find("name: Mint short-lived baseline-writer App token")
-        .expect("baseline writer token mint must exist");
-    assert!(
-        validation_job < validation
-            && validation < write_job
-            && write_job < digest_binding
-            && digest_binding < token_mint,
-        "untrusted data validation and write authority must remain separate jobs"
-    );
-    for boundary in [
-        "shell: python",
-        "candidate_files != {\"baseline.json\"}",
-        "measurement[\"cargo_lock_sha256\"] != semantic_lock",
-        "candidate[\"index_ms\"]",
-        "candidate[\"working_set_bytes\"]",
-        "query_keys",
-        "restore[\"entries\"] != candidate[\"entries\"]",
-        "candidate_sha256=",
-    ] {
-        assert!(
-            controller[validation..write_job].contains(boundary),
-            "hosted pre-token validation must retain boundary `{boundary}`"
-        );
-    }
-    assert!(!controller[validation..write_job].contains("python3 - <<'PY'"));
-    assert!(controller[digest_binding..token_mint].contains("sha256sum --check --strict"));
-    assert!(controller[token_mint..].contains("candidateHash !== expectedCandidateHash"));
 }
 
 #[test]

@@ -444,6 +444,10 @@ fn release_uses_the_same_trusted_controller_and_blocks_signing_on_it() {
         "\n  mutation:\n",
         "\n  # ---------------------------------------------------------------------------\n  # 1c)",
     );
+    // The gate is 16 shards behind a 360-minute timeout, and since ADR-0048 a
+    // release is startable by anyone holding Actions:write. It must not begin
+    // until the secretless preflight has admitted the dispatch.
+    assert!(mutation.contains("needs: preflight"));
     assert!(mutation.contains("actions: read # let the fresh nested verifier"));
     assert!(mutation.contains("contents: read"));
     assert!(mutation.contains("uses: ./.github/workflows/mutation-controller.yml"));

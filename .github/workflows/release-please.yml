@@ -4,15 +4,11 @@
 # bumps engine/Cargo.toml + engine/Cargo.lock and the C# csproj, and updates
 # CHANGELOG.md. Merging that PR makes release-please create both the `vX.Y.Z`
 # tag (`force-tag-creation`: true) and a DRAFT GitHub Release. This workflow then
-# dispatches the hosted-only `main` copy of performance-gate-request.yml with that
-# exact tag and commit as inert inputs. The default-branch workflow_run controller
-# in performance-controller.yml is the only workflow that may assign the self-hosted
-# instrument. Only the separate
-# performance-release.yml workflow, triggered after that run has completed
-# successfully, may invoke the trusted reusable release.yml. The measurement,
-# checkout, environment
-# approval, and provenance therefore all identify the same immutable commit.
-# Humans never hand-pick or hand-edit a version.
+# dispatches release.yml from protected `main` with that exact tag, commit, and
+# numeric draft release ID as inert inputs (ADR-0048). Dispatching with
+# `--ref main` loads main's copy of release.yml, so the checkout, environment
+# approvals, and provenance all identify the same immutable commit while the tag
+# stays pure data. Humans never hand-pick or hand-edit a version.
 #
 # Runs as a GitHub App: a short-lived installation token (actions/create-github-app-token)
 # from two secrets — RELEASE_PLEASE_CLIENT_ID and RELEASE_PLEASE_PRIVATE_KEY — lets
@@ -29,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Recovery only: re-run the gate for an existing vX.Y.Z draft"
+        description: "Recovery only: re-dispatch release.yml for an existing vX.Y.Z draft"
         required: false
         type: string
 
@@ -50,7 +46,7 @@ jobs:
     # deployment-branch policy of `main` only and deliberately has NO required
     # reviewers: release-please must run unattended (the human gate is merging
     # the Release PR; signing/publication approvals live in the separate
-    # `release` environment in the reusable release.yml). ADR-0035.
+    # `release` environment in the dispatched release.yml). ADR-0035.
     environment: release-please
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
@@ -73,7 +69,7 @@ jobs:
 
       # Mint a short-lived installation token scoped to this repo. It lets
       # release-please write the release commit/tag and maintain its PR/release;
-      # credentialed release.yml remains reusable-only from the trusted controller.
+      # credentialed release.yml remains dispatchable only from protected main.
       - name: Mint GitHub App token
         id: app-token
         if: env.HAS_APP == 'true' && env.RUN_BOT == 'true'
@@ -293,10 +289,11 @@ jobs:
             );
 
   # Keep dispatch authority away from the job that checks out and executes the
-  # mutable Release PR branch. This job can start only the secretless performance
-  # workflow; publication authority lives in performance-release.yml and is never
-  # present on the elevated self-hosted measurement runner.
-  dispatch-performance-gate:
+  # mutable Release PR branch. This job holds no publication authority of its own:
+  # it resolves the exact draft identity from release-please's own `upload_url`
+  # and hands that triple to release.yml, which re-derives and revalidates every
+  # one of those facts from protected main before doing anything (ADR-0048).
+  dispatch-release:
     needs: release-please
     if: >-
       ${{
@@ -310,7 +307,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      actions: write # dispatch the trusted-main performance gate
+      actions: write # dispatch the trusted-main release workflow
       contents: read
     env:
       GH_TOKEN: ${{ github.token }}
@@ -326,7 +323,7 @@ jobs:
           set -euo pipefail
 
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::performance dispatch requires an exact vX.Y.Z tag, got '$TAG'"
+            echo "::error::release dispatch requires an exact vX.Y.Z tag, got '$TAG'"
             exit 1
           fi
 
@@ -404,7 +401,7 @@ jobs:
             echo "release_id=$release_id"
           } >>"$GITHUB_OUTPUT"
 
-      - name: Revalidate, deduplicate, and dispatch trusted measurement
+      - name: Revalidate, deduplicate, and dispatch the trusted release
         shell: bash
         env:
           TAG_SHA: ${{ steps.draft.outputs.tag_sha }}
@@ -431,9 +428,13 @@ jobs:
 
           tag_sha=$TAG_SHA
           release_id=$RELEASE_ID
-          release_title="performance-release performance-gate $TAG $tag_sha release $release_id"
-          release_runs=$(gh run list --repo "$REPO" --workflow performance-release.yml \
-            --branch main --event workflow_run --limit 50 \
+          # release.yml's `run-name:` renders exactly this string, so a run that
+          # already owns this tag/commit/release triple is visible by title alone.
+          # In-flight and successful runs both block a second dispatch; only a
+          # failed one may be re-dispatched (or re-run from the Actions UI).
+          release_title="release publish $TAG $tag_sha release $release_id"
+          release_runs=$(gh run list --repo "$REPO" --workflow release.yml \
+            --branch main --event workflow_dispatch --limit 50 \
             --json displayTitle,status,conclusion,databaseId)
           existing_release=$(jq -r --arg title "$release_title" '
             .[] |
@@ -442,37 +443,9 @@ jobs:
             .databaseId
           ' <<<"$release_runs" | head -n 1)
           if [ -n "$existing_release" ]; then
-            echo "Release run $existing_release already owns release $release_id — no duplicate gate."
+            echo "Release run $existing_release already owns release $release_id — no duplicate dispatch."
             exit 0
           fi
 
-          gate_title="performance-gate $TAG $tag_sha release $release_id"
-          request_runs=$(gh run list --repo "$REPO" --workflow performance-gate-request.yml \
-            --branch main --event workflow_dispatch --limit 50 \
-            --json displayTitle,status,conclusion,databaseId)
-          active_request=$(jq -r --arg title "$gate_title" '
-            .[] |
-            select(.displayTitle == $title and .status != "completed") |
-            .databaseId
-          ' <<<"$request_runs" | head -n 1)
-          if [ -n "$active_request" ]; then
-            echo "Performance request $active_request already owns $TAG — no duplicate dispatch."
-            exit 0
-          fi
-
-          gate_runs=$(gh run list --repo "$REPO" --workflow performance-controller.yml \
-            --branch main --event workflow_run --limit 50 \
-            --json displayTitle,status,conclusion,databaseId)
-          existing_gate=$(jq -r --arg title "$gate_title" '
-            .[] |
-            select(.displayTitle == $title) |
-            select(.status != "completed" or .conclusion == "success") |
-            .databaseId
-          ' <<<"$gate_runs" | head -n 1)
-          if [ -n "$existing_gate" ]; then
-            echo "Performance gate $existing_gate already owns $TAG — no duplicate dispatch."
-            exit 0
-          fi
-
-          gh workflow run performance-gate-request.yml --repo "$REPO" --ref main \
+          gh workflow run release.yml --repo "$REPO" --ref main \
             -f tag_name="$TAG" -f commit_sha="$tag_sha" -f release_id="$release_id"
