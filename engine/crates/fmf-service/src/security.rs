@@ -1289,7 +1289,7 @@ fn validate_leaf_utf16(leaf: &[u16]) -> io::Result<u16> {
     // terminator the object manager does not need but callers may assume.
     leaf.len()
         .checked_mul(size_of::<u16>())
-        .filter(|bytes| *bytes <= usize::from(u16::MAX) - 1)
+        .filter(|bytes| *bytes < usize::from(u16::MAX))
         .and_then(|bytes| u16::try_from(bytes).ok())
         .ok_or_else(|| refuse("name too long"))
 }
@@ -1710,12 +1710,18 @@ fn next_directory_entry(
             return Err(malformed("record header runs past the batch"));
         }
 
-        let base = state.buffer.as_ptr().cast::<u8>();
+        // Offset the `*const u64` directly and cast from that, rather than by
+        // way of a `*const u8`: going through a byte pointer would throw the
+        // alignment away and the cast would then be a genuine 1-to-8 widening,
+        // which `cast_ptr_alignment` is right to deny. From `u64` the cast
+        // preserves alignment (8 to 8) and the lint is satisfied on the merits.
+        //
         // SAFETY: the bounds check above proves `offset` — and a whole record
-        // header after it — lies inside the single `buffer` allocation, and
-        // the alignment check proves the resulting address is suitably aligned
-        // for `FILE_FULL_DIR_INFO`.
-        let record = unsafe { base.add(state.offset) }.cast::<FILE_FULL_DIR_INFO>();
+        // header after it — lies inside the single `buffer` allocation, and the
+        // alignment check proves the resulting address is suitably aligned for
+        // `FILE_FULL_DIR_INFO`.
+        let record =
+            unsafe { state.buffer.as_ptr().byte_add(state.offset) }.cast::<FILE_FULL_DIR_INFO>();
         // SAFETY: `record` points at an in-bounds, initialized header. The
         // scalars are read with `read_unaligned`, so these reads stay sound
         // even if the alignment invariant above were ever weakened; no
@@ -3137,6 +3143,27 @@ mod tests {
             .to_string()
     }
 
+    /// Opens a root the way a walk's caller does, but with permissive sharing.
+    ///
+    /// The product opens it `FILE_SHARE_READ`, which is right for the product
+    /// and wrong for these tests: the swap tests must mutate the tree *while*
+    /// the walk holds the root, which is precisely the concurrency a walk in
+    /// production is entitled to exclude. Relaxing it here is what lets the
+    /// attacker exist at all; it does not weaken what is being measured, which
+    /// is what the walk does once a name has been repointed under it.
+    fn walk_root(path: &Path, access: u32) -> LockedObject {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        open_checked(
+            path,
+            Some(ObjectKind::Directory),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        )
+        .unwrap_or_else(|error| panic!("open walk root {}: {error}", path.display()))
+    }
+
     /// Attempts exactly the open the hardening walk performs.
     fn walk_open(path: &Path) -> io::Result<LockedObject> {
         open_checked(
@@ -3641,5 +3668,150 @@ mod tests {
         );
 
         std::fs::remove_dir(&link).expect("remove the junction, not its target");
+    }
+
+    // --- handle-relative walks (DEV-166) -------------------------------------
+    //
+    // What these two pin, stated honestly.
+    //
+    // They pin the *fail-closed* property across a real swap performed inside
+    // the walk's own window: a child replaced after it was enumerated and
+    // before it was opened is refused, and nothing outside the managed tree is
+    // touched. That property is not new — the old path-re-opening walk also
+    // refused these two shapes, because a junction and a hard link are both
+    // things `inspect_handle` rejects on the handle.
+    //
+    // What *is* new cannot be written as an assertion, because it is the
+    // absence of an operation: no step of either walk resolves a full path any
+    // more, so an ancestor's name is never consulted a second time and a
+    // repointed ancestor has nothing left to influence. Enumeration likewise no
+    // longer depends on the ACL the hardening walk is rewriting. Those are
+    // structural, argued in the code and in docs/SECURITY.md threat 7 rather
+    // than measured here.
+    //
+    // These are unelevated on purpose. A junction and a hard link are both
+    // creatable by a standard user, so every PR runs the swap.
+
+    /// The hardening walk, with a child swapped for a junction inside the
+    /// window between enumeration and open.
+    #[test]
+    fn hardening_walk_refuses_a_child_swapped_after_enumeration() {
+        let sddl = own_tree_sddl();
+        let anchor = tempfile::tempdir().expect("anchor");
+        let outside = tempfile::tempdir().expect("outside");
+        let sentinel = outside.path().join("sentinel");
+        std::fs::write(&sentinel, b"outside").expect("sentinel");
+
+        let root = anchor.path().join("find-my-files");
+        create_directory_new_with_security(&root, &sddl).expect("root");
+        let victim = root.join("victim");
+        std::fs::write(&victim, b"victim").expect("victim");
+
+        let before_dir = read_sddl(outside.path());
+        let before_file = read_sddl(&sentinel);
+
+        let root_locked = walk_root(
+            &root,
+            SECURITY_WRITE_ACCESS | FILE_LIST_DIRECTORY_ACCESS | FILE_TRAVERSE_ACCESS,
+        );
+
+        // Fires once, after `victim` has been enumerated and before it is
+        // opened: park the real child under another name and put a junction to
+        // an outside directory in its place.
+        let swap = {
+            let victim = victim.clone();
+            let parked = root.join("parked");
+            let target = outside.path().to_path_buf();
+            let mut fired = false;
+            walk_seam::install(move |child| {
+                if fired || !child.ends_with("victim") {
+                    return;
+                }
+                fired = true;
+                std::fs::rename(&victim, &parked).expect("park the real child");
+                create_junction(&victim, &target).expect("swap a junction into the same name");
+            })
+        };
+
+        let error = harden_descendants(&root_locked.file, &root, &sddl)
+            .expect_err("a child swapped after enumeration must be refused");
+        drop(swap);
+        drop(root_locked);
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(error.to_string().contains("reparse point"), "{error}");
+        assert_eq!(
+            read_sddl(outside.path()),
+            before_dir,
+            "the swapped-in target's own descriptor must be untouched"
+        );
+        assert_eq!(
+            read_sddl(&sentinel),
+            before_file,
+            "propagation must not have reached the target's contents"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).expect("sentinel survives"),
+            b"outside"
+        );
+
+        std::fs::remove_dir(&victim).expect("remove the junction, not its target");
+    }
+
+    /// The deletion walk, with a child swapped for a second link to a file
+    /// outside the managed tree — the shape where being wrong destroys data.
+    #[test]
+    fn deletion_walk_refuses_a_child_swapped_after_enumeration() {
+        let sddl = own_tree_sddl();
+        let anchor = tempfile::tempdir().expect("anchor");
+        let outside = tempfile::tempdir().expect("outside");
+        let sentinel = outside.path().join("sentinel");
+        std::fs::write(&sentinel, b"outside").expect("sentinel");
+
+        let root = anchor.path().join("find-my-files");
+        create_directory_new_with_security(&root, &sddl).expect("root");
+        let victim = root.join("victim");
+        std::fs::write(&victim, b"victim").expect("victim");
+
+        let root_locked = walk_root(
+            &root,
+            DELETE_ACCESS
+                | FILE_READ_ATTRIBUTES_ACCESS
+                | FILE_LIST_DIRECTORY_ACCESS
+                | FILE_TRAVERSE_ACCESS,
+        );
+
+        // Both temporary directories live under `%TEMP%`, so they are on one
+        // volume and a hard link between them is possible.
+        let swap = {
+            let victim = victim.clone();
+            let target = sentinel.clone();
+            let mut fired = false;
+            walk_seam::install(move |child| {
+                if fired || !child.ends_with("victim") {
+                    return;
+                }
+                fired = true;
+                std::fs::remove_file(&victim).expect("remove the real child");
+                std::fs::hard_link(&target, &victim).expect("swap in a link to an outside file");
+            })
+        };
+
+        let error = delete_descendants(&root_locked.file, &root)
+            .expect_err("a child swapped after enumeration must be refused");
+        drop(swap);
+        drop(root_locked);
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(error.to_string().contains("multiply-linked"), "{error}");
+        assert!(
+            victim.exists(),
+            "the walk must refuse before unlinking anything"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).expect("the outside file survives"),
+            b"outside",
+            "deleting the link must never have reached the file it names"
+        );
     }
 }
