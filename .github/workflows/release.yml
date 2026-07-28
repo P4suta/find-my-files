@@ -1218,12 +1218,12 @@ jobs:
               {"name": path.name, "sha256": sha256(path)}
               for path in sorted(public_assets, key=lambda item: item.name)
           ]
-          # schemaVersion 2 (ADR-0048): `release.performanceRunId` is gone with the
-          # workflow_run chain, `controller.triggeringActor` records who dispatched
+          # schemaVersion 2 (ADR-0048). The v1 release-gate run ID field is gone
+          # with the chain, `controller.triggeringActor` records who dispatched
           # this release, and `controller.runId` / `controller.runAttempt` change
-          # referent — under schemaVersion 1 they identified performance-release.yml's
-          # workflow_run run, and they now identify release.yml's own dispatch run.
-          # The predicate type URL is unchanged; consumers must read schemaVersion.
+          # referent: under v1 they identified the dispatching workflow_run run,
+          # and they now identify release.yml's own dispatch run. The predicate
+          # type URL is unchanged, so consumers must read schemaVersion.
           predicate = {
               "schemaVersion": 2,
               "source": {
