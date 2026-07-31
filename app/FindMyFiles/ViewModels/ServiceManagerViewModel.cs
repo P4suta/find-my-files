@@ -249,10 +249,10 @@ internal sealed partial class ServiceManagerViewModel : ObservableObject
     public void CancelPurgeConfirmation() => PurgeConfirmationVisible = false;
 
     /// <summary>Uninstall the service through <see cref="ServiceProvisioner"/>.
-    /// Purge mode maps exactly to <c>fmf-service uninstall --purge-data</c> and
-    /// removes both machine-wide engine data and per-user UI data. Service-only
-    /// removal soft-restarts the page graph in-process (ADR-0036); a successful
-    /// full purge exits so the just-deleted user-data tree is not recreated.</summary>
+    /// Purge mode first maps to <c>fmf-service uninstall --purge-data</c> for the
+    /// machine-wide tree, then the app separately removes its per-user UI data.
+    /// Service-only removal soft-restarts the page graph in-process (ADR-0036);
+    /// a successful full purge exits so the deleted user-data tree is not recreated.</summary>
     /// <param name="purgeData">Whether to remove machine-wide engine data too.</param>
     /// <returns>A task that completes after the elevated action and soft restart.</returns>
     public async Task UninstallAsync(bool purgeData)

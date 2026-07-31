@@ -121,7 +121,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     public partial bool CanSearch { get; set; }
 
     /// <summary>The current index mode for the status submenu's info row
-    /// (all NTFS drives). Fixed for this page's lifetime (ADR-0036),
+    /// (fixed NTFS drives only). Fixed for this page's lifetime (ADR-0036),
     /// so x:Bind OneTime.</summary>
     public string ModeText { get; } = Loc.Get("Status_ModePrivileged");
 
@@ -130,8 +130,8 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     /// the type in XAML; the app version is fixed for the process lifetime.</summary>
     public static string AppVersionText => Loc.Get("About_AppVersion", BuildInfo.Version);
 
-    /// <summary>The engine/service build version, fetched on demand via
-    /// <see cref="RefreshVersionsAsync"/>. Empty until known and for in-proc
+    /// <summary>The engine/service build version, refreshed after every pipe
+    /// connection and on demand by Settings. Empty until known and for in-proc
     /// clients (Ffi/Fake) where there is no separate service to ask.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasEngineVersion))]
@@ -151,19 +151,27 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     public bool HasVersionMismatch =>
         HasEngineVersion && !BuildInfo.SameBase(BuildInfo.Version, EngineVersion);
 
-    /// <summary>Best-effort fetch of the engine version for the About block. Stays
-    /// empty for in-proc clients or if stats are unavailable — About is purely
-    /// informational, so a failure must not surface as an error. Call on the UI
-    /// thread (it writes a bound property; no ConfigureAwait(false), ADR-0036).</summary>
+    /// <summary>Best-effort fetch of the service version for About and the main
+    /// version-skew warning. Stays empty for in-proc clients or if stats are
+    /// unavailable, so a fetch failure never becomes a misleading warning. Call
+    /// on the UI thread (it writes bound state; no ConfigureAwait(false), ADR-0036).</summary>
     /// <returns>A task that completes once the engine version has been fetched.</returns>
     public async Task RefreshVersionsAsync()
     {
+        var generation = Interlocked.Increment(ref _versionRefreshGeneration);
+        if (_engine.Kind != EngineClientKind.Service)
+        {
+            ApplyEngineVersion(string.Empty);
+            return;
+        }
+
         try
         {
             var stats = await _engine.GetStatsAsync(_lifetime.Token).ConfigureAwait(true);
-            if (Volatile.Read(ref _disposed) == 0)
+            if (Volatile.Read(ref _disposed) == 0
+                && generation == Volatile.Read(ref _versionRefreshGeneration))
             {
-                EngineVersion = stats?.Service?.Version ?? string.Empty;
+                ApplyEngineVersion(stats?.Service?.Version ?? string.Empty);
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
@@ -171,12 +179,40 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         catch (Exception ex)
         {
-            if (Volatile.Read(ref _disposed) == 0)
+            if (Volatile.Read(ref _disposed) == 0
+                && generation == Volatile.Read(ref _versionRefreshGeneration))
             {
-                EngineVersion = string.Empty;
+                ApplyEngineVersion(string.Empty);
             }
 
             FileLog.Warn("engine", "engine version unavailable", ex);
+        }
+    }
+
+    private void ApplyEngineVersion(string version)
+    {
+        EngineVersion = version;
+        if (!HasVersionMismatch)
+        {
+            if (_versionMismatchNotification is not null)
+            {
+                Notifications.Remove(_versionMismatchNotification);
+                _versionMismatchNotification = null;
+            }
+
+            return;
+        }
+
+        _versionMismatchNotification ??= new AppNotification(
+            NotifySeverity.Warning,
+            Loc.GetXaml("AboutVersionMismatch", "Title"),
+            Loc.GetXaml("AboutVersionMismatch", "Message"),
+            Loc.Get("VersionMismatch_RepairAction"),
+            _openServiceManager,
+            "VersionMismatchRepair");
+        if (!Notifications.Items.Contains(_versionMismatchNotification))
+        {
+            Notifications.Push(_versionMismatchNotification);
         }
     }
 
@@ -220,7 +256,9 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     /// without elevation or rebuilding the page. Defaults to
     /// <see cref="ServiceProvisioner.Real"/>.</summary>
     private readonly ServiceProvisioner _provisioner;
+    private readonly Action _openServiceManager;
     private bool _restoringPersistedSetting;
+    private int _versionRefreshGeneration;
 
     /// <summary>Builds the focused components, restores focused-search settings,
     /// and subscribes the engine events (volume updates, errors, connection
@@ -235,12 +273,16 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     /// (tests inject fakes so <see cref="EnableSearchAsync"/> runs without UAC).</param>
     /// <param name="saveSettings">Persistence seam; defaults to
     /// <see cref="AppSettings.Save"/> and is injected by failure-path tests.</param>
+    /// <param name="openServiceManager">Opens the service-management surface
+    /// when the persistent version-skew warning's repair action is invoked.
+    /// The callback keeps this ViewModel independent of WinUI view types.</param>
     public MainViewModel(
         IEngineClient engine,
         IDispatcher dispatcher,
         AppSettings? settings = null,
         ServiceProvisioner? provisioner = null,
-        Func<bool>? saveSettings = null)
+        Func<bool>? saveSettings = null,
+        Action? openServiceManager = null)
     {
         _engine = engine;
         IsDisconnected = engine.Kind == EngineClientKind.Unavailable
@@ -251,6 +293,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         _settings = settings ?? AppSettings.Load();
         _saveSettings = saveSettings ?? _settings.Save;
         _provisioner = provisioner ?? ServiceProvisioner.Real;
+        _openServiceManager = openServiceManager ?? (static () => { });
         _engineEvents = new EngineEventMarshaler(engine, dispatcher);
         Results = new ResultsPresenter(dispatcher);
         Search = new SearchOrchestrator(
@@ -288,6 +331,10 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     /// held by reference so it never duplicates and is removed on recovery.
     /// Non-Info notifications never auto-dissolve (NotificationCenter).</summary>
     private AppNotification? _reconnectBanner;
+
+    /// <summary>The non-expiring app/service version warning. Reference identity
+    /// prevents repeated stats refreshes and reconnects from stacking copies.</summary>
+    private AppNotification? _versionMismatchNotification;
 
     /// <summary>The actionable startup failure currently shown. Held by
     /// reference so a connect-driven retry or button retry replaces/removes
@@ -334,6 +381,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
                 _reconnectBanner = null;
             }
 
+            ApplyEngineVersion(string.Empty);
             IsDisconnected = true;
             return;
         }
@@ -349,6 +397,11 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             Notifications.Remove(_reconnectBanner);
             _reconnectBanner = null;
         }
+
+        // ServiceInfo belongs to the newly connected pipe session. Refresh it
+        // after every connect (including reconnect) so replacing a stale service
+        // is reflected without requiring the user to reopen Settings.
+        RefreshVersionsAsync().Forget("service-version");
 
         // First successful connection over a pipe — the service may have been
         // warming up when the page loaded (freshly registered, cold MFT scan). Run
@@ -399,6 +452,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
+        await RefreshVersionsAsync();
         await RunStartupAsync();
     }
 

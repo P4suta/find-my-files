@@ -93,6 +93,8 @@ public sealed class MainViewModelTests
     private static StubEngineClient EngineReportingVersion(string serviceVersion) =>
         new()
         {
+            Kind = EngineClientKind.Service,
+            Connection = EngineConnectionState.Connected,
             Stats = new EngineStatsData
             {
                 Service = new ServiceInfoData { Version = serviceVersion },
@@ -122,18 +124,89 @@ public sealed class MainViewModelTests
 
         Assert.True(vm.HasEngineVersion);
         Assert.True(vm.HasVersionMismatch);
+        var warning = Assert.Single(vm.Notifications.Items);
+        Assert.Equal(NotifySeverity.Warning, warning.Severity);
+    }
+
+    [Fact]
+    public async Task Version_mismatch_warning_is_unique_actionable_and_clears_when_repaired()
+    {
+        var repairs = 0;
+        var engine = EngineReportingVersion("99.0.0-dev+gabc1234");
+        using var vm = new MainViewModel(
+            engine,
+            new ManualDispatcher(),
+            new AppSettings(),
+            openServiceManager: () => repairs++);
+
+        await vm.RefreshVersionsAsync();
+        await vm.RefreshVersionsAsync();
+
+        var warning = Assert.Single(vm.Notifications.Items);
+        Assert.Equal(Loc.Get("VersionMismatch_RepairAction"), warning.ActionLabel);
+        Assert.Equal("VersionMismatchRepair", warning.ActionAutomationId);
+        warning.Invoke();
+        Assert.Equal(1, repairs);
+
+        engine.Stats!.Service!.Version = BuildInfo.Version;
+        await vm.RefreshVersionsAsync();
+
+        Assert.False(vm.HasVersionMismatch);
+        Assert.Empty(vm.Notifications.Items);
+    }
+
+    [Fact]
+    public void Reconnect_refreshes_service_version_without_duplicating_the_warning()
+    {
+        var dispatcher = new ManualDispatcher();
+        var engine = EngineReportingVersion("99.0.0");
+        engine.Connection = EngineConnectionState.Connecting;
+        using var vm = new MainViewModel(engine, dispatcher, new AppSettings());
+
+        engine.Connection = EngineConnectionState.Connected;
+        engine.RaiseConnectionChanged(EngineConnectionState.Connected);
+        dispatcher.DrainQueue();
+        engine.Connection = EngineConnectionState.Reconnecting;
+        engine.RaiseConnectionChanged(EngineConnectionState.Reconnecting);
+        dispatcher.DrainQueue();
+        engine.Connection = EngineConnectionState.Connected;
+        engine.RaiseConnectionChanged(EngineConnectionState.Connected);
+        dispatcher.DrainQueue();
+
+        Assert.True(vm.HasVersionMismatch);
+        Assert.Single(vm.Notifications.Items);
     }
 
     [Fact]
     public async Task RefreshVersions_stays_empty_for_in_proc_clients_without_a_service()
     {
-        // Stub with no stats → in-proc client (Ffi/Fake): no separate service.
-        using var vm = Vm(new StubEngineClient());
+        // Even misleading stats must be ignored for in-proc/Fake clients: there
+        // is no separately installed service whose build can be repaired.
+        using var vm = Vm(new StubEngineClient
+        {
+            Stats = new EngineStatsData
+            {
+                Service = new ServiceInfoData { Version = "99.0.0" },
+            },
+        });
 
         await vm.RefreshVersionsAsync();
 
         Assert.False(vm.HasEngineVersion);
         Assert.False(vm.HasVersionMismatch);
+        Assert.Empty(vm.Notifications.Items);
+    }
+
+    [Fact]
+    public async Task RefreshVersions_stays_empty_for_the_fake_engine()
+    {
+        using var vm = Vm(new FakeEngineClient());
+
+        await vm.RefreshVersionsAsync();
+
+        Assert.False(vm.HasEngineVersion);
+        Assert.False(vm.HasVersionMismatch);
+        Assert.Empty(vm.Notifications.Items);
     }
 
     [Fact]
@@ -149,6 +222,7 @@ public sealed class MainViewModelTests
         Assert.Null(error);
         Assert.False(vm.HasEngineVersion);
         Assert.False(vm.HasVersionMismatch);
+        Assert.Empty(vm.Notifications.Items);
     }
 
     [Fact]

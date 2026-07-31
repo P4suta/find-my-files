@@ -39,7 +39,9 @@ public sealed partial class MainPage : Page
     public MainPage()
     {
         ViewModel = new MainViewModel(
-            App.EngineClient, new DispatcherQueueDispatcher(App.DispatcherQueue));
+            App.EngineClient,
+            new DispatcherQueueDispatcher(App.DispatcherQueue),
+            openServiceManager: OpenServiceManager);
         InitializeComponent();
 
         // Attached properties (tooltip / accessibility name) localize in code —
@@ -297,6 +299,11 @@ public sealed partial class MainPage : Page
     // gear this button is part of the disconnected setup screen itself.
     private void SetupRecovery_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         Views.SettingsDialog.OpenAsync(ViewModel).Forget("settings-ui");
+
+    // Injected into MainViewModel's version-skew notification. Keeping this
+    // coordination here prevents the ViewModel from referencing a WinUI view.
+    private void OpenServiceManager() =>
+        Views.ServiceManagerDialog.OpenAsync().Forget("service-ui");
 
     // ── Drag & drop: folder → path: filter, file → name search ──────────
     private void Page_DragOver(object sender, Microsoft.UI.Xaml.DragEventArgs e)
