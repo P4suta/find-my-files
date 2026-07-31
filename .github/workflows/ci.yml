@@ -115,7 +115,7 @@ jobs:
       # are owned by cargo-audit.yml, so this checks bans/licenses/sources.
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
-          tool: cargo-deny@0.19.9
+          tool: cargo-deny@0.20.2
           fallback: none
       - run: cargo deny check bans licenses sources
         working-directory: engine
@@ -319,7 +319,7 @@ jobs:
         with:
           # just: the publish recipe. cargo-about: publish generates the bundle's
           # THIRD-PARTY-NOTICES.txt from the Rust crate graph.
-          tool: just@1.54.0,cargo-about@0.7.1
+          tool: just@1.54.0,cargo-about@0.9.1
           fallback: none
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

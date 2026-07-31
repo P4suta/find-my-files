@@ -79,7 +79,7 @@ jobs:
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         if: steps.freshness.outputs.build == 'true'
         with:
-          tool: just@1.54.0,cargo-about@0.7.1
+          tool: just@1.54.0,cargo-about@0.9.1
           fallback: none
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         if: steps.freshness.outputs.build == 'true'
