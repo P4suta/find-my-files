@@ -14,7 +14,7 @@ members = [
 [workspace.package]
 version = "0.1.1" # release version — managed by release-please (ADR-0035)
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.97"
 license = "Apache-2.0"
 repository = "https://github.com/P4suta/find-my-files"
 # Internal crates, never published to a registry (path deps are versionless by
@@ -188,7 +188,7 @@ codegen-units = 1
 panic = "unwind"
 # NOT set: `trim-paths = "all"`. It would strip the `<CARGO_HOME>\registry\src\
 # ...\<crate>\...rs` paths that `core::panic::Location` bakes into the shipped
-# PEs, but the pinned toolchain's Cargo (1.96) rejects the profile key as
+# PEs, but the pinned toolchain's Cargo (1.97) rejects the profile key as
 # unstable ("requires nightly"), and mise forbids ad-hoc toolchain swaps. The
 # leak is low-severity in practice: CI-built releases embed only the generic
 # hosted-runner path (`C:\Users\runneradmin\...`) plus the dependency tree that

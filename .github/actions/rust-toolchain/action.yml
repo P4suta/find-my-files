@@ -18,7 +18,7 @@ runs:
   steps:
     - id: pin
       shell: bash
-      # mise.toml line: `rust = "1.96"`. awk (not `grep -oP`, whose PCRE is absent
+      # mise.toml line: `rust = "1.97"`. awk (not `grep -oP`, whose PCRE is absent
       # from the windows runners' Git Bash) splits on the quotes and takes the value.
       run: |
         version=$(awk -F'"' '/^rust[[:space:]]*=/{print $2; exit}' mise.toml)

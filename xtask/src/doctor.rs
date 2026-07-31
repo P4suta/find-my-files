@@ -1424,9 +1424,9 @@ jobs:
             ("http:winappcli".to_owned(), "0.5.0".to_owned()),
             ("just".to_owned(), "1.54.0".to_owned()),
             ("cargo:mdbook".to_owned(), "0.5.3".to_owned()),
-            ("cargo:cargo-about".to_owned(), "0.7.1".to_owned()),
+            ("cargo:cargo-about".to_owned(), "0.9.1".to_owned()),
             ("cargo:cargo-nextest".to_owned(), "0.9.140".to_owned()),
-            ("cargo:cargo-deny".to_owned(), "0.19.9".to_owned()),
+            ("cargo:cargo-deny".to_owned(), "0.20.2".to_owned()),
             ("cargo:cargo-machete".to_owned(), "0.9.2".to_owned()),
             ("cargo:cargo-llvm-cov".to_owned(), "0.8.7".to_owned()),
             ("cargo:cargo-mutants".to_owned(), "27.1.0".to_owned()),
@@ -1502,9 +1502,9 @@ jobs:
           tool: |
             just@1.54.0
             mdbook@0.5.3
-            cargo-about@0.7.1
+            cargo-about@0.9.1
             nextest@0.9.140
-            cargo-deny@0.19.9
+            cargo-deny@0.20.2
             cargo-machete@0.9.2
             cargo-llvm-cov@0.8.7
             cargo-mutants@27.1.0
