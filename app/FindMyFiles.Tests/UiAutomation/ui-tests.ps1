@@ -53,6 +53,12 @@ param(
     # coverage runs against the separately compiled test-seam bundle.
     [switch]$StableSmoke,
 
+    # Cold WinUI/Windows App SDK initialization can legitimately exceed the old
+    # five-second budget on a clean machine. Tests may lower this to exercise the
+    # launch-timeout cleanup path deterministically.
+    [ValidateRange(1, 300000)]
+    [int]$StartupTimeoutMs = 30000,
+
     # Where screenshots + the results JSON land. Resolve from the script so a
     # standalone invocation still obeys ADR-0021 regardless of the current dir.
     [string]$OutDir = (Join-Path $PSScriptRoot '..\..\..\build\ui-automation')
@@ -123,7 +129,7 @@ function Activate-AppWindow {
     param(
         [Parameter(Mandatory)]
         [System.Diagnostics.Process]$Process,
-        [int]$TimeoutMs = 5000
+        [int]$TimeoutMs = 30000
     )
 
     $processId = $Process.Id
@@ -318,11 +324,19 @@ function Start-App {
     # defaults or counts, and prevents the suite from touching the user's profile.
     $arguments = @($AppArgs) + "--data-dir=$script:DataDir"
     $p = Start-Process -FilePath $Exe -ArgumentList $arguments -PassThru
-    Activate-AppWindow -Process $p
-    # Give the WinUI window + the automation tree time to materialise. The first
-    # wait-for in each phase has its own timeout, so this is just startup slack.
-    Start-Sleep -Seconds 2
-    return $p.Id
+    $processId = $p.Id
+    try {
+        Activate-AppWindow -Process $p -TimeoutMs $StartupTimeoutMs
+        # Give the WinUI window + the automation tree time to materialise. The first
+        # wait-for in each phase has its own timeout, so this is just startup slack.
+        Start-Sleep -Seconds 2
+        return $processId
+    } catch {
+        # Capture ownership immediately after Start-Process: even HWND discovery
+        # failures must tear down the exact process before control escapes.
+        Stop-AppGracefully $processId
+        throw
+    }
 }
 
 # Launch the real shipping artifact without --fake-engine, --engine=unavailable,
@@ -341,9 +355,15 @@ function Start-StableApp {
         APPDATA = $script:DataDir
         LOCALAPPDATA = $localData
     }
-    Activate-AppWindow -Process $process
-    Start-Sleep -Seconds 2
-    return $process.Id
+    $processId = $process.Id
+    try {
+        Activate-AppWindow -Process $process -TimeoutMs $StartupTimeoutMs
+        Start-Sleep -Seconds 2
+        return $processId
+    } catch {
+        Stop-AppGracefully $processId
+        throw
+    }
 }
 
 # Tear an app instance down WITHOUT leaving a DWM ghost window. A bare
@@ -383,6 +403,7 @@ function Invoke-SetupPhase {
         return
     }
 
+    try {
     Test-UI 'Setup: EnableSearch button present' {
         Invoke-Ui wait-for 'EnableSearch' -a $setupPid -t 5000
     }
@@ -444,7 +465,9 @@ function Invoke-SetupPhase {
     Invoke-Ui screenshot -a $setupPid -o (Join-Path $OutDir 'A-recovery-service.png') 2>$null
     Invoke-Ui invoke 'CloseButton' -a $setupPid 2>$null | Out-Null
 
-    Stop-AppGracefully $setupPid
+    } finally {
+        Stop-AppGracefully $setupPid
+    }
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -591,6 +614,8 @@ function Invoke-SearchPhase {
             'SortDescending',
             'LangCombo',
             'OptCloseToTray',
+            'StatusMode',
+            'StatusVolumeScope',
             'DiagToggle',
             'ServiceManageMenu')) {
             Assert-AccessibleElement -Selector $selector -ProcessId $AppPid

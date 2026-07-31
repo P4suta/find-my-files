@@ -153,6 +153,12 @@
                     Text="{x:Bind VM.ModeText, Mode=OneTime}"
                     Visibility="{x:Bind conv:UiConverters.BoolToVis(VM.IsReady), Mode=OneWay}" />
                 <TextBlock
+                    x:Uid="StatusVolumeScope"
+                    AutomationProperties.AutomationId="StatusVolumeScope"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Style="{ThemeResource CaptionTextBlockStyle}"
+                    TextWrapping="Wrap" />
+                <TextBlock
                     AutomationProperties.AutomationId="StatusState"
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                     Style="{ThemeResource CaptionTextBlockStyle}"

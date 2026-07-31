@@ -36,6 +36,9 @@ public sealed class LocalizationResourceTests
     [InlineData("ServiceCard.Description")]
     [InlineData("Svc_IdentityUnavailable")]
     [InlineData("Svc_UserDataPurgeFailed")]
+    [InlineData("Status_ModePrivileged")]
+    [InlineData("StatusVolumeScope.Text")]
+    [InlineData("VersionMismatch_RepairAction")]
     public void Recovery_surface_copy_is_localized_in_every_locale(string key)
     {
         foreach (var file in ResourceFiles)
@@ -44,6 +47,29 @@ public sealed class LocalizationResourceTests
                 LoadResources(file).TryGetValue(key, out var value)
                 && !string.IsNullOrWhiteSpace(value),
                 $"{file} is missing a non-empty {key} resource.");
+        }
+    }
+
+    [Fact]
+    public void Supported_volume_copy_names_ntfs_and_every_excluded_volume_family()
+    {
+        foreach (var file in ResourceFiles)
+        {
+            var resources = LoadResources(file);
+            var copy = resources["Status_ModePrivileged"]
+                + resources["StatusVolumeScope.Text"];
+            var (removable, network) = file switch
+            {
+                "Strings_en-US.resw" => ("removable", "network"),
+                "Strings_ja-JP.resw" => ("リムーバブル", "ネットワーク"),
+                "Strings_zh-Hans.resw" => ("可移动", "网络"),
+                _ => throw new InvalidOperationException($"Unreviewed locale: {file}"),
+            };
+            Assert.Contains("NTFS", copy, StringComparison.Ordinal);
+            Assert.Contains("ReFS", copy, StringComparison.Ordinal);
+            Assert.Contains("FAT/exFAT", copy, StringComparison.Ordinal);
+            Assert.Contains(removable, copy, StringComparison.Ordinal);
+            Assert.Contains(network, copy, StringComparison.Ordinal);
         }
     }
 

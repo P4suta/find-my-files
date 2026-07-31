@@ -82,7 +82,7 @@
   <data name="About_AppVersion" xml:space="preserve"><value>应用: v{0}</value></data>
   <data name="About_EngineVersion" xml:space="preserve"><value>引擎: v{0}</value></data>
   <data name="AboutVersionMismatch.Title" xml:space="preserve"><value>版本不匹配</value></data>
-  <data name="AboutVersionMismatch.Message" xml:space="preserve"><value>应用与引擎来自不同的构建。请重启应用，或更新以使两者一致。</value></data>
+  <data name="AboutVersionMismatch.Message" xml:space="preserve"><value>应用和搜索服务来自不同版本。请修复服务以注册匹配的构建。</value></data>
   <data name="DiagCard.Header" xml:space="preserve"><value>诊断</value></data>
   <data name="DiagCard.Description" xml:space="preserve"><value>检查日志、引擎状态和性能计数器。</value></data>
   <data name="ServiceCard.Header" xml:space="preserve"><value>管理服务…</value></data>
@@ -104,7 +104,8 @@
   <data name="SortDescendingCard.Header" xml:space="preserve"><value>降序</value></data>
   <data name="DiagOpen.Content" xml:space="preserve"><value>打开诊断</value></data>
   <data name="ServiceOpen.Content" xml:space="preserve"><value>管理服务</value></data>
-  <data name="Status_ModePrivileged" xml:space="preserve"><value>模式: 所有驱动器</value></data>
+  <data name="Status_ModePrivileged" xml:space="preserve"><value>模式: 仅固定 NTFS 驱动器</value></data>
+  <data name="StatusVolumeScope.Text" xml:space="preserve"><value>不会索引 ReFS、FAT/exFAT、可移动介质和网络驱动器。</value></data>
   <data name="Settings_OpenFailed" xml:space="preserve"><value>无法打开设置</value></data>
   <data name="NoResultsTitle.Text" xml:space="preserve"><value>未找到结果</value></data>
   <data name="NoResults_Body" xml:space="preserve"><value>未找到与“{0}”匹配的结果</value></data>
@@ -151,6 +152,7 @@
   <data name="OptionsButton_ToolTip" xml:space="preserve"><value>设置、状态、诊断(精简/隐藏文件/排序/数量/引擎/诊断)</value></data>
   <data name="OptionsButton_Name" xml:space="preserve"><value>设置、状态、诊断</value></data>
   <data name="ResultsList_Name" xml:space="preserve"><value>搜索结果</value></data>
+  <data name="VersionMismatch_RepairAction" xml:space="preserve"><value>修复服务</value></data>
   <data name="DiagWindowTitle" xml:space="preserve"><value>诊断</value></data>
 
   <data name="Status_Preparing" xml:space="preserve"><value>正在准备…</value></data>

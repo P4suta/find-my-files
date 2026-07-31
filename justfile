@@ -52,6 +52,27 @@ check-contract:
 build:
     cargo build --locked --release
 
+# Remove compiler outputs needed to reproduce a cold source-gate run. Published
+# release evidence is intentionally not destroyed; its lifecycle is owned by
+# the release recipes/xtask sealing flow.
+[group('daily')]
+[doc('Clean compiler outputs before reproducing a cold source-gate run')]
+clean: clean-engine clean-xtask clean-app
+
+[private]
+[working-directory: 'engine']
+clean-engine:
+    cargo clean
+
+[private]
+[working-directory: 'xtask']
+clean-xtask:
+    cargo clean
+
+[private]
+clean-app:
+    dotnet clean app/FindMyFiles.Tests -p:SkipRustBuild=true
+
 # Run every Rust test through nextest, then the doctests cargo-nextest does not run.
 [group('daily')]
 [doc('Run Rust tests with nextest plus doctests (no elevation)')]
@@ -64,6 +85,14 @@ test *args="":
 [group('daily')]
 test-app:
     dotnet test app/FindMyFiles.Tests --results-directory build/test-results/app -p:SkipRustBuild=true -p:RestoreLockedMode=true
+
+# `test-app` deliberately never builds Rust: it stays a fast, hermetic C# lane.
+# Aggregate source gates, however, must also work from an empty build/ tree, so
+# they materialize the release FFI DLL before MSBuild copies it into test output.
+[private]
+[working-directory: 'engine']
+build-ffi-for-source-gate:
+    cargo build --locked --release -p fmf-ffi
 
 # C# unit tests + coverage gate (line+branch >=57; UI is [ExcludeFromCodeCoverage]).
 # Threshold/type/stat live in the test csproj (with ExcludeByFile), so this is just
@@ -143,14 +172,14 @@ fmt-check-toml:
 
 # Everything the pre-push hook checks, in one shot
 [group('daily')]
-verify: fmt-check lint test test-xtask test-app deny machete
+verify: build-ffi-for-source-gate fmt-check lint test test-xtask test-app deny machete
 
 # The dispatched release workflow is the already-linted protected-main workflow;
 # its checkout is build input, not workflow code. Re-run every source and
 # dependency gate there without requiring the Linux-only actionlint verifier on
 # the Windows release runner.
 [private]
-verify-release-source: fmt-check lint-engine lint-xtask lint-text test test-xtask test-app deny machete
+verify-release-source: build-ffi-for-source-gate fmt-check lint-engine lint-xtask lint-text test test-xtask test-app deny machete
 
 # xtask is intentionally a separate binary-only workspace, so its nextest lane
 # is explicit rather than silently omitted from `verify`.

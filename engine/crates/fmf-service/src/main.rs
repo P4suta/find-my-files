@@ -58,9 +58,12 @@ enum Cli {
         #[arg(long)]
         owner_sid: Option<String>,
     },
-    /// Deregister the service. Data (index snapshots = every file name,
-    /// logs, service.json) is kept unless --purge-data.
+    /// Deregister the service. Machine data under
+    /// %ProgramData%\find-my-files is kept unless --purge-data. User settings
+    /// and UI logs under %APPDATA%\find-my-files are never removed by this command.
     Uninstall {
+        /// Also delete machine engine data under %ProgramData%\find-my-files.
+        /// Never deletes user UI settings or app logs under %APPDATA%\find-my-files.
         #[arg(long)]
         purge_data: bool,
     },
@@ -525,7 +528,11 @@ fn uninstall(purge_data: bool) -> Result<(), String> {
         if let Some(root) = data_root {
             root.purge().map_err(|e| format!("purge: {e}"))?;
         }
-        println!("purged {}", data_dir.display());
+        println!(
+            "purged {} (machine engine data only); user settings and UI logs under \
+             %APPDATA%\\find-my-files were not removed",
+            data_dir.display()
+        );
     } else {
         // Remove the stable binary copy too — it is program clutter, not user
         // data (a re-install copies it fresh from the bundle). Keep only the
@@ -1130,6 +1137,20 @@ fn change_config2_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn uninstall_help_distinguishes_machine_data_from_user_data() {
+        let mut command = Cli::command();
+        let uninstall = command
+            .find_subcommand_mut("uninstall")
+            .expect("uninstall subcommand");
+        let help = uninstall.render_long_help().to_string();
+
+        assert!(help.contains("%ProgramData%\\find-my-files"), "{help}");
+        assert!(help.contains("%APPDATA%\\find-my-files"), "{help}");
+        assert!(help.contains("never removed"), "{help}");
+    }
 
     #[test]
     fn gc_only_treats_a_fully_stopped_service_as_inactive() {

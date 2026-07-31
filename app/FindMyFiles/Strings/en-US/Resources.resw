@@ -82,7 +82,7 @@
   <data name="About_AppVersion" xml:space="preserve"><value>App: v{0}</value></data>
   <data name="About_EngineVersion" xml:space="preserve"><value>Engine: v{0}</value></data>
   <data name="AboutVersionMismatch.Title" xml:space="preserve"><value>Version mismatch</value></data>
-  <data name="AboutVersionMismatch.Message" xml:space="preserve"><value>The app and engine are from different builds. Restart the app, or update so both match.</value></data>
+  <data name="AboutVersionMismatch.Message" xml:space="preserve"><value>The app and search service are from different releases. Repair the service to install the matching build.</value></data>
   <data name="DiagCard.Header" xml:space="preserve"><value>Diagnostics</value></data>
   <data name="DiagCard.Description" xml:space="preserve"><value>Inspect logs, engine status, and performance counters.</value></data>
   <data name="ServiceCard.Header" xml:space="preserve"><value>Manage service…</value></data>
@@ -104,7 +104,8 @@
   <data name="SortDescendingCard.Header" xml:space="preserve"><value>Descending</value></data>
   <data name="DiagOpen.Content" xml:space="preserve"><value>Open diagnostics</value></data>
   <data name="ServiceOpen.Content" xml:space="preserve"><value>Manage service</value></data>
-  <data name="Status_ModePrivileged" xml:space="preserve"><value>Mode: all drives</value></data>
+  <data name="Status_ModePrivileged" xml:space="preserve"><value>Mode: fixed NTFS drives only</value></data>
+  <data name="StatusVolumeScope.Text" xml:space="preserve"><value>ReFS, FAT/exFAT, removable media, and network drives are not indexed.</value></data>
   <data name="Settings_OpenFailed" xml:space="preserve"><value>Couldn't open settings</value></data>
   <data name="NoResultsTitle.Text" xml:space="preserve"><value>No results found</value></data>
   <data name="NoResults_Body" xml:space="preserve"><value>No results for “{0}”</value></data>
@@ -151,6 +152,7 @@
   <data name="OptionsButton_ToolTip" xml:space="preserve"><value>Settings, status, diagnostics (focus / hidden files / sort / count / engine / diagnostics)</value></data>
   <data name="OptionsButton_Name" xml:space="preserve"><value>Settings, status, diagnostics</value></data>
   <data name="ResultsList_Name" xml:space="preserve"><value>Search results</value></data>
+  <data name="VersionMismatch_RepairAction" xml:space="preserve"><value>Repair service</value></data>
   <data name="DiagWindowTitle" xml:space="preserve"><value>Diagnostics</value></data>
 
   <data name="Status_Preparing" xml:space="preserve"><value>Preparing…</value></data>

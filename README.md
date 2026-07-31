@@ -37,6 +37,14 @@ By default, hidden/system files — and everything under hidden/system folders
 ($Recycle.Bin contents, `pagefile.sys`, `.git` internals…) — are excluded from
 results. A setting brings them back instantly (they stay indexed).
 
+Only fixed NTFS drives are indexed. ReFS, FAT/exFAT, removable media, and
+network drives are outside the current product scope.
+
+`fmf-service uninstall --purge-data` removes only the machine-wide service and
+engine data under `%ProgramData%\find-my-files`; it never removes UI settings or
+app logs under `%APPDATA%\find-my-files`. To remove both scopes, use **Remove all
+Find My Files data** in the app's service-management screen.
+
 ## Building
 
 Toolchain is pinned via [mise](https://mise.jdx.dev/) (`mise.toml`), tasks run via `just`:
@@ -68,7 +76,8 @@ contract itself is the `fmf-contract` crate, not a document. Contributions are
 Apache-2.0 and follow the [Code of Conduct](.github/CODE_OF_CONDUCT.md). For a
 failure, start with `just doctor`, the F12 panel,
 `%APPDATA%\find-my-files\logs\app.log`, and the rolling `engine.<date>.log` files
-under `%ProgramData%\find-my-files\logs\`.
+under `%ProgramData%\find-my-files\logs\`. The date in an engine log filename is
+UTC; each log line's `ts` field carries the process-cached local UTC offset.
 
 ## Architecture
 
