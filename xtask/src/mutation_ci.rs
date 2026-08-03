@@ -26,6 +26,10 @@ const STRYKER_VERSION: &str = "4.16.0";
 const RUST_TOOLCHAIN_VERSION: &str = "1.97.1";
 const CSHARP_TARGET_FRAMEWORK: &str = "net10.0-windows10.0.26100.0";
 const POLICY_REVISION: &str = "mutation-controller-v1";
+const CSHARP_UNEXECUTED_IGNORE_REASONS: &[&str] = &[
+    "Removed by mutate filter",
+    "Removed by exclude from code coverage filter",
+];
 const NEXTEXT_POLICY: &str = r#"nextest-version = "0.9.140"
 
 [store]
@@ -126,17 +130,7 @@ struct RustMutant {
     mutation: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(deny_unknown_fields)]
-struct CsharpMutant {
-    path: String,
-    start_line: u64,
-    start_column: u64,
-    end_line: u64,
-    end_column: u64,
-    mutator: String,
-    replacement: String,
-}
+type CsharpMutant = mutation::CsharpIdentity;
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -784,11 +778,23 @@ fn parse_single_line(bytes: &[u8], label: &str) -> Result<String> {
 }
 
 fn source_inventory(checkout: &Checkout, language: &str) -> Result<Vec<SourceFile>> {
+    let reviewed_csharp_files = if language == "csharp" {
+        Some(
+            mutation::read_csharp_reviewed_policy(&controller_root())?
+                .examined_files
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+        )
+    } else {
+        None
+    };
     let mut files = Vec::new();
     for path in &checkout.tracked {
         let selected = match language {
             "rust" => is_rust_production_source(path),
-            "csharp" => is_csharp_production_source(path),
+            "csharp" => reviewed_csharp_files
+                .as_ref()
+                .is_some_and(|reviewed| reviewed.contains(path)),
             _ => false,
         };
         if !selected {
@@ -811,6 +817,12 @@ fn source_inventory(checkout: &Checkout, language: &str) -> Result<Vec<SourceFil
     if files.is_empty() {
         bail!("{language} production source inventory is empty");
     }
+    if let Some(reviewed) = reviewed_csharp_files {
+        let actual: BTreeSet<String> = files.iter().map(|source| source.path.clone()).collect();
+        if actual != reviewed {
+            bail!("target checkout does not contain the exact reviewed C# source inventory");
+        }
+    }
     Ok(files)
 }
 
@@ -824,15 +836,6 @@ fn is_rust_production_source(path: &str) -> bool {
     }
     let rest = &path["engine/crates/".len()..];
     rest.contains("/src/") || rest.ends_with("/build.rs")
-}
-
-fn is_csharp_production_source(path: &str) -> bool {
-    path.starts_with("app/FindMyFiles/")
-        && Path::new(path)
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("cs"))
-        && !path.starts_with("app/FindMyFiles/Engine/Generated/")
-        && !path.split('/').any(|part| matches!(part, "obj" | "bin"))
 }
 
 fn contains_rust_user_ignore(bytes: &[u8]) -> bool {
@@ -1035,6 +1038,13 @@ const fn csharp_build_control_paths() -> &'static [&'static str] {
 fn csharp_policies(checkout: &Checkout, work: &Path) -> Result<Vec<PolicySeal>> {
     let mut policies = vec![policy_seal("runner-revision", POLICY_REVISION.as_bytes())];
     for path in csharp_build_control_paths() {
+        let bytes = require_target_matches_controller(checkout, path)?;
+        policies.push(policy_seal(format!("controller:{path}"), &bytes));
+    }
+    for path in [
+        "app/FindMyFiles.Tests/stryker-config.json",
+        "app/FindMyFiles.Tests/mutation-baseline.json",
+    ] {
         let bytes = require_target_matches_controller(checkout, path)?;
         policies.push(policy_seal(format!("controller:{path}"), &bytes));
     }
@@ -1972,6 +1982,7 @@ fn positive_u64(value: Option<&Value>, label: &str) -> Result<u64> {
 fn run_csharp_ci(args: CiRunArgs) -> Result<()> {
     let (checkout, work, evidence) = prepare(&args, "csharp")?;
     reject_forbidden_auto_configs(&checkout)?;
+    let reviewed_policy = mutation::read_csharp_reviewed_policy(&controller_root())?;
     let sources = source_inventory(&checkout, "csharp")?;
     copy_target_tree(&checkout, &work, "csharp")?;
     let mut policies = csharp_policies(&checkout, &work)?;
@@ -1983,6 +1994,7 @@ fn run_csharp_ci(args: CiRunArgs) -> Result<()> {
         .filter(|(index, _)| index % args.shard_count == args.shard_index)
         .map(|(_, source)| source.path.clone())
         .collect();
+    let expected_survivors = reviewed_csharp_survivors(&reviewed_policy, &shard_sources);
 
     let restore_output = run_dotnet_project_restore(&work)?;
     write_bytes(&evidence.join("restore.stdout.log"), &restore_output.stdout)?;
@@ -2061,7 +2073,7 @@ fn run_csharp_ci(args: CiRunArgs) -> Result<()> {
     validate_csharp_terminal_partition(&outcomes)?;
     let passed = baseline_passed
         && process_exit_code == Some(0)
-        && outcomes.survived.is_empty()
+        && outcomes.survived == expected_survivors
         && outcomes.no_coverage.is_empty()
         && outcomes.timeout.is_empty()
         && outcomes.ignored.is_empty()
@@ -2090,9 +2102,10 @@ fn run_csharp_ci(args: CiRunArgs) -> Result<()> {
 
     if !receipt.passed {
         bail!(
-            "C# mutation shard {} failed closed: survived={}, no-coverage={}, timeout={}, ignored={}, outside={}, exit={:?}; evidence={}",
+            "C# mutation shard {} failed closed: survived={} (expected accepted={}), no-coverage={}, timeout={}, ignored={}, outside={}, exit={:?}; evidence={}",
             args.shard_index,
             receipt.outcomes.survived.len(),
+            expected_survivors.len(),
             receipt.outcomes.no_coverage.len(),
             receipt.outcomes.timeout.len(),
             receipt.outcomes.ignored.len(),
@@ -2102,10 +2115,11 @@ fn run_csharp_ci(args: CiRunArgs) -> Result<()> {
         );
     }
     println!(
-        "C# mutation shard {}/{} passed: {} valid killed, {} invalid, {} stock redundant.",
+        "C# mutation shard {}/{} passed: {} valid killed, {} accepted equivalent, {} invalid, {} stock redundant.",
         args.shard_index,
         args.shard_count,
         receipt.outcomes.killed.len(),
+        receipt.outcomes.survived.len(),
         receipt.outcomes.invalid.len(),
         receipt.outcomes.redundant.len()
     );
@@ -2195,6 +2209,19 @@ fn stryker_config(shard_sources: &[String]) -> Result<Value> {
             "break-on-initial-test-failure": true
         }
     }))
+}
+
+fn reviewed_csharp_survivors(
+    policy: &mutation::CsharpReviewedPolicy,
+    shard_sources: &[String],
+) -> Vec<CsharpMutant> {
+    let shard_sources: BTreeSet<&str> = shard_sources.iter().map(String::as_str).collect();
+    policy
+        .accepted_equivalents
+        .iter()
+        .filter(|mutant| shard_sources.contains(mutant.path.as_str()))
+        .cloned()
+        .collect()
 }
 
 fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>> {
@@ -2380,9 +2407,7 @@ fn parse_csharp_report(
                 reason: reason.clone(),
             };
             if !in_scope {
-                if status != "Ignored"
-                    || reason.as_deref() != Some("Removed by exclude from code coverage filter")
-                {
+                if !csharp_outside_scope_is_unexecuted(&status, reason.as_deref()) {
                     outside.insert(status_identity);
                 }
                 continue;
@@ -2434,6 +2459,16 @@ fn parse_csharp_report(
         ignored: ignored.into_iter().collect(),
         outside_scope_violations: outside.into_iter().collect(),
     })
+}
+
+fn csharp_outside_scope_is_unexecuted(status: &str, reason: Option<&str>) -> bool {
+    match status {
+        "CompileError" => true,
+        "Ignored" => {
+            reason.is_some_and(|reason| CSHARP_UNEXECUTED_IGNORE_REASONS.contains(&reason))
+        }
+        _ => false,
+    }
 }
 
 fn canonical_csharp_report_path(project_root: &str, file: &str) -> Result<String> {
@@ -2936,10 +2971,13 @@ fn verify_rust_evidence(args: VerifyArgs) -> Result<()> {
         "rust",
         &args,
         &sources,
-        global.len(),
-        killed_total,
-        invalid_total,
-        0,
+        VerifiedCounts {
+            mutants: global.len(),
+            killed: killed_total,
+            invalid: invalid_total,
+            redundant: 0,
+            accepted: 0,
+        },
     )?;
     println!(
         "Independently verified all {} Rust mutation shards: {} valid killed, {} invalid.",
@@ -3043,6 +3081,7 @@ fn verify_rust_invalid_diagnostics(
 
 fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
     let context = prepare_verifier(&args)?;
+    let reviewed_policy = mutation::read_csharp_reviewed_policy(&controller_root())?;
     let sources = source_inventory(&context.checkout, "csharp")?;
     let policy_work = paths::build_root()
         .join("mutation")
@@ -3056,6 +3095,7 @@ fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
     let mut killed_total = 0_usize;
     let mut invalid_total = 0_usize;
     let mut redundant_total = 0_usize;
+    let mut accepted_total = 0_usize;
     for (index, directory) in directories.iter().enumerate() {
         let receipt: CsharpReceipt = mutation::read_json(&directory.join("receipt.json"))?;
         let expected_sources: Vec<String> = sources
@@ -3064,6 +3104,7 @@ fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
             .filter(|(position, _)| position % args.shard_count == index)
             .map(|(_, source)| source.path.clone())
             .collect();
+        let expected_survivors = reviewed_csharp_survivors(&reviewed_policy, &expected_sources);
         let config = stryker_config(&expected_sources)?;
         let config_bytes = canonical_json_bytes(&config)?;
         let mut expected_policies = base_policies.clone();
@@ -3117,7 +3158,7 @@ fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
             || !receipt.baseline_passed
             || receipt.process_exit_code != Some(0)
             || !receipt.passed
-            || !receipt.outcomes.survived.is_empty()
+            || receipt.outcomes.survived != expected_survivors
             || !receipt.outcomes.no_coverage.is_empty()
             || !receipt.outcomes.timeout.is_empty()
             || !receipt.outcomes.ignored.is_empty()
@@ -3130,6 +3171,7 @@ fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
             .outcomes
             .killed
             .iter()
+            .chain(&receipt.outcomes.survived)
             .chain(receipt.outcomes.invalid.iter().map(|entry| &entry.mutant))
             .chain(receipt.outcomes.redundant.iter().map(|entry| &entry.mutant))
         {
@@ -3138,6 +3180,7 @@ fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
             }
         }
         killed_total += receipt.outcomes.killed.len();
+        accepted_total += receipt.outcomes.survived.len();
         invalid_total += receipt.outcomes.invalid.len();
         redundant_total += receipt.outcomes.redundant.len();
     }
@@ -3150,14 +3193,17 @@ fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
         "csharp",
         &args,
         &sources,
-        mutant_union.len(),
-        killed_total,
-        invalid_total,
-        redundant_total,
+        VerifiedCounts {
+            mutants: mutant_union.len(),
+            killed: killed_total,
+            invalid: invalid_total,
+            redundant: redundant_total,
+            accepted: accepted_total,
+        },
     )?;
     println!(
-        "Independently verified all {} C# mutation shards: {} valid killed, {} invalid, {} stock redundant.",
-        args.shard_count, killed_total, invalid_total, redundant_total
+        "Independently verified all {} C# mutation shards: {} valid killed, {} accepted equivalent, {} invalid, {} stock redundant.",
+        args.shard_count, killed_total, accepted_total, invalid_total, redundant_total
     );
     Ok(())
 }
@@ -3264,14 +3310,20 @@ fn validate_receipt_common(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VerifiedCounts {
+    mutants: usize,
+    killed: usize,
+    invalid: usize,
+    redundant: usize,
+    accepted: usize,
+}
+
 fn write_verified_summary(
     language: &str,
     args: &VerifyArgs,
     sources: &[SourceFile],
-    mutant_count: usize,
-    killed: usize,
-    invalid: usize,
-    redundant: usize,
+    counts: VerifiedCounts,
 ) -> Result<()> {
     let output = paths::build_root().join("mutation").join("verified");
     fs::create_dir_all(&output)
@@ -3286,10 +3338,11 @@ fn write_verified_summary(
         "shard_count": args.shard_count,
         "source_inventory_sha256": inventory_hash(sources)?,
         "source_file_count": sources.len(),
-        "mutant_count": mutant_count,
-        "valid_killed": killed,
-        "invalid": invalid,
-        "stock_redundant": redundant,
+        "mutant_count": counts.mutants,
+        "valid_killed": counts.killed,
+        "accepted_equivalent": counts.accepted,
+        "invalid": counts.invalid,
+        "stock_redundant": counts.redundant,
         "passed": true
     });
     mutation::write_json_atomic(&output.join(format!("{language}.json")), &summary)
@@ -3455,6 +3508,61 @@ mod tests {
             "fixture",
         )
         .is_err());
+    }
+
+    #[test]
+    fn csharp_outside_scope_accepts_only_outcomes_that_never_executed() {
+        for (status, reason) in [
+            ("CompileError", Some("Mutant caused compile errors")),
+            ("CompileError", None),
+            ("Ignored", Some("Removed by mutate filter")),
+            (
+                "Ignored",
+                Some("Removed by exclude from code coverage filter"),
+            ),
+        ] {
+            assert!(
+                csharp_outside_scope_is_unexecuted(status, reason),
+                "unexecuted outside-scope outcome was rejected: {status} {reason:?}"
+            );
+        }
+        for (status, reason) in [
+            ("Killed", None),
+            ("Survived", None),
+            ("NoCoverage", None),
+            ("Timeout", None),
+            ("Ignored", None),
+            ("Ignored", Some("Removed by block already covered filter")),
+        ] {
+            assert!(
+                !csharp_outside_scope_is_unexecuted(status, reason),
+                "executed or unexplained outside-scope outcome was accepted: {status} {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn csharp_reviewed_survivors_follow_the_exact_source_partition() {
+        let accepted = |path: &str, line| CsharpMutant {
+            path: path.to_owned(),
+            start_line: line,
+            start_column: 1,
+            end_line: line,
+            end_column: 2,
+            mutator: "Boolean mutation".to_owned(),
+            replacement: "true".to_owned(),
+        };
+        let first = accepted("app/FindMyFiles/Engine/A.cs", 1);
+        let second = accepted("app/FindMyFiles/Engine/B.cs", 2);
+        let policy = mutation::CsharpReviewedPolicy {
+            examined_files: vec![first.path.clone(), second.path.clone()],
+            accepted_equivalents: vec![first, second.clone()],
+        };
+
+        assert_eq!(
+            reviewed_csharp_survivors(&policy, std::slice::from_ref(&second.path)),
+            vec![second]
+        );
     }
 
     #[test]
