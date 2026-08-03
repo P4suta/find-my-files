@@ -1900,6 +1900,30 @@ fn assert_exact_keys(object: &Map<String, Value>, expected: &[&str], label: &str
     Ok(())
 }
 
+fn assert_required_optional_keys(
+    object: &Map<String, Value>,
+    required: &[&str],
+    optional: &[&str],
+    label: &str,
+) -> Result<()> {
+    let actual: BTreeSet<&str> = object.keys().map(String::as_str).collect();
+    let required: BTreeSet<&str> = required.iter().copied().collect();
+    let optional: BTreeSet<&str> = optional.iter().copied().collect();
+    if !required.is_disjoint(&optional) {
+        bail!("{label} controller key policy overlaps");
+    }
+    let allowed: BTreeSet<&str> = required.union(&optional).copied().collect();
+    if !required.is_subset(&actual) || !actual.is_subset(&allowed) {
+        bail!(
+            "{label} JSON keys drifted: actual={}, required={}, optional={}",
+            serde_json::to_string(&actual)?,
+            serde_json::to_string(&required)?,
+            serde_json::to_string(&optional)?
+        );
+    }
+    Ok(())
+}
+
 fn exact_object<'a>(
     value: Option<&'a Value>,
     label: &str,
@@ -2320,7 +2344,7 @@ fn parse_csharp_report(
             let object = mutant_value
                 .as_object()
                 .ok_or_else(|| anyhow!("Stryker mutant is not an object"))?;
-            assert_exact_keys(
+            assert_required_optional_keys(
                 object,
                 &[
                     "coveredBy",
@@ -2331,8 +2355,8 @@ fn parse_csharp_report(
                     "replacement",
                     "static",
                     "status",
-                    "statusReason",
                 ],
+                &["statusReason"],
                 "Stryker mutant",
             )?;
             let id = clean_string(object.get("id"), "mutant.id", false)?;
@@ -3390,6 +3414,47 @@ mod tests {
     #[test]
     fn rust_nextest_locked_is_forwarded_only_by_cargo_mutants() {
         assert!(!RUST_MUTATION_NEXTEST_ARGS.contains(&"--locked"));
+    }
+
+    #[test]
+    fn optional_json_keys_allow_absence_but_never_schema_drift() {
+        let mut object = Map::new();
+        object.insert("id".to_owned(), Value::Null);
+        object.insert("status".to_owned(), Value::Null);
+        assert!(assert_required_optional_keys(
+            &object,
+            &["id", "status"],
+            &["statusReason"],
+            "fixture",
+        )
+        .is_ok());
+
+        object.insert("statusReason".to_owned(), Value::Null);
+        assert!(assert_required_optional_keys(
+            &object,
+            &["id", "status"],
+            &["statusReason"],
+            "fixture",
+        )
+        .is_ok());
+
+        object.insert("unexpected".to_owned(), Value::Null);
+        assert!(assert_required_optional_keys(
+            &object,
+            &["id", "status"],
+            &["statusReason"],
+            "fixture",
+        )
+        .is_err());
+        object.remove("unexpected");
+        object.remove("id");
+        assert!(assert_required_optional_keys(
+            &object,
+            &["id", "status"],
+            &["statusReason"],
+            "fixture",
+        )
+        .is_err());
     }
 
     #[test]
