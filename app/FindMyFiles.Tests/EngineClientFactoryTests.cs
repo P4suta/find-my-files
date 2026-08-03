@@ -1,6 +1,10 @@
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
+using FindMyFiles.Tests.TestDoubles;
 using FindMyFiles.ViewModels;
+using Serilog;
+using Serilog.Core;
+using Serilog.Events;
 using Xunit;
 
 namespace FindMyFiles.Tests;
@@ -10,6 +14,221 @@ namespace FindMyFiles.Tests;
 /// transport choice disables every feature.</summary>
 public sealed class EngineClientFactoryTests
 {
+    private sealed class Harness
+    {
+        public EngineServiceState State { get; set; } = EngineServiceState.NotInstalled;
+
+        public bool ProbeResult { get; set; }
+
+        public bool Compatible { get; set; }
+
+        public bool StartResult { get; set; }
+
+        public bool Elevated { get; set; }
+
+        public int ProbeCalls { get; private set; }
+
+        public int QueryStateCalls { get; private set; }
+
+        public string? ProbedPipeName { get; private set; }
+
+        public string? OpenedPipeName { get; private set; }
+
+        public StubEngineClient PipeClient { get; } = new() { Kind = EngineClientKind.Service };
+
+        public StubEngineClient InProcClient { get; } = new() { Kind = EngineClientKind.InProcess };
+
+        public EngineClientFactoryHooks Hooks => new(
+            pipeName =>
+            {
+                ProbeCalls++;
+                ProbedPipeName = pipeName;
+                return ProbeResult;
+            },
+            () =>
+            {
+                QueryStateCalls++;
+                return State;
+            },
+            () => Compatible,
+            () => StartResult,
+            () => Elevated,
+            pipeName =>
+            {
+                OpenedPipeName = pipeName;
+                return PipeClient;
+            },
+            () => InProcClient);
+    }
+
+    private static (T Result, string Log) CaptureLog<T>(Func<T> action)
+    {
+        var previous = Log.Logger;
+        var sink = new CaptureSink();
+        using var logger = new LoggerConfiguration()
+            .MinimumLevel.Debug()
+            .Enrich.FromLogContext()
+            .WriteTo.Sink(sink)
+            .CreateLogger();
+        try
+        {
+            Log.Logger = logger;
+            return (action(), sink.Text);
+        }
+        finally
+        {
+            Log.Logger = previous;
+        }
+    }
+
+    private sealed class CaptureSink : ILogEventSink
+    {
+        private readonly LogfmtFormatter _formatter = new();
+        private readonly StringWriter _writer = new();
+
+        public string Text => _writer.ToString();
+
+        public void Emit(LogEvent logEvent) => _formatter.Format(logEvent, _writer);
+    }
+
+    private static (IEngineClient Engine, string Log) ResolveAndCapture(
+        string[] args,
+        Harness harness)
+    {
+        return CaptureLog(() => EngineClientFactory.Resolve(args, harness.Hooks));
+    }
+
+    private static void AssertLogMessage(string contents, string message)
+    {
+        Assert.Contains(
+            contents.Split('\n'),
+            line => line.Contains("area=app", StringComparison.Ordinal)
+                && line.EndsWith($"msg=\"{message}\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Resolve_with_injected_boundaries_covers_every_transport_outcome()
+    {
+        var fakeHarness = new Harness();
+        var (fake, fakeLog) = ResolveAndCapture(["--fake-engine"], fakeHarness);
+        using (fake)
+        {
+            Assert.IsType<FakeEngineClient>(fake);
+        }
+
+        AssertLogMessage(fakeLog, "data root selected");
+        Assert.Contains("test_override=", fakeLog, StringComparison.Ordinal);
+        AssertLogMessage(fakeLog, "engine: fake (--fake-engine)");
+
+        var unavailableHarness = new Harness();
+        var (forcedUnavailable, forcedUnavailableLog) = ResolveAndCapture(
+            ["--engine=unavailable"], unavailableHarness);
+        Assert.IsType<UnavailableEngineClient>(forcedUnavailable);
+        AssertLogMessage(
+            forcedUnavailableLog,
+            "engine: unavailable (--engine=unavailable test seam)");
+
+        var explicitPipeHarness = new Harness();
+        var (explicitPipe, explicitPipeLog) = ResolveAndCapture(
+            ["--engine=pipe"], explicitPipeHarness);
+        Assert.Same(explicitPipeHarness.PipeClient, explicitPipe);
+        Assert.Equal(PipeProtocol.DefaultPipeName, explicitPipeHarness.OpenedPipeName);
+        AssertLogMessage(explicitPipeLog, "engine: pipe (explicit)");
+
+        var inProcHarness = new Harness { State = EngineServiceState.NotInstalled };
+        var (inProc, inProcLog) = ResolveAndCapture(["--engine=inproc"], inProcHarness);
+        Assert.Same(inProcHarness.InProcClient, inProc);
+        Assert.Equal(1, inProcHarness.QueryStateCalls);
+        Assert.Contains("service_installed=false", inProcLog, StringComparison.Ordinal);
+        AssertLogMessage(
+            inProcLog,
+            "engine: in-proc FFI (explicit --engine=inproc) — the machine index is outside the service-hardened data root");
+
+        var customPipeHarness = new Harness { ProbeResult = true };
+        var (customPipe, customPipeLog) = ResolveAndCapture(
+            ["--pipe-name=fmf-custom"], customPipeHarness);
+        Assert.Same(customPipeHarness.PipeClient, customPipe);
+        Assert.Equal("fmf-custom", customPipeHarness.ProbedPipeName);
+        Assert.Equal("fmf-custom", customPipeHarness.OpenedPipeName);
+        Assert.Equal(0, customPipeHarness.QueryStateCalls);
+        AssertLogMessage(customPipeLog, "engine: pipe (probe succeeded)");
+
+        var customMissingHarness = new Harness { Elevated = true };
+        var (customMissing, customMissingLog) = ResolveAndCapture(
+            ["--pipe-name=fmf-missing"], customMissingHarness);
+        Assert.IsType<UnavailableEngineClient>(customMissing);
+        Assert.Equal("fmf-missing", customMissingHarness.ProbedPipeName);
+        Assert.Equal(0, customMissingHarness.QueryStateCalls);
+        Assert.Contains("elevated=true", customMissingLog, StringComparison.Ordinal);
+        AssertLogMessage(
+            customMissingLog,
+            "engine: unavailable (no service registered) — setup required");
+
+        var runningHarness = new Harness
+        {
+            State = EngineServiceState.Running,
+            ProbeResult = true,
+        };
+        var (running, runningLog) = ResolveAndCapture([], runningHarness);
+        Assert.Same(runningHarness.PipeClient, running);
+        Assert.Equal(PipeProtocol.DefaultPipeName, runningHarness.ProbedPipeName);
+        AssertLogMessage(runningLog, "engine: pipe (probe succeeded)");
+
+        var startHarness = new Harness
+        {
+            State = EngineServiceState.Stopped,
+            Compatible = true,
+            StartResult = true,
+        };
+        var (started, startedLog) = ResolveAndCapture([], startHarness);
+        Assert.Same(startHarness.PipeClient, started);
+        Assert.Equal(0, startHarness.ProbeCalls);
+        AssertLogMessage(
+            startedLog,
+            "engine: pipe (started marker-compatible on-demand service)");
+
+        var startFailedHarness = new Harness
+        {
+            State = EngineServiceState.Stopped,
+            Compatible = true,
+        };
+        var (startFailed, startFailedLog) = ResolveAndCapture([], startFailedHarness);
+        Assert.IsType<UnavailableEngineClient>(startFailed);
+        AssertLogMessage(
+            startFailedLog,
+            "engine: compatible on-demand service failed to start — setup required");
+
+        var rejectedHarness = new Harness
+        {
+            State = EngineServiceState.Running,
+            ProbeResult = false,
+        };
+        var (rejected, rejectedLog) = ResolveAndCapture([], rejectedHarness);
+        Assert.IsType<UnavailableEngineClient>(rejected);
+        AssertLogMessage(
+            rejectedLog,
+            "engine: service running but unreachable (token rejected) — unavailable");
+
+        var incompatibleHarness = new Harness
+        {
+            State = EngineServiceState.Stopped,
+            Compatible = false,
+        };
+        var (incompatible, incompatibleLog) = ResolveAndCapture([], incompatibleHarness);
+        Assert.IsType<UnavailableEngineClient>(incompatible);
+        AssertLogMessage(
+            incompatibleLog,
+            "engine: installed service protocol is incompatible — setup required");
+
+        var absentHarness = new Harness();
+        var (absent, absentLog) = ResolveAndCapture([], absentHarness);
+        Assert.IsType<UnavailableEngineClient>(absent);
+        Assert.Contains("elevated=false", absentLog, StringComparison.Ordinal);
+        AssertLogMessage(
+            absentLog,
+            "engine: unavailable (no service registered) — setup required");
+    }
+
     [Fact]
     public void DecideAuto_chooses_pipe_when_running_service_answers()
     {
@@ -194,16 +413,45 @@ public sealed class EngineClientFactoryTests
         var error = Assert.Throws<ArgumentException>(
             () => EngineClientFactory.Resolve(["--engine=typo"]));
 
-        Assert.Contains("unsupported --engine mode", error.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            "unsupported --engine mode 'typo' (expected auto, pipe, or inproc)",
+            error.Message,
+            StringComparison.Ordinal);
     }
 
     [Fact]
     public void Resolve_rejects_duplicate_or_conflicting_engine_overrides()
     {
-        Assert.Throws<ArgumentException>(
+        var duplicate = Assert.Throws<ArgumentException>(
             () => EngineClientFactory.Resolve(["--engine=auto", "--ENGINE=pipe"]));
-        Assert.Throws<ArgumentException>(
+        Assert.Contains("specify --engine at most once", duplicate.Message, StringComparison.Ordinal);
+
+        var conflict = Assert.Throws<ArgumentException>(
             () => EngineClientFactory.Resolve(["--fake-engine", "--engine=auto"]));
+        Assert.Contains(
+            "--fake-engine and --engine are mutually exclusive",
+            conflict.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Resolve_injected_core_rejects_null_inputs()
+    {
+        var harness = new Harness();
+
+        var args = Assert.Throws<ArgumentNullException>(
+            () => EngineClientFactory.Resolve(null!, harness.Hooks));
+        Assert.Equal("args", args.ParamName);
+
+        var hooks = Assert.Throws<ArgumentNullException>(
+            () => EngineClientFactory.Resolve([], null!));
+        Assert.Equal("hooks", hooks.ParamName);
+
+        var resolve = Assert.Throws<ArgumentNullException>(() =>
+        {
+            _ = EngineClientFactory.ResolveAsync((Func<IEngineClient>)null!);
+        });
+        Assert.Equal("resolve", resolve.ParamName);
     }
 
     [Fact]

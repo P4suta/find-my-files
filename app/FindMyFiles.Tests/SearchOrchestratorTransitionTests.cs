@@ -14,10 +14,11 @@ namespace FindMyFiles.Tests;
 /// and <see cref="ManualDispatcher"/> let each test choose exactly when and in
 /// which order queries complete.
 /// </summary>
-public sealed class SearchOrchestratorTransitionTests
+public sealed class SearchOrchestratorTransitionTests : IDisposable
 {
     private readonly ManualDispatcher _dispatcher = new();
     private readonly StubEngineClient _engine = new();
+    private readonly EngineEventMarshaler _events;
     private readonly ResultsPresenter _presenter;
     private readonly SearchOrchestrator _orchestrator;
     private SearchRequest _request = new(string.Empty, SearchOptions.Default);
@@ -31,12 +32,20 @@ public sealed class SearchOrchestratorTransitionTests
         // continuation synchronously and each transition is deterministic.
         SyncContext.RunContinuationsInline();
         _presenter = new ResultsPresenter(_dispatcher);
+        _events = new EngineEventMarshaler(_engine, _dispatcher);
         _orchestrator = new SearchOrchestrator(
             _engine,
-            new EngineEventMarshaler(_engine, _dispatcher),
+            _events,
             _dispatcher,
             _presenter,
             () => _request);
+    }
+
+    public void Dispose()
+    {
+        _orchestrator.Dispose();
+        _presenter.Dispose();
+        _events.Dispose();
     }
 
     [Fact]

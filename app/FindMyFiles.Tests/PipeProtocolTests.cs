@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text;
 using FindMyFiles.Engine;
 using Xunit;
@@ -72,6 +73,28 @@ public sealed class PipeProtocolTests
     }
 
     [Fact]
+    public void QueryReq_ExactlyTheOptionsSize_DecodesAnEmptyQuery()
+    {
+        var (options, text, presentationBasis) = PipeProtocol.DecodeQueryReq(
+            new byte[EngineContract.QueryOptionsSize]);
+
+        Assert.Equal(SearchOptions.Default, options);
+        Assert.Equal(string.Empty, text);
+        Assert.Equal(0UL, presentationBasis);
+    }
+
+    [Fact]
+    public void QueryReq_NonZeroReservedField_IsRejected()
+    {
+        var payload = new byte[EngineContract.QueryOptionsSize];
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(20), 1);
+
+        var ex = Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodeQueryReq(payload));
+
+        Assert.Equal("QueryReq reserved field is nonzero", ex.Message);
+    }
+
+    [Fact]
     public void EncodeQueryReq_RejectsTextOverTheUtf8ByteLimit()
     {
         var text = new string('界', (EngineContract.MaxQueryBytes / 3) + 1);
@@ -107,8 +130,12 @@ public sealed class PipeProtocolTests
     [InlineData(0UL)]
     [InlineData(4UL)]
     [InlineData(ulong.MaxValue)]
-    public void EngineErrorSeverityWire_RejectsValuesOutsideTheContract(ulong value) =>
-        Assert.Throws<InvalidDataException>(() => EngineErrorSeverityWire.Decode(value));
+    public void EngineErrorSeverityWire_RejectsValuesOutsideTheContract(ulong value)
+    {
+        var ex = Assert.Throws<InvalidDataException>(() => EngineErrorSeverityWire.Decode(value));
+
+        Assert.Equal($"engine-error severity {value} is outside the contract", ex.Message);
+    }
 
     [Fact]
     public void EngineErrorSeverityWire_AcceptsEveryContractValue()
@@ -186,7 +213,11 @@ public sealed class PipeProtocolTests
         var bytes = PipeProtocol.EncodePageResp([new(1, 1, 1, 1, 0, "a", "C:\\")]);
         bytes[0] = 2; // row_count says 2, but only one row is present
 
-        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodePageResp(bytes));
+        var ex = Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodePageResp(bytes));
+
+        Assert.Equal(
+            $"PageResp payload is {bytes.Length} bytes, expected {8 + (2 * PipeProtocol.RowSize) + 4} for 2 rows",
+            ex.Message);
     }
 
     [Fact]
@@ -215,14 +246,93 @@ public sealed class PipeProtocolTests
             .Select(i => new RowData((ulong)i, (ulong)i, 0, 0, 0, "n", "C:\\"))
             .ToArray();
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => PipeProtocol.EncodePageResp(rows));
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(() => PipeProtocol.EncodePageResp(rows));
+
+        Assert.Contains(
+            $"A page may contain at most {EngineContract.MaxPageRows} rows.",
+            ex.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EncodePageResp_ExactlyTheContractRowLimit_IsAccepted()
+    {
+        var rows = Enumerable
+            .Range(0, EngineContract.MaxPageRows)
+            .Select(i => new RowData((ulong)i, (ulong)i, 0, 0, 0, string.Empty, string.Empty))
+            .ToArray();
+
+        Assert.Equal(
+            8 + (EngineContract.MaxPageRows * PipeProtocol.RowSize),
+            PipeProtocol.EncodePageResp(rows).Length);
+    }
+
+    [Fact]
+    public void DecodePageResp_ExactlyTheContractRowLimit_IsAccepted()
+    {
+        var payload = new byte[8 + (EngineContract.MaxPageRows * PipeProtocol.RowSize)];
+        BinaryPrimitives.WriteUInt32LittleEndian(payload, (uint)EngineContract.MaxPageRows);
+
+        Assert.Equal(EngineContract.MaxPageRows, PipeProtocol.DecodePageResp(payload).Count);
+    }
+
+    [Fact]
+    public void DecodePageResp_RejectsAHostileRowCountBeforeSizingRows()
+    {
+        var payload = new byte[8];
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            payload, (uint)EngineContract.MaxPageRows + 1);
+
+        var ex = Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodePageResp(payload));
+
+        Assert.Equal(
+            $"PageResp row_count {EngineContract.MaxPageRows + 1} exceeds {EngineContract.MaxPageRows}",
+            ex.Message);
+    }
+
+    [Fact]
+    public void PagePayloadLengthValidators_AcceptTheCapWithoutAllocation()
+    {
+        var max = checked((int)PipeProtocol.MaxPayloadLen);
+
+        Assert.Equal(max, PipeProtocol.ValidateDecodedPagePayloadLength(max));
+        Assert.Equal(max, PipeProtocol.ValidateEncodedPagePayloadLength(max));
+    }
+
+    [Fact]
+    public void PagePayloadLengthValidators_RejectOneByteOverTheCap()
+    {
+        var max = checked((int)PipeProtocol.MaxPayloadLen);
+        var decode = Assert.Throws<InvalidDataException>(
+            () => PipeProtocol.ValidateDecodedPagePayloadLength(max + 1));
+        Assert.Equal(
+            $"PageResp payload is {max + 1} bytes, maximum is {PipeProtocol.MaxPayloadLen}",
+            decode.Message);
+
+        var encode = Assert.Throws<ArgumentOutOfRangeException>(
+            () => PipeProtocol.ValidateEncodedPagePayloadLength(max + 1L));
+        Assert.Contains(
+            $"Encoded page is {max + 1} bytes; maximum is {PipeProtocol.MaxPayloadLen}.",
+            encode.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EncodePageResp_RejectsNullRows()
+    {
+        Assert.Throws<ArgumentNullException>(() => PipeProtocol.EncodePageResp(null!));
     }
 
     [Theory]
     [InlineData(0)]
     [InlineData(7)] // one short of the 8-byte {row_count, blob_len} header
-    public void PageResp_TruncatedHeader_IsRejected(int len) =>
-        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodePageResp(new byte[len]));
+    public void PageResp_TruncatedHeader_IsRejected(int len)
+    {
+        var ex = Assert.Throws<InvalidDataException>(
+            () => PipeProtocol.DecodePageResp(new byte[len]));
+
+        Assert.Equal($"PageResp payload is {len} bytes, need ≥8", ex.Message);
+    }
 
     [Fact]
     public void Header_AtTheExactCap_IsAccepted()
@@ -271,6 +381,12 @@ public sealed class PipeProtocolTests
     }
 
     [Fact]
+    public void QueryResp_ExactlyTheFixedFields_DecodesAnEmptyTrace()
+    {
+        Assert.Equal((0UL, 0UL, string.Empty), PipeProtocol.DecodeQueryResp(new byte[16]));
+    }
+
+    [Fact]
     public void ResultPageReq_RoundTrips()
     {
         var bytes = PipeProtocol.EncodeResultPageReq(0x0102_0304_0506_0708, 0x1000, 250);
@@ -302,40 +418,93 @@ public sealed class PipeProtocolTests
         Assert.Equal("0123456789ABCDEF", volume);
     }
 
+    [Fact]
+    public void Event_EmptyLabel_StopsAtTheFirstTerminator()
+    {
+        Assert.Equal(string.Empty, PipeProtocol.DecodeEvent(new byte[32]).Volume);
+    }
+
     [Theory]
     [InlineData(11)]
     [InlineData(13)]
-    public void DecodeHelloResp_WrongLength_IsRejected(int len) =>
-        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodeHelloResp(new byte[len]));
+    public void DecodeHelloResp_WrongLength_IsRejected(int len)
+    {
+        var ex = Assert.Throws<InvalidDataException>(
+            () => PipeProtocol.DecodeHelloResp(new byte[len]));
+
+        Assert.Equal($"HelloResp payload is {len} bytes, expected 12", ex.Message);
+    }
 
     [Fact]
-    public void DecodeQueryReq_TooShortForOptions_IsRejected() =>
-        Assert.Throws<InvalidDataException>(
-            () => PipeProtocol.DecodeQueryReq(new byte[EngineContract.QueryOptionsSize - 1]));
+    public void DecodeQueryReq_TooShortForOptions_IsRejected()
+    {
+        var len = EngineContract.QueryOptionsSize - 1;
+        var ex = Assert.Throws<InvalidDataException>(
+            () => PipeProtocol.DecodeQueryReq(new byte[len]));
+
+        Assert.Equal(
+            $"QueryReq payload is {len} bytes, need ≥{EngineContract.QueryOptionsSize}",
+            ex.Message);
+    }
 
     [Fact]
-    public void DecodeQueryResp_TooShortForIds_IsRejected() =>
-        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodeQueryResp(new byte[15]));
+    public void DecodeQueryResp_TooShortForIds_IsRejected()
+    {
+        var ex = Assert.Throws<InvalidDataException>(
+            () => PipeProtocol.DecodeQueryResp(new byte[15]));
+
+        Assert.Equal("QueryResp payload is 15 bytes, need ≥16", ex.Message);
+    }
 
     [Theory]
     [InlineData(19)]
     [InlineData(21)]
-    public void DecodeResultPageReq_WrongLength_IsRejected(int len) =>
-        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodeResultPageReq(new byte[len]));
+    public void DecodeResultPageReq_WrongLength_IsRejected(int len)
+    {
+        var ex = Assert.Throws<InvalidDataException>(
+            () => PipeProtocol.DecodeResultPageReq(new byte[len]));
+
+        Assert.Equal($"ResultPageReq payload is {len} bytes, expected 20", ex.Message);
+    }
 
     [Theory]
     [InlineData(7)]
     [InlineData(9)]
-    public void DecodeResultFreeReq_WrongLength_IsRejected(int len) =>
-        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodeResultFreeReq(new byte[len]));
+    public void DecodeResultFreeReq_WrongLength_IsRejected(int len)
+    {
+        var ex = Assert.Throws<InvalidDataException>(
+            () => PipeProtocol.DecodeResultFreeReq(new byte[len]));
+
+        Assert.Equal($"ResultFreeReq payload is {len} bytes, expected 8", ex.Message);
+    }
 
     [Theory]
     [InlineData(31)]
     [InlineData(33)]
-    public void DecodeEvent_WrongLength_IsRejected(int len) =>
-        Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodeEvent(new byte[len]));
+    public void DecodeEvent_WrongLength_IsRejected(int len)
+    {
+        var ex = Assert.Throws<InvalidDataException>(
+            () => PipeProtocol.DecodeEvent(new byte[len]));
+
+        Assert.Equal($"Event payload is {len} bytes, expected 32", ex.Message);
+    }
 
     [Fact]
     public void DecodeVolumeStatuses_EmptyJsonArray_DecodesToNoStatuses() =>
         Assert.Empty(PipeProtocol.DecodeVolumeStatuses("[]"u8));
+
+    [Fact]
+    public void DecodeVolumeStatuses_JsonNull_DecodesToNoStatuses() =>
+        Assert.Empty(PipeProtocol.DecodeVolumeStatuses("null"u8));
+
+    [Fact]
+    public void DecodeVolumeStatuses_MissingVolume_UsesTheEmptyWireDefault()
+    {
+        var status = Assert.Single(
+            PipeProtocol.DecodeVolumeStatuses("[{\"state\":1,\"entries\":2}]"u8));
+
+        Assert.Equal(string.Empty, status.Label);
+        Assert.Equal(VolumeState.Ready, status.State);
+        Assert.Equal(2UL, status.Entries);
+    }
 }

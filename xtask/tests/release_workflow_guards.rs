@@ -51,6 +51,15 @@ fn release_pr_guards_match_the_configured_component_branch() {
         Some(true),
         "breaking changes before 1.0 must remain minor releases"
     );
+    assert_eq!(
+        config["changelog-sections"],
+        serde_json::json!([
+            {"type": "feat", "section": "Features"},
+            {"type": "fix", "section": "Bug Fixes"},
+            {"type": "refactor", "section": "Code Refactoring"}
+        ]),
+        "the Release PR must retain the release-path refactors in its generated notes"
+    );
     let expected = format!("release-please--branches--main--components--{component}");
 
     for relative in [
@@ -66,6 +75,22 @@ fn release_pr_guards_match_the_configured_component_branch() {
             "{relative} must guard the configured Release Please branch {expected}"
         );
     }
+}
+
+#[test]
+fn release_lock_commit_uses_the_graphql_branch_name_field() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask has the repository as its parent");
+    let workflow = fs::read_to_string(repo.join(".github/workflows/release-please.yml"))
+        .expect("release orchestrator must be readable");
+
+    assert!(workflow.contains("repositoryNameWithOwner:"));
+    assert!(workflow.contains("branchName: branch,"));
+    assert!(
+        !workflow.contains("refName: branch,"),
+        "CreateCommitOnBranchInput requires BranchNameInput.branchName"
+    );
 }
 
 #[test]

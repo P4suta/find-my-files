@@ -125,15 +125,15 @@ impl Wtf8Regex {
 /// pass on every ordinary regex miss; memchr makes the overwhelmingly common
 /// "no ED byte" case a vectorized scan.
 fn has_lone_surrogate(bytes: &[u8]) -> bool {
-    let mut offset = 0usize;
-    while let Some(relative) = memchr::memchr(0xED, &bytes[offset..]) {
-        let lead = offset + relative;
-        if bytes.get(lead + 1..lead + 3).is_some_and(|tail| {
+    let mut rest = bytes;
+    while let Some(relative) = memchr::memchr(0xED, rest) {
+        let lead = &rest[relative..];
+        if lead.get(1..3).is_some_and(|tail| {
             (0xA0..=0xBF).contains(&tail[0]) && (0x80..=0xBF).contains(&tail[1])
         }) {
             return true;
         }
-        offset = lead + 1;
+        rest = &lead[1..];
     }
     false
 }
@@ -1058,6 +1058,47 @@ mod tests {
         let ast = parse(r"regex:\d+").unwrap();
         let q = compile(&ast, CaseMode::Smart, &super::super::dates::UtcResolver).unwrap();
         assert!(matches!(q.groups[0].driver, Driver::FullScan));
+    }
+
+    #[test]
+    fn literal_and_extension_driver_plans_pin_selectivity_and_exactness() {
+        let resolver = super::super::dates::UtcResolver;
+
+        let two_byte = compile(&parse("ab").unwrap(), CaseMode::Smart, &resolver).unwrap();
+        let group = &two_byte.groups[0];
+        assert!(matches!(group.driver, Driver::Sub { .. }));
+        assert!(group.driver_term.is_some());
+        assert!(group.driver_exact);
+
+        for text in ["a", "!ab"] {
+            let query = compile(&parse(text).unwrap(), CaseMode::Smart, &resolver).unwrap();
+            let group = &query.groups[0];
+            assert!(matches!(group.driver, Driver::FullScan), "{text:?}");
+            assert!(group.driver_term.is_none(), "{text:?}");
+        }
+
+        let extension = compile(&parse("ext:rs").unwrap(), CaseMode::Smart, &resolver).unwrap();
+        let group = &extension.groups[0];
+        match &group.driver {
+            Driver::Suffixes {
+                suffixes,
+                files_only,
+                canonical,
+            } => {
+                assert_eq!(suffixes, &[b".rs".to_vec()]);
+                assert!(*files_only);
+                assert!(!*canonical);
+            }
+            _ => panic!("expected extension suffix driver"),
+        }
+        assert!(group.driver_term.is_some());
+        assert!(group.driver_exact);
+
+        let empty_extension = compile(&parse("ext:").unwrap(), CaseMode::Smart, &resolver).unwrap();
+        let group = &empty_extension.groups[0];
+        assert!(matches!(group.driver, Driver::FullScan));
+        assert_eq!(group.terms.len(), 1);
+        assert_eq!(driver_score(&group.terms[0]), None);
     }
 
     #[test]

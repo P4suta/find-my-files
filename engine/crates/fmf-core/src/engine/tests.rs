@@ -458,9 +458,7 @@ fn status_reports_ready_volumes() {
     );
 }
 
-/// Real-volume E2E: `index_start` → `VolumeReady` → query → snapshot save on
-/// shutdown → `load_from` restores the same entry count. Run from an elevated
-/// Run with `just test-admin` from an elevated terminal.
+/// Dirty Ready volumes are persisted once and then skipped until they change.
 #[cfg(windows)]
 #[test]
 fn flush_saves_dirty_volumes_and_skips_clean_ones() {
@@ -509,6 +507,9 @@ fn require_admin_gate() {
     );
 }
 
+/// Real-volume E2E: `index_start` → `VolumeReady` → query → snapshot save on
+/// shutdown → `load_from` restores the same entry count. Run with
+/// `just test-admin` from an elevated terminal.
 #[test]
 #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
 fn engine_e2e_scan_query_snapshot_restore() {
@@ -555,22 +556,11 @@ fn engine_e2e_scan_query_snapshot_restore() {
         "parent paths must resolve to the scanned volume"
     );
 
-    // The tailing thread sits in a blocking journal read; generate volume
-    // activity until shutdown's join completes so the test never hangs on an
-    // otherwise idle machine (temp_dir lives on C: on a stock setup).
-    let stop_tickle = Arc::new(AtomicBool::new(false));
-    let tickle_flag = stop_tickle.clone();
-    let tickle = std::thread::spawn(move || {
-        let p = std::env::temp_dir().join("fmf-e2e-tickle.tmp");
-        while !tickle_flag.load(Ordering::Relaxed) {
-            let _ = std::fs::write(&p, b"tick");
-            let _ = std::fs::remove_file(&p);
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    });
+    // Journal reads have a bounded 250 ms park and re-check the stop flag, so
+    // shutdown no longer needs synthetic file churn to wake the worker. Rapid
+    // create/delete churn can legitimately invalidate a metadata batch and
+    // start a rescan, which removes the now-stale snapshot by design.
     e.shutdown(); // joins the volume thread → snapshot saved with checkpoint
-    stop_tickle.store(true, Ordering::Relaxed);
-    tickle.join().unwrap();
 
     // After join the in-memory state is frozen; the saved snapshot must
     // restore to exactly the entry count the engine last reported.

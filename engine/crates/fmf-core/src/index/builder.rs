@@ -214,7 +214,11 @@ impl VolumeIndexBuilder {
         // a fixed point rather than once. Each round removes at least one row
         // and rows are finite, so it terminates; in practice it is one round
         // plus the depth of whatever subtree came and went during the scan.
-        loop {
+        // The live-row count is also a hard convergence bound: each successful
+        // round removes at least one row. Keeping the bound independent of the
+        // tombstone side effect prevents a broken deletion primitive from
+        // turning recovery into a non-terminating build.
+        for _ in 0..self.idx.len() {
             let doomed: Vec<EntryId> = (1..self.idx.len() as EntryId)
                 .filter(|&id| self.idx.is_live(id))
                 .filter(|&id| {
@@ -230,6 +234,7 @@ impl VolumeIndexBuilder {
                 self.idx.tombstone_id(id);
             }
         }
+        dropped
     }
 
     fn validate_strict_parent_graph(&self) -> Result<(), IndexBuildError> {

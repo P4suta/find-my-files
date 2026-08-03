@@ -51,7 +51,6 @@ impl TestDir {
     /// Panics if the directory cannot be created.
     #[must_use]
     pub fn new() -> Self {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
         // The build output tree is build/engine at the repo root, not
         // engine/target (ADR-0021); `.cargo/config.toml`'s target-dir does not
         // export CARGO_TARGET_DIR, so the fallback hard-codes that location —
@@ -61,7 +60,17 @@ impl TestDir {
             || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../build/engine"),
             PathBuf::from,
         );
-        let path = target.join("test-tmp").join(format!(
+        Self::new_in(target)
+    }
+
+    /// Create a fresh per-test directory below an explicit volume root.
+    ///
+    /// This is crate-visible for live volume tests whose file references must
+    /// belong to the same volume as the OS metadata handle under test.
+    #[must_use]
+    pub(crate) fn new_in(target: impl AsRef<Path>) -> Self {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let path = target.as_ref().join("test-tmp").join(format!(
             "fmf-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)

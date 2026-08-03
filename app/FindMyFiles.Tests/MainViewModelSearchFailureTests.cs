@@ -15,7 +15,7 @@ namespace FindMyFiles.Tests;
 /// <see cref="StubEngineClient.ThrowOnSearch"/> makes the debounced requery
 /// raise the orchestrator's <c>SearchFailed</c>, which the view model handles
 /// on the (manual) UI thread.</summary>
-public sealed class MainViewModelSearchFailureTests
+public sealed class MainViewModelSearchFailureTests : IDisposable
 {
     private readonly ManualDispatcher _dispatcher = new();
     private readonly StubEngineClient _engine = new();
@@ -23,6 +23,7 @@ public sealed class MainViewModelSearchFailureTests
 
     public MainViewModelSearchFailureTests()
     {
+        Notifier.ResetForTests();
         SyncContext.RunContinuationsInline();
         _vm = new MainViewModel(_engine, _dispatcher, new AppSettings());
     }
@@ -87,6 +88,7 @@ public sealed class MainViewModelSearchFailureTests
         var error = Assert.Single(_vm.Notifications.Items, n => n.Severity == NotifySeverity.Error);
         Assert.Equal(Loc.Get("Notify_SearchUnexpectedTitle"), error.Message);
         Assert.NotEqual(Loc.Get("Notify_SearchFailedTitle"), error.Message);
+        Assert.Equal("unexpected", error.Detail);
     }
 
     [Fact]
@@ -122,5 +124,11 @@ public sealed class MainViewModelSearchFailureTests
         // the InfoBar itself is suppressed during reconnect.
         Assert.False(_vm.HasNoResults);
         Assert.False(HasErrorNotification);
+    }
+
+    public void Dispose()
+    {
+        _vm.Dispose();
+        Notifier.ResetForTests();
     }
 }

@@ -1,5 +1,7 @@
 using System.IO.Pipes;
 using FindMyFiles.Engine;
+using FindMyFiles.Services;
+using Serilog;
 using Xunit;
 
 namespace FindMyFiles.Tests;
@@ -30,6 +32,51 @@ public sealed class PipeConnectionTests
     private static PipeConnection Wrap(NamedPipeClientStream client, int epoch = 1) =>
         new(client, epoch, (_, _, _) => { }, (_, _, _, _, _) => { }, CancellationToken.None);
 
+    private static async Task<string> CaptureLogAsync(Func<Task> action)
+    {
+        var root = Directory.CreateTempSubdirectory("fmf-pipe-log-");
+        var previous = Log.Logger;
+        var logger = LogSetup.CreateLogger(root.FullName);
+        try
+        {
+            try
+            {
+                Log.Logger = logger;
+                await action();
+            }
+            finally
+            {
+                Log.Logger = previous;
+                logger.Dispose();
+            }
+
+            return File.ReadAllText(Path.Combine(root.FullName, "app.log"));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Constructor_PublishesItsEpoch_AndStartsAWaitingReadLoop()
+    {
+        var (server, client) = await ConnectedPairAsync();
+        using (server)
+        using (var conn = new PipeConnection(
+            client,
+            42,
+            (_, _, _) => { },
+            (_, _, _, _, _) => { },
+            CancellationToken.None))
+        {
+            Assert.Equal(42, conn.Epoch);
+            Assert.NotNull(conn.ReadLoop);
+            await Task.Delay(50);
+            Assert.False(conn.ReadLoop.IsCompleted);
+        }
+    }
+
     [Fact]
     public async Task WriteAfterDispose_IsNormalizedToEngineUnavailable()
     {
@@ -43,29 +90,38 @@ public sealed class PipeConnectionTests
             // gets the transport exception, never a raw
             // ObjectDisposedException leaking from the dead stream.
             var frame = PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []);
-            await Assert.ThrowsAsync<EngineUnavailableException>(
+            var ex = await Assert.ThrowsAsync<EngineUnavailableException>(
                 () => conn.WriteFrameAsync(frame, CancellationToken.None));
+            Assert.Equal(
+                "engine service connection lost: connection is closed",
+                ex.Message);
         }
     }
 
     [Fact]
     public async Task ServerVanishing_CompletesTheReadLoopQuietly_AndDisposeIsIdempotent()
     {
-        var (server, client) = await ConnectedPairAsync();
-        var conn = Wrap(client);
+        var contents = await CaptureLogAsync(async () =>
+        {
+            var (server, client) = await ConnectedPairAsync();
+            var conn = Wrap(client);
 
-        server.Dispose(); // server side goes away under the connection
+            server.Dispose(); // server side goes away under the connection
 
-        // The supervisor awaits ReadLoop to know the connection died — it
-        // must complete (never fault, never hang).
-        await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5));
+            // The supervisor awaits ReadLoop to know the connection died — it
+            // must complete (never fault, never hang).
+            await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5));
 
-        conn.Dispose();
-        conn.Dispose(); // double-dispose must be harmless
-        await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => conn.WriteFrameAsync(
-                PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []),
-                CancellationToken.None));
+            conn.Dispose();
+            conn.Dispose(); // double-dispose must be harmless
+            await Assert.ThrowsAsync<EngineUnavailableException>(
+                () => conn.WriteFrameAsync(
+                    PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []),
+                    CancellationToken.None));
+        });
+
+        Assert.Contains("area=pipe", contents, StringComparison.Ordinal);
+        Assert.Contains("msg=\"server closed the connection\"", contents, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -77,8 +133,9 @@ public sealed class PipeConnectionTests
         await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5));
 
         var frame = PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []);
-        await Assert.ThrowsAsync<EngineUnavailableException>(
+        var ex = await Assert.ThrowsAsync<EngineUnavailableException>(
             () => conn.WriteFrameAsync(frame, CancellationToken.None));
+        Assert.StartsWith("engine service connection lost: ", ex.Message, StringComparison.Ordinal);
         conn.Dispose();
     }
 
@@ -93,27 +150,34 @@ public sealed class PipeConnectionTests
         uint requestId,
         int status)
     {
-        var (server, client) = await ConnectedPairAsync();
-        using (server)
+        var contents = await CaptureLogAsync(async () =>
         {
-            var dispatched = 0;
-            using var conn = new PipeConnection(
-                client,
-                1,
-                (_, _, _) => Interlocked.Increment(ref dispatched),
-                (_, _, _, _, _) => Interlocked.Increment(ref dispatched),
-                CancellationToken.None);
+            var (server, client) = await ConnectedPairAsync();
+            using (server)
+            {
+                var dispatched = 0;
+                using var conn = new PipeConnection(
+                    client,
+                    1,
+                    (_, _, _) => Interlocked.Increment(ref dispatched),
+                    (_, _, _, _, _) => Interlocked.Increment(ref dispatched),
+                    CancellationToken.None);
 
-            await server.WriteAsync(PipeProtocol.EncodeFrame(
-                PipeProtocol.Op.Stats,
-                flags,
-                requestId,
-                status,
-                []));
-            await server.FlushAsync();
+                await server.WriteAsync(PipeProtocol.EncodeFrame(
+                    PipeProtocol.Op.Stats,
+                    flags,
+                    requestId,
+                    status,
+                    []));
+                await server.FlushAsync();
 
-            await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.Equal(0, Volatile.Read(ref dispatched));
-        }
+                await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5));
+                Assert.Equal(0, Volatile.Read(ref dispatched));
+            }
+        });
+
+        Assert.Contains("area=pipe", contents, StringComparison.Ordinal);
+        Assert.Contains("msg=\"read loop ended\"", contents, StringComparison.Ordinal);
+        Assert.Contains("error_type=System.IO.InvalidDataException", contents, StringComparison.Ordinal);
     }
 }

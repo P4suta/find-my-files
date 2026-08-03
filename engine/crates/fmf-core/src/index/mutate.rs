@@ -406,7 +406,14 @@ impl VolumeIndex {
             self.tombstone_id(id);
         }
 
-        while let Some(old) = self.entry_by_link(e.frn, e.parent_frn, e.name_utf16) {
+        // Bound convergence independently of `tombstone_id`'s side effect so
+        // a broken tombstone operation cannot turn a corrupt duplicate set
+        // into an infinite loop.
+        let candidate_count = self.entries_by_frn(e.frn).count();
+        for _ in 0..candidate_count {
+            let Some(old) = self.entry_by_link(e.frn, e.parent_frn, e.name_utf16) else {
+                break;
+            };
             self.tombstone_id(old);
         }
         Ok(self.push_raw(e, parent))
@@ -944,7 +951,11 @@ impl VolumeIndex {
             let mut cur = start;
             let mut inherited = false;
 
-            loop {
+            // A parent walk can visit at most every row before it must hit a
+            // root, a completed row, or a cycle; one extra iteration observes
+            // the terminal sentinel. Keep that input-derived bound independent
+            // of the state-machine arms so a broken cycle branch cannot spin.
+            for _ in 0..=n {
                 if cur == NO_PARENT || cur as usize >= n {
                     break;
                 }

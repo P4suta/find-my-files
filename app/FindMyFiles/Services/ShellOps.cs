@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Windows.AppLifecycle;
-using Windows.ApplicationModel.DataTransfer;
 
 namespace FindMyFiles.Services;
 
@@ -12,9 +11,6 @@ namespace FindMyFiles.Services;
 /// </summary>
 internal static partial class ShellOps
 {
-    /// <summary><c>COINIT_APARTMENTTHREADED</c> — reveal runs on a dedicated STA.</summary>
-    private const uint COINITAPARTMENTTHREADED = 0x2;
-
     /// <summary>Longest path <c>CreateFileW</c> accepts without long-path support:
     /// <c>MAX_PATH</c> (260) counts the terminating NUL.</summary>
     private const int LegacyMaxPathChars = 259;
@@ -26,13 +22,25 @@ internal static partial class ShellOps
     private static readonly string ExplorerPath =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
 
+    private static ShellOpsHooks _hooks = ShellOpsHooks.Production;
+
+    /// <summary>Replaces every operating-system boundary for one deterministic test scope.</summary>
+    /// <param name="hooks">Complete boundary implementation.</param>
+    /// <returns>A scope that restores the previous implementation.</returns>
+    internal static IDisposable UseHooksForTests(ShellOpsHooks hooks)
+    {
+        ArgumentNullException.ThrowIfNull(hooks);
+        var previous = Interlocked.Exchange(ref _hooks, hooks);
+        return new ActionOnDispose(() => Interlocked.Exchange(ref _hooks, previous));
+    }
+
     /// <summary>Open a file or folder with its default handler via
     /// explorer.exe, shedding the app's elevation. Failures notify the user
     /// (with a Win32-specific hint) rather than throwing.</summary>
     /// <param name="fullPath">Absolute path to open; treated as data, never as
     /// a command line (see <see cref="BuildOpenStartInfo"/>).</param>
     public static void OpenTrusted(string fullPath) =>
-        OpenTrustedWith(RealProcessRunner.Instance, fullPath);
+        OpenTrustedWith(Volatile.Read(ref _hooks).ProcessRunner, fullPath);
 
     /// <summary>
     /// Open an MFT-sourced result only after the path has been pinned and its
@@ -40,12 +48,11 @@ internal static partial class ShellOps
     /// </summary>
     /// <param name="fullPath">MFT-sourced absolute path.</param>
     /// <param name="expectedFrn">Exact NTFS record-and-sequence identity.</param>
-    public static void OpenIndexed(string fullPath, ulong expectedFrn) =>
-        OpenIndexedWith(
-            RealIndexedShellTargetVerifier.Instance,
-            RealProcessRunner.Instance,
-            fullPath,
-            expectedFrn);
+    public static void OpenIndexed(string fullPath, ulong expectedFrn)
+    {
+        var hooks = Volatile.Read(ref _hooks);
+        OpenIndexedWith(hooks.Verifier, hooks.ProcessRunner, fullPath, expectedFrn);
+    }
 
     /// <summary>"Open" core, parameterised over the process runner so the launch
     /// (not just <see cref="BuildOpenStartInfo"/>'s arguments) is unit-testable.
@@ -105,48 +112,49 @@ internal static partial class ShellOps
     public static void RevealIndexed(string fullPath, ulong expectedFrn)
     {
         string failureMessage = Loc.Get("Shell_RevealFailed");
-        var thread = new Thread(() => RevealOnSta(failureMessage, fullPath, expectedFrn))
-        {
-            IsBackground = true,
-        };
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
+        var hooks = Volatile.Read(ref _hooks);
+        hooks.StartStaThread(() => RevealOnSta(hooks, failureMessage, fullPath, expectedFrn));
     }
 
     /// <summary>STA-thread body: initialise COM, reveal, report any failure, and
     /// balance the COM init. Never lets an exception escape the thread (an
     /// unhandled one would tear down the process).</summary>
+    /// <param name="hooks">Captured boundary set for the whole STA operation.</param>
     /// <param name="failureMessage">Pre-resolved headline for a failure notification.</param>
     /// <param name="fullPath">Absolute path to reveal and select.</param>
     /// <param name="expectedFrn">Exact indexed identity.</param>
     private static void RevealOnSta(
+        ShellOpsHooks hooks,
         string failureMessage,
         string fullPath,
         ulong expectedFrn)
     {
-        int coHr = CoInitializeEx(IntPtr.Zero, COINITAPARTMENTTHREADED);
         try
         {
-            var failure = DoRevealIndexed(
-                RealIndexedShellTargetVerifier.Instance,
-                RealRevealApi.Instance,
-                fullPath,
-                expectedFrn);
-            if (failure is not null)
+            int coHr = hooks.CoInitialize();
+            try
             {
-                ReportFailure(failureMessage, "reveal", fullPath, failure);
+                var failure = DoRevealIndexed(
+                    hooks.Verifier,
+                    hooks.RevealApi,
+                    fullPath,
+                    expectedFrn);
+                if (failure is not null)
+                {
+                    ReportFailure(failureMessage, "reveal", fullPath, failure);
+                }
+            }
+            finally
+            {
+                if (coHr >= 0)
+                {
+                    hooks.CoUninitialize();
+                }
             }
         }
         catch (Exception ex)
         {
             ReportFailure(failureMessage, "reveal", fullPath, ex);
-        }
-        finally
-        {
-            if (coHr >= 0)
-            {
-                CoUninitialize();
-            }
         }
     }
 
@@ -221,7 +229,7 @@ internal static partial class ShellOps
     /// (ADR-0036). Every other "restart" reason — service register or uninstall —
     /// is an in-process <see cref="AppReload"/> (App.SoftRestart). A
     /// failed restart notifies and leaves this instance running.</summary>
-    public static void Relaunch() => RelaunchWith(RealAppRestart.Instance);
+    public static void Relaunch() => RelaunchWith(Volatile.Read(ref _hooks).AppRestart);
 
     /// <summary>Relaunch core, parameterised over the restart step so it is
     /// unit-testable without actually terminating the process. A failure is
@@ -244,9 +252,7 @@ internal static partial class ShellOps
     {
         try
         {
-            var pkg = new DataPackage();
-            pkg.SetText(text);
-            Clipboard.SetContent(pkg);
+            Volatile.Read(ref _hooks).CopyText(text);
         }
         catch (Exception ex)
         {
@@ -286,7 +292,7 @@ internal static partial class ShellOps
         Notifier.Post(
             NotifySeverity.Warning,
             $"{failureMessage}: {Path.GetFileName(path)}",
-            hint.Length == 0 ? ex.Message : $"{ex.Message}({hint})");
+            $"{ex.Message}({hint})");
     }
 
     /// <summary>Win32-error-specific hint — "access denied" must not read
@@ -296,7 +302,8 @@ internal static partial class ShellOps
     /// <param name="ex">The failure whose Win32 error code selects the hint.</param>
     /// <param name="path">The path acted on, which decides whether a
     /// "not found" is really a length failure.</param>
-    /// <returns>The localized hint, or empty when none is defensible.</returns>
+    /// <returns>The localized hint; unknown failures use the conservative
+    /// "moved recently" fallback.</returns>
     internal static string Hint(Exception ex, string path) =>
         IsLengthFailure(ex, path)
             ? Loc.Get("Shell_HintPathTooLong")
@@ -327,13 +334,10 @@ internal static partial class ShellOps
             && (ex as System.ComponentModel.Win32Exception)?.NativeErrorCode
                 is 2 or 3 or 206);
 
-    // COM init for the reveal STA thread (SHOpenFolderAndSelectItems needs an
-    // initialised STA). Pinned to System32 like the other shell imports.
-    [LibraryImport("ole32.dll")]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    private static partial int CoInitializeEx(IntPtr reserved, uint coInit);
+    private sealed class ActionOnDispose(Action action) : IDisposable
+    {
+        private Action? _action = action;
 
-    [LibraryImport("ole32.dll")]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    private static partial void CoUninitialize();
+        public void Dispose() => Interlocked.Exchange(ref _action, null)?.Invoke();
+    }
 }

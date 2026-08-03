@@ -102,7 +102,23 @@ public sealed class PageCodecTests
         BinaryPrimitives.WriteUInt32LittleEndian(
             rowBytes.AsSpan(EngineContract.RowOffsets.NameLen), 1);
 
-        Assert.Throws<InvalidDataException>(() => PageCodec.Decode(rowBytes, []));
+        var ex = Assert.Throws<InvalidDataException>(() => PageCodec.Decode(rowBytes, []));
+
+        Assert.Equal("row 0 name window [0, 1) exceeds blob length 0", ex.Message);
+    }
+
+    [Fact]
+    public void ParentPathWindowOutsidePayload_IdentifiesTheFieldAndRow()
+    {
+        var rowBytes = new byte[PageCodec.RowSize * 2];
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            rowBytes.AsSpan(PageCodec.RowSize + EngineContract.RowOffsets.ParentPathOff), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            rowBytes.AsSpan(PageCodec.RowSize + EngineContract.RowOffsets.ParentPathLen), 1);
+
+        var ex = Assert.Throws<InvalidDataException>(() => PageCodec.Decode(rowBytes, [0]));
+
+        Assert.Equal("row 1 parent path window [1, 2) exceeds blob length 1", ex.Message);
     }
 
     [Fact]
@@ -115,7 +131,19 @@ public sealed class PageCodecTests
 
         var ex = Assert.Throws<InvalidDataException>(() => PageCodec.Decode(rowBytes, []));
 
-        Assert.Contains("unknown flags", ex.Message, StringComparison.Ordinal);
+        Assert.Equal("row 0 has unknown flags (0x00000002)", ex.Message);
+    }
+
+    [Fact]
+    public void NonZeroReservedField_IsRejectedWithItsValue()
+    {
+        var rowBytes = new byte[PageCodec.RowSize];
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            rowBytes.AsSpan(EngineContract.RowOffsets.Reserved), 42);
+
+        var ex = Assert.Throws<InvalidDataException>(() => PageCodec.Decode(rowBytes, []));
+
+        Assert.Equal("row 0 has non-zero reserved field (42)", ex.Message);
     }
 
     [Fact]

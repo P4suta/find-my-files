@@ -270,7 +270,7 @@ jobs:
               input: {
                 branch: {
                   repositoryNameWithOwner: `${context.repo.owner}/${context.repo.repo}`,
-                  refName: branch,
+                  branchName: branch,
                 },
                 message: {
                   headline: "chore: sync Cargo.lock to the release version",

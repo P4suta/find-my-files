@@ -85,6 +85,8 @@ internal static class PageCodec
                 $"row {row} {field} window [{offset}, {end}) exceeds blob length {blob.Length}");
         }
 
-        return blob.Slice(checked((int)offset), checked((int)length));
+        // The ulong end check above proves both uint values fit in the int-sized
+        // span before either cast is evaluated.
+        return blob.Slice((int)offset, (int)length);
     }
 }

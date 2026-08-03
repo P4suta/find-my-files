@@ -19,6 +19,7 @@ namespace FindMyFiles.Services;
 /// </summary>
 internal sealed class ServiceProvisioner
 {
+    private static ServiceProvisionerHooks _hooks = ServiceProvisionerHooks.Production;
     private readonly Func<Task<ServiceActionOutcome>> _register;
     private readonly Action _relaunch;
     private readonly Func<bool, Task<ServiceActionResult>> _uninstall;
@@ -53,6 +54,17 @@ internal sealed class ServiceProvisioner
     public static ServiceProvisioner Real { get; } = new(
         RegisterElevatedAsync,
         App.SoftRestartIntoPipe);
+
+    /// <summary>Replace all production provisioning boundaries as one atomic
+    /// test seam. The returned disposable restores the previous set.</summary>
+    /// <param name="hooks">Complete deterministic boundary implementation.</param>
+    /// <returns>A scope that restores the previous hooks.</returns>
+    internal static IDisposable UseHooksForTests(ServiceProvisionerHooks hooks)
+    {
+        ArgumentNullException.ThrowIfNull(hooks);
+        var previous = Interlocked.Exchange(ref _hooks, hooks);
+        return new ActionOnDispose(() => Interlocked.Exchange(ref _hooks, previous));
+    }
 
     /// <summary>install (idempotent) + restart in one elevated step (the
     /// fmf-service `setup` verb), forwarding the daily user's SID so OTS
@@ -92,14 +104,16 @@ internal sealed class ServiceProvisioner
     /// <returns>The outcome of the elevated setup, or Failed when the exe is missing.</returns>
     private static async Task<ServiceActionOutcome> RegisterElevatedAsync()
     {
-        var exe = ServiceSetup.LocateServiceExe(AppContext.BaseDirectory);
+        var hooks = Volatile.Read(ref _hooks);
+        var exe = hooks.LocateServiceExe(AppContext.BaseDirectory);
         if (exe is null)
         {
             FileLog.Warn("service-ui", "fmf-service.exe not found — cannot register");
             return ServiceActionOutcome.Failed;
         }
 
-        if (!ServiceSetup.TryCreateSetupArguments(out var args))
+        var setup = hooks.CreateSetupArguments();
+        if (!setup.Success)
         {
             FileLog.Warn(
                 "service-ui",
@@ -107,7 +121,8 @@ internal sealed class ServiceProvisioner
             return ServiceActionOutcome.IdentityUnavailable;
         }
 
-        var result = await Task.Run(() => ServiceSetup.RunElevated(exe, args)).ConfigureAwait(false);
+        var result = await Task.Run(
+            () => hooks.RunElevated(exe, setup.Arguments)).ConfigureAwait(false);
         FileLog.Event(
             "service-ui",
             "service action completed",
@@ -119,9 +134,12 @@ internal sealed class ServiceProvisioner
     /// <summary>The real elevated uninstall behind <see cref="Real"/>. The
     /// command line is closed over a boolean, so no user-controlled text reaches
     /// the elevated boundary.</summary>
-    private static async Task<ServiceActionResult> UninstallElevatedAsync(bool purgeData)
+    /// <param name="purgeData">Whether the machine-owned ProgramData is removed.</param>
+    /// <returns>The classified elevated helper result.</returns>
+    internal static async Task<ServiceActionResult> UninstallElevatedAsync(bool purgeData)
     {
-        var exe = ServiceSetup.LocateServiceExe(AppContext.BaseDirectory);
+        var hooks = Volatile.Read(ref _hooks);
+        var exe = hooks.LocateServiceExe(AppContext.BaseDirectory);
         if (exe is null)
         {
             FileLog.Warn("service-ui", "fmf-service.exe not found — cannot uninstall");
@@ -129,7 +147,7 @@ internal sealed class ServiceProvisioner
         }
 
         var args = purgeData ? "uninstall --purge-data" : "uninstall";
-        var result = await Task.Run(() => ServiceSetup.RunElevated(exe, args)).ConfigureAwait(false);
+        var result = await Task.Run(() => hooks.RunElevated(exe, args)).ConfigureAwait(false);
         FileLog.Event(
             "service-ui",
             "service action completed",
@@ -138,6 +156,13 @@ internal sealed class ServiceProvisioner
             ("outcome", (int)result.Outcome),
             ("exit", result.ExitCode));
         return result;
+    }
+
+    private sealed class ActionOnDispose(Action action) : IDisposable
+    {
+        private Action? _action = action;
+
+        public void Dispose() => Interlocked.Exchange(ref _action, null)?.Invoke();
     }
 }
 

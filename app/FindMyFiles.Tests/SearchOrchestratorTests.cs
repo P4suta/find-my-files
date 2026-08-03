@@ -1,4 +1,6 @@
+using System.Reflection;
 using FindMyFiles.Engine;
+using FindMyFiles.Highlighting;
 using FindMyFiles.Tests.TestDoubles;
 using FindMyFiles.ViewModels;
 using Xunit;
@@ -77,7 +79,9 @@ public sealed class SearchOrchestratorTests : IDisposable
     {
         SyncContext.RunContinuationsInline();
         var publications = new List<ResultsPublication>();
+        var traces = new List<QueryTraceData?>();
         _presenter.ResultsPublished += publications.Add;
+        _orchestrator.TraceCaptured += traces.Add;
 
         _request = new SearchRequest("a", SearchOptions.Default);
         _orchestrator.Requery(RequeryOrigin.Initial); // query 1, held by the stub
@@ -86,17 +90,23 @@ public sealed class SearchOrchestratorTests : IDisposable
         Assert.Equal(2, _engine.Searches.Count);
 
         // The newer query completes first and gets published…
-        var newer = _engine.Searches[1].CompleteWith(Rows.Many(5, "new"));
+        var newestTrace = new QueryTraceData { TotalUs = 20 };
+        var newer = _engine.Searches[1].CompleteWith(Rows.Many(5, "new"), newestTrace);
         Assert.Equal(5, _presenter.ResultsSource.Count);
         Assert.Single(publications);
-        Assert.Equal("5 items", _presenter.CountText);
+        var countText = _presenter.CountText;
+        Assert.EndsWith("5 items", countText, StringComparison.Ordinal);
 
         // …then the superseded result arrives late: disposed, screen untouched.
-        var older = _engine.Searches[0].CompleteWith(Rows.Many(3, "old"));
+        var older = _engine.Searches[0].CompleteWith(
+            Rows.Many(3, "old"),
+            new QueryTraceData { TotalUs = 10 });
         Assert.True(older.Disposed);
         Assert.False(newer.Disposed);
         Assert.Equal(5, _presenter.ResultsSource.Count);
         Assert.Single(publications); // no second publication
+        Assert.Equal([newestTrace], traces);
+        Assert.Equal(countText, _presenter.CountText);
         Assert.Equal("new_000000.txt", ((ResultRow)_presenter.ResultsSource[0]!).Name);
     }
 
@@ -167,7 +177,10 @@ public sealed class SearchOrchestratorTests : IDisposable
     {
         SyncContext.RunContinuationsInline();
         var resets = 0;
+        var failures = new List<Exception>();
         _presenter.ResultsSource.CollectionChanged += (_, _) => resets++;
+        _orchestrator.SearchFailed += failures.Add;
+        _engine.ThrowOnSearch = new InvalidOperationException("empty query reached the engine");
 
         // Startup: empty box → no engine call, and the list is already
         // empty, so not even a Reset fires (the startup flicker source).
@@ -182,18 +195,63 @@ public sealed class SearchOrchestratorTests : IDisposable
         Assert.Equal(0, resets);
 
         // A real query publishes; clearing it empties the screen once.
+        _engine.ThrowOnSearch = null;
         _request = new SearchRequest("a", SearchOptions.Default);
         _orchestrator.Requery(RequeryOrigin.Typing);
         _engine.Searches[0].CompleteWith(Rows.Many(3));
         Assert.Equal(3, _presenter.ResultsSource.Count);
 
         _request = new SearchRequest(string.Empty, SearchOptions.Default);
+        _engine.ThrowOnSearch = new InvalidOperationException("clear reached the engine");
         var resetsBeforeClear = resets;
         _orchestrator.NotifyTextChanged(string.Empty);
         Assert.Empty(_presenter.ResultsSource);
         Assert.Equal(string.Empty, _presenter.CountText);
         Assert.Equal(resetsBeforeClear + 1, resets); // exactly one clearing Reset
         Assert.Single(_engine.Searches); // still only the "a" search
+        Assert.Empty(failures);
+    }
+
+    [Fact]
+    public void EmptyQuery_clears_the_last_trace_without_starting_engine_work()
+    {
+        SyncContext.RunContinuationsInline();
+        var traces = new List<QueryTraceData?>();
+        _orchestrator.TraceCaptured += traces.Add;
+
+        _orchestrator.Requery(RequeryOrigin.Initial);
+
+        Assert.Equal([null], traces);
+        Assert.Empty(_engine.Searches);
+    }
+
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("", true)]
+    [InlineData("x", false)]
+    public void TextAndGenerationClassifiers_PinBothSidesOfTheirBoundaries(
+        string? value,
+        bool empty)
+    {
+        Assert.Equal(empty, SearchOrchestrator.IsEmptyText(value));
+        Assert.True(SearchOrchestrator.IsCurrentGeneration(7, 7));
+        Assert.False(SearchOrchestrator.IsCurrentGeneration(7, 8));
+    }
+
+    [Fact]
+    public void NotificationsAfterDispose_AreNoOps()
+    {
+        _orchestrator.Dispose();
+        var starts = Debounce.StartCount;
+        var stops = Debounce.StopCount;
+
+        _orchestrator.NotifyTextChanged("x");
+        _orchestrator.NotifyCompositionStarted();
+        _orchestrator.NotifyCompositionEnded("x");
+
+        Assert.Equal(starts, Debounce.StartCount);
+        Assert.Equal(stops, Debounce.StopCount);
+        Assert.Empty(_engine.Searches);
     }
 
     [Fact]
@@ -214,6 +272,36 @@ public sealed class SearchOrchestratorTests : IDisposable
         Assert.True(Debounce.IsStarted);
         Debounce.Fire();
         Assert.Equal("省察", Assert.Single(_engine.Searches).Query);
+    }
+
+    [Fact]
+    public void ImeComposition_start_disarms_an_already_pending_debounce()
+    {
+        _orchestrator.NotifyTextChanged("draft");
+        Assert.True(Debounce.IsStarted);
+        var stops = Debounce.StopCount;
+
+        _orchestrator.NotifyCompositionStarted();
+
+        Assert.False(Debounce.IsStarted);
+        Assert.Equal(stops + 1, Debounce.StopCount);
+        Debounce.Fire();
+        Assert.Empty(_engine.Searches);
+    }
+
+    [Fact]
+    public void Completed_query_clears_and_disposes_its_active_operation()
+    {
+        SyncContext.RunContinuationsInline();
+        _request = new SearchRequest("done", SearchOptions.Default);
+        _orchestrator.Requery(RequeryOrigin.Initial);
+        var operation = Assert.IsAssignableFrom<CancellationTokenSource>(
+            Field("_activeQuery").GetValue(_orchestrator));
+
+        Assert.Single(_engine.Searches).CompleteWith([]);
+
+        Assert.Null(Field("_activeQuery").GetValue(_orchestrator));
+        Assert.Throws<ObjectDisposedException>(() => _ = operation.Token);
     }
 
     [Fact]
@@ -276,6 +364,21 @@ public sealed class SearchOrchestratorTests : IDisposable
     }
 
     [Fact]
+    public void EngineUnavailable_RaisesSearchFailed_AndClearsCountText()
+    {
+        SyncContext.RunContinuationsInline();
+        var failures = new List<Exception>();
+        _orchestrator.SearchFailed += failures.Add;
+        _engine.ThrowOnSearch = new EngineUnavailableException("service disconnected");
+
+        _request = new SearchRequest("a", SearchOptions.Default);
+        _orchestrator.Requery(RequeryOrigin.Typing);
+
+        Assert.Equal(string.Empty, _presenter.CountText);
+        Assert.IsType<EngineUnavailableException>(Assert.Single(failures));
+    }
+
+    [Fact]
     public void Typing_DebouncesUntilTheTimerFires()
     {
         SyncContext.RunContinuationsInline();
@@ -319,6 +422,7 @@ public sealed class SearchOrchestratorTests : IDisposable
     public void StaleResult_RetriesOnce_ThenGivesUp()
     {
         SyncContext.RunContinuationsInline();
+        using var log = new LogCapture();
         _request = new SearchRequest("a", SearchOptions.Default);
         _orchestrator.Requery(RequeryOrigin.Initial);
         var first = new StubSearchResult(Rows.Many(3))
@@ -339,6 +443,7 @@ public sealed class SearchOrchestratorTests : IDisposable
 
         Assert.True(second.Disposed);
         Assert.Equal(2, _engine.Searches.Count); // stale twice → no requery storm
+        AssertLog(log.Text.Split('\n'), "area=query", "qlen=1", "result stale twice in a row");
     }
 
     [Fact]
@@ -394,6 +499,98 @@ public sealed class SearchOrchestratorTests : IDisposable
         Assert.Equal(@"report.*\.pdf$", search.Query);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void RegexMode_selects_the_matching_highlighter_for_published_rows(
+        bool regexMode,
+        bool expectedHighlight)
+    {
+        SyncContext.RunContinuationsInline();
+        _request = new SearchRequest(
+            "^report",
+            SearchOptions.Default with
+            {
+                RegexMode = regexMode,
+                Scope = RegexScope.Name,
+            });
+
+        _orchestrator.Requery(RequeryOrigin.Filter);
+        Assert.Single(_engine.Searches).CompleteWith([Rows.File(1, "report.txt")]);
+
+        var row = Assert.IsType<ResultRow>(_presenter.ResultsSource[0]);
+        if (expectedHighlight)
+        {
+            Assert.Equal([new HighlightRange(0, 6)], row.NameRanges);
+        }
+        else
+        {
+            Assert.Empty(row.NameRanges);
+        }
+    }
+
+    [Fact]
+    public void Failure_paths_clear_visible_status_and_emit_complete_safe_logs()
+    {
+        SyncContext.RunContinuationsInline();
+        using var log = new LogCapture();
+        var failures = new List<Exception>();
+        _orchestrator.SearchFailed += failures.Add;
+        _request = new SearchRequest("abc", SearchOptions.Default);
+
+        _presenter.CountText = "visible";
+        _engine.ThrowOnSearch = new EngineUnavailableException("private path");
+        _orchestrator.Requery(RequeryOrigin.Typing);
+        Assert.Equal(string.Empty, _presenter.CountText);
+
+        _presenter.CountText = "visible";
+        _engine.ThrowOnSearch = new EngineException("private query", 7);
+        _orchestrator.Requery(RequeryOrigin.Typing);
+        Assert.Equal(string.Empty, _presenter.CountText);
+
+        _engine.ThrowOnSearch = new InvalidOperationException("private unexpected detail");
+        _orchestrator.Requery(RequeryOrigin.Typing);
+
+        Assert.Collection(
+            failures,
+            item => Assert.IsType<EngineUnavailableException>(item),
+            item => Assert.IsType<EngineException>(item),
+            item => Assert.IsType<InvalidOperationException>(item));
+        var lines = log.Text.Split('\n');
+        AssertLog(lines, "area=query", "qlen=3", "engine unavailable");
+        AssertLog(lines, "area=query", "qlen=3", "engine error");
+        AssertLog(lines, "area=query", "qlen=3", "unexpected query failure");
+        Assert.DoesNotContain("private path", log.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("private query", log.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("private unexpected detail", log.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Constructor_and_dispose_own_exactly_one_auto_requery_subscription()
+    {
+        Assert.Equal(1, SubscriberCount(_presenter.ResultsSource, "BecameStale"));
+        Assert.Equal(1, SubscriberCount(_events, "IndexChanged"));
+
+        _orchestrator.Dispose();
+
+        Assert.Equal(0, SubscriberCount(_presenter.ResultsSource, "BecameStale"));
+        Assert.Equal(0, SubscriberCount(_events, "IndexChanged"));
+    }
+
+    [Fact]
+    public void Dispose_stops_a_pending_debounce()
+    {
+        var lifetime = Assert.IsType<CancellationTokenSource>(
+            Field("_lifetime").GetValue(_orchestrator));
+        _orchestrator.NotifyTextChanged("pending");
+        Assert.True(Debounce.IsStarted);
+
+        _orchestrator.Dispose();
+
+        Assert.False(Debounce.IsStarted);
+        Assert.Throws<ObjectDisposedException>(() => _ = lifetime.Token);
+    }
+
     [Fact]
     public void IndexChanged_RequeriesViaTheDispatcher()
     {
@@ -405,6 +602,19 @@ public sealed class SearchOrchestratorTests : IDisposable
         _dispatcher.DrainQueue();
         Assert.Single(_engine.Searches);
     }
+
+    private static FieldInfo Field(string name) =>
+        typeof(SearchOrchestrator).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException($"missing field {name}");
+
+    private static int SubscriberCount(object owner, string eventName) =>
+        (owner.GetType().GetField(eventName, BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(owner) as Delegate)?.GetInvocationList().Length ?? 0;
+
+    private static void AssertLog(string[] lines, params string[] fragments) =>
+        Assert.Contains(
+            lines,
+            line => fragments.All(fragment => line.Contains(fragment, StringComparison.Ordinal)));
 
     public void Dispose()
     {

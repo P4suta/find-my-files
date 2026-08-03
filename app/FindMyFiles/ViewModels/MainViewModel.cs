@@ -168,8 +168,10 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         try
         {
             var stats = await _engine.GetStatsAsync(_lifetime.Token).ConfigureAwait(true);
-            if (Volatile.Read(ref _disposed) == 0
-                && generation == Volatile.Read(ref _versionRefreshGeneration))
+            if (ShouldApplyVersion(
+                Volatile.Read(ref _disposed) != 0,
+                generation,
+                Volatile.Read(ref _versionRefreshGeneration)))
             {
                 ApplyEngineVersion(stats?.Service?.Version ?? string.Empty);
             }
@@ -179,8 +181,10 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         catch (Exception ex)
         {
-            if (Volatile.Read(ref _disposed) == 0
-                && generation == Volatile.Read(ref _versionRefreshGeneration))
+            if (ShouldApplyVersion(
+                Volatile.Read(ref _disposed) != 0,
+                generation,
+                Volatile.Read(ref _versionRefreshGeneration)))
             {
                 ApplyEngineVersion(string.Empty);
             }
@@ -189,7 +193,16 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    private void ApplyEngineVersion(string version)
+    /// <summary>Accept a version response only while its owner is alive and
+    /// no newer refresh has superseded it.</summary>
+    /// <param name="disposed">Whether the ViewModel lifetime has ended.</param>
+    /// <param name="candidate">Generation captured by this refresh.</param>
+    /// <param name="current">Most recently issued refresh generation.</param>
+    /// <returns>True only when the response may still update bound state.</returns>
+    internal static bool ShouldApplyVersion(bool disposed, int candidate, int current) =>
+        !disposed && candidate == current;
+
+    internal void ApplyEngineVersion(string version)
     {
         EngineVersion = version;
         if (!HasVersionMismatch)
@@ -305,14 +318,21 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
                 SearchText,
                 new SearchOptions(Sort, SortDescending, FmfCase.Smart, IncludeHiddenSystem, RegexMode, RegexScope)));
 
-        // Focused-search policy is code-owned; only the user-facing on/off
-        // preference is persisted.
-        FocusedSearch = _settings.FocusedSearch;
+        // Restore bound settings without starting async work from a partially
+        // constructed ViewModel. Search/Notifications/Perf wiring is completed
+        // below; user-initiated changes requery after construction.
+        RestorePersistedSetting(() =>
+        {
+            // Focused-search policy is code-owned; only the user-facing on/off
+            // preference is persisted.
+            FocusedSearch = _settings.FocusedSearch;
 
-        // Regex mode/scope restore (same ctor-time no-op requery as focused).
-        RegexScope = string.Equals(_settings.RegexScope, "path", StringComparison.Ordinal) ? RegexScopeKind.Path : RegexScopeKind.Name;
-        RegexMode = _settings.RegexMode;
-        CloseToTray = _settings.CloseToTray;
+            // Regex mode/scope are restored as one constructor transaction.
+            RegexScope = string.Equals(_settings.RegexScope, "path", StringComparison.Ordinal) ? RegexScopeKind.Path : RegexScopeKind.Name;
+            RegexMode = _settings.RegexMode;
+            CloseToTray = _settings.CloseToTray;
+        });
+
         Notifications = new NotificationCenter(dispatcher);
         Perf = new PerfPanelViewModel(engine);
 
@@ -603,10 +623,9 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     partial void OnIncludeHiddenSystemChanged(bool value) =>
         Search.Requery(RequeryOrigin.Filter);
 
-    /// <summary>Toggle → orchestrator + persistence + filter requery. Also
-    /// runs once from the ctor (settings=true flips the default-false
-    /// property): the save is skipped (no change) and the requery is a no-op
-    /// on the still-empty query.</summary>
+    /// <summary>Toggle → orchestrator + persistence + filter requery. Constructor
+    /// restoration updates the orchestrator but suppresses persistence and async
+    /// requery until the ViewModel is fully wired.</summary>
     partial void OnFocusedSearchChanged(bool value)
     {
         Search.FocusedSearch = value;
@@ -622,13 +641,15 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             }
         }
 
-        Search.Requery(RequeryOrigin.Filter);
+        if (!_restoringPersistedSetting)
+        {
+            Search.Requery(RequeryOrigin.Filter);
+        }
     }
 
     /// <summary>Regex toggle → persist + filter requery (the live query text
-    /// switches between substring and whole-regex semantics). Also runs once
-    /// from the ctor; the save is skipped when unchanged and the requery is a
-    /// no-op on the still-empty query.</summary>
+    /// switches between substring and whole-regex semantics). Constructor
+    /// restoration suppresses persistence and requery until wiring completes.</summary>
     partial void OnRegexModeChanged(bool value)
     {
         if (!_restoringPersistedSetting && _settings.RegexMode != value)
@@ -643,7 +664,10 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             }
         }
 
-        Search.Requery(RequeryOrigin.Filter);
+        if (!_restoringPersistedSetting)
+        {
+            Search.Requery(RequeryOrigin.Filter);
+        }
     }
 
     /// <summary>Scope radio → persist; requery only while regex mode is on
@@ -666,7 +690,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             }
         }
 
-        if (RegexMode)
+        if (!_restoringPersistedSetting && RegexMode)
         {
             Search.Requery(RequeryOrigin.Filter);
         }

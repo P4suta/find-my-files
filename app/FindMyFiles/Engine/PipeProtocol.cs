@@ -160,7 +160,6 @@ internal static class PipeProtocol
         BinaryPrimitives.WriteUInt32LittleEndian(
             b.AsSpan(12), options.IncludeHiddenSystem ? 1u : 0u);
         BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(16), options.RegexModeBits);
-        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(20), 0);
         BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(24), presentationBasis);
         Encoding.UTF8.GetBytes(text, b.AsSpan(EngineContract.QueryOptionsSize));
         return b;
@@ -257,18 +256,14 @@ internal static class PipeProtocol
                 $"PageResp row_count {rowCount} exceeds {EngineContract.MaxPageRows}");
         }
 
-        if ((ulong)payload.Length > EngineContract.MaxPayloadLen)
-        {
-            throw new InvalidDataException(
-                $"PageResp payload is {payload.Length} bytes, maximum is {EngineContract.MaxPayloadLen}");
-        }
+        var validatedPayloadLength = ValidateDecodedPagePayloadLength(payload.Length);
 
         // Validate the declared sizes in long: the fields are u32, so
         // `rowCount * RowSize` overflows int for a hostile/buggy frame. The 16 MiB
         // frame cap already bounds payload.Length, so once this equality holds
         // every offset below fits an int.
         var expected = 8L + ((long)rowCount * RowSize) + blobLen;
-        if (expected != payload.Length)
+        if (expected != validatedPayloadLength)
         {
             throw new InvalidDataException(
                 $"PageResp payload is {payload.Length} bytes, expected {expected} for {rowCount} rows");
@@ -296,29 +291,26 @@ internal static class PipeProtocol
         for (var i = 0; i < rows.Count; i++)
         {
             encoded[i] = (Wtf8.Encode(rows[i].Name), Wtf8.Encode(rows[i].ParentPath));
-            blobLength = checked(blobLength + encoded[i].Name.Length + encoded[i].Parent.Length);
+            blobLength += encoded[i].Name.Length + encoded[i].Parent.Length;
         }
 
-        var rowBytesLength = checked(rows.Count * RowSize);
-        var payloadLength = checked(8L + rowBytesLength + blobLength);
-        if (payloadLength > EngineContract.MaxPayloadLen)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(rows),
-                $"Encoded page is {payloadLength} bytes; maximum is {EngineContract.MaxPayloadLen}.");
-        }
+        // rows.Count is contract-bounded above and every allocation length is
+        // int-sized. The payload cap below therefore proves each later cast.
+        var rowBytesLength = rows.Count * RowSize;
+        var payloadLength = 8L + rowBytesLength + blobLength;
+        var validatedPayloadLength = ValidateEncodedPagePayloadLength(payloadLength);
 
-        var blob = new byte[checked((int)blobLength)];
+        var blob = new byte[(int)blobLength];
         var blobOffset = 0;
         var rowBytes = new byte[rowBytesLength];
         for (var i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
             var (name, parent) = encoded[i];
-            var nameOff = checked((uint)blobOffset);
+            var nameOff = (uint)blobOffset;
             name.CopyTo(blob, blobOffset);
             blobOffset += name.Length;
-            var parentOff = checked((uint)blobOffset);
+            var parentOff = (uint)blobOffset;
             parent.CopyTo(blob, blobOffset);
             blobOffset += parent.Length;
 
@@ -333,19 +325,47 @@ internal static class PipeProtocol
                 r[EngineContract.RowOffsets.ParentPathOff..], parentOff);
             BinaryPrimitives.WriteUInt32LittleEndian(r[EngineContract.RowOffsets.Flags..], row.Flags);
             BinaryPrimitives.WriteUInt32LittleEndian(
-                r[EngineContract.RowOffsets.NameLen..], checked((uint)name.Length));
+                r[EngineContract.RowOffsets.NameLen..], (uint)name.Length);
             BinaryPrimitives.WriteUInt32LittleEndian(
-                r[EngineContract.RowOffsets.ParentPathLen..], checked((uint)parent.Length));
-            BinaryPrimitives.WriteUInt32LittleEndian(
-                r[EngineContract.RowOffsets.Reserved..], 0);
+                r[EngineContract.RowOffsets.ParentPathLen..], (uint)parent.Length);
         }
 
-        var b = new byte[checked((int)payloadLength)];
+        var b = new byte[validatedPayloadLength];
         BinaryPrimitives.WriteUInt32LittleEndian(b, (uint)rows.Count);
-        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), checked((uint)blob.Length));
+        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), (uint)blob.Length);
         rowBytes.CopyTo(b, 8);
         blob.CopyTo(b, 8 + rowBytes.Length);
         return b;
+    }
+
+    /// <summary>Validate a received page length without allocating that page.</summary>
+    /// <param name="payloadLength">Received payload byte length.</param>
+    /// <returns>The validated length for subsequent size equations.</returns>
+    internal static int ValidateDecodedPagePayloadLength(int payloadLength)
+    {
+        if ((ulong)payloadLength > EngineContract.MaxPayloadLen)
+        {
+            throw new InvalidDataException(
+                $"PageResp payload is {payloadLength} bytes, maximum is {EngineContract.MaxPayloadLen}");
+        }
+
+        return payloadLength;
+    }
+
+    /// <summary>Validate a page encoder's calculated length without allocating it.</summary>
+    /// <param name="payloadLength">Calculated payload byte length.</param>
+    /// <returns>The validated int-sized allocation length.</returns>
+    internal static int ValidateEncodedPagePayloadLength(long payloadLength)
+    {
+        if (payloadLength > EngineContract.MaxPayloadLen)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(payloadLength),
+                payloadLength,
+                $"Encoded page is {payloadLength} bytes; maximum is {EngineContract.MaxPayloadLen}.");
+        }
+
+        return (int)payloadLength;
     }
 
     // ── ResultFree (op 9, binary) ───────────────────────────────────────

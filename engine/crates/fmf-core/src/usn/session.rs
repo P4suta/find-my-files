@@ -898,7 +898,11 @@ mod tests {
     #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
     fn live_metadata_returns_the_complete_hard_link_set() {
         require_admin_gate();
-        let dir = TestDir::new();
+        // The GitHub runner checks out on D:, while this test intentionally
+        // opens the C: metadata handle. Keep the fixture on C: as well: FRNs
+        // are volume-local and querying C: with a D: FRN correctly returns
+        // Gone rather than an authoritative link set.
+        let dir = TestDir::new_in(std::path::Path::new(r"C:\"));
         let first = dir.join("hard-link-first.txt");
         let second = dir.join("hard-link-second.txt");
         std::fs::write(&first, b"hard-link fixture").unwrap();

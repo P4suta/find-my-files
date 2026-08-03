@@ -101,7 +101,7 @@ internal sealed class SearchOrchestrator : IDisposable
             return; // IME composition in flight — wait for the commit
         }
 
-        if (string.IsNullOrEmpty(value))
+        if (IsEmptyText(value))
         {
             _debounce.Stop();
             Requery(RequeryOrigin.Clear); // clearing should feel instant
@@ -263,7 +263,7 @@ internal sealed class SearchOrchestrator : IDisposable
                 request.Options,
                 _presenter.PresentationBasis,
                 ct);
-            if (generation != Interlocked.Read(ref _generation))
+            if (!IsCurrentGeneration(generation, Interlocked.Read(ref _generation)))
             {
                 outcome.Result.Dispose(); // a newer query superseded this one
                 return;
@@ -279,7 +279,7 @@ internal sealed class SearchOrchestrator : IDisposable
                     outcome.Trace,
                     origin,
                     highlighter,
-                    () => generation == Interlocked.Read(ref _generation),
+                    () => IsCurrentGeneration(generation, Interlocked.Read(ref _generation)),
                     ct);
                 return;
             }
@@ -289,7 +289,7 @@ internal sealed class SearchOrchestrator : IDisposable
                 outcome.Trace,
                 origin,
                 highlighter,
-                () => generation == Interlocked.Read(ref _generation),
+                () => IsCurrentGeneration(generation, Interlocked.Read(ref _generation)),
                 ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -363,4 +363,16 @@ internal sealed class SearchOrchestrator : IDisposable
         SearchFailed = null;
         _lifetime.Dispose();
     }
+
+    /// <summary>Pure text classification kept separate from fire-and-forget
+    /// orchestration so null/empty mutation checks cannot strand an async query.</summary>
+    /// <param name="value">Current text-box value.</param>
+    /// <returns>True for null or empty input.</returns>
+    internal static bool IsEmptyText(string? value) => string.IsNullOrEmpty(value);
+
+    /// <summary>Pure generation comparison used both before and during publish.</summary>
+    /// <param name="candidate">Generation captured by the operation.</param>
+    /// <param name="current">Latest orchestrator generation.</param>
+    /// <returns>True only while the operation is still current.</returns>
+    internal static bool IsCurrentGeneration(long candidate, long current) => candidate == current;
 }

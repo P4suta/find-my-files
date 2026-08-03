@@ -25,6 +25,21 @@ public sealed class PipeEngineClientTests
     }
 
     [Fact]
+    public void ResultLeaseGate_RejectsReleaseWithoutAnActiveLease()
+    {
+        var gate = new ResultLeaseGate();
+
+        var beforeAcquire = Assert.Throws<InvalidOperationException>(() => gate.Release());
+        Assert.Equal("result lease underflow", beforeAcquire.Message);
+
+        Assert.True(gate.TryAcquire());
+        Assert.False(gate.Release());
+
+        var afterDrain = Assert.Throws<InvalidOperationException>(() => gate.Release());
+        Assert.Equal("result lease underflow", afterDrain.Message);
+    }
+
+    [Fact]
     public async Task Connection_RunsFixedHandshake_AndSynthesizesEvents()
     {
         using var server = new FakePipeServer
@@ -41,11 +56,11 @@ public sealed class PipeEngineClientTests
                 log.Add($"volume {s.Label} {s.State} {s.Entries}");
             }
         };
-        client.IndexChanged += _ =>
+        client.IndexChanged += volume =>
         {
             lock (gate)
             {
-                log.Add("index-changed");
+                log.Add($"index-changed {volume}");
             }
         };
 
@@ -58,7 +73,7 @@ public sealed class PipeEngineClientTests
             {
                 lock (gate)
                 {
-                    return log.Contains("index-changed", StringComparer.Ordinal);
+                    return log.Contains("index-changed *", StringComparer.Ordinal);
                 }
             },
             "synthesized IndexChanged");
@@ -76,7 +91,7 @@ public sealed class PipeEngineClientTests
         lock (gate)
         {
             Assert.Equal(
-                ["volume C: Ready 42", "volume D: Scanning 7", "index-changed"],
+                ["volume C: Ready 42", "volume D: Scanning 7", "index-changed *"],
                 log);
         }
     }
@@ -131,6 +146,7 @@ public sealed class PipeEngineClientTests
     [Fact]
     public async Task SearchThenPage_RoundTrips_AcrossChunkedWrites()
     {
+        using var log = new LogCapture();
         using var server = new FakePipeServer
         {
             ChunkedWrites = true, // 1-byte writes: reassembly must not care
@@ -145,6 +161,10 @@ public sealed class PipeEngineClientTests
 
         var rows = await outcome.Result.GetRangeAsync(0, 5);
         Assert.Equal(Rows.Many(5, "pipe"), rows); // record equality, all fields
+        Assert.Contains("area=query", log.Text, StringComparison.Ordinal);
+        Assert.Contains("rid=1", log.Text, StringComparison.Ordinal);
+        Assert.Contains("hits=5", log.Text, StringComparison.Ordinal);
+        Assert.Contains("query served", log.Text, StringComparison.Ordinal);
         outcome.Result.Dispose();
     }
 
@@ -236,7 +256,7 @@ public sealed class PipeEngineClientTests
         await Assert.ThrowsAsync<System.Text.Json.JsonException>(
             () => client.SearchAsync("a", SearchOptions.Default));
 
-        await server.WaitForAsync(PipeProtocol.Op.ResultFree);
+        await server.WaitForAsync(PipeProtocol.Op.ResultFree, timeoutMs: 500);
         var free = server.Received.Last(r => r.Opcode == PipeProtocol.Op.ResultFree);
         Assert.Equal(resultId, PipeProtocol.DecodeResultFreeReq(free.Payload));
     }
@@ -260,7 +280,7 @@ public sealed class PipeEngineClientTests
         await Assert.ThrowsAsync<OverflowException>(
             () => client.SearchAsync("a", SearchOptions.Default));
 
-        await server.WaitForAsync(PipeProtocol.Op.ResultFree);
+        await server.WaitForAsync(PipeProtocol.Op.ResultFree, timeoutMs: 500);
         var free = server.Received.Last(r => r.Opcode == PipeProtocol.Op.ResultFree);
         Assert.Equal(resultId, PipeProtocol.DecodeResultFreeReq(free.Payload));
     }
@@ -290,7 +310,7 @@ public sealed class PipeEngineClientTests
         responseGate.SetResult((
             PipeProtocol.Status.Ok,
             PipeProtocol.EncodeQueryResp(resultId, 1, "{}")));
-        await server.WaitForAsync(PipeProtocol.Op.ResultFree);
+        await server.WaitForAsync(PipeProtocol.Op.ResultFree, timeoutMs: 500);
 
         var free = server.Received.Last(r => r.Opcode == PipeProtocol.Op.ResultFree);
         Assert.Equal(resultId, PipeProtocol.DecodeResultFreeReq(free.Payload));
@@ -300,7 +320,10 @@ public sealed class PipeEngineClientTests
     public async Task ResponseOpcodeMismatch_FailsRequestAndRetiresConnection()
     {
         using var server = new FakePipeServer();
-        using var client = new PipeEngineClient(server.PipeName);
+        using var client = new PipeEngineClient(server.PipeName)
+        {
+            RequestTimeout = TimeSpan.FromSeconds(1),
+        };
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
@@ -308,18 +331,29 @@ public sealed class PipeEngineClientTests
         server.ResponseOpcode = opcode =>
             opcode == PipeProtocol.Op.ListVolumes ? PipeProtocol.Op.Stats : opcode;
 
-        await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => client.ListVolumesAsync());
+        var request = client.ListVolumesAsync();
+        var completed = await Task.WhenAny(request, Task.Delay(250));
+        Assert.Same(request, completed);
+        var ex = await Assert.ThrowsAsync<EngineUnavailableException>(() => request);
+        Assert.Contains("response opcode mismatch for request", ex.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            $"expected {PipeProtocol.Op.ListVolumes}, received {PipeProtocol.Op.Stats}",
+            ex.Message,
+            StringComparison.Ordinal);
         await WaitUntilAsync(
             () => server.ConnectionCount >= 2,
-            "protocol-violating connection retired");
+            "protocol-violating connection retired",
+            timeoutMs: 500);
     }
 
     [Fact]
     public async Task Disconnect_FailsPendingFast_AndStalesLiveResults()
     {
         using var server = new FakePipeServer { Rows = Rows.Many(3) };
-        using var client = new PipeEngineClient(server.PipeName);
+        using var client = new PipeEngineClient(server.PipeName)
+        {
+            RequestTimeout = TimeSpan.FromSeconds(1),
+        };
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected, "connected");
         var outcome = await client.SearchAsync("a", SearchOptions.Default);
@@ -332,7 +366,10 @@ public sealed class PipeEngineClientTests
         server.DisconnectAll();
 
         // Pending requests fail fast — no 10s timeout wait.
-        await Assert.ThrowsAsync<EngineUnavailableException>(() => fetch);
+        var completed = await Task.WhenAny(fetch, Task.Delay(250));
+        Assert.Same(fetch, completed);
+        var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() => fetch);
+        Assert.Equal("engine service connection lost", failure.Message);
 
         // The surviving handle is epoch-invalidated: stale, not hanging.
         await Assert.ThrowsAsync<StaleResultException>(() => outcome.Result.GetRangeAsync(0, 1));
@@ -353,9 +390,10 @@ public sealed class PipeEngineClientTests
             () => client.Connection == EngineConnectionState.Reconnecting, "noticed the drop");
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        await Assert.ThrowsAsync<EngineUnavailableException>(
+        var failure = await Assert.ThrowsAsync<EngineUnavailableException>(
             () => client.SearchAsync("a", SearchOptions.Default));
         sw.Stop();
+        Assert.Equal("engine service is not connected", failure.Message);
 
         // There is no connection to write to, so the failure is immediate —
         // never the 10s per-request deadline.
@@ -381,12 +419,16 @@ public sealed class PipeEngineClientTests
         server.Handler = (opcode, _) =>
             opcode == PipeProtocol.Op.ListVolumes ? hung.Task : null;
 
-        await Assert.ThrowsAsync<EngineUnavailableException>(
+        var failure = await Assert.ThrowsAsync<EngineUnavailableException>(
             () => client.ListVolumesAsync());
+        Assert.Equal(
+            $"request (opcode {PipeProtocol.Op.ListVolumes}) timed out after 0s",
+            failure.Message);
         await WaitUntilAsync(
             () => server.ConnectionCount >= 2
                 && client.Connection == EngineConnectionState.Connected,
-            "hung epoch retired and reconnected");
+            "hung epoch retired and reconnected",
+            timeoutMs: 500);
 
         server.Handler = null;
         Assert.Equal(["C:"], await client.ListVolumesAsync());
@@ -421,6 +463,11 @@ public sealed class PipeEngineClientTests
 
         var oldRequest = client.ListVolumesAsync();
         await timeoutReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var pendingField = typeof(PipeEngineClient).GetField(
+            "_pending",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.Empty(Assert.IsAssignableFrom<System.Collections.IEnumerable>(
+            pendingField?.GetValue(client)));
 
         // Replace the timed-out request's epoch while its catch path is
         // deliberately paused immediately before retirement.
@@ -430,12 +477,22 @@ public sealed class PipeEngineClientTests
                 && client.Connection == EngineConnectionState.Connected,
             "replacement connection");
 
-        server.Handler = null;
+        var replacementResponse = new TaskCompletionSource<(int Status, byte[] Payload)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        server.Handler = (opcode, _) => opcode == PipeProtocol.Op.ListVolumes
+            ? replacementResponse.Task
+            : null;
+        var replacementRequest = client.ListVolumesAsync();
+        await server.WaitForAsync(PipeProtocol.Op.ListVolumes, minCount: 2);
         client.BeforeTimeoutRetireForTests = null;
         allowTimeoutRetire.SetResult();
         await Assert.ThrowsAsync<EngineUnavailableException>(() => oldRequest);
 
-        Assert.Equal(["C:"], await client.ListVolumesAsync());
+        Assert.False(replacementRequest.IsCompleted);
+        replacementResponse.SetResult((
+            PipeProtocol.Status.Ok,
+            PipeProtocol.EncodeVolumeStatuses(server.Statuses)));
+        Assert.Equal(["C:"], await replacementRequest);
         await Task.Delay(750);
         Assert.Equal(2, server.ConnectionCount);
         Assert.Equal(EngineConnectionState.Connected, client.Connection);
@@ -444,6 +501,7 @@ public sealed class PipeEngineClientTests
     [Fact]
     public async Task Reconnect_RedoesHandshake_AndRefiresIndexChanged()
     {
+        using var log = new LogCapture();
         using var server = new FakePipeServer();
         using var client = new PipeEngineClient(server.PipeName, autoStart: false);
         var indexChanged = 0;
@@ -461,6 +519,7 @@ public sealed class PipeEngineClientTests
             () => client.Connection == EngineConnectionState.Connected, "first connect");
         await WaitUntilAsync(
             () => Volatile.Read(ref indexChanged) == 1, "first synthesized IndexChanged");
+        Assert.DoesNotContain("reconnected to engine service", log.Text, StringComparison.Ordinal);
 
         server.DisconnectAll();
         await WaitUntilAsync(
@@ -471,6 +530,10 @@ public sealed class PipeEngineClientTests
             () => Volatile.Read(ref indexChanged) == 2, "re-fired IndexChanged");
 
         Assert.True(Volatile.Read(ref sawReconnecting) >= 1);
+        Assert.Contains(
+            log.Text.Split('\n'),
+            line => line.Contains("area=pipe", StringComparison.Ordinal)
+                && line.Contains("reconnected to engine service", StringComparison.Ordinal));
 
         // The second connection replays the full fixed sequence.
         Assert.Equal(
@@ -487,6 +550,9 @@ public sealed class PipeEngineClientTests
         Assert.Equal(1, stats.Transport.Reconnects);
         Assert.Equal(4242u, stats.Transport.ServerPid);
         Assert.Equal(EngineContract.AbiVersion, stats.Transport.AbiVersion);
+        Assert.Contains("area=pipe", log.Text, StringComparison.Ordinal);
+        Assert.Contains("reconnects=1", log.Text, StringComparison.Ordinal);
+        Assert.Contains("reconnected to engine service", log.Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -654,11 +720,28 @@ public sealed class PipeEngineClientTests
     [Fact]
     public async Task Probe_AcceptsFullPipePath_AndFailsFastWithoutAServer()
     {
+        SyncContext.RunContinuationsInline();
         using var server = new FakePipeServer();
 
         Assert.True(await PipeEngineClient.ProbeAsync(
             @"\\.\pipe\" + server.PipeName, TimeSpan.FromSeconds(2)));
         Assert.False(await PipeEngineClient.ProbeAsync(
             "fmf-test-no-such-pipe", TimeSpan.FromMilliseconds(250)));
+    }
+
+    [Fact]
+    public void ProbeHelloHeader_RequiresEveryCanonicalField()
+    {
+        var valid = new PipeProtocol.FrameHeader(
+            12,
+            PipeProtocol.Op.Hello,
+            PipeProtocol.FlagResponse,
+            1,
+            PipeProtocol.Status.Ok);
+        Assert.True(PipeEngineClient.IsValidHelloResponse(valid));
+        Assert.False(PipeEngineClient.IsValidHelloResponse(valid with { Flags = 0 }));
+        Assert.False(PipeEngineClient.IsValidHelloResponse(valid with { RequestId = 0 }));
+        Assert.False(PipeEngineClient.IsValidHelloResponse(valid with { Opcode = PipeProtocol.Op.Stats }));
+        Assert.False(PipeEngineClient.IsValidHelloResponse(valid with { StatusCode = PipeProtocol.Status.Io }));
     }
 }

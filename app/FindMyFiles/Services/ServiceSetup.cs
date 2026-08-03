@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using FindMyFiles.Engine;
 
 namespace FindMyFiles.Services;
@@ -11,7 +10,7 @@ namespace FindMyFiles.Services;
 /// fmf-service.exe only for one-time elevated setup/removal. Mutations are
 /// strictly user-initiated; install is idempotent on the service side.
 /// </summary>
-internal static partial class ServiceSetup
+internal static class ServiceSetup
 {
     private const uint ServiceStopped = 1;
     private const uint ServiceStartPending = 2;
@@ -27,16 +26,24 @@ internal static partial class ServiceSetup
     private static readonly TimeSpan ServiceControlPollInterval =
         TimeSpan.FromMilliseconds(100);
 
+    private static ServiceSetupHooks _hooks = ServiceSetupHooks.Production;
+
+    /// <summary>Replace every operating-system boundary for one deterministic test scope.</summary>
+    /// <param name="hooks">Complete boundary implementation.</param>
+    /// <returns>A scope that restores the previous implementation.</returns>
+    internal static IDisposable UseHooksForTests(ServiceSetupHooks hooks)
+    {
+        ArgumentNullException.ThrowIfNull(hooks);
+        var previous = Interlocked.Exchange(ref _hooks, hooks);
+        return new ActionOnDispose(() => Interlocked.Exchange(ref _hooks, previous));
+    }
+
     /// <summary>True when *this* process is already running with an
     /// Administrator token — the in-proc engine path needs it, and when set the
     /// in-app install/start verbs can skip their own UAC prompt.</summary>
     /// <returns>True when the current process token is in the Administrators role.</returns>
-    public static bool IsProcessElevated()
-    {
-        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
-        return new System.Security.Principal.WindowsPrincipal(identity)
-            .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
-    }
+    public static bool IsProcessElevated() =>
+        Volatile.Read(ref _hooks).IsProcessElevated();
 
     /// <summary>Read-only SCM query for <see cref="EngineContract.ServiceName"/>.</summary>
     /// <returns>The service's install/run state for the offer logic.</returns>
@@ -45,40 +52,26 @@ internal static partial class ServiceSetup
         const uint ScManagerConnect = 0x0001;
         const uint ServiceQueryStatus = 0x0004;
         const int ErrorServiceDoesNotExist = 1060;
-        var scm = OpenSCManager(null, null, ScManagerConnect);
-        if (scm == IntPtr.Zero)
+        using var scm = Volatile.Read(ref _hooks).OpenManager(ScManagerConnect);
+        if (scm is null)
         {
             return EngineServiceState.Unknown;
         }
 
-        try
+        using var svc = scm.OpenService(EngineContract.ServiceName, ServiceQueryStatus);
+        if (svc is null)
         {
-            var svc = OpenService(scm, EngineContract.ServiceName, ServiceQueryStatus);
-            if (svc == IntPtr.Zero)
-            {
-                return Marshal.GetLastWin32Error() == ErrorServiceDoesNotExist
-                    ? EngineServiceState.NotInstalled
-                    : EngineServiceState.Unknown;
-            }
-
-            try
-            {
-                if (!QueryServiceStatus(svc, out var status))
-                {
-                    return EngineServiceState.Unknown;
-                }
-
-                return MapServiceState(status.CurrentState);
-            }
-            finally
-            {
-                CloseServiceHandle(svc);
-            }
+            return scm.LastError == ErrorServiceDoesNotExist
+                ? EngineServiceState.NotInstalled
+                : EngineServiceState.Unknown;
         }
-        finally
+
+        if (!svc.TryQueryState(out var state))
         {
-            CloseServiceHandle(scm);
+            return EngineServiceState.Unknown;
         }
+
+        return MapServiceState(state);
     }
 
     /// <summary>Map raw SERVICE_STATUS state. Only SERVICE_STOPPED proves the
@@ -98,67 +91,28 @@ internal static partial class ServiceSetup
     {
         const uint ScManagerConnect = 0x0001;
         const uint ServiceQueryConfig = 0x0001;
-        const uint ServiceConfigDescription = 1;
         const uint MaxDescriptionBytes = 4096;
 
-        var scm = OpenSCManager(null, null, ScManagerConnect);
-        if (scm == IntPtr.Zero)
+        using var scm = Volatile.Read(ref _hooks).OpenManager(ScManagerConnect);
+        if (scm is null)
         {
             return false;
         }
 
-        try
+        using var svc = scm.OpenService(EngineContract.ServiceName, ServiceQueryConfig);
+        if (svc is null)
         {
-            var svc = OpenService(scm, EngineContract.ServiceName, ServiceQueryConfig);
-            if (svc == IntPtr.Zero)
-            {
-                return false;
-            }
-
-            try
-            {
-                _ = QueryServiceConfig2(
-                    svc,
-                    ServiceConfigDescription,
-                    IntPtr.Zero,
-                    0,
-                    out var bytesNeeded);
-                if (bytesNeeded == 0 || bytesNeeded > MaxDescriptionBytes)
-                {
-                    return false;
-                }
-
-                var buffer = Marshal.AllocHGlobal((int)bytesNeeded);
-                try
-                {
-                    if (!QueryServiceConfig2(
-                        svc,
-                        ServiceConfigDescription,
-                        buffer,
-                        bytesNeeded,
-                        out _))
-                    {
-                        return false;
-                    }
-
-                    var description = Marshal.PtrToStructure<ServiceDescription>(buffer);
-                    return IsServiceProtocolMarkerCompatible(
-                        Marshal.PtrToStringUni(description.Description));
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(buffer);
-                }
-            }
-            finally
-            {
-                CloseServiceHandle(svc);
-            }
+            return false;
         }
-        finally
+
+        var bytesNeeded = svc.QueryDescriptionBytesNeeded();
+        if (bytesNeeded == 0 || bytesNeeded > MaxDescriptionBytes)
         {
-            CloseServiceHandle(scm);
+            return false;
         }
+
+        return svc.TryReadDescription(bytesNeeded, out var description)
+            && IsServiceProtocolMarkerCompatible(description);
     }
 
     /// <summary>Exact marker comparison, split out for deterministic tests.</summary>
@@ -177,54 +131,27 @@ internal static partial class ServiceSetup
     /// because registering the service needs admin.</summary>
     /// <returns>The running service's process id, or 0 when not installed/running.</returns>
     public static uint QueryServiceProcessId()
+        => QueryServiceProcessId(Volatile.Read(ref _hooks));
+
+    private static uint QueryServiceProcessId(ServiceSetupHooks hooks)
     {
         const uint ScManagerConnect = 0x0001;
         const uint ServiceQueryStatus = 0x0004;
-        const int ScStatusProcessInfo = 0;
-        var scm = OpenSCManager(null, null, ScManagerConnect);
-        if (scm == IntPtr.Zero)
+        using var scm = hooks.OpenManager(ScManagerConnect);
+        if (scm is null)
         {
             return 0;
         }
 
-        try
+        using var svc = scm.OpenService(EngineContract.ServiceName, ServiceQueryStatus);
+        if (svc is null
+            || !svc.TryQueryProcess(out var state, out var processId))
         {
-            var svc = OpenService(scm, EngineContract.ServiceName, ServiceQueryStatus);
-            if (svc == IntPtr.Zero)
-            {
-                return 0;
-            }
-
-            try
-            {
-                var size = (uint)Marshal.SizeOf<ServiceStatusProcess>();
-                var buffer = Marshal.AllocHGlobal((int)size);
-                try
-                {
-                    if (!QueryServiceStatusEx(svc, ScStatusProcessInfo, buffer, size, out _))
-                    {
-                        return 0;
-                    }
-
-                    var status = Marshal.PtrToStructure<ServiceStatusProcess>(buffer);
-
-                    // dwProcessId is only meaningful while RUNNING.
-                    return status.CurrentState == ServiceRunning ? status.ProcessId : 0;
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(buffer);
-                }
-            }
-            finally
-            {
-                CloseServiceHandle(svc);
-            }
+            return 0;
         }
-        finally
-        {
-            CloseServiceHandle(scm);
-        }
+
+        // dwProcessId is only meaningful while RUNNING.
+        return state == ServiceRunning ? processId : 0;
     }
 
     /// <summary>Resolve the exact bundled companion next to the app.
@@ -270,8 +197,9 @@ internal static partial class ServiceSetup
     {
         try
         {
-            using var trusted = ServiceExecutableTrust.Acquire(exe);
-            using var p = Process.Start(new ProcessStartInfo
+            var hooks = Volatile.Read(ref _hooks);
+            using var trusted = hooks.AcquireExecutable(exe);
+            using var p = hooks.StartProcess(new ProcessStartInfo
             {
                 FileName = trusted.Path,
                 Arguments = args,
@@ -336,7 +264,10 @@ internal static partial class ServiceSetup
     public static bool TryRestartUnelevated() =>
         TryControlUnelevated(ScmControlVerb.Restart);
 
-    private static bool TryControlUnelevated(ScmControlVerb verb)
+    /// <summary>Contains failures from the native SCM boundary for one verb.</summary>
+    /// <param name="verb">Requested service lifecycle operation.</param>
+    /// <returns>True only when the requested terminal state is observed.</returns>
+    internal static bool TryControlUnelevated(ScmControlVerb verb)
     {
         try
         {
@@ -359,69 +290,50 @@ internal static partial class ServiceSetup
         const uint ServiceStart = 0x0010;
         const uint ServiceStop = 0x0020;
 
-        var scm = OpenSCManager(null, null, ScManagerConnect);
-        if (scm == IntPtr.Zero)
+        var hooks = Volatile.Read(ref _hooks);
+        using var scm = hooks.OpenManager(ScManagerConnect);
+        if (scm is null)
         {
             FileLog.Event(
                 "service-setup",
                 "could not open SCM for unelevated service control",
                 ("verb", verb.ToString()),
-                ("win32", Marshal.GetLastWin32Error()));
+                ("win32", -1));
             return false;
         }
 
-        try
+        var verbAccess = verb switch
         {
-            var verbAccess = verb switch
-            {
-                ScmControlVerb.Start => ServiceStart,
-                ScmControlVerb.Stop => ServiceStop,
-                ScmControlVerb.Restart => ServiceStart | ServiceStop,
-                _ => 0u,
-            };
-            var access = ServiceQueryStatus | verbAccess;
-            var service = OpenService(scm, EngineContract.ServiceName, access);
-            if (service == IntPtr.Zero)
-            {
-                FileLog.Event(
-                    "service-setup",
-                    "could not open service for unelevated control",
-                    ("verb", verb.ToString()),
-                    ("win32", Marshal.GetLastWin32Error()));
-                return false;
-            }
+            ScmControlVerb.Start => ServiceStart,
+            ScmControlVerb.Stop => ServiceStop,
+            ScmControlVerb.Restart => ServiceStart | ServiceStop,
+            _ => 0u,
+        };
+        var access = ServiceQueryStatus | verbAccess;
+        using var service = scm.OpenService(EngineContract.ServiceName, access);
+        if (service is null)
+        {
+            FileLog.Event(
+                "service-setup",
+                "could not open service for unelevated control",
+                ("verb", verb.ToString()),
+                ("win32", scm.LastError));
+            return false;
+        }
 
-            try
-            {
-                var success = DriveServiceControl(
-                    verb,
-                    () => QueryServiceStatus(service, out var status)
-                        ? status.CurrentState
-                        : null,
-                    () => StartServiceNative(service, 0, IntPtr.Zero)
-                        ? 0
-                        : Marshal.GetLastWin32Error(),
-                    () => ControlServiceNative(service, 1, out _)
-                        ? 0
-                        : Marshal.GetLastWin32Error(),
-                    ServiceControlPollAttempts,
-                    () => Thread.Sleep(ServiceControlPollInterval));
-                FileLog.Event(
-                    "service-setup",
-                    "unelevated SCM control completed",
-                    ("verb", verb.ToString()),
-                    ("success", success));
-                return success;
-            }
-            finally
-            {
-                CloseServiceHandle(service);
-            }
-        }
-        finally
-        {
-            CloseServiceHandle(scm);
-        }
+        var success = DriveServiceControl(
+            verb,
+            () => service.TryQueryState(out var state) ? state : null,
+            service.Start,
+            service.Stop,
+            ServiceControlPollAttempts,
+            () => hooks.Wait(ServiceControlPollInterval));
+        FileLog.Event(
+            "service-setup",
+            "unelevated SCM control completed",
+            ("verb", verb.ToString()),
+            ("success", success));
+        return success;
     }
 
     internal enum ScmControlVerb
@@ -451,16 +363,16 @@ internal static partial class ServiceSetup
         Action wait)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxPollAttempts);
-        var remaining = maxPollAttempts;
+        var remaining = new Queue<byte>(new byte[maxPollAttempts]);
         return verb switch
         {
             ScmControlVerb.Start =>
-                DriveToRunning(queryState, start, wait, ref remaining),
+                DriveToRunning(queryState, start, wait, remaining),
             ScmControlVerb.Stop =>
-                DriveToStopped(queryState, stop, wait, ref remaining),
+                DriveToStopped(queryState, stop, wait, remaining),
             ScmControlVerb.Restart =>
-                DriveToStopped(queryState, stop, wait, ref remaining)
-                && DriveToRunning(queryState, start, wait, ref remaining),
+                DriveToStopped(queryState, stop, wait, remaining)
+                && DriveToRunning(queryState, start, wait, remaining),
             _ => false,
         };
     }
@@ -469,10 +381,10 @@ internal static partial class ServiceSetup
         Func<uint?> queryState,
         Func<int> start,
         Action wait,
-        ref int remaining)
+        Queue<byte> remaining)
     {
         var startIssued = false;
-        while (TryReadState(queryState, ref remaining, out var state))
+        while (TryReadState(queryState, remaining, out var state))
         {
             switch (state)
             {
@@ -512,10 +424,10 @@ internal static partial class ServiceSetup
         Func<uint?> queryState,
         Func<int> stop,
         Action wait,
-        ref int remaining)
+        Queue<byte> remaining)
     {
         var stopIssued = false;
-        while (TryReadState(queryState, ref remaining, out var state))
+        while (TryReadState(queryState, remaining, out var state))
         {
             switch (state)
             {
@@ -560,16 +472,15 @@ internal static partial class ServiceSetup
 
     private static bool TryReadState(
         Func<uint?> queryState,
-        ref int remaining,
+        Queue<byte> remaining,
         out uint state)
     {
         state = 0;
-        if (remaining <= 0)
+        if (!remaining.TryDequeue(out _))
         {
             return false;
         }
 
-        remaining--;
         var current = queryState();
         if (current is null)
         {
@@ -580,9 +491,9 @@ internal static partial class ServiceSetup
         return true;
     }
 
-    private static bool WaitForNextPoll(Action wait, int remaining)
+    private static bool WaitForNextPoll(Action wait, Queue<byte> remaining)
     {
-        if (remaining <= 0)
+        if (remaining.Count == 0)
         {
             return false;
         }
@@ -597,7 +508,7 @@ internal static partial class ServiceSetup
     /// intentionally bounded; an elevated process handle may deny termination,
     /// in which case the failure is logged rather than hidden.
     /// </summary>
-    private static void TryTerminateTimedOutProcess(Process process, string mode)
+    private static void TryTerminateTimedOutProcess(IElevatedProcess process, string mode)
     {
         try
         {
@@ -626,13 +537,16 @@ internal static partial class ServiceSetup
     /// to the caller for stop + setup recovery.</summary>
     /// <param name="pipeName">Current contract pipe name.</param>
     /// <returns>True only when a protocol-compatible Hello succeeds.</returns>
-    public static bool WaitForCompatibleStartedService(string pipeName) =>
-        PollForCompatibleStartedService(
-            QueryServiceProcessId,
-            () => PipeEngineClient.Probe(pipeName, TimeSpan.FromMilliseconds(250)),
+    public static bool WaitForCompatibleStartedService(string pipeName)
+    {
+        var hooks = Volatile.Read(ref _hooks);
+        return PollForCompatibleStartedService(
+            () => QueryServiceProcessId(hooks),
+            () => hooks.ProbePipe(pipeName),
             startPollAttempts: 100,
             compatibilityProbeAttempts: 5,
-            () => Thread.Sleep(100));
+            () => hooks.Wait(TimeSpan.FromMilliseconds(100)));
+    }
 
     /// <summary>Purely injected polling core for
     /// <see cref="WaitForCompatibleStartedService"/>.</summary>
@@ -652,31 +566,33 @@ internal static partial class ServiceSetup
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(startPollAttempts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(compatibilityProbeAttempts);
 
-        for (var attempt = 0; attempt < startPollAttempts; attempt++)
+        var waitBeforeStartPoll = false;
+        foreach (var startPoll in Enumerable.Repeat(0, startPollAttempts))
         {
+            if (waitBeforeStartPoll)
+            {
+                wait();
+            }
+
+            waitBeforeStartPoll = true;
             if (servicePid() != 0)
             {
-                for (var probeAttempt = 0;
-                    probeAttempt < compatibilityProbeAttempts;
-                    probeAttempt++)
+                var waitBeforeProbe = false;
+                foreach (var probeSlot in Enumerable.Repeat(0, compatibilityProbeAttempts))
                 {
+                    if (waitBeforeProbe)
+                    {
+                        wait();
+                    }
+
+                    waitBeforeProbe = true;
                     if (probe())
                     {
                         return true;
                     }
-
-                    if (probeAttempt + 1 < compatibilityProbeAttempts)
-                    {
-                        wait();
-                    }
                 }
 
                 return false;
-            }
-
-            if (attempt + 1 < startPollAttempts)
-            {
-                wait();
             }
         }
 
@@ -694,8 +610,7 @@ internal static partial class ServiceSetup
     {
         try
         {
-            using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
-            return id.User?.Value;
+            return Volatile.Read(ref _hooks).ReadCurrentUserSid();
         }
         catch (Exception ex)
         {
@@ -768,79 +683,10 @@ internal static partial class ServiceSetup
         && (component.Length == 1 || component[0] != '0')
         && component.All(char.IsAsciiDigit);
 
-    [LibraryImport("advapi32.dll", EntryPoint = "OpenSCManagerW",
-        StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
-    private static partial IntPtr OpenSCManager(string? machine, string? database, uint access);
-
-    [LibraryImport("advapi32.dll", EntryPoint = "OpenServiceW",
-        StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
-    private static partial IntPtr OpenService(IntPtr scm, string name, uint access);
-
-    [LibraryImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool QueryServiceStatus(IntPtr service, out ServiceStatus status);
-
-    [LibraryImport("advapi32.dll", EntryPoint = "StartServiceW", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool StartServiceNative(
-        IntPtr service,
-        uint argumentCount,
-        IntPtr argumentVectors);
-
-    [LibraryImport("advapi32.dll", EntryPoint = "ControlService", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool ControlServiceNative(
-        IntPtr service,
-        uint control,
-        out ServiceStatus status);
-
-    [LibraryImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool QueryServiceStatusEx(
-        IntPtr service, int infoLevel, IntPtr buffer, uint bufSize, out uint bytesNeeded);
-
-    [LibraryImport("advapi32.dll", EntryPoint = "QueryServiceConfig2W", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool QueryServiceConfig2(
-        IntPtr service,
-        uint infoLevel,
-        IntPtr buffer,
-        uint bufSize,
-        out uint bytesNeeded);
-
-    [LibraryImport("advapi32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool CloseServiceHandle(IntPtr handle);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ServiceStatus
+    private sealed class ActionOnDispose(Action action) : IDisposable
     {
-        public uint ServiceType;
-        public uint CurrentState;
-        public uint ControlsAccepted;
-        public uint Win32ExitCode;
-        public uint ServiceSpecificExitCode;
-        public uint CheckPoint;
-        public uint WaitHint;
-    }
+        private Action? _action = action;
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ServiceStatusProcess
-    {
-        public uint ServiceType;
-        public uint CurrentState;
-        public uint ControlsAccepted;
-        public uint Win32ExitCode;
-        public uint ServiceSpecificExitCode;
-        public uint CheckPoint;
-        public uint WaitHint;
-        public uint ProcessId;
-        public uint ServiceFlags;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ServiceDescription
-    {
-        public IntPtr Description;
+        public void Dispose() => Interlocked.Exchange(ref _action, null)?.Invoke();
     }
 }
