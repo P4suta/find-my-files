@@ -140,7 +140,7 @@ parking_lot = "0.12"
 crossbeam-channel = "0.5"
 # 2.0.19 moves thiserror-impl to syn 3 while serde/tracing still require syn 2;
 # keep the workspace duplicate-free until the remaining proc-macro graph moves.
-thiserror = "=2.0.18"
+thiserror = "=2.0.19"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
@@ -153,7 +153,7 @@ regex-syntax = "0.8"
 unicode-normalization = "0.1"
 # 4.6.4 moves clap_derive to syn 3; keep the same duplicate-free proc-macro
 # graph as thiserror above until serde/tracing can move in one transaction.
-clap = { version = "=4.6.3", features = ["derive", "wrap_help"] }
+clap = { version = "=4.6.4", features = ["derive", "wrap_help"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # CLI presentation: TTY-aware colouring that strips ANSI when redirected
