@@ -37,6 +37,23 @@ retries = 0
 flaky-result = "fail"
 "#;
 
+// `--cargo-arg=--locked` is forwarded by cargo-mutants to both the build and
+// nextest invocations. Keep the nextest-only policy here so `--locked` cannot
+// accidentally be supplied a second time (nextest rejects duplicate uses).
+const RUST_MUTATION_NEXTEST_ARGS: &[&str] = &[
+    "--user-config-file",
+    "none",
+    "--profile",
+    "mutation",
+    "--fail-fast",
+    "--retries",
+    "0",
+    "--flaky-result",
+    "fail",
+    "--no-tests",
+    "fail",
+];
+
 const RUST_REPORT_FILES: &[&str] = &[
     "caught.txt",
     "missed.txt",
@@ -1297,19 +1314,8 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
         "--",
         "--config-file",
         &nextest_config_arg,
-        "--user-config-file",
-        "none",
-        "--profile",
-        "mutation",
-        "--fail-fast",
-        "--retries",
-        "0",
-        "--flaky-result",
-        "fail",
-        "--no-tests",
-        "fail",
-        "--locked",
     ]);
+    command.args(RUST_MUTATION_NEXTEST_ARGS);
     let status = command
         .status()
         .context("spawn trusted cargo-mutants run")?;
@@ -1662,18 +1668,15 @@ fn parse_rust_outcomes(evidence: &Path, generated: &BTreeSet<RustMutant>) -> Res
     if baseline_count != 1 {
         bail!("outcomes.json must contain exactly one baseline");
     }
-    let all: BTreeSet<RustMutant> = killed
-        .iter()
-        .chain(invalid.keys())
-        .chain(&survived)
-        .chain(&timeout)
-        .cloned()
-        .collect();
-    if &all != generated
-        || all.len() != killed.len() + invalid.len() + survived.len() + timeout.len()
-    {
-        bail!("Rust terminal outcomes are not a disjoint exhaustive generated-mutant partition");
-    }
+    let baseline_passed = baseline_passed.ok_or_else(|| anyhow!("baseline result disappeared"))?;
+    let all = validate_parsed_rust_partition(
+        baseline_passed,
+        generated,
+        &killed,
+        &invalid,
+        &survived,
+        &timeout,
+    )?;
     let killed_vec: Vec<_> = killed.into_iter().collect();
     let invalid_vec: Vec<_> = invalid.into_iter().collect();
     let survived_vec: Vec<_> = survived.into_iter().collect();
@@ -1696,12 +1699,40 @@ fn parse_rust_outcomes(evidence: &Path, generated: &BTreeSet<RustMutant>) -> Res
     validate_count(root, "timeout", timeout_vec.len())?;
     Ok(ParsedRustRun {
         baseline_log: baseline_log.ok_or_else(|| anyhow!("baseline log path disappeared"))?,
-        baseline_passed: baseline_passed.ok_or_else(|| anyhow!("baseline result disappeared"))?,
+        baseline_passed,
         killed: killed_vec,
         invalid: invalid_vec,
         survived: survived_vec,
         timeout: timeout_vec,
     })
+}
+
+fn validate_parsed_rust_partition(
+    baseline_passed: bool,
+    generated: &BTreeSet<RustMutant>,
+    killed: &BTreeSet<RustMutant>,
+    invalid: &BTreeMap<RustMutant, String>,
+    survived: &BTreeSet<RustMutant>,
+    timeout: &BTreeSet<RustMutant>,
+) -> Result<BTreeSet<RustMutant>> {
+    let all: BTreeSet<RustMutant> = killed
+        .iter()
+        .chain(invalid.keys())
+        .chain(survived)
+        .chain(timeout)
+        .cloned()
+        .collect();
+    if all.len() != killed.len() + invalid.len() + survived.len() + timeout.len() {
+        bail!("Rust terminal outcomes are not disjoint");
+    }
+    if baseline_passed {
+        if &all != generated {
+            bail!("Rust terminal outcomes are not an exhaustive generated-mutant partition");
+        }
+    } else if !all.is_empty() {
+        bail!("failed Rust baseline unexpectedly emitted mutant outcomes");
+    }
+    Ok(all)
 }
 
 fn parse_rust_baseline_summary(summary: &str) -> Result<bool> {
@@ -3340,9 +3371,48 @@ mod tests {
     }
 
     #[test]
+    fn rust_nextest_locked_is_forwarded_only_by_cargo_mutants() {
+        assert!(!RUST_MUTATION_NEXTEST_ARGS.contains(&"--locked"));
+    }
+
+    #[test]
     fn failed_rust_baseline_remains_parseable_for_diagnostic_copy() {
         assert!(parse_rust_baseline_summary("Success").unwrap());
         assert!(!parse_rust_baseline_summary("Failure").unwrap());
         assert!(parse_rust_baseline_summary("Timeout").is_err());
+
+        let mutant = RustMutant {
+            name: "fixture".to_owned(),
+            package: "fmf-core".to_owned(),
+            path: "crates/fmf-core/src/lib.rs".to_owned(),
+            line: 1,
+            column: 1,
+            mutation: "fixture mutation".to_owned(),
+        };
+        let generated = BTreeSet::from([mutant.clone()]);
+        let empty_set = BTreeSet::new();
+        let empty_map = BTreeMap::new();
+        assert!(validate_parsed_rust_partition(
+            false, &generated, &empty_set, &empty_map, &empty_set, &empty_set,
+        )
+        .is_ok());
+        assert!(validate_parsed_rust_partition(
+            true,
+            &generated,
+            &BTreeSet::from([mutant.clone()]),
+            &empty_map,
+            &empty_set,
+            &empty_set,
+        )
+        .is_ok());
+        assert!(validate_parsed_rust_partition(
+            false,
+            &generated,
+            &BTreeSet::from([mutant]),
+            &empty_map,
+            &empty_set,
+            &empty_set,
+        )
+        .is_err());
     }
 }
