@@ -444,6 +444,10 @@ mod tests {
         let mut multi = names(&idx, "ext:pdf;rs");
         multi.sort();
         assert_eq!(multi, vec!["Report.PDF", "main.rs"]);
+        assert!(
+            names(&idx, "ext:Report.PDF").is_empty(),
+            "a suffix spanning two dotted segments is not the final extension"
+        );
     }
 
     #[test]
