@@ -32,11 +32,27 @@ internal sealed class LogCapture : IDisposable
 
     private sealed class CaptureSink : ILogEventSink
     {
+        private readonly Lock _gate = new();
         private readonly LogfmtFormatter _formatter = new();
         private readonly StringWriter _writer = new();
 
-        public string Text => _writer.ToString();
+        public string Text
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _writer.ToString();
+                }
+            }
+        }
 
-        public void Emit(LogEvent logEvent) => _formatter.Format(logEvent, _writer);
+        public void Emit(LogEvent logEvent)
+        {
+            lock (_gate)
+            {
+                _formatter.Format(logEvent, _writer);
+            }
+        }
     }
 }

@@ -720,22 +720,30 @@ fn driver_for(t: &CTerm) -> (Driver, bool) {
             },
             *folded && !*canonical,
         ),
-        Matcher::Ext { exts, canonical } => (
-            Driver::Suffixes {
-                suffixes: exts
-                    .iter()
-                    .map(|e| {
-                        let mut s = Vec::with_capacity(e.len() + 1);
-                        s.push(b'.');
-                        s.extend_from_slice(e);
-                        s
-                    })
-                    .collect(),
-                files_only: true,
-                canonical: *canonical,
-            },
-            !*canonical,
-        ),
+        Matcher::Ext { exts, canonical } => {
+            // The suffix sweep exactly implements extension equality only when
+            // every value is one final path segment.  For example,
+            // `ext:txt.PDF` produces the useful candidate suffix `.txt.PDF`,
+            // but a name ending in it has extension `PDF`, not `txt.PDF`.
+            // Keep that candidate plan and re-run the source matcher.
+            let suffix_is_exact = exts.iter().all(|e| !e.contains(&b'.'));
+            (
+                Driver::Suffixes {
+                    suffixes: exts
+                        .iter()
+                        .map(|e| {
+                            let mut s = Vec::with_capacity(e.len() + 1);
+                            s.push(b'.');
+                            s.extend_from_slice(e);
+                            s
+                        })
+                        .collect(),
+                    files_only: true,
+                    canonical: *canonical,
+                },
+                !*canonical && suffix_is_exact,
+            )
+        }
         _ => unreachable!("driver_score gated"),
     }
 }
@@ -1093,6 +1101,15 @@ mod tests {
         }
         assert!(group.driver_term.is_some());
         assert!(group.driver_exact);
+
+        let dotted = compile(&parse("ext:txt.PDF").unwrap(), CaseMode::Smart, &resolver).unwrap();
+        let group = &dotted.groups[0];
+        assert!(matches!(group.driver, Driver::Suffixes { .. }));
+        assert!(group.driver_term.is_some());
+        assert!(
+            !group.driver_exact,
+            "a dotted value is not a final extension"
+        );
 
         let empty_extension = compile(&parse("ext:").unwrap(), CaseMode::Smart, &resolver).unwrap();
         let group = &empty_extension.groups[0];
