@@ -191,18 +191,6 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 354,
-        "start_column": 84,
-        "end_line": 354,
-        "end_column": 89,
-        "mutator": "Boolean mutation",
-        "replacement": "true"
-      },
-      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
-    },
-    {
-      "identity": {
-        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
         "start_line": 358,
         "start_column": 59,
         "end_line": 358,
@@ -307,18 +295,6 @@
         "replacement": "\"\""
       },
       "rationale": "A failed private handshake is only retried or made terminal before publication, and safe logging redacts its exception message; this operation label cannot reach callers."
-    },
-    {
-      "identity": {
-        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 479,
-        "start_column": 60,
-        "end_line": 479,
-        "end_column": 65,
-        "mutator": "Boolean mutation",
-        "replacement": "true"
-      },
-      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
     },
     {
       "identity": {

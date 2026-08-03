@@ -13,6 +13,8 @@ namespace FindMyFiles.Tests;
 /// thread, or window is involved.</summary>
 public sealed class MainViewModelTests
 {
+    public MainViewModelTests() => SyncContext.RunContinuationsInline();
+
     private static MainViewModel Vm(IEngineClient engine) =>
         new(engine, new ManualDispatcher(), new AppSettings());
 
