@@ -526,6 +526,9 @@ public sealed class PipeEngineClientAdditionalTests
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
+        await WaitUntilAsync(
+            () => log.Text.Contains("event=IndexChanged", StringComparison.Ordinal),
+            "handshake catch-up index event log");
         var initialIndexFailures = log.Text.Split('\n').Count(line =>
             line.Contains("event=IndexChanged", StringComparison.Ordinal));
 
@@ -859,6 +862,44 @@ public sealed class PipeEngineClientAdditionalTests
 
         await server.WaitForAsync(PipeProtocol.Op.QueryCancel);
         Assert.Single(server.Received, frame => frame.Opcode == PipeProtocol.Op.QueryCancel);
+    }
+
+    [Fact]
+    public async Task Empty_body_operations_emit_zero_length_payloads()
+    {
+        using var server = new FakePipeServer();
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        client.Start();
+        await WaitUntilAsync(
+            () => client.Connection == EngineConnectionState.Connected,
+            "connected");
+
+        await client.ListVolumesAsync();
+        await client.GetStatusAsync();
+        Assert.NotNull(await client.GetStatsAsync());
+        Assert.Null(await client.TryGetServiceInfoAsync(CancellationToken.None));
+
+        var connection = Assert.IsType<PipeConnection>(client.CurrentPipeConnectionForTests);
+        client.SendQueryCancel(connection, 123);
+        await server.WaitForAsync(PipeProtocol.Op.QueryCancel);
+
+        ushort[] expected =
+        [
+            PipeProtocol.Op.Subscribe,
+            PipeProtocol.Op.IndexStatus,
+            PipeProtocol.Op.ListVolumes,
+            PipeProtocol.Op.Stats,
+            PipeProtocol.Op.ServiceInfo,
+            PipeProtocol.Op.QueryCancel,
+        ];
+        var received = server.Received
+            .Where(frame => expected.Contains(frame.Opcode))
+            .ToArray();
+
+        Assert.Equal(
+            expected.Order(),
+            received.Select(frame => frame.Opcode).Distinct().Order());
+        Assert.All(received, frame => Assert.Empty(frame.Payload));
     }
 
     [Fact]

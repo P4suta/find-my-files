@@ -13,6 +13,8 @@ namespace FindMyFiles.Tests;
 /// thread, or window is involved.</summary>
 public sealed class MainViewModelTests
 {
+    public MainViewModelTests() => SyncContext.RunContinuationsInline();
+
     private static MainViewModel Vm(IEngineClient engine) =>
         new(engine, new ManualDispatcher(), new AppSettings());
 
@@ -629,6 +631,7 @@ public sealed class MainViewModelTests
         var engine = EngineReportingVersion("99.0.0");
         engine.Connection = EngineConnectionState.Connecting;
         using var vm = new MainViewModel(engine, dispatcher, new AppSettings());
+        vm.SearchText = string.Empty;
 
         engine.Connection = EngineConnectionState.Connected;
         engine.RaiseConnectionChanged(EngineConnectionState.Connected);

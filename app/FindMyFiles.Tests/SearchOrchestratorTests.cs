@@ -21,6 +21,13 @@ public sealed class SearchOrchestratorTests : IDisposable
 
     public SearchOrchestratorTests()
     {
+        // Every test in this fixture must stay teardown-safe under mutation.
+        // A mutant can turn a normally debounced notification into an immediate,
+        // deliberately incomplete StubEngineClient query.  xUnit's tracking
+        // SynchronizationContext would then wait forever for the production
+        // fire-and-forget chain instead of reporting the assertion that killed
+        // the mutant.
+        SyncContext.RunContinuationsInline();
         _presenter = new ResultsPresenter(_dispatcher);
         _events = new EngineEventMarshaler(_engine, _dispatcher);
         _orchestrator = new SearchOrchestrator(

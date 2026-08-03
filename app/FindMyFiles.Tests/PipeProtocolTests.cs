@@ -172,6 +172,12 @@ public sealed class PipeProtocolTests
         Assert.Equal(["C:", "D:"], PipeProtocol.DecodeIndexStartReq(bytes));
     }
 
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("null")]
+    public void IndexStartReq_MissingVolumes_DecodesToEmptyList(string json) =>
+        Assert.Empty(PipeProtocol.DecodeIndexStartReq(Encoding.UTF8.GetBytes(json)));
+
     [Fact]
     public void IndexStartReq_RejectsMalformedAndUnboundedLists()
     {

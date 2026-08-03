@@ -24,6 +24,7 @@ public sealed class MainViewModelEventTests : IDisposable
         Notifier.ResetForTests();
         SyncContext.RunContinuationsInline();
         _vm = new MainViewModel(_engine, _dispatcher, new AppSettings());
+        _vm.SearchText = string.Empty;
     }
 
     [Fact]
