@@ -108,14 +108,20 @@ struct RustIdentity {
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
-struct CsharpIdentity {
-    path: String,
-    start_line: u64,
-    start_column: u64,
-    end_line: u64,
-    end_column: u64,
-    mutator: String,
-    replacement: String,
+pub struct CsharpIdentity {
+    pub path: String,
+    pub start_line: u64,
+    pub start_column: u64,
+    pub end_line: u64,
+    pub end_column: u64,
+    pub mutator: String,
+    pub replacement: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CsharpReviewedPolicy {
+    pub examined_files: Vec<String>,
+    pub accepted_equivalents: Vec<CsharpIdentity>,
 }
 
 #[derive(Debug, Serialize)]
@@ -355,6 +361,40 @@ pub fn run_csharp() -> Result<()> {
         run.survivors.len()
     );
     Ok(())
+}
+
+/// Load the canonical C# mutation scope and reviewed survivor identities.
+///
+/// The trusted CI controller uses this instead of accepting mutation policy
+/// from the target checkout. `read_baseline` validates the tool pin, exact
+/// ordering, identities, and rationales; `read_stryker_scope` additionally
+/// proves that every exact mutate entry resolves to the same file inventory.
+pub fn read_csharp_reviewed_policy(repo: &Path) -> Result<CsharpReviewedPolicy> {
+    let test_dir = repo.join("app").join("FindMyFiles.Tests");
+    let baseline_path = test_dir.join("mutation-baseline.json");
+    let baseline: AcceptedBaseline<CsharpIdentity> =
+        read_baseline(&baseline_path, STRYKER_NAME, STRYKER_VERSION)?;
+    let scope = read_stryker_scope(
+        &test_dir.join("stryker-config.json"),
+        repo,
+        &baseline.examined_files,
+    )?;
+    for (index, accepted) in baseline.accepted_equivalents.iter().enumerate() {
+        if !scope.contains(&accepted.identity.path) {
+            bail!(
+                "{} accepted_equivalents[{index}] is outside the reviewed C# source inventory",
+                baseline_path.display()
+            );
+        }
+    }
+    Ok(CsharpReviewedPolicy {
+        examined_files: baseline.examined_files,
+        accepted_equivalents: baseline
+            .accepted_equivalents
+            .into_iter()
+            .map(|accepted| accepted.identity)
+            .collect(),
+    })
 }
 
 fn verify_cargo_mutants_version() -> Result<()> {
