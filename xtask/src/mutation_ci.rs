@@ -440,8 +440,6 @@ fn prepare(args: &CiRunArgs, language: &str) -> Result<(Checkout, PathBuf, PathB
     ));
     reset_owned_directory(&work, &paths::build_root())?;
     reset_owned_directory(&evidence, &paths::build_root())?;
-    fs::create_dir_all(work.join(".t"))
-        .with_context(|| format!("create mutation temp directory below {}", work.display()))?;
     Ok((checkout, work, evidence))
 }
 
@@ -1361,6 +1359,13 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
     }
     write_bytes(&evidence.join("baseline.log"), &baseline_bytes)?;
 
+    if !parsed.baseline_passed {
+        bail!(
+            "cargo-mutants unmutated baseline was not successful; diagnostic={}",
+            evidence.join("baseline.log").display()
+        );
+    }
+
     ensure_hash(
         &nextest_config,
         &checksum::sha256_hex(NEXTEXT_POLICY.as_bytes()),
@@ -1593,6 +1598,7 @@ fn parse_rust_outcomes(evidence: &Path, generated: &BTreeSet<RustMutant>) -> Res
         .ok_or_else(|| anyhow!("outcomes.json has no outcomes array"))?;
     let mut baseline_count = 0_usize;
     let mut baseline_log = None;
+    let mut baseline_passed = None;
     let mut killed = BTreeSet::new();
     let mut invalid = BTreeMap::new();
     let mut survived = BTreeSet::new();
@@ -1620,9 +1626,7 @@ fn parse_rust_outcomes(evidence: &Path, generated: &BTreeSet<RustMutant>) -> Res
             .ok_or_else(|| anyhow!("outcome has no scenario"))?;
         if scenario.as_str() == Some("Baseline") {
             baseline_count += 1;
-            if summary != "Success" {
-                bail!("cargo-mutants unmutated baseline was not successful: {summary}");
-            }
+            baseline_passed = Some(parse_rust_baseline_summary(&summary)?);
             baseline_log = Some(log_path);
             continue;
         }
@@ -1656,7 +1660,7 @@ fn parse_rust_outcomes(evidence: &Path, generated: &BTreeSet<RustMutant>) -> Res
         }
     }
     if baseline_count != 1 {
-        bail!("outcomes.json must contain exactly one successful baseline");
+        bail!("outcomes.json must contain exactly one baseline");
     }
     let all: BTreeSet<RustMutant> = killed
         .iter()
@@ -1690,15 +1694,22 @@ fn parse_rust_outcomes(evidence: &Path, generated: &BTreeSet<RustMutant>) -> Res
     validate_count(root, "unviable", invalid_vec.len())?;
     validate_count(root, "missed", survived_vec.len())?;
     validate_count(root, "timeout", timeout_vec.len())?;
-    let baseline_passed = baseline_count == 1;
     Ok(ParsedRustRun {
         baseline_log: baseline_log.ok_or_else(|| anyhow!("baseline log path disappeared"))?,
-        baseline_passed,
+        baseline_passed: baseline_passed.ok_or_else(|| anyhow!("baseline result disappeared"))?,
         killed: killed_vec,
         invalid: invalid_vec,
         survived: survived_vec,
         timeout: timeout_vec,
     })
+}
+
+fn parse_rust_baseline_summary(summary: &str) -> Result<bool> {
+    match summary {
+        "Success" => Ok(true),
+        "Failure" => Ok(false),
+        other => bail!("cargo-mutants emitted unknown baseline summary `{other}`"),
+    }
 }
 
 fn validate_rust_text_report(evidence: &Path, name: &str, expected: &[RustMutant]) -> Result<()> {
@@ -2669,11 +2680,11 @@ fn rust_command(program: &str, work: &Path) -> Command {
     let mut command = trusted_command(program);
     command
         .current_dir(work.join("engine"))
-        // cargo-mutants copies the engine below the process temp directory.
-        // One extra `.t` level makes the launcher's ../../../app asset path
-        // resolve back to the sanitized worktree instead of the runner temp root.
-        .env("TEMP", work.join(".t"))
-        .env("TMP", work.join(".t"))
+        // cargo-mutants creates `<TEMP>/cargo-mutants-engine-*/crates/...`.
+        // Making TEMP the sanitized root preserves the engine/crates ancestry,
+        // so the launcher's canonical ../../../app asset path stays valid.
+        .env("TEMP", work)
+        .env("TMP", work)
         .env("RUSTUP_TOOLCHAIN", RUST_TOOLCHAIN_VERSION)
         .env("CARGO_HOME", work.join(".cargo-home"))
         .env("CARGO_INCREMENTAL", "0")
@@ -2688,7 +2699,10 @@ fn dotnet_command(work: &Path) -> Command {
     let mut command = trusted_command("dotnet");
     command
         .current_dir(work.join("app").join("FindMyFiles.Tests"))
-        .env("DOTNET_ROLL_FORWARD", "Disable")
+        // The SDK remains exactly pinned and verified above. Testhost targets
+        // Microsoft.NETCore.App 10.0.0 and must accept the runner's serviced
+        // patch (for example 10.0.10) instead of requiring an insecure RTM copy.
+        .env("DOTNET_ROLL_FORWARD", "LatestPatch")
         .env("DOTNET_MULTILEVEL_LOOKUP", "0")
         .env("DOTNET_NOLOGO", "1")
         .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
@@ -3298,12 +3312,17 @@ mod tests {
             .collect();
         assert_eq!(
             rust_env.get(OsStr::new("TEMP")),
-            Some(&work.join(".t").into_os_string())
+            Some(&work.as_os_str().to_owned())
         );
         assert_eq!(
             rust_env.get(OsStr::new("TMP")),
-            Some(&work.join(".t").into_os_string())
+            Some(&work.as_os_str().to_owned())
         );
+        let mutant_crate = work
+            .join("cargo-mutants-engine.tmp")
+            .join("crates")
+            .join("fmf-launcher");
+        assert_eq!(mutant_crate.ancestors().nth(3), Some(work.as_path()));
 
         let csharp = dotnet_command(&work);
         let csharp_env: BTreeMap<_, _> = csharp
@@ -3314,5 +3333,16 @@ mod tests {
             csharp_env.get(OsStr::new("NUGET_PACKAGES")),
             Some(&work.join(".n").into_os_string())
         );
+        assert_eq!(
+            csharp_env.get(OsStr::new("DOTNET_ROLL_FORWARD")),
+            Some(&OsStr::new("LatestPatch").to_owned())
+        );
+    }
+
+    #[test]
+    fn failed_rust_baseline_remains_parseable_for_diagnostic_copy() {
+        assert!(parse_rust_baseline_summary("Success").unwrap());
+        assert!(!parse_rust_baseline_summary("Failure").unwrap());
+        assert!(parse_rust_baseline_summary("Timeout").is_err());
     }
 }
