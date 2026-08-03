@@ -368,7 +368,7 @@ internal sealed class SearchOrchestrator : IDisposable
     /// orchestration so null/empty mutation checks cannot strand an async query.</summary>
     /// <param name="value">Current text-box value.</param>
     /// <returns>True for null or empty input.</returns>
-    internal static bool IsEmptyText(string? value) => string.IsNullOrEmpty(value);
+    internal static bool IsEmptyText(string? value) => value is null || value.Length == 0;
 
     /// <summary>Pure generation comparison used both before and during publish.</summary>
     /// <param name="candidate">Generation captured by the operation.</param>
