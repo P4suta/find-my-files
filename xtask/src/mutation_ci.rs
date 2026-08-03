@@ -880,13 +880,20 @@ fn is_forbidden_auto_config(path: &str) -> bool {
             && matches!(file.to_ascii_lowercase().as_str(), "config" | "config.toml"))
 }
 
+fn is_trusted_auto_config(path: &str) -> bool {
+    matches!(
+        path,
+        "engine/.cargo/config.toml" | "xtask/.cargo/config.toml"
+    )
+}
+
 fn reject_forbidden_auto_configs(checkout: &Checkout) -> Result<()> {
     let mut forbidden = Vec::new();
     for path in &checkout.tracked {
         if !is_forbidden_auto_config(path) {
             continue;
         }
-        if path == "engine/.cargo/config.toml" {
+        if is_trusted_auto_config(path) {
             require_target_matches_controller(checkout, path)?;
         } else {
             forbidden.push(path);
@@ -3242,5 +3249,14 @@ mod tests {
         let mut wrong_count = complete();
         wrong_count.shard_count = Some(15);
         assert!(wrong_count.into_ci().is_err());
+    }
+
+    #[test]
+    fn only_controller_owned_cargo_configs_are_trusted() {
+        assert!(is_trusted_auto_config("engine/.cargo/config.toml"));
+        assert!(is_trusted_auto_config("xtask/.cargo/config.toml"));
+        assert!(!is_trusted_auto_config(".cargo/config.toml"));
+        assert!(!is_trusted_auto_config("app/.cargo/config.toml"));
+        assert!(is_forbidden_auto_config("xtask/.cargo/config.toml"));
     }
 }
