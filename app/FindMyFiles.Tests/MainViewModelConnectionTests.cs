@@ -111,6 +111,11 @@ public sealed class MainViewModelConnectionTests
             },
         };
         using var vm = new MainViewModel(engine, _dispatcher, new AppSettings());
+
+        // This test owns only the terminal-to-connected transition. Keep a
+        // pre-existing query from adding debounce/search work to DrainQueue;
+        // MainViewModelTests separately pins the constructor's empty default.
+        vm.SearchText = string.Empty;
         Assert.True(vm.IsDisconnected);
 
         engine.Connection = EngineConnectionState.Connected;

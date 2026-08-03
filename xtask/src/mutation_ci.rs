@@ -2190,7 +2190,10 @@ fn stryker_config(shard_sources: &[String]) -> Result<Value> {
         "stryker-config": {
             "project": "FindMyFiles.csproj",
             "test-projects": ["FindMyFiles.Tests.csproj"],
-            "concurrency": 4,
+            // Stryker itself recommends at most two sessions on a normal
+            // runner. Four made otherwise-killed mutants time out under the
+            // hosted Windows CPU/memory contention.
+            "concurrency": 2,
             "additional-timeout": 30000,
             "mutate": patterns,
             "mutation-level": "Complete",

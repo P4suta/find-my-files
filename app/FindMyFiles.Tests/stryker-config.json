@@ -2,7 +2,7 @@
   "stryker-config": {
     "project": "FindMyFiles.csproj",
     "test-projects": ["FindMyFiles.Tests.csproj"],
-    "concurrency": 4,
+    "concurrency": 2,
     "additional-timeout": 30000,
     "mutate": [
       "**/Services/ShellOps.cs",

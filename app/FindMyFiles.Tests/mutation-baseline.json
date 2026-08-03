@@ -191,6 +191,18 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 354,
+        "start_column": 84,
+        "end_line": 354,
+        "end_column": 89,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "HandshakeAsync is awaited only by SuperviseAsync, which Start launches through Task.Run; no SynchronizationContext exists to capture, and the same authenticated statuses and candidate connection state result."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
         "start_line": 358,
         "start_column": 59,
         "end_line": 358,
@@ -211,18 +223,6 @@
         "replacement": ";"
       },
       "rationale": "Terminal failure ends the supervisor permanently, while every retryable failure leaves this field null; after any successful handshake this write therefore stores its existing value."
-    },
-    {
-      "identity": {
-        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 386,
-        "start_column": 58,
-        "end_line": 386,
-        "end_column": 63,
-        "mutator": "Boolean mutation",
-        "replacement": "true"
-      },
-      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
     },
     {
       "identity": {
@@ -299,6 +299,18 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 479,
+        "start_column": 60,
+        "end_line": 479,
+        "end_column": 65,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "The Subscribe request is part of HandshakeAsync invoked only by the Task.Run supervisor; capturing its absent SynchronizationContext cannot change the response tuple, validation, or published connection."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
         "start_line": 480,
         "start_column": 50,
         "end_line": 480,
@@ -307,18 +319,6 @@
         "replacement": "\"\""
       },
       "rationale": "A failed private handshake is only retried or made terminal before publication, and safe logging redacts its exception message; this operation label cannot reach callers."
-    },
-    {
-      "identity": {
-        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 488,
-        "start_column": 60,
-        "end_line": 488,
-        "end_column": 65,
-        "mutator": "Boolean mutation",
-        "replacement": "true"
-      },
-      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
     },
     {
       "identity": {
@@ -955,18 +955,6 @@
         "replacement": "cp >>> 6"
       },
       "rationale": "The shifted operand cp is UInt32, so arithmetic and logical right shift produce identical bits for every reachable value."
-    },
-    {
-      "identity": {
-        "path": "app/FindMyFiles/Services/ServiceProvisioner.cs",
-        "start_line": 85,
-        "start_column": 66,
-        "end_line": 85,
-        "end_column": 71,
-        "mutator": "Boolean mutation",
-        "replacement": "true"
-      },
-      "rationale": "The continuation performs only scalar result mapping, logging, or filesystem cleanup and touches no synchronization-context-bound state; the returned result is identical."
     },
     {
       "identity": {
