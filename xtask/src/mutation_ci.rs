@@ -863,7 +863,8 @@ fn copy_path_for_language(path: &str, language: &str) -> bool {
         "rust" => {
             (path.starts_with("engine/")
                 || path.starts_with("contract/golden/")
-                || path.starts_with("app/FindMyFiles/Assets/"))
+                || path.starts_with("app/FindMyFiles/Assets/")
+                || path == "app/FindMyFiles/Engine/Generated/EngineContract.g.cs")
                 && !path.starts_with("engine/.cargo/")
                 && !path.starts_with("engine/.config/")
                 && path != "engine/mutants.toml"
@@ -3315,6 +3316,22 @@ mod tests {
         assert!(!is_trusted_auto_config(".cargo/config.toml"));
         assert!(!is_trusted_auto_config("app/.cargo/config.toml"));
         assert!(is_forbidden_auto_config("xtask/.cargo/config.toml"));
+    }
+
+    #[test]
+    fn rust_copy_scope_includes_only_required_cross_tree_inputs() {
+        assert!(copy_path_for_language(
+            "app/FindMyFiles/Engine/Generated/EngineContract.g.cs",
+            "rust"
+        ));
+        assert!(copy_path_for_language(
+            "app/FindMyFiles/Assets/find-my-files.ico",
+            "rust"
+        ));
+        assert!(!copy_path_for_language(
+            "app/FindMyFiles/Views/MainPage.xaml",
+            "rust"
+        ));
     }
 
     #[test]
