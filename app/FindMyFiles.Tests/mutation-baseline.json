@@ -227,6 +227,18 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 386,
+        "start_column": 58,
+        "end_line": 386,
+        "end_column": 63,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "SuperviseAsync is launched exclusively by Start through Task.Run, so the ReadLoop continuation has no SynchronizationContext to capture and connection retirement or retry state is identical."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
         "start_line": 390,
         "start_column": 17,
         "end_line": 390,
@@ -319,6 +331,18 @@
         "replacement": "\"\""
       },
       "rationale": "A failed private handshake is only retried or made terminal before publication, and safe logging redacts its exception message; this operation label cannot reach callers."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 488,
+        "start_column": 60,
+        "end_line": 488,
+        "end_column": 65,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "The IndexStatus request is part of HandshakeAsync invoked only by the Task.Run supervisor; capturing its absent SynchronizationContext cannot change the response tuple, validation, or published connection."
     },
     {
       "identity": {
@@ -955,6 +979,18 @@
         "replacement": "cp >>> 6"
       },
       "rationale": "The shifted operand cp is UInt32, so arithmetic and logical right shift produce identical bits for every reachable value."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Services/ServiceProvisioner.cs",
+        "start_line": 85,
+        "start_column": 66,
+        "end_line": 85,
+        "end_column": 71,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "The continuation performs only scalar result mapping, logging, or filesystem cleanup and touches no synchronization-context-bound state; the returned result is identical."
     },
     {
       "identity": {
