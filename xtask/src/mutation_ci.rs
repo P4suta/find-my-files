@@ -406,6 +406,20 @@ fn controller_root() -> PathBuf {
     paths::repo_root()
 }
 
+fn mutation_work_dir(args: &CiRunArgs, language: &str) -> Result<PathBuf> {
+    let language_tag = match language {
+        "rust" => "r",
+        "csharp" => "c",
+        other => bail!("unsupported mutation language `{other}`"),
+    };
+    Ok(paths::mutation_ci_work_dir()
+        .join(language_tag)
+        .join(format!(
+            "{}-{}-{}",
+            args.run_id, args.run_attempt, args.shard_index
+        )))
+}
+
 fn prepare(args: &CiRunArgs, language: &str) -> Result<(Checkout, PathBuf, PathBuf)> {
     let controller = canonical_directory(&controller_root(), "controller root")?;
     let target = canonical_directory(&args.target_root, "target root")?;
@@ -419,23 +433,15 @@ fn prepare(args: &CiRunArgs, language: &str) -> Result<(Checkout, PathBuf, PathB
     verify_checkout_identity(&controller, &args.controller_sha, "controller")?;
     let checkout = inspect_target_checkout(&target, &args.target_sha)?;
 
-    let work = paths::build_root()
-        .join("mutation")
-        .join("ci-work")
-        .join(language)
-        .join(format!(
-            "run-{}-attempt-{}-shard-{}-of-{}",
-            args.run_id, args.run_attempt, args.shard_index, args.shard_count
-        ));
-    let evidence = paths::build_root()
-        .join("mutation")
-        .join(language)
-        .join(format!(
-            "shard-{}-of-{}",
-            args.shard_index, args.shard_count
-        ));
+    let work = mutation_work_dir(args, language)?;
+    let evidence = paths::mutation_dir().join(language).join(format!(
+        "shard-{}-of-{}",
+        args.shard_index, args.shard_count
+    ));
     reset_owned_directory(&work, &paths::build_root())?;
     reset_owned_directory(&evidence, &paths::build_root())?;
+    fs::create_dir_all(work.join(".t"))
+        .with_context(|| format!("create mutation temp directory below {}", work.display()))?;
     Ok((checkout, work, evidence))
 }
 
@@ -2663,6 +2669,11 @@ fn rust_command(program: &str, work: &Path) -> Command {
     let mut command = trusted_command(program);
     command
         .current_dir(work.join("engine"))
+        // cargo-mutants copies the engine below the process temp directory.
+        // One extra `.t` level makes the launcher's ../../../app asset path
+        // resolve back to the sanitized worktree instead of the runner temp root.
+        .env("TEMP", work.join(".t"))
+        .env("TMP", work.join(".t"))
         .env("RUSTUP_TOOLCHAIN", RUST_TOOLCHAIN_VERSION)
         .env("CARGO_HOME", work.join(".cargo-home"))
         .env("CARGO_INCREMENTAL", "0")
@@ -2682,7 +2693,8 @@ fn dotnet_command(work: &Path) -> Command {
         .env("DOTNET_NOLOGO", "1")
         .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
         .env("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", "1")
-        .env("NUGET_PACKAGES", work.join(".nuget").join("packages"))
+        // XAML Compiler dependency resolution is still MAX_PATH-sensitive.
+        .env("NUGET_PACKAGES", work.join(".n"))
         .env("RestoreLockedMode", "true")
         .env("SkipRustBuild", "true")
         // Stryker analyses FindMyFiles.csproj standalone and never sees the test
@@ -3258,5 +3270,49 @@ mod tests {
         assert!(!is_trusted_auto_config(".cargo/config.toml"));
         assert!(!is_trusted_auto_config("app/.cargo/config.toml"));
         assert!(is_forbidden_auto_config("xtask/.cargo/config.toml"));
+    }
+
+    #[test]
+    fn mutation_work_paths_are_short_and_language_scoped() {
+        let args = complete().into_ci().unwrap().unwrap();
+        let rust = mutation_work_dir(&args, "rust").unwrap();
+        let csharp = mutation_work_dir(&args, "csharp").unwrap();
+        assert_eq!(
+            rust.strip_prefix(paths::build_root()).unwrap(),
+            Path::new("mw").join("r").join("1-1-0")
+        );
+        assert_eq!(
+            csharp.strip_prefix(paths::build_root()).unwrap(),
+            Path::new("mw").join("c").join("1-1-0")
+        );
+        assert!(mutation_work_dir(&args, "python").is_err());
+    }
+
+    #[test]
+    fn tool_caches_stay_short_and_rust_temp_preserves_asset_ancestry() {
+        let work = PathBuf::from(r"C:\repo\build\mw\r\1-1-0");
+        let rust = rust_command("cargo", &work);
+        let rust_env: BTreeMap<_, _> = rust
+            .get_envs()
+            .filter_map(|(name, value)| value.map(|value| (name.to_owned(), value.to_owned())))
+            .collect();
+        assert_eq!(
+            rust_env.get(OsStr::new("TEMP")),
+            Some(&work.join(".t").into_os_string())
+        );
+        assert_eq!(
+            rust_env.get(OsStr::new("TMP")),
+            Some(&work.join(".t").into_os_string())
+        );
+
+        let csharp = dotnet_command(&work);
+        let csharp_env: BTreeMap<_, _> = csharp
+            .get_envs()
+            .filter_map(|(name, value)| value.map(|value| (name.to_owned(), value.to_owned())))
+            .collect();
+        assert_eq!(
+            csharp_env.get(OsStr::new("NUGET_PACKAGES")),
+            Some(&work.join(".n").into_os_string())
+        );
     }
 }

@@ -48,6 +48,12 @@ pub fn mutation_dir() -> PathBuf {
     build_root().join("mutation")
 }
 
+/// Short-lived sanitized mutation worktrees. Keep this component deliberately
+/// compact: Windows XAML tooling still has MAX_PATH-sensitive dependency loads.
+pub fn mutation_ci_work_dir() -> PathBuf {
+    build_root().join("mw")
+}
+
 pub fn rust_mutation_dir() -> PathBuf {
     mutation_dir().join("rust")
 }
