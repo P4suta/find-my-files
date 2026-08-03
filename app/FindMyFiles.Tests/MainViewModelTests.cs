@@ -631,6 +631,7 @@ public sealed class MainViewModelTests
         var engine = EngineReportingVersion("99.0.0");
         engine.Connection = EngineConnectionState.Connecting;
         using var vm = new MainViewModel(engine, dispatcher, new AppSettings());
+        vm.SearchText = string.Empty;
 
         engine.Connection = EngineConnectionState.Connected;
         engine.RaiseConnectionChanged(EngineConnectionState.Connected);

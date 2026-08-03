@@ -526,6 +526,9 @@ public sealed class PipeEngineClientAdditionalTests
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
+        await WaitUntilAsync(
+            () => log.Text.Contains("event=IndexChanged", StringComparison.Ordinal),
+            "handshake catch-up index event log");
         var initialIndexFailures = log.Text.Split('\n').Count(line =>
             line.Contains("event=IndexChanged", StringComparison.Ordinal));
 
