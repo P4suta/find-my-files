@@ -55,6 +55,8 @@ internal sealed class StubEngineClient : IEngineClient
     /// path (status + error notification) without a real engine.</summary>
     public Exception? ThrowOnStartup { get; set; }
 
+    public Task<IReadOnlyList<string>>? ListVolumesTask { get; set; }
+
     public event Action<string>? IndexChanged;
 
     public event Action<VolumeStatus>? VolumeUpdated;
@@ -95,16 +97,25 @@ internal sealed class StubEngineClient : IEngineClient
     /// and a later Connected event must not double-run it).</summary>
     public int ListVolumesCalls { get; private set; }
 
+    public int StartIndexingCalls { get; private set; }
+
+    public List<CancellationToken> StatsTokens { get; } = [];
+
     public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
     {
         ListVolumesCalls++;
-        return ThrowOnStartup is { } ex
-            ? Task.FromException<IReadOnlyList<string>>(ex)
-            : Task.FromResult<IReadOnlyList<string>>(["F:"]);
+        return ListVolumesTask
+            ?? (ThrowOnStartup is { } ex
+                ? Task.FromException<IReadOnlyList<string>>(ex)
+                : Task.FromResult<IReadOnlyList<string>>(["F:"]));
     }
 
     public Task StartIndexingAsync(
-        IReadOnlyList<string> volumes, CancellationToken ct = default) => Task.CompletedTask;
+        IReadOnlyList<string> volumes, CancellationToken ct = default)
+    {
+        StartIndexingCalls++;
+        return Task.CompletedTask;
+    }
 
     public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<VolumeStatus>>([]);
@@ -116,10 +127,16 @@ internal sealed class StubEngineClient : IEngineClient
 
     public Exception? ThrowOnStats { get; set; }
 
-    public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default) =>
-        ThrowOnStats is { } ex
-            ? Task.FromException<EngineStatsData?>(ex)
-            : Task.FromResult(Stats);
+    public Task<EngineStatsData?>? StatsTask { get; set; }
+
+    public Task<EngineStatsData?> GetStatsAsync(CancellationToken ct = default)
+    {
+        StatsTokens.Add(ct);
+        return StatsTask
+            ?? (ThrowOnStats is { } ex
+                ? Task.FromException<EngineStatsData?>(ex)
+                : Task.FromResult(Stats));
+    }
 
     public Task<SearchOutcome> SearchAsync(
         string query, SearchOptions options, CancellationToken ct = default)
@@ -127,6 +144,14 @@ internal sealed class StubEngineClient : IEngineClient
         if (ThrowOnSearch is { } ex)
         {
             throw ex;
+        }
+
+        // The UI product contract is "no query, no results". Fail fast if a
+        // ViewModel test accidentally crosses that boundary: recording an
+        // incomplete pending search would turn the defect into a test hang.
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            throw new InvalidOperationException("empty query reached the test engine");
         }
 
         ct.ThrowIfCancellationRequested();

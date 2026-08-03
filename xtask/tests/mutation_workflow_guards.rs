@@ -299,6 +299,16 @@ fn stryker_json_report_is_required_instead_of_a_score_only_reporter() {
     );
 }
 
+#[test]
+fn local_stryker_run_has_enough_time_for_integration_tests() {
+    let config: serde_json::Value =
+        serde_json::from_str(STRYKER_CONFIG).expect("stryker-config.json must be valid JSON");
+    assert_eq!(
+        config.pointer("/stryker-config/additional-timeout"),
+        Some(&serde_json::json!(30_000))
+    );
+}
+
 /// The four files that define what the mutation gates review — two scopes and
 /// the two reviewed baselines they are compared against — are gate *inputs*,
 /// not gate output. A baseline that is absent (never added to git, or hidden by

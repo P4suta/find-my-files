@@ -71,6 +71,12 @@ public sealed class Wtf8Tests
     }
 
     [Fact]
+    public void Decode_RejectsAnIsolatedContinuationByte()
+    {
+        Assert.ThrowsAny<Exception>(() => Wtf8.Decode([0x80]));
+    }
+
+    [Fact]
     public void LoneHighSurrogate_BeforeAscii_DoesNotConsumeTheNextChar()
     {
         // A high surrogate not followed by a low one must encode as its own

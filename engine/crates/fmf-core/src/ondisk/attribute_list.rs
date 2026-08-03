@@ -173,12 +173,19 @@ fn physical_ranges_are_disjoint(runs: &[StreamRun]) -> bool {
 }
 
 fn partial_runs_are_valid(runs: &[StreamRun], data_size: u64) -> bool {
-    if data_size == 0
-        || data_size > MAX_LIST_BYTES
-        || runs.is_empty()
-        || runs.len() > MAX_LIST_RUNS
-        || !physical_ranges_are_disjoint(runs)
-    {
+    if data_size == 0 {
+        return false;
+    }
+    if data_size > MAX_LIST_BYTES {
+        return false;
+    }
+    if runs.is_empty() {
+        return false;
+    }
+    if runs.len() > MAX_LIST_RUNS {
+        return false;
+    }
+    if !physical_ranges_are_disjoint(runs) {
         return false;
     }
     let mut ordered = runs.to_vec();
@@ -243,6 +250,10 @@ fn le_u64(data: &[u8], off: usize) -> u64 {
 fn declared_entry_length(header: &[u8]) -> Option<usize> {
     let len = usize::from(le_u16(header, 4));
     (len >= ATTRIBUTE_LIST_ENTRY_BYTES && len.is_multiple_of(8)).then_some(len)
+}
+
+fn list_byte_len_is_valid(len: usize) -> bool {
+    u64::try_from(len).is_ok_and(|len| len <= MAX_LIST_BYTES)
 }
 
 fn validate_entry_header(header: &[u8], len: usize) -> Option<(u32, usize, usize, u64)> {
@@ -314,7 +325,7 @@ fn decode_list_entry(data: &[u8]) -> Option<DecodedListEntry> {
 /// on the same bytes.
 #[must_use]
 pub fn parse_list_entries(data: &[u8], prefix: bool) -> Option<Vec<ListEntry>> {
-    if u64::try_from(data.len()).ok()? > MAX_LIST_BYTES {
+    if !list_byte_len_is_valid(data.len()) {
         return None;
     }
     let header_len = ATTRIBUTE_LIST_ENTRY_BYTES;
@@ -651,7 +662,10 @@ impl<'a, R: Read + Seek> RunReader<'a, R> {
                 .checked_sub(run.logical)
                 .ok_or(ListStreamError::Invalid)?;
             if run_offset >= run.len {
-                self.run_index += 1;
+                self.run_index = self
+                    .run_index
+                    .checked_add(1)
+                    .ok_or(ListStreamError::Invalid)?;
                 continue;
             }
             let available = usize::try_from((run.len - run_offset).min(out.len() as u64))
@@ -784,6 +798,101 @@ mod tests {
         assert!(!partial_runs_are_valid(&holed, 96));
     }
 
+    #[test]
+    fn partial_run_validation_pins_each_fail_closed_boundary() {
+        let valid = [StreamRun {
+            logical: 0,
+            physical: Some(16),
+            len: 1,
+        }];
+        assert!(partial_runs_are_valid(&valid, 1));
+        assert!(!partial_runs_are_valid(&valid, 0));
+        assert!(partial_runs_are_valid(&valid, MAX_LIST_BYTES));
+        assert!(!partial_runs_are_valid(&valid, MAX_LIST_BYTES + 1));
+        assert!(!partial_runs_are_valid(&[], 1));
+        assert!(!partial_runs_are_valid(
+            &[StreamRun {
+                physical: None,
+                ..valid[0].clone()
+            }],
+            1,
+        ));
+        assert!(!partial_runs_are_valid(
+            &[StreamRun {
+                len: 0,
+                ..valid[0].clone()
+            }],
+            1,
+        ));
+        assert!(!partial_runs_are_valid(
+            &[StreamRun {
+                physical: Some(u64::MAX),
+                len: 2,
+                ..valid[0].clone()
+            }],
+            1,
+        ));
+
+        let logical_overlap = [
+            StreamRun {
+                logical: 0,
+                physical: Some(16),
+                len: 2,
+            },
+            StreamRun {
+                logical: 1,
+                physical: Some(32),
+                len: 1,
+            },
+        ];
+        assert!(!partial_runs_are_valid(&logical_overlap, 2));
+
+        let runs_at_and_over_limit: Vec<_> = (0..=MAX_LIST_RUNS)
+            .map(|index| StreamRun {
+                logical: (index * 2) as u64,
+                physical: Some((index * 2) as u64),
+                len: 1,
+            })
+            .collect();
+        assert!(partial_runs_are_valid(
+            &runs_at_and_over_limit[..MAX_LIST_RUNS],
+            1,
+        ));
+        assert!(!partial_runs_are_valid(&runs_at_and_over_limit, 1));
+    }
+
+    #[test]
+    fn complete_run_validation_requires_contiguous_full_coverage() {
+        let exact = [StreamRun {
+            logical: 0,
+            physical: Some(16),
+            len: 4,
+        }];
+        assert!(complete_runs_are_valid(&exact, 4));
+        assert!(complete_runs_are_valid(&exact, 3));
+        assert!(!complete_runs_are_valid(&exact, 5));
+
+        let gap = [
+            StreamRun {
+                logical: 0,
+                physical: Some(16),
+                len: 2,
+            },
+            StreamRun {
+                logical: 3,
+                physical: Some(32),
+                len: 2,
+            },
+        ];
+        assert!(partial_runs_are_valid(&gap, 4));
+        assert!(!complete_runs_are_valid(&gap, 4));
+    }
+
+    #[test]
+    fn little_endian_u16_reader_uses_the_requested_adjacent_bytes() {
+        assert_eq!(le_u16(&[0xAA, 0x34, 0x12], 1), 0x1234);
+    }
+
     fn put_u16(data: &mut [u8], off: usize, value: u16) {
         data[off..off + 2].copy_from_slice(&value.to_le_bytes());
     }
@@ -892,6 +1001,15 @@ mod tests {
         assert!(parse_list_entries(&zero_tail, false).is_none());
         assert_eq!(parse_list_entries(&zero_tail, true).unwrap().len(), 1);
         assert!(parse_list_entries(&[], false).is_none());
+
+        let complete_but_invalid_header = vec![0; ATTRIBUTE_LIST_ENTRY_BYTES];
+        assert!(parse_list_entries(&complete_but_invalid_header, true).is_none());
+    }
+
+    #[test]
+    fn list_byte_limit_accepts_exactly_the_limit_and_rejects_one_more() {
+        assert!(list_byte_len_is_valid(MAX_LIST_BYTES as usize));
+        assert!(!list_byte_len_is_valid(MAX_LIST_BYTES as usize + 1));
     }
 
     #[test]
@@ -926,6 +1044,14 @@ mod tests {
             let invalid = list_entry(invalid_type, 0, 5, 5);
             assert!(parse_list_entries(&invalid, false).is_none());
         }
+
+        let max_type = list_entry(MAX_ATTRIBUTE_TYPE, 0, frn(6), 6);
+        assert!(parse_list_entries(&max_type, false).is_some());
+
+        let mut in_bounds_wrong_name_offset =
+            list_entry_named(NtfsAttributeType::Data as u32, &[b'x' as u16], 0, frn(7), 7);
+        in_bounds_wrong_name_offset[7] = 0;
+        assert!(parse_list_entries(&in_bounds_wrong_name_offset, false).is_none());
 
         let mut zero_sequence = list_entry(NtfsAttributeType::AttributeList as u32, 0, 5, 5);
         put_u64(&mut zero_sequence, 16, 5);
@@ -992,6 +1118,25 @@ mod tests {
             3,
         ));
         assert!(parse_list_entries(&duplicate_target_instance, false).is_none());
+    }
+
+    #[test]
+    fn entry_sequence_accepts_the_exact_limit_and_rejects_one_more() {
+        let mut sequence = EntrySequence {
+            count: MAX_LIST_ENTRIES - 1,
+            ..EntrySequence::default()
+        };
+        let at_limit = DecodedListEntry {
+            public: ListEntry::unnamed(NtfsAttributeType::AttributeList as u32, 0, 1, 1),
+            name: Box::default(),
+        };
+        assert!(sequence.accept(&at_limit));
+
+        let over_limit = DecodedListEntry {
+            public: ListEntry::unnamed(NtfsAttributeType::AttributeList as u32, 1, 2, 2),
+            name: Box::default(),
+        };
+        assert!(!sequence.accept(&over_limit));
     }
 
     /// Replay the same bytes through the streaming entry point, which shares

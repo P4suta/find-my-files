@@ -83,9 +83,31 @@ public sealed partial class MainPage : Page
                 () => UpdateAvailabilityFocusAndAnnouncement(
                     announceSetup: ViewModel.IsDisconnected,
                     forcePrimaryFocus: true));
+#if FMF_TEST_SEAMS
+            StartForUiAutomationAsync().Forget("startup");
+#else
             ViewModel.StartAsync().Forget("startup");
+#endif
         };
     }
+
+#if FMF_TEST_SEAMS
+    /// <summary>UI-test bundle only: after the real fake-engine startup path has
+    /// completed, optionally inject a stale service version through the same
+    /// ViewModel method used by pipe ServiceInfo. Stable artifacts compile out
+    /// both the flag string and this method.</summary>
+    private async Task StartForUiAutomationAsync()
+    {
+        await ViewModel.StartAsync();
+        if (Environment.GetCommandLineArgs().Any(arg => string.Equals(
+            arg,
+            "--test-version-mismatch",
+            StringComparison.OrdinalIgnoreCase)))
+        {
+            ViewModel.ApplyEngineVersion("99.0.0-ui-test");
+        }
+    }
+#endif
 
     private void OnUnloaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {

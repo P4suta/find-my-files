@@ -39,6 +39,7 @@ internal sealed class FakePipeServer : IDisposable
     private readonly List<Conn> _conns = [];
     private readonly List<(int Connection, ushort Opcode, byte[] Payload)> _received = [];
     private int _connections;
+    private int _closedConnections;
 
     /// <summary>When non-null, the accept loop waits on this before creating the
     /// next pipe instance — so the pipe simply does not exist yet and a client's
@@ -71,6 +72,8 @@ internal sealed class FakePipeServer : IDisposable
     public Func<ushort, byte[], Task<(int Status, byte[] Payload)>?>? Handler { get; set; }
 
     public int ConnectionCount => Volatile.Read(ref _connections);
+
+    public int ClosedConnectionCount => Volatile.Read(ref _closedConnections);
 
     /// <summary>Creates the server and starts accepting. Pass
     /// <paramref name="startHeld"/> to begin in the warm-up state (no pipe created
@@ -148,6 +151,13 @@ internal sealed class FakePipeServer : IDisposable
     /// <summary>Pushes an event frame to the most recent live connection.</summary>
     public async Task SendEventAsync(uint kind, ulong entries, string volume)
     {
+        await SendEventAsync((ushort)kind, kind, entries, volume);
+    }
+
+    /// <summary>Pushes an event whose header opcode and body kind may differ,
+    /// for protocol-consistency tests.</summary>
+    public async Task SendEventAsync(ushort opcode, uint kind, ulong entries, string volume)
+    {
         Conn? conn;
         lock (_gate)
         {
@@ -161,7 +171,7 @@ internal sealed class FakePipeServer : IDisposable
 
         await SendAsync(
             conn,
-            (ushort)kind,
+            opcode,
             PipeProtocol.FlagEvent,
             0,
             0,
@@ -298,6 +308,10 @@ internal sealed class FakePipeServer : IDisposable
         catch
         {
             // Client went away or the test dropped the connection.
+        }
+        finally
+        {
+            Interlocked.Increment(ref _closedConnections);
         }
     }
 

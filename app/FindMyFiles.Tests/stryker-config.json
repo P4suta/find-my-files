@@ -3,6 +3,7 @@
     "project": "FindMyFiles.csproj",
     "test-projects": ["FindMyFiles.Tests.csproj"],
     "concurrency": 4,
+    "additional-timeout": 30000,
     "mutate": [
       "**/Services/ShellOps.cs",
       "**/Services/ServiceProvisioner.cs",

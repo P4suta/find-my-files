@@ -92,13 +92,20 @@ internal sealed class ManualDispatcher : IDispatcher
         /// <summary>Start() calls so far — debounce restarts included.</summary>
         public int StartCount { get; private set; }
 
+        /// <summary>Stop() calls so far — lets lifecycle tests pin no-op guards.</summary>
+        public int StopCount { get; private set; }
+
         public void Start()
         {
             StartCount++;
             IsStarted = true;
         }
 
-        public void Stop() => IsStarted = false;
+        public void Stop()
+        {
+            StopCount++;
+            IsStarted = false;
+        }
 
         /// <summary>Simulate the interval elapsing. No-op unless armed.</summary>
         public void Fire()

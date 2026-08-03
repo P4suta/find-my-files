@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using FindMyFiles.Services;
 using Xunit;
 
@@ -104,11 +105,14 @@ public sealed class ShellOpsRevealTests
         // This is the regression test that pins the shipped-broken behaviour.
         var api = new FakeRevealApi(parseHr: 0, openHr: 1);
 
-        Assert.NotNull(ShellOps.DoRevealIndexed(
+        var failure = Assert.IsType<InvalidOperationException>(ShellOps.DoRevealIndexed(
             new RecordingVerifier(),
             api,
             @"C:\dir\file.txt",
             0x0007_0000_0000_0042));
+        Assert.Equal(
+            "reveal failed (SHOpenFolderAndSelectItems returned 0x00000001)",
+            failure.Message);
         Assert.Equal(1, api.FreeCalls);
     }
 
@@ -117,11 +121,12 @@ public sealed class ShellOpsRevealTests
     {
         var api = new FakeRevealApi(parseHr: 0, openHr: unchecked((int)0x80004005)); // E_FAIL
 
-        Assert.NotNull(ShellOps.DoRevealIndexed(
+        var failure = Assert.IsType<COMException>(ShellOps.DoRevealIndexed(
             new RecordingVerifier(),
             api,
             @"C:\dir\file.txt",
             0x0007_0000_0000_0042));
+        Assert.Equal(unchecked((int)0x80004005), failure.HResult);
         Assert.Equal(1, api.FreeCalls);
     }
 
@@ -130,11 +135,12 @@ public sealed class ShellOpsRevealTests
     {
         var api = new FakeRevealApi(parseHr: unchecked((int)0x80070002), openHr: 0); // ERROR_FILE_NOT_FOUND
 
-        Assert.NotNull(ShellOps.DoRevealIndexed(
+        var failure = Assert.IsAssignableFrom<IOException>(ShellOps.DoRevealIndexed(
             new RecordingVerifier(),
             api,
             @"C:\missing\file.txt",
             0x0007_0000_0000_0042));
+        Assert.Equal(unchecked((int)0x80070002), failure.HResult);
         Assert.Equal(0, api.OpenCalls);
         Assert.Equal(0, api.FreeCalls);
     }

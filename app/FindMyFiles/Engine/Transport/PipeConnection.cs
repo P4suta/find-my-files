@@ -14,9 +14,14 @@ namespace FindMyFiles.Engine;
 /// against a mutable stream field. <see cref="PipeEngineClient"/> supervises:
 /// it creates one of these per (re)connection and replaces it wholesale.
 /// </summary>
-internal sealed class PipeConnection : IDisposable
+internal sealed class PipeConnection(
+    NamedPipeClientStream stream,
+    int epoch,
+    Action<int, ushort, byte[]> onEvent,
+    Action<int, uint, ushort, int, byte[]> onResponse,
+    CancellationToken ct) : IDisposable
 {
-    private readonly NamedPipeClientStream _stream;
+    private readonly NamedPipeClientStream _stream = stream;
 
     // CA2213 false positive: SemaphoreSlim only owns a disposable handle if its
     // AvailableWaitHandle is accessed — it never is here (only WaitAsync/Release).
@@ -25,34 +30,20 @@ internal sealed class PipeConnection : IDisposable
     // the EngineUnavailableException translation PipeConnectionTests pins).
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2213:Disposable fields should be disposed", Justification = "SemaphoreSlim allocates no handle unless AvailableWaitHandle is used (it is not); disposing it breaks write-after-dispose normalization")]
     private readonly SemaphoreSlim _writeLock = new(1, 1);
-    private readonly Action<int, ushort, byte[]> _onEvent;
-    private readonly Action<int, uint, ushort, int, byte[]> _onResponse;
     private volatile bool _disposed;
 
     /// <summary>Generation id of this connection (monotonic, never reused).
     /// Results born on this connection carry it; once the object dies the
     /// client's CurrentEpoch can never equal it again, so epoch mismatch ⇒
     /// stale holds structurally, not by convention.</summary>
-    internal int Epoch { get; }
+    internal int Epoch { get; } = epoch;
 
     /// <summary>Completes when the connection is dead (server closed the
     /// pipe, malformed frame, cancellation) — the supervisor awaits this to
     /// tear down and reconnect. Never faults; failures are logged.</summary>
-    internal Task ReadLoop { get; }
-
-    internal PipeConnection(
-        NamedPipeClientStream stream,
-        int epoch,
-        Action<int, ushort, byte[]> onEvent,
-        Action<int, uint, ushort, int, byte[]> onResponse,
-        CancellationToken ct)
-    {
-        _stream = stream;
-        Epoch = epoch;
-        _onEvent = onEvent;
-        _onResponse = onResponse;
-        ReadLoop = Task.Run(() => ReadLoopAsync(ct), CancellationToken.None);
-    }
+    internal Task ReadLoop { get; } = Task.Run(
+        () => ReadLoopAsync(stream, epoch, onEvent, onResponse, ct),
+        CancellationToken.None);
 
     /// <summary>Serialized frame write. A write that lands after
     /// <see cref="Dispose"/> (the supervisor tore this connection down) is
@@ -64,7 +55,7 @@ internal sealed class PipeConnection : IDisposable
     /// <returns>A task that completes when the frame has been written.</returns>
     internal async Task WriteFrameAsync(byte[] frame, CancellationToken ct)
     {
-        await _writeLock.WaitAsync(ct).ConfigureAwait(false);
+        await _writeLock.WaitAsync(ct).ConfigureAwait(ConfigureAwaitOptions.None);
         try
         {
             if (_disposed)
@@ -86,33 +77,33 @@ internal sealed class PipeConnection : IDisposable
         }
     }
 
-    private async Task ReadLoopAsync(CancellationToken ct)
+    private static async Task ReadLoopAsync(
+        NamedPipeClientStream stream,
+        int epoch,
+        Action<int, ushort, byte[]> onEvent,
+        Action<int, uint, ushort, int, byte[]> onResponse,
+        CancellationToken ct)
     {
-        var header = new byte[PipeProtocol.HeaderLen];
         try
         {
-            while (!ct.IsCancellationRequested)
+            for (; ;)
             {
-                await _stream.ReadExactlyAsync(header, ct).ConfigureAwait(false);
-                var h = PipeProtocol.ReadHeader(header); // oversize throws → drop the link
+                var h = await ReadHeaderAsync(stream, ct).ConfigureAwait(false);
                 var payload = new byte[h.Len];
-                if (h.Len > 0)
-                {
-                    await _stream.ReadExactlyAsync(payload, ct).ConfigureAwait(false);
-                }
+                await stream.ReadExactlyAsync(payload, ct).ConfigureAwait(false);
 
                 switch (h.Flags)
                 {
                     case PipeProtocol.FlagEvent
                         when h.RequestId == 0 && h.StatusCode == PipeProtocol.Status.Ok:
-                        _onEvent(Epoch, h.Opcode, payload);
+                        onEvent(epoch, h.Opcode, payload);
                         break;
                     case PipeProtocol.FlagEvent:
                         throw new InvalidDataException(
                             $"event frame has request/status fields "
                             + $"({h.RequestId}/{h.StatusCode})");
                     case PipeProtocol.FlagResponse when h.RequestId != 0:
-                        _onResponse(Epoch, h.RequestId, h.Opcode, h.StatusCode, payload);
+                        onResponse(epoch, h.RequestId, h.Opcode, h.StatusCode, payload);
                         break;
                     case PipeProtocol.FlagResponse:
                         throw new InvalidDataException("response frame has request id 0");
@@ -133,6 +124,19 @@ internal sealed class PipeConnection : IDisposable
         {
             FileLog.Warn("pipe", "read loop ended", ex);
         }
+    }
+
+    private static async Task<PipeProtocol.FrameHeader> ReadHeaderAsync(
+        NamedPipeClientStream stream,
+        CancellationToken ct)
+    {
+        var header = new byte[PipeProtocol.HeaderLen];
+        var bytesRead = await stream.ReadAtLeastAsync(
+            header,
+            header.Length,
+            throwOnEndOfStream: true,
+            ct).ConfigureAwait(false);
+        return PipeProtocol.ReadHeader(header.AsSpan(0, bytesRead)); // oversize throws → drop the link
     }
 
     /// <summary>Invalidates the whole connection. Idempotent; an in-flight

@@ -18,7 +18,7 @@ internal enum EngineChoice
 
     /// <summary>The service is installed but stopped — start it unelevated and
     /// connect over the pipe (on-demand lifecycle, ADR-0027). Resolved inside
-    /// <see cref="EngineClientFactory.Resolve"/>; never surfaced to the UI.</summary>
+    /// <see cref="EngineClientFactory.Resolve(string[])"/>; never surfaced to the UI.</summary>
     StartThenPipe,
 
     /// <summary>Service is running but rejected our token (stale authorized-SID
@@ -51,6 +51,14 @@ internal enum EngineChoice
 internal static class EngineClientFactory
 {
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromMilliseconds(250);
+    private static readonly EngineClientFactoryHooks ProductionHooks = new(
+        pipeName => PipeEngineClient.Probe(pipeName, ProbeTimeout),
+        ServiceSetup.QueryState,
+        ServiceSetup.IsInstalledServiceCompatible,
+        ServiceSetup.TryStartUnelevated,
+        ServiceSetup.IsProcessElevated,
+        pipeName => new PipeEngineClient(pipeName),
+        () => new FfiEngineClient());
 
     /// <summary>Called once at startup; resolves and returns a single engine
     /// implementation by the priority above. When no service can serve us,
@@ -59,8 +67,17 @@ internal static class EngineClientFactory
     /// <param name="args">Process command-line args (production reads only
     /// <c>--engine=pipe|inproc</c>).</param>
     /// <returns>The single chosen <see cref="IEngineClient"/> implementation instance.</returns>
-    public static IEngineClient Resolve(string[] args)
+    public static IEngineClient Resolve(string[] args) => Resolve(args, ProductionHooks);
+
+    /// <summary>Deterministic resolver core. All process and transport effects
+    /// enter through <paramref name="hooks"/>; selection logic remains here.</summary>
+    /// <param name="args">Process engine-selection arguments.</param>
+    /// <param name="hooks">Injected process, SCM, and transport operations.</param>
+    /// <returns>The selected engine client.</returns>
+    internal static IEngineClient Resolve(string[] args, EngineClientFactoryHooks hooks)
     {
+        ArgumentNullException.ThrowIfNull(args);
+        ArgumentNullException.ThrowIfNull(hooks);
         FileLog.Event(
             "app",
             "data root selected",
@@ -108,13 +125,13 @@ internal static class EngineClientFactory
         if (string.Equals(mode, "pipe", StringComparison.OrdinalIgnoreCase))
         {
             FileLog.Info("app", "engine: pipe (explicit)");
-            return new PipeEngineClient(pipeName);
+            return hooks.OpenPipe(pipeName);
         }
 
         if (string.Equals(mode, "inproc", StringComparison.OrdinalIgnoreCase))
         {
-            WarnExplicitInProcIsUnhardened();
-            return new FfiEngineClient();
+            WarnExplicitInProcIsUnhardened(hooks.QueryState);
+            return hooks.OpenInProc();
         }
 
         if (!string.Equals(mode, "auto", StringComparison.OrdinalIgnoreCase))
@@ -127,19 +144,19 @@ internal static class EngineClientFactory
         // An explicit custom pipe is not represented by the fixed SCM service,
         // so probe it directly. The default path queries SCM first and only pays
         // the 250ms Hello budget when a service may actually be alive.
-        var probe = () => PipeEngineClient.Probe(pipeName, ProbeTimeout);
+        var probe = () => hooks.Probe(pipeName);
 #if FMF_TEST_SEAMS
         var choice = pipeOverride is not null
             ? DecideCustomPipe(probe)
             : DecideAuto(
-                ServiceSetup.QueryState,
+                hooks.QueryState,
                 probe,
-                ServiceSetup.IsInstalledServiceCompatible);
+                hooks.ServiceCompatible);
 #else
         var choice = DecideAuto(
-            ServiceSetup.QueryState,
+            hooks.QueryState,
             probe,
-            ServiceSetup.IsInstalledServiceCompatible);
+            hooks.ServiceCompatible);
 #endif
 
         if (choice == EngineChoice.StartThenPipe)
@@ -150,10 +167,10 @@ internal static class EngineClientFactory
             // If the start can't be done — e.g. an older install without the
             // granted right — fall back as if no service is present; the setup
             // screen's re-register then migrates it.
-            if (ServiceSetup.TryStartUnelevated())
+            if (hooks.TryStart())
             {
                 FileLog.Info("app", "engine: pipe (started marker-compatible on-demand service)");
-                return new PipeEngineClient(pipeName);
+                return hooks.OpenPipe(pipeName);
             }
 
             FileLog.Warn(
@@ -165,7 +182,7 @@ internal static class EngineClientFactory
         if (choice == EngineChoice.Pipe)
         {
             FileLog.Info("app", "engine: pipe (probe succeeded)");
-            return new PipeEngineClient(pipeName);
+            return hooks.OpenPipe(pipeName);
         }
 
         if (choice == EngineChoice.UnavailableServiceRejected)
@@ -196,7 +213,7 @@ internal static class EngineClientFactory
             "app",
             "engine: unavailable (no service registered) — setup required",
             ex: null,
-            ("elevated", ServiceSetup.IsProcessElevated()));
+            ("elevated", hooks.IsElevated()));
         return new UnavailableEngineClient();
     }
 
@@ -209,7 +226,7 @@ internal static class EngineClientFactory
     /// pre-creatable, by every local standard user. Accepted for a path a
     /// developer opts into by hand, but never silently: say so on the way in,
     /// and say whether an install has ever hardened the root.</summary>
-    private static void WarnExplicitInProcIsUnhardened()
+    private static void WarnExplicitInProcIsUnhardened(Func<EngineServiceState> queryState)
     {
         const string message =
             "engine: in-proc FFI (explicit --engine=inproc) — the machine index is "
@@ -218,7 +235,7 @@ internal static class EngineClientFactory
             "app",
             message,
             ex: null,
-            ("service_installed", ServiceSetup.QueryState() != EngineServiceState.NotInstalled));
+            ("service_installed", queryState() != EngineServiceState.NotInstalled));
     }
 
     /// <summary>Resolves the engine on a worker so synchronous SCM and pipe

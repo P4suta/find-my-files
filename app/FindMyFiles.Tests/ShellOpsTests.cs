@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using FindMyFiles.Services;
+using FindMyFiles.Tests.TestDoubles;
 using Xunit;
 
 namespace FindMyFiles.Tests;
@@ -58,6 +59,12 @@ public sealed class ShellOpsTests : IDisposable
         }
     }
 
+    private sealed class ThrowingRunner : IProcessRunner
+    {
+        public void Start(ProcessStartInfo psi) =>
+            throw new InvalidOperationException("launch failed");
+    }
+
     private sealed class RecordingVerifier : IIndexedShellTargetVerifier
     {
         internal string? Path { get; private set; }
@@ -105,6 +112,40 @@ public sealed class ShellOpsTests : IDisposable
             throw new IOException("identity mismatch");
     }
 
+    private sealed class SuccessfulRevealApi : IRevealApi
+    {
+        public int ParseDisplayName(string path, out IntPtr pidl)
+        {
+            pidl = (IntPtr)0x1234;
+            return 0;
+        }
+
+        public int OpenFolderAndSelectItems(IntPtr pidl) => 0;
+
+        public void FreePidl(IntPtr pidl)
+        {
+        }
+    }
+
+    private static ShellOpsHooks Hooks(
+        IProcessRunner runner,
+        IIndexedShellTargetVerifier verifier,
+        IAppRestart restart,
+        IRevealApi? reveal = null,
+        Action<Action>? startSta = null,
+        Func<int>? coInitialize = null,
+        Action? coUninitialize = null,
+        Action<string>? copyText = null) =>
+        new(
+            runner,
+            verifier,
+            reveal ?? new SuccessfulRevealApi(),
+            restart,
+            startSta ?? (static action => action()),
+            coInitialize ?? (static () => 0),
+            coUninitialize ?? (static () => { }),
+            copyText ?? (static _ => { }));
+
     [Fact]
     public void OpenTrustedWith_drives_the_runner_with_the_path_as_one_verbatim_argument()
     {
@@ -147,6 +188,115 @@ public sealed class ShellOpsTests : IDisposable
             0x0007_0000_0000_0042);
 
         Assert.Equal(0, runner.Calls);
+    }
+
+    [Fact]
+    public void Public_shell_entry_points_use_the_atomic_boundary_set()
+    {
+        var runner = new RecordingRunner();
+        var verifier = new RecordingVerifier();
+        var restart = new RecordingRestart();
+        var staStarts = 0;
+        var coInitializes = 0;
+        var coUninitializes = 0;
+        string? copied = null;
+        using var scope = ShellOps.UseHooksForTests(Hooks(
+            runner,
+            verifier,
+            restart,
+            startSta: action =>
+            {
+                staStarts++;
+                action();
+            },
+            coInitialize: () =>
+            {
+                coInitializes++;
+                return 0;
+            },
+            coUninitialize: () => coUninitializes++,
+            copyText: text => copied = text));
+
+        ShellOps.OpenTrusted(@"C:\dir\open.txt");
+        ShellOps.OpenIndexed(@"C:\dir\indexed.txt", 42);
+        ShellOps.RevealIndexed(@"C:\dir\reveal.txt", 43);
+        ShellOps.Relaunch();
+        ShellOps.CopyText("copied text", "test");
+
+        Assert.Equal(2, runner.Calls);
+        Assert.Equal(@"C:\dir\reveal.txt", verifier.Path);
+        Assert.Equal(43UL, verifier.Frn);
+        Assert.Equal(1, staStarts);
+        Assert.Equal(1, coInitializes);
+        Assert.Equal(1, coUninitializes);
+        Assert.Equal(1, restart.Calls);
+        Assert.Equal("copied text", copied);
+    }
+
+    [Fact]
+    public void Reveal_failure_notifies_and_a_failed_Com_init_is_not_uninitialized()
+    {
+        var notifications = new List<AppNotification>();
+        using var subscription = Notifier.Attach(notifications.Add);
+        var uninitializes = 0;
+        using var scope = ShellOps.UseHooksForTests(Hooks(
+            new RecordingRunner(),
+            new ThrowingVerifier(),
+            new RecordingRestart(),
+            coInitialize: () => -1,
+            coUninitialize: () => uninitializes++));
+
+        ShellOps.RevealIndexed(@"C:\dir\missing.txt", 44);
+
+        var notification = Assert.Single(notifications);
+        Assert.Equal(NotifySeverity.Warning, notification.Severity);
+        Assert.Contains("identity mismatch", notification.Detail, StringComparison.Ordinal);
+        Assert.Equal(0, uninitializes);
+    }
+
+    [Fact]
+    public void Reveal_contains_a_Com_initialization_exception_on_the_STA_thread()
+    {
+        using var log = new LogCapture();
+        var notifications = new List<AppNotification>();
+        using var subscription = Notifier.Attach(notifications.Add);
+        var uninitializes = 0;
+        using var scope = ShellOps.UseHooksForTests(Hooks(
+            new RecordingRunner(),
+            new RecordingVerifier(),
+            new RecordingRestart(),
+            coInitialize: () => throw new InvalidOperationException("COM unavailable"),
+            coUninitialize: () => uninitializes++));
+
+        ShellOps.RevealIndexed(@"C:\dir\file.txt", 45);
+
+        var notification = Assert.Single(notifications);
+        Assert.Equal(NotifySeverity.Warning, notification.Severity);
+        Assert.Contains("COM unavailable", notification.Detail, StringComparison.Ordinal);
+        Assert.Equal(0, uninitializes);
+        Assert.Contains(
+            log.Text.Split('\n'),
+            line => line.Contains("shell operation failed", StringComparison.Ordinal)
+                && line.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                    .Contains("operation=reveal", StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void Clipboard_failure_is_reported_without_escaping()
+    {
+        var notifications = new List<AppNotification>();
+        using var subscription = Notifier.Attach(notifications.Add);
+        using var scope = ShellOps.UseHooksForTests(Hooks(
+            new RecordingRunner(),
+            new RecordingVerifier(),
+            new RecordingRestart(),
+            copyText: _ => throw new InvalidOperationException("clipboard busy")));
+
+        ShellOps.CopyText("text", "diagnostics");
+
+        var notification = Assert.Single(notifications);
+        Assert.Equal(NotifySeverity.Warning, notification.Severity);
+        Assert.Contains("clipboard busy", notification.Detail, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -394,5 +544,99 @@ public sealed class ShellOpsTests : IDisposable
         // the call must return normally rather than propagate — Dispose resets the
         // Notifier the swallowed failure posted to.
         ShellOps.RelaunchWith(new ThrowingRestart());
+    }
+
+    [Fact]
+    public void Hook_scope_rejects_null()
+    {
+        Assert.Throws<ArgumentNullException>(() => ShellOps.UseHooksForTests(null!));
+    }
+
+    [Fact]
+    public void Shell_failures_preserve_user_messages_and_structured_operations()
+    {
+        using var log = new LogCapture();
+        var notifications = new List<AppNotification>();
+        using var subscription = Notifier.Attach(notifications.Add);
+
+        ShellOps.OpenTrustedWith(new ThrowingRunner(), @"C:\dir\open.txt");
+        ShellOps.OpenIndexedWith(
+            new ThrowingVerifier(),
+            new RecordingRunner(),
+            @"C:\dir\indexed.txt",
+            42);
+        ShellOps.RelaunchWith(new ThrowingRestart());
+
+        using (ShellOps.UseHooksForTests(Hooks(
+            new RecordingRunner(),
+            new ThrowingVerifier(),
+            new RecordingRestart(),
+            copyText: _ => throw new InvalidOperationException("clipboard busy"))))
+        {
+            ShellOps.RevealIndexed(@"C:\dir\reveal.txt", 43);
+            ShellOps.CopyText("text", "diagnostics");
+        }
+
+        Assert.Contains(
+            notifications,
+            item => string.Equals(
+                item.Message,
+                $"{Loc.Get("Shell_OpenFailed")}: open.txt",
+                StringComparison.Ordinal));
+        Assert.Contains(
+            notifications,
+            item => string.Equals(
+                item.Message,
+                $"{Loc.Get("Shell_OpenFailed")}: indexed.txt",
+                StringComparison.Ordinal));
+        Assert.Contains(
+            notifications,
+            item => string.Equals(
+                item.Message,
+                $"{Loc.Get("Shell_RelaunchFailed")}: FindMyFiles",
+                StringComparison.Ordinal));
+        Assert.Contains(
+            notifications,
+            item => string.Equals(
+                item.Message,
+                $"{Loc.Get("Shell_RevealFailed")}: reveal.txt",
+                StringComparison.Ordinal));
+        Assert.Contains(
+            notifications,
+            item => string.Equals(
+                    item.Message,
+                    Loc.Get("Shell_ClipboardFailed"),
+                    StringComparison.Ordinal)
+                && item.Detail?.Contains("clipboard busy", StringComparison.Ordinal) == true);
+
+        var lines = log.Text.Split('\n');
+        foreach (var operation in new[] { "open", "open-indexed", "relaunch", "reveal" })
+        {
+            Assert.Contains(
+                lines,
+                line => line.Contains("area=shell", StringComparison.Ordinal)
+                    && line.Contains("shell operation failed", StringComparison.Ordinal)
+                    && line.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                        .Contains($"operation={operation}", StringComparer.Ordinal));
+        }
+
+        Assert.Contains(
+            lines,
+            line => line.Contains("area=shell", StringComparison.Ordinal)
+                && line.Contains("clipboard copy failed", StringComparison.Ordinal)
+                && line.Contains("operation=diagnostics", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Win32_not_found_switches_to_long_path_hint_only_after_max_path()
+    {
+        var error = new System.ComponentModel.Win32Exception(2);
+
+        Assert.Equal(
+            Loc.Get("Shell_HintMoved"),
+            ShellOps.Hint(error, @"C:\" + new string('a', 256)));
+        Assert.Equal(
+            Loc.Get("Shell_HintPathTooLong"),
+            ShellOps.Hint(error, @"C:\" + new string('a', 257)));
     }
 }

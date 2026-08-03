@@ -19,5 +19,1242 @@
     "app/FindMyFiles/ViewModels/MainViewModel.cs",
     "app/FindMyFiles/ViewModels/SearchOrchestrator.cs"
   ],
-  "accepted_equivalents": []
+  "accepted_equivalents": [
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeConnection.cs",
+        "start_line": 67,
+        "start_column": 64,
+        "end_line": 67,
+        "end_column": 69,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "After the serialized write, the continuation only releases the private write semaphore; synchronization-context capture cannot change bytes, errors, or owned state."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeConnection.cs",
+        "start_line": 91,
+        "start_column": 74,
+        "end_line": 91,
+        "end_column": 79,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "ReadLoopAsync runs on Task.Run without a SynchronizationContext, so changing ConfigureAwait cannot alter scheduling, decoded frames, or connection state."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeConnection.cs",
+        "start_line": 93,
+        "start_column": 75,
+        "end_line": 93,
+        "end_column": 80,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "ReadLoopAsync runs on Task.Run without a SynchronizationContext, so changing ConfigureAwait cannot alter scheduling, decoded frames, or connection state."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeConnection.cs",
+        "start_line": 103,
+        "start_column": 29,
+        "end_line": 103,
+        "end_column": 70,
+        "mutator": "String mutation",
+        "replacement": "$\"\""
+      },
+      "rationale": "ReadLoopAsync contains this malformed-frame exception and the safe logger records its exception type rather than its message; connection retirement is unchanged."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeConnection.cs",
+        "start_line": 104,
+        "start_column": 31,
+        "end_line": 104,
+        "end_column": 64,
+        "mutator": "String mutation",
+        "replacement": "$\"\""
+      },
+      "rationale": "ReadLoopAsync contains this malformed-frame exception and the safe logger records its exception type rather than its message; connection retirement is unchanged."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeConnection.cs",
+        "start_line": 109,
+        "start_column": 56,
+        "end_line": 109,
+        "end_column": 89,
+        "mutator": "String mutation",
+        "replacement": "\"\""
+      },
+      "rationale": "ReadLoopAsync contains this malformed-frame exception and the safe logger records its exception type rather than its message; connection retirement is unchanged."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeConnection.cs",
+        "start_line": 112,
+        "start_column": 29,
+        "end_line": 112,
+        "end_column": 90,
+        "mutator": "String mutation",
+        "replacement": "$\"\""
+      },
+      "rationale": "ReadLoopAsync contains this malformed-frame exception and the safe logger records its exception type rather than its message; connection retirement is unchanged."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeConnection.cs",
+        "start_line": 138,
+        "start_column": 32,
+        "end_line": 138,
+        "end_column": 37,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "ReadLoopAsync runs on Task.Run without a SynchronizationContext, so changing ConfigureAwait cannot alter scheduling, decoded frames, or connection state."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 264,
+        "start_column": 65,
+        "end_line": 264,
+        "end_column": 70,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 276,
+        "start_column": 70,
+        "end_line": 276,
+        "end_column": 75,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 278,
+        "start_column": 77,
+        "end_line": 278,
+        "end_column": 82,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 281,
+        "start_column": 17,
+        "end_line": 281,
+        "end_column": 26,
+        "mutator": "Equality mutation",
+        "replacement": "h.Len >= 0"
+      },
+      "rationale": "Frame length is unsigned; for zero length the added branch allocates an empty buffer and ReadExactlyAsync is a no-op, yielding the same decoded response."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 283,
+        "start_column": 82,
+        "end_line": 283,
+        "end_column": 87,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 342,
+        "start_column": 62,
+        "end_line": 342,
+        "end_column": 67,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 354,
+        "start_column": 84,
+        "end_line": 354,
+        "end_column": 89,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 358,
+        "start_column": 59,
+        "end_line": 358,
+        "end_column": 64,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 383,
+        "start_column": 17,
+        "end_line": 383,
+        "end_column": 60,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Terminal failure ends the supervisor permanently, while every retryable failure leaves this field null; after any successful handshake this write therefore stores its existing value."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 386,
+        "start_column": 58,
+        "end_line": 386,
+        "end_column": 63,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 390,
+        "start_column": 17,
+        "end_line": 390,
+        "end_column": 23,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Without the first break, finally retires the same candidate and the immediately cancelled delay breaks the loop; state publication is idempotent and teardown is identical."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 421,
+        "start_column": 62,
+        "end_line": 421,
+        "end_column": 67,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 425,
+        "start_column": 17,
+        "end_line": 425,
+        "end_column": 23,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Without this break only the local backoff value is advanced, after which the cancelled while condition exits and performs the same teardown."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 431,
+        "start_column": 9,
+        "end_line": 431,
+        "end_column": 30,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Every loop exit has already retired its captured connection in finally, and Dispose tears down the published connection before cancellation; this final call sees null."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 457,
+        "start_column": 60,
+        "end_line": 457,
+        "end_column": 65,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 458,
+        "start_column": 50,
+        "end_line": 458,
+        "end_column": 57,
+        "mutator": "String mutation",
+        "replacement": "\"\""
+      },
+      "rationale": "A failed private handshake is only retried or made terminal before publication, and safe logging redacts its exception message; this operation label cannot reach callers."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 479,
+        "start_column": 60,
+        "end_line": 479,
+        "end_column": 65,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 480,
+        "start_column": 50,
+        "end_line": 480,
+        "end_column": 61,
+        "mutator": "String mutation",
+        "replacement": "\"\""
+      },
+      "rationale": "A failed private handshake is only retried or made terminal before publication, and safe logging redacts its exception message; this operation label cannot reach callers."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 488,
+        "start_column": 60,
+        "end_line": 488,
+        "end_column": 65,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 489,
+        "start_column": 50,
+        "end_line": 489,
+        "end_column": 63,
+        "mutator": "String mutation",
+        "replacement": "\"\""
+      },
+      "rationale": "A failed private handshake is only retried or made terminal before publication, and safe logging redacts its exception message; this operation label cannot reach callers."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 571,
+        "start_column": 29,
+        "end_line": 571,
+        "end_column": 80,
+        "mutator": "String mutation",
+        "replacement": "$\"\""
+      },
+      "rationale": "The read loop contains this protocol exception and safe logging records its type rather than message text; the same connection is retired and pending work is handled identically."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 618,
+        "start_column": 17,
+        "end_line": 618,
+        "end_column": 69,
+        "mutator": "String mutation",
+        "replacement": "$\"\""
+      },
+      "rationale": "The read loop contains this protocol exception and safe logging records its type rather than message text; the same connection is retired and pending work is handled identically."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 652,
+        "start_column": 48,
+        "end_line": 652,
+        "end_column": 76,
+        "mutator": "String mutation",
+        "replacement": "$\"\""
+      },
+      "rationale": "The read loop contains this protocol exception and safe logging records its type rather than message text; the same connection is retired and pending work is handled identically."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 685,
+        "start_column": 9,
+        "end_line": 685,
+        "end_column": 30,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "TearDown first removes the public slot, while the supervisor finally always calls RetireConnection on its captured object and disposes it; disposal remains eventual and idempotent."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 686,
+        "start_column": 9,
+        "end_line": 686,
+        "end_column": 81,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Lifetime cancellation has already completed pending waits as engine-client-disposed, and supervisor retirement also fails the same epoch; this fallback pass cannot change completion."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 686,
+        "start_column": 47,
+        "end_line": 686,
+        "end_column": 79,
+        "mutator": "String mutation",
+        "replacement": "\"\""
+      },
+      "rationale": "Dispose cancels the linked pending waits synchronously before teardown, so callers take the canonical engine-client-disposed path before this fallback reason can win."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 767,
+        "start_column": 9,
+        "end_line": 767,
+        "end_column": 43,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Every public caller performs the same cancellation check before reaching this helper, while private handshake callers use the client lifetime token observed by their awaited pipe operation."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 773,
+        "start_column": 20,
+        "end_line": 773,
+        "end_column": 72,
+        "mutator": "Null coalescing mutation (left to right)",
+        "replacement": "Volatile.Read(ref _connection)?? capturedConnection"
+      },
+      "rationale": "A captured handshake connection is private while the public connection slot is null; ordinary requests pass null, so reversing the operands selects the same connection at every call site."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 816,
+        "start_column": 81,
+        "end_line": 816,
+        "end_column": 86,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 831,
+        "start_column": 33,
+        "end_line": 831,
+        "end_column": 38,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 844,
+        "start_column": 53,
+        "end_line": 844,
+        "end_column": 58,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 859,
+        "start_column": 67,
+        "end_line": 859,
+        "end_column": 72,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 915,
+        "start_column": 32,
+        "end_line": 915,
+        "end_column": 37,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 925,
+        "start_column": 92,
+        "end_line": 925,
+        "end_column": 97,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 941,
+        "start_column": 32,
+        "end_line": 941,
+        "end_column": 37,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 966,
+        "start_column": 9,
+        "end_line": 966,
+        "end_column": 43,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Every public caller performs the same cancellation check before reaching this helper, while private handshake callers use the client lifetime token observed by their awaited pipe operation."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 968,
+        "start_column": 29,
+        "end_line": 968,
+        "end_column": 34,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 976,
+        "start_column": 9,
+        "end_line": 976,
+        "end_column": 43,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Every public caller performs the same cancellation check before reaching this helper, while private handshake callers use the client lifetime token observed by their awaited pipe operation."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 979,
+        "start_column": 29,
+        "end_line": 979,
+        "end_column": 34,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 985,
+        "start_column": 9,
+        "end_line": 985,
+        "end_column": 43,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Every public caller performs the same cancellation check before reaching this helper, while private handshake callers use the client lifetime token observed by their awaited pipe operation."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 987,
+        "start_column": 29,
+        "end_line": 987,
+        "end_column": 34,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 994,
+        "start_column": 68,
+        "end_line": 994,
+        "end_column": 73,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1003,
+        "start_column": 9,
+        "end_line": 1003,
+        "end_column": 43,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Every public caller performs the same cancellation check before reaching this helper, while private handshake callers use the client lifetime token observed by their awaited pipe operation."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1021,
+        "start_column": 54,
+        "end_line": 1021,
+        "end_column": 59,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1037,
+        "start_column": 40,
+        "end_line": 1037,
+        "end_column": 45,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1053,
+        "start_column": 40,
+        "end_line": 1053,
+        "end_column": 45,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1068,
+        "start_column": 59,
+        "end_line": 1068,
+        "end_column": 64,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1096,
+        "start_column": 79,
+        "end_line": 1096,
+        "end_column": 84,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1104,
+        "start_column": 9,
+        "end_line": 1104,
+        "end_column": 43,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Every public caller performs the same cancellation check before reaching this helper, while private handshake callers use the client lifetime token observed by their awaited pipe operation."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1110,
+        "start_column": 33,
+        "end_line": 1110,
+        "end_column": 38,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1140,
+        "start_column": 77,
+        "end_line": 1140,
+        "end_column": 82,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1154,
+        "start_column": 33,
+        "end_line": 1154,
+        "end_column": 38,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1180,
+        "start_column": 9,
+        "end_line": 1180,
+        "end_column": 43,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Every public caller performs the same cancellation check before reaching this helper, while private handshake callers use the client lifetime token observed by their awaited pipe operation."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1187,
+        "start_column": 32,
+        "end_line": 1187,
+        "end_column": 37,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1206,
+        "start_column": 61,
+        "end_line": 1206,
+        "end_column": 75,
+        "mutator": "String mutation",
+        "replacement": "\"\""
+      },
+      "rationale": "ReleaseResultIfCurrentAsync catches every cleanup failure internally, so its returned task cannot fault into Forget and the diagnostic area label is unreachable."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1213,
+        "start_column": 13,
+        "end_line": 1213,
+        "end_column": 20,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Falling through on a stale epoch calls RequestOkOnEpochAsync, which rejects that epoch with StaleResultException and is caught immediately, producing the same no-op cleanup."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1218,
+        "start_column": 70,
+        "end_line": 1218,
+        "end_column": 75,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1240,
+        "start_column": 17,
+        "end_line": 1240,
+        "end_column": 29,
+        "mutator": "String mutation",
+        "replacement": "\"\""
+      },
+      "rationale": "A ResultFree status failure is contained by release cleanup and safe logging redacts exception messages, so this internal operation label cannot change caller-visible behavior."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1242,
+        "start_column": 33,
+        "end_line": 1242,
+        "end_column": 38,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1262,
+        "start_column": 9,
+        "end_line": 1262,
+        "end_column": 30,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Cancellation stops the read loop and supervisor finally retires and disposes its captured connection and pending epoch; Dispose is intentionally non-blocking, so cleanup remains identical."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 1279,
+        "start_column": 47,
+        "end_line": 1279,
+        "end_column": 61,
+        "mutator": "String mutation",
+        "replacement": "\"\""
+      },
+      "rationale": "The continuation only disposes the single owned CancellationTokenSource after the supervisor exits; that idempotent action cannot fault into Forget, making its area label unreachable."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Wtf8.cs",
+        "start_line": 19,
+        "start_column": 28,
+        "end_line": 19,
+        "end_column": 47,
+        "mutator": "Equality mutation",
+        "replacement": "bytes.Length < 512"
+      },
+      "rationale": "The mutation changes only stack-versus-heap temporary storage; both spans have identical length and produce the same decoded character sequence."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Wtf8.cs",
+        "start_line": 19,
+        "start_column": 28,
+        "end_line": 19,
+        "end_column": 47,
+        "mutator": "Equality mutation",
+        "replacement": "bytes.Length > 512"
+      },
+      "rationale": "The mutation changes only stack-versus-heap temporary storage; both spans have identical length and produce the same decoded character sequence."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Wtf8.cs",
+        "start_line": 19,
+        "start_column": 28,
+        "end_line": 19,
+        "end_column": 104,
+        "mutator": "Conditional (false) mutation",
+        "replacement": "(false?stackalloc char[bytes.Length] :new char[bytes.Length])"
+      },
+      "rationale": "The mutation changes only stack-versus-heap temporary storage; both spans have identical length and produce the same decoded character sequence."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Wtf8.cs",
+        "start_line": 19,
+        "start_column": 28,
+        "end_line": 19,
+        "end_column": 104,
+        "mutator": "Conditional (true) mutation",
+        "replacement": "(true?stackalloc char[bytes.Length] :new char[bytes.Length])"
+      },
+      "rationale": "The mutation changes only stack-versus-heap temporary storage; both spans have identical length and produce the same decoded character sequence."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Wtf8.cs",
+        "start_line": 53,
+        "start_column": 47,
+        "end_line": 53,
+        "end_column": 55,
+        "mutator": "Bitwise mutation",
+        "replacement": "cp >>> 10"
+      },
+      "rationale": "The shifted operand cp is UInt32, so arithmetic and logical right shift produce identical bits for every reachable value."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Wtf8.cs",
+        "start_line": 115,
+        "start_column": 41,
+        "end_line": 115,
+        "end_column": 48,
+        "mutator": "Bitwise mutation",
+        "replacement": "cp >>> 6"
+      },
+      "rationale": "The shifted operand cp is UInt32, so arithmetic and logical right shift produce identical bits for every reachable value."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Wtf8.cs",
+        "start_line": 120,
+        "start_column": 41,
+        "end_line": 120,
+        "end_column": 49,
+        "mutator": "Bitwise mutation",
+        "replacement": "cp >>> 12"
+      },
+      "rationale": "The shifted operand cp is UInt32, so arithmetic and logical right shift produce identical bits for every reachable value."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Wtf8.cs",
+        "start_line": 121,
+        "start_column": 42,
+        "end_line": 121,
+        "end_column": 49,
+        "mutator": "Bitwise mutation",
+        "replacement": "cp >>> 6"
+      },
+      "rationale": "The shifted operand cp is UInt32, so arithmetic and logical right shift produce identical bits for every reachable value."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Wtf8.cs",
+        "start_line": 126,
+        "start_column": 41,
+        "end_line": 126,
+        "end_column": 49,
+        "mutator": "Bitwise mutation",
+        "replacement": "cp >>> 18"
+      },
+      "rationale": "The shifted operand cp is UInt32, so arithmetic and logical right shift produce identical bits for every reachable value."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Wtf8.cs",
+        "start_line": 127,
+        "start_column": 42,
+        "end_line": 127,
+        "end_column": 50,
+        "mutator": "Bitwise mutation",
+        "replacement": "cp >>> 12"
+      },
+      "rationale": "The shifted operand cp is UInt32, so arithmetic and logical right shift produce identical bits for every reachable value."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Wtf8.cs",
+        "start_line": 128,
+        "start_column": 42,
+        "end_line": 128,
+        "end_column": 49,
+        "mutator": "Bitwise mutation",
+        "replacement": "cp >>> 6"
+      },
+      "rationale": "The shifted operand cp is UInt32, so arithmetic and logical right shift produce identical bits for every reachable value."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Services/ServiceProvisioner.cs",
+        "start_line": 85,
+        "start_column": 66,
+        "end_line": 85,
+        "end_column": 71,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "The continuation performs only scalar result mapping, logging, or filesystem cleanup and touches no synchronization-context-bound state; the returned result is identical."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Services/ServiceProvisioner.cs",
+        "start_line": 125,
+        "start_column": 75,
+        "end_line": 125,
+        "end_column": 80,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "The continuation performs only scalar result mapping, logging, or filesystem cleanup and touches no synchronization-context-bound state; the returned result is identical."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Services/ServiceProvisioner.cs",
+        "start_line": 150,
+        "start_column": 88,
+        "end_line": 150,
+        "end_column": 93,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "The continuation performs only scalar result mapping, logging, or filesystem cleanup and touches no synchronization-context-bound state; the returned result is identical."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Services/ServiceSetup.cs",
+        "start_line": 481,
+        "start_column": 20,
+        "end_line": 481,
+        "end_column": 25,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "A failed dequeue leaves state initialized to zero; returning true instead reaches the caller switch default, which returns the same false result without invoking SCM."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Services/ServiceSetup.cs",
+        "start_line": 487,
+        "start_column": 20,
+        "end_line": 487,
+        "end_column": 25,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "A null queried state leaves state initialized to zero; returning true instead reaches the caller switch default, which returns the same false result."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Services/ServiceSetup.cs",
+        "start_line": 498,
+        "start_column": 20,
+        "end_line": 498,
+        "end_column": 25,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "When no poll budget remains, returning true only loops once into TryReadState with an empty queue, which immediately returns the same false result without waiting."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/MainViewModel.cs",
+        "start_line": 370,
+        "start_column": 49,
+        "end_line": 370,
+        "end_column": 63,
+        "mutator": "String mutation",
+        "replacement": "\"\""
+      },
+      "rationale": "This Forget label is unreachable for owned operational failures because the invoked async routine contains cancellation and exception paths internally; it cannot change UI state or control flow."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/MainViewModel.cs",
+        "start_line": 388,
+        "start_column": 13,
+        "end_line": 388,
+        "end_column": 20,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "For Reconnecting, fallthrough immediately fails the Faulted-or-Unavailable guard and then returns at the non-Connected guard, producing the same state and notifications."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/MainViewModel.cs",
+        "start_line": 406,
+        "start_column": 13,
+        "end_line": 406,
+        "end_column": 20,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "For Faulted or Unavailable, fallthrough immediately returns at the non-Connected guard, so version, disconnected state, and notifications are already final."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/MainViewModel.cs",
+        "start_line": 424,
+        "start_column": 39,
+        "end_line": 424,
+        "end_column": 56,
+        "mutator": "String mutation",
+        "replacement": "\"\""
+      },
+      "rationale": "This Forget label is unreachable for owned operational failures because the invoked async routine contains cancellation and exception paths internally; it cannot change UI state or control flow."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/MainViewModel.cs",
+        "start_line": 433,
+        "start_column": 38,
+        "end_line": 433,
+        "end_column": 54,
+        "mutator": "String mutation",
+        "replacement": "\"\""
+      },
+      "rationale": "This Forget label is unreachable for owned operational failures because the invoked async routine contains cancellation and exception paths internally; it cannot change UI state or control flow."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/MainViewModel.cs",
+        "start_line": 516,
+        "start_column": 13,
+        "end_line": 516,
+        "end_column": 20,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "This cancellation catch is the final effective branch of RunStartupAsync; removing return only falls out of the method with no following statement."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/MainViewModel.cs",
+        "start_line": 655,
+        "start_column": 13,
+        "end_line": 655,
+        "end_column": 72,
+        "mutator": "Logical mutation",
+        "replacement": "!_restoringPersistedSetting || _settings.RegexMode != value"
+      },
+      "rationale": "During persisted restore the settings backing RegexMode already equals the assigned value, making the second disjunct false; outside restore both forms reduce to the same inequality test."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/MainViewModel.cs",
+        "start_line": 704,
+        "start_column": 13,
+        "end_line": 704,
+        "end_column": 74,
+        "mutator": "Logical mutation",
+        "replacement": "!_restoringPersistedSetting || _settings.CloseToTray != value"
+      },
+      "rationale": "During persisted restore the settings backing CloseToTray already equals the assigned value, making the second disjunct false; outside restore both forms reduce to the same inequality test."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/MainViewModel.cs",
+        "start_line": 839,
+        "start_column": 13,
+        "end_line": 839,
+        "end_column": 20,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "After disposal, Notifications has already been disposed and ignores pushes; continuing through the severity branch therefore cannot publish or retain a notification."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/MainViewModel.cs",
+        "start_line": 871,
+        "start_column": 9,
+        "end_line": 871,
+        "end_column": 55,
+        "mutator": "SubtractAssignmentExpression to AddAssignmentExpression mutation",
+        "replacement": "Results.ResultsPublished += OnResultsPublished"
+      },
+      "rationale": "The mutated publisher is owned by MainViewModel and is disposed moments later; EngineEventMarshaler also detaches its external engine root, leaving only a collectible owned-object cycle."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/MainViewModel.cs",
+        "start_line": 872,
+        "start_column": 9,
+        "end_line": 872,
+        "end_column": 49,
+        "mutator": "SubtractAssignmentExpression to AddAssignmentExpression mutation",
+        "replacement": "Search.TraceCaptured += Perf.RecordTrace"
+      },
+      "rationale": "The mutated publisher is owned by MainViewModel and is disposed moments later; EngineEventMarshaler also detaches its external engine root, leaving only a collectible owned-object cycle."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/MainViewModel.cs",
+        "start_line": 873,
+        "start_column": 9,
+        "end_line": 873,
+        "end_column": 46,
+        "mutator": "SubtractAssignmentExpression to AddAssignmentExpression mutation",
+        "replacement": "Search.SearchFailed += OnSearchFailed"
+      },
+      "rationale": "The mutated publisher is owned by MainViewModel and is disposed moments later; EngineEventMarshaler also detaches its external engine root, leaving only a collectible owned-object cycle."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/SearchOrchestrator.cs",
+        "start_line": 135,
+        "start_column": 13,
+        "end_line": 135,
+        "end_column": 20,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "After disposal, fallthrough calls NotifyTextChanged, whose first guard observes the same disposed flag and returns before touching debounce or engine state."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/SearchOrchestrator.cs",
+        "start_line": 213,
+        "start_column": 9,
+        "end_line": 213,
+        "end_column": 43,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Requery creates the operation token and enters this async method synchronously; a pre-cancelled token is unreachable after the disposed guard, while later cancellation is observed by the first engine await."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/SearchOrchestrator.cs",
+        "start_line": 356,
+        "start_column": 9,
+        "end_line": 356,
+        "end_column": 48,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Dispose also cancels both the active operation and lifetime token and clears all publications, so incrementing generation adds no additional observable invalidation."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/SearchOrchestrator.cs",
+        "start_line": 358,
+        "start_column": 9,
+        "end_line": 358,
+        "end_column": 69,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "The active query token is linked to the lifetime token cancelled on the next line; removing this individual cancel leaves the same operation cancelled before Dispose returns."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/ViewModels/SearchOrchestrator.cs",
+        "start_line": 359,
+        "start_column": 9,
+        "end_line": 359,
+        "end_column": 28,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "The active query token is explicitly cancelled on the preceding line and disposal blocks future Requery calls, so lifetime cancellation adds no distinct observable effect here."
+    }
+  ]
 }

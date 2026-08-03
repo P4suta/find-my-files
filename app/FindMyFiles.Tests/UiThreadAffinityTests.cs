@@ -114,7 +114,7 @@ public sealed class UiThreadAffinityTests : IDisposable
             {
                 // Also releases the wait: a cross-thread mutation aborts the query
                 // instead of publishing, and the assertion below should report the
-                // real exception rather than a 20-second timeout.
+                // real exception rather than a timeout.
                 failures.Enqueue(e);
                 published.TrySetResult();
             };
@@ -128,12 +128,21 @@ public sealed class UiThreadAffinityTests : IDisposable
             return Task.CompletedTask;
         });
 
-        await published.Task.WaitAsync(TimeSpan.FromSeconds(20));
-        await dispatcher.InvokeAsync(() =>
+        try
         {
-            vm.Dispose();
-            return Task.CompletedTask;
-        });
+            await published.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            if (vm is not null)
+            {
+                await dispatcher.InvokeAsync(() =>
+                {
+                    vm.Dispose();
+                    return Task.CompletedTask;
+                });
+            }
+        }
 
         // Two independent witnesses: the recorded thread identity of every bound
         // mutation, and the production guard itself — EnsureUiThread throws into

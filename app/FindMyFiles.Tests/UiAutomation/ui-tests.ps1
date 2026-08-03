@@ -13,6 +13,8 @@
       --fake-engine   loads deterministic 100k-row data (seed 42) so search,
                       sort, option-toggle and fault-injection scenarios are
                       reproducible without touching a real volume.
+      --test-version-mismatch  test-seam-only stale ServiceInfo simulation used
+                      with --fake-engine to verify the real warning/action UI.
 
     DEBUG --fake-engine also honours the fault queries !!panic / !!lag / !!warn
     (FakeEngineClient.SearchAsync) so the InfoBar/NotifyBar error pipeline can be
@@ -467,6 +469,74 @@ function Invoke-SetupPhase {
 
     } finally {
         Stop-AppGracefully $setupPid
+    }
+}
+
+function Set-TestLanguage {
+    param([string]$Language)
+    $settingsPath = Join-Path $script:DataDir 'settings.json'
+    @{ language = $Language } |
+        ConvertTo-Json -Compress |
+        Set-Content -LiteralPath $settingsPath -Encoding utf8NoBOM
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase A2 — localized fixed-volume scope and version-mismatch recovery.
+# Every launch is isolated and stopped before the next one, preserving the
+# process-wide single-instance contract while exercising real localized XAML.
+# ──────────────────────────────────────────────────────────────────────────────
+function Invoke-ReleasePolishPhase {
+    param([string]$Exe)
+    Write-Host "`n=== Phase A2: localized scope + version mismatch ===" -ForegroundColor Cyan
+
+    $locales = @(
+        @{ Tag = 'ja'; Mode = 'モード: 固定 NTFS ドライブのみ'; Scope = 'ReFS、FAT/exFAT、リムーバブル メディア、ネットワーク ドライブは索引しません。' },
+        @{ Tag = 'en'; Mode = 'Mode: fixed NTFS drives only'; Scope = 'ReFS, FAT/exFAT, removable media, and network drives are not indexed.' },
+        @{ Tag = 'zh-Hans'; Mode = '模式: 仅固定 NTFS 驱动器'; Scope = '不会索引 ReFS、FAT/exFAT、可移动介质和网络驱动器。' }
+    )
+    foreach ($locale in $locales) {
+        Set-TestLanguage -Language $locale.Tag
+        $localePid = $null
+        try {
+            $localePid = Start-App -Exe $Exe -AppArgs @('--fake-engine')
+            Invoke-Ui invoke 'OptionsButton' -a $localePid | Out-Null
+            Invoke-Ui wait-for 'SettingsDialog' -a $localePid -t 3000 | Out-Null
+            Test-UI "Locale $($locale.Tag): fixed NTFS mode text" {
+                Invoke-Ui wait-for 'StatusMode' -a $localePid --value $locale.Mode -t 3000
+            }
+            Test-UI "Locale $($locale.Tag): excluded volume types text" {
+                Invoke-Ui wait-for 'StatusVolumeScope' -a $localePid --value $locale.Scope -t 3000
+            }
+            Test-UI "Locale $($locale.Tag): scope text is accessible" {
+                Assert-AccessibleElement -Selector 'StatusVolumeScope' -ProcessId $localePid
+                $global:LASTEXITCODE = 0
+            }
+        } finally {
+            Stop-AppGracefully $localePid
+        }
+    }
+
+    Set-TestLanguage -Language 'ja'
+    $mismatchPid = $null
+    try {
+        $mismatchPid = Start-App -Exe $Exe -AppArgs @(
+            '--fake-engine',
+            '--test-version-mismatch')
+        Test-UI 'Version mismatch: warning action is visible and accessible' {
+            Invoke-Ui wait-for 'VersionMismatchRepair' -a $mismatchPid -t 5000 | Out-Null
+            Assert-AccessibleElement -Selector 'VersionMismatchRepair' -ProcessId $mismatchPid
+            $global:LASTEXITCODE = 0
+        }
+        Invoke-Ui screenshot -a $mismatchPid -o (Join-Path $OutDir 'A2-version-warning.png') 2>$null
+        Test-UI 'Version mismatch: repair opens service management without elevation' {
+            Invoke-Ui invoke 'VersionMismatchRepair' -a $mismatchPid | Out-Null
+            Invoke-Ui wait-for 'ServiceManagerDialog' -a $mismatchPid -t 5000
+        }
+        Invoke-Ui screenshot -a $mismatchPid -o (Join-Path $OutDir 'A2-version-repair.png') 2>$null
+        Invoke-Ui invoke 'CloseButton' -a $mismatchPid 2>$null | Out-Null
+    } finally {
+        Stop-AppGracefully $mismatchPid
+        Set-TestLanguage -Language 'auto'
     }
 }
 
@@ -956,6 +1026,7 @@ try {
         # one published exe path. Phase A spins its own --engine=unavailable process; the
         # rest share a --fake-engine process.
         Invoke-SetupPhase -Exe $ExePath
+        Invoke-ReleasePolishPhase -Exe $ExePath
         $script:AppPid = Start-App -Exe $ExePath -AppArgs @('--fake-engine')
         $ownsApp = $true
     } else {

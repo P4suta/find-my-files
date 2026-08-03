@@ -70,6 +70,60 @@ public sealed class MainViewModelConnectionTests
             StatusFormatter.Overall(Array.Empty<VolumeStatus>(), StubVolumes), vm.StatusText);
     }
 
+    [Fact]
+    public async Task StartAsync_waits_for_the_service_version_before_startup_work()
+    {
+        var stats = new TaskCompletionSource<EngineStatsData?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var engine = new StubEngineClient
+        {
+            Kind = EngineClientKind.Service,
+            Connection = EngineConnectionState.Connected,
+            StatsTask = stats.Task,
+        };
+        using var vm = new MainViewModel(engine, _dispatcher, new AppSettings());
+
+        var startup = vm.StartAsync();
+        Assert.False(startup.IsCompleted);
+        Assert.Equal(0, engine.ListVolumesCalls);
+
+        stats.SetResult(new EngineStatsData
+        {
+            Service = new ServiceInfoData { Version = BuildInfo.Version },
+        });
+        await startup;
+
+        Assert.Equal(BuildInfo.Version, vm.EngineVersion);
+        Assert.Equal(1, engine.ListVolumesCalls);
+        Assert.Equal(1, engine.StartIndexingCalls);
+    }
+
+    [Fact]
+    public void Connected_from_a_terminal_state_restores_the_search_surface()
+    {
+        var engine = new StubEngineClient
+        {
+            Kind = EngineClientKind.Service,
+            Connection = EngineConnectionState.Faulted,
+            Stats = new EngineStatsData
+            {
+                Service = new ServiceInfoData { Version = BuildInfo.Version },
+            },
+        };
+        using var vm = new MainViewModel(engine, _dispatcher, new AppSettings());
+        Assert.True(vm.IsDisconnected);
+
+        engine.Connection = EngineConnectionState.Connected;
+        engine.RaiseConnectionChanged(EngineConnectionState.Connected);
+        _dispatcher.DrainQueue();
+
+        Assert.False(vm.IsDisconnected);
+        Assert.True(vm.IsReady);
+        Assert.True(vm.CanSearch);
+        Assert.Equal(BuildInfo.Version, vm.EngineVersion);
+        Assert.Equal(1, engine.ListVolumesCalls);
+    }
+
     [Theory]
     [InlineData((int)EngineConnectionState.Connecting)]
     [InlineData((int)EngineConnectionState.Reconnecting)]
@@ -104,6 +158,34 @@ public sealed class MainViewModelConnectionTests
         Assert.False(vm.IsReady);
         Assert.False(vm.CanSearch);
         Assert.Equal(Loc.Get("Status_ServiceUnregistered"), vm.StatusText);
+        Assert.Equal(0, engine.ListVolumesCalls);
+    }
+
+    [Fact]
+    public async Task StartAsync_handles_a_terminal_state_that_races_the_constructor()
+    {
+        var engine = new StubEngineClient { Connection = EngineConnectionState.InProc };
+        using var vm = new MainViewModel(engine, _dispatcher, new AppSettings());
+        engine.Connection = EngineConnectionState.Faulted;
+
+        await vm.StartAsync();
+
+        Assert.True(vm.IsDisconnected);
+        Assert.Equal(Loc.Get("Status_ServiceUnregistered"), vm.StatusText);
+        Assert.Equal(0, engine.ListVolumesCalls);
+    }
+
+    [Fact]
+    public void A_non_pipe_connection_event_only_updates_search_availability()
+    {
+        var engine = new StubEngineClient { Connection = EngineConnectionState.Connecting };
+        using var vm = new MainViewModel(engine, _dispatcher, new AppSettings());
+
+        engine.RaiseConnectionChanged(EngineConnectionState.InProc);
+        _dispatcher.DrainQueue();
+
+        Assert.True(vm.CanSearch);
+        Assert.False(vm.IsDisconnected);
         Assert.Equal(0, engine.ListVolumesCalls);
     }
 
@@ -172,6 +254,56 @@ public sealed class MainViewModelConnectionTests
 
         Assert.Equal(0, relaunches);
         Assert.Equal(Loc.Get("Svc_IdentityUnavailable"), vm.SetupStatus);
+        Assert.False(vm.SetupBusy);
+    }
+
+    [Fact]
+    public async Task EnableSearchAsync_rejects_a_second_call_while_Uac_is_pending()
+    {
+        var completion = new TaskCompletionSource<ServiceActionOutcome>();
+        var calls = 0;
+        var provisioner = new ServiceProvisioner(
+            register: () =>
+            {
+                calls++;
+                return completion.Task;
+            },
+            relaunch: () => { });
+        using var vm = new MainViewModel(
+            new UnavailableEngineClient(), _dispatcher, new AppSettings(), provisioner: provisioner);
+
+        var first = vm.EnableSearchAsync();
+        var second = vm.EnableSearchAsync();
+        var secondCompletedSynchronously = second.IsCompleted;
+        var busyWhilePending = vm.SetupBusy;
+        var statusWhilePending = vm.SetupStatus;
+        completion.SetResult(ServiceActionOutcome.Cancelled);
+        await Task.WhenAll(first, second);
+
+        Assert.True(secondCompletedSynchronously);
+        Assert.True(busyWhilePending);
+        Assert.Equal(Loc.Get("Setup_WaitingForPermission"), statusWhilePending);
+        Assert.Equal(1, calls);
+        Assert.False(vm.SetupBusy);
+    }
+
+    [Fact]
+    public async Task EnableSearchAsync_does_not_relaunch_a_disposed_page()
+    {
+        var completion = new TaskCompletionSource<ServiceActionOutcome>();
+        var relaunches = 0;
+        var provisioner = new ServiceProvisioner(
+            register: () => completion.Task,
+            relaunch: () => relaunches++);
+        var vm = new MainViewModel(
+            new UnavailableEngineClient(), _dispatcher, new AppSettings(), provisioner: provisioner);
+
+        var enable = vm.EnableSearchAsync();
+        vm.Dispose();
+        completion.SetResult(ServiceActionOutcome.Ok);
+        await enable;
+
+        Assert.Equal(0, relaunches);
         Assert.False(vm.SetupBusy);
     }
 }

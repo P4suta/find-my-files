@@ -23,7 +23,7 @@ internal static class Wtf8
             uint b0 = bytes[i];
             uint cp;
             int adv;
-            if (b0 < 0x80)
+            if (b0 <= 0x7F)
             {
                 cp = b0;
                 adv = 1;
@@ -69,44 +69,64 @@ internal static class Wtf8
     public static byte[] Encode(string s)
     {
         var bytes = new byte[s.Length * 3]; // WTF-8 bytes ≤ 3 × UTF-16 units
-        int n = 0, i = 0;
-        while (i < s.Length)
+        var n = 0;
+        char? pendingHigh = null;
+        foreach (var unit in s)
         {
-            uint cp = s[i];
-            if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+            if (pendingHigh is { } high)
             {
-                cp = (uint)char.ConvertToUtf32(s[i], s[i + 1]);
-                i += 2;
-            }
-            else
-            {
-                i++; // lone surrogates fall through as 3-byte sequences
+                if (char.IsLowSurrogate(unit))
+                {
+                    AppendCodePoint((uint)char.ConvertToUtf32(high, unit), bytes, ref n);
+                    pendingHigh = null;
+                    continue;
+                }
+
+                AppendCodePoint(high, bytes, ref n);
+                pendingHigh = null;
             }
 
-            if (cp < 0x80)
+            if (char.IsHighSurrogate(unit))
             {
-                bytes[n++] = (byte)cp;
-            }
-            else if (cp < 0x800)
-            {
-                bytes[n++] = (byte)(0xC0 | (cp >> 6));
-                bytes[n++] = (byte)(0x80 | (cp & 0x3F));
-            }
-            else if (cp < 0x10000)
-            {
-                bytes[n++] = (byte)(0xE0 | (cp >> 12));
-                bytes[n++] = (byte)(0x80 | ((cp >> 6) & 0x3F));
-                bytes[n++] = (byte)(0x80 | (cp & 0x3F));
+                pendingHigh = unit;
             }
             else
             {
-                bytes[n++] = (byte)(0xF0 | (cp >> 18));
-                bytes[n++] = (byte)(0x80 | ((cp >> 12) & 0x3F));
-                bytes[n++] = (byte)(0x80 | ((cp >> 6) & 0x3F));
-                bytes[n++] = (byte)(0x80 | (cp & 0x3F));
+                AppendCodePoint(unit, bytes, ref n);
             }
         }
 
+        if (pendingHigh is { } trailingHigh)
+        {
+            AppendCodePoint(trailingHigh, bytes, ref n);
+        }
+
         return bytes[..n];
+    }
+
+    private static void AppendCodePoint(uint cp, Span<byte> bytes, ref int n)
+    {
+        if (cp <= 0x7F)
+        {
+            bytes[n++] = (byte)cp;
+        }
+        else if (cp < 0x800)
+        {
+            bytes[n++] = (byte)(0xC0 | (cp >> 6));
+            bytes[n++] = (byte)(0x80 | (cp & 0x3F));
+        }
+        else if (cp < 0x10000)
+        {
+            bytes[n++] = (byte)(0xE0 | (cp >> 12));
+            bytes[n++] = (byte)(0x80 | ((cp >> 6) & 0x3F));
+            bytes[n++] = (byte)(0x80 | (cp & 0x3F));
+        }
+        else
+        {
+            bytes[n++] = (byte)(0xF0 | (cp >> 18));
+            bytes[n++] = (byte)(0x80 | ((cp >> 12) & 0x3F));
+            bytes[n++] = (byte)(0x80 | ((cp >> 6) & 0x3F));
+            bytes[n++] = (byte)(0x80 | (cp & 0x3F));
+        }
     }
 }

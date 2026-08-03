@@ -24,17 +24,17 @@ fn push_code_point(cp: u32, out: &mut Vec<u8>) {
     if cp < 0x80 {
         out.push(cp as u8);
     } else if cp < 0x800 {
-        out.push(0xC0 | (cp >> 6) as u8);
-        out.push(0x80 | (cp & 0x3F) as u8);
+        out.push(0xC0 + (cp >> 6) as u8);
+        out.push(0x80 + (cp & 0x3F) as u8);
     } else if cp < 0x1_0000 {
-        out.push(0xE0 | (cp >> 12) as u8);
-        out.push(0x80 | ((cp >> 6) & 0x3F) as u8);
-        out.push(0x80 | (cp & 0x3F) as u8);
+        out.push(0xE0 + (cp >> 12) as u8);
+        out.push(0x80 + ((cp >> 6) & 0x3F) as u8);
+        out.push(0x80 + (cp & 0x3F) as u8);
     } else {
-        out.push(0xF0 | (cp >> 18) as u8);
-        out.push(0x80 | ((cp >> 12) & 0x3F) as u8);
-        out.push(0x80 | ((cp >> 6) & 0x3F) as u8);
-        out.push(0x80 | (cp & 0x3F) as u8);
+        out.push(0xF0 + (cp >> 18) as u8);
+        out.push(0x80 + ((cp >> 12) & 0x3F) as u8);
+        out.push(0x80 + ((cp >> 6) & 0x3F) as u8);
+        out.push(0x80 + (cp & 0x3F) as u8);
     }
 }
 
@@ -63,26 +63,21 @@ fn fold_char(c: char) -> char {
 }
 
 /// Decode UTF-16 (with possible unpaired surrogates) into code points,
-/// invoking `f(cp)` for each. ASCII units (`u < 0x80`, never a surrogate)
-/// take a fast first arm that skips the pairing test.
+/// invoking `f(cp)` for each.
 #[inline]
-fn for_each_code_point(units: &[u16], mut f: impl FnMut(u32)) {
-    let mut i = 0;
-    while i < units.len() {
-        let u = units[i];
-        let cp: u32 = if u < 0x80 {
-            i += 1;
-            u as u32
-        } else if (0xD800..=0xDBFF).contains(&u)
-            && i + 1 < units.len()
-            && (0xDC00..=0xDFFF).contains(&units[i + 1])
+fn for_each_code_point(mut units: &[u16], mut f: impl FnMut(u32)) {
+    while let Some((&u, tail)) = units.split_first() {
+        units = tail;
+        let cp: u32 = if (0xD800..=0xDBFF).contains(&u)
+            && units
+                .first()
+                .is_some_and(|low| (0xDC00..=0xDFFF).contains(low))
         {
-            let hi = (u as u32 - 0xD800) << 10;
-            let lo = units[i + 1] as u32 - 0xDC00;
-            i += 2;
+            let hi = u32::from(u - 0xD800) << 10;
+            let lo = u32::from(units[0] - 0xDC00);
+            units = &units[1..];
             0x1_0000 + hi + lo
         } else {
-            i += 1;
             u as u32
         };
         f(cp);
@@ -135,20 +130,19 @@ pub(crate) fn push_wtf8le_pair(
     if !bytes.len().is_multiple_of(2) {
         return false;
     }
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        let unit = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
-        let cp = if (0xD800..=0xDBFF).contains(&unit) && offset + 3 < bytes.len() {
-            let low = u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]);
+    let mut bytes = bytes;
+    while !bytes.is_empty() {
+        let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+        bytes = &bytes[2..];
+        let cp = if (0xD800..=0xDBFF).contains(&unit) && bytes.len() >= 2 {
+            let low = u16::from_le_bytes([bytes[0], bytes[1]]);
             if (0xDC00..=0xDFFF).contains(&low) {
-                offset += 4;
-                0x1_0000 + ((u32::from(unit) - 0xD800) << 10) + (u32::from(low) - 0xDC00)
+                bytes = &bytes[2..];
+                0x1_0000 + (u32::from(unit - 0xD800) << 10) + u32::from(low - 0xDC00)
             } else {
-                offset += 2;
                 u32::from(unit)
             }
         } else {
-            offset += 2;
             u32::from(unit)
         };
         push_pair_cp(cp, name_out, lower_out);
@@ -181,15 +175,6 @@ fn push_normalized_span(span: &str, folded: bool, out: &mut Vec<u8>) {
             push_char(c, out);
         }
     }
-}
-
-#[inline]
-fn surrogate_len(bytes: &[u8]) -> Option<usize> {
-    (bytes.len() >= 3
-        && bytes[0] == 0xED
-        && (0xA0..=0xBF).contains(&bytes[1])
-        && (0x80..=0xBF).contains(&bytes[2]))
-    .then_some(3)
 }
 
 /// Materialize the canonical search view of a WTF-8 byte string.
@@ -232,16 +217,16 @@ pub(crate) fn normalize_wtf8_into(bytes: &[u8], folded: bool, out: &mut Vec<u8>)
                     rest = &rest[valid..];
                 }
 
-                if let Some(len) = surrogate_len(rest) {
-                    out.extend_from_slice(&rest[..len]);
-                    rest = &rest[len..];
-                } else {
-                    // A canonical WTF-8 name cannot reach this branch. Treat
-                    // one invalid byte as an opaque boundary instead of
-                    // panicking or dropping it.
-                    out.push(rest[0]);
-                    rest = &rest[1..];
-                }
+                // A canonical WTF-8 name reaches this branch for each byte of
+                // an encoded lone surrogate. Unexpected non-WTF-8 input uses
+                // the same byte-preserving opaque-boundary path. Consuming a
+                // slice structurally guarantees progress even when a future
+                // edit changes the surrounding classification.
+                let (&byte, tail) = rest
+                    .split_first()
+                    .expect("the normalization loop has a non-empty remainder");
+                out.push(byte);
+                rest = tail;
             }
         }
     }
@@ -264,31 +249,25 @@ pub fn has_uppercase(s: &str) -> bool {
 
 /// Decode WTF-8 back to UTF-16 units (inverse of `push_wtf8_pair`'s name
 /// output). Used when handing names across the FFI boundary.
-pub fn wtf8_to_utf16(bytes: &[u8], out: &mut Vec<u16>) {
-    let mut i = 0;
-    while i < bytes.len() {
-        let b0 = bytes[i] as u32;
-        let (cp, adv) = if b0 < 0x80 {
-            (b0, 1)
-        } else if b0 < 0xE0 {
-            ((b0 & 0x1F) << 6 | (bytes[i + 1] as u32 & 0x3F), 2)
-        } else if b0 < 0xF0 {
-            (
-                (b0 & 0x0F) << 12
-                    | (bytes[i + 1] as u32 & 0x3F) << 6
-                    | (bytes[i + 2] as u32 & 0x3F),
+pub fn wtf8_to_utf16(mut bytes: &[u8], out: &mut Vec<u16>) {
+    while !bytes.is_empty() {
+        let b0 = bytes[0] as u32;
+        let (cp, adv) = match b0 {
+            0x00..=0x7F => (b0, 1),
+            0xC0..=0xDF => (((b0 & 0x1F) << 6) + (bytes[1] as u32 & 0x3F), 2),
+            0xE0..=0xEF => (
+                ((b0 & 0x0F) << 12) + ((bytes[1] as u32 & 0x3F) << 6) + (bytes[2] as u32 & 0x3F),
                 3,
-            )
-        } else {
-            (
-                (b0 & 0x07) << 18
-                    | (bytes[i + 1] as u32 & 0x3F) << 12
-                    | (bytes[i + 2] as u32 & 0x3F) << 6
-                    | (bytes[i + 3] as u32 & 0x3F),
+            ),
+            _ => (
+                ((b0 & 0x07) << 18)
+                    + ((bytes[1] as u32 & 0x3F) << 12)
+                    + ((bytes[2] as u32 & 0x3F) << 6)
+                    + (bytes[3] as u32 & 0x3F),
                 4,
-            )
+            ),
         };
-        i += adv;
+        bytes = &bytes[adv..];
         if cp >= 0x1_0000 {
             let v = cp - 0x1_0000;
             out.push(0xD800 + (v >> 10) as u16);
@@ -373,6 +352,16 @@ mod tests {
             wtf8_to_utf16(&name, &mut back);
             assert_eq!(back, units, "U+{cp:04X} must round-trip back to UTF-16");
         }
+    }
+
+    #[test]
+    fn utf8_length_classifier_pins_every_width_boundary() {
+        assert_eq!(utf8_len(0x7F), 1);
+        assert_eq!(utf8_len(0x80), 2);
+        assert_eq!(utf8_len(0x7FF), 2);
+        assert_eq!(utf8_len(0x800), 3);
+        assert_eq!(utf8_len(0xFFFF), 3);
+        assert_eq!(utf8_len(0x1_0000), 4);
     }
 
     #[test]
@@ -462,6 +451,15 @@ mod tests {
             back, units,
             "query-time normalization must never mutate stored WTF-8"
         );
+    }
+
+    #[test]
+    fn canonical_view_normalizes_valid_prefix_before_lone_surrogate() {
+        let units = [b'A' as u16, b'e' as u16, 0x0301, 0xD800, b'B' as u16];
+        let (name, _) = pair(&units);
+        let mut canonical = Vec::new();
+        normalize_wtf8_into(&name, true, &mut canonical);
+        assert_eq!(canonical, [b'a', 0xC3, 0xA9, 0xED, 0xA0, 0x80, b'b']);
     }
 
     #[test]

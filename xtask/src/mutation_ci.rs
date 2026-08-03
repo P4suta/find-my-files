@@ -2097,6 +2097,7 @@ fn stryker_config(shard_sources: &[String]) -> Result<Value> {
             "project": "FindMyFiles.csproj",
             "test-projects": ["FindMyFiles.Tests.csproj"],
             "concurrency": 4,
+            "additional-timeout": 30000,
             "mutate": patterns,
             "mutation-level": "Complete",
             "coverage-analysis": "off",

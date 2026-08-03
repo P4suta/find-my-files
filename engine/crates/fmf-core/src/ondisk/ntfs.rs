@@ -414,7 +414,7 @@ impl<'a> NtfsFile<'a> {
             let Some(next) = offset.checked_add(length) else {
                 return;
             };
-            if next > used {
+            if next <= offset || next > used {
                 return;
             }
             offset = next;
@@ -437,10 +437,11 @@ impl<'a> NtfsFile<'a> {
             if type_id == attribute_type as u32 {
                 return Some(attribute);
             }
-            offset = offset.checked_add(attribute.len())?;
-            if offset > used {
+            let next = offset.checked_add(attribute.len())?;
+            if next <= offset || next > used {
                 return None;
             }
+            offset = next;
         }
         None
     }
