@@ -68,6 +68,10 @@ public sealed class PipeEngineClientAdditionalTests
     [Fact]
     public async Task Supervisor_identity_rejection_is_terminal_and_trusted_identity_connects()
     {
+        // FakePipeServer owns fire-and-forget accept/response loops. Keep those
+        // transport tasks outside xUnit's async tracker so a mutation session
+        // cannot attribute an unrelated late completion to this test.
+        SyncContext.RunContinuationsInline();
         using var log = new LogCapture();
         using var rejectedServer = new FakePipeServer();
         using (var rejected = new PipeEngineClient(
@@ -971,10 +975,15 @@ public sealed class PipeEngineClientAdditionalTests
 
         var timingOut = client.ListVolumesAsync();
         await server.WaitForAsync(PipeProtocol.Op.ListVolumes);
-        await Task.Delay(125);
+        await timeoutReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // The first request is now timed out but deliberately paused before it
+        // retires the connection. Start the collateral request in that exact
+        // window instead of approximating it with a wall-clock delay: mutation
+        // runs can be heavily loaded, making a 125 ms delay resume after both
+        // requests have already timed out.
         var collateral = client.ListVolumesAsync();
         await server.WaitForAsync(PipeProtocol.Op.ListVolumes, minCount: 2);
-        await timeoutReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
         allowRetire.SetResult();
 
         var expected = $"request (opcode {PipeProtocol.Op.ListVolumes}) timed out after 0s";
@@ -989,6 +998,10 @@ public sealed class PipeEngineClientAdditionalTests
     [Fact]
     public async Task Completed_query_detaches_its_caller_cancellation_callback()
     {
+        // See SyncContext.RunContinuationsInline: FakePipeServer's background
+        // loops must not become xUnit-tracked work whose scheduling can turn an
+        // otherwise equivalent ConfigureAwait mutation into a spurious kill.
+        SyncContext.RunContinuationsInline();
         using var server = new FakePipeServer();
         using var client = new PipeEngineClient(server.PipeName, autoStart: false);
         client.Start();
