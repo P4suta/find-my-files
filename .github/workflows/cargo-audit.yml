@@ -26,7 +26,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/rust-toolchain
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+      - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
         with:
           tool: cargo-audit@0.22.2
           fallback: none

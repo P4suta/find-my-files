@@ -76,7 +76,7 @@ jobs:
       - uses: ./.github/actions/setup-winapp
         id: winapp
         if: steps.freshness.outputs.build == 'true'
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+      - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
         if: steps.freshness.outputs.build == 'true'
         with:
           tool: just@1.54.0,cargo-about@0.9.1
@@ -194,20 +194,20 @@ jobs:
       # stored secrets) make the nightly `gh attestation verify`-able. The
       # 14-day artifact expires but attestations persist in the repository.
       - name: Attest build provenance
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: |
             build/package/find-my-files-${{ needs.build.outputs.version }}-win-x64.zip
             build/package/SHA256SUMS.txt
 
       - name: Attest Rust SBOM
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: build/package/find-my-files-${{ needs.build.outputs.version }}-win-x64.zip
           sbom-path: build/sbom/fmf-engine.cdx.json
 
       - name: Attest C# SBOM
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: build/package/find-my-files-${{ needs.build.outputs.version }}-win-x64.zip
           sbom-path: build/sbom/app.cdx.json
