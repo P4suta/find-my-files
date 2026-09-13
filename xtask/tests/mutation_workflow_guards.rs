@@ -5,6 +5,8 @@
 //! trust split: default-branch caller -> same-commit reusable controller ->
 //! separate immutable target data checkout -> fresh evidence verifier.
 
+const MUTATION_LOCAL_SOURCE: &str = include_str!("../src/mutation.rs");
+const MUTATION_CI_SOURCE: &str = include_str!("../src/mutation_ci.rs");
 const MUTANTS_WORKFLOW: &str = include_str!("../../.github/workflows/mutants.yml");
 const CONTROLLER_WORKFLOW: &str = include_str!("../../.github/workflows/mutation-controller.yml");
 const RELEASE_WORKFLOW: &str = include_str!("../../.github/workflows/release.yml");
@@ -445,6 +447,115 @@ fn gitignore_matching_models_the_patterns_this_repository_uses() {
     assert!(!wildcard_matches("app/*/obj", "app/a/b/obj"));
     assert!(gitignore_pattern_hiding("build/mutation/rust/gate.json").is_some());
     assert!(gitignore_pattern_hiding("engine/mutants.toml").is_none());
+}
+
+/// Production code only: the `#[cfg(test)]` module below it asserts things
+/// *about* forbidden options and therefore has to name them, and this
+/// repository explains a rule in the comment above the code that implements it.
+/// Both would trip a tripwire that searched the whole file.
+fn executable_code(source: &str) -> String {
+    let (production, _) = source
+        .split_once("\n#[cfg(test)]\n")
+        .unwrap_or((source, ""));
+    production
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A target checkout supplies no mutation policy, and the controller supplies
+/// its own in its place.
+///
+/// Only the first half of that was ever implemented for Rust. `mutants.toml`
+/// and `mutation-baseline.json` were correctly excluded from the copied target
+/// tree, and then the run passed `--no-config` instead of the controller's
+/// copy, so sixteen shards mutated the whole workspace against no baseline at
+/// all: five consecutive weekly audits failed with ~121 survivors per shard,
+/// nearly all of them in the one file `mutants.toml` documents as unmutatable
+/// under this gate, while `just mutants` was green on the same commits. Because
+/// `release.yml`'s `sign-stage` needs `mutation`, that also blocked signing.
+///
+/// `every_rust_lane_runs_the_one_reviewed_scope` (in `mutation_ci.rs`) proves
+/// the three argument vectors agree. This pins the surrounding structure that
+/// unit test cannot see: that both halves of the policy substitution stay, and
+/// that every cargo-mutants spawn in the tree is built by the shared builders
+/// rather than spelled out again at the call site.
+#[test]
+fn the_rust_lanes_take_scope_and_baseline_only_from_the_controller() {
+    let local = executable_code(MUTATION_LOCAL_SOURCE);
+    let ci = executable_code(MUTATION_CI_SOURCE);
+
+    // Neither lane may opt out of the reviewed scope, and neither may restate
+    // an option `engine/mutants.toml` already answers (cargo-mutants prefers
+    // the command line without complaining).
+    for (lane, source) in [("mutation.rs", &local), ("mutation_ci.rs", &ci)] {
+        for forbidden in [
+            "--no-config",
+            "\"--test-tool\"",
+            "\"--timeout-multiplier\"",
+            "\"--skip-calls-defaults\"",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{lane} passes `{forbidden}` instead of deferring to engine/mutants.toml"
+            );
+        }
+    }
+
+    // Every cargo-mutants process in the repository is spawned from the shared
+    // builders, so a new lane cannot quietly assemble its own scope. (The
+    // `mutants --version` pins are argument slices, not `.arg("mutants")`.)
+    assert_eq!(local.matches(".arg(\"mutants\")").count(), 1);
+    assert_eq!(ci.matches(".arg(\"mutants\")").count(), 2);
+    assert_eq!(
+        local
+            .matches("rust_run_args(&config_arg, &output_arg)")
+            .count(),
+        1
+    );
+    assert_eq!(
+        ci.matches("mutation::rust_run_args(config, output)")
+            .count(),
+        1
+    );
+    assert_eq!(ci.matches("mutation::rust_scope_args(config)").count(), 1);
+
+    // The target contributes no policy...
+    for excluded in ["engine/mutants.toml", "engine/mutation-baseline.json"] {
+        assert_eq!(
+            ci.matches(&format!("path != \"{excluded}\"")).count(),
+            2,
+            "both language copy filters must keep `{excluded}` out of the work tree"
+        );
+    }
+    // ...and the controller supplies both files in its place, for the Rust lane
+    // exactly as for the C# lane.
+    for supplied in [
+        "paths::rust_mutants_config_in(&controller_root())",
+        "mutation::read_rust_reviewed_policy(&controller_root())",
+        "mutation::read_csharp_reviewed_policy(&controller_root())",
+    ] {
+        assert!(
+            ci.contains(supplied),
+            "the controller no longer supplies `{supplied}`"
+        );
+    }
+
+    // Both the shard that produces evidence and the fresh verifier that grades
+    // it project the reviewed survivors themselves, in both languages. A run
+    // that decides which survivors are acceptable, or a verifier that takes the
+    // shard's word for it, is the same hole in a different place — and with
+    // today's empty `accepted_equivalents` no runtime assertion can tell the
+    // difference, because every projection is empty.
+    for language in ["rust", "csharp"] {
+        assert_eq!(
+            ci.matches(&format!("reviewed_{language}_survivors(&reviewed_policy"))
+                .count(),
+            2,
+            "the {language} producer and verifier must each project the reviewed policy"
+        );
+    }
 }
 
 #[test]

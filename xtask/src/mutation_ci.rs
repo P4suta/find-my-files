@@ -777,35 +777,42 @@ fn parse_single_line(bytes: &[u8], label: &str) -> Result<String> {
     Ok(line.to_owned())
 }
 
+/// The exact reviewed inventory the shard's evidence is sealed against.
+///
+/// Both lanes take the file list from the controller's reviewed baseline, never
+/// from the target: the target contributes bytes to hash, not the decision about
+/// which bytes matter. The Rust lane additionally reads *every* production
+/// source, reviewed or not, because `#[mutants::skip]` is rejected repo-wide —
+/// `engine/mutants.toml` cites that rejection as a reason narrowing a file to
+/// its testable helpers is not available, so it must keep holding for files
+/// outside the reviewed twelve (today's exclusion is tomorrow's inclusion).
 fn source_inventory(checkout: &Checkout, language: &str) -> Result<Vec<SourceFile>> {
-    let reviewed_csharp_files = if language == "csharp" {
-        Some(
-            mutation::read_csharp_reviewed_policy(&controller_root())?
-                .examined_files
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-        )
-    } else {
-        None
+    let reviewed: BTreeSet<String> = match language {
+        "rust" => mutation::read_rust_reviewed_policy(&controller_root())?
+            .examined_files
+            .into_iter()
+            .collect(),
+        "csharp" => mutation::read_csharp_reviewed_policy(&controller_root())?
+            .examined_files
+            .into_iter()
+            .collect(),
+        _ => bail!("unknown mutation language `{language}`"),
     };
     let mut files = Vec::new();
     for path in &checkout.tracked {
-        let selected = match language {
-            "rust" => is_rust_production_source(path),
-            "csharp" => reviewed_csharp_files
-                .as_ref()
-                .is_some_and(|reviewed| reviewed.contains(path)),
-            _ => false,
-        };
-        if !selected {
+        let scanned = language == "rust" && is_rust_production_source(path);
+        if !scanned && !reviewed.contains(path) {
             continue;
         }
         let bytes = fs::read(checkout.root.join(path))
             .with_context(|| format!("read production source `{path}`"))?;
-        if language == "rust" && contains_rust_user_ignore(&bytes) {
+        if scanned && contains_rust_user_ignore(&bytes) {
             bail!(
                 "production source `{path}` contains a target-controlled cargo-mutants skip attribute"
             );
+        }
+        if !reviewed.contains(path) {
+            continue;
         }
         files.push(SourceFile {
             path: path.clone(),
@@ -817,11 +824,9 @@ fn source_inventory(checkout: &Checkout, language: &str) -> Result<Vec<SourceFil
     if files.is_empty() {
         bail!("{language} production source inventory is empty");
     }
-    if let Some(reviewed) = reviewed_csharp_files {
-        let actual: BTreeSet<String> = files.iter().map(|source| source.path.clone()).collect();
-        if actual != reviewed {
-            bail!("target checkout does not contain the exact reviewed C# source inventory");
-        }
+    let actual: BTreeSet<String> = files.iter().map(|source| source.path.clone()).collect();
+    if actual != reviewed {
+        bail!("target checkout does not contain the exact reviewed {language} source inventory");
     }
     Ok(files)
 }
@@ -1267,6 +1272,7 @@ struct ParsedRustRun {
 fn run_rust_ci(args: CiRunArgs) -> Result<()> {
     let (checkout, work, evidence) = prepare(&args, "rust")?;
     reject_forbidden_auto_configs(&checkout)?;
+    let reviewed_policy = mutation::read_rust_reviewed_policy(&controller_root())?;
     let sources = source_inventory(&checkout, "rust")?;
     copy_target_tree(&checkout, &work, "rust")?;
     let policies = rust_policies(&checkout, &work)?;
@@ -1291,42 +1297,14 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
         .join(".config")
         .join("nextest-mutation.toml");
     let nextest_config_arg = path_arg(&nextest_config)?;
-    let shard = format!("{}/{}", args.shard_index, args.shard_count);
     let mut command = rust_command("cargo", &work);
-    command.args([
-        "mutants",
-        "--no-config",
-        "--workspace",
-        "--output",
+    command.arg("mutants").args(rust_ci_run_args(
+        &rust_scope_config()?,
         &raw_parent_arg,
-        "--baseline",
-        "run",
-        "--no-shuffle",
-        "--no-times",
-        "--colors",
-        "never",
-        "--annotations",
-        "none",
-        "--cargo-arg=--locked",
-        "--test-workspace",
-        "true",
-        "--test-tool",
-        "nextest",
-        "--timeout-multiplier",
-        "5.0",
-        "--minimum-test-timeout",
-        "60",
-        "--skip-calls-defaults",
-        "false",
-        "--shard",
-        &shard,
-        "--sharding",
-        "round-robin",
-        "--",
-        "--config-file",
         &nextest_config_arg,
-    ]);
-    command.args(RUST_MUTATION_NEXTEST_ARGS);
+        args.shard_index,
+        args.shard_count,
+    ));
     let status = command
         .status()
         .context("spawn trusted cargo-mutants run")?;
@@ -1388,8 +1366,9 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
         &checksum::sha256_hex(NEXTEXT_POLICY.as_bytes()),
         "trusted nextest policy",
     )?;
+    let expected_survivors = reviewed_rust_survivors(&reviewed_policy, &shard_set);
     let gate_passed = parsed.baseline_passed
-        && parsed.survived.is_empty()
+        && parsed.survived == expected_survivors
         && parsed.timeout.is_empty()
         && status.code() == Some(0);
     let outcomes = RustOutcomes {
@@ -1424,9 +1403,10 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
 
     if !receipt.passed {
         bail!(
-            "Rust mutation shard {} failed closed: survived={}, timeout={}, baseline={}, exit={:?}; evidence={}",
+            "Rust mutation shard {} failed closed: survived={} (expected accepted={}), timeout={}, baseline={}, exit={:?}; evidence={}",
             args.shard_index,
             receipt.outcomes.survived.len(),
+            expected_survivors.len(),
             receipt.outcomes.timeout.len(),
             receipt.baseline_passed,
             receipt.process_exit_code,
@@ -1434,10 +1414,11 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
         );
     }
     println!(
-        "Rust mutation shard {}/{} passed: {} valid killed, {} invalid recorded.",
+        "Rust mutation shard {}/{} passed: {} valid killed, {} accepted equivalent, {} invalid recorded.",
         args.shard_index,
         args.shard_count,
         receipt.outcomes.killed.len(),
+        receipt.outcomes.survived.len(),
         receipt.outcomes.invalid.len()
     );
     Ok(())
@@ -1457,22 +1438,8 @@ fn binding(args: &CiRunArgs) -> RunBinding {
 fn run_rust_list(work: &Path) -> Result<Output> {
     let mut command = rust_command("cargo", work);
     let output = command
-        .args([
-            "mutants",
-            "--no-config",
-            "--workspace",
-            "--list",
-            "--json",
-            "--no-shuffle",
-            "--no-times",
-            "--colors",
-            "never",
-            "--annotations",
-            "none",
-            "--cargo-arg=--locked",
-            "--skip-calls-defaults",
-            "false",
-        ])
+        .arg("mutants")
+        .args(rust_ci_list_args(&rust_scope_config()?))
         .output()
         .context("enumerate complete Rust mutant inventory")?;
     require_success(&output, "enumerate complete Rust mutant inventory")?;
@@ -1480,6 +1447,84 @@ fn run_rust_list(work: &Path) -> Result<Output> {
         bail!("cargo-mutants returned an empty global JSON inventory");
     }
     Ok(output)
+}
+
+/// The reviewed scope file, resolved in the protected controller checkout.
+///
+/// `copy_path_for_language` keeps the target's `engine/mutants.toml` out of the
+/// sanitized work tree, so a target cannot widen or narrow what gets mutated.
+/// That exclusion is only half a policy: passing `--no-config` to make up for
+/// the missing file is what turned this gate into a whole-workspace run with
+/// ~1,900 structural survivors. The controller supplies its own copy instead.
+fn rust_scope_config() -> Result<String> {
+    path_arg(&paths::rust_mutants_config_in(&controller_root()))
+}
+
+/// Enumerate every mutant the reviewed scope generates, for the trusted
+/// round-robin partition.
+///
+/// This must agree with [`rust_ci_run_args`] on every option that changes the
+/// generated set. If it does not, the shard cargo-mutants actually runs cannot
+/// equal the partition computed from this listing and
+/// `validate_parsed_rust_partition` fails the shard closed — a real defect
+/// reported as an unexplained inventory mismatch.
+fn rust_ci_list_args(config: &str) -> Vec<String> {
+    let mut args = mutation::rust_scope_args(config);
+    args.extend(["--list", "--json"].into_iter().map(str::to_owned));
+    args
+}
+
+/// One shard of the reviewed scope, run against the sanitized target tree.
+///
+/// Everything that selects mutants or judges them comes from
+/// [`mutation::rust_run_args`], so this lane and `just mutants` see one program.
+/// What is added here is CI-only and strictly increases what the gate demands:
+/// the whole workspace's tests run against every mutant (`--test-workspace`)
+/// rather than only the mutated package's, slow hosted runners get a 60-second
+/// floor under the config's computed timeout, the run is restricted to this
+/// shard, and nextest is pinned to the controller's fail-closed profile.
+///
+/// `--skip-calls-defaults false` used to be here as well, on the theory that a
+/// tool default could narrow the reviewed scope. It cannot any more — the scope
+/// now arrives from the controller — and it was not free: it re-enables mutation
+/// of the arguments of `with_capacity` calls, adding 14 mutants (1,760 -> 1,774)
+/// which are all arithmetic inside a capacity hint (`Vec::with_capacity(len * 3)`
+/// -> `len + 3`). Capacity is not observable behaviour, so every one of them
+/// survives by construction, against a reviewed baseline recorded with the
+/// default skip list. Keeping the flag would have meant 14 permanent survivors
+/// in a gate whose whole design is exact survivor equality.
+fn rust_ci_run_args(
+    config: &str,
+    output: &str,
+    nextest_config: &str,
+    shard_index: usize,
+    shard_count: usize,
+) -> Vec<String> {
+    let mut args = mutation::rust_run_args(config, output);
+    args.extend(
+        [
+            "--test-workspace",
+            "true",
+            "--minimum-test-timeout",
+            "60",
+            "--shard",
+            &format!("{shard_index}/{shard_count}"),
+            "--sharding",
+            "round-robin",
+            "--",
+            "--config-file",
+            nextest_config,
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    args.extend(
+        RUST_MUTATION_NEXTEST_ARGS
+            .iter()
+            .copied()
+            .map(str::to_owned),
+    );
+    args
 }
 
 fn parse_rust_mutant_list(path: &Path, require_nonempty: bool) -> Result<Vec<RustMutant>> {
@@ -2214,6 +2259,43 @@ fn stryker_config(shard_sources: &[String]) -> Result<Value> {
     }))
 }
 
+/// The reviewed survivors this Rust shard is allowed to report.
+///
+/// The C# lane can project its accepted equivalents by file because its shards
+/// *are* a file partition. Rust shards are round-robin over mutants, so every
+/// shard touches all twelve reviewed files and a file-based projection would
+/// expect the same survivor in sixteen shards at once. The projection is over
+/// mutant identity instead: an accepted equivalent counts for exactly the shard
+/// that generated it.
+///
+/// A baseline identity may omit the column (`cargo-mutants` only prints one when
+/// `--line-col` is on, and the reviewed file is written by hand), in which case
+/// it matches any column on that line. Iterating the shard's `BTreeSet` keeps
+/// the result in the same order as the parsed `MissedMutant` set it is compared
+/// against.
+fn reviewed_rust_survivors(
+    policy: &mutation::RustReviewedPolicy,
+    shard: &BTreeSet<RustMutant>,
+) -> Vec<RustMutant> {
+    shard
+        .iter()
+        .filter(|mutant| {
+            policy
+                .accepted_equivalents
+                .iter()
+                .any(|accepted| rust_identity_matches(accepted, mutant))
+        })
+        .cloned()
+        .collect()
+}
+
+fn rust_identity_matches(accepted: &mutation::RustIdentity, mutant: &RustMutant) -> bool {
+    accepted.path == mutant.path
+        && accepted.line == mutant.line
+        && accepted.column.is_none_or(|column| column == mutant.column)
+        && accepted.mutation == mutant.mutation
+}
+
 fn reviewed_csharp_survivors(
     policy: &mutation::CsharpReviewedPolicy,
     shard_sources: &[String],
@@ -2883,6 +2965,7 @@ fn artifact_directories(root: &Path, language: &str, count: usize) -> Result<Vec
 
 fn verify_rust_evidence(args: VerifyArgs) -> Result<()> {
     let context = prepare_verifier(&args)?;
+    let reviewed_policy = mutation::read_rust_reviewed_policy(&controller_root())?;
     let sources = source_inventory(&context.checkout, "rust")?;
     let policy_work = paths::build_root()
         .join("mutation")
@@ -2895,6 +2978,7 @@ fn verify_rust_evidence(args: VerifyArgs) -> Result<()> {
     let mut union = BTreeSet::new();
     let mut killed_total = 0_usize;
     let mut invalid_total = 0_usize;
+    let mut accepted_total = 0_usize;
     for (index, directory) in directories.iter().enumerate() {
         let receipt: RustReceipt = mutation::read_json(&directory.join("receipt.json"))?;
         validate_rust_receipt_header(&receipt, &args, index, &expected_policies, &sources)?;
@@ -2948,16 +3032,21 @@ fn verify_rust_evidence(args: VerifyArgs) -> Result<()> {
             survived: parsed.survived,
             timeout: parsed.timeout,
         };
+        // Recomputed from the controller's reviewed policy, never read out of
+        // the receipt: a shard that decided for itself which survivors were
+        // acceptable would be grading its own homework.
+        let expected_survivors = reviewed_rust_survivors(&reviewed_policy, &shard_set);
         if derived != receipt.outcomes
             || !parsed.baseline_passed
             || !receipt.baseline_passed
             || receipt.process_exit_code != Some(0)
             || !receipt.passed
-            || !receipt.outcomes.survived.is_empty()
+            || receipt.outcomes.survived != expected_survivors
             || !receipt.outcomes.timeout.is_empty()
         {
             bail!("Rust shard {index} receipt/report gate semantics do not pass");
         }
+        accepted_total += receipt.outcomes.survived.len();
         let baseline = fs::read(directory.join("baseline.log"))?;
         if baseline.is_empty() {
             bail!("Rust shard {index} baseline diagnostic is empty");
@@ -2979,12 +3068,12 @@ fn verify_rust_evidence(args: VerifyArgs) -> Result<()> {
             killed: killed_total,
             invalid: invalid_total,
             redundant: 0,
-            accepted: 0,
+            accepted: accepted_total,
         },
     )?;
     println!(
-        "Independently verified all {} Rust mutation shards: {} valid killed, {} invalid.",
-        args.shard_count, killed_total, invalid_total
+        "Independently verified all {} Rust mutation shards: {} valid killed, {} accepted equivalent, {} invalid.",
+        args.shard_count, killed_total, accepted_total, invalid_total
     );
     Ok(())
 }
@@ -3470,6 +3559,219 @@ mod tests {
     #[test]
     fn rust_nextest_locked_is_forwarded_only_by_cargo_mutants() {
         assert!(!RUST_MUTATION_NEXTEST_ARGS.contains(&"--locked"));
+    }
+
+    /// Options `engine/mutants.toml` answers. A CLI copy is not an error —
+    /// cargo-mutants silently prefers it — so it is how the reviewed scope and
+    /// the executed scope come apart. `--skip-calls-defaults` is here for the
+    /// same reason even though the config does not set it: turning the built-in
+    /// `with_capacity` skip off adds 14 capacity-hint mutants that survive by
+    /// construction, which the reviewed baseline does not (and should not) list.
+    const CONFIG_OWNED_FLAGS: [&str; 3] = [
+        "--test-tool",
+        "--timeout-multiplier",
+        "--skip-calls-defaults",
+    ];
+
+    /// Every cargo-mutants 27.1.0 option that changes *which* mutants exist.
+    /// `engine/mutants.toml` is the only place this repository decides that, so
+    /// none of these may appear on any lane's command line — an enumeration and
+    /// an execution that disagree on one of them cannot form a partition.
+    const SELECTION_FLAGS: [&str; 15] = [
+        "--file",
+        "-f",
+        "--exclude",
+        "-e",
+        "--re",
+        "-F",
+        "--exclude-re",
+        "-E",
+        "--package",
+        "-p",
+        "--in-diff",
+        "-D",
+        "--iterate",
+        "--skip-calls",
+        "--Zmutate-file",
+    ];
+
+    /// The cargo-mutants half and the test-runner half of an argument vector.
+    /// Flags repeat legitimately across the `--`; within one half they must not.
+    fn halves(args: &[String]) -> (Vec<&str>, Vec<&str>) {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        args.iter().position(|arg| *arg == "--").map_or_else(
+            || (args.clone(), Vec::new()),
+            |index| (args[..index].to_vec(), args[index + 1..].to_vec()),
+        )
+    }
+
+    fn flag_values<'a>(args: &[&'a str], flag: &str) -> Vec<&'a str> {
+        args.windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| pair[1])
+            .collect()
+    }
+
+    fn duplicate_flags(args: &[&str]) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        args.iter()
+            .filter(|arg| arg.starts_with("--") && **arg != "--")
+            .filter(|arg| !seen.insert(**arg))
+            .map(|arg| (*arg).to_owned())
+            .collect()
+    }
+
+    /// The local `just mutants` gate and both CI cargo-mutants invocations run
+    /// one reviewed scope.
+    ///
+    /// This compares the argument vectors the three lanes actually build, not
+    /// the fact that they mention the same file: for five weeks CI *did* exclude
+    /// the target's `engine/mutants.toml` and then ran `--no-config --workspace`,
+    /// so it enumerated the whole workspace while `just mutants` enumerated the
+    /// twelve reviewed files, and nothing compared the two.
+    #[test]
+    fn every_rust_lane_runs_the_one_reviewed_scope() {
+        let config = r"C:\controller\engine\mutants.toml";
+        let scope = mutation::rust_scope_args(config);
+        let lanes = [
+            (
+                "local",
+                mutation::rust_run_args(config, r"C:\repo\build\mutation\rust"),
+            ),
+            ("ci-list", rust_ci_list_args(config)),
+            (
+                "ci-run",
+                rust_ci_run_args(
+                    config,
+                    r"C:\work\tool-output\rust",
+                    r"C:\work\engine\.config\nextest-mutation.toml",
+                    3,
+                    16,
+                ),
+            ),
+        ];
+
+        for (lane, args) in &lanes {
+            let (mutants, runner) = halves(args);
+            assert!(
+                args.starts_with(&scope),
+                "{lane} does not open with the shared reviewed scope: {args:?}"
+            );
+            assert_eq!(
+                flag_values(&mutants, "--config"),
+                vec![config],
+                "{lane} must run under exactly the controller's reviewed scope"
+            );
+            assert!(
+                !mutants
+                    .iter()
+                    .any(|arg| arg.ends_with("-config") && arg.starts_with("--no")),
+                "{lane} disables the reviewed scope: {args:?}"
+            );
+            for flag in CONFIG_OWNED_FLAGS {
+                assert!(
+                    !mutants.contains(&flag),
+                    "{lane} restates `{flag}`, which the reviewed scope owns"
+                );
+            }
+            assert_eq!(
+                duplicate_flags(&mutants),
+                Vec::<String>::new(),
+                "{lane} passes a cargo-mutants flag twice"
+            );
+            assert_eq!(
+                duplicate_flags(&runner),
+                Vec::<String>::new(),
+                "{lane} passes a nextest flag twice (nextest rejects duplicates)"
+            );
+            assert!(
+                !runner.contains(&"--locked"),
+                "{lane} adds a second --locked on top of --cargo-arg=--locked"
+            );
+        }
+
+        // The enumeration that defines the trusted round-robin partition and the
+        // run that has to reproduce it must generate the same mutants, or the
+        // shard fails closed on a partition mismatch that reads like a tool bug.
+        // Both open with the same scope (asserted above), so it is enough that
+        // neither adds a selection option of its own: what is left over decides
+        // only how mutants are *tested*, never which ones exist.
+        let (list, _) = halves(&lanes[1].1);
+        let (run, _) = halves(&lanes[2].1);
+        for (lane, args) in [("ci-list", &list), ("ci-run", &run)] {
+            let extra: Vec<&&str> = args[scope.len()..]
+                .iter()
+                .filter(|arg| SELECTION_FLAGS.contains(arg))
+                .collect();
+            assert!(
+                extra.is_empty(),
+                "{lane} selects mutants outside the reviewed scope with {extra:?}"
+            );
+        }
+    }
+
+    /// The scope and the reviewed baseline the CI controller supplies are the
+    /// same two files the local gate reads, and the real ones parse.
+    #[test]
+    fn the_controller_supplies_the_reviewed_policy_the_local_gate_uses() {
+        assert_eq!(
+            paths::rust_mutants_config_in(&controller_root()),
+            paths::rust_mutants_config()
+        );
+        assert!(paths::rust_mutants_config().is_file());
+
+        let policy = mutation::read_rust_reviewed_policy(&controller_root())
+            .expect("the committed Rust mutation baseline must load as reviewed policy");
+        let baseline: Value = mutation::read_json(&paths::rust_mutation_baseline())
+            .expect("the local gate's baseline must be readable");
+        let examined: Vec<String> =
+            serde_json::from_value(baseline["examined_files"].clone()).expect("examined_files");
+        assert_eq!(policy.examined_files, examined);
+    }
+
+    #[test]
+    fn reviewed_rust_survivors_project_by_mutant_identity_not_by_file() {
+        let path = "engine/crates/fmf-core/src/wtf8.rs";
+        let mutant = |column: u64, mutation: &str| RustMutant {
+            name: format!("crates/fmf-core/src/wtf8.rs:10:{column}: {mutation}"),
+            package: "fmf-core".to_owned(),
+            path: path.to_owned(),
+            line: 10,
+            column,
+            mutation: mutation.to_owned(),
+        };
+        let first = mutant(5, "replace + with -");
+        let second = mutant(9, "replace * with +");
+        let identity = |column| mutation::RustIdentity {
+            path: path.to_owned(),
+            line: 10,
+            column,
+            mutation: "replace + with -".to_owned(),
+        };
+        let policy = |column| mutation::RustReviewedPolicy {
+            examined_files: vec![path.to_owned()],
+            accepted_equivalents: vec![identity(column)],
+        };
+
+        // Round-robin sharding puts both mutants of one file in different
+        // shards, so only the shard that generated the accepted mutant may
+        // report it.
+        assert_eq!(
+            reviewed_rust_survivors(
+                &policy(Some(5)),
+                &BTreeSet::from([first.clone(), second.clone()])
+            ),
+            vec![first.clone()]
+        );
+        assert!(
+            reviewed_rust_survivors(&policy(Some(5)), &BTreeSet::from([second.clone()])).is_empty()
+        );
+        // A hand-written identity may omit the column; it then accepts any
+        // mutant of that description on the line, and nothing else.
+        assert_eq!(
+            reviewed_rust_survivors(&policy(None), &BTreeSet::from([first, second])).len(),
+            1
+        );
     }
 
     #[test]

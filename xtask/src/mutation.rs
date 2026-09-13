@@ -99,11 +99,11 @@ struct AcceptedBaseline<T> {
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RustIdentity {
-    path: String,
-    line: u64,
-    column: Option<u64>,
-    mutation: String,
+pub struct RustIdentity {
+    pub path: String,
+    pub line: u64,
+    pub column: Option<u64>,
+    pub mutation: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -116,6 +116,12 @@ pub struct CsharpIdentity {
     pub end_column: u64,
     pub mutator: String,
     pub replacement: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RustReviewedPolicy {
+    pub examined_files: Vec<String>,
+    pub accepted_equivalents: Vec<RustIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -183,6 +189,54 @@ struct OutsideScopeSummary {
     status_counts: BTreeMap<String, usize>,
 }
 
+/// The cargo-mutants arguments that decide **which mutants exist** and **how
+/// each one is judged**, shared verbatim by every lane.
+///
+/// `engine/mutants.toml` owns the answers: `examine_globs` (the twelve reviewed
+/// fmf-core files), `test_tool`, `timeout_multiplier`, and the per-sandbox
+/// `--target-dir`. A lane that does not pass `--config` judges a different
+/// program than the reviewed baseline describes, and nothing downstream
+/// notices: the CI controller ran `--no-config --workspace` for five weeks and
+/// reported ~1,900 survivors — nearly all of them in `fmf-service/src/security.rs`,
+/// the file `mutants.toml` excludes precisely because `#[ignore]` tests cannot
+/// run under this gate — while `just mutants` was green over the same commits.
+///
+/// Nothing here may restate a key the config already owns (`test_tool`,
+/// `timeout_multiplier`, `additional_cargo_args`). cargo-mutants lets the CLI
+/// win silently, so a duplicate is not an error, it is the next drift.
+/// `--workspace` is generation-only and measured to be a no-op against these
+/// globs (identical 1,760-mutant list with and without it); it stays so that a
+/// new crate matching a glob fails the inventory check instead of vanishing.
+pub fn rust_scope_args(config: &str) -> Vec<String> {
+    [
+        "--config",
+        config,
+        "--workspace",
+        "--no-shuffle",
+        "--no-times",
+        "--colors",
+        "never",
+        "--annotations",
+        "none",
+        "--cargo-arg=--locked",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+/// [`rust_scope_args`] plus the clean-tree baseline and output location that
+/// every *executing* lane needs. The local gate runs exactly this; the CI shard
+/// runner appends its sharding and workspace-test policy to it.
+pub fn rust_run_args(config: &str, output: &str) -> Vec<String> {
+    let mut args = rust_scope_args(config);
+    args.extend(
+        ["--output", output, "--baseline", "run"]
+            .into_iter()
+            .map(str::to_owned),
+    );
+    args
+}
+
 pub fn run_rust() -> Result<()> {
     verify_cargo_mutants_version()?;
 
@@ -196,23 +250,10 @@ pub fn run_rust() -> Result<()> {
         .with_context(|| format!("create Rust mutation output {}", output.display()))?;
 
     let output_arg = output.to_string_lossy().into_owned();
+    let config_arg = paths::rust_mutants_config().to_string_lossy().into_owned();
     let status = Command::new("cargo")
-        .args([
-            "mutants",
-            "--config",
-            "mutants.toml",
-            "--output",
-            &output_arg,
-            "--baseline",
-            "run",
-            "--no-shuffle",
-            "--no-times",
-            "--colors",
-            "never",
-            "--annotations",
-            "none",
-            "--cargo-arg=--locked",
-        ])
+        .arg("mutants")
+        .args(rust_run_args(&config_arg, &output_arg))
         .env("FMF_MUTATION_SOURCE_ROOT", paths::repo_root())
         .env_remove("FMF_BLESS")
         .current_dir(paths::engine_dir())
@@ -361,6 +402,42 @@ pub fn run_csharp() -> Result<()> {
         run.survivors.len()
     );
     Ok(())
+}
+
+/// Load the canonical Rust mutation scope and reviewed survivor identities.
+///
+/// The trusted CI controller uses this instead of accepting mutation policy
+/// from the target checkout, exactly as the C# lane does below. `read_baseline`
+/// validates the tool pin, the strict ordering, every identity and every
+/// rationale.
+///
+/// Unlike the C# reader there is no second file to cross-check: the scope lives
+/// in `engine/mutants.toml` as globs, and xtask deliberately never parses it —
+/// cargo-mutants owns glob matching at run time, and a second matcher here
+/// would be a second answer. The proof that the config and this baseline agree
+/// is therefore after the fact and already exists in both lanes: the files
+/// cargo-mutants reports as examined are compared to `examined_files`.
+pub fn read_rust_reviewed_policy(repo: &Path) -> Result<RustReviewedPolicy> {
+    let baseline_path = paths::rust_mutation_baseline_in(repo);
+    let baseline: AcceptedBaseline<RustIdentity> =
+        read_baseline(&baseline_path, CARGO_MUTANTS_NAME, CARGO_MUTANTS_VERSION)?;
+    let scope: BTreeSet<&str> = baseline.examined_files.iter().map(String::as_str).collect();
+    for (index, accepted) in baseline.accepted_equivalents.iter().enumerate() {
+        if !scope.contains(accepted.identity.path.as_str()) {
+            bail!(
+                "{} accepted_equivalents[{index}] is outside the reviewed Rust source inventory",
+                baseline_path.display()
+            );
+        }
+    }
+    Ok(RustReviewedPolicy {
+        examined_files: baseline.examined_files,
+        accepted_equivalents: baseline
+            .accepted_equivalents
+            .into_iter()
+            .map(|accepted| accepted.identity)
+            .collect(),
+    })
 }
 
 /// Load the canonical C# mutation scope and reviewed survivor identities.
