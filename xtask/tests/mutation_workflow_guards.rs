@@ -704,17 +704,15 @@ fn the_rust_lanes_take_scope_and_baseline_only_from_the_controller() {
     // `mutants --version` pins are argument slices, not `.arg("mutants")`.)
     assert_eq!(local.matches(".arg(\"mutants\")").count(), 1);
     assert_eq!(ci.matches(".arg(\"mutants\")").count(), 2);
-    assert_eq!(
-        local
-            .matches("rust_run_args(&config_arg, &output_arg)")
-            .count(),
-        1
-    );
-    assert_eq!(
-        ci.matches("mutation::rust_run_args(config, output)")
-            .count(),
-        1
-    );
+    assert_eq!(local.matches(".args(rust_run_args(").count(), 1);
+    assert_eq!(ci.matches("mutation::rust_run_args(").count(), 1);
+    // The nextest policy is one constant in one place. A second copy is a second
+    // place for the lanes to drift, which is how `just mutants` ended up running
+    // the repository's ordinary profile — 60-second test kill and all — while CI
+    // ran a profile with no test timeout at all.
+    assert_eq!(local.matches("pub(crate) const NEXTEST_POLICY").count(), 1);
+    assert!(!ci.contains("const NEXTEST_POLICY"));
+    assert!(!ci.contains("const RUST_MUTATION_NEXTEST_ARGS"));
     assert_eq!(ci.matches("mutation::rust_scope_args(config)").count(), 1);
 
     // The target contributes no policy...
