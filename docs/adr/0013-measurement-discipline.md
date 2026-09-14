@@ -6,9 +6,12 @@ Date: 2026-06-11 / Status: Accepted
 
 Performance judgments are fixed as follows: (1) baseline recording and
 `perf-gate`/`bench-check` only on a cold, idle machine; xtask compiles before
-measurement, refuses the run unless both the preflight and postflight have mean
-`% Processor Performance` >=95% and mean CPU time <=20%, and continuously
-monitors the same clock counter while the benchmark runs (2) criterion
+measurement, refuses the run unless the preflight has mean
+`% Processor Performance` >=95% and both the preflight and the postflight have
+mean CPU time <=20%, and monitors the same clock counter for the whole measured
+run — judging that run against the clock the baseline recorded while measuring
+itself (<=5 points of drift, <=20 points of extra CPU) rather than against an
+absolute bar (amended 2026-09-15, below) (2) criterion
 comparisons are limited to back-to-back A/B within the same session and run in
 a fresh `CRITERION_HOME` seeded only from the baseline (3) the micro gate
 requires the exact 28-report suite and reports a >10% regression only when the
@@ -53,6 +56,25 @@ mean WTF-8 length 29.7B), and `build_synthetic` asserts those ratios every run.
   processor, timestamps, and
   counter summaries, and is promoted only after postflight succeeds. A failed
   or thermally invalid run cannot overwrite the previous baseline.
+- **Amended 2026-09-15: the loaded run is judged for comparability, not for
+  absolute clock.** The original wording was implemented as one 95% bar applied
+  to the preflight, the postflight *and* the whole-run monitor. That is
+  unsatisfiable by construction here: the engine scans and queries on every core
+  by design, and the rationale above records this very machine falling to ~75%
+  under exactly that load. The chronology shows it was never satisfied — the
+  bar landed in `0f3d873` (2026-07-28) and the last baseline was recorded on
+  2026-07-11, so no baseline has ever been recorded under it, and the real-volume
+  half of `perf-gate` has been dead since. A measured run now records its clock
+  summary into the measurement identity (it always did) and is compared against
+  the summary the baseline recorded for its own run. The band is derived, not
+  chosen: the rationale's 25-point drop costs at most +46% of time, so at most
+  1.84% per point, and thermal drift must stay under the smallest regression
+  these gates will report (+10%, decision item 3) — 10 / 1.84 = 5.4, taken as 5
+  points. Extra CPU beyond the baseline's is allowed up to the same 20% this ADR
+  already calls harmless foreign work. The postflight keeps the CPU half only:
+  right after an all-core run the clock is legitimately still recovering (94.8%
+  measured), and the *next* run's own cold preflight is what protects it from
+  starting warm.
 - **Retired by [ADR-0048](0048-direct-dispatch-release-workflow.md) (2026-07-28):
   the four CI measurement workflows below were deleted — their organization
   runner group cannot exist on a user-owned repository, so the chain never ran.
@@ -96,3 +118,12 @@ mean WTF-8 length 29.7B), and `build_synthetic` asserts those ratios every run.
 ## Re-examination triggers
 
 - If a thermally stable machine dedicated to measurement (constant clock >=95%) becomes available, reconsider tightening the relative gate.
+- If a measured run stops reproducing the baseline's clock regime within the
+  5-point band on the reference machine, re-derive the band from fresh
+  measurements and record the numbers here. Widening it to make a run pass is
+  the failure mode this amendment exists to prevent.
+- The Criterion baseline lives in `build/engine/criterion`, which is gitignored
+  and machine-local, so `perf-gate` is a two-step local ritual: a fresh checkout
+  must run `just bench-micro-baseline` before `just bench-micro-check` can mean
+  anything. That is by design (a baseline is only comparable to itself on one
+  machine), not a defect to be re-discovered.
