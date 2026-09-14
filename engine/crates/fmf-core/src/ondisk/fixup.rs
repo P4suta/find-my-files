@@ -75,10 +75,25 @@ mod tests {
     /// Build a `len`-byte record with an update-sequence array at `uso`
     /// carrying `usn` plus `fixups` (the bytes that belong at each sector
     /// tail), and write the `usn` sentinel into each sector tail so a correct
-    /// `apply_fixup` succeeds and restores the `fixups`.
+    /// `apply_fixup` succeeds and restores the `fixups`. The record spans one
+    /// `len / fixups.len()` sector per fixup.
     fn record_with_usa(len: usize, uso: usize, usn: u16, fixups: &[u16]) -> Vec<u8> {
+        record_with_usa_of(len, len / fixups.len(), uso, usn, fixups)
+    }
+
+    /// `record_with_usa` for a record whose sector size is not simply its
+    /// length divided by the number of fixups: the sector tails land at
+    /// `sector_size` strides, so the record can be given a geometry that
+    /// leaves a partial sector at the end or that no volume could be
+    /// formatted with.
+    fn record_with_usa_of(
+        len: usize,
+        sector_size: usize,
+        uso: usize,
+        usn: u16,
+        fixups: &[u16],
+    ) -> Vec<u8> {
         let mut r = vec![0u8; len];
-        let sector_size = len / fixups.len();
         let usl = (fixups.len() + 1) as u16;
         let attributes_offset = (uso + usize::from(usl) * 2).next_multiple_of(8);
         r[4..6].copy_from_slice(&(uso as u16).to_le_bytes());
@@ -163,5 +178,116 @@ mod tests {
         // Corrupt the second sector tail so it no longer matches the USN.
         r[1022] = 0x99;
         assert!(!apply_fixup(&mut r, SECTOR));
+    }
+
+    #[test]
+    fn rejects_a_record_with_no_room_for_even_one_sector() {
+        // An empty buffer passes every other geometry rule on its own terms:
+        // 512 is inside the legal range and is a power of two, and zero bytes
+        // are trivially a whole number of sectors. Only the length rule stands
+        // between an empty read and a header parse off the end of the buffer.
+        let mut empty: [u8; 0] = [];
+        assert!(!apply_fixup(&mut empty, SECTOR));
+    }
+
+    #[test]
+    fn rejects_a_sector_size_outside_the_range_a_volume_can_be_formatted_with() {
+        // Each record is internally consistent for the sector size it is read
+        // with — the update-sequence array covers every sector exactly and each
+        // tail holds the sentinel — so the size being outside 512..=4096 is on
+        // its own enough to refuse the record.
+        let mut below_range =
+            record_with_usa_of(1024, 256, 48, 0x0001, &[0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD]);
+        assert!(!apply_fixup(&mut below_range, 256));
+
+        let mut above_range = record_with_usa_of(8192, 8192, 48, 0x0001, &[0xBEEF]);
+        assert!(!apply_fixup(&mut above_range, 8192));
+    }
+
+    #[test]
+    fn rejects_a_sector_size_that_is_not_a_power_of_two() {
+        // 1536 sits inside 512..=4096 and divides this record evenly, so the
+        // power-of-two rule is the only thing refusing a geometry that the
+        // sector arithmetic elsewhere in the decoder assumes it can never see.
+        let mut r = record_with_usa_of(3072, 1536, 48, 0x0001, &[0xAAAA, 0xBBBB]);
+        assert!(!apply_fixup(&mut r, 1536));
+    }
+
+    #[test]
+    fn rejects_a_record_truncated_part_way_through_its_last_sector() {
+        // 1792 bytes is three whole 512-byte sectors plus half of a fourth.
+        // The update-sequence array claims the four sectors the header arithmetic
+        // computes and every tail that does exist holds the sentinel, so only
+        // the whole-sector rule refuses this truncated buffer.
+        let mut r = record_with_usa_of(1792, SECTOR, 48, 0x0001, &[0xAAAA, 0xBBBB, 0xCCCC]);
+        assert!(!apply_fixup(&mut r, SECTOR));
+    }
+
+    #[test]
+    fn rejects_an_update_sequence_array_that_starts_inside_the_record_header() {
+        // The fixed record header is 42 bytes, so a USA at 40 would park its
+        // sentinel and its first fixup on top of header fields. This record is
+        // consistent in every other respect, so the offset alone must sink it.
+        let mut r = record_with_usa(1024, 40, 0x0001, &[0xAAAA, 0xBBBB]);
+        assert!(!apply_fixup(&mut r, SECTOR));
+    }
+
+    #[test]
+    fn accepts_an_update_sequence_array_at_the_first_offset_past_the_header() {
+        // 42 is the smallest legal offset: the array may butt straight up
+        // against the end of the fixed header, and the attributes may in turn
+        // start the moment it ends (42 + 3 entries * 2 = 48).
+        let mut r = record_with_usa(1024, 42, 0x0001, &[0xAAAA, 0xBBBB]);
+        assert_eq!(fixup_layout(&r, SECTOR), Some((42, 3)));
+        assert!(apply_fixup(&mut r, SECTOR));
+        assert_eq!(u16::from_le_bytes([r[510], r[511]]), 0xAAAA);
+        assert_eq!(u16::from_le_bytes([r[1022], r[1023]]), 0xBBBB);
+    }
+
+    #[test]
+    fn rejects_a_usa_that_leaves_the_last_sector_unverified() {
+        // A two-entry array over a two-sector record verifies the first sector
+        // and says nothing about the second, which is how a torn tail would get
+        // through. The entry count has to match the geometry exactly, and a
+        // record refused this way must come back untouched.
+        let mut r = record_with_usa(1024, 48, 0x0001, &[0xAAAA, 0xBBBB]);
+        r[6..8].copy_from_slice(&2u16.to_le_bytes());
+        let pristine = r.clone();
+        assert!(!apply_fixup(&mut r, SECTOR));
+        assert_eq!(r, pristine);
+    }
+
+    #[test]
+    fn rejects_attributes_that_begin_inside_the_update_sequence_array() {
+        // This record's array runs 48..54, so attributes starting at 48 would
+        // hand the attribute walker bytes the fixup has already claimed. A
+        // record may not describe the same bytes twice.
+        let mut r = record_with_usa(1024, 48, 0x0001, &[0xAAAA, 0xBBBB]);
+        r[20..22].copy_from_slice(&48u16.to_le_bytes());
+        assert!(!apply_fixup(&mut r, SECTOR));
+    }
+
+    #[test]
+    fn accepts_attributes_that_begin_exactly_where_the_update_sequence_array_ends() {
+        // The other half of that rule: 54 is the first byte the array does not
+        // claim, so a record that packs its attributes tight against it is
+        // valid and must still have its sector tails restored.
+        let mut r = record_with_usa(1024, 48, 0x0001, &[0xAAAA, 0xBBBB]);
+        r[20..22].copy_from_slice(&54u16.to_le_bytes());
+        assert_eq!(fixup_layout(&r, SECTOR), Some((48, 3)));
+        assert!(apply_fixup(&mut r, SECTOR));
+        assert_eq!(u16::from_le_bytes([r[510], r[511]]), 0xAAAA);
+    }
+
+    #[test]
+    fn rejects_attributes_that_begin_at_or_past_the_end_of_the_record() {
+        // The array itself is well inside the buffer in both cases; what makes
+        // these records unusable is an attribute stream that starts where the
+        // record has no bytes left to parse.
+        for attributes_offset in [1024u16, 2048] {
+            let mut r = record_with_usa(1024, 48, 0x0001, &[0xAAAA, 0xBBBB]);
+            r[20..22].copy_from_slice(&attributes_offset.to_le_bytes());
+            assert!(!apply_fixup(&mut r, SECTOR));
+        }
     }
 }
