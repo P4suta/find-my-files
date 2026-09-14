@@ -507,9 +507,11 @@ fn require_admin_gate() {
     );
 }
 
-/// Real-volume E2E: `index_start` → `VolumeReady` → query → snapshot save on
-/// shutdown → `load_from` restores the same entry count. Run with
-/// `just test-admin` from an elevated terminal.
+/// Real-volume E2E: `index_start` → `VolumeReady` → query → shutdown, which
+/// either saves a checkpoint that `load_from` restores to the same entry count
+/// or removes a snapshot a rescan has just invalidated. Both are asserted; on a
+/// live volume neither is guaranteed. Run with `just test-admin` from an
+/// elevated terminal.
 #[test]
 #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS"]
 fn engine_e2e_scan_query_snapshot_restore() {
@@ -571,9 +573,25 @@ fn engine_e2e_scan_query_snapshot_restore() {
         .map(|(_, _, n)| *n)
         .expect("C: slot still registered");
     let snapshot = dir.join("c.fmfidx");
-    let (restored, journal_id, next_usn) =
-        VolumeIndex::load_from(&snapshot).expect("snapshot written on shutdown and loadable");
-    assert_ne!(journal_id, 0, "checkpoint must carry the journal id");
-    assert!(next_usn > 0, "checkpoint must carry a USN cursor");
-    assert_eq!(restored.live_len() as u64, final_entries);
+
+    // Both outcomes above are legitimate, so assert which one happened instead
+    // of assuming the quiet one. Requiring the snapshot unconditionally made
+    // this test fail for the reason the comment documents as correct — twice in
+    // a week on the nightly elevated runner (2026-09-06, 2026-09-12) — and a
+    // re-run hid it each time. Reading the rescan counter turns the same run
+    // into coverage of both branches.
+    let rescans = e.metrics_snapshot().counters.journal_rescans;
+    if snapshot.exists() {
+        let (restored, journal_id, next_usn) =
+            VolumeIndex::load_from(&snapshot).expect("a snapshot that exists must load");
+        assert_ne!(journal_id, 0, "checkpoint must carry the journal id");
+        assert!(next_usn > 0, "checkpoint must carry a USN cursor");
+        assert_eq!(restored.live_len() as u64, final_entries);
+    } else {
+        assert!(
+            rescans > 0,
+            "shutdown left no snapshot and no rescan to explain it: the volume thread must \
+             either write a checkpoint on join or have removed a stale one"
+        );
+    }
 }
