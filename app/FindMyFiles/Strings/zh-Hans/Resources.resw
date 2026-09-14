@@ -136,6 +136,7 @@
   <data name="DiagStatHits.Text" xml:space="preserve"><value>命中</value></data>
   <data name="DiagStatScanned.Text" xml:space="preserve"><value>扫描</value></data>
   <data name="DiagStatDriver.Text" xml:space="preserve"><value>方式</value></data>
+  <data name="DiagRecentQueriesHeader.Text" xml:space="preserve"><value>最近查询</value></data>
   <data name="DiagHealthHeaderBar.Title" xml:space="preserve"><value>健康状况</value></data>
   <data name="DiagMemoryHeader.Text" xml:space="preserve"><value>内存</value></data>
   <data name="DiagMemProcess.Text" xml:space="preserve"><value>进程</value></data>

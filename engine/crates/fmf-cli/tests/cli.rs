@@ -85,6 +85,18 @@ fn diag_runs_unelevated_and_reports_the_version() {
         r"engine logs: C:\TestProgramData\find-my-files\logs (rolling engine.<date>.log)"
     ));
     assert!(!stdout.contains(r"\logs\engine.log"));
+
+    // Each section says whose diagnostics it is. The ring belongs to this
+    // `fmf` process and is therefore empty on every normal run; the service's
+    // are the ones a developer came for, and reading one as the other is the
+    // confusion this labelling exists to prevent.
+    assert!(stdout.contains("service process —"), "{stdout}");
+    assert!(stdout.contains("this fmf process —"), "{stdout}");
+    // And an empty section explains itself rather than just being empty.
+    assert!(
+        stdout.contains(r"! cannot read C:\TestProgramData\find-my-files\logs"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -106,6 +118,18 @@ fn diag_json_is_a_versioned_object() {
     );
     assert!(v.get("engine_log").is_none());
     assert!(v["recent_errors"].is_array());
+
+    // Additive (format_version stays 2, ADR-0026): the service's own log,
+    // which is where the diagnostics worth reading actually are.
+    assert_eq!(
+        v["service_log"]["dir"].as_str(),
+        Some(r"C:\TestProgramData\find-my-files\logs")
+    );
+    assert!(v["service_log"]["recent"].is_array());
+    let notes = v["service_log"]["notes"]
+        .as_array()
+        .expect("notes is an array");
+    assert_eq!(notes.len(), 1, "an empty tail must carry its reason: {v}");
 }
 
 #[test]

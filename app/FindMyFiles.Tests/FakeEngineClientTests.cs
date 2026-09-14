@@ -33,6 +33,43 @@ public sealed class FakeEngineClientTests
                 StringComparison.OrdinalIgnoreCase));
     }
 
+#if DEBUG
+    [Fact]
+    public async Task FaultInjection_reproduces_every_token_the_service_implements()
+    {
+        // The fake is the engine a developer can reach without installing a
+        // service, so a fault token it does not implement is a fault that can
+        // only be reproduced by the people who least need to. `!!drop` was
+        // that token: a response that never arrives is the shape of failure
+        // that looks like a hang, and it was reachable only through the pipe.
+        // (xtask's fault_injection_tokens_match_on_both_engines holds the two
+        // token sets equal; this pins what the fake's half actually does.)
+        using var engine = new FakeEngineClient();
+
+        await Assert.ThrowsAsync<EngineException>(
+            () => engine.SearchAsync("!!panic", SearchOptions.Default));
+
+        // The service severs the pipe; the fake has none, so it raises what
+        // the pipe client raises once its connection is gone.
+        await Assert.ThrowsAsync<EngineUnavailableException>(
+            () => engine.SearchAsync("!!drop", SearchOptions.Default));
+
+        // `!!warn` and `!!lag` degrade rather than fail: the query still runs.
+        var warned = await engine.SearchAsync("!!warn", SearchOptions.Default);
+        warned.Result.Dispose();
+        var stats = await engine.GetStatsAsync();
+        Assert.NotNull(stats);
+        Assert.Contains(
+            stats.RecentErrors,
+            e => string.Equals(e.Severity, "warn", StringComparison.Ordinal)
+                && e.Message.StartsWith("fault injection:", StringComparison.Ordinal));
+
+        var lagged = await engine.SearchAsync("!!lag file_0", SearchOptions.Default);
+        using var laggedResult = lagged.Result;
+        Assert.True(laggedResult.Count > 0);
+    }
+#endif
+
     [Fact]
     public async Task HiddenSystemConstraint_StillHonorsTheSearchOption()
     {

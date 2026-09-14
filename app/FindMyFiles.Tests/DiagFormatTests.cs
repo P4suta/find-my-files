@@ -293,6 +293,23 @@ public sealed class DiagFormatTests
         Assert.Equal("C: 5rec → +3 -1 ~1 (60 µs)", DiagFormat.Usn("C:", 5, 3, 1, 1, 60));
 
     [Fact]
+    public void RecentQuery_names_the_driver_the_candidates_and_the_cost() =>
+        Assert.Equal(
+            "3.21 ms · suffix/refine · 1,240 hits / 100,000 scanned · 8 chars",
+            DiagFormat.RecentQuery(8, "suffix", "refine", 1240, 100_000, 3210, 1, false));
+
+    [Fact]
+    public void RecentQuery_marks_the_cases_that_would_otherwise_read_as_anomalies()
+    {
+        // An empty query is "(all)", not "0 chars"; a multi-volume query says
+        // so (it is why a merge stage exists); and a query whose result was
+        // identical says so rather than looking suspiciously cheap.
+        Assert.Equal(
+            "0.05 ms · full-scan/miss · 0 hits / 12 scanned · (all) · 2 vol · unchanged",
+            DiagFormat.RecentQuery(0, "full-scan", "miss", 0, 12, 50, 2, true));
+    }
+
+    [Fact]
     public void Error_includes_uptime_severity_area_volume_and_first_line() =>
         Assert.Equal("[12s] ERROR usn (C:): x", DiagFormat.Error(12000, "error", "usn", "C:", "x\ny"));
 
