@@ -86,6 +86,20 @@ fn is_problem(line: &str) -> bool {
     matches!(level_of(line), Some("WARN " | "ERROR"))
 }
 
+/// Whether `name` is one of the appender's `engine.<date>.log` generations.
+///
+/// Matched case-insensitively: NTFS is, so the same file can be listed under
+/// any casing, and a case-sensitive test would silently report "no log here"
+/// for a log that exists.
+fn is_generation(name: &str) -> bool {
+    const PREFIX: &str = "engine.";
+    name.get(..PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(PREFIX))
+        && Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("log"))
+}
+
 /// The newest [`GENERATIONS`] `engine.<date>.log` files, oldest first.
 fn generations(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
@@ -94,7 +108,7 @@ fn generations(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("engine.") && name.ends_with(".log"))
+                .is_some_and(is_generation)
         })
         .collect();
     // `engine.YYYY-MM-DD.log` sorts lexicographically in date order.
@@ -111,7 +125,13 @@ fn tail_lines(path: &Path) -> std::io::Result<Vec<String>> {
     let start = file.metadata()?.len().saturating_sub(TAIL_BYTES);
     file.seek(SeekFrom::Start(start))?;
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
+    // Bounded at the reader, not only by the seek: the service is still writing
+    // to this file, so the length behind `start` is a guess that can grow while
+    // it is being read. The slack lets concurrent growth through while keeping
+    // the read finite.
+    (&mut file)
+        .take(TAIL_BYTES.saturating_mul(2))
+        .read_to_end(&mut buf)?;
     // Lossy: a torn multi-byte write at the seek point must not lose the whole
     // tail, and the line it damages is dropped below anyway.
     let text = String::from_utf8_lossy(&buf).into_owned();
@@ -254,6 +274,25 @@ mod tests {
         assert_eq!(level_of(""), None);
         assert_eq!(level_of("short"), None);
         assert_eq!(level_of(&"ERROR".repeat(20)), None);
+    }
+
+    #[test]
+    fn generations_are_matched_the_way_the_filesystem_names_them() {
+        assert!(is_generation("engine.2026-09-14.log"));
+        // NTFS is case-insensitive, so the same file can be listed under any
+        // casing; a case-sensitive test would report "no log here" for a log
+        // that exists, which is the silent-empty-answer failure again.
+        assert!(is_generation("ENGINE.2026-09-14.LOG"));
+        assert!(is_generation("Engine.2026-09-14.Log"));
+
+        assert!(!is_generation("engine.2026-09-14.log.bak"));
+        assert!(!is_generation("app.log"));
+        assert!(!is_generation("engine.log.txt"));
+        assert!(!is_generation("notes.txt"));
+        assert!(!is_generation(""));
+        // Shorter than the prefix, and multi-byte inside it: neither may panic.
+        assert!(!is_generation("eng"));
+        assert!(!is_generation("エンジン.log"));
     }
 
     #[test]

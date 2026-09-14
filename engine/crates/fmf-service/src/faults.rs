@@ -7,7 +7,7 @@
 //! `!!drop` (abrupt disconnect → reconnect path), `!!lag` (page responses
 //! +250ms → flicker-free publish path under RTT stress),
 //! `!!warn` (one WARN into the diagnostics ring → `ENGINE_ERROR` event,
-//! InfoBar and F12 health card; the query itself still runs).
+//! `InfoBar` and F12 health card; the query itself still runs).
 //!
 //! "Mirrors" is a contract, not a hope: the token set here and the fake's must
 //! be identical, or a fault reproduces on one engine and not the other — and

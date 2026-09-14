@@ -395,10 +395,13 @@ impl LogfmtVisitor {
 /// the specific `msg` trap from coming back.
 pub const REDACTED_UNKNOWN_FIELD: &str = "[redacted:unknown-field]";
 
-/// Redaction marker for an allowlisted field whose *value* failed
-/// [`safe_diagnostic_tag`] (empty, over 64 bytes, or carrying anything outside
-/// `[A-Za-z0-9._:-]` — a space, a path separator, a quoted error body). The fix
-/// is at the call site: record a finite tag, and put prose in the message.
+/// Redaction marker for an allowlisted field whose *value* was rejected.
+///
+/// [`safe_diagnostic_tag`] rejects an empty value, one over 64 bytes, and
+/// anything carrying a byte outside `[A-Za-z0-9._:-]` — a space, a path
+/// separator, a quoted error body. Unlike [`REDACTED_UNKNOWN_FIELD`] the fix is
+/// at the call site, not in the allowlist: record a finite tag, and put the
+/// prose in the message.
 pub const REDACTED_UNSAFE_VALUE: &str = "[redacted:unsafe-value]";
 
 /// String diagnostics are fail-closed: only finite identifiers are useful in
