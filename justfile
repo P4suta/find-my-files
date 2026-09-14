@@ -636,3 +636,18 @@ stryker:
 [group('quality')]
 [doc('Run both exact-identity mutation gates (slow)')]
 mutation: mutants stryker
+
+# Repository-ruleset drift (.github/rulesets/README.md). GitHub never applies the
+# committed templates, so nothing but this proves the hand re-export happened.
+# Two steps: rulesets-fetch captures the live rulesets through gh (read-only
+# GETs, one per ruleset id — the list endpoint carries no rules), rulesets-check
+# compares them by name and exits non-zero on any difference. Not a CI job:
+# reading rulesets needs repository-admin scope, which no workflow token has.
+# Both steps live in xtask because the capture loops over ids discovered at run
+# time, and a just recipe may not depend on one shell to do that (AGENTS.md).
+[group('quality')]
+[doc('Compare the committed ruleset templates with the live repository rulesets')]
+[working-directory: 'xtask']
+rulesets-check:
+    cargo run --locked -- rulesets-fetch
+    cargo run --locked -- rulesets-check

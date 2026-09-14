@@ -51,6 +51,27 @@ pub fn succeeds(dir: &Path, program: &str, args: &[&str]) -> Result<bool> {
     Ok(status.success())
 }
 
+/// Like [`capture`], but a missing program or a non-zero exit is an error
+/// carrying the program's own stderr — for tools whose failure is something to
+/// report rather than a normal answer. The output is returned untrimmed,
+/// because callers parse it (JSON keeps its shape).
+pub fn capture_stdout(dir: &Path, program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .with_context(|| format!("failed to spawn `{program}` (is it on PATH?)"))?;
+    if !output.status.success() {
+        bail!(
+            "`{program} {}` exited with {}: {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// Run `program args…` in `dir`, capturing its standard output. Returns the
 /// trimmed output on success, or `None` when the program is missing or exits
 /// non-zero — for version probes (`rustc --version`) where absence is a normal
