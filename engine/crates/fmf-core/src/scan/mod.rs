@@ -451,10 +451,7 @@ mod tests {
         require_admin_gate();
 
         let (baseline, baseline_stats) = scan_volume("C:").expect("baseline streaming scan");
-        assert_eq!(
-            baseline_stats.unresolved_parents, 0,
-            "the baseline must be clean or the reinjected count means nothing"
-        );
+        let baseline_unresolved = baseline_stats.unresolved_parents;
 
         // One O(n) pass: direct children per parent. The root is excluded —
         // its record is seeded by the builder rather than parsed, so
@@ -487,6 +484,17 @@ mod tests {
              tell a dropped subtree from noise",
             String::from_utf8_lossy(baseline.name(target))
         );
+        // A live volume reports a few unresolved parents of its own: a directory
+        // deleted between the $MFT read and the deferred resolve leaves its
+        // children without one. Requiring a zero baseline made this test a coin
+        // flip rather than a measurement — it lost on 2026-09-07 — so the
+        // reinjected count is read as a delta below, and the baseline only has
+        // to be quiet enough for that delta to still be legible.
+        assert!(
+            baseline_unresolved * 4 < direct_children,
+            "baseline churn reported {baseline_unresolved} unresolved parents against a \
+             {direct_children}-child target — too noisy to attribute the reinjected count"
+        );
         let record = baseline.frn(target).record();
 
         let (suppressed, stats) =
@@ -501,9 +509,10 @@ mod tests {
         // working while both scans run), and the drop is transitive, so the
         // floor is the direct children alone, halved for churn.
         assert!(
-            stats.unresolved_parents >= direct_children / 2,
+            stats.unresolved_parents >= baseline_unresolved + direct_children / 2,
             "dropping `{}` ({direct_children} direct children) reported only {} unresolved \
-             parents — the count is not reaching ScanStats",
+             parents over a {baseline_unresolved} baseline — the count is not reaching \
+             ScanStats",
             String::from_utf8_lossy(baseline.name(target)),
             stats.unresolved_parents
         );
