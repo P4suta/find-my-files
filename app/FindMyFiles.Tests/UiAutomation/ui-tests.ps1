@@ -16,10 +16,10 @@
       --test-version-mismatch  test-seam-only stale ServiceInfo simulation used
                       with --fake-engine to verify the real warning/action UI.
 
-    DEBUG --fake-engine also honours the fault queries !!panic / !!lag / !!warn
-    (FakeEngineClient.SearchAsync) so the InfoBar/NotifyBar error pipeline can be
-    verified end-to-end. Those scenarios are guarded by -IncludeFaults because
-    they only fire in a DEBUG build of the app.
+    DEBUG --fake-engine also honours the fault queries !!panic / !!drop / !!lag
+    / !!warn (FakeEngineClient.SearchAsync) so the InfoBar/NotifyBar error
+    pipeline can be verified end-to-end. Those scenarios are guarded by
+    -IncludeFaults because they only fire in a DEBUG build of the app.
 
     This script does NOT build or publish — the `just ui-test` recipe publishes
     the bundle and launches the exe, then passes us the PID. To run standalone,
@@ -46,8 +46,9 @@ param(
     [Parameter(Mandatory, ParameterSetName = 'Exe')]
     [string]$ExePath,
 
-    # Run the DEBUG-only fault-injection phase (!!panic / !!lag). Skipped by
-    # default because a Release bundle compiles those branches out.
+    # Run the DEBUG-only fault-injection phase (!!panic / !!drop / !!lag /
+    # !!warn). Skipped by default because a Release bundle compiles those
+    # branches out.
     [switch]$IncludeFaults,
 
     # Exercise the actual shipping binary with no test-only command-line seams.
@@ -971,8 +972,11 @@ function Invoke-DiagPhase {
 # Phase E — fault injection (DEBUG --fake-engine only; -IncludeFaults)
 #   !!panic  → SearchAsync throws EngineException → surfaced into NotifyBar as an
 #              error InfoBar; the app must NOT crash (window + tree survive).
+#   !!drop   → the engine reports the transport as gone (the pipe's severed
+#              connection, reproduced in-proc); the app must recover, not hang.
 #   !!lag    → every page fetch takes 250ms; results still publish with no blank
 #              rows and the window stays responsive.
+#   !!warn   → one WARN into the diagnostics ring → the F12 health card.
 # ──────────────────────────────────────────────────────────────────────────────
 function Invoke-FaultPhase {
     Write-Host "`n=== Phase E: fault injection (DEBUG --fake-engine) ===" -ForegroundColor Cyan
