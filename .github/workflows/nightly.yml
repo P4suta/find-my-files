@@ -72,7 +72,7 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         if: steps.freshness.outputs.build == 'true'
         with:
-          dotnet-version: 10.0.302
+          dotnet-version: 10.0.401
       - uses: ./.github/actions/setup-winapp
         id: winapp
         if: steps.freshness.outputs.build == 'true'

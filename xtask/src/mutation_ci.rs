@@ -21,7 +21,7 @@ const RECEIPT_SCHEMA_VERSION: u32 = 1;
 const REQUIRED_SHARD_COUNT: usize = 16;
 const CARGO_MUTANTS_VERSION: &str = "27.1.0";
 const CARGO_NEXTEST_VERSION: &str = "0.9.140";
-const DOTNET_SDK_VERSION: &str = "10.0.302";
+const DOTNET_SDK_VERSION: &str = "10.0.401";
 const STRYKER_VERSION: &str = "4.16.0";
 const RUST_TOOLCHAIN_VERSION: &str = "1.97.1";
 const CSHARP_TARGET_FRAMEWORK: &str = "net10.0-windows10.0.26100.0";
@@ -1156,7 +1156,7 @@ fn trusted_global_json() -> Result<Vec<u8>> {
 
 /// The `mise.toml` the C# lane seals is only half-checked without this.
 ///
-/// `10.0.302` is spelled three times: here as [`DOTNET_SDK_VERSION`], in
+/// The SDK pin is spelled three times: here as [`DOTNET_SDK_VERSION`], in
 /// `mise.toml` for the developer machine, and in `mutation-controller.yml` for
 /// `actions/setup-dotnet`. `validate_mise_rust_pin` has always held the Rust pin
 /// to that standard, while the .NET pin went into the sealed policy list with

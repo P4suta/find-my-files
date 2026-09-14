@@ -1351,7 +1351,7 @@ jobs:
     steps:
       - uses: actions/setup-dotnet@immutable
         with:
-          dotnet-version: "10.0.302"
+          dotnet-version: "10.0.401"
       - name: Install tools
         uses: taiki-e/install-action@immutable
         with:
@@ -1369,7 +1369,7 @@ jobs:
         );
         assert_eq!(
             steps[0].inputs.get("dotnet-version").map(String::as_str),
-            Some("10.0.302")
+            Some("10.0.401")
         );
         let tools: Vec<_> = steps[1]
             .inputs
@@ -1420,7 +1420,7 @@ jobs:
 
     fn mirror_test_pins() -> BTreeMap<String, String> {
         BTreeMap::from([
-            ("dotnet".to_owned(), "10.0.302".to_owned()),
+            ("dotnet".to_owned(), "10.0.401".to_owned()),
             ("http:winappcli".to_owned(), "0.5.0".to_owned()),
             ("just".to_owned(), "1.54.0".to_owned()),
             ("cargo:mdbook".to_owned(), "0.5.3".to_owned()),
@@ -1493,7 +1493,7 @@ jobs:
     steps:
       - uses: actions/setup-dotnet@immutable
         with:
-          dotnet-version: 10.0.302
+          dotnet-version: 10.0.401
       - uses: ./.github/actions/setup-winapp
         id: winapp
       - uses: ./.github/actions/setup-actionlint
@@ -1609,7 +1609,7 @@ jobs:
     steps:
       - uses: actions/setup-dotnet@immutable
         with:
-          dotnet-version: 10.0.302
+          dotnet-version: 10.0.401
       - uses: ./.github/actions/setup-winapp
         id: winapp
       - uses: ./.github/actions/setup-actionlint

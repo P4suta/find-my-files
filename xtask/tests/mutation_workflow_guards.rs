@@ -152,7 +152,7 @@ fn every_controller_job_binds_the_defining_workflow_commit_and_clean_trees() {
 fn pinned_tools_and_trusted_runner_interfaces_cannot_be_narrowed_by_the_target() {
     assert!(CONTROLLER_WORKFLOW.contains("cargo-mutants@27.1.0"));
     assert!(CONTROLLER_WORKFLOW.contains("cargo-nextest@0.9.140"));
-    assert!(CONTROLLER_WORKFLOW.contains("dotnet-version: 10.0.302"));
+    assert!(CONTROLLER_WORKFLOW.contains("dotnet-version: 10.0.401"));
     assert!(CONTROLLER_WORKFLOW.contains("controller/mise.toml"));
     assert!(CONTROLLER_WORKFLOW.contains("fallback: none"));
     assert!(CONTROLLER_WORKFLOW.contains("mutation-rust `"));
