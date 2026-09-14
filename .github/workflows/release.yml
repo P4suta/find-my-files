@@ -309,7 +309,7 @@ jobs:
           components: clippy, rustfmt
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: 10.0.302
+          dotnet-version: 10.0.401
       - uses: ./.github/actions/setup-winapp
         id: winapp
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
@@ -495,7 +495,7 @@ jobs:
       - uses: ./.github/actions/rust-toolchain
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: 10.0.302
+          dotnet-version: 10.0.401
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: just@1.54.0

@@ -5,7 +5,7 @@ min_version = "2026.7.5"
 
 [tools]
 rust = "1.97.1"
-dotnet = "10.0.302"
+dotnet = "10.0.401"
 # Prebuilt installer used by mise's cargo backend. It is a project pin, not a
 # separately installed bootstrap prerequisite.
 cargo-binstall = "1.21.1"
