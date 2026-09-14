@@ -19,6 +19,7 @@
       "**/Engine/PipeProtocol.cs",
       "**/Engine/Wtf8.cs"
     ],
+    "ignore-methods": ["ConfigureAwait"],
     "mutation-level": "Complete",
     "coverage-analysis": "off",
     "disable-mix-mutants": true,

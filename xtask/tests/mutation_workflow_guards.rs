@@ -368,6 +368,12 @@ fn the_reviewed_stryker_configuration_is_the_one_both_lanes_run() {
         ),
         ("report-file-name", serde_json::json!("mutation-report")),
         ("reporters", serde_json::json!(["progress", "json"])),
+        // The one key that decides what is not mutation-tested at all. Pinned by
+        // value here, and again at run time against the reviewed inventory in
+        // xtask before either lane starts Stryker (ADR-0022) — the filter drops
+        // whole invocations, so widening this list is how the C# gate would go
+        // quiet without a single check turning red.
+        ("ignore-methods", serde_json::json!(["ConfigureAwait"])),
     ];
     for (key, value) in &expected {
         assert_eq!(

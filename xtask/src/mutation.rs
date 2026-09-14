@@ -22,11 +22,48 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::LazyLock;
 
 const BASELINE_SCHEMA_VERSION: u32 = 1;
-const EVIDENCE_SCHEMA_VERSION: u32 = 1;
+// Bumped to 2 when the C# `gate.json` grew `method_ignored`. One constant covers
+// both languages' evidence, so the Rust file moves with it rather than letting
+// two different C# shapes both call themselves version 1.
+const EVIDENCE_SCHEMA_VERSION: u32 = 2;
 const CARGO_MUTANTS_NAME: &str = "cargo-mutants";
 const CARGO_MUTANTS_VERSION: &str = "27.1.0";
 const STRYKER_NAME: &str = "dotnet-stryker";
 const STRYKER_VERSION: &str = "4.16.0";
+
+/// The complete reviewed `ignore-methods` inventory, restated here so the
+/// whitelist below cannot be widened by editing the Stryker config alone.
+///
+/// `ignore-methods` drops mutants before any test runs, so every name on this
+/// list is coverage deliberately given up. `ConfigureAwait` is on it because its
+/// argument is a *scheduling* switch, and a scheduling switch cannot be judged
+/// by an exact-identity gate: the same mutant survived locally and was killed in
+/// CI by a timing-sensitive pipe test, so neither "accept it as equivalent" nor
+/// "kill it" is a stable verdict (ADR-0022). Stryker's own documentation uses
+/// `ConfigureAwait` as the canonical example for this option.
+///
+/// Anything added here must come with the same kind of argument, because
+/// `csharp_ignore_methods_are_reviewed` is what makes accepting
+/// [`METHOD_IGNORE_REASON`] safe: without it, `"ignore-methods": ["*"]` would
+/// silently retire the whole C# gate while every check still reported green.
+const REVIEWED_IGNORED_METHODS: &[&str] = &["ConfigureAwait"];
+
+/// Stryker's exact `statusReason` for a mutant dropped by `ignore-methods`.
+///
+/// Measured against the pinned Stryker 4.16.0, not inferred: a run whose
+/// `mutate` scope was narrowed to `Engine/Transport/PipeConnection.cs` reported
+/// `8 mutants got status Ignored. Reason: Removed by method filter`, and the
+/// JSON carried that exact spelling on all eight. The reason is a
+/// `$"Removed by {filter.DisplayName}"` at the filter broadcast, which is why it
+/// shares a shape with the two inventory reasons already whitelisted below.
+///
+/// Worth knowing before adding a name to [`REVIEWED_IGNORED_METHODS`]: the
+/// filter drops every mutant in the *whole invocation*, not just the arguments
+/// of the ignored call. In the run above it took the three `Statement mutation`s
+/// that delete `await …ConfigureAwait(…);` outright and the `throwOnEndOfStream`
+/// boolean belonging to the awaited call — not only the four `ConfigureAwait`
+/// arguments.
+pub const METHOD_IGNORE_REASON: &str = "Removed by method filter";
 
 /// The app-project build profile every C# mutation run must use, as environment
 /// variables (`MSBuild` reads the environment as properties).
@@ -152,6 +189,7 @@ struct CsharpEvidence<'a> {
     timeouts: &'a [CsharpIdentity],
     ignored: &'a [CsharpIdentity],
     redundant_ignored: &'a [CsharpStatusIdentity],
+    method_ignored: &'a [CsharpStatusIdentity],
     outside_scope: &'a OutsideScopeSummary,
     outside_scope_violations: &'a [CsharpStatusIdentity],
 }
@@ -171,6 +209,7 @@ struct CsharpRun {
     timeouts: Vec<CsharpIdentity>,
     ignored: Vec<CsharpIdentity>,
     redundant_ignored: Vec<CsharpStatusIdentity>,
+    method_ignored: Vec<CsharpStatusIdentity>,
     outside_scope: OutsideScopeSummary,
     outside_scope_violations: Vec<CsharpStatusIdentity>,
 }
@@ -405,6 +444,7 @@ pub fn run_csharp() -> Result<()> {
             timeouts: &run.timeouts,
             ignored: &run.ignored,
             redundant_ignored: &run.redundant_ignored,
+            method_ignored: &run.method_ignored,
             outside_scope: &run.outside_scope,
             outside_scope_violations: &run.outside_scope_violations,
         },
@@ -421,9 +461,10 @@ pub fn run_csharp() -> Result<()> {
     compare_exact_survivors(&baseline, &run.survivors, &baseline_path)?;
 
     println!(
-        "C# mutation gate passed: exact survivor set matches {} ({} accepted equivalent(s)).",
+        "C# mutation gate passed: exact survivor set matches {} ({} accepted equivalent(s), {} dropped by the reviewed ignore-methods inventory).",
         baseline_path.display(),
-        run.survivors.len()
+        run.survivors.len(),
+        run.method_ignored.len()
     );
     Ok(())
 }
@@ -554,6 +595,55 @@ fn verify_stryker_manifest_pin() -> Result<()> {
     Ok(())
 }
 
+/// Require the Stryker config's `ignore-methods` to be exactly the reviewed
+/// inventory, in order, with no extras and nothing missing.
+///
+/// This is the other half of accepting [`METHOD_IGNORE_REASON`] as a terminal
+/// outcome. Once the gate treats "the method filter dropped it" as fine, the
+/// config alone decides how much of the program stops being mutation-tested —
+/// and `ignore-methods` takes wildcards, so a single character (`["*"]`) would
+/// retire the whole C# gate with every check still green. Pinning the list here,
+/// in the code that judges the results, means widening it has to be argued for
+/// in a diff to [`REVIEWED_IGNORED_METHODS`].
+///
+/// The key must be present even when empty: an absent one is indistinguishable
+/// from a config that lost it in a merge, and the reviewed policy is a
+/// non-empty list either way.
+pub fn csharp_ignore_methods_are_reviewed(
+    stryker_config_root: &serde_json::Map<String, Value>,
+    config_path: &Path,
+) -> Result<()> {
+    let ignored = stryker_config_root
+        .get("ignore-methods")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            anyhow!(
+                "{} has no ignore-methods array; the reviewed inventory is {REVIEWED_IGNORED_METHODS:?}",
+                config_path.display()
+            )
+        })?;
+    let actual: Vec<&str> = ignored
+        .iter()
+        .map(|value| {
+            value.as_str().ok_or_else(|| {
+                anyhow!(
+                    "{} ignore-methods entry is not a string",
+                    config_path.display()
+                )
+            })
+        })
+        .collect::<Result<_>>()?;
+    if actual != REVIEWED_IGNORED_METHODS {
+        bail!(
+            "{} ignore-methods is {actual:?}, expected exactly {REVIEWED_IGNORED_METHODS:?}; \
+             every name there is mutation coverage deliberately given up, so it is reviewed \
+             in xtask, not in the tool config alone",
+            config_path.display()
+        );
+    }
+    Ok(())
+}
+
 fn read_stryker_scope(
     config_path: &Path,
     repo_root: &Path,
@@ -574,6 +664,7 @@ fn read_stryker_scope(
             config_path.display()
         );
     }
+    csharp_ignore_methods_are_reviewed(root, config_path)?;
     let patterns = root
         .get("mutate")
         .and_then(Value::as_array)
@@ -966,6 +1057,7 @@ fn parse_csharp_run(
     let mut timeouts = BTreeSet::new();
     let mut ignored = BTreeSet::new();
     let mut redundant_ignored = BTreeSet::new();
+    let mut method_ignored = BTreeSet::new();
     let mut outside_scope = OutsideScopeSummary::default();
     let mut outside_scope_violations = BTreeSet::new();
     let mut report_files = BTreeSet::new();
@@ -1069,6 +1161,14 @@ fn parse_csharp_run(
                 {
                     redundant_ignored.insert(status_identity);
                 }
+                // Unlike the optimizer case above this one is not pinned to a
+                // mutator: `ignore-methods` drops whatever the ignored call
+                // encloses, and the measured set already spans `Statement
+                // mutation` and `Boolean mutation`. The reviewed inventory in
+                // REVIEWED_IGNORED_METHODS is what bounds it, not the mutator.
+                "Ignored" if status_reason.as_deref() == Some(METHOD_IGNORE_REASON) => {
+                    method_ignored.insert(status_identity);
+                }
                 "Ignored" => {
                     ignored.insert(identity);
                 }
@@ -1098,6 +1198,7 @@ fn parse_csharp_run(
         timeouts: timeouts.into_iter().collect(),
         ignored: ignored.into_iter().collect(),
         redundant_ignored: redundant_ignored.into_iter().collect(),
+        method_ignored: method_ignored.into_iter().collect(),
         outside_scope,
         outside_scope_violations: outside_scope_violations.into_iter().collect(),
     })
@@ -1106,9 +1207,22 @@ fn parse_csharp_run(
 /// Stryker's reasons for an `Ignored` mutant that was dropped before any test
 /// could run it. `Removed by mutate filter` is how the reviewed `mutate`
 /// inventory is enforced in the first place.
-const UNEXECUTED_IGNORE_REASONS: [&str; 2] = [
+///
+/// [`METHOD_IGNORE_REASON`] belongs here for the same reason and no other: a
+/// mutant the method filter dropped is untested by construction, so it cannot be
+/// evidence that the `mutate` scope leaked. Measured order in the narrowed run
+/// was mutate-filter-first — every out-of-scope `ConfigureAwait` mutant came back
+/// as `Removed by mutate filter`, and the reviewed file's came back as
+/// `Removed by method filter` — but the same run's console summary counted 89
+/// method-filtered mutants against the eight the JSON attributed to the reviewed
+/// file, so the filters clearly do see mutants this report never attributes.
+/// Leaving the reason out would turn that accounting difference into a spurious
+/// scope violation; including it cannot admit an *executed* mutant, which is the
+/// only thing this predicate is asked about.
+const UNEXECUTED_IGNORE_REASONS: [&str; 3] = [
     "Removed by mutate filter",
     "Removed by exclude from code coverage filter",
+    METHOD_IGNORE_REASON,
 ];
 
 /// Whether an out-of-scope mutant result proves the mutant was never executed.
@@ -1988,6 +2102,7 @@ mod tests {
                 "Ignored",
                 Some("Removed by exclude from code coverage filter"),
             ),
+            ("Ignored", Some(METHOD_IGNORE_REASON)),
         ] {
             assert!(
                 outside_scope_is_unexecuted(status, reason),
@@ -2008,6 +2123,122 @@ mod tests {
                 "an executed or unexplained outcome was accepted: {status} {reason:?}"
             );
         }
+    }
+
+    /// `ignore-methods` is accepted as a terminal outcome, but only under its
+    /// exact measured reason and only as its own bucket.
+    ///
+    /// The mutant in this fixture is the one that started the whole change: the
+    /// `ConfigureAwait` argument at `PipeConnection.cs` 138:32, which survived
+    /// locally and was killed in CI by a load-sensitive pipe test. It must not
+    /// land in `ignored` (which fails the gate) and must not be mistaken for the
+    /// nested-block optimizer's redundant bucket.
+    #[test]
+    fn csharp_scope_accepts_the_reviewed_ignore_methods_drop_as_its_own_outcome() {
+        let mutant = |reason: &str| {
+            serde_json::json!({
+                "mutatorName": "Boolean mutation",
+                "replacement": "true",
+                "status": "Ignored",
+                "statusReason": reason,
+                "location": {
+                    "start": {"line": 138, "column": 32},
+                    "end": {"line": 138, "column": 37}
+                }
+            })
+        };
+        let base = std::env::temp_dir().join(format!(
+            "xtask-mutation-csharp-method-{}",
+            std::process::id()
+        ));
+        let _ = fsx::force_remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("create test directory");
+
+        for (reason, accepted) in [
+            (METHOD_IGNORE_REASON, true),
+            // One character off is still an untested mutant of unknown origin.
+            ("Removed by methods filter", false),
+            ("Ignored via attribute", false),
+        ] {
+            let report = serde_json::json!({
+                "schemaVersion": "2",
+                "projectRoot": "C:\\repo\\app\\FindMyFiles",
+                "files": {
+                    "Engine/PipeProtocol.cs": { "mutants": [mutant(reason)] }
+                }
+            });
+            let path = base.join("mutation-report.json");
+            fs::write(
+                &path,
+                serde_json::to_vec(&report).expect("serialize fixture"),
+            )
+            .expect("write fixture");
+            let parsed = parse_csharp_run(
+                &path,
+                Path::new(r"C:\repo"),
+                &csharp_scope("app/FindMyFiles/Engine/PipeProtocol.cs"),
+            )
+            .expect("report should parse");
+
+            assert_eq!(
+                parsed.method_ignored.len(),
+                usize::from(accepted),
+                "{reason}"
+            );
+            assert_eq!(parsed.ignored.len(), usize::from(!accepted), "{reason}");
+            assert!(parsed.redundant_ignored.is_empty(), "{reason}");
+            assert!(parsed.survivors.is_empty(), "{reason}");
+            assert_eq!(
+                validate_csharp_conclusive(&parsed, Path::new("gate.json")).is_ok(),
+                accepted,
+                "{reason}"
+            );
+        }
+
+        fsx::force_remove_dir_all(&base).expect("remove test directory");
+    }
+
+    /// The whitelist above is only safe while the inventory it whitelists stays
+    /// the reviewed one, so a widened `ignore-methods` must fail loudly. Without
+    /// this, `["*"]` would retire the C# gate with every check still green.
+    #[test]
+    fn stryker_ignore_methods_must_equal_the_reviewed_inventory() {
+        let config_of = |value: Value| {
+            let mut root = serde_json::Map::new();
+            root.insert("ignore-methods".to_owned(), value);
+            root
+        };
+        assert!(csharp_ignore_methods_are_reviewed(
+            &config_of(serde_json::json!(["ConfigureAwait"])),
+            Path::new("stryker-config.json")
+        )
+        .is_ok());
+
+        for widened in [
+            serde_json::json!([]),
+            serde_json::json!(["*"]),
+            serde_json::json!(["ConfigureAwait", "Dispose"]),
+            serde_json::json!(["ConfigureAwait*"]),
+            serde_json::json!(["configureawait"]),
+        ] {
+            assert!(
+                csharp_ignore_methods_are_reviewed(
+                    &config_of(widened.clone()),
+                    Path::new("stryker-config.json")
+                )
+                .is_err(),
+                "{widened} must not pass as the reviewed inventory"
+            );
+        }
+
+        assert!(
+            csharp_ignore_methods_are_reviewed(
+                &serde_json::Map::new(),
+                Path::new("stryker-config.json")
+            )
+            .is_err(),
+            "a missing ignore-methods key is indistinguishable from one lost in a merge"
+        );
     }
 
     /// The exact shape the smoke run produced: 22 Safe-Mode rollbacks in
@@ -2197,6 +2428,7 @@ mod tests {
             timeouts: Vec::new(),
             ignored: Vec::new(),
             redundant_ignored: Vec::new(),
+            method_ignored: Vec::new(),
             outside_scope: OutsideScopeSummary::default(),
             outside_scope_violations: Vec::new(),
         };
@@ -2228,6 +2460,7 @@ mod tests {
             timeouts: Vec::new(),
             ignored: Vec::new(),
             redundant_ignored: Vec::new(),
+            method_ignored: Vec::new(),
             outside_scope: OutsideScopeSummary::default(),
             outside_scope_violations: Vec::new(),
         }

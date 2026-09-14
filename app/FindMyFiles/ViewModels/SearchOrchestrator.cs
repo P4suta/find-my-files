@@ -364,11 +364,14 @@ internal sealed class SearchOrchestrator : IDisposable
         _lifetime.Dispose();
     }
 
-    /// <summary>Pure text classification kept separate from fire-and-forget
-    /// orchestration so null/empty mutation checks cannot strand an async query.</summary>
+    /// <summary>An empty search box means "show nothing", never "search for
+    /// everything". This decision is a pure function, separate from the
+    /// fire-and-forget orchestration around it, so that clearing the box is
+    /// answered synchronously instead of by an async query that has to be
+    /// cancelled afterwards.</summary>
     /// <param name="value">Current text-box value.</param>
     /// <returns>True for null or empty input.</returns>
-    internal static bool IsEmptyText(string? value) => value is null || value.Length == 0;
+    internal static bool IsEmptyText(string? value) => string.IsNullOrEmpty(value);
 
     /// <summary>Pure generation comparison used both before and during publish.</summary>
     /// <param name="candidate">Generation captured by the operation.</param>

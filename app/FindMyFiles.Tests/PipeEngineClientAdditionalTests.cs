@@ -68,10 +68,6 @@ public sealed class PipeEngineClientAdditionalTests
     [Fact]
     public async Task Supervisor_identity_rejection_is_terminal_and_trusted_identity_connects()
     {
-        // FakePipeServer owns fire-and-forget accept/response loops. Keep those
-        // transport tasks outside xUnit's async tracker so a mutation session
-        // cannot attribute an unrelated late completion to this test.
-        SyncContext.RunContinuationsInline();
         using var log = new LogCapture();
         using var rejectedServer = new FakePipeServer();
         using (var rejected = new PipeEngineClient(
@@ -943,10 +939,6 @@ public sealed class PipeEngineClientAdditionalTests
     [Fact]
     public async Task Timeout_reason_is_preserved_for_other_requests_on_the_retired_epoch()
     {
-        // The production code deliberately avoids capturing a context here. Keep
-        // this transport-only seam context-free too, so mutation scheduling cannot
-        // change the test's continuation semantics.
-        SyncContext.RunContinuationsInline();
         var held = new TaskCompletionSource<(int Status, byte[] Payload)>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         using var server = new FakePipeServer
@@ -998,10 +990,6 @@ public sealed class PipeEngineClientAdditionalTests
     [Fact]
     public async Task Completed_query_detaches_its_caller_cancellation_callback()
     {
-        // See SyncContext.RunContinuationsInline: FakePipeServer's background
-        // loops must not become xUnit-tracked work whose scheduling can turn an
-        // otherwise equivalent ConfigureAwait mutation into a spurious kill.
-        SyncContext.RunContinuationsInline();
         using var server = new FakePipeServer();
         using var client = new PipeEngineClient(server.PipeName, autoStart: false);
         client.Start();

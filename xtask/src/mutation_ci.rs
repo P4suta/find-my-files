@@ -17,7 +17,11 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
 
-const RECEIPT_SCHEMA_VERSION: u32 = 1;
+// Bumped to 2 when `CsharpOutcomes` grew `method_ignored`. Both the writer and
+// the verifier deserialize receipts with `deny_unknown_fields`, so the shape and
+// the version have to move together or a mixed pair fails with a parse error
+// instead of a policy message.
+const RECEIPT_SCHEMA_VERSION: u32 = 2;
 const REQUIRED_SHARD_COUNT: usize = 16;
 const CARGO_MUTANTS_VERSION: &str = "27.1.0";
 const CARGO_NEXTEST_VERSION: &str = "0.9.140";
@@ -26,9 +30,17 @@ const STRYKER_VERSION: &str = "4.16.0";
 const RUST_TOOLCHAIN_VERSION: &str = "1.97.1";
 const CSHARP_TARGET_FRAMEWORK: &str = "net10.0-windows10.0.26100.0";
 const POLICY_REVISION: &str = "mutation-controller-v1";
+// Reasons that prove a mutant outside the shard's slice was dropped before any
+// test ran it. `mutation::METHOD_IGNORE_REASON` is the third for the same
+// reason as the other two and no other: `ignore-methods` filters ahead of
+// execution, so its mutants are not evidence that the `mutate` partition leaked.
+// The list this whitelist is safe under is pinned by
+// `mutation::csharp_ignore_methods_are_reviewed`, which the controller runs over
+// its own sealed Stryker config before a shard starts.
 const CSHARP_UNEXECUTED_IGNORE_REASONS: &[&str] = &[
     "Removed by mutate filter",
     "Removed by exclude from code coverage filter",
+    mutation::METHOD_IGNORE_REASON,
 ];
 const NEXTEXT_POLICY: &str = r#"nextest-version = "0.9.140"
 
@@ -162,6 +174,10 @@ struct CsharpOutcomes {
     killed: Vec<CsharpMutant>,
     invalid: Vec<CsharpStatus>,
     redundant: Vec<CsharpStatus>,
+    /// Mutants the reviewed `ignore-methods` inventory dropped before any test
+    /// ran. Accepted, but recorded per identity so the cost of that inventory
+    /// stays visible in the receipt instead of vanishing into a count.
+    method_ignored: Vec<CsharpStatus>,
     survived: Vec<CsharpMutant>,
     no_coverage: Vec<CsharpMutant>,
     timeout: Vec<CsharpMutant>,
@@ -2174,6 +2190,7 @@ fn run_csharp_ci(args: CiRunArgs) -> Result<()> {
                 killed: Vec::new(),
                 invalid: Vec::new(),
                 redundant: Vec::new(),
+                method_ignored: Vec::new(),
                 survived: Vec::new(),
                 no_coverage: Vec::new(),
                 timeout: Vec::new(),
@@ -2248,13 +2265,14 @@ fn run_csharp_ci(args: CiRunArgs) -> Result<()> {
         );
     }
     println!(
-        "C# mutation shard {}/{} passed: {} valid killed, {} accepted equivalent, {} invalid, {} stock redundant.",
+        "C# mutation shard {}/{} passed: {} valid killed, {} accepted equivalent, {} invalid, {} stock redundant, {} ignore-methods.",
         args.shard_index,
         args.shard_count,
         receipt.outcomes.killed.len(),
         receipt.outcomes.survived.len(),
         receipt.outcomes.invalid.len(),
-        receipt.outcomes.redundant.len()
+        receipt.outcomes.redundant.len(),
+        receipt.outcomes.method_ignored.len()
     );
     Ok(())
 }
@@ -2344,6 +2362,12 @@ fn stryker_config(shard_sources: &[String]) -> Result<Value> {
             reviewed_path.display()
         );
     }
+    // `ignore-methods` decides how much of the program is dropped before any
+    // test runs, and the shard runner now accepts those drops as terminal. It is
+    // therefore checked against the reviewed inventory here — on the controller's
+    // own copy, before the config is sealed and handed to Stryker — rather than
+    // trusted because it happens to sit in a sealed file.
+    mutation::csharp_ignore_methods_are_reviewed(root, &reviewed_path)?;
     let mut patterns = Vec::with_capacity(shard_sources.len());
     for source in shard_sources {
         let relative = source
@@ -2521,6 +2545,7 @@ fn parse_csharp_report(
     let mut no_coverage = BTreeSet::new();
     let mut timeout = BTreeSet::new();
     let mut ignored = BTreeSet::new();
+    let mut method_ignored = BTreeSet::new();
     let mut outside = BTreeSet::new();
 
     for (file, value) in files {
@@ -2604,6 +2629,12 @@ fn parse_csharp_report(
                 {
                     redundant.insert(status_identity);
                 }
+                // Not pinned to a mutator, unlike the optimizer case above: the
+                // method filter drops whatever the ignored invocation encloses,
+                // which was measured to span statement and boolean mutants alike.
+                "Ignored" if reason.as_deref() == Some(mutation::METHOD_IGNORE_REASON) => {
+                    method_ignored.insert(status_identity);
+                }
                 "Ignored" => {
                     ignored.insert(status_identity);
                 }
@@ -2629,6 +2660,7 @@ fn parse_csharp_report(
         killed: killed.into_iter().collect(),
         invalid: invalid.into_iter().collect(),
         redundant: redundant.into_iter().collect(),
+        method_ignored: method_ignored.into_iter().collect(),
         survived: survived.into_iter().collect(),
         no_coverage: no_coverage.into_iter().collect(),
         timeout: timeout.into_iter().collect(),
@@ -2817,6 +2849,7 @@ fn validate_csharp_terminal_partition(outcomes: &CsharpOutcomes) -> Result<()> {
         .invalid
         .iter()
         .chain(&outcomes.redundant)
+        .chain(&outcomes.method_ignored)
         .chain(&outcomes.ignored)
     {
         total += 1;
@@ -3162,6 +3195,7 @@ fn verify_rust_evidence(args: VerifyArgs) -> Result<()> {
             killed: killed_total,
             invalid: invalid_total,
             redundant: 0,
+            method_ignored: 0,
             accepted: accepted_total,
         },
     )?;
@@ -3281,6 +3315,7 @@ fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
     let mut killed_total = 0_usize;
     let mut invalid_total = 0_usize;
     let mut redundant_total = 0_usize;
+    let mut method_ignored_total = 0_usize;
     let mut accepted_total = 0_usize;
     for (index, directory) in directories.iter().enumerate() {
         let receipt: CsharpReceipt = mutation::read_json(&directory.join("receipt.json"))?;
@@ -3333,6 +3368,7 @@ fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
                 killed: Vec::new(),
                 invalid: Vec::new(),
                 redundant: Vec::new(),
+                method_ignored: Vec::new(),
                 survived: Vec::new(),
                 no_coverage: Vec::new(),
                 timeout: Vec::new(),
@@ -3360,6 +3396,13 @@ fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
             .chain(&receipt.outcomes.survived)
             .chain(receipt.outcomes.invalid.iter().map(|entry| &entry.mutant))
             .chain(receipt.outcomes.redundant.iter().map(|entry| &entry.mutant))
+            .chain(
+                receipt
+                    .outcomes
+                    .method_ignored
+                    .iter()
+                    .map(|entry| &entry.mutant),
+            )
         {
             if !mutant_union.insert(mutant.clone()) {
                 bail!("C# mutant evidence overlaps across source shards");
@@ -3369,6 +3412,7 @@ fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
         accepted_total += receipt.outcomes.survived.len();
         invalid_total += receipt.outcomes.invalid.len();
         redundant_total += receipt.outcomes.redundant.len();
+        method_ignored_total += receipt.outcomes.method_ignored.len();
     }
     let expected_source_union: BTreeSet<String> =
         sources.iter().map(|source| source.path.clone()).collect();
@@ -3384,12 +3428,13 @@ fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
             killed: killed_total,
             invalid: invalid_total,
             redundant: redundant_total,
+            method_ignored: method_ignored_total,
             accepted: accepted_total,
         },
     )?;
     println!(
-        "Independently verified all {} C# mutation shards: {} valid killed, {} accepted equivalent, {} invalid, {} stock redundant.",
-        args.shard_count, killed_total, accepted_total, invalid_total, redundant_total
+        "Independently verified all {} C# mutation shards: {} valid killed, {} accepted equivalent, {} invalid, {} stock redundant, {} dropped by ignore-methods.",
+        args.shard_count, killed_total, accepted_total, invalid_total, redundant_total, method_ignored_total
     );
     Ok(())
 }
@@ -3502,6 +3547,7 @@ struct VerifiedCounts {
     killed: usize,
     invalid: usize,
     redundant: usize,
+    method_ignored: usize,
     accepted: usize,
 }
 
@@ -3529,6 +3575,7 @@ fn write_verified_summary(
         "accepted_equivalent": counts.accepted,
         "invalid": counts.invalid,
         "stock_redundant": counts.redundant,
+        "ignore_methods_dropped": counts.method_ignored,
         "passed": true
     });
     mutation::write_json_atomic(&output.join(format!("{language}.json")), &summary)
@@ -4102,6 +4149,10 @@ mod tests {
                 "Ignored",
                 Some("Removed by exclude from code coverage filter"),
             ),
+            // Measured: Stryker stamps the method filter before the mutate
+            // filter, so a shard sees this reason on the other fifteen shards'
+            // files. It is still a mutant that never ran.
+            ("Ignored", Some(mutation::METHOD_IGNORE_REASON)),
         ] {
             assert!(
                 csharp_outside_scope_is_unexecuted(status, reason),

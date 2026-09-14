@@ -138,3 +138,22 @@ dotnet_diagnostic.SA1651.severity = none   # placeholder doc elements
 # handler" sentinel; the null is checked before it is ever awaited, so returning
 # null is intentional here (not an unobserved-null-Task bug).
 dotnet_diagnostic.MA0022.severity = none   # return null vs Task.FromResult
+
+# ── Named-pipe transport internals: the one place in this app where
+#    ConfigureAwait(false) is mandatory rather than forbidden.
+#
+#    PipeEngineClient starts its supervisor and read loops with Task.Run, so
+#    everything under Engine/Transport/ already runs off the dispatcher and owns
+#    only transport state — no bound property, no XAML-thread object. Resuming on
+#    a captured context there would be pure overhead at best, and at worst it
+#    re-couples the wire protocol to whichever thread happened to call in.
+#
+#    CA2007/MA0004 are `none` for the app as a whole (above) precisely because the
+#    ViewModels must stay on the dispatcher, which is the opposite rule; that
+#    blanket-off also meant nothing was checking the transport side. Re-arming
+#    both here makes "every transport await is explicit" a build error instead of
+#    a convention, and pairs with the ViewModel-side guard in
+#    xtask/tests/repo_invariants.rs that forbids the same call there.
+[app/FindMyFiles/Engine/Transport/**.cs]
+dotnet_diagnostic.CA2007.severity = error  # every await states its context
+dotnet_diagnostic.MA0004.severity = error  # Meziantou's equivalent of CA2007

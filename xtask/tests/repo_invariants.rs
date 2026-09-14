@@ -394,3 +394,177 @@ fn raw_volume_streams_are_read_through_the_sector_aligned_adapter() {
         );
     }
 }
+
+/// C# source with every comment and literal replaced by a space, and all
+/// whitespace removed.
+///
+/// The guard below forbids a call that the surrounding prose has to quote in
+/// order to explain itself — `ViewModels/` currently carries eight comments
+/// containing the exact text `ConfigureAwait(false)`, every one of them saying
+/// *not* to write it. A plain substring search over the raw file would fire on
+/// the documentation and never on the code. Literals are neutralized for the
+/// same reason: a message or log template may name the rule.
+///
+/// Collapsing whitespace afterwards is what makes the search resistant to
+/// reformatting — a call broken across lines by an editor is the same call.
+///
+/// Raw string literals (`"""`) are rejected rather than parsed: the tracker
+/// below would nest them wrongly, and a guard that silently stops seeing code
+/// is worse than one that fails loudly on a construct it does not model.
+fn csharp_code_only(source: &str) -> String {
+    assert!(
+        !source.contains("\"\"\""),
+        "csharp_code_only does not model raw string literals; teach it before using one"
+    );
+    let mut code = String::with_capacity(source.len());
+    let mut characters = source.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '/' if characters.peek() == Some(&'/') => {
+                for next in characters.by_ref() {
+                    if next == '\n' {
+                        break;
+                    }
+                }
+                code.push(' ');
+            }
+            '/' if characters.peek() == Some(&'*') => {
+                characters.next();
+                let mut star = false;
+                for next in characters.by_ref() {
+                    if star && next == '/' {
+                        break;
+                    }
+                    star = next == '*';
+                }
+                code.push(' ');
+            }
+            '@' if characters.peek() == Some(&'"') => {
+                characters.next();
+                // A verbatim string ends at the first `"` that is not doubled.
+                while let Some(next) = characters.next() {
+                    if next == '"' {
+                        if characters.peek() == Some(&'"') {
+                            characters.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                code.push(' ');
+            }
+            '"' | '\'' => {
+                let quote = character;
+                let mut escaped = false;
+                for next in characters.by_ref() {
+                    if escaped {
+                        escaped = false;
+                    } else if next == '\\' {
+                        escaped = true;
+                    } else if next == quote {
+                        break;
+                    }
+                }
+                code.push(' ');
+            }
+            _ if character.is_whitespace() => {}
+            _ => code.push(character),
+        }
+    }
+    code
+}
+
+/// Every `.cs` file under a repository-relative directory, with its code-only
+/// text. Panics rather than returning an empty list: an empty fixture would
+/// make every assertion below vacuously true.
+fn csharp_sources_under(relative: &str) -> Vec<(String, String)> {
+    let root = repo();
+    let directory = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let mut sources: Vec<(String, String)> = source_files(&directory)
+        .into_iter()
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("cs"))
+        .map(|path| {
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()));
+            let name = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            (name, csharp_code_only(&source))
+        })
+        .collect();
+    assert!(
+        !sources.is_empty(),
+        "{relative} holds no C# sources; this guard has stopped guarding anything"
+    );
+    sources.sort();
+    sources
+}
+
+#[test]
+fn csharp_code_only_sees_calls_and_not_the_prose_about_them() {
+    // The guard's whole value depends on this function distinguishing the two,
+    // so pin both directions on a fixture rather than trusting the real tree.
+    let stripped = csharp_code_only(
+        r#"
+// Never write ConfigureAwait(false) here.
+/* ConfigureAwait(false) */
+var message = "ConfigureAwait(false)";
+var verbatim = @"C:\ConfigureAwait(false)";
+await Work().ConfigureAwait(
+    false);
+await Other().ConfigureAwait(true);
+"#,
+    );
+    assert!(
+        !stripped.contains("Neverwrite"),
+        "line comments must be removed: {stripped}"
+    );
+    assert_eq!(
+        stripped.matches("ConfigureAwait(false)").count(),
+        1,
+        "exactly the reformatted call survives, not the four quotations: {stripped}"
+    );
+    assert!(
+        stripped.contains("ConfigureAwait(true)"),
+        "a real call must survive verbatim: {stripped}"
+    );
+}
+
+#[test]
+fn viewmodels_never_resume_off_the_dispatcher() {
+    // ConfigureAwait(false) in a ViewModel is a shipped-bug pattern in this app,
+    // not a style preference: SearchOrchestrator's query continuation writes bound
+    // state, and adding ConfigureAwait(false) to it threw RPC_E_WRONG_THREAD at
+    // runtime while every unit test stayed green (ADR-0036, and the comments at
+    // SearchOrchestrator.cs / ResultsPresenter.cs / PerfPanelViewModel.cs that
+    // record it). The unit tests cannot catch it because ManualDispatcher is
+    // always "on the UI thread"; the analyzers cannot catch it because CA2007 and
+    // MA0004 are `none` app-wide (.editorconfig) — they enforce the *opposite*
+    // rule, which is the correct default for a WinUI app. That leaves nothing
+    // checking the one directory where the mistake is fatal, so check it here.
+    //
+    // Scope is deliberately just ViewModels/ and (in .editorconfig) the transport.
+    // Services/, Virtualization/, App.xaml.cs and Program.cs each mix dispatcher-
+    // bound and background work inside one file, so neither blanket rule is true
+    // there; they are reviewed per await instead of gated.
+    let mut awaits_seen = 0_usize;
+    for (name, code) in csharp_sources_under("app/FindMyFiles/ViewModels") {
+        awaits_seen += code.matches("await").count();
+        assert!(
+            !code.contains("ConfigureAwait(false)"),
+            "{name} resumes off the dispatcher; ViewModel continuations write bound \
+             state and must keep the captured context (ADR-0036, RPC_E_WRONG_THREAD)"
+        );
+    }
+
+    // Non-vacuity: a stripper that ate real code would make the assertion above
+    // pass on an empty string, and the whole rule is about awaits — so if none
+    // survived, it is the scanner that changed and not the tree.
+    assert!(
+        awaits_seen > 0,
+        "no await survived stripping; the scanner, not the tree, changed"
+    );
+}

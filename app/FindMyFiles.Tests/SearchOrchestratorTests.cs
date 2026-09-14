@@ -21,12 +21,13 @@ public sealed class SearchOrchestratorTests : IDisposable
 
     public SearchOrchestratorTests()
     {
-        // Every test in this fixture must stay teardown-safe under mutation.
-        // A mutant can turn a normally debounced notification into an immediate,
-        // deliberately incomplete StubEngineClient query.  xUnit's tracking
-        // SynchronizationContext would then wait forever for the production
-        // fire-and-forget chain instead of reporting the assertion that killed
-        // the mutant.
+        // This fixture drives the real fire-and-forget query chain against a stub
+        // whose SearchAsync is deliberately left incomplete, which is exactly the
+        // shape SyncContext.RunContinuationsInline exists for: xUnit's tracking
+        // SynchronizationContext would adopt that chain as test work and wait for
+        // it forever at teardown, turning a failed assertion into a hung run. Set
+        // it once here so every test in the fixture is teardown-safe, not only the
+        // ones that remember to ask.
         SyncContext.RunContinuationsInline();
         _presenter = new ResultsPresenter(_dispatcher);
         _events = new EngineEventMarshaler(_engine, _dispatcher);
