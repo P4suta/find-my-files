@@ -18,5 +18,24 @@
     "engine/crates/fmf-core/src/usn/apply.rs",
     "engine/crates/fmf-core/src/wtf8.rs"
   ],
-  "accepted_equivalents": []
+  "accepted_equivalents": [
+    {
+      "identity": {
+        "path": "engine/crates/fmf-core/src/ondisk/fixup.rs",
+        "line": 74,
+        "column": 20,
+        "mutation": "replace > with == in fixup_layout"
+      },
+      "rationale": "Line 74 is unreachable-true: accepting a record also requires usa_end <= attributes_offset (the next rule) and attributes_offset < data.len() (the rule after it), which together already give usa_end < data.len(). Narrowing > to == therefore rejects exactly the same records, so no input can distinguish this mutant. The rule is kept because it bounds the untrusted uso/usl pair directly, so relaxing either later rule cannot silently drop the only check keeping the update-sequence array inside the buffer."
+    },
+    {
+      "identity": {
+        "path": "engine/crates/fmf-core/src/ondisk/fixup.rs",
+        "line": 74,
+        "column": 20,
+        "mutation": "replace > with >= in fixup_layout"
+      },
+      "rationale": "Line 74 is unreachable-true: accepting a record also requires usa_end <= attributes_offset (the next rule) and attributes_offset < data.len() (the rule after it), which together already give usa_end < data.len(). Widening > to >= only adds the case usa_end == data.len(), which the same two rules already reject, so no input can distinguish this mutant either. The rule is kept because it bounds the untrusted uso/usl pair directly, so relaxing either later rule cannot silently drop the only check keeping the update-sequence array inside the buffer."
+    }
+  ]
 }

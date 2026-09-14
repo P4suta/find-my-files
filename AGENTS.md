@@ -29,7 +29,7 @@ content検索 / プロパティ・タグ索引 / プレビュー / FTP・HTTP・
 - **版/タグ/CHANGELOG は release-please が正本(ADR-0035)**: Conventional Commits → Release PR を自動維持 → マージで `vX.Y.Z` タグ。**手動の `xtask release` / `just release` は廃止**(人は版番号を選ばない)。release-please は `release-please-config.json`+`.release-please-manifest.json`、`RELEASE_PLEASE_TOKEN`(GitHub App/PAT)で点火する休眠配管(GITHUB_TOKEN のタグは release.yml を起こさない再帰防止のため)。dev/nightly/stable の刻印は `engine/crates/fmf-buildstamp`(build.rs・**core/ffi 非依存の終端**)+ C# `InformationalVersion`、文字列形式の正本は `xtask version --channel`。`fmf --version` は `fmf_buildstamp::VERSION`
 - ビルド/配布の手続き的ロジック(`publish` / `publish-app` / `package` / `clean-temp` / `version`)は **`xtask/` クレート**に集約(cargo-xtask パターン)。justは薄いラッパーで `cargo run --manifest-path xtask/Cargo.toml -- <cmd>` を呼ぶだけ。**xtask は repo直下の独立ワークスペース。engine ワークスペースのメンバーにしない**(`cargo *--workspace*` の日常ループ/`llvm-cov --fail-under-lines` に混入するため)。純ロジック(チャネル版整形=version.rs / locale剪定 / checksum / semver)は xtask 内でユニットテスト。インライン PowerShell をここに戻さない。CIゲートは ubuntu `xtask` ジョブ(test+clippy+fmt)+ advisory は cargo-audit.yml(engine と並列で xtask/Cargo.lock も)
 - 最適化セッションは `just bench-micro-baseline` で開始し、変更毎に `just bench-micro-check`(criterion 10%ゲート・非昇格)。fmf-core を触ったらマージ前に昇格シェルで `just perf-gate`
-- git hookは `lefthook`(`just setup` で導入)。pre-commit: typos+rustfmt+taplo、pre-push: clippy+test+test-app
+- git hookは `lefthook`(`just setup` で導入)。pre-commit: typos+rustfmt+taplo、pre-push: `just verify` フルセット(build-ffi/fmt-check/lint/test/test-xtask/test-app/deny/machete)と fmf-core 変更時の perf-gate リマインダ(非ブロッキング)
 - `rust-toolchain.toml` / `global.json` は意図的に置かない(miseと二重管理になるため)
 
 ## シェルの既定(bash/PowerShellで迷わない)
