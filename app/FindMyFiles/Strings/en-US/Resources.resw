@@ -136,6 +136,7 @@
   <data name="DiagStatHits.Text" xml:space="preserve"><value>Hits</value></data>
   <data name="DiagStatScanned.Text" xml:space="preserve"><value>Scanned</value></data>
   <data name="DiagStatDriver.Text" xml:space="preserve"><value>Driver</value></data>
+  <data name="DiagRecentQueriesHeader.Text" xml:space="preserve"><value>Recent queries</value></data>
   <data name="DiagHealthHeaderBar.Title" xml:space="preserve"><value>Health</value></data>
   <data name="DiagMemoryHeader.Text" xml:space="preserve"><value>Memory</value></data>
   <data name="DiagMemProcess.Text" xml:space="preserve"><value>Process</value></data>

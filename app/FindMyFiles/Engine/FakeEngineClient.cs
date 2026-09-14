@@ -251,10 +251,30 @@ internal sealed class FakeEngineClient : IEngineClient
         }
 #if DEBUG
         // Fault injection for end-to-end verification of the error pipeline
-        // (InfoBar, F12 panel, app.log) without touching real volumes.
+        // (InfoBar, F12 panel, app.log) without touching real volumes. The
+        // token set is a contract shared with fmf-service's faults.rs — a
+        // fault that reproduces on only one engine is worse than none, because
+        // the fake is the one reachable without installing a service. xtask's
+        // fault_injection_tokens_match_on_both_engines holds both sides against
+        // one reviewed list.
         if (string.Equals(query.Trim(), "!!panic", StringComparison.Ordinal))
         {
             throw new EngineException("fault injection: simulated engine panic", 99);
+        }
+
+        if (string.Equals(query.Trim(), "!!drop", StringComparison.Ordinal))
+        {
+            // The service severs the pipe; there is no pipe here, so reproduce
+            // the *app-visible* effect instead of faking transport mechanics —
+            // the request dies with the exception PipeEngineClient raises once
+            // its connection is gone. Deliberately not a simulated state
+            // machine: the fake declares Connection => InProc and never raises
+            // ConnectionChanged, and inventing transitions it does not have
+            // would make this fault lie about a path it cannot exercise.
+            // Reconnect behaviour itself stays a pipe-side test
+            // (drop_fault_severs_the_connection in pipe_loopback.rs).
+            throw new EngineUnavailableException(
+                "fault injection: simulated engine disconnect");
         }
 
         if (string.Equals(query.Trim(), "!!warn", StringComparison.Ordinal))

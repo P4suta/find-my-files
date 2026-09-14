@@ -160,6 +160,32 @@
                             Stroke="{ThemeResource AccentFillColorDefaultBrush}"
                             StrokeThickness="{StaticResource SparklineStrokeThickness}" />
                     </Grid>
+                    <!--  Recent-query feed: the engine's own trace ring, which it has
+                          always sent and the panel never showed. The sparkline above
+                          plots the times; this says what produced each of them —
+                          driver, candidates examined, cache verdict — which is the
+                          evidence a slow search is actually diagnosed from. The query
+                          text is not in the trace at all (only its length), so the
+                          feed is privacy-safe by construction. The automation hook
+                          rides the header TextBlock: a Border/StackPanel/Grid has no
+                          automation peer, and an ItemsControl that is empty before
+                          the first poll would resolve intermittently.  -->
+                    <TextBlock
+                        x:Uid="DiagRecentQueriesHeader"
+                        AutomationProperties.AutomationId="PerfRecentQueries"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Style="{ThemeResource CaptionTextBlockStyle}" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.RecentQueriesTail, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="eng:QueryTraceData">
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    Style="{ThemeResource CaptionTextBlockStyle}"
+                                    Text="{x:Bind conv:DiagFormat.RecentQuery(QueryLength, Driver, Cache, Hits, EntriesScanned, TotalUs, Volumes, Unchanged), Mode=OneTime}"
+                                    TextTrimming="CharacterEllipsis" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
                 </StackPanel>
             </Border>
 

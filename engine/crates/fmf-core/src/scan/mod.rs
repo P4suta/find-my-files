@@ -220,7 +220,7 @@ fn scan_volume_impl(
     tracing::debug!(
         area = "scan",
         volume = drive,
-        msg = "scan phase: mft read complete"
+        "scan phase: mft read complete"
     );
 
     // Deferred pass: names hiding behind $ATTRIBUTE_LIST, resolved in
@@ -234,14 +234,14 @@ fn scan_volume_impl(
             area = "scan",
             volume = drive,
             objects = deferred.len(),
-            msg = "scan phase: opening live metadata"
+            "scan phase: opening live metadata"
         );
         let metadata =
             crate::usn::MetadataSource::open_volume_cancellable(drive, Arc::clone(stop))?;
         tracing::debug!(
             area = "scan",
             volume = drive,
-            msg = "scan phase: resolving deferred names"
+            "scan phase: resolving deferred names"
         );
         resolve_deferred(
             DeferredContext {
@@ -288,7 +288,7 @@ fn scan_volume_impl(
         area = "scan",
         volume = drive,
         ms = stats.elapsed_deferred_ms,
-        msg = "scan phase: deferred complete"
+        "scan phase: deferred complete"
     );
     drop(extensions);
     drop(deferred);
@@ -296,11 +296,7 @@ fn scan_volume_impl(
     // Shared-arena spills and failed targeted reads remain observable even
     // when the authoritative live fallback completed the object.
 
-    tracing::debug!(
-        area = "scan",
-        volume = drive,
-        msg = "scan phase: builder finish"
-    );
+    tracing::debug!(area = "scan", volume = drive, "scan phase: builder finish");
     let Some((idx, finish)) = b.finish_timed_cancellable(stop).map_err(|error| {
         // Log here, where the error still has a type: the scan boundary
         // stringifies it into `Ntfs`, and the formatter redacts bodies, so
