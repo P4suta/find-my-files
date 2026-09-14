@@ -30,33 +30,11 @@ const CSHARP_UNEXECUTED_IGNORE_REASONS: &[&str] = &[
     "Removed by mutate filter",
     "Removed by exclude from code coverage filter",
 ];
-const NEXTEXT_POLICY: &str = r#"nextest-version = "0.9.140"
-
-[store]
-dir = "../build/nextest"
-
-[profile.mutation]
-fail-fast = true
-retries = 0
-flaky-result = "fail"
-"#;
-
-// `--cargo-arg=--locked` is forwarded by cargo-mutants to both the build and
-// nextest invocations. Keep the nextest-only policy here so `--locked` cannot
-// accidentally be supplied a second time (nextest rejects duplicate uses).
-const RUST_MUTATION_NEXTEST_ARGS: &[&str] = &[
-    "--user-config-file",
-    "none",
-    "--profile",
-    "mutation",
-    "--fail-fast",
-    "--retries",
-    "0",
-    "--flaky-result",
-    "fail",
-    "--no-tests",
-    "fail",
-];
+// The nextest policy and the nextest argument tail both lanes run under live in
+// `mutation.rs` beside the argument builder that emits them: a copy here is a
+// second place for the two lanes to drift apart, which is the whole defect this
+// gate exists to not have.
+use mutation::NEXTEST_POLICY;
 
 const RUST_REPORT_FILES: &[&str] = &[
     "caught.txt",
@@ -1019,11 +997,11 @@ fn rust_policies(checkout: &Checkout, work: &Path) -> Result<Vec<PolicySeal>> {
             .join("engine")
             .join(".config")
             .join("nextest-mutation.toml"),
-        NEXTEXT_POLICY.as_bytes(),
+        NEXTEST_POLICY.as_bytes(),
     )?;
     policies.push(policy_seal(
         "embedded:nextest-mutation.toml",
-        NEXTEXT_POLICY.as_bytes(),
+        NEXTEST_POLICY.as_bytes(),
     ));
 
     for path in rust_build_control_paths()? {
@@ -1454,7 +1432,7 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
 
     ensure_hash(
         &nextest_config,
-        &checksum::sha256_hex(NEXTEXT_POLICY.as_bytes()),
+        &checksum::sha256_hex(NEXTEST_POLICY.as_bytes()),
         "trusted nextest policy",
     )?;
     let expected_survivors = reviewed_rust_survivors(&reviewed_policy, &shard_set);
@@ -1567,23 +1545,12 @@ fn rust_ci_list_args(config: &str) -> Vec<String> {
 
 /// One shard of the reviewed scope, run against the sanitized target tree.
 ///
-/// Everything that selects mutants or judges them comes from
-/// [`mutation::rust_run_args`], so this lane and `just mutants` see one program.
-/// What is added here is CI-only and strictly increases what the gate demands:
-/// the whole workspace's tests run against every mutant (`--test-workspace`)
-/// rather than only the mutated package's, slow hosted runners get a 60-second
-/// floor under the config's computed timeout, the run is restricted to this
-/// shard, and nextest is pinned to the controller's fail-closed profile.
-///
-/// `--skip-calls-defaults false` used to be here as well, on the theory that a
-/// tool default could narrow the reviewed scope. It cannot any more — the scope
-/// now arrives from the controller — and it was not free: it re-enables mutation
-/// of the arguments of `with_capacity` calls, adding 14 mutants (1,760 -> 1,774)
-/// which are all arithmetic inside a capacity hint (`Vec::with_capacity(len * 3)`
-/// -> `len + 3`). Capacity is not observable behaviour, so every one of them
-/// survives by construction, against a reviewed baseline recorded with the
-/// default skip list. Keeping the flag would have meant 14 permanent survivors
-/// in a gate whose whole design is exact survivor equality.
+/// Every option that selects mutants or judges them — the scope, the clean-tree
+/// baseline, the workspace test policy, the timeout floor and the nextest
+/// profile — comes from [`mutation::rust_run_args`], so this lane and
+/// `just mutants` run one program. **The shard is the only thing this lane adds**,
+/// and `every_rust_lane_runs_the_one_reviewed_scope` asserts exactly that by
+/// comparing the two vectors rather than trusting this comment.
 fn rust_ci_run_args(
     config: &str,
     output: &str,
@@ -1591,31 +1558,12 @@ fn rust_ci_run_args(
     shard_index: usize,
     shard_count: usize,
 ) -> Vec<String> {
-    let mut args = mutation::rust_run_args(config, output);
-    args.extend(
-        [
-            "--test-workspace",
-            "true",
-            "--minimum-test-timeout",
-            "60",
-            "--shard",
-            &format!("{shard_index}/{shard_count}"),
-            "--sharding",
-            "round-robin",
-            "--",
-            "--config-file",
-            nextest_config,
-        ]
-        .into_iter()
-        .map(str::to_owned),
-    );
-    args.extend(
-        RUST_MUTATION_NEXTEST_ARGS
-            .iter()
-            .copied()
-            .map(str::to_owned),
-    );
-    args
+    mutation::rust_run_args(
+        config,
+        output,
+        nextest_config,
+        Some((shard_index, shard_count)),
+    )
 }
 
 fn parse_rust_mutant_list(path: &Path, require_nonempty: bool) -> Result<Vec<RustMutant>> {
@@ -3652,7 +3600,7 @@ mod tests {
 
     #[test]
     fn rust_nextest_locked_is_forwarded_only_by_cargo_mutants() {
-        assert!(!RUST_MUTATION_NEXTEST_ARGS.contains(&"--locked"));
+        assert!(!mutation::RUST_MUTATION_NEXTEST_ARGS.contains(&"--locked"));
     }
 
     /// Options `engine/mutants.toml` answers. A CLI copy is not an error —
@@ -3727,22 +3675,36 @@ mod tests {
     fn every_rust_lane_runs_the_one_reviewed_scope() {
         let config = r"C:\controller\engine\mutants.toml";
         let scope = mutation::rust_scope_args(config);
+        let nextest = r"C:\work\engine\.config\nextest-mutation.toml";
+        let output = r"C:\work\tool-output\rust";
+        let local = mutation::rust_run_args(config, output, nextest, None);
+        let ci_run = rust_ci_run_args(config, output, nextest, 3, 16);
+
+        // The whole point, asserted on the vectors rather than described in a
+        // comment: the CI shard runs the local gate's program plus a shard, and
+        // nothing else. `--test-workspace` and `--minimum-test-timeout` were
+        // CI-only until run 34832581942 was compared against a local run over
+        // the same tree and the two lanes disagreed about 40 mutants.
+        let mut expected = local.clone();
+        let cut = expected
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("the shared vector ends with a nextest tail");
+        for (offset, arg) in ["--shard", "3/16", "--sharding", "round-robin"]
+            .into_iter()
+            .enumerate()
+        {
+            expected.insert(cut + offset, arg.to_owned());
+        }
+        assert_eq!(
+            ci_run, expected,
+            "the CI shard lane may add sharding and nothing else"
+        );
+
         let lanes = [
-            (
-                "local",
-                mutation::rust_run_args(config, r"C:\repo\build\mutation\rust"),
-            ),
+            ("local", local),
             ("ci-list", rust_ci_list_args(config)),
-            (
-                "ci-run",
-                rust_ci_run_args(
-                    config,
-                    r"C:\work\tool-output\rust",
-                    r"C:\work\engine\.config\nextest-mutation.toml",
-                    3,
-                    16,
-                ),
-            ),
+            ("ci-run", ci_run),
         ];
 
         for (lane, args) in &lanes {

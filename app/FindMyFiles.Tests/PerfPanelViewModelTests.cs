@@ -66,6 +66,40 @@ public sealed class PerfPanelViewModelTests
     }
 
     [Fact]
+    public void Stats_publishes_the_recent_query_feed_and_notifies_when_it_swaps()
+    {
+        // The engine has always sent this ring; nothing bound to it, so the
+        // panel discarded the one piece of evidence that explains a slow
+        // search. Two halves have to hold: the tail must be derived, and the
+        // property must re-notify when Stats swaps — omitting the
+        // NotifyPropertyChangedFor is the silent version of the same bug,
+        // since the list would render once and then never update.
+        var notified = new List<string?>();
+        _vm.PropertyChanged += (_, e) => notified.Add(e.PropertyName);
+
+        _vm.Stats = new EngineStatsData
+        {
+            RecentQueries = Enumerable.Range(0, 12)
+                .Select(i => new QueryTraceData { TotalUs = (ulong)i, Driver = "suffix" })
+                .ToList(),
+        };
+
+        Assert.Contains(nameof(PerfPanelViewModel.RecentQueriesTail), notified);
+
+        // Capped and newest-last, the same shape as the USN feed beside it.
+        Assert.Equal(8, _vm.RecentQueriesTail.Count);
+        Assert.Equal(4UL, _vm.RecentQueriesTail[0].TotalUs);
+        Assert.Equal(11UL, _vm.RecentQueriesTail[^1].TotalUs);
+    }
+
+    [Fact]
+    public void RecentQueriesTail_is_empty_before_the_first_snapshot()
+    {
+        Assert.Null(_vm.Stats);
+        Assert.Empty(_vm.RecentQueriesTail);
+    }
+
+    [Fact]
     public async Task RefreshStatsAsync_pulls_from_the_engine_and_raises()
     {
         var raised = 0;

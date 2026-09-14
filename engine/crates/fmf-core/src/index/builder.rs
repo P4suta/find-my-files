@@ -463,7 +463,7 @@ impl VolumeIndexBuilder {
 
         // Pass 1.5: the FRN index, in one parallel sort (ADR-0005).
         self.idx.frn_index = FrnIndex::build(&self.idx.frn, &self.idx.flag);
-        tracing::debug!(area = "index", msg = "finish: frn-index built");
+        tracing::debug!(area = "index", "finish: frn-index built");
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -482,7 +482,7 @@ impl VolumeIndexBuilder {
                 return Err(IndexBuildError::AmbiguousObjectIdentity);
             }
         }
-        tracing::debug!(area = "index", msg = "finish: strict validation done");
+        tracing::debug!(area = "index", "finish: strict validation done");
 
         // Pass 2: resolve parents now that every record is findable.
         // Read-only lookups, one write per slot — embarrassingly parallel.
@@ -597,24 +597,24 @@ impl VolumeIndexBuilder {
             return Ok(None);
         }
         let needs_compaction = if self.mode == FinalizeMode::SyntheticFixture {
-            tracing::debug!(area = "index", msg = "finish: parents resolved");
+            tracing::debug!(area = "index", "finish: parents resolved");
             self.tombstone_synthetic_duplicate_links()
         } else {
             timings.unresolved_parents = self.tombstone_unresolved_parents();
-            tracing::debug!(area = "index", msg = "finish: parents resolved");
+            tracing::debug!(area = "index", "finish: parents resolved");
             if let Some(object) = self.duplicate_link_object() {
                 return Err(IndexBuildError::DuplicateLink { object });
             }
             self.validate_strict_parent_graph()?;
             timings.unresolved_parents > 0
         };
-        tracing::debug!(area = "index", msg = "finish: parent graph validated");
+        tracing::debug!(area = "index", "finish: parent graph validated");
 
         // Pass 3: propagate EXCLUDED down resolved parent chains exactly once.
         // The same cycle-safe O(n) implementation runs at dirty USN batch
         // boundaries, so scan and incremental semantics cannot drift.
         self.idx.recompute_all_excluded();
-        tracing::debug!(area = "index", msg = "finish: excluded propagated");
+        tracing::debug!(area = "index", "finish: excluded propagated");
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -629,7 +629,7 @@ impl VolumeIndexBuilder {
         // Lever 1) — independent of the sort, which only reads folded names.
         self.idx.dedup_dict();
         self.idx.dedup_orig();
-        tracing::debug!(area = "index", msg = "finish: dictionaries deduped");
+        tracing::debug!(area = "index", "finish: dictionaries deduped");
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -658,7 +658,7 @@ impl VolumeIndexBuilder {
         };
         let mut order: Vec<u32> = (0..d as u32).collect();
         order.par_sort_unstable_by(|&a, &b| name_bytes(a as usize).cmp(name_bytes(b as usize)));
-        tracing::debug!(area = "index", msg = "finish: dictionary ranked");
+        tracing::debug!(area = "index", "finish: dictionary ranked");
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -674,7 +674,7 @@ impl VolumeIndexBuilder {
             .map(|id| (u64::from(rank[name_id[id as usize] as usize]) << 32) | u64::from(id))
             .collect();
         keyed.par_sort_unstable();
-        tracing::debug!(area = "index", msg = "finish: entries sorted");
+        tracing::debug!(area = "index", "finish: entries sorted");
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
         }

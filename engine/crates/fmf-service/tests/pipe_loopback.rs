@@ -650,6 +650,41 @@ fn drop_fault_severs_the_connection() {
 }
 
 #[test]
+fn warn_fault_reaches_the_diagnostics_ring_and_still_serves_the_query() {
+    // The `!!warn` half of the fault table. The fake engine has carried this
+    // token from the start and the service had not, so the one pipeline that
+    // actually carries a degradation to a user — ring → ENGINE_ERROR event →
+    // InfoBar and the F12 health card — could only ever be exercised against a
+    // double, on the engine that is not the one shipped.
+    //
+    // The ring is fed by DiagLayer, which exists only once a subscriber is
+    // installed. The service does that in its own entry point, so this process
+    // must too (idempotent; stderr, no log directory).
+    fmf_core::diag::init_diag(None, "warn", fmf_core::diag::DEFAULT_MAX_LOG_FILES);
+
+    let hx = start("warnfault", true);
+    let mut c = Client::hello(&hx.pipe_name);
+    let (status, result) = c.query("!!warn");
+    assert_eq!(status, codes::OK, "a warning degrades, it does not fail");
+    assert!(result.is_some(), "the query is still served after warning");
+
+    let (header, body) = c.request(opcode::STATS, &[]);
+    assert_eq!(header.status, codes::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let errors = json["recent_errors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("stats must carry the diagnostics ring: {json}"));
+    assert!(
+        errors.iter().any(|event| {
+            event["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("!!warn"))
+        }),
+        "the injected warning must reach the ring the UI reads: {json}"
+    );
+}
+
+#[test]
 fn page_roundtrip_stays_inside_the_latency_budget() {
     // Latency budget (ADR-0016): ResultPage 64 rows p99 <=5ms. Loopback
     // RTT is normally ~0.1-0.3ms — 5ms is a comfortable absolute line even
