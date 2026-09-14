@@ -56,6 +56,18 @@ pub(crate) fn fixup_layout(data: &[u8], sector_size: usize) -> Option<(usize, us
     let usa_bytes = usl.checked_mul(2)?;
     let usa_end = uso.checked_add(usa_bytes)?;
     let attributes_offset = u16::from_le_bytes([data[20], data[21]]) as usize;
+    // `usa_end > data.len()` is redundant against the two rules below it:
+    // accepting requires both `usa_end <= attributes_offset` and
+    // `attributes_offset < data.len()`, which already give `usa_end <
+    // data.len()`. It stays because it bounds the untrusted `uso`/`usl` pair
+    // directly instead of inferring that bound from a third untrusted field,
+    // so relaxing either of the last two rules cannot silently remove the only
+    // check that keeps the update-sequence array inside the buffer. Anyone
+    // editing those two rules is carrying that guarantee.
+    //
+    // Being redundant also makes it unobservable, so mutating it produces two
+    // equivalent mutants; they are recorded in engine/mutation-baseline.json
+    // with this proof rather than papered over with a test that cannot exist.
     if uso < 42
         || !uso.is_multiple_of(2)
         || usl != expected_usl
