@@ -356,7 +356,7 @@ impl LogfmtVisitor {
             (true, "area") => {
                 self.area = Some(
                     safe_diagnostic_tag(value)
-                        .unwrap_or("[redacted]")
+                        .unwrap_or(REDACTED_UNSAFE_VALUE)
                         .to_string(),
                 );
             }
@@ -364,10 +364,10 @@ impl LogfmtVisitor {
                 push_field(
                     &mut self.fields,
                     name,
-                    safe_diagnostic_tag(value).unwrap_or("[redacted]"),
+                    safe_diagnostic_tag(value).unwrap_or(REDACTED_UNSAFE_VALUE),
                 );
             }
-            _ => push_field(&mut self.fields, name, "[redacted]"),
+            _ => push_field(&mut self.fields, name, REDACTED_UNKNOWN_FIELD),
         }
     }
 
@@ -377,6 +377,29 @@ impl LogfmtVisitor {
         let _ = write!(self.fields, " {name}={value}");
     }
 }
+
+/// Redaction marker for a field whose *name* is not on
+/// [`is_safe_string_field`]'s reviewed allowlist. Adding the name to that list
+/// is the fix.
+///
+/// Redaction is self-describing on purpose. A bare `[redacted]` says a value
+/// was dropped but not *why*, and the two causes need opposite fixes — so the
+/// bare marker sent readers down the wrong one. That is not hypothetical: the
+/// formatter renders an event's message as ` msg=`, which makes `msg = "…"`
+/// the natural thing for a developer to type, and fourteen call sites did.
+/// Being a *field* named `msg`, every one of them landed here and logged its
+/// body as `[redacted]` — and allowlisting `msg` would not have helped, because
+/// the bodies contain spaces and would then have failed
+/// [`safe_diagnostic_tag`] instead. The distinct markers make that visible
+/// from the log line alone; `no_tracing_macro_uses_a_msg_field` in xtask keeps
+/// the specific `msg` trap from coming back.
+pub const REDACTED_UNKNOWN_FIELD: &str = "[redacted:unknown-field]";
+
+/// Redaction marker for an allowlisted field whose *value* failed
+/// [`safe_diagnostic_tag`] (empty, over 64 bytes, or carrying anything outside
+/// `[A-Za-z0-9._:-]` — a space, a path separator, a quoted error body). The fix
+/// is at the call site: record a finite tag, and put prose in the message.
+pub const REDACTED_UNSAFE_VALUE: &str = "[redacted:unsafe-value]";
 
 /// String diagnostics are fail-closed: only finite identifiers are useful in
 /// persisted logs. Paths, error bodies, payloads and user data are redacted at
@@ -987,6 +1010,9 @@ mod tests {
                 area = "privacy",
                 path = SECRET,
                 error = %format_args!("failed to read {SECRET}"),
+                // `driver` *is* allowlisted, but this value carries a space,
+                // so it fails safe_diagnostic_tag — the other redaction cause.
+                driver = "full scan",
                 code = 5_u64,
                 "operation failed"
             );
@@ -994,8 +1020,57 @@ mod tests {
 
         let out = String::from_utf8(buf.lock().clone()).unwrap();
         assert!(!out.contains(SECRET), "secret crossed the log sink: {out}");
-        assert!(out.contains(" path=[redacted]"), "path marker: {out}");
-        assert!(out.contains(" error=[redacted]"), "error marker: {out}");
+        // Which cause fired is pinned per field, in both directions: the two
+        // causes need opposite fixes (allowlist the name vs. fix the value at
+        // the call site), so a marker that cannot tell them apart sends the
+        // reader down the wrong one.
+        assert!(
+            out.contains(" path=[redacted:unknown-field]"),
+            "path is not an allowlisted field name: {out}"
+        );
+        assert!(
+            out.contains(" error=[redacted:unknown-field]"),
+            "error is not an allowlisted field name: {out}"
+        );
+        assert!(
+            out.contains(" driver=[redacted:unsafe-value]"),
+            "driver is allowlisted but its value is not a finite tag: {out}"
+        );
         assert!(out.contains(" code=5"), "numeric evidence survives: {out}");
+    }
+
+    #[test]
+    fn an_allowlisted_field_with_a_finite_value_is_not_redacted_at_all() {
+        // The counterpart to the redaction test: proves the allowlist actually
+        // lets reviewed diagnostics through, so a regression that redacted
+        // *everything* could not pass by satisfying only the negative cases.
+        let mut visitor = LogfmtVisitor::span();
+        visitor.put("driver", "full-scan");
+        visitor.put("cache", "refine");
+        assert_eq!(visitor.fields, " driver=full-scan cache=refine");
+    }
+
+    #[test]
+    fn the_message_is_a_message_not_a_field_named_msg() {
+        // The trap this repository actually fell into: the formatter emits the
+        // message as ` msg=`, so `msg = "…"` reads like the right spelling —
+        // but it is a *field* named `msg`, which is not allowlisted, and its
+        // prose could not pass safe_diagnostic_tag even if it were. Positional
+        // form is the one that reaches the reader.
+        let mut positional = LogfmtVisitor::event();
+        positional.put("message", "finish: frn-index built");
+        assert_eq!(
+            positional.message.as_deref(),
+            Some("finish: frn-index built")
+        );
+        assert!(positional.fields.is_empty());
+
+        let mut as_field = LogfmtVisitor::event();
+        as_field.put("msg", "finish: frn-index built");
+        assert_eq!(as_field.message, None);
+        assert_eq!(as_field.fields, format!(" msg={REDACTED_UNKNOWN_FIELD}"));
+        // Allowlisting `msg` would move the loss, not stop it: the body still
+        // fails the value check.
+        assert_eq!(safe_diagnostic_tag("finish: frn-index built"), None);
     }
 }
