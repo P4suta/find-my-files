@@ -71,10 +71,13 @@ The command never writes a ruleset. Applying a template, and deciding whether a
 difference is fixed by re-exporting the live ruleset or by changing the live
 settings, are maintainer actions.
 
-**Why this is not a CI job.** Reading a repository's rulesets requires
-administration access. The `GITHUB_TOKEN` a workflow runs with does not have it
-and cannot be granted it through `permissions:`, so a workflow could only do this
-with a long-lived admin PAT — a credential with far more power than the check
-needs, stored where every workflow run can reach it. The check therefore runs
-locally, under the maintainer's own `gh` login, as part of the same session that
-changes the settings.
+**Why this is not a CI job.** The rulesets endpoint answers
+`X-Accepted-OAuth-Scopes: repo` — the whole-repository scope, with no narrower
+one accepted. A workflow's `GITHUB_TOKEN` is scoped instead by the `permissions:`
+block, whose keys are a closed per-resource set (`contents`, `checks`, `issues`,
+`pull-requests`, …) with nothing for repository settings; `actionlint` rejects
+`administration:` outright as an unknown permission scope. So a workflow could
+only read rulesets through a long-lived admin PAT — a credential with far more
+power than this check needs, stored where every workflow run can reach it. The
+check runs locally instead, under the maintainer's own `gh` login, in the same
+session that changes the settings.
