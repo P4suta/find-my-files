@@ -19,6 +19,13 @@
       "**/Engine/PipeProtocol.cs",
       "**/Engine/Wtf8.cs"
     ],
+    "mutation-level": "Complete",
+    "coverage-analysis": "off",
+    "disable-mix-mutants": true,
+    "test-runner": "vstest",
+    "configuration": "Release",
+    "target-framework": "net10.0-windows10.0.26100.0",
+    "break-on-initial-test-failure": true,
     "thresholds": {
       "high": 80,
       "low": 60,

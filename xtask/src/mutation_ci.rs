@@ -897,6 +897,23 @@ fn copy_path_for_language(path: &str, language: &str) -> bool {
     }
 }
 
+/// Tool configuration that the .NET SDK, cargo and `MSBuild` discover on their own
+/// by walking up from a working directory, and that a target checkout may
+/// therefore never contribute: a file nothing on the command line names can
+/// still redirect the toolchain, the package feed or the analyzer set, and
+/// `reject_forbidden_auto_configs` fails the shard closed the moment the target
+/// carries one.
+///
+/// This is a rule about **who decides**, not about whether the file should
+/// exist. `global.json` is the clearest case of the difference: the C# lane is
+/// wrong without one — with none above the work tree the muxer resolves to the
+/// newest SDK on the image instead of the pinned one, which is how five weekly
+/// audits died (see `trusted_global_json`) — and the controller writes its own
+/// into the work tree for exactly that reason. Both halves are required and they
+/// do not contradict each other: the target supplies none of this, the
+/// controller supplies all of it. `is_trusted_auto_config` names the sole
+/// exception where a target file passes through, and only after
+/// `require_target_matches_controller` proves it is byte-identical.
 fn is_forbidden_auto_config(path: &str) -> bool {
     let file = path.rsplit('/').next().unwrap_or(path);
     file.eq_ignore_ascii_case("global.json")
@@ -1055,7 +1072,15 @@ fn csharp_policies(checkout: &Checkout, work: &Path) -> Result<Vec<PolicySeal>> 
     }
     let mise = fs::read(controller_root().join("mise.toml")).context("read trusted mise.toml")?;
     validate_mise_rust_pin(&mise)?;
+    validate_mise_dotnet_pin(&mise)?;
     policies.push(policy_seal("controller:mise.toml", &mise));
+
+    // Before any `dotnet` process starts: `restore_and_verify_csharp_tools` is
+    // the first one, and it is what compares `dotnet --version` to the pin.
+    let global_json = trusted_global_json()?;
+    write_bytes(&work.join("global.json"), &global_json)?;
+    policies.push(policy_seal("generated:global.json", &global_json));
+
     let cargo_config = require_target_matches_controller(checkout, "engine/.cargo/config.toml")?;
     write_bytes(
         &work.join("engine").join(".cargo").join("config.toml"),
@@ -1088,6 +1113,72 @@ fn csharp_policies(checkout: &Checkout, work: &Path) -> Result<Vec<PolicySeal>> 
     policies.push(policy_seal("controller:.editorconfig", &editorconfig));
     policies.sort();
     Ok(policies)
+}
+
+/// The SDK selector the sanitized C# work tree resolves under.
+///
+/// `actions/setup-dotnet` *installs* [`DOTNET_SDK_VERSION`]; it does not make
+/// `dotnet` *use* it. With no `global.json` anywhere above the working
+/// directory, the muxer picks the highest SDK on the machine — so when the
+/// hosted image started shipping 10.0.400 beside the 10.0.302 the workflow had
+/// just downloaded, `dotnet --version` began answering 10.0.400 and
+/// `restore_and_verify_csharp_tools` failed every C# shard with
+/// `.NET SDK runtime pin mismatch: expected 10.0.302, got 10.0.400`. Five
+/// consecutive weekly audits died there, and with them `release.yml`'s
+/// `sign-stage`, which needs `mutation`. Raising the constant would have bought
+/// one week: the runner image moves again, and the pin would once more be a
+/// statement about what is installed rather than about what runs.
+///
+/// `rollForward: disable` is the only policy that agrees with the exact string
+/// comparison the pin check makes. Every other value — including the default,
+/// `latestPatch` — lets the muxer answer with a version other than the one
+/// written here, which is precisely the gap this file closes.
+///
+/// It is *generated* rather than copied because the repository deliberately has
+/// no `global.json` to copy: `is_forbidden_auto_config` rejects one anywhere in
+/// the target checkout, so committing one would fail the shard at
+/// `reject_forbidden_auto_configs` before reaching this line. The two are not in
+/// tension — that rejection is about *who decides*. A target must not be able to
+/// choose the toolchain it is measured with; the controller choosing it is the
+/// whole point.
+///
+/// `work/` is the right level: `dotnet_command` runs in
+/// `work/app/FindMyFiles.Tests`, and SDK resolution walks up from the working
+/// directory to the first `global.json` it finds.
+fn trusted_global_json() -> Result<Vec<u8>> {
+    canonical_json_bytes(&serde_json::json!({
+        "sdk": {
+            "version": DOTNET_SDK_VERSION,
+            "rollForward": "disable"
+        }
+    }))
+}
+
+/// The `mise.toml` the C# lane seals is only half-checked without this.
+///
+/// `10.0.302` is spelled three times: here as [`DOTNET_SDK_VERSION`], in
+/// `mise.toml` for the developer machine, and in `mutation-controller.yml` for
+/// `actions/setup-dotnet`. `validate_mise_rust_pin` has always held the Rust pin
+/// to that standard, while the .NET pin went into the sealed policy list with
+/// nobody checking that it said the same thing. A bulk tool bump (issue #175)
+/// that moves `mise.toml` and the workflow but not this constant would recreate
+/// the failure `trusted_global_json` just fixed, wearing a better disguise:
+/// `dotnet --version` would report the version the workflow installed, and the
+/// mismatch would read like an SDK bug rather than a pin edit.
+/// `mutation_workflow_guards` pins the third spelling, which no controller can
+/// read at run time.
+fn validate_mise_dotnet_pin(bytes: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(bytes).context("trusted mise.toml is not UTF-8")?;
+    let document = text
+        .parse::<toml_edit::DocumentMut>()
+        .context("parse trusted mise.toml")?;
+    let actual = document["tools"]["dotnet"]
+        .as_str()
+        .ok_or_else(|| anyhow!("trusted mise.toml has no tools.dotnet string"))?;
+    if actual != DOTNET_SDK_VERSION {
+        bail!("trusted .NET SDK pin drift: expected {DOTNET_SDK_VERSION}, got {actual}");
+    }
+    Ok(())
 }
 
 fn validate_stryker_manifest(bytes: &[u8]) -> Result<()> {
@@ -2066,10 +2157,7 @@ fn run_csharp_ci(args: CiRunArgs) -> Result<()> {
 
     let config = stryker_config(&shard_sources)?;
     let config_bytes = canonical_json_bytes(&config)?;
-    let config_path = work
-        .join("app")
-        .join("FindMyFiles.Tests")
-        .join(".trusted-stryker-shard.json");
+    let config_path = paths::csharp_test_dir(&work).join(".trusted-stryker-shard.json");
     write_bytes(&config_path, &config_bytes)?;
     write_bytes(&evidence.join("trusted-stryker-config.json"), &config_bytes)?;
     policies.push(policy_seal(
@@ -2217,7 +2305,45 @@ fn run_dotnet_baseline(work: &Path) -> Result<Output> {
         .context("spawn unmutated C# baseline")
 }
 
+/// The one reviewed Stryker configuration, narrowed to this shard's files.
+///
+/// Read, never rebuilt. Everything that decides **which mutants exist** and
+/// **how each one is judged** — `mutation-level`, `coverage-analysis`,
+/// `disable-mix-mutants`, `test-runner`, `configuration`, `target-framework`,
+/// `break-on-initial-test-failure`, `concurrency`, `additional-timeout` — comes
+/// verbatim out of `app/FindMyFiles.Tests/stryker-config.json` in the
+/// *controller's* checkout, which `csharp_policies` seals as
+/// `controller:app/FindMyFiles.Tests/stryker-config.json` after proving the
+/// target's copy is byte-identical to it.
+///
+/// This function used to restate that whole object as a `json!` literal, and the
+/// two spellings said different things. CI mutated at `Complete` level with
+/// coverage analysis off, `vstest`, and a `Release` build; the committed file
+/// named none of those, so `just stryker` mutated at Stryker's `Standard`
+/// default with `perTest` coverage under `Debug` — and then compared the result
+/// to the same 103-entry reviewed baseline. Green locally and red in CI (or the
+/// reverse) was structural rather than bad luck, and no test could see it
+/// because each lane only ever read its own copy.
+///
+/// `mutate` is the one key a shard may change, because it is the only one that
+/// describes the *partition* rather than the program: the reviewed file lists all
+/// thirteen files and a shard narrows that to its slice. Narrowing it cannot
+/// weaken anything — Stryker does not confine *mutation* to this inventory, so
+/// `parse_csharp_report` is what actually enforces the scope, and the shard's
+/// results are compared against `reviewed_csharp_survivors` for the same slice.
 fn stryker_config(shard_sources: &[String]) -> Result<Value> {
+    let reviewed_path = paths::csharp_stryker_config_in(&controller_root());
+    let mut reviewed: Value = mutation::read_json(&reviewed_path)?;
+    let root = reviewed
+        .get_mut("stryker-config")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("{} has no stryker-config object", reviewed_path.display()))?;
+    if !root.contains_key("mutate") {
+        bail!(
+            "{} has no mutate inventory for a shard to narrow",
+            reviewed_path.display()
+        );
+    }
     let mut patterns = Vec::with_capacity(shard_sources.len());
     for source in shard_sources {
         let relative = source
@@ -2231,32 +2357,8 @@ fn stryker_config(shard_sources: &[String]) -> Result<Value> {
         }
         patterns.push(Value::String(format!("**/{relative}")));
     }
-    Ok(serde_json::json!({
-        "stryker-config": {
-            "project": "FindMyFiles.csproj",
-            "test-projects": ["FindMyFiles.Tests.csproj"],
-            // Stryker itself recommends at most two sessions on a normal
-            // runner. Four made otherwise-killed mutants time out under the
-            // hosted Windows CPU/memory contention.
-            "concurrency": 2,
-            "additional-timeout": 30000,
-            "mutate": patterns,
-            "mutation-level": "Complete",
-            "coverage-analysis": "off",
-            "disable-mix-mutants": true,
-            "thresholds": {
-                "high": 100,
-                "low": 100,
-                "break": 0
-            },
-            "report-file-name": "mutation-report",
-            "reporters": ["json"],
-            "test-runner": "vstest",
-            "configuration": "Release",
-            "target-framework": CSHARP_TARGET_FRAMEWORK,
-            "break-on-initial-test-failure": true
-        }
-    }))
+    root.insert("mutate".to_owned(), Value::Array(patterns));
+    Ok(reviewed)
 }
 
 /// The reviewed survivors this Rust shard is allowed to report.
@@ -2323,18 +2425,7 @@ fn run_stryker(work: &Path, config: &Path, output: &Path) -> Result<Output> {
     let output_arg = path_arg(output)?;
     let mut command = dotnet_command(work);
     command
-        .args([
-            "tool",
-            "run",
-            "dotnet-stryker",
-            "--",
-            "--config-file",
-            config_name,
-            "--output",
-            &output_arg,
-            "--skip-version-check",
-            "--break-on-initial-test-failure",
-        ])
+        .args(mutation::stryker_args(&output_arg, Some(config_name)))
         .output()
         .context("spawn trusted Stryker.NET run")
 }
@@ -2874,7 +2965,10 @@ fn rust_command(program: &str, work: &Path) -> Command {
 fn dotnet_command(work: &Path) -> Command {
     let mut command = trusted_command("dotnet");
     command
-        .current_dir(work.join("app").join("FindMyFiles.Tests"))
+        // Inside `work`, always: the generated `global.json` at the root of the
+        // work tree only selects an SDK for processes that resolve upward
+        // through it (see `trusted_global_json`).
+        .current_dir(paths::csharp_test_dir(work))
         // The SDK remains exactly pinned and verified above. Testhost targets
         // Microsoft.NETCore.App 10.0.0 and must accept the runner's serviced
         // patch (for example 10.0.10) instead of requiring an insecure RTM copy.
@@ -3772,6 +3866,189 @@ mod tests {
             reviewed_rust_survivors(&policy(None), &BTreeSet::from([first, second])).len(),
             1
         );
+    }
+
+    /// The local `just stryker` gate and the CI shard hand Stryker one
+    /// configuration.
+    ///
+    /// This compares the settings each lane *effectively* runs under, not the
+    /// fact that both mention a file called `stryker-config.json`: for as long
+    /// as this gate has existed, CI built its own configuration object in code
+    /// while the committed file said something else, so the two lanes mutated a
+    /// different program at a different mutation level and then compared the
+    /// results to the same reviewed baseline. Nothing could observe that,
+    /// because each lane only ever read its own copy.
+    ///
+    /// Equality alone would be a hollow gate — deleting `mutation-level` from
+    /// the reviewed file keeps both lanes perfectly equal and quietly returns
+    /// both to Stryker's `Standard` default — so the absolute values are pinned
+    /// here too.
+    #[test]
+    fn every_csharp_lane_runs_the_one_reviewed_configuration() {
+        let reviewed_path = paths::csharp_stryker_config_in(&controller_root());
+        assert_eq!(reviewed_path, paths::csharp_stryker_config());
+        let reviewed: Value = mutation::read_json(&reviewed_path)
+            .expect("the committed Stryker configuration must load");
+        let reviewed_root = reviewed
+            .get("stryker-config")
+            .and_then(Value::as_object)
+            .expect("reviewed stryker-config object");
+
+        // What the reviewed file says, in full. Nothing downstream can restore a
+        // setting this file loses.
+        for (key, expected) in [
+            ("mutation-level", serde_json::json!("Complete")),
+            ("coverage-analysis", serde_json::json!("off")),
+            ("disable-mix-mutants", serde_json::json!(true)),
+            ("test-runner", serde_json::json!("vstest")),
+            ("configuration", serde_json::json!("Release")),
+            (
+                "target-framework",
+                serde_json::json!(CSHARP_TARGET_FRAMEWORK),
+            ),
+            ("break-on-initial-test-failure", serde_json::json!(true)),
+            ("reporters", serde_json::json!(["progress", "json"])),
+        ] {
+            assert_eq!(
+                reviewed_root.get(key),
+                Some(&expected),
+                "the reviewed Stryker configuration no longer sets `{key}`"
+            );
+        }
+        // `break: 0` is load-bearing where `high`/`low` are report colouring:
+        // `validate_stryker_exit` requires exit 0, and any break threshold above
+        // the achieved score makes Stryker exit 1 — failing the gate on a score
+        // instead of on the survivor identities it actually judges.
+        assert_eq!(
+            reviewed.pointer("/stryker-config/thresholds/break"),
+            Some(&serde_json::json!(0))
+        );
+
+        // The shard configuration is the reviewed one with a narrower `mutate`,
+        // and nothing else.
+        let shard = vec![
+            "app/FindMyFiles/Engine/Wtf8.cs".to_owned(),
+            "app/FindMyFiles/Engine/Transport/PipeConnection.cs".to_owned(),
+        ];
+        let generated = stryker_config(&shard).expect("shard Stryker configuration");
+        let generated_root = generated
+            .get("stryker-config")
+            .and_then(Value::as_object)
+            .expect("generated stryker-config object");
+        assert_eq!(
+            generated_root.get("mutate"),
+            Some(&serde_json::json!([
+                "**/Engine/Wtf8.cs",
+                "**/Engine/Transport/PipeConnection.cs"
+            ]))
+        );
+        assert_eq!(
+            generated_root.keys().collect::<Vec<_>>(),
+            reviewed_root.keys().collect::<Vec<_>>(),
+            "the CI shard configuration invented or dropped a key"
+        );
+        for (key, value) in reviewed_root {
+            if key == "mutate" {
+                continue;
+            }
+            assert_eq!(
+                generated_root.get(key),
+                Some(value),
+                "`{key}` differs between `just stryker` and the CI shard"
+            );
+        }
+
+        // Neither lane may answer on the command line a question the reviewed
+        // file answers. Stryker prefers the command line without saying so, so a
+        // duplicate is not an error — it is the next drift, and
+        // `--break-on-initial-test-failure` was already exactly that.
+        let local = mutation::stryker_args(r"C:\repo\build\mutation\csharp", None);
+        let ci = mutation::stryker_args(
+            r"C:\work\tool-output\csharp",
+            Some(".trusted-stryker-shard.json"),
+        );
+        for (lane, args) in [("local", &local), ("ci", &ci)] {
+            for key in reviewed_root.keys() {
+                assert!(
+                    !args.contains(&format!("--{key}")),
+                    "{lane} restates `--{key}`, which the reviewed configuration owns"
+                );
+            }
+        }
+
+        // Reduced to the same report location and the same file name, the two
+        // command lines are one command line.
+        let mut normalized = ci;
+        let config_file = normalized
+            .iter()
+            .position(|arg| arg == "--config-file")
+            .expect("the CI lane must name its generated shard configuration");
+        normalized.drain(config_file..config_file + 2);
+        let output = |args: &[String]| {
+            args.iter()
+                .position(|arg| arg == "--output")
+                .expect("every lane must place its own report")
+                + 1
+        };
+        let report = output(&normalized);
+        normalized[report] = local[output(&local)].clone();
+        assert_eq!(
+            normalized, local,
+            "the Stryker command lines differ by more than report placement"
+        );
+    }
+
+    /// The controller pins the SDK the work tree actually resolves, and the
+    /// target still cannot pin one of its own.
+    #[test]
+    fn the_controller_supplies_the_sdk_selector_the_target_may_not() {
+        let bytes = trusted_global_json().expect("generated global.json");
+        let value: Value = serde_json::from_slice(&bytes).expect("generated global.json is JSON");
+        assert_eq!(
+            value.pointer("/sdk/version"),
+            Some(&serde_json::json!(DOTNET_SDK_VERSION))
+        );
+        // Any roll-forward policy lets the muxer answer with a version other
+        // than this one, and `restore_and_verify_csharp_tools` compares that
+        // answer for exact equality.
+        assert_eq!(
+            value.pointer("/sdk/rollForward"),
+            Some(&serde_json::json!("disable"))
+        );
+
+        // Correct bytes in the wrong place are inert, and inert is the state
+        // this commit fixed. SDK resolution walks up from the *working
+        // directory*, so the selector at the root of the work tree only binds
+        // while every `dotnet` process the lane spawns runs underneath it. This
+        // reads that working directory off the real command rather than
+        // restating the layout.
+        let work = Path::new(r"C:\c\build\mw\c\1-1-3");
+        let command = dotnet_command(work);
+        let cwd = command
+            .get_current_dir()
+            .expect("every trusted dotnet process must declare a working directory");
+        assert!(
+            cwd.ancestors().any(|directory| directory == work),
+            "the generated SDK selector in {} is not on the resolution path of {}",
+            work.display(),
+            cwd.display()
+        );
+
+        // The file the controller writes is precisely the file a target may not
+        // carry. The exclusion and the generation are two halves of one policy,
+        // not a contradiction: only the exclusion was ever implemented.
+        assert!(is_forbidden_auto_config("global.json"));
+        assert!(!is_trusted_auto_config("global.json"));
+        assert!(!copy_path_for_language("global.json", "csharp"));
+        assert!(!copy_path_for_language("global.json", "rust"));
+
+        // ...and the one pin it is generated from is the pin the developer
+        // machine installs.
+        let mise = fs::read(controller_root().join("mise.toml")).expect("read mise.toml");
+        validate_mise_dotnet_pin(&mise)
+            .expect("mise.toml tools.dotnet must equal DOTNET_SDK_VERSION");
+        validate_mise_dotnet_pin(b"[tools]\ndotnet = \"10.0.999\"\n")
+            .expect_err("a drifting mise pin must fail the C# lane closed");
     }
 
     #[test]
