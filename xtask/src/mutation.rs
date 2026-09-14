@@ -224,14 +224,113 @@ pub fn rust_scope_args(config: &str) -> Vec<String> {
     .to_vec()
 }
 
-/// [`rust_scope_args`] plus the clean-tree baseline and output location that
-/// every *executing* lane needs. The local gate runs exactly this; the CI shard
-/// runner appends its sharding and workspace-test policy to it.
-pub fn rust_run_args(config: &str, output: &str) -> Vec<String> {
+/// The nextest policy both Rust mutation lanes run under. It is written to a
+/// file and passed as `--config-file`, which *replaces* the repository's own
+/// configuration rather than layering on it.
+///
+/// It has to be spelled out, because `engine/.config/nextest.toml`'s `default`
+/// profile is tuned for the ordinary suite and is actively wrong here:
+/// `slow-timeout = { period = "15s", terminate-after = 4 }` kills any test still
+/// running after a minute, so a slow-but-correct mutant is reported **caught**
+/// — by nextest, on a stopwatch, not by an assertion — and cargo-mutants' own
+/// `timeout_multiplier` never gets to call it a timeout. `leak-timeout` with
+/// `result = "fail"` can manufacture a second such verdict.
+pub const NEXTEST_POLICY: &str = r#"nextest-version = "0.9.140"
+
+[store]
+dir = "../build/nextest"
+
+[profile.mutation]
+fail-fast = true
+retries = 0
+flaky-result = "fail"
+"#;
+
+/// `--cargo-arg=--locked` is forwarded by cargo-mutants to both the build and
+/// the nextest invocation. Keep the nextest-only policy here so `--locked`
+/// cannot accidentally be supplied a second time (nextest rejects duplicate
+/// uses).
+pub const RUST_MUTATION_NEXTEST_ARGS: &[&str] = &[
+    "--user-config-file",
+    "none",
+    "--profile",
+    "mutation",
+    "--fail-fast",
+    "--retries",
+    "0",
+    "--flaky-result",
+    "fail",
+    "--no-tests",
+    "fail",
+];
+
+/// The whole executing argument vector, for both lanes. `shard` is the only
+/// thing either lane may vary.
+///
+/// Everything else is here because a lane that decides it for itself is a lane
+/// running a different program, which is the defect this gate spent five weeks
+/// failing on. Two options moved here after being measured rather than reasoned
+/// about, against `mutants.yml` run 34832581942 and a full local `just mutants`
+/// over the same tree:
+///
+/// * `--test-workspace true` was CI-only, on the stated theory that it "strictly
+///   increases what the gate demands". It does not only do that. Building the
+///   whole workspace unifies features differently from building just the mutated
+///   package, so it also changes which mutants *compile*: local reported 107
+///   unviable against CI's 67, and the 40-mutant difference reappeared in CI as
+///   15 missed, 24 caught and 1 timeout. The local gate was green-able while CI
+///   was red, on the same commit.
+/// * `--minimum-test-timeout 60` was CI-only as a concession to slow hosted
+///   runners. A floor that one lane has and the other does not is a floor that
+///   makes them disagree about timeouts, which this gate never accepts.
+///
+/// `--skip-calls-defaults false` used to be in the CI half, on the theory that a
+/// tool default could narrow the reviewed scope. It cannot any more — the scope
+/// arrives from the controller — and it was not free: it re-enables mutation of
+/// the arguments of `with_capacity` calls, adding 14 mutants (1,760 -> 1,774)
+/// which are all arithmetic inside a capacity hint (`Vec::with_capacity(len * 3)`
+/// -> `len + 3`). Capacity is not observable behaviour, so every one of them
+/// survives by construction, against a reviewed baseline recorded with the
+/// default skip list. Keeping it would have meant 14 permanent survivors in a
+/// gate whose whole design is exact survivor equality.
+pub fn rust_run_args(
+    config: &str,
+    output: &str,
+    nextest_config: &str,
+    shard: Option<(usize, usize)>,
+) -> Vec<String> {
     let mut args = rust_scope_args(config);
     args.extend(
-        ["--output", output, "--baseline", "run"]
+        [
+            "--output",
+            output,
+            "--baseline",
+            "run",
+            "--test-workspace",
+            "true",
+            "--minimum-test-timeout",
+            "60",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    if let Some((index, count)) = shard {
+        let spec = format!("{index}/{count}");
+        args.extend(
+            ["--shard", &spec, "--sharding", "round-robin"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+    }
+    args.extend(
+        ["--", "--config-file", nextest_config]
             .into_iter()
+            .map(str::to_owned),
+    );
+    args.extend(
+        RUST_MUTATION_NEXTEST_ARGS
+            .iter()
+            .copied()
             .map(str::to_owned),
     );
     args
@@ -281,11 +380,28 @@ pub fn run_rust() -> Result<()> {
     fs::create_dir_all(&output)
         .with_context(|| format!("create Rust mutation output {}", output.display()))?;
 
+    // The same nextest policy the CI shard writes into its work tree. Without
+    // it this lane silently inherits `engine/.config/nextest.toml`, whose
+    // `default` profile stops a test at 60s and calls the mutant caught.
+    let nextest_config = output.join("nextest-mutation.toml");
+    fs::write(&nextest_config, NEXTEST_POLICY).with_context(|| {
+        format!(
+            "write the mutation nextest policy {}",
+            nextest_config.display()
+        )
+    })?;
+
     let output_arg = output.to_string_lossy().into_owned();
+    let nextest_config_arg = nextest_config.to_string_lossy().into_owned();
     let config_arg = paths::rust_mutants_config().to_string_lossy().into_owned();
     let status = Command::new("cargo")
         .arg("mutants")
-        .args(rust_run_args(&config_arg, &output_arg))
+        .args(rust_run_args(
+            &config_arg,
+            &output_arg,
+            &nextest_config_arg,
+            None,
+        ))
         .env("FMF_MUTATION_SOURCE_ROOT", paths::repo_root())
         .env_remove("FMF_BLESS")
         .current_dir(paths::engine_dir())
