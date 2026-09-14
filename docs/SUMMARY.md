@@ -30,6 +30,7 @@
 - [0022 — Boundary seams and behavioral tests](adr/0022-boundary-seams-behavioral-tests.md)
 - [0023 — First-class regex](adr/0023-regex-first-class.md)
 - [0024 — Removed non-elevated scope index](adr/0024-non-elevated-scope-index.md)
+- [0025 — Scope-mode excludes pruned at walk time (superseded)](adr/0025-scope-exclude-walk-prune.md)
 - [0026 — CLI surface](adr/0026-cli-surface-polish.md)
 - [0027 — On-demand service lifecycle](adr/0027-on-demand-service-lifecycle.md)
 - [0028 — Ship a ZIP, not an MSIX](adr/0028-msix-packaging-hybrid.md)
