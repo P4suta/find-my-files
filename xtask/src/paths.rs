@@ -243,6 +243,20 @@ pub fn engine_cargo_toml() -> PathBuf {
     repo_root().join("engine").join("Cargo.toml")
 }
 
+/// The committed repository-ruleset templates — the reviewable definition of
+/// this repository's branch and tag protection. GitHub never applies them, so
+/// `rulesets-check` compares them against what the repository actually
+/// enforces.
+pub fn ruleset_templates_dir() -> PathBuf {
+    repo_root().join(".github").join("rulesets")
+}
+
+/// Where `rulesets-fetch` captures the live rulesets, one JSON per ruleset id.
+/// Under `build/` like every other generated tree (ADR-0021).
+pub fn rulesets_live_dir() -> PathBuf {
+    build_root().join("rulesets").join("live")
+}
+
 /// The mise tool-pin manifest at the repo root (what `just doctor` checks).
 pub fn mise_toml() -> PathBuf {
     repo_root().join("mise.toml")

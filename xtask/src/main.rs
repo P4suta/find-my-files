@@ -30,6 +30,7 @@ mod doctor;
 mod package;
 mod perf;
 mod publish;
+mod rulesets;
 mod signing;
 mod test_admin;
 
@@ -173,6 +174,21 @@ enum Commands {
         #[command(flatten)]
         evidence: mutation_ci::VerifyArgs,
     },
+    /// Capture the repository's live rulesets with `gh`, one JSON per ruleset
+    /// id. Read-only: it issues GETs and never writes a ruleset.
+    RulesetsFetch {
+        /// Directory to repopulate (default: `build/rulesets/live`). Existing
+        /// contents are replaced, so a deleted ruleset cannot linger.
+        out_dir: Option<std::path::PathBuf>,
+    },
+    /// Compare the committed `.github/rulesets` templates with a captured live
+    /// snapshot and fail on any drift. Offline — `rulesets-fetch` does the
+    /// capturing.
+    RulesetsCheck {
+        /// Directory holding one JSON per live ruleset (default:
+        /// `build/rulesets/live`, where `rulesets-fetch` writes).
+        live_dir: Option<std::path::PathBuf>,
+    },
     /// Check that the dev environment matches the `mise.toml` pins and the gate
     /// prerequisites (tool versions, lefthook, elevation, the build/ layout).
     Doctor,
@@ -211,6 +227,12 @@ fn main() -> Result<()> {
         Commands::MutationCsharp { ci } => mutation_ci::run_csharp(ci),
         Commands::MutationVerifyRust { evidence } => mutation_ci::verify_rust(evidence),
         Commands::MutationVerifyCsharp { evidence } => mutation_ci::verify_csharp(evidence),
+        Commands::RulesetsFetch { out_dir } => {
+            rulesets::run_fetch(&out_dir.unwrap_or_else(paths::rulesets_live_dir))
+        }
+        Commands::RulesetsCheck { live_dir } => {
+            rulesets::run_check(&live_dir.unwrap_or_else(paths::rulesets_live_dir))
+        }
         Commands::Doctor => doctor::run(),
     }
 }
