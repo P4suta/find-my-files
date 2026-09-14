@@ -15,6 +15,7 @@ internal sealed partial class PerfPanelViewModel : ObservableObject, IDisposable
     private const int UsnTailMax = 6;
     private const int ErrorTailMax = 8;
     private const int ScanTailMax = 4;
+    private const int QueryTailMax = 8;
 
     private readonly IEngineClient _engine;
     private readonly CancellationTokenSource _lifetime = new();
@@ -43,6 +44,7 @@ internal sealed partial class PerfPanelViewModel : ObservableObject, IDisposable
     /// <summary>Last engine stats snapshot (counters, RAM, recent errors), or
     /// null before the first <see cref="RefreshStatsAsync"/>.</summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(RecentQueriesTail))]
     [NotifyPropertyChangedFor(nameof(RecentUsnTail))]
     [NotifyPropertyChangedFor(nameof(RecentErrorsTail))]
     [NotifyPropertyChangedFor(nameof(ScansTail))]
@@ -60,6 +62,16 @@ internal sealed partial class PerfPanelViewModel : ObservableObject, IDisposable
     /// <see cref="Stats"/> swaps.</summary>
     public IReadOnlyList<ScanTraceData> ScansTail =>
         Stats?.Scans is { } s ? s.TakeLast(ScanTailMax).ToList() : [];
+
+    /// <summary>The most recent query traces (capped, newest last) for the
+    /// last-query card's history feed.
+    /// <para>The engine has maintained this ring and shipped it in every
+    /// snapshot since the beginning; until now nothing bound to it, so the
+    /// panel showed only the single most recent query and threw away the
+    /// history — the part that actually answers "why was that search
+    /// slow" (which driver, how many candidates, cache hit or miss).</para></summary>
+    public IReadOnlyList<QueryTraceData> RecentQueriesTail =>
+        Stats?.RecentQueries is { } q ? q.TakeLast(QueryTailMax).ToList() : [];
 
     /// <summary>The most recent USN batches (capped) for the panel's storage
     /// card. x:Bind can't call <c>TakeLast</c>, so the cap lives here; it

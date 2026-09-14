@@ -136,6 +136,7 @@
   <data name="DiagStatHits.Text" xml:space="preserve"><value>ヒット</value></data>
   <data name="DiagStatScanned.Text" xml:space="preserve"><value>走査</value></data>
   <data name="DiagStatDriver.Text" xml:space="preserve"><value>方式</value></data>
+  <data name="DiagRecentQueriesHeader.Text" xml:space="preserve"><value>直近のクエリ</value></data>
   <data name="DiagHealthHeaderBar.Title" xml:space="preserve"><value>健全性</value></data>
   <data name="DiagMemoryHeader.Text" xml:space="preserve"><value>メモリ</value></data>
   <data name="DiagMemProcess.Text" xml:space="preserve"><value>プロセス</value></data>

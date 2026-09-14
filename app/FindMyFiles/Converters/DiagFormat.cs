@@ -118,11 +118,55 @@ public static class DiagFormat
     /// <param name="t">The last query trace, or null when none was emitted.</param>
     /// <returns>The query length, or empty when <paramref name="t"/> is null.</returns>
     public static string Query(QueryTraceData? t) =>
-        t is null
-            ? string.Empty
-            : t.QueryLength == 0
-                ? "(all)"
-                : t.QueryLength.ToString(Inv) + " chars";
+        t is null ? string.Empty : QueryLength(t.QueryLength);
+
+    /// <summary>Privacy-safe size of a query: its length, never its text.</summary>
+    /// <param name="queryLength">Unicode scalar count of the query.</param>
+    /// <returns><c>"(all)"</c> for the empty query, else <c>"N chars"</c>.</returns>
+    private static string QueryLength(uint queryLength) =>
+        queryLength == 0 ? "(all)" : queryLength.ToString(Inv) + " chars";
+
+    /// <summary>One entry of the recent-query feed: how long it took, which
+    /// strategy ran it, and how much work that cost (e.g. <c>"3.21 ms ·
+    /// suffix/refine · 1,240 hits / 100,000 scanned · 8 chars"</c>).
+    /// <para>The engine has kept this ring of 64 traces and sent it in every
+    /// snapshot from the start; nothing displayed it, so the most direct
+    /// evidence for "why was that search slow" — which driver ran, how many
+    /// candidates it had to look at, whether the cache narrowed the previous
+    /// result — was being discarded on arrival.</para>
+    /// <para>The query <em>text</em> is not in the trace at all (the engine
+    /// records only its length), so this feed is privacy-safe by
+    /// construction.</para></summary>
+    /// <param name="queryLength">Unicode scalar count of the query.</param>
+    /// <param name="driver">Candidate-generation strategy that ran it.</param>
+    /// <param name="cache">Per-volume query-cache outcome.</param>
+    /// <param name="hits">Rows that matched.</param>
+    /// <param name="entriesScanned">Index entries examined.</param>
+    /// <param name="totalUs">End-to-end µs.</param>
+    /// <param name="volumes">How many volume indexes participated.</param>
+    /// <param name="unchanged">Whether the result was identical to the previous one.</param>
+    /// <returns>The formatted feed line.</returns>
+    public static string RecentQuery(
+        uint queryLength,
+        string driver,
+        string cache,
+        ulong hits,
+        ulong entriesScanned,
+        ulong totalUs,
+        uint volumes,
+        bool unchanged)
+    {
+        // One volume is the common case and adds nothing; more than one is why
+        // the merge stage shows up at all.
+        var vols = volumes == 1 ? string.Empty : $" · {volumes.ToString(Inv)} vol";
+
+        // An idle USN requery that produced the same ids is not a free query —
+        // it is a query whose repaint was skipped. Saying so stops the feed
+        // reading like a mystery.
+        var same = unchanged ? " · unchanged" : string.Empty;
+        return $"{Ms(totalUs)} · {driver}/{cache} · {Count(hits)} hits / " +
+            $"{Count(entriesScanned)} scanned · {QueryLength(queryLength)}{vols}{same}";
+    }
 
     /// <summary>End-to-end time as the "時間" stat-tile value (e.g. <c>"6.05 ms"</c>).</summary>
     /// <param name="t">The last query trace, or null when none was emitted.</param>
