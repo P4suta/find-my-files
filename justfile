@@ -170,14 +170,25 @@ fmt-check-xtask:
 fmt-check-toml:
     taplo fmt --check
 
-# Everything the pre-push hook checks, in one shot
+# Everything the pre-push hook checks, in one shot.
+#
+# `doc` is in here because rustdoc is a gate CI runs and nothing local did:
+# `cargo doc` rejects a public item whose documentation links to a private
+# one, and neither `lint` nor `test` compiles documentation at all, so that
+# diagnostic could only ever appear after a push. Measured by injecting the
+# defect: `just doc` reports it, `just lint` and `just test` do not.
 [group('daily')]
-verify: build-ffi-for-source-gate fmt-check lint test test-xtask test-app deny machete
+verify: build-ffi-for-source-gate fmt-check lint doc test test-xtask test-app deny machete
 
 # The dispatched release workflow is the already-linted protected-main workflow;
 # its checkout is build input, not workflow code. Re-run every source and
 # dependency gate there without requiring the Linux-only actionlint verifier on
 # the Windows release runner.
+#
+# `doc` is deliberately absent here even though `verify` has it. It would add a
+# mdbook dependency to the release path to re-check something already gated on
+# every pull request into main, and a documentation link is not a reason to
+# fail a release that is otherwise sound.
 [private]
 verify-release-source: build-ffi-for-source-gate fmt-check lint-engine lint-xtask lint-text test test-xtask test-app deny machete
 
