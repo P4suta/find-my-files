@@ -379,7 +379,7 @@ impl LogfmtVisitor {
 }
 
 /// Redaction marker for a field whose *name* is not on
-/// [`is_safe_string_field`]'s reviewed allowlist. Adding the name to that list
+/// `is_safe_string_field`'s reviewed allowlist. Adding the name to that list
 /// is the fix.
 ///
 /// Redaction is self-describing on purpose. A bare `[redacted]` says a value
@@ -390,14 +390,14 @@ impl LogfmtVisitor {
 /// Being a *field* named `msg`, every one of them landed here and logged its
 /// body as `[redacted]` — and allowlisting `msg` would not have helped, because
 /// the bodies contain spaces and would then have failed
-/// [`safe_diagnostic_tag`] instead. The distinct markers make that visible
+/// `safe_diagnostic_tag` instead. The distinct markers make that visible
 /// from the log line alone; `no_tracing_macro_uses_a_msg_field` in xtask keeps
 /// the specific `msg` trap from coming back.
 pub const REDACTED_UNKNOWN_FIELD: &str = "[redacted:unknown-field]";
 
 /// Redaction marker for an allowlisted field whose *value* was rejected.
 ///
-/// [`safe_diagnostic_tag`] rejects an empty value, one over 64 bytes, and
+/// `safe_diagnostic_tag` rejects an empty value, one over 64 bytes, and
 /// anything carrying a byte outside `[A-Za-z0-9._:-]` — a space, a path
 /// separator, a quoted error body. Unlike [`REDACTED_UNKNOWN_FIELD`] the fix is
 /// at the call site, not in the allowlist: record a finite tag, and put the
