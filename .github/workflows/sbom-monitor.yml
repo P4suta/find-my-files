@@ -8,7 +8,9 @@
 # does work here instead of being a write-only release artifact (ADR-0034).
 #
 # Dormant only until the first published release. Once any release exists, both
-# canonical SBOM assets and their product identity are mandatory.
+# canonical SBOM assets, their release digests and their CycloneDX structure are
+# mandatory; the one narrow product-identity waiver is documented at the check
+# that applies it.
 name: sbom-monitor
 
 on:
@@ -93,30 +95,155 @@ jobs:
             fi
           done
 
-          version=${tag#v}
-          for path in sbom/app.cdx.json sbom/fmf-engine.cdx.json; do
-            jq -e '
-              .bomFormat == "CycloneDX" and
-              .specVersion == "1.6" and
-              (.components | type == "array" and length > 0)
-            ' "$path" >/dev/null
-          done
-          jq -e --arg version "$version" '
-            .metadata.component.type == "application" and
-            .metadata.component.name == "FindMyFiles" and
-            .metadata.component.version == $version and
-            .metadata.component["bom-ref"] == ("FindMyFiles@" + $version)
-          ' sbom/app.cdx.json >/dev/null
-          jq -e --arg version "$version" '
-            .metadata.component.type == "application" and
-            .metadata.component.name == "fmf-engine" and
-            .metadata.component.version == $version and
-            .metadata.component["bom-ref"] == ("fmf-engine@" + $version)
-          ' sbom/fmf-engine.cdx.json >/dev/null
-
-          echo "Downloaded and validated SBOM identity, structure, and asset digests for $tag."
+          echo "Located $tag and verified both SBOM asset digests against release metadata."
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "scan=true" >> "$GITHUB_OUTPUT"
+
+      # Reading the SBOMs is a separate step from fetching them for two reasons.
+      #
+      # The first is the point of this file: a named step tells the run log which
+      # half failed before anyone reads a message. Downloading the wrong bytes and
+      # shipping an SBOM whose shape drifted are different problems with different
+      # fixes, and they now fail under different headings.
+      #
+      # The second is mechanical and load-bearing, so do not merge these back
+      # together. `actionlint` pipes each bash `run:` body to `shellcheck` on
+      # stdin, and on Windows that anonymous pipe holds 4096 bytes: a bash script
+      # of 4050 bytes lints in 130 ms, one of 4090 bytes deadlocks forever with no
+      # output at all. The limit is per `run:` block, not per workflow (two 3 KB
+      # steps are fine; one 6 KB step is not), and `pwsh` blocks are exempt only
+      # because shellcheck never sees them. `just lint` is a required gate, so a
+      # step over that line hangs the local loop with no diagnostic — the same
+      # class of silent failure this commit exists to remove. Keeping the long
+      # prose here at YAML level rather than inside `run: |` is part of that
+      # budget: comments outside the block scalar are not part of the script.
+      #
+      # What the validation itself is for, and why exactly one thing is waived:
+      #
+      # This block used to be five `jq -e '...' "$path" >/dev/null` calls. `jq -e`
+      # answers a false predicate with exit status 1 and the single word `false`
+      # on stdout — which `>/dev/null` discarded — so `set -e` killed the step
+      # leaving `##[error]Process completed with exit code 1.` as the entire
+      # record of what had gone wrong. This monitor was red for six consecutive
+      # weeks (2026-08-03 through 2026-09-07, last green 2026-07-27) and no run
+      # log ever named the file, the field, or the value. Every other check here
+      # already used `if ...; then echo "::error::..."; exit 1; fi`; the `jq -e`
+      # calls were the one shape that could fail anonymously, and they are the
+      # ones that failed. Facts are now read once per file and compared as
+      # rendered strings, so the diagnostic falls out of the comparison instead of
+      # being something a future edit has to remember to add.
+      #
+      # Structure (`bomFormat` / `specVersion` / a non-empty `.components`) and
+      # the asset digests verified in the previous step apply to every release,
+      # forever. `.components` is the array osv-scanner actually reads, so an SBOM
+      # failing there carries no usable vulnerability data and scanning it would
+      # be theatre. Product identity is strict too, with one waiver, recorded in
+      # the `osv-scanner.toml` style — why it cannot be fixed, and when it stops
+      # applying:
+      #
+      # reason: v0.1.1's `fmf-engine.cdx.json` shipped as `type=application
+      #   name=engine version=null bom-ref=null`. It predates PR #164, which
+      #   standardized `metadata.component` identity; `xtask/src/sbom.rs` now
+      #   requires name/version/bom-ref on the root component, so no release from
+      #   v0.2.0 on can reproduce that shape. v0.1.1 is an immutable release, so
+      #   those bytes cannot be corrected after the fact and the strict
+      #   comparison can never pass against them.
+      # revisit after: nothing to schedule. The waiver is literal tag equality, so
+      #   the strict path resumes by itself the moment v0.2.0 becomes the latest
+      #   stable release. If this branch is still reachable then, the
+      #   `[ "$tag" = "v0.1.1" ]` test is dead code — delete it.
+      #
+      # Waiving it is not a security regression. The digest check binds these
+      # exact bytes to the release metadata GitHub serves, so "we downloaded the
+      # right file" is settled before validation starts, and structure is checked
+      # unwaived. `metadata.component` is provenance labelling that carries no
+      # vulnerability data. Hard failing on a cosmetic label is precisely what
+      # switched off the only check we have on already-shipped binaries for six
+      # weeks (ADR-0034).
+      #
+      # v0.1.0 is deliberately not named in the shell. It published zero assets,
+      # so the asset-name check in the previous step rejects it with its own
+      # `::error::` long before validation; naming it here would falsely imply it
+      # reaches identity validation at all.
+      - name: Validate the downloaded SBOM pair
+        if: steps.fetch.outputs.scan == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.fetch.outputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="$TAG"
+          version=${tag#v}
+          expected=("app.cdx.json" "fmf-engine.cdx.json")
+          for name in "${expected[@]}"; do
+            path="sbom/$name"
+            case "$name" in
+              app.cdx.json) root="FindMyFiles" ;;
+              fmf-engine.cdx.json) root="fmf-engine" ;;
+              *)
+                echo "::error::No expected root component is defined for $name."
+                exit 1
+                ;;
+            esac
+
+            # A `jq` process failure (unparseable bytes, a `metadata.component`
+            # that is not an object) is the same "died without saying why"
+            # defect as a false predicate, so its stderr is captured, not lost.
+            if ! facts=$(jq -r '
+              [
+                (.bomFormat // "null"),
+                (.specVersion // "null"),
+                (if (.components | type) == "array" then (.components | length) else "not-an-array" end),
+                (.metadata.component.type // "null"),
+                (.metadata.component.name // "null"),
+                (.metadata.component.version // "null"),
+                (.metadata.component["bom-ref"] // "null")
+              ] | map(tostring) | join("\u001f")
+            ' "$path" 2>&1); then
+              echo "::error::$path could not be read as CycloneDX JSON."
+              echo "  jq: $facts"
+              exit 1
+            fi
+            # \x1f, not \t. Tab is IFS *whitespace*, so bash folds a run of tabs
+            # into one delimiter and every field after an empty one shifts left —
+            # and `// "null"` does not prevent that, since only null and false are
+            # falsy in jq (`"" // "null"` is `""`). A drifted SBOM is exactly
+            # where an empty field turns up, so a tab here would make the
+            # expected/actual line misreport the very drift it exists to show.
+            IFS=$'\037' read -r bom_format spec_version components \
+              root_type root_name root_version root_ref <<<"$facts"
+
+            # Unconditional for every release, forever (rationale above step).
+            if [ "$bom_format" != "CycloneDX" ] || [ "$spec_version" != "1.6" ] ||
+              [ "$components" = "not-an-array" ] || [ "$components" = "0" ]; then
+              echo "::error::$path failed SBOM structure validation."
+              echo "  expected: bomFormat=CycloneDX specVersion=1.6 components=<non-empty array>"
+              echo "  actual:   bomFormat=$bom_format specVersion=$spec_version components=$components"
+              exit 1
+            fi
+
+            # Strict for every release but one file of one immutable release.
+            # Reason, expiry and the security argument are above this step; the
+            # short version is that v0.1.1's engine SBOM predates #164 and its
+            # bytes can never be corrected, while its digest and structure are
+            # verified unwaived.
+            expected_identity="type=application name=$root version=$version bom-ref=$root@$version"
+            actual_identity="type=$root_type name=$root_name version=$root_version bom-ref=$root_ref"
+            if [ "$actual_identity" != "$expected_identity" ]; then
+              if [ "$tag" = "v0.1.1" ] && [ "$name" = "fmf-engine.cdx.json" ]; then
+                echo "::notice::$path identity waived for $tag: shipped before #164 standardized metadata.component, and $tag is immutable. Digest and structure were verified."
+                echo "  expected: $expected_identity"
+                echo "  actual:   $actual_identity"
+              else
+                echo "::error::$path failed SBOM identity validation for $tag."
+                echo "  expected: $expected_identity"
+                echo "  actual:   $actual_identity"
+                exit 1
+              fi
+            fi
+          done
+
+          echo "Validated SBOM structure and product identity for $tag."
 
       - name: Hand validated SBOMs to the isolated scanner
         if: steps.fetch.outputs.scan == 'true'

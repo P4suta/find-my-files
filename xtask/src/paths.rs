@@ -64,15 +64,64 @@ pub fn csharp_mutation_dir() -> PathBuf {
 
 /// Reviewed exact-equivalent survivor set for cargo-mutants.
 pub fn rust_mutation_baseline() -> PathBuf {
-    engine_dir().join("mutation-baseline.json")
+    rust_mutation_baseline_in(&repo_root())
+}
+
+/// [`rust_mutation_baseline`] for an arbitrary repository root.
+///
+/// The CI controller reads the reviewed policy out of its own protected
+/// checkout, never the target's, so it needs the same derivation rooted
+/// somewhere else. Both spellings live here so the two lanes cannot end up
+/// comparing against two different files.
+pub fn rust_mutation_baseline_in(repo: &Path) -> PathBuf {
+    repo.join("engine").join("mutation-baseline.json")
+}
+
+/// The reviewed cargo-mutants scope (`examine_globs`, `test_tool`,
+/// `timeout_multiplier`, per-sandbox `--target-dir`).
+pub fn rust_mutants_config() -> PathBuf {
+    rust_mutants_config_in(&repo_root())
+}
+
+/// [`rust_mutants_config`] for an arbitrary repository root — the controller
+/// supplies this file to the CI run instead of accepting the target's copy.
+pub fn rust_mutants_config_in(repo: &Path) -> PathBuf {
+    repo.join("engine").join("mutants.toml")
+}
+
+/// The C# test project directory — Stryker's working directory in every lane,
+/// and where both reviewed C# mutation policy files live.
+pub fn csharp_test_dir(repo: &Path) -> PathBuf {
+    repo.join("app").join("FindMyFiles.Tests")
 }
 
 /// Reviewed exact-equivalent survivor set for Stryker.NET.
 pub fn csharp_mutation_baseline() -> PathBuf {
-    repo_root()
-        .join("app")
-        .join("FindMyFiles.Tests")
-        .join("mutation-baseline.json")
+    csharp_mutation_baseline_in(&repo_root())
+}
+
+/// [`csharp_mutation_baseline`] for an arbitrary repository root — the CI
+/// controller reads the reviewed policy out of its own protected checkout.
+pub fn csharp_mutation_baseline_in(repo: &Path) -> PathBuf {
+    csharp_test_dir(repo).join("mutation-baseline.json")
+}
+
+/// The one reviewed Stryker.NET configuration.
+///
+/// Everything that decides *which* mutants exist and *how* they are judged —
+/// `mutation-level`, `coverage-analysis`, `disable-mix-mutants`, `test-runner`,
+/// `configuration`, `target-framework`, `break-on-initial-test-failure` — lives
+/// in this one file. Stryker auto-discovers it by name in its working directory
+/// for `just stryker`; the CI shard runner reads it through this path and
+/// rewrites only `mutate` (see `mutation_ci::stryker_config`).
+pub fn csharp_stryker_config() -> PathBuf {
+    csharp_stryker_config_in(&repo_root())
+}
+
+/// [`csharp_stryker_config`] for an arbitrary repository root — the controller
+/// supplies this file to the CI run instead of accepting the target's copy.
+pub fn csharp_stryker_config_in(repo: &Path) -> PathBuf {
+    csharp_test_dir(repo).join("stryker-config.json")
 }
 
 /// The committed real-volume performance baseline.

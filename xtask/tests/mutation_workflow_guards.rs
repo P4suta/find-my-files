@@ -5,10 +5,13 @@
 //! trust split: default-branch caller -> same-commit reusable controller ->
 //! separate immutable target data checkout -> fresh evidence verifier.
 
+const MUTATION_LOCAL_SOURCE: &str = include_str!("../src/mutation.rs");
+const MUTATION_CI_SOURCE: &str = include_str!("../src/mutation_ci.rs");
 const MUTANTS_WORKFLOW: &str = include_str!("../../.github/workflows/mutants.yml");
 const CONTROLLER_WORKFLOW: &str = include_str!("../../.github/workflows/mutation-controller.yml");
 const RELEASE_WORKFLOW: &str = include_str!("../../.github/workflows/release.yml");
 const JUSTFILE: &str = include_str!("../../justfile");
+const MISE: &str = include_str!("../../mise.toml");
 const STRYKER_CONFIG: &str = include_str!("../../app/FindMyFiles.Tests/stryker-config.json");
 const DOTNET_TOOLS: &str = include_str!("../../.config/dotnet-tools.json");
 const GITIGNORE: &str = include_str!("../../.gitignore");
@@ -280,33 +283,228 @@ fn mutation_boundary_is_secretless_read_only_and_hosted() {
     );
 }
 
+/// `app/FindMyFiles.Tests/stryker-config.json` is the *only* place this
+/// repository decides how C# mutants are generated and judged — every key, with
+/// its reviewed value.
+///
+/// It was not. The CI shard runner built a rival configuration object in code,
+/// and the two said different things: CI mutated at `Complete` level with
+/// coverage analysis off, `vstest` and a `Release` build, while this file named
+/// none of that and `just stryker` therefore ran Stryker's `Standard` default
+/// under `Debug` with `perTest` coverage. Both then compared their results to
+/// the same 103-entry reviewed baseline, so a mutant killed in one lane and
+/// alive in the other was a structural property of the gate rather than a
+/// finding about the code — and no test could see it, because each lane only
+/// ever read its own copy.
+///
+/// `every_csharp_lane_runs_the_one_reviewed_configuration` (in `mutation_ci.rs`)
+/// proves the two lanes hand Stryker the same settings. That equality is hollow
+/// on its own: dropping a key here keeps both lanes equal and silently returns
+/// both to a Stryker default. This pins the values themselves, so a deletion
+/// fails instead of passing.
+///
+/// Load-bearing, key by key:
+/// * `mutation-level: Complete` — Stryker's default is `Standard`, which
+///   generates strictly fewer mutants. Nothing else in the tree asks for the
+///   thorough set.
+/// * `coverage-analysis: off` and `disable-mix-mutants: true` — every mutant is
+///   run against the full suite, one at a time. Coverage-driven selection and
+///   mixed mutants are how a survivor becomes unattributable to a single
+///   identity, and identity is what the baseline is written in.
+/// * `test-runner: vstest`, `configuration: Release`, `target-framework` — the
+///   gate must mutate the program the product ships, not a Debug build under a
+///   different runner.
+/// * `break-on-initial-test-failure: true` — an unmutated suite that already
+///   fails makes every subsequent verdict meaningless.
+/// * `additional-timeout: 30000` — the reviewed scope includes pipe integration
+///   tests; 3s (the default) turns otherwise-killed mutants into timeouts, and
+///   `validate_stryker_exit` never accepts a timeout.
+/// * `concurrency: 2` — Stryker recommends at most two sessions on an ordinary
+///   runner, and four made otherwise-killed mutants time out under hosted
+///   Windows contention (PR #187).
+/// * `reporters` must include `json` — the gate parses `mutation-report.json`;
+///   a score-only reporter leaves it nothing to read.
+/// * `thresholds.break: 0` — load-bearing where `high`/`low` are report
+///   colouring. `validate_stryker_exit` requires exit 0; any break threshold
+///   above the achieved score makes Stryker exit 1, failing the gate on a score
+///   rather than on the survivor identities it actually judges. The reviewed
+///   80/60 are Stryker's own defaults, and with 103 accepted equivalents the
+///   100/100 CI used to inject named a state that can never occur.
+///
+/// `mutate` is deliberately not pinned to a literal here: it is proven against
+/// `mutation-baseline.json` through the gate's own resolver by
+/// `mutation::tests::csharp_mutate_scope_and_baseline_name_the_same_files`, and
+/// a second list would only give the two lists something to drift from.
 #[test]
-fn stryker_json_report_is_required_instead_of_a_score_only_reporter() {
+fn the_reviewed_stryker_configuration_is_the_one_both_lanes_run() {
     let config: serde_json::Value =
         serde_json::from_str(STRYKER_CONFIG).expect("stryker-config.json must be valid JSON");
     let root = config
         .get("stryker-config")
         .and_then(serde_json::Value::as_object)
         .expect("stryker-config root");
-    assert_eq!(
-        root.get("report-file-name")
-            .and_then(serde_json::Value::as_str),
-        Some("mutation-report")
-    );
-    assert_eq!(
-        root.get("reporters"),
-        Some(&serde_json::json!(["progress", "json"]))
+
+    let expected = [
+        ("project", serde_json::json!("FindMyFiles.csproj")),
+        (
+            "test-projects",
+            serde_json::json!(["FindMyFiles.Tests.csproj"]),
+        ),
+        ("concurrency", serde_json::json!(2)),
+        ("additional-timeout", serde_json::json!(30_000)),
+        ("mutation-level", serde_json::json!("Complete")),
+        ("coverage-analysis", serde_json::json!("off")),
+        ("disable-mix-mutants", serde_json::json!(true)),
+        ("test-runner", serde_json::json!("vstest")),
+        ("configuration", serde_json::json!("Release")),
+        (
+            "target-framework",
+            serde_json::json!("net10.0-windows10.0.26100.0"),
+        ),
+        ("break-on-initial-test-failure", serde_json::json!(true)),
+        (
+            "thresholds",
+            serde_json::json!({"high": 80, "low": 60, "break": 0}),
+        ),
+        ("report-file-name", serde_json::json!("mutation-report")),
+        ("reporters", serde_json::json!(["progress", "json"])),
+    ];
+    for (key, value) in &expected {
+        assert_eq!(
+            root.get(*key),
+            Some(value),
+            "reviewed Stryker configuration key `{key}`"
+        );
+    }
+
+    // Exactly these keys and `mutate`: an unreviewed key is a setting nobody
+    // decided, and it would reach CI too, because CI now reads this file.
+    let mut keys: Vec<&str> = root.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let mut allowed: Vec<&str> = expected.iter().map(|(key, _)| *key).collect();
+    allowed.push("mutate");
+    allowed.sort_unstable();
+    assert_eq!(keys, allowed);
+    assert!(
+        root.get("mutate")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|patterns| !patterns.is_empty()),
+        "the reviewed mutate inventory must not be empty"
     );
 }
 
+/// Both Stryker lanes read the reviewed configuration instead of restating it,
+/// and the controller supplies the SDK selector the target may not.
+///
+/// The unit tests next to the code prove the values agree. This pins the
+/// surrounding structure they cannot see: that the settings live in exactly one
+/// file, that every Stryker spawn is built by the one shared argument builder,
+/// and that both halves of the `global.json` policy substitution stay — the
+/// target forbidden from supplying one, the controller generating and sealing
+/// its own. Only the first half of that had ever been implemented, which is why
+/// `dotnet --version` answered with whatever SDK the runner image shipped last.
 #[test]
-fn local_stryker_run_has_enough_time_for_integration_tests() {
-    let config: serde_json::Value =
-        serde_json::from_str(STRYKER_CONFIG).expect("stryker-config.json must be valid JSON");
+fn the_csharp_lanes_take_stryker_policy_and_the_sdk_only_from_the_controller() {
+    let local = executable_code(MUTATION_LOCAL_SOURCE);
+    let ci = executable_code(MUTATION_CI_SOURCE);
+
+    // No lane may spell a setting the reviewed configuration owns — neither as
+    // a rival JSON literal nor on the command line, where Stryker silently
+    // prefers it over the file. `thresholds` is spelled with its colon because
+    // the bare word is also a key of the Stryker *report* schema, which
+    // `parse_csharp_report` legitimately names; only the object-literal form is
+    // a rival configuration.
+    for (lane, source) in [("mutation.rs", &local), ("mutation_ci.rs", &ci)] {
+        for forbidden in [
+            "--break-on-initial-test-failure",
+            "\"mutation-level\"",
+            "\"coverage-analysis\"",
+            "\"disable-mix-mutants\"",
+            "\"test-runner\"",
+            "\"reporters\"",
+            "\"thresholds\": ",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{lane} spells `{forbidden}` instead of deferring to app/FindMyFiles.Tests/stryker-config.json"
+            );
+        }
+    }
+
+    // One argument builder, used by both lanes and defined once.
+    assert_eq!(local.matches("pub fn stryker_args(").count(), 1);
+    assert_eq!(local.matches("stryker_args(&output_arg, None)").count(), 1);
     assert_eq!(
-        config.pointer("/stryker-config/additional-timeout"),
-        Some(&serde_json::json!(30_000))
+        ci.matches("mutation::stryker_args(&output_arg, Some(config_name))")
+            .count(),
+        1
     );
+    // ...and one reviewed file, resolved for the local repository and for the
+    // protected controller checkout by the same derivation.
+    assert!(local.contains("paths::csharp_stryker_config()"));
+    assert!(ci.contains("paths::csharp_stryker_config_in(&controller_root())"));
+
+    // The target supplies no SDK selector...
+    assert!(ci.contains("file.eq_ignore_ascii_case(\"global.json\")"));
+    // ...and the controller supplies one in its place, sealed like every other
+    // policy input so a shard cannot run under a different SDK than the evidence
+    // claims.
+    for supplied in [
+        "let global_json = trusted_global_json()?;",
+        "write_bytes(&work.join(\"global.json\"), &global_json)?;",
+        "policy_seal(\"generated:global.json\", &global_json)",
+        "\"rollForward\": \"disable\"",
+    ] {
+        assert!(
+            ci.contains(supplied),
+            "the controller no longer supplies `{supplied}`"
+        );
+    }
+}
+
+/// The .NET SDK pin is one version, however many places spell it.
+///
+/// Three do: `DOTNET_SDK_VERSION` in `mutation_ci.rs` (what the gate demands and
+/// what the generated `global.json` selects), `mise.toml` (what a developer
+/// machine installs), and `actions/setup-dotnet` in the controller workflow
+/// (what the runner downloads). The gate compares `dotnet --version` to the
+/// first for exact equality, so a bulk tool-pin bump (issue #175) that moves the
+/// other two and forgets it fails every C# shard — and fails it a week later, in
+/// a scheduled run nobody is watching, having blocked `release.yml`'s
+/// `sign-stage` in the meantime. `validate_mise_dotnet_pin` catches the
+/// `mise.toml` half at run time; the workflow half only exists here.
+#[test]
+fn the_dotnet_sdk_pin_is_one_version_in_every_spelling() {
+    let sdk = quoted_const(MUTATION_CI_SOURCE, "DOTNET_SDK_VERSION");
+    assert!(
+        MISE.contains(&format!("dotnet = \"{sdk}\"")),
+        "mise.toml does not pin dotnet {sdk}"
+    );
+    let installed: Vec<&str> = CONTROLLER_WORKFLOW
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("dotnet-version:"))
+        .map(str::trim)
+        .collect();
+    assert_eq!(
+        installed,
+        vec![sdk.as_str()],
+        "the mutation controller must install exactly the pinned SDK, once"
+    );
+}
+
+/// The literal behind a `const NAME: &str = "..."` declaration.
+///
+/// `mutation_workflow_guards` is an integration test against a binary crate, so
+/// it cannot import the constant; reading the source is how every tripwire here
+/// reaches into the gate.
+fn quoted_const(source: &str, name: &str) -> String {
+    let (_, tail) = source
+        .split_once(&format!("const {name}: &str = \""))
+        .unwrap_or_else(|| panic!("missing `const {name}`"));
+    let (value, _) = tail
+        .split_once('"')
+        .unwrap_or_else(|| panic!("unterminated `const {name}`"));
+    value.to_owned()
 }
 
 /// The four files that define what the mutation gates review — two scopes and
@@ -445,6 +643,115 @@ fn gitignore_matching_models_the_patterns_this_repository_uses() {
     assert!(!wildcard_matches("app/*/obj", "app/a/b/obj"));
     assert!(gitignore_pattern_hiding("build/mutation/rust/gate.json").is_some());
     assert!(gitignore_pattern_hiding("engine/mutants.toml").is_none());
+}
+
+/// Production code only: the `#[cfg(test)]` module below it asserts things
+/// *about* forbidden options and therefore has to name them, and this
+/// repository explains a rule in the comment above the code that implements it.
+/// Both would trip a tripwire that searched the whole file.
+fn executable_code(source: &str) -> String {
+    let (production, _) = source
+        .split_once("\n#[cfg(test)]\n")
+        .unwrap_or((source, ""));
+    production
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A target checkout supplies no mutation policy, and the controller supplies
+/// its own in its place.
+///
+/// Only the first half of that was ever implemented for Rust. `mutants.toml`
+/// and `mutation-baseline.json` were correctly excluded from the copied target
+/// tree, and then the run passed `--no-config` instead of the controller's
+/// copy, so sixteen shards mutated the whole workspace against no baseline at
+/// all: five consecutive weekly audits failed with ~121 survivors per shard,
+/// nearly all of them in the one file `mutants.toml` documents as unmutatable
+/// under this gate, while `just mutants` was green on the same commits. Because
+/// `release.yml`'s `sign-stage` needs `mutation`, that also blocked signing.
+///
+/// `every_rust_lane_runs_the_one_reviewed_scope` (in `mutation_ci.rs`) proves
+/// the three argument vectors agree. This pins the surrounding structure that
+/// unit test cannot see: that both halves of the policy substitution stay, and
+/// that every cargo-mutants spawn in the tree is built by the shared builders
+/// rather than spelled out again at the call site.
+#[test]
+fn the_rust_lanes_take_scope_and_baseline_only_from_the_controller() {
+    let local = executable_code(MUTATION_LOCAL_SOURCE);
+    let ci = executable_code(MUTATION_CI_SOURCE);
+
+    // Neither lane may opt out of the reviewed scope, and neither may restate
+    // an option `engine/mutants.toml` already answers (cargo-mutants prefers
+    // the command line without complaining).
+    for (lane, source) in [("mutation.rs", &local), ("mutation_ci.rs", &ci)] {
+        for forbidden in [
+            "--no-config",
+            "\"--test-tool\"",
+            "\"--timeout-multiplier\"",
+            "\"--skip-calls-defaults\"",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{lane} passes `{forbidden}` instead of deferring to engine/mutants.toml"
+            );
+        }
+    }
+
+    // Every cargo-mutants process in the repository is spawned from the shared
+    // builders, so a new lane cannot quietly assemble its own scope. (The
+    // `mutants --version` pins are argument slices, not `.arg("mutants")`.)
+    assert_eq!(local.matches(".arg(\"mutants\")").count(), 1);
+    assert_eq!(ci.matches(".arg(\"mutants\")").count(), 2);
+    assert_eq!(
+        local
+            .matches("rust_run_args(&config_arg, &output_arg)")
+            .count(),
+        1
+    );
+    assert_eq!(
+        ci.matches("mutation::rust_run_args(config, output)")
+            .count(),
+        1
+    );
+    assert_eq!(ci.matches("mutation::rust_scope_args(config)").count(), 1);
+
+    // The target contributes no policy...
+    for excluded in ["engine/mutants.toml", "engine/mutation-baseline.json"] {
+        assert_eq!(
+            ci.matches(&format!("path != \"{excluded}\"")).count(),
+            2,
+            "both language copy filters must keep `{excluded}` out of the work tree"
+        );
+    }
+    // ...and the controller supplies both files in its place, for the Rust lane
+    // exactly as for the C# lane.
+    for supplied in [
+        "paths::rust_mutants_config_in(&controller_root())",
+        "mutation::read_rust_reviewed_policy(&controller_root())",
+        "mutation::read_csharp_reviewed_policy(&controller_root())",
+    ] {
+        assert!(
+            ci.contains(supplied),
+            "the controller no longer supplies `{supplied}`"
+        );
+    }
+
+    // Both the shard that produces evidence and the fresh verifier that grades
+    // it project the reviewed survivors themselves, in both languages. A run
+    // that decides which survivors are acceptable, or a verifier that takes the
+    // shard's word for it, is the same hole in a different place — and with
+    // today's empty `accepted_equivalents` no runtime assertion can tell the
+    // difference, because every projection is empty.
+    for language in ["rust", "csharp"] {
+        assert_eq!(
+            ci.matches(&format!("reviewed_{language}_survivors(&reviewed_policy"))
+                .count(),
+            2,
+            "the {language} producer and verifier must each project the reviewed policy"
+        );
+    }
 }
 
 #[test]
