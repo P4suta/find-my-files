@@ -27,7 +27,12 @@ fn repo() -> PathBuf {
 
 /// Every committed `.rs` file, by directory scan rather than through the git
 /// index, so an untracked stray is seen too. `build/`, `target/` and `.git/`
-/// are generated or not source.
+/// are generated or not source, and neither is another checkout that happens
+/// to sit inside this one: a `git worktree` placed under the repository (they
+/// land in `.claude/worktrees/` here) holds *another branch's* sources, so
+/// scanning it makes this guard report defects that were fixed on main and
+/// pass or fail depending on what else the machine has checked out. CI never
+/// has one, so the disagreement only ever appears locally.
 fn rust_sources() -> Vec<(String, String)> {
     let root = repo();
     let mut found = Vec::new();
@@ -41,7 +46,14 @@ fn rust_sources() -> Vec<(String, String)> {
             let path = entry.path();
             if kind.is_dir() {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if !matches!(name.as_str(), ".git" | "build" | "target") {
+                // A nested checkout carries its own `.git` (a file for a
+                // worktree, a directory for a clone); that probe is the general
+                // rule, and `.claude` is named as well so the common case costs
+                // no syscall.
+                let nested_checkout = path.join(".git").exists();
+                if !nested_checkout
+                    && !matches!(name.as_str(), ".git" | ".claude" | "build" | "target")
+                {
                     pending.push(path);
                 }
             } else if kind.is_file() && path.extension().is_some_and(|e| e == "rs") {
