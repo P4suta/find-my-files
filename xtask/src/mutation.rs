@@ -235,7 +235,7 @@ pub fn rust_scope_args(config: &str) -> Vec<String> {
 /// — by nextest, on a stopwatch, not by an assertion — and cargo-mutants' own
 /// `timeout_multiplier` never gets to call it a timeout. `leak-timeout` with
 /// `result = "fail"` can manufacture a second such verdict.
-pub(crate) const NEXTEST_POLICY: &str = r#"nextest-version = "0.9.140"
+pub const NEXTEST_POLICY: &str = r#"nextest-version = "0.9.140"
 
 [store]
 dir = "../build/nextest"
@@ -250,7 +250,7 @@ flaky-result = "fail"
 /// the nextest invocation. Keep the nextest-only policy here so `--locked`
 /// cannot accidentally be supplied a second time (nextest rejects duplicate
 /// uses).
-pub(crate) const RUST_MUTATION_NEXTEST_ARGS: &[&str] = &[
+pub const RUST_MUTATION_NEXTEST_ARGS: &[&str] = &[
     "--user-config-file",
     "none",
     "--profile",
