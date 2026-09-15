@@ -564,8 +564,23 @@ fn render() -> String {
     o
 }
 
+/// The environment variable a mutation sandbox uses to name the real tree.
+/// Same variable, same reason, as `golden_dir` in fmf-core's golden corpus
+/// test: under the mutation gate this crate is compiled inside a scratch copy,
+/// so `CARGO_MANIFEST_DIR` points there and the relative walk below lands
+/// outside the repository entirely.
+const MUTATION_SOURCE_ROOT_ENV: &str = "FMF_MUTATION_SOURCE_ROOT";
+
 /// Where the generated C# contract is written (committed).
 fn csharp_output_path() -> PathBuf {
+    if let Some(source_root) = std::env::var_os(MUTATION_SOURCE_ROOT_ENV) {
+        let source_root = PathBuf::from(source_root);
+        assert!(
+            source_root.is_absolute(),
+            "{MUTATION_SOURCE_ROOT_ENV} must be an absolute trusted source root"
+        );
+        return source_root.join("app/FindMyFiles/Engine/Generated/EngineContract.g.cs");
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../app/FindMyFiles/Engine/Generated/EngineContract.g.cs")
 }
@@ -581,7 +596,21 @@ fn main() {
     let mut drifted = false;
     for (path, rendered, label) in &artifacts {
         if check {
-            let on_disk = std::fs::read_to_string(path).unwrap_or_default();
+            // A missing file is not drift, and saying so is the difference
+            // between "regenerate this" and "you are looking in the wrong
+            // tree". Reading it as an empty string reported the first when it
+            // meant the second.
+            let on_disk = match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) => {
+                    eprintln!(
+                        "{label} could not be read at {}: {error}. This is not drift: the check never found the generated file (ADR-0018).",
+                        path.display()
+                    );
+                    drifted = true;
+                    continue;
+                }
+            };
             if normalize(&on_disk) == normalize(rendered) {
                 println!("{label} is up to date");
             } else {
@@ -592,6 +621,10 @@ fn main() {
                 drifted = true;
             }
         } else {
+            assert!(
+                std::env::var_os(MUTATION_SOURCE_ROOT_ENV).is_none(),
+                "a mutation scratch tree may only verify the generated contract, never rewrite it"
+            );
             std::fs::create_dir_all(path.parent().expect("generated path has a parent"))
                 .expect("create generated output directory");
             std::fs::write(path, rendered).expect("write generated file");
