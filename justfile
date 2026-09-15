@@ -414,9 +414,18 @@ bench-micro *args="":
 bench-micro-baseline:
     cargo run --locked -- perf-micro-baseline
 
-# Compare in a fresh CRITERION_HOME. The gate requires all 28 current reports
-# and fails only when the median 95% CI lower bound exceeds +10%.
+# Compare in a fresh CRITERION_HOME, requiring all 28 current reports and
+# failing only when the median 95% CI lower bound exceeds +10%.
+#
+# Informational, and NOT part of `perf-gate`: on this machine the comparison is
+# only valid while the baseline is adjacent in time. Measured 2026-09-15 at one
+# commit, same code both sides — adjacent, the whole suite agrees within +0.3%;
+# 25 minutes later a report fails at +13.1%, 45 minutes at +19.3%, 65 minutes at
+# +102.1%, a different report each time, at identical clock and CPU. See
+# ADR-0013's 2026-09-15 amendments. A comparison that can judge code needs two
+# versions interleaved in one session, which this recipe does not do.
 [group('bench')]
+[doc('Criterion suite vs the machine-local baseline (informational; needs an adjacent baseline)')]
 [working-directory: 'xtask']
 bench-micro-check:
     cargo run --locked -- perf-micro-check
@@ -424,11 +433,16 @@ bench-micro-check:
 # The performance gate. Run it before merging fmf-core changes AND, since
 # ADR-0048 retired the CI measurement chain, by hand on the reference machine
 # before approving a release's `sign` job — it is the release performance gate,
-# not a mechanical precondition CI can enforce (DEV-287/DEV-321). Each half
-# performs its own compile/preflight/monitor/postflight sequence; just cannot
-# dedupe it.
+# not a mechanical precondition CI can enforce (DEV-287/DEV-321).
+#
+# The real-volume absolute gate is what ADR-0013 item (4) calls the final
+# judgment. The Criterion suite is run by hand (`just bench-micro-check`) until
+# it compares two code versions interleaved in one session; it also perturbs
+# measurably when run straight after the real-volume scan (median +29.7% on an
+# undisturbed machine's own numbers).
 [group('bench')]
-perf-gate: bench-check bench-micro-check
+[doc('The release performance gate: the real-volume absolute gate (ADR-0013 item 4)')]
+perf-gate: bench-check
 
 # ── Volume tools (elevated) ──────────────────────────────────────────────
 
