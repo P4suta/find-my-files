@@ -301,6 +301,20 @@ pub const RUST_MUTATION_NEXTEST_ARGS: &[&str] = &[
 /// survives by construction, against a reviewed baseline recorded with the
 /// default skip list. Keeping it would have meant 14 permanent survivors in a
 /// gate whose whole design is exact survivor equality.
+/// The floor under cargo-mutants' own timeout, in seconds.
+///
+/// A timeout is a gate failure under ADR-0022, so this number decides which
+/// runs are called failures. It was 60, chosen when mutants ran one at a time.
+/// Measured over 1192 test phases at four jobs: p50 38.3s, p90 49.4s, p95
+/// 52.1s, p99 57.0s, max 60.1s — the floor sat inside the distribution of
+/// healthy runs, and six mutants were reported as timeouts purely for being in
+/// the tail. Re-run alone, all six were caught in well under a minute, so none
+/// of them was the hang a timeout is meant to catch. The floor now sits five
+/// times past the slowest healthy run observed, which leaves a genuine hang
+/// (an infinite loop does not finish at any budget) detectable while taking the
+/// tail out of the verdict.
+const MINIMUM_TEST_TIMEOUT_SECS: &str = "300";
+
 /// How many mutants to build and test at once.
 ///
 /// One job per four logical CPUs, matching the four test threads
@@ -330,7 +344,7 @@ pub fn rust_run_args(
             "--test-workspace",
             "true",
             "--minimum-test-timeout",
-            "60",
+            MINIMUM_TEST_TIMEOUT_SECS,
             "--jobs",
             jobs.as_str(),
         ]
