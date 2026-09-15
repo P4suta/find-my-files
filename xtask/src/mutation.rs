@@ -244,6 +244,14 @@ dir = "../build/nextest"
 fail-fast = true
 retries = 0
 flaky-result = "fail"
+# Paired with `mutant_jobs()`: one mutant job per four logical CPUs, four test
+# threads per job. Without the cap each parallel job would start one test thread
+# per CPU and oversubscribe the machine by the job count, which shows up as
+# timeouts — a gate failure under ADR-0022 — rather than as slowness. A hosted
+# 4-vCPU runner is unaffected: it runs one job, and four threads is what nextest
+# would have picked anyway. The baseline is measured under the same cap, so the
+# timeout budget derived from it stays proportionate.
+test-threads = 4
 "#;
 
 /// `--cargo-arg=--locked` is forwarded by cargo-mutants to both the build and
@@ -293,6 +301,18 @@ pub const RUST_MUTATION_NEXTEST_ARGS: &[&str] = &[
 /// survives by construction, against a reviewed baseline recorded with the
 /// default skip list. Keeping it would have meant 14 permanent survivors in a
 /// gate whose whole design is exact survivor equality.
+/// How many mutants to build and test at once.
+///
+/// One job per four logical CPUs, matching the four test threads
+/// [`NEXTEST_POLICY`] gives each job, so the machine is used without being
+/// oversubscribed. Hosted CI runners have four vCPUs and therefore get one job,
+/// exactly what they ran before this existed. Each job also carries its own
+/// sandbox and target directory, so the divisor is the disk budget as much as
+/// the CPU one.
+fn mutant_jobs() -> usize {
+    std::thread::available_parallelism().map_or(1, |cpus| (cpus.get() / 4).max(1))
+}
+
 pub fn rust_run_args(
     config: &str,
     output: &str,
@@ -300,6 +320,7 @@ pub fn rust_run_args(
     shard: Option<(usize, usize)>,
 ) -> Vec<String> {
     let mut args = rust_scope_args(config);
+    let jobs = mutant_jobs().to_string();
     args.extend(
         [
             "--output",
@@ -310,6 +331,8 @@ pub fn rust_run_args(
             "true",
             "--minimum-test-timeout",
             "60",
+            "--jobs",
+            jobs.as_str(),
         ]
         .into_iter()
         .map(str::to_owned),
