@@ -36,10 +36,8 @@ examine_globs = [
   "**/src/ondisk/fixup.rs",
 ]
 
-# fmf-service/src/security.rs is deliberately absent, and the reason is
-# mechanical rather than a judgement about its importance. cargo-mutants drives
-# nextest with default arguments — it has no `--run-ignored`, and xtask passes
-# it no test arguments — so `#[ignore]` tests can never run under this gate.
+# fmf-service/src/security.rs is deliberately absent, and the reason is a
+# containment problem rather than a judgement about its importance.
 # security.rs's behavioural coverage is `tests/security_admin.rs`, which is
 # `#[ignore]` + `FMF_ADMIN_TESTS=1`; only the 12 in-file unit tests over the
 # pure SDDL/SID string helpers run here. Of the 408 mutants cargo-mutants
@@ -57,9 +55,21 @@ examine_globs = [
 # unelevated (tests/pipe_loopback.rs, accept_loop_loss.rs, idle_stop.rs), so
 # mutating them would give real signal — they are left out only to keep the
 # gate's runtime bounded, and they are the first candidates if it is widened.
-# Re-examination trigger: security.rs becomes mutable here the moment its
-# privileged paths gain unelevated coverage (a fake-handle seam, or a separate
-# elevated mutation gate with its own baseline), not before.
+# Probed 2026-09-15, correcting an earlier claim here that running the ignored
+# tests was mechanically impossible: it is not. xtask already forwards nextest
+# arguments after `--` (see RUST_MUTATION_NEXTEST_ARGS), and a probe confirmed
+# cargo-mutants 27.1.0 passes `--run-ignored=all` straight through to
+# `cargo nextest run`. What actually blocks an elevated gate is containment.
+# The admin tests assert `FMF_ADMIN_TESTS=1` before doing anything, so such a
+# gate must set it, and then every mutant in this file executes *as
+# administrator*: DACL hardening, quarantine and atomic-replace code driven by
+# path and flag computations the mutation is free to change. A mutant that
+# widens a hardening target or redirects a replace is a real risk to the host,
+# which is why this is not simply switched on.
+# Re-examination trigger: security.rs becomes mutable here once its privileged
+# paths gain unelevated coverage (a fake-handle seam), or once an elevated gate
+# can run against a disposable root (the VHDX the nightly-admin lane already
+# builds) with its own baseline — not before.
 
 # Keep each cargo-mutants sandbox's build artifacts inside the sandbox.
 # `engine/.cargo/config.toml` sets `target-dir = "../build/engine"`, which is

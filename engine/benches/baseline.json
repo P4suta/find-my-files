@@ -1,124 +1,161 @@
 {
-  "volume": "C:",
-  "entries": 2137099,
-  "peak_working_set_bytes": 303603712,
+  "entries": 3510665,
+  "index_ms": 34292,
+  "measurement": {
+    "cargo_lock_sha256": "fb302d2ed2e2b0df4521d24e372d0c45ae733097023ddf62c7076d5f14744399",
+    "counters": {
+      "during": {
+        "max_processor_time": 96.877182,
+        "mean_processor_performance": 78.31546059649122,
+        "mean_processor_time": 56.33913110526317,
+        "min_processor_performance": 63.840408
+      },
+      "postflight": {
+        "max_processor_time": 7.015346,
+        "mean_processor_performance": 95.830654,
+        "mean_processor_time": 2.2081228333333334,
+        "min_processor_performance": 92.955168
+      },
+      "preflight": {
+        "max_processor_time": 3.007837,
+        "mean_processor_performance": 96.37500900000002,
+        "mean_processor_time": 2.1859683333333333,
+        "min_processor_performance": 93.519555
+      }
+    },
+    "finished_unix": 1789429710,
+    "git": {
+      "commit": "1d301e3416fcf01280a8b9397686f8cfc7263a83",
+      "dirty": false,
+      "dirty_sha256": "5edc6db52db2c52cf4491cc1c0545e4205e40c1ed41805b7b7b47b244680ce19"
+    },
+    "kind": "real-baseline",
+    "logical_processors": "16",
+    "processor": "AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-pc-windows-msvc\nrelease: 1.97.1\nLLVM version: 22.1.6",
+    "schema": 1,
+    "started_unix": 1789429639
+  },
+  "peak_working_set_bytes": 423276544,
   "queries": [
     {
-      "query": "",
-      "hits": 1483219,
-      "p50_us": 3336,
-      "p99_us": 5680,
-      "max_us": 6691,
+      "cold_us": 7958,
+      "hits": 2605552,
+      "max_us": 7958,
+      "p50_materialize_us": 4556,
       "p50_memo_us": 0,
       "p50_scan_us": 0,
-      "p50_materialize_us": 3323,
-      "cold_us": 3727
+      "p50_us": 4562,
+      "p99_us": 7553,
+      "query": ""
     },
     {
-      "query": "e",
-      "hits": 1018803,
-      "p50_us": 12023,
-      "p99_us": 16097,
-      "max_us": 16152,
+      "cold_us": 17654,
+      "hits": 1976916,
+      "max_us": 23299,
+      "p50_materialize_us": 19018,
       "p50_memo_us": 1,
       "p50_scan_us": 0,
-      "p50_materialize_us": 12009,
-      "cold_us": 12023
+      "p50_us": 19038,
+      "p99_us": 22228,
+      "query": "e"
     },
     {
-      "query": "a",
-      "hits": 926182,
-      "p50_us": 13229,
-      "p99_us": 21199,
-      "max_us": 27176,
+      "cold_us": 18260,
+      "hits": 1713819,
+      "max_us": 20571,
+      "p50_materialize_us": 18854,
       "p50_memo_us": 1,
       "p50_scan_us": 0,
-      "p50_materialize_us": 13215,
-      "cold_us": 12363
+      "p50_us": 18876,
+      "p99_us": 20414,
+      "query": "a"
     },
     {
-      "query": "win",
-      "hits": 158936,
-      "p50_us": 4727,
-      "p99_us": 5988,
-      "max_us": 6001,
+      "cold_us": 7313,
+      "hits": 182889,
+      "max_us": 7957,
+      "p50_materialize_us": 4792,
       "p50_memo_us": 0,
-      "p50_scan_us": 2164,
-      "p50_materialize_us": 2510,
-      "cold_us": 4898
+      "p50_scan_us": 2545,
+      "p50_us": 7352,
+      "p99_us": 7922,
+      "query": "win"
     },
     {
-      "query": "Win",
-      "hits": 27207,
-      "p50_us": 5164,
-      "p99_us": 9087,
-      "max_us": 9662,
+      "cold_us": 8011,
+      "hits": 39230,
+      "max_us": 9100,
+      "p50_materialize_us": 5594,
       "p50_memo_us": 0,
-      "p50_scan_us": 2090,
-      "p50_materialize_us": 3027,
-      "cold_us": 7032
+      "p50_scan_us": 2471,
+      "p50_us": 8075,
+      "p99_us": 8899,
+      "query": "Win"
     },
     {
-      "query": "qzx",
-      "hits": 45,
-      "p50_us": 3566,
-      "p99_us": 5322,
-      "max_us": 6013,
+      "cold_us": 5830,
+      "hits": 17,
+      "max_us": 6406,
+      "p50_materialize_us": 3892,
       "p50_memo_us": 0,
-      "p50_scan_us": 1672,
-      "p50_materialize_us": 1901,
-      "cold_us": 3978
+      "p50_scan_us": 1750,
+      "p50_us": 5673,
+      "p99_us": 6397,
+      "query": "qzx"
     },
     {
-      "query": "ext:dll",
-      "hits": 79248,
-      "p50_us": 3861,
-      "p99_us": 8276,
-      "max_us": 17062,
+      "cold_us": 6462,
+      "hits": 65143,
+      "max_us": 6819,
+      "p50_materialize_us": 4349,
       "p50_memo_us": 0,
-      "p50_scan_us": 1737,
-      "p50_materialize_us": 2092,
-      "cold_us": 3614
+      "p50_scan_us": 1860,
+      "p50_us": 6224,
+      "p99_us": 6777,
+      "query": "ext:dll"
     },
     {
-      "query": "size:>100mb path:windows",
-      "hits": 39,
-      "p50_us": 4230,
-      "p99_us": 6213,
-      "max_us": 67911,
+      "cold_us": 35940,
+      "hits": 57,
+      "max_us": 35940,
+      "p50_materialize_us": 11133,
       "p50_memo_us": 1,
       "p50_scan_us": 0,
-      "p50_materialize_us": 4210,
-      "cold_us": 67911
+      "p50_us": 11155,
+      "p99_us": 12186,
+      "query": "size:>100mb path:windows"
     },
     {
-      "query": "*.rs",
-      "hits": 77797,
-      "p50_us": 3756,
-      "p99_us": 4700,
-      "max_us": 4852,
+      "cold_us": 6552,
+      "hits": 54484,
+      "max_us": 7697,
+      "p50_materialize_us": 4539,
       "p50_memo_us": 0,
-      "p50_scan_us": 1684,
-      "p50_materialize_us": 2049,
-      "cold_us": 3928
+      "p50_scan_us": 1883,
+      "p50_us": 6448,
+      "p99_us": 7158,
+      "query": "*.rs"
     },
     {
-      "query": "regex:win.*\\.dll",
-      "hits": 10505,
-      "p50_us": 7242,
-      "p99_us": 11423,
-      "max_us": 12054,
+      "cold_us": 11664,
+      "hits": 10046,
+      "max_us": 11664,
+      "p50_materialize_us": 7655,
       "p50_memo_us": 0,
-      "p50_scan_us": 1761,
-      "p50_materialize_us": 5055,
-      "cold_us": 7532
+      "p50_scan_us": 1998,
+      "p50_us": 10459,
+      "p99_us": 11362,
+      "query": "regex:win.*\\.dll"
     }
   ],
   "restore": {
-    "file_bytes": 118336776,
-    "entries": 2137099,
-    "save_ms": 69,
-    "p50_ms": 146,
-    "min_ms": 128
-  }
+    "entries": 3510665,
+    "file_bytes": 168435997,
+    "min_ms": 352,
+    "p50_ms": 358,
+    "save_ms": 82
+  },
+  "volume": "C:",
+  "working_set_bytes": 195522560
 }

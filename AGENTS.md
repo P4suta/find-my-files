@@ -64,7 +64,7 @@ content検索 / プロパティ・タグ索引 / プレビュー / FTP・HTTP・
 
 ## 性能合格ライン
 
-**合格ラインを定義・強制するのは `just perf-gate`**(実ボリューム絶対ゲート+microの両方・昇格)。閾値の値は `engine/crates/fmf-cli/src/cmd/bench.rs` の定数と `engine/benches/baseline.json` が正本、**その数値を選んだ理由と測定規律(冷機・同一セッション交互A/B・熱ドリフトの扱い)は ADR-0013** が正本。**ここに数値を写さない**。
+**合格ラインを定義・強制するのは `just perf-gate`**(実ボリューム絶対ゲート・昇格。criterion は 2026-09-15 の ADR-0013 改訂で perf-gate から外れ、隣接ベースラインを要する informational 手動計測)。閾値の値は `engine/crates/fmf-cli/src/cmd/bench.rs` の定数と `engine/benches/baseline.json` が正本、**その数値を選んだ理由と測定規律(冷機・同一セッション交互A/B・熱ドリフトの扱い)は ADR-0013** が正本。**ここに数値を写さない**。
 
 判定の読み方だけ固定する: RAM はエンジンプロセス単体の ready working set で見る(アプリ全体WSは WinUI/.NET ベースラインが乗るため別枠の参考値)。「復元も含め全項目が一様に劣化」は熱の署名でありコード回帰と判定しない(冷機で再測)。
 
