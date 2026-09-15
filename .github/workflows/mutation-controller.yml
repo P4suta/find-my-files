@@ -127,7 +127,7 @@ jobs:
         with:
           toolchain: ${{ steps.rust-pin.outputs.version }}
 
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
         with:
           tool: |
             cargo-mutants@27.1.0
