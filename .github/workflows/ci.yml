@@ -422,3 +422,21 @@ jobs:
         uses: ./.github/actions/gate-results
         with:
           results: ${{ join(needs.*.result, ',') }}
+
+  # The one status check branch protection requires,
+  # named the same in every P4suta repository.
+  # It passes only when every job it needs succeeded or was skipped.
+  required:
+    name: required
+    if: always()
+    needs: [changes, hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app, bench, fuzz, ci-required]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Fail unless every needed job succeeded or was skipped
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "${RESULTS}"
+          jq -e 'all(.[]; IN("success", "skipped"))' <<< "${RESULTS}"
