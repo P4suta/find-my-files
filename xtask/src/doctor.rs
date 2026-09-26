@@ -576,12 +576,21 @@ fn workflow_runs_ui_automation(ci: &CiYaml) -> bool {
     })
 }
 
+fn is_self_repository_ref(action_ref: &str, path: &str) -> bool {
+    action_ref
+        .strip_prefix("$/")
+        .or_else(|| action_ref.strip_prefix("./"))
+        == Some(path)
+}
+
 fn ui_cli_wiring_problems(path: &str, ci: &CiYaml) -> Vec<String> {
     let mut problems = Vec::new();
     for block in &ci.step_blocks {
         let mut setup_ids = Vec::new();
         for step in block {
-            if step.uses.as_deref() == Some("./.github/actions/setup-winapp") {
+            if step.uses.as_deref().is_some_and(|action_ref| {
+                is_self_repository_ref(action_ref, ".github/actions/setup-winapp")
+            }) {
                 match step.id.as_deref().filter(|id| !id.is_empty()) {
                     Some(id) => setup_ids.push(id.to_owned()),
                     None => problems.push(format!(
@@ -691,6 +700,15 @@ fn ci_mirror_parity(
                 .rsplit_once('@')
                 .map_or(action_ref, |(name, _)| name)
                 .to_ascii_lowercase();
+            if is_self_repository_ref(&action_name, ".github/actions/setup-winapp") {
+                saw_winapp = true;
+                has_winapp = true;
+                continue;
+            }
+            if is_self_repository_ref(&action_name, ".github/actions/setup-actionlint") {
+                saw_actionlint = true;
+                continue;
+            }
             match action_name.as_str() {
                 "actions/setup-dotnet" => {
                     saw_dotnet = true;
@@ -701,13 +719,6 @@ fn ci_mirror_parity(
                             .problems
                             .push(format!("{path}: setup-dotnet has no `dotnet-version`"));
                     }
-                }
-                "./.github/actions/setup-winapp" => {
-                    saw_winapp = true;
-                    has_winapp = true;
-                }
-                "./.github/actions/setup-actionlint" => {
-                    saw_actionlint = true;
                 }
                 "microsoft/setup-winappcli" => {
                     parity.problems.push(format!(
@@ -769,7 +780,7 @@ fn ci_mirror_parity(
         parity.problems.extend(ui_cli_wiring_problems(path, &ci));
         if requires_winapp && !has_winapp {
             parity.problems.push(format!(
-                "{path}: runs UI automation without ./.github/actions/setup-winapp"
+                "{path}: runs UI automation without the self-repository setup-winapp action"
             ));
         }
     }
@@ -782,12 +793,12 @@ fn ci_mirror_parity(
     if !saw_winapp {
         parity
             .problems
-            .push("no ./.github/actions/setup-winapp wiring found in workflows".to_owned());
+            .push("no self-repository setup-winapp wiring found in workflows".to_owned());
     }
     if !saw_actionlint {
         parity
             .problems
-            .push("no ./.github/actions/setup-actionlint wiring found in workflows".to_owned());
+            .push("no self-repository setup-actionlint wiring found in workflows".to_owned());
     }
     if !saw_taiki {
         parity
@@ -1250,7 +1261,7 @@ just = \"1\"
 \"cargo:samply\" = \"0.13.1\"
 \"cargo:cargo-nextest\" = \"0.9.140\"
 \"github:rhysd/actionlint\" = \"1.7.7\"
-\"github:zizmorcore/zizmor\" = \"1.28.0\"
+\"github:zizmorcore/zizmor\" = \"1.30.1\"
 
 [tools.\"http:winappcli\"]
 version = \"0.5.0\"
@@ -1280,7 +1291,7 @@ cargo.binstall = true
         );
         assert_eq!(
             pins.get("github:zizmorcore/zizmor").map(String::as_str),
-            Some("1.28.0")
+            Some("1.30.1")
         );
         assert_eq!(pins.len(), 8);
     }
@@ -1433,7 +1444,7 @@ jobs:
             ("cargo:taplo-cli".to_owned(), "0.10.0".to_owned()),
             ("cargo:typos-cli".to_owned(), "1.47.2".to_owned()),
             ("github:rhysd/actionlint".to_owned(), "1.7.12".to_owned()),
-            ("github:zizmorcore/zizmor".to_owned(), "1.28.0".to_owned()),
+            ("github:zizmorcore/zizmor".to_owned(), "1.30.1".to_owned()),
         ])
     }
 
@@ -1494,9 +1505,9 @@ jobs:
       - uses: actions/setup-dotnet@immutable
         with:
           dotnet-version: 10.0.401
-      - uses: ./.github/actions/setup-winapp
+      - uses: $/.github/actions/setup-winapp
         id: winapp
-      - uses: ./.github/actions/setup-actionlint
+      - uses: $/.github/actions/setup-actionlint
       - uses: taiki-e/install-action@immutable
         with:
           tool: |
@@ -1510,7 +1521,7 @@ jobs:
             cargo-mutants@27.1.0
             taplo@0.10.0
             typos-cli@1.47.2
-            zizmor@1.28.0
+            zizmor@1.30.1
             cargo-audit@0.22.2
             osv-scanner@2.3.6
           fallback: none
@@ -1593,7 +1604,7 @@ jobs:
 
         assert!(problems.contains("CI pins 10.0.999"));
         assert!(problems.contains("external setup-WinAppCli bypasses"));
-        assert!(problems.contains("no ./.github/actions/setup-winapp wiring"));
+        assert!(problems.contains("no self-repository setup-winapp wiring"));
         assert!(problems.contains("`WINAPP_VERSION` is 0.4.0"));
         assert!(problems.contains("CI pins 1.53.0"));
         assert!(problems.contains("`cargo-audit` is not version-pinned"));
@@ -1610,9 +1621,9 @@ jobs:
       - uses: actions/setup-dotnet@immutable
         with:
           dotnet-version: 10.0.401
-      - uses: ./.github/actions/setup-winapp
+      - uses: $/.github/actions/setup-winapp
         id: winapp
-      - uses: ./.github/actions/setup-actionlint
+      - uses: $/.github/actions/setup-actionlint
       - uses: taiki-e/install-action@immutable
         with:
           tool: just@1.54.0
@@ -1650,7 +1661,7 @@ jobs:
             .problems
             .iter()
             .any(|problem| problem.contains(
-                ".github/workflows/missing.yml: runs UI automation without ./.github/actions/setup-winapp"
+                ".github/workflows/missing.yml: runs UI automation without the self-repository setup-winapp action"
             )));
     }
 

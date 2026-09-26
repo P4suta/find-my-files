@@ -59,7 +59,7 @@ fn weekly_and_manual_audits_authorize_only_a_default_branch_controller() {
         .split_once("\n  mutation:\n")
         .expect("mutation caller job")
         .1;
-    assert!(invocation.contains("uses: ./.github/workflows/mutation-controller.yml"));
+    assert!(invocation.contains("uses: $/.github/workflows/mutation-controller.yml"));
     assert!(invocation.contains("actions: read # let the fresh nested verifier"));
     assert!(invocation.contains("controller_sha: ${{ needs.authorize.outputs.controller_sha }}"));
     assert!(invocation.contains("target_sha: ${{ needs.authorize.outputs.target_sha }}"));
@@ -765,7 +765,7 @@ fn release_uses_the_same_trusted_controller_and_blocks_signing_on_it() {
     assert!(mutation.contains("needs: preflight"));
     assert!(mutation.contains("actions: read # let the fresh nested verifier"));
     assert!(mutation.contains("contents: read"));
-    assert!(mutation.contains("uses: ./.github/workflows/mutation-controller.yml"));
+    assert!(mutation.contains("uses: $/.github/workflows/mutation-controller.yml"));
     assert!(mutation.contains("controller_sha: ${{ github.workflow_sha }}"));
     assert!(mutation.contains("target_sha: ${{ inputs.commit_sha }}"));
     assert!(!mutation.contains("actions/checkout@"));
