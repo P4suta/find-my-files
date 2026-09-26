@@ -304,13 +304,13 @@ jobs:
       # This is the only release job that needs the complete build/test/UI
       # toolchain. Use first-party or repository-verified setup boundaries; the
       # later signing handoff jobs stay deliberately smaller.
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy, rustfmt
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.401
-      - uses: ./.github/actions/setup-winapp
+      - uses: $/.github/actions/setup-winapp
         id: winapp
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
@@ -405,7 +405,7 @@ jobs:
           just bundle-verify unsigned
 
       - name: Require pristine unsigned first-party binaries
-        uses: ./.github/actions/verify-signatures
+        uses: $/.github/actions/verify-signatures
         with:
           bundle-dir: build/dist/FindMyFiles
           expected-state: unsigned
@@ -469,7 +469,7 @@ jobs:
     permissions:
       actions: read # let the fresh nested verifier bind this run's raw artifacts
       contents: read
-    uses: ./.github/workflows/mutation-controller.yml
+    uses: $/.github/workflows/mutation-controller.yml
     with:
       controller_sha: ${{ github.workflow_sha }}
       target_sha: ${{ inputs.commit_sha }}
@@ -492,7 +492,7 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.commit_sha }}
 
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.401
@@ -518,7 +518,7 @@ jobs:
       # cargo-sbom's raw wrappers and scanner scratch stay job-local. xtask
       # produces and validates the canonical pair in build/sbom.
       - name: Generate SBOMs and scan disposable copies (release gate)
-        uses: ./.github/actions/sbom-scan
+        uses: $/.github/actions/sbom-scan
 
       - name: Reverify source artifact and canonical SBOM pair
         run: |
@@ -804,7 +804,7 @@ jobs:
 
       # Target-controlled setup/code begins only after the signer result crossed
       # the protected workflow's exact regular-file allowlist above.
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: just@1.54.0
@@ -825,7 +825,7 @@ jobs:
       # The committed manifest is derived from xtask's FIRST_PARTY_PES map. This
       # verifies every mapped destination after the artifact boundary.
       - name: Verify signatures
-        uses: ./.github/actions/verify-signatures
+        uses: $/.github/actions/verify-signatures
         with:
           bundle-dir: build/dist/FindMyFiles
           expected-state: signed
@@ -870,7 +870,7 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.commit_sha }}
 
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: just@1.54.0
@@ -891,7 +891,7 @@ jobs:
       # and verifies in-place; repeat the same manifest/chain/timestamp/signer check
       # after the artifact handoff, before packaging.
       - name: Require the bundle to be signed before publishing
-        uses: ./.github/actions/verify-signatures
+        uses: $/.github/actions/verify-signatures
         with:
           bundle-dir: build/dist/FindMyFiles
           expected-state: signed

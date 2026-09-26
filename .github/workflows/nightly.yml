@@ -67,13 +67,13 @@ jobs:
       # CI provisions only the tools this job executes. Rust reads the repository
       # pin, .NET uses its first-party Action, and WinAppCli is byte/signer pinned
       # by the repository-local security boundary.
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
         if: steps.freshness.outputs.build == 'true'
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         if: steps.freshness.outputs.build == 'true'
         with:
           dotnet-version: 10.0.401
-      - uses: ./.github/actions/setup-winapp
+      - uses: $/.github/actions/setup-winapp
         id: winapp
         if: steps.freshness.outputs.build == 'true'
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
@@ -150,7 +150,7 @@ jobs:
       # composite action so the tool versions never drift.
       - name: Generate SBOMs and scan (gate)
         if: steps.freshness.outputs.build == 'true'
-        uses: ./.github/actions/sbom-scan
+        uses: $/.github/actions/sbom-scan
 
       - name: Package (tagless — zip name from bundled BUILDINFO)
         if: steps.freshness.outputs.build == 'true'

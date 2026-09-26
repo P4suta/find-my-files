@@ -79,7 +79,7 @@ jobs:
           persist-credentials: false
       # Lint the workflow YAML itself: syntax, ${{ }} expression types, and
       # shellcheck over run: blocks. Catches workflow errors before a release run.
-      - uses: ./.github/actions/setup-actionlint
+      - uses: $/.github/actions/setup-actionlint
         id: actionlint
       - run: '"$ACTIONLINT"'
         env:
@@ -98,7 +98,7 @@ jobs:
       # fmt --check from the repo root enforces TOML *formatting* (taplo.toml),
       # not just validity, across every crate + the root configs.
       - run: taplo fmt --check
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -147,7 +147,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -180,7 +180,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -218,7 +218,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy, llvm-tools-preview
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -300,7 +300,7 @@ jobs:
       # Reuse the engine binaries built upstream. The publish recipes still run
       # the independent xtask workspace, so provision and cache Rust for xtask
       # without rebuilding the engine.
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: xtask
@@ -313,7 +313,7 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.401
-      - uses: ./.github/actions/setup-winapp
+      - uses: $/.github/actions/setup-winapp
         id: winapp
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
@@ -384,7 +384,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/rust-toolchain
+      - uses: $/.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: engine
@@ -403,7 +403,7 @@ jobs:
     if: needs.changes.outputs.fuzz == 'true'
     permissions:
       contents: read
-    uses: ./.github/workflows/fuzz.yml
+    uses: $/.github/workflows/fuzz.yml
 
   # Single required status check. Transitively enforces the leaves and treats
   # `skipped` (docs-only / paths-gated) as success — avoids the "Expected —
@@ -419,7 +419,7 @@ jobs:
         with:
           persist-credentials: false
       - name: gate on needed job results
-        uses: ./.github/actions/gate-results
+        uses: $/.github/actions/gate-results
         with:
           results: ${{ join(needs.*.result, ',') }}
 
