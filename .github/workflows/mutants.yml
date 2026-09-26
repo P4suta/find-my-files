@@ -109,7 +109,7 @@ jobs:
     permissions:
       actions: read # let the fresh nested verifier bind this run's raw artifacts
       contents: read
-    uses: ./.github/workflows/mutation-controller.yml
+    uses: $/.github/workflows/mutation-controller.yml
     with:
       controller_sha: ${{ needs.authorize.outputs.controller_sha }}
       target_sha: ${{ needs.authorize.outputs.target_sha }}

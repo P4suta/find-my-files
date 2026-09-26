@@ -211,7 +211,7 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
         4,
         "direct release jobs that execute target repository code must check out the authorized SHA; mutation uses the separately guarded reusable controller"
     );
-    assert!(release.contains("uses: ./.github/workflows/mutation-controller.yml"));
+    assert!(release.contains("uses: $/.github/workflows/mutation-controller.yml"));
     assert!(release.contains("target_sha: ${{ inputs.commit_sha }}"));
     assert!(release.contains("controller_sha: ${{ github.workflow_sha }}"));
     assert!(release.contains("permission-administration: read"));
@@ -450,7 +450,7 @@ fn release_artifacts_are_exactly_sealed_across_every_handoff() {
             "name: Download sealed unsigned bundle",
             "name: Verify exact unsigned SBOM source artifact",
             "name: Restore locked NuGet SBOM evidence",
-            "uses: ./.github/actions/sbom-scan",
+            "uses: $/.github/actions/sbom-scan",
             "name: Reverify source artifact and canonical SBOM pair",
             "name: Upload exact SBOM pair",
         ],
@@ -468,6 +468,7 @@ fn release_artifacts_are_exactly_sealed_across_every_handoff() {
     assert!(sign_stage.contains("path: build/dist"));
     assert!(!sign_stage.contains("actions/checkout@"));
     assert!(!sign_stage.contains("./.github/actions/"));
+    assert!(!sign_stage.contains("$/.github/actions/"));
     assert!(!sign_stage.contains("just "));
     for boundary in [
         "\"FindMyFiles.exe\" = \"FindMyFiles.exe\"",
@@ -512,6 +513,7 @@ fn release_artifacts_are_exactly_sealed_across_every_handoff() {
     assert!(sign.contains("permissions: {}"));
     assert!(!sign.contains("actions/checkout@"));
     assert!(!sign.contains("./.github/actions/"));
+    assert!(!sign.contains("$/.github/actions/"));
     assert!(!sign
         .lines()
         .any(|line| line.trim_start().starts_with("run:")));
@@ -548,7 +550,7 @@ fn release_artifacts_are_exactly_sealed_across_every_handoff() {
         sign_collect,
         &[
             "name: Require the exact signed-result file set",
-            "uses: ./.github/actions/rust-toolchain",
+            "uses: $/.github/actions/rust-toolchain",
             "name: Verify exact unsigned bundle before collection",
             "name: Copy signed binaries back into the bundle",
             "name: Verify signing-only bundle transition",
@@ -561,7 +563,7 @@ fn release_artifacts_are_exactly_sealed_across_every_handoff() {
         .find("name: Require the exact signed-result file set")
         .expect("signed-result check must exist");
     let local_action = sign_collect
-        .find("uses: ./.github/actions/rust-toolchain")
+        .find("uses: $/.github/actions/rust-toolchain")
         .expect("target-local setup must exist");
     assert!(
         result_check < local_action,

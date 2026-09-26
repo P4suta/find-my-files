@@ -38,4 +38,4 @@ pre-push:
       run: echo "fmf-core changed — run 'just perf-gate' from an elevated shell before merging"
 
     - name: verify
-      run: just verify
+      run: if [ "${OS:-}" = Windows_NT ]; then just verify; else echo "Full verification requires Windows; running the portable repository checks locally."; just verify-portable; fi

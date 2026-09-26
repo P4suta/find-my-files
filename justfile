@@ -180,6 +180,9 @@ fmt-check-toml:
 [group('daily')]
 verify: build-ffi-for-source-gate fmt-check lint doc test test-xtask test-app deny machete
 
+# Run repository-only verification on hosts that cannot build or test the Windows application.
+verify-portable: fmt-check-toml lint-text lint-actions
+
 # The dispatched release workflow is the already-linted protected-main workflow;
 # its checkout is build input, not workflow code. Re-run every source and
 # dependency gate there without requiring the Linux-only actionlint verifier on
