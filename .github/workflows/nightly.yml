@@ -76,7 +76,7 @@ jobs:
       - uses: $/.github/actions/setup-winapp
         id: winapp
         if: steps.freshness.outputs.build == 'true'
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         if: steps.freshness.outputs.build == 'true'
         with:
           tool: just@1.54.0,cargo-about@0.9.1
