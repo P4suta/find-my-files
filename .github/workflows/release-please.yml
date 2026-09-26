@@ -147,7 +147,7 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - name: Set up Rust only to calculate Cargo.lock
-        uses: ./.github/actions/rust-toolchain
+        uses: $/.github/actions/rust-toolchain
 
       - name: Calculate Cargo.lock for the bumped workspace version
         shell: bash

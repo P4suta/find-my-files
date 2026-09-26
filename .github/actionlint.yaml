@@ -2,3 +2,10 @@ self-hosted-runner:
   labels:
     - fmf-perf
     - fmf-jit-ephemeral
+
+# actionlint 1.7.12 predates GitHub's recommended self-repository syntax, so ignore only its two known parser false positives until upstream issue 711 is released.
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      - 'specifying action "\$/\.github/actions/[^"]+" in invalid format because ref is missing'
+      - 'reusable workflow call "\$/\.github/workflows/[^"]+" at "uses" is not following the format'
