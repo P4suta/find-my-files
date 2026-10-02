@@ -1,0 +1,132 @@
+name: Verify Doppler access
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-doppler
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  automation:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: release-please
+    permissions:
+      id-token: write # authenticate to the automation-only Doppler identity
+    steps:
+      - name: Fetch automation credentials
+        id: doppler
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ vars.DOPPLER_SERVICE_IDENTITY_ID }}
+          doppler-project: find-my-files
+          doppler-config: automation
+          inject-env-vars: false
+
+      - name: Require resolved automation credentials
+        shell: bash
+        env:
+          RELEASE_PLEASE_CLIENT_ID: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
+          RELEASE_PLEASE_PRIVATE_KEY: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          for name in RELEASE_PLEASE_CLIENT_ID RELEASE_PLEASE_PRIVATE_KEY; do
+            if [[ -z "${!name}" || "${!name}" =~ ^\$\{[^}]+\}$ ]]; then
+              echo "::error::$name is empty or contains an unresolved Doppler reference."
+              exit 1
+            fi
+          done
+
+      - name: Mint a read-only repository token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
+          private-key: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: read
+
+      - name: Verify read-only App authentication
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: "heads/main",
+            });
+            core.info("Read-only App authentication succeeded for this repository.");
+
+      - name: Attempt access to the signing config
+        id: forbidden
+        continue-on-error: true
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ vars.DOPPLER_SERVICE_IDENTITY_ID }}
+          doppler-project: find-my-files
+          doppler-config: windows
+          inject-env-vars: false
+
+      - name: Require denial of signing access
+        if: ${{ always() && steps.forbidden.outcome != 'failure' }}
+        run: |
+          echo "::error::The automation identity must not fetch the signing config."
+          exit 1
+
+  windows:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 5
+    environment: release
+    permissions:
+      id-token: write # authenticate to the signing-only Doppler identity
+    steps:
+      - name: Fetch signing credentials
+        id: doppler
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ vars.DOPPLER_SERVICE_IDENTITY_ID }}
+          doppler-project: find-my-files
+          doppler-config: windows
+          inject-env-vars: false
+
+      - name: Require resolved signing credentials
+        shell: pwsh
+        env:
+          ES_USERNAME: ${{ steps.doppler.outputs.ES_USERNAME }}
+          ES_PASSWORD: ${{ steps.doppler.outputs.ES_PASSWORD }}
+          CREDENTIAL_ID: ${{ steps.doppler.outputs.CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ steps.doppler.outputs.ES_TOTP_SECRET }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in @("ES_USERNAME", "ES_PASSWORD", "CREDENTIAL_ID", "ES_TOTP_SECRET")) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -match '^\$\{[^}]+\}$') {
+              throw "$name is empty or contains an unresolved Doppler reference."
+            }
+          }
+
+      - name: Attempt access to the automation config
+        id: forbidden
+        continue-on-error: true
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ vars.DOPPLER_SERVICE_IDENTITY_ID }}
+          doppler-project: find-my-files
+          doppler-config: automation
+          inject-env-vars: false
+
+      - name: Require denial of automation access
+        if: ${{ always() && steps.forbidden.outcome != 'failure' }}
+        shell: pwsh
+        run: throw "The signing identity must not fetch the automation config."

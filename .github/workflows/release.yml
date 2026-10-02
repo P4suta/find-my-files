@@ -47,13 +47,10 @@
 #              SBOM attestations, then publishes the exact numeric draft ID. It
 #              checks out and executes no repository build code.
 #
-# Auth: a short-lived Release Please App token publishes the release; SSL.com
-# eSigner uses four `release` environment secrets (ES_USERNAME / ES_PASSWORD /
-# CREDENTIAL_ID / ES_TOTP_SECRET). The App credentials remain scoped to the
-# `release-please` environment and are referenced only by publication.
-# Signing is gated at publish: the run re-verifies the bundle is validly signed
-# and FAILS before publishing the existing draft if it is not, so a
-# missing/misconfigured secret can never ship an unsigned release unnoticed.
+# Auth: a short-lived Release Please App token publishes the release.
+# Doppler OIDC supplies eSigner credentials to the approval-gated sign job and App credentials to publication through separate configs and identities.
+# The GitHub release and release-please environments retain their existing approval and protected-main boundaries.
+# Signing is gated at publish: the run re-verifies the bundle is validly signed and FAILS before publishing the existing draft if it is not, so a missing/misconfigured secret can never ship an unsigned release unnoticed.
 # Human procedure lives in docs/RELEASING.md; rationale is
 # in docs/adr/0020-code-signing-provider.md (provider/cert) and
 # docs/adr/0029-ci-signing-cka-pipeline.md (official Action, this split pipeline;
@@ -683,7 +680,8 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 20
     environment: release
-    permissions: {}
+    permissions:
+      id-token: write # authenticate to the signing-only Doppler identity
     steps:
       - name: Download flat signing input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -700,16 +698,40 @@ jobs:
           name: signing-output-directory
           path: build/signed
 
+      - name: Fetch windows credentials from Doppler
+        id: doppler
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ vars.DOPPLER_SERVICE_IDENTITY_ID }}
+          doppler-project: find-my-files
+          doppler-config: windows
+          inject-env-vars: false
+
+      - name: Require complete Doppler credentials
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          ES_USERNAME: ${{ steps.doppler.outputs.ES_USERNAME }}
+          ES_PASSWORD: ${{ steps.doppler.outputs.ES_PASSWORD }}
+          CREDENTIAL_ID: ${{ steps.doppler.outputs.CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ steps.doppler.outputs.ES_TOTP_SECRET }}
+        with:
+          script: |
+            for (const name of ["ES_USERNAME", "ES_PASSWORD", "CREDENTIAL_ID", "ES_TOTP_SECRET"]) {
+              const value = process.env[name];
+              if (!value?.trim() || /^\$\{[^}]+\}$/.test(value)) {
+                throw new Error(`${name} is empty or contains an unresolved Doppler reference.`);
+              }
+            }
+
       - name: Sign staged binaries (SSL.com eSigner)
-        # Missing credentials enter the Action as empty required inputs and fail
-        # closed; the production workflow has no unsigned mode.
         uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
         with:
           command: batch_sign
-          username: ${{ secrets.ES_USERNAME }}
-          password: ${{ secrets.ES_PASSWORD }}
-          credential_id: ${{ secrets.CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          username: ${{ steps.doppler.outputs.ES_USERNAME }}
+          password: ${{ steps.doppler.outputs.ES_PASSWORD }}
+          credential_id: ${{ steps.doppler.outputs.CREDENTIAL_ID }}
+          totp_secret: ${{ steps.doppler.outputs.ES_TOTP_SECRET }}
           dir_path: ${{ github.workspace }}\build\sign-stage
           # Write signed files to a dedicated dir. batch_sign does NOT honor
           # `override` (the Action never forwards -override), so without an
@@ -994,8 +1016,7 @@ jobs:
     needs: publish-approval
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # App credentials exist only in this environment. The preceding secretless
-    # `publish-approval` job retains the distinct human "release this?" decision.
+    # This environment selects the App-only Doppler identity; the preceding secretless publish-approval job retains the human publication decision.
     environment: release-please
     permissions:
       actions: read # download the immutable release-assets handoff
@@ -1009,14 +1030,38 @@ jobs:
           name: release-assets
           path: build
 
+      - name: Fetch automation credentials from Doppler
+        id: doppler
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ vars.DOPPLER_SERVICE_IDENTITY_ID }}
+          doppler-project: find-my-files
+          doppler-config: automation
+          inject-env-vars: false
+
+      - name: Require complete Doppler credentials
+        shell: bash
+        env:
+          RELEASE_PLEASE_CLIENT_ID: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
+          RELEASE_PLEASE_PRIVATE_KEY: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          for name in RELEASE_PLEASE_CLIENT_ID RELEASE_PLEASE_PRIVATE_KEY; do
+            if [[ -z "${!name}" || "${!name}" =~ ^\$\{[^}]+\}$ ]]; then
+              echo "::error::$name is empty or contains an unresolved Doppler reference."
+              exit 1
+            fi
+          done
+
       # Immutable-release configuration needs Administration:read. Keep that
       # read-only authority separate from the later publication token.
       - name: Mint short-lived immutable-settings App token
         id: immutable-settings-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.RELEASE_PLEASE_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_PRIVATE_KEY }}
+          client-id: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
+          private-key: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
           permission-administration: read
 
       - name: Require immutable releases before attestations
@@ -1331,8 +1376,8 @@ jobs:
         id: publication-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.RELEASE_PLEASE_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_PRIVATE_KEY }}
+          client-id: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
+          private-key: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
           permission-contents: write
 
       # release-please created the vX.Y.Z tag and draft together. Every read,
