@@ -10,12 +10,11 @@
 # approvals, and provenance all identify the same immutable commit while the tag
 # stays pure data. Humans never hand-pick or hand-edit a version.
 #
-# Runs as a GitHub App: a short-lived installation token (actions/create-github-app-token)
-# from two secrets — RELEASE_PLEASE_CLIENT_ID and RELEASE_PLEASE_PRIVATE_KEY — lets
-# release-please push the release commit + open the PR with a signed identity. With
-# either secret missing, an ordinary bot run fails visibly instead of silently
-# abandoning release maintenance. Release mutation and workflow dispatch are
-# separate jobs with separate least-privilege tokens. See docs/RELEASING.md.
+# Runs as a GitHub App: a short-lived installation token lets release-please write release metadata with a signed identity.
+# Doppler OIDC supplies RELEASE_PLEASE_CLIENT_ID and RELEASE_PLEASE_PRIVATE_KEY only inside the release-please environment.
+# Missing credentials fail visibly instead of silently abandoning release maintenance.
+# Release mutation and workflow dispatch are separate jobs with separate least-privilege tokens.
+# See docs/RELEASING.md.
 
 name: release-please
 
@@ -41,12 +40,9 @@ jobs:
   release-please:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # The App identity lives only in this environment; the publication job enters
-    # the same environment to mint its own narrower token. This environment has a
-    # deployment-branch policy of `main` only and deliberately has NO required
-    # reviewers: release-please must run unattended (the human gate is merging
-    # the Release PR; signing/publication approvals live in the separate
-    # `release` environment in the dispatched release.yml). ADR-0035.
+    # The App identity is fetched only by jobs in this environment, including the publication job's narrower token.
+    # Its deployment policy allows main only and has no required reviewers so release-please can run unattended.
+    # Merging the Release PR remains the human gate; signing and publication approvals use the release environment (ADR-0035).
     environment: release-please
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
@@ -54,36 +50,55 @@ jobs:
       sha: ${{ steps.rp.outputs.sha }}
       upload_url: ${{ steps.rp.outputs.upload_url }}
       pr_branch: ${{ steps.rp_branch.outputs.branch }}
-    permissions: {}
+    permissions:
+      id-token: write # authenticate to the purpose-scoped Doppler identity
     env:
-      # Server-side boolean — never exposes the secret values.
-      HAS_APP: ${{ secrets.RELEASE_PLEASE_CLIENT_ID != '' && secrets.RELEASE_PLEASE_PRIVATE_KEY != '' }}
       # A tag input means "recover dispatch only"; do not also run the version bot.
       RUN_BOT: ${{ github.event_name == 'push' || inputs.tag_name == '' }}
     steps:
-      - name: Require the release-please App configuration
-        if: env.RUN_BOT == 'true' && env.HAS_APP != 'true'
+      - name: Fetch automation credentials from Doppler
+        id: doppler
+        if: env.RUN_BOT == 'true'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ vars.DOPPLER_SERVICE_IDENTITY_ID }}
+          doppler-project: find-my-files
+          doppler-config: automation
+          inject-env-vars: false
+
+      - name: Require complete Doppler credentials
+        if: env.RUN_BOT == 'true'
+        shell: bash
+        env:
+          RELEASE_PLEASE_CLIENT_ID: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
+          RELEASE_PLEASE_PRIVATE_KEY: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
         run: |
-          echo "::error::Both RELEASE_PLEASE_CLIENT_ID and RELEASE_PLEASE_PRIVATE_KEY are required."
-          exit 1
+          set -euo pipefail
+          for name in RELEASE_PLEASE_CLIENT_ID RELEASE_PLEASE_PRIVATE_KEY; do
+            if [[ -z "${!name}" || "${!name}" =~ ^\$\{[^}]+\}$ ]]; then
+              echo "::error::$name is empty or contains an unresolved Doppler reference."
+              exit 1
+            fi
+          done
 
       # Mint a short-lived installation token scoped to this repo. It lets
       # release-please write the release commit/tag and maintain its PR/release;
       # credentialed release.yml remains dispatchable only from protected main.
       - name: Mint GitHub App token
         id: app-token
-        if: env.HAS_APP == 'true' && env.RUN_BOT == 'true'
+        if: env.RUN_BOT == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.RELEASE_PLEASE_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_PRIVATE_KEY }}
+          client-id: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
+          private-key: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
           permission-contents: write
           permission-issues: write
           permission-pull-requests: write
 
       - name: release-please (active)
         id: rp
-        if: env.HAS_APP == 'true' && env.RUN_BOT == 'true'
+        if: env.RUN_BOT == 'true'
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ steps.app-token.outputs.token }}
@@ -103,7 +118,7 @@ jobs:
       # gated on a plain string compare and emits a plain string output.
       - name: Resolve the Release PR branch
         id: rp_branch
-        if: ${{ env.HAS_APP == 'true' && steps.rp.outputs.pr != '' }}
+        if: ${{ env.RUN_BOT == 'true' && steps.rp.outputs.pr != '' }}
         env:
           PR_JSON: ${{ steps.rp.outputs.pr }}
         run: echo "branch=$(printf '%s' "$PR_JSON" | jq -r '.headBranchName')" >> "$GITHUB_OUTPUT"
@@ -184,7 +199,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: release-please
-    permissions: {}
+    permissions:
+      id-token: write # authenticate to the purpose-scoped Doppler identity
     steps:
       - name: Download the lockfile candidate before minting write authority
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -192,12 +208,36 @@ jobs:
           name: release-lock-candidate
           path: build/release-lock
 
+      - name: Fetch automation credentials from Doppler
+        id: doppler
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ vars.DOPPLER_SERVICE_IDENTITY_ID }}
+          doppler-project: find-my-files
+          doppler-config: automation
+          inject-env-vars: false
+
+      - name: Require complete Doppler credentials
+        shell: bash
+        env:
+          RELEASE_PLEASE_CLIENT_ID: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
+          RELEASE_PLEASE_PRIVATE_KEY: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          for name in RELEASE_PLEASE_CLIENT_ID RELEASE_PLEASE_PRIVATE_KEY; do
+            if [[ -z "${!name}" || "${!name}" =~ ^\$\{[^}]+\}$ ]]; then
+              echo "::error::$name is empty or contains an unresolved Doppler reference."
+              exit 1
+            fi
+          done
+
       - name: Mint short-lived App token for the atomic commit
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.RELEASE_PLEASE_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_PRIVATE_KEY }}
+          client-id: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
+          private-key: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
           permission-contents: write
 
       - name: Commit only Cargo.lock with an atomic branch-head guard
