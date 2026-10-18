@@ -47,6 +47,7 @@ pub(super) struct VolumeSlot {
     pub(super) scanned: Mutex<u64>,
     pub(super) index: RwLock<Option<VolumeIndex>>,
     pub(super) stop: Arc<AtomicBool>,
+    pub(super) retry: AtomicBool,
     /// Single-entry query cache (lock order: `index` read first, then this).
     pub(super) last_query: Mutex<Option<VolumeQueryCache>>,
     /// None until the volume is Ready (flush skips it).
@@ -72,6 +73,7 @@ impl VolumeSlot {
             scanned: Mutex::new(0),
             index: RwLock::new(None),
             stop: Arc::new(AtomicBool::new(false)),
+            retry: AtomicBool::new(false),
             last_query: Mutex::new(None),
             checkpoint: Mutex::new(None),
             last_saved: Mutex::new(None),

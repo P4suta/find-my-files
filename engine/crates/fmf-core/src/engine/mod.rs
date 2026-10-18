@@ -350,7 +350,8 @@ impl Engine {
     /// Begin indexing the given volumes (asynchronous; progress via events).
     /// Idempotent per volume label: clients re-send `IndexStart` on every
     /// (re)connect and the service also calls this at startup, so a volume
-    /// already being indexed is skipped. A duplicate slot would make every
+    /// already being indexed is skipped; a failed worker is woken for retry.
+    /// A duplicate slot would make every
     /// query return that volume's rows once per copy (search merges all Ready
     /// slots) — the source of the "each result appears N times" bug.
     ///
@@ -379,7 +380,10 @@ impl Engine {
             // index_start of the same label can't slip a second slot in.
             let slot = {
                 let mut vols = self.volumes.write();
-                if vols.iter().any(|s| s.label == *label) {
+                if let Some(existing) = vols.iter().find(|s| s.label == *label) {
+                    if *existing.phase.lock() == VolumeState::Failed {
+                        existing.retry.store(true, Ordering::Release);
+                    }
                     continue;
                 }
                 let store = Arc::new(seams::WinSnapshotStore::new(volume::snapshot_path(
@@ -519,6 +523,7 @@ impl Engine {
             scanned: Mutex::new(idx.live_len() as u64),
             index: RwLock::new(Some(idx)),
             stop: Arc::new(AtomicBool::new(false)),
+            retry: AtomicBool::new(false),
             last_query: Mutex::new(None),
             checkpoint: Mutex::new(Some(JournalCheckpoint {
                 journal_id: 0,

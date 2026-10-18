@@ -180,16 +180,40 @@ impl Engine {
         slot: Arc<VolumeSlot>,
         journal: &mut dyn JournalSource,
     ) {
-        let this = self.clone();
-        let slot2 = slot.clone();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            this.volume_thread_inner(slot2, journal);
-        }));
-        if result.is_err() {
-            *slot.phase.lock() = VolumeState::Failed;
-            self.emit(EngineEvent::VolumeFailed {
+        let mut automatic_retry = true;
+        loop {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.clone().volume_thread_inner(slot.clone(), journal);
+            }));
+            if result.is_err() {
+                automatic_retry = false;
+                *slot.phase.lock() = VolumeState::Failed;
+                self.emit(EngineEvent::VolumeFailed {
+                    volume: slot.label.clone(),
+                    message: "internal panic — エンジンログに詳細".to_string(),
+                });
+            }
+            if slot.stop.load(Ordering::Acquire) || *slot.phase.lock() != VolumeState::Failed {
+                return;
+            }
+
+            let retry_at = automatic_retry.then(|| Instant::now() + Duration::from_secs(2));
+            automatic_retry = false;
+            loop {
+                if slot.stop.load(Ordering::Acquire) {
+                    return;
+                }
+                if slot.retry.swap(false, Ordering::AcqRel)
+                    || retry_at.is_some_and(|deadline| Instant::now() >= deadline)
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            *slot.phase.lock() = VolumeState::Rescanning;
+            tracing::info!(volume = %slot.label, "retrying failed volume");
+            self.emit(EngineEvent::RescanStarted {
                 volume: slot.label.clone(),
-                message: "internal panic — エンジンログに詳細".to_string(),
             });
         }
     }
