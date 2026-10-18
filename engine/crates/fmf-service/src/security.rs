@@ -674,13 +674,31 @@ impl TrustedDataRoot {
     /// Returns the first fail-closed traversal or exact-handle delete error.
     pub fn purge(self) -> io::Result<()> {
         delete_descendants(&self.root.file, &self.path)?;
-        delete_handle(&self.root.file)?;
         let Self {
             root,
             program_data_guard,
-            path: _,
+            path,
             quarantined_root: _,
         } = self;
+        // The operational handle has no DELETE access and denies delete
+        // sharing, so release it before the DELETE reopen. The final DACL
+        // already excludes untrusted principals, and the identity is
+        // revalidated as in the strict-to-operational handoff.
+        let identity = root.identity;
+        drop(root);
+        let root = open_checked(
+            &path,
+            Some(ObjectKind::Directory),
+            DELETE_ACCESS | FILE_READ_ATTRIBUTES_ACCESS,
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+        )?;
+        if root.identity != identity {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "machine data root changed before purge could delete it",
+            ));
+        }
+        delete_handle(&root.file)?;
         drop(root);
         drop(program_data_guard);
         Ok(())
@@ -742,11 +760,15 @@ fn open_root(path: &Path) -> io::Result<LockedObject> {
 fn open_operational_root(path: &Path) -> io::Result<LockedObject> {
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 
+    // No DELETE access: Windows 11 21H2 (build 22000) opens a rename or
+    // hard-link target's parent without FILE_SHARE_DELETE, so a DELETE handle
+    // here fails every atomic publish with ERROR_SHARING_VIOLATION. Denying
+    // FILE_SHARE_DELETE is what pins the root against replacement; `purge`
+    // reopens it for DELETE only to remove it.
     open_checked(
         path,
         Some(ObjectKind::Directory),
         SECURITY_WRITE_ACCESS
-            | DELETE_ACCESS
             | FILE_LIST_DIRECTORY_ACCESS
             | FILE_ADD_FILE_ACCESS
             | FILE_ADD_SUBDIRECTORY_ACCESS
@@ -3773,12 +3795,10 @@ mod tests {
         let victim = root.join("victim");
         std::fs::write(&victim, b"victim").expect("victim");
 
+        // Same access as the operational root `purge` walks.
         let root_locked = walk_root(
             &root,
-            DELETE_ACCESS
-                | FILE_READ_ATTRIBUTES_ACCESS
-                | FILE_LIST_DIRECTORY_ACCESS
-                | FILE_TRAVERSE_ACCESS,
+            FILE_READ_ATTRIBUTES_ACCESS | FILE_LIST_DIRECTORY_ACCESS | FILE_TRAVERSE_ACCESS,
         );
 
         // Both temporary directories live under `%TEMP%`, so they are on one
