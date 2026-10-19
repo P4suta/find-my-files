@@ -92,7 +92,7 @@ test-app:
 [private]
 [working-directory: 'engine']
 build-ffi-for-source-gate:
-    cargo build --locked --release -p fmf-ffi
+    cargo build --locked --release --target-dir ../build/engine -p fmf-ffi
 
 # C# unit tests + coverage gate (line+branch >=57; UI is [ExcludeFromCodeCoverage]).
 # Threshold/type/stat live in the test csproj (with ExcludeByFile), so this is just

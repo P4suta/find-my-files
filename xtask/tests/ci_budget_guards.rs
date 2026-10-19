@@ -20,6 +20,14 @@ fn pre_push_uses_the_native_gate_without_shell_conditionals() {
     assert_eq!(verify["run"].as_str(), Some("just verify-push"));
     assert!(include_str!("../../justfile")
         .contains("just {{ if os() == \"windows\" { \"verify\" } else { \"verify-portable\" } }}"));
+    let fixture = include_str!("../../justfile")
+        .split_once("build-ffi-for-source-gate:\n")
+        .expect("native fixture recipe")
+        .1
+        .split_once("\n\n")
+        .expect("fixture recipe end")
+        .0;
+    assert!(fixture.contains("--target-dir ../build/engine"));
 }
 
 fn yaml(source: &str) -> Yaml {
