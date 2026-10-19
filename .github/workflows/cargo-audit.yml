@@ -19,20 +19,42 @@ permissions:
 
 jobs:
   audit:
+    permissions:
+      contents: read
+      pull-requests: read # Read changed PR files for dependency selection.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        if: github.event_name == 'pull_request'
+        id: changes
+        with:
+          filters: |
+            dependencies:
+              - 'engine/Cargo.toml'
+              - 'engine/Cargo.lock'
+              - 'engine/crates/**/Cargo.toml'
+              - 'xtask/Cargo.toml'
+              - 'xtask/Cargo.lock'
+              - '**/audit.toml'
+              - 'mise.toml'
+              - '.github/actions/rust-toolchain/**'
+              - '.github/workflows/cargo-audit.yml'
       - uses: $/.github/actions/rust-toolchain
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        if: github.event_name != 'pull_request' || steps.changes.outputs.dependencies == 'true'
+      - if: github.event_name != 'pull_request' || steps.changes.outputs.dependencies == 'true'
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-audit@0.22.2
           fallback: none
       - name: cargo audit (engine)
+        if: github.event_name != 'pull_request' || steps.changes.outputs.dependencies == 'true'
         run: cargo audit
         working-directory: engine
       - name: cargo audit (xtask)
+        if: github.event_name != 'pull_request' || steps.changes.outputs.dependencies == 'true'
         run: cargo audit
         working-directory: xtask

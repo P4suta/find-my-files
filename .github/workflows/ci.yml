@@ -28,11 +28,16 @@ jobs:
   # Skip the heavy windows jobs on docs-only PRs (ci-required treats their
   # `skipped` as success, so branch protection still passes).
   changes:
+    permissions:
+      contents: read
+      pull-requests: read # Read changed PR files for parser selection.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       code: ${{ steps.f.outputs.code }}
-      fuzz: ${{ steps.f.outputs.fuzz }}
+      fuzz: ${{ steps.f.outputs.fuzz_all == 'true' || steps.f.outputs.fuzz_wire == 'true' || steps.f.outputs.fuzz_core == 'true' || steps.f.outputs.fuzz_usn == 'true' || steps.f.outputs.fuzz_ntfs == 'true' }}
+      fuzz_surfaces: ${{ steps.f.outputs.changes }}
+      bench: ${{ steps.f.outputs.bench }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,17 +61,41 @@ jobs:
               # future-proof instead of hand-maintaining an allowlist that can
               # silently omit a newly added gate.
               - '.github/workflows/**'
-            # fmf-core is listed because its cfg-gate-free parsers are what the
-            # fuzz targets build against. `ondisk` (the NTFS grammar) is now
-            # reachable from Linux too (ADR-0047) but has no target yet, so this
-            # filter is broader than the coverage it triggers — deliberately, so
-            # a grammar change never merges without the existing targets running.
-            fuzz:
+            fuzz_all:
               - 'engine/fuzz/**'
-              - 'engine/crates/fmf-proto/**'
+              - 'engine/Cargo.toml'
+              - 'engine/Cargo.lock'
+              - 'engine/.cargo/**'
+              - 'engine/crates/fmf-core/Cargo.toml'
+              - 'engine/crates/fmf-core/build.rs'
+              - 'engine/crates/fmf-core/src/lib.rs'
+              - 'engine/crates/fmf-core/src/metrics.rs'
+              - 'engine/crates/fmf-core/src/diag/**'
+              - 'engine/crates/fmf-proto/Cargo.toml'
+              - 'engine/crates/fmf-proto/build.rs'
               - 'engine/crates/fmf-contract/**'
-              - 'engine/crates/fmf-core/**'
+              - 'mise.toml'
+              - '.github/actions/rust-toolchain/**'
+              - '.github/actions/fuzz-target/**'
               - '.github/workflows/fuzz.yml'
+              - '.github/workflows/ci.yml'
+            fuzz_wire:
+              - 'engine/crates/fmf-proto/**'
+            fuzz_core:
+              - 'engine/crates/fmf-core/src/query/**'
+              - 'engine/crates/fmf-core/src/index/**'
+              - 'engine/crates/fmf-core/src/wtf8.rs'
+            fuzz_usn:
+              - 'engine/crates/fmf-core/src/usn/**'
+            fuzz_ntfs:
+              - 'engine/crates/fmf-core/src/ondisk/**'
+            bench:
+              - 'engine/crates/fmf-core/**'
+              - 'engine/benches/**'
+              - 'engine/Cargo.toml'
+              - 'engine/Cargo.lock'
+              - 'mise.toml'
+              - '.github/actions/rust-toolchain/**'
               - '.github/workflows/ci.yml'
 
   # ── ubuntu hygiene tier: parallel, no needs, cheap fast-fail signal ──
@@ -377,7 +406,7 @@ jobs:
   # benchmark is nevertheless a release-blocking defect.
   bench:
     needs: [hygiene, changes]
-    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
+    if: github.event_name == 'pull_request' && needs.changes.outputs.bench == 'true'
     runs-on: windows-2025
     timeout-minutes: 25
     steps:
@@ -390,7 +419,7 @@ jobs:
           workspaces: engine
           shared-key: engine-win
           save-if: false
-      - run: cargo bench --locked -p fmf-core --features testutil
+      - run: cargo bench --locked -p fmf-core --features testutil -- --test
         working-directory: engine
 
   # Bounded libFuzzer smoke over the untrusted-input parsers, folded into the
@@ -400,10 +429,12 @@ jobs:
   # skipped, which ci-required treats as success.
   fuzz:
     needs: changes
-    if: needs.changes.outputs.fuzz == 'true'
+    if: github.event_name == 'pull_request' && needs.changes.outputs.fuzz == 'true'
     permissions:
       contents: read
     uses: $/.github/workflows/fuzz.yml
+    with:
+      surfaces: ${{ needs.changes.outputs.fuzz_surfaces }}
 
   # Single required status check. Transitively enforces the leaves and treats
   # `skipped` (docs-only / paths-gated) as success — avoids the "Expected —

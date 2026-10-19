@@ -50,9 +50,9 @@ Canonical patterns: `app/FindMyFiles/Engine/IEngineClient.cs` (Fake/Ffi/Pipe), `
   unexpected exact report schema, a Stryker exit/report mismatch, Rust
   timeouts, and C# timeout/no-coverage/non-redundant-ignored/non-terminal
   outcomes fail.
-- The weekly/on-demand workflow runs Rust and C# independently without
-  `continue-on-error`. Stable release re-runs both gates on the exact immutable
-  source commit in a secretless job, and signing cannot start until it passes.
+- The on-demand workflow runs Rust and C# independently without `continue-on-error`.
+  Stable release re-runs both gates on the exact immutable source commit in a secretless job, and signing cannot start until it passes.
+  Full audits outside a release require manual dispatch; repeating an unchanged source every week adds no new mutation cases.
 - The C# coverage gate is raised incrementally from 15% (ratchet).
 
 ## Re-examination triggers

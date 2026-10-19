@@ -183,6 +183,11 @@ verify: build-ffi-for-source-gate fmt-check lint doc test test-xtask test-app de
 # Run repository-only verification on hosts that cannot build or test the Windows application.
 verify-portable: fmt-check-toml lint-text lint-actions
 
+[group('daily')]
+[doc('Run the native pre-push verification gate')]
+verify-push:
+    just {{ if os() == "windows" { "verify" } else { "verify-portable" } }}
+
 # The dispatched release workflow is the already-linted protected-main workflow;
 # its checkout is build input, not workflow code. Re-run every source and
 # dependency gate there without requiring the Linux-only actionlint verifier on
