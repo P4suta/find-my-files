@@ -45,8 +45,8 @@ jobs:
       # from source) would be slow and pointless for a version check.
       - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
         with:
-          version: "2026.7.13"
-          sha256: 1a3b94edb7b73f75fc15d8a8ca050503d88c0892400421ab01555dbc6cb1a72c
+          version: "v2026.10.15"
+          sha256: 8b53511db7d036db984a92eb63e139d9942a8d179ddbe4e880addfa04a924f96
           install: false
 
       - name: Check pins against latest (beyond-pin)
