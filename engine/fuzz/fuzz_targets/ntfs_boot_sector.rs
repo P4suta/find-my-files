@@ -1,72 +1,68 @@
 #![no_main]
-//! Fuzz the NTFS boot-sector decoder — the first bytes read from a mounted
-//! volume, and the ones that decide every later offset. A crafted VHDX or USB
-//! stick chooses all of them, and `fmf-service` parses them as `LocalSystem`,
-//! so a geometry that overflows or panics is a denial of service on a
-//! privileged process (ADR-0047).
-//!
-//! Input shaping. Raw bytes essentially never satisfy the two magic gates
-//! (`"NTFS    "` at offset 3, `0x55AA` at 510), so a purely raw harness would
-//! spend its whole budget on the first `return None`. The second construction
-//! stamps only those two constants over a 512-byte sector and leaves *every*
-//! geometry field — bytes-per-sector, sectors-per-cluster, total sectors, $MFT
-//! cluster, the signed clusters-per-record code — under fuzzer control, so the
-//! sanity checks themselves are what gets mutated.
-//!
-//! That alone is not enough: the derived arithmetic (`cluster_size`,
-//! `volume_size`, `mft_position`, the record-size shift, and the containment
-//! test that ties them together) sits behind a conjunction of two
-//! power-of-two-in-range tests, which a mutator clears only by chance —
-//! measured at 0 in 200k random inputs. The third construction therefore draws
-//! just those two fields from the small set a real volume can declare and
-//! leaves the sizes they are multiplied by fuzzed, so every `checked_mul`,
-//! `checked_shl` and bound in the second half of the decoder is reached on
-//! every input.
+//! Exercise raw, unaligned, and shaped boot sectors while checking every accepted geometry.
 
 use fmf_core::ondisk::ntfs::decode_boot_sector;
 use libfuzzer_sys::fuzz_target;
 
 const SECTOR_BYTES: usize = 512;
+const MAX_SECTOR_BYTES: u64 = 4096;
+const OEM_RANGE: core::ops::Range<usize> = 3..11;
+const SIGNATURE_RANGE: core::ops::Range<usize> = 510..512;
+const SIGNATURE: [u8; 2] = [0x55, 0xAA];
+const SECTOR_SIZE_RANGE: core::ops::Range<usize> = 11..13;
+const CLUSTER_SECTORS_OFFSET: usize = 13;
+const TOTAL_SECTORS_HIGH_RANGE: core::ops::Range<usize> = 46..48;
+const MFT_CLUSTER_HIGH_RANGE: core::ops::Range<usize> = 53..56;
+const ALIGNMENT_SKEW_MASK: usize = 7;
+const ALIGNMENT_PADDING: u8 = 0xA5;
+const MIN_SECTOR_SHIFT: u32 = 9;
+const SECTOR_SHIFT_CHOICES: u32 = 4;
+const CLUSTER_SHIFT_CHOICES: u32 = 8;
+const CLUSTER_CONTROL: usize = 2;
+
+fn check_geometry(bytes: &[u8]) {
+    if let Some(geometry) = decode_boot_sector(bytes) {
+        assert!(geometry.sector_size.is_power_of_two());
+        assert!((SECTOR_BYTES as u64..=MAX_SECTOR_BYTES).contains(&geometry.sector_size));
+        assert!(geometry.cluster_size.is_power_of_two());
+        assert!(geometry.cluster_size.is_multiple_of(geometry.sector_size));
+        assert!(geometry.file_record_size.is_power_of_two());
+        assert!(geometry
+            .mft_position
+            .checked_add(geometry.file_record_size)
+            .is_some_and(|end| end <= geometry.volume_size));
+    }
+}
 
 fuzz_target!(|data: &[u8]| {
-    // Fixed-offset control prefix: a byte's meaning must not shift when the
-    // mutator changes the input's length.
     let control = |index: usize| u32::from(data.get(index).copied().unwrap_or(0));
-
-    // Raw bytes at a deliberately unaligned address: the decoder may never
-    // rely on the buffer's alignment, and short buffers must fail closed.
-    let skew = control(0) as usize & 7;
-    let mut skewed = vec![0xA5; skew];
+    let skew = control(0) as usize & ALIGNMENT_SKEW_MASK;
+    let mut skewed = vec![ALIGNMENT_PADDING; skew];
     skewed.extend_from_slice(data);
-    let _ = decode_boot_sector(&skewed[skew..]);
+    assert_eq!(
+        decode_boot_sector(data),
+        decode_boot_sector(&skewed[skew..])
+    );
+    check_geometry(data);
 
-    // Past the magic: the whole geometry is attacker-chosen.
     let mut sector = [0u8; SECTOR_BYTES];
     let body = &data[..data.len().min(SECTOR_BYTES)];
     sector[..body.len()].copy_from_slice(body);
-    sector[3..11].copy_from_slice(b"NTFS    ");
-    sector[510..512].copy_from_slice(&[0x55, 0xAA]);
-    let _ = decode_boot_sector(&sector);
+    sector[OEM_RANGE].copy_from_slice(b"NTFS    ");
+    sector[SIGNATURE_RANGE].copy_from_slice(&SIGNATURE);
+    check_geometry(&sector);
 
-    // Same sector, one byte off the natural alignment of every field it holds.
-    let mut unaligned = vec![0xA5];
+    let mut unaligned = vec![ALIGNMENT_PADDING];
     unaligned.extend_from_slice(&sector);
-    let _ = decode_boot_sector(&unaligned[1..]);
+    assert_eq!(
+        decode_boot_sector(&sector),
+        decode_boot_sector(&unaligned[1..])
+    );
 
-    // Past the two power-of-two gates as well: sector and cluster geometry
-    // from the values a real boot sector declares, everything they scale
-    // (total sectors, $MFT cluster, clusters-per-record) still fuzzed.
-    let sector_size = 1u16 << (9 + control(1) % 4); // 512..=4096
-    sector[11..13].copy_from_slice(&sector_size.to_le_bytes());
-    sector[13] = 1 << (control(2) % 8); // 1..=128 sectors per cluster
-
-    // A random 64-bit sector count or $MFT cluster overflows its scaling
-    // multiply about 998 times in 1000, so leaving both raw hides the check
-    // that matters most here — that the $MFT plus one record lands inside the
-    // volume, i.e. that a crafted boot sector cannot aim later reads off the
-    // end of the device. Narrow both fields (the overflow guards stay fuzzed
-    // through the two raw constructions above) so that decision is reached.
-    sector[46..48].fill(0); // total sectors: 48 bits
-    sector[53..56].fill(0); // $MFT first cluster: 40 bits
-    let _ = decode_boot_sector(&sector);
+    let sector_size = 1u16 << (MIN_SECTOR_SHIFT + control(1) % SECTOR_SHIFT_CHOICES);
+    sector[SECTOR_SIZE_RANGE].copy_from_slice(&sector_size.to_le_bytes());
+    sector[CLUSTER_SECTORS_OFFSET] = 1 << (control(CLUSTER_CONTROL) % CLUSTER_SHIFT_CHOICES);
+    sector[TOTAL_SECTORS_HIGH_RANGE].fill(0);
+    sector[MFT_CLUSTER_HIGH_RANGE].fill(0);
+    check_geometry(&sector);
 });

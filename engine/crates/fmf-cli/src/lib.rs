@@ -1,10 +1,7 @@
 //! fmf — developer CLI for the find-my-files engine.
 //!
-//! The crate is a thin clap surface over fmf-core: [`command`] exposes the
-//! parser used by the shipped completion command and [`run`] parses argv and
-//! dispatches. Command implementations live in `cmd/`
-//! (and `bench_support` for the bench-shared pieces); all engine logic stays in
-//! fmf-core.
+//! The crate is a thin clap surface over fmf-core: [`command`] exposes the parser used by the shipped completion command and [`run`] parses argv and dispatches.
+//! Command implementations live in `cmd/` (and `bench_support` for the bench-shared pieces); all engine logic stays in fmf-core.
 
 mod bench_support;
 mod cmd;
@@ -39,13 +36,12 @@ struct Cli {
     /// Suppress the progress spinner and other stderr chrome.
     #[arg(short, long, global = true)]
     quiet: bool,
-    /// Increase log verbosity: `-v` = debug, `-vv` = trace (default: info). The
-    /// `FMF_LOG` environment variable still takes precedence when set.
+    /// Increase log verbosity: `-v` = debug, `-vv` = trace (default: info).
+    /// The `FMF_LOG` environment variable still takes precedence when set.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
-    /// Output format. `json` emits a single machine-readable document on stdout
-    /// (NDJSON for the streaming `watch`); the interactive `index` REPL and
-    /// `completions` are text-only.
+    /// Output format.
+    /// `json` emits a single machine-readable document on stdout (NDJSON for the streaming `watch`); the interactive `index` REPL and `completions` are text-only.
     #[arg(long, value_enum, default_value_t = Format::Human, global = true)]
     format: Format,
     #[command(subcommand)]
@@ -59,8 +55,7 @@ enum Command {
         /// Volume to scan, e.g. `C:` (an NTFS drive root).
         drive: String,
     },
-    /// Build the index for a volume, print stats, then run an interactive
-    /// query REPL (requires an elevated terminal).
+    /// Build the index for a volume, print stats, then run an interactive query REPL (requires an elevated terminal).
     Index {
         /// Volume to index, e.g. `C:` (an NTFS drive root).
         drive: String,
@@ -75,16 +70,14 @@ enum Command {
     Bench {
         /// Volume to index and benchmark, e.g. `C:` (an NTFS drive root).
         drive: String,
-        /// Write the full report to this file as JSON (distinct from the global
-        /// `--format json`, which streams a document to stdout).
+        /// Write the full report to this file as JSON (distinct from the global `--format json`, which streams a document to stdout).
         #[arg(long)]
         out: Option<std::path::PathBuf>,
-        /// Compare against a previous `--out` report and enforce the absolute
-        /// index, query, ready-memory, and snapshot-restore acceptance lines.
+        /// Compare against a previous `--out` report and enforce the absolute index, query, ready-memory, and snapshot-restore acceptance lines.
         #[arg(long)]
         baseline: Option<std::path::PathBuf>,
-        /// Write the complete deterministic gate decision. Requires
-        /// `--baseline`; the file is written before a failing verdict exits.
+        /// Write the complete deterministic gate decision.
+        /// Requires `--baseline`; the file is written before a failing verdict exits.
         #[arg(long, requires = "baseline")]
         evidence: Option<std::path::PathBuf>,
     },
@@ -92,26 +85,19 @@ enum Command {
     Stats {
         /// Volume to index and measure, e.g. `C:` (an NTFS drive root).
         drive: String,
-        /// Also estimate what a trigram index would cost on this volume's
-        /// real names — input to the re-examination criteria of ADR-0002
-        /// (read-only, nothing is built).
+        /// Also estimate what a trigram index would cost on this volume's real names — input to the re-examination criteria of ADR-0002 (read-only, nothing is built).
         #[arg(long)]
         trigram_estimate: bool,
-        /// Also dump per-name statistics over the live entries (fold
-        /// identity, duplication, length distribution, ≥4GiB sizes) — the
-        /// measured inputs for pool/column layout decisions (read-only).
+        /// Also dump per-name statistics over the live entries (fold identity, duplication, length distribution, ≥4GiB sizes) — the measured inputs for pool/column layout decisions (read-only).
         #[arg(long)]
         name_stats: bool,
-        /// Also estimate the name-dictionary-encoding memory delta on this
-        /// volume's real names: store each distinct folded name once and
-        /// replace `name_off`+`name_len` with a `name_id` — the Phase-2
-        /// go/no-go input (read-only, nothing is built).
+        /// Also estimate the name-dictionary-encoding memory delta on this volume's real names: store each distinct folded name once and replace `name_off`+`name_len` with a `name_id` — the Phase-2 go/no-go input (read-only, nothing is built).
         #[arg(long)]
         dict_estimate: bool,
     },
     /// Measure $MFT read throughput per I/O strategy (elevated terminal;
-    /// reads the scan's exact chunk plan, parses nothing). Verdicts live in
-    /// docs/RESEARCH.md — production reads stay buffered until a mode wins.
+    /// reads the scan's exact chunk plan, parses nothing).
+    /// Verdicts live in docs/RESEARCH.md — production reads stay buffered until a mode wins.
     IoProbe {
         /// Volume to probe, e.g. `C:` (an NTFS drive root).
         drive: String,
@@ -133,19 +119,15 @@ enum Command {
         /// Volume to index and watch, e.g. `C:` (an NTFS drive root).
         drive: String,
     },
-    /// Gate criterion micro-bench results: scan change reports written by
-    /// `cargo bench -- --baseline <name>` and exit 1 past the threshold
-    /// (criterion itself never sets an exit code on regressions).
+    /// Gate criterion micro-bench results: scan change reports written by `cargo bench -- --baseline <name>` and exit 1 past the threshold (criterion itself never sets an exit code on regressions).
     CriterionGate {
-        /// Criterion output directory (required; `just bench-micro-check`
-        /// supplies the canonical build/engine/criterion path).
+        /// Criterion output directory (required; `just bench-micro-check` supplies the canonical build/engine/criterion path).
         #[arg(long)]
         dir: std::path::PathBuf,
         /// Relative median regression threshold (0.10 = +10%).
         #[arg(long, default_value_t = 0.10)]
         threshold: f64,
-        /// Write the complete deterministic gate decision even when the
-        /// regression verdict makes the command exit unsuccessfully.
+        /// Write the complete deterministic gate decision even when the regression verdict makes the command exit unsuccessfully.
         #[arg(long)]
         evidence: Option<std::path::PathBuf>,
     },
@@ -157,28 +139,24 @@ enum Command {
     },
 }
 
-/// The clap command tree for `fmf` — the single definition behind argv parsing
-/// and generated shell completions.
+/// The clap command tree for `fmf` — the single definition behind argv parsing and generated shell completions.
 #[must_use]
 pub fn command() -> clap::Command {
     Cli::command()
 }
 
-/// Parse argv, run the requested subcommand, and exit the process with the
-/// mapped `FMF_E_*` code on failure. Returns normally on success.
+/// Parse argv, run the requested subcommand, and exit the process with the mapped `FMF_E_*` code on failure.
+/// Returns normally on success.
 pub fn run() {
     let cli = Cli::parse();
-    // -v/--verbose raises the default level; FMF_LOG still overrides it (init_diag).
     let level = match cli.verbose {
         0 => "info",
         1 => "debug",
         _ => "trace",
     };
-    // Same pipeline as the DLL: stderr log + diag ring + panic capture.
-    fmf_core::diag::init_diag(None, level, fmf_core::diag::DEFAULT_MAX_LOG_FILES);
+    fmf_runtime::diag::init_diag(None, level, fmf_runtime::diag::DEFAULT_MAX_LOG_FILES);
 
     let color = cmd::term::resolve_color(cli.color);
-    // Make the choice global so the styled anstream macros pick it up.
     color.write_global();
     let ctx = cmd::ctx::Ctx {
         quiet: cli.quiet,

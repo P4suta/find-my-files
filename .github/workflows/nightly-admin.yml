@@ -1,14 +1,8 @@
-# Required scheduled sentinel for the elevated-only surface: real C: MFT scan,
-# USN tailing, streaming/reference equivalence, service durability/restore,
-# and real-token/local-user/remote-transport named-pipe isolation.
-# windows-2025 is elevated; sustained green runs promoted this from an
-# informational experiment into both a failing nightly signal and a stable
-# release gate.
 name: nightly-admin
 
 on:
   schedule:
-    - cron: "17 17 * * 1" # Monday 17:17 UTC
+    - cron: "17 17 * * 1"
   workflow_dispatch:
 
 concurrency:
@@ -34,7 +28,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: engine
-          shared-key: engine-win # shared with ci.yml/codeql to reuse deps
+          shared-key: engine-win
       - name: elevated real-volume and machine-security suite
         run: just test-admin
       - name: Upload nextest evidence

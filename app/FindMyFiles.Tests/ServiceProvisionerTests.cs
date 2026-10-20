@@ -4,10 +4,8 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Tests for <see cref="ServiceProvisioner"/>'s two injected boundaries
-/// — the elevated register and the pipe-forcing relaunch behind the setup screen
-/// and the service manager. Drives both as fakes so the flow runs without a real
-/// service, elevation, or exiting the process.</summary>
+/// <summary>Tests for <see cref="ServiceProvisioner"/>'s two injected boundaries — the elevated register and the pipe-forcing relaunch behind the setup screen and the service manager.
+/// Drives both as fakes so the flow runs without a real service, elevation, or exiting the process.</summary>
 public sealed class ServiceProvisionerTests
 {
     private sealed class ProductionHarness
@@ -64,7 +62,7 @@ public sealed class ServiceProvisionerTests
         var sut = Build(relaunch: () => relaunches++, register: () => Task.FromResult(outcome));
 
         Assert.Equal(outcome, await sut.RegisterAsync());
-        Assert.Equal(0, relaunches); // register never relaunches on its own
+        Assert.Equal(0, relaunches);
     }
 
     [Theory]

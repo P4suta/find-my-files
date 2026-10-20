@@ -1,27 +1,25 @@
 //! Engine bring-up for the service.
 //!
-//! The lock-loser path retries with backoff instead of dying: an
-//! `--engine=inproc` UI may legitimately hold the index directory's writer
-//! lock, and that is a transient condition ending when the user closes it —
+//! The lock-loser path retries with backoff instead of dying: an `--engine=inproc` UI may legitimately hold the index directory's writer lock, and that is a transient condition ending when the user closes it —
 //! not a reason to fail the service permanently.
+
+const RETRY_BACKOFF_FACTOR: u32 = 2;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use fmf_core::engine::{Engine, EngineConfig, EngineCreateError};
+use fmf_runtime::engine::{Engine, EngineConfig, EngineCreateError};
 
 const FIRST_DELAY: Duration = Duration::from_secs(5);
 const MAX_DELAY: Duration = Duration::from_mins(1);
 
-/// Retries on `Locked` until success, a non-lock error, `stop`, or
-/// `max_attempts`. Exhaustion returns the `Locked` error — the caller exits
-/// honestly (no SCM crash-loop; P4 wires the exit code).
+/// Retries on `Locked` until success, a non-lock error, `stop`, or `max_attempts`.
+/// Exhaustion returns the `Locked` error — the caller exits honestly (no SCM crash-loop; P4 wires the exit code).
 ///
 /// # Errors
-/// Returns the [`EngineCreateError`]: a non-`Locked` error immediately, or the
-/// last `Locked` error once `max_attempts` is reached or `stop` is set.
+/// Returns the [`EngineCreateError`]: a non-`Locked` error immediately, or the last `Locked` error once `max_attempts` is reached or `stop` is set.
 pub fn create_engine_with_retry(
     index_dir: PathBuf,
     stop: &AtomicBool,
@@ -47,7 +45,7 @@ pub fn create_engine_with_retry(
                     return Err(e);
                 }
                 std::thread::sleep(delay);
-                delay = (delay * 2).min(MAX_DELAY);
+                delay = (delay * RETRY_BACKOFF_FACTOR).min(MAX_DELAY);
             }
             Err(e) => return Err(e),
         }

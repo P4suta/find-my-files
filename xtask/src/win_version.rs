@@ -1,8 +1,8 @@
 //! Native, shell-free reader for Win32 `VERSIONINFO` string resources.
 //!
 //! Release verification must not depend on PowerShell formatting, code pages,
-//! profiles, or executable lookup. The supported Windows path calls version.dll
-//! directly; non-Windows hosts fail closed if asked to verify a Windows bundle.
+//! profiles, or executable lookup.
+//! The supported Windows path calls version.dll directly; non-Windows hosts fail closed if asked to verify a Windows bundle.
 
 use anyhow::{bail, Result};
 use std::path::Path;
@@ -22,6 +22,7 @@ pub struct VersionInfo {
 
 #[cfg(windows)]
 pub fn read(path: &Path) -> Result<VersionInfo> {
+    const FALLBACK_TRANSLATION: (u16, u16) = (0x0409, 0x04b0);
     use anyhow::Context as _;
     use std::os::windows::ffi::OsStrExt as _;
 
@@ -35,8 +36,7 @@ pub fn read(path: &Path) -> Result<VersionInfo> {
     }
     let size_usize = usize::try_from(size).context("VERSIONINFO size does not fit usize")?;
     let mut data = vec![0u8; size_usize];
-    // SAFETY: the API receives the same valid path and a buffer of exactly the
-    // byte length returned by `GetFileVersionInfoSizeW`.
+    /* SAFETY: The API receives the same valid path and a buffer with exactly the byte length returned by `GetFileVersionInfoSizeW`. */
     let loaded = unsafe {
         GetFileVersionInfoW(
             wide_path.as_ptr(),
@@ -51,11 +51,8 @@ pub fn read(path: &Path) -> Result<VersionInfo> {
     }
 
     let mut translations = query_translations(&data);
-    // winresource emits US-English Unicode today. Keep it as a standards-based
-    // fallback for a malformed/missing Translation table, while preferring every
-    // translation the resource itself declares.
-    if !translations.contains(&(0x0409, 0x04b0)) {
-        translations.push((0x0409, 0x04b0));
+    if !translations.contains(&FALLBACK_TRANSLATION) {
+        translations.push(FALLBACK_TRANSLATION);
     }
     for (language, codepage) in translations {
         let prefix = format!(r"\StringFileInfo\{language:04X}{codepage:04X}");
@@ -77,11 +74,12 @@ pub fn read(path: &Path) -> Result<VersionInfo> {
 
 #[cfg(windows)]
 fn query_translations(data: &[u8]) -> Vec<(u16, u16)> {
+    const TRANSLATION_BYTES: u32 = 4;
+    const WORDS_PER_TRANSLATION: usize = 2;
     let subblock = wide(r"\VarFileInfo\Translation");
     let mut buffer = ptr::null_mut::<c_void>();
     let mut byte_len = 0u32;
-    // SAFETY: `data` remains alive, `subblock` is NUL-terminated, and both
-    // out-pointers are writable for the duration of the call.
+    /* SAFETY: `data` remains alive, `subblock` has a NUL terminator, and both output pointers remain writable throughout the call. */
     let found = unsafe {
         VerQueryValueW(
             data.as_ptr().cast::<c_void>(),
@@ -90,17 +88,17 @@ fn query_translations(data: &[u8]) -> Vec<(u16, u16)> {
             &raw mut byte_len,
         )
     };
-    if found == 0 || buffer.is_null() || byte_len < 4 {
+    if found == 0 || buffer.is_null() || byte_len < TRANSLATION_BYTES {
         return Vec::new();
     }
-    let Ok(word_len) = usize::try_from(byte_len / 2) else {
+    let Ok(word_len) = usize::try_from(byte_len / size_of::<u16>() as u32) else {
         return Vec::new();
     };
-    // SAFETY: version.dll returned a buffer inside `data` with `byte_len`
-    // bytes. Translation entries are two aligned u16 values.
+    /* SAFETY: version.dll returned `byte_len` bytes inside the live `data` buffer.
+    Translation entries contain pairs of aligned u16 values. */
     let words = unsafe { std::slice::from_raw_parts(buffer.cast::<u16>(), word_len) };
     words
-        .chunks_exact(2)
+        .chunks_exact(WORDS_PER_TRANSLATION)
         .map(|pair| (pair[0], pair[1]))
         .collect()
 }
@@ -110,8 +108,7 @@ fn query_string(data: &[u8], subblock: &str) -> Option<String> {
     let subblock = wide(subblock);
     let mut buffer = ptr::null_mut::<c_void>();
     let mut char_len = 0u32;
-    // SAFETY: `data` remains alive, `subblock` is NUL-terminated, and both
-    // out-pointers are writable for the duration of the call.
+    /* SAFETY: `data` remains alive, `subblock` has a NUL terminator, and both output pointers remain writable throughout the call. */
     let found = unsafe {
         VerQueryValueW(
             data.as_ptr().cast::<c_void>(),
@@ -124,8 +121,7 @@ fn query_string(data: &[u8], subblock: &str) -> Option<String> {
         return None;
     }
     let char_len = usize::try_from(char_len).ok()?;
-    // SAFETY: for a string query, version.dll returns `char_len` UTF-16 code
-    // units inside the still-live VERSIONINFO buffer.
+    /* SAFETY: For a string query, version.dll returns `char_len` UTF-16 code units inside the live VERSIONINFO buffer. */
     let value = unsafe { std::slice::from_raw_parts(buffer.cast::<u16>(), char_len) };
     let end = value
         .iter()

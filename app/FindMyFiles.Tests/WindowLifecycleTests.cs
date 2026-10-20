@@ -5,15 +5,13 @@ namespace FindMyFiles.Tests;
 
 public sealed class WindowLifecycleTests
 {
-    // ADR-0030: a close (×) hides only when the setting is on, the exit is not
-    // explicit, and Explorer confirms that a real tray icon exists.
     [Theory]
-    [InlineData(false, false, false, false)] // off, no icon → exit
-    [InlineData(false, false, true, false)] // off, icon → exit
-    [InlineData(false, true, true, false)] // off, explicit exit → exit
-    [InlineData(true, true, true, false)] // on, explicit exit → exit
-    [InlineData(true, false, false, false)] // on, missing icon → exit
-    [InlineData(true, false, true, true)] // on, real icon → hide
+    [InlineData(false, false, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(false, true, true, false)]
+    [InlineData(true, true, true, false)]
+    [InlineData(true, false, false, false)]
+    [InlineData(true, false, true, true)]
     public void ShouldHideToTray_TruthTable(
         bool closeToTray,
         bool explicitExit,
@@ -30,18 +28,18 @@ public sealed class WindowLifecycleTests
     {
         var registration = new TrayIcon.RegistrationState();
 
-        registration.RecordAttempt(succeeded: false); // initial NIM_ADD failure
+        registration.RecordAttempt(succeeded: false);
         Assert.False(registration.IsAvailable);
 
         registration.RecordAttempt(succeeded: true);
         Assert.True(registration.IsAvailable);
 
-        registration.MarkUnavailable(); // TaskbarCreated: Explorer lost it
+        registration.MarkUnavailable();
         Assert.False(registration.IsAvailable);
-        registration.RecordAttempt(succeeded: false); // re-add failure
+        registration.RecordAttempt(succeeded: false);
         Assert.False(registration.IsAvailable);
 
-        registration.RecordAttempt(succeeded: true); // later re-add succeeds
+        registration.RecordAttempt(succeeded: true);
         Assert.True(registration.IsAvailable);
     }
 }

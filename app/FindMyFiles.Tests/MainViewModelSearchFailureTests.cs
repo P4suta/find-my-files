@@ -6,15 +6,9 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Behavioural tests for <see cref="MainViewModel"/>'s
-/// <c>OnSearchFailed</c> across engine connection states. A surfaced
-/// search-failure InfoBar must be suppressed while the connection is still
-/// settling (Connecting/Reconnecting already explain the gap via the
-/// "preparing" / reconnect banner), yet surfaced once the engine is usable
-/// (Connected/InProc). The failure is driven end-to-end: the stub's
-/// <see cref="StubEngineClient.ThrowOnSearch"/> makes the debounced requery
-/// raise the orchestrator's <c>SearchFailed</c>, which the view model handles
-/// on the (manual) UI thread.</summary>
+/// <summary>Behavioural tests for <see cref="MainViewModel"/>'s <c>OnSearchFailed</c> across engine connection states.
+/// A surfaced search-failure InfoBar must be suppressed while the connection is still settling (Connecting/Reconnecting already explain the gap via the "preparing" / reconnect banner), yet surfaced once the engine is usable (Connected/InProc).
+/// The failure is driven end-to-end: the stub's <see cref="StubEngineClient.ThrowOnSearch"/> makes the debounced requery raise the orchestrator's <c>SearchFailed</c>, which the view model handles on the (manual) UI thread.</summary>
 public sealed class MainViewModelSearchFailureTests : IDisposable
 {
     private readonly ManualDispatcher _dispatcher = new();
@@ -28,16 +22,15 @@ public sealed class MainViewModelSearchFailureTests : IDisposable
         _vm = new MainViewModel(_engine, _dispatcher, new AppSettings());
     }
 
-    /// <summary>Type a non-empty query and let the debounce elapse so the
-    /// orchestrator issues the (failing) search. The stub throws synchronously,
-    /// so <c>SearchFailed</c> → <c>OnSearchFailed</c> runs inline on the manual
-    /// dispatcher's "UI thread".</summary>
+    /// <summary>Type a non-empty query and let the debounce elapse so the orchestrator issues the (failing) search.
+    /// The stub throws synchronously,
+    /// so <c>SearchFailed</c> → <c>OnSearchFailed</c> runs inline on the manual dispatcher's "UI thread".</summary>
     private void DriveSearchFailure(EngineConnectionState connection, Exception failure)
     {
         _engine.Connection = connection;
         _engine.ThrowOnSearch = failure;
-        _vm.SearchText = "report"; // arms the 50ms debounce
-        _dispatcher.FireTimers();  // interval elapses → requery → SearchAsync throws
+        _vm.SearchText = "report";
+        _dispatcher.FireTimers();
     }
 
     private bool HasErrorNotification =>
@@ -52,8 +45,6 @@ public sealed class MainViewModelSearchFailureTests : IDisposable
         var connection = (EngineConnectionState)connectionValue;
         DriveSearchFailure(connection, new EngineException("boom", 7));
 
-        // The reconnect banner / "preparing" state already explains the gap, so
-        // a search that merely raced the connect must not stack an error on top.
         Assert.DoesNotContain(_vm.Notifications.Items, n => n.Severity == NotifySeverity.Error);
     }
 
@@ -98,9 +89,6 @@ public sealed class MainViewModelSearchFailureTests : IDisposable
 
         var error = Assert.Single(_vm.Notifications.Items, n => n.Severity == NotifySeverity.Error);
 
-        // Known failures carry both the localized error text (FMF_E_LOCKED here)
-        // and the engine's English detail, joined on a newline — the app absorbs
-        // the service's English-only surface for diagnostics.
         var localized = MainViewModel.EngineErrorText(new EngineException("raw detail", 7));
         Assert.Equal($"{localized}\nraw detail", error.Detail);
     }
@@ -108,20 +96,14 @@ public sealed class MainViewModelSearchFailureTests : IDisposable
     [Fact]
     public void Suppressed_failure_still_clears_the_no_results_empty_state()
     {
-        // Seed a live query, then assert the empty state independently of the
-        // SearchText setter (which also clears it): a background USN requery is
-        // what fails here, so HasNoResults can only be reset by OnSearchFailed.
         _vm.SearchText = "report";
-        _vm.HasNoResults = true; // a prior query had landed empty
+        _vm.HasNoResults = true;
         _engine.Connection = EngineConnectionState.Reconnecting;
         _engine.ThrowOnSearch = new EngineException("boom", 7);
 
-        _engine.RaiseIndexChanged("F:"); // idle USN tick → marshaled requery
-        _dispatcher.DrainQueue();         // …which fails inside RunQueryAsync
+        _engine.RaiseIndexChanged("F:");
+        _dispatcher.DrainQueue();
 
-        // OnSearchFailed clears HasNoResults before the suppression branch — an
-        // error must never leave the "no results" empty state showing, even when
-        // the InfoBar itself is suppressed during reconnect.
         Assert.False(_vm.HasNoResults);
         Assert.False(HasErrorNotification);
     }

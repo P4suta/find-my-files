@@ -2,21 +2,17 @@ using System.Collections.Concurrent;
 
 namespace FindMyFiles.Services;
 
-/// <summary>
-/// Process-wide notification funnel. Anything (global handlers, background
-/// tasks, the engine callback) can post from any thread; the ViewModel
-/// subscribes and marshals to the UI InfoBar stack. Posts are also mirrored
-/// to the file log so nothing the user saw is missing from a bug report.
+/// <summary> Process-wide notification funnel.
+/// Anything (global handlers, background tasks, the engine callback) can post from any thread; the ViewModel subscribes and marshals to the UI InfoBar stack.
+/// Posts are also mirrored to the file log so nothing the user saw is missing from a bug report.
 /// </summary>
 internal static class Notifier
 {
     private static readonly System.Threading.Lock Gate = new();
     private static Action<AppNotification>? _posted;
 
-    /// <summary>Raised on the posting thread for each notification once a
-    /// subscriber exists. Subscribe via <see cref="Attach"/> (which also
-    /// replays the pre-subscription backlog) rather than touching this
-    /// directly; the ViewModel handler marshals to the UI thread.</summary>
+    /// <summary>Raised on the posting thread for each notification once a subscriber exists.
+    /// Subscribe via <see cref="Attach"/> (which also replays the pre-subscription backlog) rather than touching this directly; the ViewModel handler marshals to the UI thread.</summary>
     public static event Action<AppNotification>? Posted
     {
         add
@@ -39,15 +35,8 @@ internal static class Notifier
     /// <summary>Queue for posts that happen before the UI subscribes.</summary>
     private static readonly ConcurrentQueue<AppNotification> Pending = new();
 
-    /// <summary>Post a notification from any thread. Mirrors it to the file log
-    /// at the level matching <paramref name="severity"/> (so nothing the user
-    /// saw is missing from a bug report), then hands it to the subscriber — or
-    /// queues it until one attaches.</summary>
-    /// <param name="severity">Style/level and auto-dismiss policy.</param>
-    /// <param name="message">Headline text.</param>
-    /// <param name="detail">Optional secondary line (e.g. exception message).</param>
-    /// <param name="actionLabel">Caption for an optional action button.</param>
-    /// <param name="action">Callback for the action button, if any.</param>
+    /// <summary>Post a notification from any thread.
+    /// Mirrors it to the file log at the level matching <paramref name="severity"/> (so nothing the user saw is missing from a bug report), then hands it to the subscriber — or queues it until one attaches.</summary> <param name="severity">Style/level and auto-dismiss policy.</param> <param name="message">Headline text.</param> <param name="detail">Optional secondary line (e.g. exception message).</param> <param name="actionLabel">Caption for an optional action button.</param> <param name="action">Callback for the action button, if any.</param>
     public static void Post(
         NotifySeverity severity,
         string message,
@@ -119,18 +108,13 @@ internal static class Notifier
                 }
                 catch
                 {
-                    // A diagnostics failure must never escape the global
-                    // notification boundary either.
                 }
             }
         }
     }
 
-    /// <summary>Attach one subscriber and drain posts that arrived before the
-    /// UI was ready. The returned token removes exactly this subscription.</summary>
-    /// <param name="handler">Subscriber invoked for each notification, including
-    /// the replayed pre-subscription backlog.</param>
-    /// <returns>An idempotent subscription token.</returns>
+    /// <summary>Attach one subscriber and drain posts that arrived before the UI was ready.
+    /// The returned token removes exactly this subscription.</summary> <param name="handler">Subscriber invoked for each notification, including the replayed pre-subscription backlog.</param> <returns>An idempotent subscription token.</returns>
     public static IDisposable Attach(Action<AppNotification> handler)
     {
         ArgumentNullException.ThrowIfNull(handler);
@@ -147,10 +131,8 @@ internal static class Notifier
     }
 
 #if FMF_TEST_SEAMS
-    /// <summary>Test-only: drop every subscriber and the pending backlog so this
-    /// process-wide static cannot leak posts across tests — a post made with no
-    /// live subscriber is queued and replayed into the next one to attach. Never
-    /// for production, where the app keeps a single long-lived subscriber.</summary>
+    /// <summary>Test-only: drop every subscriber and the pending backlog so this process-wide static cannot leak posts across tests — a post made with no live subscriber is queued and replayed into the next one to attach.
+    /// Never for production, where the app keeps a single long-lived subscriber.</summary>
     internal static void ResetForTests()
     {
         lock (Gate)

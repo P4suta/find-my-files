@@ -1,10 +1,5 @@
 name: Deploy GitHub Pages
 
-# Publishes the landing page plus the canonical design book:
-#   /        — landing page (site/index.html, ja/en)
-#   /book/   — mdBook design docs rendered from docs/ (ADRs, security, research)
-# Requires Settings > Pages > Source = "GitHub Actions" (set once after publish).
-
 on:
   push:
     branches: [main]
@@ -17,13 +12,9 @@ on:
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
-# Least privilege: read-only at the top level; the deploy job requests the
-# Pages + OIDC writes it needs (Scorecard's Token-Permissions check rewards
-# job-scoped writes over top-level ones).
 permissions:
   contents: read
 
-# One concurrent deploy; let in-progress runs finish.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -40,7 +31,6 @@ jobs:
           persist-credentials: false
 
       - uses: $/.github/actions/rust-toolchain
-      # Install only the two release-archive binaries this job executes.
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: just@1.54.0,mdbook@0.5.3
@@ -55,14 +45,11 @@ jobs:
         with:
           path: build/site
 
-  # Keep Pages write authority and OIDC away from repository build code. This
-  # runner receives only upload-pages-artifact's completed static-site archive
-  # and executes pinned official Pages actions.
   deploy:
     needs: build
     permissions:
-      pages: write # deploy the verified Pages artifact
-      id-token: write # authenticate the deployment to GitHub Pages
+      pages: write # Permission: Deploy the verified Pages artifact.
+      id-token: write # Permission: Authenticate the Pages deployment.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:

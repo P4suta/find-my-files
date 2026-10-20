@@ -1,16 +1,16 @@
 //! On-demand service lifecycle (ADR-0027): the machine-wide "last use" stamp,
 //! the stable binary-copy location, and the pure idle-stop / GC decisions.
 //!
-//! The two decisions are pure functions over their inputs, unit-tested without
-//! a running service — the same testable-seam discipline as the app-side
-//! `DecideAuto`. All time/file I/O lives at the edges of this module.
+//! The two decisions are pure functions over their inputs, unit-tested without a running service — the same testable-seam discipline as the app-side `DecideAuto`.
+//! All time/file I/O lives at the edges of this module.
+
+const UTF16_LE_BOM: [u8; 2] = [0xFF, 0xFE];
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Scheduled Task name for the daily GC (registered by `install`, removed by
-/// `uninstall`/`gc`). A fixed constant — the task action is the stable binary
-/// copy plus the `gc` verb, never user input.
+/// Scheduled Task name for the daily GC (registered by `install`, removed by `uninstall`/`gc`).
+/// A fixed constant — the task action is the stable binary copy plus the `gc` verb, never user input.
 pub const GC_TASK_NAME: &str = "find-my-files engine GC";
 
 /// Seconds in a day — the GC threshold is expressed in days.
@@ -18,10 +18,8 @@ const SECS_PER_DAY: u64 = 86_400;
 
 /// Path of the machine-wide `last_use` stamp.
 ///
-/// `%ProgramData%\find-my-files\last_use` — Unix seconds (text) of the most
-/// recent client connection / graceful stop, read by `gc` to age out an unused
-/// install. Lives in the SYSTEM+Administrators data root, so a standard user
-/// cannot forge it.
+/// `%ProgramData%\find-my-files\last_use` — Unix seconds (text) of the most recent client connection / graceful stop, read by `gc` to age out an unused install.
+/// Lives in the SYSTEM+Administrators data root, so a standard user cannot forge it.
 #[must_use]
 pub fn last_use_path(data_dir: &Path) -> PathBuf {
     data_dir.join("last_use")
@@ -29,23 +27,19 @@ pub fn last_use_path(data_dir: &Path) -> PathBuf {
 
 /// Path of the stable service-binary copy in the data root.
 ///
-/// `%ProgramData%\find-my-files\fmf-service.exe` — the service binary copied out
-/// of the (portable) app bundle at install, so the SCM registration and the GC
-/// task survive the app folder being deleted, and so a standard user — who
-/// cannot write the hardened data root — cannot replace the SYSTEM binary.
+/// `%ProgramData%\find-my-files\fmf-service.exe` — the service binary copied out of the (portable) app bundle at install, so the SCM registration and the GC task survive the app folder being deleted, and so a standard user — who cannot write the hardened data root — cannot replace the SYSTEM binary.
 #[must_use]
 pub fn stable_exe_path(data_dir: &Path) -> PathBuf {
     data_dir.join("fmf-service.exe")
 }
 
-/// Atomically records "the service was used now" through the already verified
-/// machine-root handle. No path-only staging or replacement API is used.
+/// Atomically records "the service was used now" through the already verified machine-root handle.
+/// No path-only staging or replacement API is used.
 ///
 /// # Errors
 ///
-/// Returns timestamp conversion or trusted-root publication errors. Callers
-/// must surface the failure rather than letting GC mistake an old stamp for an
-/// unused installation.
+/// Returns timestamp conversion or trusted-root publication errors.
+/// Callers must surface the failure rather than letting GC mistake an old stamp for an unused installation.
 pub fn stamp_last_use(root: &crate::security::TrustedDataRoot) -> std::io::Result<()> {
     stamp_last_use_with_sddl(root, SystemTime::now(), &crate::security::data_dir_sddl())
 }
@@ -64,9 +58,8 @@ fn stamp_last_use_with_sddl(
 
 /// Reads the last-use stamp.
 ///
-/// A missing stamp is `Ok(None)`. Malformed content and every other I/O failure
-/// are errors so the GC command fails closed instead of silently classifying a
-/// damaged installation as fresh or stale.
+/// A missing stamp is `Ok(None)`.
+/// Malformed content and every other I/O failure are errors so the GC command fails closed instead of silently classifying a damaged installation as fresh or stale.
 ///
 /// # Errors
 ///
@@ -85,8 +78,7 @@ pub fn read_last_use(data_dir: &Path) -> std::io::Result<Option<SystemTime>> {
 /// Reads a last-use stamp from an already verified file handle.
 ///
 /// # Errors
-/// Returns I/O errors, `InvalidData` for malformed/oversized Unix seconds, or
-/// `InvalidData` when the timestamp cannot be represented by `SystemTime`.
+/// Returns I/O errors, `InvalidData` for malformed/oversized Unix seconds, or `InvalidData` when the timestamp cannot be represented by `SystemTime`.
 pub fn read_last_use_file(
     mut file: std::fs::File,
     display_path: &Path,
@@ -125,10 +117,8 @@ pub fn read_last_use_file(
 
 /// Pure idle-stop decision (ADR-0027).
 ///
-/// Stop only once a client has connected and gone (`seen_client`), nothing is
-/// live now (`active == 0`), no index pass is in flight (`indexing`), and the
-/// idle gap has reached the timeout. `timeout == 0` (disabled) is handled by the
-/// caller.
+/// Stop only once a client has connected and gone (`seen_client`), nothing is live now (`active == 0`), no index pass is in flight (`indexing`), and the idle gap has reached the timeout.
+/// `timeout == 0` (disabled) is handled by the caller.
 #[must_use]
 pub fn idle_should_stop(
     seen_client: bool,
@@ -143,32 +133,24 @@ pub fn idle_should_stop(
 /// Serializes the daily GC Scheduled Task definition for `schtasks /Create /XML`.
 ///
 /// Returned as **UTF-16LE with a BOM** under an `encoding="UTF-16"` declaration:
-/// `schtasks` starts reading the file as UTF-16 and aborts at the declaration
-/// with "Cannot switch the encoding" `(1,40)` on non-English Windows (e.g. ja-JP)
-/// when the bytes are UTF-8. UTF-16LE+BOM is the form Windows itself exports, so
-/// the definition loads on every locale. `<Command>`/`<Arguments>` are separate
-/// elements, sidestepping `/TR` command-line quoting; the action runs the stable
-/// binary copy with the `gc` verb as SYSTEM (`S-1-5-18`). The fixed descriptor
-/// from [`crate::security::gc_task_sddl`] is embedded in registration metadata
-/// so owner/group/DACL hardening is atomic with task creation. The `stable_exe`
-/// process token is reduced to `SeChangeNotifyPrivilege`, matching the service.
+/// `schtasks` starts reading the file as UTF-16 and aborts at the declaration with "Cannot switch the encoding" `(1,40)` on non-English Windows (e.g. ja-JP) when the bytes are UTF-8.
+/// UTF-16LE+BOM is the form Windows itself exports, so the definition loads on every locale.
+/// `<Command>`/`<Arguments>` are separate elements, sidestepping `/TR` command-line quoting; the action runs the stable binary copy with the `gc` verb as SYSTEM (`S-1-5-18`).
+/// The fixed descriptor from [`crate::security::gc_task_sddl`] is embedded in registration metadata so owner/group/DACL hardening is atomic with task creation.
+/// The `stable_exe` process token is reduced to `SeChangeNotifyPrivilege`, matching the service.
 /// The `stable_exe` path is the fixed hardened-data-root copy (never user input),
 /// so it needs no escaping.
-/// No `RequiredPrivileges`/`ProcessTokenSidType`: those are `IPrincipal2`
-/// properties, and the schema `schtasks /Create /XML` validates against has no
-/// such elements at any `Task version` — measured, both are rejected with "the
-/// task XML contains an unexpected node" on 1.3 and 1.4 alike. Narrowing the GC
-/// task's token needs COM registration (`ITaskService` + `IPrincipal2`) rather
-/// than a richer document. The *service* still has its privilege set narrowed
-/// via `ChangeServiceConfig2(SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO)`, which is
-/// a different mechanism and does work.
+/// No `RequiredPrivileges`/`ProcessTokenSidType`: those are `IPrincipal2` properties, and the schema `schtasks /Create /XML` validates against has no such elements at any `Task version` — measured, both are rejected with "the task XML contains an unexpected node" on 1.3 and 1.4 alike.
+/// Narrowing the GC task's token needs COM registration (`ITaskService` + `IPrincipal2`) rather than a richer document.
+/// The *service* still has its privilege set narrowed via `ChangeServiceConfig2(SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO)`, which is a different mechanism and does work.
 #[must_use]
 pub fn gc_task_xml(stable_exe: &Path) -> Vec<u8> {
+    const TASK_XML_NAMESPACE: &str = "http://schemas.microsoft.com/windows/2004/02/mit/task";
     let command = xml_text(&stable_exe.display().to_string());
     let security_descriptor = xml_text(crate::security::gc_task_sddl());
     let xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
-         <Task version=\"1.3\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
+         <Task version=\"1.3\" xmlns=\"{TASK_XML_NAMESPACE}\">\n\
          <RegistrationInfo><SecurityDescriptor>{security_descriptor}</SecurityDescriptor><Description>find-my-files engine on-demand GC (ADR-0027)</Description></RegistrationInfo>\n\
          <Triggers><CalendarTrigger><StartBoundary>2024-01-01T03:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers>\n\
          <Principals><Principal id=\"Author\"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\n\
@@ -176,10 +158,8 @@ pub fn gc_task_xml(stable_exe: &Path) -> Vec<u8> {
          <Actions Context=\"Author\"><Exec><Command>{command}</Command><Arguments>gc</Arguments></Exec></Actions>\n\
          </Task>\n",
     );
-    // UTF-16LE + BOM (see the doc comment): the BOM is what tells schtasks to read
-    // the rest as UTF-16, matching the declaration.
-    let mut bytes = Vec::with_capacity(2 + xml.len() * 2);
-    bytes.extend_from_slice(&[0xFF, 0xFE]); // UTF-16LE byte-order mark
+    let mut bytes = Vec::with_capacity(UTF16_LE_BOM.len() + xml.len() * size_of::<u16>());
+    bytes.extend_from_slice(&UTF16_LE_BOM);
     for unit in xml.encode_utf16() {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
@@ -203,8 +183,7 @@ fn xml_text(value: &str) -> String {
 
 /// Pure GC decision (ADR-0027): remove an install unused for `max_idle_days`.
 ///
-/// `0` disables it; a missing (`None`) stamp is conservative — never GC without
-/// evidence of staleness; a `last_use` in the future (clock skew) never fires.
+/// `0` disables it; a missing (`None`) stamp is conservative — never GC without evidence of staleness; a `last_use` in the future (clock skew) never fires.
 #[must_use]
 pub fn gc_should_remove(now: SystemTime, last_use: Option<SystemTime>, max_idle_days: u64) -> bool {
     if max_idle_days == 0 {
@@ -212,7 +191,7 @@ pub fn gc_should_remove(now: SystemTime, last_use: Option<SystemTime>, max_idle_
     }
     let Some(last) = last_use else { return false };
     let Ok(idle) = now.duration_since(last) else {
-        return false; // last_use is in the future — clock skew, do nothing
+        return false;
     };
     idle >= Duration::from_secs(max_idle_days.saturating_mul(SECS_PER_DAY))
 }
@@ -236,7 +215,6 @@ mod tests {
     #[test]
     fn idle_stop_requires_seen_idle_and_not_indexing() {
         let t = Duration::from_mins(5);
-        // Happy path: a client came and went, nothing live, not indexing, gap reached.
         assert!(idle_should_stop(
             true,
             0,
@@ -244,7 +222,6 @@ mod tests {
             Duration::from_secs(301),
             t
         ));
-        // Never saw a client → don't stop (client-less console bring-up).
         assert!(!idle_should_stop(
             false,
             0,
@@ -252,7 +229,6 @@ mod tests {
             Duration::from_secs(999),
             t
         ));
-        // A live connection → never stop.
         assert!(!idle_should_stop(
             true,
             1,
@@ -260,7 +236,6 @@ mod tests {
             Duration::from_secs(999),
             t
         ));
-        // An index pass in flight → never stop.
         assert!(!idle_should_stop(
             true,
             0,
@@ -268,7 +243,6 @@ mod tests {
             Duration::from_secs(999),
             t
         ));
-        // Gap not yet reached → keep waiting.
         assert!(!idle_should_stop(true, 0, false, Duration::from_mins(2), t));
     }
 
@@ -277,15 +251,10 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_secs(30 * SECS_PER_DAY);
         let eight_days_ago = UNIX_EPOCH + Duration::from_secs(22 * SECS_PER_DAY);
         let yesterday = UNIX_EPOCH + Duration::from_secs(29 * SECS_PER_DAY);
-        // 8 days idle, threshold 7 → remove.
         assert!(gc_should_remove(now, Some(eight_days_ago), 7));
-        // 1 day idle → keep.
         assert!(!gc_should_remove(now, Some(yesterday), 7));
-        // Disabled (0) → never remove, even when ancient.
         assert!(!gc_should_remove(now, Some(eight_days_ago), 0));
-        // No stamp → conservative keep.
         assert!(!gc_should_remove(now, None, 7));
-        // Future stamp (clock skew) → keep.
         let future = UNIX_EPOCH + Duration::from_secs(40 * SECS_PER_DAY);
         assert!(!gc_should_remove(now, Some(future), 7));
     }
@@ -294,11 +263,8 @@ mod tests {
     fn gc_task_xml_is_utf16le_bom_for_schtasks() {
         let exe = Path::new(r"C:\ProgramData\find-my-files\fmf-service.exe");
         let bytes = gc_task_xml(exe);
-        // Regression (ja-JP): it was UTF-8 and `schtasks /Create /XML` failed with
-        // "Cannot switch the encoding" at the declaration. Must be UTF-16LE + BOM.
         assert_eq!(&bytes[..2], &[0xFF, 0xFE], "missing UTF-16LE BOM");
         assert_eq!(bytes.len() % 2, 0, "UTF-16 code units are 2 bytes");
-        // Decode back past the BOM and check the declaration + the SYSTEM action.
         let units: Vec<u16> = bytes[2..]
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -317,11 +283,6 @@ mod tests {
             "with the gc verb"
         );
         assert!(text.contains("<UserId>S-1-5-18</UserId>"), "as SYSTEM");
-        // Tripwire, not a feature check. These elements were present here and
-        // made every real registration fail while this very test stayed green:
-        // a string assertion cannot tell a valid element from one the schema
-        // rejects. `gc_task_xml_registers_with_schtasks` is what proves the
-        // document is accepted; this only stops them creeping back.
         for unsupported in ["RequiredPrivileges", "ProcessTokenSidType"] {
             assert!(
                 !text.contains(unsupported),
@@ -393,7 +354,7 @@ mod tests {
 
     #[test]
     fn last_use_rejects_corruption_instead_of_treating_it_as_missing() {
-        let dir = fmf_core::index::testutil::TestDir::new();
+        let dir = fmf_runtime::index::testutil::TestDir::new();
         std::fs::write(last_use_path(dir.path()), b"not-unix-seconds").expect("corrupt stamp");
 
         let error = read_last_use(dir.path()).expect_err("corruption must fail closed");
@@ -403,7 +364,7 @@ mod tests {
 
     #[test]
     fn last_use_rejects_oversized_control_file() {
-        let dir = fmf_core::index::testutil::TestDir::new();
+        let dir = fmf_runtime::index::testutil::TestDir::new();
         std::fs::write(last_use_path(dir.path()), vec![b'1'; 33]).expect("oversized stamp");
 
         let error = read_last_use(dir.path()).expect_err("control file read must be bounded");
@@ -413,7 +374,7 @@ mod tests {
 
     #[test]
     fn last_use_propagates_non_not_found_io_errors() {
-        let dir = fmf_core::index::testutil::TestDir::new();
+        let dir = fmf_runtime::index::testutil::TestDir::new();
         std::fs::create_dir(last_use_path(dir.path())).expect("directory at stamp path");
 
         let error = read_last_use(dir.path()).expect_err("I/O faults must fail closed");

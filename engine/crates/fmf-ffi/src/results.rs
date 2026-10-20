@@ -4,8 +4,8 @@ use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock};
 
-use fmf_core::engine::{EngineError, ResultSet};
-use fmf_core::query::QueryOptions;
+use fmf_runtime::engine::{EngineError, ResultSet};
+use fmf_runtime::query::QueryOptions;
 use parking_lot::Mutex;
 
 use crate::allocation::next_owner_id;
@@ -18,9 +18,6 @@ use crate::{
     FMF_E_CANCELLED, FMF_E_INVALID_ARG, FMF_E_IO, FMF_E_QUERY_SYNTAX, FMF_E_STALE, FMF_OK,
 };
 
-// ── Query & paging ──────────────────────────────────────────────────────
-
-// The query/page PODs radiate from the contract (ADR-0018).
 pub use fmf_contract::pod::{FmfPage, FmfQueryOptions, FmfRow};
 
 /// Per-query correlation counter for the in-process FFI path (see `fmf_query`).
@@ -67,24 +64,21 @@ pub(crate) fn purge_engine(engine_id: usize) {
         .retain(|_, entry| entry.engine_id != engine_id);
 }
 
-/// Runs a query against the engine, returning an opaque result-set handle plus
-/// the total match count and an optional JSON query trace.
+/// Runs a query against the engine, returning an opaque result-set handle plus the total match count and an optional JSON query trace.
 ///
 /// Writes the result-set handle to `out_handle`, the match count to `out_count`,
-/// and (when `out_trace` is non-null) a `FmfBlob` holding the stage-breakdown
-/// trace as JSON. Returns `FMF_OK` on success or an `FMF_E_*` code.
+/// and (when `out_trace` is non-null) a `FmfBlob` holding the stage-breakdown trace as JSON.
+/// Returns `FMF_OK` on success or an `FMF_E_*` code.
 ///
 /// # Safety
 ///
-/// `query_utf8` must point to readable, NUL-terminated UTF-8 and `options`
-/// must point to one aligned, initialized `FmfQueryOptions`; both stay
-/// immutable for this call. `out_handle` and `out_count` must be aligned and
-/// writable for one value each. A non-null `out_trace` must likewise be
-/// writable for one pointer. Once the required output pointers are validated,
-/// all outputs are initialized to null/zero before any other argument or handle
-/// validation. All input/output regions must be disjoint. The result handle
-/// remains registry-owned until `fmf_result_free`; a returned trace remains
-/// valid until its `owner_id` is passed to `fmf_blob_free`.
+/// `query_utf8` must point to readable, NUL-terminated UTF-8 and `options` must point to one aligned, initialized `FmfQueryOptions`; both stay immutable for this call.
+/// `out_handle` and `out_count` must be aligned and writable for one value each.
+/// A non-null `out_trace` must likewise be writable for one pointer.
+/// Once the required output pointers are validated,
+/// all outputs are initialized to null/zero before any other argument or handle validation.
+/// All input/output regions must be disjoint.
+/// The result handle remains registry-owned until `fmf_result_free`; a returned trace remains valid until its `owner_id` is passed to `fmf_blob_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_query(
     h: *mut c_void,
@@ -93,7 +87,7 @@ pub unsafe extern "C" fn fmf_query(
     query_control_id: u64,
     out_handle: *mut *mut c_void,
     out_count: *mut u64,
-    out_trace: *mut *mut FmfBlob, // nullable: stage breakdown as JSON
+    out_trace: *mut *mut FmfBlob,
 ) -> i32 {
     guard(|| {
         if out_handle.is_null() || out_count.is_null() {
@@ -135,11 +129,6 @@ pub unsafe extern "C" fn fmf_query(
                 return FMF_E_INVALID_ARG;
             }
         };
-        // Per-query correlation: an in-process counter groups this request's
-        // engine-side log lines under `qid`. The cross-log join key for the
-        // (single-process) FFI path is `rid` — the result handle's address,
-        // which the UI also holds — since there is no wire request id here
-        // (ADR-0037). The contract is unchanged.
         let _qid = tracing::info_span!("req", qid = FFI_QID.fetch_add(1, AtomicOrdering::Relaxed))
             .entered();
         let basis_id = usize::try_from(wire_opt.presentation_basis).ok();
@@ -180,9 +169,7 @@ pub unsafe extern "C" fn fmf_query(
                             }
                         },
                         Err(e) => {
-                            // don't go silent: counted + warned; the query itself
-                            // succeeded, the trace is explicitly absent.
-                            fmf_core::degrade!(
+                            fmf_runtime::degrade!(
                                 handle.engine.metrics().counters.trace_serialize_failures,
                                 error = %e,
                                 "query trace serialization failed — returning null trace"
@@ -191,7 +178,7 @@ pub unsafe extern "C" fn fmf_query(
                         }
                     }
                 };
-                fmf_core::diag::log_query_served(opaque::id_of(raw) as u64, &trace);
+                fmf_runtime::diag::log_query_served(opaque::id_of(raw) as u64, &trace);
                 unsafe {
                     *out_count = count;
                     *out_handle = raw;
@@ -223,16 +210,14 @@ pub unsafe extern "C" fn fmf_query(
 
 #[repr(C)]
 struct PageOwned {
-    page: FmfPage, // published descriptor; the Box keeps its address stable
+    page: FmfPage,
     rows: Vec<FmfRow>,
     blob: Vec<u8>,
 }
 
-// SAFETY: `page.rows`/`page.blob` are null for empty buffers and otherwise
-// point into the two owned Vec allocations. Moving the Box does not move those
-// allocations, and the owner is immutable after publication. The registry
-// mutex serializes ownership transfer/removal; callers must not read while
-// concurrently freeing the page.
+/* SAFETY: `page.rows` and `page.blob` contain null pointers for empty buffers and otherwise point into the two owned Vec allocations.
+Moving the Box preserves both allocations, and publication freezes the owner.
+The registry mutex serializes ownership transfer and removal; callers must prevent reads concurrent with freeing the page. */
 #[expect(
     clippy::non_send_fields_in_send_ty,
     reason = "the raw descriptor pointers target this Box's immutable Vec allocations"
@@ -257,9 +242,6 @@ fn insert_page(mut owned: Box<PageOwned>) -> Result<*mut FmfPage, i32> {
     };
     let mut pages = PAGES.lock();
     match pages.entry(owner_id) {
-        // Derive the pointer from the stored box, after the move. The heap
-        // address is stable either way, but a pointer derived before moving a
-        // `Box` carries a tag the move invalidates under Stacked/Tree Borrows.
         Entry::Vacant(entry) => Ok(std::ptr::from_mut(&mut entry.insert(owned).page)),
         Entry::Occupied(_) => {
             set_error(format!(
@@ -270,19 +252,16 @@ fn insert_page(mut owned: Box<PageOwned>) -> Result<*mut FmfPage, i32> {
     }
 }
 
-/// Materializes a window of rows from a result-set handle into a freshly
-/// allocated `FmfPage`.
+/// Materializes a window of rows from a result-set handle into a freshly allocated `FmfPage`.
 ///
-/// Fills `count` rows starting at `offset` and writes the owning page pointer to
-/// `out`; free it with `fmf_page_free`. Returns `FMF_OK`, or `FMF_E_STALE` if the
-/// structural generation moved (re-run the query), or another `FMF_E_*` code.
+/// Fills `count` rows starting at `offset` and writes the owning page pointer to `out`; free it with `fmf_page_free`.
+/// Returns `FMF_OK`, or `FMF_E_STALE` if the structural generation moved (re-run the query), or another `FMF_E_*` code.
 ///
 /// # Safety
 ///
-/// `out` must be aligned and writable as one `*mut FmfPage` for this call. It
-/// is initialized to null. On success the descriptor, rows, and string blob are
-/// immutable registry-owned borrows until its `owner_id` is passed exactly
-/// once to `fmf_page_free`; they must not be read concurrently with that free.
+/// `out` must be aligned and writable as one `*mut FmfPage` for this call.
+/// It is initialized to null.
+/// On success the descriptor, rows, and string blob are immutable registry-owned borrows until its `owner_id` is passed exactly once to `fmf_page_free`; they must not be read concurrently with that free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_result_page(
     r: *mut c_void,
@@ -304,11 +283,7 @@ pub unsafe extern "C" fn fmf_result_page(
             set_error("fmf_result_page offset exceeds the supported address space");
             return FMF_E_INVALID_ARG;
         };
-        // `count` is u32, which is losslessly representable by usize on every
-        // supported Windows target.
         let count = count as usize;
-        // The row+blob packing is fmf-core's single implementation
-        // (ResultSet::fill_page) — this layer only wraps it in FmfPage.
         let (rows, blob) = match rs.fill_page(offset, count) {
             Ok(page) => page,
             Err(EngineError::Stale) => {
@@ -356,8 +331,7 @@ pub unsafe extern "C" fn fmf_result_page(
 
 /// Frees the result page identified by the monotonic owner ID returned in its descriptor.
 ///
-/// ID zero is a no-op; unknown, wrong-kind, stale, and already freed IDs are
-/// rejected without touching foreign memory.
+/// ID zero is a no-op; unknown, wrong-kind, stale, and already freed IDs are rejected without touching foreign memory.
 #[unsafe(no_mangle)]
 pub extern "C" fn fmf_page_free(owner_id: u64) -> i32 {
     guard(|| {
@@ -375,9 +349,9 @@ pub extern "C" fn fmf_page_free(owner_id: u64) -> i32 {
     })
 }
 
-/// Frees a result-set handle previously returned by `fmf_query`. Null is a
-/// no-op. Unknown, foreign, stale, and duplicate opaque IDs fail closed without
-/// dereferencing the pointer value.
+/// Frees a result-set handle previously returned by `fmf_query`.
+/// Null is a no-op.
+/// Unknown, foreign, stale, and duplicate opaque IDs fail closed without dereferencing the pointer value.
 #[unsafe(no_mangle)]
 pub extern "C" fn fmf_result_free(r: *mut c_void) -> i32 {
     guard(|| {

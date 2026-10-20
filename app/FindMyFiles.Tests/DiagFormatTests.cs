@@ -7,11 +7,8 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// Unit tests for the F12 diagnostics formatters. These pin the invariant-culture
-/// rendering the panel binds to (the logic previously lived untested in the
-/// panel's code-behind), including the ADR-0018 guard that a contract counter
-/// surfaces by reflection with no UI edits.
+/// <summary> Unit tests for the F12 diagnostics formatters.
+/// These pin the invariant-culture rendering the panel binds to (the logic previously lived untested in the panel's code-behind), including the ADR-0018 guard that a contract counter surfaces by reflection with no UI edits.
 /// </summary>
 public sealed class DiagFormatTests
 {
@@ -45,9 +42,6 @@ public sealed class DiagFormatTests
     [Fact]
     public void DiagnosticCopy_reports_the_in_proc_engine_log_directory()
     {
-        // The in-proc engine derives its log dir from the index dir
-        // (resolve_log_dir(None, index_dir)), so naming the service's directory
-        // here sends the reader to an empty folder.
         var dump = DiagFormat.DiagnosticCopy(
             DateTimeOffset.Parse(
                 "2026-07-26T12:34:56+09:00",
@@ -67,7 +61,6 @@ public sealed class DiagFormatTests
     [Fact]
     public void EngineLogSubPath_follows_the_live_transport()
     {
-        // Only the pipe client fills Transport, so it is the discriminator.
         Assert.Equal(
             Path.Combine("find-my-files", "logs"),
             DiagFormat.EngineLogSubPath(PipeStats()));
@@ -100,7 +93,7 @@ public sealed class DiagFormatTests
 
     [Theory]
     [InlineData(0UL, "0 MB")]
-    [InlineData(95420416UL, "91 MB")] // 91 * 1024 * 1024
+    [InlineData(95420416UL, "91 MB")]
     public void Mb_rounds_to_whole_mebibytes(ulong bytes, string expected) =>
         Assert.Equal(expected, DiagFormat.Mb(bytes));
 
@@ -183,7 +176,6 @@ public sealed class DiagFormatTests
     [Fact]
     public void ProcessMemory_renders_private_bytes_and_working_set_with_standard_names()
     {
-        // 142 MiB private, 138 MiB working set.
         var stats = new EngineStatsData
         {
             CurrentPrivateBytes = 142UL * 1024 * 1024,
@@ -216,7 +208,6 @@ public sealed class DiagFormatTests
         };
         Assert.Equal("30 MB", DiagFormat.Overhead(stats));
 
-        // Index larger than WS (shouldn't happen, but must not underflow).
         var weird = new EngineStatsData
         {
             CurrentWsBytes = 10UL * 1024 * 1024,
@@ -301,9 +292,6 @@ public sealed class DiagFormatTests
     [Fact]
     public void RecentQuery_marks_the_cases_that_would_otherwise_read_as_anomalies()
     {
-        // An empty query is "(all)", not "0 chars"; a multi-volume query says
-        // so (it is why a merge stage exists); and a query whose result was
-        // identical says so rather than looking suspiciously cheap.
         Assert.Equal(
             "0.05 ms · full-scan/miss · 0 hits / 12 scanned · (all) · 2 vol · unchanged",
             DiagFormat.RecentQuery(0, "full-scan", "miss", 0, 12, 50, 2, true));
@@ -327,8 +315,6 @@ public sealed class DiagFormatTests
     [Fact]
     public void Counters_surfaces_a_nonzero_contract_counter_by_snake_case_name()
     {
-        // ADR-0018 guard: a counter set on the generated CountersData must
-        // appear via reflection with its snake_case contract name.
         var stats = new EngineStatsData { Counters = new CountersData { StatFetchFailures = 3 } };
         Assert.Equal("劣化: stat_fetch_failures=3", DiagFormat.Counters(stats));
     }

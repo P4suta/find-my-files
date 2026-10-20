@@ -1,15 +1,50 @@
-//! Alignment-independent decoding of the NTFS on-disk structures used by the
-//! scanner.
+//! Alignment-independent decoding of the NTFS on-disk structures used by the scanner.
 //!
-//! Disk bytes are untrusted and may begin at any address.  This module never
-//! casts them to Rust references: every multi-byte field is copied into an
-//! owned integer with an explicit little-endian conversion.  Keeping that
-//! invariant in one module prevents packed-struct references from leaking into
-//! the parallel initial scan or the live-USN reconciliation path.
+//! Disk bytes are untrusted and may begin at any address.
+//! This module never casts them to Rust references: every multi-byte field is copied into an owned integer with an explicit little-endian conversion.
+//! Keeping that invariant in one module prevents packed-struct references from leaking into the parallel initial scan or the live-USN reconciliation path.
 
 #![forbid(unsafe_code)]
 
-use thiserror::Error;
+use alloc::vec::Vec;
+
+const MAX_SECTOR_BYTES: usize = 4096;
+const UTF16_UNIT_BYTES: usize = size_of::<u16>();
+const MAX_FILENAME_UNITS: usize = 255;
+const ATTRIBUTE_ALIGNMENT: usize = 8;
+const SEQUENCE_SHIFT: u32 = 48;
+const RESIDENT_LENGTH_OFFSET: usize = 16;
+const RESIDENT_VALUE_OFFSET: usize = 20;
+const LOWEST_VCN_OFFSET: usize = 16;
+const HIGHEST_VCN_OFFSET: usize = 24;
+const MAPPING_PAIRS_OFFSET: usize = 32;
+const STREAM_SIZE_OFFSET: usize = 48;
+const MODIFICATION_TIME_OFFSET: usize = 8;
+const FILE_ATTRIBUTES_OFFSET: usize = 32;
+const FILENAME_UNITS_OFFSET: usize = 64;
+const FILENAME_NAMESPACE_OFFSET: usize = 65;
+const BOOT_OEM_RANGE: core::ops::Range<usize> = 3..11;
+const BOOT_SIGNATURE_RANGE: core::ops::Range<usize> = 510..512;
+const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xAA];
+const BYTES_PER_SECTOR_OFFSET: usize = 11;
+const SECTORS_PER_CLUSTER_OFFSET: usize = 13;
+const TOTAL_SECTORS_OFFSET: usize = 40;
+const MFT_CLUSTER_OFFSET: usize = 48;
+const RECORD_SIZE_CODE_OFFSET: usize = 64;
+const FILE_SEQUENCE_OFFSET: usize = 16;
+const FILE_ATTRIBUTES_OFFSET_FIELD: usize = 20;
+const FILE_FLAGS_OFFSET: usize = 22;
+const FILE_USED_BYTES_OFFSET: usize = 24;
+const FILE_ALLOCATED_BYTES_OFFSET: usize = 28;
+const FILE_BASE_REFERENCE_OFFSET: usize = 32;
+const USA_OFFSET_FIELD: usize = 4;
+const USA_LENGTH_FIELD: usize = 6;
+const ATTRIBUTE_LENGTH_OFFSET: usize = 4;
+const ATTRIBUTE_RESIDENCY_OFFSET: usize = 8;
+const ATTRIBUTE_NAME_UNITS_OFFSET: usize = 9;
+const ATTRIBUTE_NAME_OFFSET_FIELD: usize = 10;
+const ATTRIBUTE_FLAGS_OFFSET: usize = 12;
+const ATTRIBUTE_ID_OFFSET: usize = 14;
 
 const FILE_RECORD_HEADER_BYTES: usize = 42;
 const ATTRIBUTE_HEADER_BYTES: usize = 16;
@@ -33,29 +68,10 @@ pub const ROOT_RECORD: u64 = 5;
 /// Record number of `\$Extend`.
 ///
 /// It is the one metadata file that is a directory with children of its own.
-/// Those children (`$Quota`, `$ObjId`, `$Reparse`, `$UsnJrnl`, `$RmMetadata`)
-/// live at or above [`FIRST_NORMAL_RECORD`], so they are indexed — and a parent
-/// that is not indexed is a parent that cannot resolve.
+/// Those children (`$Quota`, `$ObjId`, `$Reparse`, `$UsnJrnl`, `$RmMetadata`) live at or above [`FIRST_NORMAL_RECORD`], so they are indexed — and a parent that is not indexed is a parent that cannot resolve.
 pub const EXTEND_RECORD: u64 = 11;
 /// First record number that is not an NTFS metadata file.
 pub const FIRST_NORMAL_RECORD: u64 = 24;
-
-/// Why raw NTFS access or decoding failed.
-#[derive(Debug, Error)]
-pub enum NtfsError {
-    /// The raw volume handle requires privileges this process does not hold.
-    #[error("raw volume access requires an elevated service")]
-    Elevation,
-    /// A device read or FSCTL failed.
-    #[error("NTFS I/O failed: {0}")]
-    Io(#[from] std::io::Error),
-    /// $MFT record 0 lacked an attribute the scanner needs.
-    #[error("missing required MFT attribute: {0}")]
-    MissingMftAttribute(String),
-    /// The bytes on disk do not describe a structure this decoder accepts.
-    #[error("invalid NTFS data: {0}")]
-    InvalidData(&'static str),
-}
 
 /// The attribute types the scanner decodes; every other type is skipped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,12 +184,11 @@ pub struct NtfsFileName<'a> {
 impl NtfsFileName<'_> {
     /// Copy the borrowed name into owned UTF-16 code units.
     ///
-    /// Unpaired surrogates are preserved: NTFS names are not required to be
-    /// valid Unicode, and the index stores them as WTF-8.
+    /// Unpaired surrogates are preserved: NTFS names are not required to be valid Unicode, and the index stores them as WTF-8.
     #[must_use]
     pub fn to_utf16(self) -> Vec<u16> {
         self.utf16le
-            .chunks_exact(2)
+            .chunks_exact(UTF16_UNIT_BYTES)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect()
     }
@@ -188,8 +203,7 @@ pub struct NtfsAttribute<'a> {
 }
 
 impl<'a> NtfsAttribute<'a> {
-    /// Decode the attribute starting at `data[0]`, or `None` if its declared
-    /// length, residency, or name range escapes the buffer.
+    /// Decode the attribute starting at `data[0]`, or `None` if its declared length, residency, or name range escapes the buffer.
     #[must_use]
     pub fn parse(data: &'a [u8]) -> Option<Self> {
         let header = decode_attribute_header(data)?;
@@ -245,15 +259,14 @@ impl<'a> NtfsAttribute<'a> {
         &self.data[..self.length]
     }
 
-    /// The resident value bytes, or `None` for a non-resident attribute or an
-    /// offset/length pair that escapes the attribute.
+    /// The resident value bytes, or `None` for a non-resident attribute or an offset/length pair that escapes the attribute.
     #[must_use]
     pub fn get_resident(&self) -> Option<&'a [u8]> {
         if self.header.is_non_resident != 0 || self.length < RESIDENT_HEADER_BYTES {
             return None;
         }
-        let value_length = usize::try_from(le_u32(self.data(), 16)?).ok()?;
-        let value_offset = usize::from(le_u16(self.data(), 20)?);
+        let value_length = usize::try_from(le_u32(self.data(), RESIDENT_LENGTH_OFFSET)?).ok()?;
+        let value_offset = usize::from(le_u16(self.data(), RESIDENT_VALUE_OFFSET)?);
         if value_offset < RESIDENT_HEADER_BYTES {
             return None;
         }
@@ -261,28 +274,27 @@ impl<'a> NtfsAttribute<'a> {
         self.data().get(value_offset..end)
     }
 
-    /// The declared resident value length, without slicing it out. Lets a
-    /// caller distinguish "declared too large" from "absent".
+    /// The declared resident value length, without slicing it out.
+    /// Lets a caller distinguish "declared too large" from "absent".
     #[must_use]
     pub fn resident_value_length(&self) -> Option<u32> {
         if self.header.is_non_resident != 0 || self.length < RESIDENT_HEADER_BYTES {
             return None;
         }
-        le_u32(self.data(), 16)
+        le_u32(self.data(), RESIDENT_LENGTH_OFFSET)
     }
 
-    /// The non-resident header, or `None` unless this is a non-resident
-    /// attribute whose mapping-pair offset stays inside it.
+    /// The non-resident header, or `None` unless this is a non-resident attribute whose mapping-pair offset stays inside it.
     #[must_use]
     pub fn nonresident_header(&self) -> Option<NtfsNonResidentAttributeHeader> {
         if self.header.is_non_resident != 1 || self.length < NONRESIDENT_HEADER_BYTES {
             return None;
         }
         Some(NtfsNonResidentAttributeHeader {
-            lowest_vcn: le_i64(self.data(), 16)?,
-            highest_vcn: le_i64(self.data(), 24)?,
-            data_runs_offset: le_u16(self.data(), 32)?,
-            data_size: le_u64(self.data(), 48)?,
+            lowest_vcn: le_i64(self.data(), LOWEST_VCN_OFFSET)?,
+            highest_vcn: le_i64(self.data(), HIGHEST_VCN_OFFSET)?,
+            data_runs_offset: le_u16(self.data(), MAPPING_PAIRS_OFFSET)?,
+            data_size: le_u64(self.data(), STREAM_SIZE_OFFSET)?,
         })
         .filter(|header| {
             let offset = usize::from(header.data_runs_offset);
@@ -290,8 +302,7 @@ impl<'a> NtfsAttribute<'a> {
         })
     }
 
-    /// Decode this attribute as `$STANDARD_INFORMATION`, or `None` if it is a
-    /// different type or too short.
+    /// Decode this attribute as `$STANDARD_INFORMATION`, or `None` if it is a different type or too short.
     #[must_use]
     pub fn as_standard_info(&self) -> Option<NtfsStandardInformation> {
         if self.header.type_id != NtfsAttributeType::StandardInformation as u32 {
@@ -302,17 +313,14 @@ impl<'a> NtfsAttribute<'a> {
             return None;
         }
         Some(NtfsStandardInformation {
-            modification_time: le_u64(value, 8)?,
-            file_attributes: le_u32(value, 32)?,
+            modification_time: le_u64(value, MODIFICATION_TIME_OFFSET)?,
+            file_attributes: le_u32(value, FILE_ATTRIBUTES_OFFSET)?,
         })
     }
 
     /// Decode this attribute as `$FILE_NAME`.
     ///
-    /// Returns `None` for a different type, a value whose length does not
-    /// match its declared name length exactly, a name containing NUL or a
-    /// path separator, a link with no parent, or an unknown namespace — a
-    /// crafted volume must not be able to inject a path into the index.
+    /// Returns `None` for a different type, a value whose length does not match its declared name length exactly, a name containing NUL or a path separator, a link with no parent, or an unknown namespace — a crafted volume must not be able to inject a path into the index.
     #[must_use]
     pub fn as_name(&self) -> Option<NtfsFileName<'a>> {
         if self.header.type_id != NtfsAttributeType::FileName as u32 {
@@ -322,8 +330,8 @@ impl<'a> NtfsAttribute<'a> {
         if value.len() < FILE_NAME_HEADER_BYTES {
             return None;
         }
-        let name_length = usize::from(*value.get(64)?);
-        if name_length == 0 || name_length > 255 {
+        let name_length = usize::from(*value.get(FILENAME_UNITS_OFFSET)?);
+        if name_length == 0 || name_length > MAX_FILENAME_UNITS {
             return None;
         }
         let name_bytes = name_length.checked_mul(size_of::<u16>())?;
@@ -332,17 +340,17 @@ impl<'a> NtfsAttribute<'a> {
             return None;
         }
         let encoded = value.get(FILE_NAME_HEADER_BYTES..end)?;
-        if encoded.chunks_exact(2).any(|pair| {
+        if encoded.chunks_exact(UTF16_UNIT_BYTES).any(|pair| {
             let unit = u16::from_le_bytes([pair[0], pair[1]]);
             unit == 0 || unit == u16::from(b'/') || unit == u16::from(b'\\')
         }) {
             return None;
         }
         let parent_directory_reference = le_u64(value, 0)?;
-        if parent_directory_reference >> 48 == 0 {
+        if parent_directory_reference >> SEQUENCE_SHIFT == 0 {
             return None;
         }
-        let namespace = *value.get(65)?;
+        let namespace = *value.get(FILENAME_NAMESPACE_OFFSET)?;
         if namespace > NtfsFileNamespace::Win32AndDos as u8 {
             return None;
         }
@@ -368,9 +376,7 @@ pub struct NtfsFile<'a> {
 }
 
 impl<'a> NtfsFile<'a> {
-    /// Validate `data` as record `number` and borrow it, or `None` if the
-    /// signature, update-sequence geometry, or size fields disagree with
-    /// `sector_size` and the buffer length.
+    /// Validate `data` as record `number` and borrow it, or `None` if the signature, update-sequence geometry, or size fields disagree with `sector_size` and the buffer length.
     #[must_use]
     pub fn parse(number: u64, data: &'a [u8], sector_size: usize) -> Option<Self> {
         let header = decode_file_header(data)?;
@@ -381,22 +387,19 @@ impl<'a> NtfsFile<'a> {
         })
     }
 
-    /// The same validation as [`NtfsFile::parse`] without borrowing, for use
-    /// before the fixup is applied.
+    /// The same validation as [`NtfsFile::parse`] without borrowing, for use before the fixup is applied.
     #[must_use]
     pub fn is_valid(data: &[u8], sector_size: usize) -> bool {
         decode_file_header(data).is_some_and(|header| valid_file_header(data, header, sector_size))
     }
 
-    /// The record's FRN: sequence value in the high 16 bits, record number in
-    /// the low 48.
+    /// The record's FRN: sequence value in the high 16 bits, record number in the low 48.
     #[must_use]
     pub const fn reference_number(&self) -> u64 {
-        (self.header.sequence_value as u64) << 48 | (self.number & FILE_RECORD_MASK)
+        (self.header.sequence_value as u64) << SEQUENCE_SHIFT | (self.number & FILE_RECORD_MASK)
     }
 
-    /// Visit every decodable attribute in chain order, stopping at the first
-    /// terminator, malformed attribute, or overrun of the used region.
+    /// Visit every decodable attribute in chain order, stopping at the first terminator, malformed attribute, or overrun of the used region.
     pub fn attributes(&self, mut visit: impl FnMut(&NtfsAttribute<'a>)) {
         let mut offset = usize::from(self.header.attributes_offset);
         let used = usize::try_from(self.header.used_size)
@@ -477,20 +480,18 @@ pub struct VolumeGeometry {
 /// Decode and sanity-check the NTFS boot sector.
 ///
 /// Every derived quantity is range- and overflow-checked against the others,
-/// so a crafted boot sector cannot produce a geometry that later drives an
-/// out-of-bounds read: the $MFT must start inside the volume and one record
-/// must fit after it.
+/// so a crafted boot sector cannot produce a geometry that later drives an out-of-bounds read: the $MFT must start inside the volume and one record must fit after it.
 #[must_use]
 pub fn decode_boot_sector(data: &[u8]) -> Option<VolumeGeometry> {
     if data.len() < SECTOR_BYTES
-        || data.get(3..11)? != b"NTFS    "
-        || data.get(510..512)? != [0x55, 0xAA]
+        || data.get(BOOT_OEM_RANGE)? != b"NTFS    "
+        || data.get(BOOT_SIGNATURE_RANGE)? != BOOT_SIGNATURE
     {
         return None;
     }
-    let sector_size = u64::from(le_u16(data, 11)?);
-    let sectors_per_cluster = u64::from(*data.get(13)?);
-    if !(512..=4096).contains(&sector_size)
+    let sector_size = u64::from(le_u16(data, BYTES_PER_SECTOR_OFFSET)?);
+    let sectors_per_cluster = u64::from(*data.get(SECTORS_PER_CLUSTER_OFFSET)?);
+    if !(SECTOR_BYTES as u64..=MAX_SECTOR_BYTES as u64).contains(&sector_size)
         || !sector_size.is_power_of_two()
         || sectors_per_cluster == 0
         || !sectors_per_cluster.is_power_of_two()
@@ -501,9 +502,9 @@ pub fn decode_boot_sector(data: &[u8]) -> Option<VolumeGeometry> {
     if cluster_size > MAX_CLUSTER_BYTES {
         return None;
     }
-    let volume_size = le_u64(data, 40)?.checked_mul(sector_size)?;
-    let mft_position = le_u64(data, 48)?.checked_mul(cluster_size)?;
-    let record_code = i8::from_le_bytes([*data.get(64)?]);
+    let volume_size = le_u64(data, TOTAL_SECTORS_OFFSET)?.checked_mul(sector_size)?;
+    let mft_position = le_u64(data, MFT_CLUSTER_OFFSET)?.checked_mul(cluster_size)?;
+    let record_code = i8::from_le_bytes([*data.get(RECORD_SIZE_CODE_OFFSET)?]);
     let file_record_size = if record_code > 0 {
         u64::try_from(record_code).ok()?.checked_mul(cluster_size)?
     } else {
@@ -531,24 +532,26 @@ pub fn decode_boot_sector(data: &[u8]) -> Option<VolumeGeometry> {
 }
 
 fn decode_file_header(data: &[u8]) -> Option<NtfsFileRecordHeader> {
-    if data.len() < FILE_RECORD_HEADER_BYTES || data.get(..4)? != FILE_RECORD_SIGNATURE {
+    if data.len() < FILE_RECORD_HEADER_BYTES
+        || data.get(..FILE_RECORD_SIGNATURE.len())? != FILE_RECORD_SIGNATURE
+    {
         return None;
     }
     Some(NtfsFileRecordHeader {
-        sequence_value: le_u16(data, 16)?,
-        attributes_offset: le_u16(data, 20)?,
-        flags: le_u16(data, 22)?,
-        used_size: le_u32(data, 24)?,
-        allocated_size: le_u32(data, 28)?,
-        base_reference: le_u64(data, 32)?,
+        sequence_value: le_u16(data, FILE_SEQUENCE_OFFSET)?,
+        attributes_offset: le_u16(data, FILE_ATTRIBUTES_OFFSET_FIELD)?,
+        flags: le_u16(data, FILE_FLAGS_OFFSET)?,
+        used_size: le_u32(data, FILE_USED_BYTES_OFFSET)?,
+        allocated_size: le_u32(data, FILE_ALLOCATED_BYTES_OFFSET)?,
+        base_reference: le_u64(data, FILE_BASE_REFERENCE_OFFSET)?,
     })
 }
 
 fn valid_file_header(data: &[u8], header: NtfsFileRecordHeader, sector_size: usize) -> bool {
-    let Some(update_sequence_offset) = le_u16(data, 4).map(usize::from) else {
+    let Some(update_sequence_offset) = le_u16(data, USA_OFFSET_FIELD).map(usize::from) else {
         return false;
     };
-    let Some(update_sequence_length) = le_u16(data, 6).map(usize::from) else {
+    let Some(update_sequence_length) = le_u16(data, USA_LENGTH_FIELD).map(usize::from) else {
         return false;
     };
     let Some(update_sequence_bytes) = update_sequence_length.checked_mul(size_of::<u16>()) else {
@@ -565,19 +568,19 @@ fn valid_file_header(data: &[u8], header: NtfsFileRecordHeader, sector_size: usi
     let in_use = header.flags & FILE_RECORD_IN_USE != 0;
     update_sequence_length > 1
         && update_sequence_offset >= FILE_RECORD_HEADER_BYTES
-        && update_sequence_offset.is_multiple_of(2)
+        && update_sequence_offset.is_multiple_of(UTF16_UNIT_BYTES)
         && update_sequence_end <= data.len()
         && update_sequence_end <= attributes_offset
-        && (SECTOR_BYTES..=4096).contains(&sector_size)
+        && (SECTOR_BYTES..=MAX_SECTOR_BYTES).contains(&sector_size)
         && sector_size.is_power_of_two()
         && data.len().is_multiple_of(sector_size)
         && update_sequence_length == data.len() / sector_size + 1
         && usize::try_from(header.allocated_size).ok() == Some(data.len())
         && (!in_use || header.sequence_value != 0)
-        && (header.base_reference == 0 || header.base_reference >> 48 != 0)
+        && (header.base_reference == 0 || header.base_reference >> SEQUENCE_SHIFT != 0)
         && used <= data.len()
         && attributes_offset >= FILE_RECORD_HEADER_BYTES
-        && attributes_offset.is_multiple_of(8)
+        && attributes_offset.is_multiple_of(ATTRIBUTE_ALIGNMENT)
         && attributes_offset < used
 }
 
@@ -587,34 +590,50 @@ fn decode_attribute_header(data: &[u8]) -> Option<NtfsAttributeHeader> {
     }
     Some(NtfsAttributeHeader {
         type_id: le_u32(data, 0)?,
-        length: le_u32(data, 4)?,
-        is_non_resident: *data.get(8)?,
-        name_length: *data.get(9)?,
-        name_offset: le_u16(data, 10)?,
-        flags: le_u16(data, 12)?,
-        id: le_u16(data, 14)?,
+        length: le_u32(data, ATTRIBUTE_LENGTH_OFFSET)?,
+        is_non_resident: *data.get(ATTRIBUTE_RESIDENCY_OFFSET)?,
+        name_length: *data.get(ATTRIBUTE_NAME_UNITS_OFFSET)?,
+        name_offset: le_u16(data, ATTRIBUTE_NAME_OFFSET_FIELD)?,
+        flags: le_u16(data, ATTRIBUTE_FLAGS_OFFSET)?,
+        id: le_u16(data, ATTRIBUTE_ID_OFFSET)?,
     })
 }
 
 fn le_u16(data: &[u8], offset: usize) -> Option<u16> {
-    let bytes: [u8; 2] = data.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
+    let bytes: [u8; 2] = data
+        .get(offset..offset.checked_add(size_of::<u16>())?)?
+        .try_into()
+        .ok()?;
     Some(u16::from_le_bytes(bytes))
 }
 
 fn le_u32(data: &[u8], offset: usize) -> Option<u32> {
-    let bytes: [u8; 4] = data.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
+    let bytes: [u8; 4] = data
+        .get(offset..offset.checked_add(size_of::<u32>())?)?
+        .try_into()
+        .ok()?;
     Some(u32::from_le_bytes(bytes))
 }
 
 fn le_u64(data: &[u8], offset: usize) -> Option<u64> {
-    let bytes: [u8; 8] = data.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
+    let bytes: [u8; 8] = data
+        .get(offset..offset.checked_add(size_of::<u64>())?)?
+        .try_into()
+        .ok()?;
     Some(u64::from_le_bytes(bytes))
 }
 
 fn le_i64(data: &[u8], offset: usize) -> Option<i64> {
-    let bytes: [u8; 8] = data.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
+    let bytes: [u8; 8] = data
+        .get(offset..offset.checked_add(size_of::<i64>())?)?
+        .try_into()
+        .ok()?;
     Some(i64::from_le_bytes(bytes))
 }
+
+#[cfg(kani)]
+#[path = "ntfs_proofs.rs"]
+mod kani_proofs;
 
 #[cfg(test)]
 mod tests {
@@ -661,10 +680,6 @@ mod tests {
 
     #[test]
     fn attribute_decode_never_requires_aligned_storage() {
-        // The attribute must start at an odd address whatever the stack layout
-        // is: the decoder may never rely on 2/8-byte aligned storage. A `[u8;
-        // N]` is only 1-byte aligned, so derive the skew from the real address
-        // instead of assuming the buffer itself starts aligned.
         let mut storage = [0x5A; NONRESIDENT_HEADER_BYTES + 2];
         let skew = 1 + (storage.as_ptr().addr() & 1);
         let attribute = &mut storage[skew..skew + NONRESIDENT_HEADER_BYTES];

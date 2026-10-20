@@ -6,20 +6,14 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// <see cref="MainViewModel"/>'s connection-driven startup — the transition the
-/// shipped onboarding bug broke: a pipe that is still warming up at page load must
-/// not surface a bogus failure, and the very first Connected event must drive the
-/// startup so the UI goes Setup/preparing → Ready on its own. Also the setup
-/// screen's one-click <see cref="MainViewModel.EnableSearchAsync"/> outcome
-/// branches. Engine state is driven on a <see cref="StubEngineClient"/> and
-/// marshalled through the <see cref="ManualDispatcher"/>.
+/// <summary> <see cref="MainViewModel"/>'s connection-driven startup — the transition the shipped onboarding bug broke: a pipe that is still warming up at page load must not surface a bogus failure, and the very first Connected event must drive the startup so the UI goes Setup/preparing → Ready on its own.
+/// Also the setup screen's one-click <see cref="MainViewModel.EnableSearchAsync"/> outcome branches.
+/// Engine state is driven on a <see cref="StubEngineClient"/> and marshalled through the <see cref="ManualDispatcher"/>.
 /// </summary>
 public sealed class MainViewModelConnectionTests
 {
     private readonly ManualDispatcher _dispatcher = new();
 
-    // The volume set the stub's ListVolumesAsync returns (CA1861: not inline).
     private static readonly string[] StubVolumes = ["F:"];
 
     public MainViewModelConnectionTests() => SyncContext.RunContinuationsInline();
@@ -32,14 +26,11 @@ public sealed class MainViewModelConnectionTests
 
         await vm.StartAsync();
 
-        // Warm-up: held on "preparing", the startup work has NOT run (no bogus
-        // "index start failed" from calling a not-yet-connected engine).
         Assert.Equal(Loc.Get("Status_Preparing"), vm.StatusText);
         Assert.False(vm.CanSearch);
         Assert.Equal(Loc.Get("Status_Preparing"), vm.SearchInputPlaceholder);
         Assert.Equal(0, engine.ListVolumesCalls);
 
-        // The pipe connects — the first Connected event drives the real startup.
         engine.Connection = EngineConnectionState.Connected;
         engine.RaiseConnectionChanged(EngineConnectionState.Connected);
         _dispatcher.DrainQueue();
@@ -50,7 +41,6 @@ public sealed class MainViewModelConnectionTests
         Assert.Equal(
             StatusFormatter.Overall(Array.Empty<VolumeStatus>(), StubVolumes), vm.StatusText);
 
-        // A later Connected (a reconnect) must NOT re-run the startup sequence.
         engine.RaiseConnectionChanged(EngineConnectionState.Connected);
         _dispatcher.DrainQueue();
         Assert.Equal(1, engine.ListVolumesCalls);
@@ -59,7 +49,6 @@ public sealed class MainViewModelConnectionTests
     [Fact]
     public async Task StartAsync_runs_immediately_when_already_connected()
     {
-        // The fast path (probe succeeded before Loaded, or FFI/in-proc): no deferral.
         var engine = new StubEngineClient { Connection = EngineConnectionState.Connected };
         using var vm = new MainViewModel(engine, _dispatcher, new AppSettings());
 
@@ -112,9 +101,6 @@ public sealed class MainViewModelConnectionTests
         };
         using var vm = new MainViewModel(engine, _dispatcher, new AppSettings());
 
-        // This test owns only the terminal-to-connected transition. Keep a
-        // pre-existing query from adding debounce/search work to DrainQueue;
-        // MainViewModelTests separately pins the constructor's empty default.
         vm.SearchText = string.Empty;
         Assert.True(vm.IsDisconnected);
 
@@ -206,7 +192,7 @@ public sealed class MainViewModelConnectionTests
 
         await vm.EnableSearchAsync();
 
-        Assert.Equal(1, relaunches); // forced pipe relaunch; production would exit here
+        Assert.Equal(1, relaunches);
         Assert.Equal(Loc.Get("Setup_Connecting"), vm.SetupStatus);
         Assert.False(vm.SetupBusy);
     }
@@ -223,7 +209,7 @@ public sealed class MainViewModelConnectionTests
 
         await vm.EnableSearchAsync();
 
-        Assert.Equal(0, relaunches); // the user dismissed the UAC prompt — no relaunch
+        Assert.Equal(0, relaunches);
         Assert.Equal(string.Empty, vm.SetupStatus);
         Assert.False(vm.SetupBusy);
     }

@@ -3,17 +3,12 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace FindMyFiles.Controls;
 
-/// <summary>
-/// A minimal, dependency-free Fluent "settings card": an optional leading icon,
-/// a header with an optional description on the left, and the card's single
-/// <see cref="ContentControl.Content"/> (one control) right-aligned, on the same
-/// card chrome the diagnostics panel uses. It stands in for CommunityToolkit's
-/// <c>SettingsCard</c>, which cannot be referenced here — the toolkit pulls the
-/// WindowsAppSDK 1.x metapackage and hard-conflicts with this app's slim 2.x
-/// component packages. Apply <c>SettingsCardStyle</c> (Themes/Settings.xaml);
-/// localize <see cref="Header"/> / <see cref="Description"/> via x:Uid (resw keys
-/// "&lt;Uid&gt;.Header" / "&lt;Uid&gt;.Description"). The icon and the
-/// description each collapse when unset.
+/// <summary> A minimal, dependency-free Fluent "settings card": an optional leading icon,
+/// a header with an optional description on the left, and the card's single <see cref="ContentControl.Content"/> (one control) right-aligned, on the same card chrome the diagnostics panel uses.
+/// It stands in for CommunityToolkit's <c>SettingsCard</c>, which cannot be referenced here — the toolkit pulls the WindowsAppSDK 1.x metapackage and hard-conflicts with this app's slim 2.x component packages.
+/// Apply <c>SettingsCardStyle</c> (Themes/Settings.xaml);
+/// localize <see cref="Header"/> / <see cref="Description"/> via x:Uid (resw keys "&lt;Uid&gt;.Header" / "&lt;Uid&gt;.Description").
+/// The icon and the description each collapse when unset.
 /// </summary>
 [TemplatePart(Name = PartIcon, Type = typeof(FrameworkElement))]
 [TemplatePart(Name = PartDescription, Type = typeof(FrameworkElement))]
@@ -70,8 +65,7 @@ public sealed class SettingsCard : ContentControl
     private FrameworkElement? _iconPart;
     private FrameworkElement? _descriptionPart;
 
-    /// <summary>Caches the optional template parts (icon, description) and sets
-    /// their visibility from the current <see cref="Glyph"/> / <see cref="Description"/>.</summary>
+    /// <summary>Caches the optional template parts (icon, description) and sets their visibility from the current <see cref="Glyph"/> / <see cref="Description"/>.</summary>
     protected override void OnApplyTemplate()
     {
         base.OnApplyTemplate();

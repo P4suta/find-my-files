@@ -1,15 +1,14 @@
 //! Payload codecs.
 //!
-//! Binary payloads are little-endian, padding free, and concatenated in the
-//! order each codec below documents; cold-path payloads are UTF-8 JSON with
-//! `snake_case` field names (serde's default — do not add renames). The types
-//! themselves come from `fmf_contract` (see [`opcode`] for which payload
-//! belongs to which operation); only the byte logic lives here.
+//! Binary payloads are little-endian, padding free, and concatenated in the order each codec below documents; cold-path payloads are UTF-8 JSON with `snake_case` field names (serde's default — do not add renames).
+//! The types themselves come from `fmf_contract` (see [`opcode`] for which payload belongs to which operation); only the byte logic lives here.
 //!
 //! A volume is identified everywhere by its drive-label string (`"C:"`),
 //! never a GUID.
 
 use serde::{Deserialize, Serialize};
+
+const PAGE_COUNT_HEADER_BYTES: usize = size_of::<u32>() * 2;
 
 pub use fmf_contract::opcodes as opcode;
 use fmf_contract::pod::row_flags;
@@ -58,20 +57,22 @@ pub enum WireError {
     InvalidPageRow(&'static str),
 }
 
-fn u32_at(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+fn array_at<const N: usize>(bytes: &[u8], offset: usize) -> [u8; N] {
+    let mut field = [0; N];
+    field.copy_from_slice(&bytes[offset..offset + N]);
+    field
 }
 
-fn u64_at(b: &[u8], off: usize) -> u64 {
-    let mut a = [0u8; 8];
-    a.copy_from_slice(&b[off..off + 8]);
-    u64::from_le_bytes(a)
+fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(array_at(bytes, offset))
 }
 
-fn bytes16_at(b: &[u8], off: usize) -> [u8; 16] {
-    let mut a = [0u8; 16];
-    a.copy_from_slice(&b[off..off + 16]);
-    a
+fn u64_at(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(array_at(bytes, offset))
+}
+
+fn bytes16_at(bytes: &[u8], offset: usize) -> [u8; 16] {
+    array_at(bytes, offset)
 }
 
 const fn check_len(what: &'static str, b: &[u8], expected: usize) -> Result<(), WireError> {
@@ -84,8 +85,6 @@ const fn check_len(what: &'static str, b: &[u8], expected: usize) -> Result<(), 
     }
     Ok(())
 }
-
-// ── Hello (op 1, binary) ────────────────────────────────────────────────
 
 /// Client handshake request (op 1): announces the protocol version it speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,19 +143,18 @@ impl HelloResp {
     ///
     /// Returns [`WireError::Length`] if `b` is not exactly [`Self::LEN`] bytes.
     pub fn decode(b: &[u8]) -> Result<Self, WireError> {
+        const ABI_OFFSET: usize = size_of::<u32>();
+        const PID_OFFSET: usize = ABI_OFFSET + size_of::<u32>();
         check_len("HelloResp", b, Self::LEN)?;
         Ok(Self {
             protocol_version: u32_at(b, 0),
-            abi_version: u32_at(b, 4),
-            server_pid: u32_at(b, 8),
+            abi_version: u32_at(b, ABI_OFFSET),
+            server_pid: u32_at(b, PID_OFFSET),
         })
     }
 }
 
-// ── Query (op 7, binary options + UTF-8 text) ───────────────────────────
-
-/// Encode a query request (op 7): the fixed options header followed by the
-/// UTF-8 query text.
+/// Encode a query request (op 7): the fixed options header followed by the UTF-8 query text.
 #[must_use]
 pub fn encode_query_req(opt: FmfQueryOptions, text: &str) -> Vec<u8> {
     let mut v = Vec::with_capacity(FmfQueryOptions::LEN + text.len());
@@ -173,9 +171,7 @@ pub fn encode_query_req(opt: FmfQueryOptions, text: &str) -> Vec<u8> {
 
 /// # Errors
 ///
-/// Returns [`WireError::Length`] if `b` is shorter than the fixed options
-/// header, or [`WireError::Utf8`] if the trailing query text is not valid
-/// UTF-8.
+/// Returns [`WireError::Length`] if `b` is shorter than the fixed options header, or [`WireError::Utf8`] if the trailing query text is not valid UTF-8.
 pub fn decode_query_req(b: &[u8]) -> Result<(FmfQueryOptions, &str), WireError> {
     if b.len() < FmfQueryOptions::LEN {
         return Err(WireError::Length {
@@ -186,12 +182,15 @@ pub fn decode_query_req(b: &[u8]) -> Result<(FmfQueryOptions, &str), WireError> 
     }
     let opt = FmfQueryOptions {
         sort: u32_at(b, 0),
-        desc: u32_at(b, 4),
-        case_mode: u32_at(b, 8),
-        include_hidden_system: u32_at(b, 12),
-        regex_mode: u32_at(b, 16),
-        _reserved: u32_at(b, 20),
-        presentation_basis: u64_at(b, 24),
+        desc: u32_at(b, std::mem::offset_of!(FmfQueryOptions, desc)),
+        case_mode: u32_at(b, std::mem::offset_of!(FmfQueryOptions, case_mode)),
+        include_hidden_system: u32_at(
+            b,
+            std::mem::offset_of!(FmfQueryOptions, include_hidden_system),
+        ),
+        regex_mode: u32_at(b, std::mem::offset_of!(FmfQueryOptions, regex_mode)),
+        _reserved: u32_at(b, std::mem::offset_of!(FmfQueryOptions, _reserved)),
+        presentation_basis: u64_at(b, std::mem::offset_of!(FmfQueryOptions, presentation_basis)),
     };
     let text = std::str::from_utf8(&b[FmfQueryOptions::LEN..])
         .map_err(|_| WireError::Utf8 { what: "QueryReq" })?;
@@ -221,12 +220,9 @@ impl QueryRespHead {
         v
     }
 
-    /// Begin a response buffer with the 16-byte head written and `trace_cap`
-    /// bytes reserved, so the caller appends the `QueryTrace` JSON directly
-    /// into it (e.g. `serde_json::to_writer`) — one allocation, no intermediate
-    /// trace Vec + copy. The head layout stays defined here, not in the
-    /// service. On a serialize failure the caller truncates back to
-    /// [`Self::LEN`] for the empty-trace degrade path.
+    /// Begin a response buffer with the 16-byte head written and `trace_cap` bytes reserved, so the caller appends the `QueryTrace` JSON directly into it (e.g. `serde_json::to_writer`) — one allocation, no intermediate trace Vec + copy.
+    /// The head layout stays defined here, not in the service.
+    /// On a serialize failure the caller truncates back to [`Self::LEN`] for the empty-trace degrade path.
     #[must_use]
     pub fn begin_response(self, trace_cap: usize) -> Vec<u8> {
         let mut v = Vec::with_capacity(Self::LEN + trace_cap);
@@ -249,14 +245,12 @@ impl QueryRespHead {
         Ok((
             Self {
                 result_id: u64_at(b, 0),
-                count: u64_at(b, 8),
+                count: u64_at(b, size_of::<u64>()),
             },
             &b[Self::LEN..],
         ))
     }
 }
-
-// ── ResultPage (op 8, binary) ───────────────────────────────────────────
 
 /// Request for a page of rows from a prior result set (op 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,14 +284,13 @@ impl ResultPageReq {
         check_len("ResultPageReq", b, Self::LEN)?;
         Ok(Self {
             result_id: u64_at(b, 0),
-            offset: u64_at(b, 8),
-            count: u32_at(b, 16),
+            offset: u64_at(b, size_of::<u64>()),
+            count: u32_at(b, Self::LEN - size_of::<u32>()),
         })
     }
 }
 
-/// One row on the wire — byte-for-byte the FFI `FmfRow` (56 bytes, no
-/// padding; offsets are relative to the string blob start).
+/// One row on the wire — byte-for-byte the FFI `FmfRow` (56 bytes, no padding; offsets are relative to the string blob start).
 fn write_row(v: &mut Vec<u8>, r: &FmfRow) {
     v.extend_from_slice(&r.entry_ref.to_le_bytes());
     v.extend_from_slice(&r.frn.to_le_bytes());
@@ -314,15 +307,15 @@ fn write_row(v: &mut Vec<u8>, r: &FmfRow) {
 fn read_row_at(b: &[u8], off: usize) -> FmfRow {
     FmfRow {
         entry_ref: u64_at(b, off),
-        frn: u64_at(b, off + 8),
-        size: u64_at(b, off + 16),
-        mtime: u64_at(b, off + 24) as i64,
-        name_off: u32_at(b, off + 32),
-        parent_path_off: u32_at(b, off + 36),
-        flags: u32_at(b, off + 40),
-        name_len: u32_at(b, off + 44),
-        parent_path_len: u32_at(b, off + 48),
-        _reserved: u32_at(b, off + 52),
+        frn: u64_at(b, off + std::mem::offset_of!(FmfRow, frn)),
+        size: u64_at(b, off + std::mem::offset_of!(FmfRow, size)),
+        mtime: u64_at(b, off + std::mem::offset_of!(FmfRow, mtime)) as i64,
+        name_off: u32_at(b, off + std::mem::offset_of!(FmfRow, name_off)),
+        parent_path_off: u32_at(b, off + std::mem::offset_of!(FmfRow, parent_path_off)),
+        flags: u32_at(b, off + std::mem::offset_of!(FmfRow, flags)),
+        name_len: u32_at(b, off + std::mem::offset_of!(FmfRow, name_len)),
+        parent_path_len: u32_at(b, off + std::mem::offset_of!(FmfRow, parent_path_len)),
+        _reserved: u32_at(b, off + std::mem::offset_of!(FmfRow, _reserved)),
     }
 }
 
@@ -335,14 +328,11 @@ pub struct PageView<'a> {
     pub blob: &'a [u8],
 }
 
-/// Encode a result page (op 8): a `{row_count, blob_len}` header, then the
-/// fixed-size rows, then the string blob.
+/// Encode a result page (op 8): a `{row_count, blob_len}` header, then the fixed-size rows, then the string blob.
 ///
 /// # Errors
 ///
-/// Returns [`WireError::Limit`] when the page exceeds a contract bound, or
-/// [`WireError::InvalidPageRow`] when a row points outside `blob` or has a
-/// non-zero reserved field.
+/// Returns [`WireError::Limit`] when the page exceeds a contract bound, or [`WireError::InvalidPageRow`] when a row points outside `blob` or has a non-zero reserved field.
 pub fn encode_page(rows: &[FmfRow], blob: &[u8]) -> Result<Vec<u8>, WireError> {
     validate_page(rows, blob)?;
     let encoded_len = page_encoded_len(rows.len(), blob.len())?;
@@ -368,18 +358,17 @@ pub fn encode_page(rows: &[FmfRow], blob: &[u8]) -> Result<Vec<u8>, WireError> {
 
 /// # Errors
 ///
-/// Returns [`WireError::Length`] if `b` is shorter than the 8-byte count
-/// header or if its `row_count`/`blob_len` do not match the payload length.
+/// Returns [`WireError::Length`] if `b` is shorter than the 8-byte count header or if its `row_count`/`blob_len` do not match the payload length.
 pub fn decode_page(b: &[u8]) -> Result<PageView<'_>, WireError> {
-    if b.len() < 8 {
+    if b.len() < PAGE_COUNT_HEADER_BYTES {
         return Err(WireError::Length {
             what: "PageResp",
-            expected: 8,
+            expected: PAGE_COUNT_HEADER_BYTES,
             got: b.len(),
         });
     }
     let row_count = u32_at(b, 0) as usize;
-    let blob_len = u32_at(b, 4) as usize;
+    let blob_len = u32_at(b, size_of::<u32>()) as usize;
     if row_count > fmf_contract::limits::MAX_PAGE_ROWS as usize {
         return Err(WireError::Limit {
             what: "result-page row count",
@@ -390,9 +379,9 @@ pub fn decode_page(b: &[u8]) -> Result<PageView<'_>, WireError> {
     let expected = page_encoded_len(row_count, blob_len)?;
     check_len("PageResp", b, expected)?;
     let rows = (0..row_count)
-        .map(|i| read_row_at(b, 8 + i * FmfRow::LEN))
+        .map(|i| read_row_at(b, PAGE_COUNT_HEADER_BYTES + i * FmfRow::LEN))
         .collect::<Vec<_>>();
-    let blob = &b[8 + row_count * FmfRow::LEN..];
+    let blob = &b[PAGE_COUNT_HEADER_BYTES + row_count * FmfRow::LEN..];
     validate_page(&rows, blob)?;
     Ok(PageView { rows, blob })
 }
@@ -401,7 +390,7 @@ fn page_encoded_len(row_count: usize, blob_len: usize) -> Result<usize, WireErro
     let encoded_len = row_count
         .checked_mul(FmfRow::LEN)
         .and_then(|rows_len| rows_len.checked_add(blob_len))
-        .and_then(|body_len| body_len.checked_add(8))
+        .and_then(|body_len| body_len.checked_add(PAGE_COUNT_HEADER_BYTES))
         .ok_or(WireError::Limit {
             what: "result-page encoded length",
             maximum: fmf_contract::limits::MAX_PAYLOAD_LEN as usize,
@@ -451,8 +440,6 @@ fn validate_page(rows: &[FmfRow], blob: &[u8]) -> Result<(), WireError> {
     Ok(())
 }
 
-// ── ResultFree (op 9, binary) ───────────────────────────────────────────
-
 /// Encode a result-free request (op 9): releases the result set `result_id`.
 #[must_use]
 pub fn encode_result_free(result_id: u64) -> Vec<u8> {
@@ -463,11 +450,9 @@ pub fn encode_result_free(result_id: u64) -> Vec<u8> {
 ///
 /// Returns [`WireError::Length`] if `b` is not exactly 8 bytes.
 pub fn decode_result_free(b: &[u8]) -> Result<u64, WireError> {
-    check_len("ResultFree", b, 8)?;
+    check_len("ResultFree", b, size_of::<u64>())?;
     Ok(u64_at(b, 0))
 }
-
-// ── Event push (flags = FLAG_EVENT, opcode = kind 1..=6, binary) ────────
 
 /// Body is the FFI `FmfEvent` POD (32 bytes), serialized explicitly:
 /// `{kind:u32, _pad:u32(0), entries:u64, volume:[u8;16]}`.
@@ -475,7 +460,7 @@ pub fn decode_result_free(b: &[u8]) -> Result<u64, WireError> {
 pub fn encode_event(ev: &FmfEvent) -> Vec<u8> {
     let mut v = Vec::with_capacity(FmfEvent::LEN);
     v.extend_from_slice(&ev.kind.to_le_bytes());
-    v.extend_from_slice(&0u32.to_le_bytes()); // _pad
+    v.extend_from_slice(&0u32.to_le_bytes());
     v.extend_from_slice(&ev.entries.to_le_bytes());
     v.extend_from_slice(&ev.volume);
     v
@@ -489,12 +474,10 @@ pub fn decode_event(b: &[u8]) -> Result<FmfEvent, WireError> {
     Ok(FmfEvent {
         kind: u32_at(b, 0),
         _pad: 0,
-        entries: u64_at(b, 8),
-        volume: bytes16_at(b, 16),
+        entries: u64_at(b, std::mem::offset_of!(FmfEvent, entries)),
+        volume: bytes16_at(b, std::mem::offset_of!(FmfEvent, volume)),
     })
 }
-
-// ── JSON messages (op 4/5/6/10/12) ──────────────────────────────────────
 
 /// Per-volume status as carried in the JSON volume-status message (op 5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -502,8 +485,7 @@ pub fn decode_event(b: &[u8]) -> Result<FmfEvent, WireError> {
 pub struct VolumeStatusWire {
     /// Drive label, e.g. "C:" — the one volume identifier on the wire.
     pub volume: String,
-    /// Same values as FFI FmfVolumeStatus.state (0=Scanning 1=Ready
-    /// 2=Rescanning 3=Failed).
+    /// Same values as FFI FmfVolumeStatus.state (0=Scanning 1=Ready 2=Rescanning 3=Failed).
     pub state: u32,
     /// Number of indexed file entries on this volume.
     pub entries: u64,
@@ -574,7 +556,7 @@ mod tests {
             desc: 1,
             case_mode: 2,
             include_hidden_system: 0,
-            regex_mode: 3, // whole-query regex (bit0) over the full path (bit1)
+            regex_mode: 3,
             _reserved: 0,
             presentation_basis: 0x0102_0304_0506_0708,
         };
@@ -582,24 +564,16 @@ mod tests {
         assert_eq!(
             bytes,
             [
-                1, 0, 0, 0, // sort=Size
-                1, 0, 0, 0, // desc
-                2, 0, 0, 0, // case=Sensitive
-                0, 0, 0, 0, // include_hidden_system
-                3, 0, 0, 0, // regex_mode = whole(bit0) | path(bit1)
-                0, 0, 0, 0, // reserved
-                8, 7, 6, 5, 4, 3, 2, 1, // presentation basis
-                b'w', b'i', b'n',
+                1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 8, 7, 6, 5,
+                4, 3, 2, 1, b'w', b'i', b'n',
             ]
         );
         let (d_opt, d_text) = decode_query_req(&bytes).unwrap();
         assert_eq!(d_opt, opt);
         assert_eq!(d_text, "win");
-        // Empty query text is wire-legal (the server rejects it, not the codec).
         let empty_req = encode_query_req(opt, "");
         let (_, empty) = decode_query_req(&empty_req).unwrap();
         assert_eq!(empty, "");
-        // Invalid UTF-8 text is a codec error.
         let mut bad = encode_query_req(opt, "");
         bad.push(0xFF);
         assert!(decode_query_req(&bad).is_err());
@@ -648,9 +622,8 @@ mod tests {
         assert_eq!(v.rows, vec![row]);
         assert_eq!(v.blob, blob);
 
-        // Lying header lengths must not panic or over-read.
         let mut lying = bytes.clone();
-        lying[0..4].copy_from_slice(&2u32.to_le_bytes()); // row_count=2, but only 1 row present
+        lying[0..4].copy_from_slice(&2u32.to_le_bytes());
         assert!(decode_page(&lying).is_err());
     }
 

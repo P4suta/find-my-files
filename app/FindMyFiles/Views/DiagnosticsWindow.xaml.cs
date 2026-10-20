@@ -8,19 +8,11 @@ using Windows.Graphics;
 
 namespace FindMyFiles.Views;
 
-/// <summary>The diagnostics window: a non-modal utility window hosting the
-/// <see cref="PerfPanel"/>. Shares the single <see cref="PerfPanelViewModel"/>
-/// owned by the main view, so trace recording and the 1 Hz live poll keep
-/// running regardless of where the panel is shown.</summary>
-// View shell: window chrome + title bar, not unit-tested (ADR-0022).
+/// <summary>The diagnostics window: a non-modal utility window hosting the <see cref="PerfPanel"/>. Shares the single <see cref="PerfPanelViewModel"/> owned by the main view, so trace recording and the 1 Hz live poll keep running regardless of where the panel is shown.</summary>
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed partial class DiagnosticsWindow : Window
 {
-    /// <summary>Extends the title bar into the content, sets the window icon and
-    /// title, hands the shared <paramref name="perf"/> ViewModel to the hosted
-    /// <see cref="PerfPanel"/>, then sizes (DPI-correct, before first paint) and
-    /// centers the window on its display.</summary>
-    /// <param name="perf">The shared diagnostics ViewModel owned by the main view.</param>
+    /// <summary>Extends the title bar into the content, sets the window icon and title, hands the shared <paramref name="perf"/> ViewModel to the hosted <see cref="PerfPanel"/>, then sizes (DPI-correct, before first paint) and centers the window on its display.</summary> <param name="perf">The shared diagnostics ViewModel owned by the main view.</param>
     internal DiagnosticsWindow(PerfPanelViewModel perf)
     {
         InitializeComponent();
@@ -32,11 +24,9 @@ public sealed partial class DiagnosticsWindow : Window
         DiagPerfPanel.ViewModel = perf;
         Closed += (_, _) => DiagPerfPanel.Dispose();
 
-        // DPI-correct, flicker-free sizing (ctor runs before first paint).
         var hwnd = Win32Interop.GetWindowFromWindowId(AppWindow.Id);
         var scale = GetDpiForWindow(hwnd) / 96.0;
 
-        // Window sizing comes from the design-token system (Themes/Tokens.Semantic.xaml).
         var res = Application.Current.Resources;
         AppWindow.ResizeClient(new SizeInt32(
             (int)((double)res["DiagWindowWidth"] * scale),

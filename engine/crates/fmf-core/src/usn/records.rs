@@ -1,16 +1,35 @@
-//! Pure change-journal buffer parsing — no OS calls, so the whole layer is
-//! testable from raw byte fixtures.
+//! Pure change-journal buffer parsing — no OS calls, so the whole layer is testable from raw byte fixtures.
 //!
-//! That split is deliberate: reading a real journal needs elevation, so
-//! keeping the grammar OS-free is what lets the USN logic be covered by
-//! unelevated `cargo test` (see AGENTS.md).
+//! That split is deliberate: reading a real journal needs elevation, so keeping the grammar OS-free is what lets the USN logic be covered by unelevated `cargo test` (see AGENTS.md).
 //!
-//! NTFS V2 records are decoded; foreign V3/V4 records are skipped only
-//! after their version-specific variable-length layout has been validated.
+//! NTFS V2 records are decoded; foreign V3/V4 records are skipped only after their version-specific variable-length layout has been validated.
 //!
 //! Buffer layout returned by `FSCTL_READ_USN_JOURNAL` / `FSCTL_ENUM_USN_DATA`:
-//! a leading u64 (the next USN / next FRN to resume from), then a sequence of
-//! `USN_RECORD_V2` structures, each `RecordLength` bytes, 8-byte aligned.
+//! a leading u64 (the next USN / next FRN to resume from), then a sequence of `USN_RECORD_V2` structures, each `RecordLength` bytes, 8-byte aligned.
+
+use alloc::vec::Vec;
+
+const CURSOR_BYTES: usize = size_of::<u64>();
+const RECORD_ALIGNMENT: usize = 8;
+const ESTIMATED_RECORD_BYTES: usize = 96;
+const MAX_FILENAME_UNITS: usize = 255;
+const V2_HEADER_BYTES: usize = 60;
+const V3_HEADER_BYTES: usize = 76;
+const VERSION_OFFSET: usize = 4;
+const V2_VERSION: u16 = 2;
+const V3_VERSION: u16 = 3;
+const V4_VERSION: u16 = 4;
+const V2_FRN_OFFSET: usize = 8;
+const V2_PARENT_OFFSET: usize = 16;
+const V2_USN_OFFSET: usize = 24;
+const V2_REASON_OFFSET: usize = 40;
+const V2_ATTRIBUTES_OFFSET: usize = 52;
+const V2_NAME_LENGTH_OFFSET: usize = 56;
+const V2_NAME_OFFSET_FIELD: usize = 58;
+const V3_NAME_LENGTH_OFFSET: usize = 72;
+const V3_NAME_OFFSET_FIELD: usize = 74;
+const V4_EXTENT_COUNT_OFFSET: usize = 60;
+const V4_EXTENT_SIZE_OFFSET: usize = 62;
 
 /// Reason flags we act on (winioctl.h).
 pub mod reason {
@@ -60,8 +79,7 @@ pub struct UsnRecord {
     pub reason: u32,
     /// Bitfield of `FILE_ATTRIBUTE_*` flags for the file at record time.
     pub attributes: u32,
-    /// File name in UTF-16 units (single link name, see RESEARCH.md on
-    /// hard links).
+    /// File name in UTF-16 units (single link name, see RESEARCH.md on hard links).
     pub name: Vec<u16>,
 }
 
@@ -94,12 +112,17 @@ fn u16_at(b: &[u8], off: usize) -> u16 {
 }
 #[inline]
 fn u32_at(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+    u32::from_le_bytes([
+        b[off],
+        b[off + 1],
+        b[off + size_of::<u16>()],
+        b[off + size_of::<u32>() - 1],
+    ])
 }
 #[inline]
 fn u64_at(b: &[u8], off: usize) -> u64 {
     let mut a = [0u8; 8];
-    a.copy_from_slice(&b[off..off + 8]);
+    a.copy_from_slice(&b[off..off + size_of::<u64>()]);
     u64::from_le_bytes(a)
 }
 
@@ -113,9 +136,9 @@ fn valid_utf16_tail(
     let name_len = u16_at(record, length_offset) as usize;
     let name_off = u16_at(record, data_offset) as usize;
     name_off >= fixed_header
-        && name_off.is_multiple_of(2)
-        && name_len.is_multiple_of(2)
-        && name_len <= 255 * 2
+        && name_off.is_multiple_of(size_of::<u16>())
+        && name_len.is_multiple_of(size_of::<u16>())
+        && name_len <= MAX_FILENAME_UNITS * size_of::<u16>()
         && name_off
             .checked_add(name_len)
             .is_some_and(|end| end <= record_length)
@@ -128,8 +151,8 @@ fn valid_v4_extents(record: &[u8], record_length: usize) -> bool {
     if record_length < V4_HEADER_BYTES {
         return false;
     }
-    let count = u16_at(record, 60) as usize;
-    let extent_size = u16_at(record, 62) as usize;
+    let count = u16_at(record, V4_EXTENT_COUNT_OFFSET) as usize;
+    let extent_size = u16_at(record, V4_EXTENT_SIZE_OFFSET) as usize;
     if count > 0 && extent_size < EXTENT_BYTES {
         return false;
     }
@@ -141,102 +164,107 @@ fn valid_v4_extents(record: &[u8], record_length: usize) -> bool {
 
 /// Parse a raw FSCTL output buffer.
 ///
-/// Returns the leading "next" cursor value, the decoded records, and whether
-/// trailing bytes had to be dropped (malformed/truncated input — callers
-/// surface this as a counter+warning instead of letting it vanish).
+/// Returns the leading "next" cursor value, the decoded records, and whether trailing bytes had to be dropped (malformed/truncated input — callers surface this as a counter+warning instead of letting it vanish).
 #[must_use]
 pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>, bool) {
-    // A 64 KiB FSCTL buffer holds hundreds of ~60-80 B V2 records; pre-size
-    // off the input length (min record ~60 B, ~96 B average) to skip the
-    // realloc chain. Bounded by the input, so no over-allocation on a buffer
-    // that decodes to few records.
-    let mut records = Vec::with_capacity(buf.len() / 96);
+    let mut records = Vec::with_capacity(buf.len() / ESTIMATED_RECORD_BYTES);
     let mut truncated = false;
-    if buf.len() < 8 {
+    if buf.len() < CURSOR_BYTES {
         return (0, records, true);
     }
     let next = u64_at(buf, 0);
-    let mut off = 8usize;
+    let mut off = CURSOR_BYTES;
 
-    while off + 60 <= buf.len() {
+    while off + V2_HEADER_BYTES <= buf.len() {
         let rec = &buf[off..];
         let record_length = u32_at(rec, 0) as usize;
         let Some(record_end) = off.checked_add(record_length) else {
             truncated = true;
             break;
         };
-        if record_length < 60 || !record_length.is_multiple_of(8) || record_end > buf.len() {
+        if record_length < V2_HEADER_BYTES
+            || !record_length.is_multiple_of(RECORD_ALIGNMENT)
+            || record_end > buf.len()
+        {
             truncated = true;
             break;
         }
-        match u16_at(rec, 4) {
-            2 if valid_utf16_tail(rec, record_length, 60, 56, 58) => {
-                let name_len = u16_at(rec, 56) as usize;
-                let name_off = u16_at(rec, 58) as usize;
+        match u16_at(rec, VERSION_OFFSET) {
+            V2_VERSION
+                if valid_utf16_tail(
+                    rec,
+                    record_length,
+                    V2_HEADER_BYTES,
+                    V2_NAME_LENGTH_OFFSET,
+                    V2_NAME_OFFSET_FIELD,
+                ) =>
+            {
+                let name_len = u16_at(rec, V2_NAME_LENGTH_OFFSET) as usize;
+                let name_off = u16_at(rec, V2_NAME_OFFSET_FIELD) as usize;
                 let name_end = name_off + name_len;
-                let mut name = Vec::with_capacity(name_len / 2);
+                let mut name = Vec::with_capacity(name_len / size_of::<u16>());
                 let nb = &rec[name_off..name_end];
-                for ch in nb.chunks_exact(2) {
+                for ch in nb.chunks_exact(size_of::<u16>()) {
                     name.push(u16::from_le_bytes([ch[0], ch[1]]));
                 }
                 records.push(UsnRecord {
-                    usn: u64_at(rec, 24) as i64,
-                    frn: u64_at(rec, 8),
-                    parent_frn: u64_at(rec, 16),
-                    reason: u32_at(rec, 40),
-                    attributes: u32_at(rec, 52),
+                    usn: u64_at(rec, V2_USN_OFFSET) as i64,
+                    frn: u64_at(rec, V2_FRN_OFFSET),
+                    parent_frn: u64_at(rec, V2_PARENT_OFFSET),
+                    reason: u32_at(rec, V2_REASON_OFFSET),
+                    attributes: u32_at(rec, V2_ATTRIBUTES_OFFSET),
                     name,
                 });
             }
-            2 => {
-                // Name escapes its record: corrupt bytes. The record is
-                // dropped, but the caller must hear about it (counter +
-                // warning) — a silently lost rename means a stale index.
+            V2_VERSION => {
                 truncated = true;
             }
-            // A read can legally mix record versions. This NTFS indexer only
-            // consumes V2's 64-bit file IDs; V3/V4 framing is nevertheless
-            // validated before it is skipped. Treating a structurally valid
-            // supported foreign version as corruption would create an
-            // infinite full-rescan loop.
-            3 if record_length >= 76 && valid_utf16_tail(rec, record_length, 76, 72, 74) => {}
-            4 if valid_v4_extents(rec, record_length) => {}
-            // Unknown versions and malformed foreign records cannot be
-            // skipped safely: advancing the cursor could permanently lose a
-            // record hidden behind corrupt framing.
+            V3_VERSION
+                if record_length >= V3_HEADER_BYTES
+                    && valid_utf16_tail(
+                        rec,
+                        record_length,
+                        V3_HEADER_BYTES,
+                        V3_NAME_LENGTH_OFFSET,
+                        V3_NAME_OFFSET_FIELD,
+                    ) => {}
+            V4_VERSION if valid_v4_extents(rec, record_length) => {}
             _ => truncated = true,
         }
-        // FSCTL records are 8-byte aligned and RecordLength includes padding.
         off = record_end;
     }
     if off != buf.len() {
-        truncated = true; // sub-record trailing garbage (< 60 bytes)
+        truncated = true;
     }
     (next, records, truncated)
 }
 
-/// Serialize records into the FSCTL wire format — used to build test
-/// fixtures and replay files (`fmf capture-usn`).
+/// Serialize records into the FSCTL wire format — used to build test fixtures and replay files (`fmf capture-usn`).
 #[must_use]
 pub fn encode_buffer(next: u64, records: &[UsnRecord]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&next.to_le_bytes());
     for r in records {
         let name_bytes: Vec<u8> = r.name.iter().flat_map(|u| u.to_le_bytes()).collect();
-        let len = (60 + name_bytes.len()).next_multiple_of(8);
+        let len = (V2_HEADER_BYTES + name_bytes.len()).next_multiple_of(RECORD_ALIGNMENT);
         let start = out.len();
         out.resize(start + len, 0);
         let w = &mut out[start..];
-        w[0..4].copy_from_slice(&(len as u32).to_le_bytes());
-        w[4..6].copy_from_slice(&2u16.to_le_bytes()); // major
-        w[8..16].copy_from_slice(&r.frn.to_le_bytes());
-        w[16..24].copy_from_slice(&r.parent_frn.to_le_bytes());
-        w[24..32].copy_from_slice(&(r.usn as u64).to_le_bytes());
-        w[40..44].copy_from_slice(&r.reason.to_le_bytes());
-        w[52..56].copy_from_slice(&r.attributes.to_le_bytes());
-        w[56..58].copy_from_slice(&(name_bytes.len() as u16).to_le_bytes());
-        w[58..60].copy_from_slice(&60u16.to_le_bytes());
-        w[60..60 + name_bytes.len()].copy_from_slice(&name_bytes);
+        w[0..size_of::<u32>()].copy_from_slice(&(len as u32).to_le_bytes());
+        w[VERSION_OFFSET..VERSION_OFFSET + size_of::<u16>()]
+            .copy_from_slice(&V2_VERSION.to_le_bytes());
+        w[V2_FRN_OFFSET..V2_PARENT_OFFSET].copy_from_slice(&r.frn.to_le_bytes());
+        w[V2_PARENT_OFFSET..V2_USN_OFFSET].copy_from_slice(&r.parent_frn.to_le_bytes());
+        w[V2_USN_OFFSET..V2_USN_OFFSET + size_of::<i64>()]
+            .copy_from_slice(&(r.usn as u64).to_le_bytes());
+        w[V2_REASON_OFFSET..V2_REASON_OFFSET + size_of::<u32>()]
+            .copy_from_slice(&r.reason.to_le_bytes());
+        w[V2_ATTRIBUTES_OFFSET..V2_NAME_LENGTH_OFFSET].copy_from_slice(&r.attributes.to_le_bytes());
+        w[V2_NAME_LENGTH_OFFSET..V2_NAME_OFFSET_FIELD]
+            .copy_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        w[V2_NAME_OFFSET_FIELD..V2_HEADER_BYTES]
+            .copy_from_slice(&(V2_HEADER_BYTES as u16).to_le_bytes());
+        w[V2_HEADER_BYTES..V2_HEADER_BYTES + name_bytes.len()].copy_from_slice(&name_bytes);
     }
     out
 }

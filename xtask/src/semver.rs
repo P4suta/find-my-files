@@ -1,15 +1,13 @@
 //! Release versions are plain `X.Y.Z` triples (no pre-release/build metadata).
-//! Validating up front turns a typo into a clear error before any file is
-//! rewritten or any tag is cut — the old PowerShell recipe had no such guard.
+//! Validating up front turns a typo into a clear error before any file is rewritten or any tag is cut — the old PowerShell recipe had no such guard.
 
 use anyhow::{bail, Result};
 
-/// Accept only canonical release `SemVer` `X.Y.Z`: exactly three ASCII-decimal
-/// components, with no leading zero on a multi-digit component. Pre-release and
-/// build metadata are deliberately excluded from release-source versions.
+/// Accept only canonical release `SemVer` `X.Y.Z`: exactly three ASCII-decimal components, with no leading zero on a multi-digit component.
+/// Pre-release and build metadata are deliberately excluded from release-source versions.
 pub fn validate(version: &str) -> Result<()> {
     let parts: Vec<&str> = version.split('.').collect();
-    let ok = parts.len() == 3
+    let ok = matches!(parts.as_slice(), [_, _, _])
         && parts.iter().all(|p| {
             !p.is_empty()
                 && p.bytes().all(|b| b.is_ascii_digit())
@@ -66,7 +64,6 @@ mod tests {
         assert_eq!(strip_tag_v("v0.2.0"), "0.2.0");
         assert_eq!(strip_tag_v("V0.2.0"), "0.2.0");
         assert_eq!(strip_tag_v("0.2.0"), "0.2.0");
-        // Only one leading v is stripped.
         assert_eq!(strip_tag_v("vv1.0.0"), "v1.0.0");
     }
 }

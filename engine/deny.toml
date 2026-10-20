@@ -1,10 +1,5 @@
-# cargo-deny policy. Advisories are owned by cargo-audit.yml (weekly cron);
-# this gate runs `cargo deny check bans licenses sources` on each PR.
 
 [licenses]
-# SPDX identifiers we accept. Covers the current dependency tree
-# (MIT/Apache/BSD/ISC/Unicode/Zlib/…). Add here when a new dep introduces one;
-# the `licenses` check fails loudly on anything not listed.
 allow = [
   "MIT",
   "Apache-2.0",
@@ -21,16 +16,17 @@ allow = [
   "BSL-1.0",
 ]
 confidence-threshold = 0.8
-# The allow list is a curated superset of the current tree (plus headroom for
-# licenses a new dep may pull in). cargo-deny 0.18+ warns on allow entries no
-# crate currently uses; that fights the superset intent, so don't flag unused.
 unused-allowed-license = "allow"
 
 [bans]
-# Any duplicate version is a dependency-policy failure.
 multiple-versions = "deny"
 wildcards = "deny"
 allow-wildcard-paths = true
+
+[[bans.skip]]
+name = "syn"
+version = "=2.0.119"
+reason = "tracing-attributes and clap_derive require syn 2 while serde_derive and thiserror-impl require syn 3; remove this exception when the macro dependencies converge."
 
 [sources]
 unknown-registry = "deny"

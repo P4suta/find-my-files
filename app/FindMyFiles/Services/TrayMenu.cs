@@ -2,12 +2,9 @@ using System.Runtime.InteropServices;
 
 namespace FindMyFiles.Services;
 
-/// <summary>The tray icon's right-click menu (ADR-0030): a Win32
-/// <c>TrackPopupMenuEx</c> popup, since a WinUI <c>MenuFlyout</c> cannot be shown
-/// outside an HWND / XamlRoot context. Synchronous (<c>TPM_RETURNCMD</c>): it
-/// returns the chosen command and the caller acts on it. Labels are localized via
-/// <see cref="Loc"/>. Self-written P/Invoke, pinned to System32, like the other
-/// interop seams (<see cref="ServiceSetup"/>, <c>ShellOps</c>).</summary>
+/// <summary>The tray icon's right-click menu (ADR-0030): a Win32 <c>TrackPopupMenuEx</c> popup, since a WinUI <c>MenuFlyout</c> cannot be shown outside an HWND / XamlRoot context.
+/// Synchronous (<c>TPM_RETURNCMD</c>): it returns the chosen command and the caller acts on it.
+/// Labels are localized via <see cref="Loc"/>. Self-written P/Invoke, pinned to System32, like the other interop seams (<see cref="ServiceSetup"/>, <c>ShellOps</c>).</summary>
 internal static partial class TrayMenu
 {
     private const uint MfString = 0x0;
@@ -17,11 +14,7 @@ internal static partial class TrayMenu
     private const uint CmdOpen = 1;
     private const uint CmdExit = 2;
 
-    /// <summary>Shows the context menu at the cursor and returns the chosen
-    /// command.</summary>
-    /// <param name="hwnd">Owner window — foregrounded first so the menu does not
-    /// dismiss immediately (the classic shell tray-menu workaround).</param>
-    /// <returns>The selected command, or <see cref="TrayCommand.None"/>.</returns>
+    /// <summary>Shows the context menu at the cursor and returns the chosen command.</summary> <param name="hwnd">Owner window — foregrounded first so the menu does not dismiss immediately (the classic shell tray-menu workaround).</param> <returns>The selected command, or <see cref="TrayCommand.None"/>.</returns>
     internal static TrayCommand Show(IntPtr hwnd)
     {
         var menu = CreatePopupMenu();
@@ -35,7 +28,6 @@ internal static partial class TrayMenu
             _ = AppendMenu(menu, MfString, CmdOpen, Loc.Get("Tray_Open"));
             _ = AppendMenu(menu, MfString, CmdExit, Loc.Get("Tray_Exit"));
 
-            // Foreground the owner first or the menu closes the instant it opens.
             _ = SetForegroundWindow(hwnd);
             _ = GetCursorPos(out var pt);
 

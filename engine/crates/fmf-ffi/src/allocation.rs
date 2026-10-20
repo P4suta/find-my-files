@@ -1,8 +1,7 @@
 //! Process-wide owner IDs for FFI allocations.
 //!
-//! Pages and JSON blobs share one monotonic namespace. The C caller receives
-//! the ID in the descriptor and returns only that ID to the matching free
-//! function; Rust never reconstructs ownership from a foreign address.
+//! Pages and JSON blobs share one monotonic namespace.
+//! The C caller receives the ID in the descriptor and returns only that ID to the matching free function; Rust never reconstructs ownership from a foreign address.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

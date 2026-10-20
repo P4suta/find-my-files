@@ -1,9 +1,3 @@
-# Mechanical "don't go silent" enforcement (ADR-0018): no silent fallbacks at the
-# boundary. Degrade via fmf_core::degrade! (atomic warn + counter) plus an explicit
-# fallback.
-#
-# Test re-allows mirror the workspace clippy.toml (clippy reads the nearest file and
-# does not merge, so they are restated here).
 allow-unwrap-in-tests = true
 allow-dbg-in-tests = true
 disallowed-methods = [

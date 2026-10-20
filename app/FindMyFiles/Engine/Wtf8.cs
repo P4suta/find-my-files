@@ -1,21 +1,13 @@
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// WTF-8 decoding: like UTF-8 but unpaired surrogates round-trip, matching
-/// the engine's name pools. C# strings hold unpaired surrogates natively.
+/// <summary> WTF-8 decoding: like UTF-8 but unpaired surrogates round-trip, matching the engine's name pools.
+/// C# strings hold unpaired surrogates natively.
 /// </summary>
 internal static class Wtf8
 {
-    /// <summary>WTF-8 decoding: the inverse of <see cref="Encode"/>. Lone
-    /// surrogate byte sequences round-trip to the matching UTF-16 code units.</summary>
-    /// <param name="bytes">The WTF-8 encoded bytes to decode.</param>
-    /// <returns>The decoded string, with any lone surrogates preserved.</returns>
+    /// <summary>WTF-8 decoding: the inverse of <see cref="Encode"/>. Lone surrogate byte sequences round-trip to the matching UTF-16 code units.</summary> <param name="bytes">The WTF-8 encoded bytes to decode.</param> <returns>The decoded string, with any lone surrogates preserved.</returns>
     public static string Decode(ReadOnlySpan<byte> bytes)
     {
-        // UTF-16 units ≤ WTF-8 bytes, so this is a safe upper bound. Decode into
-        // a stack buffer for the common short name/path (≤512 chars = 1 KiB) so
-        // only the unavoidable final string allocates; the throwaway scratch
-        // array is gone from the per-row page-decode path.
         Span<char> chars = bytes.Length <= 512 ? stackalloc char[bytes.Length] : new char[bytes.Length];
         int n = 0, i = 0;
         while (i < bytes.Length)
@@ -55,20 +47,17 @@ internal static class Wtf8
             }
             else
             {
-                chars[n++] = (char)cp; // includes lone surrogates — intentional
+                chars[n++] = (char)cp;
             }
         }
 
         return new string(chars[..n]);
     }
 
-    /// <summary>WTF-8 encoding: the inverse of <see cref="Decode"/>. Lone
-    /// surrogates become 3-byte sequences instead of U+FFFD.</summary>
-    /// <param name="s">The string to encode, which may contain lone surrogates.</param>
-    /// <returns>The WTF-8 encoded bytes.</returns>
+    /// <summary>WTF-8 encoding: the inverse of <see cref="Decode"/>. Lone surrogates become 3-byte sequences instead of U+FFFD.</summary> <param name="s">The string to encode, which may contain lone surrogates.</param> <returns>The WTF-8 encoded bytes.</returns>
     public static byte[] Encode(string s)
     {
-        var bytes = new byte[s.Length * 3]; // WTF-8 bytes ≤ 3 × UTF-16 units
+        var bytes = new byte[s.Length * 3];
         var n = 0;
         char? pendingHigh = null;
         foreach (var unit in s)

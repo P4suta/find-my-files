@@ -1,8 +1,6 @@
 namespace FindMyFiles.Services;
 
-/// <summary>Severity of an <see cref="AppNotification"/> — selects the InfoBar
-/// style and the file-log level, and decides whether the entry auto-dismisses
-/// (Info) or stays until the user closes it.</summary>
+/// <summary>Severity of an <see cref="AppNotification"/> — selects the InfoBar style and the file-log level, and decides whether the entry auto-dismisses (Info) or stays until the user closes it.</summary>
 public enum NotifySeverity
 {
     /// <summary>Transient confirmation — logged at INFO; dissolves on its own.</summary>

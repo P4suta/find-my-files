@@ -1,12 +1,3 @@
-# Dev-task runner for find-my-files (the cargo-xtask pattern).
-#
-# Deliberately its OWN single-crate workspace, NOT a member of engine/: the
-# daily loop and CI gates run `cargo {check,clippy,doc} --workspace` and
-# `cargo llvm-cov --workspace --fail-under-lines 70` against engine/, and a
-# member here would pollute the coverage denominator and lint/doc surface.
-# Invoked via `cargo run --manifest-path xtask/Cargo.toml -- <cmd>` (just hides
-# this). Holds the imperative build/release plumbing that used to live as
-# inline PowerShell in justfile / the GitHub workflows.
 [workspace]
 
 [package]
@@ -15,19 +6,16 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-# Mirrors the engine workspace's maximal lint policy (engine/Cargo.toml). xtask
-# is a separate workspace, so the policy is restated here. publish=false build
-# tooling: the cargo-group metadata lints get justified allows during triage.
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(kani)'] }
+unfulfilled_lint_expectations = "deny"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
-# Same justified exemptions as the engine workspace (see engine/Cargo.toml for the
-# reasoning). Everything else stays deny and is fixed in code.
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
@@ -44,7 +32,6 @@ significant_drop_in_scrutinee = "allow"
 option_if_let_else = "allow"
 cargo_common_metadata = "allow"
 multiple_crate_versions = "allow"
-# Curated restriction lints — mirror engine/Cargo.toml (see there for the rationale).
 unwrap_used = "deny"
 dbg_macro = "deny"
 todo = "deny"
@@ -70,12 +57,11 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 toml_edit = "0.25"
 regex = "1"
-# deflate only — drops the bzip2/zstd C deps so xtask builds clean on the
-# ubuntu CI lane (and everywhere) without a C toolchain.
 zip = { version = "9", default-features = false, features = ["deflate"] }
 sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+syn = { version = "3", features = ["full", "visit"] }
 yaml-rust2 = { version = "0.11", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
@@ -86,8 +72,6 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_System_Threading",
 ] }
 
-# This is build tooling, not a hot path: optimize for fast compiles, not fast
-# runtime. (The engine workspace is the opposite — see engine/Cargo.toml.)
 [profile.release]
 lto = false
 codegen-units = 16

@@ -2,15 +2,8 @@ using Microsoft.UI.Dispatching;
 
 namespace FindMyFiles.Services;
 
-/// <summary>
-/// Production <see cref="IDispatcher"/>: a thin wrapper over the UI thread's
-/// cached <see cref="DispatcherQueue"/> (AGENTS.md UI rules — cache on the UI
-/// thread, TryEnqueue from background threads).
-/// </summary>
-/// <param name="queue">The UI thread's <see cref="DispatcherQueue"/>, captured
-/// once on that thread at construction.</param>
-// UI-thread DispatcherQueue wrapper: exercised only on a live UI thread; the
-// ManualDispatcher fake stands in for tests (ADR-0022).
+/// <summary> Production <see cref="IDispatcher"/>: a thin wrapper over the UI thread's cached <see cref="DispatcherQueue"/> (AGENTS.md UI rules — cache on the UI thread, TryEnqueue from background threads).
+/// </summary> <param name="queue">The UI thread's <see cref="DispatcherQueue"/>, captured once on that thread at construction.</param>
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 internal sealed class DispatcherQueueDispatcher(DispatcherQueue queue) : IDispatcher
 {
@@ -34,7 +27,7 @@ internal sealed class DispatcherQueueDispatcher(DispatcherQueue queue) : IDispat
     {
         public void Start()
         {
-            timer.Stop(); // restart semantics: a pending tick is superseded
+            timer.Stop();
             timer.Start();
         }
 

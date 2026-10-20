@@ -3,20 +3,14 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// Defense-in-depth behavior tests for the pure, unelevated
-/// <see cref="ServiceSetup"/> surfaces that the thicker suites skipped: the
-/// exe-location walk and the SID injection guard that gate the one-time
-/// elevation. Anything touching the SCM, elevation, or a real process launch is
-/// deliberately out of scope here.
+/// <summary> Defense-in-depth behavior tests for the pure, unelevated <see cref="ServiceSetup"/> surfaces that the thicker suites skipped: the exe-location walk and the SID injection guard that gate the one-time elevation.
+/// Anything touching the SCM, elevation, or a real process launch is deliberately out of scope here.
 /// </summary>
 public sealed class ServiceLifecycleTests
 {
     [Fact]
     public void Locate_service_exe_returns_null_when_nothing_is_present()
     {
-        // The simplest transition: an isolated bin dir with no bundle and no dev
-        // tree above it resolves to null, so the caller falls back to setup.
         var root = Directory.CreateTempSubdirectory("fmf-lifecycle-test");
         try
         {
@@ -34,8 +28,6 @@ public sealed class ServiceLifecycleTests
     [Fact]
     public void Locate_service_exe_walks_up_several_levels_to_find_the_dev_tree()
     {
-        // The dev-tree probe walks up from the bin dir; a deeply nested bin dir
-        // must still find build\engine\release sitting near the repo root.
         var root = Directory.CreateTempSubdirectory("fmf-lifecycle-test");
         try
         {
@@ -58,7 +50,6 @@ public sealed class ServiceLifecycleTests
     [Fact]
     public void Locate_service_exe_returns_the_bundle_without_walking_when_present()
     {
-        // A bundle next to the bin dir short-circuits the dev-tree walk entirely.
         var root = Directory.CreateTempSubdirectory("fmf-lifecycle-test");
         try
         {
@@ -76,7 +67,7 @@ public sealed class ServiceLifecycleTests
     }
 
     [Theory]
-    [InlineData("S-1-5")] // minimal well-formed prefix
+    [InlineData("S-1-5")]
     [InlineData("S-1-5-21-1654600493-3733564142-2704359447-1001")]
     public void Is_valid_sid_accepts_canonical_values(string input)
     {
@@ -84,15 +75,15 @@ public sealed class ServiceLifecycleTests
     }
 
     [Theory]
-    [InlineData("s-1-5-18")] // lowercase prefix — the S-1- check is case-sensitive
+    [InlineData("s-1-5-18")]
     [InlineData("S-1-5-21-abc")]
     [InlineData("S-1-05-18")]
     [InlineData("S-2-5-18")]
-    [InlineData("S-1-281474976710656-18")] // identifier authority exceeds 48 bits
-    [InlineData("S-1-5-4294967296")] // sub-authority exceeds 32 bits
-    [InlineData("S-1-5-21-1\n--owner-sid=evil")] // newline injection
-    [InlineData("S-1-5-21-1\t--owner-sid=evil")] // tab injection
-    [InlineData("X-1-5-18")] // wrong authority prefix
+    [InlineData("S-1-281474976710656-18")]
+    [InlineData("S-1-5-4294967296")]
+    [InlineData("S-1-5-21-1\n--owner-sid=evil")]
+    [InlineData("S-1-5-21-1\t--owner-sid=evil")]
+    [InlineData("X-1-5-18")]
     public void Is_valid_sid_rejects_malformed_or_injecting_values(string input)
     {
         Assert.False(ServiceSetup.IsValidSid(input));

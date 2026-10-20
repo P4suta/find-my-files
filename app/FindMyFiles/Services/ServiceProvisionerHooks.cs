@@ -1,11 +1,7 @@
 namespace FindMyFiles.Services;
 
-/// <summary>Process/elevation boundaries used by the production service
-/// provisioner. Tests replace the complete set so exercising <see
-/// cref="ServiceProvisioner.Real"/> never opens UAC or touches SCM state.</summary>
-/// <param name="LocateServiceExe">Resolves the bundled helper.</param>
-/// <param name="CreateSetupArguments">Builds the SID-bound setup command.</param>
-/// <param name="RunElevated">Runs the closed command through the UAC boundary.</param>
+/// <summary>Process/elevation boundaries used by the production service provisioner.
+/// Tests replace the complete set so exercising <see cref="ServiceProvisioner.Real"/> never opens UAC or touches SCM state.</summary> <param name="LocateServiceExe">Resolves the bundled helper.</param> <param name="CreateSetupArguments">Builds the SID-bound setup command.</param> <param name="RunElevated">Runs the closed command through the UAC boundary.</param>
 internal sealed record ServiceProvisionerHooks(
     Func<string, string?> LocateServiceExe,
     Func<(bool Success, string Arguments)> CreateSetupArguments,

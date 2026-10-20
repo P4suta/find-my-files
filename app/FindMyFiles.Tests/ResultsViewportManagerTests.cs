@@ -5,10 +5,8 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// Pins the pure decision helpers of <see cref="ResultsViewportManager"/> —
-/// the ListView-touching members themselves need a real UI thread and are
-/// covered by the fake-engine UI smoke instead.
+/// <summary> Pins the pure decision helpers of <see cref="ResultsViewportManager"/> —
+/// the ListView-touching members themselves need a real UI thread and are covered by the fake-engine UI smoke instead.
 /// </summary>
 public sealed class ResultsViewportManagerTests
 {
@@ -20,10 +18,10 @@ public sealed class ResultsViewportManagerTests
     }
 
     [Theory]
-    [InlineData(null, 10, false)] // reset origin: no restore index
+    [InlineData(null, 10, false)]
     [InlineData(-1, 10, false)]
-    [InlineData(0, 0, false)] // new result is empty
-    [InlineData(10, 10, false)] // one past the end
+    [InlineData(0, 0, false)]
+    [InlineData(10, 10, false)]
     [InlineData(0, 10, true)]
     [InlineData(9, 10, true)]
     public void Restores_only_when_the_index_addresses_an_existing_row(
@@ -54,11 +52,9 @@ public sealed class ResultsViewportManagerTests
     {
         var items = new object?[] { Row(1, 0), Row(2, 1), Row(3, 2) };
 
-        // Row 0 exists but sits outside the seeded window.
         Assert.Null(ResultsViewportManager.FindSelectionIndex(
             i => items[i], items.Length, firstSeededIndex: 1, lastSeededIndex: 2, entryRef: 1));
 
-        // Window reaches past the item count: the count clamps, never throws.
         Assert.Null(ResultsViewportManager.FindSelectionIndex(
             i => items[i], itemCount: 2, firstSeededIndex: 0, lastSeededIndex: 5, entryRef: 3));
     }

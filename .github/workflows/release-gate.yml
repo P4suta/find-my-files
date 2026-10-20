@@ -1,8 +1,3 @@
-# Deliberate-release gate, intentionally independent from CI.
-#
-# Label changes re-run this workflow only. They must never create a second,
-# mostly-skipped CI run whose green ci-required check can replace a failed test
-# result for the same commit.
 name: release-gate
 
 on:
@@ -10,7 +5,6 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
 concurrency:
-  # Irrelevant label churn must neither cancel nor replace the required gate.
   group: >-
     release-gate-${{ github.event.pull_request.number }}-${{
       (
@@ -25,9 +19,6 @@ permissions:
 
 jobs:
   release-gate:
-    # GitHub emits pull_request events for every label, with no trigger-level
-    # name filter. Give unrelated labels a different check context so they
-    # cannot replace a failed/approved required `release-gate` on the same SHA.
     name: >-
       ${{
         (
@@ -38,7 +29,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      pull-requests: read # verify release-please PR labels and source branch
+      pull-requests: read # Permission: Verify release labels and the source branch.
     steps:
       - name: Require explicit approval for a Release PR
         env:

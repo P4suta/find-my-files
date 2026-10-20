@@ -1,15 +1,28 @@
 #![no_main]
-//! Fuzz the snapshot reader — the highest-risk decoder in fmf-core. It does
-//! `unsafe` POD reads (`set_len` over `from_raw_parts_mut`) sized by untrusted
-//! length prefixes in the on-disk `.fmfidx`. A corrupt or hostile snapshot must
-//! come back as a clean `Err` (→ full-rescan fallback), never over-read,
-//! over-allocate (the `try_reserve_exact` guard), or read uninitialized memory.
+//! Check snapshot validation and stable re-encoding over untrusted bytes.
 
-use fmf_core::index::VolumeIndex;
+use fmf_runtime::index::VolumeIndex;
 use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
 
 fuzz_target!(|data: &[u8]| {
     let mut cur = Cursor::new(data);
-    let _ = VolumeIndex::read_snapshot(&mut cur);
+    if let Ok((index, journal, next_usn)) = VolumeIndex::read_snapshot(&mut cur) {
+        let mut encoded = Vec::new();
+        index
+            .write_snapshot(&mut encoded, journal, next_usn)
+            .expect("decoded snapshot encodes");
+        let (again, again_journal, again_usn) =
+            VolumeIndex::read_snapshot(&mut Cursor::new(&encoded))
+                .expect("encoded snapshot decodes");
+        assert_eq!(
+            (again_journal, again_usn, again.len()),
+            (journal, next_usn, index.len())
+        );
+        let mut canonical = Vec::new();
+        again
+            .write_snapshot(&mut canonical, again_journal, again_usn)
+            .expect("snapshot re-encodes");
+        assert_eq!(canonical, encoded);
+    }
 });

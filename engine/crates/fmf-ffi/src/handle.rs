@@ -3,7 +3,7 @@ use std::ffi::{c_char, c_void};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
-use fmf_core::engine::{Engine, EngineConfig, EngineCreateError};
+use fmf_runtime::engine::{Engine, EngineConfig, EngineCreateError};
 use parking_lot::{Condvar, Mutex};
 use serde::Deserialize;
 
@@ -12,17 +12,13 @@ use crate::events::{CallbackSink, callback_active_on_current_thread, clear_event
 use crate::opaque;
 use crate::{FMF_E_INVALID_ARG, FMF_E_IO, FMF_E_LOCKED, FMF_OK};
 
-// ── Handles ─────────────────────────────────────────────────────────────
-
 pub(crate) struct EngineHandle {
     pub(crate) id: usize,
     pub(crate) engine: Arc<Engine>,
-    /// Admission is counted rather than protected by an `RwLock`: an event
-    /// callback may make a (non-lifecycle) FFI call while destroy is waiting,
+    /// Admission is counted rather than protected by an `RwLock`: an event callback may make a (non-lifecycle) FFI call while destroy is waiting,
     /// and a writer-preferring lock would deadlock that re-entry.
     lifecycle: Mutex<Lifecycle>,
     lifecycle_idle: Condvar,
-    // Serializes callback replacement and keeps the callback/user pair alive.
     pub(crate) _sink_keepalive: Mutex<Option<Arc<CallbackSink>>>,
 }
 
@@ -96,16 +92,13 @@ pub const extern "C" fn fmf_abi_version() -> u32 {
     fmf_contract::versions::ABI_VERSION
 }
 
-// ── Lifecycle ───────────────────────────────────────────────────────────
-
 /// `config_json`: {"`index_dir"`: "C:\\`ProgramData`\\find-my-files\\index"}
 ///
 /// # Safety
 ///
 /// `config_json` must point to readable, NUL-terminated UTF-8 for this call.
-/// `out` must be aligned and writable as one pointer, and must not overlap the
-/// configuration string. On entry the function stores null in `out`; a
-/// successful call replaces it with a registry-owned opaque handle.
+/// `out` must be aligned and writable as one pointer, and must not overlap the configuration string.
+/// On entry the function stores null in `out`; a successful call replaces it with a registry-owned opaque handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_engine_create(
     config_json: *const c_char,
@@ -129,14 +122,11 @@ pub unsafe extern "C" fn fmf_engine_create(
             }
         };
 
-        // Diagnostics first: everything after this point is observable
-        // (file log, diag ring, ENGINE_ERROR events). Resolution rule and
-        // bootstrap live in fmf-core::diag — the single home (ADR-0018).
-        let log_dir = fmf_core::diag::resolve_log_dir(parsed.log_dir, &parsed.index_dir);
-        fmf_core::diag::init_diag(
+        let log_dir = fmf_runtime::diag::resolve_log_dir(parsed.log_dir, &parsed.index_dir);
+        fmf_runtime::diag::init_diag(
             Some(&log_dir),
             &parsed.log_level,
-            fmf_core::diag::DEFAULT_MAX_LOG_FILES,
+            fmf_runtime::diag::DEFAULT_MAX_LOG_FILES,
         );
 
         let engine = match Engine::new(EngineConfig {
@@ -172,11 +162,9 @@ pub unsafe extern "C" fn fmf_engine_create(
     })
 }
 
-/// Snapshot-saves every Ready volume that is dirty (its content generation
-/// advanced since the last save) and returns once they are written.
+/// Snapshot-saves every Ready volume that is dirty (its content generation advanced since the last save) and returns once they are written.
 ///
-/// Deliberately has no pipe opcode: the service flushes on its own schedule
-/// and at stop, so no client can turn this into a disk-write amplifier.
+/// Deliberately has no pipe opcode: the service flushes on its own schedule and at stop, so no client can turn this into a disk-write amplifier.
 #[unsafe(no_mangle)]
 pub extern "C" fn fmf_flush(h: *mut c_void) -> i32 {
     guard(|| {
@@ -195,9 +183,8 @@ pub extern "C" fn fmf_flush(h: *mut c_void) -> i32 {
 
 /// Destroys an engine handle after draining its admitted work.
 ///
-/// This detaches the event sink, waits for admitted calls and callbacks, shuts
-/// the engine down, and invalidates the opaque handle. Concurrent calls already
-/// admitted may finish; later and duplicate uses fail closed.
+/// This detaches the event sink, waits for admitted calls and callbacks, shuts the engine down, and invalidates the opaque handle.
+/// Concurrent calls already admitted may finish; later and duplicate uses fail closed.
 #[unsafe(no_mangle)]
 pub extern "C" fn fmf_engine_destroy(h: *mut c_void) -> i32 {
     guard(|| {
@@ -211,10 +198,6 @@ pub extern "C" fn fmf_engine_destroy(h: *mut c_void) -> i32 {
         };
         crate::query_control::cancel_engine(handle.id);
         handle.begin_destroy();
-        // A control creation admitted just before `begin_destroy` can insert
-        // after the first sweep. The lifecycle barrier above waits for every
-        // such call to retire; sweep once more so destruction leaves no
-        // engine-owned control orphaned in the process-global registry.
         crate::query_control::cancel_engine(handle.id);
         clear_event_callback(&handle);
         crate::results::purge_engine(handle.id);

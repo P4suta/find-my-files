@@ -1,7 +1,7 @@
 namespace FindMyFiles.Tests.TestDoubles;
 
-/// <summary>Shared polling wait for tests that observe background threads
-/// (pipe supervisor, child processes). Import via `using static`.</summary>
+/// <summary>Shared polling wait for tests that observe background threads (pipe supervisor, child processes).
+/// Import via `using static`.</summary>
 internal static class Polling
 {
     public static async Task WaitUntilAsync(

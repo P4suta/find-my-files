@@ -1,13 +1,3 @@
-# Reconciles the repo's labels from .github/labels.json (the source of truth) so
-# label names/colors/descriptions are version-controlled, not set by hand. Runs
-# only when the manifest changes (or on demand).
-#
-# Deliberately done with `gh` + `jq` (both pre-installed on the runner) rather
-# than a labeler action: this repo restricts Actions to a SHA-pinned allowlist
-# (Settings → Actions → "selected"), so pulling in a third-party labeler would
-# mean widening that trust surface. `gh label create --force` is create-or-update
-# and never deletes, so the sync is additive — labels missing from the manifest
-# (GitHub defaults, future tool labels) are left untouched.
 name: labels-sync
 
 on:
@@ -28,8 +18,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      contents: read # checkout the manifest (job perms replace, not extend, top-level)
-      issues: write # create/update labels
+      contents: read
+      issues: write # Permission: Create and update repository labels.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

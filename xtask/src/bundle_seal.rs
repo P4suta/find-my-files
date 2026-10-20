@@ -1,20 +1,24 @@
 //! Deterministic, fail-closed manifests for the assembled release bundle.
 //!
-//! The manifest lives next to (never inside) `build/dist/FindMyFiles`, so it can
-//! prove the exact bundle tree without changing the tree it describes.  The
-//! unsigned manifest also pins an Authenticode-stable payload identity for every
-//! entry in [`crate::publish::FIRST_PARTY_PES`].  A signed transition is accepted
-//! only when those exact files gained one structurally valid terminal
-//! `WIN_CERTIFICATE`, their normalized payloads stayed identical, and every
-//! other shipped byte stayed identical.
+//! The manifest lives next to (never inside) `build/dist/FindMyFiles`, so it can prove the exact bundle tree without changing the tree it describes.
+//! The unsigned manifest also pins an Authenticode-stable payload identity for every entry in [`crate::publish::FIRST_PARTY_PES`].
+//! A signed transition is accepted only when those exact files gained one structurally valid terminal `WIN_CERTIFICATE`, their normalized payloads stayed identical, and every other shipped byte stayed identical.
 
+use crate::pe_format::{
+    CHECKSUM_FIELD_OFFSET, COFF_HEADER_SIZE, COFF_OPTIONAL_SIZE_OFFSET, COFF_SECTION_COUNT_OFFSET,
+    DATA_DIRECTORY_SIZE, DOS_HEADER_BYTES, DOS_PE_POINTER_OFFSET, DOS_SIGNATURE_BYTES,
+    HEADERS_SIZE_FIELD_OFFSET, PE32_DIRECTORIES_OFFSET, PE32_DIRECTORY_COUNT_OFFSET, PE32_MAGIC,
+    PE32_PLUS_DIRECTORIES_OFFSET, PE32_PLUS_DIRECTORY_COUNT_OFFSET, PE32_PLUS_MAGIC,
+    PE_SIGNATURE_BYTES, SECTION_HEADER_SIZE, SECTION_RAW_POINTER_OFFSET, SECTION_RAW_SIZE_OFFSET,
+    WIN_CERTIFICATE_ALIGNMENT, WIN_CERTIFICATE_HEADER_BYTES, WIN_CERTIFICATE_REVISION_OFFSET,
+    WIN_CERTIFICATE_TYPE_OFFSET,
+};
 use crate::{checksum, fsx, paths, publish::FIRST_PARTY_PES, version};
 use anyhow::{bail, ensure, Context, Result};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -70,8 +74,6 @@ pub fn run_seal(state: BundleState) -> Result<()> {
     let dist = paths::dist_dir();
     let manifest_path = manifest_path(state);
     if state == BundleState::Signed {
-        // A caller cannot accidentally bless an arbitrary already-signed tree:
-        // creating the signed manifest itself requires the signing-only proof.
         verify_signed_transition_at(&dist, &paths::unsigned_bundle_manifest())?;
     }
     seal_to(&dist, &manifest_path, state)?;
@@ -82,8 +84,7 @@ pub fn run_seal(state: BundleState) -> Result<()> {
     Ok(())
 }
 
-/// Verify the current distribution tree byte-for-byte against its canonical
-/// manifest, including the declared Authenticode state of all first-party PEs.
+/// Verify the current distribution tree byte-for-byte against its canonical manifest, including the declared Authenticode state of all first-party PEs.
 pub fn run_verify(state: BundleState) -> Result<()> {
     let dist = paths::dist_dir();
     let manifest_path = manifest_path(state);
@@ -95,8 +96,7 @@ pub fn run_verify(state: BundleState) -> Result<()> {
     Ok(())
 }
 
-/// Prove that the current signed bundle is the only allowed transition from the
-/// canonical unsigned manifest.
+/// Prove that the current signed bundle is the only allowed transition from the canonical unsigned manifest.
 pub fn run_verify_signed_transition() -> Result<()> {
     let dist = paths::dist_dir();
     let unsigned_manifest = paths::unsigned_bundle_manifest();
@@ -324,8 +324,8 @@ fn compare_exact(expected: &[BundleFileIdentity], actual: &[BundleFileIdentity])
     Ok(())
 }
 
-/// Enumerate and validate an exact bundle tree for release consumers such as
-/// sealing and SBOM generation. This is the single implementation of path,
+/// Enumerate and validate an exact bundle tree for release consumers such as sealing and SBOM generation.
+/// This is the single implementation of path,
 /// case-collision, reparse-point, file-set, and first-party PE-state policy.
 pub fn collect_bundle_files(root: &Path, state: BundleState) -> Result<Vec<BundleFileIdentity>> {
     let root_metadata =
@@ -532,8 +532,6 @@ fn is_reserved_device_number(suffix: &str) -> bool {
 }
 
 fn fold_path(path: &str) -> String {
-    // Paths are validated ASCII before folding, so this exactly models the
-    // distributable namespace we permit without Unicode case ambiguities.
     path.to_ascii_lowercase()
 }
 
@@ -557,8 +555,7 @@ fn ensure_manifest_outside_bundle(root: &Path, manifest_path: &Path) -> Result<(
     Ok(())
 }
 
-/// Return the shared Authenticode-stable SHA-256 identity used by bundle
-/// sealing and shipped-file SBOM attribution.
+/// Return the shared Authenticode-stable SHA-256 identity used by bundle sealing and shipped-file SBOM attribution.
 pub fn normalized_pe_payload_sha256(bytes: &[u8], state: BundleState) -> Result<String> {
     let layout = parse_pe(bytes)?;
     match (state, &layout.certificate) {
@@ -574,47 +571,60 @@ pub fn normalized_pe_payload_sha256(bytes: &[u8], state: BundleState) -> Result<
         .as_ref()
         .map_or(bytes.len(), |table| table.offset);
     ensure!(
-        layout.checksum_offset + 4 <= layout.security_directory_offset
-            && layout.security_directory_offset + 8 <= payload_end,
+        layout.checksum_offset + size_of::<u32>() <= layout.security_directory_offset
+            && layout.security_directory_offset + DATA_DIRECTORY_SIZE <= payload_end,
         "PE normalization fields are out of order or overlap the certificate table"
     );
 
     let mut hasher = Sha256::new();
     hasher.update(&bytes[..layout.checksum_offset]);
     hasher.update([0_u8; 4]);
-    hasher.update(&bytes[layout.checksum_offset + 4..layout.security_directory_offset]);
+    hasher.update(
+        &bytes[layout.checksum_offset + size_of::<u32>()..layout.security_directory_offset],
+    );
     hasher.update([0_u8; 8]);
-    hasher.update(&bytes[layout.security_directory_offset + 8..payload_end]);
+    hasher.update(&bytes[layout.security_directory_offset + DATA_DIRECTORY_SIZE..payload_end]);
     let digest = hasher.finalize();
-    let mut encoded = String::with_capacity(SHA256_HEX_LEN);
-    for byte in digest {
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    Ok(encoded)
+    Ok(crate::checksum::hex(&digest))
 }
 
 fn parse_pe(bytes: &[u8]) -> Result<PeLayout> {
-    ensure!(bytes.len() >= 0x40, "PE is shorter than its DOS header");
-    ensure!(&bytes[..2] == b"MZ", "PE has no MZ signature");
-    let pe_offset = read_u32(bytes, 0x3c, "DOS e_lfanew")? as usize;
     ensure!(
-        pe_offset >= 0x40,
+        bytes.len() >= DOS_HEADER_BYTES,
+        "PE is shorter than its DOS header"
+    );
+    ensure!(
+        &bytes[..DOS_SIGNATURE_BYTES] == b"MZ",
+        "PE has no MZ signature"
+    );
+    let pe_offset = read_u32(bytes, DOS_PE_POINTER_OFFSET, "DOS e_lfanew")? as usize;
+    ensure!(
+        pe_offset >= DOS_HEADER_BYTES,
         "PE header overlaps or precedes the DOS header"
     );
     ensure!(
-        bytes.get(pe_offset..pe_offset.saturating_add(4)) == Some(b"PE\0\0".as_slice()),
+        bytes.get(pe_offset..pe_offset.saturating_add(PE_SIGNATURE_BYTES))
+            == Some(b"PE\0\0".as_slice()),
         "PE signature is missing or truncated"
     );
 
     let coff = pe_offset
-        .checked_add(4)
+        .checked_add(PE_SIGNATURE_BYTES)
         .context("PE COFF header offset overflow")?;
     let optional = coff
-        .checked_add(20)
+        .checked_add(COFF_HEADER_SIZE)
         .context("PE optional header offset overflow")?;
-    let section_count = usize::from(read_u16(bytes, coff + 2, "COFF NumberOfSections")?);
+    let section_count = usize::from(read_u16(
+        bytes,
+        coff + COFF_SECTION_COUNT_OFFSET,
+        "COFF NumberOfSections",
+    )?);
     ensure!(section_count != 0, "PE contains no sections");
-    let optional_size = usize::from(read_u16(bytes, coff + 16, "COFF SizeOfOptionalHeader")?);
+    let optional_size = usize::from(read_u16(
+        bytes,
+        coff + COFF_OPTIONAL_SIZE_OFFSET,
+        "COFF SizeOfOptionalHeader",
+    )?);
     let optional_end = optional
         .checked_add(optional_size)
         .context("PE optional header size overflow")?;
@@ -625,24 +635,29 @@ fn parse_pe(bytes: &[u8]) -> Result<PeLayout> {
 
     let magic = read_u16(bytes, optional, "optional-header magic")?;
     let (directory_count_offset, directories_offset) = match magic {
-        0x010b => (92_usize, 96_usize),
-        0x020b => (108_usize, 112_usize),
+        PE32_MAGIC => (PE32_DIRECTORY_COUNT_OFFSET, PE32_DIRECTORIES_OFFSET),
+        PE32_PLUS_MAGIC => (
+            PE32_PLUS_DIRECTORY_COUNT_OFFSET,
+            PE32_PLUS_DIRECTORIES_OFFSET,
+        ),
         _ => bail!("unsupported PE optional-header magic 0x{magic:04x}"),
     };
     let checksum_offset = optional
-        .checked_add(64)
+        .checked_add(CHECKSUM_FIELD_OFFSET)
         .context("PE checksum offset overflow")?;
     let directory_count_position = optional
         .checked_add(directory_count_offset)
         .context("PE directory count offset overflow")?;
     let security_directory_offset = optional
         .checked_add(directories_offset)
-        .and_then(|offset| offset.checked_add(IMAGE_DIRECTORY_ENTRY_SECURITY.checked_mul(8)?))
+        .and_then(|offset| {
+            offset.checked_add(IMAGE_DIRECTORY_ENTRY_SECURITY.checked_mul(DATA_DIRECTORY_SIZE)?)
+        })
         .context("PE security directory offset overflow")?;
     ensure!(
-        checksum_offset + 4 <= optional_end
-            && directory_count_position + 4 <= optional_end
-            && security_directory_offset + 8 <= optional_end,
+        checksum_offset + size_of::<u32>() <= optional_end
+            && directory_count_position + size_of::<u32>() <= optional_end
+            && security_directory_offset + DATA_DIRECTORY_SIZE <= optional_end,
         "PE optional header is too short for Authenticode fields"
     );
     let directory_count =
@@ -652,9 +667,13 @@ fn parse_pe(bytes: &[u8]) -> Result<PeLayout> {
         "PE optional header does not declare a security directory"
     );
 
-    let size_of_headers = read_u32(bytes, optional + 60, "optional-header SizeOfHeaders")? as usize;
+    let size_of_headers = read_u32(
+        bytes,
+        optional + HEADERS_SIZE_FIELD_OFFSET,
+        "optional-header SizeOfHeaders",
+    )? as usize;
     let section_table_size = section_count
-        .checked_mul(40)
+        .checked_mul(SECTION_HEADER_SIZE)
         .context("PE section table size overflow")?;
     let section_table_end = optional_end
         .checked_add(section_table_size)
@@ -670,9 +689,17 @@ fn parse_pe(bytes: &[u8]) -> Result<PeLayout> {
 
     let mut image_end = size_of_headers;
     for index in 0..section_count {
-        let section = optional_end + index * 40;
-        let raw_size = read_u32(bytes, section + 16, "section SizeOfRawData")? as usize;
-        let raw_offset = read_u32(bytes, section + 20, "section PointerToRawData")? as usize;
+        let section = optional_end + index * SECTION_HEADER_SIZE;
+        let raw_size = read_u32(
+            bytes,
+            section + SECTION_RAW_SIZE_OFFSET,
+            "section SizeOfRawData",
+        )? as usize;
+        let raw_offset = read_u32(
+            bytes,
+            section + SECTION_RAW_POINTER_OFFSET,
+            "section PointerToRawData",
+        )? as usize;
         if raw_size == 0 {
             continue;
         }
@@ -697,7 +724,7 @@ fn parse_pe(bytes: &[u8]) -> Result<PeLayout> {
     )? as usize;
     let certificate_size = read_u32(
         bytes,
-        security_directory_offset + 4,
+        security_directory_offset + size_of::<u32>(),
         "security-directory size",
     )? as usize;
     let certificate = match (certificate_offset, certificate_size) {
@@ -705,7 +732,7 @@ fn parse_pe(bytes: &[u8]) -> Result<PeLayout> {
         (0, _) | (_, 0) => bail!("PE security directory has an inconsistent zero offset/size"),
         (offset, size) => {
             ensure!(
-                offset.is_multiple_of(8),
+                offset.is_multiple_of(WIN_CERTIFICATE_ALIGNMENT),
                 "PE certificate table is not 8-byte aligned"
             );
             ensure!(
@@ -733,23 +760,31 @@ fn parse_pe(bytes: &[u8]) -> Result<PeLayout> {
 
 fn validate_certificate_table(bytes: &[u8], start: usize, end: usize) -> Result<()> {
     ensure!(
-        end - start >= 8,
+        end - start >= WIN_CERTIFICATE_HEADER_BYTES,
         "PE certificate table is shorter than its header"
     );
     let mut cursor = start;
     let mut entries = 0_usize;
     while cursor < end {
         ensure!(
-            end - cursor >= 8,
+            end - cursor >= WIN_CERTIFICATE_HEADER_BYTES,
             "truncated WIN_CERTIFICATE header or alignment padding"
         );
         let length = read_u32(bytes, cursor, "WIN_CERTIFICATE.dwLength")? as usize;
         ensure!(
-            length > 8,
+            length > WIN_CERTIFICATE_HEADER_BYTES,
             "WIN_CERTIFICATE has an empty or invalid payload length"
         );
-        let revision = read_u16(bytes, cursor + 4, "WIN_CERTIFICATE.wRevision")?;
-        let certificate_type = read_u16(bytes, cursor + 6, "WIN_CERTIFICATE.wCertificateType")?;
+        let revision = read_u16(
+            bytes,
+            cursor + WIN_CERTIFICATE_REVISION_OFFSET,
+            "WIN_CERTIFICATE.wRevision",
+        )?;
+        let certificate_type = read_u16(
+            bytes,
+            cursor + WIN_CERTIFICATE_TYPE_OFFSET,
+            "WIN_CERTIFICATE.wCertificateType",
+        )?;
         ensure!(
             revision == WIN_CERT_REVISION_2_0,
             "WIN_CERTIFICATE has unsupported revision 0x{revision:04x}"
@@ -762,8 +797,8 @@ fn validate_certificate_table(bytes: &[u8], start: usize, end: usize) -> Result<
             .checked_add(length)
             .context("WIN_CERTIFICATE length overflow")?;
         let aligned_length = length
-            .checked_add(7)
-            .map(|value| value & !7)
+            .checked_add(WIN_CERTIFICATE_ALIGNMENT - 1)
+            .map(|value| value & !(WIN_CERTIFICATE_ALIGNMENT - 1))
             .context("WIN_CERTIFICATE alignment overflow")?;
         let aligned_end = cursor
             .checked_add(aligned_length)
@@ -794,7 +829,7 @@ fn validate_certificate_table(bytes: &[u8], start: usize, end: usize) -> Result<
 
 fn read_u16(bytes: &[u8], offset: usize, label: &str) -> Result<u16> {
     let raw: [u8; 2] = bytes
-        .get(offset..offset.saturating_add(2))
+        .get(offset..offset.saturating_add(size_of::<u16>()))
         .with_context(|| format!("truncated {label}"))?
         .try_into()
         .with_context(|| format!("invalid {label} width"))?;
@@ -803,7 +838,7 @@ fn read_u16(bytes: &[u8], offset: usize, label: &str) -> Result<u16> {
 
 fn read_u32(bytes: &[u8], offset: usize, label: &str) -> Result<u32> {
     let raw: [u8; 4] = bytes
-        .get(offset..offset.saturating_add(4))
+        .get(offset..offset.saturating_add(size_of::<u32>()))
         .with_context(|| format!("truncated {label}"))?
         .try_into()
         .with_context(|| format!("invalid {label} width"))?;

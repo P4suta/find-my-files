@@ -5,17 +5,11 @@ using System.Text.Json;
 
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// Wire codec for the fmf-service named pipe: 16-byte LE frame header +
-/// length-prefixed payload, binary hot path, JSON cold path. Pure functions
-/// and constants only — the canonical wire definition is the fmf-contract
-/// crate radiated into <see cref="EngineContract"/> (ADR-0018), and the Rust
-/// twin (fmf-proto) pins byte-identical golden frames from contract/golden/.
+/// <summary> Wire codec for the fmf-service named pipe: 16-byte LE frame header + length-prefixed payload, binary hot path, JSON cold path.
+/// Pure functions and constants only — the canonical wire definition is the fmf-contract crate radiated into <see cref="EngineContract"/> (ADR-0018), and the Rust twin (fmf-proto) pins byte-identical golden frames from contract/golden/.
 /// </summary>
 internal static class PipeProtocol
 {
-    // All values radiate from Generated/EngineContract.g.cs (ADR-0018);
-    // these aliases keep the historical spelling at the call sites.
     public const uint ProtocolVersion = EngineContract.ProtocolVersion;
 
     /// <summary>Short pipe name (without the <c>\\.\pipe\</c> prefix).</summary>
@@ -67,7 +61,6 @@ internal static class PipeProtocol
         public bool IsEvent => (Flags & FlagEvent) != 0;
     }
 
-    // ── Frame header ────────────────────────────────────────────────────
     public static void WriteHeader(Span<byte> dest, FrameHeader h)
     {
         BinaryPrimitives.WriteUInt32LittleEndian(dest, h.Len);
@@ -77,12 +70,7 @@ internal static class PipeProtocol
         BinaryPrimitives.WriteInt32LittleEndian(dest[12..], h.StatusCode);
     }
 
-    /// <summary>Decodes a <see cref="FrameHeader"/> from the first bytes of a
-    /// frame on the wire (the inverse of the header writer above).</summary>
-    /// <param name="src">The frame bytes; the first <see cref="HeaderLen"/> are read.</param>
-    /// <exception cref="InvalidDataException">announced payload over the cap
-    /// — the connection has no resync point and must be dropped</exception>
-    /// <returns>The decoded frame header.</returns>
+    /// <summary>Decodes a <see cref="FrameHeader"/> from the first bytes of a frame on the wire (the inverse of the header writer above).</summary> <param name="src">The frame bytes; the first <see cref="HeaderLen"/> are read.</param> <exception cref="InvalidDataException">announced payload over the cap — the connection has no resync point and must be dropped</exception> <returns>The decoded frame header.</returns>
     public static FrameHeader ReadHeader(ReadOnlySpan<byte> src)
     {
         var h = new FrameHeader(
@@ -100,13 +88,7 @@ internal static class PipeProtocol
         return h;
     }
 
-    /// <summary>One contiguous frame: header (len filled in) + payload.</summary>
-    /// <param name="opcode">Operation code for the frame.</param>
-    /// <param name="flags">Frame flag bits (response/event).</param>
-    /// <param name="requestId">Request correlation id; 0 for events.</param>
-    /// <param name="status">Status code carried in the header.</param>
-    /// <param name="payload">Payload bytes to append after the header.</param>
-    /// <returns>The header followed by the payload, as one byte array.</returns>
+    /// <summary>One contiguous frame: header (len filled in) + payload.</summary> <param name="opcode">Operation code for the frame.</param> <param name="flags">Frame flag bits (response/event).</param> <param name="requestId">Request correlation id; 0 for events.</param> <param name="status">Status code carried in the header.</param> <param name="payload">Payload bytes to append after the header.</param> <returns>The header followed by the payload, as one byte array.</returns>
     public static byte[] EncodeFrame(
         ushort opcode, ushort flags, uint requestId, int status, ReadOnlySpan<byte> payload)
     {
@@ -116,7 +98,6 @@ internal static class PipeProtocol
         return buf;
     }
 
-    // ── Hello (op 1, binary) ────────────────────────────────────────────
     public static byte[] EncodeHelloReq(uint protocolVersion)
     {
         var b = new byte[4];
@@ -143,7 +124,6 @@ internal static class PipeProtocol
             BinaryPrimitives.ReadUInt32LittleEndian(payload[8..]));
     }
 
-    // ── Query (op 7, 32B POD options + UTF-8 text) ──────────────────────
     public static byte[] EncodeQueryReq(
         SearchOptions options,
         string text,
@@ -151,8 +131,6 @@ internal static class PipeProtocol
     {
         text = EngineRequest.QueryText(text);
 
-        // Size the frame off the UTF-8 byte count and encode the text straight
-        // into it — no intermediate array + copy (this runs per keystroke).
         var b = new byte[EngineContract.QueryOptionsSize + Encoding.UTF8.GetByteCount(text)];
         BinaryPrimitives.WriteUInt32LittleEndian(b, (uint)options.Sort);
         BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), options.Descending ? 1u : 0u);
@@ -218,7 +196,6 @@ internal static class PipeProtocol
             Encoding.UTF8.GetString(payload[16..]));
     }
 
-    // ── ResultPage (op 8, binary) ───────────────────────────────────────
     public static byte[] EncodeResultPageReq(ulong resultId, ulong offset, uint count)
     {
         var b = new byte[20];
@@ -238,9 +215,7 @@ internal static class PipeProtocol
             BinaryPrimitives.ReadUInt32LittleEndian(payload[16..]));
     }
 
-    /// <summary>`{row_count:u32, blob_len:u32}` + 56B rows + WTF-8 blob.</summary>
-    /// <param name="payload">The ResultPage response payload bytes.</param>
-    /// <returns>The decoded rows from the page.</returns>
+    /// <summary>`{row_count:u32, blob_len:u32}` + 56B rows + WTF-8 blob.</summary> <param name="payload">The ResultPage response payload bytes.</param> <returns>The decoded rows from the page.</returns>
     public static List<RowData> DecodePageResp(ReadOnlySpan<byte> payload)
     {
         if (payload.Length < 8)
@@ -258,10 +233,6 @@ internal static class PipeProtocol
 
         var validatedPayloadLength = ValidateDecodedPagePayloadLength(payload.Length);
 
-        // Validate the declared sizes in long: the fields are u32, so
-        // `rowCount * RowSize` overflows int for a hostile/buggy frame. The 16 MiB
-        // frame cap already bounds payload.Length, so once this equality holds
-        // every offset below fits an int.
         var expected = 8L + ((long)rowCount * RowSize) + blobLen;
         if (expected != validatedPayloadLength)
         {
@@ -294,8 +265,6 @@ internal static class PipeProtocol
             blobLength += encoded[i].Name.Length + encoded[i].Parent.Length;
         }
 
-        // rows.Count is contract-bounded above and every allocation length is
-        // int-sized. The payload cap below therefore proves each later cast.
         var rowBytesLength = rows.Count * RowSize;
         var payloadLength = 8L + rowBytesLength + blobLength;
         var validatedPayloadLength = ValidateEncodedPagePayloadLength(payloadLength);
@@ -338,9 +307,7 @@ internal static class PipeProtocol
         return b;
     }
 
-    /// <summary>Validate a received page length without allocating that page.</summary>
-    /// <param name="payloadLength">Received payload byte length.</param>
-    /// <returns>The validated length for subsequent size equations.</returns>
+    /// <summary>Validate a received page length without allocating that page.</summary> <param name="payloadLength">Received payload byte length.</param> <returns>The validated length for subsequent size equations.</returns>
     internal static int ValidateDecodedPagePayloadLength(int payloadLength)
     {
         if ((ulong)payloadLength > EngineContract.MaxPayloadLen)
@@ -352,9 +319,7 @@ internal static class PipeProtocol
         return payloadLength;
     }
 
-    /// <summary>Validate a page encoder's calculated length without allocating it.</summary>
-    /// <param name="payloadLength">Calculated payload byte length.</param>
-    /// <returns>The validated int-sized allocation length.</returns>
+    /// <summary>Validate a page encoder's calculated length without allocating it.</summary> <param name="payloadLength">Calculated payload byte length.</param> <returns>The validated int-sized allocation length.</returns>
     internal static int ValidateEncodedPagePayloadLength(long payloadLength)
     {
         if (payloadLength > EngineContract.MaxPayloadLen)
@@ -368,7 +333,6 @@ internal static class PipeProtocol
         return (int)payloadLength;
     }
 
-    // ── ResultFree (op 9, binary) ───────────────────────────────────────
     public static byte[] EncodeResultFreeReq(ulong resultId)
     {
         var b = new byte[8];
@@ -382,12 +346,8 @@ internal static class PipeProtocol
         return BinaryPrimitives.ReadUInt64LittleEndian(payload);
     }
 
-    // ── Event push (flags bit1, request_id=0, opcode = kind 1..6) ───────
-
     /// <summary>32B POD `{kind:u32, _pad:u32, entries:u64, volume:[u8;16]}`;
-    /// volume is the zero-padded UTF-8 drive label ("C:"), not a GUID.</summary>
-    /// <param name="payload">The 32-byte event payload bytes.</param>
-    /// <returns>The event kind, entry count, and source volume label.</returns>
+    /// volume is the zero-padded UTF-8 drive label ("C:"), not a GUID.</summary> <param name="payload">The 32-byte event payload bytes.</param> <returns>The event kind, entry count, and source volume label.</returns>
     public static (uint Kind, ulong Entries, string Volume) DecodeEvent(ReadOnlySpan<byte> payload)
     {
         CheckLen("Event", payload, 32);
@@ -414,9 +374,6 @@ internal static class PipeProtocol
         return b;
     }
 
-    // ── JSON payloads (op 4/5/6/10/12, snake_case via EngineJson) ───────
-    // internal (not private) only so EngineJsonContext can register them for
-    // source-generated (de)serialization; they remain engine-internal DTOs.
     internal sealed class VolumeStatusJson
     {
         public string Volume { get; set; } = string.Empty;
@@ -431,10 +388,7 @@ internal static class PipeProtocol
         public List<string> Volumes { get; set; } = [];
     }
 
-    /// <summary>`[{"volume":"C:","state":1,"entries":42}]` — ListVolumes and
-    /// IndexStatus share this shape; state values equal VolumeState.</summary>
-    /// <param name="payload">The JSON volume-status array as UTF-8 bytes.</param>
-    /// <returns>The decoded per-volume status list.</returns>
+    /// <summary>`[{"volume":"C:","state":1,"entries":42}]` — ListVolumes and IndexStatus share this shape; state values equal VolumeState.</summary> <param name="payload">The JSON volume-status array as UTF-8 bytes.</param> <returns>The decoded per-volume status list.</returns>
     public static List<VolumeStatus> DecodeVolumeStatuses(ReadOnlySpan<byte> payload)
     {
         var wire = JsonSerializer.Deserialize<List<VolumeStatusJson>>(payload, EngineJson.SnakeCase) ?? [];

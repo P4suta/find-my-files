@@ -2,17 +2,12 @@ using System.Buffers.Binary;
 
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// Decodes the shared page layout — densely packed fixed-size rows followed by
-/// one WTF-8 string blob — used verbatim by both the FFI <c>FmfPage</c> and the
-/// pipe ResultPage payload. Every row's name/parent-path offset is relative to
-/// the start of that blob, not to the row or the frame. Row size and field
-/// offsets come from <see cref="EngineContract.RowOffsets"/>.
+/// <summary> Decodes the shared page layout — densely packed fixed-size rows followed by one WTF-8 string blob — used verbatim by both the FFI <c>FmfPage</c> and the pipe ResultPage payload.
+/// Every row's name/parent-path offset is relative to the start of that blob, not to the row or the frame.
+/// Row size and field offsets come from <see cref="EngineContract.RowOffsets"/>.
 /// </summary>
 internal static class PageCodec
 {
-    // Offsets radiate from Generated/EngineContract.g.cs — the Rust
-    // offset_of! values, no hand-derived numbers (ADR-0018).
     public const int RowSize = EngineContract.RowSize;
 
     public static List<RowData> Decode(ReadOnlySpan<byte> rowBytes, ReadOnlySpan<byte> blob)
@@ -85,8 +80,6 @@ internal static class PageCodec
                 $"row {row} {field} window [{offset}, {end}) exceeds blob length {blob.Length}");
         }
 
-        // The ulong end check above proves both uint values fit in the int-sized
-        // span before either cast is evaluated.
         return blob.Slice((int)offset, (int)length);
     }
 }

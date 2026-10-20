@@ -6,11 +6,9 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// Client-side fake-server defense (SECURITY.md threat 4): a pipe is trusted only
-/// when its server process is the SCM-registered fmf-engine service. The test
-/// process is never that service, so the check answers false for it and for
-/// any in-process server it hosts. Works unelevated (no SYSTEM token reads).
+/// <summary> Client-side fake-server defense (SECURITY.md threat 4): a pipe is trusted only when its server process is the SCM-registered fmf-engine service.
+/// The test process is never that service, so the check answers false for it and for any in-process server it hosts.
+/// Works unelevated (no SYSTEM token reads).
 /// </summary>
 public sealed class PipeServerIdentityTests
 {
@@ -21,8 +19,6 @@ public sealed class PipeServerIdentityTests
     [Fact]
     public void IsServiceProcess_NonexistentPid_FailsClosed() =>
 
-        // Real PIDs are multiples of 4 — 3 can never name a process, so the
-        // check must answer false, not throw.
         Assert.False(PipeServerIdentity.IsServiceProcess(3));
 
     [Theory]
@@ -41,7 +37,7 @@ public sealed class PipeServerIdentityTests
         var pid = ServiceSetup.QueryServiceProcessId();
         if (pid == 0)
         {
-            return; // service not installed/running here — nothing to assert
+            return;
         }
 
         Assert.True(PipeServerIdentity.IsServiceProcess(pid));
@@ -55,7 +51,6 @@ public sealed class PipeServerIdentityTests
             ".", server.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
         await stream.ConnectAsync(new CancellationTokenSource(5000).Token);
 
-        // The server end is this test process, not the fmf-engine service.
         Assert.False(PipeServerIdentity.IsServerTrusted(stream.SafePipeHandle));
     }
 }

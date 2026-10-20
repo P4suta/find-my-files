@@ -6,13 +6,9 @@ using Xunit;
 
 namespace FindMyFiles.Tests.Contract;
 
-/// <summary>
-/// Pins the shared golden corpus (contract/golden/, captured by the Rust
-/// suite via the FMF_BLESS=1 ritual) against the C# codec: every frame must
-/// decode and re-encode byte-for-byte. Rust and C# reading the same files is
-/// what makes "Rust and C# tests both pin the same golden bytes" true
-/// (ADR-0018). The C# codec stays hand-written on purpose — two independent
-/// implementations agreeing on one corpus is the verification structure.
+/// <summary> Pins the shared golden corpus (contract/golden/, captured by the Rust suite via the FMF_BLESS=1 ritual) against the C# codec: every frame must decode and re-encode byte-for-byte.
+/// Rust and C# reading the same files is what makes "Rust and C# tests both pin the same golden bytes" true (ADR-0018).
+/// The C# codec stays hand-written on purpose — two independent implementations agreeing on one corpus is the verification structure.
 /// </summary>
 public sealed class GoldenCorpusTests
 {
@@ -63,8 +59,7 @@ public sealed class GoldenCorpusTests
         }
     }
 
-    /// <summary>Decode + re-encode through the C# codec; returns the payload
-    /// verbatim for shapes C# only consumes (validated, no encoder).</summary>
+    /// <summary>Decode + re-encode through the C# codec; returns the payload verbatim for shapes C# only consumes (validated, no encoder).</summary>
     private static byte[] ReencodePayload(
         string file, PipeProtocol.FrameHeader header, byte[] payload)
     {
@@ -77,7 +72,6 @@ public sealed class GoldenCorpusTests
 
         if (header.StatusCode != 0)
         {
-            // Error responses carry a UTF-8 detail string.
             return Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(payload));
         }
 
@@ -127,9 +121,6 @@ public sealed class GoldenCorpusTests
                     PipeProtocol.DecodeResultFreeReq(payload));
             case (PipeProtocol.Op.ServiceInfo, true):
                 {
-                    // C# has no ServiceInfo encoder (the client only consumes it);
-                    // pin the snake_case key set and that it deserializes into the
-                    // DTO the pipe client fills, then pass the payload through.
                     using var doc = JsonDocument.Parse(payload);
                     Assert.True(doc.RootElement.TryGetProperty("uptime_ms", out _), file);
                     Assert.True(doc.RootElement.TryGetProperty("connections", out _), file);
@@ -158,11 +149,9 @@ public sealed class GoldenCorpusTests
         Assert.Equal("C:\\", rows[0].ParentPath);
         Assert.Equal("省察.txt", rows[1].Name);
         Assert.Equal("C:\\メモ\\", rows[1].ParentPath);
-        Assert.Equal(0x1_0000_0001UL, rows[1].Size); // u64 survives, not truncated
-        Assert.Equal(-5, rows[1].Mtime);             // i64 signedness survives
+        Assert.Equal(0x1_0000_0001UL, rows[1].Size);
+        Assert.Equal(-5, rows[1].Mtime);
 
-        // Unpaired surrogate U+D800 must round-trip through the WTF-8 decode
-        // into UTF-16 (that's the whole point of WTF-8 on this wire).
         Assert.Equal('\uD800', rows[2].Name[0]);
         Assert.EndsWith("tail.dat", rows[2].Name, StringComparison.Ordinal);
         Assert.True(rows[2].IsDirectory);
@@ -197,14 +186,12 @@ public sealed class GoldenCorpusTests
         Assert.Equal(41UL, index.Entries);
         Assert.Equal(58UL, index.ContentGeneration);
 
-        // Per-column breakdown the panel surfaces (was silently dropped before).
         Assert.Equal(44UL, index.NamePoolBytes);
         Assert.Equal(53UL, index.FrnMapBytes);
         Assert.Equal(54UL, index.DeadNameBytes);
         Assert.Equal(0.5, index.PoolGarbageRatio);
         Assert.Equal(59UL, index.StructuralGeneration);
 
-        // Process memory footprint (the headline new figure).
         Assert.Equal(90UL, stats.CurrentWsBytes);
         Assert.Equal(91UL, stats.CurrentPrivateBytes);
         Assert.Equal(61UL, stats.Counters.StatFetchFailures);

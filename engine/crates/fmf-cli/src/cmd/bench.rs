@@ -1,9 +1,8 @@
-//! `bench` — the fixed real-volume benchmark set + the baseline regression
-//! gate (discipline: ADR-0013).
+//! `bench` — the fixed real-volume benchmark set + the baseline regression gate (discipline: ADR-0013).
 
 use std::time::Instant;
 
-use fmf_core::query::QueryOptions;
+use fmf_runtime::query::QueryOptions;
 use serde::Serialize;
 
 use super::ctx::Ctx;
@@ -12,6 +11,12 @@ use crate::bench_support::{
     BENCH_QUERIES, BenchReport, QueryBench, bench_restore, entry_count_within_baseline,
     index_budget_ms, median, working_set_within_budget,
 };
+
+const MIN_BASELINE: f64 = 0.0;
+const MEDIAN_DIVISOR: usize = 2;
+const P99_SAMPLE_NUMERATOR: usize = 99;
+const PERCENT_DENOMINATOR: usize = 100;
+const P50_REGRESSION_MULTIPLIER: f64 = 1.5;
 
 const P99_BUDGET_US: u64 = 50_000;
 const RESTORE_BUDGET_MS: u64 = 1_000;
@@ -68,7 +73,7 @@ fn expected_case_names() -> Vec<String> {
 }
 
 fn ratio_delta(actual: f64, baseline: f64) -> Result<f64, String> {
-    if !actual.is_finite() || !baseline.is_finite() || baseline <= 0.0 {
+    if !actual.is_finite() || !baseline.is_finite() || baseline <= MIN_BASELINE {
         return Err(format!(
             "cannot compute a finite ratio from actual={actual}, baseline={baseline}"
         ));
@@ -148,7 +153,7 @@ fn evaluate(report: &BenchReport, old: &BenchReport) -> Result<RealEvidence, Str
         actual: entries_actual,
         baseline: entries_baseline,
         threshold_metric: "absolute_delta_ratio",
-        threshold_value: 0.10,
+        threshold_value: crate::bench_support::MAX_ENTRY_COUNT_DRIFT_RATIO,
         unit: "entries",
         passes: entry_count_within_baseline(report.entries, old.entries),
     })?);
@@ -170,13 +175,14 @@ fn evaluate(report: &BenchReport, old: &BenchReport) -> Result<RealEvidence, Str
         actual: actual_bytes_per_entry,
         baseline: baseline_bytes_per_entry,
         threshold_metric: "actual",
-        threshold_value: 110.0,
+        threshold_value: crate::bench_support::MAX_INDEX_BYTES_PER_ENTRY as f64,
         unit: "bytes_per_entry",
         passes: working_set_within_budget(report),
     })?);
 
     for (index, (actual, baseline)) in report.queries.iter().zip(&old.queries).enumerate() {
-        let p50_threshold = baseline.p50_us.max(P50_BASELINE_FLOOR_US) as f64 * 1.5;
+        let p50_threshold =
+            baseline.p50_us.max(P50_BASELINE_FLOOR_US) as f64 * P50_REGRESSION_MULTIPLIER;
         cases.push(case(RealCaseInput {
             id: format!("query/{index:02}/p50"),
             subject: actual.query.clone(),
@@ -267,9 +273,7 @@ pub fn bench(
     let index_started = Instant::now();
     let idx = build_index(drive, ctx)?;
     let index_ms = index_started.elapsed().as_millis() as u64;
-    // Capture the Ready-state working set before user-demanded lazy caches are
-    // built. This is the steady state shared by the CLI and the application.
-    let working_set_bytes = fmf_core::mft::current_working_set();
+    let working_set_bytes = fmf_runtime::mft::current_working_set();
     let opt = QueryOptions::default();
 
     let mut report = BenchReport {
@@ -295,7 +299,6 @@ pub fn bench(
         );
     }
     for q in BENCH_QUERIES {
-        // 200 runs make p99 a real percentile, not the max (ADR-0013).
         const RUNS: usize = 200;
         let mut totals = Vec::with_capacity(RUNS);
         let (mut memos, mut scans, mut mats) = (Vec::new(), Vec::new(), Vec::new());
@@ -314,8 +317,8 @@ pub fn bench(
         let qb = QueryBench {
             query: q.to_string(),
             hits,
-            p50_us: totals[RUNS / 2],
-            p99_us: totals[RUNS * 99 / 100],
+            p50_us: totals[RUNS / MEDIAN_DIVISOR],
+            p99_us: totals[RUNS * P99_SAMPLE_NUMERATOR / PERCENT_DENOMINATOR],
             max_us: totals[RUNS - 1],
             p50_memo_us: median(memos),
             p50_scan_us: median(scans),
@@ -338,26 +341,24 @@ pub fn bench(
         }
         report.queries.push(qb);
     }
-    report.peak_working_set_bytes = fmf_core::mft::peak_working_set();
+    report.peak_working_set_bytes = fmf_runtime::mft::peak_working_set();
     report.restore = Some(bench_restore(&idx)?);
     if ctx.is_json() {
-        // The whole report goes to stdout as one document; the human table and
-        // the baseline verdict below stay on text/stderr.
         super::json::emit(&report)?;
     } else {
         println!("initial index {} ms", report.index_ms);
         println!(
             "ready working set {:.1} MiB ({:.1} B/entry)",
-            report.working_set_bytes as f64 / (1024.0 * 1024.0),
+            report.working_set_bytes as f64 / fmf_runtime::units::MEBIBYTE,
             if report.entries == 0 {
-                0.0
+                fmf_runtime::units::EMPTY_MEASUREMENT
             } else {
                 report.working_set_bytes as f64 / report.entries as f64
             }
         );
         println!(
             "peak working set {:.1} MiB",
-            report.peak_working_set_bytes as f64 / (1024.0 * 1024.0)
+            report.peak_working_set_bytes as f64 / fmf_runtime::units::MEBIBYTE
         );
         if let Some(r) = &report.restore {
             println!(
@@ -365,7 +366,7 @@ pub fn bench(
                 r.save_ms,
                 r.p50_ms,
                 r.min_ms,
-                r.file_bytes as f64 / (1024.0 * 1024.0),
+                r.file_bytes as f64 / fmf_runtime::units::MEBIBYTE,
                 r.entries
             );
         }
@@ -377,8 +378,6 @@ pub fn bench(
     }
 
     if let Some(path) = baseline {
-        // Tail latency and restore are gated on *absolute* acceptance
-        // budgets, never relative (ADR-0013).
         let old: BenchReport = match std::fs::read_to_string(path)
             .map_err(|error| error.to_string())
             .and_then(|text| serde_json::from_str(&text).map_err(|error| error.to_string()))
@@ -438,7 +437,8 @@ pub fn bench(
             );
         }
         for (qb, prev) in report.queries.iter().zip(&old.queries) {
-            let p50_threshold = prev.p50_us.max(P50_BASELINE_FLOOR_US) as f64 * 1.5;
+            let p50_threshold =
+                prev.p50_us.max(P50_BASELINE_FLOOR_US) as f64 * P50_REGRESSION_MULTIPLIER;
             if qb.p50_us as f64 > p50_threshold {
                 anstream::eprintln!(
                     "{} {:<24} p50 {}→{}µs",

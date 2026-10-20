@@ -1,8 +1,6 @@
-//! `xtask contract-bless` — explicitly recapture every shared contract golden
-//! with `FMF_BLESS=1`, using nextest for both suites.
+//! `xtask contract-bless` — explicitly recapture every shared contract golden with `FMF_BLESS=1`, using nextest for both suites.
 //!
-//! The environment flag is set directly on each cargo child so the ritual is
-//! shell-independent and nextest receives it at test runtime.
+//! The environment flag is set directly on each cargo child so the ritual is shell-independent and nextest receives it at test runtime.
 
 use crate::{cmd, paths};
 use anyhow::Result;
@@ -32,7 +30,7 @@ pub fn run() -> Result<()> {
             "run",
             "--locked",
             "-p",
-            "fmf-core",
+            "fmf-runtime",
             "--test",
             "golden_json",
         ],

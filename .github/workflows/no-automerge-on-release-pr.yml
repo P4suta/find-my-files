@@ -1,17 +1,6 @@
-# A Release PR must be merged by a deliberate manual click (ADR-0035). Auto-merge
-# is a repo-wide feature we rely on for normal PRs, so GitHub's "Enable auto-merge"
-# button can't be hidden per-PR — instead, if anyone arms auto-merge on a
-# release-please PR, turn it straight back off. Without this, pre-arming auto-merge
-# and later adding the `release: approved` label would collapse the deliberate-merge
-# gate into a single action.
-#
-# pull_request_target so this runs from main's definition with a write token; it
-# only calls the API to disable auto-merge (never checks out PR code). The guard
-# requires the exact same-repository bot branch, so a fork cannot trigger writes
-# merely by spoofing a `release-please--*` branch name.
 name: no-automerge-on-release-pr
 
-on: # zizmor: ignore[dangerous-triggers] trusted base workflow; API-only exact-branch guard described above
+on: # zizmor: ignore[dangerous-triggers] Trusted base workflow; API-only guard requires the exact same-repository release branch.
   pull_request_target:
     types: [auto_merge_enabled]
 
@@ -31,7 +20,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      pull-requests: write # disable auto-merge on the guarded release PR
+      pull-requests: write # Permission: Disable auto-merge on the guarded release PR.
     steps:
       - name: Disable auto-merge on the Release PR
         env:

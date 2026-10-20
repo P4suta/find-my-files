@@ -8,57 +8,15 @@ using Microsoft.Win32.SafeHandles;
 
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// Engine client over the fmf-service named pipe. This class is the connection
-/// *supervisor* plus the request multiplexing table; the established connection
-/// itself (stream, read loop, serialized writer, epoch) is one
-/// <see cref="PipeConnection"/> object, replaced wholesale on every
-/// (re)connect. Events fire on the read-loop thread — consumers marshal (see
-/// <see cref="EngineEventMarshaler"/>), the same contract as the FFI client. No
-/// DispatcherQueue dependency.
-/// </summary>
-/// <remarks>
-/// <para><b>The (re)connect sequence is fixed, and it is the client's
-/// responsibility — the server enforces only that Hello comes first.</b> Every
-/// step below is load-bearing; reordering or dropping one produces a client
-/// that connects and then silently shows stale data.</para>
-/// <list type="number">
-/// <item><description>Open the pipe at
-/// <c>TokenImpersonationLevel.Identification</c>. The .NET default
-/// (anonymous) makes the installed service's SID check reject even an
-/// authorized user — and console-mode tests cannot catch that, because they
-/// run with an empty <c>authorized_sids</c> and skip the check.</description></item>
-/// <item><description>Verify the server is the SCM-registered fmf-engine
-/// service, on the default pipe name only (SECURITY.md Threat 4); a custom
-/// --pipe-name is a test/dev pipe and skips the check.</description></item>
-/// <item><description><b>Hello</b>, and compare the returned protocol version
-/// for equality. A mismatch (or an untrusted server) is fatal: the supervisor
-/// stops for good instead of reconnecting, because retrying can never repair
-/// it.</description></item>
-/// <item><description><b>Subscribe</b> — before IndexStatus, so no change can
-/// slip through the gap between the snapshot and the subscription. The cost is
-/// that events may arrive while the connection is still a private handshake
-/// candidate; those are discarded by the epoch check and covered by step 5
-/// instead.</description></item>
-/// <item><description><b>IndexStatus</b>, whose response is the only source of
-/// the catch-up: one synthesized <see cref="VolumeUpdated"/> per volume, then
-/// one synthesized <see cref="IndexChanged"/>. <b>The server never sends that
-/// IndexChanged.</b> The client fabricates it locally so a requery picks up
-/// whatever changed while it was disconnected — without it, a reconnect leaves
-/// the results list frozen at pre-disconnect content until the user types.</description></item>
-/// <item><description>Only now is the connection published and the state set
-/// to <see cref="EngineConnectionState.Connected"/>. Ordinary callers can
-/// therefore never race a request onto a peer that has not completed the
-/// handshake.</description></item>
-/// </list>
-/// <para>On disconnect every pending request fails immediately with
-/// <see cref="EngineUnavailableException"/>, and results born on the retired
-/// connection become permanently stale: epochs are monotonic and never reused,
-/// so a dead connection's epoch can never read as current again and the next
-/// page fetch raises <see cref="StaleResultException"/> — the existing
-/// re-query path is the recovery. Reconnection then retries forever with a
-/// 250ms→5s backoff.</para>
-/// </remarks>
+/// <summary> Engine client over the fmf-service named pipe.
+/// This class is the connection *supervisor* plus the request multiplexing table; the established connection itself (stream, read loop, serialized writer, epoch) is one <see cref="PipeConnection"/> object, replaced wholesale on every (re)connect.
+/// Events fire on the read-loop thread — consumers marshal (see <see cref="EngineEventMarshaler"/>), the same contract as the FFI client.
+/// No DispatcherQueue dependency.
+/// </summary> <remarks> <para><b>The (re)connect sequence is fixed, and it is the client's responsibility — the server enforces only that Hello comes first.</b> Every step below is load-bearing; reordering or dropping one produces a client that connects and then silently shows stale data.</para> <list type="number"> <item><description>Open the pipe at <c>TokenImpersonationLevel.Identification</c>. The .NET default (anonymous) makes the installed service's SID check reject even an authorized user — and console-mode tests cannot catch that, because they run with an empty <c>authorized_sids</c> and skip the check.</description></item> <item><description>Verify the server is the SCM-registered fmf-engine service, on the default pipe name only (SECURITY.md Threat 4); a custom --pipe-name is a test/dev pipe and skips the check.</description></item> <item><description><b>Hello</b>, and compare the returned protocol version for equality.
+/// A mismatch (or an untrusted server) is fatal: the supervisor stops for good instead of reconnecting, because retrying can never repair it.</description></item> <item><description><b>Subscribe</b> — before IndexStatus, so no change can slip through the gap between the snapshot and the subscription.
+/// The cost is that events may arrive while the connection is still a private handshake candidate; those are discarded by the epoch check and covered by step 5 instead.</description></item> <item><description><b>IndexStatus</b>, whose response is the only source of the catch-up: one synthesized <see cref="VolumeUpdated"/> per volume, then one synthesized <see cref="IndexChanged"/>. <b>The server never sends that IndexChanged.</b> The client fabricates it locally so a requery picks up whatever changed while it was disconnected — without it, a reconnect leaves the results list frozen at pre-disconnect content until the user types.</description></item> <item><description>Only now is the connection published and the state set to <see cref="EngineConnectionState.Connected"/>. Ordinary callers can therefore never race a request onto a peer that has not completed the handshake.</description></item> </list> <para>On disconnect every pending request fails immediately with <see cref="EngineUnavailableException"/>, and results born on the retired connection become permanently stale: epochs are monotonic and never reused,
+/// so a dead connection's epoch can never read as current again and the next page fetch raises <see cref="StaleResultException"/> — the existing re-query path is the recovery.
+/// Reconnection then retries forever with a 250ms→5s backoff.</para> </remarks>
 internal sealed class PipeEngineClient : IEngineClient
 {
     private static readonly TimeSpan InitialBackoff = TimeSpan.FromMilliseconds(250);
@@ -89,29 +47,19 @@ internal sealed class PipeEngineClient : IEngineClient
         TaskCompletionSource<(int Status, byte[] Payload)> Completion);
 
 #if FMF_TEST_SEAMS
-    /// <summary>Deterministic race seam: pauses after a request's deadline
-    /// expires but before its captured connection is retired.</summary>
+    /// <summary>Deterministic race seam: pauses after a request's deadline expires but before its captured connection is retired.</summary>
     internal Func<Task>? BeforeTimeoutRetireForTests { get; set; }
 
-    /// <summary>Deterministic race seam: pauses after a presentation basis is
-    /// leased but before its epoch is admitted to the request table.</summary>
+    /// <summary>Deterministic race seam: pauses after a presentation basis is leased but before its epoch is admitted to the request table.</summary>
     internal Func<Task>? AfterBasisAcquireForTests { get; set; }
 
-    /// <summary>Deterministic race seam: pauses after the private connection
-    /// completes its handshake but before it can be published.</summary>
+    /// <summary>Deterministic race seam: pauses after the private connection completes its handshake but before it can be published.</summary>
     internal Func<Task>? AfterHandshakeForTests { get; set; }
 
-    /// <summary>Deterministic race seam: pauses after a query result handle is
-    /// decoded but before ownership can be transferred to the caller.</summary>
+    /// <summary>Deterministic race seam: pauses after a query result handle is decoded but before ownership can be transferred to the caller.</summary>
     internal Func<Task>? AfterQueryResponseForTests { get; set; }
 
-    /// <summary>Inject a decoded response with an explicit epoch so tests can
-    /// prove stale frames cannot complete or remove current requests.</summary>
-    /// <param name="epoch">Connection epoch carried by the frame.</param>
-    /// <param name="requestId">Wire request identifier.</param>
-    /// <param name="opcode">Response opcode.</param>
-    /// <param name="status">Response status.</param>
-    /// <param name="payload">Response payload.</param>
+    /// <summary>Inject a decoded response with an explicit epoch so tests can prove stale frames cannot complete or remove current requests.</summary> <param name="epoch">Connection epoch carried by the frame.</param> <param name="requestId">Wire request identifier.</param> <param name="opcode">Response opcode.</param> <param name="status">Response status.</param> <param name="payload">Response payload.</param>
     internal void DispatchResponseForTests(
         int epoch,
         uint requestId,
@@ -120,9 +68,7 @@ internal sealed class PipeEngineClient : IEngineClient
         byte[] payload) =>
         OnResponse(epoch, requestId, opcode, status, payload);
 
-    /// <summary>Publish a fixed-handshake status snapshot synchronously so
-    /// event-label failure logging is attributable to its unit test.</summary>
-    /// <param name="statuses">Decoded IndexStatus snapshot.</param>
+    /// <summary>Publish a fixed-handshake status snapshot synchronously so event-label failure logging is attributable to its unit test.</summary> <param name="statuses">Decoded IndexStatus snapshot.</param>
     internal void PublishHandshakeCatchUpForTests(IReadOnlyList<VolumeStatus> statuses) =>
         PublishHandshakeCatchUp(statuses);
 #endif
@@ -151,13 +97,8 @@ internal sealed class PipeEngineClient : IEngineClient
     /// <inheritdoc/>
     public EngineConnectionState Connection => _connectionState;
 
-    /// <summary>Connects to the fmf-service named pipe and starts the
-    /// supervisor loop immediately. <paramref name="pipeName"/> defaults to
-    /// <see cref="PipeProtocol.DefaultPipeName"/>; only that default name has
-    /// its server identity verified (SECURITY.md Threat 4) — a custom name
-    /// (tests) skips the SYSTEM check.</summary>
-    /// <param name="pipeName">Pipe to connect to, as either the short name or
-    /// the full <c>\\.\pipe\…</c> path.</param>
+    /// <summary>Connects to the fmf-service named pipe and starts the supervisor loop immediately.
+    /// <paramref name="pipeName"/> defaults to <see cref="PipeProtocol.DefaultPipeName"/>; only that default name has its server identity verified (SECURITY.md Threat 4) — a custom name (tests) skips the SYSTEM check.</summary> <param name="pipeName">Pipe to connect to, as either the short name or the full <c>\\.\pipe\…</c> path.</param>
     public PipeEngineClient(string pipeName = PipeProtocol.DefaultPipeName)
         : this(pipeName, autoStart: true)
     {
@@ -167,10 +108,7 @@ internal sealed class PipeEngineClient : IEngineClient
     /// a custom --pipe-name (tests) skips the check (SECURITY.md Threat 4).</summary>
     private readonly bool _verifyServerIdentity;
 
-    /// <summary>Tests pass autoStart=false to attach event handlers before
-    /// the supervisor races them to the first connection.</summary>
-    /// <param name="pipeName">Pipe to connect to, short name or full path.</param>
-    /// <param name="autoStart">Whether to start the supervisor loop immediately.</param>
+    /// <summary>Tests pass autoStart=false to attach event handlers before the supervisor races them to the first connection.</summary> <param name="pipeName">Pipe to connect to, short name or full path.</param> <param name="autoStart">Whether to start the supervisor loop immediately.</param>
     internal PipeEngineClient(string pipeName, bool autoStart)
         : this(
             pipeName,
@@ -180,12 +118,7 @@ internal sealed class PipeEngineClient : IEngineClient
     {
     }
 
-    /// <summary>Constructs a client with an explicit identity boundary for
-    /// deterministic security-branch tests.</summary>
-    /// <param name="pipeName">Pipe to connect to, short name or full path.</param>
-    /// <param name="autoStart">Whether to start the supervisor immediately.</param>
-    /// <param name="verifyServerIdentity">Whether this pipe requires SCM identity verification.</param>
-    /// <param name="isServerTrusted">Handle-bound identity verifier.</param>
+    /// <summary>Constructs a client with an explicit identity boundary for deterministic security-branch tests.</summary> <param name="pipeName">Pipe to connect to, short name or full path.</param> <param name="autoStart">Whether to start the supervisor immediately.</param> <param name="verifyServerIdentity">Whether this pipe requires SCM identity verification.</param> <param name="isServerTrusted">Handle-bound identity verifier.</param>
     internal PipeEngineClient(
         string pipeName,
         bool autoStart,
@@ -204,8 +137,7 @@ internal sealed class PipeEngineClient : IEngineClient
     internal void Start() =>
         _supervisor ??= Task.Run(() => SuperviseAsync(_cts.Token), CancellationToken.None);
 
-    /// <summary>Accepts both the full path (\\.\pipe\name) and the short name.</summary>
-    /// <param name="pipeName">Pipe name as either the full path or short name.</param>
+    /// <summary>Accepts both the full path (\\.\pipe\name) and the short name.</summary> <param name="pipeName">Pipe name as either the full path or short name.</param>
     private static string ToShortName(string pipeName)
     {
         const string prefix = @"\\.\pipe\";
@@ -214,19 +146,12 @@ internal sealed class PipeEngineClient : IEngineClient
             : pipeName;
     }
 
-    /// <summary>Can a trusted server be reached and Hello'd on this pipe within
-    /// the timeout? The default production pipe must belong to the
-    /// SCM-registered service; custom test/development pipes skip that check.</summary>
-    /// <param name="pipeName">Pipe to probe, short name or full path.</param>
-    /// <param name="timeout">Budget for connect plus the Hello round-trip.</param>
-    /// <returns>True if a protocol-compatible server answered within the timeout.</returns>
+    /// <summary>Can a trusted server be reached and Hello'd on this pipe within the timeout?
+    /// The default production pipe must belong to the SCM-registered service; custom test/development pipes skip that check.</summary> <param name="pipeName">Pipe to probe, short name or full path.</param> <param name="timeout">Budget for connect plus the Hello round-trip.</param> <returns>True if a protocol-compatible server answered within the timeout.</returns>
     public static bool Probe(string pipeName, TimeSpan timeout) =>
         ProbeAsync(pipeName, timeout).GetAwaiter().GetResult();
 
-    /// <summary>Asynchronously probes with the production identity policy.</summary>
-    /// <param name="pipeName">Pipe to probe.</param>
-    /// <param name="timeout">Connect and Hello budget.</param>
-    /// <returns>True only for a trusted, protocol-compatible response.</returns>
+    /// <summary>Asynchronously probes with the production identity policy.</summary> <param name="pipeName">Pipe to probe.</param> <param name="timeout">Connect and Hello budget.</param> <returns>True only for a trusted, protocol-compatible response.</returns>
     internal static Task<bool> ProbeAsync(string pipeName, TimeSpan timeout) =>
         ProbeAsync(
             pipeName,
@@ -234,12 +159,7 @@ internal sealed class PipeEngineClient : IEngineClient
             ShouldVerifyServerIdentity(ToShortName(pipeName)),
             PipeServerIdentity.IsServerTrusted);
 
-    /// <summary>Asynchronously probes with an explicit handle identity boundary.</summary>
-    /// <param name="pipeName">Pipe to probe.</param>
-    /// <param name="timeout">Connect and Hello budget.</param>
-    /// <param name="verifyServerIdentity">Whether to invoke the identity verifier.</param>
-    /// <param name="isServerTrusted">Handle-bound verifier.</param>
-    /// <returns>True only for a trusted, protocol-compatible response.</returns>
+    /// <summary>Asynchronously probes with an explicit handle identity boundary.</summary> <param name="pipeName">Pipe to probe.</param> <param name="timeout">Connect and Hello budget.</param> <param name="verifyServerIdentity">Whether to invoke the identity verifier.</param> <param name="isServerTrusted">Handle-bound verifier.</param> <returns>True only for a trusted, protocol-compatible response.</returns>
     internal static async Task<bool> ProbeAsync(
         string pipeName,
         TimeSpan timeout,
@@ -249,12 +169,6 @@ internal sealed class PipeEngineClient : IEngineClient
         using var cts = new CancellationTokenSource(timeout);
         try
         {
-            // Identification level is mandatory: the installed service's
-            // verify_client ImpersonateNamedPipeClient's us to read our SID
-            // against authorized_sids. The .NET default (None) yields an
-            // anonymous token server-side → every connection is rejected
-            // ("pipe client token rejected") — invisible to console-mode
-            // tests where authorized_sids is empty and the check is skipped.
             using var stream = new NamedPipeClientStream(
                 ".",
                 ToShortName(pipeName),
@@ -297,9 +211,7 @@ internal sealed class PipeEngineClient : IEngineClient
         }
     }
 
-    /// <summary>Pure validation of the fixed probe response header.</summary>
-    /// <param name="header">Header returned for request id one.</param>
-    /// <returns>True only for the canonical successful Hello response.</returns>
+    /// <summary>Pure validation of the fixed probe response header.</summary> <param name="header">Header returned for request id one.</param> <returns>True only for the canonical successful Hello response.</returns>
     internal static bool IsValidHelloResponse(PipeProtocol.FrameHeader header) =>
         header.Flags == PipeProtocol.FlagResponse
         && header.RequestId == 1
@@ -307,17 +219,13 @@ internal sealed class PipeEngineClient : IEngineClient
         && header.StatusCode == PipeProtocol.Status.Ok;
 
     /// <summary>Only the fixed production pipe has an SCM identity to verify.
-    /// Kept separate so the full-path spelling and custom-pipe exception are
-    /// pinned without requiring a live service.</summary>
-    /// <param name="pipeName">Short or full pipe name.</param>
-    /// <returns>True when the production service identity check is required.</returns>
+    /// Kept separate so the full-path spelling and custom-pipe exception are pinned without requiring a live service.</summary> <param name="pipeName">Short or full pipe name.</param> <returns>True when the production service identity check is required.</returns>
     internal static bool ShouldVerifyServerIdentity(string pipeName) =>
         string.Equals(
             ToShortName(pipeName),
             PipeProtocol.DefaultPipeName,
             StringComparison.Ordinal);
 
-    // ── Connection supervisor ───────────────────────────────────────────
     private async Task SuperviseAsync(CancellationToken ct)
     {
         var backoff = InitialBackoff;
@@ -328,10 +236,7 @@ internal sealed class PipeEngineClient : IEngineClient
             PipeConnection? connection = null;
             try
             {
-                // Identification level: the service impersonates us to read
-                // our SID for the authorized_sids check (see Probe). Without
-                // it the server gets an anonymous token and rejects us.
-#pragma warning disable CA2000 // disposed in finally or transferred to PipeConnection
+#pragma warning disable CA2000
                 stream = new NamedPipeClientStream(
                     ".",
                     _pipeName,
@@ -346,11 +251,11 @@ internal sealed class PipeEngineClient : IEngineClient
                         $@"server on \\.\pipe\{_pipeName} is not the registered fmf-engine service "
                         + "— refusing to connect (possible pipe squatting; SECURITY.md Threat 4)");
                 }
-#pragma warning disable CA2000 // owned by the client: stored and disposed on teardown/reconnect
+#pragma warning disable CA2000
                 connection = new PipeConnection(
                     stream, Interlocked.Increment(ref _epochSeq), DispatchEvent, OnResponse, ct);
 #pragma warning restore CA2000
-                stream = null; // owned by connection from here on
+                stream = null;
                 var statuses = await HandshakeAsync(connection, ct).ConfigureAwait(false);
 #if FMF_TEST_SEAMS
                 if (AfterHandshakeForTests is { } afterHandshake)
@@ -360,20 +265,11 @@ internal sealed class PipeEngineClient : IEngineClient
 #endif
                 ct.ThrowIfCancellationRequested();
 
-                // The candidate is intentionally private until every fixed
-                // handshake response has been authenticated and decoded.
-                // Ordinary callers can never race a request onto a peer that
-                // has not completed Hello.
                 ThrowIfConnectionAlreadyPublished(
                     Interlocked.CompareExchange(ref _connection, connection, null) is not null);
 
                 if (everConnected)
                 {
-                    // A successful *re*connect after a drop must leave a trace
-                    // ("don't stay silent"): the first connect is announced by
-                    // EngineClientFactory, so only reconnections are logged here
-                    // — e.g. the service was killed and SCM restarted it. Failed
-                    // attempts already log WARN; success used to log nothing.
                     var reconnects = Interlocked.Increment(ref _reconnects);
                     FileLog.Event("pipe", "reconnected to engine service", ("reconnects", reconnects));
                 }
@@ -383,7 +279,7 @@ internal sealed class PipeEngineClient : IEngineClient
                 Volatile.Write(ref _terminalFailure, null);
                 SetConnection(EngineConnectionState.Connected);
                 PublishHandshakeCatchUp(statuses);
-                await connection.ReadLoop.ConfigureAwait(false); // returns when the pipe dies
+                await connection.ReadLoop.ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -391,10 +287,6 @@ internal sealed class PipeEngineClient : IEngineClient
             }
             catch (FatalPipeException ex)
             {
-                // A version skew or a non-SYSTEM impostor server never fixes
-                // itself by retrying — stay down until a human fixes one side
-                // (pipe spec / SECURITY.md Threat 4). Requests keep failing with
-                // EngineUnavailableException.
                 FileLog.Error("pipe", "fatal pipe failure — not reconnecting", ex);
                 Volatile.Write(ref _terminalFailure, ex.Message);
                 SetConnection(EngineConnectionState.Faulted);
@@ -431,19 +323,13 @@ internal sealed class PipeEngineClient : IEngineClient
         TearDownConnection();
     }
 
-    /// <summary>Advance the reconnect delay with exponential growth capped at
-    /// the client-owned maximum.</summary>
-    /// <param name="current">Delay used for the preceding retry.</param>
-    /// <returns>The delay to use for the next retry.</returns>
+    /// <summary>Advance the reconnect delay with exponential growth capped at the client-owned maximum.</summary> <param name="current">Delay used for the preceding retry.</param> <returns>The delay to use for the next retry.</returns>
     internal static TimeSpan NextBackoff(TimeSpan current) =>
         TimeSpan.FromTicks(Math.Min(current.Ticks * 2, MaxBackoff.Ticks));
 
     /// <summary>Runs the fixed (re)connect sequence documented on this class —
     /// Hello → Subscribe → IndexStatus — on a connection that is still private,
-    /// and returns the status snapshot the caller replays as the synthesized
-    /// catch-up events.</summary>
-    /// <param name="connection">Private candidate used only by the handshake.</param>
-    /// <param name="ct">Cancels the handshake on teardown or shutdown.</param>
+    /// and returns the status snapshot the caller replays as the synthesized catch-up events.</summary> <param name="connection">Private candidate used only by the handshake.</param> <param name="ct">Cancels the handshake on teardown or shutdown.</param>
     private async Task<IReadOnlyList<VolumeStatus>> HandshakeAsync(
         PipeConnection connection,
         CancellationToken ct)
@@ -491,13 +377,7 @@ internal sealed class PipeEngineClient : IEngineClient
         return PipeProtocol.DecodeVolumeStatuses(payload);
     }
 
-    /// <summary>Reject a failed fixed-handshake response before the candidate
-    /// connection can be published.</summary>
-    /// <param name="status">Wire response status.</param>
-    /// <param name="payload">Wire detail payload.</param>
-    /// <param name="operation">Fixed handshake operation name.</param>
-    /// <param name="invalidArgumentIsProtocolMismatch">Whether InvalidArg is
-    /// the Hello protocol-version rejection and therefore terminal.</param>
+    /// <summary>Reject a failed fixed-handshake response before the candidate connection can be published.</summary> <param name="status">Wire response status.</param> <param name="payload">Wire detail payload.</param> <param name="operation">Fixed handshake operation name.</param> <param name="invalidArgumentIsProtocolMismatch">Whether InvalidArg is the Hello protocol-version rejection and therefore terminal.</param>
     internal static void ValidateHandshakeStatus(
         int status,
         byte[] payload,
@@ -519,9 +399,6 @@ internal sealed class PipeEngineClient : IEngineClient
 
     private void PublishHandshakeCatchUp(IReadOnlyList<VolumeStatus> statuses)
     {
-        // Synthesized catch-up: VolumeUpdated per volume from the status
-        // snapshot, then one local IndexChanged so a requery picks up
-        // whatever happened while disconnected (the server sends neither).
         foreach (var s in statuses)
         {
             RaiseSafe(() => VolumeUpdated?.Invoke(s), "VolumeUpdated");
@@ -530,9 +407,7 @@ internal sealed class PipeEngineClient : IEngineClient
         RaiseSafe(() => IndexChanged?.Invoke("*"), "IndexChanged");
     }
 
-    /// <summary>Enforces the supervisor's single published-connection invariant.</summary>
-    /// <param name="alreadyPublished">Whether compare-exchange found an existing connection.</param>
-    /// <exception cref="InvalidOperationException">A connection was already published.</exception>
+    /// <summary>Enforces the supervisor's single published-connection invariant.</summary> <param name="alreadyPublished">Whether compare-exchange found an existing connection.</param> <exception cref="InvalidOperationException">A connection was already published.</exception>
     internal static void ThrowIfConnectionAlreadyPublished(bool alreadyPublished)
     {
         if (alreadyPublished)
@@ -541,13 +416,7 @@ internal sealed class PipeEngineClient : IEngineClient
         }
     }
 
-    /// <summary>Response frames from the connection's read loop land in the
-    /// multiplexing table (out-of-order completion is wire-legal).</summary>
-    /// <param name="responseEpoch">Epoch of the connection that read the frame.</param>
-    /// <param name="requestId">Id of the pending request this frame answers.</param>
-    /// <param name="opcode">Operation code echoed by the response.</param>
-    /// <param name="status">Wire status code of the response.</param>
-    /// <param name="payload">Response body bytes.</param>
+    /// <summary>Response frames from the connection's read loop land in the multiplexing table (out-of-order completion is wire-legal).</summary> <param name="responseEpoch">Epoch of the connection that read the frame.</param> <param name="requestId">Id of the pending request this frame answers.</param> <param name="opcode">Operation code echoed by the response.</param> <param name="status">Wire status code of the response.</param> <param name="payload">Response body bytes.</param>
     private void OnResponse(
         int responseEpoch,
         uint requestId,
@@ -577,10 +446,6 @@ internal sealed class PipeEngineClient : IEngineClient
             }
         }
 
-        // Caller cancellation/time-out can retire the pending wait after a
-        // Query frame was already sent. The service cannot cancel that query,
-        // so reclaim a successful late result instead of leaving it in the
-        // per-connection registry until eviction or disconnect.
         if (opcode == PipeProtocol.Op.Query && status == PipeProtocol.Status.Ok)
         {
             try
@@ -595,19 +460,11 @@ internal sealed class PipeEngineClient : IEngineClient
         }
     }
 
-    /// <summary>Event pushes fire handlers on the read-loop thread; the
-    /// same contract as FFI engine threads — consumers marshal.</summary>
-    /// <param name="eventEpoch">Epoch of the connection that read the event.</param>
-    /// <param name="opcode">Event kind echoed in the frame header.</param>
-    /// <param name="payload">Encoded event frame body to decode and dispatch.</param>
+    /// <summary>Event pushes fire handlers on the read-loop thread; the same contract as FFI engine threads — consumers marshal.</summary> <param name="eventEpoch">Epoch of the connection that read the event.</param> <param name="opcode">Event kind echoed in the frame header.</param> <param name="payload">Encoded event frame body to decode and dispatch.</param>
     private void DispatchEvent(int eventEpoch, ushort opcode, byte[] payload)
     {
         if (eventEpoch != CurrentEpoch)
         {
-            // Subscribe precedes IndexStatus in the fixed handshake, so a
-            // candidate can receive events before it is published. The
-            // subsequent status snapshot and synthesized catch-up cover that
-            // interval. Events from retired epochs are equally obsolete.
             return;
         }
 
@@ -653,9 +510,7 @@ internal sealed class PipeEngineClient : IEngineClient
         }
     }
 
-    /// <summary>A faulting consumer must not kill the read loop (don't crash).</summary>
-    /// <param name="raise">The handler invocation to run guarded.</param>
-    /// <param name="what">Label for the event, used in the failure log.</param>
+    /// <summary>A faulting consumer must not kill the read loop (don't crash).</summary> <param name="raise">The handler invocation to run guarded.</param> <param name="what">Label for the event, used in the failure log.</param>
     private static void RaiseSafe(Action raise, string what)
     {
         try
@@ -672,8 +527,8 @@ internal sealed class PipeEngineClient : IEngineClient
         }
     }
 
-    /// <summary>Retires whichever connection is current and fails requests
-    /// admitted on that epoch. Used by the owning supervisor and Dispose.</summary>
+    /// <summary>Retires whichever connection is current and fails requests admitted on that epoch.
+    /// Used by the owning supervisor and Dispose.</summary>
     private void TearDownConnection()
     {
         var connection = Interlocked.Exchange(ref _connection, null);
@@ -686,10 +541,8 @@ internal sealed class PipeEngineClient : IEngineClient
         FailPendingRequests(connection.Epoch, "engine service connection lost");
     }
 
-    /// <summary>Retire one captured connection. The compare-exchange clears
-    /// the public slot only when it still names this exact object; disposal
-    /// and pending-request failure remain scoped to the captured epoch, so an
-    /// old deadline can never tear down or fail a replacement connection.</summary>
+    /// <summary>Retire one captured connection.
+    /// The compare-exchange clears the public slot only when it still names this exact object; disposal and pending-request failure remain scoped to the captured epoch, so an old deadline can never tear down or fail a replacement connection.</summary>
     private bool RetireConnection(PipeConnection expected, string reason)
     {
         var wasCurrent = ReferenceEquals(
@@ -718,8 +571,7 @@ internal sealed class PipeEngineClient : IEngineClient
         ((ICollection<KeyValuePair<uint, PendingRequest>>)_pending)
             .Remove(new KeyValuePair<uint, PendingRequest>(id, expected));
 
-    /// <summary>Best-effort disposal for a stream already known to be broken.</summary>
-    /// <param name="d">Disposable boundary, or null.</param>
+    /// <summary>Best-effort disposal for a stream already known to be broken.</summary> <param name="d">Disposable boundary, or null.</param>
     internal static void SafeDispose(IDisposable? d)
     {
         try
@@ -728,7 +580,6 @@ internal sealed class PipeEngineClient : IEngineClient
         }
         catch
         {
-            // Already broken — nothing to report.
         }
     }
 
@@ -743,7 +594,6 @@ internal sealed class PipeEngineClient : IEngineClient
         RaiseSafe(() => ConnectionChanged?.Invoke(state), "ConnectionChanged");
     }
 
-    // ── Request plumbing ────────────────────────────────────────────────
     private enum QueryCancelMode
     {
         None,
@@ -766,10 +616,6 @@ internal sealed class PipeEngineClient : IEngineClient
     {
         ct.ThrowIfCancellationRequested();
 
-        // Grab the connection object once; from here on it answers its own
-        // liveness (a write racing teardown surfaces as
-        // EngineUnavailableException inside PipeConnection) — there is no
-        // null-check-then-write window against a mutable stream field.
         var conn = capturedConnection ?? Volatile.Read(ref _connection);
         if (conn is null)
         {
@@ -794,10 +640,6 @@ internal sealed class PipeEngineClient : IEngineClient
         }
         while (id == 0 || !_pending.TryAdd(id, pending));
 
-        // The caller's ct joins the client-lifetime token: either one aborts
-        // the wait. Caller cancellation surfaces as OperationCanceledException;
-        // a client-lifetime cancellation (Dispose) keeps reading as
-        // EngineUnavailableException, same as before ct plumbing existed.
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, ct);
         CancellationTokenRegistration queryCancellation = default;
 
@@ -805,11 +647,6 @@ internal sealed class PipeEngineClient : IEngineClient
         {
             var frame = PipeProtocol.EncodeFrame(opcode, 0, id, 0, payload);
 
-            // A Query frame must finish before its cancel frame. Caller
-            // cancellation therefore does not interrupt this serialized
-            // write; registration immediately after it observes a token that
-            // cancelled during the write and sends QueryCancel without a
-            // lost pre-registration window.
             var writeCancellation = queryCancelMode == QueryCancelMode.OnCallerCancellation
                 ? _cts.Token
                 : linked.Token;
@@ -833,10 +670,6 @@ internal sealed class PipeEngineClient : IEngineClient
         }
         catch (TimeoutException)
         {
-            // The deadline already completed this caller's wait. Remove its
-            // TCS before failing the rest of the epoch so no abandoned faulted
-            // task is left behind; a late Query response will take the orphan
-            // result-release path in OnResponse.
             TryRemovePending(id, pending);
 #if FMF_TEST_SEAMS
             if (BeforeTimeoutRetireForTests is { } beforeRetire)
@@ -861,9 +694,7 @@ internal sealed class PipeEngineClient : IEngineClient
         }
     }
 
-    /// <summary>Sends a best-effort cancellation for a query on a captured connection.</summary>
-    /// <param name="connection">Connection captured by the original query.</param>
-    /// <param name="requestId">Original query request id.</param>
+    /// <summary>Sends a best-effort cancellation for a query on a captured connection.</summary> <param name="connection">Connection captured by the original query.</param> <param name="requestId">Original query request id.</param>
     internal void SendQueryCancel(PipeConnection connection, uint requestId)
     {
         if (!ShouldSendQueryCancel(
@@ -885,23 +716,14 @@ internal sealed class PipeEngineClient : IEngineClient
             .Forget("pipe.query-cancel");
     }
 
-    /// <summary>Whether a best-effort query cancel still targets the live connection.</summary>
-    /// <param name="connectionEpoch">Epoch captured by the original query.</param>
-    /// <param name="currentEpoch">Currently published connection epoch.</param>
-    /// <param name="disposed">Whether the client lifetime has ended.</param>
-    /// <returns>True only while the captured connection remains current and usable.</returns>
+    /// <summary>Whether a best-effort query cancel still targets the live connection.</summary> <param name="connectionEpoch">Epoch captured by the original query.</param> <param name="currentEpoch">Currently published connection epoch.</param> <param name="disposed">Whether the client lifetime has ended.</param> <returns>True only while the captured connection remains current and usable.</returns>
     internal static bool ShouldSendQueryCancel(
         int connectionEpoch,
         int currentEpoch,
         bool disposed) =>
         connectionEpoch == currentEpoch && !disposed;
 
-    /// <summary>Request + FFI-equivalent status mapping (error responses
-    /// carry the detail text inline).</summary>
-    /// <param name="opcode">Operation code of the request frame.</param>
-    /// <param name="payload">Request body bytes.</param>
-    /// <param name="operation">Operation name for the failure message.</param>
-    /// <param name="ct">Cancels the request.</param>
+    /// <summary>Request + FFI-equivalent status mapping (error responses carry the detail text inline).</summary> <param name="opcode">Operation code of the request frame.</param> <param name="payload">Request body bytes.</param> <param name="operation">Operation name for the failure message.</param> <param name="ct">Cancels the request.</param>
     private async Task<byte[]> RequestOkAsync(
         ushort opcode,
         byte[] payload,
@@ -957,8 +779,6 @@ internal sealed class PipeEngineClient : IEngineClient
             };
 
     private static string Detail(byte[] payload) => Encoding.UTF8.GetString(payload);
-
-    // ── IEngineClient ───────────────────────────────────────────────────
 
     /// <inheritdoc/>
     public async Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
@@ -1038,9 +858,6 @@ internal sealed class PipeEngineClient : IEngineClient
             }
             catch (StaleResultException) when (basisEpoch.HasValue)
             {
-                // The basis epoch turned between acquisition and request
-                // admission. It is advisory, so retry once on the current
-                // connection with zero rather than forwarding the old ID.
                 basisLease?.Dispose();
                 basisLease = null;
                 basisId = 0;
@@ -1076,23 +893,17 @@ internal sealed class PipeEngineClient : IEngineClient
                 trace = JsonSerializer.Deserialize<QueryTraceData>(traceJson, EngineJson.SnakeCase);
             }
 
-            // Cross-log correlation (ADR-0037): the engine logs the same `rid`
-            // (result handle) for this query, so the app and rolling engine logs join on it.
-            // Skipped for an unchanged idle requery, mirroring the engine.
             if (trace is null || !trace.Unchanged)
             {
                 FileLog.Event("query", "query served", ("rid", resultId), ("hits", count));
             }
-#pragma warning disable CA2000 // ownership transferred to the caller, disposed by the caller / on epoch change
+#pragma warning disable CA2000
             return new SearchOutcome(
                 new PipeSearchResult(this, resultId, signedCount, epoch), trace);
 #pragma warning restore CA2000
         }
         catch
         {
-            // Once QueryResp has yielded a result id, every exceptional exit
-            // still owns that server-side handle. Release it on the same
-            // connection epoch; a concurrent disconnect already reclaimed it.
             await ReleaseResultIfCurrentAsync(resultId, epoch).ConfigureAwait(false);
             throw;
         }
@@ -1110,7 +921,7 @@ internal sealed class PipeEngineClient : IEngineClient
                 .ConfigureAwait(false);
             if (status != PipeProtocol.Status.Ok)
             {
-                return null; // FFI parity: stats are best-effort
+                return null;
             }
         }
         catch (EngineUnavailableException ex)
@@ -1134,18 +945,13 @@ internal sealed class PipeEngineClient : IEngineClient
                 };
             }
 
-            // Service runtime info is a separate op and a nice-to-have on top of
-            // the stats snapshot — best-effort, so a failure here never voids the
-            // stats the panel already has.
             stats.Service = await TryGetServiceInfoAsync(ct).ConfigureAwait(false);
         }
 
         return stats;
     }
 
-    /// <summary>Best-effort service metadata request used to enrich stats.</summary>
-    /// <param name="ct">Request cancellation.</param>
-    /// <returns>The service metadata, or null when unavailable or rejected.</returns>
+    /// <summary>Best-effort service metadata request used to enrich stats.</summary> <param name="ct">Request cancellation.</param> <returns>The service metadata, or null when unavailable or rejected.</returns>
     internal async Task<ServiceInfoData?> TryGetServiceInfoAsync(CancellationToken ct)
     {
         try
@@ -1163,12 +969,8 @@ internal sealed class PipeEngineClient : IEngineClient
         }
     }
 
-    // ── Result paging (used by PipeSearchResult) ────────────────────────
-
-    /// <summary>Epoch of the live connection; 0 (never a connection's value)
-    /// while disconnected. A result is current iff its birth epoch equals
-    /// this — connection generations are never reused, so a result born on a
-    /// dead connection can never read as current again.</summary>
+    /// <summary>Epoch of the live connection; 0 (never a connection's value) while disconnected.
+    /// A result is current iff its birth epoch equals this — connection generations are never reused, so a result born on a dead connection can never read as current again.</summary>
     internal int CurrentEpoch => Volatile.Read(ref _connection)?.Epoch ?? 0;
 
     internal async Task<IReadOnlyList<RowData>> FetchPageAsync(
@@ -1194,10 +996,7 @@ internal sealed class PipeEngineClient : IEngineClient
         return PipeProtocol.DecodePageResp(payload);
     }
 
-    /// <summary>Update the page RTT exponentially weighted moving average.</summary>
-    /// <param name="previous">Previous average, or zero before the first sample.</param>
-    /// <param name="sample">Latest measured RTT in microseconds.</param>
-    /// <returns>The initialized or weighted average.</returns>
+    /// <summary>Update the page RTT exponentially weighted moving average.</summary> <param name="previous">Previous average, or zero before the first sample.</param> <param name="sample">Latest measured RTT in microseconds.</param> <returns>The initialized or weighted average.</returns>
     internal static double UpdatePageRttEwma(double previous, double sample) =>
         previous == 0 ? sample : (0.8 * previous) + (0.2 * sample);
 
@@ -1210,7 +1009,7 @@ internal sealed class PipeEngineClient : IEngineClient
     {
         if (Volatile.Read(ref _connection) is not { } conn || conn.Epoch != epoch)
         {
-            return; // the server freed it together with the dead connection
+            return;
         }
 
         try
@@ -1219,13 +1018,9 @@ internal sealed class PipeEngineClient : IEngineClient
         }
         catch (StaleResultException)
         {
-            // The connection changed after the check. Its result registry
-            // died with it; never forward the old handle to the new epoch.
         }
         catch (Exception ex)
         {
-            // Cleanup failure must not mask the query/decode exception that
-            // made this path necessary.
             FileLog.Warn("pipe", "result release failed", ex);
         }
     }
@@ -1243,8 +1038,6 @@ internal sealed class PipeEngineClient : IEngineClient
         }
         catch (EngineUnavailableException)
         {
-            // Disconnected mid-release: the per-connection registry on the
-            // server already freed it. Not an error worth surfacing.
         }
     }
 
@@ -1256,14 +1049,9 @@ internal sealed class PipeEngineClient : IEngineClient
             return;
         }
 
-        // Stop the supervisor and break the connection; never block shutdown
-        // on the background task.
         _cts.Cancel();
         TearDownConnection();
 
-        // The supervisor may still observe the token after we return, so the
-        // CTS is disposed only once that background task has actually exited
-        // (or immediately if it never started) — never on the Dispose thread.
         var supervisor = _supervisor;
         if (supervisor is null)
         {
@@ -1280,8 +1068,7 @@ internal sealed class PipeEngineClient : IEngineClient
         }
     }
 
-    /// <summary>Conditions a reconnect can never cure — the supervisor stops
-    /// for good and every request fails with EngineUnavailableException.</summary>
+    /// <summary>Conditions a reconnect can never cure — the supervisor stops for good and every request fails with EngineUnavailableException.</summary>
     private class FatalPipeException(string message) : Exception(message);
 
     private sealed class ProtocolMismatchException(string message) : FatalPipeException(message);

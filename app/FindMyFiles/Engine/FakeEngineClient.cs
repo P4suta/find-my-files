@@ -3,14 +3,10 @@ using FindMyFiles.Services;
 
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// Deterministic in-memory engine for UI tests and unelevated development
-/// (`--fake-engine`). 100k entries from a fixed seed; substring search only.
-/// Contract-conforming (EngineClientContractTests): query-syntax verdicts
-/// come from the shared golden fixture (contract/golden/invalid_queries.json,
-/// pinned by the real Rust parser — verdict drift is caught on the Rust
-/// side), cancellation is honored, and <see cref="BumpEpoch"/> lets tests
-/// drive the Stale→requery recovery path without a real engine.
+/// <summary> Deterministic in-memory engine for UI tests and unelevated development (`--fake-engine`).
+/// 100k entries from a fixed seed; substring search only.
+/// Contract-conforming (EngineClientContractTests): query-syntax verdicts come from the shared golden fixture (contract/golden/invalid_queries.json,
+/// pinned by the real Rust parser — verdict drift is caught on the Rust side), cancellation is honored, and <see cref="BumpEpoch"/> lets tests drive the Stale→requery recovery path without a real engine.
 /// </summary>
 internal sealed class FakeEngineClient : IEngineClient
 {
@@ -23,25 +19,19 @@ internal sealed class FakeEngineClient : IEngineClient
     /// <inheritdoc/>
     public EngineClientKind Kind => EngineClientKind.Test;
 
-    /// <inheritdoc/>
-    /// <remarks>The fake never indexes, so this never fires (empty
-    /// accessors).</remarks>
+    /// <inheritdoc/> <remarks>The fake never indexes, so this never fires (empty accessors).</remarks>
     public event Action<string>? IndexChanged
     {
         add { } remove { }
     }
 
-    /// <inheritdoc/>
-    /// <remarks>Volume state is fixed (one Ready volume), so this never fires
-    /// (empty accessors).</remarks>
+    /// <inheritdoc/> <remarks>Volume state is fixed (one Ready volume), so this never fires (empty accessors).</remarks>
     public event Action<VolumeStatus>? VolumeUpdated
     {
         add { } remove { }
     }
 
-    /// <inheritdoc/>
-    /// <remarks>In-proc has no transport, so this never fires (empty
-    /// accessors).</remarks>
+    /// <inheritdoc/> <remarks>In-proc has no transport, so this never fires (empty accessors).</remarks>
     public event Action<EngineConnectionState>? ConnectionChanged
     {
         add { } remove { }
@@ -50,22 +40,16 @@ internal sealed class FakeEngineClient : IEngineClient
     /// <summary>In-proc: no transport, no state transitions.</summary>
     public EngineConnectionState Connection => EngineConnectionState.InProc;
 
-    // Only the DEBUG-only fault injection raises this; Release builds keep
-    // the member to satisfy IEngineClient.
 #pragma warning disable CS0067
-    /// <inheritdoc/>
-    /// <remarks>Only the DEBUG <c>!!warn</c> fault injection raises this; in
-    /// Release builds it never fires.</remarks>
+    /// <inheritdoc/> <remarks>Only the DEBUG <c>!!warn</c> fault injection raises this; in Release builds it never fires.</remarks>
     public event Action<EngineErrorSeverity>? EngineErrorOccurred;
 #pragma warning restore CS0067
 
     private readonly List<ErrorEventData> _injectedErrors = [];
 
-    /// <summary>Builds the deterministic 100k-row dataset used by UI and
-    /// transport-contract tests.</summary>
+    /// <summary>Builds the deterministic 100k-row dataset used by UI and transport-contract tests.</summary>
     public FakeEngineClient()
     {
-        // fake/demo sample-data generation, never security-sensitive — System.Random is intentional
 #pragma warning disable CA5394
         var rng = new Random(42);
         string[] exts = ["txt", "rs", "cs", "dll", "png", "pdf", "log", "json"];
@@ -76,8 +60,6 @@ internal sealed class FakeEngineClient : IEngineClient
         {
             var isDir = i % 50 == 0;
 
-            // Every 97th entry plays a hidden/system file so the UI toggle is
-            // exercisable against deterministic data.
             var isHiddenSystem = i % 97 == 0;
             var name = isHiddenSystem
                 ? $"hidden_sys_{i:D6}.dat"
@@ -103,8 +85,7 @@ internal sealed class FakeEngineClient : IEngineClient
     }
 
     /// <summary>The shared syntax fixture: queries the real engine rejects.
-    /// A missing/corrupt file degrades to accept-everything — loudly, never
-    /// fatally (the fake must keep working in stripped-down test hosts).</summary>
+    /// A missing/corrupt file degrades to accept-everything — loudly, never fatally (the fake must keep working in stripped-down test hosts).</summary>
     private static HashSet<string> LoadInvalidQueries()
     {
         var path = Path.Combine(AppContext.BaseDirectory, "golden", "invalid_queries.json");
@@ -125,8 +106,7 @@ internal sealed class FakeEngineClient : IEngineClient
         }
     }
 
-    /// <summary>Test hook: structurally invalidate every result handed out
-    /// so far — their next GetRangeAsync throws <see cref="StaleResultException"/>,
+    /// <summary>Test hook: structurally invalidate every result handed out so far — their next GetRangeAsync throws <see cref="StaleResultException"/>,
     /// exactly like a real index rebuild (UI Stale→requery recovery).</summary>
     public void BumpEpoch() => Interlocked.Increment(ref _epoch);
 
@@ -171,7 +151,6 @@ internal sealed class FakeEngineClient : IEngineClient
             P999Us = 8000,
             QueryHistogram = new HistogramData
             {
-                // bucket i covers [2^i, 2^(i+1)) µs; a small plausible spread.
                 Buckets = [.. Enumerable.Range(0, 32).Select(i => i is 10 or 11 or 12 ? 4ul : 0ul)],
                 Count = 12,
                 SumUs = 30_000,
@@ -250,13 +229,6 @@ internal sealed class FakeEngineClient : IEngineClient
                 $"syntax error (shared golden fixture): {query.Trim()}");
         }
 #if DEBUG
-        // Fault injection for end-to-end verification of the error pipeline
-        // (InfoBar, F12 panel, app.log) without touching real volumes. The
-        // token set is a contract shared with fmf-service's faults.rs — a
-        // fault that reproduces on only one engine is worse than none, because
-        // the fake is the one reachable without installing a service. xtask's
-        // fault_injection_tokens_match_on_both_engines holds both sides against
-        // one reviewed list.
         if (string.Equals(query.Trim(), "!!panic", StringComparison.Ordinal))
         {
             throw new EngineException("fault injection: simulated engine panic", 99);
@@ -264,15 +236,6 @@ internal sealed class FakeEngineClient : IEngineClient
 
         if (string.Equals(query.Trim(), "!!drop", StringComparison.Ordinal))
         {
-            // The service severs the pipe; there is no pipe here, so reproduce
-            // the *app-visible* effect instead of faking transport mechanics —
-            // the request dies with the exception PipeEngineClient raises once
-            // its connection is gone. Deliberately not a simulated state
-            // machine: the fake declares Connection => InProc and never raises
-            // ConnectionChanged, and inventing transitions it does not have
-            // would make this fault lie about a path it cannot exercise.
-            // Reconnect behaviour itself stays a pipe-side test
-            // (drop_fault_severs_the_connection in pipe_loopback.rs).
             throw new EngineUnavailableException(
                 "fault injection: simulated engine disconnect");
         }
@@ -294,9 +257,6 @@ internal sealed class FakeEngineClient : IEngineClient
         var needle = query.Trim();
         var pageLag = TimeSpan.Zero;
 #if DEBUG
-        // Fault injection: `!!lag` makes every page fetch take 250ms, so the
-        // results-publication path can be verified to never show blank rows
-        // (the rest of the query still filters normally).
         if (needle.Contains("!!lag", StringComparison.Ordinal))
         {
             pageLag = TimeSpan.FromMilliseconds(250);
@@ -310,10 +270,6 @@ internal sealed class FakeEngineClient : IEngineClient
         IEnumerable<RowData> hits;
         if (options.RegexMode && needle.Length != 0)
         {
-            // Deterministic regex mode for UI tests. .NET regex differs from
-            // the engine's rust regex, but the fake only needs to filter
-            // plausibly and reject invalid patterns the same way (a 100ms
-            // match timeout guards the test double against pathological input).
             var ci = options.Case switch
             {
                 FmfCase.Insensitive => true,
@@ -475,11 +431,7 @@ internal sealed class FakeEngineClient : IEngineClient
         }
     }
 
-    /// <summary>Parse the constrained suffix emitted by
-    /// <see cref="ViewModels.FocusedQueryRewriter"/>. The fake remains a UI
-    /// test double rather than a second query parser, but it must understand
-    /// the exact rewrite the UI sends by default or fake mode would always
-    /// return zero rows.</summary>
+    /// <summary>Parse the constrained suffix emitted by <see cref="ViewModels.FocusedQueryRewriter"/>. The fake remains a UI test double rather than a second query parser, but it must understand the exact rewrite the UI sends by default or fake mode would always return zero rows.</summary>
     private static FakeQuery ParseFakeQuery(string query)
     {
         const string ExcludePrefix = " !path:\"";
@@ -554,7 +506,7 @@ internal sealed class FakeEngineClient : IEngineClient
             var request = EngineRequest.PageRange(offset, count);
             if (epoch != Volatile.Read(ref owner._epoch))
             {
-                throw new StaleResultException(); // BumpEpoch invalidated us
+                throw new StaleResultException();
             }
 
             if (pageLag > TimeSpan.Zero)

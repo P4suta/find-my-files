@@ -1,12 +1,11 @@
-//! `completions` — print a shell completion script to stdout (the gh/rustup
-//! pattern: `eval "$(fmf completions bash)"`).
+//! `completions` — print a shell completion script to stdout (the gh/rustup pattern: `eval "$(fmf completions bash)"`).
 
 use std::io;
 
 use clap_complete::Shell;
 
-/// Write the completion script for `shell` to stdout. Renders from the single
-/// clap command tree (`crate::command`) so it always matches the real argv parser.
+/// Write the completion script for `shell` to stdout.
+/// Renders from the single clap command tree (`crate::command`) so it always matches the real argv parser.
 pub fn completions(shell: Shell) {
     let mut command = crate::command();
     clap_complete::generate(shell, &mut command, "fmf", &mut io::stdout());

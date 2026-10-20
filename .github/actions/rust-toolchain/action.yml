@@ -1,11 +1,3 @@
-# Install the repository's exact Rust version through the standard dtolnay
-# action. CI does not install or execute mise; it only reads the shared version
-# declaration rather than floating on `stable`.
-#
-# This composite hands that version to dtolnay/rust-toolchain, so CI remains
-# native GitHub Actions while local environment provisioning remains mise-owned.
-# (fuzz.yml is the one exception: it needs nightly-only sanitizer support, so it
-# keeps a direct dtolnay step with an explicitly dated nightly.)
 name: Rust toolchain (repository-pinned)
 description: Install the repository-pinned Rust toolchain without invoking mise.
 inputs:
@@ -18,8 +10,6 @@ runs:
   steps:
     - id: pin
       shell: bash
-      # mise.toml line: `rust = "1.97"`. awk (not `grep -oP`, whose PCRE is absent
-      # from the windows runners' Git Bash) splits on the quotes and takes the value.
       run: |
         version=$(awk -F'"' '/^rust[[:space:]]*=/{print $2; exit}' mise.toml)
         if [ -z "$version" ]; then
@@ -27,7 +17,7 @@ runs:
         fi
         echo "version=$version" >> "$GITHUB_OUTPUT"
         echo "Using repository-pinned Rust $version"
-    - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable-branch pin; `toolchain` overrides what it installs
+    - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       with:
         toolchain: ${{ steps.pin.outputs.version }}
         components: ${{ inputs.components }}

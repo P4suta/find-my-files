@@ -1,5 +1,3 @@
-# RustSec advisory scan over the committed lockfiles (engine + xtask). The
-# scheduled run catches newly-disclosed advisories even when nothing changed.
 name: cargo-audit
 
 on:
@@ -21,7 +19,7 @@ jobs:
   audit:
     permissions:
       contents: read
-      pull-requests: read # Read changed PR files for dependency selection.
+      pull-requests: read # Permission: Select changed dependency inputs.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

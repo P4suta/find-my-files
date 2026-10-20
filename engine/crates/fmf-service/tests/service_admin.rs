@@ -1,21 +1,18 @@
 //! Elevated end-to-end: a real fmf-service child process over a real C:
 //! scan — durability (periodic flush survives a kill) and snapshot restore.
-//! Gated like every real-volume test: `#[ignore]` + `FMF_ADMIN_TESTS=1`
-//! (`just test-admin`, elevated).
+//! Gated like every real-volume test: `#[ignore]` + `FMF_ADMIN_TESTS=1` (`just test-admin`, elevated).
 
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use fmf_core::index::testutil::TestDir;
 use fmf_proto::frame::{FLAG_EVENT, FrameHeader, read_frame, write_frame};
 use fmf_proto::messages::{self, opcode};
 use fmf_proto::{PROTOCOL_VERSION, codes};
+use fmf_runtime::index::testutil::TestDir;
 use fmf_service::pipe::PipeStream;
 
-/// Fails closed. `#[ignore]` is what *skips* this test; reaching the body
-/// without the arming variable means the harness was invoked outside
-/// `just test-admin`, and a silent early return would be indistinguishable
-/// from a durability proof that actually ran.
+/// Fails closed.
+/// `#[ignore]` is what *skips* this test; reaching the body without the arming variable means the harness was invoked outside `just test-admin`, and a silent early return would be indistinguishable from a durability proof that actually ran.
 fn require_admin_gate() {
     assert_eq!(
         std::env::var("FMF_ADMIN_TESTS").as_deref(),
@@ -95,14 +92,11 @@ fn hello(s: &mut PipeStream, id: u32) {
     assert_eq!(h.status, codes::OK);
 }
 
-/// `VolumeStatusWire` carries no reason for a `Failed` state, so a bare
-/// assertion reports only that the scan failed. The reason is in the service's
-/// own rolling log, and the `TestDir` holding it is deleted as the panic
-/// unwinds — read it *before* asserting or it is gone.
+/// `VolumeStatusWire` carries no reason for a `Failed` state, so a bare assertion reports only that the scan failed.
+/// The reason is in the service's own rolling log, and the `TestDir` holding it is deleted as the panic unwinds — read it *before* asserting or it is gone.
 ///
-/// This exists because that failure is intermittent. A run that fails without
-/// saying why costs a whole elevated session to chase; one that prints the log
-/// tail is a diagnosis.
+/// This exists because that failure is intermittent.
+/// A run that fails without saying why costs a whole elevated session to chase; one that prints the log tail is a diagnosis.
 fn service_log_tail(data_dir: &std::path::Path) -> String {
     let Ok(entries) = std::fs::read_dir(data_dir.join("logs")) else {
         return "<no logs directory>".to_string();
@@ -173,15 +167,12 @@ fn wait_ready(
 #[ignore = "requires elevation + a real C: scan; gated by FMF_ADMIN_TESTS=1 (just test-admin)"]
 fn service_e2e_flush_survives_kill_and_restores() {
     require_admin_gate();
-    // Fresh per-run data dir (TestDir) → guaranteed full-scan cold start.
     let data_dir = TestDir::new();
-    // Short flush interval: durability must not depend on a graceful stop.
     let mut f = std::fs::File::create(data_dir.join("service.json")).unwrap();
     f.write_all(br#"{ "flush_interval_secs": 10 }"#).unwrap();
     drop(f);
     let pipe_name = format!(r"\\.\pipe\fmf-svc-e2e-{}", std::process::id());
 
-    // 1. Cold start: full scan → Ready → queries answer.
     let child = spawn_service(data_dir.path(), &pipe_name);
     let mut s = connect_with_retry(&pipe_name, Duration::from_secs(30));
     let mut id = 0u32;
@@ -199,9 +190,8 @@ fn service_e2e_flush_survives_kill_and_restores() {
     assert_eq!(h.status, codes::OK);
     let (head, _) = messages::QueryRespHead::decode(&p).unwrap();
     assert!(head.count > 0, "'windows' must match something on C:");
-    let windows_before = head.count; // committed-set witness, re-checked after restore
+    let windows_before = head.count;
 
-    // 2. Wait out a periodic flush, then kill hard (no graceful stop).
     let snapshot = data_dir.join("index").join("c.fmfidx");
     let begin = Instant::now();
     while !snapshot.exists() {
@@ -212,10 +202,9 @@ fn service_e2e_flush_survives_kill_and_restores() {
         );
         std::thread::sleep(Duration::from_millis(500));
     }
-    drop(child); // kill -9 equivalent — durability is the periodic flush
+    drop(child);
     drop(s);
 
-    // 3. Restart: must come up from the snapshot (fast Ready), not a rescan.
     let _child2 = spawn_service(data_dir.path(), &pipe_name);
     let mut s2 = connect_with_retry(&pipe_name, Duration::from_secs(30));
     let mut id2 = 0u32;
@@ -224,20 +213,11 @@ fn service_e2e_flush_survives_kill_and_restores() {
     let restored = wait_ready(&mut s2, &mut id2, Duration::from_mins(1), data_dir.path());
     let ready_in = restore_begin.elapsed();
     assert!(restored > 10_000);
-    // The M2 gate is restore→ready ≤2s engine-side; over a child process +
-    // USN replay we allow process startup slack but a full rescan (~2s scan
-    // + deferred + journal replay on a warm machine usually lands well past
-    // this) must not be the path.
     assert!(
         ready_in < Duration::from_secs(10),
         "restore took {ready_in:?} — did it full-rescan instead of restoring?"
     );
 
-    // Restore recovered the committed SET, not just a comparable count: the total
-    // is within 10% of the pre-kill live index (snapshot + USN replay should lose
-    // nothing but in-flight churn), and the same pre-kill `windows` query still
-    // answers with at least as many hits — the flushed snapshot is intact, not a
-    // hollow index that merely reaches the entry threshold.
     assert!(
         restored >= entries / 10 * 9,
         "restore recovered only {restored} of {entries} committed entries"
@@ -257,17 +237,13 @@ fn service_e2e_flush_survives_kill_and_restores() {
         head.count
     );
 
-    // 4. Change-to-event latency (M2: USN→UI ≤1s; the engine-side debounce
-    //    is 200ms and the pipe push is the only extra hop). Subscribe, touch
-    //    a file on C:, expect IndexChanged within the budget — while the
-    //    short flush interval keeps periodic flushes firing around it.
     id2 += 1;
     let (h, _) = request(&mut s2, id2, opcode::SUBSCRIBE, &[]);
     assert_eq!(h.status, codes::OK);
     let tickle = std::env::temp_dir().join(format!("fmf-usn-latency-{}.tmp", std::process::id()));
     let touched = Instant::now();
     std::fs::write(&tickle, b"tick").unwrap();
-    let deadline = Duration::from_secs(5); // budget 1s; CI slack on top
+    let deadline = Duration::from_secs(5);
     let mut latency = None;
     while touched.elapsed() < deadline {
         let (eh, body) = read_frame(&mut s2).expect("event stream");
@@ -280,16 +256,8 @@ fn service_e2e_flush_survives_kill_and_restores() {
         }
     }
     let _ = std::fs::remove_file(&tickle);
-    // Correctness invariant: the change WAS detected and pushed — the event
-    // arrived within the generous deadline above (the loop's `.expect`). The <1s
-    // M2 figure is a PERFORMANCE budget, and perf budgets are gated on a cool
-    // machine via `just bench` / `just perf-gate` (ADR-0013), NOT asserted in a
-    // correctness E2E that runs right after heavy release builds — the CPU is
-    // thermally throttled then (bench-thermal-discipline), so a hard <1s here is
-    // flaky by construction. Record it as a metric; gate it where it belongs.
     let latency = latency.expect("IndexChanged never arrived");
     eprintln!(
         "M2 gate record: restore→ready {ready_in:?} (incl. process spawn), USN→event {latency:?}"
     );
-    // data_dir (TestDir) drops last — after _child2 is killed on drop.
 }

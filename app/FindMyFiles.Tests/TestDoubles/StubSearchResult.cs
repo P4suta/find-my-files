@@ -2,11 +2,8 @@ using FindMyFiles.Engine;
 
 namespace FindMyFiles.Tests.TestDoubles;
 
-/// <summary>
-/// <see cref="ISearchResult"/> test double. By default pages resolve
-/// synchronously; <see cref="Gate"/> holds every fetch until the test
-/// releases it (for in-flight/epoch races), and <see cref="ThrowOnFetch"/>
-/// faults the fetch instead of returning rows.
+/// <summary> <see cref="ISearchResult"/> test double.
+/// By default pages resolve synchronously; <see cref="Gate"/> holds every fetch until the test releases it (for in-flight/epoch races), and <see cref="ThrowOnFetch"/> faults the fetch instead of returning rows.
 /// </summary>
 internal sealed class StubSearchResult(IReadOnlyList<RowData> rows) : ISearchResult
 {
@@ -22,15 +19,12 @@ internal sealed class StubSearchResult(IReadOnlyList<RowData> rows) : ISearchRes
     /// <summary>When set, GetRangeAsync throws after passing the gate.</summary>
     public Exception? ThrowOnFetch { get; init; }
 
-    /// <summary>When true, GetRangeAsync honors a cancelled ct after passing
-    /// the gate (OperationCanceledException) — pins the cancellation defense.
+    /// <summary>When true, GetRangeAsync honors a cancelled ct after passing the gate (OperationCanceledException) — pins the cancellation defense.
     /// Default false: the fetch completes with data even when cancelled,
-    /// pinning the epoch defense on its own (the two defenses are pinned by
-    /// separate tests on purpose).</summary>
+    /// pinning the epoch defense on its own (the two defenses are pinned by separate tests on purpose).</summary>
     public bool HonorCancellation { get; init; }
 
-    /// <summary>The ct of the most recent GetRangeAsync call — lets tests
-    /// assert the token was actually wired through and cancelled.</summary>
+    /// <summary>The ct of the most recent GetRangeAsync call — lets tests assert the token was actually wired through and cancelled.</summary>
     public CancellationToken LastFetchToken { get; private set; }
 
     public long Count => rows.Count;

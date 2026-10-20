@@ -1,0 +1,897 @@
+const MERGE_RUNS: usize = 2;
+
+use rayon::prelude::*;
+
+use super::{QueryCancellation, QueryCancelled};
+use crate::index::{DerivedValidity, EntryId, SortKey, VolumeIndex};
+
+/// Pre-sorted id order for one sort key, built on the first query that sorts by it and extended per content generation after that — the same insertion-point in-place merge the name permutation uses, through the same `cmp_by` order (ADR-0006).
+///
+/// Existing-row stat changes force a full lazy rebuild before the next size/mtime query; append-only batches retain the incremental extension.
+/// Never persisted: a snapshot restore re-sorts on first use.
+#[derive(Clone)]
+pub(super) struct SortPerm {
+    pub(super) ids: Vec<EntryId>,
+    /// Entries `[0, covers)` are placed; a generation step sorts and merges only the ids past the watermark.
+    covers: u32,
+    /// Exact stat-column revision used to order `ids`.
+    stat_generation: u64,
+}
+
+/// Size order — its own derived-cache slot (TypeId-keyed).
+pub(super) struct SizePerm(pub(super) SortPerm);
+/// Mtime order — separate slot.
+pub(super) struct MtimePerm(pub(super) SortPerm);
+
+impl DerivedValidity for SizePerm {
+    fn is_current(&self, index: &VolumeIndex) -> bool {
+        self.0.is_current(index)
+    }
+}
+
+impl DerivedValidity for MtimePerm {
+    fn is_current(&self, index: &VolumeIndex) -> bool {
+        self.0.is_current(index)
+    }
+}
+
+impl SizePerm {
+    #[cfg(test)]
+    pub(super) fn get(idx: &VolumeIndex) -> std::sync::Arc<Self> {
+        Self::get_cancellable(idx, &QueryCancellation::new())
+            .expect("fresh cancellation token cannot cancel")
+    }
+
+    pub(super) fn get_cancellable(
+        idx: &VolumeIndex,
+        cancellation: &QueryCancellation,
+    ) -> Result<std::sync::Arc<Self>, QueryCancelled> {
+        idx.cached_derived_or_try_update(|prev| {
+            Ok(match prev {
+                Some(p) => Self(SortPerm::extend_cancellable(
+                    idx,
+                    take_perm(p, |m: &Self| &m.0),
+                    SortKey::Size,
+                    cancellation,
+                )?),
+                None => Self(SortPerm::build_cancellable(
+                    idx,
+                    SortKey::Size,
+                    cancellation,
+                )?),
+            })
+        })
+    }
+}
+
+impl MtimePerm {
+    #[cfg(test)]
+    pub(super) fn get(idx: &VolumeIndex) -> std::sync::Arc<Self> {
+        Self::get_cancellable(idx, &QueryCancellation::new())
+            .expect("fresh cancellation token cannot cancel")
+    }
+
+    pub(super) fn get_cancellable(
+        idx: &VolumeIndex,
+        cancellation: &QueryCancellation,
+    ) -> Result<std::sync::Arc<Self>, QueryCancelled> {
+        idx.cached_derived_or_try_update(|prev| {
+            Ok(match prev {
+                Some(p) => Self(SortPerm::extend_cancellable(
+                    idx,
+                    take_perm(p, |m: &Self| &m.0),
+                    SortKey::Mtime,
+                    cancellation,
+                )?),
+                None => Self(SortPerm::build_cancellable(
+                    idx,
+                    SortKey::Mtime,
+                    cancellation,
+                )?),
+            })
+        })
+    }
+}
+
+/// Reuse the previous permutation's allocation when the cache slot held the only Arc, clone otherwise (same policy as the other derived caches).
+fn take_perm<T>(prev: std::sync::Arc<T>, perm_of: impl Fn(&T) -> &SortPerm) -> SortPerm
+where
+    SortPerm: From<T>,
+{
+    match std::sync::Arc::try_unwrap(prev) {
+        Ok(owned) => owned.into(),
+        Err(shared) => perm_of(&shared).clone(),
+    }
+}
+
+impl From<SizePerm> for SortPerm {
+    fn from(p: SizePerm) -> Self {
+        p.0
+    }
+}
+impl From<MtimePerm> for SortPerm {
+    fn from(p: MtimePerm) -> Self {
+        p.0
+    }
+}
+
+impl SortPerm {
+    /// Reusable exactly when the stat columns still carry the revision this order was computed from *and* every row is placed.
+    /// The watermark half is what stops a cache hit from answering with fewer ids than the index holds — the same completeness rule `extend_cancellable` enforces, now also on the path that never calls it.
+    const fn is_current(&self, index: &VolumeIndex) -> bool {
+        self.stat_generation == index.stat_generation() && self.covers as usize == index.len()
+    }
+
+    #[cfg(test)]
+    fn build(idx: &VolumeIndex, key: SortKey) -> Self {
+        Self::build_cancellable(idx, key, &QueryCancellation::new())
+            .expect("fresh cancellation token cannot cancel")
+    }
+
+    fn build_cancellable(
+        idx: &VolumeIndex,
+        key: SortKey,
+        cancellation: &QueryCancellation,
+    ) -> Result<Self, QueryCancelled> {
+        let ids = cancellable_sort((0..idx.len() as u32).collect(), idx, key, cancellation)?;
+        Ok(Self {
+            ids,
+            covers: idx.len() as u32,
+            stat_generation: idx.stat_generation(),
+        })
+    }
+
+    #[cfg(test)]
+    fn extend(idx: &VolumeIndex, perm: Self, key: SortKey) -> Self {
+        Self::extend_cancellable(idx, perm, key, &QueryCancellation::new())
+            .expect("fresh cancellation token cannot cancel")
+    }
+
+    fn extend_cancellable(
+        idx: &VolumeIndex,
+        mut perm: Self,
+        key: SortKey,
+        cancellation: &QueryCancellation,
+    ) -> Result<Self, QueryCancelled> {
+        cancellation.check()?;
+        let n = idx.len() as u32;
+        if perm.stat_generation != idx.stat_generation() {
+            return Self::build_cancellable(idx, key, cancellation);
+        }
+        if perm.covers > n {
+            crate::degrade!(
+                crate::metrics::LAZY_PERM_REBUILD_FALLBACKS,
+                covers = perm.covers,
+                entries = n,
+                "lazy sort permutation watermark regressed — falling back to a full rebuild"
+            );
+            return Self::build_cancellable(idx, key, cancellation);
+        }
+        let batch = cancellable_sort((perm.covers..n).collect(), idx, key, cancellation)?;
+        if !batch.is_empty() {
+            perm.ids = cancellable_merge(&perm.ids, &batch, idx, key, cancellation)?;
+        }
+        perm.covers = n;
+        Ok(perm)
+    }
+}
+
+/// Sort in bounded independently-cancellable runs, then parallel merge passes.
+/// A cancellation waits for at most one small run sort or 1024 merge comparisons; no million-entry `par_sort` continues invisibly.
+fn cancellable_sort(
+    mut ids: Vec<EntryId>,
+    idx: &VolumeIndex,
+    key: SortKey,
+    cancellation: &QueryCancellation,
+) -> Result<Vec<EntryId>, QueryCancelled> {
+    const RUN: usize = 4096;
+    cancellation.check()?;
+    ids.par_chunks_mut(RUN).try_for_each(|chunk| {
+        cancellation.check()?;
+        chunk.sort_unstable_by(|&a, &b| idx.cmp_by(key, a, b));
+        cancellation.check()
+    })?;
+
+    let mut source = ids;
+    let mut destination = vec![0; source.len()];
+    let mut width = RUN;
+    while width < source.len() {
+        cancellation.check()?;
+        let pair_width = width.saturating_mul(MERGE_RUNS);
+        destination
+            .par_chunks_mut(pair_width)
+            .enumerate()
+            .try_for_each(|(pair, out)| {
+                cancellation.check()?;
+                let start = pair * pair_width;
+                let middle = (start + width).min(source.len());
+                let end = (start + pair_width).min(source.len());
+                let (left, right) = (&source[start..middle], &source[middle..end]);
+                let (mut l, mut r) = (0usize, 0usize);
+                for (position, target) in out.iter_mut().enumerate() {
+                    if position.is_multiple_of(super::CANCELLATION_POLL_ENTRIES) {
+                        cancellation.check()?;
+                    }
+                    let take_left = r == right.len()
+                        || (l < left.len()
+                            && idx.cmp_by(key, left[l], right[r]) != std::cmp::Ordering::Greater);
+                    *target = if take_left {
+                        let value = left[l];
+                        l += 1;
+                        value
+                    } else {
+                        let value = right[r];
+                        r += 1;
+                        value
+                    };
+                }
+                Ok::<(), QueryCancelled>(())
+            })?;
+        std::mem::swap(&mut source, &mut destination);
+        width = pair_width;
+    }
+    cancellation.check()?;
+    Ok(source)
+}
+
+fn cancellable_merge(
+    left: &[EntryId],
+    right: &[EntryId],
+    idx: &VolumeIndex,
+    key: SortKey,
+    cancellation: &QueryCancellation,
+) -> Result<Vec<EntryId>, QueryCancelled> {
+    let mut out = Vec::with_capacity(left.len() + right.len());
+    let (mut l, mut r) = (0usize, 0usize);
+    while l < left.len() || r < right.len() {
+        if out.len().is_multiple_of(super::CANCELLATION_POLL_ENTRIES) {
+            cancellation.check()?;
+        }
+        let take_left = r == right.len()
+            || (l < left.len()
+                && idx.cmp_by(key, left[l], right[r]) != std::cmp::Ordering::Greater);
+        if take_left {
+            out.push(left[l]);
+            l += 1;
+        } else {
+            out.push(right[r]);
+            r += 1;
+        }
+    }
+    cancellation.check()?;
+    Ok(out)
+}
+
+/// Compact, sanitized parent topology for path matching.
+///
+/// Full path strings are deliberately not cached: a chain of `n` one-byte directory names contains Θ(n²) prefix bytes.
+/// The index already owns every name once, so this cache stores only one parent id per entry (Θ(n)); each worker materializes the one path it is currently evaluating into reusable scratch.
+pub(super) struct DirTopology {
+    parents: Vec<EntryId>,
+    /// Entries `[0, covers_entries)` have a sanitized parent.
+    covers_entries: usize,
+    /// The dir-topology generation this cache is valid for.
+    topo_generation: u64,
+}
+
+impl DerivedValidity for DirTopology {
+    /// Same two-part rule as [`SortPerm::is_current`]: the topology revision must match and every row must have a sanitized parent.
+    /// The second half is load-bearing — `append_parent_path` indexes `parents` by `EntryId`,
+    /// so answering a query from a topology that predates appended rows is an out-of-bounds panic, not a merely stale path.
+    fn is_current(&self, index: &VolumeIndex) -> bool {
+        self.topo_generation == index.dir_topology_generation()
+            && self.covers_entries == index.len()
+    }
+}
+
+impl DirTopology {
+    #[cfg(test)]
+    fn build(idx: &VolumeIndex) -> Self {
+        Self::build_cancellable(idx, &QueryCancellation::new())
+            .expect("fresh cancellation token cannot cancel")
+    }
+
+    #[cfg(test)]
+    fn extend_from(idx: &VolumeIndex, prev: std::sync::Arc<Self>) -> Self {
+        Self::extend_from_cancellable(idx, prev, &QueryCancellation::new())
+            .expect("fresh cancellation token cannot cancel")
+    }
+
+    pub(super) fn extend_from_cancellable(
+        idx: &VolumeIndex,
+        prev: std::sync::Arc<Self>,
+        cancellation: &QueryCancellation,
+    ) -> Result<Self, QueryCancelled> {
+        let mut topology = match std::sync::Arc::try_unwrap(prev) {
+            Ok(owned) => owned,
+            Err(shared) => Self {
+                parents: shared.parents.clone(),
+                covers_entries: shared.covers_entries,
+                topo_generation: shared.topo_generation,
+            },
+        };
+        cancellation.check()?;
+        let n = idx.len();
+        if topology.topo_generation != idx.dir_topology_generation() || topology.covers_entries > n
+        {
+            return Self::build_cancellable(idx, cancellation);
+        }
+
+        topology.parents.resize(n, VolumeIndex::ROOT);
+        for id in topology.covers_entries as u32..n as u32 {
+            if (id as usize).is_multiple_of(super::CANCELLATION_POLL_ENTRIES) {
+                cancellation.check()?;
+            }
+            topology.parents[id as usize] =
+                Self::valid_parent(idx, id).unwrap_or(VolumeIndex::ROOT);
+        }
+        topology.covers_entries = n;
+        cancellation.check()?;
+        Ok(topology)
+    }
+
+    fn valid_parent(idx: &VolumeIndex, id: EntryId) -> Option<EntryId> {
+        if id == VolumeIndex::ROOT {
+            return Some(VolumeIndex::ROOT);
+        }
+        let parent = idx.parent(id);
+        ((parent as usize) < idx.len() && idx.is_dir(parent)).then_some(parent)
+    }
+
+    /// Build an acyclic parent forest in linear space.
+    /// Valid trees retain their exact parents at any depth; malformed cycles or non-directory parents are detached to the root instead of poisoning every descendant.
+    pub(super) fn build_cancellable(
+        idx: &VolumeIndex,
+        cancellation: &QueryCancellation,
+    ) -> Result<Self, QueryCancelled> {
+        const UNSEEN: u8 = 0;
+        const VISITING: u8 = 1;
+        const DONE: u8 = 2;
+
+        cancellation.check()?;
+        let n = idx.len();
+        let mut parents = vec![VolumeIndex::ROOT; n];
+        let mut state = vec![UNSEEN; n];
+        state[VolumeIndex::ROOT as usize] = DONE;
+        let mut stack = Vec::<EntryId>::new();
+        let mut cycle_members = 0u64;
+        let mut steps = 0usize;
+
+        for start in 1..n as u32 {
+            if !idx.is_dir(start) || state[start as usize] == DONE {
+                continue;
+            }
+            stack.clear();
+            let mut current = start;
+            loop {
+                if steps.is_multiple_of(super::CANCELLATION_POLL_ENTRIES) {
+                    cancellation.check()?;
+                }
+                steps += 1;
+
+                let current_index = current as usize;
+                if current_index >= n || !idx.is_dir(current) {
+                    break;
+                }
+                match state[current_index] {
+                    UNSEEN => {
+                        state[current_index] = VISITING;
+                        stack.push(current);
+                        let Some(parent) = Self::valid_parent(idx, current) else {
+                            break;
+                        };
+                        current = parent;
+                    }
+                    VISITING => {
+                        let Some(cycle_start) = stack.iter().position(|&entry| entry == current)
+                        else {
+                            break;
+                        };
+                        for entry in stack.split_off(cycle_start) {
+                            parents[entry as usize] = VolumeIndex::ROOT;
+                            state[entry as usize] = DONE;
+                            cycle_members += 1;
+                        }
+                        break;
+                    }
+                    DONE => break,
+                    _ => unreachable!("directory visitation state is internal"),
+                }
+            }
+
+            while let Some(entry) = stack.pop() {
+                let parent = Self::valid_parent(idx, entry)
+                    .filter(|&parent| state[parent as usize] == DONE)
+                    .unwrap_or(VolumeIndex::ROOT);
+                parents[entry as usize] = parent;
+                state[entry as usize] = DONE;
+            }
+        }
+
+        for id in 1..n as u32 {
+            if (id as usize).is_multiple_of(super::CANCELLATION_POLL_ENTRIES) {
+                cancellation.check()?;
+            }
+            if !idx.is_dir(id) {
+                parents[id as usize] = Self::valid_parent(idx, id)
+                    .filter(|&parent| state[parent as usize] == DONE)
+                    .unwrap_or(VolumeIndex::ROOT);
+            }
+        }
+
+        if cycle_members > 0 {
+            tracing::warn!(
+                cycle_members,
+                "corrupt parent cycle while building path topology — cycle members attached at root"
+            );
+        }
+        cancellation.check()?;
+        Ok(Self {
+            parents,
+            covers_entries: n,
+            topo_generation: idx.dir_topology_generation(),
+        })
+    }
+
+    /// Append the sanitized parent path of `id`, including the volume root and trailing separators.
+    /// `chain` is caller-owned scratch reused per entry.
+    fn append_parent_path(
+        &self,
+        idx: &VolumeIndex,
+        id: EntryId,
+        folded: bool,
+        out: &mut Vec<u8>,
+        chain: &mut Vec<EntryId>,
+    ) {
+        chain.clear();
+        let mut current = self.parents[id as usize];
+        let mut remaining = self.parents.len();
+        loop {
+            chain.push(current);
+            if current == VolumeIndex::ROOT {
+                break;
+            }
+            current = self.parents[current as usize];
+            remaining -= 1;
+            if remaining == 0 {
+                chain.push(VolumeIndex::ROOT);
+                break;
+            }
+        }
+        for &directory in chain.iter().rev() {
+            let name = if folded {
+                idx.lower_name(directory)
+            } else {
+                idx.name(directory)
+            };
+            out.extend_from_slice(name);
+            out.push(b'\\');
+        }
+    }
+
+    const fn bytes(&self) -> u64 {
+        (self.parents.capacity() * std::mem::size_of::<EntryId>()) as u64
+    }
+}
+
+/// The compact path topology one query execution may read.
+/// `None` means the compiled query contains no path matcher and pays no cache cost.
+#[derive(Default)]
+pub(super) struct PathMemos {
+    pub(super) topology: Option<std::sync::Arc<DirTopology>>,
+}
+
+impl PathMemos {
+    #[inline]
+    pub(super) fn append_lower_parent(
+        &self,
+        idx: &VolumeIndex,
+        id: EntryId,
+        out: &mut Vec<u8>,
+        chain: &mut Vec<EntryId>,
+    ) {
+        self.topology
+            .as_ref()
+            .expect("compiled path query builds topology")
+            .append_parent_path(idx, id, true, out, chain);
+    }
+
+    #[inline]
+    pub(super) fn append_orig_parent(
+        &self,
+        idx: &VolumeIndex,
+        id: EntryId,
+        out: &mut Vec<u8>,
+        chain: &mut Vec<EntryId>,
+    ) {
+        self.topology
+            .as_ref()
+            .expect("compiled path query builds topology")
+            .append_parent_path(idx, id, false, out, chain);
+    }
+}
+
+/// Bytes currently held by this index's derived caches (dir-path memos and the lazy sort permutations), for the RAM accounting in `IndexStats`.
+/// Probes only — never builds.
+pub fn derived_cache_bytes(idx: &VolumeIndex) -> u64 {
+    let mut total = 0u64;
+    if let Some(topology) = idx.derived_probe::<DirTopology>() {
+        total += topology.bytes();
+    }
+    if let Some(p) = idx.derived_probe::<SizePerm>() {
+        total += (p.0.ids.capacity() * size_of::<EntryId>()) as u64;
+    }
+    if let Some(p) = idx.derived_probe::<MtimePerm>() {
+        total += (p.0.ids.capacity() * size_of::<EntryId>()) as u64;
+    }
+    total
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::index::VolumeIndexBuilder;
+    use crate::index::testutil::{build_sample, raw, u16s};
+    use crate::query::{CaseMode, QueryOptions, UtcResolver, compile, parse, search};
+
+    /// Resolve a query the way production does.
+    /// `query::search` (through `exec::path_memos`) is the only place the cached directory topology is consulted, so a test that calls `DirTopology::build`/`extend_from` directly never reaches the cache-*hit* branch — the one branch that runs no builder and therefore validates nothing on its own.
+    fn search_sorted(idx: &VolumeIndex, text: &str, sort: SortKey) -> Vec<EntryId> {
+        let ast = parse(text).expect("test query parses");
+        let compiled = compile(&ast, CaseMode::Smart, &UtcResolver).expect("test query compiles");
+        search(
+            idx,
+            &compiled,
+            &QueryOptions {
+                sort,
+                ..Default::default()
+            },
+        )
+        .0
+        .ids
+    }
+
+    /// A 60-deep directory chain plus a multibyte directory and files.
+    fn deep_index() -> VolumeIndex {
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
+        for i in 0..60u64 {
+            let name = u16s(&format!("d{i:02}"));
+            let parent = if i == 0 { 5 } else { 99 + i };
+            b.push(raw(100 + i, parent, &name, true, 0, i as i64));
+        }
+        let jp = u16s("日本語フォルダ");
+        b.push(raw(300, 110, &jp, true, 0, 1));
+        let note = u16s("Note.TXT");
+        b.push(raw(301, 300, &note, false, 9, 2));
+        let leaf = u16s("leaf.txt");
+        b.push(raw(302, 159, &leaf, false, 1, 3));
+        b.finish()
+    }
+
+    /// Oracle: full path of `id` incl.
+    /// trailing `\`, built from the parent chain exactly like `VolumeIndex::append_path` does.
+    fn oracle_paths(idx: &VolumeIndex, id: EntryId) -> (Vec<u8>, Vec<u8>) {
+        let mut chain = vec![id];
+        let mut cur = id;
+        while cur != VolumeIndex::ROOT {
+            cur = idx.parent(cur);
+            chain.push(cur);
+        }
+        let (mut lower, mut orig) = (Vec::new(), Vec::new());
+        for &c in chain.iter().rev() {
+            lower.extend_from_slice(idx.lower_name(c));
+            lower.push(b'\\');
+            orig.extend_from_slice(idx.name(c));
+            orig.push(b'\\');
+        }
+        (lower, orig)
+    }
+
+    fn topology_path(
+        topology: &DirTopology,
+        idx: &VolumeIndex,
+        id: EntryId,
+        folded: bool,
+    ) -> Vec<u8> {
+        let mut path = Vec::new();
+        let mut chain = Vec::new();
+        if id != VolumeIndex::ROOT {
+            topology.append_parent_path(idx, id, folded, &mut path, &mut chain);
+        }
+        path.extend_from_slice(if folded {
+            idx.lower_name(id)
+        } else {
+            idx.name(id)
+        });
+        path.push(b'\\');
+        path
+    }
+
+    fn assert_memo_matches_oracle(idx: &VolumeIndex) {
+        let topology = DirTopology::build(idx);
+        for id in 0..idx.len() as u32 {
+            if idx.is_dir(id) {
+                let (lower, orig) = oracle_paths(idx, id);
+                assert_eq!(
+                    topology_path(&topology, idx, id, true),
+                    lower,
+                    "lower path of dir {id}"
+                );
+                assert_eq!(
+                    topology_path(&topology, idx, id, false),
+                    orig,
+                    "orig path of dir {id}"
+                );
+                if id != VolumeIndex::ROOT {
+                    let mut ap = Vec::new();
+                    idx.append_path(id, &mut ap).unwrap();
+                    ap.push(b'\\');
+                    assert_eq!(orig, ap, "append_path oracle of dir {id}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dir_paths_match_append_path_oracle() {
+        assert_memo_matches_oracle(&deep_index());
+    }
+
+    #[test]
+    fn very_deep_chain_uses_linear_cache_and_keeps_the_complete_path() {
+        const DEPTH: u64 = 10_000;
+        let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
+        let component = u16s("x");
+        for offset in 0..DEPTH {
+            let record = 10 + offset;
+            let parent = if offset == 0 { 5 } else { record - 1 };
+            builder.push(raw(record, parent, &component, true, 0, offset as i64));
+        }
+        let idx = builder.finish();
+        let topology = DirTopology::build(&idx);
+        let deepest = idx.entry_by_record(9 + DEPTH).unwrap();
+        let path = topology_path(&topology, &idx, deepest, false);
+
+        assert_eq!(path.len(), b"C:\\".len() + DEPTH as usize * b"x\\".len());
+        assert_eq!(topology.parents.len(), idx.len());
+        assert!(
+            topology.bytes() <= (idx.len() * 2 * std::mem::size_of::<EntryId>()) as u64,
+            "cache must stay O(entries), not O(total prefix bytes)"
+        );
+    }
+
+    /// Oracle: an incrementally extended topology must equal a fresh build —
+    /// across appended entries (extend fast path) and dir renames / moves (topology bump → internal full rebuild).
+    #[test]
+    fn extended_dir_paths_match_fresh_build() {
+        let assert_same_as_fresh = |idx: &VolumeIndex, topology: &DirTopology, what: &str| {
+            let fresh = DirTopology::build(idx);
+            assert_eq!(topology.parents, fresh.parents, "{what}");
+        };
+
+        let mut idx = deep_index();
+        let topology = DirTopology::build(&idx);
+
+        let first_new = idx.len() as u32;
+        let new_dir = u16s("new_dir");
+        idx.upsert_synthetic(&raw(500, 110, &new_dir, true, 0, 1));
+        let new_file = u16s("new_file.txt");
+        idx.upsert_synthetic(&raw(501, 500, &new_file, false, 1, 2));
+        let nested = u16s("nested");
+        idx.upsert_synthetic(&raw(502, 500, &nested, true, 0, 3));
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
+        let topology = DirTopology::extend_from(&idx, Arc::new(topology));
+        assert_same_as_fresh(&idx, &topology, "append generation");
+
+        let renamed = u16s("renamed_mid");
+        idx.rename_dir_synthetic_in_place(110, &renamed, 109)
+            .unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
+        let topology = DirTopology::extend_from(&idx, Arc::new(topology));
+        assert_same_as_fresh(&idx, &topology, "rename generation");
+
+        idx.reparent_synthetic(500, 100).unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
+        let topology = DirTopology::extend_from(&idx, Arc::new(topology));
+        assert_same_as_fresh(&idx, &topology, "reparent generation");
+
+        let first_new = idx.len() as u32;
+        let f2 = u16s("plain.txt");
+        idx.upsert_synthetic(&raw(503, 100, &f2, false, 1, 4));
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
+        let topo_before = idx.dir_topology_generation();
+        let topology = DirTopology::extend_from(&idx, Arc::new(topology));
+        assert_eq!(idx.dir_topology_generation(), topo_before);
+        assert_same_as_fresh(&idx, &topology, "file-only generation");
+    }
+
+    #[test]
+    fn dir_paths_follow_dir_rename_and_reparent() {
+        let mut idx = deep_index();
+        let renamed = u16s("Renamed_D10");
+        idx.rename_dir_synthetic_in_place(110, &renamed, 109)
+            .unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
+        assert_memo_matches_oracle(&idx);
+        idx.reparent_synthetic(130, 102).unwrap();
+        idx.merge_new_into_permutations(idx.len() as u32)
+            .expect("fixture topology remains valid");
+        assert_memo_matches_oracle(&idx);
+    }
+
+    /// Oracle: an incrementally extended lazy sort permutation equals a fresh parallel sort byte-for-byte across append/delete generations (strict total order → the sorted result is unique).
+    #[test]
+    fn lazy_sort_perms_extend_like_fresh_builds() {
+        let mut idx = build_sample();
+        let mut size_perm = SortPerm::build(&idx, SortKey::Size);
+        let mut mtime_perm = SortPerm::build(&idx, SortKey::Mtime);
+        for g in 0..20u64 {
+            let first_new = idx.len() as u32;
+            let record = 200 + g;
+            let size = if g % 4 == 0 { (4u64 << 30) + g } else { g * 37 };
+            let name = u16s(&format!("lazy_{g}.bin"));
+            let mtime = crate::query::dates::FILETIME_UNIX_EPOCH + (g as i64 + 1) * 864_000_000_000;
+            idx.upsert_synthetic(&raw(record, 50, &name, false, size, mtime));
+            if g % 3 == 0 {
+                idx.delete(200 + g / 2);
+            }
+            idx.merge_new_into_permutations(first_new)
+                .expect("fixture topology remains valid");
+            size_perm = SortPerm::extend(&idx, size_perm, SortKey::Size);
+            mtime_perm = SortPerm::extend(&idx, mtime_perm, SortKey::Mtime);
+            assert_eq!(
+                size_perm.ids,
+                SortPerm::build(&idx, SortKey::Size).ids,
+                "size order diverged at generation {g}"
+            );
+            assert_eq!(
+                mtime_perm.ids,
+                SortPerm::build(&idx, SortKey::Mtime).ids,
+                "mtime order diverged at generation {g}"
+            );
+        }
+    }
+
+    #[test]
+    fn size_and_mtime_perms_rebuild_when_existing_keys_reverse_order() {
+        let mut idx = build_sample();
+        let note = idx.entry_by_record(100).unwrap();
+        let big = idx.entry_by_record(60).unwrap();
+
+        let size_before = SizePerm::get(&idx);
+        assert!(
+            position(&size_before.0.ids, note) < position(&size_before.0.ids, big),
+            "fixture must initially order Note.TXT before big.bin by size"
+        );
+        assert!(
+            Arc::ptr_eq(&size_before, &SizePerm::get(&idx)),
+            "unchanged stat generation must cache-hit"
+        );
+
+        idx.update_stat(100, 999_999, 300).unwrap();
+        let size_after = SizePerm::get(&idx);
+        assert!(
+            position(&size_after.0.ids, big) < position(&size_after.0.ids, note),
+            "an existing row whose size crosses another row must be repositioned"
+        );
+        assert_eq!(
+            size_after.0.ids,
+            SortPerm::build(&idx, SortKey::Size).ids,
+            "cached size order must equal a fresh exact sort"
+        );
+
+        let epoch = crate::query::dates::FILETIME_UNIX_EPOCH;
+        idx.update_stat(100, 999_999, epoch + 10 * 10_000_000)
+            .unwrap();
+        idx.update_stat(60, 99_999, epoch + 20 * 10_000_000)
+            .unwrap();
+        let mtime_before = MtimePerm::get(&idx);
+        assert!(
+            position(&mtime_before.0.ids, note) < position(&mtime_before.0.ids, big),
+            "fixture must initially order Note.TXT before big.bin by mtime"
+        );
+
+        idx.update_stat(100, 999_999, epoch + 30 * 10_000_000)
+            .unwrap();
+        let mtime_after = MtimePerm::get(&idx);
+        assert!(
+            position(&mtime_after.0.ids, big) < position(&mtime_after.0.ids, note),
+            "an existing row whose mtime crosses another row must be repositioned"
+        );
+        assert_eq!(
+            mtime_after.0.ids,
+            SortPerm::build(&idx, SortKey::Mtime).ids,
+            "cached mtime order must equal a fresh exact sort"
+        );
+    }
+
+    fn position(ids: &[EntryId], wanted: EntryId) -> usize {
+        ids.iter()
+            .position(|&id| id == wanted)
+            .expect("permutation must contain every entry")
+    }
+
+    #[test]
+    fn dir_topology_is_lazy_and_accounted_once() {
+        let idx = build_sample();
+        assert!(idx.derived_probe::<DirTopology>().is_none());
+        assert_eq!(
+            derived_cache_bytes(&idx),
+            0,
+            "no derived caches until a query"
+        );
+
+        let _ = search_sorted(&idx, "note", SortKey::Name);
+        assert!(idx.derived_probe::<DirTopology>().is_none());
+
+        let _ = search_sorted(&idx, "path:c", SortKey::Name);
+        assert!(
+            derived_cache_bytes(&idx) > 0,
+            "the topology joins derived-cache accounting"
+        );
+    }
+
+    /// A derived-cache *hit* runs no builder, so the only thing standing between a query and an out-of-bounds `parents` index is `DerivedValidity::is_current`.
+    /// Rows can outlive the content generation they were appended under (a USN batch the index rejected used to leave exactly that state behind), and the topology is keyed by that generation — so its own coverage watermark has to be the thing that catches it.
+    #[test]
+    fn cached_dir_topology_is_revalidated_against_rows_appended_without_a_generation_bump() {
+        let mut idx = deep_index();
+        assert!(!search_sorted(&idx, "path:日本語 note", SortKey::Name).is_empty());
+        let cached = idx
+            .derived_probe::<DirTopology>()
+            .expect("a path query caches the topology");
+        assert_eq!(cached.covers_entries, idx.len());
+
+        let generation = idx.content_generation();
+        let name = u16s("appended-note.txt");
+        idx.upsert_synthetic(&raw(900, 300, &name, false, 5, 7));
+        assert_eq!(
+            idx.content_generation(),
+            generation,
+            "no batch boundary ran, so the cache key did not move"
+        );
+        assert!(idx.len() > cached.covers_entries);
+
+        let appended = idx.entry_by_record(900).expect("the appended row is live");
+        assert_eq!(
+            search_sorted(&idx, "path:日本語 appended-note", SortKey::Size),
+            vec![appended]
+        );
+        assert_eq!(
+            idx.derived_probe::<DirTopology>()
+                .expect("the topology stays cached")
+                .covers_entries,
+            idx.len(),
+            "the rejected value was extended, not returned as-is"
+        );
+    }
+
+    #[test]
+    fn parent_cycle_attaches_dirs_at_root_instead_of_aborting() {
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
+        let (da, db, f) = (u16s("a"), u16s("b"), u16s("f.txt"));
+        b.push(raw(10, 5, &da, true, 0, 1));
+        b.push(raw(20, 10, &db, true, 0, 2));
+        b.push(raw(30, 20, &f, false, 1, 3));
+        let mut idx = b.finish();
+        idx.reparent_synthetic(10, 20).unwrap();
+        let a = idx.entry_by_record(10).unwrap();
+        let bb = idx.entry_by_record(20).unwrap();
+        let file = idx.entry_by_record(30).unwrap();
+
+        let topology = DirTopology::build(&idx);
+        assert_eq!(topology_path(&topology, &idx, a, true), b"c:\\a\\");
+        assert_eq!(topology_path(&topology, &idx, bb, true), b"c:\\b\\");
+        assert_eq!(
+            topology_path(&topology, &idx, file, true),
+            b"c:\\b\\f.txt\\"
+        );
+    }
+}

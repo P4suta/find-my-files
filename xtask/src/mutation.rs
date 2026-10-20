@@ -1,21 +1,19 @@
 //! Exact-identity mutation-testing gates (ADR-0022).
 //!
-//! Mutation scores are deliberately not policy: a score can stay flat while a
-//! critical old survivor disappears and a new security-relevant survivor takes
-//! its place. These gates run each tool's unmutated baseline, parse its
-//! machine-readable report, canonicalize exact mutant identities, and compare
-//! the survivor set with a reviewed, rationale-bearing baseline.
+//! Mutation scores are deliberately not policy: a score can stay flat while a critical old survivor disappears and a new security-relevant survivor takes its place.
+//! These gates run each tool's unmutated baseline, parse its machine-readable report, canonicalize exact mutant identities, and compare the survivor set with a reviewed, rationale-bearing baseline.
+
+const MUTANTS_INCOMPLETE_EXIT: i32 = 3;
+const WINDOWS_DRIVE_ROOT_BYTES: usize = b"C:/".len();
+const MUTANTS_SURVIVORS_EXIT: i32 = 2;
+const MIN_EQUIVALENCE_RATIONALE_BYTES: usize = 12;
 
 use crate::{fsx, paths};
 use anyhow::{anyhow, bail, Context, Result};
 use regex::Regex;
-use serde::{
-    de::{self, DeserializeOwned, MapAccess, SeqAccess, Visitor},
-    Deserialize, Deserializer, Serialize,
-};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -28,43 +26,30 @@ const CARGO_MUTANTS_VERSION: &str = "27.1.0";
 const STRYKER_NAME: &str = "dotnet-stryker";
 const STRYKER_VERSION: &str = "4.16.0";
 
-/// The app-project build profile every C# mutation run must use, as environment
-/// variables (`MSBuild` reads the environment as properties).
+/// The app-project build profile every C# mutation run must use, as environment variables (`MSBuild` reads the environment as properties).
 ///
-/// `FindMyFiles.Tests.csproj` carries these on its `ProjectReference` as
-/// `AdditionalProperties`, which is enough for `dotnet test` but **not** for
-/// Stryker: Stryker analyses `FindMyFiles.csproj` on its own (Buildalyzer,
-/// standalone) to build the mutated compilation, so those reference-scoped
-/// properties are simply absent. The app then compiles with `FmfTestSeams=false`
-/// — no `InternalsVisibleTo("FindMyFiles.Tests")`, and `FakeEngineClient.cs`
-/// removed from the compile — and the injected assembly makes the test host throw
-/// `TypeLoadException: Access is denied: 'FindMyFiles.ViewModels.SearchRequest'`
-/// during discovery. Zero tests found, every mutant Timeout.
+/// `FindMyFiles.Tests.csproj` carries these on its `ProjectReference` as `AdditionalProperties`, which is enough for `dotnet test` but **not** for Stryker: Stryker analyses `FindMyFiles.csproj` on its own (Buildalyzer,
+/// standalone) to build the mutated compilation, so those reference-scoped properties are simply absent.
+/// The app then compiles with `FmfTestSeams=false` — no `InternalsVisibleTo("FindMyFiles.Tests")`, and `FakeEngineClient.cs` removed from the compile — and the injected assembly makes the test host throw `TypeLoadException: Access is denied: 'FindMyFiles.ViewModels.SearchRequest'` during discovery.
+/// Zero tests found, every mutant Timeout.
 ///
-/// Stryker has no `-p:` passthrough, so the environment is the only channel. It
-/// lives here, on the command the gate itself spawns, rather than in a shell or a
-/// workflow `env:` block: there is no step for an operator or a YAML author to
-/// forget. `mutation_ci::dotnet_command` sets the identical pair for the same
-/// reason, so both entry points build one app profile.
+/// Stryker has no `-p:` passthrough, so the environment is the only channel.
+/// It lives here, on the command the gate itself spawns, rather than in a shell or a workflow `env:` block: there is no step for an operator or a YAML author to forget.
+/// `mutation_ci::dotnet_command` sets the identical pair for the same reason, so both entry points build one app profile.
 const CSHARP_TEST_PROFILE: [(&str, &str); 2] =
     [("FmfTestSeams", "true"), ("FmfArtifactKind", "ui-test")];
 
-/// [`CSHARP_TEST_PROFILE`] for the CI shard runner, so neither entry point can
-/// carry its own copy of the pair.
+/// [`CSHARP_TEST_PROFILE`] for the CI shard runner, so neither entry point can carry its own copy of the pair.
 pub const fn csharp_test_profile() -> [(&'static str, &'static str); 2] {
     CSHARP_TEST_PROFILE
 }
 
 /// Where cargo-mutants actually writes its reports for a given `--output` dir.
 ///
-/// `--output <D>` is the *parent*: cargo-mutants 27.1.0 creates `<D>/mutants.out`
-/// (rotating any previous one to `mutants.out.old`) and puts `outcomes.json`,
-/// `mutants.json`, the `*.txt` verdict lists and the per-mutant logs there. Both
-/// callers — the local gate and the CI shard runner — need the same mapping, and
-/// having each spell it out is exactly how they drifted: the CI path joined
-/// `mutants.out` while the local path read `<D>/outcomes.json` and failed with
-/// `os error 2` after a complete run. One function, pinned by a test, next to the
-/// tool version it is a fact about.
+/// `--output <D>` is the *parent*: cargo-mutants 27.1.0 creates `<D>/mutants.out` (rotating any previous one to `mutants.out.old`) and puts `outcomes.json`,
+/// `mutants.json`, the `*.txt` verdict lists and the per-mutant logs there.
+/// Both callers — the local gate and the CI shard runner — need the same mapping, and having each spell it out is exactly how they drifted: the CI path joined `mutants.out` while the local path read `<D>/outcomes.json` and failed with `os error 2` after a complete run.
+/// One function, pinned by a test, next to the tool version it is a fact about.
 pub fn cargo_mutants_report_dir(output: &Path) -> PathBuf {
     output.join("mutants.out")
 }
@@ -189,24 +174,16 @@ struct OutsideScopeSummary {
     status_counts: BTreeMap<String, usize>,
 }
 
-/// The cargo-mutants arguments that decide **which mutants exist** and **how
-/// each one is judged**, shared verbatim by every lane.
+/// The cargo-mutants arguments that decide **which mutants exist** and **how each one is judged**, shared verbatim by every lane.
 ///
-/// `engine/mutants.toml` owns the answers: `examine_globs` (the twelve reviewed
-/// fmf-core files), `test_tool`, `timeout_multiplier`, and the per-sandbox
-/// `--target-dir`. A lane that does not pass `--config` judges a different
-/// program than the reviewed baseline describes, and nothing downstream
-/// notices: the CI controller ran `--no-config --workspace` for five weeks and
-/// reported ~1,900 survivors — nearly all of them in `fmf-service/src/security.rs`,
-/// the file `mutants.toml` excludes precisely because `#[ignore]` tests cannot
-/// run under this gate — while `just mutants` was green over the same commits.
+/// `engine/mutants.toml` owns the answers: `examine_globs` (the twelve reviewed fmf-core files), `test_tool`, `timeout_multiplier`, and the per-sandbox `--target-dir`.
+/// A lane that does not pass `--config` judges a different program than the reviewed baseline describes, and nothing downstream notices: the CI controller ran `--no-config --workspace` for five weeks and reported ~1,900 survivors — nearly all of them in `fmf-service/src/security.rs`,
+/// the file `mutants.toml` excludes precisely because `#[ignore]` tests cannot run under this gate — while `just mutants` was green over the same commits.
 ///
 /// Nothing here may restate a key the config already owns (`test_tool`,
-/// `timeout_multiplier`, `additional_cargo_args`). cargo-mutants lets the CLI
-/// win silently, so a duplicate is not an error, it is the next drift.
-/// `--workspace` is generation-only and measured to be a no-op against these
-/// globs (identical 1,760-mutant list with and without it); it stays so that a
-/// new crate matching a glob fails the inventory check instead of vanishing.
+/// `timeout_multiplier`, `additional_cargo_args`).
+/// cargo-mutants lets the CLI win silently, so a duplicate is not an error, it is the next drift.
+/// `--workspace` is generation-only and measured to be a no-op against these globs (identical 1,760-mutant list with and without it); it stays so that a new crate matching a glob fails the inventory check instead of vanishing.
 pub fn rust_scope_args(config: &str) -> Vec<String> {
     [
         "--config",
@@ -224,17 +201,12 @@ pub fn rust_scope_args(config: &str) -> Vec<String> {
     .to_vec()
 }
 
-/// The nextest policy both Rust mutation lanes run under. It is written to a
-/// file and passed as `--config-file`, which *replaces* the repository's own
-/// configuration rather than layering on it.
+/// The nextest policy both Rust mutation lanes run under.
+/// It is written to a file and passed as `--config-file`, which *replaces* the repository's own configuration rather than layering on it.
 ///
-/// It has to be spelled out, because `engine/.config/nextest.toml`'s `default`
-/// profile is tuned for the ordinary suite and is actively wrong here:
-/// `slow-timeout = { period = "15s", terminate-after = 4 }` kills any test still
-/// running after a minute, so a slow-but-correct mutant is reported **caught**
-/// — by nextest, on a stopwatch, not by an assertion — and cargo-mutants' own
-/// `timeout_multiplier` never gets to call it a timeout. `leak-timeout` with
-/// `result = "fail"` can manufacture a second such verdict.
+/// It has to be spelled out, because `engine/.config/nextest.toml`'s `default` profile is tuned for the ordinary suite and is actively wrong here:
+/// `slow-timeout = { period = "15s", terminate-after = 4 }` kills any test still running after a minute, so a slow-but-correct mutant is reported **caught** — by nextest, on a stopwatch, not by an assertion — and cargo-mutants' own `timeout_multiplier` never gets to call it a timeout.
+/// `leak-timeout` with `result = "fail"` can manufacture a second such verdict.
 pub const NEXTEST_POLICY: &str = r#"nextest-version = "0.9.140"
 
 [store]
@@ -246,10 +218,8 @@ retries = 0
 flaky-result = "fail"
 "#;
 
-/// `--cargo-arg=--locked` is forwarded by cargo-mutants to both the build and
-/// the nextest invocation. Keep the nextest-only policy here so `--locked`
-/// cannot accidentally be supplied a second time (nextest rejects duplicate
-/// uses).
+/// `--cargo-arg=--locked` is forwarded by cargo-mutants to both the build and the nextest invocation.
+/// Keep the nextest-only policy here so `--locked` cannot accidentally be supplied a second time (nextest rejects duplicate uses).
 pub const RUST_MUTATION_NEXTEST_ARGS: &[&str] = &[
     "--user-config-file",
     "none",
@@ -264,35 +234,23 @@ pub const RUST_MUTATION_NEXTEST_ARGS: &[&str] = &[
     "fail",
 ];
 
-/// The whole executing argument vector, for both lanes. `shard` is the only
-/// thing either lane may vary.
+/// The whole executing argument vector, for both lanes.
+/// `shard` is the only thing either lane may vary.
 ///
-/// Everything else is here because a lane that decides it for itself is a lane
-/// running a different program, which is the defect this gate spent five weeks
-/// failing on. Two options moved here after being measured rather than reasoned
-/// about, against `mutants.yml` run 34832581942 and a full local `just mutants`
-/// over the same tree:
+/// Everything else is here because a lane that decides it for itself is a lane running a different program, which is the defect this gate spent five weeks failing on.
+/// Two options moved here after being measured rather than reasoned about, against `mutants.yml` run 34832581942 and a full local `just mutants` over the same tree:
 ///
-/// * `--test-workspace true` was CI-only, on the stated theory that it "strictly
-///   increases what the gate demands". It does not only do that. Building the
-///   whole workspace unifies features differently from building just the mutated
-///   package, so it also changes which mutants *compile*: local reported 107
-///   unviable against CI's 67, and the 40-mutant difference reappeared in CI as
-///   15 missed, 24 caught and 1 timeout. The local gate was green-able while CI
-///   was red, on the same commit.
-/// * `--minimum-test-timeout 60` was CI-only as a concession to slow hosted
-///   runners. A floor that one lane has and the other does not is a floor that
-///   makes them disagree about timeouts, which this gate never accepts.
+/// * `--test-workspace true` was CI-only, on the stated theory that it "strictly increases what the gate demands".
+///   It does not only do that.
+///   Building the whole workspace unifies features differently from building just the mutated package, so it also changes which mutants *compile*: local reported 107 unviable against CI's 67, and the 40-mutant difference reappeared in CI as 15 missed, 24 caught and 1 timeout.
+///   The local gate was green-able while CI was red, on the same commit.
+/// * `--minimum-test-timeout 60` was CI-only as a concession to slow hosted runners.
+///   A floor that one lane has and the other does not is a floor that makes them disagree about timeouts, which this gate never accepts.
 ///
-/// `--skip-calls-defaults false` used to be in the CI half, on the theory that a
-/// tool default could narrow the reviewed scope. It cannot any more — the scope
-/// arrives from the controller — and it was not free: it re-enables mutation of
-/// the arguments of `with_capacity` calls, adding 14 mutants (1,760 -> 1,774)
-/// which are all arithmetic inside a capacity hint (`Vec::with_capacity(len * 3)`
-/// -> `len + 3`). Capacity is not observable behaviour, so every one of them
-/// survives by construction, against a reviewed baseline recorded with the
-/// default skip list. Keeping it would have meant 14 permanent survivors in a
-/// gate whose whole design is exact survivor equality.
+/// `--skip-calls-defaults false` used to be in the CI half, on the theory that a tool default could narrow the reviewed scope.
+/// It cannot any more — the scope arrives from the controller — and it was not free: it re-enables mutation of the arguments of `with_capacity` calls, adding 14 mutants (1,760 -> 1,774) which are all arithmetic inside a capacity hint (`Vec::with_capacity(len * 3)` -> `len + 3`).
+/// Capacity is not observable behaviour, so every one of them survives by construction, against a reviewed baseline recorded with the default skip list.
+/// Keeping it would have meant 14 permanent survivors in a gate whose whole design is exact survivor equality.
 pub fn rust_run_args(
     config: &str,
     output: &str,
@@ -336,26 +294,13 @@ pub fn rust_run_args(
     args
 }
 
-/// The Stryker.NET argument vector shared by every lane, `rust_scope_args` for
-/// the C# half of the gate.
+/// The Stryker.NET argument vector shared by every lane, `rust_scope_args` for the C# half of the gate.
 ///
-/// Everything that decides **which mutants exist** and **how each one is judged**
-/// lives in `app/FindMyFiles.Tests/stryker-config.json`
-/// (see [`paths::csharp_stryker_config`]), and nothing here may restate one of
-/// those keys. Stryker lets a command-line option win over the configuration
-/// file without saying so, which is how a lane drifts — and this gate had
-/// drifted twice over: `--break-on-initial-test-failure` was spelled on both
-/// command lines *and* in the configuration the CI runner generated, while
-/// `mutation-level: Complete`, `coverage-analysis: off`, `test-runner: vstest`
-/// and `configuration: Release` were spelled only in that generated copy, so
-/// `just stryker` mutated a different program at `Standard` level against the
-/// same 103-entry reviewed baseline.
+/// Everything that decides **which mutants exist** and **how each one is judged** lives in `app/FindMyFiles.Tests/stryker-config.json` (see [`paths::csharp_stryker_config`]), and nothing here may restate one of those keys.
+/// Stryker lets a command-line option win over the configuration file without saying so, which is how a lane drifts — and this gate had drifted twice over: `--break-on-initial-test-failure` was spelled on both command lines *and* in the configuration the CI runner generated, while `mutation-level: Complete`, `coverage-analysis: off`, `test-runner: vstest` and `configuration: Release` were spelled only in that generated copy, so `just stryker` mutated a different program at `Standard` level against the same 103-entry reviewed baseline.
 ///
-/// What is left is per-lane placement, which no shared configuration file can
-/// own: where the report goes, and — CI only — the file name of the generated
-/// shard configuration, because the trusted runner writes it *beside* the
-/// reviewed file rather than over it. `--skip-version-check` is not a
-/// configuration key at all; it suppresses Stryker's outbound version query,
+/// What is left is per-lane placement, which no shared configuration file can own: where the report goes, and — CI only — the file name of the generated shard configuration, because the trusted runner writes it *beside* the reviewed file rather than over it.
+/// `--skip-version-check` is not a configuration key at all; it suppresses Stryker's outbound version query,
 /// which both lanes must stay offline for.
 pub fn stryker_args(output: &str, config_file: Option<&str>) -> Vec<String> {
     let mut args = ["tool", "run", "dotnet-stryker", "--"]
@@ -374,15 +319,9 @@ pub fn run_rust() -> Result<()> {
     let output = paths::rust_mutation_dir();
     fsx::force_remove_dir_all(&output)
         .with_context(|| format!("remove stale Rust mutation output {}", output.display()))?;
-    // cargo-mutants creates only the last component of `--output` itself, so a
-    // fresh checkout (or the removal above) leaves it dying with `create output
-    // parent directory` before a single mutant is built.
     fs::create_dir_all(&output)
         .with_context(|| format!("create Rust mutation output {}", output.display()))?;
 
-    // The same nextest policy the CI shard writes into its work tree. Without
-    // it this lane silently inherits `engine/.config/nextest.toml`, whose
-    // `default` profile stops a test at 60s and calls the mutant caught.
     let nextest_config = output.join("nextest-mutation.toml");
     fs::write(&nextest_config, NEXTEST_POLICY).with_context(|| {
         format!(
@@ -546,17 +485,12 @@ pub fn run_csharp() -> Result<()> {
 
 /// Load the canonical Rust mutation scope and reviewed survivor identities.
 ///
-/// The trusted CI controller uses this instead of accepting mutation policy
-/// from the target checkout, exactly as the C# lane does below. `read_baseline`
-/// validates the tool pin, the strict ordering, every identity and every
-/// rationale.
+/// The trusted CI controller uses this instead of accepting mutation policy from the target checkout, exactly as the C# lane does below.
+/// `read_baseline` validates the tool pin, the strict ordering, every identity and every rationale.
 ///
-/// Unlike the C# reader there is no second file to cross-check: the scope lives
-/// in `engine/mutants.toml` as globs, and xtask deliberately never parses it —
-/// cargo-mutants owns glob matching at run time, and a second matcher here
-/// would be a second answer. The proof that the config and this baseline agree
-/// is therefore after the fact and already exists in both lanes: the files
-/// cargo-mutants reports as examined are compared to `examined_files`.
+/// Unlike the C# reader there is no second file to cross-check: the scope lives in `engine/mutants.toml` as globs, and xtask deliberately never parses it —
+/// cargo-mutants owns glob matching at run time, and a second matcher here would be a second answer.
+/// The proof that the config and this baseline agree is therefore after the fact and already exists in both lanes: the files cargo-mutants reports as examined are compared to `examined_files`.
 pub fn read_rust_reviewed_policy(repo: &Path) -> Result<RustReviewedPolicy> {
     let baseline_path = paths::rust_mutation_baseline_in(repo);
     let baseline: AcceptedBaseline<RustIdentity> =
@@ -582,10 +516,8 @@ pub fn read_rust_reviewed_policy(repo: &Path) -> Result<RustReviewedPolicy> {
 
 /// Load the canonical C# mutation scope and reviewed survivor identities.
 ///
-/// The trusted CI controller uses this instead of accepting mutation policy
-/// from the target checkout. `read_baseline` validates the tool pin, exact
-/// ordering, identities, and rationales; `read_stryker_scope` additionally
-/// proves that every exact mutate entry resolves to the same file inventory.
+/// The trusted CI controller uses this instead of accepting mutation policy from the target checkout.
+/// `read_baseline` validates the tool pin, exact ordering, identities, and rationales; `read_stryker_scope` additionally proves that every exact mutate entry resolves to the same file inventory.
 pub fn read_csharp_reviewed_policy(repo: &Path) -> Result<CsharpReviewedPolicy> {
     let baseline_path = paths::csharp_mutation_baseline_in(repo);
     let baseline: AcceptedBaseline<CsharpIdentity> =
@@ -758,10 +690,10 @@ fn validate_cargo_mutants_exit(status: ExitStatus, run: &RustRun) -> Result<()> 
         if run.survivors.is_empty() {
             0
         } else {
-            2
+            MUTANTS_SURVIVORS_EXIT
         }
     } else {
-        3
+        MUTANTS_INCOMPLETE_EXIT
     };
     if status.code() != Some(expected) {
         bail!(
@@ -1219,9 +1151,8 @@ fn parse_csharp_run(
     })
 }
 
-/// Stryker's reasons for an `Ignored` mutant that was dropped before any test
-/// could run it. `Removed by mutate filter` is how the reviewed `mutate`
-/// inventory is enforced in the first place.
+/// Stryker's reasons for an `Ignored` mutant that was dropped before any test could run it.
+/// `Removed by mutate filter` is how the reviewed `mutate` inventory is enforced in the first place.
 const UNEXECUTED_IGNORE_REASONS: [&str; 2] = [
     "Removed by mutate filter",
     "Removed by exclude from code coverage filter",
@@ -1229,27 +1160,19 @@ const UNEXECUTED_IGNORE_REASONS: [&str; 2] = [
 
 /// Whether an out-of-scope mutant result proves the mutant was never executed.
 ///
-/// Stryker does not narrow *mutation* to the `mutate` inventory. It mutates the
-/// whole project, compiles that, and only then filters: with a single file in
-/// scope this app still produced `6308 mutants created`, of which `5001 mutants
-/// got status Ignored. Reason: Removed by mutate filter` and `3 total mutants
-/// will be tested`. Files outside the reviewed inventory therefore appear in the
-/// report by construction, so the question the gate must answer is not "was
-/// anything mutated outside the scope" (always yes) but "was anything *executed*
-/// outside it".
+/// Stryker does not narrow *mutation* to the `mutate` inventory.
+/// It mutates the whole project, compiles that, and only then filters: with a single file in scope this app still produced `6308 mutants created`, of which `5001 mutants got status Ignored. Reason: Removed by mutate filter` and `3 total mutants will be tested`.
+/// Files outside the reviewed inventory therefore appear in the report by construction, so the question the gate must answer is not "was anything mutated outside the scope" (always yes) but "was anything *executed* outside it".
 ///
 /// Two outcomes answer no:
 /// * `Ignored` for a filter reason — dropped before testing.
-/// * `CompileError` — the mutated tree did not build, so Safe Mode rolled every
-///   mutant in the enclosing method back out of the assembly (`Safe Mode! Stryker
-///   will remove all mutations in <method>`). Compilation precedes filtering,
-///   which is why these carry `CompileError` rather than the mutate-filter
-///   reason. In-scope `CompileError` is accepted for exactly the same reason: a
-///   mutant that is not in the binary cannot change a verdict.
+/// * `CompileError` — the mutated tree did not build, so Safe Mode rolled every mutant in the enclosing method back out of the assembly (`Safe Mode! Stryker will remove all mutations in <method>`).
+///   Compilation precedes filtering,
+///   which is why these carry `CompileError` rather than the mutate-filter reason.
+///   In-scope `CompileError` is accepted for exactly the same reason: a mutant that is not in the binary cannot change a verdict.
 ///
-/// Everything else — `Killed`, `Survived`, `NoCoverage`, `Timeout` — means
-/// Stryker activated a mutant the reviewed inventory does not cover. That is the
-/// mutate scope failing to hold, and the gate must not absorb it.
+/// Everything else — `Killed`, `Survived`, `NoCoverage`, `Timeout` — means Stryker activated a mutant the reviewed inventory does not cover.
+/// That is the mutate scope failing to hold, and the gate must not absorb it.
 fn outside_scope_is_unexecuted(status: &str, status_reason: Option<&str>) -> bool {
     match status {
         "CompileError" => true,
@@ -1404,7 +1327,7 @@ where
             .validate()
             .with_context(|| format!("{} accepted_equivalents[{index}]", path.display()))?;
         if accepted.rationale.trim() != accepted.rationale
-            || accepted.rationale.len() < 12
+            || accepted.rationale.len() < MIN_EQUIVALENCE_RATIONALE_BYTES
             || accepted.rationale.chars().any(char::is_control)
         {
             bail!(
@@ -1543,106 +1466,8 @@ fn expected_tool(name: &str, version: &str) -> ToolPin {
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let bytes = fs::read(path).with_context(|| format!("read required JSON {}", path.display()))?;
-    let value: StrictJsonValue = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parse strict JSON {}", path.display()))?;
-    serde_json::from_value(value.0)
+    crate::strict_json::decode(&bytes)
         .with_context(|| format!("decode strict JSON {}", path.display()))
-}
-
-struct StrictJsonValue(Value);
-
-impl<'de> Deserialize<'de> for StrictJsonValue {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(StrictJsonVisitor)
-    }
-}
-
-struct StrictJsonVisitor;
-
-impl<'de> Visitor<'de> for StrictJsonVisitor {
-    type Value = StrictJsonValue;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a JSON value with no duplicate object keys")
-    }
-
-    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Bool(value)))
-    }
-
-    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Number(value.into())))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Number(value.into())))
-    }
-
-    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        let number = serde_json::Number::from_f64(value)
-            .ok_or_else(|| E::custom("JSON number is not finite"))?;
-        Ok(StrictJsonValue(Value::Number(number)))
-    }
-
-    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        self.visit_string(value.to_owned())
-    }
-
-    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::String(value)))
-    }
-
-    fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Null))
-    }
-
-    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Null))
-    }
-
-    fn visit_some<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        StrictJsonValue::deserialize(deserializer)
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut values = Vec::new();
-        while let Some(value) = sequence.next_element::<StrictJsonValue>()? {
-            values.push(value.0);
-        }
-        Ok(StrictJsonValue(Value::Array(values)))
-    }
-
-    fn visit_map<A>(self, mut object: A) -> std::result::Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut values = serde_json::Map::new();
-        while let Some(key) = object.next_key::<String>()? {
-            if values.contains_key(&key) {
-                return Err(de::Error::custom(format!(
-                    "duplicate JSON object key `{key}`"
-                )));
-            }
-            let value = object.next_value::<StrictJsonValue>()?;
-            values.insert(key, value.0);
-        }
-        Ok(StrictJsonValue(Value::Object(values)))
-    }
 }
 
 pub fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -1726,14 +1551,14 @@ fn parse_path(input: &str) -> Result<LexicalPath> {
             PathRoot::Unc(server.to_owned(), share.to_owned()),
             parts.collect::<Vec<_>>().join("/"),
         )
-    } else if normalized.len() >= 3
+    } else if normalized.len() >= WINDOWS_DRIVE_ROOT_BYTES
         && normalized.as_bytes()[1] == b':'
-        && normalized.as_bytes()[2] == b'/'
+        && normalized.as_bytes()[b"C:".len()] == b'/'
         && normalized.as_bytes()[0].is_ascii_alphabetic()
     {
         (
             PathRoot::Drive(char::from(normalized.as_bytes()[0]).to_ascii_uppercase()),
-            normalized[3..].to_owned(),
+            normalized[WINDOWS_DRIVE_ROOT_BYTES..].to_owned(),
         )
     } else if let Some(rest) = normalized.strip_prefix('/') {
         (PathRoot::Unix, rest.to_owned())
@@ -1888,10 +1713,8 @@ mod tests {
         assert!(parse_rust_identity("crates/fmf-core/src/wtf8.rs:42:0: replace x").is_err());
     }
 
-    /// The local gate and the CI shard runner must resolve the same directory
-    /// from the same `--output` argument. They disagreed once (`<D>` vs
-    /// `<D>/mutants.out`), which made a fully completed local run die reading a
-    /// report that was never going to be there.
+    /// The local gate and the CI shard runner must resolve the same directory from the same `--output` argument.
+    /// They disagreed once (`<D>` vs `<D>/mutants.out`), which made a fully completed local run die reading a report that was never going to be there.
     #[test]
     fn cargo_mutants_reports_live_one_level_below_the_output_argument() {
         assert_eq!(
@@ -2091,9 +1914,8 @@ mod tests {
         assert!(validate_csharp_conclusive(&run, Path::new("gate.json")).is_err());
     }
 
-    /// Out of scope, the only acceptable outcomes are the ones that prove the
-    /// mutant never ran. A verdict there means the `mutate` inventory did not
-    /// hold, which is the whole point of tracking out-of-scope results.
+    /// Out of scope, the only acceptable outcomes are the ones that prove the mutant never ran.
+    /// A verdict there means the `mutate` inventory did not hold, which is the whole point of tracking out-of-scope results.
     #[test]
     fn outside_scope_accepts_only_unexecuted_mutant_outcomes() {
         for (status, reason) in [
@@ -2126,9 +1948,7 @@ mod tests {
         }
     }
 
-    /// The exact shape the smoke run produced: 22 Safe-Mode rollbacks in
-    /// `MainPage.xaml.cs` / `MainWindow.xaml.cs`, which used to bail the gate
-    /// before it ever compared survivors.
+    /// The exact shape the smoke run produced: 22 Safe-Mode rollbacks in `MainPage.xaml.cs` / `MainWindow.xaml.cs`, which used to bail the gate before it ever compared survivors.
     #[test]
     fn csharp_scope_tolerates_safe_mode_rollbacks_outside_the_reviewed_inventory() {
         let report = serde_json::json!({
@@ -2381,11 +2201,9 @@ mod tests {
         fsx::force_remove_dir_all(&base).expect("remove test directory");
     }
 
-    /// Repository-relative (`/`-separated) paths of every Rust source file
-    /// `cargo mutants`, run from `engine/`, can reach.
+    /// Repository-relative (`/`-separated) paths of every Rust source file `cargo mutants`, run from `engine/`, can reach.
     ///
-    /// `engine/fuzz` is a standalone workspace (like `xtask/`), so the engine
-    /// workspace never builds it and cargo-mutants never examines it;
+    /// `engine/fuzz` is a standalone workspace (like `xtask/`), so the engine workspace never builds it and cargo-mutants never examines it;
     /// `target`/`build` are generated output, not source.
     fn engine_source_files() -> BTreeSet<String> {
         let repo = paths::repo_root();
@@ -2424,18 +2242,11 @@ mod tests {
         files
     }
 
-    /// Resolve `engine/mutants.toml`'s `examine_globs` to the exact repository
-    /// -relative files they select.
+    /// Resolve `engine/mutants.toml`'s `examine_globs` to the exact repository -relative files they select.
     ///
-    /// cargo-mutants owns the real matching at run time and xtask never parses
-    /// `mutants.toml`, so — unlike the C# side, where the gate itself reads the
-    /// Stryker scope through `read_stryker_scope` — there is no runtime
-    /// function to reuse. What makes the resolution exact rather than a second
-    /// glob engine is the pinned form the config already documents and this
-    /// function enforces: `**/` followed by a wildcard-free path tail
-    /// containing at least one `/`, which selects a file if and only if the
-    /// file's path ends with `/<tail>`. Anything looser is rejected instead of
-    /// approximated.
+    /// cargo-mutants owns the real matching at run time and xtask never parses `mutants.toml`, so — unlike the C# side, where the gate itself reads the Stryker scope through `read_stryker_scope` — there is no runtime function to reuse.
+    /// What makes the resolution exact rather than a second glob engine is the pinned form the config already documents and this function enforces: `**/` followed by a wildcard-free path tail containing at least one `/`, which selects a file if and only if the file's path ends with `/<tail>`.
+    /// Anything looser is rejected instead of approximated.
     fn resolve_examine_globs(config: &str, sources: &BTreeSet<String>) -> Result<Vec<String>> {
         let document = config
             .parse::<toml_edit::DocumentMut>()
@@ -2481,11 +2292,8 @@ mod tests {
         Ok(scope.into_iter().collect())
     }
 
-    /// The Rust gate's reviewed scope lives in two files that must agree, and
-    /// nothing at run time notices when they don't until `just mutants` has
-    /// already burned hours: cargo-mutants derives `examined_files` from what
-    /// `examine_globs` actually matched, and only then is it compared with the
-    /// baseline. This is that comparison, seconds after the edit.
+    /// The Rust gate's reviewed scope lives in two files that must agree, and nothing at run time notices when they don't until `just mutants` has already burned hours: cargo-mutants derives `examined_files` from what `examine_globs` actually matched, and only then is it compared with the baseline.
+    /// This is that comparison, seconds after the edit.
     #[test]
     fn rust_examine_globs_and_baseline_name_the_same_files() {
         let baseline_path = paths::rust_mutation_baseline();
@@ -2505,11 +2313,8 @@ mod tests {
         );
     }
 
-    /// The C# half of the same invariant, through the very function the gate
-    /// calls at run time (`read_stryker_scope` canonicalizes every `mutate`
-    /// pattern, rejects wildcards, requires each target to exist on disk, and
-    /// ends in the same `compare_exact_files`). Reimplementing that here would
-    /// only give the reimplementation something to drift from.
+    /// The C# half of the same invariant, through the very function the gate calls at run time (`read_stryker_scope` canonicalizes every `mutate` pattern, rejects wildcards, requires each target to exist on disk, and ends in the same `compare_exact_files`).
+    /// Reimplementing that here would only give the reimplementation something to drift from.
     #[test]
     fn csharp_mutate_scope_and_baseline_name_the_same_files() {
         let repo = paths::repo_root();
