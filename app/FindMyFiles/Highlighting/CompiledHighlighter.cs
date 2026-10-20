@@ -2,25 +2,18 @@ using System.Text;
 
 namespace FindMyFiles.Highlighting;
 
-/// <summary>
-/// A query compiled into the positive text needles worth highlighting. Pure
-/// (no WinUI), so it is unit-testable and reusable across rows. Built once per
-/// query by <see cref="MatchHighlighter.Compile"/> and queried per displayed
-/// string by <see cref="Ranges"/>.
+/// <summary> A query compiled into the positive text needles worth highlighting.
+/// Pure (no WinUI), so it is unit-testable and reusable across rows.
+/// Built once per query by <see cref="MatchHighlighter.Compile"/> and queried per displayed string by <see cref="Ranges"/>.
 ///
-/// Highlighting deliberately mirrors only the *simple, certain* slice of the
-/// engine's match semantics (fmf-core query/): plain substrings, anchored
-/// <c>lit*</c>/<c>*lit</c>/<c>*lit*</c> wildcards, and smart-case folding
-/// (engine/crates/fmf-core/src/wtf8.rs). Anything the UI cannot reproduce
-/// exactly — user regex, general wildcards, negation, path wildcards — is left
-/// un-highlighted rather than guessed at: a row the engine returned is never
-/// hidden, only its emphasis is skipped (don't crash / don't go silent). This guarantees
-/// the UI never lights up a position the engine did not actually match.
+/// Highlighting deliberately mirrors only the *simple, certain* slice of the engine's match semantics (fmf-core query/): plain substrings, anchored <c>lit*</c>/<c>*lit</c>/<c>*lit*</c> wildcards, and smart-case folding (engine/crates/fmf-core/src/wtf8.rs).
+/// Anything the UI cannot reproduce exactly — user regex, general wildcards, negation, path wildcards — is left un-highlighted rather than guessed at: a row the engine returned is never hidden, only its emphasis is skipped (don't crash / don't go silent).
+/// This guarantees the UI never lights up a position the engine did not actually match.
 /// </summary>
 internal sealed class CompiledHighlighter : IHighlighter
 {
-    /// <summary>A highlighter with no terms — every <see cref="Ranges"/> call
-    /// returns empty. Used for empty/filter-only queries.</summary>
+    /// <summary>A highlighter with no terms — every <see cref="Ranges"/> call returns empty.
+    /// Used for empty/filter-only queries.</summary>
     public static readonly CompiledHighlighter Empty = new([]);
 
     private readonly IReadOnlyList<Needle> _needles;
@@ -31,9 +24,6 @@ internal sealed class CompiledHighlighter : IHighlighter
     {
         _needles = needles;
 
-        // Precompute which fields any needle targets so Ranges can early-return
-        // the shared empty list for an absent field (the common name-only query
-        // calls Ranges(fullPath, Path) per row) without allocating + scanning.
         foreach (var n in needles)
         {
             if (n.Field == HighlightField.Name)
@@ -47,20 +37,13 @@ internal sealed class CompiledHighlighter : IHighlighter
         }
     }
 
-    /// <summary>True when nothing will ever be highlighted — the caller can
-    /// skip per-row work entirely.</summary>
+    /// <summary>True when nothing will ever be highlighted — the caller can skip per-row work entirely.</summary>
     public bool IsEmpty => _needles.Count == 0;
 
-    /// <summary>
-    /// The ranges of <paramref name="text"/> matched by the terms targeting
-    /// <paramref name="field"/>, sorted by start and with overlapping/adjacent
-    /// runs merged. Indices/lengths are UTF-16 units of <paramref name="text"/>
-    /// itself, ready to slice. Empty when nothing matches (or the query has no
-    /// terms for this field).
-    /// </summary>
-    /// <param name="text">The displayed string (a name, or a full path).</param>
-    /// <param name="field">Which term family to apply.</param>
-    /// <returns>The sorted, merged highlight ranges; empty when nothing matches.</returns>
+    /// <summary> The ranges of <paramref name="text"/> matched by the terms targeting <paramref name="field"/>, sorted by start and with overlapping/adjacent runs merged.
+    /// Indices/lengths are UTF-16 units of <paramref name="text"/> itself, ready to slice.
+    /// Empty when nothing matches (or the query has no terms for this field).
+    /// </summary> <param name="text">The displayed string (a name, or a full path).</param> <param name="field">Which term family to apply.</param> <returns>The sorted, merged highlight ranges; empty when nothing matches.</returns>
     public IReadOnlyList<HighlightRange> Ranges(string text, HighlightField field)
     {
         var fieldPresent = field == HighlightField.Name ? _hasName : _hasPath;
@@ -69,8 +52,6 @@ internal sealed class CompiledHighlighter : IHighlighter
             return [];
         }
 
-        // The folded haystack is shared by all insensitive needles for this
-        // text; computed lazily because a sensitive-only query never needs it.
         string? folded = null;
         var foldComputed = false;
         var ranges = new List<HighlightRange>();
@@ -92,7 +73,7 @@ internal sealed class CompiledHighlighter : IHighlighter
 
                 if (folded is null)
                 {
-                    continue; // text not length-preservingly foldable — skip safely
+                    continue;
                 }
 
                 hay = folded;
@@ -123,7 +104,7 @@ internal sealed class CompiledHighlighter : IHighlighter
                     }
 
                     ranges.Add(new HighlightRange(idx, n.Pattern.Length));
-                    from = idx + n.Pattern.Length; // non-overlapping occurrences
+                    from = idx + n.Pattern.Length;
                 }
 
                 break;
@@ -149,12 +130,8 @@ internal sealed class CompiledHighlighter : IHighlighter
         }
     }
 
-    /// <summary>Sort by start and fuse overlapping or touching runs so the
-    /// renderer emits the fewest possible <c>Run</c>s. Shared with
-    /// <c>ResultRow</c>, which re-merges name ranges after splitting a path
-    /// match at the parent/name boundary.</summary>
-    /// <param name="ranges">The unsorted ranges to sort and fuse in place.</param>
-    /// <returns>The sorted ranges with overlapping or touching runs merged.</returns>
+    /// <summary>Sort by start and fuse overlapping or touching runs so the renderer emits the fewest possible <c>Run</c>s.
+    /// Shared with <c>ResultRow</c>, which re-merges name ranges after splitting a path match at the parent/name boundary.</summary> <param name="ranges">The unsorted ranges to sort and fuse in place.</param> <returns>The sorted ranges with overlapping or touching runs merged.</returns>
     internal static List<HighlightRange> MergeRanges(List<HighlightRange> ranges)
     {
         if (ranges.Count <= 1)
@@ -185,18 +162,10 @@ internal sealed class CompiledHighlighter : IHighlighter
         return merged;
     }
 
-    // ── Folding (engine/crates/fmf-core/src/wtf8.rs, kept byte-for-byte aligned) ──
-
-    /// <summary>
-    /// Fold a string with the engine's rule (wtf8::fold_str): lowercase each
-    /// scalar only when the result is a single scalar of identical encoded
-    /// length, else keep it. The fold preserves UTF-16 length, so an index
-    /// found in the folded form is valid in the original. Returns <c>null</c>
-    /// if (defensively) some scalar broke length preservation, so the caller
-    /// can skip rather than emit a misaligned range.
-    /// </summary>
-    /// <param name="s">The string to fold.</param>
-    /// <returns>The length-preserving folded string, or <c>null</c> if a scalar broke length preservation.</returns>
+    /// <summary> Fold a string with the engine's rule (wtf8::fold_str): lowercase each scalar only when the result is a single scalar of identical encoded length, else keep it.
+    /// The fold preserves UTF-16 length, so an index found in the folded form is valid in the original.
+    /// Returns <c>null</c> if (defensively) some scalar broke length preservation, so the caller can skip rather than emit a misaligned range.
+    /// </summary> <param name="s">The string to fold.</param> <returns>The length-preserving folded string, or <c>null</c> if a scalar broke length preservation.</returns>
     internal static string? FoldString(string s)
     {
         var sb = new StringBuilder(s.Length);
@@ -214,11 +183,8 @@ internal sealed class CompiledHighlighter : IHighlighter
         return sb.Length == s.Length ? sb.ToString() : null;
     }
 
-    /// <summary>True if folding changes <paramref name="s"/> — i.e. it carries
-    /// a foldable (uppercase-ish) scalar. Mirrors wtf8::has_uppercase and
-    /// drives smart-case: a needle with one is matched case-sensitively.</summary>
-    /// <param name="s">The string to inspect.</param>
-    /// <returns>True when folding would change the string; otherwise false.</returns>
+    /// <summary>True if folding changes <paramref name="s"/> — i.e. it carries a foldable (uppercase-ish) scalar.
+    /// Mirrors wtf8::has_uppercase and drives smart-case: a needle with one is matched case-sensitively.</summary> <param name="s">The string to inspect.</param> <returns>True when folding would change the string; otherwise false.</returns>
     internal static bool HasFoldUppercase(string s)
     {
         foreach (var rune in s.EnumerateRunes())
@@ -232,11 +198,8 @@ internal sealed class CompiledHighlighter : IHighlighter
         return false;
     }
 
-    /// <summary>Lowercase one scalar only if the result is a single scalar of
-    /// the same UTF-8 length; otherwise return it unchanged (wtf8::fold_char).
-    /// Uses full (ICU) lowercasing via the string overload so multi-scalar
-    /// expansions like <c>İ</c>→<c>i̇</c> are detected and kept, matching the
-    /// engine (a simple per-rune lowercase would diverge there).</summary>
+    /// <summary>Lowercase one scalar only if the result is a single scalar of the same UTF-8 length; otherwise return it unchanged (wtf8::fold_char).
+    /// Uses full (ICU) lowercasing via the string overload so multi-scalar expansions like <c>İ</c>→<c>i̇</c> are detected and kept, matching the engine (a simple per-rune lowercase would diverge there).</summary>
     [System.Diagnostics.CodeAnalysis.SuppressMessage(
         "Globalization",
         "CA1308:Normalize strings to uppercase",
@@ -258,7 +221,7 @@ internal sealed class CompiledHighlighter : IHighlighter
         var first = it.Current;
         if (it.MoveNext())
         {
-            return r; // expanded to multiple scalars → keep original
+            return r;
         }
 
         return Utf8Len(first.Value) == Utf8Len(r.Value) ? first : r;

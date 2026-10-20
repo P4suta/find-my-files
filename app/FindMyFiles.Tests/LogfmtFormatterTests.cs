@@ -7,9 +7,7 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Behavioural tests for <see cref="LogfmtFormatter"/> — the quoting
-/// rules (which are the log-injection defence) and the line shape, mirroring the
-/// Rust engine's logfmt tests so both sides stay in lockstep (ADR-0037).</summary>
+/// <summary>Behavioural tests for <see cref="LogfmtFormatter"/> — the quoting rules (which are the log-injection defence) and the line shape, mirroring the Rust engine's logfmt tests so both sides stay in lockstep (ADR-0037).</summary>
 public sealed class LogfmtFormatterTests
 {
     private static string Esc(string value)
@@ -39,13 +37,11 @@ public sealed class LogfmtFormatterTests
     [Fact]
     public void AppendValue_neutralises_log_injection()
     {
-        // CR/LF fold onto one line so a crafted value cannot forge a record.
         var escaped = Esc("real\r\nFAKE level=ERROR msg=pwned");
         Assert.DoesNotContain('\n', escaped);
         Assert.DoesNotContain('\r', escaped);
         Assert.Contains("\\r\\n", escaped, StringComparison.Ordinal);
 
-        // A bare control char becomes \u00XX.
         Assert.Equal("\"x\\u0007y\"", Esc("xy"));
     }
 
@@ -71,7 +67,6 @@ public sealed class LogfmtFormatterTests
         Assert.Contains("rid=7", line, StringComparison.Ordinal);
         Assert.EndsWith(" msg=\"query served\"", line, StringComparison.Ordinal);
 
-        // Inline fields are ordinal-sorted: hits before rid.
         Assert.True(
             line.IndexOf("hits=", StringComparison.Ordinal)
                 < line.IndexOf("rid=", StringComparison.Ordinal),
@@ -112,9 +107,7 @@ public sealed class LogfmtFormatterTests
         Assert.Contains(" DEBUG area=x", line, StringComparison.Ordinal);
     }
 
-    /// <summary>Run one log call through a real Serilog pipeline using
-    /// <see cref="LogfmtFormatter"/> and return the single rendered line (without
-    /// its trailing newline).</summary>
+    /// <summary>Run one log call through a real Serilog pipeline using <see cref="LogfmtFormatter"/> and return the single rendered line (without its trailing newline).</summary>
     private static string Capture(LogEventLevel min, Action<ILogger> emit)
     {
         var sink = new CaptureSink();

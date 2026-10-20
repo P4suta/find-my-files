@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 5
     environment: release-please
     permissions:
-      id-token: write # authenticate to the automation-only Doppler identity
+      id-token: write # Permission: Authenticate the automation-only Doppler identity.
     steps:
       - name: Fetch automation credentials
         id: doppler
@@ -87,7 +87,7 @@ jobs:
     timeout-minutes: 5
     environment: release
     permissions:
-      id-token: write # authenticate to the signing-only Doppler identity
+      id-token: write # Permission: Authenticate the signing-only Doppler identity.
     steps:
       - name: Fetch signing credentials
         id: doppler

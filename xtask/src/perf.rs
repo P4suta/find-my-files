@@ -1,11 +1,15 @@
 //! Transactional performance measurement (ADR-0013).
 //!
-//! Compiles happen before the environment check. Every measured command then
-//! gets an idle preflight, a whole-run clock monitor, and an idle postflight.
-//! Criterion comparisons use a fresh `CRITERION_HOME`, seeded only with the
-//! canonical baseline, so a same-named report from an older run cannot pass the
-//! gate. Baselines are recorded into a candidate and promoted only after every
-//! measurement/environment check succeeds.
+//! Compiles happen before the environment check.
+//! Every measured command then gets an idle preflight, a whole-run clock monitor, and an idle postflight.
+//! Criterion comparisons use a fresh `CRITERION_HOME`, seeded only with the canonical baseline, so a same-named report from an older run cannot pass the gate.
+//! Baselines are recorded into a candidate and promoted only after every measurement/environment check succeeds.
+
+const NO_CLOCK_DRIFT: f64 = 0.0;
+const PERF_COUNTER_FIELDS: usize = 2;
+const PERF_DECISION_FIELD_COUNT: usize = 7;
+
+use crate::checksum::hex;
 
 use crate::{cmd, fsx, paths};
 use anyhow::{bail, Context, Result};
@@ -21,20 +25,16 @@ use toml_edit::DocumentMut;
 
 const SAMPLE_COUNT: u8 = 6;
 const MONITOR_SAMPLE_COUNT: u16 = 3_600;
-/// ADR-0013 requires a measurement to *start* from a machine at its nominal
-/// clock. It judges the idle preflight, never the loaded run in between.
+/// ADR-0013 requires a measurement to *start* from a machine at its nominal clock.
+/// It judges the idle preflight, never the loaded run in between.
 const MIN_IDLE_PROCESSOR_PERFORMANCE: f64 = 95.0;
-/// ADR-0013's definition of idle: foreign work below this does not perturb a
-/// measurement.
+/// ADR-0013's definition of idle: foreign work below this does not perturb a measurement.
 const MAX_PROCESSOR_TIME: f64 = 20.0;
-/// How far the clock during a measured run may sit from the clock the baseline
-/// recorded while measuring itself.
+/// How far the clock during a measured run may sit from the clock the baseline recorded while measuring itself.
 ///
-/// Derived, not chosen. ADR-0013's rationale measures a 25-point clock drop
-/// (100% to 75%) drifting p50 by at most +46%, so at most 1.84% of time per
-/// point of clock. The smallest regression this project is willing to report is
-/// +10% (the micro gate, decision item 3), and thermal drift has to stay under
-/// the smallest thing the gates call a regression: 10 / 1.84 = 5.4 points.
+/// Derived, not chosen.
+/// ADR-0013's rationale measures a 25-point clock drop (100% to 75%) drifting p50 by at most +46%, so at most 1.84% of time per point of clock.
+/// The smallest regression this project is willing to report is +10% (the micro gate, decision item 3), and thermal drift has to stay under the smallest thing the gates call a regression: 10 / 1.84 = 5.4 points.
 const MAX_CLOCK_DRIFT_POINTS: f64 = 5.0;
 const BASELINE_METADATA: &str = "fmf-baseline.json";
 const BENCHMARK_MANIFEST: &str = include_str!("../../engine/benches/criterion-benchmarks.txt");
@@ -120,9 +120,6 @@ impl CounterMonitor {
     }
 
     fn finish(mut self) -> Result<Summary> {
-        // A finite, deliberately oversized sample count avoids shell-specific
-        // signal handling. Terminating our own child after the measured command
-        // preserves all rows already written to its pipe.
         let _kill_result = self.child.kill();
         let output = self
             .child
@@ -132,24 +129,18 @@ impl CounterMonitor {
             .context("whole-run processor monitor returned no usable samples")?;
         let summary = summarize(&samples)?;
         print_summary("perf-monitor", summary, samples.len());
-        // The loaded run is not judged here. The engine scans and queries on
-        // every core, and ADR-0013's rationale measures this machine falling to
-        // ~75% under exactly that load, so the idle bar cannot be met while the
-        // benchmark runs. `validate_comparable_run` judges this summary against
-        // the clock the baseline recorded for its own run instead.
         Ok(summary)
     }
 }
 
-/// Standalone, fast environment probe used before asking an administrator to
-/// run a full gate.
+/// Standalone, fast environment probe used before asking an administrator to run a full gate.
 pub fn run() -> Result<()> {
     let _summary = sample_idle("perf-preflight", IdleRule::ColdStart)?;
     Ok(())
 }
 
-/// Compare all synthetic benchmarks in a clean run directory. The canonical
-/// baseline is read-only throughout this operation.
+/// Compare all synthetic benchmarks in a clean run directory.
+/// The canonical baseline is read-only throughout this operation.
 pub fn micro_check() -> Result<()> {
     let canonical = canonical_micro_baseline_dir()?;
     compile_micro_tools()?;
@@ -169,7 +160,7 @@ pub fn micro_check() -> Result<()> {
                 "bench",
                 "--locked",
                 "-p",
-                "fmf-core",
+                "fmf-runtime",
                 "--features",
                 "testutil",
                 "--bench",
@@ -211,9 +202,8 @@ pub fn micro_check() -> Result<()> {
     require_passing_evidence(&evidence, &evidence_path)
 }
 
-/// Record the full synthetic suite into an isolated candidate. Promotion of
-/// the whole directory occurs only after the monitored run and structural
-/// validation both succeed.
+/// Record the full synthetic suite into an isolated candidate.
+/// Promotion of the whole directory occurs only after the monitored run and structural validation both succeed.
 pub fn micro_baseline() -> Result<()> {
     let canonical = canonical_micro_baseline_dir()?;
     compile_micro_tools()?;
@@ -233,7 +223,7 @@ pub fn micro_baseline() -> Result<()> {
                 "bench",
                 "--locked",
                 "-p",
-                "fmf-core",
+                "fmf-runtime",
                 "--features",
                 "testutil",
                 "--bench",
@@ -319,8 +309,8 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
 }
 
-/// Run the real-volume acceptance gate after compilation, with continuous
-/// environment validation. The committed baseline is never modified.
+/// Run the real-volume acceptance gate after compilation, with continuous environment validation.
+/// The committed baseline is never modified.
 pub fn real_check(drive: &str) -> Result<()> {
     compile_real_tool()?;
     let baseline = paths::real_baseline();
@@ -356,9 +346,6 @@ pub fn real_check(drive: &str) -> Result<()> {
     );
     let run_record = perf_dir.join("real-check.json");
     write_json(&run_record, &evidence)?;
-    // Before the verdict is read at all: a run made in a different thermal
-    // regime than the baseline produces a verdict in either direction that says
-    // more about the machine than about the code.
     validate_comparable_run(baseline_run, measured.measurement.during).with_context(|| {
         format!(
             "the verdict recorded in {} cannot be trusted",
@@ -368,8 +355,7 @@ pub fn real_check(drive: &str) -> Result<()> {
     require_passing_evidence(&evidence, &run_record)
 }
 
-/// Record a real-volume candidate and atomically replace the committed JSON
-/// only after the run, counter checks, and JSON validation all succeed.
+/// Record a real-volume candidate and atomically replace the committed JSON only after the run, counter checks, and JSON validation all succeed.
 pub fn real_baseline(drive: &str) -> Result<()> {
     compile_real_tool()?;
     let perf_dir = paths::perf_dir();
@@ -398,7 +384,7 @@ fn compile_micro_tools() -> Result<()> {
             "bench",
             "--locked",
             "-p",
-            "fmf-core",
+            "fmf-runtime",
             "--features",
             "testutil",
             "--bench",
@@ -450,10 +436,6 @@ fn measure_allow_failure(operation: impl FnOnce() -> Result<()>) -> Result<Measu
     let postflight_result = sample_idle("perf-postflight", IdleRule::Settled);
     let finished_unix = unix_time()?;
 
-    // Report every check that failed. Propagating them through struct field
-    // initialisers hid whichever one came later in declaration order: a run
-    // whose postflight and whole-run monitor both failed reported only the
-    // monitor, so the printed cause was not the whole cause.
     let counter_failure = describe_counter_failures(
         operation_result.as_ref().err(),
         during_result.as_ref().err(),
@@ -476,9 +458,8 @@ fn measure_allow_failure(operation: impl FnOnce() -> Result<()>) -> Result<Measu
     })
 }
 
-/// Fold the measured run's failures into one message. Returns `None` when the
-/// counter checks both passed, so a failing measured command still reaches the
-/// caller as a recordable verdict rather than as a lost error.
+/// Fold the measured run's failures into one message.
+/// Returns `None` when the counter checks both passed, so a failing measured command still reaches the caller as a recordable verdict rather than as a lost error.
 fn describe_counter_failures(
     operation: Option<&anyhow::Error>,
     during: Option<&anyhow::Error>,
@@ -536,7 +517,9 @@ fn assemble_gate_evidence(
         }
     };
 
-    let valid_shape = decision.as_object().is_some_and(|object| object.len() == 7)
+    let valid_shape = decision
+        .as_object()
+        .is_some_and(|object| object.len() == PERF_DECISION_FIELD_COUNT)
         && decision.get("schema").and_then(Value::as_u64) == Some(1)
         && decision.get("kind").and_then(Value::as_str) == Some(verdict_kind)
         && decision.get("expected_cases").is_some_and(Value::is_array)
@@ -713,10 +696,8 @@ fn checked_command_output(dir: &Path, program: &str, args: &[&str]) -> Result<Ve
     Ok(output.stdout)
 }
 
-/// Hash the dependency graph while ignoring only the release-please-managed
-/// versions of source-less workspace packages. A version-only Release PR must
-/// not invalidate a machine baseline; registry/git sources, versions, and
-/// checksums remain byte-for-byte significant.
+/// Hash the dependency graph while ignoring only the release-please-managed versions of source-less workspace packages.
+/// A version-only Release PR must not invalidate a machine baseline; registry/git sources, versions, and checksums remain byte-for-byte significant.
 fn semantic_cargo_lock_sha256(repo: &Path) -> Result<String> {
     let metadata = checked_output(
         repo,
@@ -803,10 +784,6 @@ fn semantic_cargo_lock_sha256_from_text(
         );
     }
 
-    // Keep every byte significant except the two exact version spellings that
-    // release-please owns. This intentionally simple canonical form can be
-    // reproduced by the hosted evidence verifier with Python's standard
-    // library; no target code or package manager is executed there.
     let normalized_newlines = text.replace("\r\n", "\n");
     let marker = "[[package]]";
     let mut parts = normalized_newlines.split(marker);
@@ -849,16 +826,6 @@ fn semantic_cargo_lock_sha256_from_text(
     Ok(hex(&Sha256::digest(canonical.as_bytes())))
 }
 
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    output
-}
-
 fn unix_time() -> Result<u64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -869,12 +836,9 @@ fn unix_time() -> Result<u64> {
 /// What an idle sample has to prove.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IdleRule {
-    /// Before the run: the machine must be at its nominal clock and carrying no
-    /// foreign work, so the measurement starts from a known state.
+    /// Before the run: the machine must be at its nominal clock and carrying no foreign work, so the measurement starts from a known state.
     ColdStart,
-    /// After the run: the clock is legitimately still depressed by the
-    /// workload's own all-core load, so only the foreign-work half is judged and
-    /// the clock is kept as the run's thermal evidence.
+    /// After the run: the clock is legitimately still depressed by the workload's own all-core load, so only the foreign-work half is judged and the clock is kept as the run's thermal evidence.
     Settled,
 }
 
@@ -929,9 +893,8 @@ fn summary_json(summary: Summary) -> Value {
     })
 }
 
-/// `typeperf` emits quoted PDH-CSV rows. Counter names are localized on some
-/// Windows installations, so ignore the header and parse the final two numeric
-/// fields of each data row instead of matching English column names.
+/// `typeperf` emits quoted PDH-CSV rows.
+/// Counter names are localized on some Windows installations, so ignore the header and parse the final two numeric fields of each data row instead of matching English column names.
 fn parse_samples(text: &str) -> Result<Vec<Sample>> {
     let mut samples = Vec::new();
     for line in text.lines() {
@@ -941,9 +904,9 @@ fn parse_samples(text: &str) -> Result<Vec<Sample>> {
             .collect();
         let Some((performance, processor_time)) = fields
             .len()
-            .checked_sub(2)
+            .checked_sub(PERF_COUNTER_FIELDS)
             .and_then(|start| fields.get(start..))
-            .filter(|tail| tail.len() == 2)
+            .filter(|tail| tail.len() == PERF_COUNTER_FIELDS)
             .and_then(|tail| Some((tail[0].parse::<f64>().ok()?, tail[1].parse::<f64>().ok()?)))
         else {
             continue;
@@ -1007,16 +970,12 @@ fn validate_idle(summary: Summary, rule: IdleRule) -> Result<()> {
 
 /// Judge a measured run against the run the baseline recorded for itself.
 ///
-/// Absolute clock stability cannot be required *while* a benchmark runs — the
-/// engine scans and queries on every core by design — but two runs are only
-/// comparable when they were made in the same thermal regime and under the same
-/// amount of foreign work. Both summaries are already part of the recorded
-/// measurement identity, so this judgement needs no instrument the gate does
-/// not already carry.
+/// Absolute clock stability cannot be required *while* a benchmark runs — the engine scans and queries on every core by design — but two runs are only comparable when they were made in the same thermal regime and under the same amount of foreign work.
+/// Both summaries are already part of the recorded measurement identity, so this judgement needs no instrument the gate does not already carry.
 fn validate_comparable_run(baseline: Summary, actual: Summary) -> Result<()> {
     let drift = actual.mean_performance - baseline.mean_performance;
     if drift.abs() > MAX_CLOCK_DRIFT_POINTS {
-        let direction = if drift < 0.0 {
+        let direction = if drift < NO_CLOCK_DRIFT {
             "slower, which inflates every measured time and can read as a regression that is not there"
         } else {
             "faster, which deflates every measured time and can hide a real regression"
@@ -1446,14 +1405,14 @@ mod tests {
             r#"version = 4
 
 [[package]]
-name = "fmf-core"
+name = "fmf-runtime"
 version = "{workspace_version}"
 
 [[package]]
 name = "local-helper"
 version = "{local_helper_version}"
 dependencies = [
- "fmf-core {workspace_version}",
+ "fmf-runtime {workspace_version}",
 ]
 
 [[package]]
@@ -1469,8 +1428,8 @@ checksum = "{registry_checksum}"
     fn lock_fingerprint_ignores_only_workspace_package_versions() {
         let first = lockfile("0.1.0", "1.0.0", "abc", "2.0.0");
         let version_bump = lockfile("0.2.0", "1.0.0", "abc", "2.0.0");
-        let workspace_v1 = BTreeMap::from([("fmf-core".to_owned(), "0.1.0".to_owned())]);
-        let workspace_v2 = BTreeMap::from([("fmf-core".to_owned(), "0.2.0".to_owned())]);
+        let workspace_v1 = BTreeMap::from([("fmf-runtime".to_owned(), "0.1.0".to_owned())]);
+        let workspace_v2 = BTreeMap::from([("fmf-runtime".to_owned(), "0.2.0".to_owned())]);
         assert_eq!(
             semantic_cargo_lock_sha256_from_text(&first, &workspace_v1).unwrap(),
             semantic_cargo_lock_sha256_from_text(&version_bump, &workspace_v2).unwrap(),
@@ -1493,7 +1452,7 @@ checksum = "{registry_checksum}"
             );
         }
 
-        let wrong_identity = BTreeMap::from([("fmf-core".to_owned(), "9.9.9".to_owned())]);
+        let wrong_identity = BTreeMap::from([("fmf-runtime".to_owned(), "9.9.9".to_owned())]);
         assert!(
             semantic_cargo_lock_sha256_from_text(&first, &wrong_identity).is_err(),
             "metadata/lock disagreement must fail closed"
@@ -1600,8 +1559,6 @@ checksum = "{registry_checksum}"
             "rustc": identity.rustc,
             "processor": identity.processor,
             "logical_processors": identity.logical_processors,
-            // A real measurement always carries its counter summaries; the
-            // gate now reads `during` back to judge comparability.
             "counters": {
                 "preflight": summary_json(FIXTURE_IDLE),
                 "during": summary_json(FIXTURE_DURING),
@@ -1698,17 +1655,13 @@ checksum = "{registry_checksum}"
         assert!(validate_idle(good, IdleRule::ColdStart).is_ok());
         assert!(validate_idle(good, IdleRule::Settled).is_ok());
 
-        // A measurement still may not start from a warm machine.
         let warm = Summary {
             mean_performance: 94.99,
             ..good
         };
         assert!(validate_idle(warm, IdleRule::ColdStart).is_err());
-        // ...but after the run the workload's own all-core load is why the
-        // clock is down, so the settled sample judges foreign work only.
         assert!(validate_idle(warm, IdleRule::Settled).is_ok());
 
-        // Foreign work invalidates a sample taken at either end.
         let busy = Summary {
             mean_processor_time: 20.01,
             ..good
@@ -1717,8 +1670,8 @@ checksum = "{registry_checksum}"
         assert!(validate_idle(busy, IdleRule::Settled).is_err());
     }
 
-    /// The loaded run is judged against the baseline's own recorded run. These
-    /// are the states that must fail, re-injected one at a time.
+    /// The loaded run is judged against the baseline's own recorded run.
+    /// These are the states that must fail, re-injected one at a time.
     #[test]
     fn a_run_is_only_comparable_in_the_baselines_thermal_regime() {
         let baseline = Summary {
@@ -1728,9 +1681,6 @@ checksum = "{registry_checksum}"
             max_processor_time: 97.5,
         };
 
-        // The regime the real-volume baseline was recorded in: an all-core
-        // workload holding ~78% clock passes, where the old absolute 95% bar
-        // rejected it and left the gate impossible to satisfy.
         assert!(validate_comparable_run(baseline, baseline).is_ok());
         assert!(validate_comparable_run(
             baseline,
@@ -1741,8 +1691,6 @@ checksum = "{registry_checksum}"
         )
         .is_ok());
 
-        // Colder clock than the baseline: every time inflates, so a regression
-        // verdict would be the machine's, not the code's.
         let slower = validate_comparable_run(
             baseline,
             Summary {
@@ -1753,8 +1701,6 @@ checksum = "{registry_checksum}"
         .expect_err("a 5.4-point colder clock must not be judged");
         assert!(format!("{slower:#}").contains("inflates"), "{slower:#}");
 
-        // Faster clock than the baseline: every time deflates, so a pass could
-        // be hiding a real regression.
         let faster = validate_comparable_run(
             baseline,
             Summary {
@@ -1765,7 +1711,6 @@ checksum = "{registry_checksum}"
         .expect_err("a 5.4-point faster clock must not be judged");
         assert!(format!("{faster:#}").contains("hide"), "{faster:#}");
 
-        // Foreign work the baseline did not carry.
         assert!(validate_comparable_run(
             baseline,
             Summary {
@@ -1817,7 +1762,6 @@ checksum = "{registry_checksum}"
             .expect("a recorded measurement carries its own run summary");
         assert_eq!(recorded, measurement.during);
 
-        // The shape the committed baseline had before this schema existed.
         let error = recorded_during_summary(&json!({ "schema": 1 }))
             .expect_err("a baseline with no counters cannot be compared against");
         assert!(format!("{error:#}").contains("re-record"), "{error:#}");
@@ -1832,7 +1776,6 @@ checksum = "{registry_checksum}"
         let postflight = anyhow!("the machine was still busy");
 
         assert!(describe_counter_failures(None, None, None).is_none());
-        // A failing command with healthy counters stays a recordable verdict.
         assert!(describe_counter_failures(Some(&operation), None, None).is_none());
 
         let both = describe_counter_failures(Some(&operation), Some(&during), Some(&postflight))
@@ -1841,8 +1784,6 @@ checksum = "{registry_checksum}"
         assert!(both.contains("the clock fell over"), "{both}");
         assert!(both.contains("the machine was still busy"), "{both}");
 
-        // The regression this guards: a postflight failure used to be dropped
-        // because the monitor's error was propagated first.
         let postflight_only = describe_counter_failures(None, None, Some(&postflight))
             .expect("a lone postflight failure must be reported");
         assert!(

@@ -11,13 +11,9 @@ public sealed class StatusFormatterTests
 {
     public StatusFormatterTests()
     {
-        // N0/F1 are culture-sensitive; pin the culture so the expected
-        // strings hold on any machine. CurrentCulture flows across awaits
-        // and is per-thread, so this cannot leak into parallel tests.
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
     }
 
-    // Assertions are against the en-US resource values (LocTestInit pins them).
     [Fact]
     public void Count_WithTrace_ShowsMillisecondsAndHits()
     {
@@ -46,7 +42,6 @@ public sealed class StatusFormatterTests
     [Fact]
     public void Overall_NoStatusButRequested_ReportsIndexing()
     {
-        // The engine hasn't surfaced status yet, but we asked to index them.
         Assert.Equal("Indexing: C:, D:", StatusFormatter.Overall([], ["C:", "D:"]));
     }
 

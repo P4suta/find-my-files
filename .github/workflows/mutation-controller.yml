@@ -1,18 +1,3 @@
-# Trusted exact-identity mutation controller (ADR-0022).
-#
-# This reusable workflow is loaded from the same immutable commit as its caller.
-# The controller checkout supplies xtask, policy, baselines, tool manifests, and
-# local setup code. The separately checked-out target is data under test: none
-# of its workflows, Actions, just recipes, xtask code, mutation configuration,
-# or accepted-survivor baselines are executed or trusted.
-#
-# Target tests necessarily execute target-controlled code on a secretless,
-# hosted, disposable runner. Raw results therefore cross a second boundary:
-# a fresh job that never executes target code re-checks the exact source, policy,
-# tool, and report digests with the trusted controller before the gate passes.
-# This is tamper-evident CI evidence, not a sandbox or a cryptographic claim that
-# a deliberately hostile test process executed honestly; release targets are
-# separately restricted to protected-main lineage.
 name: mutation-controller
 
 on:
@@ -123,7 +108,7 @@ jobs:
           }
           "version=$($Matches[1])" >> $env:GITHUB_OUTPUT
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable action; exact toolchain input
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           toolchain: ${{ steps.rust-pin.outputs.version }}
 
@@ -259,7 +244,7 @@ jobs:
           }
           "version=$($Matches[1])" >> $env:GITHUB_OUTPUT
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable action; exact toolchain input
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           toolchain: ${{ steps.rust-pin.outputs.version }}
 
@@ -306,7 +291,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 60
     permissions:
-      actions: read # enumerate and bind the exact immutable producer artifacts
+      actions: read # Permission: Identify the immutable producer artifacts.
       contents: read
     steps:
       - name: Refuse missing or failed producer jobs
@@ -505,7 +490,7 @@ jobs:
           }
           "version=$($Matches[1])" >> $env:GITHUB_OUTPUT
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable action; exact toolchain input
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           toolchain: ${{ steps.rust-pin.outputs.version }}
 

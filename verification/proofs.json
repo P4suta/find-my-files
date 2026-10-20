@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "kani_version": "0.68.0",
+  "jobs": 2,
+  "timeout_seconds": 90,
+  "targets": [
+    {
+      "package": "fmf-core",
+      "source": "engine/crates/fmf-core/src/histogram_proofs.rs",
+      "prefix": "histogram::kani_proofs::",
+      "harnesses": [
+        "slots_are_always_bounded_and_preserve_every_valid_index",
+        "samples_have_a_bounded_bucket_and_a_conservative_upper_bound"
+      ]
+    },
+    {
+      "package": "fmf-runtime",
+      "source": "engine/crates/fmf-runtime/src/metrics_proofs.rs",
+      "prefix": "metrics::kani_proofs::",
+      "harnesses": ["recording_changes_only_the_selected_bucket_without_overflow"]
+    },
+    {
+      "package": "fmf-core",
+      "source": "engine/crates/fmf-core/src/wtf8_proofs.rs",
+      "prefix": "wtf8::kani_proofs::",
+      "harnesses": [
+        "empty_and_single_byte_decoding_preserve_prefix_or_roll_back",
+        "two_byte_decoding_preserves_prefix_or_rolls_back",
+        "three_byte_decoding_preserves_prefix_or_rolls_back",
+        "four_byte_decoding_preserves_prefix_or_rolls_back",
+        "output_lengths_preserve_the_prefix_or_reject_overflow"
+      ]
+    },
+    {
+      "package": "fmf-runtime",
+      "source": "engine/crates/fmf-runtime/src/index/snapshot_proofs.rs",
+      "prefix": "index::snapshot::kani_proofs::",
+      "harnesses": [
+        "byte_columns_are_initialized_before_reader_access",
+        "word_columns_are_initialized_before_reader_access",
+        "wide_columns_are_initialized_before_reader_access",
+        "initialized_growth_preserves_arbitrary_existing_column_bytes"
+      ]
+    },
+    {
+      "package": "xtask",
+      "source": "xtask/src/proof_proofs.rs",
+      "prefix": "proof::kani_proofs::",
+      "harnesses": [
+        "accepted_summary_requires_every_registered_harness_to_pass",
+        "a_complete_nonempty_summary_remains_acceptable"
+      ]
+    },
+    {
+      "package": "fmf-contract",
+      "source": "engine/crates/fmf-contract/src/kani_proofs.rs",
+      "prefix": "kani_proofs::",
+      "harnesses": [
+        "frame_header_fields_roundtrip",
+        "frame_header_bytes_roundtrip",
+        "frame_header_matches_little_endian_layout",
+        "encoded_bytes_preserve_prefix_and_zero_padding",
+        "encoded_labels_always_terminate",
+        "label_prefix_stops_at_first_zero"
+      ]
+    },
+    {
+      "package": "fmf-core",
+      "source": "engine/crates/fmf-core/src/ondisk/fixup_proofs.rs",
+      "prefix": "ondisk::fixup::kani_proofs::",
+      "harnesses": [
+        "accepted_layout_bounds_every_sector_and_update_sequence_word",
+        "invalid_sector_geometry_never_produces_a_layout"
+      ]
+    },
+    {
+      "package": "fmf-core",
+      "source": "engine/crates/fmf-core/src/ondisk/ntfs_proofs.rs",
+      "prefix": "ondisk::ntfs::kani_proofs::",
+      "harnesses": [
+        "accepted_boot_geometry_contains_a_complete_record_without_overflow",
+        "every_short_boot_sector_is_rejected_before_field_access",
+        "accepted_attribute_ranges_remain_inside_the_declared_buffer"
+      ]
+    }
+  ]
+}

@@ -3,10 +3,7 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Error-path tests for <see cref="AppSettings"/> via the
-/// path-parameterised <c>LoadFrom</c>/<c>SaveTo</c> internals — missing and
-/// corrupt files must degrade to defaults (and quarantine), and a roundtrip
-/// must preserve non-default values.</summary>
+/// <summary>Error-path tests for <see cref="AppSettings"/> via the path-parameterised <c>LoadFrom</c>/<c>SaveTo</c> internals — missing and corrupt files must degrade to defaults (and quarantine), and a roundtrip must preserve non-default values.</summary>
 public sealed class AppSettingsErrorTests
 {
     private static string TempDir() => Directory.CreateTempSubdirectory("fmf-settings-").FullName;
@@ -33,9 +30,9 @@ public sealed class AppSettingsErrorTests
 
             var s = AppSettings.LoadFrom(path);
 
-            Assert.Equal("auto", s.Language);             // defaults
-            Assert.False(File.Exists(path));              // original moved…
-            Assert.True(File.Exists(path + ".bad"));      // …to the .bad quarantine
+            Assert.Equal("auto", s.Language);
+            Assert.False(File.Exists(path));
+            Assert.True(File.Exists(path + ".bad"));
         }
         finally
         {
@@ -89,9 +86,6 @@ public sealed class AppSettingsErrorTests
     [Fact]
     public void Locked_file_is_never_quarantined_and_saving_is_refused()
     {
-        // A backup/sync/AV pass holding settings.json for a moment must not cost
-        // the user every setting: the file stays put, and the defaults we fell
-        // back to must not be written over it.
         var dir = Directory.CreateTempSubdirectory("fmf-settings-");
         try
         {
@@ -105,12 +99,12 @@ public sealed class AppSettingsErrorTests
                 settings = AppSettings.LoadFrom(path, NoWait);
             }
 
-            Assert.Equal("auto", settings.Language);              // fallback defaults
+            Assert.Equal("auto", settings.Language);
             Assert.False(settings.CloseToTray);
-            Assert.True(File.Exists(path));                       // …but nothing was moved
+            Assert.True(File.Exists(path));
             Assert.False(File.Exists(path + ".bad"));
 
-            Assert.False(settings.SaveTo(path));                  // and nothing is written back
+            Assert.False(settings.SaveTo(path));
             Assert.Equal(original, File.ReadAllText(path));
         }
         finally
@@ -131,8 +125,6 @@ public sealed class AppSettingsErrorTests
             var exclusive = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.None);
             try
             {
-                // The lock clears during the first backoff, exactly like a
-                // finished AV/backup pass.
                 var settings = AppSettings.LoadFrom(
                     path,
                     _ =>
@@ -157,8 +149,6 @@ public sealed class AppSettingsErrorTests
     [Fact]
     public void Corrupt_content_is_still_quarantined_and_saving_stays_enabled()
     {
-        // The complement of the two tests above: quarantine is reserved for
-        // content we did read and cannot use.
         var dir = Directory.CreateTempSubdirectory("fmf-settings-");
         try
         {
@@ -178,8 +168,7 @@ public sealed class AppSettingsErrorTests
         }
     }
 
-    /// <summary>Backoff that does not actually wait — the failure the retry
-    /// loop is being tested against is permanent for the test's duration.</summary>
+    /// <summary>Backoff that does not actually wait — the failure the retry loop is being tested against is permanent for the test's duration.</summary>
     private static void NoWait(int milliseconds) => _ = milliseconds;
 
     [Fact]

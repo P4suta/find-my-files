@@ -1,11 +1,7 @@
-//! Contract emitter — radiates the contract to the committed C# binding
-//! `app/FindMyFiles/Engine/Generated/EngineContract.g.cs` (ADR-0018).
+//! Contract emitter — radiates the contract to the committed C# binding `app/FindMyFiles/Engine/Generated/EngineContract.g.cs` (ADR-0018).
 //!
-//! Every value is read from the compiled contract items themselves
-//! (`offset_of!`/`size_of!` on the real `#[repr(C)]` types, the actual
-//! consts), so the generated numbers cannot drift from the Rust truth.
-//! `tests/drift.rs` runs `--check` inside the nextest workspace suite, so an
-//! out-of-date generated file fails the ordinary test gate.
+//! Every value is read from the compiled contract items themselves (`offset_of!`/`size_of!` on the real `#[repr(C)]` types, the actual consts), so the generated numbers cannot drift from the Rust truth.
+//! `tests/drift.rs` runs `--check` inside the nextest workspace suite, so an out-of-date generated file fails the ordinary test gate.
 //!
 //! Usage: `just contract-gen` (write) / `gen-contract --check` (verify).
 
@@ -359,9 +355,6 @@ fn render() -> String {
     w("/// <summary>Degradation counters of the stats JSON (snake_case keys —");
     w("/// deserialize with SnakeCaseLower). Generated from the contract's");
     w("/// counter-name registry; nonzero values surface in the F12 panel.</summary>");
-    // WinUI x:Bind reaches this type through public EngineStatsData and the
-    // public DiagFormat methods. The XAML compiler requires the full property
-    // type chain to be public even though this is not a supported product API.
     w("public sealed class CountersData");
     w("{");
     for name in counters::COUNTER_NAMES {
@@ -565,10 +558,8 @@ fn render() -> String {
 }
 
 /// The environment variable a mutation sandbox uses to name the real tree.
-/// Same variable, same reason, as `golden_dir` in fmf-core's golden corpus
-/// test: under the mutation gate this crate is compiled inside a scratch copy,
-/// so `CARGO_MANIFEST_DIR` points there and the relative walk below lands
-/// outside the repository entirely.
+/// Same variable, same reason, as `golden_dir` in fmf-core's golden corpus test: under the mutation gate this crate is compiled inside a scratch copy,
+/// so `CARGO_MANIFEST_DIR` points there and the relative walk below lands outside the repository entirely.
 const MUTATION_SOURCE_ROOT_ENV: &str = "FMF_MUTATION_SOURCE_ROOT";
 
 /// Where the generated C# contract is written (committed).
@@ -596,10 +587,6 @@ fn main() {
     let mut drifted = false;
     for (path, rendered, label) in &artifacts {
         if check {
-            // A missing file is not drift, and saying so is the difference
-            // between "regenerate this" and "you are looking in the wrong
-            // tree". Reading it as an empty string reported the first when it
-            // meant the second.
             let on_disk = match std::fs::read_to_string(path) {
                 Ok(text) => text,
                 Err(error) => {

@@ -1,12 +1,7 @@
 namespace FindMyFiles.Tests.TestDoubles;
 
-/// <summary>A deferred <see cref="SynchronizationContext"/> for UI-thread-affinity
-/// tests: it records how many continuations were marshaled to it (<see cref="Posted"/>)
-/// and runs them only when the test pumps (<see cref="Drain"/>) — the message-loop
-/// behavior a real UI dispatcher provides, made deterministic. Install it as
-/// <see cref="SynchronizationContext.Current"/>, let a production <c>await</c> (without
-/// <c>ConfigureAwait(false)</c>) capture it, then assert the continuation was Posted
-/// here rather than run inline on whatever thread completed the awaited task.</summary>
+/// <summary>A deferred <see cref="SynchronizationContext"/> for UI-thread-affinity tests: it records how many continuations were marshaled to it (<see cref="Posted"/>) and runs them only when the test pumps (<see cref="Drain"/>) — the message-loop behavior a real UI dispatcher provides, made deterministic.
+/// Install it as <see cref="SynchronizationContext.Current"/>, let a production <c>await</c> (without <c>ConfigureAwait(false)</c>) capture it, then assert the continuation was Posted here rather than run inline on whatever thread completed the awaited task.</summary>
 internal sealed class RecordingSyncContext : SynchronizationContext
 {
     private readonly Queue<(SendOrPostCallback Callback, object? State)> _queue = new();
@@ -20,8 +15,7 @@ internal sealed class RecordingSyncContext : SynchronizationContext
         _queue.Enqueue((d, state));
     }
 
-    /// <summary>Pump every queued continuation with this context installed as
-    /// Current — the message-loop behavior a real UI dispatcher provides.</summary>
+    /// <summary>Pump every queued continuation with this context installed as Current — the message-loop behavior a real UI dispatcher provides.</summary>
     public void Drain()
     {
         var previous = Current;

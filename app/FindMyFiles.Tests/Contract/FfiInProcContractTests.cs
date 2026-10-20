@@ -3,14 +3,9 @@ using Xunit.Abstractions;
 
 namespace FindMyFiles.Tests.Contract;
 
-/// <summary>
-/// Contract run #4: <see cref="FfiEngineClient"/> over fmf_engine.dll, gated
-/// on FMF_ADMIN_TESTS=1 (the same environment gate as the elevated Rust
-/// suite — the run that loads the native DLL into the test host). Partial
-/// conformance without volumes: no indexing is started, so valid queries hit
-/// 0 rows and staleness (a structural rebuild) cannot be forced — that fact
-/// skips. The engine gets a throwaway index dir, never %ProgramData%, so it
-/// cannot collide with an installed service's writer lock.
+/// <summary> Contract run #4: <see cref="FfiEngineClient"/> over fmf_engine.dll, gated on FMF_ADMIN_TESTS=1 (the same environment gate as the elevated Rust suite — the run that loads the native DLL into the test host).
+/// Partial conformance without volumes: no indexing is started, so valid queries hit 0 rows and staleness (a structural rebuild) cannot be forced — that fact skips.
+/// The engine gets a throwaway index dir, never %ProgramData%, so it cannot collide with an installed service's writer lock.
 /// </summary>
 public sealed class FfiInProcContractTests(ITestOutputHelper output)
     : EngineClientContractTests(output)
@@ -41,7 +36,6 @@ public sealed class FfiInProcContractTests(ITestOutputHelper output)
             }
             catch (IOException)
             {
-                // Lock file released a beat late — temp dir is self-cleaning.
             }
         }
 
@@ -49,6 +43,4 @@ public sealed class FfiInProcContractTests(ITestOutputHelper output)
     }
 
     protected override string ValidQuery => "anything";
-
-    // No stale hook: a structural rebuild needs a real volume rescan.
 }

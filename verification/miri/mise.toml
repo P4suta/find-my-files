@@ -1,0 +1,2 @@
+[tools]
+rust = { version = "nightly-2026-08-21", components = ["miri", "rust-src"], profile = "minimal" }

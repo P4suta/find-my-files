@@ -1,20 +1,17 @@
 //! Filesystem helpers with the `-Force` semantics the PowerShell recipes had.
 //!
-//! `std::fs::remove_dir_all` fails on Windows the moment it hits a read-only
-//! file (the OS refuses to delete one), and published bundles are full of them
-//! (`ReadyToRun` DLLs, `PreserveNewest` copies). This clears the read-only
-//! attribute and retries — matching `Remove-Item -Recurse -Force`.
+//! `std::fs::remove_dir_all` fails on Windows the moment it hits a read-only file (the OS refuses to delete one), and published bundles are full of them (`ReadyToRun` DLLs, `PreserveNewest` copies).
+//! This clears the read-only attribute and retries — matching `Remove-Item -Recurse -Force`.
 
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::Path;
 
-/// Atomically replace `path` with `bytes`, using a same-directory temporary
-/// file and a write-through replace on Windows. An interrupted update therefore
-/// leaves either the complete old file or the complete new file, never a gap or
-/// partially written release artifact.
+/// Atomically replace `path` with `bytes`, using a same-directory temporary file and a write-through replace on Windows.
+/// An interrupted update therefore leaves either the complete old file or the complete new file, never a gap or partially written release artifact.
 pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    const MAX_TEMPORARY_NAMES: u8 = 64;
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -30,7 +27,7 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     })?;
 
     let mut temporary = None;
-    for suffix in 0..64_u8 {
+    for suffix in 0..MAX_TEMPORARY_NAMES {
         let candidate = parent.join(format!(".{file_name}.tmp-{}-{suffix}", std::process::id()));
         match OpenOptions::new()
             .create_new(true)
@@ -58,7 +55,14 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         replace_file(&temporary_path, path)
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temporary_path);
+        if let Err(error) = fs::remove_file(&temporary_path) {
+            if error.kind() != io::ErrorKind::NotFound {
+                eprintln!(
+                    "could not remove temporary output {}: {error}",
+                    temporary_path.display()
+                );
+            }
+        }
     }
     result
 }
@@ -81,8 +85,7 @@ fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
         .encode_wide()
         .chain(Some(0))
         .collect();
-    // SAFETY: both paths are live, NUL-terminated UTF-16 buffers for the
-    // duration of the synchronous call.
+    /* SAFETY: Both paths remain live, NUL-terminated UTF-16 buffers throughout the synchronous call. */
     let moved = unsafe {
         MoveFileExW(
             source_wide.as_ptr(),
@@ -96,8 +99,7 @@ fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// True for symbolic links and every other Windows reparse-point kind
-/// (junctions, mount points, cloud placeholders, and future variants).
+/// True for symbolic links and every other Windows reparse-point kind (junctions, mount points, cloud placeholders, and future variants).
 #[cfg(windows)]
 pub fn is_reparse_point(metadata: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
@@ -110,8 +112,7 @@ pub fn is_reparse_point(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
-/// Recursively copy `src` into `dst`, creating `dst` (and parents) and
-/// overwriting existing files — `Copy-Item -Recurse -Force` for a directory.
+/// Recursively copy `src` into `dst`, creating `dst` (and parents) and overwriting existing files — `Copy-Item -Recurse -Force` for a directory.
 pub fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
@@ -127,16 +128,20 @@ pub fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Recursively delete `path`. A missing path is success (the old recipes'
-/// `-ErrorAction SilentlyContinue; exit 0`). Read-only entries are forced.
+/// Recursively delete `path`.
+/// A missing path is success (the old recipes' `-ErrorAction SilentlyContinue; exit 0`).
+/// Read-only entries are forced.
 pub fn force_remove_dir_all(path: &Path) -> io::Result<()> {
-    // Fast path: the common case (nothing read-only) needs no extra syscalls.
     match fs::remove_dir_all(path) {
-        Ok(()) => return Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => {} // fall through to the read-only-clearing slow path
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(first) => remove_recursive(path).map_err(|retry| {
+            io::Error::new(
+                retry.kind(),
+                format!("delete {} failed: {first}; retry: {retry}", path.display()),
+            )
+        }),
     }
-    remove_recursive(path)
 }
 
 fn remove_recursive(path: &Path) -> io::Result<()> {
@@ -164,17 +169,20 @@ fn retry_clearing_readonly(
     if remove(path).is_ok() {
         return Ok(());
     }
-    // Clearing read-only is the only way to delete a read-only file on Windows
-    // (the failure that brought us here). The entry is deleted on the very next
-    // line, so the brief Unix "world-writable" window the lint warns about is on
-    // a doomed file — harmless. This slow path is essentially Windows-only
-    // anyway (Unix deletes by parent-dir permission, so the fast path wins).
-    #[allow(clippy::permissions_set_readonly_false)]
+    let mut perms = meta.permissions();
+    #[cfg(windows)]
+    #[expect(
+        clippy::permissions_set_readonly_false,
+        reason = "This Windows-only branch changes the read-only attribute; Unix preserves the other mode bits."
+    )]
+    perms.set_readonly(false);
+    #[cfg(unix)]
     {
-        let mut perms = meta.permissions();
-        perms.set_readonly(false);
-        fs::set_permissions(path, perms)?;
+        use std::os::unix::fs::PermissionsExt;
+        const OWNER_WRITE: u32 = 0o200;
+        perms.set_mode(perms.mode() | OWNER_WRITE);
     }
+    fs::set_permissions(path, perms)?;
     remove(path)
 }
 
@@ -189,7 +197,7 @@ mod tests {
     #[test]
     fn removes_a_tree_containing_a_readonly_file() {
         let base = scratch("ro");
-        let _ = force_remove_dir_all(&base); // clean any leftover
+        let _ = force_remove_dir_all(&base);
         let nested = base.join("a").join("b");
         fs::create_dir_all(&nested).unwrap();
         let f = nested.join("readonly.txt");
@@ -200,6 +208,36 @@ mod tests {
 
         force_remove_dir_all(&base).unwrap();
         assert!(!base.exists(), "tree should be gone");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readonly_retry_preserves_group_and_other_permission_bits() {
+        use std::cell::Cell;
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = scratch("permission-bits");
+        fs::create_dir_all(&base).unwrap();
+        let file = base.join("readonly.txt");
+        fs::write(&file, b"x").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o440)).unwrap();
+        let metadata = fs::metadata(&file).unwrap();
+        let attempts = Cell::new(0);
+        retry_clearing_readonly(&file, &metadata, |path| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            } else {
+                assert_eq!(
+                    fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o640
+                );
+                fs::remove_file(path)
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts.get(), 2);
+        force_remove_dir_all(&base).unwrap();
     }
 
     #[test]

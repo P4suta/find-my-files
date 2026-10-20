@@ -1,13 +1,10 @@
 namespace FindMyFiles.Engine;
 
-/// <summary>Log2-bucketed latency histogram (mirrors fmf-core's
-/// <c>Histogram</c>): bucket <c>i</c> counts query latencies in
-/// <c>[2^i, 2^(i+1))</c> µs. The standard HdrHistogram-style distribution the
-/// F12 panel renders behind the p50/p90/p99/p99.9 line.</summary>
+/// <summary>Log2-bucketed latency histogram (mirrors fmf-core's <c>Histogram</c>): bucket <c>i</c> counts query latencies in <c>[2^i, 2^(i+1))</c> µs.
+/// The standard HdrHistogram-style distribution the F12 panel renders behind the p50/p90/p99/p99.9 line.</summary>
 public sealed class HistogramData
 {
-    /// <summary>Per-bucket counts (length 32); bucket <c>i</c> covers
-    /// <c>[2^i, 2^(i+1))</c> µs.</summary>
+    /// <summary>Per-bucket counts (length 32); bucket <c>i</c> covers <c>[2^i, 2^(i+1))</c> µs.</summary>
     public List<ulong> Buckets { get; set; } = [];
 
     /// <summary>Total number of recorded queries.</summary>

@@ -1,8 +1,7 @@
-//! Terminal presentation shared by the CLI's human-facing output: the
-//! `--color` choice and how it resolves against the `NO_COLOR` /
-//! `CLICOLOR_FORCE` conventions and TTY detection. The actual stripping of
-//! ANSI when a stream is redirected is anstream's job — nothing here writes
-//! escape codes itself.
+//! Terminal presentation shared by the CLI's human-facing output: the `--color` choice and how it resolves against the `NO_COLOR` / `CLICOLOR_FORCE` conventions and TTY detection.
+//! The actual stripping of ANSI when a stream is redirected is anstream's job — nothing here writes escape codes itself.
+
+const PROGRESS_TICK_MILLIS: u64 = 120;
 
 use anstream::ColorChoice;
 use anstyle::{AnsiColor, Color, Effects, Style};
@@ -22,10 +21,8 @@ pub const OK: Style = Style::new()
 /// A table header or section title (bold).
 pub const HEADER: Style = Style::new().effects(Effects::BOLD);
 
-/// Wrap `text` in `style`'s ANSI escapes. The result is meant to be written
-/// through an anstream sink (e.g. `anstream::println!`), which strips the
-/// escapes again when the stream is not taking colour — so callers never have
-/// to know whether colour is on.
+/// Wrap `text` in `style`'s ANSI escapes.
+/// The result is meant to be written through an anstream sink (e.g. `anstream::println!`), which strips the escapes again when the stream is not taking colour — so callers never have to know whether colour is on.
 #[must_use]
 pub fn paint(style: Style, text: &str) -> String {
     format!("{}{text}{}", style.render(), style.render_reset())
@@ -33,10 +30,9 @@ pub fn paint(style: Style, text: &str) -> String {
 
 /// A steady-ticking spinner for a long blocking step (e.g. indexing a volume).
 ///
-/// Returns a hidden, inert bar unless human chrome is wanted (text format, not
-/// `--quiet`) *and* stderr is a terminal, so the spinner never lands in piped,
-/// redirected, or JSON output. Call [`ProgressBar::finish_and_clear`] when the
-/// step ends.
+/// Returns a hidden, inert bar unless human chrome is wanted (text format, not `--quiet`) *and* stderr is a terminal, so the spinner never lands in piped,
+/// redirected, or JSON output.
+/// Call [`ProgressBar::finish_and_clear`] when the step ends.
 #[must_use]
 pub fn spinner(ctx: Ctx, message: impl Into<std::borrow::Cow<'static, str>>) -> ProgressBar {
     use std::io::IsTerminal as _;
@@ -49,7 +45,7 @@ pub fn spinner(ctx: Ctx, message: impl Into<std::borrow::Cow<'static, str>>) -> 
             .expect("static spinner template is valid"),
     );
     pb.set_message(message);
-    pb.enable_steady_tick(std::time::Duration::from_millis(120));
+    pb.enable_steady_tick(std::time::Duration::from_millis(PROGRESS_TICK_MILLIS));
     pb
 }
 
@@ -67,19 +63,16 @@ pub enum ColorArg {
 
 /// Resolve `--color` into anstream's [`ColorChoice`].
 ///
-/// `always`/`never` are explicit overrides. `auto` honours the `NO_COLOR` and
-/// `CLICOLOR_FORCE` conventions and otherwise defers to the stream's own TTY
-/// detection ([`ColorChoice::Auto`]).
+/// `always`/`never` are explicit overrides.
+/// `auto` honours the `NO_COLOR` and `CLICOLOR_FORCE` conventions and otherwise defers to the stream's own TTY detection ([`ColorChoice::Auto`]).
 #[must_use]
 pub fn resolve_color(arg: ColorArg) -> ColorChoice {
     match arg {
         ColorArg::Always => ColorChoice::Always,
         ColorArg::Never => ColorChoice::Never,
         ColorArg::Auto => {
-            // NO_COLOR: any non-empty value disables colour (no-color.org).
             if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
                 ColorChoice::Never
-            // CLICOLOR_FORCE: any non-empty value other than "0" forces colour.
             } else if std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| !v.is_empty() && v != "0")
             {
                 ColorChoice::Always

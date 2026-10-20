@@ -5,8 +5,7 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// Pins the wire bytes to the exact values fmf-proto's Rust tests pin —
+/// <summary> Pins the wire bytes to the exact values fmf-proto's Rust tests pin —
 /// both suites must agree byte-for-byte or one of them fails.
 /// </summary>
 public sealed class PipeProtocolTests
@@ -27,11 +26,11 @@ public sealed class PipeProtocolTests
         Assert.Equal(
             new byte[]
             {
-                0x03, 0x02, 0x01, 0x00, // len
-                0x06, 0x05, // opcode
-                0x03, 0x00, // flags
-                0x0A, 0x09, 0x08, 0x07, // request_id
-                0xFE, 0xFF, 0xFF, 0xFF, // status (-2)
+                0x03, 0x02, 0x01, 0x00,
+                0x06, 0x05,
+                0x03, 0x00,
+                0x0A, 0x09, 0x08, 0x07,
+                0xFE, 0xFF, 0xFF, 0xFF,
             },
             bytes);
         Assert.Equal(h, PipeProtocol.ReadHeader(bytes));
@@ -55,13 +54,13 @@ public sealed class PipeProtocolTests
         Assert.Equal(
             new byte[]
             {
-                1, 0, 0, 0, // sort = Size
-                1, 0, 0, 0, // desc
-                2, 0, 0, 0, // case = Sensitive
-                0, 0, 0, 0, // include_hidden_system
-                3, 0, 0, 0, // regex_mode = whole(bit0) | path(bit1)
-                0, 0, 0, 0, // reserved
-                8, 7, 6, 5, 4, 3, 2, 1, // presentation basis
+                1, 0, 0, 0,
+                1, 0, 0, 0,
+                2, 0, 0, 0,
+                0, 0, 0, 0,
+                3, 0, 0, 0,
+                0, 0, 0, 0,
+                8, 7, 6, 5, 4, 3, 2, 1,
                 (byte)'w', (byte)'i', (byte)'n',
             },
             bytes);
@@ -121,8 +120,6 @@ public sealed class PipeProtocolTests
 
         var ex = Assert.Throws<InvalidDataException>(() => PipeProtocol.ReadHeader(bytes));
 
-        // The drop reason must name the cap — there is no resync point, so this
-        // message is the only forensic trail for a hostile/oversized frame.
         Assert.Contains(PipeProtocol.MaxPayloadLen.ToString(), ex.Message, StringComparison.Ordinal);
     }
 
@@ -217,7 +214,7 @@ public sealed class PipeProtocolTests
     public void PageResp_LyingLengths_AreRejected()
     {
         var bytes = PipeProtocol.EncodePageResp([new(1, 1, 1, 1, 0, "a", "C:\\")]);
-        bytes[0] = 2; // row_count says 2, but only one row is present
+        bytes[0] = 2;
 
         var ex = Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodePageResp(bytes));
 
@@ -230,7 +227,7 @@ public sealed class PipeProtocolTests
     public void PageResp_LyingBlobLength_IsRejected()
     {
         var bytes = PipeProtocol.EncodePageResp([new(1, 1, 1, 1, 0, "ab", "C:\\")]);
-        bytes[4]++; // blob_len overstated by one — total no longer matches
+        bytes[4]++;
 
         Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodePageResp(bytes));
     }
@@ -240,7 +237,7 @@ public sealed class PipeProtocolTests
     {
         var bytes = PipeProtocol.EncodePageResp([]);
 
-        Assert.Equal(8, bytes.Length); // just the {row_count, blob_len} header
+        Assert.Equal(8, bytes.Length);
         Assert.Empty(PipeProtocol.DecodePageResp(bytes));
     }
 
@@ -331,7 +328,7 @@ public sealed class PipeProtocolTests
 
     [Theory]
     [InlineData(0)]
-    [InlineData(7)] // one short of the 8-byte {row_count, blob_len} header
+    [InlineData(7)]
     public void PageResp_TruncatedHeader_IsRejected(int len)
     {
         var ex = Assert.Throws<InvalidDataException>(
@@ -343,7 +340,6 @@ public sealed class PipeProtocolTests
     [Fact]
     public void Header_AtTheExactCap_IsAccepted()
     {
-        // The boundary is `> MaxPayloadLen`, so the cap value itself is legal.
         var bytes = new byte[PipeProtocol.HeaderLen];
         PipeProtocol.WriteHeader(
             bytes, new PipeProtocol.FrameHeader(PipeProtocol.MaxPayloadLen, 1, 0, 1, 0));
@@ -413,10 +409,8 @@ public sealed class PipeProtocolTests
     [Fact]
     public void Event_FullSixteenByteLabel_DecodesWithoutATerminator()
     {
-        // No NUL inside the 16-byte volume field: the decoder must read all 16
-        // bytes (the `len < 0 → 16` fallback), not stop early.
         var payload = new byte[32];
-        var label = "0123456789ABCDEF"u8; // exactly 16 bytes, no terminator
+        var label = "0123456789ABCDEF"u8;
         label.CopyTo(payload.AsSpan(16));
 
         var (_, _, volume) = PipeProtocol.DecodeEvent(payload);

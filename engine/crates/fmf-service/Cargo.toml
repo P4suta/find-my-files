@@ -10,7 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-fmf-core = { workspace = true }
+fmf-runtime = { workspace = true }
 fmf-proto = { workspace = true }
 fmf-buildstamp = { workspace = true }
 clap = { workspace = true }
@@ -23,7 +23,5 @@ windows-service = { workspace = true }
 windows-sys = { workspace = true }
 
 [dev-dependencies]
-# Test-only feature union: exposes fmf-core's index::testutil (TestDir RAII)
-# to the integration tests without touching the production build.
-fmf-core = { workspace = true, features = ["testutil"] }
+fmf-runtime = { workspace = true, features = ["testutil"] }
 tempfile = { workspace = true }

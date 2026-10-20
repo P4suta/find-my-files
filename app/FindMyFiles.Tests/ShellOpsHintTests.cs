@@ -4,14 +4,9 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// Pins the failure hint shell operations attach to their notification. The
-/// engine indexes paths up to 32767 UTF-16 units and shell actions pin them
-/// through <c>CreateFileW</c>, which reports a path past the legacy MAX_PATH
-/// limit as "not found" whenever long-path support is not in effect — the hint
-/// must not turn that into "the file was moved or deleted", whose remedy is the
-/// opposite (the file is exactly where the user left it). It names the length
-/// instead, and points at the machine setting that lifts the limit.
+/// <summary> Pins the failure hint shell operations attach to their notification.
+/// The engine indexes paths up to 32767 UTF-16 units and shell actions pin them through <c>CreateFileW</c>, which reports a path past the legacy MAX_PATH limit as "not found" whenever long-path support is not in effect — the hint must not turn that into "the file was moved or deleted", whose remedy is the opposite (the file is exactly where the user left it).
+/// It names the length instead, and points at the machine setting that lifts the limit.
 /// </summary>
 public sealed class ShellOpsHintTests
 {
@@ -21,17 +16,17 @@ public sealed class ShellOpsHintTests
         @"C:\Users\example\" + new string('a', 300) + ".txt";
 
     [Theory]
-    [InlineData(2)] // ERROR_FILE_NOT_FOUND
-    [InlineData(3)] // ERROR_PATH_NOT_FOUND
+    [InlineData(2)]
+    [InlineData(3)]
     public void A_short_path_that_is_not_found_really_did_move(int error) =>
         Assert.Equal(
             Loc.Get("Shell_HintMoved"),
             ShellOps.Hint(new Win32Exception(error), ShortPath));
 
     [Theory]
-    [InlineData(2)] // ERROR_FILE_NOT_FOUND
-    [InlineData(3)] // ERROR_PATH_NOT_FOUND
-    [InlineData(206)] // ERROR_FILENAME_EXCED_RANGE
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(206)]
     public void A_long_path_that_is_not_found_blames_its_length(int error) =>
         Assert.Equal(
             Loc.Get("Shell_HintPathTooLong"),

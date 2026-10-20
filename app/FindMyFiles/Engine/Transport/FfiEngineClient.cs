@@ -6,12 +6,9 @@ using FindMyFiles.Services;
 
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// In-proc engine client over fmf_engine.dll. Every native operation holds a
-/// SafeHandle reference for its complete call, so Dispose cannot free the Rust
-/// engine while queued/in-flight Task.Run work still dereferences it. Events
-/// arrive on engine threads and are exception-firewalled at the unmanaged
-/// boundary; consumers marshal to the UI thread themselves.
+/// <summary> In-proc engine client over fmf_engine.dll.
+/// Every native operation holds a SafeHandle reference for its complete call, so Dispose cannot free the Rust engine while queued/in-flight Task.Run work still dereferences it.
+/// Events arrive on engine threads and are exception-firewalled at the unmanaged boundary; consumers marshal to the UI thread themselves.
 /// </summary>
 internal sealed unsafe class FfiEngineClient : IEngineClient
 {
@@ -46,8 +43,7 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
         remove { }
     }
 
-    /// <summary>Creates the in-proc engine over the default machine index at
-    /// <c>%ProgramData%\find-my-files\index</c>.</summary>
+    /// <summary>Creates the in-proc engine over the default machine index at <c>%ProgramData%\find-my-files\index</c>.</summary>
     public FfiEngineClient()
         : this(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -56,10 +52,7 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
     {
     }
 
-    /// <summary>Test seam (contract suite): a throwaway index dir keeps the
-    /// suite off %ProgramData% and out of the service's writer lock.</summary>
-    /// <param name="indexDir">Directory holding the on-disk index.</param>
-    /// <param name="logDir">When non-null, redirects the engine log here.</param>
+    /// <summary>Test seam (contract suite): a throwaway index dir keeps the suite off %ProgramData% and out of the service's writer lock.</summary> <param name="indexDir">Directory holding the on-disk index.</param> <param name="logDir">When non-null, redirects the engine log here.</param>
     internal FfiEngineClient(string indexDir, string? logDir = null)
     {
         EnsureCompatibleAbi(NativeEngine.fmf_abi_version());
@@ -90,8 +83,6 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
         }
         catch
         {
-            // Registration failed before SafeHandle ownership transferred.
-            // Tear down both native and managed handles on every exception path.
             _ = NativeEngine.fmf_set_event_callback(rawHandle, null, IntPtr.Zero);
             _ = NativeEngine.fmf_engine_destroy(rawHandle);
             if (self.IsAllocated)
@@ -103,9 +94,7 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
         }
     }
 
-    /// <summary>Reject an incompatible native DLL before any structured value
-    /// or opaque handle crosses the ABI boundary.</summary>
-    /// <param name="actual">ABI version reported by the loaded native DLL.</param>
+    /// <summary>Reject an incompatible native DLL before any structured value or opaque handle crosses the ABI boundary.</summary> <param name="actual">ABI version reported by the loaded native DLL.</param>
     internal static void EnsureCompatibleAbi(uint actual)
     {
         if (actual != EngineContract.AbiVersion)
@@ -219,11 +208,7 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
     }
 
 #if FMF_TEST_SEAMS
-    /// <summary>Exercises the unmanaged callback's managed dispatch firewall
-    /// without requiring a live native worker thread.</summary>
-    /// <param name="kind">Synthetic event kind.</param>
-    /// <param name="volume">Synthetic event volume label.</param>
-    /// <param name="entries">Synthetic event entry count or payload.</param>
+    /// <summary>Exercises the unmanaged callback's managed dispatch firewall without requiring a live native worker thread.</summary> <param name="kind">Synthetic event kind.</param> <param name="volume">Synthetic event volume label.</param> <param name="entries">Synthetic event entry count or payload.</param>
     internal void DispatchEventForTests(EventKind kind, string volume, ulong entries) =>
         DispatchEvent(kind, volume, entries);
 #endif
@@ -236,8 +221,6 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
         }
         catch
         {
-            // Nothing may escape an UnmanagedCallersOnly boundary, including
-            // a secondary diagnostics failure.
         }
     }
 
@@ -558,10 +541,6 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
 
         void Cleanup()
         {
-            // Dispose waits for an in-flight callback. Only after it is
-            // impossible to issue another cancel do we remove/free the
-            // native control; the SafeHandle admission remains held through
-            // the entire lifecycle.
             cancellationRegistration.Dispose();
             if (controlId != 0)
             {
@@ -642,9 +621,6 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
             return;
         }
 
-        // Suppress callbacks first. SafeHandle.Dispose then rejects new
-        // DangerousAddRef calls and defers ReleaseHandle until every operation
-        // that already acquired a reference has returned.
         Volatile.Write(ref _liveGeneration, Interlocked.Increment(ref generation));
         foreach (var controlId in _activeQueryControls.Keys)
         {
@@ -654,10 +630,8 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
         _handle.Dispose();
     }
 
-    /// <summary>
-    /// Owns the Rust engine pointer and the callback GCHandle as one lifetime.
-    /// ReleaseHandle runs only after all operation references drain; native
-    /// destroy joins worker threads before the callback user handle is freed.
+    /// <summary> Owns the Rust engine pointer and the callback GCHandle as one lifetime.
+    /// ReleaseHandle runs only after all operation references drain; native destroy joins worker threads before the callback user handle is freed.
     /// </summary>
     private sealed class FfiEngineSafeHandle : SafeHandle
     {
@@ -692,10 +666,6 @@ internal sealed unsafe class FfiEngineClient : IEngineClient
             {
                 try
                 {
-                    // If native teardown failed before either unregister or
-                    // destroy crossed its quiescence barrier, leaking the weak
-                    // GCHandle is safer than letting a late callback observe a
-                    // recycled managed handle.
                     if (callbackDetached && _callbackUser != IntPtr.Zero)
                     {
                         var self = GCHandle.FromIntPtr(_callbackUser);

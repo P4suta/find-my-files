@@ -1,10 +1,7 @@
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// Explicit no-engine state used when the service is not installed/reachable
-/// or engine initialization failed. It contains no demo data and performs no
-/// privileged work; the main page recognizes <see cref="Kind"/> and shows the
-/// setup/recovery experience instead of issuing calls to it.
+/// <summary> Explicit no-engine state used when the service is not installed/reachable or engine initialization failed.
+/// It contains no demo data and performs no privileged work; the main page recognizes <see cref="Kind"/> and shows the setup/recovery experience instead of issuing calls to it.
 /// </summary>
 internal sealed class UnavailableEngineClient : IEngineClient
 {

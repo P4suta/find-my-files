@@ -1,10 +1,7 @@
 //! Wire enumerations of `FmfQueryOptions` and `FmfVolumeStatus.state`.
 //!
-//! These are the canonical values; fmf-core uses these enums directly (no
-//! wire↔engine mapping layer). Both boundaries reject an unknown
-//! discriminant, a non-Boolean value in a Boolean field, and any nonzero
-//! reserved word or reserved `regex_mode` bit with
-//! [`crate::codes::INVALID_ARG`] — neither ever coerces one to a default.
+//! These are the canonical values; fmf-runtime uses these enums directly.
+//! Both boundaries reject an unknown discriminant, a non-Boolean value in a Boolean field, and any nonzero reserved word or reserved `regex_mode` bit with [`crate::codes::INVALID_ARG`] — neither ever coerces one to a default.
 
 /// Which result column results are ordered by (`FmfQueryOptions.sort_key`).
 #[repr(u32)]
@@ -46,8 +43,7 @@ pub enum VolumeState {
     Failed = 3,
 }
 
-/// Which haystack a whole-query regex runs against
-/// (`FmfQueryOptions.regex_mode` bit1; ADR-0023).
+/// Which haystack a whole-query regex runs against (`FmfQueryOptions.regex_mode` bit1; ADR-0023).
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RegexScope {

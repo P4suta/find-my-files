@@ -1,13 +1,11 @@
-//! find-my-files dev-task runner (the cargo-xtask pattern).
-//!
-//! Holds the imperative build/release plumbing that used to be inline
-//! PowerShell in justfile and the GitHub workflows. `just` calls into here via
-//! `cargo run --manifest-path xtask/Cargo.toml -- <cmd>`; the logic is plain
-//! testable Rust instead of shell.
+//! Repository verification, build, and release commands.
 
 mod cmd;
 mod fsx;
+mod hygiene;
+mod interpreter;
 mod paths;
+mod proof;
 
 mod bundle_seal;
 mod checksum;
@@ -16,10 +14,13 @@ mod mutation;
 mod mutation_ci;
 mod notices;
 mod pe_digest;
+mod pe_format;
 mod pe_load;
 mod prune;
 mod sbom;
 mod semver;
+mod strict_json;
+mod verification_tools;
 mod version;
 mod win_version;
 
@@ -46,8 +47,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Print the canonical channel-aware version string — the source of the
-    /// `FMF_BUILD_VERSION` format that the build stamp and nightly packaging use.
+    /// Execute the registered codec boundary tests through Miri.
+    Miri,
+    /// Replay every committed fuzz corpus without a mutation campaign.
+    FuzzReplay,
+    /// Explore one parser while preserving the committed regression corpus.
+    Fuzz {
+        target: String,
+        seconds: std::num::NonZeroU32,
+    },
+    /// Install the pinned verification tool for the Linux CI lane.
+    VerificationTools {
+        #[arg(value_enum)]
+        tool: verification_tools::Tool,
+    },
+    /// Relocate existing C# mutation identities after comment edits without changing their source spans.
+    MutationRelocateCsharp,
+    /// Validate the nonempty proof inventory against the Rust source.
+    ProofCheck,
+    /// Verify every registered production harness and bind results to its source.
+    Proof,
+    /// Reject missing, incomplete, failed, or stale proof evidence.
+    ProofVerify,
+    /// Print the canonical channel-aware version string — the source of the `FMF_BUILD_VERSION` format that the build stamp and nightly packaging use.
     /// Release *bumping* is release-please's job, not this command's.
     Version {
         /// Build channel: dev | nightly | stable.
@@ -57,44 +79,40 @@ enum Commands {
         #[arg(long)]
         date: Option<String>,
     },
-    /// Assemble the distributable bundle in dist/FindMyFiles (publish the app
-    /// into app/, prune locales, copy the engine binaries, add the root launcher
+    /// Assemble the distributable bundle in dist/FindMyFiles (publish the app into app/, prune locales, copy the engine binaries, add the root launcher
     /// + README, then self-verify the bundle).
     Publish {
         /// Skip the in-build cargo step (CI: engine binaries are prebuilt).
         #[arg(long, action = clap::ArgAction::Set, default_value_t = false)]
         skip_rust: bool,
     },
-    /// Assemble an isolated, non-shippable bundle with deterministic UI-test
-    /// seams compiled in. Never writes to build/dist.
+    /// Assemble an isolated, non-shippable bundle with deterministic UI-test seams compiled in.
+    /// Never writes to build/dist.
     PublishUiTest {
         /// Skip the in-build cargo step (CI: engine binaries are prebuilt).
         #[arg(long, action = clap::ArgAction::Set, default_value_t = false)]
         skip_rust: bool,
     },
-    /// Zip + checksum the assembled bundle. With a vX.Y.Z tag → stable zip; omit
-    /// the tag to name a dev/nightly zip from the bundled `BUILDINFO.txt`.
+    /// Zip + checksum the assembled bundle.
+    /// With a vX.Y.Z tag → stable zip; omit the tag to name a dev/nightly zip from the bundled `BUILDINFO.txt`.
     Package {
-        /// The release tag, e.g. v0.2.0 (a leading 'v' is optional). Omit for
-        /// the bundle's stamped dev/nightly identity.
+        /// The release tag, e.g. v0.2.0 (a leading 'v' is optional).
+        /// Omit for the bundle's stamped dev/nightly identity.
         tag: Option<String>,
     },
     /// Verify a release tag (vX.Y.Z) matches the committed workspace version —
-    /// the manual-dispatch guard release.yml runs before signing/packaging so a
-    /// drifted tag can't ship mislabeled artifacts.
+    /// the manual-dispatch guard release.yml runs before signing/packaging so a drifted tag can't ship mislabeled artifacts.
     CheckVersion {
         /// The release tag, e.g. v0.2.0 (a leading 'v' is optional).
         tag: String,
     },
     /// Sweep leftover engine test fixtures under build/engine/test-tmp.
     CleanTemp,
-    /// Stage the bundle's first-party PEs into a flat dir for the release
-    /// signing step (unique names; the eSigner Action signs them in place).
+    /// Stage the bundle's first-party PEs into a flat dir for the release signing step (unique names; the eSigner Action signs them in place).
     SignStage,
     /// Copy the signed PEs back over the bundle after the signing step.
     SignCollect,
-    /// Write an exact deterministic manifest for the current unsigned or signed
-    /// distribution tree.
+    /// Write an exact deterministic manifest for the current unsigned or signed distribution tree.
     BundleSeal {
         /// Authenticode state every first-party PE must have.
         #[arg(value_enum)]
@@ -106,13 +124,11 @@ enum Commands {
         #[arg(value_enum)]
         state: bundle_seal::BundleState,
     },
-    /// Prove the current signed tree changed from the canonical unsigned
-    /// manifest only by valid first-party Authenticode certificate tables.
+    /// Prove the current signed tree changed from the canonical unsigned manifest only by valid first-party Authenticode certificate tables.
     BundleVerifySignedTransition,
     /// Run the elevated, `#[ignore]`-gated engine tests with `FMF_ADMIN_TESTS=1`.
     TestAdmin,
-    /// Build deterministic `CycloneDX` 1.6 Rust + app SBOMs from the three raw
-    /// cargo-sbom documents and the final distribution tree.
+    /// Build deterministic `CycloneDX` 1.6 Rust + app SBOMs from the three raw cargo-sbom documents and the final distribution tree.
     Sbom {
         /// Exact product identity already stamped into BUILDINFO/binaries.
         version: String,
@@ -121,8 +137,7 @@ enum Commands {
         #[arg(long)]
         cargo_raw_dir: std::path::PathBuf,
     },
-    /// Verify that build/sbom contains exactly the canonical final BOM pair for
-    /// the requested product version and no other entry.
+    /// Verify that build/sbom contains exactly the canonical final BOM pair for the requested product version and no other entry.
     SbomVerify {
         /// Exact product version both BOM roots must declare.
         version: String,
@@ -133,8 +148,7 @@ enum Commands {
     DocsAssemble,
     /// Refuse performance measurement unless Windows reports a cold, idle CPU.
     PerfPreflight,
-    /// Compare the synthetic Criterion suite with the machine-local baseline
-    /// inside a fresh, monitored run directory.
+    /// Compare the synthetic Criterion suite with the machine-local baseline inside a fresh, monitored run directory.
     PerfMicroCheck,
     /// Record and atomically promote a monitored Criterion baseline.
     PerfMicroBaseline,
@@ -150,52 +164,54 @@ enum Commands {
         #[arg(default_value = "C:")]
         drive: String,
     },
-    /// Run cargo-mutants 27.1.0 with its clean-tree baseline enabled, then
-    /// compare the exact missed-mutant identities with the reviewed baseline.
+    /// Run cargo-mutants 27.1.0 with its clean-tree baseline enabled, then compare the exact missed-mutant identities with the reviewed baseline.
     MutationRust {
         #[command(flatten)]
         ci: mutation_ci::RunArgs,
     },
-    /// Run Stryker.NET 4.16.0 after a clean unit-test baseline, then compare
-    /// exact survivor identities and reject no-coverage/timeout outcomes.
+    /// Run Stryker.NET 4.16.0 after a clean unit-test baseline, then compare exact survivor identities and reject no-coverage/timeout outcomes.
     MutationCsharp {
         #[command(flatten)]
         ci: mutation_ci::RunArgs,
     },
-    /// Independently verify the exact 16-shard Rust mutation evidence without
-    /// executing target-controlled code.
+    /// Independently verify the exact 16-shard Rust mutation evidence without executing target-controlled code.
     MutationVerifyRust {
         #[command(flatten)]
         evidence: mutation_ci::VerifyArgs,
     },
-    /// Independently verify the exact 16-shard C# mutation evidence without
-    /// executing target-controlled code.
+    /// Independently verify the exact 16-shard C# mutation evidence without executing target-controlled code.
     MutationVerifyCsharp {
         #[command(flatten)]
         evidence: mutation_ci::VerifyArgs,
     },
-    /// Capture the repository's live rulesets with `gh`, one JSON per ruleset
-    /// id. Read-only: it issues GETs and never writes a ruleset.
+    /// Capture the repository's live rulesets with `gh`, one JSON per ruleset id.
+    /// Read-only: it issues GETs and never writes a ruleset.
     RulesetsFetch {
-        /// Directory to repopulate (default: `build/rulesets/live`). Existing
-        /// contents are replaced, so a deleted ruleset cannot linger.
+        /// Directory to repopulate (default: `build/rulesets/live`).
+        /// Existing contents are replaced, so a deleted ruleset cannot linger.
         out_dir: Option<std::path::PathBuf>,
     },
-    /// Compare the committed `.github/rulesets` templates with a captured live
-    /// snapshot and fail on any drift. Offline — `rulesets-fetch` does the
-    /// capturing.
+    /// Compare the committed `.github/rulesets` templates with a captured live snapshot and fail on any drift.
+    /// Offline — `rulesets-fetch` does the capturing.
     RulesetsCheck {
         /// Directory holding one JSON per live ruleset (default:
         /// `build/rulesets/live`, where `rulesets-fetch` writes).
         live_dir: Option<std::path::PathBuf>,
     },
-    /// Check that the dev environment matches the `mise.toml` pins and the gate
-    /// prerequisites (tool versions, lefthook, elevation, the build/ layout).
+    /// Check that the dev environment matches the `mise.toml` pins and the gate prerequisites (tool versions, lefthook, elevation, the build/ layout).
     Doctor,
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Commands::Miri => interpreter::miri(),
+        Commands::FuzzReplay => interpreter::fuzz_replay(),
+        Commands::Fuzz { target, seconds } => interpreter::fuzz(&target, seconds),
+        Commands::VerificationTools { tool } => verification_tools::install(tool),
+        Commands::MutationRelocateCsharp => hygiene::relocate_csharp(),
+        Commands::ProofCheck => proof::check(),
+        Commands::Proof => proof::run(),
+        Commands::ProofVerify => proof::verify(),
         Commands::Version { channel, date } => version::run(&channel, date.as_deref()),
         Commands::Publish { skip_rust } => publish::run(skip_rust),
         Commands::PublishUiTest { skip_rust } => publish::run_ui_test(skip_rust),

@@ -1,25 +1,23 @@
 use std::ffi::{c_char, c_void};
 
 use fmf_contract::volume::encode_label;
-use fmf_core::engine::Engine;
+use fmf_runtime::engine::Engine;
 
 use crate::error::{guard, set_error, utf8_arg};
 use crate::handle::engine;
 use crate::{FMF_E_INVALID_ARG, FMF_E_IO, FMF_OK};
 
-// ── Volumes & indexing ──────────────────────────────────────────────────
-
-// The status POD radiates from the contract (ADR-0018).
 pub use fmf_contract::pod::FmfVolumeStatus;
 
-/// Enumerate the NTFS volumes available for indexing, writing up to `cap`
-/// entries into `buf` and the total count into `count`.
+/// Enumerate the NTFS volumes available for indexing, writing up to `cap` entries into `buf` and the total count into `count`.
 ///
 /// # Safety
 ///
-/// `count` must be aligned and writable as one `u32`. When `buf` is non-null,
-/// it must be aligned and writable for `cap` consecutive `FmfVolumeStatus`
-/// values. `count` is initialized to zero before handle validation. Those
+/// `count` must be aligned and writable as one `u32`.
+/// When `buf` is non-null,
+/// it must be aligned and writable for `cap` consecutive `FmfVolumeStatus` values.
+/// `count` is initialized to zero before handle validation.
+/// Those
 /// regions must not overlap and must remain valid for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_list_volumes(
@@ -64,14 +62,12 @@ pub unsafe extern "C" fn fmf_list_volumes(
     })
 }
 
-/// Begin indexing the `n` volume labels pointed to by `volumes` on the engine
-/// behind handle `h`.
+/// Begin indexing the `n` volume labels pointed to by `volumes` on the engine behind handle `h`.
 ///
 /// # Safety
 ///
-/// For nonzero `n`, `volumes` must address `n` readable, aligned C-string
-/// pointers. Every element must point to readable, NUL-terminated UTF-8 and
-/// the array and strings must remain immutable for this call.
+/// For nonzero `n`, `volumes` must address `n` readable, aligned C-string pointers.
+/// Every element must point to readable, NUL-terminated UTF-8 and the array and strings must remain immutable for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_index_start(
     h: *mut c_void,
@@ -115,14 +111,15 @@ pub unsafe extern "C" fn fmf_index_start(
     })
 }
 
-/// Report per-volume indexing status for the engine behind handle `h`, writing
-/// up to `cap` entries into `buf` and the total count into `count`.
+/// Report per-volume indexing status for the engine behind handle `h`, writing up to `cap` entries into `buf` and the total count into `count`.
 ///
 /// # Safety
 ///
-/// `count` must be aligned and writable as one `u32`. When `buf` is non-null,
-/// it must be aligned and writable for `cap` consecutive `FmfVolumeStatus`
-/// values. `count` is initialized to zero before handle validation. Those
+/// `count` must be aligned and writable as one `u32`.
+/// When `buf` is non-null,
+/// it must be aligned and writable for `cap` consecutive `FmfVolumeStatus` values.
+/// `count` is initialized to zero before handle validation.
+/// Those
 /// regions must not overlap and must remain valid for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_index_status(
@@ -153,7 +150,6 @@ pub unsafe extern "C" fn fmf_index_status(
         unsafe { *count = total };
         if !buf.is_null() {
             for (i, (label, phase, entries)) in status.iter().take(cap as usize).enumerate() {
-                // VolumeState is the contract enum (repr u32) — no mapping.
                 let state = *phase as u32;
                 unsafe {
                     *buf.add(i) = FmfVolumeStatus {

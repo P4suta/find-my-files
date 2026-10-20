@@ -1,12 +1,7 @@
-//! Executable tripwires for the repository invariants that AGENTS.md and the
-//! ADRs otherwise state only in prose.
+//! Executable tripwires for the repository invariants that AGENTS.md and the ADRs otherwise state only in prose.
 //!
-//! A rule with no gate is a rule that is already half-broken: every invariant
-//! below has a failure mode that is silent (an analyzer set that stops being
-//! injected, a toolchain that stops being owned by mise, a trait seam that
-//! quietly becomes a third port). These tests read the committed tree as text
-//! — the same structural style as the workflow guards beside them — so the
-//! prose and the repository cannot drift apart unnoticed.
+//! A rule with no gate is a rule that is already half-broken: every invariant below has a failure mode that is silent (an analyzer set that stops being injected, a toolchain that stops being owned by mise, a trait seam that quietly becomes a third port).
+//! These tests read the committed tree as text — the same structural style as the workflow guards beside them — so the prose and the repository cannot drift apart unnoticed.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -18,11 +13,11 @@ const FFI_MANIFEST: &str = include_str!("../../engine/crates/fmf-ffi/Cargo.toml"
 const CONTRACT_MANIFEST: &str = include_str!("../../engine/crates/fmf-contract/Cargo.toml");
 const NATIVE_ENGINE: &str = include_str!("../../app/FindMyFiles/Engine/NativeEngine.cs");
 const APP_CSPROJ: &str = include_str!("../../app/FindMyFiles/FindMyFiles.csproj");
-const QUERY_MOD: &str = include_str!("../../engine/crates/fmf-core/src/query/mod.rs");
+const QUERY_MOD: &str = include_str!("../../engine/crates/fmf-runtime/src/query/mod.rs");
 const JUSTFILE: &str = include_str!("../../justfile");
 const LEFTHOOK: &str = include_str!("../../lefthook.yml");
-const DEFERRED: &str = include_str!("../../engine/crates/fmf-core/src/scan/deferred.rs");
-const USN_SESSION: &str = include_str!("../../engine/crates/fmf-core/src/usn/session.rs");
+const DEFERRED: &str = include_str!("../../engine/crates/fmf-runtime/src/scan/deferred.rs");
+const USN_SESSION: &str = include_str!("../../engine/crates/fmf-runtime/src/usn/session.rs");
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -31,10 +26,8 @@ fn repo() -> PathBuf {
         .to_path_buf()
 }
 
-/// Walk the working tree the way `MSBuild`, rustup and the .NET SDK do — by
-/// directory scan, not through the git index — so an *untracked* stray file is
-/// caught as well. `build/` is the single generated-output tree (ADR-0021) and
-/// `.git/` is not source, so neither can hide or fake a violation.
+/// Walk the working tree the way `MSBuild`, rustup and the .NET SDK do — by directory scan, not through the git index — so an *untracked* stray file is caught as well.
+/// `build/` is the single generated-output tree (ADR-0021) and `.git/` is not source, so neither can hide or fake a violation.
 fn source_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];
@@ -58,10 +51,8 @@ fn source_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Repository-relative, forward-slashed paths of every file whose name matches
-/// one of `names`. The comparison is ASCII-case-insensitive because the tools
-/// that consume these files resolve them case-insensitively on Windows: a
-/// `directory.build.props` would be just as effective as the canonical spelling.
+/// Repository-relative, forward-slashed paths of every file whose name matches one of `names`.
+/// The comparison is ASCII-case-insensitive because the tools that consume these files resolve them case-insensitively on Windows: a `directory.build.props` would be just as effective as the canonical spelling.
 fn files_named(names: &[&str]) -> Vec<String> {
     let root = repo();
     let mut found: Vec<String> = source_files(&root)
@@ -103,12 +94,6 @@ fn has_meaningful_line(section: &str) -> bool {
 
 #[test]
 fn no_msbuild_directory_level_import_files_exist() {
-    // A repository-level Directory.Build.props/targets or Directory.Packages.props
-    // is implicitly imported by every project. The WinUI build script injects the
-    // analyzer set through its own import, and that injection is *silently* skipped
-    // once a directory-level file takes over — no error, no warning, only a
-    // shrinking static-analysis surface. Loud absence beats a quiet loss of
-    // coverage, so the files must simply never exist (AGENTS.md).
     let strays = files_named(&[
         "Directory.Build.props",
         "Directory.Build.targets",
@@ -123,10 +108,6 @@ fn no_msbuild_directory_level_import_files_exist() {
 
 #[test]
 fn toolchain_selection_belongs_to_mise_alone() {
-    // mise.toml is the single owner of the rust/dotnet pins (`just doctor` checks
-    // the installed versions against it, and the CI mirror parity check keeps the
-    // workflows in step). A rust-toolchain.toml or global.json would introduce a
-    // second, silently-winning owner for the same decision (AGENTS.md).
     let strays = files_named(&["rust-toolchain.toml", "rust-toolchain", "global.json"]);
 
     assert!(
@@ -137,42 +118,37 @@ fn toolchain_selection_belongs_to_mise_alone() {
 
 #[test]
 fn xtask_is_its_own_workspace_and_never_an_engine_member() {
-    // The daily loop and the CI gates run `cargo clippy/test --workspace` and
-    // `cargo llvm-cov --workspace --fail-under-lines 76` inside engine/. Making
-    // xtask a member would silently fold the build tooling into the engine's
-    // lint surface and coverage denominator (AGENTS.md, ADR-0021).
-    let members = toml_section(ENGINE_MANIFEST, "members = [")
-        .expect("engine workspace must declare its members inline");
-    for member in members.lines() {
+    let engine = ENGINE_MANIFEST
+        .parse::<toml_edit::DocumentMut>()
+        .expect("valid engine manifest");
+    let members = engine["workspace"]["members"]
+        .as_array()
+        .expect("engine workspace members");
+    for member in members {
+        let member = member.as_str().expect("workspace member path");
         assert!(
             !member.contains("xtask"),
             "engine workspace must not list xtask as a member: {member}"
         );
+        assert!(
+            !member.contains(".."),
+            "engine workspace members must stay inside engine/: {member}"
+        );
     }
+    let xtask = XTASK_MANIFEST
+        .parse::<toml_edit::DocumentMut>()
+        .expect("valid xtask manifest");
+    let workspace = xtask["workspace"]
+        .as_table()
+        .expect("standalone xtask workspace");
     assert!(
-        !members.contains(".."),
-        "engine workspace members must stay inside engine/: {members}"
-    );
-
-    assert!(
-        XTASK_MANIFEST
-            .lines()
-            .any(|line| line.trim() == "[workspace]"),
-        "xtask must declare its own [workspace] table so cargo cannot attach it to engine/"
-    );
-    assert!(
-        toml_section(XTASK_MANIFEST, "\n[workspace]")
-            .is_some_and(|section| !section.contains("members")),
+        !workspace.contains_key("members"),
         "xtask is a single-crate workspace; it must not grow a members list"
     );
 }
 
 #[test]
 fn the_shipped_engine_dll_has_one_name_in_all_three_places() {
-    // Rust names the cdylib, C# resolves it by that name at the first P/Invoke,
-    // and the csproj copies that exact file into the output. A rename in one
-    // place alone produces no build error at all — only a DllNotFoundException /
-    // EntryPointNotFoundException at runtime, far from the edit (AGENTS.md).
     let library = toml_section(FFI_MANIFEST, "\n[lib]").expect("fmf-ffi must declare [lib]");
     let name = library
         .lines()
@@ -206,10 +182,6 @@ fn the_shipped_engine_dll_has_one_name_in_all_three_places() {
 
 #[test]
 fn the_contract_crate_stays_a_dependency_free_leaf() {
-    // fmf-contract is the machine-readable single source (ADR-0018). Every other
-    // engine crate — including the cdylib — depends on it, so any dependency
-    // added here becomes a dependency of the whole graph and of the golden-byte
-    // drift tests, which assume nothing beyond std.
     let dependencies = toml_section(CONTRACT_MANIFEST, "\n[dependencies]")
         .expect("fmf-contract must keep an explicit, empty [dependencies] table");
     assert!(
@@ -217,9 +189,6 @@ fn the_contract_crate_stays_a_dependency_free_leaf() {
         "fmf-contract must stay dependency-free, found: {dependencies}"
     );
 
-    // dev-dependencies would be just as disqualifying in practice: the drift and
-    // golden tests are the contract's own proof, so they must not need anything
-    // that the crate's consumers do not already have.
     for table in ["[dev-dependencies]", "[build-dependencies]", "[target."] {
         assert!(
             !CONTRACT_MANIFEST.contains(table),
@@ -228,26 +197,15 @@ fn the_contract_crate_stays_a_dependency_free_leaf() {
     }
 }
 
-// The complete, reviewed inventory of `pub trait` declarations in fmf-core.
 const EXPECTED_CORE_PUB_TRAITS: &[(&str, &str)] = &[
-    // ADR-0018's hard cap: the engine's only two OS-effect seams. They exist so
-    // the volume worker's privileged failure paths replay in unprivileged tests.
     ("src/engine/seams.rs", "JournalSource"),
     ("src/engine/seams.rs", "SnapshotStore"),
-    // Not a port, and not part of the cap: `query::dates` is declared
-    // `pub(crate) mod` (asserted below), so `DateResolver` is unreachable from
-    // outside the crate despite the `pub` keyword — it cannot be implemented by
-    // another layer and therefore cannot become a boundary. It abstracts a pure
-    // civil-date -> FILETIME conversion (UTC for deterministic tests, the
-    // Windows time-zone rules in production): no I/O, no privilege boundary,
-    // nothing to fake in a replay test. Promoting `dates` to a public module
-    // fails the companion assertion rather than silently adding a third seam.
     ("src/query/dates.rs", "DateResolver"),
 ];
 
 #[test]
-fn fmf_core_exposes_exactly_the_two_capped_trait_seams() {
-    let core = repo().join("engine").join("crates").join("fmf-core");
+fn fmf_runtime_exposes_exactly_the_two_capped_trait_seams() {
+    let core = repo().join("engine").join("crates").join("fmf-runtime");
     let mut actual = BTreeSet::new();
     for path in source_files(&core) {
         if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
@@ -255,7 +213,7 @@ fn fmf_core_exposes_exactly_the_two_capped_trait_seams() {
         }
         let relative = path
             .strip_prefix(&core)
-            .expect("walked path is under fmf-core")
+            .expect("walked path is under fmf-runtime")
             .display()
             .to_string()
             .replace('\\', "/");
@@ -281,7 +239,7 @@ fn fmf_core_exposes_exactly_the_two_capped_trait_seams() {
         .collect();
     assert_eq!(
         actual, expected,
-        "fmf-core's trait seams are capped at SnapshotStore + JournalSource (ADR-0018); \
+        "fmf-runtime's trait seams are capped at SnapshotStore + JournalSource (ADR-0018); \
          a new port needs an ADR, not a new trait"
     );
     assert!(
@@ -290,9 +248,6 @@ fn fmf_core_exposes_exactly_the_two_capped_trait_seams() {
     );
 }
 
-// PowerShell vocabulary that only works under one interpreter. `pwsh -File
-// <script>.ps1` is deliberately absent: invoking a program by path behaves
-// identically under sh and PowerShell, so it is not shell-specific *syntax*.
 const POWERSHELL_ONLY_TOKENS: &[&str] = &[
     "powershell.exe",
     "$env:",
@@ -316,8 +271,6 @@ const POWERSHELL_ONLY_TOKENS: &[&str] = &[
     "-ErrorAction",
 ];
 
-// POSIX-shell vocabulary. `&&` has its own rationale in AGENTS.md: sequencing
-// belongs in the recipe's own lines or in separate jobs, not in shell operators.
 const POSIX_ONLY_TOKENS: &[&str] = &[
     "/dev/null",
     "export ",
@@ -329,10 +282,9 @@ const POSIX_ONLY_TOKENS: &[&str] = &[
     "2>/dev",
 ];
 
-/// Lines that a shell actually executes: prose comments and the `windows-shell`
-/// declaration are excluded. The declaration names the *launching interpreter*,
-/// which is an implementation detail of `just` on Windows — the rule is about
-/// the definitions themselves, so excluding it is part of the rule, not a hole.
+/// Lines that a shell actually executes: prose comments and the `windows-shell` declaration are excluded.
+/// The declaration names the *launching interpreter*,
+/// which is an implementation detail of `just` on Windows — the rule is about the definitions themselves, so excluding it is part of the rule, not a hole.
 fn executable_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
     source
         .lines()
@@ -348,9 +300,6 @@ fn executable_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
 
 #[test]
 fn task_definitions_never_depend_on_one_shell() {
-    // The machine runs PowerShell as primary and Git Bash for POSIX work. A
-    // recipe or hook whose *correctness* depends on which one launched it is a
-    // latent break for the other lane and for CI (AGENTS.md).
     for (name, source) in [("justfile", JUSTFILE), ("lefthook.yml", LEFTHOOK)] {
         for (number, line) in executable_lines(source) {
             for token in POWERSHELL_ONLY_TOKENS.iter().chain(POSIX_ONLY_TOKENS) {
@@ -365,16 +314,6 @@ fn task_definitions_never_depend_on_one_shell() {
 
 #[test]
 fn raw_volume_streams_are_read_through_the_sector_aligned_adapter() {
-    // A Windows volume handle refuses any read whose offset or length is not a
-    // multiple of the logical sector size, with ERROR_INVALID_PARAMETER, before
-    // the device is touched. `$MFT` record reads satisfy that by construction;
-    // `visit_list_stream` does not, because it walks a non-resident
-    // `$ATTRIBUTE_LIST` entry by entry and an entry header is 26 bytes.
-    //
-    // Passing the handle straight in therefore fails 100% of the time on real
-    // NTFS while every `Cursor`-based test passes, which is exactly how it
-    // reached a released branch: a real C: could not be indexed at all. The
-    // adapter is easy to forget on a new call site, so require it here.
     for (name, source) in [
         ("scan/deferred.rs", DEFERRED),
         ("usn/session.rs", USN_SESSION),

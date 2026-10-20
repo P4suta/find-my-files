@@ -77,7 +77,7 @@ fn fuzz_surfaces(path: &str) -> BTreeSet<String> {
 #[test]
 fn unrelated_changes_never_start_a_parser_campaign() {
     for path in [
-        "engine/crates/fmf-core/src/engine/worker.rs",
+        "engine/crates/fmf-runtime/src/engine/worker.rs",
         "engine/crates/fmf-service/src/security.rs",
         "app/FindMyFiles/MainWindow.xaml.cs",
         "docs/SECURITY.md",
@@ -90,8 +90,11 @@ fn unrelated_changes_never_start_a_parser_campaign() {
 fn parser_changes_select_their_surface_and_shared_inputs_select_all() {
     for (path, expected) in [
         ("engine/crates/fmf-proto/src/frame.rs", "fuzz_wire"),
-        ("engine/crates/fmf-core/src/query/parse.rs", "fuzz_core"),
-        ("engine/crates/fmf-core/src/index/snapshot.rs", "fuzz_core"),
+        ("engine/crates/fmf-runtime/src/query/parse.rs", "fuzz_core"),
+        (
+            "engine/crates/fmf-runtime/src/index/snapshot.rs",
+            "fuzz_core",
+        ),
         ("engine/crates/fmf-core/src/wtf8.rs", "fuzz_core"),
         ("engine/crates/fmf-core/src/usn/records.rs", "fuzz_usn"),
         ("engine/crates/fmf-core/src/ondisk/ntfs.rs", "fuzz_ntfs"),
@@ -105,6 +108,13 @@ fn parser_changes_select_their_surface_and_shared_inputs_select_all() {
         "engine/crates/fmf-core/Cargo.toml",
         "engine/crates/fmf-contract/src/lib.rs",
         "engine/fuzz/fuzz_targets/frame_decode.rs",
+        "xtask/src/strict_json.rs",
+        "xtask/src/interpreter.rs",
+        "xtask/src/paths.rs",
+        "xtask/src/cmd.rs",
+        "xtask/src/main.rs",
+        "xtask/Cargo.toml",
+        "xtask/Cargo.lock",
         ".github/actions/fuzz-target/action.yml",
         ".github/actions/rust-toolchain/action.yml",
         ".github/workflows/ci.yml",
@@ -143,6 +153,18 @@ fn fuzz_uses_one_runner_and_never_duplicates_a_main_push() {
         FUZZ.contains("'10' || '60'"),
         "bounded PR and weekly budgets"
     );
+    let lock_check = fuzz["jobs"]["fuzz"]["steps"]
+        .as_vec()
+        .expect("fuzz steps")
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Verify committed fuzz dependency graph"))
+        .expect("locked graph check");
+    let command = lock_check["run"].as_str().expect("lock check command");
+    assert!(command.contains("cargo metadata --locked"));
+    assert!(
+        !command.contains("--no-deps"),
+        "resolve transitive dependencies before fuzzing"
+    );
 }
 
 #[test]
@@ -163,6 +185,36 @@ fn every_fuzz_binary_runs_once_through_the_shared_action() {
         .map(|bin| bin["name"].as_str().expect("target name"))
         .collect();
     assert_eq!(targets.iter().copied().collect::<BTreeSet<_>>(), expected);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repository");
+    for name in &expected {
+        let corpus = root.join("engine/fuzz/corpus").join(name);
+        assert!(
+            std::fs::read_dir(&corpus)
+                .expect("committed corpus directory")
+                .any(|entry| {
+                    let entry = entry.expect("corpus entry");
+                    entry.file_type().expect("corpus type").is_file()
+                        && entry.metadata().expect("corpus metadata").len() > 0
+                }),
+            "missing saved input for {name}"
+        );
+    }
+    let action = yaml(include_str!("../../.github/actions/fuzz-target/action.yml"));
+    let runs: Vec<&str> = action["runs"]["steps"]
+        .as_vec()
+        .expect("fuzz steps")
+        .iter()
+        .filter_map(|step| step["run"].as_str())
+        .collect();
+    assert!(
+        runs.iter()
+            .any(|run| run.contains("--manifest-path xtask/Cargo.toml")
+                && run.contains("fuzz \"$FUZZ_TARGET\" \"$FUZZ_SECONDS\"")),
+        "use the shared runner for replay and bounded exploration"
+    );
+    assert!(runs.iter().all(|run| !run.contains("cargo fuzz")));
     assert_eq!(
         targets.len(),
         expected.len(),
@@ -188,7 +240,7 @@ fn automatic_admin_runs_are_weekly_and_benchmarks_only_smoke() {
         Some("17 17 * * 1")
     );
     assert!(!admin["on"]["workflow_dispatch"].is_badvalue());
-    assert!(CI.contains("cargo bench --locked -p fmf-core --features testutil -- --test"));
+    assert!(CI.contains("cargo bench --locked -p fmf-runtime --features testutil -- --test"));
 }
 
 #[test]

@@ -66,13 +66,13 @@ public sealed class ServiceSetupTests
 
     [Theory]
     [InlineData(1u, true)]
-    [InlineData(2u, false)] // START_PENDING
-    [InlineData(3u, false)] // STOP_PENDING
+    [InlineData(2u, false)]
+    [InlineData(3u, false)]
     [InlineData(4u, false)]
-    [InlineData(5u, false)] // CONTINUE_PENDING
-    [InlineData(6u, false)] // PAUSE_PENDING
-    [InlineData(7u, false)] // PAUSED
-    [InlineData(0u, false)] // malformed: fail closed
+    [InlineData(5u, false)]
+    [InlineData(6u, false)]
+    [InlineData(7u, false)]
+    [InlineData(0u, false)]
     public void MapServiceState_only_treats_SERVICE_STOPPED_as_stopped(
         uint raw,
         bool expectedStopped) =>
@@ -112,7 +112,7 @@ public sealed class ServiceSetupTests
             () =>
             {
                 starts++;
-                return 1056; // ERROR_SERVICE_ALREADY_RUNNING
+                return 1056;
             },
             () => throw new InvalidOperationException(),
             maxPollAttempts: 3,
@@ -135,7 +135,7 @@ public sealed class ServiceSetupTests
             () =>
             {
                 stops++;
-                return 1062; // ERROR_SERVICE_NOT_ACTIVE
+                return 1062;
             },
             maxPollAttempts: 3,
             () => { });
@@ -184,7 +184,7 @@ public sealed class ServiceSetupTests
             () =>
             {
                 queries++;
-                return 2; // SERVICE_START_PENDING forever
+                return 2;
             },
             () => throw new InvalidOperationException(),
             () => throw new InvalidOperationException(),
@@ -202,7 +202,7 @@ public sealed class ServiceSetupTests
         Assert.False(ServiceSetup.DriveServiceControl(
             ServiceSetup.ScmControlVerb.Start,
             () => 1,
-            () => 5, // ERROR_ACCESS_DENIED
+            () => 5,
             () => 0,
             maxPollAttempts: 2,
             () => { }));
@@ -312,14 +312,12 @@ public sealed class ServiceSetupTests
             Directory.CreateDirectory(baseDir);
             Assert.Null(ServiceSetup.LocateServiceExe(baseDir));
 
-            // Dev tree: build\engine\release above the bin dir.
             var dev = Path.Combine(root.FullName, "build", "engine", "release");
             Directory.CreateDirectory(dev);
             var devExe = Path.Combine(dev, "fmf-service.exe");
             File.WriteAllText(devExe, string.Empty);
             Assert.Equal(devExe, ServiceSetup.LocateServiceExe(baseDir));
 
-            // The dist bundle wins over the dev tree.
             var bundled = Path.Combine(baseDir, "fmf-service.exe");
             File.WriteAllText(bundled, string.Empty);
             Assert.Equal(bundled, ServiceSetup.LocateServiceExe(baseDir));
@@ -332,7 +330,7 @@ public sealed class ServiceSetupTests
 
     [Theory]
     [InlineData("S-1-5-21-1654600493-3733564142-2704359447-1001", true)]
-    [InlineData("S-1-5-18", true)] // well-formed (validate_user_sid rejects it server-side)
+    [InlineData("S-1-5-18", true)]
     [InlineData(null, false)]
     [InlineData("", false)]
     [InlineData("not-a-sid", false)]
@@ -341,10 +339,10 @@ public sealed class ServiceSetupTests
     [InlineData("S-2-5-18", false)]
     [InlineData("S-1-281474976710656-18", false)]
     [InlineData("S-1-5-4294967296", false)]
-    [InlineData("S-1-5-21-1; rm -rf", false)] // ; and space — injection attempt
-    [InlineData("S-1-5-21-1 --owner-sid=evil", false)] // space would split into args
-    [InlineData("S-1-5-21-１", false)] // full-width digit is not ASCII
-    [InlineData("S-1-5-+1", false)] // uint accepts a sign; canonical SID syntax does not
+    [InlineData("S-1-5-21-1; rm -rf", false)]
+    [InlineData("S-1-5-21-1 --owner-sid=evil", false)]
+    [InlineData("S-1-5-21-１", false)]
+    [InlineData("S-1-5-+1", false)]
     public void IsValidSid_AcceptsWellFormed_RejectsInjection(string? input, bool expected)
     {
         Assert.Equal(expected, ServiceSetup.IsValidSid(input));
@@ -394,7 +392,7 @@ public sealed class ServiceSetupTests
             () => waits++);
 
         Assert.True(compatible);
-        Assert.Equal(3, waits); // two START_PENDING polls + one probe grace
+        Assert.Equal(3, waits);
         Assert.Empty(pids);
         Assert.Empty(probes);
     }

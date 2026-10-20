@@ -1,10 +1,8 @@
-//! Map a command failure to a process exit code drawn from the shared
-//! `fmf_contract::codes` table, and render the error to stderr.
+//! Map a command failure to a process exit code drawn from the shared `fmf_contract::codes` table, and render the error to stderr.
 //!
-//! The CLI consumes fmf-core directly, so it sees the same typed errors the
-//! FFI/pipe boundary classifies into `FMF_E_*` codes (fmf-ffi `handle.rs`,
-//! `results.rs`). We mirror that classification here so a script can branch on
-//! `$LASTEXITCODE` the same way a pipe client branches on a frame status.
+//! The CLI consumes fmf-core directly, so it sees the same typed errors the FFI/pipe boundary classifies into `FMF_E_*` codes (fmf-ffi `handle.rs`,
+//! `results.rs`).
+//! We mirror that classification here so a script can branch on `$LASTEXITCODE` the same way a pipe client branches on a frame status.
 //! Numbers are never redefined — they come from `fmf_contract::codes`.
 
 use std::error::Error;
@@ -12,26 +10,23 @@ use std::io::Write;
 
 use anstream::{AutoStream, ColorChoice};
 use fmf_contract::codes;
-use fmf_core::engine::{EngineCreateError, EngineError};
-use fmf_core::mft::MftError;
-use fmf_core::query::{CompileError, ParseError};
-use fmf_core::usn::UsnError;
+use fmf_runtime::engine::{EngineCreateError, EngineError};
+use fmf_runtime::mft::MftError;
+use fmf_runtime::query::{CompileError, ParseError};
+use fmf_runtime::usn::UsnError;
 use serde::Serialize;
 
 use super::ctx::Format;
 use super::json::FORMAT_VERSION;
 
-/// Win32 `ERROR_ACCESS_DENIED` — a raw-volume open that fails this way means
-/// the terminal is not elevated, not that the volume is unreadable.
+/// Win32 `ERROR_ACCESS_DENIED` — a raw-volume open that fails this way means the terminal is not elevated, not that the volume is unreadable.
 const ERROR_ACCESS_DENIED: u32 = 5;
 
-/// Conventional generic-failure exit code for errors the CLI cannot classify
-/// (matches the Unix "general error" convention; distinct from clap's usage
-/// exit code of 2, which clap sets before dispatch ever runs).
+/// Conventional generic-failure exit code for errors the CLI cannot classify (matches the Unix "general error" convention; distinct from clap's usage exit code of 2, which clap sets before dispatch ever runs).
 pub const GENERIC_FAILURE: i32 = 1;
 
-/// The `FMF_E_*` status code for `err`, or `None` when it is not a recognised
-/// engine error. The mapping matches the FFI boundary verbatim.
+/// The `FMF_E_*` status code for `err`, or `None` when it is not a recognised engine error.
+/// The mapping matches the FFI boundary verbatim.
 #[must_use]
 pub fn classify(err: &(dyn Error + 'static)) -> Option<i32> {
     if let Some(e) = err.downcast_ref::<MftError>() {
@@ -80,8 +75,7 @@ pub fn status_code(err: &(dyn Error + 'static)) -> i32 {
     classify(err).unwrap_or(GENERIC_FAILURE)
 }
 
-/// The symbolic `FMF_E_*` name for a status code, for human labels and the
-/// machine-readable error payload.
+/// The symbolic `FMF_E_*` name for a status code, for human labels and the machine-readable error payload.
 #[must_use]
 pub const fn code_name(code: i32) -> &'static str {
     match code {
@@ -118,9 +112,8 @@ struct ErrorBody<'a> {
 
 /// Report `err` to stderr and return the process exit code.
 ///
-/// Text mode prints a `error[CODE]:` label (red when the stream takes colour)
-/// and the cause chain; JSON mode emits an [`ErrorEnvelope`] so a script can
-/// parse the failure. A classified error carries its `FMF_E_*` code.
+/// Text mode prints a `error[CODE]:` label (red when the stream takes colour) and the cause chain; JSON mode emits an [`ErrorEnvelope`] so a script can parse the failure.
+/// A classified error carries its `FMF_E_*` code.
 #[must_use]
 pub fn report(err: &(dyn Error + 'static), color: ColorChoice, format: Format) -> i32 {
     let code = status_code(err);
@@ -141,7 +134,6 @@ pub fn report(err: &(dyn Error + 'static), color: ColorChoice, format: Format) -
                 causes,
             },
         };
-        // Errors are JSON-only data: no colour, straight to stderr.
         if let Ok(line) = serde_json::to_string(&envelope) {
             eprintln!("{line}");
         }
@@ -153,14 +145,19 @@ pub fn report(err: &(dyn Error + 'static), color: ColorChoice, format: Format) -
         Some(c) => format!("error[{}]", code_name(c)),
         None => "error".to_owned(),
     };
-    // anstream strips these escapes when the stream is not taking colour.
-    let _ = writeln!(
+    if writeln!(
         stderr,
         "{}: {err}",
         super::term::paint(super::term::ERROR, &label)
-    );
+    )
+    .is_err()
+    {
+        return code;
+    }
     for cause in causes {
-        let _ = writeln!(stderr, "  caused by: {cause}");
+        if writeln!(stderr, "  caused by: {cause}").is_err() {
+            break;
+        }
     }
     code
 }
@@ -199,8 +196,7 @@ mod tests {
 
     #[test]
     fn parse_errors_are_query_syntax() {
-        // `"` opens a quote that never closes — a guaranteed ParseError.
-        let err = fmf_core::query::parse("\"").unwrap_err();
+        let err = fmf_runtime::query::parse("\"").unwrap_err();
         assert_eq!(status_code(boxed(err).as_ref()), codes::QUERY_SYNTAX);
     }
 

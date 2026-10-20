@@ -1,10 +1,6 @@
-//! Overlapped named-pipe I/O behind blocking `Read`/`Write` so the frame
-//! codec (fmf-proto) works unchanged.
+//! Overlapped named-pipe I/O behind blocking `Read`/`Write` so the frame codec (fmf-proto) works unchanged.
 //!
-//! The pipe is created OVERLAPPED solely so the accept loop can wait on
-//! (connect, stop) at once; data I/O issues an overlapped op and immediately
-//! waits on its per-call event — blocking semantics, cancel-safe via
-//! `CloseHandle` (pending ops fail, threads exit).
+//! The pipe is created OVERLAPPED solely so the accept loop can wait on (connect, stop) at once; data I/O issues an overlapped op and immediately waits on its per-call event — blocking semantics, cancel-safe via `CloseHandle` (pending ops fail, threads exit).
 
 use std::io::{self, Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
@@ -55,16 +51,12 @@ impl Event {
         }))
     }
 
-    /// Signals the event, waking any thread waiting on it (used to break a
-    /// quiet accept loop on SCM stop / Ctrl+C).
+    /// Signals the event, waking any thread waiting on it (used to break a quiet accept loop on SCM stop / Ctrl+C).
     pub fn set(&self) {
         unsafe { SetEvent(self.0.as_raw_handle() as HANDLE) };
     }
 
-    /// Clears the signaled state before reusing the event for a new overlapped
-    /// op: a synchronous completion leaves an auto-reset event signaled (the
-    /// wait that would have reset it never happened), so a reused event must be
-    /// reset or the next wait returns prematurely.
+    /// Clears the signaled state before reusing the event for a new overlapped op: a synchronous completion leaves an auto-reset event signaled (the wait that would have reset it never happened), so a reused event must be reset or the next wait returns prematurely.
     fn reset(&self) {
         unsafe { ResetEvent(self.0.as_raw_handle() as HANDLE) };
     }
@@ -74,18 +66,14 @@ impl Event {
     }
 }
 
-/// One duplex pipe endpoint. Cloning shares the OS handle; reads and writes
-/// may run on different threads (independent OVERLAPPED + events).
+/// One duplex pipe endpoint.
+/// Cloning shares the OS handle; reads and writes may run on different threads (independent OVERLAPPED + events).
 pub struct PipeStream {
     handle: Arc<OwnedHandle>,
-    /// This clone's own auto-reset event for overlapped I/O, created on first
-    /// use. Reused across every read/write on this clone instead of a fresh
-    /// `CreateEventW`/`CloseHandle` pair per op. Created lazily because `Clone`
-    /// is infallible and `CreateEventW` is not; each clone gets a *separate*
-    /// event (reads and writes run on different threads and must not share one
-    /// — they would cross each other's waits). `OnceLock` keeps the type
-    /// `Send + Sync` and the per-clone access is single-role (a reader owns its
-    /// clone; writes are serialized under a `Mutex`, server.rs).
+    /// This clone's own auto-reset event for overlapped I/O, created on first use.
+    /// Reused across every read/write on this clone instead of a fresh `CreateEventW`/`CloseHandle` pair per op.
+    /// Created lazily because `Clone` is infallible and `CreateEventW` is not; each clone gets a *separate* event (reads and writes run on different threads and must not share one — they would cross each other's waits).
+    /// `OnceLock` keeps the type `Send + Sync` and the per-clone access is single-role (a reader owns its clone; writes are serialized under a `Mutex`, server.rs).
     io_event: OnceLock<Event>,
 }
 
@@ -93,7 +81,6 @@ impl Clone for PipeStream {
     fn clone(&self) -> Self {
         Self {
             handle: Arc::clone(&self.handle),
-            // A fresh, independent event for the clone — NOT a shared one.
             io_event: OnceLock::new(),
         }
     }
@@ -109,26 +96,15 @@ impl PipeStream {
         if let Some(ev) = self.io_event.get() {
             return Ok(ev);
         }
-        // First I/O on this clone: create the event. `set` only fails if a
-        // concurrent caller won the race (there is none in practice — single
-        // role per clone), in which case `get_or_init` returns the winner and
-        // our `created` drops; no fallible closure or `unwrap` needed.
         let created = Event::new()?;
         Ok(self.io_event.get_or_init(|| created))
     }
 
-    /// Client side: opens an existing pipe (blocking I/O is fine here, but
-    /// we open OVERLAPPED for symmetry with the I/O helpers).
+    /// Client side: opens an existing pipe (blocking I/O is fine here, but we open OVERLAPPED for symmetry with the I/O helpers).
     ///
     /// # Errors
-    /// Returns the OS error if `CreateFileW` fails (e.g. the pipe does not
-    /// exist or the caller is not authorized).
+    /// Returns the OS error if `CreateFileW` fails (e.g. the pipe does not exist or the caller is not authorized).
     pub fn connect(path: &str) -> io::Result<Self> {
-        // SQOS with Identification level is mandatory: the server's
-        // verify_client ImpersonateNamedPipeClient's the connection to read
-        // the caller's SID against authorized_sids. Without SECURITY_SQOS_PRESENT
-        // the client defaults to SecurityAnonymous and the server gets an
-        // anonymous token → rejected (ERROR_PIPE_NOT_CONNECTED at the client).
         const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
         const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
         let h = unsafe {
@@ -151,8 +127,7 @@ impl PipeStream {
         })
     }
 
-    /// Server side: force-disconnects the client without closing our handle
-    /// (no double-close risk across clones); pending reads complete broken.
+    /// Server side: force-disconnects the client without closing our handle (no double-close risk across clones); pending reads complete broken.
     pub fn disconnect(&self) {
         unsafe { DisconnectNamedPipe(self.raw()) };
     }
@@ -163,8 +138,6 @@ impl PipeStream {
         start: impl FnOnce(*mut OVERLAPPED) -> i32,
     ) -> io::Result<usize> {
         let ev = self.io_event()?;
-        // Reused event: clear any leftover signal from a prior synchronous
-        // completion before issuing the next op (see Event::reset).
         ev.reset();
         let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
         ov.hEvent = ev.raw();
@@ -227,14 +200,13 @@ impl Write for PipeStream {
     }
 }
 
-/// Listener for one pipe name: creates instances, accepts with a 2-wait on
-/// (connect, stop) so SCM stop / Ctrl+C interrupts a quiet accept.
+/// Listener for one pipe name: creates instances, accepts with a 2-wait on (connect, stop) so SCM stop / Ctrl+C interrupts a quiet accept.
 pub struct PipeListener {
     path_w: Vec<u16>,
     instances: u32,
     first_created: bool,
-    /// Explicit descriptor (`security::PipeSecurity`). None = process default
-    /// (console/test mode only — the installed service always sets one).
+    /// Explicit descriptor (`security::PipeSecurity`).
+    /// None = process default (console/test mode only — the installed service always sets one).
     security: Option<crate::security::PipeSecurity>,
 }
 
@@ -264,9 +236,7 @@ impl RemoteClients {
 }
 
 impl PipeListener {
-    /// Creates a listener for `path` allowing up to `instances` concurrent
-    /// pipe instances; `security` is the explicit descriptor (None = process
-    /// default, console/test only — the installed service always sets one).
+    /// Creates a listener for `path` allowing up to `instances` concurrent pipe instances; `security` is the explicit descriptor (None = process default, console/test only — the installed service always sets one).
     #[must_use]
     pub fn new(
         path: &str,
@@ -281,14 +251,12 @@ impl PipeListener {
         }
     }
 
-    /// Creates the next server instance and waits for a client or the stop
-    /// event. The first instance carries `FILE_FLAG_FIRST_PIPE_INSTANCE` —
-    /// and only the first (a second flagged instance would fail against our
-    /// own; docs/SECURITY.md threat 4).
+    /// Creates the next server instance and waits for a client or the stop event.
+    /// The first instance carries `FILE_FLAG_FIRST_PIPE_INSTANCE` —
+    /// and only the first (a second flagged instance would fail against our own; docs/SECURITY.md threat 4).
     ///
     /// # Errors
-    /// Returns the OS error if `CreateNamedPipeW`, the stop-event creation, or
-    /// the connect wait fails.
+    /// Returns the OS error if `CreateNamedPipeW`, the stop-event creation, or the connect wait fails.
     pub fn accept(&mut self, stop: &Event, on_listening: impl FnOnce()) -> io::Result<Accepted> {
         self.accept_with_remote_policy(stop, on_listening, RemoteClients::Reject)
     }
@@ -354,11 +322,10 @@ impl PipeListener {
                 err => return Err(io::Error::from_raw_os_error(err as i32)),
             }
             let handles = [ev.raw(), stop.raw()];
-            let waited = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
+            let waited = unsafe {
+                WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE)
+            };
             if waited != WAIT_OBJECT_0 {
-                // Stop (or wait failure). Close the instance to cancel the
-                // pending connect, then wait for the kernel to finish with
-                // the stack-held OVERLAPPED before it goes out of scope.
                 drop(stream);
                 unsafe { WaitForSingleObject(ev.raw(), INFINITE) };
                 return Ok(Accepted::Stopped);
@@ -375,9 +342,6 @@ impl PipeListener {
     }
 }
 
-// `pub(crate)` only so the elevated data-root tests in `security` can reuse the
-// ephemeral-account and impersonation fixtures rather than growing a second,
-// separately-audited copy of "create a real standard user".
 #[cfg(test)]
 pub(crate) mod admin_security_tests {
     use std::io::{self, Write as _};
@@ -498,9 +462,6 @@ pub(crate) mod admin_security_tests {
     impl TemporaryLocalUser {
         pub fn create() -> Self {
             for _ in 0..8 {
-                // Twenty characters keeps compatibility with every supported
-                // local-account API while PID + CSPRNG prevents collisions
-                // across parallel/retried test processes.
                 let name = format!(
                     "fmft{:08x}{}",
                     std::process::id(),
@@ -779,9 +740,6 @@ pub(crate) mod admin_security_tests {
             "the adversarial connection must carry a genuinely different TokenUser SID"
         );
 
-        // Layer 1: production SDDL denies the real second user at CreateFile,
-        // while the ordinary authorized token reaches the very same pending
-        // instance and passes the independent server-side SID check.
         let (dacl_local, _) = unique_pipe_paths("dacl");
         let production_sddl = pipe_sddl(std::slice::from_ref(&current_sid));
         let dacl_accept = PendingAccept::start(
@@ -808,10 +766,6 @@ pub(crate) mod admin_security_tests {
         );
         drop(authorized_client);
 
-        // Layer 4 independently holds if layer 1 is accidentally widened:
-        // Everyone may reach this test-only pipe at the kernel, but the real
-        // client TokenUser SID is still rejected by verify_client and the
-        // server disconnects it.
         let (token_local, _) = unique_pipe_paths("token");
         let deliberately_wide_sddl = "D:P(A;;GA;;;SY)(A;;GRGW;;;WD)";
         let token_accept = PendingAccept::start(
@@ -833,11 +787,6 @@ pub(crate) mod admin_security_tests {
         );
         drop(unauthorized_client);
 
-        // Layer 2 is behavioral, not a constant/SDDL assertion. First prove
-        // this host can traverse the remote named-pipe transport with the
-        // accept control. Only then test the production reject mode under the
-        // same identity, DACL, host, and API path. A broken SMB/control
-        // environment is a hard failure, never a skip.
         let (remote_control_local, remote_control_unc) = unique_pipe_paths("remote-control");
         let remote_control = PendingAccept::start(
             &remote_control_local,

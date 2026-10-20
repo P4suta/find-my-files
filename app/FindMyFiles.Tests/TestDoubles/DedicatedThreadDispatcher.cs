@@ -3,15 +3,10 @@ using FindMyFiles.Services;
 
 namespace FindMyFiles.Tests.TestDoubles;
 
-/// <summary>
-/// An <see cref="IDispatcher"/> backed by a REAL dedicated thread with its own
-/// <see cref="SynchronizationContext"/> and message pump — the counterpart to
-/// <see cref="ManualDispatcher"/> for tests that must observe thread identity.
-/// Unlike ManualDispatcher (whose <c>HasThreadAccess</c> is always true), this
-/// reports access only on its pump thread, so a continuation that resumes off
-/// the UI thread — a stray <c>ConfigureAwait(false)</c> on a UI-affine path —
-/// is detectable. That is the bug class that ships RPC_E_WRONG_THREAD crashes
-/// (the orphaned-window setup bug), which ManualDispatcher structurally can't see.
+/// <summary> An <see cref="IDispatcher"/> backed by a REAL dedicated thread with its own <see cref="SynchronizationContext"/> and message pump — the counterpart to <see cref="ManualDispatcher"/> for tests that must observe thread identity.
+/// Unlike ManualDispatcher (whose <c>HasThreadAccess</c> is always true), this reports access only on its pump thread, so a continuation that resumes off the UI thread — a stray <c>ConfigureAwait(false)</c> on a UI-affine path —
+/// is detectable.
+/// That is the bug class that ships RPC_E_WRONG_THREAD crashes (the orphaned-window setup bug), which ManualDispatcher structurally can't see.
 /// </summary>
 internal sealed class DedicatedThreadDispatcher : IDispatcher, IDisposable
 {
@@ -35,8 +30,7 @@ internal sealed class DedicatedThreadDispatcher : IDispatcher, IDisposable
     /// <summary>Managed id of the pump thread — the "UI thread" for tests.</summary>
     public int ThreadId { get; }
 
-    /// <summary>First unhandled exception from a posted action, if any (posted
-    /// continuations normally route their own failures elsewhere).</summary>
+    /// <summary>First unhandled exception from a posted action, if any (posted continuations normally route their own failures elsewhere).</summary>
     public Exception? LastError { get; private set; }
 
     public bool HasThreadAccess => Environment.CurrentManagedThreadId == ThreadId;
@@ -55,17 +49,14 @@ internal sealed class DedicatedThreadDispatcher : IDispatcher, IDisposable
         }
         catch (InvalidOperationException)
         {
-            return false; // CompleteAdding raced with us
+            return false;
         }
     }
 
     public IDispatcherTimer CreateOneShotTimer(TimeSpan interval, Action tick) =>
         new PumpTimer(this, interval, tick);
 
-    /// <summary>Run <paramref name="work"/> on the pump thread (so its awaits
-    /// capture this dispatcher's context) and complete when it finishes.</summary>
-    /// <param name="work">The async work to run on the pump thread.</param>
-    /// <returns>A task that completes when <paramref name="work"/> finishes.</returns>
+    /// <summary>Run <paramref name="work"/> on the pump thread (so its awaits capture this dispatcher's context) and complete when it finishes.</summary> <param name="work">The async work to run on the pump thread.</param> <returns>A task that completes when <paramref name="work"/> finishes.</returns>
     public Task InvokeAsync(Func<Task> work) =>
         InvokeAsync(async () =>
         {
@@ -73,10 +64,7 @@ internal sealed class DedicatedThreadDispatcher : IDispatcher, IDisposable
             return true;
         });
 
-    /// <summary>Run <paramref name="work"/> on the pump thread and return its result.</summary>
-    /// <typeparam name="T">The result type.</typeparam>
-    /// <param name="work">The async work to run on the pump thread.</param>
-    /// <returns>A task carrying the result of <paramref name="work"/>.</returns>
+    /// <summary>Run <paramref name="work"/> on the pump thread and return its result.</summary> <typeparam name="T">The result type.</typeparam> <param name="work">The async work to run on the pump thread.</param> <returns>A task carrying the result of <paramref name="work"/>.</returns>
     public Task<T> InvokeAsync<T>(Func<Task<T>> work)
     {
         var tcs = new TaskCompletionSource<T>();
@@ -130,8 +118,7 @@ internal sealed class DedicatedThreadDispatcher : IDispatcher, IDisposable
         }
     }
 
-    /// <summary>Routes async continuations Posted to the captured context back
-    /// onto the pump thread — what makes <c>await</c> resume on the "UI thread".</summary>
+    /// <summary>Routes async continuations Posted to the captured context back onto the pump thread — what makes <c>await</c> resume on the "UI thread".</summary>
     private sealed class PumpSyncContext : SynchronizationContext
     {
         private readonly DedicatedThreadDispatcher _owner;
@@ -176,9 +163,9 @@ internal sealed class DedicatedThreadDispatcher : IDispatcher, IDisposable
         public override SynchronizationContext CreateCopy() => this;
     }
 
-    /// <summary>One-shot timer whose tick fires on the pump thread (like a real
-    /// DispatcherQueueTimer). Generation-guarded so a restart cancels the pending
-    /// tick (debounce). No disposable field, so the handle stays non-disposable.</summary>
+    /// <summary>One-shot timer whose tick fires on the pump thread (like a real DispatcherQueueTimer).
+    /// Generation-guarded so a restart cancels the pending tick (debounce).
+    /// No disposable field, so the handle stays non-disposable.</summary>
     private sealed class PumpTimer : IDispatcherTimer
     {
         private readonly DedicatedThreadDispatcher _owner;
