@@ -65,6 +65,8 @@ Boot-sector and extent targets check accepted geometry and volume bounds.
 The list target compares flat decoding with streaming across reversed physical runs and checks cancellation.
 The WTF-8 target checks UTF-16 round-trips and atomic rejection of arbitrary bytes.
 The strict JSON target includes the production decoder used by mutation evidence and checks successful decoding against `serde_json`.
+All JSON workspaces use the library's `float_roundtrip` feature to preserve finite floating-point values across serialization and decoding.
+Numeric regression tests compare the decoded bits with Rust's floating-point parser and preserve the original fuzz input.
 New regressions belong in the matching corpus.
 Regeneration or mutation campaigns must preserve existing minimized inputs.
 

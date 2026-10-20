@@ -112,3 +112,38 @@ impl<'de> Visitor<'de> for StrictJsonVisitor {
         Ok(StrictJsonValue(Value::Object(values)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::decode;
+    use serde_json::Value;
+
+    #[test]
+    fn numeric_values_round_correctly_and_survive_serialization() {
+        for raw in [
+            include_str!("../../engine/fuzz/corpus/strict_json_decode/crash-0c7a0e4e8ae65d1397749469c1cb38b8c1422a35"),
+            "-0.0",
+            "5e-324",
+            "1e-323",
+            "2.2250738585072014e-308",
+            "1.7976931348623157e308",
+            "18446744073709551615",
+            "-9223372036854775808",
+            "9007199254740993",
+            "0.10000000000000001",
+        ] {
+            let decoded: Value = decode(raw.as_bytes()).expect("finite JSON number");
+            assert_eq!(
+                decoded.as_f64().expect("number").to_bits(),
+                raw.parse::<f64>().expect("reference number").to_bits(),
+                "{raw}"
+            );
+            let encoded = serde_json::to_vec(&decoded).expect("number serializes");
+            assert_eq!(
+                decode::<Value>(&encoded).expect("serialized number decodes"),
+                decoded,
+                "{raw}"
+            );
+        }
+    }
+}
