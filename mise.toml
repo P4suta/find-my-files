@@ -2,7 +2,7 @@ min_version = "2026.7.5"
 
 [tools]
 rust = "1.97.1"
-dotnet = "10.0.401"
+dotnet = "10.0.402"
 cargo-binstall = "1.21.1"
 just = "1.54.0"
 lefthook = "2.1.9"
