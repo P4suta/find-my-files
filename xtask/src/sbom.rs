@@ -1706,7 +1706,10 @@ fn load_package_inventory(node: &DotnetNode, roots: &[PathBuf]) -> Result<Packag
         if entry.is_dir() {
             continue;
         }
-        let relative = normalize_archive_path(entry.name())?;
+        let entry_name = entry
+            .name()
+            .with_context(|| format!("decode {} entry {index} name", archives[0].display()))?;
+        let relative = normalize_archive_path(&entry_name)?;
         ensure!(
             folded_paths.insert(relative.to_ascii_lowercase()),
             "{} archive contains case-colliding path {relative}",
