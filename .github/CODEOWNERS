@@ -1,5 +1,1 @@
-# Code owners for find-my-files.
-#
-# Every change defaults to the maintainer. A ruleset may require this review.
-# GitHub matches the LAST matching pattern, so order narrow rules after broad.
 *       @P4suta

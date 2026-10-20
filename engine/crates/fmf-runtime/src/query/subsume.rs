@@ -1,0 +1,386 @@
+//! Query subsumption: does the result set of `next` provably fit inside the result set of `prev`?
+//! When it does (and the index generation is unchanged), the engine refines the cached `prev` ids instead of scanning — the incremental-typing fast path.
+//!
+//! Every rule here must be *sound* (false positives lose results — the one unacceptable failure mode); being incomplete merely costs a cold scan.
+//! The oracle property test in exec.rs cross-checks refine == fresh search over random names and typing sequences.
+
+use super::QueryOptions;
+use super::compile::{CompiledQuery, Matcher};
+use crate::wtf8;
+
+/// True when every entry matching `next` (under `next_opt`) is guaranteed to be present in `prev`'s materialized ids, in the right order.
+pub fn subsumes(
+    prev: &CompiledQuery,
+    prev_opt: &QueryOptions,
+    next: &CompiledQuery,
+    next_opt: &QueryOptions,
+) -> bool {
+    if prev_opt.sort != next_opt.sort || prev_opt.desc != next_opt.desc {
+        return false;
+    }
+    if next_opt.include_hidden_system && !prev_opt.include_hidden_system {
+        return false;
+    }
+
+    let prev_is_match_all = prev.groups.len() == 1 && prev.groups[0].all_terms().next().is_none();
+    if prev_is_match_all {
+        return true;
+    }
+    let [prev_group] = prev.groups.as_slice() else {
+        return false;
+    };
+    let [next_group] = next.groups.as_slice() else {
+        return false;
+    };
+
+    prev_group.all_terms().all(|p| {
+        next_group.all_terms().any(|n| {
+            if p.negated != n.negated {
+                return false;
+            }
+            if p.negated {
+                matcher_eq(&p.matcher, &n.matcher)
+            } else {
+                implies(&n.matcher, &p.matcher)
+            }
+        }) || (!p.negated && matches!(p.matcher, Matcher::True))
+    })
+}
+
+/// Needle-domain bridge: a byte needle proven about one pool implies one about the other only in the orig→folded direction.
+/// Valid-UTF-8 needles can only match at code-point boundaries and folding is length-preserving per code point, so a name matching `n` at offset i guarantees the lower pool holds `fold(n)` at i. The reverse (folded match → original bytes) does not hold.
+fn bridge_needle(
+    n_bytes: &[u8],
+    n_folded: bool,
+    n_canonical: bool,
+    p_folded: bool,
+    p_canonical: bool,
+) -> Option<std::borrow::Cow<'_, [u8]>> {
+    if n_canonical != p_canonical {
+        return None;
+    }
+    match (n_folded, p_folded) {
+        (true, true) | (false, false) => Some(std::borrow::Cow::Borrowed(n_bytes)),
+        (false, true) => std::str::from_utf8(n_bytes).ok().map(|s| {
+            std::borrow::Cow::Owned(if n_canonical {
+                wtf8::normalize_str(s, true)
+            } else {
+                wtf8::fold_str(s).into_bytes()
+            })
+        }),
+        (true, false) => None,
+    }
+}
+
+/// Does a positive match of `n` guarantee a positive match of `p`?
+fn implies(n: &Matcher, p: &Matcher) -> bool {
+    use Matcher::{Ext, IsDir, Mtime, NamePrefix, NameSub, NameSuffix, Size, True};
+    match (n, p) {
+        (_, True) => true,
+
+        (
+            NameSub {
+                finder: nf,
+                folded: nfo,
+                canonical: nca,
+            },
+            NameSub {
+                finder: pf,
+                folded: pfo,
+                canonical: pca,
+            },
+        ) => bridge_needle(nf.needle(), *nfo, *nca, *pfo, *pca)
+            .is_some_and(|n| memchr::memmem::find(&n, pf.needle()).is_some()),
+        (
+            NamePrefix {
+                bytes,
+                folded: nfo,
+                canonical: nca,
+            }
+            | NameSuffix {
+                bytes,
+                folded: nfo,
+                canonical: nca,
+            },
+            NameSub {
+                finder: pf,
+                folded: pfo,
+                canonical: pca,
+            },
+        ) => bridge_needle(bytes, *nfo, *nca, *pfo, *pca)
+            .is_some_and(|n| memchr::memmem::find(&n, pf.needle()).is_some()),
+        (
+            NamePrefix {
+                bytes: nb,
+                folded: nfo,
+                canonical: nca,
+            },
+            NamePrefix {
+                bytes: pb,
+                folded: pfo,
+                canonical: pca,
+            },
+        ) => bridge_needle(nb, *nfo, *nca, *pfo, *pca).is_some_and(|n| n.starts_with(pb)),
+        (
+            NameSuffix {
+                bytes: nb,
+                folded: nfo,
+                canonical: nca,
+            },
+            NameSuffix {
+                bytes: pb,
+                folded: pfo,
+                canonical: pca,
+            },
+        ) => bridge_needle(nb, *nfo, *nca, *pfo, *pca).is_some_and(|n| n.ends_with(pb)),
+
+        (
+            Ext {
+                exts: ne,
+                canonical: nc,
+            },
+            Ext {
+                exts: pe,
+                canonical: pc,
+            },
+        ) => nc == pc && ne.iter().all(|e| pe.contains(e)),
+        (
+            Size {
+                min: nmin,
+                max: nmax,
+            },
+            Size {
+                min: pmin,
+                max: pmax,
+            },
+        ) => nmin >= pmin && nmax <= pmax,
+        (
+            Mtime {
+                min: nmin,
+                max: nmax,
+            },
+            Mtime {
+                min: pmin,
+                max: pmax,
+            },
+        ) => nmin >= pmin && nmax <= pmax,
+        (IsDir(a), IsDir(b)) => a == b,
+
+        _ => matcher_eq(n, p),
+    }
+}
+
+/// Structural equality of two compiled matchers.
+fn matcher_eq(a: &Matcher, b: &Matcher) -> bool {
+    use Matcher::{
+        Ext, IsDir, Mtime, NamePrefix, NameRegex, NameSub, NameSuffix, PathRegex, PathSub, Size,
+        True,
+    };
+    match (a, b) {
+        (True, True) => true,
+        (
+            NameSub {
+                finder: fa,
+                folded: ca,
+                canonical: na,
+            },
+            NameSub {
+                finder: fb,
+                folded: cb,
+                canonical: nb,
+            },
+        )
+        | (
+            PathSub {
+                finder: fa,
+                folded: ca,
+                canonical: na,
+            },
+            PathSub {
+                finder: fb,
+                folded: cb,
+                canonical: nb,
+            },
+        ) => ca == cb && na == nb && fa.needle() == fb.needle(),
+        (
+            NamePrefix {
+                bytes: ba,
+                folded: ca,
+                canonical: na,
+            },
+            NamePrefix {
+                bytes: bb,
+                folded: cb,
+                canonical: nb,
+            },
+        )
+        | (
+            NameSuffix {
+                bytes: ba,
+                folded: ca,
+                canonical: na,
+            },
+            NameSuffix {
+                bytes: bb,
+                folded: cb,
+                canonical: nb,
+            },
+        ) => ca == cb && na == nb && ba == bb,
+        (
+            NameRegex {
+                re: ra,
+                canonical: ca,
+            },
+            NameRegex {
+                re: rb,
+                canonical: cb,
+            },
+        )
+        | (
+            PathRegex {
+                re: ra,
+                canonical: ca,
+            },
+            PathRegex {
+                re: rb,
+                canonical: cb,
+            },
+        ) => ca == cb && ra.same_pattern(rb),
+        (
+            Ext {
+                exts: ea,
+                canonical: ca,
+            },
+            Ext {
+                exts: eb,
+                canonical: cb,
+            },
+        ) => ca == cb && ea == eb,
+        (Size { min: ia, max: xa }, Size { min: ib, max: xb }) => ia == ib && xa == xb,
+        (Mtime { min: ia, max: xa }, Mtime { min: ib, max: xb }) => ia == ib && xa == xb,
+        (IsDir(a), IsDir(b)) => a == b,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::dates::UtcResolver;
+    use super::super::{CaseMode, compile, parse};
+    use super::*;
+
+    fn q(text: &str) -> CompiledQuery {
+        compile(&parse(text).unwrap(), CaseMode::Smart, &UtcResolver).unwrap()
+    }
+
+    fn subsumed(prev: &str, next: &str) -> bool {
+        let o = QueryOptions::default();
+        subsumes(&q(prev), &o, &q(next), &o)
+    }
+
+    #[test]
+    fn typing_extends_substring() {
+        assert!(subsumed("", "w"));
+        assert!(subsumed("w", "wi"));
+        assert!(subsumed("wi", "win"));
+        assert!(subsumed("win", "win .rs"));
+        assert!(!subsumed("win", "wi"), "backspace must go cold");
+        assert!(!subsumed("win", "wood"));
+    }
+
+    #[test]
+    fn smart_case_bridges_orig_to_folded_only() {
+        assert!(subsumed("wi", "Win"));
+        assert!(subsumed("Win", "Windows"), "same sensitive domain extends");
+        assert!(
+            !subsumed("Win", "win"),
+            "folded next cannot prove orig prev"
+        );
+    }
+
+    #[test]
+    fn filters_narrow_soundly() {
+        assert!(subsumed("ext:rs;txt", "ext:rs"), "ext subset narrows");
+        assert!(!subsumed("ext:d", "ext:dl"), "ext is equality, not prefix");
+        assert!(!subsumed("ext:rs", "ext:rs;txt"), "superset widens");
+        assert!(subsumed("size:>100", "size:>200"));
+        assert!(!subsumed("size:>200", "size:>100"));
+        assert!(subsumed("report", "report file:"), "added term narrows");
+        assert!(!subsumed("report file:", "report"), "dropped term widens");
+    }
+
+    #[test]
+    fn negation_requires_exact_match() {
+        assert!(subsumed("rs !test", "rs !test"));
+        assert!(subsumed("rs", "rs !test"), "added negation narrows");
+        assert!(!subsumed("rs !test", "rs"), "dropped negation widens");
+        assert!(
+            !subsumed("rs !test", "rs !tes"),
+            "¬tes does not imply ¬test"
+        );
+    }
+
+    #[test]
+    fn or_and_option_changes_go_cold() {
+        assert!(!subsumed("a | b", "ab"), "OR prev is out of the v1 algebra");
+        assert!(!subsumed("ab", "ab | cd"));
+        assert!(subsumed("", "ab | cd"), "match-all subsumes even an OR");
+
+        let prev = q("win");
+        let next = q("wind");
+        let base = QueryOptions::default();
+        let desc = QueryOptions { desc: true, ..base };
+        assert!(!subsumes(&prev, &base, &next, &desc), "sort flip");
+        let hidden = QueryOptions {
+            include_hidden_system: true,
+            ..base
+        };
+        assert!(!subsumes(&prev, &base, &next, &hidden), "widening toggle");
+        assert!(subsumes(&prev, &hidden, &next, &base), "narrowing toggle");
+    }
+
+    #[test]
+    fn wildcard_and_path_terms_need_equality() {
+        assert!(subsumed("*.rs", "*.rs"));
+        assert!(subsumed("*.rs", "*.rs main"), "extra term narrows");
+        assert!(subsumed("rs", "*.rs"));
+        assert!(!subsumed("*.rsx", "*.rs"));
+        assert!(
+            subsumed("A?B", r#"regex:"^A.B$""#),
+            "identical Unicode and WTF-8 programs are equal"
+        );
+        assert!(subsumed(r"path:src", r"path:src main"));
+        assert!(
+            !subsumed(r"path:src", r"path:srcmain"),
+            "path needs equality"
+        );
+    }
+
+    #[test]
+    fn regex_equality_includes_compiler_flags() {
+        let ast = parse(r#"regex:"foo""#).unwrap();
+        let insensitive = compile(&ast, CaseMode::Insensitive, &UtcResolver).unwrap();
+        let sensitive = compile(&ast, CaseMode::Sensitive, &UtcResolver).unwrap();
+        let insensitive_opt = QueryOptions {
+            case: CaseMode::Insensitive,
+            ..Default::default()
+        };
+        let sensitive_opt = QueryOptions {
+            case: CaseMode::Sensitive,
+            ..Default::default()
+        };
+
+        assert!(!subsumes(
+            &sensitive,
+            &sensitive_opt,
+            &insensitive,
+            &insensitive_opt
+        ));
+        assert!(!subsumes(
+            &insensitive,
+            &insensitive_opt,
+            &sensitive,
+            &sensitive_opt
+        ));
+    }
+}

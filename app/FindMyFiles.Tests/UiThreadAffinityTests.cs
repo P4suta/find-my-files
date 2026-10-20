@@ -7,17 +7,11 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// Regression tests for the UI-thread-affinity bug class that shipped the
-/// orphaned-window setup-screen bug. Built on <see cref="DedicatedThreadDispatcher"/>
-/// (real thread identity); <see cref="ManualDispatcher"/> (HasThreadAccess always
-/// true) structurally cannot catch any of these.
+/// <summary> Regression tests for the UI-thread-affinity bug class that shipped the orphaned-window setup-screen bug.
+/// Built on <see cref="DedicatedThreadDispatcher"/> (real thread identity); <see cref="ManualDispatcher"/> (HasThreadAccess always true) structurally cannot catch any of these.
 /// </summary>
 public sealed class UiThreadAffinityTests : IDisposable
 {
-    // EnableSearchAsync can route a failure to the process-wide Notifier; reset it
-    // on teardown so a post can't replay into another test (serial execution makes
-    // this deterministic).
     public void Dispose()
     {
         Notifier.ResetForTests();
@@ -29,7 +23,7 @@ public sealed class UiThreadAffinityTests : IDisposable
     {
         using var dispatcher = new DedicatedThreadDispatcher();
 
-        Assert.False(dispatcher.HasThreadAccess); // the test thread is not the pump thread
+        Assert.False(dispatcher.HasThreadAccess);
 
         var hadAccessOnThread = await dispatcher.InvokeAsync(() =>
             Task.FromResult(dispatcher.HasThreadAccess));
@@ -43,21 +37,14 @@ public sealed class UiThreadAffinityTests : IDisposable
     [Fact]
     public async Task EnableSearchAsync_keeps_bound_writes_on_the_ui_thread()
     {
-        // The VM await must not ConfigureAwait(false): bound SetupStatus/SetupBusy
-        // writes after the elevated register (which completes on a pool thread) must
-        // resume on the UI thread, or WinUI throws RPC_E_WRONG_THREAD at runtime.
         using var dispatcher = new DedicatedThreadDispatcher();
         var provisioner = new ServiceProvisioner(
             register: async () =>
             {
-                // A genuine suspension that resumes on a pool thread, so the VM's
-                // await is exercised for real: a task that completes instantly would
-                // resume inline on the pump thread and hide a ConfigureAwait(false)
-                // regression (the bug only bites when the await actually suspends).
                 await Task.Delay(20).ConfigureAwait(false);
                 return ServiceActionOutcome.Ok;
             },
-            relaunch: () => { }); // no-op: don't rebuild the page in the test
+            relaunch: () => { });
         using var vm = new MainViewModel(
             new UnavailableEngineClient(), dispatcher, new AppSettings(), provisioner: provisioner);
 
@@ -78,15 +65,6 @@ public sealed class UiThreadAffinityTests : IDisposable
     [Fact]
     public async Task Search_pipeline_publishes_results_only_on_the_ui_thread()
     {
-        // The hottest UI-affine path in the app: SearchOrchestrator awaits the
-        // engine, then the presenter awaits page reads, and only then does it
-        // mutate the ListView's ItemsSource (Reassign → Reset), the bound
-        // CountText and the bound perf trace. Both awaits complete off the UI
-        // thread in production (FFI Task.Run / pipe read loop), so every one of
-        // them is a place where ConfigureAwait(false) would move XAML mutations
-        // onto a pool thread. ManualDispatcher cannot see any of it: its
-        // HasThreadAccess is true everywhere, which also neuters
-        // VirtualResultList.EnsureUiThread, the production guard for this.
         using var dispatcher = new DedicatedThreadDispatcher();
         using var engine = new OffThreadEngineClient(rowCount: 150);
         var offThread = new ConcurrentQueue<string>();
@@ -112,9 +90,6 @@ public sealed class UiThreadAffinityTests : IDisposable
             vm.Results.ResultsSource.CollectionChanged += (_, _) => Record("results.reset");
             vm.Search.SearchFailed += e =>
             {
-                // Also releases the wait: a cross-thread mutation aborts the query
-                // instead of publishing, and the assertion below should report the
-                // real exception rather than a timeout.
                 failures.Enqueue(e);
                 published.TrySetResult();
             };
@@ -124,7 +99,7 @@ public sealed class UiThreadAffinityTests : IDisposable
                 published.TrySetResult();
             };
 
-            vm.SearchText = "row"; // debounce → requery → engine → prefetch → publish
+            vm.SearchText = "row";
             return Task.CompletedTask;
         });
 
@@ -144,9 +119,6 @@ public sealed class UiThreadAffinityTests : IDisposable
             }
         }
 
-        // Two independent witnesses: the recorded thread identity of every bound
-        // mutation, and the production guard itself — EnsureUiThread throws into
-        // the orchestrator's catch-all, which surfaces as SearchFailed.
         Assert.Empty(failures);
         Assert.Empty(offThread);
         Assert.Null(dispatcher.LastError);
@@ -156,10 +128,6 @@ public sealed class UiThreadAffinityTests : IDisposable
     [Fact]
     public async Task Startup_failure_writes_status_and_notifications_on_the_ui_thread()
     {
-        // RunStartupAsync resumes after three engine round-trips and then writes
-        // the bound StatusText and pushes into the bound notification collection.
-        // The failure branch is the interesting one: it mutates an
-        // ObservableCollection, which throws inside XAML from a pool thread.
         using var dispatcher = new DedicatedThreadDispatcher();
         using var engine = new OffThreadEngineClient
         {
@@ -184,7 +152,6 @@ public sealed class UiThreadAffinityTests : IDisposable
             await vm.StartAsync();
         });
 
-        // The continuation really ran (otherwise "nothing off-thread" is vacuous).
         Assert.Single(vm.Notifications.Items);
         Assert.Empty(offThread);
         Assert.Null(dispatcher.LastError);
@@ -199,9 +166,6 @@ public sealed class UiThreadAffinityTests : IDisposable
     [Fact]
     public async Task Perf_stats_poll_updates_bound_state_on_the_ui_thread()
     {
-        // The F12 poll runs once a second for as long as the panel is open, and
-        // its continuation writes bound Stats and raises PerfDataChanged, which
-        // the view turns into imperative XAML drawing.
         using var dispatcher = new DedicatedThreadDispatcher();
         using var engine = new OffThreadEngineClient { Stats = new EngineStatsData() };
         using var perf = new PerfPanelViewModel(engine);
@@ -220,7 +184,7 @@ public sealed class UiThreadAffinityTests : IDisposable
 
         await dispatcher.InvokeAsync(() => perf.RefreshStatsAsync());
 
-        Assert.NotNull(perf.Stats); // the continuation really ran
+        Assert.NotNull(perf.Stats);
         Assert.Empty(offThread);
         Assert.Null(dispatcher.LastError);
     }

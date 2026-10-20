@@ -1,14 +1,11 @@
 //! Elevated: the GC Scheduled Task document must be one the registrar accepts.
-//! Gated like every machine-mutating test: `#[ignore]` + `FMF_ADMIN_TESTS=1`
-//! (`just test-admin`, elevated).
+//! Gated like every machine-mutating test: `#[ignore]` + `FMF_ADMIN_TESTS=1` (`just test-admin`, elevated).
 
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Fails closed. `#[ignore]` is what *skips* this test; reaching the body
-/// without the arming variable means the harness was invoked outside
-/// `just test-admin`, and a silent early return would be indistinguishable
-/// from a registration that actually succeeded.
+/// Fails closed.
+/// `#[ignore]` is what *skips* this test; reaching the body without the arming variable means the harness was invoked outside `just test-admin`, and a silent early return would be indistinguishable from a registration that actually succeeded.
 fn require_admin_gate() {
     assert_eq!(
         std::env::var("FMF_ADMIN_TESTS").as_deref(),
@@ -18,8 +15,6 @@ fn require_admin_gate() {
 }
 
 fn schtasks() -> PathBuf {
-    // Known-Folder-resolved absolute path, never a PATH search — same rule the
-    // installer follows for this binary.
     PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is set"))
         .join("System32")
         .join("schtasks.exe")
@@ -37,10 +32,8 @@ impl Drop for TaskGuard {
 }
 
 /// The unit test can only assert that some string is present in the document.
-/// That is exactly how `<RequiredPrivileges>` — an `IPrincipal2` property with
-/// no place in the schema `schtasks` validates against — stayed in the template
-/// while every real install failed at task registration. Only registering the
-/// document proves it is accepted.
+/// That is exactly how `<RequiredPrivileges>` — an `IPrincipal2` property with no place in the schema `schtasks` validates against — stayed in the template while every real install failed at task registration.
+/// Only registering the document proves it is accepted.
 #[test]
 #[ignore = "registers a real Scheduled Task; gated by FMF_ADMIN_TESTS=1 (just test-admin)"]
 fn gc_task_xml_registers_with_schtasks() {
@@ -48,8 +41,6 @@ fn gc_task_xml_registers_with_schtasks() {
 
     let dir = tempfile::tempdir().expect("temp dir");
     let xml_path = dir.path().join("gc-task.xml");
-    // The stable installed path is what production registers; the task is
-    // deleted before anything could run it.
     let stable_exe = std::path::Path::new(r"C:\ProgramData\find-my-files\fmf-service.exe");
     std::fs::write(&xml_path, fmf_service::lifecycle::gc_task_xml(stable_exe)).expect("write xml");
 

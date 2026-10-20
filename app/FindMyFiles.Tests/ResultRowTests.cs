@@ -10,7 +10,6 @@ public sealed class ResultRowTests
 {
     public ResultRowTests()
     {
-        // FormatSize uses N0/N1/N2 — pin the culture for stable expectations.
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
     }
 
@@ -20,9 +19,9 @@ public sealed class ResultRowTests
     [InlineData(1023UL, "1023 B")]
     [InlineData(1024UL, "1 KB")]
     [InlineData(10_240UL, "10 KB")]
-    [InlineData(1_048_576UL, "1.0 MB")] // 1 MiB
-    [InlineData(1_572_864UL, "1.5 MB")] // 1.5 MiB
-    [InlineData(3_221_225_472UL, "3.00 GB")] // 3 GiB
+    [InlineData(1_048_576UL, "1.0 MB")]
+    [InlineData(1_572_864UL, "1.5 MB")]
+    [InlineData(3_221_225_472UL, "3.00 GB")]
     public void Fill_File_FormatsSizeText(ulong size, string expected)
     {
         var row = ResultRow.CreatePlaceholder(0);
@@ -34,7 +33,7 @@ public sealed class ResultRowTests
     public void Fill_Directory_LeavesSizeTextEmpty()
     {
         var row = ResultRow.CreatePlaceholder(0);
-        row.Fill(Rows.Dir(1, "src", size: 4096)); // even with a size, dirs show none
+        row.Fill(Rows.Dir(1, "src", size: 4096));
         Assert.Equal(string.Empty, row.SizeText);
     }
 
@@ -70,7 +69,7 @@ public sealed class ResultRowTests
 
         Assert.False(row.IsPlaceholder);
         Assert.Equal(7UL, row.EntryRef);
-        Assert.Equal(42, row.Index); // identity survives the fill
+        Assert.Equal(42, row.Index);
         Assert.Equal("name.txt", row.Name);
         Assert.Equal(data.ParentPath, row.ParentPath);
         Assert.Equal(data.FullPath, row.FullPath);
@@ -127,10 +126,9 @@ public sealed class ResultRowTests
     {
         var row = ResultRow.CreatePlaceholder(0);
 
-        // ParentPath "F:\t\" + Name "report.txt"; the path term spans the boundary.
         row.Fill(Rows.File(1, "report.txt"), MatchHighlighter.Compile(@"t\report"));
-        Assert.Equal([new HighlightRange(3, 2)], row.PathRanges); // "t\" in the parent
-        Assert.Equal([new HighlightRange(0, 6)], row.NameRanges); // "report" in the name
+        Assert.Equal([new HighlightRange(3, 2)], row.PathRanges);
+        Assert.Equal([new HighlightRange(0, 6)], row.NameRanges);
     }
 
     [Fact]
@@ -147,7 +145,7 @@ public sealed class ResultRowTests
                 nameChanges++;
             }
         };
-        row.Fill(Rows.File(1, "report.txt"), hl); // identical query+name → identical ranges
-        Assert.Equal(0, nameChanges); // no re-notification → RefreshInPlace repaints nothing
+        row.Fill(Rows.File(1, "report.txt"), hl);
+        Assert.Equal(0, nameChanges);
     }
 }

@@ -1,9 +1,6 @@
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// Pipe-backed <see cref="ISearchResult"/>. Pages stale out when the
-/// connection epoch moves (disconnects); Dispose defers the wire-level
-/// ResultFree until every in-flight page fetch has drained.
+/// <summary> Pipe-backed <see cref="ISearchResult"/>. Pages stale out when the connection epoch moves (disconnects); Dispose defers the wire-level ResultFree until every in-flight page fetch has drained.
 /// </summary>
 internal sealed class PipeSearchResult(
     PipeEngineClient client, ulong resultId, long count, int epoch) : ISearchResult
@@ -54,7 +51,7 @@ internal sealed class PipeSearchResult(
         {
             if (epoch != client.CurrentEpoch)
             {
-                throw new StaleResultException(); // re-check inside the guard
+                throw new StaleResultException();
             }
 
             return await client.FetchPageAsync(resultId, request, epoch, ct).ConfigureAwait(false);

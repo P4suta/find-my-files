@@ -1,27 +1,12 @@
-# Re-scans the SBOM of the LATEST published release against today's OSV.dev DB.
-#
-# This is the one supply-chain check that looks at *what we already shipped*,
-# not the current source tree: cargo-audit / cargo-deny / Dependabot all scan
-# HEAD, so a CVE disclosed *after* a release goes unnoticed for the binary users
-# already have. The release's frozen CycloneDX SBOM assets are exactly the
-# manifest needed to answer "is the shipped v1.0 affected?" — so the SBOM finally
-# does work here instead of being a write-only release artifact (ADR-0034).
-#
-# Dormant only until the first published release. Once any release exists, both
-# canonical SBOM assets, their release digests and their CycloneDX structure are
-# mandatory; the one narrow product-identity waiver is documented at the check
-# that applies it.
 name: sbom-monitor
 
 on:
   schedule:
-    - cron: "7 5 * * 1" # weekly Mon 05:07 UTC (offset from cargo-audit/codeql/scorecard crons)
+    - cron: "7 5 * * 1"
   workflow_dispatch:
 
 permissions: {}
 
-# Serialize scheduled/manual rescans so two report jobs cannot race and create
-# duplicate tracking issues for the same shipped release.
 concurrency:
   group: sbom-monitor
   cancel-in-progress: false
@@ -32,14 +17,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      contents: read # read releases + download SBOM assets
+      contents: read
     outputs:
       scan: ${{ steps.fetch.outputs.scan }}
       tag: ${{ steps.fetch.outputs.tag }}
     steps:
-      # Checkout is only for osv-scanner.toml (the accepted-advisory ignore
-      # list). The main-only guard above makes manual feature-branch runs inert;
-      # retain the event SHA for an auditable policy snapshot.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -99,72 +81,6 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "scan=true" >> "$GITHUB_OUTPUT"
 
-      # Reading the SBOMs is a separate step from fetching them for two reasons.
-      #
-      # The first is the point of this file: a named step tells the run log which
-      # half failed before anyone reads a message. Downloading the wrong bytes and
-      # shipping an SBOM whose shape drifted are different problems with different
-      # fixes, and they now fail under different headings.
-      #
-      # The second is mechanical and load-bearing, so do not merge these back
-      # together. `actionlint` pipes each bash `run:` body to `shellcheck` on
-      # stdin, and on Windows that anonymous pipe holds 4096 bytes: a bash script
-      # of 4050 bytes lints in 130 ms, one of 4090 bytes deadlocks forever with no
-      # output at all. The limit is per `run:` block, not per workflow (two 3 KB
-      # steps are fine; one 6 KB step is not), and `pwsh` blocks are exempt only
-      # because shellcheck never sees them. `just lint` is a required gate, so a
-      # step over that line hangs the local loop with no diagnostic — the same
-      # class of silent failure this commit exists to remove. Keeping the long
-      # prose here at YAML level rather than inside `run: |` is part of that
-      # budget: comments outside the block scalar are not part of the script.
-      #
-      # What the validation itself is for, and why exactly one thing is waived:
-      #
-      # This block used to be five `jq -e '...' "$path" >/dev/null` calls. `jq -e`
-      # answers a false predicate with exit status 1 and the single word `false`
-      # on stdout — which `>/dev/null` discarded — so `set -e` killed the step
-      # leaving `##[error]Process completed with exit code 1.` as the entire
-      # record of what had gone wrong. This monitor was red for six consecutive
-      # weeks (2026-08-03 through 2026-09-07, last green 2026-07-27) and no run
-      # log ever named the file, the field, or the value. Every other check here
-      # already used `if ...; then echo "::error::..."; exit 1; fi`; the `jq -e`
-      # calls were the one shape that could fail anonymously, and they are the
-      # ones that failed. Facts are now read once per file and compared as
-      # rendered strings, so the diagnostic falls out of the comparison instead of
-      # being something a future edit has to remember to add.
-      #
-      # Structure (`bomFormat` / `specVersion` / a non-empty `.components`) and
-      # the asset digests verified in the previous step apply to every release,
-      # forever. `.components` is the array osv-scanner actually reads, so an SBOM
-      # failing there carries no usable vulnerability data and scanning it would
-      # be theatre. Product identity is strict too, with one waiver, recorded in
-      # the `osv-scanner.toml` style — why it cannot be fixed, and when it stops
-      # applying:
-      #
-      # reason: v0.1.1's `fmf-engine.cdx.json` shipped as `type=application
-      #   name=engine version=null bom-ref=null`. It predates PR #164, which
-      #   standardized `metadata.component` identity; `xtask/src/sbom.rs` now
-      #   requires name/version/bom-ref on the root component, so no release from
-      #   v0.2.0 on can reproduce that shape. v0.1.1 is an immutable release, so
-      #   those bytes cannot be corrected after the fact and the strict
-      #   comparison can never pass against them.
-      # revisit after: nothing to schedule. The waiver is literal tag equality, so
-      #   the strict path resumes by itself the moment v0.2.0 becomes the latest
-      #   stable release. If this branch is still reachable then, the
-      #   `[ "$tag" = "v0.1.1" ]` test is dead code — delete it.
-      #
-      # Waiving it is not a security regression. The digest check binds these
-      # exact bytes to the release metadata GitHub serves, so "we downloaded the
-      # right file" is settled before validation starts, and structure is checked
-      # unwaived. `metadata.component` is provenance labelling that carries no
-      # vulnerability data. Hard failing on a cosmetic label is precisely what
-      # switched off the only check we have on already-shipped binaries for six
-      # weeks (ADR-0034).
-      #
-      # v0.1.0 is deliberately not named in the shell. It published zero assets,
-      # so the asset-name check in the previous step rejects it with its own
-      # `::error::` long before validation; naming it here would falsely imply it
-      # reaches identity validation at all.
       - name: Validate the downloaded SBOM pair
         if: steps.fetch.outputs.scan == 'true'
         shell: bash
@@ -258,8 +174,6 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  # The third-party scanner gets only read access to this run's validated
-  # artifact. It cannot read repository contents/releases or mutate issues.
   scan:
     needs: prepare
     if: >-
@@ -270,7 +184,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      actions: read # download the validated SBOM handoff artifact
+      actions: read # Permission: Download the validated SBOM handoff.
     outputs:
       code: ${{ steps.scan.outputs.code }}
     steps:
@@ -313,8 +227,6 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  # Keep the Issues-write token away from release assets and osv-scanner. This
-  # job receives only the scanner's bounded exit code/tag plus its text report.
   report:
     needs: [prepare, scan]
     if: >-
@@ -327,8 +239,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      actions: read # download the scanner report artifact
-      issues: write # open/update/close the sbom-vuln tracking issue
+      actions: read # Permission: Download the scanner report.
+      issues: write # Permission: Maintain the vulnerability tracking issue.
     steps:
       - name: Download vulnerability report
         if: needs.scan.outputs.code == '1'

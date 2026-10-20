@@ -3,11 +3,6 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// Pins the highlighter's match semantics — the UI-side subset that must agree
-/// with the engine (fmf-core query/ + wtf8.rs). Cases are aligned with the
-/// engine's own fixtures (File.TXT, ΣΟΦΟΣ) so a future divergence is caught.
-/// </summary>
 public sealed class MatchHighlighterTests
 {
     private static (int Start, int Length)[] Name(string query, string text) =>
@@ -41,7 +36,7 @@ public sealed class MatchHighlighterTests
         Assert.Equal([(1, 2)], Name("oo", "foo"));
 
     [Fact]
-    public void SingleCharNeedle_Highlights() => // 1-char queries light up too (no min-length gate)
+    public void SingleCharNeedle_Highlights() =>
         Assert.Equal([(1, 1), (3, 1), (5, 1)], Name("a", "banana"));
 
     [Fact]

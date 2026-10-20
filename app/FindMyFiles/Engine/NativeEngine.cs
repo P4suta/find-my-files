@@ -2,27 +2,19 @@ using System.Runtime.InteropServices;
 
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// Raw bindings and ABI-boundary validation for fmf_engine.dll. The DLL name
-/// is fixed (AGENTS.md); every struct layout, status code and limit used here
-/// is radiated from the fmf-contract crate into
-/// <see cref="EngineContract"/> (ADR-0018), never hand-written. Engine
-/// behavior remains outside this interop boundary.
+/// <summary> Raw bindings and ABI-boundary validation for fmf_engine.dll.
+/// The DLL name is fixed (AGENTS.md); every struct layout, status code and limit used here is radiated from the fmf-contract crate into <see cref="EngineContract"/> (ADR-0018), never hand-written.
+/// Engine behavior remains outside this interop boundary.
 /// </summary>
 internal static partial class NativeEngine
 {
-    // The struct definitions live in Generated/EngineContract.g.cs (the
-    // other half of this partial class — LayoutKind.Explicit with offsets
-    // radiated from Rust offset_of!). These aliases keep the historical
-    // spelling at the call sites; the values are the contract's.
     internal const int Ok = EngineContract.Status.Ok;
     internal const int Stale = EngineContract.Status.Stale;
     internal const int QuerySyntax = EngineContract.Status.QuerySyntax;
     internal const int Locked = EngineContract.Status.Locked;
     internal const int Cancelled = EngineContract.Status.Cancelled;
 
-    /// <summary>Marshaled sizes must equal the contract's — catches a stale
-    /// Generated file at first touch, before any P/Invoke crosses.</summary>
+    /// <summary>Marshaled sizes must equal the contract's — catches a stale Generated file at first touch, before any P/Invoke crosses.</summary>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1065:_", Justification = "deliberate fail-fast ABI tripwire: a TypeInitializationException at load is the intended failure when the marshaled layout drifts from the contract")]
     static NativeEngine()
     {
@@ -39,16 +31,7 @@ internal static partial class NativeEngine
         }
     }
 
-    // These P/Invoke entry points are named to match fmf_engine.dll's lowercase
-    // `#[no_mangle]` C exports EXACTLY: LibraryImport uses the method name as the
-    // symbol and GetProcAddress is case-sensitive, so a PascalCased name resolves
-    // to nothing → EntryPointNotFoundException at the first call. SA1300
-    // ("begin with uppercase") wants
-    // PascalCase and would reintroduce exactly that break (it is the original cause:
-    // it only flags entry points with no out/ref param, so the surface drifted half
-    // PascalCased), so it is disabled across the binding block. NativeEngineBindingTests
-    // pins the lowercase shape so any future drift fails the build instead of search.
-#pragma warning disable SA1300 // FFI entry points mirror the DLL's lowercase C exports, not C# naming
+#pragma warning disable SA1300
     [LibraryImport("fmf_engine")]
     internal static partial uint fmf_abi_version();
 
@@ -58,10 +41,6 @@ internal static partial class NativeEngine
     [LibraryImport("fmf_engine")]
     internal static partial int fmf_engine_destroy(IntPtr handle);
 
-    // Save-now for Ready, dirty volumes. The UI never calls this on its own:
-    // the pipe deliberately exposes no flush opcode (a client-driven flush is a
-    // local DoS on the index read lock — ADR-0016), so saving stays a
-    // service-internal schedule. This export exists for in-proc parity only.
     [LibraryImport("fmf_engine")]
     internal static partial int fmf_flush(IntPtr handle);
 
@@ -133,13 +112,9 @@ internal static partial class NativeEngine
         }
     }
 
-    /// <summary>
-    /// Validates an engine-owned blob before a managed span/string observes
-    /// its pointer. The pointer is present exactly when the byte length is
-    /// positive, and the allocation cannot exceed the shared payload cap.
-    /// </summary>
-    /// <param name="blob">Native blob descriptor to validate.</param>
-    /// <returns>The checked managed byte length.</returns>
+    /// <summary> Validates an engine-owned blob before a managed span/string observes its pointer.
+    /// The pointer is present exactly when the byte length is positive, and the allocation cannot exceed the shared payload cap.
+    /// </summary> <param name="blob">Native blob descriptor to validate.</param> <returns>The checked managed byte length.</returns>
     internal static int ValidateBlob(FmfBlob blob)
     {
         if (blob.OwnerId == 0)
@@ -164,13 +139,8 @@ internal static partial class NativeEngine
         return checked((int)blob.Len);
     }
 
-    /// <summary>
-    /// Validates a native result page before either native buffer is exposed
-    /// as a managed span.
-    /// </summary>
-    /// <param name="page">Native page descriptor to validate.</param>
-    /// <param name="requestedCount">Row count requested from the engine.</param>
-    /// <returns>Checked row-buffer and blob lengths.</returns>
+    /// <summary> Validates a native result page before either native buffer is exposed as a managed span.
+    /// </summary> <param name="page">Native page descriptor to validate.</param> <param name="requestedCount">Row count requested from the engine.</param> <returns>Checked row-buffer and blob lengths.</returns>
     internal static (int RowBytes, int BlobBytes) ValidatePage(
         FmfPage page,
         uint requestedCount)
@@ -227,10 +197,7 @@ internal static partial class NativeEngine
         return (checked((int)rowBytes), checked((int)page.BlobLen));
     }
 
-    /// <summary>Validates a native volume-array count before allocation.</summary>
-    /// <param name="count">Element count returned by the engine.</param>
-    /// <param name="capacity">Capacity supplied to the engine.</param>
-    /// <returns>The checked managed element count.</returns>
+    /// <summary>Validates a native volume-array count before allocation.</summary> <param name="count">Element count returned by the engine.</param> <param name="capacity">Capacity supplied to the engine.</param> <returns>The checked managed element count.</returns>
     internal static int ValidateVolumeCount(uint count, uint capacity)
     {
         if (capacity > (uint)EngineContract.MaxVolumes)
@@ -251,9 +218,7 @@ internal static partial class NativeEngine
         return checked((int)count);
     }
 
-    /// <summary>Converts an ABI result count without signed wraparound.</summary>
-    /// <param name="count">Unsigned result count returned by the engine.</param>
-    /// <returns>The checked managed result count.</returns>
+    /// <summary>Converts an ABI result count without signed wraparound.</summary> <param name="count">Unsigned result count returned by the engine.</param> <returns>The checked managed result count.</returns>
     internal static long ValidateResultCount(ulong count)
     {
         if (count > long.MaxValue)

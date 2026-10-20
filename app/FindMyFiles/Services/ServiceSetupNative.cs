@@ -3,8 +3,8 @@ using System.Runtime.InteropServices;
 
 namespace FindMyFiles.Services;
 
-/// <summary>Raw SCM and process adapters. Policy and outcome classification
-/// remain in <see cref="ServiceSetup"/>.</summary>
+/// <summary>Raw SCM and process adapters.
+/// Policy and outcome classification remain in <see cref="ServiceSetup"/>.</summary>
 internal static partial class ServiceSetupNative
 {
     internal static IServiceManagerHandle? OpenManager(uint access)

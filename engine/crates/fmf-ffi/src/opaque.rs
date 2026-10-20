@@ -1,7 +1,7 @@
 //! Process-wide opaque-handle identifiers.
 //!
-//! C callers transport these values as pointers but Rust never dereferences
-//! them. A single monotonic namespace is shared by engine and result handles,
+//! C callers transport these values as pointers but Rust never dereferences them.
+//! A single monotonic namespace is shared by engine and result handles,
 //! preventing both ABA reuse and accidental cross-kind aliasing.
 
 use std::ffi::c_void;

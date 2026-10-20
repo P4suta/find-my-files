@@ -1,24 +1,26 @@
 //! Minimal, fail-closed PE parser for the service's dependent-load policy.
 //!
-//! `fmf-service.exe` is the only executable launched through UAC while it still
-//! lives in the user-writable extracted bundle. Its linker embeds
-//! `DependentLoadFlags` in the PE Load Configuration Directory. Publish and
-//! package both parse that field themselves so a missing linker flag cannot
-//! silently turn an adjacent DLL into elevated code.
+//! `fmf-service.exe` is the only executable launched through UAC while it still lives in the user-writable extracted bundle.
+//! Its linker embeds `DependentLoadFlags` in the PE Load Configuration Directory.
+//! Publish and package both parse that field themselves so a missing linker flag cannot silently turn an adjacent DLL into elevated code.
 
+use crate::pe_format::{
+    COFF_HEADER_SIZE, COFF_OPTIONAL_SIZE_OFFSET, COFF_SECTION_COUNT_OFFSET, DATA_DIRECTORY_SIZE,
+    DOS_PE_POINTER_OFFSET, DOS_SIGNATURE_BYTES, HEADERS_SIZE_FIELD_OFFSET,
+    PE32_DEPENDENT_FLAGS_OFFSET, PE32_DIRECTORIES_OFFSET, PE32_DIRECTORY_COUNT_OFFSET, PE32_MAGIC,
+    PE32_PLUS_DEPENDENT_FLAGS_OFFSET, PE32_PLUS_DIRECTORIES_OFFSET,
+    PE32_PLUS_DIRECTORY_COUNT_OFFSET, PE32_PLUS_MAGIC, PE_SIGNATURE_BYTES, SECTION_HEADER_SIZE,
+    SECTION_RAW_POINTER_OFFSET, SECTION_RAW_SIZE_OFFSET, SECTION_VIRTUAL_ADDRESS_OFFSET,
+    SECTION_VIRTUAL_SIZE_OFFSET,
+};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
 
-/// `LOAD_LIBRARY_SEARCH_SYSTEM32`, embedded by
-/// `/DEPENDENTLOADFLAG:0x800`.
+/// `LOAD_LIBRARY_SEARCH_SYSTEM32`, embedded by `/DEPENDENTLOADFLAG:0x800`.
 pub const SYSTEM32_ONLY_DEPENDENT_LOAD_FLAGS: u16 = 0x0800;
 
-const DOS_PE_POINTER_OFFSET: usize = 0x3c;
-const COFF_HEADER_SIZE: usize = 20;
-const SECTION_HEADER_SIZE: usize = 40;
 const LOAD_CONFIG_DIRECTORY_INDEX: usize = 10;
-const DATA_DIRECTORY_SIZE: usize = 8;
 
 pub fn require_system32_only(path: &Path) -> Result<()> {
     let bytes = fs::read(path).with_context(|| format!("read PE {}", path.display()))?;
@@ -36,18 +38,18 @@ pub fn require_system32_only(path: &Path) -> Result<()> {
 }
 
 fn dependent_load_flags(bytes: &[u8]) -> Result<u16> {
-    if read_bytes(bytes, 0, 2, "DOS signature")? != b"MZ" {
+    if read_bytes(bytes, 0, DOS_SIGNATURE_BYTES, "DOS signature")? != b"MZ" {
         bail!("missing DOS MZ signature");
     }
     let pe_offset = read_u32(bytes, DOS_PE_POINTER_OFFSET, "DOS e_lfanew")? as usize;
-    if read_bytes(bytes, pe_offset, 4, "PE signature")? != b"PE\0\0" {
+    if read_bytes(bytes, pe_offset, PE_SIGNATURE_BYTES, "PE signature")? != b"PE\0\0" {
         bail!("missing PE signature");
     }
 
-    let coff = checked_add(pe_offset, 4, "COFF header offset")?;
+    let coff = checked_add(pe_offset, PE_SIGNATURE_BYTES, "COFF header offset")?;
     let section_count = read_u16(
         bytes,
-        checked_add(coff, 2, "section count offset")?,
+        checked_add(coff, COFF_SECTION_COUNT_OFFSET, "section count offset")?,
         "section count",
     )? as usize;
     if section_count == 0 {
@@ -55,7 +57,7 @@ fn dependent_load_flags(bytes: &[u8]) -> Result<u16> {
     }
     let optional_size = read_u16(
         bytes,
-        checked_add(coff, 16, "optional size offset")?,
+        checked_add(coff, COFF_OPTIONAL_SIZE_OFFSET, "optional size offset")?,
         "optional header size",
     )? as usize;
     let optional = checked_add(coff, COFF_HEADER_SIZE, "optional header offset")?;
@@ -63,8 +65,16 @@ fn dependent_load_flags(bytes: &[u8]) -> Result<u16> {
 
     let magic = read_u16(bytes, optional, "optional header magic")?;
     let (directory_count_offset, directories_offset, dependent_flags_offset) = match magic {
-        0x10b => (92usize, 96usize, 54usize), // PE32 / IMAGE_LOAD_CONFIG_DIRECTORY32
-        0x20b => (108usize, 112usize, 78usize), // PE32+ / IMAGE_LOAD_CONFIG_DIRECTORY64
+        PE32_MAGIC => (
+            PE32_DIRECTORY_COUNT_OFFSET,
+            PE32_DIRECTORIES_OFFSET,
+            PE32_DEPENDENT_FLAGS_OFFSET,
+        ),
+        PE32_PLUS_MAGIC => (
+            PE32_PLUS_DIRECTORY_COUNT_OFFSET,
+            PE32_PLUS_DIRECTORIES_OFFSET,
+            PE32_PLUS_DEPENDENT_FLAGS_OFFSET,
+        ),
         other => bail!("unsupported optional header magic 0x{other:04x}"),
     };
     let load_config_end = checked_add(
@@ -107,10 +117,14 @@ fn dependent_load_flags(bytes: &[u8]) -> Result<u16> {
     let load_rva = read_u32(bytes, load_entry, "load-config RVA")?;
     let load_directory_size = read_u32(
         bytes,
-        checked_add(load_entry, 4, "load-config size offset")?,
+        checked_add(load_entry, size_of::<u32>(), "load-config size offset")?,
         "load-config size",
     )? as usize;
-    let required_size = checked_add(dependent_flags_offset, 2, "DependentLoadFlags end")?;
+    let required_size = checked_add(
+        dependent_flags_offset,
+        size_of::<u16>(),
+        "DependentLoadFlags end",
+    )?;
     if load_rva == 0 {
         bail!("PE load-config directory is absent");
     }
@@ -123,7 +137,7 @@ fn dependent_load_flags(bytes: &[u8]) -> Result<u16> {
 
     let size_of_headers = read_u32(
         bytes,
-        checked_add(optional, 60, "SizeOfHeaders offset")?,
+        checked_add(optional, HEADERS_SIZE_FIELD_OFFSET, "SizeOfHeaders offset")?,
         "SizeOfHeaders",
     )?;
     let sections = checked_add(optional, optional_size, "section table offset")?;
@@ -185,22 +199,30 @@ fn rva_to_file_offset(
         )?;
         let virtual_size = read_u32(
             bytes,
-            checked_add(section, 8, "VirtualSize offset")?,
+            checked_add(section, SECTION_VIRTUAL_SIZE_OFFSET, "VirtualSize offset")?,
             "VirtualSize",
         )?;
         let virtual_address = read_u32(
             bytes,
-            checked_add(section, 12, "VirtualAddress offset")?,
+            checked_add(
+                section,
+                SECTION_VIRTUAL_ADDRESS_OFFSET,
+                "VirtualAddress offset",
+            )?,
             "VirtualAddress",
         )?;
         let raw_size = read_u32(
             bytes,
-            checked_add(section, 16, "SizeOfRawData offset")?,
+            checked_add(section, SECTION_RAW_SIZE_OFFSET, "SizeOfRawData offset")?,
             "SizeOfRawData",
         )?;
         let raw_pointer = read_u32(
             bytes,
-            checked_add(section, 20, "PointerToRawData offset")?,
+            checked_add(
+                section,
+                SECTION_RAW_POINTER_OFFSET,
+                "PointerToRawData offset",
+            )?,
             "PointerToRawData",
         )?;
 
@@ -238,14 +260,14 @@ fn read_bytes<'a>(bytes: &'a [u8], offset: usize, len: usize, field: &str) -> Re
 }
 
 fn read_u16(bytes: &[u8], offset: usize, field: &str) -> Result<u16> {
-    let raw: [u8; 2] = read_bytes(bytes, offset, 2, field)?
+    let raw: [u8; 2] = read_bytes(bytes, offset, size_of::<u16>(), field)?
         .try_into()
         .expect("length checked");
     Ok(u16::from_le_bytes(raw))
 }
 
 fn read_u32(bytes: &[u8], offset: usize, field: &str) -> Result<u32> {
-    let raw: [u8; 4] = read_bytes(bytes, offset, 4, field)?
+    let raw: [u8; 4] = read_bytes(bytes, offset, size_of::<u32>(), field)?
         .try_into()
         .expect("length checked");
     Ok(u32::from_le_bytes(raw))

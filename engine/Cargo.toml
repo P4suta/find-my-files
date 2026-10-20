@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/fmf-contract",
   "crates/fmf-core",
+  "crates/fmf-runtime",
   "crates/fmf-ffi",
   "crates/fmf-cli",
   "crates/fmf-proto",
@@ -12,26 +13,17 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1" # release version — managed by release-please (ADR-0035)
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.97"
 license = "Apache-2.0"
 repository = "https://github.com/P4suta/find-my-files"
-# Internal crates, never published to a registry (path deps are versionless by
-# design; this also lets cargo-deny's allow-wildcard-paths exempt them).
 publish = false
 
-# Maximal lint policy — the single source of truth; every member opts in with
-# `[lints] workspace = true`. Security-hardening intent (this session's north
-# star): the clippy groups below activate cast_ptr_alignment, ptr_as_ptr,
-# cast_possible_truncation, cast_sign_loss, etc. that guard the FFI and on-disk
-# parsing surfaces. Groups sit at priority -1 so a justified per-lint `allow`
-# (priority 0) wins; every such re-allow MUST carry a `reason = "…"`.
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
-# Every public item carries a doc comment — the Rust mirror of the C# side's
-# CS1591 (GenerateDocumentationFile + warnings-as-errors). rustdoc (just doc /
-# pages.yml) and `cargo check` both enforce it.
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(kani)'] }
+unfulfilled_lint_expectations = "deny"
 missing_docs = "deny"
 
 [workspace.lints.clippy]
@@ -40,55 +32,27 @@ pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 
-# ── Justified exemptions (priority 0 overrides the groups). EVERYTHING not listed
-#    here stays deny and is fixed in code, not suppressed. Each group has a reason.
-#
-# Numeric `as` casts are deliberate, not accidents: the index packs FRNs / offsets
-# / lengths into u32 to hit the ≤110 B/file RAM target (the project's core perf
-# goal), and int↔float casts feed ratios/metrics. Trust-boundary truncations are
-# validated in code (MAX_PAYLOAD_LEN, record_length, volume-label checks); forcing
-# try_from would only add panic paths, against the "落ちない" principle. Pointer /
-# alignment casts (cast_ptr_alignment, ptr_as_ptr, …) deliberately stay DENY.
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
 cast_lossless = "allow"
 cast_possible_wrap = "allow"
-# Structural / API-shape lints: "fixing" means a redesign, not a mechanical edit,
-# with no correctness or security gain.
 too_many_lines = "allow"
 needless_pass_by_value = "allow"
 struct_excessive_bools = "allow"
 fn_params_excessive_bools = "allow"
 module_name_repetitions = "allow"
-# RAII keep-alive fields are intentionally `_`-prefixed (held only for Drop);
-# dropping the prefix would trip dead_code instead.
 used_underscore_binding = "allow"
-# nursery, false-positive-prone here: the flagged lock scopes are deliberate and
-# the alternatives read worse. Revisit if these stabilize out of nursery.
 significant_drop_tightening = "allow"
 significant_drop_in_scrutinee = "allow"
 option_if_let_else = "allow"
-# cargo: internal workspace crates are never published to a registry, so registry
-# metadata is intentionally absent; transitive duplicate versions are not ours.
 cargo_common_metadata = "allow"
 multiple_crate_versions = "allow"
 
-# ── Curated `restriction` lints. The group is opt-in per-lint by design (enabling
-#    it wholesale is discouraged and would force mass allows). Each below earns its
-#    place; everything else in the group stays off.
-# Crash-safety ("don't crash"): a bare `unwrap()` carries no context, so ban it —
-# parsing of external/on-disk data returns an error instead, internal invariants
-# become `expect("why")`. `expect`/`panic!` themselves stay allowed: a documented
-# invariant panic is legitimate fail-fast, and denying them would only force
-# blanket re-allows (against the "don't add dead panic paths" rationale below).
-# Tests re-allow unwrap via allow-unwrap-in-tests in clippy.toml.
 unwrap_used = "deny"
-# No debugging residue in committed code (dbg! re-allowed in tests via clippy.toml).
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
-# Correctness / footguns.
 mem_forget = "deny"
 rc_buffer = "deny"
 rc_mutex = "deny"
@@ -96,7 +60,6 @@ mutex_atomic = "deny"
 lossy_float_literal = "deny"
 verbose_file_reads = "deny"
 try_err = "deny"
-# Consistency with the existing layout/style.
 empty_structs_with_brackets = "deny"
 unnecessary_self_imports = "deny"
 if_then_some_else_none = "deny"
@@ -105,11 +68,10 @@ wildcard_dependencies = "deny"
 [workspace.dependencies]
 fmf-contract = { path = "crates/fmf-contract" }
 fmf-core = { path = "crates/fmf-core" }
+fmf-runtime = { path = "crates/fmf-runtime" }
 fmf-proto = { path = "crates/fmf-proto" }
 fmf-buildstamp = { path = "crates/fmf-buildstamp" }
 windows-sys = { version = "0.61", features = [
-  # `NtCreateFile` + `OBJECT_ATTRIBUTES`: handle-relative opens of managed-tree
-  # descendants, so no walk ever re-resolves a full path (docs/SECURITY.md #7).
   "Wdk_Foundation",
   "Wdk_Storage_FileSystem",
   "Win32_Foundation",
@@ -131,80 +93,38 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_WindowsProgramming",
   "Win32_UI_Shell",
 ] }
-# SCM integration for fmf-service only (Mullvad's maintained wrapper).
 windows-service = "0.8"
 memchr = "2"
 rustc-hash = "2"
 rayon = "1"
 parking_lot = "0.12"
+bytemuck = { version = "1.25.2", default-features = false }
 crossbeam-channel = "0.5"
-# 2.0.19 moves thiserror-impl to syn 3 while serde/tracing still require syn 2;
-# keep the workspace duplicate-free until the remaining proc-macro graph moves.
-thiserror = "=2.0.18"
+thiserror = "=2.0.21"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 regex = "1"
-# Literal extraction from a regex HIR drives the prefilter that keeps regex
-# queries on the linear pool sweep instead of a full scan (ADR-0023). Pinned
-# to regex's own syntax crate; already in the lock as a transitive dep.
 regex-syntax = "0.8"
 unicode-normalization = "0.1"
-# 4.6.4 moves clap_derive to syn 3; keep the same duplicate-free proc-macro
-# graph as thiserror above until serde/tracing can move in one transaction.
 clap = { version = "=4.6.3", features = ["derive", "wrap_help"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-# CLI presentation: TTY-aware colouring that strips ANSI when redirected
-# (anstream) over clap's own style vocabulary (anstyle, already in the lock as
-# a clap dependency). No colour is ever hardcoded — the stream decides.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 anstream = "1.0"
 anstyle = "1"
-# A spinner while a volume is being indexed; hides itself when stderr is not a
-# terminal, so it never pollutes piped/JSON output.
 indicatif = "0.18"
-# CLI behavioural tests (dev-only): drive the built `fmf` binary and assert on
-# its stdout/stderr/exit code.
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
-# CLI shell-completion generation.
 clap_complete = "4"
 
-# Engine is always built/measured in release; keep stack traces usable.
-# codegen-units=1 keeps hot-path inlining independent of module layout
-# (ADR-0014).
 [profile.release]
 debug = "line-tables-only"
 lto = "thin"
 codegen-units = 1
-# Pin the unwind strategy the FFI boundary depends on. fmf-ffi's `guard()`
-# wraps every entry point in catch_unwind (fmf-ffi/src/error.rs), which only
-# contains a panic when unwinding; `panic = "abort"` (a common size tweak) would
-# turn a DLL-internal panic into a process abort that takes the C# host down
-# with it. unwind is the default — this makes the invariant explicit so it can't
-# be flipped by accident.
 panic = "unwind"
-# NOT set: `trim-paths = "all"`. It would strip the `<CARGO_HOME>\registry\src\
-# ...\<crate>\...rs` paths that `core::panic::Location` bakes into the shipped
-# PEs, but the pinned toolchain's Cargo (1.97) rejects the profile key as
-# unstable ("requires nightly"), and mise forbids ad-hoc toolchain swaps. The
-# leak is low-severity in practice: CI-built releases embed only the generic
-# hosted-runner path (`C:\Users\runneradmin\...`) plus the dependency tree that
-# `SHA256SUMS`/SBOM already publish — no personal data. `--remap-path-prefix` is
-# the stable alternative but its FROM is machine-specific (non-portable across
-# CI/dev). Revisit trigger: this Cargo stabilizes `trim-paths` → set it here.
-# (Local dev builds do embed the developer's username; official dist is CI-only.)
 
-# Attacker-facing boundary crates keep integer-overflow checks in release
-# (issue #137 S-3): frame/message-decode arithmetic panics loudly (contained
-# by the catch_unwind boundaries → FMF_E_PANIC) instead of silently wrapping.
-# None of these crates sit on the query hot path, so the cost is ~0. fmf-core
-# stays unchecked in release — measured +27% p50 on single-char queries with a
-# p99 past the 50 ms acceptance line (#137) — its coverage is the
-# overflow-checked dev/test/fuzz profiles plus explicit checked arithmetic at
-# trust boundaries; full-core re-measurement on a quiet machine is #152.
 [profile.release.package.fmf-proto]
 overflow-checks = true
 [profile.release.package.fmf-ffi]
@@ -214,8 +134,6 @@ overflow-checks = true
 [profile.release.package.fmf-contract]
 overflow-checks = true
 
-# Profiling builds (just profile): identical machine code to release — only
-# the debuginfo is upgraded to full so samply resolves inlined frames.
 [profile.profiling]
 inherits = "release"
 debug = true

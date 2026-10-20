@@ -9,29 +9,21 @@ repository.workspace = true
 [lints]
 workspace = true
 
-# DLL name is fixed: fmf_engine.dll, paired with [LibraryImport("fmf_engine")] in C#.
 [lib]
 name = "fmf_engine"
 crate-type = ["cdylib"]
 doctest = false
 
 [dependencies]
-# A cdylib can depend on rlibs just fine (the old "cannot depend" comment
-# was a Cargo misconception — ADR-0018); the contract is the single source.
 fmf-contract = { workspace = true }
-fmf-core = { workspace = true }
+fmf-runtime = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# degrade!(warn+カウンタ不可分)の warn 側 — 変換失敗の劣化記録のみに使う。
 tracing = { workspace = true }
 
 [dev-dependencies]
-# Test-only feature union: exposes fmf-core's index::testutil (TestDir RAII)
-# to the contract tests without touching the production cdylib build.
-fmf-core = { workspace = true, features = ["testutil"] }
+fmf-runtime = { workspace = true, features = ["testutil"] }
 
 [package.metadata.cargo-machete]
-# tracing is used only through fmf-core's degrade! macro expansion, which
-# cargo-machete can't see (it doesn't expand macros) — keep it.
 ignored = ["tracing"]

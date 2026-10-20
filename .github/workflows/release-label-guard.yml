@@ -1,15 +1,3 @@
-# release-please tracks its Release PR by the `autorelease: pending` label and,
-# after merge, finds the merged PR carrying it to cut the tag + GitHub Release
-# (relabelling it `autorelease: tagged`). Strip that label and the release would
-# silently never be cut. GitHub has no per-label lock, so instead: if anyone
-# removes `autorelease: pending` from a release-please PR, put it straight back.
-#
-# The `issues` label event runs the default-branch definition for both issues and
-# pull requests, so this API-only guard needs no `pull_request_target`. It first
-# filters for a PR event, then fetches current PR state and requires the exact
-# same-repository bot branch before writing. The human approval label
-# `release: approved` is deliberately NOT guarded: removing it (un-approving) is
-# a legitimate act (ADR-0035).
 name: release-label-guard
 
 on:
@@ -24,9 +12,6 @@ concurrency:
 
 jobs:
   reinstate:
-    # Ignore ordinary issues and every label except release-please's tracking
-    # label before allocating a runner. Current branch/repository identity is
-    # checked via the API immediately before the mutation.
     if: >-
       github.event.issue.pull_request != null
       && github.event.issue.state == 'open'
@@ -34,7 +19,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      pull-requests: write # restore the protected autorelease label
+      pull-requests: write # Permission: Restore the protected release label.
     steps:
       - name: Reinstate release-please's tracking label
         env:

@@ -4,9 +4,7 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Behavioural tests for <see cref="ShellOps.DoRevealIndexed"/> — the
-/// reveal-and-select orchestration that shipped broken because only the pure
-/// <c>BuildOpenStartInfo</c> helper was tested, never the HRESULT handling.
+/// <summary>Behavioural tests for <see cref="ShellOps.DoRevealIndexed"/> — the reveal-and-select orchestration that shipped broken because only the pure <c>BuildOpenStartInfo</c> helper was tested, never the HRESULT handling.
 /// A fake <see cref="IRevealApi"/> drives every branch without a live shell.</summary>
 public sealed class ShellOpsRevealTests
 {
@@ -100,9 +98,6 @@ public sealed class ShellOpsRevealTests
     [Fact]
     public void Non_negative_open_hr_is_a_failure_and_still_frees()
     {
-        // S_FALSE (1) has its severity bit clear, so Marshal.ThrowExceptionForHR
-        // (the old code) treated it as success — reveal silently did nothing.
-        // This is the regression test that pins the shipped-broken behaviour.
         var api = new FakeRevealApi(parseHr: 0, openHr: 1);
 
         var failure = Assert.IsType<InvalidOperationException>(ShellOps.DoRevealIndexed(
@@ -119,7 +114,7 @@ public sealed class ShellOpsRevealTests
     [Fact]
     public void Negative_open_hr_is_a_failure_and_still_frees()
     {
-        var api = new FakeRevealApi(parseHr: 0, openHr: unchecked((int)0x80004005)); // E_FAIL
+        var api = new FakeRevealApi(parseHr: 0, openHr: unchecked((int)0x80004005));
 
         var failure = Assert.IsType<COMException>(ShellOps.DoRevealIndexed(
             new RecordingVerifier(),
@@ -133,7 +128,7 @@ public sealed class ShellOpsRevealTests
     [Fact]
     public void Parse_failure_skips_open_and_frees_nothing()
     {
-        var api = new FakeRevealApi(parseHr: unchecked((int)0x80070002), openHr: 0); // ERROR_FILE_NOT_FOUND
+        var api = new FakeRevealApi(parseHr: unchecked((int)0x80070002), openHr: 0);
 
         var failure = Assert.IsAssignableFrom<IOException>(ShellOps.DoRevealIndexed(
             new RecordingVerifier(),

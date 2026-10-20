@@ -7,8 +7,7 @@ internal static partial class ShellOpsNative
 {
     private const uint CoInitApartmentThreaded = 0x2;
 
-    /// <summary>Initializes COM as an STA on the current thread.</summary>
-    /// <returns>The COM initialization HRESULT.</returns>
+    /// <summary>Initializes COM as an STA on the current thread.</summary> <returns>The COM initialization HRESULT.</returns>
     internal static int CoInitialize() =>
         CoInitializeEx(IntPtr.Zero, CoInitApartmentThreaded);
 

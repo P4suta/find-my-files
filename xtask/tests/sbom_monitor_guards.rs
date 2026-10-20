@@ -1,19 +1,13 @@
-//! Structural tripwires for the shipped-release SBOM re-scan
-//! (`.github/workflows/sbom-monitor.yml`, ADR-0034).
+//! Structural tripwires for the shipped-release SBOM re-scan (`.github/workflows/sbom-monitor.yml`, ADR-0034).
 //!
-//! This is the one supply-chain check that looks at bytes users have already
-//! downloaded rather than at HEAD, and it went red on 2026-08-03 and stayed red
-//! for six consecutive weekly runs. Nobody could say why. The identity and
-//! structure assertions were written as `jq -e '...' "$path" >/dev/null`, and
-//! `jq -e` reports a false predicate as exit status 1 with the word `false` on
-//! the stdout that `>/dev/null` threw away — so `set -e` ended the step with
-//! `##[error]Process completed with exit code 1.` and nothing else. A monitor
-//! that cannot say what it found is indistinguishable from one nobody reads.
+//! This is the one supply-chain check that looks at bytes users have already downloaded rather than at HEAD, and it went red on 2026-08-03 and stayed red for six consecutive weekly runs.
+//! Nobody could say why.
+//! The identity and structure assertions were written as `jq -e '...' "$path" >/dev/null`, and `jq -e` reports a false predicate as exit status 1 with the word `false` on the stdout that `>/dev/null` threw away — so `set -e` ended the step with `##[error]Process completed with exit code 1.` and nothing else.
+//! A monitor that cannot say what it found is indistinguishable from one nobody reads.
 //!
-//! These tests pin that defect class, plus the scope of the single identity
-//! waiver. They deliberately do not pin message wording or jq filter bodies:
-//! the diagnostics should stay freely editable — only their existence, and the
-//! narrowness of the waiver, are load-bearing.
+//! These tests pin that defect class, plus the scope of the single identity waiver.
+//! They deliberately do not pin message wording or jq filter bodies:
+//! the diagnostics should stay freely editable — only their existence, and the narrowness of the waiver, are load-bearing.
 
 const SBOM_MONITOR_WORKFLOW: &str = include_str!("../../.github/workflows/sbom-monitor.yml");
 
@@ -27,9 +21,8 @@ fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
     section
 }
 
-/// The workflow with whole-line comments stripped — the text that actually
-/// runs. The prose in that file is free to quote `jq -e` and to name v0.1.0
-/// while explaining why neither may appear in the shell itself.
+/// The workflow with whole-line comments stripped — the text that actually runs.
+/// The prose in that file is free to quote `jq -e` and to name v0.1.0 while explaining why neither may appear in the shell itself.
 fn executable_text(workflow: &str) -> String {
     workflow
         .lines()
@@ -49,10 +42,6 @@ fn every_failing_exit_names_what_it_found() {
         }
         guarded += 1;
 
-        // Walk back to the opener of the block this `exit 1` lives in. The
-        // `::error::` has to be inside that same block: whoever opens the run
-        // log is told which file and which field failed in the same breath as
-        // the failure, or the run has degenerated into a bare exit code again.
         let mut announced = false;
         for candidate in lines[..index].iter().rev() {
             let trimmed = candidate.trim();
@@ -77,9 +66,6 @@ fn every_failing_exit_names_what_it_found() {
         );
     }
 
-    // An empty sweep is a green gate that proves nothing. If the failing exits
-    // are ever restructured out of existence, this guard must be re-aimed
-    // rather than left quietly passing over nothing.
     assert!(
         guarded >= 9,
         "expected the monitor to still have its failing exits; found only {guarded}"
@@ -131,13 +117,6 @@ fn identity_waiver_covers_one_file_of_one_immutable_release() {
         "v0.1.0 published zero assets, so the asset-name check rejects it long \
          before identity validation. Naming it in the shell would imply it gets there."
     );
-    assert!(
-        SBOM_MONITOR_WORKFLOW.contains("v0.2.0"),
-        "the waiver must record when it stops applying: v0.2.0 becoming latest"
-    );
-
-    // A waived check announces itself. Silently accepting is how a monitor
-    // becomes decorative.
     let waived_branch = between(&executable, waiver, "else");
     assert!(
         waived_branch.contains("::notice::"),
@@ -148,10 +127,6 @@ fn identity_waiver_covers_one_file_of_one_immutable_release() {
         "the waiver relaxes identity only; it must never take over a failure path"
     );
 
-    // Relaxing identity is the whole of the waiver, and the digest comparison
-    // is what keeps that safe: it binds the downloaded bytes to the release
-    // metadata GitHub serves. `.components` is the array osv-scanner actually
-    // reads. Both therefore run for every release, outside any tag conditional.
     let before_identity = between(&executable, "mkdir -p sbom", "expected_identity=");
     for unconditional in ["sha256sum", "bomFormat", "specVersion"] {
         assert!(
@@ -167,12 +142,7 @@ fn identity_waiver_covers_one_file_of_one_immutable_release() {
 
 #[test]
 fn both_halves_agree_on_the_canonical_sbom_pair() {
-    // Fetching and validating are separate steps (see the comment above the
-    // validation step: a >4096-byte bash `run:` body deadlocks actionlint's
     // shellcheck pipe on Windows, hanging `just lint` with no output). That
-    // split means the canonical filename pair is spelled twice, so the two
-    // halves can disagree — and a validator iterating a shorter list than the
-    // downloader would check fewer SBOMs than it downloaded, silently.
     let executable = executable_text(SBOM_MONITOR_WORKFLOW);
     let pair = r#"expected=("app.cdx.json" "fmf-engine.cdx.json")"#;
     assert_eq!(

@@ -1,5 +1,8 @@
-//! `criterion-gate` — turn criterion change reports into an exit code
-//! (criterion itself never sets one on regressions; ADR-0013).
+//! `criterion-gate` — turn criterion change reports into an exit code (criterion itself never sets one on regressions; ADR-0013).
+
+const PERCENT_SCALE: f64 = 100.0;
+const MIN_ESTIMATE: f64 = 0.0;
+const REQUIRED_CONFIDENCE_LEVEL: f64 = 0.95;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -8,14 +11,13 @@ use serde::Serialize;
 
 use super::term;
 
-/// Single machine-readable report contract shared with xtask's transactional
-/// baseline validation. A renamed/added benchmark changes this manifest first;
+/// Single machine-readable report contract shared with xtask's transactional baseline validation.
+/// A renamed/added benchmark changes this manifest first;
 /// the small exclusion list below is the only policy layered on top.
 const BENCHMARK_MANIFEST: &str = include_str!("../../../../benches/criterion-benchmarks.txt");
 
-/// Measured and required to be present, but deliberately excluded from the
-/// relative gate. Their synthetic layout noise is documented at the benchmark
-/// definitions; the real-volume absolute gate is their arbiter.
+/// Measured and required to be present, but deliberately excluded from the relative gate.
+/// Their synthetic layout noise is documented at the benchmark definitions; the real-volume absolute gate is their arbiter.
 const INFORMATIONAL_BENCHES: &[&str] = &["build/finish_1m", "query/regex_scan"];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -174,7 +176,7 @@ fn parse_median_estimate(value: &serde_json::Value) -> Result<MedianEstimate, St
         .and_then(serde_json::Value::as_f64)
         .ok_or_else(|| "missing numeric `median.confidence_interval.upper_bound`".to_owned())?;
 
-    if (confidence - 0.95).abs() > f64::EPSILON {
+    if (confidence - REQUIRED_CONFIDENCE_LEVEL).abs() > f64::EPSILON {
         return Err(format!(
             "median confidence level is {confidence}, expected 0.95"
         ));
@@ -223,7 +225,7 @@ fn expected_case_names() -> Vec<String> {
 }
 
 fn evaluate(dir: &Path, threshold: f64) -> Result<CriterionEvidence, String> {
-    if !threshold.is_finite() || threshold < 0.0 {
+    if !threshold.is_finite() || threshold < MIN_ESTIMATE {
         return Err(format!(
             "criterion regression threshold must be a finite non-negative ratio, got {threshold}"
         ));
@@ -254,7 +256,7 @@ fn evaluate(dir: &Path, threshold: f64) -> Result<CriterionEvidence, String> {
             name,
             "baseline estimate",
         )?;
-        if actual.point < 0.0 || baseline.point < 0.0 {
+        if actual.point < MIN_ESTIMATE || baseline.point < MIN_ESTIMATE {
             return Err(format!(
                 "Criterion actual/baseline median for `{name}` must be non-negative"
             ));
@@ -365,9 +367,9 @@ pub fn criterion_gate(
                 "{} {} median {:+.1}% (95% CI {:+.1}%..{:+.1}%)",
                 term::paint(term::ERROR, "REGRESSION"),
                 case.id,
-                case.delta_ratio * 100.0,
-                case.delta_ci_lower_ratio * 100.0,
-                case.delta_ci_upper_ratio * 100.0
+                case.delta_ratio * PERCENT_SCALE,
+                case.delta_ci_lower_ratio * PERCENT_SCALE,
+                case.delta_ci_upper_ratio * PERCENT_SCALE
             );
         }
     }
@@ -380,7 +382,7 @@ pub fn criterion_gate(
             "criterion-gate: {checked} gated benches compared, {} informational reports \
              verified, threshold {:+.0}% (95% CI lower bound)",
             INFORMATIONAL_BENCHES.len(),
-            threshold * 100.0
+            threshold * PERCENT_SCALE
         );
     }
     if !decision.passed {
