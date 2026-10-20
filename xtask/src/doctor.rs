@@ -17,6 +17,8 @@ use yaml_rust2::{Yaml, YamlLoader};
 
 use crate::{cmd, paths};
 
+const SHA256_HEX_DIGITS: usize = 64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
     Ok,
@@ -113,7 +115,8 @@ fn parse_mise_winapp_pin(mise_toml: &str) -> std::result::Result<WinAppArtifactP
         .and_then(|checksum| checksum.strip_prefix("sha256:"))
         .ok_or_else(|| "WinAppCli `checksum` must use `sha256:<hex>`".to_owned())?
         .to_ascii_lowercase();
-    if checksum.len() != 64 || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if checksum.len() != SHA256_HEX_DIGITS || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         return Err("WinAppCli SHA-256 must contain exactly 64 hex digits".to_owned());
     }
     let size = table
@@ -495,7 +498,7 @@ fn compare_actionlint_action_pin(
 
     let digests = ci_env_values(ci, "ACTIONLINT_SHA256");
     if digests.len() != 1
-        || digests[0].len() != 64
+        || digests[0].len() != SHA256_HEX_DIGITS
         || !digests[0].bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         parity.problems.push(
@@ -1094,13 +1097,14 @@ fn render(checks: &[Check]) -> String {
     let width = checks.iter().map(|c| c.name.len()).max().unwrap_or(0);
     let mut out = String::from("\nfind-my-files doctor\n\n");
     for c in checks {
-        let _ = writeln!(
+        writeln!(
             out,
             "  {tag}  {name:<width$}  {detail}",
             tag = c.status.tag(),
             name = c.name,
             detail = c.detail,
-        );
+        )
+        .expect("formatting into a String cannot fail");
     }
     out
 }

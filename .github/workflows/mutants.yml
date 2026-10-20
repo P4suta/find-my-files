@@ -1,4 +1,4 @@
-# Weekly/manual exact-identity mutation audit (ADR-0022).
+# Manual exact-identity mutation audit (ADR-0022).
 #
 # A valid audit binds its controller to the protected default-branch workflow
 # commit. A manual run from main may name a different exact repository commit as
@@ -9,8 +9,6 @@ name: mutants
 run-name: mutation audit ${{ github.event.inputs.target_sha || github.workflow_sha }}
 
 on:
-  schedule:
-    - cron: "53 4 * * 1" # Monday 04:53 UTC
   workflow_dispatch:
     inputs:
       target_sha:

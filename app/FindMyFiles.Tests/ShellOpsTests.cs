@@ -328,6 +328,18 @@ public sealed class ShellOpsTests : IDisposable
         bool expected) =>
         Assert.Equal(expected, RealIndexedShellTargetVerifier.IsLexicallySafe(path));
 
+    private static string CreateNtfsFixtureDirectory(string name)
+    {
+        var root = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Temp");
+        Assert.True(Path.IsPathFullyQualified(root));
+        Assert.Equal("NTFS", new DriveInfo(new DirectoryInfo(root).Root.FullName).DriveFormat);
+        var directory = Path.Combine(root, "fmf-" + name + "-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        return directory;
+    }
+
     [Fact]
     public void Pinned_leaf_cannot_be_deleted_or_renamed_while_the_lease_is_held()
     {
@@ -336,15 +348,12 @@ public sealed class ShellOpsTests : IDisposable
         // used to be decorative and the leaf could be swapped between the identity
         // check and shell dispatch. Real files, real handles — a fake verifier
         // could not fail this.
-        var dir = Path.Combine(Path.GetTempPath(), "fmf-pin-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(dir);
+        var dir = CreateNtfsFixtureDirectory("pin");
         var file = Path.Combine(dir, "pinned.txt");
         var swapped = Path.Combine(dir, "swapped.txt");
         File.WriteAllText(file, "indexed");
         try
         {
-            // Reaching a lease at all also pins the fallback path: %TEMP% sits under
-            // C:\ and C:\Users, which withhold DELETE from a standard user.
             using (RealIndexedShellTargetVerifier.Instance.VerifyAndPin(
                 file,
                 RealIndexedShellTargetVerifier.ReadFileReference(file)))
@@ -375,8 +384,7 @@ public sealed class ShellOpsTests : IDisposable
     [Fact]
     public void Replacing_the_leaf_between_index_and_use_fails_the_identity_check()
     {
-        var dir = Path.Combine(Path.GetTempPath(), "fmf-pin-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(dir);
+        var dir = CreateNtfsFixtureDirectory("pin");
         var file = Path.Combine(dir, "target.txt");
         File.WriteAllText(file, "indexed");
         try
@@ -452,7 +460,7 @@ public sealed class ShellOpsTests : IDisposable
         // Real reparse points on the real file system: the pure classifier above
         // is only worth anything if the verifier actually consults it, and a
         // junction is the one name surrogate a non-elevated test can create.
-        var root = Path.Combine(Path.GetTempPath(), "fmf-junction-" + Guid.NewGuid().ToString("N"));
+        var root = CreateNtfsFixtureDirectory("junction");
         var real = Path.Combine(root, "real");
         Directory.CreateDirectory(real);
         var file = Path.Combine(real, "target.txt");

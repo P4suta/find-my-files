@@ -1,0 +1,19 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>P4suta/renovate-config"
+  ],
+  "customManagers": [
+    {
+      "customType": "jsonata",
+      "fileFormat": "toml",
+      "managerFilePatterns": [
+        "mise.toml"
+      ],
+      "matchStrings": [
+        "tools.dotnet.{'depName': 'dotnet', 'packageName': 'dotnet-sdk', 'currentValue': $type($) = 'string' ? $ : version, 'datasource': 'dotnet-version', 'versioning': 'semver'}",
+        "$each(tools, function($tool, $name) { $substring($name, 0, 5) = 'http:' and $tool.version_json_path = '.tag_name' ? ($release := $match($tool.version_list_url, /^https:\\/\\/api\\.github\\.com\\/repos\\/([^\\/]+\\/[^\\/]+)\\/releases\\/latest$/); $release ? {'depName': $name, 'packageName': $release.groups[0], 'currentValue': $tool.version, 'datasource': 'github-releases', 'versioning': 'semver-coerced'}) })"
+      ]
+    }
+  ]
+}

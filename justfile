@@ -92,7 +92,7 @@ test-app:
 [private]
 [working-directory: 'engine']
 build-ffi-for-source-gate:
-    cargo build --locked --release -p fmf-ffi
+    cargo build --locked --release --target-dir ../build/engine -p fmf-ffi
 
 # C# unit tests + coverage gate (line+branch >=57; UI is [ExcludeFromCodeCoverage]).
 # Threshold/type/stat live in the test csproj (with ExcludeByFile), so this is just
@@ -182,6 +182,11 @@ verify: build-ffi-for-source-gate fmt-check lint doc test test-xtask test-app de
 
 # Run repository-only verification on hosts that cannot build or test the Windows application.
 verify-portable: fmt-check-toml lint-text lint-actions
+
+[group('daily')]
+[doc('Run the native pre-push verification gate')]
+verify-push:
+    just {{ if os() == "windows" { "verify" } else { "verify-portable" } }}
 
 # The dispatched release workflow is the already-linted protected-main workflow;
 # its checkout is build input, not workflow code. Re-run every source and

@@ -36,8 +36,8 @@ fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
 }
 
 #[test]
-fn weekly_and_manual_audits_authorize_only_a_default_branch_controller() {
-    assert!(MUTANTS_WORKFLOW.contains("  schedule:\n"));
+fn manual_audits_authorize_only_a_default_branch_controller() {
+    assert!(!MUTANTS_WORKFLOW.contains("  schedule:\n"));
     assert!(MUTANTS_WORKFLOW.contains("  workflow_dispatch:\n"));
     assert!(MUTANTS_WORKFLOW.contains("      target_sha:\n"));
     assert!(!MUTANTS_WORKFLOW.contains("pull_request:"));

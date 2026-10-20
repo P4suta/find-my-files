@@ -1,116 +1,105 @@
-# Bounded libFuzzer smoke over the untrusted-input parsers, on Linux. Three
-# surfaces: the named-pipe wire codec (fmf-proto + fmf-contract — the
-# privilege-boundary parsers, non-elevated UI -> elevated fmf-service,
-# docs/SECURITY.md), the fmf-core decoders (query / index::snapshot /
-# usn::records / wtf8), and the NTFS on-disk grammar (fmf_core::ondisk — boot
-# sector, file records, $ATTRIBUTE_LIST, non-resident runs), which a crafted
-# VHDX or USB stick fully controls and fmf-service parses as LocalSystem
-# (ADR-0047). All are buildable on Linux because fmf-core's Windows deps
-# are cfg-gated. cargo-fuzz needs nightly + libFuzzer (Linux), installed CI-only
-# here; the pinned dev toolchain stays stable (mise.toml). Each target runs for a
-# short, fixed budget so a real crash fails the run without flaking on time.
+# Required parser smoke on relevant PRs and bounded weekly input exploration.
+# One runner shares tool installation and compilation across selected targets.
 name: fuzz
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "engine/fuzz/**"
-      - "engine/crates/fmf-proto/**"
-      - "engine/crates/fmf-contract/**"
-      - "engine/crates/fmf-core/**"
-      - ".github/workflows/fuzz.yml"
-  # PR gating is driven by ci.yml, which `uses:`-calls this workflow (paths-gated)
-  # and folds it into the single required `ci-required` check, so a fuzz failure
-  # blocks auto-merge (#93). A `pull_request` trigger here too would double-run it.
   workflow_call:
+    inputs:
+      surfaces:
+        description: JSON array of changed parser surfaces from the CI path filter.
+        type: string
+        required: false
+        default: '["fuzz_all"]'
   schedule:
-    - cron: "43 4 * * 1" # Monday 04:43 UTC (staggered from codeql/cargo-audit/scorecard)
+    - cron: "43 4 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fuzz-${{ github.ref }}
+  group: fuzz-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   fuzz:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    # Force one dated nightly for cargo-fuzz and every cargo build it spawns.
-    # Floating `nightly` would change compiler/stdlib bytes without a source
-    # change and make a crash irreproducible.
+    timeout-minutes: 30
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-07-24
-    strategy:
-      fail-fast: false
-      matrix:
-        # Wire codec (fmf-proto), the fmf-core decoders now reachable on Linux,
-        # and the NTFS on-disk grammar (fmf_core::ondisk, ADR-0047) — the bytes
-        # a crafted VHDX or USB stick fully controls. One job per target so each
-        # gets its own budget; they run in parallel, so adding a target costs no
-        # wall-clock time.
-        target:
-          [
-            frame_decode,
-            message_decode,
-            query_parse,
-            index_snapshot,
-            usn_records,
-            wtf8_decode,
-            ntfs_boot_sector,
-            ntfs_file_record,
-            ntfs_attribute_list,
-            ntfs_extent_runs,
-          ]
+      FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '10' || '60' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      # Same pinned action as the rest of CI; a dated nightly via the toolchain
-      # input (the action code is identical and `toolchain` controls the install).
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable-branch pin
         with:
           toolchain: nightly-2026-07-24
-
-      # cargo-fuzz is not present in install-action's checksummed release
-      # manifest. Make the exceptional source build explicit: Cargo verifies the
-      # crates.io package checksum, --locked fixes its transitive graph, and the
-      # executable is isolated under runner temp.
+      # Cargo verifies the package checksum; --locked fixes its dependency graph.
       - name: Install cargo-fuzz from its locked crates.io package
         run: cargo install cargo-fuzz --locked --version 0.13.2 --root "$RUNNER_TEMP/fmf-cargo-fuzz"
       - name: Expose the isolated cargo-fuzz subcommand
         run: echo "$RUNNER_TEMP/fmf-cargo-fuzz/bin" >> "$GITHUB_PATH"
-
-      # cargo-fuzz 0.13.2 does not expose Cargo's --locked switch. Validate its
-      # standalone workspace first; with the committed lock already complete,
-      # the subsequent internal `cargo run` has nothing to re-resolve.
       - name: Verify committed fuzz dependency graph
         working-directory: engine
         run: >-
           cargo metadata --locked --manifest-path fuzz/Cargo.toml
           --format-version 1 --no-deps > /dev/null
-
-      # Run from engine/ so cargo-fuzz finds ./fuzz (no --fuzz-dir keeps this
-      # working across cargo-fuzz versions). Cargo target, evolving corpus and
-      # crash artifacts all land in the single build/ tree (ADR-0021).
-      #
-      # Keep the target explicit: ASan needs the runner's dynamic GNU libc.
-      - name: prepare fuzz output
-        env:
-          FUZZ_TARGET: ${{ matrix.target }}
-        run: mkdir -p "build/fuzz/corpus/$FUZZ_TARGET" "build/fuzz/artifacts/$FUZZ_TARGET"
-      - name: fuzz ${{ matrix.target }} (60s)
-        working-directory: engine
-        env:
-          FUZZ_TARGET: ${{ matrix.target }}
-        run: >-
-          cargo fuzz run "$FUZZ_TARGET"
-          --target x86_64-unknown-linux-gnu
-          "../build/fuzz/corpus/$FUZZ_TARGET"
-          --
-          "-artifact_prefix=../build/fuzz/artifacts/$FUZZ_TARGET/"
-          -max_total_time=60
+      - uses: $/.github/actions/fuzz-target
+        if: contains(fromJSON(inputs.surfaces || '["fuzz_all"]'), 'fuzz_all') || contains(fromJSON(inputs.surfaces), 'fuzz_wire')
+        with:
+          target: frame_decode
+          seconds: ${{ env.FUZZ_SECONDS }}
+      - uses: $/.github/actions/fuzz-target
+        if: contains(fromJSON(inputs.surfaces || '["fuzz_all"]'), 'fuzz_all') || contains(fromJSON(inputs.surfaces), 'fuzz_wire')
+        with:
+          target: message_decode
+          seconds: ${{ env.FUZZ_SECONDS }}
+      - uses: $/.github/actions/fuzz-target
+        if: contains(fromJSON(inputs.surfaces || '["fuzz_all"]'), 'fuzz_all') || contains(fromJSON(inputs.surfaces), 'fuzz_core')
+        with:
+          target: query_parse
+          seconds: ${{ env.FUZZ_SECONDS }}
+      - uses: $/.github/actions/fuzz-target
+        if: contains(fromJSON(inputs.surfaces || '["fuzz_all"]'), 'fuzz_all') || contains(fromJSON(inputs.surfaces), 'fuzz_core')
+        with:
+          target: index_snapshot
+          seconds: ${{ env.FUZZ_SECONDS }}
+      - uses: $/.github/actions/fuzz-target
+        if: contains(fromJSON(inputs.surfaces || '["fuzz_all"]'), 'fuzz_all') || contains(fromJSON(inputs.surfaces), 'fuzz_usn')
+        with:
+          target: usn_records
+          seconds: ${{ env.FUZZ_SECONDS }}
+      - uses: $/.github/actions/fuzz-target
+        if: contains(fromJSON(inputs.surfaces || '["fuzz_all"]'), 'fuzz_all') || contains(fromJSON(inputs.surfaces), 'fuzz_core')
+        with:
+          target: wtf8_decode
+          seconds: ${{ env.FUZZ_SECONDS }}
+      - uses: $/.github/actions/fuzz-target
+        if: contains(fromJSON(inputs.surfaces || '["fuzz_all"]'), 'fuzz_all') || contains(fromJSON(inputs.surfaces), 'fuzz_ntfs')
+        with:
+          target: ntfs_boot_sector
+          seconds: ${{ env.FUZZ_SECONDS }}
+      - uses: $/.github/actions/fuzz-target
+        if: contains(fromJSON(inputs.surfaces || '["fuzz_all"]'), 'fuzz_all') || contains(fromJSON(inputs.surfaces), 'fuzz_ntfs')
+        with:
+          target: ntfs_file_record
+          seconds: ${{ env.FUZZ_SECONDS }}
+      - uses: $/.github/actions/fuzz-target
+        if: contains(fromJSON(inputs.surfaces || '["fuzz_all"]'), 'fuzz_all') || contains(fromJSON(inputs.surfaces), 'fuzz_ntfs')
+        with:
+          target: ntfs_attribute_list
+          seconds: ${{ env.FUZZ_SECONDS }}
+      - uses: $/.github/actions/fuzz-target
+        if: contains(fromJSON(inputs.surfaces || '["fuzz_all"]'), 'fuzz_all') || contains(fromJSON(inputs.surfaces), 'fuzz_ntfs')
+        with:
+          target: ntfs_extent_runs
+          seconds: ${{ env.FUZZ_SECONDS }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: build/fuzz/artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+          overwrite: true

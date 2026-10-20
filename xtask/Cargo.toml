@@ -72,7 +72,7 @@ toml_edit = "0.25"
 regex = "1"
 # deflate only — drops the bzip2/zstd C deps so xtask builds clean on the
 # ubuntu CI lane (and everywhere) without a C toolchain.
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
