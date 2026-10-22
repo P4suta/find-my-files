@@ -707,21 +707,6 @@ jobs:
           doppler-project: find-my-files
           doppler-config: sign_windows
           inject-env-vars: false
-      - name: Reject missing or unresolved sign_windows credentials
-        if: >-
-          ${{ steps.doppler.outcome == 'success' && (
-          steps.doppler.outputs.SSLDOTCOM_CREDENTIAL_ID == '' ||
-          startsWith(steps.doppler.outputs.SSLDOTCOM_CREDENTIAL_ID, '${') ||
-          steps.doppler.outputs.SSLDOTCOM_PASSWORD == '' ||
-          startsWith(steps.doppler.outputs.SSLDOTCOM_PASSWORD, '${') ||
-          steps.doppler.outputs.SSLDOTCOM_TOTP_SECRET == '' ||
-          startsWith(steps.doppler.outputs.SSLDOTCOM_TOTP_SECRET, '${') ||
-          steps.doppler.outputs.SSLDOTCOM_USERNAME == '' ||
-          startsWith(steps.doppler.outputs.SSLDOTCOM_USERNAME, '${')
-          ) }}
-        shell: bash
-        run: exit 1
-
       - name: Require complete Doppler credentials
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
