@@ -56,23 +56,33 @@ jobs:
       # A tag input means "recover dispatch only"; do not also run the version bot.
       RUN_BOT: ${{ github.event_name == 'push' || inputs.tag_name == '' }}
     steps:
-      - name: Fetch automation credentials from Doppler
+      - name: Fetch automation credentials
         id: doppler
-        if: env.RUN_BOT == 'true'
-        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        if: "env.RUN_BOT == 'true'"
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534
         with:
           auth-method: oidc
-          doppler-identity-id: ${{ vars.DOPPLER_SERVICE_IDENTITY_ID }}
+          doppler-identity-id: ${{ vars.DOPPLER_AUTOMATION_IDENTITY_ID }}
           doppler-project: find-my-files
           doppler-config: automation
           inject-env-vars: false
+      - name: Reject missing or unresolved automation credentials
+        if: >-
+          ${{ steps.doppler.outcome == 'success' && (
+          steps.doppler.outputs.GITHUB_APP_CLIENT_ID == '' ||
+          startsWith(steps.doppler.outputs.GITHUB_APP_CLIENT_ID, '${') ||
+          steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY == '' ||
+          startsWith(steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY, '${')
+          ) }}
+        shell: bash
+        run: exit 1
 
       - name: Require complete Doppler credentials
         if: env.RUN_BOT == 'true'
         shell: bash
         env:
-          RELEASE_PLEASE_CLIENT_ID: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
-          RELEASE_PLEASE_PRIVATE_KEY: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
+          RELEASE_PLEASE_CLIENT_ID: ${{ steps.doppler.outputs.GITHUB_APP_CLIENT_ID }}
+          RELEASE_PLEASE_PRIVATE_KEY: ${{ steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           for name in RELEASE_PLEASE_CLIENT_ID RELEASE_PLEASE_PRIVATE_KEY; do
@@ -90,8 +100,8 @@ jobs:
         if: env.RUN_BOT == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
-          private-key: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
+          client-id: ${{ steps.doppler.outputs.GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-issues: write
           permission-pull-requests: write
@@ -208,21 +218,31 @@ jobs:
           name: release-lock-candidate
           path: build/release-lock
 
-      - name: Fetch automation credentials from Doppler
+      - name: Fetch automation credentials
         id: doppler
-        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534
         with:
           auth-method: oidc
-          doppler-identity-id: ${{ vars.DOPPLER_SERVICE_IDENTITY_ID }}
+          doppler-identity-id: ${{ vars.DOPPLER_AUTOMATION_IDENTITY_ID }}
           doppler-project: find-my-files
           doppler-config: automation
           inject-env-vars: false
+      - name: Reject missing or unresolved automation credentials
+        if: >-
+          ${{ steps.doppler.outcome == 'success' && (
+          steps.doppler.outputs.GITHUB_APP_CLIENT_ID == '' ||
+          startsWith(steps.doppler.outputs.GITHUB_APP_CLIENT_ID, '${') ||
+          steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY == '' ||
+          startsWith(steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY, '${')
+          ) }}
+        shell: bash
+        run: exit 1
 
       - name: Require complete Doppler credentials
         shell: bash
         env:
-          RELEASE_PLEASE_CLIENT_ID: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
-          RELEASE_PLEASE_PRIVATE_KEY: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
+          RELEASE_PLEASE_CLIENT_ID: ${{ steps.doppler.outputs.GITHUB_APP_CLIENT_ID }}
+          RELEASE_PLEASE_PRIVATE_KEY: ${{ steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           for name in RELEASE_PLEASE_CLIENT_ID RELEASE_PLEASE_PRIVATE_KEY; do
@@ -236,8 +256,8 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
-          private-key: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
+          client-id: ${{ steps.doppler.outputs.GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY }}
           permission-contents: write
 
       - name: Commit only Cargo.lock with an atomic branch-head guard

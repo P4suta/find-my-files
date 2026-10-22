@@ -698,23 +698,22 @@ jobs:
           name: signing-output-directory
           path: build/signed
 
-      - name: Fetch windows credentials from Doppler
+      - name: Fetch sign_windows credentials
         id: doppler
-        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534
         with:
           auth-method: oidc
-          doppler-identity-id: ${{ vars.DOPPLER_SERVICE_IDENTITY_ID }}
+          doppler-identity-id: ${{ vars.DOPPLER_SIGN_WINDOWS_IDENTITY_ID }}
           doppler-project: find-my-files
-          doppler-config: windows
+          doppler-config: sign_windows
           inject-env-vars: false
-
       - name: Require complete Doppler credentials
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          ES_USERNAME: ${{ steps.doppler.outputs.ES_USERNAME }}
-          ES_PASSWORD: ${{ steps.doppler.outputs.ES_PASSWORD }}
-          CREDENTIAL_ID: ${{ steps.doppler.outputs.CREDENTIAL_ID }}
-          ES_TOTP_SECRET: ${{ steps.doppler.outputs.ES_TOTP_SECRET }}
+          ES_USERNAME: ${{ steps.doppler.outputs.SSLDOTCOM_USERNAME }}
+          ES_PASSWORD: ${{ steps.doppler.outputs.SSLDOTCOM_PASSWORD }}
+          CREDENTIAL_ID: ${{ steps.doppler.outputs.SSLDOTCOM_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ steps.doppler.outputs.SSLDOTCOM_TOTP_SECRET }}
         with:
           script: |
             for (const name of ["ES_USERNAME", "ES_PASSWORD", "CREDENTIAL_ID", "ES_TOTP_SECRET"]) {
@@ -728,10 +727,10 @@ jobs:
         uses: SSLcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
         with:
           command: batch_sign
-          username: ${{ steps.doppler.outputs.ES_USERNAME }}
-          password: ${{ steps.doppler.outputs.ES_PASSWORD }}
-          credential_id: ${{ steps.doppler.outputs.CREDENTIAL_ID }}
-          totp_secret: ${{ steps.doppler.outputs.ES_TOTP_SECRET }}
+          username: ${{ steps.doppler.outputs.SSLDOTCOM_USERNAME }}
+          password: ${{ steps.doppler.outputs.SSLDOTCOM_PASSWORD }}
+          credential_id: ${{ steps.doppler.outputs.SSLDOTCOM_CREDENTIAL_ID }}
+          totp_secret: ${{ steps.doppler.outputs.SSLDOTCOM_TOTP_SECRET }}
           dir_path: ${{ github.workspace }}\build\sign-stage
           # Write signed files to a dedicated dir. batch_sign does NOT honor
           # `override` (the Action never forwards -override), so without an
@@ -1030,21 +1029,31 @@ jobs:
           name: release-assets
           path: build
 
-      - name: Fetch automation credentials from Doppler
+      - name: Fetch automation credentials
         id: doppler
-        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534
         with:
           auth-method: oidc
-          doppler-identity-id: ${{ vars.DOPPLER_SERVICE_IDENTITY_ID }}
+          doppler-identity-id: ${{ vars.DOPPLER_AUTOMATION_IDENTITY_ID }}
           doppler-project: find-my-files
           doppler-config: automation
           inject-env-vars: false
+      - name: Reject missing or unresolved automation credentials
+        if: >-
+          ${{ steps.doppler.outcome == 'success' && (
+          steps.doppler.outputs.GITHUB_APP_CLIENT_ID == '' ||
+          startsWith(steps.doppler.outputs.GITHUB_APP_CLIENT_ID, '${') ||
+          steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY == '' ||
+          startsWith(steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY, '${')
+          ) }}
+        shell: bash
+        run: exit 1
 
       - name: Require complete Doppler credentials
         shell: bash
         env:
-          RELEASE_PLEASE_CLIENT_ID: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
-          RELEASE_PLEASE_PRIVATE_KEY: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
+          RELEASE_PLEASE_CLIENT_ID: ${{ steps.doppler.outputs.GITHUB_APP_CLIENT_ID }}
+          RELEASE_PLEASE_PRIVATE_KEY: ${{ steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           for name in RELEASE_PLEASE_CLIENT_ID RELEASE_PLEASE_PRIVATE_KEY; do
@@ -1060,8 +1069,8 @@ jobs:
         id: immutable-settings-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
-          private-key: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
+          client-id: ${{ steps.doppler.outputs.GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY }}
           permission-administration: read
 
       - name: Require immutable releases before attestations
@@ -1376,8 +1385,8 @@ jobs:
         id: publication-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID }}
-          private-key: ${{ steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY }}
+          client-id: ${{ steps.doppler.outputs.GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY }}
           permission-contents: write
 
       # release-please created the vX.Y.Z tag and draft together. Every read,
