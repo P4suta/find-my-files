@@ -152,6 +152,20 @@ fn index_start_skips_an_already_indexed_volume() {
 }
 
 #[test]
+fn index_start_wakes_only_a_failed_volume_without_duplicate_slots() {
+    let (_dir, e) = test_engine();
+    e.insert_ready_volume("C:", vol("C:", &[("retry.txt", 10)]));
+    e.insert_ready_volume("D:", vol("D:", &[("keep.txt", 10)]));
+    let slots = e.volumes.read().clone();
+    *slots[0].phase.lock() = VolumeState::Failed;
+    e.start_canonical_volumes(&["C:".to_owned(), "D:".to_owned()]);
+    assert!(slots[0].retry.load(Ordering::Acquire));
+    assert!(!slots[1].retry.load(Ordering::Acquire));
+    assert_eq!(e.status().len(), 2);
+    assert!(Arc::ptr_eq(&e.volumes.read()[0], &slots[0]));
+}
+
+#[test]
 fn volume_label_validation_is_exactly_letter_colon() {
     use super::volume::is_valid_volume_label;
     for good in ["C:", "c:", "D:", "z:", "A:"] {

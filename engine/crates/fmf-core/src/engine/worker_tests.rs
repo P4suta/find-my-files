@@ -441,6 +441,121 @@ fn phase_of(e: &Engine, volume: &str) -> VolumeState {
 
 // ── Failure-path replays ────────────────────────────────────────────────
 
+fn retry_journal(attempts: usize) -> FakeJournal {
+    FakeJournal::new(
+        (0..attempts)
+            .map(|_| Incarnation {
+                journal_id: 7,
+                next_usn: 100,
+                view: Some(JournalView {
+                    journal_id: 7,
+                    first_usn: 1,
+                }),
+                reads: vec![],
+            })
+            .collect(),
+        true,
+        Arc::new(AtomicU64::new(0)),
+    )
+}
+
+#[test]
+fn failed_volume_automatically_recovers_without_disturbing_ready_volume() {
+    let label = "FMFRETRY:";
+    let (_dir, e) = test_engine();
+    e.insert_ready_volume("D:", vol("D:", &["survivor.txt"]));
+    let rx = sink_channel(&e);
+    let store = FakeStore::new(
+        vec![
+            LoadScript::Corrupt,
+            LoadScript::Found(Box::new(vol(label, &["recovered.txt"])), 7, 50),
+        ],
+        false,
+    );
+    e.spawn_worker_with_seams(label, store, Box::new(retry_journal(2)));
+    let events = lifecycle_until(&rx, label, |event| {
+        matches!(event, EngineEvent::VolumeReady { .. })
+    });
+    assert!(matches!(
+        events.as_slice(),
+        [
+            EngineEvent::VolumeFailed { .. },
+            EngineEvent::RescanStarted { .. },
+            EngineEvent::VolumeReady { .. }
+        ]
+    ));
+    assert_eq!(phase_of(&e, label), VolumeState::Ready);
+    assert_eq!(phase_of(&e, "D:"), VolumeState::Ready);
+    assert_eq!(e.status().len(), 2);
+    assert_eq!(e.threads.lock().len(), 1, "retry must reuse the worker");
+    assert_eq!(
+        e.query("survivor", &QueryOptions::default()).unwrap().0.len(),
+        1
+    );
+    e.shutdown();
+}
+
+#[test]
+fn exhausted_automatic_retry_waits_for_an_explicit_retry() {
+    let label = "FMFRETRYBOUND:";
+    let (_dir, e) = test_engine();
+    let rx = sink_channel(&e);
+    let store = FakeStore::new(
+        vec![
+            LoadScript::Corrupt,
+            LoadScript::Corrupt,
+            LoadScript::Found(Box::new(vol(label, &["recovered.txt"])), 7, 50),
+        ],
+        false,
+    );
+    e.spawn_worker_with_seams(label, store.clone(), Box::new(retry_journal(3)));
+    lifecycle_until(&rx, label, |event| {
+        matches!(event, EngineEvent::VolumeFailed { .. })
+    });
+    let second = lifecycle_until(&rx, label, |event| {
+        matches!(event, EngineEvent::VolumeFailed { .. })
+    });
+    assert!(matches!(
+        second.as_slice(),
+        [EngineEvent::RescanStarted { .. }, EngineEvent::VolumeFailed { .. }]
+    ));
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(phase_of(&e, label), VolumeState::Failed);
+    assert_eq!(
+        store.loads.lock().len(),
+        1,
+        "persistent failure must not loop scans"
+    );
+    e.volumes.read()[0].retry.store(true, Ordering::Release);
+    let third = lifecycle_until(&rx, label, |event| {
+        matches!(event, EngineEvent::VolumeReady { .. })
+    });
+    assert!(matches!(
+        third.as_slice(),
+        [EngineEvent::RescanStarted { .. }, EngineEvent::VolumeReady { .. }]
+    ));
+    assert_eq!(e.threads.lock().len(), 1);
+    e.shutdown();
+}
+
+#[test]
+fn shutdown_interrupts_failed_volume_retry_wait() {
+    let label = "FMFRETRYSTOP:";
+    let (_dir, e) = test_engine();
+    let rx = sink_channel(&e);
+    e.spawn_worker_with_seams(
+        label,
+        FakeStore::new(vec![LoadScript::Corrupt], false),
+        Box::new(retry_journal(1)),
+    );
+    lifecycle_until(&rx, label, |event| {
+        matches!(event, EngineEvent::VolumeFailed { .. })
+    });
+    let start = Instant::now();
+    e.shutdown();
+    assert!(start.elapsed() < Duration::from_secs(1));
+}
+
 /// Corrupt snapshot → counted + warned, then degrade to the full-scan
 /// path. The scan itself is not behind a seam (2-trait cap), so the label
 /// names a volume that cannot exist: the scan attempt fails identically
