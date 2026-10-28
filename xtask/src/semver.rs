@@ -3,6 +3,15 @@
 
 use anyhow::{bail, Result};
 
+#[cfg(kani)]
+#[path = "semver_proofs.rs"]
+mod kani_proofs;
+
+/// The release version before channel and build metadata.
+pub fn product_base(full: &str) -> &str {
+    full.split(['-', '+']).next().unwrap_or_default()
+}
+
 /// Accept only canonical release `SemVer` `X.Y.Z`: exactly three ASCII-decimal components, with no leading zero on a multi-digit component.
 /// Pre-release and build metadata are deliberately excluded from release-source versions.
 pub fn validate(version: &str) -> Result<()> {
