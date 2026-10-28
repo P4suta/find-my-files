@@ -1,6 +1,6 @@
 //! Non-elevated behavioural test for the on-demand idle self-stop (ADR-0027):
-//! a console `fmf-service run --no-index` with a 1s idle timeout exits on its
-//! own shortly after its only client disconnects. No elevation, no real scan —
+//! a console `fmf-service run --no-index` with a 1s idle timeout exits on its own shortly after its only client disconnects.
+//! No elevation, no real scan —
 //! it exercises the real `serve()` park loop in a child process.
 
 use std::io::Write as _;
@@ -24,8 +24,7 @@ fn connect_with_retry(pipe_name: &str, deadline: Duration) -> PipeStream {
 
 #[test]
 fn idle_stop_exits_after_last_client_disconnects() {
-    let data_dir = fmf_core::index::testutil::TestDir::new();
-    // 1s idle timeout; no volumes scanned (no_index below).
+    let data_dir = fmf_runtime::index::testutil::TestDir::new();
     let mut f = std::fs::File::create(data_dir.join("service.json")).unwrap();
     f.write_all(br#"{ "idle_stop_secs": 1, "flush_interval_secs": 10 }"#)
         .unwrap();
@@ -44,8 +43,6 @@ fn idle_stop_exits_after_last_client_disconnects() {
         .spawn()
         .expect("spawn fmf-service run");
 
-    // Connect, say Hello, and hold the connection long enough for the serve()
-    // park loop (200ms tick) to observe a live client, then disconnect.
     {
         let mut s = connect_with_retry(&pipe_name, Duration::from_secs(10));
         write_frame(
@@ -65,9 +62,8 @@ fn idle_stop_exits_after_last_client_disconnects() {
         .expect("write hello");
         let _ = read_frame(&mut s).expect("hello reply");
         std::thread::sleep(Duration::from_millis(700));
-    } // stream dropped → server sees the disconnect → the idle clock starts
+    }
 
-    // It should self-stop within the 1s idle timeout plus generous slack.
     let begin = Instant::now();
     loop {
         if let Some(status) = child.try_wait().expect("try_wait") {

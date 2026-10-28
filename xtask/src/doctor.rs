@@ -1,9 +1,6 @@
-//! `just doctor` — a fast check that the dev environment matches `mise.toml`
-//! and the gate prerequisites, so a contributor knows right after `just setup`
-//! whether anything is off.
+//! `just doctor` — a fast check that the dev environment matches `mise.toml` and the gate prerequisites, so a contributor knows right after `just setup` whether anything is off.
 //!
-//! The pure helpers (pin parsing, CI-mirror parity, version matching, rendering)
-//! are unit-tested; `run` is the only part that shells out to the tools.
+//! The pure helpers (pin parsing, CI-mirror parity, version matching, rendering) are unit-tested; `run` is the only part that shells out to the tools.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -16,6 +13,8 @@ use yaml_rust2::yaml::Hash;
 use yaml_rust2::{Yaml, YamlLoader};
 
 use crate::{cmd, paths};
+
+const SHA256_HEX_DIGITS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
@@ -61,10 +60,6 @@ impl Check {
     }
 }
 
-// Pull every tool pin out of mise.toml. Most pins are bare strings; download
-// backends use a table with a `version` field so identity, URL, and checksum can
-// stay together. Backend-qualified tools are kept: a required subcommand must
-// not disappear behind a falsely green doctor.
 fn parse_mise_pins(mise_toml: &str) -> BTreeMap<String, String> {
     let mut pins = BTreeMap::new();
     let Ok(doc) = mise_toml.parse::<DocumentMut>() else {
@@ -113,7 +108,8 @@ fn parse_mise_winapp_pin(mise_toml: &str) -> std::result::Result<WinAppArtifactP
         .and_then(|checksum| checksum.strip_prefix("sha256:"))
         .ok_or_else(|| "WinAppCli `checksum` must use `sha256:<hex>`".to_owned())?
         .to_ascii_lowercase();
-    if checksum.len() != 64 || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if checksum.len() != SHA256_HEX_DIGITS || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         return Err("WinAppCli SHA-256 must contain exactly 64 hex digits".to_owned());
     }
     let size = table
@@ -211,9 +207,6 @@ fn load_ci_yaml(path: &str, source: &str) -> std::result::Result<CiYaml, String>
         ));
     }
 
-    // YamlLoader is itself a parser-event receiver. In addition to producing the
-    // typed tree, it rejects duplicate keys at every mapping depth before a
-    // LinkedHashMap could hide the earlier value.
     let documents = YamlLoader::load_from_str(source)
         .map_err(|error| format!("{path}: invalid YAML: {error}"))?;
     if documents.len() != 1 {
@@ -349,9 +342,6 @@ fn parse_ci_steps(node: &Yaml, context: &str) -> std::result::Result<Vec<CiStep>
     Ok(parsed)
 }
 
-// Explicit aliases for CI binaries whose upstream executable/package name is
-// not the mise key. Adding a new mirrored taiki-e tool without updating this
-// policy is a hard failure instead of a silently unverified duplicate pin.
 fn taiki_mise_key(tool: &str) -> Option<&'static str> {
     match tool {
         "just" => Some("just"),
@@ -369,10 +359,6 @@ fn taiki_mise_key(tool: &str) -> Option<&'static str> {
     }
 }
 
-// These binaries intentionally have no local mise mirror. They are narrow,
-// CI-only tools: advisory scanning and remote SBOM monitoring. Every exception
-// remains version-pinned in YAML. cargo-fuzz is audited separately because its
-// upstream has no checksummed prebuilt manifest.
 fn taiki_mirror_exception(tool: &str) -> Option<&'static str> {
     match tool {
         "cargo-audit" => Some("CI-only advisory scanner"),
@@ -495,7 +481,7 @@ fn compare_actionlint_action_pin(
 
     let digests = ci_env_values(ci, "ACTIONLINT_SHA256");
     if digests.len() != 1
-        || digests[0].len() != 64
+        || digests[0].len() != SHA256_HEX_DIGITS
         || !digests[0].bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         parity.problems.push(
@@ -576,12 +562,21 @@ fn workflow_runs_ui_automation(ci: &CiYaml) -> bool {
     })
 }
 
+fn is_self_repository_ref(action_ref: &str, path: &str) -> bool {
+    action_ref
+        .strip_prefix("$/")
+        .or_else(|| action_ref.strip_prefix("./"))
+        == Some(path)
+}
+
 fn ui_cli_wiring_problems(path: &str, ci: &CiYaml) -> Vec<String> {
     let mut problems = Vec::new();
     for block in &ci.step_blocks {
         let mut setup_ids = Vec::new();
         for step in block {
-            if step.uses.as_deref() == Some("./.github/actions/setup-winapp") {
+            if step.uses.as_deref().is_some_and(|action_ref| {
+                is_self_repository_ref(action_ref, ".github/actions/setup-winapp")
+            }) {
                 match step.id.as_deref().filter(|id| !id.is_empty()) {
                     Some(id) => setup_ids.push(id.to_owned()),
                     None => problems.push(format!(
@@ -691,6 +686,15 @@ fn ci_mirror_parity(
                 .rsplit_once('@')
                 .map_or(action_ref, |(name, _)| name)
                 .to_ascii_lowercase();
+            if is_self_repository_ref(&action_name, ".github/actions/setup-winapp") {
+                saw_winapp = true;
+                has_winapp = true;
+                continue;
+            }
+            if is_self_repository_ref(&action_name, ".github/actions/setup-actionlint") {
+                saw_actionlint = true;
+                continue;
+            }
             match action_name.as_str() {
                 "actions/setup-dotnet" => {
                     saw_dotnet = true;
@@ -701,13 +705,6 @@ fn ci_mirror_parity(
                             .problems
                             .push(format!("{path}: setup-dotnet has no `dotnet-version`"));
                     }
-                }
-                "./.github/actions/setup-winapp" => {
-                    saw_winapp = true;
-                    has_winapp = true;
-                }
-                "./.github/actions/setup-actionlint" => {
-                    saw_actionlint = true;
                 }
                 "microsoft/setup-winappcli" => {
                     parity.problems.push(format!(
@@ -769,7 +766,7 @@ fn ci_mirror_parity(
         parity.problems.extend(ui_cli_wiring_problems(path, &ci));
         if requires_winapp && !has_winapp {
             parity.problems.push(format!(
-                "{path}: runs UI automation without ./.github/actions/setup-winapp"
+                "{path}: runs UI automation without the self-repository setup-winapp action"
             ));
         }
     }
@@ -782,12 +779,12 @@ fn ci_mirror_parity(
     if !saw_winapp {
         parity
             .problems
-            .push("no ./.github/actions/setup-winapp wiring found in workflows".to_owned());
+            .push("no self-repository setup-winapp wiring found in workflows".to_owned());
     }
     if !saw_actionlint {
         parity
             .problems
-            .push("no ./.github/actions/setup-actionlint wiring found in workflows".to_owned());
+            .push("no self-repository setup-actionlint wiring found in workflows".to_owned());
     }
     if !saw_taiki {
         parity
@@ -908,9 +905,6 @@ fn ci_mirror_check_at(root: &Path, pins: &BTreeMap<String, String>, mise_toml: &
     }
 }
 
-// Whether `actual` satisfies the loose mise `pin`: each dot-separated part of the
-// pin must equal the matching leading part of `actual`. Pin `10` accepts
-// `10.0.118`; pin `1.95` accepts `1.95.3` but not `1.96.0`.
 fn version_satisfies(pin: &str, actual: &str) -> bool {
     let mut actual_parts = actual.split('.');
     for p in pin.split('.') {
@@ -921,8 +915,6 @@ fn version_satisfies(pin: &str, actual: &str) -> bool {
     true
 }
 
-// Return the first whitespace-separated version token, accepting an optional
-// leading `v` as well as output such as `rustc 1.95.0`.
 fn first_version_token(raw: &str) -> Option<&str> {
     raw.split_whitespace().find_map(|tok| {
         let numeric = tok.strip_prefix('v').unwrap_or(tok);
@@ -934,7 +926,6 @@ fn first_version_token(raw: &str) -> Option<&str> {
     })
 }
 
-// Probe one tool: compare the version it reports against its mise pin.
 fn tool_check(
     name: &str,
     pin_key: &str,
@@ -971,8 +962,6 @@ fn tool_check(
 
 #[cfg(windows)]
 fn elevation_detail() -> String {
-    // High Mandatory Level (S-1-16-12288) or System (S-1-16-16384) in whoami's
-    // group list means an elevated token — no extra crate dependency needed.
     match cmd::capture(&paths::repo_root(), "whoami", &["/groups"]) {
         Some(groups) if groups.contains("S-1-16-12288") || groups.contains("S-1-16-16384") => {
             "ADMIN — full $MFT / USN access".to_owned()
@@ -987,10 +976,6 @@ fn elevation_detail() -> String {
     "n/a (non-Windows host)".to_owned()
 }
 
-// ADR-0021: every generated artifact except C# obj lives under build/. The
-// required `build/` ignore rule also matches nested directories, and the WinUI
-// project's local ignore file masks its conventional output directories, so
-// doctor probes these paths directly instead of relying on `git status`.
 const MISPLACED_OUTPUT_PATHS: &[&str] = &[
     "target",
     "engine/target",
@@ -1083,13 +1068,14 @@ fn render(checks: &[Check]) -> String {
     let width = checks.iter().map(|c| c.name.len()).max().unwrap_or(0);
     let mut out = String::from("\nfind-my-files doctor\n\n");
     for c in checks {
-        let _ = writeln!(
+        writeln!(
             out,
             "  {tag}  {name:<width$}  {detail}",
             tag = c.status.tag(),
             name = c.name,
             detail = c.detail,
-        );
+        )
+        .expect("formatting into a String cannot fail");
     }
     out
 }
@@ -1104,8 +1090,7 @@ fn overall(checks: &[Check]) -> Status {
     }
 }
 
-/// Print the environment report and fail (non-zero exit) only when a `[FAIL]`
-/// item is present — a `[WARN]` leaves the environment usable.
+/// Print the environment report and fail (non-zero exit) only when a `[FAIL]` item is present — a `[WARN]` leaves the environment usable.
 pub fn run() -> Result<()> {
     let mise_toml = std::fs::read_to_string(paths::mise_toml()).unwrap_or_default();
     let pins = parse_mise_pins(&mise_toml);
@@ -1250,7 +1235,7 @@ just = \"1\"
 \"cargo:samply\" = \"0.13.1\"
 \"cargo:cargo-nextest\" = \"0.9.140\"
 \"github:rhysd/actionlint\" = \"1.7.7\"
-\"github:zizmorcore/zizmor\" = \"1.28.0\"
+\"github:zizmorcore/zizmor\" = \"1.30.1\"
 
 [tools.\"http:winappcli\"]
 version = \"0.5.0\"
@@ -1280,7 +1265,7 @@ cargo.binstall = true
         );
         assert_eq!(
             pins.get("github:zizmorcore/zizmor").map(String::as_str),
-            Some("1.28.0")
+            Some("1.30.1")
         );
         assert_eq!(pins.len(), 8);
     }
@@ -1433,7 +1418,7 @@ jobs:
             ("cargo:taplo-cli".to_owned(), "0.10.0".to_owned()),
             ("cargo:typos-cli".to_owned(), "1.47.2".to_owned()),
             ("github:rhysd/actionlint".to_owned(), "1.7.12".to_owned()),
-            ("github:zizmorcore/zizmor".to_owned(), "1.28.0".to_owned()),
+            ("github:zizmorcore/zizmor".to_owned(), "1.30.1".to_owned()),
         ])
     }
 
@@ -1494,9 +1479,9 @@ jobs:
       - uses: actions/setup-dotnet@immutable
         with:
           dotnet-version: 10.0.401
-      - uses: ./.github/actions/setup-winapp
+      - uses: $/.github/actions/setup-winapp
         id: winapp
-      - uses: ./.github/actions/setup-actionlint
+      - uses: $/.github/actions/setup-actionlint
       - uses: taiki-e/install-action@immutable
         with:
           tool: |
@@ -1510,7 +1495,7 @@ jobs:
             cargo-mutants@27.1.0
             taplo@0.10.0
             typos-cli@1.47.2
-            zizmor@1.28.0
+            zizmor@1.30.1
             cargo-audit@0.22.2
             osv-scanner@2.3.6
           fallback: none
@@ -1593,7 +1578,7 @@ jobs:
 
         assert!(problems.contains("CI pins 10.0.999"));
         assert!(problems.contains("external setup-WinAppCli bypasses"));
-        assert!(problems.contains("no ./.github/actions/setup-winapp wiring"));
+        assert!(problems.contains("no self-repository setup-winapp wiring"));
         assert!(problems.contains("`WINAPP_VERSION` is 0.4.0"));
         assert!(problems.contains("CI pins 1.53.0"));
         assert!(problems.contains("`cargo-audit` is not version-pinned"));
@@ -1610,9 +1595,9 @@ jobs:
       - uses: actions/setup-dotnet@immutable
         with:
           dotnet-version: 10.0.401
-      - uses: ./.github/actions/setup-winapp
+      - uses: $/.github/actions/setup-winapp
         id: winapp
-      - uses: ./.github/actions/setup-actionlint
+      - uses: $/.github/actions/setup-actionlint
       - uses: taiki-e/install-action@immutable
         with:
           tool: just@1.54.0
@@ -1650,7 +1635,7 @@ jobs:
             .problems
             .iter()
             .any(|problem| problem.contains(
-                ".github/workflows/missing.yml: runs UI automation without ./.github/actions/setup-winapp"
+                ".github/workflows/missing.yml: runs UI automation without the self-repository setup-winapp action"
             )));
     }
 

@@ -1,0 +1,19 @@
+name: Bounded parser fuzz target
+description: Run one parser target with shared compiler outputs and an explicit time budget.
+inputs:
+  target:
+    description: Fuzz binary declared in engine/fuzz/Cargo.toml.
+    required: true
+  seconds:
+    description: Maximum exploration time for this target.
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        FUZZ_TARGET: ${{ inputs.target }}
+        FUZZ_SECONDS: ${{ inputs.seconds }}
+      run: >-
+        cargo run --locked --manifest-path xtask/Cargo.toml --
+        fuzz "$FUZZ_TARGET" "$FUZZ_SECONDS"

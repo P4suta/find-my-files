@@ -2,22 +2,11 @@ using FindMyFiles.Services;
 
 namespace FindMyFiles.Tests.TestDoubles;
 
-/// <summary>
-/// Deterministic <see cref="IDispatcher"/> for unit tests: HasThreadAccess is
-/// always true (the production Debug.Asserts must pass), TryEnqueue collects
-/// work until the test drains it, and one-shot timers fire only when the test
-/// says so. No real threads, no real time.
+/// <summary> Deterministic <see cref="IDispatcher"/> for unit tests: HasThreadAccess is always true (the production Debug.Asserts must pass), TryEnqueue collects work until the test drains it, and one-shot timers fire only when the test says so.
+/// No real threads, no real time.
 ///
-/// <para>The queue is locked because the real <c>DispatcherQueue.TryEnqueue</c>
-/// is thread-safe and production relies on that: a background page fetch awaits
-/// with <c>ConfigureAwait(false)</c> and marshals its completion back through
-/// <c>TryEnqueue</c> — that continuation can resume on a thread-pool thread
-/// (the TPL is free not to inline it) and race a test-thread
-/// <see cref="DrainQueue"/>. An unsynchronized <see cref="Queue{T}"/> tears
-/// under that concurrent enqueue/dequeue (a null slot → NRE). Actions are
-/// invoked outside the lock so re-entrant enqueues and concurrent producers
-/// never block on the action.</para>
-/// </summary>
+/// <para>The queue is locked because the real <c>DispatcherQueue.TryEnqueue</c> is thread-safe and production relies on that: a background page fetch awaits with <c>ConfigureAwait(false)</c> and marshals its completion back through <c>TryEnqueue</c> — that continuation can resume on a thread-pool thread (the TPL is free not to inline it) and race a test-thread <see cref="DrainQueue"/>. An unsynchronized <see cref="Queue{T}"/> tears under that concurrent enqueue/dequeue (a null slot → NRE).
+/// Actions are invoked outside the lock so re-entrant enqueues and concurrent producers never block on the action.</para> </summary>
 internal sealed class ManualDispatcher : IDispatcher
 {
     private readonly Queue<Action> _queue = new();
@@ -45,9 +34,8 @@ internal sealed class ManualDispatcher : IDispatcher
         return timer;
     }
 
-    /// <summary>
-    /// Run everything queued so far, including work the drained actions
-    /// enqueue themselves. Returns the number of actions run.
+    /// <summary> Run everything queued so far, including work the drained actions enqueue themselves.
+    /// Returns the number of actions run.
     /// </summary>
     public int DrainQueue()
     {
@@ -65,7 +53,7 @@ internal sealed class ManualDispatcher : IDispatcher
                 next = _queue.Dequeue();
             }
 
-            next(); // outside the lock: an action may re-enqueue or a producer may run
+            next();
             ran++;
         }
 
@@ -75,7 +63,6 @@ internal sealed class ManualDispatcher : IDispatcher
     /// <summary>Fire every currently-armed timer once (one-shot semantics).</summary>
     public void FireTimers()
     {
-        // Snapshot: a tick may create or re-arm timers.
         foreach (var timer in Timers.Where(t => t.IsStarted).ToList())
         {
             timer.Fire();
@@ -107,7 +94,8 @@ internal sealed class ManualDispatcher : IDispatcher
             IsStarted = false;
         }
 
-        /// <summary>Simulate the interval elapsing. No-op unless armed.</summary>
+        /// <summary>Simulate the interval elapsing.
+        /// No-op unless armed.</summary>
         public void Fire()
         {
             if (!IsStarted)
@@ -115,7 +103,7 @@ internal sealed class ManualDispatcher : IDispatcher
                 return;
             }
 
-            IsStarted = false; // one-shot
+            IsStarted = false;
             tick();
         }
     }

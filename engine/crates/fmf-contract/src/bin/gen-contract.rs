@@ -1,11 +1,7 @@
-//! Contract emitter — radiates the contract to the committed C# binding
-//! `app/FindMyFiles/Engine/Generated/EngineContract.g.cs` (ADR-0018).
+//! Contract emitter — radiates the contract to the committed C# binding `app/FindMyFiles/Engine/Generated/EngineContract.g.cs` (ADR-0018).
 //!
-//! Every value is read from the compiled contract items themselves
-//! (`offset_of!`/`size_of!` on the real `#[repr(C)]` types, the actual
-//! consts), so the generated numbers cannot drift from the Rust truth.
-//! `tests/drift.rs` runs `--check` inside the nextest workspace suite, so an
-//! out-of-date generated file fails the ordinary test gate.
+//! Every value is read from the compiled contract items themselves (`offset_of!`/`size_of!` on the real `#[repr(C)]` types, the actual consts), so the generated numbers cannot drift from the Rust truth.
+//! `tests/drift.rs` runs `--check` inside the nextest workspace suite, so an out-of-date generated file fails the ordinary test gate.
 //!
 //! Usage: `just contract-gen` (write) / `gen-contract --check` (verify).
 
@@ -359,9 +355,6 @@ fn render() -> String {
     w("/// <summary>Degradation counters of the stats JSON (snake_case keys —");
     w("/// deserialize with SnakeCaseLower). Generated from the contract's");
     w("/// counter-name registry; nonzero values surface in the F12 panel.</summary>");
-    // WinUI x:Bind reaches this type through public EngineStatsData and the
-    // public DiagFormat methods. The XAML compiler requires the full property
-    // type chain to be public even though this is not a supported product API.
     w("public sealed class CountersData");
     w("{");
     for name in counters::COUNTER_NAMES {
@@ -564,8 +557,21 @@ fn render() -> String {
     o
 }
 
+/// The environment variable a mutation sandbox uses to name the real tree.
+/// Same variable, same reason, as `golden_dir` in fmf-core's golden corpus test: under the mutation gate this crate is compiled inside a scratch copy,
+/// so `CARGO_MANIFEST_DIR` points there and the relative walk below lands outside the repository entirely.
+const MUTATION_SOURCE_ROOT_ENV: &str = "FMF_MUTATION_SOURCE_ROOT";
+
 /// Where the generated C# contract is written (committed).
 fn csharp_output_path() -> PathBuf {
+    if let Some(source_root) = std::env::var_os(MUTATION_SOURCE_ROOT_ENV) {
+        let source_root = PathBuf::from(source_root);
+        assert!(
+            source_root.is_absolute(),
+            "{MUTATION_SOURCE_ROOT_ENV} must be an absolute trusted source root"
+        );
+        return source_root.join("app/FindMyFiles/Engine/Generated/EngineContract.g.cs");
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../app/FindMyFiles/Engine/Generated/EngineContract.g.cs")
 }
@@ -581,7 +587,17 @@ fn main() {
     let mut drifted = false;
     for (path, rendered, label) in &artifacts {
         if check {
-            let on_disk = std::fs::read_to_string(path).unwrap_or_default();
+            let on_disk = match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) => {
+                    eprintln!(
+                        "{label} could not be read at {}: {error}. This is not drift: the check never found the generated file (ADR-0018).",
+                        path.display()
+                    );
+                    drifted = true;
+                    continue;
+                }
+            };
             if normalize(&on_disk) == normalize(rendered) {
                 println!("{label} is up to date");
             } else {
@@ -592,6 +608,10 @@ fn main() {
                 drifted = true;
             }
         } else {
+            assert!(
+                std::env::var_os(MUTATION_SOURCE_ROOT_ENV).is_none(),
+                "a mutation scratch tree may only verify the generated contract, never rewrite it"
+            );
             std::fs::create_dir_all(path.parent().expect("generated path has a parent"))
                 .expect("create generated output directory");
             std::fs::write(path, rendered).expect("write generated file");

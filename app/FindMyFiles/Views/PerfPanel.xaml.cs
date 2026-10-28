@@ -7,16 +7,13 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace FindMyFiles.Views;
 
-/// <summary>
-/// The F12 diagnostics panel. The stage bar (proportional theme-brush
-/// segments) and the latency sparkline are drawn imperatively from
-/// <see cref="PerfPanelViewModel.PerfDataChanged"/> — diagnostic chrome, not
-/// app data. Everything else (headline, volumes, USN, transport, errors,
-/// counters) is declarative x:Bind through DiagFormat. The host supplies
-/// <see cref="ViewModel"/> via x:Bind; the 1 Hz stats poll runs only while the
-/// panel is open. UI thread only.
+/// <summary> The F12 diagnostics panel.
+/// The stage bar (proportional theme-brush segments) and the latency sparkline are drawn imperatively from <see cref="PerfPanelViewModel.PerfDataChanged"/> — diagnostic chrome, not app data.
+/// Everything else (headline, volumes, USN, transport, errors,
+/// counters) is declarative x:Bind through DiagFormat.
+/// The host supplies <see cref="ViewModel"/> via x:Bind; the 1 Hz stats poll runs only while the panel is open.
+/// UI thread only.
 /// </summary>
-// View code-behind: imperative F12 rendering, not unit-tested (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed partial class PerfPanel : UserControl, IDisposable
 {
@@ -29,8 +26,8 @@ public sealed partial class PerfPanel : UserControl, IDisposable
             typeof(PerfPanel),
             new PropertyMetadata(null, (d, e) => ((PerfPanel)d).OnViewModelChanged(e)));
 
-    /// <summary>Diagnostic ViewModel supplied by the host via `x:Bind`. Source of
-    /// trace/stats update notifications; drives the 1 Hz stats poll only while the panel is open.</summary>
+    /// <summary>Diagnostic ViewModel supplied by the host via `x:Bind`.
+    /// Source of trace/stats update notifications; drives the 1 Hz stats poll only while the panel is open.</summary>
     internal PerfPanelViewModel? ViewModel
     {
         get => (PerfPanelViewModel?)GetValue(ViewModelProperty);
@@ -76,11 +73,9 @@ public sealed partial class PerfPanel : UserControl, IDisposable
         }
     }
 
-    /// <summary>
-    /// Reconciles the 1 Hz stats poll with <see cref="PerfPanelViewModel.IsOpen"/>.
-    /// Called both on `ViewModel` assignment and on `IsOpen` change so the poll
-    /// starts regardless of whether the DP is set before or after the panel opens
-    /// (<c>Start</c> is idempotent). An immediate refresh primes the first frame.
+    /// <summary> Reconciles the 1 Hz stats poll with <see cref="PerfPanelViewModel.IsOpen"/>.
+    /// Called both on `ViewModel` assignment and on `IsOpen` change so the poll starts regardless of whether the DP is set before or after the panel opens (<c>Start</c> is idempotent).
+    /// An immediate refresh primes the first frame.
     /// </summary>
     private void SyncTimer(PerfPanelViewModel vm)
     {
@@ -111,8 +106,7 @@ public sealed partial class PerfPanel : UserControl, IDisposable
         _statsRefresh.RunAsync(() => vm.RefreshStatsAsync()).Forget("perf.stats");
 
     /// <summary>Stop the timer and detach every subscription owned by this view.
-    /// Called by <see cref="DiagnosticsWindow"/> on close; idempotent so app
-    /// shutdown and the user close button can converge safely.</summary>
+    /// Called by <see cref="DiagnosticsWindow"/> on close; idempotent so app shutdown and the user close button can converge safely.</summary>
     internal void TearDown()
     {
         if (Interlocked.Exchange(ref _tornDown, 1) != 0)
@@ -131,17 +125,16 @@ public sealed partial class PerfPanel : UserControl, IDisposable
         _statsRefresh.Dispose();
     }
 
-    /// <summary>Detach the timer and ViewModel subscriptions owned by this
-    /// panel. Idempotent and called when the diagnostics window closes.</summary>
+    /// <summary>Detach the timer and ViewModel subscriptions owned by this panel.
+    /// Idempotent and called when the diagnostics window closes.</summary>
     public void Dispose()
     {
         TearDown();
         GC.SuppressFinalize(this);
     }
 
-    /// <summary>
-    /// One-click bug-report payload: engine stats JSON + app log tail +
-    /// environment. The dev-side half of "don't go silent".
+    /// <summary> One-click bug-report payload: engine stats JSON + app log tail + environment.
+    /// The dev-side half of "don't go silent".
     /// </summary>
     private void CopyDiag_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
@@ -159,23 +152,16 @@ public sealed partial class PerfPanel : UserControl, IDisposable
         Notifier.Post(NotifySeverity.Info, Loc.Get("Diag_Copied"));
     }
 
-    /// <summary>Open the live engine's log folder in Explorer via
-    /// <see cref="ShellOps"/> (unelevated). Which folder that is depends on the
-    /// transport (<see cref="DiagFormat.EngineLogSubPath"/>): the service logs
-    /// under its data root, the in-proc engine under <c>index\logs</c>.
-    /// <para>Explorer runs unelevated by design, and an installed machine keeps
-    /// <c>index\</c> SYSTEM+Administrators only, so the in-proc folder can be
-    /// unreadable from here. Report that instead of handing Explorer a path it
-    /// will refuse — the notification still names the folder so it can be opened
-    /// from an elevated shell or pasted into a bug report.</para></summary>
+    /// <summary>Open the live engine's log folder in Explorer via <see cref="ShellOps"/> (unelevated).
+    /// Which folder that is depends on the transport (<see cref="DiagFormat.EngineLogSubPath"/>): the service logs under its data root, the in-proc engine under <c>index\logs</c>.
+    /// <para>Explorer runs unelevated by design, and an installed machine keeps <c>index\</c> SYSTEM+Administrators only, so the in-proc folder can be unreadable from here.
+    /// Report that instead of handing Explorer a path it will refuse — the notification still names the folder so it can be opened from an elevated shell or pasted into a bug report.</para></summary>
     private void OpenEngineLog_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         var folder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             DiagFormat.EngineLogSubPath(ViewModel?.Stats));
 
-        // Directory.Exists is false for both "not there yet" and "denied", which
-        // are exactly the two cases where launching Explorer helps nobody.
         if (!Directory.Exists(folder))
         {
             Notifier.Post(NotifySeverity.Warning, Loc.Get("Shell_OpenFailed"), folder);
@@ -185,8 +171,7 @@ public sealed partial class PerfPanel : UserControl, IDisposable
         ShellOps.OpenTrusted(folder);
     }
 
-    /// <summary>Open the app's log folder (the directory holding app.log) in
-    /// Explorer via <see cref="ShellOps"/> (unelevated).</summary>
+    /// <summary>Open the app's log folder (the directory holding app.log) in Explorer via <see cref="ShellOps"/> (unelevated).</summary>
     private void OpenAppLog_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         var folder = Path.GetDirectoryName(FileLog.LogPath);
@@ -196,10 +181,8 @@ public sealed partial class PerfPanel : UserControl, IDisposable
         }
     }
 
-    /// <summary>
-    /// Diagnostic chrome rendered imperatively: the stage bar (proportional
-    /// theme-brush segments) and the latency sparkline. All textual data is
-    /// declarative x:Bind, not touched here.
+    /// <summary> Diagnostic chrome rendered imperatively: the stage bar (proportional theme-brush segments) and the latency sparkline.
+    /// All textual data is declarative x:Bind, not touched here.
     /// </summary>
     private void RenderPerf()
     {
@@ -222,7 +205,6 @@ public sealed partial class PerfPanel : UserControl, IDisposable
             StageBar.ColumnDefinitions.Clear();
             StageBar.Children.Clear();
 
-            // Segment corner radius from the token system, hoisted out of the loop.
             var segRadius = (Microsoft.UI.Xaml.CornerRadius)Microsoft.UI.Xaml.Application.Current
                 .Resources["StageSegmentCornerRadius"];
             var col = 0;
@@ -254,17 +236,14 @@ public sealed partial class PerfPanel : UserControl, IDisposable
                 .Select(s => $"{s.Name} {s.Us / 1000.0:F2}ms"));
         }
 
-        // Sparklines: recent query latencies and the host process's working set.
         DrawSparkline(Spark, vm.RecentTotalsUs);
         DrawSparkline(MemSpark, vm.RecentWsBytes);
 
-        // Latency distribution: log2-bucket histogram behind the percentile line.
         RenderHistogram(vm.Stats?.QueryHistogram);
     }
 
-    /// <summary>Plots <paramref name="data"/> (oldest first) as a polyline into
-    /// <paramref name="target"/>, normalised to its own max so the shape reads
-    /// regardless of scale. No-op for fewer than two points.</summary>
+    /// <summary>Plots <paramref name="data"/> (oldest first) as a polyline into <paramref name="target"/>, normalised to its own max so the shape reads regardless of scale.
+    /// No-op for fewer than two points.</summary>
     private static void DrawSparkline(Microsoft.UI.Xaml.Shapes.Polyline target, IReadOnlyList<ulong> data)
     {
         if (data.Count < 2)
@@ -273,11 +252,9 @@ public sealed partial class PerfPanel : UserControl, IDisposable
             return;
         }
 
-        const double MinSparkWidth = 240.0; // geometry floor for a readable sparkline; not a design token.
+        const double MinSparkWidth = 240.0;
         var w = Math.Max(target.ActualWidth, MinSparkWidth);
 
-        // Height from the SparklineHeight token; the XAML host Grid binds the same
-        // token, so the drawn geometry and the layout box can never drift.
         var h = (double)Microsoft.UI.Xaml.Application.Current.Resources["SparklineHeight"];
         var max = Math.Max(data.Max(), 1UL);
         var points = new Microsoft.UI.Xaml.Media.PointCollection();
@@ -291,9 +268,8 @@ public sealed partial class PerfPanel : UserControl, IDisposable
         target.Points = points;
     }
 
-    /// <summary>Draws the latency histogram as bottom-aligned bars, one column
-    /// per log2 bucket from the first to the last non-empty bucket (bucket i
-    /// covers [2^i, 2^(i+1)) µs). Heights normalise to the tallest bucket.</summary>
+    /// <summary>Draws the latency histogram as bottom-aligned bars, one column per log2 bucket from the first to the last non-empty bucket (bucket i covers [2^i, 2^(i+1)) µs).
+    /// Heights normalise to the tallest bucket.</summary>
     private void RenderHistogram(Engine.HistogramData? hist)
     {
         LatencyHist.ColumnDefinitions.Clear();
@@ -306,7 +282,7 @@ public sealed partial class PerfPanel : UserControl, IDisposable
         var last = buckets.FindLastIndex(c => c > 0);
         if (last < 0)
         {
-            return; // no samples yet
+            return;
         }
 
         var first = buckets.FindIndex(c => c > 0);

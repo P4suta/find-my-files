@@ -1,9 +1,7 @@
 //! Authenticode-stable SHA-256 identity for a PE image.
 //!
-//! `ImageGetDigestStream` returns the bytes Windows considers part of the PE
-//! image while omitting the mutable certificate table. The digest therefore
-//! stays identical before and after release signing and can be embedded into
-//! the app before both files are signed.
+//! `ImageGetDigestStream` returns the bytes Windows considers part of the PE image while omitting the mutable certificate table.
+//! The digest therefore stays identical before and after release signing and can be embedded into the app before both files are signed.
 
 use anyhow::{bail, Result};
 use std::path::Path;
@@ -12,8 +10,6 @@ use std::path::Path;
 use anyhow::Context;
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
-#[cfg(windows)]
-use std::fmt::Write as _;
 #[cfg(windows)]
 use std::fs::File;
 #[cfg(windows)]
@@ -45,9 +41,8 @@ unsafe extern "system" fn append_digest(digest_handle: usize, data: *const u8, l
     if digest_handle == 0 || (data.is_null() && length != 0) {
         return 0;
     }
-    // SAFETY: `digest_handle` points at the stack-owned hasher for the entire
-    // synchronous ImageGetDigestStream call. ImageHlp supplies `length`
-    // readable bytes for the duration of this callback.
+    /* SAFETY: `digest_handle` points at the stack-owned hasher throughout the synchronous ImageGetDigestStream call.
+    ImageHlp supplies `length` readable bytes throughout this callback. */
     let hasher = unsafe { &mut *(digest_handle as *mut Sha256) };
     let bytes = if length == 0 {
         &[]
@@ -63,8 +58,7 @@ unsafe extern "system" fn append_digest(digest_handle: usize, data: *const u8, l
 ///
 /// # Errors
 ///
-/// Fails when the file cannot be opened, is not a valid PE image, `ImageHlp`
-/// rejects it, or the process-global `ImageHlp` serialization lock is poisoned.
+/// Fails when the file cannot be opened, is not a valid PE image, `ImageHlp` rejects it, or the process-global `ImageHlp` serialization lock is poisoned.
 #[cfg(windows)]
 pub fn sha256_file(path: &Path) -> Result<String> {
     let file = File::open(path).with_context(|| format!("open PE image {}", path.display()))?;
@@ -72,8 +66,7 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         .lock()
         .map_err(|_| anyhow::anyhow!("ImageHlp digest lock was poisoned"))?;
     let mut hasher = Sha256::new();
-    // SAFETY: the file handle and stack-owned hasher remain live for the
-    // synchronous call; the callback validates its inputs.
+    /* SAFETY: The file handle and stack-owned hasher remain live throughout the synchronous call; the callback validates its inputs. */
     let ok = unsafe {
         ImageGetDigestStream(
             file.as_raw_handle().cast(),
@@ -90,16 +83,11 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         );
     }
     let digest = hasher.finalize();
-    let mut encoded = String::with_capacity(64);
-    for byte in digest {
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    Ok(encoded)
+    Ok(crate::checksum::hex(&digest))
 }
 
-/// PE publishing is Windows-only. Keeping a stub lets the xtask workspace and
-/// its pure tests compile on Ubuntu CI without pretending a raw-file hash has
-/// the same semantics.
+/// PE publishing is Windows-only.
+/// Keeping a stub lets the xtask workspace and its pure tests compile on Ubuntu CI without pretending a raw-file hash has the same semantics.
 #[cfg(not(windows))]
 pub fn sha256_file(path: &Path) -> Result<String> {
     bail!(

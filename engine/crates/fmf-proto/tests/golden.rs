@@ -1,10 +1,8 @@
 //! Golden corpus pin: every representative frame the protocol can carry,
-//! captured byte-for-byte in `contract/golden/` (repo root). The C# suite
-//! (`GoldenCorpusTests`) pins the very same files — this is the "Rust and C#
-//! tests pin the same golden bytes" rule made real (ADR-0018).
+//! captured byte-for-byte in `contract/golden/` (repo root).
+//! The C# suite (`GoldenCorpusTests`) pins the very same files — this is the "Rust and C# tests pin the same golden bytes" rule made real (ADR-0018).
 //!
-//! Re-capture (bless) is an explicit ritual for intentional contract
-//! changes only:
+//! Re-capture (bless) is an explicit ritual for intentional contract changes only:
 //!
 //! ```text
 //! just contract-bless
@@ -50,15 +48,14 @@ struct Case {
     bytes: Vec<u8>,
 }
 
-/// The corpus, constructed from the current codec. Bless captures these
-/// bytes; a pin run requires the files to match them exactly.
+/// The corpus, constructed from the current codec.
+/// Bless captures these bytes; a pin run requires the files to match them exactly.
 fn corpus() -> Vec<Case> {
     let mut cases = Vec::new();
     let mut case = |file: &'static str, desc: &'static str, bytes: Vec<u8>| {
         cases.push(Case { file, desc, bytes });
     };
 
-    // ── Hello (op 1) ────────────────────────────────────────────────────
     #[expect(
         clippy::literal_string_with_formatting_args,
         reason = "golden manifest descriptor text, never a format string"
@@ -94,7 +91,6 @@ fn corpus() -> Vec<Case> {
         ),
     );
 
-    // ── Subscribe / Unsubscribe (op 2/3, empty payloads) ────────────────
     case(
         "subscribe_req.bin",
         "op2 request: empty payload",
@@ -111,7 +107,6 @@ fn corpus() -> Vec<Case> {
         frame(opcode::UNSUBSCRIBE, 0, 3, 0, &[]),
     );
 
-    // ── ListVolumes / IndexStart / IndexStatus (JSON, snake_case) ───────
     case(
         "list_volumes_resp.bin",
         "op4 response: JSON [{volume,state,entries}] — two volumes, Ready+Scanning",
@@ -175,7 +170,6 @@ fn corpus() -> Vec<Case> {
         ),
     );
 
-    // ── Query (op 7) ────────────────────────────────────────────────────
     case(
         "query_req_basic.bin",
         "op7 request: default options (Name/Asc/Smart/no-hidden) + ASCII text",
@@ -210,9 +204,6 @@ fn corpus() -> Vec<Case> {
             ),
         ),
     );
-    // The trace JSON is opaque to the codec (head + verbatim bytes). The
-    // authoritative QueryTrace shape is pinned by query_trace.json
-    // (fmf-core's golden_json test), not here.
     case(
         "query_resp.bin",
         "op7 response: QueryRespHead{result_id:1,count:3} + opaque trace JSON",
@@ -229,7 +220,6 @@ fn corpus() -> Vec<Case> {
         ),
     );
 
-    // ── ResultPage (op 8) ───────────────────────────────────────────────
     case(
         "result_page_req.bin",
         "op8 request: {result_id:1, offset:128, count:64}",
@@ -257,11 +247,6 @@ fn corpus() -> Vec<Case> {
             &encode_page(&[], &[]).expect("empty page encodes"),
         ),
     );
-    // Blob layout convention: per row, name bytes then parent bytes,
-    // appended in row order with no dedup (what the C# encoder produces;
-    // offsets being explicit, any layout is wire-legal — the corpus pins
-    // the canonical one). Row 3's name carries a WTF-8 unpaired surrogate
-    // (U+D800 = ED A0 80): file names are WTF-8, not UTF-8.
     {
         let mut blob: Vec<u8> = Vec::new();
         let mut rows: Vec<FmfRow> = Vec::new();
@@ -296,11 +281,11 @@ fn corpus() -> Vec<Case> {
             "省察.txt".as_bytes(),
             "C:\\メモ\\".as_bytes(),
             (2 << 48) | 0xC8,
-            0x1_0000_0001, // > u32::MAX — pins the u64 size column on the wire
-            -5,            // pins i64 signedness
+            0x1_0000_0001,
+            -5,
             0,
         );
-        let mut surrogate_name = vec![0xED, 0xA0, 0x80]; // unpaired U+D800, WTF-8
+        let mut surrogate_name = vec![0xED, 0xA0, 0x80];
         surrogate_name.extend_from_slice(b"tail.dat");
         push_row(&surrogate_name, b"C:\\", (3 << 48) | 0x12C, 0, 0, 1);
         case(
@@ -317,7 +302,6 @@ fn corpus() -> Vec<Case> {
         );
     }
 
-    // ── ResultFree (op 9) ───────────────────────────────────────────────
     #[expect(
         clippy::literal_string_with_formatting_args,
         reason = "golden manifest descriptor text, never a format string"
@@ -328,7 +312,6 @@ fn corpus() -> Vec<Case> {
         frame(opcode::RESULT_FREE, 0, 11, 0, &encode_result_free(1)),
     );
 
-    // ── Event pushes (flags=event, request_id=0, opcode = kind 1..=6) ───
     let events: [(&'static str, &'static str, u32, u64, &str); 6] = [
         (
             "event_progress.bin",
@@ -381,7 +364,6 @@ fn corpus() -> Vec<Case> {
         );
     }
 
-    // ── Error response (status != 0, UTF-8 detail payload) ──────────────
     case(
         "error_resp.bin",
         "op7 response with status=QUERY_SYNTAX(5): payload is the UTF-8 detail text",
@@ -394,7 +376,6 @@ fn corpus() -> Vec<Case> {
         ),
     );
 
-    // ── ServiceInfo (op 12) ─────────────────────────────────────────────
     case(
         "service_info_resp.bin",
         "op12 response: JSON {uptime_ms, connections, version}",
@@ -447,8 +428,7 @@ fn corpus_pins_the_wire_bytes() {
     }
 }
 
-/// The frame corpus must also *decode* back to the values it was built
-/// from — encode-only pins would let an asymmetric codec bug through.
+/// The frame corpus must also *decode* back to the values it was built from — encode-only pins would let an asymmetric codec bug through.
 #[test]
 fn corpus_frames_decode_back() {
     for c in corpus() {
@@ -519,29 +499,16 @@ fn corpus_frames_decode_back() {
     }
 }
 
-/// `fmf-contract`'s opcode table, read as *text* so the set is exhaustive by
-/// construction: a new `pub const … : u16 = …;` shows up here the moment it is
-/// declared, which is what makes [`every_opcode_is_captured_or_excluded`] a
-/// real gate rather than a hand-maintained list that drifts.
+/// `fmf-contract`'s opcode table, read as *text* so the set is exhaustive by construction: a new `pub const … : u16 = …;` shows up here the moment it is declared, which is what makes [`every_opcode_is_captured_or_excluded`] a real gate rather than a hand-maintained list that drifts.
 const OPCODE_SOURCE: &str = include_str!("../../fmf-contract/src/opcodes.rs");
 
-/// Opcodes deliberately shipped without a captured frame, each with the reason
-/// it earns the exemption. Adding an entry is the explicit alternative to
-/// blessing a case — never the quiet default.
+/// Opcodes deliberately shipped without a captured frame, each with the reason it earns the exemption.
+/// Adding an entry is the explicit alternative to blessing a case — never the quiet default.
 const UNCAPTURED_OPCODES: &[(&str, &str)] = &[
-    // Request payload is empty and the response is the metrics snapshot, whose
-    // authoritative shape is already pinned byte-for-byte by
-    // contract/golden/stats_snapshot.json (fmf-core's golden_json test) and
-    // re-read from C# by GoldenCorpusTests. A frame case would add only the
-    // 16-byte header, a layout every other case already pins.
     (
         "STATS",
         "payload-free request; response shape pinned by stats_snapshot.json",
     ),
-    // One-way control frame: zero payload, no response, so the capture would
-    // again be header-only. Its behaviour — abort a queued/running query,
-    // silent no-op for an unknown id, pre-Hello disconnect, zero-payload cap —
-    // is pinned by fmf-service's pipe_loopback suite, where it is observable.
     (
         "QUERY_CANCEL",
         "one-way zero-payload control frame; behaviour pinned by pipe_loopback",
@@ -560,16 +527,11 @@ fn declared_opcodes() -> Vec<(&'static str, u16)> {
         .collect()
 }
 
-/// Every declared opcode must own at least one corpus frame, or be named in
-/// [`UNCAPTURED_OPCODES`] with a reason. Without this, a protocol bump can add
-/// an opcode and stay entirely outside the golden corpus — `manifest.json`
-/// only proves manifest/disk symmetry, which a brand new opcode satisfies
-/// trivially by contributing nothing to either side.
+/// Every declared opcode must own at least one corpus frame, or be named in [`UNCAPTURED_OPCODES`] with a reason.
+/// Without this, a protocol bump can add an opcode and stay entirely outside the golden corpus — `manifest.json` only proves manifest/disk symmetry, which a brand new opcode satisfies trivially by contributing nothing to either side.
 #[test]
 fn every_opcode_is_captured_or_excluded() {
     let declared = declared_opcodes();
-    // The parse is text-based, so prove it still sees the table: two anchors
-    // cross-checked against the compiled constants, plus the known count.
     for (name, expected) in [
         ("HELLO", opcode::HELLO),
         ("QUERY_CANCEL", opcode::QUERY_CANCEL),
@@ -587,8 +549,6 @@ fn every_opcode_is_captured_or_excluded() {
         declared.len()
     );
 
-    // Event pushes reuse kinds 1..=6 in the opcode field, so counting them
-    // would credit request opcodes they have nothing to do with.
     let captured: std::collections::BTreeSet<u16> = corpus()
         .iter()
         .filter_map(|c| {
@@ -623,9 +583,7 @@ fn every_opcode_is_captured_or_excluded() {
     }
 }
 
-/// manifest.json indexes every corpus file with its description; the pin
-/// run fails when a case is added or renamed without a bless — and the C#
-/// suite walks the same manifest, so neither side can silently skip files.
+/// manifest.json indexes every corpus file with its description; the pin run fails when a case is added or renamed without a bless — and the C# suite walks the same manifest, so neither side can silently skip files.
 #[test]
 fn manifest_matches_the_corpus() {
     let manifest: Vec<serde_json::Value> = corpus()

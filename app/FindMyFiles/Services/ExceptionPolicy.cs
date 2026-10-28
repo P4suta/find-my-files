@@ -2,28 +2,16 @@ using Microsoft.UI.Xaml;
 
 namespace FindMyFiles.Services;
 
-/// <summary>
-/// The single home for the process-wide exception funnels
-/// (don't crash / don't hang / don't go silent). Three sources, three
-/// suppression rules:
+/// <summary> The single home for the process-wide exception funnels (don't crash / don't hang / don't go silent).
+/// Three sources, three suppression rules:
 ///
-/// 1. XAML <see cref="Application.UnhandledException"/> — suppressed
-///    (<c>Handled = true</c>) and surfaced as an error InfoBar for the first
-///    <see cref="XamlStormBudget"/> occurrences. Beyond that the process is
-///    in an exception storm: a crash marker is written and the exception is
-///    left unhandled so the process dies honestly.
-/// 2. <see cref="AppDomain.UnhandledException"/> — never suppressible by
-///    contract: log + crash marker, then the runtime terminates.
-/// 3. <see cref="TaskScheduler.UnobservedTaskException"/> — always observed
-///    (the task is already dead; tearing the process down helps nobody) and
-///    surfaced as an error InfoBar.
+/// 1. XAML <see cref="Application.UnhandledException"/> — suppressed (<c>Handled = true</c>) and surfaced as an error InfoBar for the first <see cref="XamlStormBudget"/> occurrences.
+///    Beyond that the process is in an exception storm: a crash marker is written and the exception is left unhandled so the process dies honestly.
+/// 2. <see cref="AppDomain.UnhandledException"/> — never suppressible by contract: log + crash marker, then the runtime terminates.
+/// 3. <see cref="TaskScheduler.UnobservedTaskException"/> — always observed (the task is already dead; tearing the process down helps nobody) and surfaced as an error InfoBar.
 ///
-/// Log routing: every path writes to <see cref="FileLog"/>
-/// (%APPDATA%\find-my-files\logs\app.log); user-visible surfaces go through
-/// <see cref="Notifier"/>, which mirrors to the same log. Crash markers are
-/// written by the fatal paths (1-storm and 2) and read back + cleared by
-/// <see cref="ReportPreviousCrash"/> on the next launch, so no crash is ever
-/// silent.
+/// Log routing: every path writes to <see cref="FileLog"/> (%APPDATA%\find-my-files\logs\app.log); user-visible surfaces go through <see cref="Notifier"/>, which mirrors to the same log.
+/// Crash markers are written by the fatal paths (1-storm and 2) and read back + cleared by <see cref="ReportPreviousCrash"/> on the next launch, so no crash is ever silent.
 /// </summary>
 internal sealed class ExceptionPolicy
 {
@@ -36,8 +24,8 @@ internal sealed class ExceptionPolicy
     {
     }
 
-    /// <summary>Wire all three funnels. Call once, from the App constructor.</summary>
-    /// <param name="app">The WinUI application whose exception events are hooked.</param>
+    /// <summary>Wire all three funnels.
+    /// Call once, from the App constructor.</summary> <param name="app">The WinUI application whose exception events are hooked.</param>
     public static void Install(Application app)
     {
         var policy = new ExceptionPolicy();
@@ -46,9 +34,7 @@ internal sealed class ExceptionPolicy
         TaskScheduler.UnobservedTaskException += policy.OnUnobservedTaskException;
     }
 
-    /// <summary>Suppression rule for funnel 1, as a pure predicate.</summary>
-    /// <param name="occurrence">The 1-based count of XAML exceptions seen so far.</param>
-    /// <returns><c>true</c> while still within the storm budget (suppress); <c>false</c> once the storm threshold is exceeded.</returns>
+    /// <summary>Suppression rule for funnel 1, as a pure predicate.</summary> <param name="occurrence">The 1-based count of XAML exceptions seen so far.</param> <returns><c>true</c> while still within the storm budget (suppress); <c>false</c> once the storm threshold is exceeded.</returns>
     internal static bool WithinStormBudget(int occurrence) => occurrence <= XamlStormBudget;
 
     private void OnXamlUnhandledException(
@@ -64,7 +50,6 @@ internal sealed class ExceptionPolicy
         }
         else
         {
-            // Exception storm — record and let the process die honestly.
             FileLog.WriteCrashMarker(CrashReason.XamlExceptionStorm, e.Exception);
         }
     }
@@ -85,8 +70,7 @@ internal sealed class ExceptionPolicy
             Loc.Get("Crash_BackgroundTitle"));
     }
 
-    /// <summary>Surface the previous run's crash marker (if any) as a warning
-    /// InfoBar; reading clears the marker.</summary>
+    /// <summary>Surface the previous run's crash marker (if any) as a warning InfoBar; reading clears the marker.</summary>
     public static void ReportPreviousCrash()
     {
         if (FileLog.TakeCrashMarker() is { } marker)

@@ -1,9 +1,3 @@
-# Install the exact Microsoft WinAppCli distribution used by UI automation.
-#
-# The repository intentionally keeps third-party Actions allowlisted. Rather
-# than broaden that policy, this local Action downloads one immutable release
-# asset and verifies its size, SHA-256 digest, every shipped PE signature, signer
-# identity, and reported version at a fixed, explicitly invoked path.
 name: Setup WinAppCli (verified)
 description: Install the pinned Microsoft WinAppCli release with fail-closed byte and signer verification.
 outputs:

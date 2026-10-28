@@ -1,22 +1,8 @@
-# Watches the mise toolchain pins (mise.toml) for versions that have fallen
-# behind their pin — the gap Dependabot can't see.
-#
-# Dependabot covers cargo (engine + xtask), nuget and github-actions, majors
-# included (group filters only *group* the PRs; out-of-filter majors still open
-# as individual PRs). It has no mise ecosystem, so the pinned local-development
-# toolchain (rust, mdbook, cargo-llvm-cov, cargo-deny, …) drifts silently —
-# exactly how cargo-deny sat on 0.16 while 0.19 shipped. CI provisions only its
-# job-specific subset, with mirror parity enforced by `just doctor`.
-#
-# `mise outdated --bump` compares each pin against the latest available version
-# *beyond* the pin (not just within it), so a pin of "0.16" against a 0.19
-# release reports bump=0.19. We act only on entries with a non-null bump; a
-# within-pin patch (e.g. dotnet "10" → 10.0.301) is left to `mise install`.
 name: mise-outdated
 
 on:
   schedule:
-    - cron: "17 5 * * 1" # weekly Mon 05:17 UTC (offset from cargo-audit/scorecard/sbom-monitor)
+    - cron: "17 5 * * 1"
   workflow_dispatch:
 
 permissions: {}
@@ -27,8 +13,6 @@ concurrency:
 
 jobs:
   check:
-    # Use the product platform so OS-gated tools (notably WinAppCli) participate
-    # in the same freshness calculation as the portable toolchain.
     runs-on: windows-2025
     timeout-minutes: 10
     permissions:
@@ -40,13 +24,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # install: false — we only need the mise binary to *query* registries for
-      # latest versions; provisioning every pinned tool (cargo: backends build
-      # from source) would be slow and pointless for a version check.
       - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
         with:
-          version: "2026.7.13"
-          sha256: 1a3b94edb7b73f75fc15d8a8ca050503d88c0892400421ab01555dbc6cb1a72c
+          version: "v2026.10.15"
+          sha256: 8b53511db7d036db984a92eb63e139d9942a8d179ddbe4e880addfa04a924f96
           install: false
 
       - name: Check pins against latest (beyond-pin)
@@ -78,15 +59,13 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  # Only this API-only runner receives Issues write authority. It never checks
-  # out repository code or executes mise / registry responses.
   report:
     needs: check
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      actions: read # download the bounded outdated-report handoff artifact
-      issues: write # open, update, or close the dependency freshness issue
+      actions: read # Permission: Download the bounded dependency report.
+      issues: write # Permission: Maintain the dependency freshness issue.
     steps:
       - name: Download the bounded drift report
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

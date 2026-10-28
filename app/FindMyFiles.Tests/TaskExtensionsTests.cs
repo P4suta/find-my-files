@@ -3,16 +3,14 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Behavioural test for <c>TaskExtensions.Forget</c> — the only
-/// sanctioned fire-and-forget. A faulted task must surface (log + notification),
+/// <summary>Behavioural test for <c>TaskExtensions.Forget</c> — the only sanctioned fire-and-forget.
+/// A faulted task must surface (log + notification),
 /// never be silently dropped (the "don't go silent" rule).</summary>
 public sealed class TaskExtensionsTests
 {
     [Fact]
     public async Task Forget_routes_a_faulted_task_to_the_notifier()
     {
-        // Notifier is a process-wide static funnel shared by every test, so a
-        // unique marker ensures only THIS test's notification completes the wait.
         const string marker = "forget-marker-7f3a";
         var captured = new TaskCompletionSource<AppNotification>(
             TaskCreationOptions.RunContinuationsAsynchronously);

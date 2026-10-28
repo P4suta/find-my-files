@@ -5,29 +5,25 @@ using FindMyFiles.Highlighting;
 
 namespace FindMyFiles.ViewModels;
 
-/// <summary>
-/// One list row. Created as a placeholder by the virtualized list and filled
-/// in place when its page arrives — the same instance stays bound, so no
-/// container regeneration happens (ADR-0015).
+/// <summary> One list row.
+/// Created as a placeholder by the virtualized list and filled in place when its page arrives — the same instance stays bound, so no container regeneration happens (ADR-0015).
 /// </summary>
 public sealed partial class ResultRow : ObservableObject
 {
     /// <summary>Shared empty range list: every un-highlighted row points here,
-    /// so an equal-empty refill compares reference-equal and notifies nothing
-    /// (keeps a same-query RefreshInPlace from repainting).</summary>
+    /// so an equal-empty refill compares reference-equal and notifies nothing (keeps a same-query RefreshInPlace from repainting).</summary>
     private static readonly IReadOnlyList<HighlightRange> NoRanges = [];
 
-    /// <summary>Absolute position of this row in the full result set — the
-    /// virtualized list's stable key, set once at placeholder creation and
-    /// never changed (the same instance is refilled when its page lands).</summary>
+    /// <summary>Absolute position of this row in the full result set — the virtualized list's stable key, set once at placeholder creation and never changed (the same instance is refilled when its page lands).</summary>
     public long Index { get; init; }
 
-    /// <summary>File or folder name (leaf). Empty until <see cref="Fill"/>.</summary>
+    /// <summary>File or folder name (leaf).
+    /// Empty until <see cref="Fill"/>.</summary>
     [ObservableProperty]
     public partial string Name { get; set; } = string.Empty;
 
-    /// <summary>Containing directory, trailing-separator included so
-    /// <c>ParentPath + Name</c> is the full path. Empty until <see cref="Fill"/>.</summary>
+    /// <summary>Containing directory, trailing-separator included so <c>ParentPath + Name</c> is the full path.
+    /// Empty until <see cref="Fill"/>.</summary>
     [ObservableProperty]
     public partial string ParentPath { get; set; } = string.Empty;
 
@@ -35,23 +31,20 @@ public sealed partial class ResultRow : ObservableObject
     [ObservableProperty]
     public partial string SizeText { get; set; } = string.Empty;
 
-    /// <summary>Local modified time formatted <c>yyyy/MM/dd HH:mm</c>; empty
-    /// when the engine reports no mtime.</summary>
+    /// <summary>Local modified time formatted <c>yyyy/MM/dd HH:mm</c>; empty when the engine reports no mtime.</summary>
     [ObservableProperty]
     public partial string DateText { get; set; } = string.Empty;
 
     /// <summary>Segoe Fluent Icons glyph for the row's type (folder vs page).</summary>
     [ObservableProperty]
-    public partial string Glyph { get; set; } = ""; // Page
+    public partial string Glyph { get; set; } = "";
 
-    /// <summary>Ranges of <see cref="Name"/> the query matched, for the name
-    /// TextBlock's highlight; empty when nothing matches. Filled together with
-    /// <see cref="Name"/> so the text and its emphasis never disagree.</summary>
+    /// <summary>Ranges of <see cref="Name"/> the query matched, for the name TextBlock's highlight; empty when nothing matches.
+    /// Filled together with <see cref="Name"/> so the text and its emphasis never disagree.</summary>
     [ObservableProperty]
     public partial IReadOnlyList<HighlightRange> NameRanges { get; set; } = NoRanges;
 
-    /// <summary>Ranges of <see cref="ParentPath"/> a path term matched (a query
-    /// term containing <c>\</c> or <c>path:</c>); empty otherwise.</summary>
+    /// <summary>Ranges of <see cref="ParentPath"/> a path term matched (a query term containing <c>\</c> or <c>path:</c>); empty otherwise.</summary>
     [ObservableProperty]
     public partial IReadOnlyList<HighlightRange> PathRanges { get; set; } = NoRanges;
 
@@ -59,47 +52,33 @@ public sealed partial class ResultRow : ObservableObject
     /// Empty until <see cref="Fill"/>.</summary>
     public string FullPath { get; private set; } = string.Empty;
 
-    /// <summary>True while this is an unfilled placeholder (its page hasn't
-    /// arrived); the row template shows a skeleton until <see cref="Fill"/>.</summary>
+    /// <summary>True while this is an unfilled placeholder (its page hasn't arrived); the row template shows a skeleton until <see cref="Fill"/>.</summary>
     public bool IsPlaceholder { get; private set; } = true;
 
-    /// <summary>Engine row identity — lets the view re-find a selected row
-    /// after a position-preserving requery (best effort).</summary>
+    /// <summary>Engine row identity — lets the view re-find a selected row after a position-preserving requery (best effort).</summary>
     public ulong EntryRef { get; private set; }
 
-    /// <summary>
-    /// Exact NTFS file reference (record plus sequence). Shell actions verify
-    /// the path against this identity before dispatch.
+    /// <summary> Exact NTFS file reference (record plus sequence).
+    /// Shell actions verify the path against this identity before dispatch.
     /// </summary>
     public ulong Frn { get; private set; }
 
     /// <summary>Stable UI Automation identity for the virtual result position.
-    /// The ListView container is recycled, so this travels with the row rather
-    /// than being assigned to a physical container.</summary>
+    /// The ListView container is recycled, so this travels with the row rather than being assigned to a physical container.</summary>
     public string AutomationId => $"ResultRow-{Index}";
 
-    /// <summary>Screen-reader summary of the visible row. Empty placeholders
-    /// stay unnamed; <see cref="Fill"/> raises one notification after every
-    /// visible field has been populated so automation never observes a
-    /// half-filled row.</summary>
+    /// <summary>Screen-reader summary of the visible row.
+    /// Empty placeholders stay unnamed; <see cref="Fill"/> raises one notification after every visible field has been populated so automation never observes a half-filled row.</summary>
     public string AutomationName => IsPlaceholder
         ? string.Empty
         : string.Join(", ", new[] { Name, ParentPath, SizeText, DateText }
             .Where(value => !string.IsNullOrEmpty(value)));
 
-    /// <summary>Make an empty row for <paramref name="index"/> — the
-    /// virtualized list's only constructor, called for every slot before any
-    /// data is fetched.</summary>
-    /// <param name="index">Absolute position of the row in the full result set.</param>
-    /// <returns>A new placeholder row keyed to <paramref name="index"/>.</returns>
+    /// <summary>Make an empty row for <paramref name="index"/> — the virtualized list's only constructor, called for every slot before any data is fetched.</summary> <param name="index">Absolute position of the row in the full result set.</param> <returns>A new placeholder row keyed to <paramref name="index"/>.</returns>
     public static ResultRow CreatePlaceholder(long index) => new() { Index = index };
 
-    /// <summary>Populate this placeholder from an engine <see cref="RowData"/>
-    /// page hit: copies identity (<see cref="EntryRef"/>, <see cref="FullPath"/>),
-    /// formats size/date for display, picks the type glyph, and clears
-    /// <see cref="IsPlaceholder"/>. In place — the bound instance is reused.</summary>
-    /// <param name="data">The engine page hit supplying this row's identity and fields.</param>
-    /// <param name="highlighter">Active-query highlighter, or null when no query is set.</param>
+    /// <summary>Populate this placeholder from an engine <see cref="RowData"/> page hit: copies identity (<see cref="EntryRef"/>, <see cref="FullPath"/>),
+    /// formats size/date for display, picks the type glyph, and clears <see cref="IsPlaceholder"/>. In place — the bound instance is reused.</summary> <param name="data">The engine page hit supplying this row's identity and fields.</param> <param name="highlighter">Active-query highlighter, or null when no query is set.</param>
     internal void Fill(RowData data, IHighlighter? highlighter = null)
     {
         EntryRef = data.EntryRef;
@@ -110,23 +89,17 @@ public sealed partial class ResultRow : ObservableObject
         ParentPath = data.ParentPath;
         SizeText = data.IsDirectory ? string.Empty : FormatSize(data.Size);
 
-        // FromFileTime already yields the instant at the local offset, so the
-        // ToLocalTime() this replaces was a no-op conversion to the same offset.
         DateText = data.Mtime > 0
             ? DateTimeOffset.FromFileTime(data.Mtime).ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture)
             : string.Empty;
-        Glyph = data.IsDirectory ? "" : ""; // Folder : Page
+        Glyph = data.IsDirectory ? "" : "";
         ApplyHighlight(highlighter, data);
         OnPropertyChanged(nameof(AutomationName));
     }
 
-    /// <summary>Compute this row's name/path highlight ranges for the active
-    /// query. Path terms match the full path and are split at the parent/name
-    /// boundary so each TextBlock gets only its own slice. Ranges are assigned
-    /// only when they change, so a same-query RefreshInPlace refill (identical
-    /// ranges) raises no notification and repaints nothing.</summary>
-    /// <param name="highlighter">Active-query highlighter, or null when no query is set.</param>
-    /// <param name="data">The engine page hit whose name and path are matched.</param>
+    /// <summary>Compute this row's name/path highlight ranges for the active query.
+    /// Path terms match the full path and are split at the parent/name boundary so each TextBlock gets only its own slice.
+    /// Ranges are assigned only when they change, so a same-query RefreshInPlace refill (identical ranges) raises no notification and repaints nothing.</summary> <param name="highlighter">Active-query highlighter, or null when no query is set.</param> <param name="data">The engine page hit whose name and path are matched.</param>
     private void ApplyHighlight(IHighlighter? highlighter, RowData data)
     {
         if (highlighter is null || highlighter.IsEmpty)
@@ -135,12 +108,8 @@ public sealed partial class ResultRow : ObservableObject
             return;
         }
 
-        // Name ranges come back already sorted + merged — usable as-is.
         var nameRanges = highlighter.Ranges(data.Name, HighlightField.Name);
 
-        // Reuse the FullPath stored by Fill instead of recomputing ParentPath +
-        // Name. For a name-only query (the common case) this returns empty and
-        // we skip the split, the merge, and the extra lists entirely.
         var pathHits = highlighter.Ranges(FullPath, HighlightField.Path);
         if (pathHits.Count == 0)
         {
@@ -148,9 +117,6 @@ public sealed partial class ResultRow : ObservableObject
             return;
         }
 
-        // A path term matched: split each full-path hit at the parent/name
-        // boundary so each TextBlock gets only its own slice. The name side can
-        // gain hits, so re-merge it; the parent side is built fresh here.
         var nameHits = new List<HighlightRange>(nameRanges);
         var parentHits = new List<HighlightRange>();
         var boundary = data.ParentPath.Length;
@@ -164,11 +130,7 @@ public sealed partial class ResultRow : ObservableObject
             ToShared(CompiledHighlighter.MergeRanges(parentHits)));
     }
 
-    /// <summary>Assign the computed ranges, but only when they differ from the
-    /// current ones — equal ranges keep the existing reference so the
-    /// ObservableProperty setter stays silent (RefreshInPlace anti-flicker).</summary>
-    /// <param name="name">Computed highlight ranges for the name.</param>
-    /// <param name="path">Computed highlight ranges for the parent path.</param>
+    /// <summary>Assign the computed ranges, but only when they differ from the current ones — equal ranges keep the existing reference so the ObservableProperty setter stays silent (RefreshInPlace anti-flicker).</summary> <param name="name">Computed highlight ranges for the name.</param> <param name="path">Computed highlight ranges for the parent path.</param>
     private void AssignRanges(IReadOnlyList<HighlightRange> name, IReadOnlyList<HighlightRange> path)
     {
         if (!RangesEqual(NameRanges, name))
@@ -182,14 +144,8 @@ public sealed partial class ResultRow : ObservableObject
         }
     }
 
-    /// <summary>Split a full-path match at the parent/name boundary: the slice
-    /// before <paramref name="boundary"/> highlights the parent path, the slice
-    /// after highlights the name (re-based to name-local coordinates). A match
-    /// straddling the separator lands in both.</summary>
-    /// <param name="r">A full-path match range in full-path coordinates.</param>
-    /// <param name="boundary">Index where the parent path ends and the name begins.</param>
-    /// <param name="parent">Accumulates the parent-path slice of the match.</param>
-    /// <param name="name">Accumulates the name slice, re-based to name-local coordinates.</param>
+    /// <summary>Split a full-path match at the parent/name boundary: the slice before <paramref name="boundary"/> highlights the parent path, the slice after highlights the name (re-based to name-local coordinates).
+    /// A match straddling the separator lands in both.</summary> <param name="r">A full-path match range in full-path coordinates.</param> <param name="boundary">Index where the parent path ends and the name begins.</param> <param name="parent">Accumulates the parent-path slice of the match.</param> <param name="name">Accumulates the name slice, re-based to name-local coordinates.</param>
     private static void SplitAtBoundary(
         HighlightRange r, int boundary, List<HighlightRange> parent, List<HighlightRange> name)
     {

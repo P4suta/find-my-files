@@ -1,16 +1,7 @@
-# Weekly/manual exact-identity mutation audit (ADR-0022).
-#
-# A valid audit binds its controller to the protected default-branch workflow
-# commit. A manual run from main may name a different exact repository commit as
-# inert target data (for example, a reviewed PR head); dispatches from any other
-# ref fail before target execution. The verified receipt records both identities;
-# consumers accept it only together with this run's protected-main identity.
 name: mutants
 run-name: mutation audit ${{ github.event.inputs.target_sha || github.workflow_sha }}
 
 on:
-  schedule:
-    - cron: "53 4 * * 1" # Monday 04:53 UTC
   workflow_dispatch:
     inputs:
       target_sha:
@@ -107,9 +98,9 @@ jobs:
   mutation:
     needs: authorize
     permissions:
-      actions: read # let the fresh nested verifier bind this run's raw artifacts
+      actions: read # Permission: Bind verification to this run's raw artifacts.
       contents: read
-    uses: ./.github/workflows/mutation-controller.yml
+    uses: $/.github/workflows/mutation-controller.yml
     with:
       controller_sha: ${{ needs.authorize.outputs.controller_sha }}
       target_sha: ${{ needs.authorize.outputs.target_sha }}

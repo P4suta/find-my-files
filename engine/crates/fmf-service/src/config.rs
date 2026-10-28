@@ -1,12 +1,12 @@
 //! Machine-wide service config: `%ProgramData%\find-my-files\service.json`.
 //!
-//! Owned by the service and kept separate from the per-user UI settings in
-//! `%APPDATA%`; `install` seeds it with the captured user SID.
+//! Owned by the service and kept separate from the per-user UI settings in `%APPDATA%`; `install` seeds it with the captured user SID.
 //!
-//! The schema is closed (`deny_unknown_fields`): an unknown or obsolete key
-//! makes the installed service refuse to start rather than run on a
-//! half-understood configuration — a silently ignored `authorized_sids`
-//! spelling would be a security hole, not a typo.
+//! The schema is closed (`deny_unknown_fields`): an unknown or obsolete key makes the installed service refuse to start rather than run on a half-understood configuration — a silently ignored `authorized_sids` spelling would be a security hole, not a typo.
+
+const MIN_FLUSH_INTERVAL_SECS: u64 = 10;
+const DEFAULT_GC_IDLE_DAYS: u64 = 7;
+const DEFAULT_INTERVAL_SECS: u64 = 300;
 
 use std::io::Read;
 #[cfg(test)]
@@ -18,9 +18,8 @@ use serde::{Deserialize, Serialize};
 const MAX_SERVICE_CONFIG_BYTES: u64 = 16 * 1024;
 const MAX_AUTHORIZED_SIDS: usize = 2;
 
-/// Machine-wide service settings persisted to `service.json`. Owned by the
-/// service; omitted fields use [`Default`], while malformed files are rejected
-/// by the installed-service path.
+/// Machine-wide service settings persisted to `service.json`.
+/// Owned by the service; omitted fields use [`Default`], while malformed files are rejected by the installed-service path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServiceConfig {
@@ -28,13 +27,13 @@ pub struct ServiceConfig {
     pub log_level: String,
     /// Interval between index flushes to disk, in seconds.
     pub flush_interval_secs: u64,
-    /// Self-stop the service after this many seconds with no live pipe
-    /// connection (on-demand lifecycle, ADR-0027). `0` disables idle-stop —
-    /// the legacy "stay resident once started" behaviour. The clock starts
-    /// only after the first client has connected and then dropped.
+    /// Self-stop the service after this many seconds with no live pipe connection (on-demand lifecycle, ADR-0027).
+    /// `0` disables idle-stop —
+    /// the legacy "stay resident once started" behaviour.
+    /// The clock starts only after the first client has connected and then dropped.
     pub idle_stop_secs: u64,
-    /// The daily GC task (ADR-0027) uninstalls the service when it has not
-    /// been used for this many days. `0` disables the GC.
+    /// The daily GC task (ADR-0027) uninstalls the service when it has not been used for this many days.
+    /// `0` disables the GC.
     pub gc_max_idle_days: u64,
     /// SIDs allowed to connect (P4: SDDL + connect-time token check).
     pub authorized_sids: Vec<String>,
@@ -44,9 +43,9 @@ impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
             log_level: "info".to_string(),
-            flush_interval_secs: 300,
-            idle_stop_secs: 300,
-            gc_max_idle_days: 7,
+            flush_interval_secs: DEFAULT_INTERVAL_SECS,
+            idle_stop_secs: DEFAULT_INTERVAL_SECS,
+            gc_max_idle_days: DEFAULT_GC_IDLE_DAYS,
             authorized_sids: Vec::new(),
         }
     }
@@ -81,8 +80,7 @@ fn known_folder_path(id: &windows_sys::core::GUID, label: &str) -> std::io::Resu
     Ok(PathBuf::from(base))
 }
 
-/// Resolves the machine-wide data directory without trusting inherited
-/// environment variables across the UAC boundary.
+/// Resolves the machine-wide data directory without trusting inherited environment variables across the UAC boundary.
 ///
 /// # Errors
 /// Returns an HRESULT-backed error if Windows cannot resolve `ProgramData`.
@@ -91,8 +89,8 @@ pub fn default_data_dir() -> std::io::Result<PathBuf> {
     Ok(known_folder_path(&FOLDERID_ProgramData, "ProgramData")?.join("find-my-files"))
 }
 
-/// Resolves the trusted native System32 directory. Elevated child processes
-/// must be launched from here, never by a PATH-searched executable name.
+/// Resolves the trusted native System32 directory.
+/// Elevated child processes must be launched from here, never by a PATH-searched executable name.
 ///
 /// # Errors
 /// Returns an HRESULT-backed error if Windows cannot resolve `System`.
@@ -112,7 +110,7 @@ impl ServiceConfig {
                 "log_level must be one of trace, debug, info, warn, error",
             ));
         }
-        if self.flush_interval_secs < 10 {
+        if self.flush_interval_secs < MIN_FLUSH_INTERVAL_SECS {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "flush_interval_secs must be at least 10",
@@ -149,8 +147,8 @@ impl ServiceConfig {
         Self::try_load_file(std::fs::File::open(path)?)
     }
 
-    /// Reads and validates one persisted config from an already verified file
-    /// handle. Privileged callers use this to avoid reopening a checked path.
+    /// Reads and validates one persisted config from an already verified file handle.
+    /// Privileged callers use this to avoid reopening a checked path.
     ///
     /// # Errors
     /// Returns I/O or `InvalidData` for an oversized or malformed config.
@@ -171,8 +169,7 @@ impl ServiceConfig {
         Ok(config)
     }
 
-    /// Serializes a validated config for publication by a trusted filesystem
-    /// boundary.
+    /// Serializes a validated config for publication by a trusted filesystem boundary.
     ///
     /// # Errors
     /// Returns `InvalidData` for an invalid setting or a serialization error.
@@ -195,9 +192,8 @@ impl ServiceConfig {
         config
     }
 
-    /// Resolve console defaults without logging, for process entry points that
-    /// must read `log_level` before diagnostics can be initialized. The caller
-    /// records the returned error immediately after initializing diagnostics.
+    /// Resolve console defaults without logging, for process entry points that must read `log_level` before diagnostics can be initialized.
+    /// The caller records the returned error immediately after initializing diagnostics.
     #[must_use]
     pub fn load_or_default_with_error(path: &Path) -> (Self, Option<std::io::Error>) {
         match Self::try_load(path) {
@@ -207,9 +203,8 @@ impl ServiceConfig {
         }
     }
 
-    /// Test-only path writer. Production machine configuration is published
-    /// exclusively through `TrustedDataRoot::atomic_write`, which binds creation
-    /// and replacement to the verified root handle.
+    /// Test-only path writer.
+    /// Production machine configuration is published exclusively through `TrustedDataRoot::atomic_write`, which binds creation and replacement to the verified root handle.
     #[cfg(test)]
     pub(crate) fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {

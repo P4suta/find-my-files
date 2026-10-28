@@ -27,14 +27,10 @@ fn clear_error() {
     LAST_ERROR.with(|e| e.borrow_mut().clear());
 }
 
-/// Full cause chain — `fmf-core::diag` owns the single implementation
-/// (4 KiB cap included; shared with the pipe error responses — ADR-0018).
-pub(crate) use fmf_core::diag::error_chain;
+/// Full cause chain — `fmf-core::diag` owns the single implementation (4 KiB cap included; shared with the pipe error responses — ADR-0018).
+pub(crate) use fmf_runtime::diag::error_chain;
 
 pub(crate) fn guard<F: FnOnce() -> i32>(f: F) -> i32 {
-    // Error detail belongs to one call. A later success or a failure branch
-    // that has no richer detail must never expose stale text from an earlier
-    // operation on the same thread.
     clear_error();
     if let Ok(code) = catch_unwind(AssertUnwindSafe(f)) {
         code
@@ -44,14 +40,11 @@ pub(crate) fn guard<F: FnOnce() -> i32>(f: F) -> i32 {
     }
 }
 
-/// Run a cleanup entry point without erasing the diagnostic from the
-/// operation it cleans up.
+/// Run a cleanup entry point without erasing the diagnostic from the operation it cleans up.
 ///
 /// Query controls must be freed after `fmf_query` even when that query failed.
-/// Both calls run on the caller thread, so an ordinary [`guard`] around the
-/// successful free would clear the query's thread-local error before the host
-/// can retrieve it. A cleanup failure still replaces the prior detail with its
-/// own error.
+/// Both calls run on the caller thread, so an ordinary [`guard`] around the successful free would clear the query's thread-local error before the host can retrieve it.
+/// A cleanup failure still replaces the prior detail with its own error.
 pub(crate) fn guard_cleanup<F: FnOnce() -> i32>(f: F) -> i32 {
     let previous = LAST_ERROR.with(|error| error.borrow().clone());
     let code = guard(f);
@@ -65,9 +58,8 @@ pub(crate) fn guard_cleanup<F: FnOnce() -> i32>(f: F) -> i32 {
 ///
 /// # Safety
 ///
-/// `p` must point to readable, NUL-terminated bytes for the duration of this
-/// call. The bytes through the first NUL must remain allocated and must not be
-/// mutated concurrently.
+/// `p` must point to readable, NUL-terminated bytes for the duration of this call.
+/// The bytes through the first NUL must remain allocated and must not be mutated concurrently.
 pub(crate) unsafe fn utf8_arg(p: *const c_char) -> Result<String, i32> {
     if p.is_null() {
         set_error("null string argument");
@@ -82,19 +74,16 @@ pub(crate) unsafe fn utf8_arg(p: *const c_char) -> Result<String, i32> {
         })
 }
 
-// ── Diagnostics ─────────────────────────────────────────────────────────
-
 /// Copies the thread-local detail message.
 ///
-/// `len` is in/out (capacity → required/written bytes, excluding NUL). A null
-/// buffer probes the size; a real buffer must hold `required + 1` bytes or the
-/// call fails without a partial write.
+/// `len` is in/out (capacity → required/written bytes, excluding NUL).
+/// A null buffer probes the size; a real buffer must hold `required + 1` bytes or the call fails without a partial write.
 ///
 /// # Safety
 ///
-/// `len` must be aligned, readable, and writable as one `u32`. When `buf` is
-/// non-null, its initial value must describe a writable allocation of at least
-/// that many bytes, valid for this call. The two regions must not overlap.
+/// `len` must be aligned, readable, and writable as one `u32`.
+/// When `buf` is non-null, its initial value must describe a writable allocation of at least that many bytes, valid for this call.
+/// The two regions must not overlap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_last_error(buf: *mut u8, len: *mut u32) -> i32 {
     if len.is_null() {
@@ -106,8 +95,6 @@ pub unsafe extern "C" fn fmf_last_error(buf: *mut u8, len: *mut u32) -> i32 {
         let required = bytes.len();
         let cap = unsafe { *len } as usize;
         let Some(required_u32) = abi_len(required) else {
-            // `LAST_ERROR` is borrowed here, so do not recursively call
-            // `set_error`. Saturate the observable size and fail closed.
             unsafe { *len = u32::MAX };
             return FMF_E_INVALID_ARG;
         };

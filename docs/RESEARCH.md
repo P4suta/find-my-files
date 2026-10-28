@@ -41,8 +41,12 @@ See `docs/adr/` for design and rejection decisions and their numeric rationale.
 
 ## Rust crates (existence and maturity confirmed)
 
-- `ntfs-reader` 0.4.5 (MIT/Apache-2.0, updated 2026-03): full raw-$MFT record scan (README benchmark: Vec Cache 3.756s / HashMap 4.981s / No Cache 12.3s, environment not stated). **Evaluated and no longer a dependency** — it is not in `engine/Cargo.lock`. Its convenience name selector surfaces a single name per record, whereas one searchable row per `$FILE_NAME` (so hard-linked paths are all retained) is the product's requirement, and the streaming/deferred-record pipeline it feeds is fmf-specific. Raw record parsing is in-house in `fmf-core/src/scan/ntfs.rs`; the benchmark above stays here as the external reference point that scan throughput is compared against.
-- `usn-journal-rs` (wangfu91, MIT, updated 2026-05): MFT enumeration + USN monitoring + FRN path resolution. Read as a reference implementation (policy: do not depend on it).
+- `ntfs-reader` 0.4.5 (MIT/Apache-2.0, updated 2026-03): full raw-$MFT record scan (README benchmark: Vec Cache 3.756s / HashMap 4.981s / No Cache 12.3s, environment not stated).
+  **Evaluated and no longer a dependency** — it is not in `engine/Cargo.lock`.
+  Its convenience name selector surfaces a single name per record, whereas one searchable row per `$FILE_NAME` (so hard-linked paths are all retained) is the product's requirement, and the streaming/deferred-record pipeline it feeds is fmf-specific.
+  Raw record parsing is in-house in `engine/crates/fmf-core/src/ondisk/ntfs.rs`; the benchmark above stays here as the external reference point that scan throughput is compared against.
+- `usn-journal-rs` (wangfu91, MIT, updated 2026-05): MFT enumeration + USN monitoring + FRN path resolution.
+  Read as a reference implementation (policy: do not depend on it).
 - `windows-sys` 0.61: complete FSCTL constants, MFT_ENUM_DATA, USN_RECORD, etc. The USN wrapper is implemented in-house (~200 lines).
 - `memchr` (memmem::Finder = SIMD substring), `rayon`, `parking_lot`, `thiserror`, `tracing`, `xxhash-rust`.
 

@@ -1,9 +1,5 @@
 commit-msg:
   jobs:
-    # Conventional Commits feed release-please's version + CHANGELOG derivation
-    # (ADR-0035). The PR-title gate in ci.yml is authoritative for squash-merges;
-    # this is the earlier, local signal. {1} = the commit-message file git hands
-    # the commit-msg hook. Do not bypass with --no-verify.
     - name: conventional-commit
       run: committed --commit-file {1}
 
@@ -15,27 +11,26 @@ pre-commit:
     - name: rustfmt-engine
       glob: "engine/**/*.rs"
       run: just fmt-check-engine
+    - name: rustfmt-fuzz
+      glob: "engine/fuzz/**/*.rs"
+      run: just fmt-check-fuzz
+    - name: comments
+      run: just lint-comments
     - name: rustfmt-xtask
       glob: "xtask/**/*.rs"
       run: just fmt-check-xtask
     - name: taplo
-      # Lefthook's default glob matcher makes `**` mean one-or-more directories,
-      # so use both patterns to cover root manifests and every nested TOML file.
       glob:
         - "*.toml"
         - "**/*.toml"
       run: just fmt-check-toml
 
 pre-push:
-  # The canonical recipe owns ordering across shared Cargo/.NET output trees.
   parallel: true
   jobs:
-    # Non-blocking reminder: the perf gates need an elevated shell, so they
-    # cannot run here — nudge instead of silently skipping them. (echo exits 0,
-    # so this never blocks the push.)
     - name: perf-nudge
-      glob: "engine/crates/fmf-core/**"
-      run: echo "fmf-core changed — run 'just perf-gate' from an elevated shell before merging"
+      glob: "engine/crates/{fmf-core,fmf-runtime}/**"
+      run: echo "engine core/runtime changed — run 'just perf-gate' from an elevated shell before merging"
 
     - name: verify
-      run: just verify
+      run: just verify-push

@@ -1,17 +1,3 @@
-# cargo-fuzz harnesses for the untrusted-input parsers, fuzzed on the Linux CI
-# runner. Two surfaces:
-#   - the named-pipe wire codec (fmf-proto / fmf-contract) — the privilege
-#     boundary (non-elevated UI -> elevated fmf-service, docs/SECURITY.md);
-#   - the fmf-core decoders (query / index::snapshot / usn::records / wtf8) —
-#     now reachable because fmf-core's Windows dependency (windows-sys)
-#     are `cfg(windows)`-gated, so its pure parsers build for Linux;
-#   - the NTFS on-disk grammar (fmf_core::ondisk — boot sector, file records,
-#     $ATTRIBUTE_LIST, non-resident runs), the bytes a crafted VHDX or USB
-#     stick fully controls and that fmf-service parses as LocalSystem
-#     (ADR-0047). These four targets shape their input rather than passing raw
-#     bytes through: see each target's module docs for why.
-# All are proptest-covered in-tree too; libFuzzer adds coverage-guided
-# exploration with ASan over the same surfaces.
 [package]
 name = "fmf-fuzz"
 version = "0.0.0"
@@ -21,15 +7,14 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
-# fmf-contract is reached through fmf-proto (not named directly), so it is not a
-# direct dependency — cargo-machete would flag it as unused otherwise.
 [dependencies]
 libfuzzer-sys = "0.4"
+serde = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 fmf-proto = { path = "../crates/fmf-proto" }
 fmf-core = { path = "../crates/fmf-core" }
+fmf-runtime = { path = "../crates/fmf-runtime" }
 
-# Crash traces over speed; cargo-fuzz already enables debug-assertions +
-# overflow-checks, so arithmetic on attacker-controlled lengths is caught.
 [profile.release]
 debug = true
 
@@ -103,7 +88,11 @@ test = false
 doc = false
 bench = false
 
-# Standalone workspace (mirrors xtask, ADR-0018): keeps fmf-fuzz out of the
-# engine workspace so `cargo --workspace` / llvm-cov never build the nightly,
-# CI-only fuzz crate.
 [workspace]
+
+[[bin]]
+name = "strict_json_decode"
+path = "fuzz_targets/strict_json_decode.rs"
+test = false
+doc = false
+bench = false

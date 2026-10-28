@@ -1,5 +1,5 @@
-//! Assemble the deliberately small Pages artifact: committed landing page plus
-//! the canonical mdBook. Implementation API documentation is not published.
+//! Assemble the deliberately small Pages artifact: committed landing page plus the canonical mdBook.
+//! Implementation API documentation is not published.
 
 use std::fs;
 use std::path::Path;
@@ -29,9 +29,6 @@ fn assemble(landing: &Path, book: &Path, site: &Path) -> Result<()> {
         require_nonempty(&required)?;
     }
 
-    // Build a complete candidate next to the final directory. Publishing must
-    // never merge into an earlier site: mdBook fingerprints assets, so a merge
-    // silently retains obsolete hashes and dead pages forever.
     let candidate = site.with_extension("candidate");
     fsx::force_remove_dir_all(&candidate)
         .with_context(|| format!("clear stale candidate {}", candidate.display()))?;
@@ -49,7 +46,12 @@ fn assemble(landing: &Path, book: &Path, site: &Path) -> Result<()> {
         Ok(())
     })();
     if let Err(error) = copied {
-        let _ = fsx::force_remove_dir_all(&candidate);
+        if let Err(cleanup) = fsx::force_remove_dir_all(&candidate) {
+            return Err(error.context(format!(
+                "remove failed candidate {}: {cleanup}",
+                candidate.display()
+            )));
+        }
         return Err(error);
     }
 

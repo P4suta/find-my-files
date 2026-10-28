@@ -4,10 +4,8 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// <see cref="EngineEventMarshaler"/>: the single engine-thread → UI-thread
-/// crossing. Deterministic via <see cref="ManualDispatcher"/> — events raised
-/// "on the engine thread" must not reach handlers until the UI queue drains.
+/// <summary> <see cref="EngineEventMarshaler"/>: the single engine-thread → UI-thread crossing.
+/// Deterministic via <see cref="ManualDispatcher"/> — events raised "on the engine thread" must not reach handlers until the UI queue drains.
 /// </summary>
 public sealed class EngineEventMarshalerTests
 {
@@ -24,15 +22,12 @@ public sealed class EngineEventMarshalerTests
         marshaler.EngineErrorOccurred += s => log.Add($"error {s}");
         marshaler.ConnectionChanged += s => log.Add($"connection {s}");
 
-        // Raised on the "engine thread": nothing reaches a handler until the
-        // UI queue runs — the marshaling is the whole point.
         _engine.RaiseVolumeUpdated(new VolumeStatus("C:", VolumeState.Ready, 42));
         _engine.RaiseIndexChanged("C:");
         _engine.RaiseEngineError(EngineErrorSeverity.Error);
         _engine.RaiseConnectionChanged(EngineConnectionState.Reconnecting);
         Assert.Empty(log);
 
-        // One drain delivers all four, payloads intact, FIFO order kept.
         _dispatcher.DrainQueue();
         Assert.Equal(
             ["volume C: Ready 42", "index C:", "error Error", "connection Reconnecting"],
@@ -50,7 +45,6 @@ public sealed class EngineEventMarshalerTests
 
         _engine.RaiseIndexChanged("*");
 
-        // One TryEnqueue hop fans out to every subscriber synchronously.
         Assert.Equal(1, _dispatcher.DrainQueue());
         Assert.Equal(1, first);
         Assert.Equal(1, second);

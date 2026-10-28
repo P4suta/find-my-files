@@ -1,9 +1,3 @@
-# Install the exact upstream actionlint binary used by the Linux hygiene job.
-#
-# This is intentionally a tiny repository-owned verifier instead of another
-# third-party setup Action. Identity (release URL), length, and digest are all
-# fixed, extraction is limited to the one executable we invoke, and the tool
-# never lands in the checkout.
 name: Setup actionlint (verified)
 description: Install the pinned actionlint Linux release after exact size and SHA-256 verification.
 outputs:

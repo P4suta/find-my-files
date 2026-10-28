@@ -5,9 +5,8 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Behavioural tests for <see cref="ResultsPresenter"/> — the result
-/// lifecycle (seeded publish, in-place refresh, empty, stale disposal) that the
-/// flicker-free virtualization depends on. Driven by <see cref="StubSearchResult"/>
+/// <summary>Behavioural tests for <see cref="ResultsPresenter"/> — the result lifecycle (seeded publish, in-place refresh, empty, stale disposal) that the flicker-free virtualization depends on.
+/// Driven by <see cref="StubSearchResult"/>
 /// + <see cref="ManualDispatcher"/>; no real engine or list view.</summary>
 public sealed class ResultsPresenterTests
 {
@@ -100,7 +99,7 @@ public sealed class ResultsPresenterTests
             () => true);
 
         Assert.Equal(8, _presenter.ResultsSource.Count);
-        Assert.Single(pubs); // the fallback went through the announcing publish path
+        Assert.Single(pubs);
     }
 
     [Fact]
@@ -122,7 +121,7 @@ public sealed class ResultsPresenterTests
             CompiledHighlighter.Empty,
             () => true);
 
-        Assert.Empty(pubs); // RefreshInPlace path raises no Reset/announce
+        Assert.Empty(pubs);
         Assert.Equal(5, _presenter.ResultsSource.Count);
     }
 

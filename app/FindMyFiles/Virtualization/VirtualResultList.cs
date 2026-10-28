@@ -8,27 +8,16 @@ using Microsoft.UI.Xaml.Data;
 
 namespace FindMyFiles.Virtualization;
 
-/// <summary>
-/// Random-access data virtualization for ListView: non-generic IList +
-/// INotifyCollectionChanged + IItemsRangeInfo (the only combination that
-/// works — microsoft-ui-xaml#1809, ADR-0015). The indexer hands out stable
-/// placeholder instances and never fetches; RangesChanged drives 64-row page
-/// fetches on a background task, and arriving data fills those same
-/// instances in place.
+/// <summary> Random-access data virtualization for ListView: non-generic IList + INotifyCollectionChanged + IItemsRangeInfo (the only combination that works — microsoft-ui-xaml#1809, ADR-0015).
+/// The indexer hands out stable placeholder instances and never fetches; RangesChanged drives 64-row page fetches on a background task, and arriving data fills those same instances in place.
 ///
-/// The instance lives as long as the page: new query results arrive through
-/// <see cref="Reassign"/> (seeded pages + one Reset), never by swapping the
-/// ItemsSource (ADR-0015). An epoch counter makes fetches started against a
-/// previous result fall on the floor.
+/// The instance lives as long as the page: new query results arrive through <see cref="Reassign"/> (seeded pages + one Reset), never by swapping the ItemsSource (ADR-0015).
+/// An epoch counter makes fetches started against a previous result fall on the floor.
 ///
-/// Membership invariant — the WinRT IList adapter trusts these answers
-/// blindly: **never vouch for membership falsely.** A false "absent" merely
-/// re-realizes a container; a false "present" sends the ListView to
-/// GetAt(staleIndex) and dies deep inside XAML (ADR-0015). A row is a member
-/// iff its index is inside <see cref="Count"/> AND the current page cache
-/// holds that exact instance in that slot; rows from previous results,
-/// evicted pages or transient enumeration answer absent. Mutating entry
-/// points enforce the UI thread (always, not just in Debug).
+/// Membership invariant — the WinRT IList adapter trusts these answers blindly: **never vouch for membership falsely.** A false "absent" merely re-realizes a container; a false "present" sends the ListView to GetAt(staleIndex) and dies deep inside XAML (ADR-0015).
+/// A row is a member iff its index is inside <see cref="Count"/> AND the current page cache holds that exact instance in that slot; rows from previous results,
+/// evicted pages or transient enumeration answer absent.
+/// Mutating entry points enforce the UI thread (always, not just in Debug).
 /// </summary>
 [System.Diagnostics.CodeAnalysis.SuppressMessage(
     "Design",
@@ -37,7 +26,7 @@ namespace FindMyFiles.Virtualization;
 internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItemsRangeInfo, IDisposable
 {
     internal const int PageSize = 64;
-    private const int MaxCachedPages = 64; // ≈4096 rows
+    private const int MaxCachedPages = 64;
 
     private readonly IDispatcher _dispatcher;
     private readonly Dictionary<long, ResultRow[]> _pages = [];
@@ -46,16 +35,9 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
     private readonly HashSet<long> _inFlight = [];
     private ISearchResult? _result;
 
-    // The active query's compiled highlighter, applied to every row filled
-    // through this list (seeds + background fetches). Swapped atomically with
-    // the result in Reassign/RefreshInPlace so rows always match the query
-    // they are shown under.
     private IHighlighter _highlighter = CompiledHighlighter.Empty;
     private int _epoch;
 
-    // Per-epoch cancellation, second line of defense behind the epoch check:
-    // the epoch check makes late completions fall on the floor; the token
-    // stops them from wasting transport work first. Both must stay.
     private CancellationTokenSource _fetchCts = new();
     private bool _disposed;
     private bool _fetchFailureNotified;
@@ -66,51 +48,30 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
     /// <summary>Raised (Reset) on the UI thread by <see cref="Reassign"/>.</summary>
     public event NotifyCollectionChangedEventHandler? CollectionChanged;
 
-    /// <summary>
-    /// Bind the list to <paramref name="dispatcher"/>, the UI-thread gate every
-    /// mutation is checked against (<see cref="EnsureUiThread"/>) and the queue
-    /// background fetch completions marshal back through.
-    /// </summary>
-    /// <param name="dispatcher">The UI-thread dispatcher mutations are gated on
-    /// and fetch completions are marshaled back through.</param>
+    /// <summary> Bind the list to <paramref name="dispatcher"/>, the UI-thread gate every mutation is checked against (<see cref="EnsureUiThread"/>) and the queue background fetch completions marshal back through.
+    /// </summary> <param name="dispatcher">The UI-thread dispatcher mutations are gated on and fetch completions are marshaled back through.</param>
     public VirtualResultList(IDispatcher dispatcher)
     {
         _dispatcher = dispatcher;
     }
 
-    /// <summary>Row count of the published result, clamped to
-    /// <see cref="int.MaxValue"/> — the fixed size the ListView virtualizes
-    /// against. Out-of-range indexers throw rather than fetch.</summary>
+    /// <summary>Row count of the published result, clamped to <see cref="int.MaxValue"/> — the fixed size the ListView virtualizes against.
+    /// Out-of-range indexers throw rather than fetch.</summary>
     public int Count { get; private set; }
 
-    /// <summary>The live result whose rows are currently presented. It is
-    /// passed back only as an opaque identity basis for the next query.</summary>
+    /// <summary>The live result whose rows are currently presented.
+    /// It is passed back only as an opaque identity basis for the next query.</summary>
     internal ISearchResult? PresentationBasis => _result;
 
-    /// <summary>
-    /// Visible (first, last) indexes from the most recent RangesChanged —
+    /// <summary> Visible (first, last) indexes from the most recent RangesChanged —
     /// what position-preserving requeries prefetch before publishing.
     /// </summary>
     public (int First, int Last)? LastVisibleRange { get; private set; }
 
-    /// <summary>
-    /// Atomically replace the backing result: bump the epoch (in-flight
-    /// fetches for the old result are cancelled, and their completions drop
-    /// their data either way), drop the page cache, apply the pre-fetched
-    /// seeds, then raise one Reset.
+    /// <summary> Atomically replace the backing result: bump the epoch (in-flight fetches for the old result are cancelled, and their completions drop their data either way), drop the page cache, apply the pre-fetched seeds, then raise one Reset.
     ///
-    /// Contract: UI thread only (a cross-thread CollectionChanged crashes
-    /// XAML); <paramref name="seeds"/> must be pages of
-    /// <paramref name="result"/> within its count; ownership of
-    /// <paramref name="result"/> transfers to this list (it is disposed by
-    /// the next Reassign/RefreshInPlace or by <see cref="Dispose"/>).
-    /// </summary>
-    /// <param name="result">The new backing result whose ownership transfers to
-    /// this list; null clears the list to empty.</param>
-    /// <param name="seeds">Pre-fetched pages of <paramref name="result"/> used to
-    /// fill the viewport before the Reset is raised.</param>
-    /// <param name="highlighter">Compiled highlighter for the active query; null
-    /// falls back to <see cref="CompiledHighlighter.Empty"/>.</param>
+    /// Contract: UI thread only (a cross-thread CollectionChanged crashes XAML); <paramref name="seeds"/> must be pages of <paramref name="result"/> within its count; ownership of <paramref name="result"/> transfers to this list (it is disposed by the next Reassign/RefreshInPlace or by <see cref="Dispose"/>).
+    /// </summary> <param name="result">The new backing result whose ownership transfers to this list; null clears the list to empty.</param> <param name="seeds">Pre-fetched pages of <paramref name="result"/> used to fill the viewport before the Reset is raised.</param> <param name="highlighter">Compiled highlighter for the active query; null falls back to <see cref="CompiledHighlighter.Empty"/>.</param>
     public void Reassign(
         ISearchResult? result, IReadOnlyList<PageSeed> seeds, IHighlighter? highlighter = null)
     {
@@ -120,9 +81,6 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         _fetchCts.Cancel();
         _fetchCts = new CancellationTokenSource();
 
-        // Re-arm the page-fetch failure notice for the new result set: the
-        // once-only suppression in the fetch path is per-epoch, not per-process,
-        // so a later distinct failure still surfaces to the user.
         _fetchFailureNotified = false;
         var old = _result;
         _result = result;
@@ -133,8 +91,6 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         Count = (int)Math.Min(result?.Count ?? 0, int.MaxValue);
         LastVisibleRange = null;
 
-        // Index loop, not foreach: iterating IReadOnlyList<PageSeed> (a struct
-        // type) through the interface boxes the enumerator.
         for (var i = 0; i < seeds.Count; i++)
         {
             ApplySeed(seeds[i]);
@@ -145,39 +101,22 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
             this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
     }
 
-    /// <summary>
-    /// Swap to a result the engine verified to contain the same rows
-    /// (<see cref="QueryTraceData.Unchanged"/>) without raising Reset:
-    /// realized rows keep their instances and re-fill from the seeds (the
-    /// MVVM setters only notify on actual value changes, so an idle USN
-    /// requery repaints nothing). Cached pages are marked unloaded so later
-    /// scrolling re-fetches from the new handle, and the visible range is
-    /// re-ensured immediately for pages the seeds missed.
+    /// <summary> Swap to a result the engine verified to contain the same rows (<see cref="QueryTraceData.Unchanged"/>) without raising Reset:
+    /// realized rows keep their instances and re-fill from the seeds (the MVVM setters only notify on actual value changes, so an idle USN requery repaints nothing).
+    /// Cached pages are marked unloaded so later scrolling re-fetches from the new handle, and the visible range is re-ensured immediately for pages the seeds missed.
     ///
-    /// Contract: UI thread only; the engine must have verified
-    /// <paramref name="result"/> holds the same rows as the published one —
-    /// same Count required, a mismatch falls back to a full seeded
-    /// <see cref="Reassign"/> (Reset) rather than lying about membership;
-    /// seeds must be pages of <paramref name="result"/>; ownership of
-    /// <paramref name="result"/> transfers to this list. In-flight fetches
-    /// of the previous epoch are cancelled here too.
-    /// </summary>
-    /// <param name="result">The verified-identical result to swap in; ownership
-    /// transfers to this list. A Count mismatch falls back to <see cref="Reassign"/>.</param>
-    /// <param name="seeds">Pre-fetched pages of <paramref name="result"/> that
-    /// re-fill realized rows in place without a Reset.</param>
-    /// <param name="highlighter">Compiled highlighter for the active query; null
-    /// falls back to <see cref="CompiledHighlighter.Empty"/>.</param>
+    /// Contract: UI thread only; the engine must have verified <paramref name="result"/> holds the same rows as the published one —
+    /// same Count required, a mismatch falls back to a full seeded <see cref="Reassign"/> (Reset) rather than lying about membership;
+    /// seeds must be pages of <paramref name="result"/>; ownership of <paramref name="result"/> transfers to this list.
+    /// In-flight fetches of the previous epoch are cancelled here too.
+    /// </summary> <param name="result">The verified-identical result to swap in; ownership transfers to this list.
+    /// A Count mismatch falls back to <see cref="Reassign"/>.</param> <param name="seeds">Pre-fetched pages of <paramref name="result"/> that re-fill realized rows in place without a Reset.</param> <param name="highlighter">Compiled highlighter for the active query; null falls back to <see cref="CompiledHighlighter.Empty"/>.</param>
     public void RefreshInPlace(
         ISearchResult result, IReadOnlyList<PageSeed> seeds, IHighlighter? highlighter = null)
     {
         EnsureUiThread(nameof(RefreshInPlace));
         if ((int)Math.Min(result.Count, int.MaxValue) != Count)
         {
-            // The engine guarantees identical results on this path; if that
-            // ever breaks, a full seeded Reset is the screen-consistent
-            // fallback — silently keeping a mismatched count is exactly the
-            // membership lie this class must never tell.
             FileLog.Warn(
                 "virtualization",
                 $"RefreshInPlace count mismatch ({result.Count} vs {Count}) — falling back to Reassign");
@@ -189,13 +128,12 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         _epoch++;
         _fetchCts.Cancel();
         _fetchCts = new CancellationTokenSource();
-        _fetchFailureNotified = false; // per-epoch re-arm (see Reassign)
+        _fetchFailureNotified = false;
         var old = _result;
         _result = result;
         _loaded.Clear();
         _inFlight.Clear();
 
-        // Index loop, not foreach: see Reassign (avoids a boxed enumerator).
         for (var i = 0; i < seeds.Count; i++)
         {
             ApplySeed(seeds[i]);
@@ -208,9 +146,7 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         }
     }
 
-    /// <summary>Always-on (not Debug-only): a cross-thread mutation reaches
-    /// XAML as a marshaling crash far from the cause — fail loud here.</summary>
-    /// <param name="member">Calling member name, included in the thrown message.</param>
+    /// <summary>Always-on (not Debug-only): a cross-thread mutation reaches XAML as a marshaling crash far from the cause — fail loud here.</summary> <param name="member">Calling member name, included in the thrown message.</param>
     private void EnsureUiThread(string member)
     {
         if (!_dispatcher.HasThreadAccess)
@@ -235,24 +171,14 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         _loaded.Add(seed.Page);
     }
 
-    /// <summary>
-    /// Hands out the stable <see cref="ResultRow"/> instance for
-    /// <paramref name="index"/> (creating the placeholder page on demand) —
-    /// it never fetches, so realization stays cheap; arriving data fills these
-    /// same instances in place. The setter is unsupported (read-only list).
-    /// </summary>
-    /// <param name="index">Zero-based row index; must be inside
-    /// <see cref="Count"/> or it throws (an out-of-range slot is never
-    /// fabricated into the LRU — ADR-0015).</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/>
-    /// is negative or ≥ <see cref="Count"/>.</exception>
-    /// <exception cref="NotSupportedException">On set.</exception>
+    /// <summary> Hands out the stable <see cref="ResultRow"/> instance for <paramref name="index"/> (creating the placeholder page on demand) —
+    /// it never fetches, so realization stays cheap; arriving data fills these same instances in place.
+    /// The setter is unsupported (read-only list).
+    /// </summary> <param name="index">Zero-based row index; must be inside <see cref="Count"/> or it throws (an out-of-range slot is never fabricated into the LRU — ADR-0015).</param> <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is negative or ≥ <see cref="Count"/>.</exception> <exception cref="NotSupportedException">On set.</exception>
     public object? this[int index]
     {
         get
         {
-            // Out of range must throw — never fetch, never fabricate
-            // phantom pages into the LRU (ADR-0015).
             if ((uint)index >= (uint)Count)
             {
                 throw new ArgumentOutOfRangeException(nameof(index), index, $"Count={Count}");
@@ -283,23 +209,14 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         return rows;
     }
 
-    /// <summary>
-    /// ListView callback whenever the realized viewport moves; records the
-    /// range and kicks page fetches. Delegates to the WinRT-free
-    /// <see cref="NotifyVisibleRange"/> seam; <paramref name="trackedItems"/>
-    /// (the pinned/selected items) is unused — only the visible window drives
-    /// prefetch.
-    /// </summary>
-    /// <param name="visibleRange">First/last realized item indexes.</param>
-    /// <param name="trackedItems">Items the host asked to keep tracked; ignored.</param>
+    /// <summary> ListView callback whenever the realized viewport moves; records the range and kicks page fetches.
+    /// Delegates to the WinRT-free <see cref="NotifyVisibleRange"/> seam; <paramref name="trackedItems"/> (the pinned/selected items) is unused — only the visible window drives prefetch.
+    /// </summary> <param name="visibleRange">First/last realized item indexes.</param> <param name="trackedItems">Items the host asked to keep tracked; ignored.</param>
     public void RangesChanged(ItemIndexRange visibleRange, IReadOnlyList<ItemIndexRange> trackedItems) =>
         NotifyVisibleRange(visibleRange.FirstIndex, visibleRange.LastIndex);
 
-    /// <summary>WinRT-free body of RangesChanged (unit-testable). An empty
-    /// list reports (-1,-1); remembering that would poison every later
-    /// position-preserving requery with Items[-1].</summary>
-    /// <param name="firstVisible">First realized item index, or -1 when empty.</param>
-    /// <param name="lastVisible">Last realized item index.</param>
+    /// <summary>WinRT-free body of RangesChanged (unit-testable).
+    /// An empty list reports (-1,-1); remembering that would poison every later position-preserving requery with Items[-1].</summary> <param name="firstVisible">First realized item index, or -1 when empty.</param> <param name="lastVisible">Last realized item index.</param>
     internal void NotifyVisibleRange(int firstVisible, int lastVisible)
     {
         if (firstVisible < 0 || lastVisible < firstVisible)
@@ -312,12 +229,9 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         EnsureRange(firstVisible, lastVisible);
     }
 
-    /// <summary>
-    /// Kick background fetches for the pages covering the given visible
-    /// range ± one page of buffer. WinRT-free seam (unit-testable).
-    /// </summary>
-    /// <param name="firstVisible">First visible item index of the range to cover.</param>
-    /// <param name="lastVisible">Last visible item index of the range to cover.</param>
+    /// <summary> Kick background fetches for the pages covering the given visible range ± one page of buffer.
+    /// WinRT-free seam (unit-testable).
+    /// </summary> <param name="firstVisible">First visible item index of the range to cover.</param> <param name="lastVisible">Last visible item index of the range to cover.</param>
     internal void EnsureRange(int firstVisible, int lastVisible)
     {
         if (_disposed || Count == 0 || _result is not { } result)
@@ -346,9 +260,6 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
                 .ConfigureAwait(false);
             _dispatcher.TryEnqueue(() =>
             {
-                // Epoch check first: after a Reassign this fetch belongs to a
-                // dead result — touching _inFlight/_pages would corrupt the
-                // new result's bookkeeping.
                 if (epoch != _epoch || _disposed)
                 {
                     return;
@@ -370,7 +281,7 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
             {
                 if (epoch != _epoch || _disposed)
                 {
-                    return; // a requery already replaced this result — no stale storm
+                    return;
                 }
 
                 _inFlight.Remove(page);
@@ -379,10 +290,6 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         }
         catch (OperationCanceledException)
         {
-            // Cancelled by an epoch turn (Reassign/RefreshInPlace) or
-            // Dispose — the second defense fired; nothing to fill. If this
-            // epoch is somehow still live, free the slot so the page can be
-            // re-fetched by a later visible-range pass.
             _dispatcher.TryEnqueue(() =>
             {
                 if (epoch == _epoch && !_disposed)
@@ -393,15 +300,11 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         }
         catch (ObjectDisposedException)
         {
-            // Result freed mid-flight — the list moved on to a newer result.
         }
         catch (Exception ex)
         {
             _dispatcher.TryEnqueue(() =>
             {
-                // Failure state is epoch-owned just like page data. An old
-                // fetch must not consume the current epoch's once-only notice
-                // latch (and thereby hide the current result's real failure).
                 if (epoch != _epoch || _disposed)
                 {
                     return;
@@ -444,11 +347,9 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         }
     }
 
-    /// <summary>
-    /// Tear the list down at page end: cancel in-flight fetches, dispose the
-    /// fetch token source, and dispose the owned result. Idempotent in effect —
-    /// the <c>_disposed</c> guard makes any late fetch continuation bail before
-    /// it touches the now-freed source.
+    /// <summary> Tear the list down at page end: cancel in-flight fetches, dispose the fetch token source, and dispose the owned result.
+    /// Idempotent in effect —
+    /// the <c>_disposed</c> guard makes any late fetch continuation bail before it touches the now-freed source.
     /// </summary>
     public void Dispose()
     {
@@ -459,10 +360,6 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
 
         _disposed = true;
 
-        // Cancel first so in-flight fetches stop, then dispose: _disposed is
-        // already set, so EnsureRange won't read the token again and queued
-        // continuations bail on the _disposed guard — nothing observes the
-        // source after this point.
         _fetchCts.Cancel();
         _fetchCts.Dispose();
         _result?.Dispose();
@@ -470,8 +367,6 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         BecameStale = null;
         CollectionChanged = null;
     }
-
-    // ── IList boilerplate (read-only) ───────────────────────────────────
 
     /// <inheritdoc/>
     public bool IsFixedSize => true;
@@ -485,33 +380,20 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
     /// <inheritdoc/>
     public object SyncRoot => this;
 
-    /// <inheritdoc/>
-    /// <exception cref="NotSupportedException">Always — the list is read-only.</exception>
+    /// <inheritdoc/> <exception cref="NotSupportedException">Always — the list is read-only.</exception>
     public int Add(object? value) => throw new NotSupportedException();
 
-    /// <inheritdoc/>
-    /// <exception cref="NotSupportedException">Always — the list is read-only.</exception>
+    /// <inheritdoc/> <exception cref="NotSupportedException">Always — the list is read-only.</exception>
     public void Clear() => throw new NotSupportedException();
 
-    /// <summary>
-    /// True only for a row whose slot still holds that exact instance. After a
-    /// Reset the ListView re-locates its selected/focused item through
-    /// Contains/IndexOf; vouching for a row of a previous result would send XAML
-    /// to GetAt(staleIndex) and crash (ADR-0015), so membership is never faked.
-    /// </summary>
-    /// <param name="value">The candidate item to test for membership.</param>
-    /// <returns>True only when the current cache holds that exact instance in its slot.</returns>
+    /// <summary> True only for a row whose slot still holds that exact instance.
+    /// After a Reset the ListView re-locates its selected/focused item through Contains/IndexOf; vouching for a row of a previous result would send XAML to GetAt(staleIndex) and crash (ADR-0015), so membership is never faked.
+    /// </summary> <param name="value">The candidate item to test for membership.</param> <returns>True only when the current cache holds that exact instance in its slot.</returns>
     public bool Contains(object? value) => IndexOf(value) >= 0;
 
-    /// <summary>
-    /// Index of <paramref name="value"/>, or -1, under the same membership
-    /// invariant as <see cref="Contains"/>: a <see cref="ResultRow"/> matches
-    /// only when its <see cref="ResultRow.Index"/> is inside <see cref="Count"/>
-    /// AND the current page cache holds that exact instance in that slot. Rows
-    /// from previous results or evicted pages answer absent.
-    /// </summary>
-    /// <param name="value">The candidate item to locate.</param>
-    /// <returns>The row's index, or -1 when it is not a current cached member.</returns>
+    /// <summary> Index of <paramref name="value"/>, or -1, under the same membership invariant as <see cref="Contains"/>: a <see cref="ResultRow"/> matches only when its <see cref="ResultRow.Index"/> is inside <see cref="Count"/> AND the current page cache holds that exact instance in that slot.
+    /// Rows from previous results or evicted pages answer absent.
+    /// </summary> <param name="value">The candidate item to locate.</param> <returns>The row's index, or -1 when it is not a current cached member.</returns>
     public int IndexOf(object? value)
     {
         if (value is not ResultRow r || r.Index >= Count)
@@ -525,23 +407,16 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
             : -1;
     }
 
-    /// <inheritdoc/>
-    /// <exception cref="NotSupportedException">Always — the list is read-only.</exception>
+    /// <inheritdoc/> <exception cref="NotSupportedException">Always — the list is read-only.</exception>
     public void Insert(int index, object? value) => throw new NotSupportedException();
 
-    /// <inheritdoc/>
-    /// <exception cref="NotSupportedException">Always — the list is read-only.</exception>
+    /// <inheritdoc/> <exception cref="NotSupportedException">Always — the list is read-only.</exception>
     public void Remove(object? value) => throw new NotSupportedException();
 
-    /// <inheritdoc/>
-    /// <exception cref="NotSupportedException">Always — the list is read-only.</exception>
+    /// <inheritdoc/> <exception cref="NotSupportedException">Always — the list is read-only.</exception>
     public void RemoveAt(int index) => throw new NotSupportedException();
 
-    /// <summary>Read surface stays landmine-free: copy what is cached, hand
-    /// out transient placeholders for the rest (never cached — see
-    /// <see cref="GetEnumerator"/>).</summary>
-    /// <param name="array">Destination array the rows are copied into.</param>
-    /// <param name="index">Start offset in <paramref name="array"/> to copy from.</param>
+    /// <summary>Read surface stays landmine-free: copy what is cached, hand out transient placeholders for the rest (never cached — see <see cref="GetEnumerator"/>).</summary> <param name="array">Destination array the rows are copied into.</param> <param name="index">Start offset in <paramref name="array"/> to copy from.</param>
     public void CopyTo(Array array, int index)
     {
         ArgumentNullException.ThrowIfNull(array);
@@ -557,14 +432,10 @@ internal sealed class VirtualResultList : IList, INotifyCollectionChanged, IItem
         }
     }
 
-    /// <summary>
-    /// Enumeration must not disturb the virtualization state: walking a
-    /// million-row result through the cache would evict every realized
-    /// viewport page (placeholder flash + refetch). Cached slots yield
-    /// their live instances; everything else yields transient placeholders,
+    /// <summary> Enumeration must not disturb the virtualization state: walking a million-row result through the cache would evict every realized viewport page (placeholder flash + refetch).
+    /// Cached slots yield their live instances; everything else yields transient placeholders,
     /// which by the membership invariant safely answer "absent".
-    /// </summary>
-    /// <returns>An enumerator yielding cached instances and transient placeholders.</returns>
+    /// </summary> <returns>An enumerator yielding cached instances and transient placeholders.</returns>
     public IEnumerator GetEnumerator()
     {
         for (var i = 0; i < Count; i++)

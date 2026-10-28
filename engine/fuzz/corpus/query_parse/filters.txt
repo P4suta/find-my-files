@@ -1,0 +1,1 @@
+ext:rs | path:"C:\source" size:1..4096

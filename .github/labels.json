@@ -37,6 +37,6 @@
   {
     "name": "dependencies",
     "color": "0366d6",
-    "description": "Dependency update (Dependabot)."
+    "description": "Dependency update (Renovate)."
   }
 ]

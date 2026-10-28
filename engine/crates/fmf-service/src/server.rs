@@ -1,9 +1,9 @@
 //! Pipe server: accept loop (2-wait on connect/stop) + per-connection threads.
 //!
-//! One reader decodes frames into a small queue, two workers dispatch
-//! out-of-order (a page fetch never queues behind a slow query), all frame
-//! writes — responses and event pushes — serialize on one mutex so frames
-//! can't interleave mid-stream.
+//! One reader decodes frames into a small queue, two workers dispatch out-of-order (a page fetch never queues behind a slow query), all frame writes — responses and event pushes — serialize on one mutex so frames can't interleave mid-stream.
+
+const DEBUG_LAG_MILLIS: u64 = 250;
+const CLIENT_READY_TIMEOUT_SECS: u64 = 5;
 
 use std::collections::HashMap;
 use std::io;
@@ -13,11 +13,11 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError};
-use fmf_core::engine::{Engine, QueryCancellation};
-use fmf_core::metrics::Counters;
 use fmf_proto::codes;
 use fmf_proto::frame::{self, FLAG_EVENT, FLAG_RESPONSE, FrameError, FrameHeader};
 use fmf_proto::messages;
+use fmf_runtime::engine::{Engine, QueryCancellation};
+use fmf_runtime::metrics::Counters;
 use parking_lot::Mutex;
 
 use crate::dispatch::{Connection, Outcome};
@@ -25,15 +25,13 @@ use crate::events::Broadcaster;
 use crate::faults::Faults;
 use crate::pipe::{Accepted, Event, PipeListener, PipeStream};
 
-/// Max concurrent pipe instances the listener will create; further clients
-/// hit `ERROR_PIPE_BUSY` at the OS until a slot frees.
+/// Max concurrent pipe instances the listener will create; further clients hit `ERROR_PIPE_BUSY` at the OS until a slot frees.
 pub const MAX_INSTANCES: u32 = 8;
 const WORKERS_PER_CONNECTION: usize = 2;
 /// Requests decoded ahead of the two per-connection workers.
 ///
-/// One waiting request per worker preserves a small amount of pipelining while
-/// bounding decoded request payloads. A cancellation channel interrupts a
-/// producer waiting on this bound when the server stops or the pipe breaks.
+/// One waiting request per worker preserves a small amount of pipelining while bounding decoded request payloads.
+/// A cancellation channel interrupts a producer waiting on this bound when the server stops or the pipe breaks.
 pub const REQUEST_QUEUE_CAP: usize = WORKERS_PER_CONNECTION;
 const CANCELLATION_RECEIVERS: usize = WORKERS_PER_CONNECTION + 1;
 
@@ -51,7 +49,7 @@ const fn request_payload_cap(opcode: u16) -> u32 {
         reason = "zero-payload contract operations are enumerated explicitly; unknown opcodes also fail closed at zero"
     )]
     match opcode {
-        opcode::HELLO => 4,
+        opcode::HELLO => size_of::<u32>() as u32,
         opcode::SUBSCRIBE
         | opcode::UNSUBSCRIBE
         | opcode::LIST_VOLUMES
@@ -62,7 +60,7 @@ const fn request_payload_cap(opcode: u16) -> u32 {
         opcode::INDEX_START => fmf_proto::limits::MAX_INDEX_START_PAYLOAD_LEN,
         opcode::QUERY => messages::FmfQueryOptions::LEN as u32 + fmf_proto::limits::MAX_QUERY_BYTES,
         opcode::RESULT_PAGE => messages::ResultPageReq::LEN as u32,
-        opcode::RESULT_FREE => 8,
+        opcode::RESULT_FREE => size_of::<u64>() as u32,
         _ => 0,
     }
 }
@@ -76,8 +74,6 @@ fn cancellation_channel() -> (Sender<()>, Receiver<()>) {
 }
 
 fn cancel(cancel_tx: &Sender<()>) {
-    // One signal for the reader and one for each worker. Filling an already
-    // signalled channel is idempotent, so concurrent failure paths coalesce.
     for _ in 0..CANCELLATION_RECEIVERS {
         if cancel_tx.try_send(()).is_err() {
             break;
@@ -97,33 +93,26 @@ fn dequeue_request(rx: &Receiver<Request>, cancel_rx: &Receiver<()>) -> Option<R
     }
 }
 
-/// Connect-time client verification (docs/SECURITY.md layer 4 of the 4-layer
-/// defense), as a function so the accept loop's failure handling is testable
-/// unelevated.
+/// Connect-time client verification (docs/SECURITY.md layer 4 of the 4-layer defense), as a function so the accept loop's failure handling is testable unelevated.
 ///
-/// Production always passes [`crate::security::verify_client`] — every
-/// construction site names its verifier explicitly so a substitution cannot
-/// slip in by defaulting. `Ok(false)` rejects one client; `Err` means the
-/// verification API itself failed and the accept loop fails closed (see
-/// [`Server::is_accepting`]).
+/// Production always passes [`crate::security::verify_client`] — every construction site names its verifier explicitly so a substitution cannot slip in by defaulting.
+/// `Ok(false)` rejects one client; `Err` means the verification API itself failed and the accept loop fails closed (see [`Server::is_accepting`]).
 pub type ClientVerifier = fn(&PipeStream, &[String]) -> io::Result<bool>;
 
 /// Configuration for starting the pipe [`Server`].
 pub struct ServerOptions {
     /// Named-pipe name the listener binds and accepts connections on.
     pub pipe_name: String,
-    /// Enable debug fault injection (`!!panic` / `!!drop` / `!!lag`); always
-    /// off for the installed service.
+    /// Enable debug fault injection (`!!panic` / `!!drop` / `!!lag`); always off for the installed service.
     pub debug_faults: bool,
-    /// Connect-time token allowlist (docs/SECURITY.md layer 4 of the 4-layer
-    /// defense). Empty =
-    /// no check (console/test mode); the installed service always fills it.
+    /// Connect-time token allowlist (docs/SECURITY.md layer 4 of the 4-layer defense).
+    /// Empty = no check (console/test mode); the installed service always fills it.
     pub authorized_sids: Vec<String>,
-    /// Verified machine root used for the `last_use` stamp. Installed service
-    /// mode always supplies it; console/test mode deliberately omits GC state.
+    /// Verified machine root used for the `last_use` stamp.
+    /// Installed service mode always supplies it; console/test mode deliberately omits GC state.
     pub data_root: Option<Arc<crate::security::TrustedDataRoot>>,
-    /// Connect-time token check. Always [`crate::security::verify_client`]
-    /// outside tests.
+    /// Connect-time token check.
+    /// Always [`crate::security::verify_client`] outside tests.
     pub client_verifier: ClientVerifier,
 }
 
@@ -136,16 +125,14 @@ pub struct Server {
     accept_thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Out-of-band signals the accept thread owns: the one-shot readiness channel
-/// [`Server::start`] blocks on, and the liveness flag it clears on the way out.
+/// Out-of-band signals the accept thread owns: the one-shot readiness channel [`Server::start`] blocks on, and the liveness flag it clears on the way out.
 struct AcceptSignals {
     ready_tx: mpsc::SyncSender<io::Result<()>>,
     accepting: Arc<AtomicBool>,
 }
 
-/// Clears the accepting flag on *every* accept-loop exit — clean stop, fatal
-/// error, or panic. A listener that is gone must be observable; a service that
-/// keeps reporting Running with nothing behind the pipe is unrecoverable.
+/// Clears the accepting flag on *every* accept-loop exit — clean stop, fatal error, or panic.
+/// A listener that is gone must be observable; a service that keeps reporting Running with nothing behind the pipe is unrecoverable.
 struct AcceptingGuard(Arc<AtomicBool>);
 
 impl Drop for AcceptingGuard {
@@ -212,16 +199,11 @@ impl ConnectionRegistry {
 
 impl Server {
     /// # Errors
-    /// Returns the OS error if the stop event, pipe security descriptor, first
-    /// pipe instance, or accept thread cannot be created. Success means the
-    /// first instance is already listening; callers never observe a
-    /// superficially-running server with a dead accept thread.
+    /// Returns the OS error if the stop event, pipe security descriptor, first pipe instance, or accept thread cannot be created.
+    /// Success means the first instance is already listening; callers never observe a superficially-running server with a dead accept thread.
     pub fn start(engine: Arc<Engine>, opts: ServerOptions) -> io::Result<Arc<Self>> {
         let stop = Arc::new(Event::new()?);
         let broadcaster = Broadcaster::install(&engine);
-        // Live-connection count: incremented per accepted connection, freed by
-        // the per-connection guard when its thread exits. Held by the Server so
-        // serve()'s idle self-stop (ADR-0027) can read it.
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let accepting = Arc::new(AtomicBool::new(true));
         let connections = Arc::new(ConnectionRegistry::default());
@@ -254,7 +236,7 @@ impl Server {
             }
         };
 
-        match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        match ready_rx.recv_timeout(Duration::from_secs(CLIENT_READY_TIMEOUT_SECS)) {
             Ok(Ok(())) => Ok(Arc::new(Self {
                 stop,
                 active,
@@ -306,14 +288,11 @@ impl Server {
         self.active.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// False once the accept thread has let go of the listener — a clean
-    /// [`Server::stop`], a fail-closed exit (a broken client-verification API),
+    /// False once the accept thread has let go of the listener — a clean [`Server::stop`], a fail-closed exit (a broken client-verification API),
     /// or a panicked accept thread.
     ///
-    /// `serve()` polls this: without a listener the pipe is unreachable, so
-    /// staying up would report Running with nothing to connect to. Stopping the
-    /// process instead lets the SCM report Stopped and the next on-demand start
-    /// rebuild the listener (ADR-0027).
+    /// `serve()` polls this: without a listener the pipe is unreachable, so staying up would report Running with nothing to connect to.
+    /// Stopping the process instead lets the SCM report Stopped and the next on-demand start rebuild the listener (ADR-0027).
     #[must_use]
     pub fn is_accepting(&self) -> bool {
         self.accepting.load(Ordering::Acquire)
@@ -334,8 +313,6 @@ impl Server {
         {
             tracing::error!("pipe accept thread panicked");
         }
-        // No accept can race this second snapshot. Every active reader is
-        // interrupted before joining its connection thread.
         self.connections.disconnect_all();
         self.connections.join_all();
     }
@@ -362,7 +339,6 @@ fn accept_loop(
         ready_tx,
         accepting,
     } = signals;
-    // Every `return` below — and a panic — must publish "no listener here".
     let _accepting_guard = AcceptingGuard(accepting);
     let mut ready_tx = Some(ready_tx);
     let security = if opts.authorized_sids.is_empty() {
@@ -374,8 +350,6 @@ fn accept_loop(
             Ok(s) => Some(s),
             Err(e) => {
                 tracing::error!(error = %e, "pipe SDDL conversion failed — not serving");
-                // Refusing to serve wide-open beats serving wide-open. Surface
-                // the failure synchronously so SCM never reports Running.
                 if let Some(tx) = ready_tx.take()
                     && tx.send(Err(e)).is_err()
                 {
@@ -397,7 +371,6 @@ fn accept_loop(
         match accepted {
             Ok(Accepted::Stopped) => return,
             Ok(Accepted::Connection(stream)) => {
-                // Defense in depth behind the DACL: verify the client token.
                 match (opts.client_verifier)(&stream, &opts.authorized_sids) {
                     Ok(true) => {}
                     Ok(false) => {
@@ -407,12 +380,6 @@ fn accept_loop(
                         continue;
                     }
                     Err(error) => {
-                        // Fail closed: a verification API that cannot answer must
-                        // not be treated as "authorized". Dropping the listener
-                        // is only safe because it is *observable* — the guard
-                        // above clears `is_accepting`, and `serve()` turns that
-                        // into a graceful service stop (flush + SCM Stopped) so
-                        // the next on-demand start recovers.
                         Counters::bump(&engine.metrics().counters.pipe_connections_rejected);
                         tracing::error!(
                             %error,
@@ -423,8 +390,6 @@ fn accept_loop(
                         return;
                     }
                 }
-                // An authorized client connected — refresh the use stamp so the
-                // GC ages out only a genuinely unused install (ADR-0027).
                 if let Some(data_root) = &opts.data_root
                     && let Err(e) = crate::lifecycle::stamp_last_use(data_root)
                 {
@@ -473,7 +438,7 @@ fn accept_loop(
                     Ok(thread) => connections.push_thread(thread),
                     Err(e) => {
                         connections.unregister(connection_id);
-                        fmf_core::degrade!(
+                        fmf_runtime::degrade!(
                             engine.metrics().counters.pipe_connections_rejected,
                             error = %e,
                             "pipe connection thread creation failed — rejecting connection"
@@ -489,11 +454,9 @@ fn accept_loop(
                     }
                     return;
                 }
-                // Typically ERROR_PIPE_BUSY at the instance cap — the
-                // client was turned away by the OS; count, breathe, retry.
                 Counters::bump(&engine.metrics().counters.pipe_connections_rejected);
                 tracing::warn!(error = %e, "pipe accept failed — retrying");
-                std::thread::sleep(std::time::Duration::from_millis(250));
+                std::thread::sleep(std::time::Duration::from_millis(DEBUG_LAG_MILLIS));
             }
         }
     }
@@ -522,8 +485,6 @@ fn run_connection(
     cancel_tx: Sender<()>,
     cancel_rx: Receiver<()>,
 ) {
-    // Decrement on every exit path (including panics) — the count must
-    // never drift from the number of live connection threads.
     struct ActiveGuard(Arc<std::sync::atomic::AtomicUsize>);
     impl Drop for ActiveGuard {
         fn drop(&mut self) {
@@ -536,7 +497,6 @@ fn run_connection(
 
     let conn = Arc::new(Connection::new(engine.clone(), faults, active));
     let writer = Arc::new(Mutex::new(stream.clone()));
-    // At most one event queue per connection; Subscribe is idempotent.
     let subscription: Arc<Mutex<Option<Arc<crate::events::EventQueue>>>> =
         Arc::new(Mutex::new(None));
 
@@ -581,7 +541,7 @@ fn run_connection(
                             };
                             if frame::write_frame(&mut *writer.lock(), h, &body).is_err() {
                                 disconnect(&worker_cancel_tx, &stream);
-                                return; // client went away; reader notices too
+                                return;
                             }
                         }
                         Outcome::Subscribe => {
@@ -594,7 +554,7 @@ fn run_connection(
                                         Ok(()) => *sub = Some(q),
                                         Err(e) => {
                                             broadcaster.unsubscribe(&q);
-                                            fmf_core::degrade!(
+                                            fmf_runtime::degrade!(
                                                 worker_engine
                                                     .metrics()
                                                     .counters
@@ -644,7 +604,7 @@ fn run_connection(
             }) {
             Ok(worker) => workers.push(worker),
             Err(e) => {
-                fmf_core::degrade!(
+                fmf_runtime::degrade!(
                     engine.metrics().counters.pipe_connections_rejected,
                     error = %e,
                     "pipe request-worker thread creation failed"
@@ -658,12 +618,10 @@ fn run_connection(
         return;
     }
 
-    // Reader: the only thread that touches the receive side.
     let mut reader = stream.clone();
     'reader: loop {
         match frame::read_frame_capped(&mut reader, |header| request_payload_cap(header.opcode)) {
             Ok((header, payload)) => {
-                // Requests must not carry response/event flags.
                 if header.flags != 0 {
                     Counters::bump(&engine.metrics().counters.pipe_malformed_frames);
                     tracing::warn!("malformed frame (flags on a request) — dropping connection");
@@ -671,9 +629,6 @@ fn run_connection(
                     break;
                 }
 
-                // QueryCancel is a one-way control message and never enters
-                // the work queue. Therefore a long-running query or saturated
-                // queue cannot put cancellation behind its target.
                 if header.opcode == messages::opcode::QUERY_CANCEL {
                     if !conn.hello_done.load(Ordering::Acquire) {
                         stream.disconnect();
@@ -692,10 +647,6 @@ fn run_connection(
                     query_cancellation,
                 };
 
-                // The reader never blocks on backpressure: otherwise a
-                // subsequent QueryCancel would be unreadable. A newest Query
-                // makes room by cancelling/dropping queued older work; a
-                // non-query gets an explicit busy response.
                 loop {
                     match tx.try_send(request) {
                         Ok(()) => break,
@@ -753,9 +704,6 @@ fn run_connection(
                                     }
                                 }
                                 Err(TryRecvError::Empty) => {
-                                    // A worker won the race between Full and
-                                    // try_recv; retrying the nonblocking send
-                                    // now succeeds without stalling the reader.
                                     std::thread::yield_now();
                                 }
                                 Err(TryRecvError::Disconnected) => break 'reader,
@@ -770,7 +718,7 @@ fn run_connection(
                 stream.disconnect();
                 break;
             }
-            Err(FrameError::Io(_)) => break, // disconnect / shutdown
+            Err(FrameError::Io(_)) => break,
         }
     }
 
@@ -783,7 +731,7 @@ fn run_connection(
         }
     }
     if let Some(q) = subscription.lock().take() {
-        broadcaster.unsubscribe(&q); // closes the queue → event writer exits
+        broadcaster.unsubscribe(&q);
     }
 }
 
@@ -818,9 +766,9 @@ mod tests {
         request_payload_cap,
     };
     use crossbeam_channel::TrySendError;
-    use fmf_core::engine::QueryCancellation;
     use fmf_proto::frame::FrameHeader;
     use fmf_proto::messages::{self, opcode};
+    use fmf_runtime::engine::QueryCancellation;
 
     fn request(request_id: u32) -> Request {
         Request {

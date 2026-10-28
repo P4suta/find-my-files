@@ -5,14 +5,8 @@ using static FindMyFiles.Tests.TestDoubles.Polling;
 
 namespace FindMyFiles.Tests.Contract;
 
-/// <summary>
-/// Contract run #3: <see cref="PipeEngineClient"/> against the real
-/// fmf-service, gated on FMF_PIPE_TESTS=1 (`just test-pipe` builds the
-/// service binary first; the PipeIntegrationTests convention). The service runs
-/// unelevated, --no-index, throwaway data dir and unique pipe name — partial
-/// conformance: queries parse for real (the golden syntax fixture hits the
-/// real parser) but hit 0 rows, and there is no way to force staleness from
-/// outside, so that fact skips.
+/// <summary> Contract run #3: <see cref="PipeEngineClient"/> against the real fmf-service, gated on FMF_PIPE_TESTS=1 (`just test-pipe` builds the service binary first; the PipeIntegrationTests convention).
+/// The service runs unelevated, --no-index, throwaway data dir and unique pipe name — partial conformance: queries parse for real (the golden syntax fixture hits the real parser) but hit 0 rows, and there is no way to force staleness from outside, so that fact skips.
 /// </summary>
 public sealed class PipeRealServiceContractTests(ITestOutputHelper output)
     : EngineClientContractTests(output)
@@ -59,12 +53,7 @@ public sealed class PipeRealServiceContractTests(ITestOutputHelper output)
 
     protected override bool IsInProcTransport => false;
 
-    // No stale hook: forcing a structural rebuild needs volumes (elevation),
-    // and killing the service is the integration test's job — the stale fact
-    // skips for this derivation by design.
-
-    /// <summary>Resolve build/engine/release/fmf-service.exe by walking up
-    /// from the test assembly (repo-relative; built by `just service-build`).</summary>
+    /// <summary>Resolve build/engine/release/fmf-service.exe by walking up from the test assembly (repo-relative; built by `just service-build`).</summary>
     private static string FindServiceExe()
     {
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
@@ -108,8 +97,7 @@ public sealed class PipeRealServiceContractTests(ITestOutputHelper output)
         return p;
     }
 
-    /// <summary>Child output may trickle in after the test finished, when
-    /// ITestOutputHelper throws — drop those lines instead of crashing.</summary>
+    /// <summary>Child output may trickle in after the test finished, when ITestOutputHelper throws — drop those lines instead of crashing.</summary>
     private void LogQuietly(string tag, string? line)
     {
         if (line is null)
@@ -143,7 +131,6 @@ public sealed class PipeRealServiceContractTests(ITestOutputHelper output)
         }
         catch
         {
-            // Already gone — nothing to clean.
         }
         finally
         {

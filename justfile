@@ -1,12 +1,3 @@
-# find-my-files task runner. Local tools are managed by mise; CI installs the
-# same pinned tools through platform-standard setup actions.
-# Recipes marked (elevated) need an administrator terminal.
-#
-# `just` (no args) prints this menu, grouped by area via the [group('…')]
-# attributes below. New here? Run `mise install`, `just setup`, then `just check`.
-
-# just defaults to `sh` even on Windows — absent in elevated PowerShell,
-# exactly where the admin recipes must run. powershell.exe always exists.
 set windows-shell := ["powershell.exe", "-NoProfile", "-Command"]
 
 default:
@@ -19,9 +10,6 @@ default:
 setup:
     lefthook install
 
-# Check the dev environment matches mise.toml (run after `mise install`).
-# Logic lives in xtask (the doctor subcommand); this is a thin wrapper, and
-# --target-dir keeps xtask output under build/ (ADR-0021).
 [group('setup')]
 [doc('Check the dev environment matches the mise.toml pins (run after mise install)')]
 doctor:
@@ -35,11 +23,6 @@ doctor:
 check: check-contract
     cargo check --locked --workspace --all-targets
 
-# Fast contract-drift tripwire (~sub-second warm): the committed C# bindings
-# still match the contract source. Same `--check` assertion as
-# drift.rs inside the nextest suite, but it compiles only the dependency-free
-# fmf-contract leaf — so `just check` catches a forgotten `just contract-gen`
-# without waiting for the whole engine test build (ADR-0018).
 [group('daily')]
 [doc('Fast contract-drift tripwire — gen-contract --check, sub-second warm')]
 [working-directory: 'engine']
@@ -52,9 +35,6 @@ check-contract:
 build:
     cargo build --locked --release
 
-# Remove compiler outputs needed to reproduce a cold source-gate run. Published
-# release evidence is intentionally not destroyed; its lifecycle is owned by
-# the release recipes/xtask sealing flow.
 [group('daily')]
 [doc('Clean compiler outputs before reproducing a cold source-gate run')]
 clean: clean-engine clean-xtask clean-app
@@ -73,7 +53,6 @@ clean-xtask:
 clean-app:
     dotnet clean app/FindMyFiles.Tests -p:SkipRustBuild=true
 
-# Run every Rust test through nextest, then the doctests cargo-nextest does not run.
 [group('daily')]
 [doc('Run Rust tests with nextest plus doctests (no elevation)')]
 [working-directory: 'engine']
@@ -86,30 +65,16 @@ test *args="":
 test-app:
     dotnet test app/FindMyFiles.Tests --results-directory build/test-results/app -p:SkipRustBuild=true -p:RestoreLockedMode=true
 
-# `test-app` deliberately never builds Rust: it stays a fast, hermetic C# lane.
-# Aggregate source gates, however, must also work from an empty build/ tree, so
-# they materialize the release FFI DLL before MSBuild copies it into test output.
 [private]
 [working-directory: 'engine']
 build-ffi-for-source-gate:
-    cargo build --locked --release -p fmf-ffi
+    cargo build --locked --release --target-dir ../build/engine -p fmf-ffi
 
-# C# unit tests + coverage gate (line+branch >=57; UI is [ExcludeFromCodeCoverage]).
-# Threshold/type/stat live in the test csproj (with ExcludeByFile), so this is just
-# -p:CollectCoverage=true and no comma-bearing prop ever reaches the shell. CI runs
-# packages.lock.json is enforced locally and in CI; the parameter remains only
-# for compatibility with existing CI calls and defaults fail-closed.
 [group('daily')]
 [doc('C# unit tests + coverage gate (line+branch >=57)')]
 test-app-cov locked="true":
     dotnet test app/FindMyFiles.Tests --results-directory build/test-results/app -p:SkipRustBuild=true -p:RestoreLockedMode={{locked}} -p:CollectCoverage=true
 
-# Elevation-gated #[ignore] tests: real-volume MFT/USN and machine-security
-# boundaries (elevated). The
-# FMF_ADMIN_TESTS gate is set by xtask via Command::env on the child cargo, not
-# in the shell — powershell.exe strips the nested quotes from `cargo --config
-# 'env.X="1"'` (leaving the bare integer 1, which cargo rejects), so the value
-# must never touch a shell. Logic lives in xtask (the test-admin subcommand).
 [group('daily')]
 [doc('Run elevated real-volume and machine-security tests')]
 [working-directory: 'xtask']
@@ -118,7 +83,72 @@ test-admin:
 
 # Clippy both Rust workspaces (deny warnings) + repository/workflow linters.
 [group('daily')]
-lint: lint-engine lint-xtask lint-text lint-actions
+lint: lint-engine lint-xtask lint-text lint-actions lint-comments proof-check
+
+[group('hygiene')]
+[doc('Check comment policy and sentence-based source prose')]
+lint-comments:
+    ocomment check --jobs 2 --format github engine app xtask .github mise.toml lefthook.yml renovate.local.json5
+
+[group('hygiene')]
+[doc('Remove redundant comments and normalize source prose')]
+comments-fix:
+    ocomment fix --jobs 2 --format github engine app xtask .github mise.toml lefthook.yml renovate.local.json5
+
+[group('quality')]
+[doc('Check proof inventory, unwind bounds, assertions, and reachability checks')]
+[working-directory: 'xtask']
+proof-check:
+    cargo run --locked -- proof-check
+
+[group('quality')]
+[doc('Verify every registered production harness with Kani on Linux x64')]
+[working-directory: 'xtask']
+proofs:
+    cargo run --locked -- proof
+
+[group('quality')]
+[doc('Reject missing, incomplete, failed, or stale proof evidence')]
+[working-directory: 'xtask']
+proof-verify:
+    cargo run --locked -- proof-verify
+
+[group('quality')]
+[doc('Relocate existing C# mutation identities after comment edits')]
+[working-directory: 'xtask']
+mutation-relocate-csharp:
+    cargo run --locked -- mutation-relocate-csharp
+
+[private]
+[working-directory: 'xtask']
+verification-tools tool:
+    cargo run --locked -- verification-tools {{tool}}
+
+[group('quality')]
+[doc('Run codec boundary tests with the pinned Linux Miri toolchain')]
+miri:
+    mise --cd verification/miri x rust -- just --justfile ../../justfile miri-run
+
+[private]
+[working-directory: 'xtask']
+miri-run:
+    cargo run --locked -- miri
+
+[group('fuzz')]
+[doc('Replay all committed fuzz inputs without exploring new inputs')]
+fuzz-replay:
+    mise --cd verification/fuzz x rust cargo:cargo-fuzz -- just --justfile ../../justfile fuzz-replay-run
+
+[private]
+[working-directory: 'xtask']
+fuzz-replay-run:
+    cargo run --locked -- fuzz-replay
+
+[group('fuzz')]
+[doc('Capture canonical snapshot and journal seeds while preserving existing regressions')]
+[working-directory: 'engine']
+fuzz-seed:
+    cargo run --locked --manifest-path fuzz/Cargo.toml --example capture_corpus
 
 [group('daily')]
 [doc('Check repository spelling')]
@@ -145,15 +175,18 @@ lint-xtask:
 [group('daily')]
 fmt:
     cargo fmt --manifest-path engine/Cargo.toml --all
+    cargo fmt --manifest-path engine/fuzz/Cargo.toml --all
     cargo fmt --manifest-path xtask/Cargo.toml --all
     taplo fmt
 
-# Verify Rust + TOML formatting. C# style/format/analyzers are enforced by the
-# build itself (EnforceCodeStyleInBuild + AnalysisMode=All + warnings-as-errors),
-# exercised by `test-app` — so `verify` below also covers C#.
 [group('daily')]
 [doc('Check Rust + TOML formatting (C# format is enforced by the build)')]
-fmt-check: fmt-check-engine fmt-check-xtask fmt-check-toml
+fmt-check: fmt-check-engine fmt-check-fuzz fmt-check-xtask fmt-check-toml
+
+[group('daily')]
+[doc('Check fuzz harness Rust formatting')]
+fmt-check-fuzz:
+    cargo fmt --manifest-path engine/fuzz/Cargo.toml --all -- --check
 
 [group('daily')]
 [doc('Check engine Rust formatting')]
@@ -170,30 +203,22 @@ fmt-check-xtask:
 fmt-check-toml:
     taplo fmt --check
 
-# Everything the pre-push hook checks, in one shot.
-#
-# `doc` is in here because rustdoc is a gate CI runs and nothing local did:
-# `cargo doc` rejects a public item whose documentation links to a private
-# one, and neither `lint` nor `test` compiles documentation at all, so that
-# diagnostic could only ever appear after a push. Measured by injecting the
-# defect: `just doc` reports it, `just lint` and `just test` do not.
 [group('daily')]
+[doc('Run all native source verification gates')]
 verify: build-ffi-for-source-gate fmt-check lint doc test test-xtask test-app deny machete
 
-# The dispatched release workflow is the already-linted protected-main workflow;
-# its checkout is build input, not workflow code. Re-run every source and
-# dependency gate there without requiring the Linux-only actionlint verifier on
-# the Windows release runner.
-#
-# `doc` is deliberately absent here even though `verify` has it. It would add a
-# mdbook dependency to the release path to re-check something already gated on
-# every pull request into main, and a documentation link is not a reason to
-# fail a release that is otherwise sound.
+# Run repository-only verification on hosts that cannot build or test the Windows application.
+verify-portable: fmt-check-toml lint-text lint-actions lint-comments proof-check
+
+[group('daily')]
+[doc('Run the native pre-push verification gate')]
+verify-push:
+    just {{ if os() == "windows" { "verify" } else { "verify-portable" } }}
+
 [private]
 verify-release-source: build-ffi-for-source-gate fmt-check lint-engine lint-xtask lint-text test test-xtask test-app deny machete
 
-# xtask is intentionally a separate binary-only workspace, so its nextest lane
-# is explicit rather than silently omitted from `verify`.
+# Run tests for the standalone xtask workspace.
 [group('daily')]
 [working-directory: 'xtask']
 test-xtask:
@@ -405,7 +430,7 @@ bench-baseline drive="C:":
 [group('bench')]
 [working-directory: 'engine']
 bench-micro *args="":
-    cargo bench --locked -p fmf-core --features testutil {{args}}
+    cargo bench --locked -p fmf-runtime --features testutil {{args}}
 
 # Lives in build/engine/criterion (machine-local; gone on cargo clean).
 # Record a complete candidate and atomically promote the whole baseline tree.
@@ -478,32 +503,31 @@ profile *args="bench C:":
     cargo build --locked --profile profiling -p fmf-cli
     samply record -- ../build/engine/profiling/fmf-cli {{args}}
 
-# ── Fuzz (Linux/nightly; CI fuzz.yml runs this on every wire-codec change) ─
-
-# libFuzzer over the pipe wire codec (fmf-proto/fmf-contract — the privilege
-# boundary). Needs nightly + cargo-fuzz on Linux/WSL (flaky on Windows).
-# Run from engine/ so cargo-fuzz finds ./fuzz (no --fuzz-dir = version-proof).
-# e.g. `just fuzz message_decode 120`
 [group('fuzz')]
-[doc('libFuzzer over the pipe wire codec (nightly + cargo-fuzz; Linux/WSL)')]
-[working-directory: 'engine']
-fuzz target="frame_decode" secs="60": fuzz-lock-check
-    cargo +nightly fuzz run {{target}} -- -max_total_time={{secs}}
+[doc('Explore one parser with the pinned Linux toolchain and a separate writable corpus')]
+fuzz target="frame_decode" secs="60":
+    mise --cd verification/fuzz x rust cargo:cargo-fuzz -- just --justfile ../../justfile fuzz-run {{target}} {{secs}}
 
-# Compile all fuzz targets without running them (fast harness sanity check).
+[private]
+[working-directory: 'xtask']
+fuzz-run target secs:
+    cargo run --locked -- fuzz {{target}} {{secs}}
+
 [group('fuzz')]
-[working-directory: 'engine']
-fuzz-build: fuzz-lock-check
-    cargo +nightly fuzz build
+[doc('Compile every fuzz target with the pinned Linux toolchain')]
+fuzz-build:
+    mise --cd verification/fuzz x rust cargo:cargo-fuzz -- just --justfile ../../justfile fuzz-build-run
 
-# cargo-fuzz 0.13.2 does not forward Cargo's --locked flag. Fail before it
-# starts unless the standalone fuzz workspace's committed lockfile is exact.
+[private]
+[working-directory: 'engine']
+fuzz-build-run: fuzz-lock-check
+    cargo fuzz build
+
 [private]
 [working-directory: 'engine']
 fuzz-lock-check:
-    cargo metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 --no-deps
+    cargo metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 --quiet
 
-# Intentional dependency-update ceremony for the standalone fuzz workspace.
 [group('fuzz')]
 [doc('Regenerate the standalone fuzz workspace lockfile intentionally')]
 [working-directory: 'engine']

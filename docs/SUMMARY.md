@@ -3,6 +3,7 @@
 - [Security](SECURITY.md)
 - [Research](RESEARCH.md)
 - [Releasing](RELEASING.md)
+- [Verification scope](verification.md)
 
 # Design decisions (ADR)
 
@@ -54,3 +55,5 @@
 - [0046 — Change-to-screen latency budget](adr/0046-change-to-screen-latency-budget.md)
 - [0047 — NTFS grammar outside the Windows gate](adr/0047-ntfs-grammar-outside-the-windows-gate.md)
 - [0048 — Direct-dispatch release workflow](adr/0048-direct-dispatch-release-workflow.md)
+- [Source-bound verification](adr/source-bound-verification.md)
+- [Pure core and shared runtime](adr/pure-core-and-shared-runtime.md)

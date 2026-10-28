@@ -1,18 +1,15 @@
 //! Event fan-out: one engine sink → per-subscriber bounded queues.
 //!
-//! A slow or dead reader must never block the volume threads that emit
-//! events, so each subscriber gets a bounded queue plus a writer thread and
-//! overflow drops the *oldest* event, counted and warned. Dropping is safe
-//! because every event in this class is a hint to re-query, not a delta: the
-//! next successful query carries whatever the dropped event announced.
+//! A slow or dead reader must never block the volume threads that emit events, so each subscriber gets a bounded queue plus a writer thread and overflow drops the *oldest* event, counted and warned.
+//! Dropping is safe because every event in this class is a hint to re-query, not a delta: the next successful query carries whatever the dropped event announced.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use fmf_core::engine::{Engine, EngineEvent};
-use fmf_core::metrics::Counters;
 use fmf_proto::limits::EVENT_QUEUE_CAP;
 use fmf_proto::messages::FmfEvent;
+use fmf_runtime::engine::{Engine, EngineEvent};
+use fmf_runtime::metrics::Counters;
 use parking_lot::{Condvar, Mutex};
 
 struct QueueState {
@@ -20,7 +17,8 @@ struct QueueState {
     closed: bool,
 }
 
-/// One subscriber's bounded queue. The connection's writer thread drains it.
+/// One subscriber's bounded queue.
+/// The connection's writer thread drains it.
 pub struct EventQueue {
     state: Mutex<QueueState>,
     ready: Condvar,
@@ -86,11 +84,8 @@ impl Broadcaster {
             subscribers: Mutex::new(Vec::new()),
         });
         let sink = b.clone();
-        // Weak: the sink closure is owned by the engine; a strong Arc here
-        // would be a reference cycle keeping the engine alive forever.
         let engine_for_counters = Arc::downgrade(engine);
         engine.set_event_sink(Some(Arc::new(move |ev: &EngineEvent| {
-            // EngineEvent::to_wire is the single kind mapping (ADR-0018).
             let wire = ev.to_wire();
             let mut dropped = 0u64;
             for q in sink.subscribers.lock().iter() {
