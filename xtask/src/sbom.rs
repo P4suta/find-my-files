@@ -19,7 +19,7 @@ use crate::pe_format::{
 };
 use crate::{
     bundle_seal::{self, BundleState},
-    checksum, cmd, fsx, paths, prune, publish, version,
+    checksum, cmd, fsx, paths, prune, publish, semver, version,
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
@@ -1100,9 +1100,11 @@ fn merge_cargo_boms(
         root_versions.len() == 1,
         "shipped Cargo entry points do not share one workspace version: {root_versions:?}"
     );
+    let base = semver::product_base(version);
+    semver::validate(base)?;
     ensure!(
-        root_versions.contains(version),
-        "shipped Cargo entry-point version set {root_versions:?} does not equal requested release version {version}"
+        root_versions.contains(base),
+        "shipped Cargo entry-point version set {root_versions:?} does not equal requested base version {base}"
     );
 
     for component in components.values() {
@@ -2967,6 +2969,35 @@ mod tests {
                 )),
                 "first-party PE full unsigned hash must not become SBOM identity"
             );
+        }
+    }
+
+    #[test]
+    fn channel_versions_preserve_the_full_product_identity_and_cargo_package_versions() {
+        let raw = complete_raw_set();
+        let borrowed = raw
+            .iter()
+            .map(|(name, value)| (*name, value))
+            .collect::<Vec<_>>();
+        for version in [
+            "0.1.1",
+            "0.1.1-dev+g1234567",
+            "0.1.1-nightly.20261029+g1234567",
+        ] {
+            let bom = merge_cargo_boms(version, &borrowed, &rust_evidence()).unwrap();
+            assert_eq!(bom["metadata"]["component"]["version"], version);
+            for component in bom["components"].as_array().unwrap() {
+                if component["name"].as_str().unwrap().starts_with("fmf-") {
+                    assert_eq!(component["version"], "0.1.1");
+                }
+            }
+        }
+        for version in [
+            "0.1.2-dev+g1234567",
+            "0.1.2-nightly.20261029+g1234567",
+            "0.1.1.0-dev",
+        ] {
+            assert!(merge_cargo_boms(version, &borrowed, &rust_evidence()).is_err());
         }
     }
 

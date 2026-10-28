@@ -494,10 +494,7 @@ fn validate_bundle_identity(
     launcher_file: &str,
     buildinfo: &str,
 ) -> Result<()> {
-    let base = expected_full
-        .split(['-', '+'])
-        .next()
-        .context("build version has no base version")?;
+    let base = semver::product_base(expected_full);
     semver::validate(base).context("build version has a non-canonical base")?;
     for (source, actual, expected) in [
         ("launcher ProductVersion", launcher_product, expected_full),
