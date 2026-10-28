@@ -242,13 +242,13 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
         .split_once("\n  publish:")
         .expect("publication credential island must exist")
         .1;
-    assert!(sign.contains("doppler-config: windows"));
+    assert!(sign.contains("doppler-config: sign_windows"));
     assert!(publish.contains("doppler-config: automation"));
     for secret in [
-        "steps.doppler.outputs.ES_USERNAME",
-        "steps.doppler.outputs.ES_PASSWORD",
-        "steps.doppler.outputs.CREDENTIAL_ID",
-        "steps.doppler.outputs.ES_TOTP_SECRET",
+        "steps.doppler.outputs.SSLDOTCOM_USERNAME",
+        "steps.doppler.outputs.SSLDOTCOM_PASSWORD",
+        "steps.doppler.outputs.SSLDOTCOM_CREDENTIAL_ID",
+        "steps.doppler.outputs.SSLDOTCOM_TOTP_SECRET",
     ] {
         assert!(sign.contains(secret));
         assert_eq!(
@@ -258,8 +258,8 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
         );
     }
     for secret in [
-        "steps.doppler.outputs.RELEASE_PLEASE_CLIENT_ID",
-        "steps.doppler.outputs.RELEASE_PLEASE_PRIVATE_KEY",
+        "steps.doppler.outputs.GITHUB_APP_CLIENT_ID",
+        "steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY",
     ] {
         assert!(publish.contains(secret));
         assert_eq!(
@@ -547,7 +547,7 @@ fn release_artifacts_are_exactly_sealed_across_every_handoff() {
         sign,
         &[
             "name: Download flat signing input",
-            "name: Fetch windows credentials from Doppler",
+            "name: Fetch sign_windows credentials",
             "name: Require complete Doppler credentials",
             "name: Sign staged binaries (SSL.com eSigner)",
         ],
