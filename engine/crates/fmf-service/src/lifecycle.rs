@@ -266,8 +266,11 @@ mod tests {
         assert_eq!(&bytes[..2], &[0xFF, 0xFE], "missing UTF-16LE BOM");
         assert_eq!(bytes.len() % 2, 0, "UTF-16 code units are 2 bytes");
         let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<{ size_of::<u16>() }>()
+            .0
+            .iter()
+            .copied()
+            .map(u16::from_le_bytes)
             .collect();
         let text = String::from_utf16(&units).expect("round-trips as UTF-16");
         assert!(
@@ -301,8 +304,11 @@ mod tests {
     fn gc_task_xml_escapes_the_command_as_xml_text() {
         let bytes = gc_task_xml(Path::new(r"C:\ProgramData\A&B\fmf-service.exe"));
         let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<{ size_of::<u16>() }>()
+            .0
+            .iter()
+            .copied()
+            .map(u16::from_le_bytes)
             .collect();
         let text = String::from_utf16(&units).expect("UTF-16");
         assert!(text.contains(r"<Command>C:\ProgramData\A&amp;B\fmf-service.exe</Command>"));

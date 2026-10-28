@@ -106,7 +106,7 @@ fn invalid_queries_are_rejected_by_the_real_parser() {
         .expect("invalid_queries.json missing — bless the corpus first");
     let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let queries = doc["queries"].as_array().expect("queries array");
-    assert!(!queries.is_empty());
+    assert_ne!(queries.as_slice(), [] as [serde_json::Value; 0]);
     for q in queries {
         let q = q.as_str().unwrap();
         assert!(

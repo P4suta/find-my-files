@@ -22,7 +22,7 @@ pub(super) struct FrnIndex {
 }
 
 #[inline]
-fn is_live(flag: &[u8], id: EntryId) -> bool {
+const fn is_live(flag: &[u8], id: EntryId) -> bool {
     flag[id as usize] & flags::TOMBSTONE == 0
 }
 

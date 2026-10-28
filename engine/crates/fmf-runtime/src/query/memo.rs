@@ -843,7 +843,10 @@ mod tests {
     #[test]
     fn cached_dir_topology_is_revalidated_against_rows_appended_without_a_generation_bump() {
         let mut idx = deep_index();
-        assert!(!search_sorted(&idx, "path:日本語 note", SortKey::Name).is_empty());
+        assert_ne!(
+            search_sorted(&idx, "path:日本語 note", SortKey::Name),
+            Vec::<u32>::new()
+        );
         let cached = idx
             .derived_probe::<DirTopology>()
             .expect("a path query caches the topology");

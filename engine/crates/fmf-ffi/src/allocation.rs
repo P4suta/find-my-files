@@ -13,7 +13,7 @@ static NEXT_OWNER_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn next_owner_id(kind: &str) -> Result<u64, i32> {
     NEXT_OWNER_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         })
         .map_err(|_| {

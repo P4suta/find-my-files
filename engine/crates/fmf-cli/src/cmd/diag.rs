@@ -269,7 +269,7 @@ mod tests {
         let missing = std::env::temp_dir().join("fmf-diag-no-such-dir-8f3a1c");
         let log = read_service_log(&missing);
 
-        assert!(log.recent.is_empty());
+        assert_eq!(log.recent, Vec::<String>::new());
         assert_eq!(log.notes.len(), 1, "{:?}", log.notes);
         assert!(
             log.notes[0].contains(&missing.display().to_string()),

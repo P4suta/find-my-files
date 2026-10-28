@@ -217,11 +217,11 @@ fn complete_runs_are_valid(runs: &[StreamRun], data_size: u64) -> bool {
     logical >= data_size
 }
 
-fn le_u16(data: &[u8], off: usize) -> u16 {
+const fn le_u16(data: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([data[off], data[off + 1]])
 }
 
-fn le_u32(data: &[u8], off: usize) -> u32 {
+const fn le_u32(data: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([
         data[off],
         data[off + 1],
@@ -294,7 +294,9 @@ fn decode_list_entry(data: &[u8]) -> Option<DecodedListEntry> {
     } else {
         let name_end = name_off.checked_add(name_len.checked_mul(size_of::<u16>())?)?;
         data.get(name_off..name_end)?
-            .chunks_exact(size_of::<u16>())
+            .as_chunks::<{ size_of::<u16>() }>()
+            .0
+            .iter()
             .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
             .collect::<Vec<_>>()
             .into_boxed_slice()
@@ -964,10 +966,9 @@ mod tests {
         let mut declared_past_end = entry.clone();
         put_u16(&mut declared_past_end, 4, 40);
         assert!(parse_list_entries(&declared_past_end, false).is_none());
-        assert!(
-            parse_list_entries(&declared_past_end, true)
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            parse_list_entries(&declared_past_end, true).unwrap(),
+            Vec::<ListEntry>::new()
         );
 
         let mut zero_tail = entry;

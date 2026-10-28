@@ -1012,7 +1012,7 @@ mod tests {
             positional.message.as_deref(),
             Some("finish: frn-index built")
         );
-        assert!(positional.fields.is_empty());
+        assert_eq!(positional.fields, "");
 
         let mut as_field = LogfmtVisitor::event();
         as_field.put("msg", "finish: frn-index built");

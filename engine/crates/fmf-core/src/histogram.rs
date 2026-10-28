@@ -22,7 +22,7 @@ impl BucketIndex {
     #[must_use]
     pub const fn for_micros(micros: u64) -> Self {
         let nonzero = if micros == 0 { 1 } else { micros };
-        Self::from_slot_clamped((u64::BITS - nonzero.leading_zeros() - 1) as usize)
+        Self::from_slot_clamped(nonzero.ilog2() as usize)
     }
 
     /// Read the checked array index.

@@ -715,7 +715,7 @@ fn le_i64(data: &[u8], off: usize) -> i64 {
     i64::from_le_bytes(out)
 }
 
-fn le_u32_session(data: &[u8], off: usize) -> u32 {
+const fn le_u32_session(data: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([
         data[off],
         data[off + 1],
@@ -749,7 +749,7 @@ mod tests {
     #[test]
     fn impossible_device_byte_count_is_a_malformed_batch() {
         let (_, records, malformed) = parse_returned_buffer(&[0u8; 8], 9);
-        assert!(records.is_empty());
+        assert_eq!(records, Vec::<fmf_core::usn::records::UsnRecord>::new());
         assert!(malformed);
     }
 
