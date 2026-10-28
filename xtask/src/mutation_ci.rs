@@ -1326,11 +1326,13 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
         .join(".config")
         .join("nextest-mutation.toml");
     let nextest_config_arg = path_arg(&nextest_config)?;
+    let cpus = std::thread::available_parallelism().context("query Rust mutation CPU budget")?;
     let mut command = rust_command("cargo", &work);
     command.arg("mutants").args(rust_ci_run_args(
         &rust_scope_config()?,
         &raw_parent_arg,
         &nextest_config_arg,
+        cpus,
         args.shard_index,
         args.shard_count,
     ));
@@ -1506,6 +1508,7 @@ fn rust_ci_run_args(
     config: &str,
     output: &str,
     nextest_config: &str,
+    cpus: std::num::NonZeroUsize,
     shard_index: usize,
     shard_count: usize,
 ) -> Vec<String> {
@@ -1513,6 +1516,7 @@ fn rust_ci_run_args(
         config,
         output,
         nextest_config,
+        cpus,
         Some((shard_index, shard_count)),
     )
 }
@@ -3585,8 +3589,9 @@ mod tests {
         let scope = mutation::rust_scope_args(config);
         let nextest = r"C:\work\engine\.config\nextest-mutation.toml";
         let output = r"C:\work\tool-output\rust";
-        let local = mutation::rust_run_args(config, output, nextest, None);
-        let ci_run = rust_ci_run_args(config, output, nextest, 3, 16);
+        let cpus = std::num::NonZeroUsize::new(8).expect("nonzero test CPU budget");
+        let local = mutation::rust_run_args(config, output, nextest, cpus, None);
+        let ci_run = rust_ci_run_args(config, output, nextest, cpus, 3, 16);
 
         let mut expected = local.clone();
         let cut = expected
@@ -3661,6 +3666,31 @@ mod tests {
                 "{lane} selects mutants outside the reviewed scope with {extra:?}"
             );
         }
+    }
+
+    #[test]
+    fn rust_lanes_pair_jobs_and_test_threads_within_the_cpu_budget() {
+        for budget in [1, 2, 3, 4, 7, 8, 16, usize::MAX] {
+            let cpus = std::num::NonZeroUsize::new(budget).expect("nonzero test CPU budget");
+            for args in [
+                mutation::rust_run_args("scope.toml", "output", "nextest.toml", cpus, None),
+                rust_ci_run_args("scope.toml", "output", "nextest.toml", cpus, 0, 2),
+            ] {
+                let (mutants, runner) = halves(&args);
+                let jobs = flag_values(&mutants, "--jobs");
+                let threads = flag_values(&runner, "--test-threads");
+                assert_eq!(jobs.len(), 1);
+                assert_eq!(threads.len(), 1);
+                let jobs: usize = jobs[0].parse().expect("integer jobs");
+                let threads: usize = threads[0].parse().expect("integer test threads");
+                assert!(jobs > 0 && threads > 0);
+                assert!(jobs * threads <= budget);
+                assert_eq!(flag_values(&mutants, "--minimum-test-timeout"), ["300"]);
+                assert!(!runner.contains(&"--jobs"));
+                assert!(!mutants.contains(&"--test-threads"));
+            }
+        }
+        assert!(!NEXTEST_POLICY.contains("test-threads"));
     }
 
     /// The scope and the reviewed baseline the CI controller supplies are the same two files the local gate reads, and the real ones parse.

@@ -75,6 +75,14 @@ The pure proofs assume the documented Windows API contracts at those adapters.
 Elevated security tests and the real-volume performance gate keep their existing merge requirements.
 Full mutation campaigns use the reviewed baseline with bounded worker and time budgets.
 
+Both Rust mutation lanes derive mutant jobs and nextest test threads from one nonzero CPU estimate.
+The production planner reserves at most four nextest threads per job and keeps their aggregate count within that estimate, including one-, two-, and three-CPU hosts.
+Kani checks positive counts, the thread cap, unused-slot bounds, and multiplication without overflow for every nonzero native unsigned CPU count.
+The operating system supplies the CPU estimate.
+Compiler workers and thread pools started inside individual tests retain their own resource policies.
+Argument tests check the actual local and CI vectors, including placement of each concurrency flag and the shared timeout floor.
+Timeouts and incomplete mutation reports still fail the existing exact-identity gate.
+
 Recovery harnesses invoke the production transitions for every retry state and failure class.
 The delay harness quantifies every valid `Duration` and checks expiration and the remaining delay without overflow.
 The runtime supplies elapsed clock time to that decision and uses a condition variable for request and shutdown notifications.

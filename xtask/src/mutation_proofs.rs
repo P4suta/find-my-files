@@ -1,0 +1,26 @@
+use super::concurrency::{Plan, TEST_THREADS_PER_JOB};
+use core::num::NonZeroUsize;
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn test_slots_fit_every_nonzero_cpu_budget_without_overflow() {
+    let cpus: usize = kani::any();
+    kani::assume(cpus > 0);
+    let plan = Plan::for_cpus(NonZeroUsize::new(cpus).expect("nonzero CPU budget"));
+    assert!(plan.jobs() > 0);
+    assert!(plan.test_threads() > 0);
+    assert!(plan.test_threads() <= TEST_THREADS_PER_JOB);
+    let slots = plan.jobs() * plan.test_threads();
+    assert!(slots <= cpus);
+    assert!(cpus - slots < plan.test_threads());
+    if cpus < TEST_THREADS_PER_JOB {
+        assert_eq!(plan.jobs(), 1);
+        assert_eq!(plan.test_threads(), cpus);
+    } else {
+        assert_eq!(plan.test_threads(), TEST_THREADS_PER_JOB);
+    }
+    kani::cover!(cpus == 1);
+    kani::cover!(cpus == TEST_THREADS_PER_JOB - 1);
+    kani::cover!(cpus == TEST_THREADS_PER_JOB);
+    kani::cover!(cpus == usize::MAX);
+}

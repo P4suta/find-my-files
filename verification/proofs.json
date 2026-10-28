@@ -5,6 +5,12 @@
   "timeout_seconds": 90,
   "targets": [
     {
+      "package": "xtask",
+      "source": "xtask/src/mutation_proofs.rs",
+      "prefix": "mutation::kani_proofs::",
+      "harnesses": ["test_slots_fit_every_nonzero_cpu_budget_without_overflow"]
+    },
+    {
       "package": "fmf-core",
       "source": "engine/crates/fmf-core/src/recovery_proofs.rs",
       "prefix": "recovery::kani_proofs::",
