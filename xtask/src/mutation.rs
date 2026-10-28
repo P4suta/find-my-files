@@ -15,6 +15,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::LazyLock;
@@ -25,6 +26,71 @@ const CARGO_MUTANTS_NAME: &str = "cargo-mutants";
 const CARGO_MUTANTS_VERSION: &str = "27.1.0";
 const STRYKER_NAME: &str = "dotnet-stryker";
 const STRYKER_VERSION: &str = "4.16.0";
+
+mod concurrency {
+    use core::num::NonZeroUsize;
+
+    pub(super) const TEST_THREADS_PER_JOB: usize = 4;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) struct Plan {
+        jobs: usize,
+        test_threads: usize,
+    }
+
+    impl Plan {
+        pub(super) const fn for_cpus(cpus: NonZeroUsize) -> Self {
+            if cpus.get() < TEST_THREADS_PER_JOB {
+                Self {
+                    jobs: 1,
+                    test_threads: cpus.get(),
+                }
+            } else {
+                Self {
+                    jobs: cpus.get() / TEST_THREADS_PER_JOB,
+                    test_threads: TEST_THREADS_PER_JOB,
+                }
+            }
+        }
+
+        pub(super) const fn jobs(self) -> usize {
+            self.jobs
+        }
+
+        pub(super) const fn test_threads(self) -> usize {
+            self.test_threads
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::Plan;
+        use core::num::NonZeroUsize;
+
+        #[test]
+        fn test_slots_fit_small_and_large_cpu_budgets() {
+            for (cpus, jobs, threads) in [
+                (1, 1, 1),
+                (2, 1, 2),
+                (3, 1, 3),
+                (4, 1, 4),
+                (7, 1, 4),
+                (8, 2, 4),
+                (16, 4, 4),
+                (usize::MAX, usize::MAX / 4, 4),
+            ] {
+                let plan =
+                    Plan::for_cpus(NonZeroUsize::new(cpus).expect("nonzero test CPU budget"));
+                assert_eq!((plan.jobs(), plan.test_threads()), (jobs, threads));
+                assert!(plan.jobs() * plan.test_threads() <= cpus);
+            }
+        }
+    }
+}
+
+#[cfg(kani)]
+#[path = "mutation_proofs.rs"]
+mod kani_proofs;
 
 /// The app-project build profile every C# mutation run must use, as environment variables (`MSBuild` reads the environment as properties).
 ///
@@ -216,14 +282,6 @@ dir = "../build/nextest"
 fail-fast = true
 retries = 0
 flaky-result = "fail"
-# Paired with `mutant_jobs()`: one mutant job per four logical CPUs, four test
-# threads per job. Without the cap each parallel job would start one test thread
-# per CPU and oversubscribe the machine by the job count, which shows up as
-# timeouts — a gate failure under ADR-0022 — rather than as slowness. A hosted
-# 4-vCPU runner is unaffected: it runs one job, and four threads is what nextest
-# would have picked anyway. The baseline is measured under the same cap, so the
-# timeout budget derived from it stays proportionate.
-test-threads = 4
 "#;
 
 /// `--cargo-arg=--locked` is forwarded by cargo-mutants to both the build and the nextest invocation.
@@ -242,49 +300,21 @@ pub const RUST_MUTATION_NEXTEST_ARGS: &[&str] = &[
     "fail",
 ];
 
-/// The whole executing argument vector, for both lanes.
-/// `shard` is the only thing either lane may vary.
-///
-/// Everything else is here because a lane that decides it for itself is a lane running a different program, which is the defect this gate spent five weeks failing on.
-/// Two options moved here after being measured rather than reasoned about, against `mutants.yml` run 34832581942 and a full local `just mutants` over the same tree:
-///
-/// * `--test-workspace true` was CI-only, on the stated theory that it "strictly increases what the gate demands".
-///   It does not only do that.
-///   Building the whole workspace unifies features differently from building just the mutated package, so it also changes which mutants *compile*: local reported 107 unviable against CI's 67, and the 40-mutant difference reappeared in CI as 15 missed, 24 caught and 1 timeout.
-///   The local gate was green-able while CI was red, on the same commit.
-/// * `--minimum-test-timeout 60` was CI-only as a concession to slow hosted runners.
-///   A floor that one lane has and the other does not is a floor that makes them disagree about timeouts, which this gate never accepts.
-///
-/// `--skip-calls-defaults false` used to be in the CI half, on the theory that a tool default could narrow the reviewed scope.
-/// It cannot any more — the scope arrives from the controller — and it was not free: it re-enables mutation of the arguments of `with_capacity` calls, adding 14 mutants (1,760 -> 1,774) which are all arithmetic inside a capacity hint (`Vec::with_capacity(len * 3)` -> `len + 3`).
-/// Capacity is not observable behaviour, so every one of them survives by construction, against a reviewed baseline recorded with the default skip list.
-/// Keeping it would have meant 14 permanent survivors in a gate whose whole design is exact survivor equality.
-/// The floor under cargo-mutants' own timeout, in seconds.
-///
-/// A timeout is a gate failure under ADR-0022, so this number decides which runs are called failures.
-/// It was 60, chosen when mutants ran one at a time.
-/// Measured over 1192 test phases at four jobs: p50 38.3s, p90 49.4s, p95 52.1s, p99 57.0s, max 60.1s — the floor sat inside the distribution of healthy runs, and six mutants were reported as timeouts purely for being in the tail.
-/// Re-run alone, all six were caught in well under a minute, so none of them was the hang a timeout is meant to catch.
-/// The floor now sits five times past the slowest healthy run observed, which leaves a genuine hang (an infinite loop does not finish at any budget) detectable while taking the tail out of the verdict.
+/// The measured healthy test phases reached 60.1 seconds across four concurrent jobs.
 const MINIMUM_TEST_TIMEOUT_SECS: &str = "300";
 
-/// How many mutants to build and test at once.
-///
-/// One job per four logical CPUs, matching the four test threads [`NEXTEST_POLICY`] gives each job, so the machine is used without being oversubscribed.
-/// Hosted CI runners have four vCPUs and therefore get one job, exactly what they ran before this existed.
-/// Each job also carries its own sandbox and target directory, so the divisor is the disk budget as much as the CPU one.
-fn mutant_jobs() -> usize {
-    std::thread::available_parallelism().map_or(1, |cpus| (cpus.get() / 4).max(1))
-}
-
+/// Build both lanes' complete mutation arguments from the same CPU budget and reviewed scope.
 pub fn rust_run_args(
     config: &str,
     output: &str,
     nextest_config: &str,
+    cpus: NonZeroUsize,
     shard: Option<(usize, usize)>,
 ) -> Vec<String> {
     let mut args = rust_scope_args(config);
-    let jobs = mutant_jobs().to_string();
+    let plan = concurrency::Plan::for_cpus(cpus);
+    let jobs = plan.jobs().to_string();
+    let test_threads = plan.test_threads().to_string();
     args.extend(
         [
             "--output",
@@ -310,9 +340,15 @@ pub fn rust_run_args(
         );
     }
     args.extend(
-        ["--", "--config-file", nextest_config]
-            .into_iter()
-            .map(str::to_owned),
+        [
+            "--",
+            "--config-file",
+            nextest_config,
+            "--test-threads",
+            &test_threads,
+        ]
+        .into_iter()
+        .map(str::to_owned),
     );
     args.extend(
         RUST_MUTATION_NEXTEST_ARGS
@@ -344,6 +380,7 @@ pub fn stryker_args(output: &str, config_file: Option<&str>) -> Vec<String> {
 
 pub fn run_rust() -> Result<()> {
     verify_cargo_mutants_version()?;
+    let cpus = std::thread::available_parallelism().context("query Rust mutation CPU budget")?;
 
     let output = paths::rust_mutation_dir();
     fsx::force_remove_dir_all(&output)
@@ -368,6 +405,7 @@ pub fn run_rust() -> Result<()> {
             &config_arg,
             &output_arg,
             &nextest_config_arg,
+            cpus,
             None,
         ))
         .env("FMF_MUTATION_SOURCE_ROOT", paths::repo_root())
