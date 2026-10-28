@@ -19,7 +19,7 @@ use crate::pe_format::{
 };
 use crate::{
     bundle_seal::{self, BundleState},
-    checksum, cmd, fsx, paths, prune, publish,
+    checksum, cmd, fsx, paths, prune, publish, version,
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
@@ -119,6 +119,9 @@ pub fn candidate(version: &str) -> Result<()> {
         "SBOM product version must not be blank"
     );
     let root = paths::repo_root();
+    let source_commit =
+        version::resolve_source_commit()?.context("SBOM candidate needs a source commit")?;
+    publish::verify_bundle_identity(&paths::dist_dir(), version, Some(&source_commit))?;
     let engine = root.join("engine");
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let work = paths::sbom_work_dir().join(format!("{}-{nonce}", std::process::id()));
@@ -173,6 +176,7 @@ pub fn candidate(version: &str) -> Result<()> {
         ],
     );
     verify_final_pair(version)?;
+    publish::verify_bundle_identity(&paths::dist_dir(), version, Some(&source_commit))?;
     scanned
 }
 
