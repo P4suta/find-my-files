@@ -26,9 +26,6 @@ pub use results::{ResultSet, Row};
 
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(any(test, feature = "testutil"))]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
@@ -339,7 +336,8 @@ impl Engine {
             debug_assert_eq!(label, &label.to_ascii_uppercase());
             let slot = {
                 let mut vols = self.volumes.write();
-                if vols.iter().any(|s| s.label == *label) {
+                if let Some(existing) = vols.iter().find(|s| s.label == *label) {
+                    existing.request_retry();
                     continue;
                 }
                 let store = Arc::new(seams::WinSnapshotStore::new(volume::snapshot_path(
@@ -384,7 +382,7 @@ impl Engine {
         self.volumes
             .read()
             .iter()
-            .map(|s| (s.label.clone(), *s.phase.lock(), *s.scanned.lock()))
+            .map(|s| (s.label.clone(), s.phase.lock().state, *s.scanned.lock()))
             .collect()
     }
 
@@ -415,29 +413,21 @@ impl Engine {
     }
 
     /// Persist every Ready volume whose generations moved since its last save ("dirty"), using the tailing thread's shared checkpoint.
-    /// The checkpoint may trail the index by an in-flight batch — the USN replay on load covers that.
+    /// The index and checkpoint remain under one read guard through persistence.
     /// Returns the number of snapshots written (failed writes are counted in `snapshot_save_failures` and excluded).
     #[cfg(windows)]
     pub fn flush(&self) -> usize {
         let volumes: Vec<_> = self.volumes.read().clone();
         let mut saved = 0;
         for slot in volumes {
-            if *slot.phase.lock() != VolumeState::Ready {
+            if slot.phase.lock().state != VolumeState::Ready {
                 continue;
             }
-            let Some(ckpt) = *slot.checkpoint.lock() else {
-                continue;
-            };
-            let dirty = {
-                let guard = slot.index.read();
-                let Some(idx) = guard.as_ref() else { continue };
-                *slot.last_saved.lock()
-                    != Some((idx.content_generation(), idx.structural_generation()))
-            };
-            if !dirty {
-                continue;
+            #[cfg(test)]
+            if let Some(gate) = slot.snapshot_read_gate.lock().take() {
+                gate.wait();
             }
-            if self.save_slot(&slot, ckpt) {
+            if self.save_slot(&slot, volume::SnapshotSave::IfDirty) {
                 saved += 1;
             }
         }
@@ -448,7 +438,7 @@ impl Engine {
     pub fn shutdown(&self) {
         *self._diag_guard.lock() = None;
         for slot in self.volumes.read().iter() {
-            slot.stop.store(true, Ordering::Relaxed);
+            slot.request_stop();
         }
         let mut threads = self.threads.lock();
         for t in threads.drain(..) {
@@ -463,24 +453,22 @@ impl Engine {
     /// The zero checkpoint stands in for a journal position so `flush` can exercise the save path on injected volumes.
     #[cfg(any(test, feature = "testutil"))]
     pub fn insert_ready_volume(&self, label: &str, idx: VolumeIndex) {
-        let slot = Arc::new(VolumeSlot {
-            label: label.to_string(),
-            phase: Mutex::new(VolumeState::Ready),
-            scanned: Mutex::new(idx.live_len() as u64),
-            index: RwLock::new(Some(idx)),
-            stop: Arc::new(AtomicBool::new(false)),
-            last_query: Mutex::new(None),
-            checkpoint: Mutex::new(Some(JournalCheckpoint {
-                journal_id: 0,
-                next_usn: 0,
-            })),
-            last_saved: Mutex::new(None),
-            save_lock: Mutex::new(()),
-            store: Arc::new(seams::WinSnapshotStore::new(volume::snapshot_path(
+        let slot = Arc::new(VolumeSlot::scanning(
+            label.to_string(),
+            Arc::new(seams::WinSnapshotStore::new(volume::snapshot_path(
                 &self.config.index_dir,
                 label,
             ))),
-        });
+        ));
+        slot.phase.lock().state = VolumeState::Ready;
+        *slot.scanned.lock() = idx.live_len() as u64;
+        slot.install_snapshot(
+            idx,
+            JournalCheckpoint {
+                journal_id: 0,
+                next_usn: 0,
+            },
+        );
         self.volumes.write().push(slot);
     }
 

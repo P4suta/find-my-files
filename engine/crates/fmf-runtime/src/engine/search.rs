@@ -96,7 +96,7 @@ impl Engine {
             .volumes
             .read()
             .iter()
-            .filter(|s| *s.phase.lock() == VolumeState::Ready)
+            .filter(|s| s.phase.lock().state == VolumeState::Ready)
             .cloned()
             .collect();
         cancellation.check()?;

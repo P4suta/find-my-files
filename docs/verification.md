@@ -90,3 +90,12 @@ Those checks establish adapter sequencing under the WinApp CLI contract, while `
 Reassess the adapter when the CLI readiness semantics or WinUI modal lifecycle changes.
 Elevated security tests and the real-volume performance gate keep their existing merge requirements.
 Full mutation campaigns use the reviewed baseline with bounded worker and time budgets.
+
+Recovery harnesses invoke the production transitions for every retry state and failure class.
+The delay harness quantifies every valid `Duration` and checks expiration and the remaining delay without overflow.
+The runtime supplies elapsed clock time to that decision and uses a condition variable for request and shutdown notifications.
+Native tests exercise the public retry request from a failure callback, bounded automatic recovery, panic recovery, and stopping retry waits.
+The native schedule tests use the existing snapshot and journal seams.
+A synchronization gate exists only in test builds and pauses a pending flush before it reads snapshot data.
+The test replaces the index and checkpoint during that pause, then checks the pair delivered to the store.
+Production persistence holds a single data read guard through the save, so replacement cannot separate the checkpoint from its index.
