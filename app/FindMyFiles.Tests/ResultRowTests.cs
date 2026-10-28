@@ -46,7 +46,7 @@ public sealed class ResultRowTests
         var expected = DateTimeOffset.FromFileTime(mtime).ToLocalTime()
             .ToString("yyyy/MM/dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
         Assert.Equal(expected, row.DateText);
-        Assert.NotEqual(string.Empty, row.DateText);
+        Assert.NotEqual(string.Empty, row.DateText, StringComparer.Ordinal);
     }
 
     [Fact]

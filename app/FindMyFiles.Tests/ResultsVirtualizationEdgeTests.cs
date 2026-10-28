@@ -68,7 +68,7 @@ public sealed class ResultsVirtualizationEdgeTests
         _list.RefreshInPlace(new StubSearchResult(newRows), SeedPage0(newRows));
 
         Assert.Same(row0Before, Row(0));
-        Assert.NotEqual(string.Empty, Row(0).DateText);
+        Assert.NotEqual(string.Empty, Row(0).DateText, StringComparer.Ordinal);
         Assert.Same(row1Before, Row(1));
         Assert.Equal(string.Empty, Row(1).DateText);
     }

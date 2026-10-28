@@ -52,7 +52,7 @@
             MaxWidth="{StaticResource ContentMaxWidth}"
             Margin="{StaticResource ContentGutterMargin}"
             AutomationProperties.AutomationId="NotifyBar"
-            ItemsSource="{x:Bind ViewModel.Notifications.Items, Mode=OneTime}"
+            ItemsSource="{x:Bind ViewModel.Notifications.Items, Mode=OneTime, FallbackValue={x:Null}}"
             Visibility="{x:Bind conv:UiConverters.BoolToVis(ViewModel.IsReady), Mode=OneWay}">
             <ItemsControl.ItemTemplate>
                 <DataTemplate x:DataType="svc:AppNotification">
@@ -153,7 +153,7 @@
                 AutomationProperties.AutomationId="ResultsList"
                 ContainerContentChanging="ResultsList_ContainerContentChanging"
                 DoubleTapped="ResultsList_DoubleTapped"
-                ItemsSource="{x:Bind ViewModel.Results.ResultsSource, Mode=OneTime}"
+                ItemsSource="{x:Bind ViewModel.Results.ResultsSource, Mode=OneTime, FallbackValue={x:Null}}"
                 KeyDown="ResultsList_KeyDown"
                 SelectionMode="Extended"
                 ShowsScrollingPlaceholders="True">

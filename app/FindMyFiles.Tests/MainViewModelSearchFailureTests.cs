@@ -67,7 +67,7 @@ public sealed class MainViewModelSearchFailureTests : IDisposable
 
         var error = Assert.Single(_vm.Notifications.Items, n => n.Severity == NotifySeverity.Error);
         Assert.Equal(Loc.Get("Notify_SearchFailedTitle"), error.Message);
-        Assert.NotEqual(Loc.Get("Notify_SearchUnexpectedTitle"), error.Message);
+        Assert.NotEqual(Loc.Get("Notify_SearchUnexpectedTitle"), error.Message, StringComparer.Ordinal);
     }
 
     [Fact]
@@ -78,7 +78,7 @@ public sealed class MainViewModelSearchFailureTests : IDisposable
 
         var error = Assert.Single(_vm.Notifications.Items, n => n.Severity == NotifySeverity.Error);
         Assert.Equal(Loc.Get("Notify_SearchUnexpectedTitle"), error.Message);
-        Assert.NotEqual(Loc.Get("Notify_SearchFailedTitle"), error.Message);
+        Assert.NotEqual(Loc.Get("Notify_SearchFailedTitle"), error.Message, StringComparer.Ordinal);
         Assert.Equal("unexpected", error.Detail);
     }
 

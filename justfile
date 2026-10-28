@@ -302,6 +302,12 @@ sbom version cargo_raw_dir:
 sbom-verify version:
     cargo run --locked --release -- sbom-verify "{{ version }}"
 
+[doc('Generate and scan artifact-derived SBOMs for an existing local candidate')]
+[group('quality')]
+[working-directory('xtask')]
+sbom-candidate version:
+    cargo run --locked --release -- sbom-candidate "{{ version }}"
+
 # Compile deterministic fake/unavailable-engine seams into a physically separate,
 # non-packaged tree. Stable build/dist never contains these launch arguments.
 [group('release')]

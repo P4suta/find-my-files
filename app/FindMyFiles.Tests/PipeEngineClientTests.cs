@@ -738,7 +738,7 @@ public sealed class PipeEngineClientTests
         lock (gate)
         {
             Assert.Contains(new VolumeStatus("C:", VolumeState.Ready, 123), volumes);
-            Assert.Contains("C:", indexChanged);
+            Assert.Contains("C:", indexChanged, StringComparer.Ordinal);
             Assert.Equal([EngineErrorSeverity.Error], errors);
         }
     }

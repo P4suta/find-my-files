@@ -23,7 +23,7 @@ public sealed class LocalizationResourceTests
 
         foreach (var (file, values) in resources)
         {
-            Assert.Equal(canonicalKeys, values.Keys.Order(StringComparer.Ordinal));
+            Assert.Equal(canonicalKeys, values.Keys.Order(StringComparer.Ordinal), StringComparer.Ordinal);
             Assert.DoesNotContain(
                 values,
                 pair => string.IsNullOrWhiteSpace(pair.Value));

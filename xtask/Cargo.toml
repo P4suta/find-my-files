@@ -62,7 +62,7 @@ sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 syn = { version = "3", features = ["full", "visit"] }
-yaml-rust2 = { version = "0.11", default-features = false }
+yaml-rust2 = { version = "0.13", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

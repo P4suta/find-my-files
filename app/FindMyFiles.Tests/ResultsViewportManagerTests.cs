@@ -67,7 +67,8 @@ public sealed class ResultsViewportManagerTests
         var selected = new object?[] { a, ResultRow.CreatePlaceholder(5), "not a row", b };
         Assert.Equal(
             new[] { a.FullPath, b.FullPath },
-            ResultsViewportManager.CopyablePaths(selected));
+            ResultsViewportManager.CopyablePaths(selected),
+            StringComparer.Ordinal);
     }
 
     [Fact]
