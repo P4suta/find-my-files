@@ -347,6 +347,7 @@ fn taiki_mise_key(tool: &str) -> Option<&'static str> {
         "just" => Some("just"),
         "mdbook" => Some("cargo:mdbook"),
         "cargo-about" => Some("cargo:cargo-about"),
+        "osv-scanner" => Some("github:google/osv-scanner"),
         "cargo-nextest" | "nextest" => Some("cargo:cargo-nextest"),
         "cargo-deny" => Some("cargo:cargo-deny"),
         "cargo-machete" => Some("cargo:cargo-machete"),
@@ -362,7 +363,6 @@ fn taiki_mise_key(tool: &str) -> Option<&'static str> {
 fn taiki_mirror_exception(tool: &str) -> Option<&'static str> {
     match tool {
         "cargo-audit" => Some("CI-only advisory scanner"),
-        "osv-scanner" => Some("CI-only release SBOM monitor"),
         _ => None,
     }
 }
@@ -671,7 +671,7 @@ fn ci_mirror_parity(
                         "{path}: cargo-sbom must be the sole audited locked crates.io install under runner temp"
                     ));
                     } else {
-                        parity.excepted += 1;
+                        compare_mirror_pin(&mut parity, pins, path, "cargo:cargo-sbom", "0.10.0");
                     }
                 }
             }
@@ -1412,6 +1412,8 @@ jobs:
             ("just".to_owned(), "1.54.0".to_owned()),
             ("cargo:mdbook".to_owned(), "0.5.3".to_owned()),
             ("cargo:cargo-about".to_owned(), "0.9.1".to_owned()),
+            ("cargo:cargo-sbom".to_owned(), "0.10.0".to_owned()),
+            ("github:google/osv-scanner".to_owned(), "2.3.6".to_owned()),
             ("cargo:cargo-nextest".to_owned(), "0.9.140".to_owned()),
             ("cargo:cargo-deny".to_owned(), "0.20.2".to_owned()),
             ("cargo:cargo-machete".to_owned(), "0.9.2".to_owned()),
@@ -1531,8 +1533,8 @@ runs:
         );
 
         assert!(parity.problems.is_empty(), "{:?}", parity.problems);
-        assert_eq!(parity.compared, 16);
-        assert_eq!(parity.excepted, 4);
+        assert_eq!(parity.compared, 18);
+        assert_eq!(parity.excepted, 2);
     }
 
     #[test]

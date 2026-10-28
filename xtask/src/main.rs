@@ -142,6 +142,11 @@ enum Commands {
         /// Exact product version both BOM roots must declare.
         version: String,
     },
+    /// Generate locked artifact-derived SBOMs and scan an existing local candidate without publishing.
+    SbomCandidate {
+        /// Exact product version already stamped into the candidate.
+        version: String,
+    },
     /// Explicitly recapture the shared wire and JSON contract golden corpus.
     ContractBless,
     /// Stage the landing page and canonical mdBook into build/site.
@@ -232,6 +237,7 @@ fn main() -> Result<()> {
             cargo_raw_dir,
         } => sbom::run(&version, &cargo_raw_dir),
         Commands::SbomVerify { version } => sbom::verify_final_pair(&version),
+        Commands::SbomCandidate { version } => sbom::candidate(&version),
         Commands::ContractBless => contract_bless::run(),
         Commands::DocsAssemble => docs::run(),
         Commands::PerfPreflight => perf::run(),

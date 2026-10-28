@@ -159,11 +159,11 @@ fn pinned_tools_and_trusted_runner_interfaces_cannot_be_narrowed_by_the_target()
     assert!(CONTROLLER_WORKFLOW.contains("--controller-sha $env:CONTROLLER_SHA"));
 
     let rust = between(JUSTFILE, "\nmutants:\n", "\n\n# Mutation testing (C#");
-    let csharp = between(JUSTFILE, "\nstryker:\n", "\n\n[group('quality')]");
+    let csharp = between(JUSTFILE, "\nstryker:\n", "\n\n[doc(");
     assert!(rust.contains("cargo run --locked --release -- mutation-rust"));
     assert!(csharp.contains("cargo run --locked --release -- mutation-csharp"));
-    assert!(!rust.contains("{{args}}"));
-    assert!(!csharp.contains("{{args}}"));
+    assert!(!rust.contains("{{"));
+    assert!(!csharp.contains("{{"));
     assert!(!JUSTFILE.contains("--baseline=skip"));
 }
 

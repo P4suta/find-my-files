@@ -19,7 +19,7 @@ use crate::pe_format::{
 };
 use crate::{
     bundle_seal::{self, BundleState},
-    checksum, fsx, paths, prune, publish,
+    checksum, cmd, fsx, paths, prune, publish,
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
@@ -93,6 +93,87 @@ struct SourceFile {
     is_pe: bool,
     managed_metadata_sha256: Option<String>,
     file_version: Option<FileVersion>,
+}
+
+fn with_locked_graph(lockfile: &Path, generate: impl FnOnce() -> Result<()>) -> Result<()> {
+    let before = fs::read(lockfile).context("read reviewed Cargo.lock")?;
+    let generated = generate();
+    let checked = fs::read(lockfile)
+        .context("read Cargo.lock after generation")
+        .and_then(|after| {
+            ensure!(before == after, "Cargo.lock changed during SBOM generation");
+            Ok(())
+        });
+    match (generated, checked) {
+        (Err(error), Err(lock_error)) => Err(error.context(lock_error)),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), checked) => checked,
+    }
+}
+
+pub fn candidate(version: &str) -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    ensure!(
+        !version.trim().is_empty(),
+        "SBOM product version must not be blank"
+    );
+    let root = paths::repo_root();
+    let engine = root.join("engine");
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let work = paths::sbom_work_dir().join(format!("{}-{nonce}", std::process::id()));
+    fs::create_dir_all(paths::sbom_work_dir())?;
+    fs::create_dir(&work)?;
+    let raw = work.join("raw");
+    fs::create_dir(&raw)?;
+    with_locked_graph(&engine.join("Cargo.lock"), || {
+        cmd::capture_stdout(
+            &engine,
+            "cargo",
+            &["metadata", "--locked", "--format-version", "1", "--no-deps"],
+        )?;
+        for (package, filename) in CARGO_RAW_FILES {
+            let body = cmd::capture_stdout(
+                &engine,
+                "cargo",
+                &[
+                    "sbom",
+                    "--cargo-package",
+                    package,
+                    "--output-format",
+                    "cyclone_dx_json_1_6",
+                ],
+            )?;
+            parse_json_strict(&body)?;
+            fs::write(raw.join(filename), body)?;
+        }
+        Ok(())
+    })?;
+    run(version, &raw)?;
+    let scan = work.join("scan");
+    fs::create_dir(&scan)?;
+    for name in ["fmf-engine.cdx.json", "app.cdx.json"] {
+        fs::copy(paths::sbom_dir().join(name), scan.join(name))?;
+    }
+    verify_final_pair(version)?;
+    let scanned = cmd::run(
+        &root,
+        "osv-scanner",
+        &[
+            "scan",
+            "source",
+            "-L",
+            scan.join("fmf-engine.cdx.json")
+                .to_str()
+                .context("engine BOM path")?,
+            "-L",
+            scan.join("app.cdx.json").to_str().context("app BOM path")?,
+            "--config",
+            "osv-scanner.toml",
+        ],
+    );
+    verify_final_pair(version)?;
+    scanned
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -3329,6 +3410,31 @@ mod tests {
         )
         .unwrap();
         assert!(verify_final_pair_at(&base, "0.1.1").is_err());
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn raw_generation_rejects_a_changed_lockfile_even_after_a_tool_failure() {
+        let base = scratch("locked-generation");
+        fs::create_dir_all(&base).unwrap();
+        let lock = base.join("Cargo.lock");
+        fs::write(&lock, b"reviewed graph").unwrap();
+        with_locked_graph(&lock, || Ok(())).unwrap();
+        assert!(with_locked_graph(&lock, || bail!("tool failed")).is_err());
+        assert!(with_locked_graph(&lock, || {
+            fs::write(&lock, b"unreviewed graph")?;
+            Ok(())
+        })
+        .is_err());
+        fs::write(&lock, b"reviewed graph").unwrap();
+        let error = with_locked_graph(&lock, || {
+            fs::write(&lock, b"different graph")?;
+            bail!("generator failed")
+        })
+        .unwrap_err();
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("generator failed"), "{diagnostic}");
+        assert!(diagnostic.contains("Cargo.lock changed"), "{diagnostic}");
         fsx::force_remove_dir_all(&base).unwrap();
     }
 }
