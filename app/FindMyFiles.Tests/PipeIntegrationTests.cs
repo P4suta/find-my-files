@@ -6,15 +6,9 @@ using static FindMyFiles.Tests.TestDoubles.Polling;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// C# client × real fmf-service integration — the widest pipe gate that still
-/// runs unelevated (protocol round-trip and Rust loopback run unconditionally
-/// under `just test`; real volumes need FMF_ADMIN_TESTS=1).
-/// Gated on FMF_PIPE_TESTS=1 (`just test-pipe`, which builds the
-/// service first); without it the test reports and returns green so plain
-/// `just test-app` stays hermetic. The service runs unelevated on a unique
-/// pipe name with --no-index and a throwaway data dir — no real volumes, no
-/// elevation.
+/// <summary> C# client × real fmf-service integration — the widest pipe gate that still runs unelevated (protocol round-trip and Rust loopback run unconditionally under `just test`; real volumes need FMF_ADMIN_TESTS=1).
+/// Gated on FMF_PIPE_TESTS=1 (`just test-pipe`, which builds the service first); without it the test reports and returns green so plain `just test-app` stays hermetic.
+/// The service runs unelevated on a unique pipe name with --no-index and a throwaway data dir — no real volumes, no elevation.
 /// </summary>
 public sealed class PipeIntegrationTests(ITestOutputHelper output)
 {
@@ -44,8 +38,6 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
                 "connect to fmf-service",
                 30_000);
 
-            // --no-index: zero Ready volumes. A query still succeeds (the
-            // contract: queries always target Ready volumes only) with 0 hits.
             var outcome = await client.SearchAsync("anything", SearchOptions.Default);
             Assert.Equal(0, outcome.Result.Count);
             outcome.Result.Dispose();
@@ -56,7 +48,6 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
 
             Assert.Empty(await client.GetStatusAsync());
 
-            // Kill the service: the next request fails fast, no 10s timeout.
             service.Kill();
             await service.WaitForExitAsync();
             await WaitUntilAsync(
@@ -66,9 +57,6 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
             await Assert.ThrowsAsync<EngineUnavailableException>(
                 () => client.SearchAsync("anything", SearchOptions.Default));
 
-            // Restart on the same pipe + data dir (the OS released the
-            // writer lock with the killed process): the supervisor reconnects
-            // by itself and searching works again.
             service.Dispose();
             service = StartService(exe, pipeName, dataDir);
             await WaitUntilAsync(
@@ -86,10 +74,7 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>!!drop fault injection (fmf-service --debug-faults): the
-    /// service hard-drops the connection instead of answering, exercising
-    /// the disconnect → fail-fast → supervisor-reconnect path against the
-    /// real server, not the in-test fake.</summary>
+    /// <summary>!!drop fault injection (fmf-service --debug-faults): the service hard-drops the connection instead of answering, exercising the disconnect → fail-fast → supervisor-reconnect path against the real server, not the in-test fake.</summary>
     [Fact]
     public async Task RealService_DropFault_FailsFast_AndTheSupervisorRecovers()
     {
@@ -114,12 +99,9 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
                 "connect to fmf-service",
                 30_000);
 
-            // The dropped request fails fast with the transport exception —
-            // not a query error, and not the 10s request timeout.
             await Assert.ThrowsAsync<EngineUnavailableException>(
                 () => client.SearchAsync("!!drop", SearchOptions.Default));
 
-            // The supervisor reconnects on its own and the next query works.
             await WaitUntilAsync(
                 () => client.Connection == EngineConnectionState.Reconnecting,
                 "client noticed the drop",
@@ -139,13 +121,10 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>!!panic fault injection (fmf-service --debug-faults): the
-    /// dispatch firewall (catch_unwind) turns a handler panic into an
-    /// FMF_E_PANIC (99) reply, so the C# client sees an <see cref="EngineException"/>
-    /// — NOT a dropped connection. The same connection keeps answering afterwards,
-    /// which is the whole point of the firewall (a buggy query must not take the
-    /// service down). The Rust loopback test proves the server side; this pins the
-    /// client's observable surface: error code 99, no reconnect, still alive.</summary>
+    /// <summary>!!panic fault injection (fmf-service --debug-faults): the dispatch firewall (catch_unwind) turns a handler panic into an FMF_E_PANIC (99) reply, so the C# client sees an <see cref="EngineException"/> — NOT a dropped connection.
+    /// The same connection keeps answering afterwards,
+    /// which is the whole point of the firewall (a buggy query must not take the service down).
+    /// The Rust loopback test proves the server side; this pins the client's observable surface: error code 99, no reconnect, still alive.</summary>
     [Fact]
     public async Task RealService_PanicFault_SurfacesAsEngineError_AndTheConnectionSurvives()
     {
@@ -170,14 +149,10 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
                 "connect to fmf-service",
                 30_000);
 
-            // The firewall caught the panic and replied FMF_E_PANIC (99): the
-            // client raises an EngineException, not a transport drop.
             var ex = await Assert.ThrowsAsync<EngineException>(
                 () => client.SearchAsync("!!panic", SearchOptions.Default));
             Assert.Equal(99, ex.Code);
 
-            // The connection survived the caught panic — no reconnect — and the
-            // same client still answers a normal query.
             Assert.Equal(EngineConnectionState.Connected, client.Connection);
             var outcome = await client.SearchAsync("anything", SearchOptions.Default);
             Assert.Equal(0, outcome.Result.Count);
@@ -190,8 +165,7 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>Resolve build/engine/release/fmf-service.exe by walking up
-    /// from the test assembly (repo-relative; built by `just service-build`).</summary>
+    /// <summary>Resolve build/engine/release/fmf-service.exe by walking up from the test assembly (repo-relative; built by `just service-build`).</summary>
     private static string FindServiceExe()
     {
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
@@ -240,8 +214,7 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
         return p;
     }
 
-    /// <summary>Child output may trickle in after the test finished, when
-    /// ITestOutputHelper throws — drop those lines instead of crashing.</summary>
+    /// <summary>Child output may trickle in after the test finished, when ITestOutputHelper throws — drop those lines instead of crashing.</summary>
     private void LogQuietly(string tag, string? line)
     {
         if (line is null)
@@ -275,7 +248,6 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
         }
         catch
         {
-            // Already gone — nothing to clean.
         }
         finally
         {

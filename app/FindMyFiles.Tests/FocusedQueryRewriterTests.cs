@@ -38,7 +38,7 @@ public sealed class FocusedQueryRewriterTests
 
     [Theory]
     [InlineData("report ext:xlsx")]
-    [InlineData("report EXT:xlsx")] // field names are case-insensitive
+    [InlineData("report EXT:xlsx")]
     [InlineData("report regex:^r")]
     public void GroupWithAnExplicitTypeFilter_SkipsTheWhitelist(string query)
     {
@@ -49,7 +49,7 @@ public sealed class FocusedQueryRewriterTests
 
     [Theory]
     [InlineData(@"report path:""D:\work""")]
-    [InlineData(@"docs\reports")] // a bare backslash already scopes the path
+    [InlineData(@"docs\reports")]
     public void GroupWithAnExplicitLocation_SkipsTheExclusions(string query)
     {
         Assert.Equal(query + " ext:pdf;docx", Compose(query));
@@ -69,8 +69,6 @@ public sealed class FocusedQueryRewriterTests
     [InlineData("   ")]
     public void EmptyQuery_StaysExactlyAsIs(string query)
     {
-        // The "no query, no results" rule is the orchestrator's — a rewrite
-        // must never turn an empty query into a non-empty one.
         Assert.Equal(query, Compose(query));
     }
 
@@ -86,8 +84,6 @@ public sealed class FocusedQueryRewriterTests
     [Fact]
     public void UnusableExtensionEntries_AreDropped()
     {
-        // Whitespace/quotes/pipes would break the unquoted ext: atom;
-        // ;/, are the engine's own separators inside one term.
         Assert.Equal(
             "report ext:pdf",
             FocusedQueryRewriter.Compose(
@@ -97,7 +93,6 @@ public sealed class FocusedQueryRewriterTests
     [Fact]
     public void NoValidSuffixParts_LeaveTheQueryUntouched()
     {
-        // An empty ext: term would match nothing — it must not be emitted.
         Assert.Equal("report", FocusedQueryRewriter.Compose("report", [], []));
         Assert.Equal(
             "report",

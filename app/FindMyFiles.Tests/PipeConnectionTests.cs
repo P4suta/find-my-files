@@ -6,12 +6,8 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// <see cref="PipeConnection"/> in isolation, over a raw in-test pipe pair:
-/// the connection object owns its own life — a write racing teardown is
-/// answered by the object (normalized transport exception), which is the
-/// structural replacement for the old "volatile null-check, then write"
-/// convention in PipeEngineClient.
+/// <summary> <see cref="PipeConnection"/> in isolation, over a raw in-test pipe pair:
+/// the connection object owns its own life — a write racing teardown is answered by the object (normalized transport exception), which is the structural replacement for the old "volatile null-check, then write" convention in PipeEngineClient.
 /// </summary>
 public sealed class PipeConnectionTests
 {
@@ -84,11 +80,8 @@ public sealed class PipeConnectionTests
         using (server)
         {
             var conn = Wrap(client);
-            conn.Dispose(); // the supervisor tore this connection down
+            conn.Dispose();
 
-            // The grabbed object answers its own liveness: the racing writer
-            // gets the transport exception, never a raw
-            // ObjectDisposedException leaking from the dead stream.
             var frame = PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []);
             var ex = await Assert.ThrowsAsync<EngineUnavailableException>(
                 () => conn.WriteFrameAsync(frame, CancellationToken.None));
@@ -106,14 +99,12 @@ public sealed class PipeConnectionTests
             var (server, client) = await ConnectedPairAsync();
             var conn = Wrap(client);
 
-            server.Dispose(); // server side goes away under the connection
+            server.Dispose();
 
-            // The supervisor awaits ReadLoop to know the connection died — it
-            // must complete (never fault, never hang).
             await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5));
 
             conn.Dispose();
-            conn.Dispose(); // double-dispose must be harmless
+            conn.Dispose();
             await Assert.ThrowsAsync<EngineUnavailableException>(
                 () => conn.WriteFrameAsync(
                     PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []),
@@ -129,7 +120,7 @@ public sealed class PipeConnectionTests
     {
         var (server, client) = await ConnectedPairAsync();
         var conn = Wrap(client);
-        server.Dispose(); // not our Dispose: the far end died (IOException path)
+        server.Dispose();
         await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5));
 
         var frame = PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []);

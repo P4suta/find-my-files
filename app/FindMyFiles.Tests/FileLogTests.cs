@@ -3,10 +3,8 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Behavioural tests for the <see cref="FileLog"/> tail reader (the
-/// F12 "copy diagnostics" dump depends on it). Formatting and rotation moved to
-/// Serilog + <see cref="LogfmtFormatter"/> (ADR-0037) and are covered by
-/// <see cref="LogfmtFormatterTests"/>; only the tail stays hand-rolled.</summary>
+/// <summary>Behavioural tests for the <see cref="FileLog"/> tail reader (the F12 "copy diagnostics" dump depends on it).
+/// Formatting and rotation moved to Serilog + <see cref="LogfmtFormatter"/> (ADR-0037) and are covered by <see cref="LogfmtFormatterTests"/>; only the tail stays hand-rolled.</summary>
 public sealed class FileLogTests
 {
     private static string TempDir() => Directory.CreateTempSubdirectory("fmf-log-").FullName;

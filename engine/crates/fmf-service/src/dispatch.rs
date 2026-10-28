@@ -1,29 +1,29 @@
 //! Opcode → Engine mapping: the server half of `fmf_contract::opcodes`.
 //!
-//! Deliberately a mapping and nothing else — the arm for an opcode validates
-//! its payload against the contract limits and calls one `Engine` method.
+//! Deliberately a mapping and nothing else — the arm for an opcode validates its payload against the contract limits and calls one `Engine` method.
 //!
-//! Every request runs inside a `catch_unwind` firewall: a panic answers
-//! `FMF_E_PANIC` and the connection survives, mirroring the FFI `guard`.
+//! Every request runs inside a `catch_unwind` firewall: a panic answers `FMF_E_PANIC` and the connection survives, mirroring the FFI `guard`.
+
+const DEBUG_LAG_MILLIS: u64 = 250;
+const VOLUME_RESPONSE_INITIAL_CAPACITY: usize = 256;
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use fmf_core::diag::error_chain;
-use fmf_core::engine::{Engine, EngineError, QueryCancellation, ResultSet};
-use fmf_core::query::QueryOptions;
 use fmf_proto::limits::MAX_RESULTS_PER_CONN;
 use fmf_proto::messages::{self, opcode};
 use fmf_proto::{ABI_VERSION, PROTOCOL_VERSION, codes};
+use fmf_runtime::diag::error_chain;
+use fmf_runtime::engine::{Engine, EngineError, QueryCancellation, ResultSet};
+use fmf_runtime::query::QueryOptions;
 use parking_lot::Mutex;
 
 use crate::faults::Faults;
 
 struct ResultEntry {
-    /// `Arc` so `result_page` can clone the handle under the results lock and
-    /// materialize the page *outside* it (`fill_page` read-locks volume slots);
+    /// `Arc` so `result_page` can clone the handle under the results lock and materialize the page *outside* it (`fill_page` read-locks volume slots);
     /// the map stays free for the connection's other worker meanwhile.
     set: Arc<ResultSet>,
     last_used: u64,
@@ -31,10 +31,6 @@ struct ResultEntry {
     lagged: bool,
 }
 
-// Result IDs are process-global and monotonic. Per-connection registries
-// still own lifetime, while global uniqueness means an opaque handle copied
-// from another connection can never alias a local result with the same
-// small integer (ADR-0044).
 static NEXT_RESULT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
@@ -84,13 +80,11 @@ impl QueryRegistry {
     }
 }
 
-/// Per-connection dispatch state: owns the live result handles and the
-/// hello/version handshake for one pipe client.
+/// Per-connection dispatch state: owns the live result handles and the hello/version handshake for one pipe client.
 pub struct Connection {
     /// Shared engine all opcodes route into (the only place logic lives).
     pub engine: Arc<Engine>,
-    /// Debug fault injector (`!!panic` / `!!drop` / `!!lag`); a no-op for
-    /// installed services.
+    /// Debug fault injector (`!!panic` / `!!drop` / `!!lag`); a no-op for installed services.
     pub faults: Faults,
     results: Mutex<HashMap<u64, ResultEntry>>,
     use_clock: AtomicU64,
@@ -98,8 +92,7 @@ pub struct Connection {
     /// True once a valid Hello with a matching protocol version arrived;
     /// any other opcode before that is a protocol violation (Drop).
     pub hello_done: AtomicBool,
-    /// Live-connection count shared with the accept loop (`ServiceInfo`
-    /// reports it; the server owns increment/decrement).
+    /// Live-connection count shared with the accept loop (`ServiceInfo` reports it; the server owns increment/decrement).
     active_connections: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -107,11 +100,9 @@ pub struct Connection {
 pub enum Outcome {
     /// Send (status, payload) back with `FLAG_RESPONSE`.
     Reply(i32, Vec<u8>),
-    /// Subscribe/Unsubscribe handled by the caller (owns the queue), then
-    /// reply OK with an empty payload.
+    /// Subscribe/Unsubscribe handled by the caller (owns the queue), then reply OK with an empty payload.
     Subscribe,
-    /// Unsubscribe handled by the caller (owns the queue), then reply OK
-    /// with an empty payload.
+    /// Unsubscribe handled by the caller (owns the queue), then reply OK with an empty payload.
     Unsubscribe,
     /// Protocol violation or `!!drop` fault — tear the connection down.
     Drop,
@@ -136,8 +127,7 @@ impl Connection {
         }
     }
 
-    /// Dispatch with the cancellation lifecycle registered by the pipe
-    /// reader before the request entered the worker queue.
+    /// Dispatch with the cancellation lifecycle registered by the pipe reader before the request entered the worker queue.
     pub(crate) fn dispatch_with_query(
         &self,
         op: u16,
@@ -164,8 +154,6 @@ impl Connection {
         payload: &[u8],
         cancellation: Option<&QueryCancellation>,
     ) -> Outcome {
-        // Hello must come first; anything else on a fresh connection is a
-        // protocol violation.
         if !self.hello_done.load(Ordering::Relaxed) && op != opcode::HELLO {
             return Outcome::Drop;
         }
@@ -238,9 +226,6 @@ impl Connection {
                             }
                         }
                     }
-                    // The serde detail (field names, byte offsets) is internal
-                    // shape — log it for F12/the engine logs, hand the client a
-                    // generic verdict rather than echoing our payload layout.
                     Err(e) => {
                         tracing::warn!(error = %e, "IndexStart payload rejected");
                         Outcome::Reply(codes::INVALID_ARG, b"malformed IndexStart payload".to_vec())
@@ -254,7 +239,6 @@ impl Connection {
                     .into_iter()
                     .map(|(volume, phase, entries)| messages::VolumeStatusWire {
                         volume,
-                        // VolumeState is the contract enum (repr u32).
                         state: phase as u32,
                         entries,
                     })
@@ -298,20 +282,19 @@ impl Connection {
         }
     }
 
-    /// Register a query before it enters the bounded work queue. Every older
-    /// queued/running query is cancelled first (latest-query-wins).
+    /// Register a query before it enters the bounded work queue.
+    /// Every older queued/running query is cancelled first (latest-query-wins).
     pub(crate) fn begin_query(&self, request_id: u32) -> QueryCancellation {
         self.queries.begin(request_id)
     }
 
-    /// Cancel one live/queued query. Unknown IDs are an idempotent no-op on
-    /// this one-way control path.
+    /// Cancel one live/queued query.
+    /// Unknown IDs are an idempotent no-op on this one-way control path.
     pub(crate) fn cancel_query(&self, request_id: u32) {
         self.queries.cancel(request_id);
     }
 
-    /// Remove a completed request without letting an old reused request ID
-    /// erase a newer lifecycle.
+    /// Remove a completed request without letting an old reused request ID erase a newer lifecycle.
     pub(crate) fn finish_query(&self, request_id: u32, cancellation: &QueryCancellation) {
         self.queries.finish(request_id, cancellation);
     }
@@ -349,8 +332,6 @@ impl Connection {
                 if cancellation.is_cancelled() {
                     return Outcome::Reply(codes::CANCELLED, b"query cancelled".to_vec());
                 }
-                // The basis must remain registered through completion. A
-                // concurrent ResultFree/eviction turns unchanged off.
                 if let Some(basis) = basis.as_ref() {
                     trace.unchanged &= self
                         .results
@@ -366,20 +347,18 @@ impl Connection {
                         b"result handle namespace exhausted".to_vec(),
                     );
                 }
-                fmf_core::diag::log_query_served(id, &trace);
+                fmf_runtime::diag::log_query_served(id, &trace);
                 let lagged = self.faults.lag_marker(text);
                 let mut results = self.results.lock();
-                if results.len() >= MAX_RESULTS_PER_CONN {
-                    // Evict the least recently *used* (not oldest-created):
-                    // the on-screen result survives query bursts.
-                    if let Some((&victim, _)) = results.iter().min_by_key(|(_, e)| e.last_used) {
-                        results.remove(&victim);
-                        fmf_core::degrade!(
-                            self.engine.metrics().counters.pipe_results_evicted,
-                            result_id = victim,
-                            "result handle LRU-evicted at the per-connection cap"
-                        );
-                    }
+                if results.len() >= MAX_RESULTS_PER_CONN
+                    && let Some((&victim, _)) = results.iter().min_by_key(|(_, e)| e.last_used)
+                {
+                    results.remove(&victim);
+                    fmf_runtime::degrade!(
+                        self.engine.metrics().counters.pipe_results_evicted,
+                        result_id = victim,
+                        "result handle LRU-evicted at the per-connection cap"
+                    );
                 }
                 results.insert(
                     id,
@@ -389,19 +368,14 @@ impl Connection {
                         lagged,
                     },
                 );
-                // One buffer: the 16-byte head, then the trace JSON appended in
-                // place (no intermediate Vec + copy). don't go silent: on a
-                // serialize failure, truncate back to the head and reply with an
-                // (explicitly) empty trace, counted + warned — the query itself
-                // succeeded.
                 let mut reply = messages::QueryRespHead {
                     result_id: id,
                     count,
                 }
-                .begin_response(256);
+                .begin_response(VOLUME_RESPONSE_INITIAL_CAPACITY);
                 if let Err(e) = serde_json::to_writer(&mut reply, &trace) {
                     reply.truncate(messages::QueryRespHead::LEN);
-                    fmf_core::degrade!(
+                    fmf_runtime::degrade!(
                         self.engine.metrics().counters.trace_serialize_failures,
                         error = %e,
                         "query trace serialization failed — replying with an empty trace"
@@ -426,17 +400,9 @@ impl Connection {
         let Ok(req) = messages::ResultPageReq::decode(payload) else {
             return Outcome::Drop;
         };
-        // Clone the result handle under the lock, then materialize the page
-        // OUTSIDE it: fill_page read-locks N volume slots and builds the
-        // rows+blob, work that must not pin the per-connection results map
-        // (the other worker can page a different result, free one, or insert a
-        // new query meanwhile). The cloned Arc keeps the set alive even if it
-        // is evicted/freed mid-fill.
         let (set, lagged) = {
             let mut results = self.results.lock();
             let Some(entry) = results.get_mut(&req.result_id) else {
-                // Evicted (or never existed): the client recovers through
-                // its STALE → re-query path; "evicted" keeps F12 honest.
                 return Outcome::Reply(
                     codes::STALE,
                     b"result handle evicted or unknown \xe2\x80\x94 re-run the query".to_vec(),
@@ -446,10 +412,8 @@ impl Connection {
             (Arc::clone(&entry.set), entry.lagged)
         };
         if lagged {
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            std::thread::sleep(std::time::Duration::from_millis(DEBUG_LAG_MILLIS));
         }
-        // Row+blob packing is fmf-core's single implementation
-        // (ResultSet::fill_page); this layer only frames it.
         let Ok(offset) = usize::try_from(req.offset) else {
             return Outcome::Reply(
                 codes::INVALID_ARG,

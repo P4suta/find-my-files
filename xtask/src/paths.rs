@@ -1,6 +1,5 @@
-//! Path anchoring. Everything resolves from the repo root, which is the parent
-//! of the xtask crate dir baked in at compile time — so the commands behave the
-//! same regardless of the caller's working directory.
+//! Path anchoring.
+//! Everything resolves from the repo root, which is the parent of the xtask crate dir baked in at compile time — so the commands behave the same regardless of the caller's working directory.
 
 use std::path::{Path, PathBuf};
 
@@ -12,24 +11,35 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The single build-output tree: every artifact (cargo target dirs, the C# bin
-/// output, the publish bundle, release packages, the staged docs site) lives
-/// under `<repo>/build/` (ADR-0021), gitignored as one line.
+/// The single build-output tree: every artifact (cargo target dirs, the C# bin output, the publish bundle, release packages, the staged docs site) lives under `<repo>/build/` (ADR-0021), gitignored as one line.
 pub fn build_root() -> PathBuf {
     repo_root().join("build")
 }
 
-/// The engine workspace's release artifacts (`build/engine/release`), where the
-/// engine `.cargo/config.toml` redirects `cargo build --release` output.
+pub fn verification_dir() -> PathBuf {
+    build_root().join("verification")
+}
+
+pub fn fuzz_corpus_dir() -> PathBuf {
+    verification_dir().join("fuzz-corpus")
+}
+
+pub fn fuzz_workspace_dir() -> PathBuf {
+    verification_dir().join("fuzz-workspace")
+}
+
+pub fn fuzz_artifacts_dir() -> PathBuf {
+    verification_dir().join("fuzz-artifacts")
+}
+
+/// The engine workspace's release artifacts (`build/engine/release`), where the engine `.cargo/config.toml` redirects `cargo build --release` output.
 pub fn engine_release_dir() -> PathBuf {
     build_root().join("engine").join("release")
 }
 
-/// Criterion's canonical machine-local baseline tree. Comparison runs are
-/// staged elsewhere and seeded from this tree, so stale `new`/`change` reports
-/// can never satisfy the regression gate. Dedicated runners set
-/// `FMF_PERF_BASELINE_DIR` to an existing persistent directory outside the
-/// checkout; local development keeps the normal single `build/` output tree.
+/// Criterion's canonical machine-local baseline tree.
+/// Comparison runs are staged elsewhere and seeded from this tree, so stale `new`/`change` reports can never satisfy the regression gate.
+/// Dedicated runners set `FMF_PERF_BASELINE_DIR` to an existing persistent directory outside the checkout; local development keeps the normal single `build/` output tree.
 pub fn criterion_dir() -> PathBuf {
     std::env::var_os("FMF_PERF_BASELINE_DIR").map_or_else(
         || build_root().join("engine").join("criterion"),
@@ -42,14 +52,14 @@ pub fn perf_dir() -> PathBuf {
     build_root().join("engine").join("perf")
 }
 
-/// Deterministic mutation-testing evidence. Tool-native reports and the
-/// canonical gate summaries stay below this one ignored build subtree.
+/// Deterministic mutation-testing evidence.
+/// Tool-native reports and the canonical gate summaries stay below this one ignored build subtree.
 pub fn mutation_dir() -> PathBuf {
     build_root().join("mutation")
 }
 
-/// Short-lived sanitized mutation worktrees. Keep this component deliberately
-/// compact: Windows XAML tooling still has MAX_PATH-sensitive dependency loads.
+/// Short-lived sanitized mutation worktrees.
+/// Keep this component deliberately compact: Windows XAML tooling still has MAX_PATH-sensitive dependency loads.
 pub fn mutation_ci_work_dir() -> PathBuf {
     build_root().join("mw")
 }
@@ -69,10 +79,8 @@ pub fn rust_mutation_baseline() -> PathBuf {
 
 /// [`rust_mutation_baseline`] for an arbitrary repository root.
 ///
-/// The CI controller reads the reviewed policy out of its own protected
-/// checkout, never the target's, so it needs the same derivation rooted
-/// somewhere else. Both spellings live here so the two lanes cannot end up
-/// comparing against two different files.
+/// The CI controller reads the reviewed policy out of its own protected checkout, never the target's, so it needs the same derivation rooted somewhere else.
+/// Both spellings live here so the two lanes cannot end up comparing against two different files.
 pub fn rust_mutation_baseline_in(repo: &Path) -> PathBuf {
     repo.join("engine").join("mutation-baseline.json")
 }
@@ -83,8 +91,7 @@ pub fn rust_mutants_config() -> PathBuf {
     rust_mutants_config_in(&repo_root())
 }
 
-/// [`rust_mutants_config`] for an arbitrary repository root — the controller
-/// supplies this file to the CI run instead of accepting the target's copy.
+/// [`rust_mutants_config`] for an arbitrary repository root — the controller supplies this file to the CI run instead of accepting the target's copy.
 pub fn rust_mutants_config_in(repo: &Path) -> PathBuf {
     repo.join("engine").join("mutants.toml")
 }
@@ -100,8 +107,7 @@ pub fn csharp_mutation_baseline() -> PathBuf {
     csharp_mutation_baseline_in(&repo_root())
 }
 
-/// [`csharp_mutation_baseline`] for an arbitrary repository root — the CI
-/// controller reads the reviewed policy out of its own protected checkout.
+/// [`csharp_mutation_baseline`] for an arbitrary repository root — the CI controller reads the reviewed policy out of its own protected checkout.
 pub fn csharp_mutation_baseline_in(repo: &Path) -> PathBuf {
     csharp_test_dir(repo).join("mutation-baseline.json")
 }
@@ -110,16 +116,13 @@ pub fn csharp_mutation_baseline_in(repo: &Path) -> PathBuf {
 ///
 /// Everything that decides *which* mutants exist and *how* they are judged —
 /// `mutation-level`, `coverage-analysis`, `disable-mix-mutants`, `test-runner`,
-/// `configuration`, `target-framework`, `break-on-initial-test-failure` — lives
-/// in this one file. Stryker auto-discovers it by name in its working directory
-/// for `just stryker`; the CI shard runner reads it through this path and
-/// rewrites only `mutate` (see `mutation_ci::stryker_config`).
+/// `configuration`, `target-framework`, `break-on-initial-test-failure` — lives in this one file.
+/// Stryker auto-discovers it by name in its working directory for `just stryker`; the CI shard runner reads it through this path and rewrites only `mutate` (see `mutation_ci::stryker_config`).
 pub fn csharp_stryker_config() -> PathBuf {
     csharp_stryker_config_in(&repo_root())
 }
 
-/// [`csharp_stryker_config`] for an arbitrary repository root — the controller
-/// supplies this file to the CI run instead of accepting the target's copy.
+/// [`csharp_stryker_config`] for an arbitrary repository root — the controller supplies this file to the CI run instead of accepting the target's copy.
 pub fn csharp_stryker_config_in(repo: &Path) -> PathBuf {
     csharp_test_dir(repo).join("stryker-config.json")
 }
@@ -130,15 +133,13 @@ pub fn real_baseline() -> PathBuf {
 }
 
 /// The distributable bundle directory assembled by `publish` — the zip root.
-/// Holds only the native launcher (`FindMyFiles.exe`) + `README.txt`; the
-/// self-contained app lives one level down in [`app_dir`].
+/// Holds only the native launcher (`FindMyFiles.exe`) + `README.txt`; the self-contained app lives one level down in [`app_dir`].
 pub fn dist_dir() -> PathBuf {
     build_root().join("dist").join("FindMyFiles")
 }
 
-/// Exact deterministic manifest for the unsigned distribution tree. It is a
-/// sibling of (never a member of) [`dist_dir`], so sealing does not mutate the
-/// tree whose identity it records.
+/// Exact deterministic manifest for the unsigned distribution tree.
+/// It is a sibling of (never a member of) [`dist_dir`], so sealing does not mutate the tree whose identity it records.
 pub fn unsigned_bundle_manifest() -> PathBuf {
     build_root()
         .join("dist")
@@ -152,24 +153,20 @@ pub fn signed_bundle_manifest() -> PathBuf {
         .join("FindMyFiles.signed.manifest.json")
 }
 
-/// The self-contained app payload, one level under the bundle root. The ~100
-/// publish files (apphost, runtime DLLs, engine binaries) stay co-located here
-/// because the .NET apphost resolves its DLLs / `*.deps.json` from its own
-/// directory — so only the launcher + README can sit at the root.
+/// The self-contained app payload, one level under the bundle root.
+/// The ~100 publish files (apphost, runtime DLLs, engine binaries) stay co-located here because the .NET apphost resolves its DLLs / `*.deps.json` from its own directory — so only the launcher + README can sit at the root.
 pub fn app_dir() -> PathBuf {
     dist_dir().join("app")
 }
 
-/// Deterministic `CycloneDX` documents generated from the final distribution
-/// tree. Release/nightly publish exactly the two top-level `*.cdx.json` files
-/// produced here.
+/// Deterministic `CycloneDX` documents generated from the final distribution tree.
+/// Release/nightly publish exactly the two top-level `*.cdx.json` files produced here.
 pub fn sbom_dir() -> PathBuf {
     build_root().join("sbom")
 }
 
-/// `NuGet`'s resolved restore graph for the shipping app. `obj/` intentionally
-/// stays beside the project (ADR-0021); SBOM generation reads this machine
-/// output only after `dotnet publish --locked-mode` has completed.
+/// `NuGet`'s resolved restore graph for the shipping app.
+/// `obj/` intentionally stays beside the project (ADR-0021); SBOM generation reads this machine output only after `dotnet publish --locked-mode` has completed.
 pub fn app_project_assets() -> PathBuf {
     repo_root()
         .join("app")
@@ -193,28 +190,22 @@ pub fn package_dir() -> PathBuf {
     build_root().join("package")
 }
 
-/// Flat staging dir the release signing step feeds to the eSigner Action
-/// (`sign-stage` populates it, one uniquely-named copy per first-party PE).
-/// Under `build/` so it is covered by the single ignore line (ADR-0021); the
-/// workflow points the Action at the matching `build\sign-stage`.
+/// Flat staging dir the release signing step feeds to the eSigner Action (`sign-stage` populates it, one uniquely-named copy per first-party PE).
+/// Under `build/` so it is covered by the single ignore line (ADR-0021); the workflow points the Action at the matching `build\sign-stage`.
 pub fn sign_stage_dir() -> PathBuf {
     build_root().join("sign-stage")
 }
 
 /// Dir the eSigner Action writes the signed PEs into (by their stage names);
-/// `sign-collect` copies them back over the bundle. Under `build/` to match
-/// [`sign_stage_dir`] and the workflow's `build\signed`.
+/// `sign-collect` copies them back over the bundle.
+/// Under `build/` to match [`sign_stage_dir`] and the workflow's `build\signed`.
 pub fn signed_dir() -> PathBuf {
     build_root().join("signed")
 }
 
-/// The committed manifest of first-party PE bundle paths the release
-/// `verify-signatures` composite action checks. Generated from
-/// [`crate::publish::FIRST_PARTY_PES`] and pinned by a drift test, so the signed-
-/// file list lives in exactly one place (xtask) instead of a hardcoded copy in
-/// the action's PowerShell. The action reads the file directly from the checkout
-/// (via `GITHUB_ACTION_PATH`); xtask only needs this path to pin/bless it, hence
-/// test-only.
+/// The committed manifest of first-party PE bundle paths the release `verify-signatures` composite action checks.
+/// Generated from [`crate::publish::FIRST_PARTY_PES`] and pinned by a drift test, so the signed- file list lives in exactly one place (xtask) instead of a hardcoded copy in the action's PowerShell.
+/// The action reads the file directly from the checkout (via `GITHUB_ACTION_PATH`); xtask only needs this path to pin/bless it, hence test-only.
 #[cfg(test)]
 pub fn signed_pe_manifest() -> PathBuf {
     repo_root()
@@ -229,24 +220,20 @@ pub fn site_dir() -> PathBuf {
     build_root().join("site")
 }
 
-/// The engine workspace dir. Running `cargo` from here (not `--manifest-path`
-/// from the root) is what lets its `.cargo/config.toml` redirect the target dir
-/// under `build/` — the same reason the just recipes use `[working-directory:
+/// The engine workspace dir.
+/// Running `cargo` from here (not `--manifest-path` from the root) is what lets its `.cargo/config.toml` redirect the target dir under `build/` — the same reason the just recipes use `[working-directory:
 /// 'engine']`.
 pub fn engine_dir() -> PathBuf {
     repo_root().join("engine")
 }
 
-/// The Rust workspace manifest carrying the base version (`xtask version` reads
-/// the `[workspace.package] version` here; release-please bumps it).
+/// The Rust workspace manifest carrying the base version (`xtask version` reads the `[workspace.package] version` here; release-please bumps it).
 pub fn engine_cargo_toml() -> PathBuf {
     repo_root().join("engine").join("Cargo.toml")
 }
 
-/// The committed repository-ruleset templates — the reviewable definition of
-/// this repository's branch and tag protection. GitHub never applies them, so
-/// `rulesets-check` compares them against what the repository actually
-/// enforces.
+/// The committed repository-ruleset templates — the reviewable definition of this repository's branch and tag protection.
+/// GitHub never applies them, so `rulesets-check` compares them against what the repository actually enforces.
 pub fn ruleset_templates_dir() -> PathBuf {
     repo_root().join(".github").join("rulesets")
 }

@@ -1,14 +1,3 @@
-# Static analysis for the C# app and the GitHub Actions workflows themselves.
-# Rust stays out of scope (its CodeQL support is beta/noisy); cargo-audit.yml
-# covers the engine's dependency advisories instead.
-#
-# Two independent analyses:
-#   - csharp (analyze): build-mode manual because the WinUI app is self-contained
-#     and its csproj references fmf_engine.dll — autobuild can't infer that. We
-#     build the engine DLL first (the C# build copies it), then trace the C# build.
-#   - actions (analyze-actions): build-mode none, cheap ubuntu. Continuously
-#     re-checks workflow GITHUB_TOKEN permissions so the missing-permissions
-#     class can't silently regress (and closes stale alerts once code complies).
 name: codeql
 
 on:
@@ -23,9 +12,6 @@ concurrency:
   group: codeql-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: true
 
-# Least privilege: the token is read-only at the top level; the single job
-# requests the security-events write it needs to upload SARIF (Scorecard's
-# Token-Permissions check rewards job-scoped writes over top-level ones).
 permissions:
   contents: read
 
@@ -36,7 +22,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: read # Read changed PR files for analysis selection.
+      pull-requests: read # Permission: Select analysis from the changed PR files.
     outputs:
       csharp: ${{ steps.paths.outputs.csharp }}
       actions: ${{ steps.paths.outputs.actions }}
@@ -62,8 +48,8 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 30
     permissions:
-      security-events: write # upload CodeQL SARIF results
-      contents: read # checkout
+      security-events: write # Permission: Upload CodeQL SARIF results.
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -73,7 +59,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: engine
-          shared-key: engine-win # shared with ci.yml/nightly to reuse deps
+          shared-key: engine-win
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -82,9 +68,8 @@ jobs:
           restore-keys: nuget-${{ runner.os }}-
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: 10.0.401
+          dotnet-version: 10.0.403
 
-      # fmf_engine.dll must exist before the C# build (the csproj copies it).
       - name: build engine dll
         run: cargo build --locked --release -p fmf-ffi
         working-directory: engine
@@ -103,16 +88,14 @@ jobs:
         with:
           category: "/language:csharp"
 
-  # Scans the workflow YAML itself (GITHUB_TOKEN permissions, untrusted-input,
-  # etc.). build-mode none needs no toolchain, so it runs on cheap ubuntu.
   analyze-actions:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.actions == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      security-events: write # upload CodeQL SARIF results
-      contents: read # checkout
+      security-events: write # Permission: Upload workflow-analysis SARIF results.
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

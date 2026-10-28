@@ -1,19 +1,14 @@
-//! Degradation-counter names — the `snake_case` keys of
-//! `MetricsSnapshot.counters` in the stats JSON.
+//! Degradation-counter names — the `snake_case` keys of `MetricsSnapshot.counters` in the stats JSON.
 //!
-//! This JSON shape is contract
-//! surface (the C# `CountersData` is generated from this list, and fmf-core's
-//! `golden_json` test pins its `CountersSnapshot` serde keys against it), so the
-//! list lives here even though the counters themselves are engine-internal.
+//! This JSON shape is contract surface (the C# `CountersData` is generated from this list, and fmf-core's `golden_json` test pins its `CountersSnapshot` serde keys against it), so the list lives here even though the counters themselves are engine-internal.
 //! Intentional changes follow the canonical contract/golden/generator flow;
-//! obsolete counters are removed rather than retained as permanently-zero
-//! public fields.
+//! obsolete counters are removed rather than retained as permanently-zero public fields.
 
 /// The ordered `snake_case` keys of the degradation counters.
 ///
-/// Exposed as `MetricsSnapshot.counters` in the stats JSON. Contract surface:
-/// Both the C# `CountersData` and fmf-core's `CountersSnapshot` serde keys are
-/// pinned against this list.
+/// Exposed as `MetricsSnapshot.counters` in the stats JSON.
+/// Contract surface:
+/// Both the C# `CountersData` and fmf-core's `CountersSnapshot` serde keys are pinned against this list.
 pub const COUNTER_NAMES: &[&str] = &[
     "scan_unresolved_parents",
     "stat_fetch_failures",

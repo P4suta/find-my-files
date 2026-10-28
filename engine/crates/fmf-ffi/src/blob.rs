@@ -10,21 +10,17 @@ use crate::error::{checked_abi_len, guard, set_error};
 use crate::handle::engine;
 use crate::{FMF_E_INVALID_ARG, FMF_E_IO, FMF_OK};
 
-// ── JSON blobs (stats / traces) ─────────────────────────────────────────
-
-// The blob POD radiates from the contract (ADR-0018).
 pub use fmf_contract::pod::FmfBlob;
 
 #[repr(C)]
 struct BlobOwned {
-    blob: FmfBlob, // published descriptor; the Box keeps its address stable
+    blob: FmfBlob,
     bytes: Vec<u8>,
 }
 
-// SAFETY: `blob.data` is either null or points into `bytes`. Moving the Box
-// between registry buckets/threads does not move either allocation, and the
-// owner is never mutated after publication. The registry mutex serializes
-// ownership transfer and removal; callers must still not read while freeing.
+/* SAFETY: `blob.data` contains a null pointer or points into `bytes`.
+Moving the Box between registry buckets or threads preserves both allocations, and publication freezes the owner.
+The registry mutex serializes ownership transfer and removal; callers must prevent reads concurrent with freeing. */
 #[expect(
     clippy::non_send_fields_in_send_ty,
     reason = "the raw descriptor pointer targets this Box's immutable Vec allocation"
@@ -54,8 +50,6 @@ pub(crate) fn blob_from_json(json: String) -> Result<*mut FmfBlob, i32> {
     };
     let mut blobs = BLOBS.lock();
     match blobs.entry(owner_id) {
-        // Derive the pointer from the stored box, after the move — see the
-        // same reasoning in `results.rs`.
         Entry::Vacant(entry) => Ok(std::ptr::from_mut(&mut entry.insert(owned).blob)),
         Entry::Occupied(_) => {
             set_error(format!(
@@ -66,9 +60,8 @@ pub(crate) fn blob_from_json(json: String) -> Result<*mut FmfBlob, i32> {
     }
 }
 
-/// Frees the JSON blob identified by the monotonic owner ID returned in its
-/// descriptor. ID zero is a no-op; unknown, wrong-kind, stale, and already
-/// freed IDs are rejected without touching foreign memory.
+/// Frees the JSON blob identified by the monotonic owner ID returned in its descriptor.
+/// ID zero is a no-op; unknown, wrong-kind, stale, and already freed IDs are rejected without touching foreign memory.
 #[unsafe(no_mangle)]
 pub extern "C" fn fmf_blob_free(owner_id: u64) -> i32 {
     guard(|| {
@@ -91,10 +84,8 @@ pub extern "C" fn fmf_blob_free(owner_id: u64) -> i32 {
 ///
 /// # Safety
 ///
-/// `out` must be aligned and writable as one `*mut FmfBlob` for this call. It
-/// is initialized to null; on success the returned descriptor and its bytes
-/// remain borrowed from the native registry until its `owner_id` is passed
-/// exactly once to `fmf_blob_free`.
+/// `out` must be aligned and writable as one `*mut FmfBlob` for this call.
+/// It is initialized to null; on success the returned descriptor and its bytes remain borrowed from the native registry until its `owner_id` is passed exactly once to `fmf_blob_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_engine_stats(h: *mut c_void, out: *mut *mut FmfBlob) -> i32 {
     guard(|| {

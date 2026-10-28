@@ -5,16 +5,10 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Guards the FFI binding surface: every P/Invoke entry point in
-/// <see cref="NativeEngine"/> must name an export that actually exists in
-/// fmf_engine.dll. The DLL's Rust exports are all lowercase snake_case
-/// (<c>#[no_mangle] extern "C" fn fmf_*</c>), and <see cref="LibraryImportAttribute"/>
-/// resolves the method name as the symbol through the case-sensitive
-/// GetProcAddress — so a single PascalCased name (e.g. an analyzer renaming
-/// <c>fmf_set_event_callback</c> to <c>Fmf_set_event_callback</c>) silently
-/// breaks in-proc mode with <see cref="EntryPointNotFoundException"/>,
-/// invisible to the fake-backed suite which never loads the DLL. Pinning the
-/// entry-point shape here makes such drift fail the build, not a user's search.</summary>
+/// <summary>Guards the FFI binding surface: every P/Invoke entry point in <see cref="NativeEngine"/> must name an export that actually exists in fmf_engine.dll.
+/// The DLL's Rust exports are all lowercase snake_case (<c>#[no_mangle] extern "C" fn fmf_*</c>), and <see cref="LibraryImportAttribute"/> resolves the method name as the symbol through the case-sensitive GetProcAddress — so a single PascalCased name (e.g. an analyzer renaming <c>fmf_set_event_callback</c> to <c>Fmf_set_event_callback</c>) silently breaks in-proc mode with <see cref="EntryPointNotFoundException"/>,
+/// invisible to the fake-backed suite which never loads the DLL.
+/// Pinning the entry-point shape here makes such drift fail the build, not a user's search.</summary>
 public sealed class NativeEngineBindingTests
 {
     [Fact]
@@ -45,8 +39,6 @@ public sealed class NativeEngineBindingTests
             .Select(x => x.Import!.EntryPoint ?? x.Name)
             .ToList();
 
-        // Guard against a false green: if the attribute ever stops surfacing
-        // through reflection, finding nothing must fail rather than pass vacuously.
         Assert.True(
             entryPoints.Count >= 10,
             $"expected NativeEngine's P/Invoke surface, found only {entryPoints.Count} entry points");

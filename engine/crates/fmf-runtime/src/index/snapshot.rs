@@ -1,0 +1,1069 @@
+#![forbid(unsafe_code)]
+
+use parking_lot::Mutex;
+
+use super::{EntryId, NO_PARENT, SortKey, VolumeIndex, flags};
+
+const SNAPSHOT_MAGIC: &[u8; 8] = b"FMFIDX08";
+const JOURNAL_ID_OFFSET: usize = SNAPSHOT_MAGIC.len();
+const NEXT_USN_OFFSET: usize = JOURNAL_ID_OFFSET + size_of::<u64>();
+const ENTRY_COUNT_OFFSET: usize = NEXT_USN_OFFSET + size_of::<i64>();
+const HEADER_BYTES: usize = ENTRY_COUNT_OFFSET + size_of::<u64>();
+const ADJACENT_ENTRIES: usize = 2;
+const READ_CHUNK_BYTES: usize = 8 << 20;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParentVisit {
+    Unvisited,
+    Active,
+    Complete,
+}
+
+fn header_field<const N: usize>(
+    head: &[u8; HEADER_BYTES],
+    offset: usize,
+) -> std::io::Result<[u8; N]> {
+    head.get(offset..)
+        .and_then(|tail| tail.get(..N))
+        .and_then(|field| field.try_into().ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid snapshot header field",
+            )
+        })
+}
+
+fn pod_bytes<T: bytemuck::Pod>(v: &[T]) -> &[u8] {
+    bytemuck::cast_slice(v)
+}
+
+fn write_vec<T: bytemuck::Pod, W: std::io::Write>(
+    w: &mut W,
+    h: &mut xxhash_rust::xxh64::Xxh64,
+    v: &[T],
+) -> std::io::Result<()> {
+    let bytes = pod_bytes(v);
+    let len = (bytes.len() as u64).to_le_bytes();
+    h.update(&len);
+    w.write_all(&len)?;
+    h.update(bytes);
+    w.write_all(bytes)
+}
+
+fn initialize_column<T: bytemuck::Pod>(
+    column: &mut Vec<T>,
+    elements: usize,
+) -> std::io::Result<()> {
+    let additional = elements.checked_sub(column.len()).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "column initialization shrinks its prefix",
+        )
+    })?;
+    column.try_reserve_exact(additional).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "section size overflow")
+    })?;
+    column.resize(elements, T::zeroed());
+    Ok(())
+}
+
+fn read_vec<T: bytemuck::Pod, R: std::io::Read>(
+    r: &mut R,
+    h: &mut xxhash_rust::xxh64::Xxh64,
+) -> std::io::Result<Vec<T>> {
+    use std::io::{Error, ErrorKind};
+    const MAX_SECTION_BYTES: usize = 1 << 30;
+    let mut len8 = [0u8; 8];
+    r.read_exact(&mut len8)?;
+    h.update(&len8);
+    let len = u64::from_le_bytes(len8) as usize;
+    if len > MAX_SECTION_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "section length implausibly large",
+        ));
+    }
+    let elem = std::mem::size_of::<T>();
+    if elem == 0 || !len.is_multiple_of(elem) {
+        return Err(Error::new(ErrorKind::InvalidData, "section size mismatch"));
+    }
+    let elems = len / elem;
+    let mut out = Vec::new();
+    out.try_reserve_exact(elems)
+        .map_err(|_| Error::new(ErrorKind::InvalidData, "section size overflow"))?;
+    let chunk_elements = (READ_CHUNK_BYTES / elem).max(1);
+    while out.len() < elems {
+        let start = out.len();
+        let end = start + (elems - start).min(chunk_elements);
+        initialize_column::<T>(&mut out, end)?;
+        let chunk: &mut [u8] = bytemuck::cast_slice_mut(&mut out[start..]);
+        r.read_exact(chunk)?;
+        h.update(chunk);
+    }
+    Ok(out)
+}
+
+#[cfg(kani)]
+#[path = "snapshot_proofs.rs"]
+mod kani_proofs;
+
+impl VolumeIndex {
+    /// Serialize the index plus the USN checkpoint (`journal_id`, `next_usn`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any I/O error from writing to `w`.
+    pub fn write_snapshot<W: std::io::Write>(
+        &self,
+        w: &mut W,
+        journal_id: u64,
+        next_usn: i64,
+    ) -> std::io::Result<()> {
+        let mut h = xxhash_rust::xxh64::Xxh64::new(0);
+        let mut head = Vec::with_capacity(HEADER_BYTES);
+        head.extend_from_slice(SNAPSHOT_MAGIC);
+        head.extend_from_slice(&journal_id.to_le_bytes());
+        head.extend_from_slice(&next_usn.to_le_bytes());
+        head.extend_from_slice(&(self.len() as u64).to_le_bytes());
+        h.update(&head);
+        w.write_all(&head)?;
+
+        write_vec(w, &mut h, &self.dict_pool)?;
+        write_vec(w, &mut h, &self.dict_off)?;
+        write_vec(w, &mut h, &self.name_id)?;
+        write_vec(w, &mut h, &self.orig_pool)?;
+        write_vec(w, &mut h, &self.orig_off)?;
+        write_vec(w, &mut h, &self.parent)?;
+        write_vec(w, &mut h, &self.size_lo)?;
+        let mut ovf: Vec<(EntryId, u64)> = self.size_ovf.iter().map(|(&k, &v)| (k, v)).collect();
+        ovf.sort_unstable();
+        let ovf_ids: Vec<u32> = ovf.iter().map(|p| p.0).collect();
+        let ovf_sizes: Vec<u64> = ovf.iter().map(|p| p.1).collect();
+        write_vec(w, &mut h, &ovf_ids)?;
+        write_vec(w, &mut h, &ovf_sizes)?;
+        write_vec(w, &mut h, &self.mtime)?;
+        write_vec(w, &mut h, &self.frn)?;
+        write_vec(w, &mut h, &self.flag)?;
+        write_vec(w, &mut h, &self.perm_name)?;
+        w.write_all(&h.digest().to_le_bytes())
+    }
+
+    /// Load a snapshot; returns the index and the persisted (`journal_id`,
+    /// `next_usn`) checkpoint.
+    /// Any structural or checksum mismatch is an error — callers fall back to a full rescan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`std::io::Error`]: any underlying read error, or `InvalidData` on a bad magic, checksum mismatch, or any structural inconsistency in the (untrusted) stream.
+    pub fn read_snapshot<R: std::io::Read>(r: &mut R) -> std::io::Result<(Self, u64, i64)> {
+        use std::io::{Error, ErrorKind};
+        let bad = |m: &str| Error::new(ErrorKind::InvalidData, m.to_string());
+
+        let mut h = xxhash_rust::xxh64::Xxh64::new(0);
+        let mut head = [0u8; HEADER_BYTES];
+        r.read_exact(&mut head)?;
+        if head.get(..SNAPSHOT_MAGIC.len()) != Some(SNAPSHOT_MAGIC.as_slice()) {
+            return Err(bad("bad magic"));
+        }
+        h.update(&head);
+        let journal_id = u64::from_le_bytes(header_field(&head, JOURNAL_ID_OFFSET)?);
+        let next_usn = i64::from_le_bytes(header_field(&head, NEXT_USN_OFFSET)?);
+        let count = u64::from_le_bytes(header_field(&head, ENTRY_COUNT_OFFSET)?) as usize;
+
+        let dict_pool: Vec<u8> = read_vec(r, &mut h)?;
+        let dict_off: Vec<u32> = read_vec(r, &mut h)?;
+        let name_id: Vec<u32> = read_vec(r, &mut h)?;
+        let orig_pool: Vec<u8> = read_vec(r, &mut h)?;
+        let orig_off: Vec<u32> = read_vec(r, &mut h)?;
+        let parent: Vec<u32> = read_vec(r, &mut h)?;
+        let size_lo: Vec<u32> = read_vec(r, &mut h)?;
+        let ovf_ids: Vec<u32> = read_vec(r, &mut h)?;
+        let ovf_sizes: Vec<u64> = read_vec(r, &mut h)?;
+        let mtime: Vec<u32> = read_vec(r, &mut h)?;
+        let frn: Vec<u64> = read_vec(r, &mut h)?;
+        let flag: Vec<u8> = read_vec(r, &mut h)?;
+        let perm_name: Vec<u32> = read_vec(r, &mut h)?;
+
+        let mut digest = [0u8; 8];
+        r.read_exact(&mut digest)?;
+        if u64::from_le_bytes(digest) != h.digest() {
+            return Err(bad("checksum mismatch"));
+        }
+        let columns_ok = [
+            name_id.len(),
+            orig_off.len(),
+            parent.len(),
+            size_lo.len(),
+            mtime.len(),
+            frn.len(),
+            flag.len(),
+            perm_name.len(),
+        ]
+        .iter()
+        .all(|&l| l == count);
+        if !columns_ok {
+            return Err(bad("column length mismatch"));
+        }
+        let dict_count = dict_off.len();
+        for k in 0..dict_count {
+            let off = dict_off[k] as usize;
+            let end = dict_off.get(k + 1).map_or(dict_pool.len(), |&e| e as usize);
+            if off > end || end > dict_pool.len() {
+                return Err(bad("dict slice out of pool bounds"));
+            }
+        }
+        let mut tombstones = 0u32;
+        let mut dead_name_bytes = 0u64;
+        for i in 0..count {
+            let nid = name_id[i] as usize;
+            if nid >= dict_count {
+                return Err(bad("name_id out of dict bounds"));
+            }
+            let is_tombstone = flag[i] & flags::TOMBSTONE != 0;
+            if is_tombstone {
+                tombstones += 1;
+            }
+            if orig_off[i] != u32::MAX {
+                let off = dict_off[nid] as usize;
+                let len = dict_off
+                    .get(nid + 1)
+                    .map_or(dict_pool.len(), |&e| e as usize)
+                    - off;
+                let orig_ok = (orig_off[i] as usize)
+                    .checked_add(len)
+                    .is_some_and(|end| end <= orig_pool.len());
+                if !orig_ok {
+                    return Err(bad("name slice out of pool bounds"));
+                }
+                if is_tombstone {
+                    dead_name_bytes += len as u64;
+                }
+            }
+        }
+        if ovf_ids.len() != ovf_sizes.len() {
+            return Err(bad("size overflow length mismatch"));
+        }
+        let sentinels = size_lo.iter().filter(|&&v| v == u32::MAX).count();
+        if sentinels != ovf_ids.len() {
+            return Err(bad("size overflow sentinel mismatch"));
+        }
+        for (i, (&id, &sz)) in ovf_ids.iter().zip(&ovf_sizes).enumerate() {
+            let ascending = i == 0 || ovf_ids[i - 1] < id;
+            if !ascending
+                || (id as usize) >= count
+                || size_lo[id as usize] != u32::MAX
+                || sz < u32::MAX as u64
+            {
+                return Err(bad("size overflow pair invalid"));
+            }
+        }
+        let size_ovf: rustc_hash::FxHashMap<u32, u64> =
+            ovf_ids.into_iter().zip(ovf_sizes).collect();
+
+        let entry_count = parent.len();
+        if entry_count == 0 {
+            return Err(bad("snapshot has no root entry"));
+        }
+
+        let known_flags = flags::IS_DIR
+            | flags::TOMBSTONE
+            | flags::REPARSE
+            | flags::HIDDEN
+            | flags::SYSTEM
+            | flags::EXCLUDED;
+        if flag.iter().any(|bits| *bits & !known_flags != 0) {
+            return Err(bad("snapshot contains unknown entry flags"));
+        }
+        if parent[0] != NO_PARENT {
+            return Err(bad("snapshot root has a parent"));
+        }
+        if flag[0] & flags::IS_DIR == 0 || flag[0] & flags::TOMBSTONE != 0 {
+            return Err(bad("snapshot root is not a live directory"));
+        }
+
+        for (entry, &parent_id) in parent.iter().enumerate().skip(1) {
+            if parent_id == NO_PARENT {
+                return Err(bad("snapshot non-root entry has no parent"));
+            }
+            let parent_idx = parent_id as usize;
+            if parent_idx >= entry_count {
+                return Err(bad("snapshot parent is out of range"));
+            }
+            if parent_idx == entry {
+                return Err(bad("snapshot non-root entry is its own parent"));
+            }
+            if flag[parent_idx] & flags::IS_DIR == 0 {
+                return Err(bad("snapshot parent is not a directory"));
+            }
+            if flag[entry] & flags::TOMBSTONE == 0 && flag[parent_idx] & flags::TOMBSTONE != 0 {
+                return Err(bad("snapshot live entry has a tombstoned parent"));
+            }
+        }
+
+        let mut parent_state = vec![ParentVisit::Unvisited; entry_count];
+        parent_state[0] = ParentVisit::Complete;
+        for start in 1..entry_count {
+            if parent_state[start] == ParentVisit::Complete {
+                continue;
+            }
+
+            let mut entry = start;
+            while parent_state[entry] == ParentVisit::Unvisited {
+                parent_state[entry] = ParentVisit::Active;
+                entry = parent[entry] as usize;
+            }
+            if parent_state[entry] == ParentVisit::Active {
+                return Err(bad("snapshot parent graph contains a cycle"));
+            }
+
+            let mut entry = start;
+            while parent_state[entry] == ParentVisit::Active {
+                parent_state[entry] = ParentVisit::Complete;
+                entry = parent[entry] as usize;
+            }
+        }
+
+        let mut seen_name_entry = vec![false; entry_count];
+        for &entry in &perm_name {
+            let entry_idx = entry as usize;
+            if entry_idx >= entry_count {
+                return Err(bad("snapshot name permutation entry is out of range"));
+            }
+            if std::mem::replace(&mut seen_name_entry[entry_idx], true) {
+                return Err(bad("snapshot name permutation contains a duplicate"));
+            }
+        }
+        if seen_name_entry.iter().any(|seen| !seen) {
+            return Err(bad("snapshot name permutation is incomplete"));
+        }
+
+        let frn_index = super::frn::FrnIndex::build(&frn, &flag);
+        if !frn_index.has_valid_live_object_groups(&frn, &flag) {
+            return Err(bad(
+                "snapshot has conflicting live FRN generations or directory links",
+            ));
+        }
+
+        let mut index = Self {
+            dict_pool,
+            dict_off,
+            name_id,
+            orig_pool,
+            orig_off,
+            parent,
+            size_lo,
+            size_ovf,
+            mtime,
+            frn,
+            flag,
+            frn_index,
+            perm_name,
+            content_generation: 0,
+            structural_generation: 0,
+            stat_generation: 0,
+            dir_topology_generation: 0,
+            exclusion_tree_dirty: false,
+            tombstones,
+            dead_name_bytes,
+            dict_appends_since_dedup: 0,
+            derived_cache: Mutex::new(None),
+        };
+        if !index.has_unique_live_link_identities() {
+            return Err(bad("snapshot contains a duplicate live link identity"));
+        }
+        if !index
+            .perm_name
+            .windows(ADJACENT_ENTRIES)
+            .all(|pair| index.cmp_by(SortKey::Name, pair[0], pair[1]).is_lt())
+        {
+            return Err(bad("snapshot name permutation is not strictly sorted"));
+        }
+        index.recompute_all_excluded();
+
+        Ok((index, journal_id, next_usn))
+    }
+
+    /// Atomic save: write to `<path>.tmp`, then rename over the target.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any I/O error from creating the parent directory, writing the temporary file, or renaming it over the target.
+    pub fn save_to(
+        &self,
+        path: &std::path::Path,
+        journal_id: u64,
+        next_usn: i64,
+    ) -> std::io::Result<()> {
+        use std::io::Write;
+
+        let tmp = path.with_extension("fmfidx.tmp");
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        {
+            let mut w = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+            self.write_snapshot(&mut w, journal_id, next_usn)?;
+            w.flush()?;
+        }
+        std::fs::rename(&tmp, path)
+    }
+
+    /// Open `path` and load the snapshot it holds.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any I/O error from opening the file, or any error from [`Self::read_snapshot`] (a corrupt or incompatible snapshot).
+    pub fn load_from(path: &std::path::Path) -> std::io::Result<(Self, u64, i64)> {
+        let mut r = std::io::BufReader::new(std::fs::File::open(path)?);
+        Self::read_snapshot(&mut r)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::index::testutil::{TestDir, build_hardlink_sample, build_sample};
+
+    #[test]
+    fn read_vec_supplies_initialized_bytes_to_safe_readers() {
+        struct InspectingReader<R>(R);
+
+        impl<R: std::io::Read> std::io::Read for InspectingReader<R> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                std::hint::black_box(buffer.iter().copied().fold(0, u8::wrapping_add));
+                self.0.read(buffer)
+            }
+        }
+
+        let values = [u64::MIN, u64::MAX];
+        let mut bytes = Vec::new();
+        write_vec(&mut bytes, &mut xxhash_rust::xxh64::Xxh64::new(0), &values).unwrap();
+        let mut reader = InspectingReader(bytes.as_slice());
+        let decoded: Vec<u64> =
+            read_vec(&mut reader, &mut xxhash_rust::xxh64::Xxh64::new(0)).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn read_vec_rejects_zero_sized_columns() {
+        let bytes = 0u64.to_le_bytes();
+        let error = read_vec::<(), _>(
+            &mut bytes.as_slice(),
+            &mut xxhash_rust::xxh64::Xxh64::new(0),
+        )
+        .expect_err("zero-sized columns have no encoded element width");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_truncated_section_initializes_only_one_read_chunk() {
+        struct TruncatedReader<'a> {
+            header: &'a [u8],
+            body_calls: usize,
+        }
+        impl std::io::Read for TruncatedReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if !self.header.is_empty() {
+                    return self.header.read(buffer);
+                }
+                self.body_calls += 1;
+                assert_eq!(buffer.len(), READ_CHUNK_BYTES);
+                assert!(buffer.iter().all(|byte| *byte == 0));
+                Ok(0)
+            }
+        }
+        let length = u64::try_from(READ_CHUNK_BYTES * 2).unwrap().to_le_bytes();
+        let mut reader = TruncatedReader {
+            header: &length,
+            body_calls: 0,
+        };
+        let error = read_vec::<u64, _>(&mut reader, &mut xxhash_rust::xxh64::Xxh64::new(0))
+            .expect_err("missing column body");
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(reader.body_calls, 1);
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_all_links_for_one_frn() {
+        let idx = build_hardlink_sample();
+        let object = crate::index::Frn((1u64 << 48) | 0x64);
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 7, 9).unwrap();
+
+        let (loaded, journal_id, next_usn) =
+            VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+        assert_eq!((journal_id, next_usn), (7, 9));
+
+        let mut paths: Vec<Vec<u8>> = loaded
+            .entries_by_frn(object)
+            .map(|id| {
+                let mut path = Vec::new();
+                loaded.append_path(id, &mut path).unwrap();
+                path
+            })
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [b"C:\\a\\shared.txt".to_vec(), b"C:\\b\\alias.txt".to_vec()]
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_two_live_generations_for_one_record() {
+        let mut idx = build_hardlink_sample();
+        let object = crate::index::Frn((1u64 << 48) | 0x64);
+        let second = idx.entries_by_frn(object).nth(1).unwrap();
+        idx.frn[second as usize] = (2u64 << 48) | 0x64;
+
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 0, 0).unwrap();
+        let Err(err) = VolumeIndex::read_snapshot(&mut buf.as_slice()) else {
+            panic!("conflicting live FRN generations must be rejected");
+        };
+        assert!(err.to_string().contains("conflicting live FRN"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_live_link_identity() {
+        let mut idx = build_hardlink_sample();
+        let object = crate::index::Frn((1u64 << 48) | 0x64);
+        let links: Vec<_> = idx.entries_by_frn(object).collect();
+        let first = links[0];
+        let second = links[1];
+        idx.parent[second as usize] = idx.parent[first as usize];
+        idx.name_id[second as usize] = idx.name_id[first as usize];
+        idx.orig_off[second as usize] = idx.orig_off[first as usize];
+
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 0, 0).unwrap();
+        let Err(err) = VolumeIndex::read_snapshot(&mut buf.as_slice()) else {
+            panic!("duplicate live link identity must be rejected");
+        };
+        assert!(
+            err.to_string().contains("duplicate live link identity"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_live_child_of_tombstoned_directory() {
+        let mut idx = build_sample();
+        idx.delete(50);
+
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 0, 0).unwrap();
+        let Err(err) = VolumeIndex::read_snapshot(&mut buf.as_slice()) else {
+            panic!("live child of a dead directory must be rejected");
+        };
+        assert!(err.to_string().contains("tombstoned parent"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_everything() {
+        let mut idx = build_sample();
+        idx.delete(60);
+        let first_new = idx.len() as u32;
+        let huge = crate::index::testutil::u16s("huge.iso");
+        let huge_id = idx.upsert_synthetic(&crate::index::testutil::raw(
+            777,
+            50,
+            &huge,
+            false,
+            (5u64 << 30) + 123,
+            1,
+        ));
+        idx.merge_new_into_permutations(first_new)
+            .expect("fixture topology remains valid");
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 0xDEAD_BEEF_u64, 12345)
+            .unwrap();
+        let (loaded, journal_id, next_usn) =
+            VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+
+        assert_eq!(journal_id, 0xDEAD_BEEF_u64);
+        assert_eq!(next_usn, 12345);
+        assert_eq!(loaded.len(), idx.len());
+        assert_eq!(loaded.live_len(), idx.live_len());
+        assert_eq!(loaded.entry_by_record(60), None);
+        let note = loaded.entry_by_record(100).unwrap();
+        let mut p = Vec::new();
+        loaded.append_path(note, &mut p).unwrap();
+        assert_eq!(p, b"C:\\docs\\Note.TXT");
+        assert_eq!(loaded.name_permutation(), idx.name_permutation());
+        assert_eq!(loaded.size(huge_id), (5u64 << 30) + 123);
+    }
+
+    #[test]
+    fn snapshot_size_overflow_inconsistencies_are_rejected() {
+        let mut sections = valid_sections();
+        sections[7] = vec![0u8; 4];
+        sections[8] = 0x00FF_FFFF_FFFF_u64.to_le_bytes().to_vec();
+        let err = read_crafted(sections);
+        assert!(err.to_string().contains("sentinel mismatch"), "{err}");
+
+        let mut sections = valid_sections();
+        sections[6] = u32::MAX.to_le_bytes().to_vec();
+        let err = read_crafted(sections);
+        assert!(err.to_string().contains("sentinel mismatch"), "{err}");
+
+        let mut sections = valid_sections();
+        sections[6] = u32::MAX.to_le_bytes().to_vec();
+        sections[7] = vec![0u8; 4];
+        sections[8] = 42u64.to_le_bytes().to_vec();
+        let err = read_crafted(sections);
+        assert!(err.to_string().contains("pair invalid"), "{err}");
+
+        let mut sections = valid_sections();
+        sections[6] = u32::MAX.to_le_bytes().to_vec();
+        sections[7] = vec![0u8; 4];
+        let err = read_crafted(sections);
+        assert!(err.to_string().contains("length mismatch"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_corruption_is_detected() {
+        let idx = build_sample();
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 1, 1).unwrap();
+        let mid = buf.len() / 2;
+        buf[mid] ^= 0xFF;
+        assert!(VolumeIndex::read_snapshot(&mut buf.as_slice()).is_err());
+
+        let mut truncated = Vec::new();
+        idx.write_snapshot(&mut truncated, 1, 1).unwrap();
+        truncated.truncate(truncated.len() - 3);
+        assert!(VolumeIndex::read_snapshot(&mut truncated.as_slice()).is_err());
+    }
+
+    /// Checksum-valid stream built from raw section bytes, so structural validation (not the digest) is what must reject it.
+    fn craft_stream(count: u64, sections: &[&[u8]]) -> Vec<u8> {
+        let mut h = xxhash_rust::xxh64::Xxh64::new(0);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(SNAPSHOT_MAGIC);
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&2i64.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        h.update(&buf);
+        for s in sections {
+            write_vec(&mut buf, &mut h, s).unwrap();
+        }
+        let digest = h.digest().to_le_bytes();
+        buf.extend_from_slice(&digest);
+        buf
+    }
+
+    /// Section byte sizes for a structurally valid count=1 snapshot, in read order (ADR-0033 / FMFIDX08): `dict_pool`, `dict_off`, `name_id`,
+    /// `orig_pool` (empty), `orig_off` (sentinel), parent, `size_lo`,
+    /// size-overflow ids/sizes (empty), mtime, frn, flag, `perm_name`.
+    fn valid_sections() -> Vec<Vec<u8>> {
+        vec![
+            b"a".to_vec(),
+            0u32.to_le_bytes().to_vec(),
+            0u32.to_le_bytes().to_vec(),
+            Vec::new(),
+            u32::MAX.to_le_bytes().to_vec(),
+            u32::MAX.to_le_bytes().to_vec(),
+            vec![0u8; 4],
+            Vec::new(),
+            Vec::new(),
+            vec![0u8; 4],
+            vec![0u8; 8],
+            vec![flags::IS_DIR],
+            vec![0u8; 4],
+        ]
+    }
+
+    /// `unwrap_err` needs `Debug` on the Ok side; `VolumeIndex` has none.
+    fn expect_load_err(buf: &[u8]) -> std::io::Error {
+        match VolumeIndex::read_snapshot(&mut &*buf) {
+            Ok(_) => panic!("corrupted snapshot must not load"),
+            Err(e) => e,
+        }
+    }
+
+    fn read_crafted(sections: Vec<Vec<u8>>) -> std::io::Error {
+        let refs: Vec<&[u8]> = sections.iter().map(Vec::as_slice).collect();
+        expect_load_err(&craft_stream(1, &refs))
+    }
+
+    fn encode_u32s(values: &[u32]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn encode_u64s(values: &[u64]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn structural_sections(count: usize) -> Vec<Vec<u8>> {
+        assert!(count > 0 && count <= 26);
+
+        let ids: Vec<u32> = (0..count as u32).collect();
+        let frns: Vec<u64> = (1..=count as u64).collect();
+        let mut parents = vec![0_u32; count];
+        parents[0] = NO_PARENT;
+
+        vec![
+            (0..count).map(|i| b'a' + i as u8).collect(),
+            encode_u32s(&ids),
+            encode_u32s(&ids),
+            Vec::new(),
+            encode_u32s(&vec![NO_PARENT; count]),
+            encode_u32s(&parents),
+            vec![0_u8; count * 4],
+            Vec::new(),
+            Vec::new(),
+            vec![0_u8; count * 4],
+            encode_u64s(&frns),
+            vec![flags::IS_DIR; count],
+            encode_u32s(&ids),
+        ]
+    }
+
+    fn read_structural(sections: Vec<Vec<u8>>, count: usize) -> std::io::Error {
+        let refs: Vec<&[u8]> = sections.iter().map(Vec::as_slice).collect();
+        expect_load_err(&craft_stream(count as u64, &refs))
+    }
+
+    #[test]
+    fn rejects_snapshot_root_with_parent() {
+        let mut sections = structural_sections(1);
+        sections[5] = 0_u32.to_le_bytes().to_vec();
+
+        let err = read_structural(sections, 1);
+        assert!(err.to_string().contains("root has a parent"));
+    }
+
+    #[test]
+    fn rejects_snapshot_non_directory_root() {
+        let mut sections = structural_sections(1);
+        sections[11] = vec![0];
+
+        let err = read_structural(sections, 1);
+        assert!(err.to_string().contains("root is not a live directory"));
+    }
+
+    #[test]
+    fn rejects_snapshot_unknown_entry_flags() {
+        let mut sections = structural_sections(1);
+        sections[11] = vec![u8::MAX];
+
+        let err = read_structural(sections, 1);
+        assert!(err.to_string().contains("unknown entry flags"));
+    }
+
+    #[test]
+    fn rejects_snapshot_parent_out_of_range() {
+        let mut sections = structural_sections(2);
+        sections[5] = [NO_PARENT, 2]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+
+        let err = read_structural(sections, 2);
+        assert!(err.to_string().contains("parent is out of range"));
+    }
+
+    #[test]
+    fn rejects_snapshot_parent_cycle() {
+        let mut sections = structural_sections(3);
+        sections[5] = [NO_PARENT, 2, 1]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+
+        let err = read_structural(sections, 3);
+        assert!(err.to_string().contains("parent graph contains a cycle"));
+    }
+
+    #[test]
+    fn rejects_snapshot_name_permutation_out_of_range() {
+        let mut sections = structural_sections(2);
+        sections[12] = [0_u32, 2].into_iter().flat_map(u32::to_le_bytes).collect();
+
+        let err = read_structural(sections, 2);
+        assert!(
+            err.to_string()
+                .contains("permutation entry is out of range")
+        );
+    }
+
+    #[test]
+    fn rejects_snapshot_name_permutation_duplicate() {
+        let mut sections = structural_sections(2);
+        sections[12] = [0_u32, 0].into_iter().flat_map(u32::to_le_bytes).collect();
+
+        let err = read_structural(sections, 2);
+        assert!(err.to_string().contains("permutation contains a duplicate"));
+    }
+
+    #[test]
+    fn rejects_snapshot_name_permutation_out_of_order() {
+        let mut sections = structural_sections(2);
+        sections[12] = [1_u32, 0].into_iter().flat_map(u32::to_le_bytes).collect();
+
+        let err = read_structural(sections, 2);
+        assert!(
+            err.to_string()
+                .contains("permutation is not strictly sorted")
+        );
+    }
+
+    #[test]
+    fn snapshot_wrong_magic_is_rejected() {
+        let idx = build_sample();
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 1, 1).unwrap();
+        buf[..8].copy_from_slice(b"FMFIDX07");
+        let err = expect_load_err(&buf);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("magic"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_crafted_stream_sanity_loads() {
+        let refs: Vec<Vec<u8>> = valid_sections();
+        let refs: Vec<&[u8]> = refs.iter().map(Vec::as_slice).collect();
+        let buf = craft_stream(1, &refs);
+        let (idx, journal_id, next_usn) = VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+        assert_eq!((journal_id, next_usn), (1, 2));
+        assert_eq!(idx.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_column_count_mismatch_is_rejected_not_panic() {
+        let mut sections = valid_sections();
+        sections[2] = vec![0u8; 8];
+        let err = read_crafted(sections);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("column length"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_misaligned_section_is_rejected_not_panic() {
+        let mut sections = valid_sections();
+        sections[2] = vec![0u8; 7];
+        let err = read_crafted(sections);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("section size"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_out_of_bounds_name_slices_are_rejected() {
+        let mut sections = valid_sections();
+        sections[1] = 5u32.to_le_bytes().to_vec();
+        let err = read_crafted(sections);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("out of pool bounds"), "{err}");
+
+        let mut sections = valid_sections();
+        sections[4] = 0u32.to_le_bytes().to_vec();
+        let err = read_crafted(sections);
+        assert!(err.to_string().contains("out of pool bounds"), "{err}");
+
+        let mut sections = valid_sections();
+        sections[3] = b"A".to_vec();
+        sections[4] = 0u32.to_le_bytes().to_vec();
+        let refs: Vec<&[u8]> = sections.iter().map(Vec::as_slice).collect();
+        let buf = craft_stream(1, &refs);
+        let (idx, _, _) = VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+        assert_eq!(idx.name(0), b"A");
+        assert_eq!(idx.lower_name(0), b"a");
+    }
+
+    #[test]
+    fn snapshot_lying_length_prefix_errors_without_huge_allocation() {
+        let idx = build_sample();
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 1, 1).unwrap();
+        buf[32..40].copy_from_slice(&(1u64 << 60).to_le_bytes());
+        assert!(VolumeIndex::read_snapshot(&mut buf.as_slice()).is_err());
+    }
+
+    #[test]
+    fn truncated_snapshot_errors_at_every_cut_point() {
+        let mut idx = build_sample();
+        idx.delete(60);
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 1, 1).unwrap();
+        assert!(VolumeIndex::read_snapshot(&mut buf.as_slice()).is_ok());
+        for cut in 0..buf.len() {
+            assert!(
+                VolumeIndex::read_snapshot(&mut &buf[..cut]).is_err(),
+                "cut at {cut} must error, not panic or succeed"
+            );
+        }
+    }
+
+    #[test]
+    fn save_to_leaves_no_tmp_file_and_overwrites() {
+        let dir = TestDir::new();
+        let target = dir.join("vol_c.fmfidx");
+        let idx = build_sample();
+        idx.save_to(&target, 7, 8).unwrap();
+        idx.save_to(&target, 9, 10).unwrap();
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["vol_c.fmfidx"], "no .tmp or stray files");
+
+        let (loaded, journal_id, next_usn) = VolumeIndex::load_from(&target).unwrap();
+        assert_eq!((journal_id, next_usn), (9, 10));
+        assert_eq!(loaded.len(), idx.len());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    //! Round-trip property: any index `write_snapshot` then `read_snapshot` reproduces the same observable state and checkpoint — the example-based tests above pin specific corruptions, this pins fidelity over the whole generated space (names spanning ASCII/multibyte/surrogate, sizes that straddle the 4 GiB `size_lo`/`size_ovf` split, real-FILETIME mtimes).
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::index::{Frn, RawEntry, VolumeIndexBuilder};
+
+    /// 4 GiB: the boundary above which a size spills from the `size_lo` u32 column into the `size_ovf` side map (two serialized sections).
+    const OVF: u64 = 4 << 30;
+
+    const FRAGMENTS: &[&str] = &[
+        "a", "Re", "report", "日本", "𠮷", ".rs", ".TXT", "x", "main",
+    ];
+
+    #[derive(Debug, Clone)]
+    struct Ent {
+        name: String,
+        is_dir: bool,
+        size: u64,
+        mtime: i64,
+    }
+
+    fn ent_strategy() -> impl Strategy<Value = Ent> {
+        const EPOCH: i64 = crate::query::dates::FILETIME_UNIX_EPOCH;
+        (
+            proptest::collection::vec(0usize..FRAGMENTS.len(), 1..=3),
+            any::<bool>(),
+            prop_oneof![0u64..OVF, OVF..(64u64 << 30)],
+            EPOCH..(EPOCH + 10_000i64 * 864_000_000_000),
+        )
+            .prop_map(|(parts, is_dir, size, mtime)| Ent {
+                name: parts.iter().map(|&i| FRAGMENTS[i]).collect(),
+                is_dir,
+                size,
+                mtime,
+            })
+    }
+
+    /// Build an index whose records are `10, 11, …`, all under the root.
+    fn build(entries: &[Ent]) -> VolumeIndex {
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
+        for (i, e) in entries.iter().enumerate() {
+            let units: Vec<u16> = e.name.encode_utf16().collect();
+            let record = i as u64 + 10;
+            b.push(RawEntry {
+                parent_frn: Frn(5),
+                frn: Frn((1u64 << 48) | record),
+                name_utf16: &units,
+                is_dir: e.is_dir,
+                is_reparse: false,
+                is_hidden: false,
+                is_system: false,
+                size: e.size,
+                mtime: e.mtime,
+            });
+        }
+        b.finish()
+    }
+
+    fn assert_same(a: &VolumeIndex, b: &VolumeIndex, records: usize) {
+        assert_eq!(a.len(), b.len());
+        assert_eq!(a.live_len(), b.live_len());
+        for i in 0..records as u64 {
+            let rec = i + 10;
+            let ia = a.entry_by_record(rec).expect("record present in source");
+            let ib = b.entry_by_record(rec).expect("record present in loaded");
+            assert_eq!(a.name(ia), b.name(ib), "name for record {rec}");
+            assert_eq!(a.size(ia), b.size(ib), "size for record {rec}");
+            assert_eq!(a.mtime(ia), b.mtime(ib), "mtime for record {rec}");
+            let (mut pa, mut pb) = (Vec::new(), Vec::new());
+            a.append_path(ia, &mut pa).unwrap();
+            b.append_path(ib, &mut pb).unwrap();
+            assert_eq!(pa, pb, "path for record {rec}");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn snapshot_round_trips_observable_state_and_checkpoint(
+            entries in proptest::collection::vec(ent_strategy(), 0..12),
+            journal_id in any::<u64>(),
+            next_usn in any::<i64>(),
+        ) {
+            let idx = build(&entries);
+            let mut buf = Vec::new();
+            idx.write_snapshot(&mut buf, journal_id, next_usn).unwrap();
+            let (loaded, gj, gu) = VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+            prop_assert_eq!((gj, gu), (journal_id, next_usn), "checkpoint must round-trip");
+            assert_same(&idx, &loaded, entries.len());
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn read_snapshot_survives_arbitrary_mutation_without_panicking(
+            entries in proptest::collection::vec(ent_strategy(), 1..6),
+            overwrites in proptest::collection::vec(
+                (any::<prop::sample::Index>(), any::<u8>()), 0..10),
+            truncate_to in any::<prop::sample::Index>(),
+        ) {
+            let mut buf = Vec::new();
+            build(&entries).write_snapshot(&mut buf, 1, 2).unwrap();
+            for (at, byte) in &overwrites {
+                let pos = at.index(buf.len());
+                buf[pos] = *byte;
+            }
+            let cut = truncate_to.index(buf.len() + 1);
+            let slice = &buf[..cut];
+
+            if let Ok((loaded, _, _)) = VolumeIndex::read_snapshot(&mut &slice[..]) {
+                let mut p = Vec::new();
+                for id in 0..loaded.len() as u32 {
+                    let _ = loaded.name(id);
+                    if loaded.is_live(id) {
+                        p.clear();
+                        loaded.append_path(id, &mut p).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Concrete vacuity companion: a ≥ 4 GiB size really does survive the `size_ovf` side-map path (so the property above is not green merely because every generated size stayed in the u32 column).
+    #[test]
+    fn overflow_size_survives_the_round_trip() {
+        let idx = build(&[Ent {
+            name: "huge.iso".into(),
+            is_dir: false,
+            size: (7u64 << 30) + 123,
+            mtime: 0,
+        }]);
+        let mut buf = Vec::new();
+        idx.write_snapshot(&mut buf, 1, 2).unwrap();
+        let (loaded, _, _) = VolumeIndex::read_snapshot(&mut buf.as_slice()).unwrap();
+        let id = loaded.entry_by_record(10).unwrap();
+        assert_eq!(loaded.size(id), (7u64 << 30) + 123);
+    }
+}

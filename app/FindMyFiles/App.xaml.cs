@@ -6,70 +6,57 @@ using Microsoft.UI.Xaml;
 
 namespace FindMyFiles;
 
-/// <summary>
-/// Application entry point and process-wide composition root. `OnLaunched`
-/// stands up the single <see cref="MainWindow"/> immediately, then resolves the
-/// engine boundary (<see cref="EngineClient"/>) off the UI STA and commits it
-/// through the in-process page reload. On fatal init failure it falls back to
-/// an explicit unavailable engine state.
+/// <summary> Application entry point and process-wide composition root.
+/// `OnLaunched` stands up the single <see cref="MainWindow"/> immediately, then resolves the engine boundary (<see cref="EngineClient"/>) off the UI STA and commits it through the in-process page reload.
+/// On fatal init failure it falls back to an explicit unavailable engine state.
 /// </summary>
-// View/startup shell: imperative UI wiring + composition root, not unit-tested (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class App : Application
 {
-    /// <summary>The single top-level window. Created in `OnLaunched`; the origin
-    /// for the HWND lookup via `WinRT.Interop` (<see cref="WindowHandle"/>).</summary>
+    /// <summary>The single top-level window.
+    /// Created in `OnLaunched`; the origin for the HWND lookup via `WinRT.Interop` (<see cref="WindowHandle"/>).</summary>
     internal static Window Window { get; private set; } = null!;
 
     /// <summary>The UI thread's <c>DispatcherQueue</c> (cached in `OnLaunched`).
-    /// Marshal UI work from background threads via <c>TryEnqueue</c> on this
-    /// (UI rule: cache it on the UI thread before use).</summary>
+    /// Marshal UI work from background threads via <c>TryEnqueue</c> on this (UI rule: cache it on the UI thread before use).</summary>
     internal static Microsoft.UI.Dispatching.DispatcherQueue DispatcherQueue { get; private set; } = null!;
 
-    /// <summary>
-    /// The engine boundary. Test-seam builds can swap in deterministic data;
+    /// <summary> The engine boundary.
+    /// Test-seam builds can swap in deterministic data;
     /// stable builds resolve only the service/in-process production engines.
     /// </summary>
     internal static IEngineClient EngineClient { get; private set; } = null!;
 
-    /// <summary>The main window's Win32 HWND. Passed to init of WinRT APIs that
-    /// take a parent window (file pickers, etc.) — the unpackaged WinUI 3 way.</summary>
+    /// <summary>The main window's Win32 HWND.
+    /// Passed to init of WinRT APIs that take a parent window (file pickers, etc.) — the unpackaged WinUI 3 way.</summary>
     internal static nint WindowHandle =>
         WinRT.Interop.WindowNative.GetWindowHandle(Window);
 
-    /// <summary>The non-modal diagnostics window, or <c>null</c> when closed. A
-    /// single instance toggled by <see cref="ToggleDiagnostics"/>; the main
-    /// window's `Closed` handler closes it first so no orphan top-level window
-    /// survives shutdown.</summary>
+    /// <summary>The non-modal diagnostics window, or <c>null</c> when closed.
+    /// A single instance toggled by <see cref="ToggleDiagnostics"/>; the main window's `Closed` handler closes it first so no orphan top-level window survives shutdown.</summary>
     private static DiagnosticsWindow? _diagWindow;
 
-    /// <summary>The system-tray icon (ADR-0030), or <c>null</c> when tray init
-    /// failed or before the window is up. Held for the process lifetime.</summary>
+    /// <summary>The system-tray icon (ADR-0030), or <c>null</c> when tray init failed or before the window is up.
+    /// Held for the process lifetime.</summary>
     private static TrayIcon? _tray;
 
-    /// <summary>Set when the user really quits (tray "Exit") so the main window's
-    /// Closing handler lets the close proceed instead of hiding to tray.</summary>
+    /// <summary>Set when the user really quits (tray "Exit") so the main window's Closing handler lets the close proceed instead of hiding to tray.</summary>
     private static bool _explicitExit;
 
-    /// <summary>The in-process soft-restart orchestrator (ADR-0036), wired in
-    /// <see cref="OnLaunched"/> once the window exists. Null only before launch.</summary>
+    /// <summary>The in-process soft-restart orchestrator (ADR-0036), wired in <see cref="OnLaunched"/> once the window exists.
+    /// Null only before launch.</summary>
     private static AppReload? _reload;
 
     /// <summary>Lifetime of the one background initial engine resolution.
-    /// Service-control polling is bounded but synchronous Win32 work, so
-    /// cancellation suppresses a late commit rather than aborting native calls.</summary>
+    /// Service-control polling is bounded but synchronous Win32 work, so cancellation suppresses a late commit rather than aborting native calls.</summary>
     private static CancellationTokenSource? _initialResolution;
 
     private static int _shuttingDown;
 
-    /// <summary>Open or close the diagnostics window, sharing the supplied
-    /// <see cref="PerfPanelViewModel"/> (the single `MainViewModel.Perf`
-    /// instance). When already open, closing it is enough; the `Closed` handler
-    /// clears the reference; <see cref="PerfPanel.Dispose"/> detaches the view,
-    /// stops its timer and clears <c>IsOpen</c>. When opening, setting
-    /// <c>IsOpen</c> to <see langword="true"/> starts the 1 Hz timer.
-    /// UI-thread serialized, so the open/close toggle has no race.</summary>
-    /// <param name="perf">The shared performance view model to display.</param>
+    /// <summary>Open or close the diagnostics window, sharing the supplied <see cref="PerfPanelViewModel"/> (the single `MainViewModel.Perf` instance).
+    /// When already open, closing it is enough; the `Closed` handler clears the reference; <see cref="PerfPanel.Dispose"/> detaches the view,
+    /// stops its timer and clears <c>IsOpen</c>. When opening, setting <c>IsOpen</c> to <see langword="true"/> starts the 1 Hz timer.
+    /// UI-thread serialized, so the open/close toggle has no race.</summary> <param name="perf">The shared performance view model to display.</param>
     internal static void ToggleDiagnostics(PerfPanelViewModel perf)
     {
         if (_diagWindow is not null)
@@ -85,33 +72,24 @@ public partial class App : Application
         };
         _diagWindow = win;
         win.Activate();
-        perf.IsOpen = true;          // panel is subscribed → SyncTimer starts polling
+        perf.IsOpen = true;
     }
 
-    /// <summary>Initialize in order: apply language override → `InitializeComponent`
-    /// → <c>ExceptionPolicy.Install</c>. The language override must run before
-    /// `InitializeComponent` so `x:Uid`/`ResourceLoader` resolve to the correct
-    /// language on the first XAML load.</summary>
+    /// <summary>Initialize in order: apply language override → `InitializeComponent` → <c>ExceptionPolicy.Install</c>. The language override must run before `InitializeComponent` so `x:Uid`/`ResourceLoader` resolve to the correct language on the first XAML load.</summary>
     public App()
     {
-        // Stand the logger up first: ApplyLanguageOverride and ExceptionPolicy
-        // below both log, and every FileLog call routes through it (ADR-0037).
         LogSetup.Init();
 
-        // Must run before InitializeComponent so x:Uid / ResourceLoader resolve
-        // to the chosen language from the first XAML load.
         ApplyLanguageOverride();
 
         InitializeComponent();
 
-        // "don't crash / don't hang / don't go silent": suppression rules, crash
-        // markers and log routing are documented in one place — ExceptionPolicy.
         ExceptionPolicy.Install(this);
     }
 
-    /// <summary>Apply the persisted UI language. "auto" (the default) follows
-    /// the OS display language; anything else overrides it. Unpackaged apps use
-    /// the WinAppSDK ApplicationLanguages (the UWP one needs package identity).</summary>
+    /// <summary>Apply the persisted UI language.
+    /// "auto" (the default) follows the OS display language; anything else overrides it.
+    /// Unpackaged apps use the WinAppSDK ApplicationLanguages (the UWP one needs package identity).</summary>
     private static void ApplyLanguageOverride()
     {
         try
@@ -151,8 +129,6 @@ public partial class App : Application
             Interlocked.Exchange(ref _shuttingDown, 1);
             CancelInitialResolution();
 
-            // Close the diagnostics window first so no orphan top-level window
-            // survives shutdown (mandatory correction 1).
             _diagWindow?.Close();
             _tray?.Dispose();
             try
@@ -164,20 +140,12 @@ public partial class App : Application
                 FileLog.Warn("app", "engine dispose failed", ex);
             }
 
-            // Flush the last lines to app.log before the process exits.
             LogSetup.Shutdown();
         };
         Window.Activate();
 
-        // Tray-resident mode (ADR-0030): the icon keeps the process (and its hot
-        // engine connection) alive after a close-to-tray. Best-effort — the app
-        // is fully usable without it.
         _tray = CreateTrayIcon();
 
-        // The in-process soft restart (ADR-0036): re-resolve the engine and rebuild
-        // the page without spawning a process. Wired here, after the window exists,
-        // because the rebuild re-navigates its Frame and the teardown closes the
-        // diagnostics window.
         _reload = new AppReload(
             resolve: ResolveEngineOrUnavailable,
             getEngine: () => EngineClient,
@@ -251,13 +219,8 @@ public partial class App : Application
         }
     }
 
-    /// <summary>Resolve the engine transport, returning an unavailable client
-    /// (with the matching notification) on failure. Shared by startup
-    /// (<see cref="OnLaunched"/>) and the in-process soft restart so the
-    /// failure behavior can never drift between the two paths.</summary>
-    /// <param name="args">Engine-selection args (process command line, or a
-    /// soft-restart override such as <c>--engine=pipe</c>).</param>
-    /// <returns>The resolved engine, or an unavailable client when initialization failed.</returns>
+    /// <summary>Resolve the engine transport, returning an unavailable client (with the matching notification) on failure.
+    /// Shared by startup (<see cref="OnLaunched"/>) and the in-process soft restart so the failure behavior can never drift between the two paths.</summary> <param name="args">Engine-selection args (process command line, or a soft-restart override such as <c>--engine=pipe</c>).</param> <returns>The resolved engine, or an unavailable client when initialization failed.</returns>
     private static IEngineClient ResolveEngineOrUnavailable(string[] args)
     {
         try
@@ -266,11 +229,6 @@ public partial class App : Application
         }
         catch (EngineException ex) when (ex.Code == EngineContract.Status.Locked)
         {
-            // The service is up and holds the index_dir writer lock, which is
-            // the cross-process single-writer invariant — in-proc cannot start
-            // here. Say exactly that (stop the service first) instead of the
-            // generic failure. The factory's QueryState guard means we rarely
-            // reach this — it's the backstop.
             FileLog.Error("app", "engine init: index locked by the running service", ex);
             Notifier.Post(
                 NotifySeverity.Error,
@@ -280,9 +238,6 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            // Engine refused to start (DLL missing, service down, index dir
-            // locked by another engine…) — run the recovery UI with no data so
-            // the failure can never masquerade as a successful demo search.
             FileLog.Error("app", "engine initialization failed; using unavailable state", ex);
             Notifier.Post(
                 NotifySeverity.Error,
@@ -292,24 +247,17 @@ public partial class App : Application
         }
     }
 
-    /// <summary>In-process soft restart (ADR-0036): re-resolve the engine from the
-    /// current process command line and rebuild the page. Used after service
-    /// lifecycle changes and the manual "restart app" button — anything that only
-    /// needs the once-at-startup transport choice re-made. Marshals onto the UI
-    /// thread (callers may resume off it after an elevated step).</summary>
+    /// <summary>In-process soft restart (ADR-0036): re-resolve the engine from the current process command line and rebuild the page.
+    /// Used after service lifecycle changes and the manual "restart app" button — anything that only needs the once-at-startup transport choice re-made.
+    /// Marshals onto the UI thread (callers may resume off it after an elevated step).</summary>
     internal static void SoftRestart()
     {
         CancelInitialResolution();
         OnUiThread(() => _reload?.Run(Environment.GetCommandLineArgs()));
     }
 
-    /// <summary>In-process soft restart forcing the pipe transport, used right
-    /// after a successful in-app service registration: the rebuilt page binds the
-    /// retrying pipe client directly (its supervisor waits out the freshly-started
-    /// service's warm-up) instead of re-running <c>auto</c> detection, whose single
-    /// short probe can miss the not-yet-answering service and report it unavailable.
-    /// Replaces the old process relaunch, which single-instancing defeated
-    /// (ADR-0036).</summary>
+    /// <summary>In-process soft restart forcing the pipe transport, used right after a successful in-app service registration: the rebuilt page binds the retrying pipe client directly (its supervisor waits out the freshly-started service's warm-up) instead of re-running <c>auto</c> detection, whose single short probe can miss the not-yet-answering service and report it unavailable.
+    /// Replaces the old process relaunch, which single-instancing defeated (ADR-0036).</summary>
     internal static void SoftRestartIntoPipe()
     {
         CancelInitialResolution();
@@ -317,9 +265,8 @@ public partial class App : Application
             EngineClientFactory.WithEngineMode(Environment.GetCommandLineArgs(), "pipe")));
     }
 
-    /// <summary>Rebuild the page on the disconnected setup engine after the
-    /// user explicitly stops an installed service. Auto mode is intentionally
-    /// bypassed; it would immediately start that same on-demand service again.</summary>
+    /// <summary>Rebuild the page on the disconnected setup engine after the user explicitly stops an installed service.
+    /// Auto mode is intentionally bypassed; it would immediately start that same on-demand service again.</summary>
     internal static void SoftRestartIntoUnavailable()
     {
         CancelInitialResolution();
@@ -329,10 +276,7 @@ public partial class App : Application
     private static void CancelInitialResolution() =>
         Volatile.Read(ref _initialResolution)?.Cancel();
 
-    /// <summary>Run <paramref name="action"/> on the cached UI dispatcher — inline
-    /// when already on it, marshaled otherwise (a soft restart touches the Frame and
-    /// the diagnostics window, which are UI-thread-affine).</summary>
-    /// <param name="action">The UI-thread work.</param>
+    /// <summary>Run <paramref name="action"/> on the cached UI dispatcher — inline when already on it, marshaled otherwise (a soft restart touches the Frame and the diagnostics window, which are UI-thread-affine).</summary> <param name="action">The UI-thread work.</param>
     private static void OnUiThread(Action action)
     {
         if (DispatcherQueue.HasThreadAccess)
@@ -345,8 +289,7 @@ public partial class App : Application
         }
     }
 
-    /// <summary>Creates the tray icon, or <c>null</c> when it cannot be
-    /// initialized — the app stays fully usable without it (ADR-0030).</summary>
+    /// <summary>Creates the tray icon, or <c>null</c> when it cannot be initialized — the app stays fully usable without it (ADR-0030).</summary>
     private static TrayIcon? CreateTrayIcon()
     {
         try
@@ -360,10 +303,8 @@ public partial class App : Application
         }
     }
 
-    /// <summary>Decides whether the main window's close (×) should hide to the
-    /// tray rather than exit (ADR-0030). Called from MainWindow's
-    /// <c>AppWindow.Closing</c>.</summary>
-    /// <returns>True to cancel the close (now hidden to tray); false to exit.</returns>
+    /// <summary>Decides whether the main window's close (×) should hide to the tray rather than exit (ADR-0030).
+    /// Called from MainWindow's <c>AppWindow.Closing</c>.</summary> <returns>True to cancel the close (now hidden to tray); false to exit.</returns>
     internal static bool HandleMainWindowClosing()
     {
         if (WindowLifecycle.ShouldHideToTray(
@@ -378,22 +319,20 @@ public partial class App : Application
         return false;
     }
 
-    /// <summary>Restores the window from the tray (left-click / "Open"). Runs on
-    /// the UI thread (the subclass proc's thread); a click is user input, so
-    /// Activate brings it to the foreground.</summary>
+    /// <summary>Restores the window from the tray (left-click / "Open").
+    /// Runs on the UI thread (the subclass proc's thread); a click is user input, so Activate brings it to the foreground.</summary>
     internal static void ShowFromTray()
     {
         Window.AppWindow.Show();
         Window.Activate();
     }
 
-    /// <summary>Really exits (tray "Exit"): marks the exit explicit so Closing
-    /// lets the window close, runs the normal teardown, then exits the process —
+    /// <summary>Really exits (tray "Exit"): marks the exit explicit so Closing lets the window close, runs the normal teardown, then exits the process —
     /// Hide had kept it alive past the last window.</summary>
     internal static void ExitApplication()
     {
         _explicitExit = true;
-        _tray?.Dispose(); // remove the icon now so no ghost survives if Close runs async
+        _tray?.Dispose();
         Window.Close();
         Current.Exit();
     }

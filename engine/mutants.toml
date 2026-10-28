@@ -1,26 +1,4 @@
-# cargo-mutants config (ADR-0022). Curated to the highest-risk fmf-core
-# soundness surfaces only, so the exact gate runs in bounded time rather than
-# over the whole workspace. `just mutants` is the only supported entry point:
-# xtask fixes cargo-mutants 27.1.0, this config, `--baseline run`,
-# `--no-shuffle`, and the output directory. No caller-supplied option can skip
-# the clean-tree baseline or silently narrow the reviewed scope.
-#
-# Globs containing a slash match the entire repo-relative path, so the `**/`
-# prefix reaches `crates/fmf-core/src/...` from the engine workspace root. A bare
-# filename (no slash) would match by name only; we pin full paths to avoid
-# accidentally pulling same-named files from other crates.
 
-# Where a broken mutant is most likely to slip past the suite: query execution,
-# subsumption, compilation, the in-memory index mutate/compact paths, raw $MFT
-# parsing, USN replay, and the WTF-8 codec.
-#
-# `ondisk/` is the NTFS byte grammar that ADR-0047 moved out from behind the
-# Windows gate: boot sector / FILE record header / attribute headers /
-# $FILE_NAME (`ntfs.rs`), the attribute-chain validator (`record.rs`),
-# $ATTRIBUTE_LIST plus non-resident run maps (`attribute_list.rs`), and the
-# update-sequence array (`fixup.rs`). An attacker who hands the machine a
-# crafted VHDX or USB stick chooses every byte these decode, and fmf-service
-# decodes them as LocalSystem, so this is the scope's whole reason to exist.
 examine_globs = [
   "**/src/query/exec.rs",
   "**/src/query/subsume.rs",
@@ -36,58 +14,7 @@ examine_globs = [
   "**/src/ondisk/fixup.rs",
 ]
 
-# fmf-service/src/security.rs is deliberately absent, and the reason is a
-# containment problem rather than a judgement about its importance.
-# security.rs's behavioural coverage is `tests/security_admin.rs`, which is
-# `#[ignore]` + `FMF_ADMIN_TESTS=1`; only the 12 in-file unit tests over the
-# pure SDDL/SID string helpers run here. Of the 408 mutants cargo-mutants
-# generates in that file, roughly 60 land in functions those unit tests reach
-# and the remaining ~85% land in Win32 handle, hardening, quarantine and
-# atomic-replace code that no test in this gate executes. Every one of those
-# would survive by construction, which teaches nothing and would bloat the
-# reviewed baseline with entries that only look like accepted equivalents.
-# Narrowing to just the pure helpers is not available either: the file-level
-# glob is all-or-nothing, `examine_re`/`exclude_re` are global rather than
-# per-file, and `#[mutants::skip]` is rejected outright by the CI runner
-# (`contains_rust_user_ignore` in xtask/src/mutation_ci.rs).
-# The same argument excludes the rest of fmf-service for a weaker reason:
-# pipe.rs / server.rs / dispatch.rs / lifecycle.rs / config.rs *are* covered
-# unelevated (tests/pipe_loopback.rs, accept_loop_loss.rs, idle_stop.rs), so
-# mutating them would give real signal — they are left out only to keep the
-# gate's runtime bounded, and they are the first candidates if it is widened.
-# Probed 2026-09-15, correcting an earlier claim here that running the ignored
-# tests was mechanically impossible: it is not. xtask already forwards nextest
-# arguments after `--` (see RUST_MUTATION_NEXTEST_ARGS), and a probe confirmed
-# cargo-mutants 27.1.0 passes `--run-ignored=all` straight through to
-# `cargo nextest run`. What actually blocks an elevated gate is containment.
-# The admin tests assert `FMF_ADMIN_TESTS=1` before doing anything, so such a
-# gate must set it, and then every mutant in this file executes *as
-# administrator*: DACL hardening, quarantine and atomic-replace code driven by
-# path and flag computations the mutation is free to change. A mutant that
-# widens a hardening target or redirects a replace is a real risk to the host,
-# which is why this is not simply switched on.
-# Re-examination trigger: security.rs becomes mutable here once its privileged
-# paths gain unelevated coverage (a fake-handle seam), or once an elevated gate
-# can run against a disposable root (the VHDX the nightly-admin lane already
-# builds) with its own baseline — not before.
-
-# Keep each cargo-mutants sandbox's build artifacts inside the sandbox.
-# `engine/.cargo/config.toml` sets `target-dir = "../build/engine"`, which is
-# relative to the workspace root — so inside a sandbox at
-# `%TEMP%\cargo-mutants-engine-XXXX.tmp` it resolves to `%TEMP%\build\engine`,
-# a single directory shared by every sandbox and by every run. Cargo then
-# reuses one sandbox's binaries in another, which destroys the isolation the
-# sandbox exists for: measured here, a clean-tree baseline reused a previous
-# mutant's `fmf-core` test binary and failed with `assertion failed:
-# apply_fixup(...)` — the exact mutant under test — while the same source tree
-# passed 362/362 outside the sandbox. Caught and missed verdicts are both
-# unsound without this. The path is relative, so it resolves against each
-# sandbox's own root; it does not create a stray `engine/target/` in the repo.
 additional_cargo_args = ["--target-dir", "target"]
 
-# Some of these tests do real index/USN-replay work, so a mutated build can run
-# slower than the clean baseline before it's caught. Give each mutant 5x the
-# baseline test time (plus the auto lower bound) so slow-but-correct mutants
-# don't get miscounted as timeouts.
 timeout_multiplier = 5.0
 test_tool = "nextest"

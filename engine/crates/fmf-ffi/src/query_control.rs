@@ -1,13 +1,12 @@
 //! Monotonic opaque query-control lifecycles for the in-process ABI.
 //!
-//! Controls are registered before managed code schedules `fmf_query`, so a
-//! cancellation that arrives before native execution cannot be lost.
+//! Controls are registered before managed code schedules `fmf_query`, so a cancellation that arrives before native execution cannot be lost.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::LazyLock;
 
-use fmf_core::engine::QueryCancellation;
+use fmf_runtime::engine::QueryCancellation;
 use parking_lot::Mutex;
 
 use crate::error::{guard, guard_cleanup, set_error};
@@ -40,8 +39,8 @@ pub(crate) fn register_for_test(engine_id: usize) -> Result<u64, i32> {
     register(engine_id)
 }
 
-/// Create a query control owned by `h`. The returned nonzero ID is passed to
-/// `fmf_query`, then freed after callback deregistration and query completion.
+/// Create a query control owned by `h`.
+/// The returned nonzero ID is passed to `fmf_query`, then freed after callback deregistration and query completion.
 ///
 /// # Safety
 ///
@@ -88,9 +87,9 @@ pub extern "C" fn fmf_query_control_cancel(control_id: u64) -> i32 {
     })
 }
 
-/// Free a completed query control. Unknown/double/stale IDs fail closed.
-/// A successful cleanup preserves the preceding `fmf_query` diagnostic on
-/// this caller thread until `fmf_last_error` can retrieve it.
+/// Free a completed query control.
+/// Unknown/double/stale IDs fail closed.
+/// A successful cleanup preserves the preceding `fmf_query` diagnostic on this caller thread until `fmf_last_error` can retrieve it.
 #[unsafe(no_mangle)]
 pub extern "C" fn fmf_query_control_free(control_id: u64) -> i32 {
     guard_cleanup(|| {

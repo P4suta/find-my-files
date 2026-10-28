@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 5
     environment: release-please
     permissions:
-      id-token: write  # Authenticate to Doppler with GitHub OIDC.
+      id-token: write # Permission: Authenticate the automation-only Doppler identity.
     steps:
       - name: Fetch automation credentials
         id: credentials
@@ -80,7 +80,7 @@ jobs:
     timeout-minutes: 5
     environment: release
     permissions:
-      id-token: write  # Authenticate to Doppler with GitHub OIDC.
+      id-token: write # Permission: Authenticate the signing-only Doppler identity.
     steps:
       - name: Fetch sign_windows credentials
         id: credentials

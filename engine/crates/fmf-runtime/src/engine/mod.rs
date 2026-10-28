@@ -1,0 +1,503 @@
+//! Multi-volume engine assembly.
+//!
+//! Owns one `VolumeIndex` per NTFS volume, drives initial scans and USN tailing threads, and answers queries with a k-way-merged, sort-ordered result set.
+//! This is the layer both boundaries expose 1:1 — the in-process FFI (`fmf-ffi`) and the named-pipe service (`fmf-service`).
+
+const RECENT_QUERY_LIMIT: usize = 64;
+#[cfg(windows)]
+const WRITER_PID_READ_LIMIT: u64 = 16;
+
+mod results;
+mod seams;
+mod search;
+mod volume;
+#[cfg(windows)]
+mod worker;
+
+#[cfg(test)]
+#[path = "../../tests/unit/engine_tests.rs"]
+mod tests;
+#[cfg(all(test, windows))]
+#[path = "../../tests/unit/worker_tests.rs"]
+mod worker_tests;
+
+pub use crate::query::QueryCancellation;
+pub use results::{ResultSet, Row};
+
+use std::path::PathBuf;
+use std::sync::Arc;
+#[cfg(any(test, feature = "testutil"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+
+use parking_lot::{Mutex, RwLock};
+use thiserror::Error;
+
+#[cfg(any(test, feature = "testutil"))]
+use crate::index::VolumeIndex;
+use crate::metrics::MetricsHub;
+use crate::query;
+
+#[cfg(any(test, feature = "testutil"))]
+use volume::JournalCheckpoint;
+use volume::VolumeSlot;
+
+/// Engine startup configuration.
+#[derive(Debug, Clone)]
+pub struct EngineConfig {
+    /// Root directory holding per-volume snapshots and the `.writer.lock` (`%ProgramData%\find-my-files\`).
+    pub index_dir: PathBuf,
+}
+
+pub use fmf_contract::options::VolumeState;
+
+/// Asynchronous notification a volume emits to the event sink during scanning and tailing (mapped 1:1 to a contract POD by [`EngineEvent::to_wire`]).
+#[derive(Debug, Clone)]
+pub enum EngineEvent {
+    /// Initial-scan progress: `entries` searchable path rows seen so far on `volume` (each hard link is one row).
+    Progress {
+        /// Volume label (e.g. `"C:"`).
+        volume: String,
+        /// Searchable path rows indexed so far (running count).
+        entries: u64,
+    },
+    /// `volume`'s initial scan finished; it is now queryable with `entries` live searchable path rows.
+    VolumeReady {
+        /// Volume label (e.g. `"C:"`).
+        volume: String,
+        /// Total live searchable path rows when the scan completed.
+        entries: u64,
+    },
+    /// Emitted (debounced, engine-side only throttle) after USN batches.
+    IndexChanged {
+        /// Volume label (e.g. `"C:"`).
+        volume: String,
+    },
+    /// A full rescan of `volume` has begun (e.g. the USN journal was lost).
+    RescanStarted {
+        /// Volume label (e.g. `"C:"`).
+        volume: String,
+    },
+    /// `volume` could not be opened or scanned; `message` is the human-readable reason.
+    VolumeFailed {
+        /// Volume label (e.g. `"C:"`).
+        volume: String,
+        /// Human-readable failure reason.
+        message: String,
+    },
+    /// A WARN/ERROR/panic was recorded in the diagnostics ring; the UI pulls details from the metrics snapshot (push notification + pull detail).
+    EngineError {
+        /// Severity recorded in the diagnostics ring (1=warn, 2=error,
+        /// 3=panic).
+        severity: u64,
+        /// Volume label the diagnostic was attributed to (empty if none).
+        volume: String,
+    },
+}
+
+impl EngineEvent {
+    /// The single `EngineEvent` → contract POD mapping — the FFI callback and the pipe event push both consume this (ADR-0018: no per-boundary kind tables).
+    #[must_use]
+    pub fn to_wire(&self) -> fmf_contract::pod::FmfEvent {
+        use fmf_contract::events::EventKind;
+        let (kind, volume, entries) = match self {
+            Self::Progress { volume, entries } => (EventKind::Progress, volume, *entries),
+            Self::VolumeReady { volume, entries } => (EventKind::VolumeReady, volume, *entries),
+            Self::IndexChanged { volume } => (EventKind::IndexChanged, volume, 0),
+            Self::RescanStarted { volume } => (EventKind::RescanStarted, volume, 0),
+            Self::VolumeFailed { volume, .. } => (EventKind::VolumeFailed, volume, 0),
+            Self::EngineError { severity, volume } => (EventKind::EngineError, volume, *severity),
+        };
+        fmf_contract::pod::FmfEvent::new(kind as u32, entries, volume)
+    }
+}
+
+/// Callback the engine invokes (from any thread) to deliver an [`EngineEvent`].
+pub type EventSink = Arc<dyn Fn(&EngineEvent) + Send + Sync>;
+
+/// Why an `IndexStart` request was rejected before any slot, worker, or event was created.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum IndexStartError {
+    /// A label was not exactly one ASCII letter followed by `':'`.
+    #[error("volume at position {position} must be an ASCII drive label such as \"C:\"")]
+    MalformedLabel {
+        /// Zero-based position in the request.
+        position: usize,
+    },
+    /// Two request entries canonicalized to the same uppercase drive label.
+    #[error("duplicate volume label {label}")]
+    DuplicateLabel {
+        /// Canonical uppercase drive label.
+        label: String,
+    },
+    /// The drive is not currently attached as a fixed NTFS volume.
+    #[error("volume {label} is not a currently attached fixed NTFS volume")]
+    UnavailableVolume {
+        /// Canonical uppercase drive label.
+        label: String,
+    },
+}
+
+/// A failure answering a query (parse, compile, or a stale result set).
+#[derive(Debug, Error)]
+pub enum EngineError {
+    /// The caller cancelled the query before a result was published.
+    #[error("query cancelled")]
+    Cancelled,
+    /// Query text exceeded the bounded parser/compiler input contract.
+    #[error("query is {actual} UTF-8 bytes; maximum is {maximum}")]
+    QueryTooLong {
+        /// Supplied UTF-8 byte length.
+        actual: usize,
+        /// Contract maximum.
+        maximum: u32,
+    },
+    /// The query text could not be parsed.
+    #[error("query parse: {0}")]
+    Parse(#[from] query::ParseError),
+    /// The parsed query could not be compiled.
+    #[error("query compile: {0}")]
+    Compile(#[from] query::CompileError),
+    /// The result set references an index that has since been rebuilt.
+    #[error("result is stale (index was rebuilt)")]
+    Stale,
+    /// A caller requested more rows than one bounded page may materialize.
+    #[error("result page count {requested} exceeds the contract maximum {maximum}")]
+    PageTooLarge {
+        /// Requested row count.
+        requested: usize,
+        /// Contract maximum.
+        maximum: u32,
+    },
+    /// A row or page cannot be represented by the fixed-width wire/FFI POD.
+    #[error("result page cannot be represented by the contract: {0}")]
+    PageEncoding(&'static str),
+    /// A corrupt parent graph prevented reconstruction of a result path.
+    #[error("result path: {0}")]
+    Path(#[from] crate::index::PathBuildError),
+}
+
+impl From<query::QueryCancelled> for EngineError {
+    fn from(_: query::QueryCancelled) -> Self {
+        Self::Cancelled
+    }
+}
+
+/// Why `Engine::new` refused to start.
+///
+/// `Locked` is the cross-process arm of the single-writer invariant: the index directory holds one `.writer.lock` opened for the engine's lifetime,
+/// so a second engine over the same directory — typically an `--engine=inproc` UI started while the service runs — fails here rather than corrupting the snapshot.
+/// Both boundaries surface it as `FMF_E_LOCKED` ([`fmf_contract::codes::LOCKED`]).
+#[derive(Debug, Error)]
+pub enum EngineCreateError {
+    #[error(
+        "index directory is locked by another engine process (holder pid: {})",
+        .0.map_or_else(|| "unknown".to_string(), |p| p.to_string())
+    )]
+    /// Another engine process already holds the writer lock (its pid if readable).
+    /// The cross-process arm of the single-writer invariant.
+    Locked(Option<u32>),
+    /// The index directory could not be created or its lock could not be opened.
+    #[error("index directory: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// The multi-volume engine: owns one index per NTFS volume, drives scans and USN tailing, and answers queries.
+/// Holds the single-writer lock for its whole lifetime.
+pub struct Engine {
+    config: EngineConfig,
+    sink: RwLock<Option<EventSink>>,
+    volumes: RwLock<Vec<Arc<VolumeSlot>>>,
+    threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    metrics: MetricsHub,
+    /// Last `(text, options) → compiled query`.
+    /// An identical re-issue — a USN- driven requery of the same text (the `RefreshInPlace` path) — then skips parse + compile, which matters most for a heavy regex.
+    /// Always sound:
+    /// the compiled query is a pure function of `(text, options)` (the date resolver maps civil dates to ticks independently of the wall clock).
+    /// Keying on the whole `QueryOptions` over-approximates (only case + the regex mode/scope actually steer compilation) but stays trivially correct.
+    /// Engine-wide because compilation is volume-independent.
+    compile_cache: Mutex<Option<(String, query::QueryOptions, Arc<query::CompiledQuery>)>>,
+    /// Keeps the diag→EngineError forwarding registered for our lifetime.
+    _diag_guard: Mutex<Option<crate::diag::SinkGuard>>,
+    /// Exclusive-write handle on `{index_dir}\.writer.lock` for our whole lifetime — the OS releases it on process death, so no stale locks.
+    #[cfg(windows)]
+    _writer_lock: std::fs::File,
+}
+
+impl Engine {
+    /// Create the engine and acquire the single-writer lock on the index directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineCreateError::Io`] if the index directory cannot be created, or [`EngineCreateError::Locked`] if another engine process already holds the writer lock (`FMF_E_LOCKED`).
+    pub fn new(config: EngineConfig) -> Result<Arc<Self>, EngineCreateError> {
+        std::fs::create_dir_all(&config.index_dir)?;
+        #[cfg(windows)]
+        let writer_lock = Self::acquire_writer_lock(&config.index_dir)?;
+        let engine = Arc::new(Self {
+            config,
+            sink: RwLock::new(None),
+            volumes: RwLock::new(Vec::new()),
+            threads: Mutex::new(Vec::new()),
+            metrics: MetricsHub::new(),
+            compile_cache: Mutex::new(None),
+            _diag_guard: Mutex::new(None),
+            #[cfg(windows)]
+            _writer_lock: writer_lock,
+        });
+        let weak = Arc::downgrade(&engine);
+        let guard = crate::diag::register_sink(Arc::new(move |ev| {
+            if let Some(e) = weak.upgrade() {
+                e.emit(EngineEvent::EngineError {
+                    severity: ev.severity.as_u64(),
+                    volume: ev.volume.clone().unwrap_or_default(),
+                });
+            }
+        }));
+        *engine._diag_guard.lock() = Some(guard);
+        Ok(engine)
+    }
+
+    /// Cross-process single-writer guard: exclusive write access on `.writer.lock` (readers allowed, so a losing process can report the holder's pid).
+    /// Held until drop; the OS frees it on process death.
+    #[cfg(windows)]
+    fn acquire_writer_lock(
+        index_dir: &std::path::Path,
+    ) -> Result<std::fs::File, EngineCreateError> {
+        use std::io::{Read, Write};
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+
+        let path = index_dir.join(".writer.lock");
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                if let Err(error) = write!(f, "{}", std::process::id()).and_then(|()| f.flush()) {
+                    tracing::warn!(error = %error, "cannot write writer-lock owner PID");
+                }
+                Ok(f)
+            }
+            Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
+                let holder = std::fs::File::open(&path).ok().and_then(|file| {
+                    let mut text = String::new();
+                    file.take(WRITER_PID_READ_LIMIT)
+                        .read_to_string(&mut text)
+                        .ok()
+                        .and_then(|_| text.trim().parse::<u32>().ok())
+                });
+                Err(EngineCreateError::Locked(holder))
+            }
+            Err(e) => Err(EngineCreateError::Io(e)),
+        }
+    }
+
+    /// Install (or clear with `None`) the callback that receives every [`EngineEvent`].
+    pub fn set_event_sink(&self, sink: Option<EventSink>) {
+        *self.sink.write() = sink;
+    }
+
+    fn emit(&self, ev: EngineEvent) {
+        let sink = self.sink.read().clone();
+        if let Some(s) = sink {
+            s(&ev);
+        }
+    }
+
+    /// Emit a deterministic event through the real sink in integration tests.
+    #[cfg(any(test, feature = "testutil"))]
+    pub fn emit_test_event(&self, event: EngineEvent) {
+        self.emit(event);
+    }
+
+    /// Begin indexing the given volumes (asynchronous; progress via events).
+    /// Idempotent per volume label: clients re-send `IndexStart` on every (re)connect and the service also calls this at startup, so a volume already being indexed is skipped.
+    /// A duplicate slot would make every query return that volume's rows once per copy (search merges all Ready slots) — the source of the "each result appears N times" bug.
+    ///
+    /// The entire request is validated and canonicalized before the first side effect.
+    /// Every label must be a member of the current fixed-NTFS volume set and canonical duplicates are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexStartError::MalformedLabel`] for a non-drive label,
+    /// [`IndexStartError::DuplicateLabel`] when two entries canonicalize to the same drive, or [`IndexStartError::UnavailableVolume`] when a drive is not currently attached as fixed NTFS.
+    pub fn index_start(self: &Arc<Self>, volumes: &[String]) -> Result<(), IndexStartError> {
+        let available = Self::list_ntfs_volumes();
+        let volumes = volume::validate_index_start_volumes(volumes, &available)?;
+        self.start_canonical_volumes(&volumes);
+        Ok(())
+    }
+
+    fn start_canonical_volumes(self: &Arc<Self>, volumes: &[String]) {
+        for label in volumes {
+            debug_assert!(volume::is_valid_volume_label(label));
+            debug_assert_eq!(label, &label.to_ascii_uppercase());
+            let slot = {
+                let mut vols = self.volumes.write();
+                if vols.iter().any(|s| s.label == *label) {
+                    continue;
+                }
+                let store = Arc::new(seams::WinSnapshotStore::new(volume::snapshot_path(
+                    &self.config.index_dir,
+                    label,
+                )));
+                let slot = Arc::new(VolumeSlot::scanning(label.clone(), store));
+                vols.push(slot.clone());
+                slot
+            };
+            let engine = self.clone();
+            let worker_slot = slot.clone();
+            match std::thread::Builder::new()
+                .name(format!("fmf-vol-{label}"))
+                .spawn(move || engine.volume_thread(worker_slot))
+            {
+                Ok(handle) => self.threads.lock().push(handle),
+                Err(error) => self.volume_spawn_failed(&slot, &error),
+            }
+        }
+    }
+
+    /// Roll back the provisional slot when the OS cannot create its worker.
+    /// Keeping it in `Scanning` would permanently suppress every later retry because `index_start` is idempotent by label.
+    fn volume_spawn_failed(&self, slot: &Arc<VolumeSlot>, error: &std::io::Error) {
+        self.volumes
+            .write()
+            .retain(|candidate| !Arc::ptr_eq(candidate, slot));
+        tracing::error!(
+            volume = %slot.label,
+            error = %error,
+            "volume worker thread unavailable"
+        );
+        self.emit(EngineEvent::VolumeFailed {
+            volume: slot.label.clone(),
+            message: format!("volume worker thread unavailable: {error}"),
+        });
+    }
+
+    /// Per-volume status: `(label, state, files scanned so far)`.
+    pub fn status(&self) -> Vec<(String, VolumeState, u64)> {
+        self.volumes
+            .read()
+            .iter()
+            .map(|s| (s.label.clone(), *s.phase.lock(), *s.scanned.lock()))
+            .collect()
+    }
+
+    /// The engine's metrics hub (counters and the diagnostics ring).
+    pub const fn metrics(&self) -> &MetricsHub {
+        &self.metrics
+    }
+
+    /// Per-volume memory accounting (perf panel / `fmf stats`).
+    pub fn index_stats(&self) -> Vec<crate::metrics::IndexStats> {
+        self.volumes
+            .read()
+            .iter()
+            .filter_map(|slot| {
+                slot.index.read().as_ref().map(|idx| {
+                    let mut s = idx.stats(&slot.label);
+                    s.add_derived_bytes(query::derived_cache_bytes(idx));
+                    s
+                })
+            })
+            .collect()
+    }
+
+    /// Full observability snapshot (JSON-serializable).
+    pub fn metrics_snapshot(&self) -> crate::metrics::MetricsSnapshot {
+        self.metrics
+            .snapshot(RECENT_QUERY_LIMIT, self.index_stats())
+    }
+
+    /// Persist every Ready volume whose generations moved since its last save ("dirty"), using the tailing thread's shared checkpoint.
+    /// The checkpoint may trail the index by an in-flight batch — the USN replay on load covers that.
+    /// Returns the number of snapshots written (failed writes are counted in `snapshot_save_failures` and excluded).
+    #[cfg(windows)]
+    pub fn flush(&self) -> usize {
+        let volumes: Vec<_> = self.volumes.read().clone();
+        let mut saved = 0;
+        for slot in volumes {
+            if *slot.phase.lock() != VolumeState::Ready {
+                continue;
+            }
+            let Some(ckpt) = *slot.checkpoint.lock() else {
+                continue;
+            };
+            let dirty = {
+                let guard = slot.index.read();
+                let Some(idx) = guard.as_ref() else { continue };
+                *slot.last_saved.lock()
+                    != Some((idx.content_generation(), idx.structural_generation()))
+            };
+            if !dirty {
+                continue;
+            }
+            if self.save_slot(&slot, ckpt) {
+                saved += 1;
+            }
+        }
+        saved
+    }
+
+    /// Signal every volume thread to stop and join them (bounded wait).
+    pub fn shutdown(&self) {
+        *self._diag_guard.lock() = None;
+        for slot in self.volumes.read().iter() {
+            slot.stop.store(true, Ordering::Relaxed);
+        }
+        let mut threads = self.threads.lock();
+        for t in threads.drain(..) {
+            let name = t.thread().name().unwrap_or("unnamed").to_owned();
+            if t.join().is_err() {
+                tracing::error!(worker = %name, "volume worker panicked while shutting down");
+            }
+        }
+    }
+
+    /// Test/dev helper: register an already-built index as a Ready volume.
+    /// The zero checkpoint stands in for a journal position so `flush` can exercise the save path on injected volumes.
+    #[cfg(any(test, feature = "testutil"))]
+    pub fn insert_ready_volume(&self, label: &str, idx: VolumeIndex) {
+        let slot = Arc::new(VolumeSlot {
+            label: label.to_string(),
+            phase: Mutex::new(VolumeState::Ready),
+            scanned: Mutex::new(idx.live_len() as u64),
+            index: RwLock::new(Some(idx)),
+            stop: Arc::new(AtomicBool::new(false)),
+            last_query: Mutex::new(None),
+            checkpoint: Mutex::new(Some(JournalCheckpoint {
+                journal_id: 0,
+                next_usn: 0,
+            })),
+            last_saved: Mutex::new(None),
+            save_lock: Mutex::new(()),
+            store: Arc::new(seams::WinSnapshotStore::new(volume::snapshot_path(
+                &self.config.index_dir,
+                label,
+            ))),
+        });
+        self.volumes.write().push(slot);
+    }
+
+    /// Test/dev helper: swap a rebuilt index into an existing Ready volume —
+    /// the same structural replacement a journal-gone full rescan performs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no volume with the given `label` exists.
+    #[cfg(any(test, feature = "testutil"))]
+    pub fn replace_ready_volume(&self, label: &str, idx: VolumeIndex) {
+        let volumes = self.volumes.read();
+        let slot = volumes
+            .iter()
+            .find(|s| s.label == label)
+            .expect("replace_ready_volume: unknown volume");
+        *slot.scanned.lock() = idx.live_len() as u64;
+        slot.install_index(idx);
+    }
+}

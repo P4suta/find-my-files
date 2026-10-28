@@ -1,0 +1,29 @@
+//! Binary layout shared by the release PE readers.
+
+pub const CHECKSUM_FIELD_OFFSET: usize = 64;
+pub const COFF_HEADER_SIZE: usize = 20;
+pub const COFF_OPTIONAL_SIZE_OFFSET: usize = 16;
+pub const COFF_SECTION_COUNT_OFFSET: usize = 2;
+pub const DATA_DIRECTORY_SIZE: usize = 8;
+pub const DOS_HEADER_BYTES: usize = 0x40;
+pub const DOS_PE_POINTER_OFFSET: usize = 0x3c;
+pub const DOS_SIGNATURE_BYTES: usize = 2;
+pub const HEADERS_SIZE_FIELD_OFFSET: usize = 60;
+pub const PE32_DEPENDENT_FLAGS_OFFSET: usize = 54;
+pub const PE32_DIRECTORIES_OFFSET: usize = 96;
+pub const PE32_DIRECTORY_COUNT_OFFSET: usize = 92;
+pub const PE32_MAGIC: u16 = 0x010b;
+pub const PE32_PLUS_DEPENDENT_FLAGS_OFFSET: usize = 78;
+pub const PE32_PLUS_DIRECTORIES_OFFSET: usize = 112;
+pub const PE32_PLUS_DIRECTORY_COUNT_OFFSET: usize = 108;
+pub const PE32_PLUS_MAGIC: u16 = 0x020b;
+pub const PE_SIGNATURE_BYTES: usize = 4;
+pub const SECTION_HEADER_SIZE: usize = 40;
+pub const SECTION_RAW_POINTER_OFFSET: usize = 20;
+pub const SECTION_RAW_SIZE_OFFSET: usize = 16;
+pub const SECTION_VIRTUAL_ADDRESS_OFFSET: usize = 12;
+pub const SECTION_VIRTUAL_SIZE_OFFSET: usize = 8;
+pub const WIN_CERTIFICATE_ALIGNMENT: usize = 8;
+pub const WIN_CERTIFICATE_HEADER_BYTES: usize = 8;
+pub const WIN_CERTIFICATE_REVISION_OFFSET: usize = 4;
+pub const WIN_CERTIFICATE_TYPE_OFFSET: usize = 6;

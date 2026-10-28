@@ -5,6 +5,9 @@ The named-pipe adoption, rejected transport alternatives, flush public surface, 
 
 ## Decision
 
+The placement of the complete engine in `fmf-core` is partly superseded by [Pure core and shared runtime](pure-core-and-shared-runtime.md).
+The contract authority, compatibility rules, and two-seam limit below remain in force.
+
 Introduce a **dependency-free leaf crate `fmf-contract` (rlib)** at the bottom of the dependency graph as the machine-readable source of truth for the engine contract (status codes, opcodes, event kinds, wire PODs, QueryOptions, limits, version numbers, pipe name), radiating a single definition to all Rust consumers (fmf-core / fmf-proto / fmf-ffi / fmf-service). For C#, the `gen-contract` binary inside `fmf-contract` radiates `app/FindMyFiles/Engine/Generated/EngineContract.g.cs` (constants, enums, `[StructLayout(Explicit)]` structs, CountersData DTO) as a **checked-in generated artifact**, and `fmf-contract/tests/drift.rs` continuously detects drift in the canonical nextest suite.
 
 The contract semantics are carried by **`contract/golden/`** at the repository root (manifest + byte streams + shared JSON fixtures) as an executable specification. The corpus is **captured from the current implementation before the refactor begins** (capture-first); thereafter both Rust (fmf-proto) and the independently hand-written C# codec (PipeProtocol/PageCodec) pin the same files. Re-capture (bless) only happens via explicit invocation with `FMF_BLESS=1` — the ritual for an intentional contract change; normal test runs require a match against the existing bytes.

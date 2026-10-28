@@ -1,20 +1,19 @@
-//! `diag` — versions, log locations, and the diagnostics a developer is
-//! actually looking for.
+//! `diag` — versions, log locations, and the diagnostics a developer is actually looking for.
 //!
-//! The command used to print one thing: `fmf_core::diag::recent_errors()`. That
-//! ring is per-process and this process is `fmf` itself, freshly started and
-//! holding no index — and `DiagLayer` only records WARN+, so the ring is empty
-//! on essentially every run. The label said "in-process" and was therefore
-//! honest, but the diagnostics worth reading live in the **service** process,
+//! The command used to print one thing: `fmf_runtime::diag::recent_errors()`.
+//! That ring is per-process and this process is `fmf` itself, freshly started and holding no index — and `DiagLayer` only records WARN+, so the ring is empty on essentially every run.
+//! The label said "in-process" and was therefore honest, but the diagnostics worth reading live in the **service** process,
 //! which `fmf` cannot reach.
 //!
-//! So `diag` reads what the service leaves behind: the rolling
-//! `engine.<date>.log` under its data root. That needs no wire — no pipe client
-//! in the CLI, no contract field — and it outlives the process that wrote it,
-//! which the ring does not: a service that crashed and restarted has an empty
-//! ring and a log that still says why. The ring is kept alongside it, now
-//! labelled with whose ring it is, because the two are genuinely different
-//! sources and a reader must not have to guess which one they are looking at.
+//! So `diag` reads what the service leaves behind: the rolling `engine.<date>.log` under its data root.
+//! That needs no wire — no pipe client in the CLI, no contract field — and it outlives the process that wrote it,
+//! which the ring does not: a service that crashed and restarted has an empty ring and a log that still says why.
+//! The ring is kept alongside it, now labelled with whose ring it is, because the two are genuinely different sources and a reader must not have to guess which one they are looking at.
+
+const LOG_TAIL_READ_FACTOR: u64 = 2;
+const LEVEL_END_OFFSET: usize = 35;
+const LEVEL_START_OFFSET: usize = 30;
+const TIMESTAMP_SEPARATOR_OFFSET: usize = 29;
 
 use std::path::{Path, PathBuf};
 
@@ -24,13 +23,12 @@ use super::json;
 /// Trailing WARN/ERROR lines reported from the service log.
 const SERVICE_LOG_LINES: usize = 20;
 
-/// Bytes read from the end of each inspected generation. A busy service's daily
-/// log is unbounded; only its end can matter here.
+/// Bytes read from the end of each inspected generation.
+/// A busy service's daily log is unbounded; only its end can matter here.
 const TAIL_BYTES: u64 = 256 * 1024;
 
-/// Newest generations inspected. One is not enough: a service that rolled over
-/// at midnight has an almost-empty newest file while the failure being chased
-/// sits in yesterday's.
+/// Newest generations inspected.
+/// One is not enough: a service that rolled over at midnight has an almost-empty newest file while the failure being chased sits in yesterday's.
 const GENERATIONS: usize = 3;
 
 /// The machine-readable shape of `diag --format json`.
@@ -41,12 +39,10 @@ struct DiagReport {
     engine_log_dir: String,
     app_log: String,
     log_filter: &'static str,
-    /// This `fmf` process's own diagnostics ring — normally empty, and never
-    /// the service's. Kept for compatibility and for `fmf -v` runs that do
-    /// warn.
+    /// This `fmf` process's own diagnostics ring — normally empty, and never the service's.
+    /// Kept for compatibility and for `fmf -v` runs that do warn.
     recent_errors: serde_json::Value,
-    /// What the service process left in its log — the diagnostics that survive
-    /// a restart.
+    /// What the service process left in its log — the diagnostics that survive a restart.
     service_log: ServiceLog,
 }
 
@@ -58,27 +54,23 @@ struct ServiceLog {
     /// Generation file names inspected, oldest first.
     files: Vec<String>,
     /// Why the answer may be incomplete — unreadable directory, no log at all,
-    /// a generation that could not be opened. Empty when `recent` is the whole
-    /// truth. An empty section with no explanation is the failure this command
-    /// exists to stop, so every reason is reported rather than swallowed.
+    /// a generation that could not be opened.
+    /// Empty when `recent` is the whole truth.
+    /// An empty section with no explanation is the failure this command exists to stop, so every reason is reported rather than swallowed.
     notes: Vec<String>,
     /// Trailing WARN/ERROR lines, oldest first.
     recent: Vec<String>,
 }
 
-/// The 5-character level column of a logfmt line, or `None` when the line has
-/// no such column (a wrapped payload, a torn final write).
+/// The 5-character level column of a logfmt line, or `None` when the line has no such column (a wrapped payload, a torn final write).
 ///
-/// `LogfmtFormat` writes a 29-character RFC3339 stamp, one space, then a
-/// fixed-width level tag — so the level is read by *position*. Substring
-/// matching would promote any line whose message body happened to contain the
-/// word `ERROR`, including one an attacker-supplied filename put there.
+/// `LogfmtFormat` writes a 29-character RFC3339 stamp, one space, then a fixed-width level tag — so the level is read by *position*. Substring matching would promote any line whose message body happened to contain the word `ERROR`, including one an attacker-supplied filename put there.
 fn level_of(line: &str) -> Option<&str> {
     let bytes = line.as_bytes();
-    if bytes.len() < 35 || bytes[29] != b' ' {
+    if bytes.len() < LEVEL_END_OFFSET || bytes[TIMESTAMP_SEPARATOR_OFFSET] != b' ' {
         return None;
     }
-    line.get(30..35)
+    line.get(LEVEL_START_OFFSET..LEVEL_END_OFFSET)
 }
 
 /// Whether this log line is one of the ones worth reporting.
@@ -88,9 +80,7 @@ fn is_problem(line: &str) -> bool {
 
 /// Whether `name` is one of the appender's `engine.<date>.log` generations.
 ///
-/// Matched case-insensitively: NTFS is, so the same file can be listed under
-/// any casing, and a case-sensitive test would silently report "no log here"
-/// for a log that exists.
+/// Matched case-insensitively: NTFS is, so the same file can be listed under any casing, and a case-sensitive test would silently report "no log here" for a log that exists.
 fn is_generation(name: &str) -> bool {
     const PREFIX: &str = "engine.";
     name.get(..PREFIX.len())
@@ -111,7 +101,6 @@ fn generations(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
                 .is_some_and(is_generation)
         })
         .collect();
-    // `engine.YYYY-MM-DD.log` sorts lexicographically in date order.
     files.sort();
     let skip = files.len().saturating_sub(GENERATIONS);
     Ok(files.split_off(skip))
@@ -125,25 +114,18 @@ fn tail_lines(path: &Path) -> std::io::Result<Vec<String>> {
     let start = file.metadata()?.len().saturating_sub(TAIL_BYTES);
     file.seek(SeekFrom::Start(start))?;
     let mut buf = Vec::new();
-    // Bounded at the reader, not only by the seek: the service is still writing
-    // to this file, so the length behind `start` is a guess that can grow while
-    // it is being read. The slack lets concurrent growth through while keeping
-    // the read finite.
     (&mut file)
-        .take(TAIL_BYTES.saturating_mul(2))
+        .take(TAIL_BYTES.saturating_mul(LOG_TAIL_READ_FACTOR))
         .read_to_end(&mut buf)?;
-    // Lossy: a torn multi-byte write at the seek point must not lose the whole
-    // tail, and the line it damages is dropped below anyway.
     let text = String::from_utf8_lossy(&buf).into_owned();
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     if start > 0 && !lines.is_empty() {
-        lines.remove(0); // the seek landed mid-line
+        lines.remove(0);
     }
     Ok(lines)
 }
 
-/// Collect the service's recent WARN/ERROR lines, reporting every reason the
-/// answer might be short.
+/// Collect the service's recent WARN/ERROR lines, reporting every reason the answer might be short.
 fn read_service_log(dir: &Path) -> ServiceLog {
     let mut log = ServiceLog {
         dir: dir.display().to_string(),
@@ -191,14 +173,11 @@ pub fn diag(ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
     let program_data = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
     let engine_log_dir = format!(r"{program_data}\find-my-files\logs");
     let app_log = r"%APPDATA%\find-my-files\logs\app.log".to_owned();
-    let errors = fmf_core::diag::recent_errors();
+    let errors = fmf_runtime::diag::recent_errors();
     let service_log = read_service_log(Path::new(&engine_log_dir));
 
     if ctx.is_json() {
         return json::emit(&DiagReport {
-            // Channel-aware build identity, identical to `fmf --version` (clap reads
-            // the same const) — not the bare CARGO_PKG_VERSION, which dropped the
-            // channel/sha and disagreed with --version.
             version: fmf_buildstamp::VERSION,
             arch: std::env::consts::ARCH,
             engine_log_dir,
@@ -218,8 +197,6 @@ pub fn diag(ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
     println!("app log    : {app_log}");
     println!("log filter : FMF_LOG (env var, e.g. FMF_LOG=debug)");
 
-    // Which process each section belongs to is stated, because the two are not
-    // interchangeable and the useful one is almost never the ring.
     println!(
         "\nservice process — WARN/ERROR from {} ({}):",
         if service_log.files.is_empty() {
@@ -265,12 +242,8 @@ mod tests {
         assert!(!is_problem(&line("INFO ", "query served")));
         assert!(!is_problem(&line("DEBUG", "finish: entries sorted")));
 
-        // An INFO line whose body merely says ERROR is still an INFO line. A
-        // substring match would have reported it, and a file name can put that
-        // word in a message body.
         assert!(!is_problem(&line("INFO ", "ERROR WARN")));
 
-        // Fragments with no level column report none rather than guessing.
         assert_eq!(level_of(""), None);
         assert_eq!(level_of("short"), None);
         assert_eq!(level_of(&"ERROR".repeat(20)), None);
@@ -279,9 +252,6 @@ mod tests {
     #[test]
     fn generations_are_matched_the_way_the_filesystem_names_them() {
         assert!(is_generation("engine.2026-09-14.log"));
-        // NTFS is case-insensitive, so the same file can be listed under any
-        // casing; a case-sensitive test would report "no log here" for a log
-        // that exists, which is the silent-empty-answer failure again.
         assert!(is_generation("ENGINE.2026-09-14.LOG"));
         assert!(is_generation("Engine.2026-09-14.Log"));
 
@@ -290,15 +260,12 @@ mod tests {
         assert!(!is_generation("engine.log.txt"));
         assert!(!is_generation("notes.txt"));
         assert!(!is_generation(""));
-        // Shorter than the prefix, and multi-byte inside it: neither may panic.
         assert!(!is_generation("eng"));
         assert!(!is_generation("エンジン.log"));
     }
 
     #[test]
     fn an_unreadable_log_directory_is_reported_with_its_reason() {
-        // The silent-empty-section failure, pinned: when there is nothing to
-        // show, the output must say why there is nothing to show.
         let missing = std::env::temp_dir().join("fmf-diag-no-such-dir-8f3a1c");
         let log = read_service_log(&missing);
 
@@ -327,7 +294,6 @@ mod tests {
             format!("{}\n{}\n", line("ERROR", "newer"), line("DEBUG", "noise")),
         )
         .expect("write generation");
-        // Not a generation file: must be ignored, not parsed.
         std::fs::write(dir.join("notes.txt"), line("ERROR", "not a log")).expect("write stray");
 
         let log = read_service_log(&dir);

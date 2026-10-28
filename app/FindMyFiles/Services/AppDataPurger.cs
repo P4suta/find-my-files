@@ -1,13 +1,11 @@
 namespace FindMyFiles.Services;
 
-/// <summary>Deletes the UI-owned per-user state for the explicit full-uninstall
-/// action. The app log is closed first because Serilog owns <c>app.log</c> with
-/// delete sharing disabled. On failure logging is reopened so the still-running
-/// app does not silently lose diagnostics.</summary>
+/// <summary>Deletes the UI-owned per-user state for the explicit full-uninstall action.
+/// The app log is closed first because Serilog owns <c>app.log</c> with delete sharing disabled.
+/// On failure logging is reopened so the still-running app does not silently lose diagnostics.</summary>
 internal static class AppDataPurger
 {
-    /// <summary>Production full-purge entry point.</summary>
-    /// <returns>True only when the canonical AppData tree no longer exists.</returns>
+    /// <summary>Production full-purge entry point.</summary> <returns>True only when the canonical AppData tree no longer exists.</returns>
     public static bool TryPurge()
     {
         if (!AppPaths.IsTestOverride && !IsCanonicalRoot(AppPaths.RootDir))
@@ -37,10 +35,7 @@ internal static class AppDataPurger
             StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>Path-parameterized core for deterministic tests.</summary>
-    /// <param name="root">Per-user state root to remove.</param>
-    /// <param name="closeLog">Closes the owner of files below <paramref name="root"/>.</param>
-    /// <returns>True only when the root is absent after the operation.</returns>
+    /// <summary>Path-parameterized core for deterministic tests.</summary> <param name="root">Per-user state root to remove.</param> <param name="closeLog">Closes the owner of files below <paramref name="root"/>.</param> <returns>True only when the root is absent after the operation.</returns>
     internal static bool TryPurge(string root, Action closeLog)
     {
         try

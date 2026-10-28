@@ -6,14 +6,12 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace FindMyFiles.Converters;
 
-/// <summary>
-/// Pure x:Bind formatters for the F12 diagnostics panel. These produce the
-/// dense numeric/diagnostic strings the panel shows — not localized prose —
+/// <summary> Pure x:Bind formatters for the F12 diagnostics panel.
+/// These produce the dense numeric/diagnostic strings the panel shows — not localized prose —
 /// so everything is formatted with <see cref="CultureInfo.InvariantCulture"/>:
-/// stable grouping for values pasted into bug reports, and deterministic unit
-/// tests regardless of the build agent's locale. Moved out of the panel's
-/// imperative code-behind so the formatting is testable (the chrome — stage
-/// bar / sparkline — stays in code-behind). UI thread only via x:Bind.
+/// stable grouping for values pasted into bug reports, and deterministic unit tests regardless of the build agent's locale.
+/// Moved out of the panel's imperative code-behind so the formatting is testable (the chrome — stage bar / sparkline — stays in code-behind).
+/// UI thread only via x:Bind.
 /// </summary>
 public static class DiagFormat
 {
@@ -22,52 +20,28 @@ public static class DiagFormat
 
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
-    /// <summary>Engine log directory of the <em>service</em> engine, relative to
-    /// %ProgramData%: the service inits diagnostics with its own data dir
-    /// (<c>&lt;data&gt;\logs</c>), the one subtree install grants the authorized
-    /// user read on.</summary>
+    /// <summary>Engine log directory of the <em>service</em> engine, relative to %ProgramData%: the service inits diagnostics with its own data dir (<c>&lt;data&gt;\logs</c>), the one subtree install grants the authorized user read on.</summary>
     internal static readonly string ServiceEngineLogSubPath = Path.Combine(DataRootLeaf, "logs");
 
-    /// <summary>Engine log directory of the <em>in-proc</em> engine, relative to
-    /// %ProgramData%. The FFI engine has no data dir, so it derives its log dir
-    /// from the index dir (<c>resolve_log_dir(None, index_dir)</c>) and writes to
-    /// <c>&lt;data&gt;\index\logs</c> — a different place from the service's, and
-    /// one an installed machine keeps SYSTEM+Administrators only.</summary>
+    /// <summary>Engine log directory of the <em>in-proc</em> engine, relative to %ProgramData%. The FFI engine has no data dir, so it derives its log dir from the index dir (<c>resolve_log_dir(None, index_dir)</c>) and writes to <c>&lt;data&gt;\index\logs</c> — a different place from the service's, and one an installed machine keeps SYSTEM+Administrators only.</summary>
     internal static readonly string InProcEngineLogSubPath =
         Path.Combine(DataRootLeaf, "index", "logs");
 
-    /// <summary>Where the engine behind <paramref name="s"/> writes its rolling
-    /// <c>engine.&lt;date&gt;.log</c>, relative to %ProgramData% — the two
-    /// engines do not share a log directory, and naming the wrong one reads as
-    /// "there are no logs". Only the pipe client fills
-    /// <see cref="EngineStatsData.Transport"/>, so it is the transport
-    /// discriminator; before the first stats poll (null) the shipped default —
-    /// the service — is named.</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns>The %ProgramData%-relative engine log directory.</returns>
+    /// <summary>Where the engine behind <paramref name="s"/> writes its rolling <c>engine.&lt;date&gt;.log</c>, relative to %ProgramData% — the two engines do not share a log directory, and naming the wrong one reads as "there are no logs".
+    /// Only the pipe client fills <see cref="EngineStatsData.Transport"/>, so it is the transport discriminator; before the first stats poll (null) the shipped default —
+    /// the service — is named.</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns>The %ProgramData%-relative engine log directory.</returns>
     internal static string EngineLogSubPath(EngineStatsData? s) =>
         s is null || s.Transport is not null
             ? ServiceEngineLogSubPath
             : InProcEngineLogSubPath;
 
-    /// <summary>The symbolic engine log directory for display and for the
-    /// copied diagnostics payload.</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns>The <c>%ProgramData%\…</c> rendering of <see cref="EngineLogSubPath"/>.</returns>
+    /// <summary>The symbolic engine log directory for display and for the copied diagnostics payload.</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns>The <c>%ProgramData%\…</c> rendering of <see cref="EngineLogSubPath"/>.</returns>
     internal static string EngineLogDirectoryDisplay(EngineStatsData? s) =>
         Path.Combine("%ProgramData%", EngineLogSubPath(s));
 
     /// <summary>Build the privacy-safe text copied from the diagnostics panel.
     /// Inputs are explicit so the complete payload, including its log guidance,
-    /// remains deterministic under unit test.</summary>
-    /// <param name="capturedAt">The UTC or offset-aware capture timestamp.</param>
-    /// <param name="appVersion">The application version.</param>
-    /// <param name="osVersion">The operating-system version.</param>
-    /// <param name="engineLogDirectory">Symbolic engine log directory for the
-    /// live transport (see <see cref="EngineLogDirectoryDisplay"/>).</param>
-    /// <param name="statsJson">The already serialized engine statistics.</param>
-    /// <param name="appLogTail">The redacted tail of the application log.</param>
-    /// <returns>The complete privacy-safe diagnostic report.</returns>
+    /// remains deterministic under unit test.</summary> <param name="capturedAt">The UTC or offset-aware capture timestamp.</param> <param name="appVersion">The application version.</param> <param name="osVersion">The operating-system version.</param> <param name="engineLogDirectory">Symbolic engine log directory for the live transport (see <see cref="EngineLogDirectoryDisplay"/>).</param> <param name="statsJson">The already serialized engine statistics.</param> <param name="appLogTail">The redacted tail of the application log.</param> <returns>The complete privacy-safe diagnostic report.</returns>
     internal static string DiagnosticCopy(
         DateTimeOffset capturedAt,
         string appVersion,
@@ -81,71 +55,36 @@ public static class DiagFormat
         $"app log: %APPDATA%\\find-my-files\\logs\\app.log\n\n=== engine stats ===\n{statsJson}\n\n" +
         $"=== app.log (redacted tail) ===\n{appLogTail}\n";
 
-    /// <summary>Group-separated integer (e.g. <c>"812,003"</c>).</summary>
-    /// <param name="n">The value to format.</param>
-    /// <returns>The invariant <c>N0</c> rendering.</returns>
+    /// <summary>Group-separated integer (e.g. <c>"812,003"</c>).</summary> <param name="n">The value to format.</param> <returns>The invariant <c>N0</c> rendering.</returns>
     public static string Count(ulong n) => n.ToString("N0", Inv);
 
-    /// <summary>Whole mebibytes with a unit (e.g. <c>"91 MB"</c>).</summary>
-    /// <param name="bytes">Resident byte count.</param>
-    /// <returns>The value in MiB, rounded to whole units.</returns>
+    /// <summary>Whole mebibytes with a unit (e.g. <c>"91 MB"</c>).</summary> <param name="bytes">Resident byte count.</param> <returns>The value in MiB, rounded to whole units.</returns>
     public static string Mb(ulong bytes) =>
         ((double)bytes / (1024.0 * 1024.0)).ToString("F0", Inv) + " MB";
 
-    /// <summary>Microseconds rendered as milliseconds (e.g. <c>"2.34 ms"</c>).</summary>
-    /// <param name="micros">Duration in µs.</param>
-    /// <returns>The duration in ms to two decimals.</returns>
+    /// <summary>Microseconds rendered as milliseconds (e.g. <c>"2.34 ms"</c>).</summary> <param name="micros">Duration in µs.</param> <returns>The duration in ms to two decimals.</returns>
     public static string Ms(ulong micros) => (micros / 1000.0).ToString("F2", Inv) + " ms";
 
-    /// <summary>Bytes-per-entry with a unit (e.g. <c>"91 B/件"</c>) — the RAM
-    /// efficiency figure measured against the ≤110 B/file target.</summary>
-    /// <param name="bytesPerEntry">Resident bytes divided by entry count.</param>
-    /// <returns>The whole-byte rendering with the per-entry unit.</returns>
+    /// <summary>Bytes-per-entry with a unit (e.g. <c>"91 B/件"</c>) — the RAM efficiency figure measured against the ≤110 B/file target.</summary> <param name="bytesPerEntry">Resident bytes divided by entry count.</param> <returns>The whole-byte rendering with the per-entry unit.</returns>
     public static string BytesPer(double bytesPerEntry) =>
         bytesPerEntry.ToString("F0", Inv) + " B/件";
 
-    /// <summary>Whole microseconds with a unit (e.g. <c>"60 µs"</c>).</summary>
-    /// <param name="micros">Duration in µs.</param>
-    /// <returns>The rounded µs rendering.</returns>
+    /// <summary>Whole microseconds with a unit (e.g. <c>"60 µs"</c>).</summary> <param name="micros">Duration in µs.</param> <returns>The rounded µs rendering.</returns>
     public static string Micros(double micros) => micros.ToString("F0", Inv) + " µs";
 
-    /// <summary>Content-generation label (e.g. <c>"gen 7"</c>).</summary>
-    /// <param name="generation">The volume's content generation counter.</param>
-    /// <returns>The labelled generation.</returns>
+    /// <summary>Content-generation label (e.g. <c>"gen 7"</c>).</summary> <param name="generation">The volume's content generation counter.</param> <returns>The labelled generation.</returns>
     public static string Gen(ulong generation) => "gen " + generation.ToString(Inv);
 
-    /// <summary>Privacy-safe query summary shown above the stat tiles.</summary>
-    /// <param name="t">The last query trace, or null when none was emitted.</param>
-    /// <returns>The query length, or empty when <paramref name="t"/> is null.</returns>
+    /// <summary>Privacy-safe query summary shown above the stat tiles.</summary> <param name="t">The last query trace, or null when none was emitted.</param> <returns>The query length, or empty when <paramref name="t"/> is null.</returns>
     public static string Query(QueryTraceData? t) =>
         t is null ? string.Empty : QueryLength(t.QueryLength);
 
-    /// <summary>Privacy-safe size of a query: its length, never its text.</summary>
-    /// <param name="queryLength">Unicode scalar count of the query.</param>
-    /// <returns><c>"(all)"</c> for the empty query, else <c>"N chars"</c>.</returns>
+    /// <summary>Privacy-safe size of a query: its length, never its text.</summary> <param name="queryLength">Unicode scalar count of the query.</param> <returns><c>"(all)"</c> for the empty query, else <c>"N chars"</c>.</returns>
     private static string QueryLength(uint queryLength) =>
         queryLength == 0 ? "(all)" : queryLength.ToString(Inv) + " chars";
 
-    /// <summary>One entry of the recent-query feed: how long it took, which
-    /// strategy ran it, and how much work that cost (e.g. <c>"3.21 ms ·
-    /// suffix/refine · 1,240 hits / 100,000 scanned · 8 chars"</c>).
-    /// <para>The engine has kept this ring of 64 traces and sent it in every
-    /// snapshot from the start; nothing displayed it, so the most direct
-    /// evidence for "why was that search slow" — which driver ran, how many
-    /// candidates it had to look at, whether the cache narrowed the previous
-    /// result — was being discarded on arrival.</para>
-    /// <para>The query <em>text</em> is not in the trace at all (the engine
-    /// records only its length), so this feed is privacy-safe by
-    /// construction.</para></summary>
-    /// <param name="queryLength">Unicode scalar count of the query.</param>
-    /// <param name="driver">Candidate-generation strategy that ran it.</param>
-    /// <param name="cache">Per-volume query-cache outcome.</param>
-    /// <param name="hits">Rows that matched.</param>
-    /// <param name="entriesScanned">Index entries examined.</param>
-    /// <param name="totalUs">End-to-end µs.</param>
-    /// <param name="volumes">How many volume indexes participated.</param>
-    /// <param name="unchanged">Whether the result was identical to the previous one.</param>
-    /// <returns>The formatted feed line.</returns>
+    /// <summary>One entry of the recent-query feed: how long it took, which strategy ran it, and how much work that cost (e.g. <c>"3.21 ms · suffix/refine · 1,240 hits / 100,000 scanned · 8 chars"</c>).
+    /// <para>The engine has kept this ring of 64 traces and sent it in every snapshot from the start; nothing displayed it, so the most direct evidence for "why was that search slow" — which driver ran, how many candidates it had to look at, whether the cache narrowed the previous result — was being discarded on arrival.</para> <para>The query <em>text</em> is not in the trace at all (the engine records only its length), so this feed is privacy-safe by construction.</para></summary> <param name="queryLength">Unicode scalar count of the query.</param> <param name="driver">Candidate-generation strategy that ran it.</param> <param name="cache">Per-volume query-cache outcome.</param> <param name="hits">Rows that matched.</param> <param name="entriesScanned">Index entries examined.</param> <param name="totalUs">End-to-end µs.</param> <param name="volumes">How many volume indexes participated.</param> <param name="unchanged">Whether the result was identical to the previous one.</param> <returns>The formatted feed line.</returns>
     public static string RecentQuery(
         uint queryLength,
         string driver,
@@ -156,70 +95,46 @@ public static class DiagFormat
         uint volumes,
         bool unchanged)
     {
-        // One volume is the common case and adds nothing; more than one is why
-        // the merge stage shows up at all.
         var vols = volumes == 1 ? string.Empty : $" · {volumes.ToString(Inv)} vol";
 
-        // An idle USN requery that produced the same ids is not a free query —
-        // it is a query whose repaint was skipped. Saying so stops the feed
-        // reading like a mystery.
         var same = unchanged ? " · unchanged" : string.Empty;
         return $"{Ms(totalUs)} · {driver}/{cache} · {Count(hits)} hits / " +
             $"{Count(entriesScanned)} scanned · {QueryLength(queryLength)}{vols}{same}";
     }
 
-    /// <summary>End-to-end time as the "時間" stat-tile value (e.g. <c>"6.05 ms"</c>).</summary>
-    /// <param name="t">The last query trace, or null when none was emitted.</param>
-    /// <returns>The total time, or empty when <paramref name="t"/> is null.</returns>
+    /// <summary>End-to-end time as the "時間" stat-tile value (e.g. <c>"6.05 ms"</c>).</summary> <param name="t">The last query trace, or null when none was emitted.</param> <returns>The total time, or empty when <paramref name="t"/> is null.</returns>
     public static string TotalMs(QueryTraceData? t) => t is null ? string.Empty : Ms(t.TotalUs);
 
-    /// <summary>Match count as the "ヒット" stat-tile value (e.g. <c>"1,234"</c>).</summary>
-    /// <param name="t">The last query trace, or null when none was emitted.</param>
-    /// <returns>The hit count, or empty when <paramref name="t"/> is null.</returns>
+    /// <summary>Match count as the "ヒット" stat-tile value (e.g. <c>"1,234"</c>).</summary> <param name="t">The last query trace, or null when none was emitted.</param> <returns>The hit count, or empty when <paramref name="t"/> is null.</returns>
     public static string Hits(QueryTraceData? t) => t is null ? string.Empty : Count(t.Hits);
 
-    /// <summary>Entries examined as the "走査" stat-tile value (e.g. <c>"100,000"</c>).</summary>
-    /// <param name="t">The last query trace, or null when none was emitted.</param>
-    /// <returns>The scanned count, or empty when <paramref name="t"/> is null.</returns>
+    /// <summary>Entries examined as the "走査" stat-tile value (e.g. <c>"100,000"</c>).</summary> <param name="t">The last query trace, or null when none was emitted.</param> <returns>The scanned count, or empty when <paramref name="t"/> is null.</returns>
     public static string Scanned(QueryTraceData? t) => t is null ? string.Empty : Count(t.EntriesScanned);
 
-    /// <summary>Execution strategy as the "方式" stat-tile value (e.g. <c>"suffix"</c>).</summary>
-    /// <param name="t">The last query trace, or null when none was emitted.</param>
-    /// <returns>The driver label, or empty when <paramref name="t"/> is null.</returns>
+    /// <summary>Execution strategy as the "方式" stat-tile value (e.g. <c>"suffix"</c>).</summary> <param name="t">The last query trace, or null when none was emitted.</param> <returns>The driver label, or empty when <paramref name="t"/> is null.</returns>
     public static string Driver(QueryTraceData? t) => t is null ? string.Empty : t.Driver;
 
-    /// <summary>The standard latency-percentile line — p50/p90/p99/p99.9, the
-    /// figures monitoring tools report (e.g.
-    /// <c>"p50 0.82 ms · p90 1.90 ms · p99 4.21 ms · p99.9 9.00 ms"</c>).</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns>The percentile line, or empty when <paramref name="s"/> is null.</returns>
+    /// <summary>The standard latency-percentile line — p50/p90/p99/p99.9, the figures monitoring tools report (e.g.
+    /// <c>"p50 0.82 ms · p90 1.90 ms · p99 4.21 ms · p99.9 9.00 ms"</c>).</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns>The percentile line, or empty when <paramref name="s"/> is null.</returns>
     public static string Percentiles(EngineStatsData? s) =>
         s is null
             ? string.Empty
             : $"p50 {Ms(s.P50Us)} · p90 {Ms(s.P90Us)} · p99 {Ms(s.P99Us)} · p99.9 {Ms(s.P999Us)}";
 
-    /// <summary>The host process's live memory footprint, using the standard
-    /// Windows names (<c>"Private Bytes 142 MB · Working Set 138 MB"</c>) —
-    /// the same figures Task Manager / Process Explorer report. In pipe mode
-    /// this is the service process; under <c>--engine=inproc</c> the app.</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns>The memory line, or empty when <paramref name="s"/> is null.</returns>
+    /// <summary>The host process's live memory footprint, using the standard Windows names (<c>"Private Bytes 142 MB · Working Set 138 MB"</c>) —
+    /// the same figures Task Manager / Process Explorer report.
+    /// In pipe mode this is the service process; under <c>--engine=inproc</c> the app.</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns>The memory line, or empty when <paramref name="s"/> is null.</returns>
     public static string ProcessMemory(EngineStatsData? s) =>
         s is null
             ? string.Empty
             : $"Private Bytes {Mb(s.CurrentPrivateBytes)} · Working Set {Mb(s.CurrentWsBytes)}";
 
-    /// <summary>Total resident index bytes summed across all volumes (the
-    /// engine's own accounting), as whole MB.</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns>The index total, or empty when <paramref name="s"/> is null.</returns>
+    /// <summary>Total resident index bytes summed across all volumes (the engine's own accounting), as whole MB.</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns>The index total, or empty when <paramref name="s"/> is null.</returns>
     public static string IndexTotal(EngineStatsData? s) =>
         s is null ? string.Empty : Mb(IndexBytes(s));
 
-    /// <summary>Process working set minus the indexes' resident bytes — the
-    /// non-index overhead (engine + runtime), as whole MB. Clamped at 0.</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns>The overhead, or empty when <paramref name="s"/> is null.</returns>
+    /// <summary>Process working set minus the indexes' resident bytes — the non-index overhead (engine + runtime), as whole MB.
+    /// Clamped at 0.</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns>The overhead, or empty when <paramref name="s"/> is null.</returns>
     public static string Overhead(EngineStatsData? s)
     {
         if (s is null)
@@ -231,19 +146,8 @@ public static class DiagFormat
         return Mb(s.CurrentWsBytes > idx ? s.CurrentWsBytes - idx : 0);
     }
 
-    /// <summary>Per-column byte breakdown for one volume index (where the RAM
-    /// goes), with the spool garbage ratio. Member-wise (not object) so it
-    /// binds from an <c>IndexStatsData</c> DataTemplate, like
-    /// <see cref="Usn"/>.</summary>
-    /// <param name="namePool">Original-name spool bytes.</param>
-    /// <param name="lowerPool">Case-folded name spool bytes.</param>
-    /// <param name="offsets">Name-offset table bytes.</param>
-    /// <param name="parent">Parent-pointer column bytes.</param>
-    /// <param name="perm">Name-sort permutation bytes.</param>
-    /// <param name="frnMap">FRN→row lookup map bytes.</param>
-    /// <param name="deadName">Reclaimable dead-name spool bytes.</param>
-    /// <param name="garbageRatio">Dead-name fraction of the spools (0..1).</param>
-    /// <returns>The breakdown line.</returns>
+    /// <summary>Per-column byte breakdown for one volume index (where the RAM goes), with the spool garbage ratio.
+    /// Member-wise (not object) so it binds from an <c>IndexStatsData</c> DataTemplate, like <see cref="Usn"/>.</summary> <param name="namePool">Original-name spool bytes.</param> <param name="lowerPool">Case-folded name spool bytes.</param> <param name="offsets">Name-offset table bytes.</param> <param name="parent">Parent-pointer column bytes.</param> <param name="perm">Name-sort permutation bytes.</param> <param name="frnMap">FRN→row lookup map bytes.</param> <param name="deadName">Reclaimable dead-name spool bytes.</param> <param name="garbageRatio">Dead-name fraction of the spools (0..1).</param> <returns>The breakdown line.</returns>
     public static string IndexColumns(
         ulong namePool,
         ulong lowerPool,
@@ -257,19 +161,8 @@ public static class DiagFormat
         $"parent {Mb(parent)} · perm {Mb(perm)} · frn-map {Mb(frnMap)} · " +
         $"dead {Mb(deadName)} ({Percent(garbageRatio)})";
 
-    /// <summary>One index-established (scan/restore) event as a compact line
-    /// (e.g. <c>"C: snapshot 1.2 s · 850 MB/s · parse 34ms build 36ms sort 37ms · peak 410 MB · 1,234,567件"</c>).
-    /// Member-wise so it binds from a <c>ScanTraceData</c> DataTemplate.</summary>
-    /// <param name="volume">Drive label.</param>
-    /// <param name="source">How the index was established (scan/snapshot).</param>
-    /// <param name="mbPerS">Read throughput in MB/s.</param>
-    /// <param name="parseMs">ms spent parsing MFT records.</param>
-    /// <param name="buildMs">ms spent building the index.</param>
-    /// <param name="sortMs">ms spent sorting the permutation.</param>
-    /// <param name="totalMs">End-to-end ms.</param>
-    /// <param name="entries">Entry count once established.</param>
-    /// <param name="peakWs">Peak working set during the establish, in bytes.</param>
-    /// <returns>The scan line.</returns>
+    /// <summary>One index-established (scan/restore) event as a compact line (e.g. <c>"C: snapshot 1.2 s · 850 MB/s · parse 34ms build 36ms sort 37ms · peak 410 MB · 1,234,567件"</c>).
+    /// Member-wise so it binds from a <c>ScanTraceData</c> DataTemplate.</summary> <param name="volume">Drive label.</param> <param name="source">How the index was established (scan/snapshot).</param> <param name="mbPerS">Read throughput in MB/s.</param> <param name="parseMs">ms spent parsing MFT records.</param> <param name="buildMs">ms spent building the index.</param> <param name="sortMs">ms spent sorting the permutation.</param> <param name="totalMs">End-to-end ms.</param> <param name="entries">Entry count once established.</param> <param name="peakWs">Peak working set during the establish, in bytes.</param> <returns>The scan line.</returns>
     public static string Scan(
         string volume,
         string source,
@@ -284,62 +177,38 @@ public static class DiagFormat
         $"parse {parseMs}ms build {buildMs}ms sort {sortMs}ms · " +
         $"peak {Mb(peakWs)} · {Count(entries)}件";
 
-    /// <summary>The service runtime line (pipe only): uptime, active
-    /// connections and version (e.g. <c>"uptime 2h13m · 接続 1 · v0.1.0"</c>).
-    /// Empty for in-proc clients where there is no separate service.</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns>The service line, or empty when there is no service.</returns>
+    /// <summary>The service runtime line (pipe only): uptime, active connections and version (e.g. <c>"uptime 2h13m · 接続 1 · v0.1.0"</c>).
+    /// Empty for in-proc clients where there is no separate service.</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns>The service line, or empty when there is no service.</returns>
     public static string Service(EngineStatsData? s) =>
         s?.Service is { } svc
             ? $"uptime {Uptime(svc.UptimeMs)} · 接続 {svc.Connections} · v{svc.Version}"
             : string.Empty;
 
-    /// <summary>Visible only when a service is on the other end (pipe clients).</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns><c>Visible</c> when there is service info, otherwise <c>Collapsed</c>.</returns>
+    /// <summary>Visible only when a service is on the other end (pipe clients).</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns><c>Visible</c> when there is service info, otherwise <c>Collapsed</c>.</returns>
     public static Visibility ServiceVis(EngineStatsData? s) =>
         s?.Service is not null ? Visibility.Visible : Visibility.Collapsed;
 
-    /// <summary>The pipe-transport detail line. Empty for in-proc/fake clients
-    /// (no wire), where the panel shows only the engine-mode label above it.</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns>The transport line, or empty when there is no transport.</returns>
+    /// <summary>The pipe-transport detail line.
+    /// Empty for in-proc/fake clients (no wire), where the panel shows only the engine-mode label above it.</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns>The transport line, or empty when there is no transport.</returns>
     public static string Transport(EngineStatsData? s) =>
         s?.Transport is { } tr
             ? $"{tr.State} · reconnects {tr.Reconnects} · RTT {Micros(tr.PageRttEwmaUs)} · pid {tr.ServerPid}"
             : string.Empty;
 
-    /// <summary>One recently-applied USN batch as a compact change-feed line.</summary>
-    /// <param name="volume">Drive label the batch applied to.</param>
-    /// <param name="records">Raw USN records in the batch.</param>
-    /// <param name="upserted">Entries created or updated.</param>
-    /// <param name="deleted">Entries tombstoned.</param>
-    /// <param name="statUpdated">Entries whose size/mtime were refreshed.</param>
-    /// <param name="applyUs">µs to apply the whole batch.</param>
-    /// <returns>The formatted batch line.</returns>
+    /// <summary>One recently-applied USN batch as a compact change-feed line.</summary> <param name="volume">Drive label the batch applied to.</param> <param name="records">Raw USN records in the batch.</param> <param name="upserted">Entries created or updated.</param> <param name="deleted">Entries tombstoned.</param> <param name="statUpdated">Entries whose size/mtime were refreshed.</param> <param name="applyUs">µs to apply the whole batch.</param> <returns>The formatted batch line.</returns>
     public static string Usn(
         string volume, ulong records, ulong upserted, ulong deleted, ulong statUpdated, ulong applyUs) =>
         $"{volume} {Count(records)}rec → +{Count(upserted)} -{Count(deleted)} ~{Count(statUpdated)} ({Micros(applyUs)})";
 
-    /// <summary>One engine diagnostic-ring event as a single line.</summary>
-    /// <param name="uptimeMs">Engine uptime in ms when the event fired.</param>
-    /// <param name="severity">Lowercase level (<c>warn</c>/<c>error</c>/<c>panic</c>).</param>
-    /// <param name="area">Originating module/target.</param>
-    /// <param name="volume">Drive label, or null when not volume-scoped.</param>
-    /// <param name="message">Human-readable description (first line only).</param>
-    /// <returns>The formatted event line.</returns>
+    /// <summary>One engine diagnostic-ring event as a single line.</summary> <param name="uptimeMs">Engine uptime in ms when the event fired.</param> <param name="severity">Lowercase level (<c>warn</c>/<c>error</c>/<c>panic</c>).</param> <param name="area">Originating module/target.</param> <param name="volume">Drive label, or null when not volume-scoped.</param> <param name="message">Human-readable description (first line only).</param> <returns>The formatted event line.</returns>
     public static string Error(ulong uptimeMs, string severity, string area, string? volume, string message)
     {
         var vol = string.IsNullOrEmpty(volume) ? string.Empty : $" ({volume})";
         return $"[{uptimeMs / 1000}s] {severity.ToUpperInvariant()} {area}{vol}: {FirstLine(message)}";
     }
 
-    /// <summary>Nonzero degradation counters as a single line, or empty when all
-    /// are zero. Reflects over the generated <see cref="CountersData"/> so a
-    /// counter added to the contract registry surfaces here with no UI edits
-    /// (ADR-0018) — the regression this guards against.</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns>The degradations line, or empty when clean/null.</returns>
+    /// <summary>Nonzero degradation counters as a single line, or empty when all are zero.
+    /// Reflects over the generated <see cref="CountersData"/> so a counter added to the contract registry surfaces here with no UI edits (ADR-0018) — the regression this guards against.</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns>The degradations line, or empty when clean/null.</returns>
     public static string Counters(EngineStatsData? s)
     {
         if (s is null)
@@ -359,34 +228,21 @@ public static class DiagFormat
             : "劣化: " + string.Join("  ", nonzero.Select(x => $"{x.Name}={Count(x.V)}"));
     }
 
-    /// <summary>Visible only when there are no degradation counters and no recent
-    /// errors — gates the green "healthy" marker.</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns><c>Visible</c> when clean, otherwise <c>Collapsed</c>.</returns>
+    /// <summary>Visible only when there are no degradation counters and no recent errors — gates the green "healthy" marker.</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns><c>Visible</c> when clean, otherwise <c>Collapsed</c>.</returns>
     public static Visibility HealthyVis(EngineStatsData? s) =>
         s is not null && !AnyDegraded(s) && s.RecentErrors.Count == 0
             ? Visibility.Visible
             : Visibility.Collapsed;
 
-    /// <summary>Visible only when at least one degradation counter is nonzero.</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns><c>Visible</c> when degraded, otherwise <c>Collapsed</c>.</returns>
+    /// <summary>Visible only when at least one degradation counter is nonzero.</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns><c>Visible</c> when degraded, otherwise <c>Collapsed</c>.</returns>
     public static Visibility CountersVis(EngineStatsData? s) =>
         s is not null && AnyDegraded(s) ? Visibility.Visible : Visibility.Collapsed;
 
-    /// <summary>Visible only when the engine reported recent WARN+ events.</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns><c>Visible</c> when there are errors, otherwise <c>Collapsed</c>.</returns>
+    /// <summary>Visible only when the engine reported recent WARN+ events.</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns><c>Visible</c> when there are errors, otherwise <c>Collapsed</c>.</returns>
     public static Visibility HasErrorsVis(EngineStatsData? s) =>
         s is { RecentErrors.Count: > 0 } ? Visibility.Visible : Visibility.Collapsed;
 
-    /// <summary>The InfoBar severity for the health section: <c>Error</c> when the
-    /// engine reported recent WARN+ events (highest priority), <c>Warning</c> when
-    /// any degradation counter is nonzero, otherwise <c>Success</c>. Returns
-    /// <c>Informational</c> before the first poll (<paramref name="s"/> is null) so
-    /// the bar stays neutral instead of falsely reading "healthy".</summary>
-    /// <param name="s">The stats snapshot, or null before the first poll.</param>
-    /// <returns>The severity reflecting the worst current condition.</returns>
+    /// <summary>The InfoBar severity for the health section: <c>Error</c> when the engine reported recent WARN+ events (highest priority), <c>Warning</c> when any degradation counter is nonzero, otherwise <c>Success</c>. Returns <c>Informational</c> before the first poll (<paramref name="s"/> is null) so the bar stays neutral instead of falsely reading "healthy".</summary> <param name="s">The stats snapshot, or null before the first poll.</param> <returns>The severity reflecting the worst current condition.</returns>
     public static InfoBarSeverity HealthSeverity(EngineStatsData? s)
     {
         if (s is null)
@@ -419,13 +275,11 @@ public static class DiagFormat
     /// <summary>A 0..1 ratio as a one-decimal percentage (e.g. <c>"1.5%"</c>).</summary>
     private static string Percent(double ratio) => (ratio * 100.0).ToString("F1", Inv) + "%";
 
-    /// <summary>Milliseconds as seconds with one decimal once past a second
-    /// (e.g. <c>"1.2 s"</c>), otherwise whole milliseconds (e.g. <c>"820ms"</c>).</summary>
+    /// <summary>Milliseconds as seconds with one decimal once past a second (e.g. <c>"1.2 s"</c>), otherwise whole milliseconds (e.g. <c>"820ms"</c>).</summary>
     private static string Secs(ulong ms) =>
         ms >= 1000 ? (ms / 1000.0).ToString("F1", Inv) + " s" : ms.ToString(Inv) + "ms";
 
-    /// <summary>Milliseconds as a coarse uptime: <c>"2h13m"</c> / <c>"13m"</c> /
-    /// <c>"45s"</c>.</summary>
+    /// <summary>Milliseconds as a coarse uptime: <c>"2h13m"</c> / <c>"13m"</c> / <c>"45s"</c>.</summary>
     private static string Uptime(ulong ms)
     {
         var totalSecs = ms / 1000;

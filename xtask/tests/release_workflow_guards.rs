@@ -127,13 +127,8 @@ fn artifact_producers_are_safe_to_rerun() {
     }
 }
 
-/// ADR-0048 replaced the four-stage `workflow_dispatch` -> `workflow_run` ->
-/// `workflow_run` -> `workflow_call` chain with one dispatch from protected
-/// main. The property the chain bought — a tag identifies build data, never
-/// workflow code — now rests on three things this test pins: the entry point is
-/// a dispatch and nothing else, `preflight` binds that dispatch before any other
-/// job runs, and the orchestrator's dedupe title is character-identical to the
-/// `run-name` release.yml renders.
+/// ADR-0048 replaced the four-stage `workflow_dispatch` -> `workflow_run` -> `workflow_run` -> `workflow_call` chain with one dispatch from protected main.
+/// The property the chain bought — a tag identifies build data, never workflow code — now rests on three things this test pins: the entry point is a dispatch and nothing else, `preflight` binds that dispatch before any other job runs, and the orchestrator's dedupe title is character-identical to the `run-name` release.yml renders.
 #[test]
 fn release_publication_is_directly_dispatched_and_exactly_bound() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -144,7 +139,6 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
     let release = fs::read_to_string(repo.join(".github/workflows/release.yml"))
         .expect("release workflow must be readable");
 
-    // The entry point, and the absence of everything the chain contributed.
     assert!(release.contains("workflow_dispatch:"));
     assert!(
         !release.contains("workflow_call:"),
@@ -163,7 +157,6 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
     assert!(release.contains("commit_sha:"));
     assert!(release.contains("release_id:"));
 
-    // Admission control runs first and gates both long jobs.
     let preflight = release
         .find("\n  preflight:")
         .expect("release.yml must open with the admission-control job");
@@ -190,7 +183,6 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
         "preflight plus every later job must independently refuse a non-main controller ref"
     );
 
-    // The dedupe contract: one string, pinned from both sides.
     assert!(release.contains(
         "run-name: release publish ${{ inputs.tag_name }} ${{ inputs.commit_sha }} release ${{ inputs.release_id }}"
     ));
@@ -223,9 +215,14 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
         !orchestrator.contains("permission-workflows:"),
         "release-please does not edit workflow files and must retain least privilege"
     );
+    let parsed = yaml_rust2::YamlLoader::load_from_str(&orchestrator).expect("valid orchestrator");
+    assert_ne!(parsed[0]["permissions"]["actions"].as_str(), Some("write"));
     assert_eq!(
-        orchestrator
-            .matches("actions: write # dispatch the trusted-main release workflow")
+        parsed[0]["jobs"]
+            .as_hash()
+            .expect("orchestrator jobs")
+            .values()
+            .filter(|job| job["permissions"]["actions"].as_str() == Some("write"))
             .count(),
         1,
         "the isolated trusted-main dispatcher is the sole Actions write boundary"
@@ -283,11 +280,6 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
     assert!(settings_mint < attestations);
     assert!(publication_mint > attestations);
 
-    // The alerts this change removes were structural: CodeQL's cache-poisoning
-    // query binds `workflow_run` through `runsOnDefaultBranch`, and zizmor's
-    // dangerous-triggers audit had to be suppressed wherever we used one. Both
-    // constructs are gone from the release path, so keep them gone repo-wide
-    // rather than re-earning the alerts one workflow at a time.
     let mut dangerous_trigger_suppressions = Vec::new();
     for entry in
         fs::read_dir(repo.join(".github/workflows")).expect("workflow directory must be readable")
@@ -312,9 +304,6 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
             );
         }
     }
-    // The one remaining suppression is the `pull_request_target` auto-merge
-    // guard, which never checks out PR code and is unrelated to the release
-    // path. Nothing on the release path may need one.
     assert_eq!(
         dangerous_trigger_suppressions,
         vec!["no-automerge-on-release-pr.yml".to_owned()],

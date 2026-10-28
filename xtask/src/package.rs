@@ -1,16 +1,15 @@
 //! `xtask package [tag]` — zip + checksum the assembled bundle.
 //!
-//! Replaces release.yml's `Compress-Archive` + `Get-FileHash` steps. Runs
-//! AFTER the signing step (which signs the PE files in dist/), so the zip
-//! contains the signed binaries. Both land in build/package/ (ADR-0021) —
+//! Replaces release.yml's `Compress-Archive` + `Get-FileHash` steps.
+//! Runs AFTER the signing step (which signs the PE files in dist/), so the zip contains the signed binaries.
+//! Both land in build/package/ (ADR-0021) —
 //! release.yml's `action-gh-release` glob points there:
 //!   find-my-files-<bundle-version>-win-x64.zip
 //!   SHA256SUMS.txt                          (coreutils `sha256sum -c` format)
 //!
-//! The assembled bundle's `BUILDINFO.txt` is the artifact-identity source of
-//! truth. A stable tag must match it exactly; tagless dev/nightly packaging uses
-//! it verbatim. This prevents an environment variable from naming a zip
-//! differently from the binaries and BUILDINFO carried inside it.
+//! The assembled bundle's `BUILDINFO.txt` is the artifact-identity source of truth.
+//! A stable tag must match it exactly; tagless dev/nightly packaging uses it verbatim.
+//! This prevents an environment variable from naming a zip differently from the binaries and BUILDINFO carried inside it.
 
 use crate::{
     bundle_seal::{self, BundleFileIdentity, BundleState},
@@ -51,9 +50,6 @@ pub fn run(tag: Option<&str>) -> Result<()> {
     let zip_path = pkg.join(&zip_name);
     write_zip(&dist, &zip_path, &sealed_files)?;
 
-    // SHA256SUMS lists every distributable in build/package (currently the zip;
-    // directory-driven so any future artifact dropped here is covered too) in
-    // coreutils format, verifiable with `sha256sum -c SHA256SUMS.txt`.
     let mut entries: Vec<(String, String)> = Vec::new();
     for entry in fs::read_dir(&pkg).with_context(|| format!("read {}", pkg.display()))? {
         let entry = entry?;
@@ -62,13 +58,13 @@ pub fn run(tag: Option<&str>) -> Result<()> {
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         if name == SUMS_NAME {
-            continue; // never checksum the sums file itself
+            continue;
         }
         let bytes =
             fs::read(entry.path()).with_context(|| format!("read {}", entry.path().display()))?;
         entries.push((checksum::sha256_hex(&bytes), name));
     }
-    entries.sort_by(|a, b| a.1.cmp(&b.1)); // deterministic line order
+    entries.sort_by(|a, b| a.1.cmp(&b.1));
 
     let sums_path = pkg.join(SUMS_NAME);
     fs::write(&sums_path, checksum::sha256sums_body(&entries))
@@ -81,9 +77,8 @@ pub fn run(tag: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Recheck security- and surface-critical publish invariants immediately before
-/// sealing the ZIP. Packaging is a separately invocable command, so it must not
-/// trust that the directory was produced by this revision of `xtask publish`.
+/// Recheck security- and surface-critical publish invariants immediately before sealing the ZIP.
+/// Packaging is a separately invocable command, so it must not trust that the directory was produced by this revision of `xtask publish`.
 fn verify_release_boundary(dist: &Path) -> Result<()> {
     let app = dist.join("app");
     pe_load::require_system32_only(&app.join("fmf-service.exe"))
@@ -106,9 +101,8 @@ fn verify_no_developer_payload(dist: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Read the exact identity shipped in the assembled bundle. `publish` writes
-/// UTF-8 with a BOM and CRLF for Notepad, while [`str::lines`] intentionally
-/// accepts both CRLF and LF so the parser remains easy to unit-test.
+/// Read the exact identity shipped in the assembled bundle.
+/// `publish` writes UTF-8 with a BOM and CRLF for Notepad, while [`str::lines`] intentionally accepts both CRLF and LF so the parser remains easy to unit-test.
 fn read_bundle_version(dist: &Path) -> Result<String> {
     let path = dist.join("BUILDINFO.txt");
     let text = fs::read_to_string(&path)
@@ -117,9 +111,8 @@ fn read_bundle_version(dist: &Path) -> Result<String> {
         .with_context(|| format!("parse artifact identity from {}", path.display()))
 }
 
-/// Fail closed if packaging is pointed at a stale bundle carrying the old
-/// adjacent-data/portable README. Publish owns generation; package independently
-/// verifies the user-facing uninstall truth before sealing the zip.
+/// Fail closed if packaging is pointed at a stale bundle carrying the old adjacent-data/portable README.
+/// Publish owns generation; package independently verifies the user-facing uninstall truth before sealing the zip.
 fn verify_shipping_readme(dist: &Path) -> Result<()> {
     let path = dist.join("README.txt");
     let text = fs::read_to_string(&path)
@@ -174,9 +167,8 @@ fn parse_buildinfo_version(text: &str) -> Result<String> {
     Ok((*version).to_owned())
 }
 
-/// Turn the bundle identity into the zip label. Stable releases keep their
-/// conventional `v` prefix, but only after proving that the requested release
-/// tag and the already-built payload are byte-for-byte the same version.
+/// Turn the bundle identity into the zip label.
+/// Stable releases keep their conventional `v` prefix, but only after proving that the requested release tag and the already-built payload are byte-for-byte the same version.
 fn package_label(tag: Option<&str>, bundle_version: &str) -> Result<String> {
     validate_artifact_version(bundle_version)?;
     if let Some(tag) = tag {
@@ -194,14 +186,14 @@ fn package_label(tag: Option<&str>, bundle_version: &str) -> Result<String> {
     }
 }
 
-/// BUILDINFO is allowed to carry dev/nightly `SemVer` suffixes, so the strict
-/// release-triple validator is intentionally not used here. This gate is about
-/// an untrusted text field becoming a Windows filename: require a compact,
+/// BUILDINFO is allowed to carry dev/nightly `SemVer` suffixes, so the strict release-triple validator is intentionally not used here.
+/// This gate is about an untrusted text field becoming a Windows filename: require a compact,
 /// path-free, SemVer-shaped label and fail closed on whitespace/control chars.
 fn validate_artifact_version(version: &str) -> Result<()> {
+    const MAX_VERSION_BYTES: usize = 128;
     let bytes = version.as_bytes();
     let safe = !bytes.is_empty()
-        && bytes.len() <= 128
+        && bytes.len() <= MAX_VERSION_BYTES
         && bytes[0].is_ascii_digit()
         && bytes[bytes.len() - 1].is_ascii_alphanumeric()
         && bytes
@@ -217,19 +209,16 @@ fn validate_artifact_version(version: &str) -> Result<()> {
     Ok(())
 }
 
-/// Start from an empty package dir. The SHA256SUMS.txt body is driven by whatever
-/// files sit here; a stale zip from an earlier version would otherwise linger in
-/// the checksum set even though workflows upload the exact versioned zip path.
-/// CI runs on a fresh runner where the wipe is a no-op; locally it closes the
-/// footgun.
+/// Start from an empty package dir.
+/// The SHA256SUMS.txt body is driven by whatever files sit here; a stale zip from an earlier version would otherwise linger in the checksum set even though workflows upload the exact versioned zip path.
+/// CI runs on a fresh runner where the wipe is a no-op; locally it closes the footgun.
 fn prepare_package_dir(pkg: &Path) -> Result<()> {
     fsx::force_remove_dir_all(pkg).with_context(|| format!("clean {}", pkg.display()))?;
     fs::create_dir_all(pkg).with_context(|| format!("create {}", pkg.display()))?;
     Ok(())
 }
 
-/// Zip the *contents* of `dist` (entries land at the zip root, matching
-/// `Compress-Archive -Path dist/FindMyFiles/*`).
+/// Zip the *contents* of `dist` (entries land at the zip root, matching `Compress-Archive -Path dist/FindMyFiles/*`).
 fn write_zip(dist: &Path, zip_path: &Path, sealed_files: &[BundleFileIdentity]) -> Result<()> {
     let file = File::create(zip_path).with_context(|| format!("create {}", zip_path.display()))?;
     let mut zw = ZipWriter::new(file);
@@ -260,8 +249,7 @@ mod tests {
         std::env::temp_dir().join(format!("xtask-package-{tag}-{}", std::process::id()))
     }
 
-    /// A stale zip from an earlier version must not survive into the next
-    /// packaging run (else it lands in SHA256SUMS.txt and the release glob).
+    /// A stale zip from an earlier version must not survive into the next packaging run (else it lands in SHA256SUMS.txt and the release glob).
     #[test]
     fn prepare_package_dir_clears_stale_artifacts() {
         let pkg = scratch("prepare");
@@ -283,8 +271,7 @@ mod tests {
         fsx::force_remove_dir_all(&pkg).unwrap();
     }
 
-    /// Preparing a not-yet-existing package dir just creates it (the fresh-runner
-    /// path) — a missing dir is not an error.
+    /// Preparing a not-yet-existing package dir just creates it (the fresh-runner path) — a missing dir is not an error.
     #[test]
     fn prepare_package_dir_creates_when_absent() {
         let pkg = scratch("absent");

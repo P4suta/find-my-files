@@ -1,21 +1,22 @@
 //! Deterministic, artifact-derived `CycloneDX` 1.6 SBOM generation.
 //!
-//! `cargo-sbom` and `NuGet` remain the dependency resolvers, but neither generated
-//! document is publishable as-is:
+//! `cargo-sbom` and `NuGet` remain the dependency resolvers, but neither generated document is publishable as-is:
 //!
-//! - cargo-sbom 0.10 wraps the selected package under
-//!   `metadata.component.components[0]`, and emits a different random/timestamped
-//!   document for every entry point;
-//! - a project-level .NET SBOM describes build/analyzer dependencies and misses
-//!   self-contained runtime payloads.
+//! - cargo-sbom 0.10 wraps the selected package under `metadata.component.components[0]`, and emits a different random/timestamped document for every entry point;
+//! - a project-level .NET SBOM describes build/analyzer dependencies and misses self-contained runtime payloads.
 //!
-//! This module treats the final distribution tree as the shipping truth. It
-//! validates and merges the three raw Rust graphs, then reconciles every shipped
-//! .NET/WinAppSDK file with `FindMyFiles.deps.json`, `project.assets.json`, and
-//! the exact restored `NuGet` package archives. All reference handling and graph
-//! checks are pure functions with unit tests; [`run`] is only the filesystem
-//! adapter.
+//! This module treats the final distribution tree as the shipping truth.
+//! It validates and merges the three raw Rust graphs, then reconciles every shipped .NET/WinAppSDK file with `FindMyFiles.deps.json`, `project.assets.json`, and the exact restored `NuGet` package archives.
+//! All reference handling and graph checks are pure functions with unit tests; [`run`] is only the filesystem adapter.
 
+use crate::pe_format::{
+    COFF_HEADER_SIZE, COFF_OPTIONAL_SIZE_OFFSET, COFF_SECTION_COUNT_OFFSET, DATA_DIRECTORY_SIZE,
+    DOS_HEADER_BYTES, DOS_PE_POINTER_OFFSET, HEADERS_SIZE_FIELD_OFFSET, PE32_DIRECTORIES_OFFSET,
+    PE32_DIRECTORY_COUNT_OFFSET, PE32_MAGIC, PE32_PLUS_DIRECTORIES_OFFSET,
+    PE32_PLUS_DIRECTORY_COUNT_OFFSET, PE32_PLUS_MAGIC, PE_SIGNATURE_BYTES, SECTION_HEADER_SIZE,
+    SECTION_RAW_POINTER_OFFSET, SECTION_RAW_SIZE_OFFSET, SECTION_VIRTUAL_ADDRESS_OFFSET,
+    SECTION_VIRTUAL_SIZE_OFFSET,
+};
 use crate::{
     bundle_seal::{self, BundleState},
     checksum, fsx, paths, prune, publish,
@@ -30,6 +31,24 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use zip::ZipArchive;
 
+const CLR_HEADER_MIN_BYTES: usize = 0x48;
+const CLR_METADATA_RVA_OFFSET: usize = 8;
+const CLR_METADATA_SIZE_OFFSET: usize = 12;
+const METADATA_MIN_BYTES: usize = 20;
+const METADATA_SIGNATURE: u32 = u32::from_le_bytes(*b"BSJB");
+const METADATA_VERSION_LENGTH_OFFSET: usize = 12;
+const METADATA_VERSION_OFFSET: usize = 16;
+const METADATA_STORAGE_ALIGNMENT: usize = 4;
+const METADATA_STREAM_COUNT_OFFSET: usize = 2;
+const METADATA_STORAGE_HEADER_BYTES: usize = 4;
+const MAX_METADATA_STREAMS: usize = 32;
+const METADATA_STREAM_SIZE_OFFSET: usize = 4;
+const METADATA_STREAM_NAME_OFFSET: usize = 8;
+const MAX_METADATA_STREAM_NAME_BYTES: usize = 32;
+const ADJACENT_METADATA_EXTENTS: usize = 2;
+#[cfg(windows)]
+const VERSION_INFO_SIGNATURE: u32 = 0xfeef_04bd;
+
 const CYCLONEDX_SCHEMA: &str = "https://cyclonedx.org/schema/bom-1.6.schema.json";
 const CARGO_RAW_FILES: [(&str, &str); 3] = [
     ("fmf-service", "fmf-service.cdx.json"),
@@ -42,9 +61,8 @@ const NUGET_SOURCE: &str = "https://api.nuget.org/v3/index.json";
 const CLR_DIRECTORY_INDEX: usize = 14;
 
 /// Crates that belong to developer/test binaries, never the shipped service,
-/// FFI library, or launcher. cargo-sbom currently filters non-normal edges; the
-/// explicit denylist makes that behavior a checked contract rather than an
-/// undocumented assumption.
+/// FFI library, or launcher.
+/// cargo-sbom currently filters non-normal edges; the explicit denylist makes that behavior a checked contract rather than an undocumented assumption.
 const DEVELOPER_ONLY_CRATES: &[&str] = &[
     "cargo-fuzz",
     "clap_complete",
@@ -505,24 +523,38 @@ struct PeSection {
     raw_size: usize,
 }
 
-/// Hash the exact CLR metadata directory embedded in a managed PE. `ReadyToRun`
-/// is allowed to change native layout, but not assembly metadata identity.
+/// Hash the exact CLR metadata directory embedded in a managed PE.
+/// `ReadyToRun` is allowed to change native layout, but not assembly metadata identity.
 fn managed_metadata_sha256(bytes: &[u8]) -> Result<Option<String>> {
     if !bytes.starts_with(b"MZ") {
         return Ok(None);
     }
-    ensure!(bytes.len() >= 0x40, "PE is shorter than its DOS header");
-    let pe_offset = sbom_read_u32(bytes, 0x3c, "DOS e_lfanew")? as usize;
     ensure!(
-        bytes.get(pe_offset..pe_offset.saturating_add(4)) == Some(b"PE\0\0".as_slice()),
+        bytes.len() >= DOS_HEADER_BYTES,
+        "PE is shorter than its DOS header"
+    );
+    let pe_offset = sbom_read_u32(bytes, DOS_PE_POINTER_OFFSET, "DOS e_lfanew")? as usize;
+    ensure!(
+        bytes.get(pe_offset..pe_offset.saturating_add(PE_SIGNATURE_BYTES))
+            == Some(b"PE\0\0".as_slice()),
         "PE signature is missing or truncated"
     );
-    let coff = pe_offset.checked_add(4).context("COFF offset overflow")?;
+    let coff = pe_offset
+        .checked_add(PE_SIGNATURE_BYTES)
+        .context("COFF offset overflow")?;
     let optional = coff
-        .checked_add(20)
+        .checked_add(COFF_HEADER_SIZE)
         .context("optional-header offset overflow")?;
-    let section_count = usize::from(sbom_read_u16(bytes, coff + 2, "NumberOfSections")?);
-    let optional_size = usize::from(sbom_read_u16(bytes, coff + 16, "SizeOfOptionalHeader")?);
+    let section_count = usize::from(sbom_read_u16(
+        bytes,
+        coff + COFF_SECTION_COUNT_OFFSET,
+        "NumberOfSections",
+    )?);
+    let optional_size = usize::from(sbom_read_u16(
+        bytes,
+        coff + COFF_OPTIONAL_SIZE_OFFSET,
+        "SizeOfOptionalHeader",
+    )?);
     let optional_end = optional
         .checked_add(optional_size)
         .context("optional-header extent overflow")?;
@@ -530,8 +562,11 @@ fn managed_metadata_sha256(bytes: &[u8]) -> Result<Option<String>> {
 
     let magic = sbom_read_u16(bytes, optional, "optional-header magic")?;
     let (directory_count_offset, directories_offset) = match magic {
-        0x010b => (92_usize, 96_usize),
-        0x020b => (108_usize, 112_usize),
+        PE32_MAGIC => (PE32_DIRECTORY_COUNT_OFFSET, PE32_DIRECTORIES_OFFSET),
+        PE32_PLUS_MAGIC => (
+            PE32_PLUS_DIRECTORY_COUNT_OFFSET,
+            PE32_PLUS_DIRECTORIES_OFFSET,
+        ),
         _ => bail!("unsupported PE optional-header magic 0x{magic:04x}"),
     };
     let directory_count = sbom_read_u32(
@@ -544,27 +579,29 @@ fn managed_metadata_sha256(bytes: &[u8]) -> Result<Option<String>> {
     }
     let clr_directory = optional
         .checked_add(directories_offset)
-        .and_then(|offset| offset.checked_add(CLR_DIRECTORY_INDEX * 8))
+        .and_then(|offset| offset.checked_add(CLR_DIRECTORY_INDEX * DATA_DIRECTORY_SIZE))
         .context("CLR directory offset overflow")?;
     ensure!(
-        clr_directory + 8 <= optional_end,
+        clr_directory + DATA_DIRECTORY_SIZE <= optional_end,
         "optional header truncates the declared CLR directory"
     );
     let clr_rva = sbom_read_u32(bytes, clr_directory, "CLR header RVA")? as usize;
-    let clr_size = sbom_read_u32(bytes, clr_directory + 4, "CLR header size")? as usize;
+    let clr_size =
+        sbom_read_u32(bytes, clr_directory + size_of::<u32>(), "CLR header size")? as usize;
     match (clr_rva, clr_size) {
         (0, 0) => return Ok(None),
         (0, _) | (_, 0) => bail!("CLR directory has an inconsistent zero RVA/size"),
         _ => {}
     }
     ensure!(
-        clr_size >= 0x48,
+        clr_size >= CLR_HEADER_MIN_BYTES,
         "CLR header is smaller than IMAGE_COR20_HEADER"
     );
 
-    let size_of_headers = sbom_read_u32(bytes, optional + 60, "SizeOfHeaders")? as usize;
+    let size_of_headers =
+        sbom_read_u32(bytes, optional + HEADERS_SIZE_FIELD_OFFSET, "SizeOfHeaders")? as usize;
     let section_table_size = section_count
-        .checked_mul(40)
+        .checked_mul(SECTION_HEADER_SIZE)
         .context("section table size overflow")?;
     ensure!(
         optional_end
@@ -574,12 +611,28 @@ fn managed_metadata_sha256(bytes: &[u8]) -> Result<Option<String>> {
     );
     let mut sections = Vec::with_capacity(section_count);
     for index in 0..section_count {
-        let section = optional_end + index * 40;
+        let section = optional_end + index * SECTION_HEADER_SIZE;
         sections.push(PeSection {
-            virtual_size: sbom_read_u32(bytes, section + 8, "section VirtualSize")? as usize,
-            virtual_address: sbom_read_u32(bytes, section + 12, "section VirtualAddress")? as usize,
-            raw_size: sbom_read_u32(bytes, section + 16, "section SizeOfRawData")? as usize,
-            raw_offset: sbom_read_u32(bytes, section + 20, "section PointerToRawData")? as usize,
+            virtual_size: sbom_read_u32(
+                bytes,
+                section + SECTION_VIRTUAL_SIZE_OFFSET,
+                "section VirtualSize",
+            )? as usize,
+            virtual_address: sbom_read_u32(
+                bytes,
+                section + SECTION_VIRTUAL_ADDRESS_OFFSET,
+                "section VirtualAddress",
+            )? as usize,
+            raw_size: sbom_read_u32(
+                bytes,
+                section + SECTION_RAW_SIZE_OFFSET,
+                "section SizeOfRawData",
+            )? as usize,
+            raw_offset: sbom_read_u32(
+                bytes,
+                section + SECTION_RAW_POINTER_OFFSET,
+                "section PointerToRawData",
+            )? as usize,
         });
     }
     let clr_offset = rva_file_offset(
@@ -590,10 +643,18 @@ fn managed_metadata_sha256(bytes: &[u8]) -> Result<Option<String>> {
         &sections,
         "CLR header",
     )?;
-    let metadata_rva = sbom_read_u32(bytes, clr_offset + 8, "CLR metadata RVA")? as usize;
-    let metadata_size = sbom_read_u32(bytes, clr_offset + 12, "CLR metadata size")? as usize;
+    let metadata_rva = sbom_read_u32(
+        bytes,
+        clr_offset + CLR_METADATA_RVA_OFFSET,
+        "CLR metadata RVA",
+    )? as usize;
+    let metadata_size = sbom_read_u32(
+        bytes,
+        clr_offset + CLR_METADATA_SIZE_OFFSET,
+        "CLR metadata size",
+    )? as usize;
     ensure!(
-        metadata_rva != 0 && metadata_size >= 20,
+        metadata_rva != 0 && metadata_size >= METADATA_MIN_BYTES,
         "CLR header has an empty metadata directory"
     );
     let metadata_offset = rva_file_offset(
@@ -648,12 +709,16 @@ fn rva_file_offset(
 
 fn metadata_identity_sha256(metadata: &[u8]) -> Result<String> {
     ensure!(
-        sbom_read_u32(metadata, 0, "CLR metadata signature")? == 0x424a_5342,
+        sbom_read_u32(metadata, 0, "CLR metadata signature")? == METADATA_SIGNATURE,
         "CLR metadata has no BSJB signature"
     );
-    let version_length = sbom_read_u32(metadata, 12, "CLR metadata version length")? as usize;
+    let version_length = sbom_read_u32(
+        metadata,
+        METADATA_VERSION_LENGTH_OFFSET,
+        "CLR metadata version length",
+    )? as usize;
     ensure!(version_length != 0, "CLR metadata version string is empty");
-    let version_end = 16_usize
+    let version_end = METADATA_VERSION_OFFSET
         .checked_add(version_length)
         .context("CLR metadata version extent overflow")?;
     ensure!(
@@ -661,41 +726,45 @@ fn metadata_identity_sha256(metadata: &[u8]) -> Result<String> {
         "CLR metadata version string is truncated"
     );
     ensure!(
-        metadata[16..version_end].contains(&0),
+        metadata[METADATA_VERSION_OFFSET..version_end].contains(&0),
         "CLR metadata version string is not NUL-terminated"
     );
-    let version_nul = metadata[16..version_end]
+    let version_nul = metadata[METADATA_VERSION_OFFSET..version_end]
         .iter()
         .position(|byte| *byte == 0)
         .context("CLR metadata version string is not NUL-terminated")?;
-    let version = &metadata[16..16 + version_nul];
+    let version = &metadata[METADATA_VERSION_OFFSET..METADATA_VERSION_OFFSET + version_nul];
     let storage_header = version_end
-        .checked_add(3)
-        .map(|value| value & !3)
+        .checked_add(METADATA_STORAGE_ALIGNMENT - 1)
+        .map(|value| value & !(METADATA_STORAGE_ALIGNMENT - 1))
         .context("CLR metadata alignment overflow")?;
     let stream_count = usize::from(sbom_read_u16(
         metadata,
-        storage_header + 2,
+        storage_header + METADATA_STREAM_COUNT_OFFSET,
         "CLR metadata stream count",
     )?);
     ensure!(
-        stream_count != 0 && stream_count <= 32,
+        stream_count != 0 && stream_count <= MAX_METADATA_STREAMS,
         "CLR metadata stream count is invalid: {stream_count}"
     );
-    let mut cursor = storage_header + 4;
+    let mut cursor = storage_header + METADATA_STORAGE_HEADER_BYTES;
     let mut names = BTreeSet::new();
     let mut streams = Vec::with_capacity(stream_count);
     for _ in 0..stream_count {
         let offset = sbom_read_u32(metadata, cursor, "CLR stream offset")? as usize;
-        let size = sbom_read_u32(metadata, cursor + 4, "CLR stream size")? as usize;
-        let name_start = cursor + 8;
+        let size = sbom_read_u32(
+            metadata,
+            cursor + METADATA_STREAM_SIZE_OFFSET,
+            "CLR stream size",
+        )? as usize;
+        let name_start = cursor + METADATA_STREAM_NAME_OFFSET;
         let name_end = metadata
             .get(name_start..)
             .and_then(|tail| tail.iter().position(|byte| *byte == 0))
             .map(|relative| name_start + relative)
             .context("CLR stream name is not NUL-terminated")?;
         ensure!(
-            name_end - name_start <= 32,
+            name_end - name_start <= MAX_METADATA_STREAM_NAME_BYTES,
             "CLR stream name exceeds the metadata limit"
         );
         let name = std::str::from_utf8(&metadata[name_start..name_end])
@@ -713,8 +782,8 @@ fn metadata_identity_sha256(metadata: &[u8]) -> Result<String> {
         streams.push((name.to_owned(), offset, size));
         cursor = name_end
             .checked_add(1)
-            .and_then(|value| value.checked_add(3))
-            .map(|value| value & !3)
+            .and_then(|value| value.checked_add(METADATA_STORAGE_ALIGNMENT - 1))
+            .map(|value| value & !(METADATA_STORAGE_ALIGNMENT - 1))
             .context("CLR stream-header alignment overflow")?;
         ensure!(
             cursor <= metadata.len(),
@@ -739,18 +808,15 @@ fn metadata_identity_sha256(metadata: &[u8]) -> Result<String> {
         })
         .collect::<Result<Vec<_>>>()?;
     extents.sort_by_key(|(start, _, _)| *start);
-    for pair in extents.windows(2) {
+    for pair in extents.windows(ADJACENT_METADATA_EXTENTS) {
+        let (_, previous_end, previous_name) = &pair[0];
+        let (next_start, _, next_name) = &pair[1];
         ensure!(
-            pair[0].1 <= pair[1].0,
-            "CLR streams {} and {} overlap",
-            pair[0].2,
-            pair[1].2
+            previous_end <= next_start,
+            "CLR streams {previous_name} and {next_name} overlap"
         );
     }
 
-    // Canonicalize semantic stream identity rather than hashing unused
-    // directory padding. ReadyToRun may rewrite native/layout bytes, but every
-    // named metadata stream and its contents must remain byte-identical.
     streams.sort_by(|left, right| left.0.cmp(&right.0));
     let mut canonical = b"find-my-files:clr-metadata-identity:v1\0".to_vec();
     canonical.extend_from_slice(&(version.len() as u32).to_le_bytes());
@@ -766,7 +832,7 @@ fn metadata_identity_sha256(metadata: &[u8]) -> Result<String> {
 
 fn sbom_read_u16(bytes: &[u8], offset: usize, label: &str) -> Result<u16> {
     let raw: [u8; 2] = bytes
-        .get(offset..offset.saturating_add(2))
+        .get(offset..offset.saturating_add(size_of::<u16>()))
         .with_context(|| format!("truncated {label}"))?
         .try_into()
         .with_context(|| format!("invalid {label} width"))?;
@@ -775,7 +841,7 @@ fn sbom_read_u16(bytes: &[u8], offset: usize, label: &str) -> Result<u16> {
 
 fn sbom_read_u32(bytes: &[u8], offset: usize, label: &str) -> Result<u32> {
     let raw: [u8; 4] = bytes
-        .get(offset..offset.saturating_add(4))
+        .get(offset..offset.saturating_add(size_of::<u32>()))
         .with_context(|| format!("truncated {label}"))?
         .try_into()
         .with_context(|| format!("invalid {label} width"))?;
@@ -791,15 +857,13 @@ fn file_version_from_path(path: &Path) -> Result<Option<FileVersion>> {
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut ignored_handle = 0_u32;
-    // SAFETY: `wide` is a live NUL-terminated UTF-16 path and the output pointer
-    // refers to a live u32 for the synchronous call.
+    /* SAFETY: `wide` provides a live NUL-terminated UTF-16 path and the output pointer refers to a live u32 throughout the synchronous call. */
     let size = unsafe { GetFileVersionInfoSizeW(wide.as_ptr(), &raw mut ignored_handle) };
     if size == 0 {
         return Ok(None);
     }
     let mut buffer = vec![0_u8; size as usize];
-    // SAFETY: the output buffer has exactly `size` writable bytes and all
-    // pointers remain live for the synchronous call.
+    /* SAFETY: The output buffer provides exactly `size` writable bytes and all pointers remain live throughout the synchronous call. */
     let loaded = unsafe {
         GetFileVersionInfoW(
             wide.as_ptr(),
@@ -818,8 +882,7 @@ fn file_version_from_path(path: &Path) -> Result<Option<FileVersion>> {
     let root_query = [b'\\' as u16, 0];
     let mut fixed_ptr = std::ptr::null_mut::<std::ffi::c_void>();
     let mut fixed_len = 0_u32;
-    // SAFETY: the version buffer is initialized by GetFileVersionInfoW; query
-    // and output pointers stay live during this synchronous call.
+    /* SAFETY: GetFileVersionInfoW initialized the version buffer; the query and output pointers remain live throughout this synchronous call. */
     let queried = unsafe {
         VerQueryValueW(
             buffer.as_ptr().cast::<std::ffi::c_void>(),
@@ -835,18 +898,18 @@ fn file_version_from_path(path: &Path) -> Result<Option<FileVersion>> {
         "PE has malformed root VS_FIXEDFILEINFO: {}",
         path.display()
     );
-    // SAFETY: VerQueryValueW returned at least one complete VS_FIXEDFILEINFO.
-    // `read_unaligned` avoids assuming alignment inside the opaque buffer.
+    /* SAFETY: VerQueryValueW returned at least one complete VS_FIXEDFILEINFO.
+    `read_unaligned` permits the opaque buffer's alignment. */
     let fixed = unsafe { fixed_ptr.cast::<VS_FIXEDFILEINFO>().read_unaligned() };
     ensure!(
-        fixed.dwSignature == 0xfeef_04bd,
+        fixed.dwSignature == VERSION_INFO_SIGNATURE,
         "PE has an invalid VS_FIXEDFILEINFO signature: {}",
         path.display()
     );
     Ok(Some(FileVersion([
-        (fixed.dwFileVersionMS >> 16) as u16,
+        (fixed.dwFileVersionMS >> u16::BITS) as u16,
         fixed.dwFileVersionMS as u16,
-        (fixed.dwFileVersionLS >> 16) as u16,
+        (fixed.dwFileVersionLS >> u16::BITS) as u16,
         fixed.dwFileVersionLS as u16,
     ])))
 }

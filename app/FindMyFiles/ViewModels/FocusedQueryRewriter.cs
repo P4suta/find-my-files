@@ -3,14 +3,10 @@ using FindMyFiles.Services;
 
 namespace FindMyFiles.ViewModels;
 
-/// <summary>
-/// Focused search: a pure query rewrite in the UI layer —
-/// the engine is never touched (ADR-0019). Every top-level OR group of the
-/// user's query gets the configured noise-path exclusions (<c>!path:"…"</c>)
-/// and the extension whitelist (one <c>ext:a;b;…</c> term) appended, except
-/// where the user already expressed intent: a group mentioning
-/// <c>ext:</c>/<c>regex:</c> keeps its own type filter, a group mentioning
-/// <c>path:</c> or containing <c>\</c> keeps its own location.
+/// <summary> Focused search: a pure query rewrite in the UI layer —
+/// the engine is never touched (ADR-0019).
+/// Every top-level OR group of the user's query gets the configured noise-path exclusions (<c>!path:"…"
+/// </c>) and the extension whitelist (one <c>ext:a;b;…</c> term) appended, except where the user already expressed intent: a group mentioning <c>ext:</c>/<c>regex:</c> keeps its own type filter, a group mentioning <c>path:</c> or containing <c>\</c> keeps its own location.
 /// </summary>
 internal static class FocusedQueryRewriter
 {
@@ -35,26 +31,17 @@ internal static class FocusedQueryRewriter
         "exe", "msi", "lnk",
     ];
 
-    /// <summary>Values already warned about — a bad settings entry must be
-    /// said once (don't go silent), not on every keystroke (2MB log rotation).</summary>
+    /// <summary>Values already warned about — a bad settings entry must be said once (don't go silent), not on every keystroke (2MB log rotation).</summary>
     private static readonly HashSet<string> WarnedValues = [];
 
     /// <summary>Rewrites with the product's curated focused-search policy.
-    /// The policy is code-owned and versioned with the parser; it is not a
-    /// hidden hand-edited settings schema.</summary>
-    /// <param name="userQuery">The user's raw query text.</param>
-    /// <returns>The focused-mode query.</returns>
+    /// The policy is code-owned and versioned with the parser; it is not a hidden hand-edited settings schema.</summary> <param name="userQuery">The user's raw query text.</param> <returns>The focused-mode query.</returns>
     public static string Compose(string userQuery) =>
         Compose(userQuery, DefaultExcludePaths, DefaultExtensions);
 
     /// <summary>Rewrites <paramref name="userQuery"/> for focused mode.
-    /// An empty/whitespace query is returned unchanged — the "no query, no
-    /// results" rule stays the orchestrator's, and a rewrite must never turn
-    /// an empty query into a non-empty one.</summary>
-    /// <param name="userQuery">The user's raw query text.</param>
-    /// <param name="excludePaths">Noise paths appended as <c>!path:"…"</c> exclusions.</param>
-    /// <param name="extensions">The extension whitelist appended as one <c>ext:</c> term.</param>
-    /// <returns>The rewritten query, or the input unchanged when empty or already constrained.</returns>
+    /// An empty/whitespace query is returned unchanged — the "no query, no results" rule stays the orchestrator's, and a rewrite must never turn an empty query into a non-empty one.</summary> <param name="userQuery">The user's raw query text.</param> <param name="excludePaths">Noise paths appended as <c>!path:"…"
+    /// </c> exclusions.</param> <param name="extensions">The extension whitelist appended as one <c>ext:</c> term.</param> <returns>The rewritten query, or the input unchanged when empty or already constrained.</returns>
     public static string Compose(
         string userQuery,
         IReadOnlyList<string> excludePaths,
@@ -77,10 +64,6 @@ internal static class FocusedQueryRewriter
         {
             var group = groups[i];
 
-            // Simple substring heuristics on the user's group (quoted
-            // occurrences over-match, which only skips a suffix — the user's
-            // terms always win). Both flags are decided before any append:
-            // the exclude suffix itself contains path:.
             var hasLocation = ContainsIgnoreCase(group, "path:") || group.Contains('\\', StringComparison.Ordinal);
             var hasTypeFilter =
                 ContainsIgnoreCase(group, "ext:") || ContainsIgnoreCase(group, "regex:");
@@ -100,8 +83,7 @@ internal static class FocusedQueryRewriter
         return string.Join(" | ", groups);
     }
 
-    /// <summary>Top-level split on <c>|</c>, leaving <c>|</c> inside quoted
-    /// sections alone (mirrors the engine tokenizer's quote handling).</summary>
+    /// <summary>Top-level split on <c>|</c>, leaving <c>|</c> inside quoted sections alone (mirrors the engine tokenizer's quote handling).</summary>
     private static List<string> SplitTopLevelOr(string query)
     {
         var groups = new List<string>();
@@ -140,8 +122,6 @@ internal static class FocusedQueryRewriter
                 continue;
             }
 
-            // A quote inside the value cannot be escaped in the query
-            // language — it would silently change the whole query's meaning.
             if (p.Contains('"', StringComparison.Ordinal))
             {
                 WarnOnce($"exclude:{p}", "exclude_path");
@@ -165,8 +145,6 @@ internal static class FocusedQueryRewriter
                 continue;
             }
 
-            // ext: is an unquoted atom — whitespace/quote/pipe would break
-            // tokenization; ;/, are the engine's own list separators.
             if (e.Any(char.IsWhiteSpace) || e.AsSpan().ContainsAny("\"|;,"))
             {
                 WarnOnce($"extension:{e}", "extension");
@@ -176,7 +154,6 @@ internal static class FocusedQueryRewriter
             valid.Add(e);
         }
 
-        // No valid entries → no term at all (an empty ext: matches nothing).
         return valid.Count == 0 ? string.Empty : " ext:" + string.Join(';', valid);
     }
 

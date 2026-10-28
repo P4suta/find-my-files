@@ -6,17 +6,10 @@ using Microsoft.Win32.SafeHandles;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// Creates a real NTFS junction so the reparse-point rules can be tested
-/// against the file system that enforces them rather than against a stub.
-/// <para>
-/// A junction is the one name-surrogate reparse point an ordinary user can
-/// create: it needs no SeCreateSymbolicLinkPrivilege and no Developer Mode
-/// (both of which a symlink needs, which would make the test machine-dependent).
-/// It is written with FSCTL_SET_REPARSE_POINT directly so no external process
-/// (cmd's mklink) has to be spawned from a unit test.
-/// </para>
-/// </summary>
+/// <summary> Creates a real NTFS junction so the reparse-point rules can be tested against the file system that enforces them rather than against a stub.
+/// <para> A junction is the one name-surrogate reparse point an ordinary user can create: it needs no SeCreateSymbolicLinkPrivilege and no Developer Mode (both of which a symlink needs, which would make the test machine-dependent).
+/// It is written with FSCTL_SET_REPARSE_POINT directly so no external process (cmd's mklink) has to be spawned from a unit test.
+/// </para> </summary>
 internal static partial class NativeJunction
 {
     private const uint GenericWrite = 0x40000000;
@@ -29,8 +22,6 @@ internal static partial class NativeJunction
     /// <summary>Points <paramref name="junctionPath"/> at an existing directory.</summary>
     internal static void Create(string junctionPath, string targetDirectory)
     {
-        // A junction lives in a directory entry that already exists: create the
-        // empty directory first, then stamp the reparse point onto it.
         Directory.CreateDirectory(junctionPath);
 
         var payload = BuildMountPointBuffer(targetDirectory);
@@ -70,16 +61,10 @@ internal static partial class NativeJunction
         }
     }
 
-    /// <summary>
-    /// Lays out REPARSE_DATA_BUFFER's MountPointReparseBuffer variant: an
-    /// 8-byte header (tag, data length, reserved), four 16-bit name
-    /// offsets/lengths, then the NUL-terminated substitute name followed by the
-    /// NUL-terminated print name.
+    /// <summary> Lays out REPARSE_DATA_BUFFER's MountPointReparseBuffer variant: an 8-byte header (tag, data length, reserved), four 16-bit name offsets/lengths, then the NUL-terminated substitute name followed by the NUL-terminated print name.
     /// </summary>
     private static byte[] BuildMountPointBuffer(string targetDirectory)
     {
-        // The substitute name is what the object manager resolves, so it uses
-        // the \??\ (DosDevices) prefix; the print name is what tools display.
         var substitute = Encoding.Unicode.GetBytes(@"\??\" + targetDirectory);
         var print = Encoding.Unicode.GetBytes(targetDirectory);
         int names = substitute.Length + 2 + print.Length + 2;
@@ -88,12 +73,12 @@ internal static partial class NativeJunction
 
         BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(0), IoReparseTagMountPoint);
         BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(4), (ushort)dataLength);
-        BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(6), 0); // Reserved
-        BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(8), 0); // SubstituteNameOffset
+        BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(6), 0);
+        BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(8), 0);
         BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(10), (ushort)substitute.Length);
         BinaryPrimitives.WriteUInt16LittleEndian(
             buffer.AsSpan(12),
-            (ushort)(substitute.Length + 2)); // PrintNameOffset
+            (ushort)(substitute.Length + 2));
         BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(14), (ushort)print.Length);
         substitute.AsSpan().CopyTo(buffer.AsSpan(16));
         print.AsSpan().CopyTo(buffer.AsSpan(16 + substitute.Length + 2));

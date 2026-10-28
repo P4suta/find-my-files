@@ -2,8 +2,7 @@ using Windows.ApplicationModel.DataTransfer;
 
 namespace FindMyFiles.Services;
 
-/// <summary>Complete set of shell/COM process boundaries used by
-/// <see cref="ShellOps"/>. Production uses the operating system implementations;
+/// <summary>Complete set of shell/COM process boundaries used by <see cref="ShellOps"/>. Production uses the operating system implementations;
 /// tests replace the set atomically.</summary>
 internal sealed record ShellOpsHooks(
     IProcessRunner ProcessRunner,
