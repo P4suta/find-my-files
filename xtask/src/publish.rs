@@ -444,7 +444,7 @@ fn place_buildinfo(dist: &Path, full: &str, source_commit: Option<&str>) -> Resu
 /// Prove the user-visible launcher metadata and the adjacent BUILDINFO describe the exact same build identity.
 /// `ProductVersion` carries the full channel/sha identity, while Win32 `FileVersion` carries its canonical clean `X.Y.Z` base.
 /// The build script already fails closed if the resource could not be embedded; this post-build readback catches a stale/wrong stamped launcher.
-fn verify_bundle_identity(
+pub fn verify_bundle_identity(
     dist: &Path,
     expected_full: &str,
     expected_source_commit: Option<&str>,
