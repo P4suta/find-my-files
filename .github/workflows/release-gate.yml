@@ -26,7 +26,7 @@ jobs:
           github.event.label.name != 'release: approved'
         ) && 'release-gate-ignored-label' || 'release-gate'
       }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       pull-requests: read # Permission: Verify release labels and the source branch.

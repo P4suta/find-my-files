@@ -31,11 +31,11 @@ const STANDARD_INFORMATION_ATTRIBUTE: u32 = 0x10;
 const ATTRIBUTE_LIST_ATTRIBUTE: u32 = 0x20;
 const FILE_NAME_ATTRIBUTE: u32 = 0x30;
 
-fn le_u16(data: &[u8], offset: usize) -> u16 {
+const fn le_u16(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([data[offset], data[offset + 1]])
 }
 
-fn le_u32(data: &[u8], offset: usize) -> u32 {
+const fn le_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes([
         data[offset],
         data[offset + 1],

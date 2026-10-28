@@ -1327,7 +1327,7 @@ mod tests {
             &MetadataSource::none(),
         );
         assert!(idx.is_excluded(leaf));
-        assert!(visible_names(&idx, "needle").is_empty());
+        assert_eq!(visible_names(&idx, "needle"), Vec::<String>::new());
 
         apply_batch(
             &mut idx,
@@ -1379,7 +1379,7 @@ mod tests {
             &MetadataSource::none(),
         );
         assert!(idx.is_excluded(leaf));
-        assert!(visible_names(&idx, "needle").is_empty());
+        assert_eq!(visible_names(&idx, "needle"), Vec::<String>::new());
 
         apply_batch(
             &mut idx,

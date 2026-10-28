@@ -14,7 +14,7 @@ static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
 
 pub fn next_id(kind: &str) -> Result<usize, i32> {
     NEXT_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         })
         .map_err(|_| {

@@ -152,6 +152,7 @@ fn compute_name_stats(idx: &VolumeIndex) -> NameStats {
     let n = live.max(1) as f64;
     let f = fold_identical as f64 / n;
     let mean = len_sum as f64 / n;
+    let shared_name_bytes = f * mean;
     NameStats {
         live,
         fold_identical,
@@ -167,9 +168,9 @@ fn compute_name_stats(idx: &VolumeIndex) -> NameStats {
         },
         size_ge_4gib,
         size_ge_4gib_ratio: size_ge_4gib as f64 / n,
-        predicted_savings_full_column: f * mean - size_of::<u32>() as f64,
+        predicted_savings_full_column: shared_name_bytes - size_of::<u32>() as f64,
         predicted_savings_sorted_pairs: PAIR_METADATA_BYTES
-            .mul_add(-(ALL_ENTRIES_RATIO - f), f * mean),
+            .mul_add(-(ALL_ENTRIES_RATIO - f), shared_name_bytes),
     }
 }
 

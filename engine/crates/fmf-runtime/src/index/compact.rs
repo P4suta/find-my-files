@@ -207,7 +207,6 @@ mod tests {
         let c = idx.compacted();
         assert_eq!(c.len(), live_before);
         assert_eq!(c.live_len(), live_before);
-        #[expect(clippy::float_cmp, reason = "0 tombstones yields an exact 0.0 ratio")]
         {
             assert_eq!(c.tombstone_ratio(), 0.0);
         }

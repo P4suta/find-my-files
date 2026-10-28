@@ -188,7 +188,9 @@ impl NtfsFileName<'_> {
     #[must_use]
     pub fn to_utf16(self) -> Vec<u16> {
         self.utf16le
-            .chunks_exact(UTF16_UNIT_BYTES)
+            .as_chunks::<UTF16_UNIT_BYTES>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect()
     }
@@ -340,10 +342,15 @@ impl<'a> NtfsAttribute<'a> {
             return None;
         }
         let encoded = value.get(FILE_NAME_HEADER_BYTES..end)?;
-        if encoded.chunks_exact(UTF16_UNIT_BYTES).any(|pair| {
-            let unit = u16::from_le_bytes([pair[0], pair[1]]);
-            unit == 0 || unit == u16::from(b'/') || unit == u16::from(b'\\')
-        }) {
+        if encoded
+            .as_chunks::<UTF16_UNIT_BYTES>()
+            .0
+            .iter()
+            .any(|pair| {
+                let unit = u16::from_le_bytes([pair[0], pair[1]]);
+                unit == 0 || unit == u16::from(b'/') || unit == u16::from(b'\\')
+            })
+        {
             return None;
         }
         let parent_directory_reference = le_u64(value, 0)?;

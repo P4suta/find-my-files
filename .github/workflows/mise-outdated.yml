@@ -13,6 +13,7 @@ concurrency:
 
 jobs:
   check:
+    name: check
     runs-on: windows-2025
     timeout-minutes: 10
     permissions:
@@ -24,10 +25,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
-          version: "v2026.10.15"
-          sha256: 8b53511db7d036db984a92eb63e139d9942a8d179ddbe4e880addfa04a924f96
+          version: "v2026.10.21"
+          sha256: 490934f990e130c2d3ec8e192c9bd06004168659ffcd28ea4e27ba489fade89e
           install: false
 
       - name: Check pins against latest (beyond-pin)
@@ -51,7 +52,7 @@ jobs:
           echo "Tools whose pin is behind: $drift"
 
       - name: Hand the bounded drift report to the issue writer
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mise-outdated-report
           path: drift-table.md
@@ -60,15 +61,16 @@ jobs:
           overwrite: true
 
   report:
+    name: report
     needs: check
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       actions: read # Permission: Download the bounded dependency report.
       issues: write # Permission: Maintain the dependency freshness issue.
     steps:
       - name: Download the bounded drift report
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: mise-outdated-report
 

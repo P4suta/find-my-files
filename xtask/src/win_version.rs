@@ -98,8 +98,10 @@ fn query_translations(data: &[u8]) -> Vec<(u16, u16)> {
     Translation entries contain pairs of aligned u16 values. */
     let words = unsafe { std::slice::from_raw_parts(buffer.cast::<u16>(), word_len) };
     words
-        .chunks_exact(WORDS_PER_TRANSLATION)
-        .map(|pair| (pair[0], pair[1]))
+        .as_chunks::<WORDS_PER_TRANSLATION>()
+        .0
+        .iter()
+        .map(|pair| (*pair).into())
         .collect()
 }
 

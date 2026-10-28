@@ -13,8 +13,9 @@ concurrency:
 
 jobs:
   prepare:
+    name: prepare
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -163,7 +164,7 @@ jobs:
 
       - name: Hand validated SBOMs to the isolated scanner
         if: steps.fetch.outputs.scan == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-monitor-input
           path: |
@@ -175,13 +176,14 @@ jobs:
           overwrite: true
 
   scan:
+    name: scan
     needs: prepare
     if: >-
       ${{
         needs.prepare.result == 'success' &&
         needs.prepare.outputs.scan == 'true'
       }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       actions: read # Permission: Download the validated SBOM handoff.
@@ -189,14 +191,14 @@ jobs:
       code: ${{ steps.scan.outputs.code }}
     steps:
       - name: Download validated SBOMs and policy
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: sbom-monitor-input
 
       - name: Install osv-scanner
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
-          tool: osv-scanner@2.3.6
+          tool: osv-scanner@2.7.0
           fallback: none
 
       - name: Re-scan release SBOMs against today's OSV DB
@@ -219,7 +221,7 @@ jobs:
 
       - name: Upload vulnerability report
         if: steps.scan.outputs.code == '1'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-monitor-report
           path: osv-report.md
@@ -228,6 +230,7 @@ jobs:
           overwrite: true
 
   report:
+    name: report
     needs: [prepare, scan]
     if: >-
       ${{
@@ -236,7 +239,7 @@ jobs:
         needs.prepare.outputs.scan == 'true' &&
         needs.scan.result == 'success'
       }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       actions: read # Permission: Download the scanner report.
@@ -244,7 +247,7 @@ jobs:
     steps:
       - name: Download vulnerability report
         if: needs.scan.outputs.code == '1'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: sbom-monitor-report
 

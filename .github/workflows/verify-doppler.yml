@@ -23,7 +23,7 @@ jobs:
       github.repository_id == '1267203446' &&
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     environment: release-please
     permissions: {}
@@ -55,7 +55,7 @@ jobs:
       github.repository_id == '1267203446' &&
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' && inputs.verify_signing
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     environment: release
     permissions:

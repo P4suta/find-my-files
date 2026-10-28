@@ -107,11 +107,11 @@ impl UsnRecord {
 }
 
 #[inline]
-fn u16_at(b: &[u8], off: usize) -> u16 {
+const fn u16_at(b: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([b[off], b[off + 1]])
 }
 #[inline]
-fn u32_at(b: &[u8], off: usize) -> u32 {
+const fn u32_at(b: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([
         b[off],
         b[off + 1],
@@ -204,7 +204,7 @@ pub fn parse_buffer(buf: &[u8]) -> (u64, Vec<UsnRecord>, bool) {
                 let name_end = name_off + name_len;
                 let mut name = Vec::with_capacity(name_len / size_of::<u16>());
                 let nb = &rec[name_off..name_end];
-                for ch in nb.chunks_exact(size_of::<u16>()) {
+                for ch in nb.as_chunks::<{ size_of::<u16>() }>().0 {
                     name.push(u16::from_le_bytes([ch[0], ch[1]]));
                 }
                 records.push(UsnRecord {
@@ -315,7 +315,7 @@ mod tests {
         let (next, parsed, truncated) = parse_buffer(&buf);
         assert!(truncated);
         assert_eq!(next, 9);
-        assert!(parsed.is_empty());
+        assert_eq!(parsed, Vec::<UsnRecord>::new());
     }
 
     #[test]
@@ -326,19 +326,19 @@ mod tests {
         odd_name_length[8 + 56..8 + 58].copy_from_slice(&3u16.to_le_bytes());
         let (_, parsed, malformed) = parse_buffer(&odd_name_length);
         assert!(malformed);
-        assert!(parsed.is_empty());
+        assert_eq!(parsed, Vec::<UsnRecord>::new());
 
         let mut header_name_offset = original.clone();
         header_name_offset[8 + 58..8 + 60].copy_from_slice(&58u16.to_le_bytes());
         let (_, parsed, malformed) = parse_buffer(&header_name_offset);
         assert!(malformed);
-        assert!(parsed.is_empty());
+        assert_eq!(parsed, Vec::<UsnRecord>::new());
 
         let mut unknown_version = original;
         unknown_version[8 + 4..8 + 6].copy_from_slice(&99u16.to_le_bytes());
         let (_, parsed, malformed) = parse_buffer(&unknown_version);
         assert!(malformed);
-        assert!(parsed.is_empty());
+        assert_eq!(parsed, Vec::<UsnRecord>::new());
     }
 
     #[test]
@@ -352,7 +352,7 @@ mod tests {
         v3[8 + 76..8 + 78].copy_from_slice(&u16::from(b'x').to_le_bytes());
         let (_, parsed, malformed) = parse_buffer(&v3);
         assert!(!malformed);
-        assert!(parsed.is_empty());
+        assert_eq!(parsed, Vec::<UsnRecord>::new());
 
         let mut v4 = vec![0u8; 8 + 80];
         v4[..8].copy_from_slice(&10u64.to_le_bytes());
@@ -362,7 +362,7 @@ mod tests {
         v4[8 + 62..8 + 64].copy_from_slice(&16u16.to_le_bytes());
         let (_, parsed, malformed) = parse_buffer(&v4);
         assert!(!malformed);
-        assert!(parsed.is_empty());
+        assert_eq!(parsed, Vec::<UsnRecord>::new());
     }
 
     #[test]
@@ -387,12 +387,12 @@ mod tests {
     #[test]
     fn empty_buffer() {
         let (_, records, malformed) = parse_buffer(&[]);
-        assert!(records.is_empty());
+        assert_eq!(records, Vec::<UsnRecord>::new());
         assert!(malformed);
 
         let (next, records, malformed) = parse_buffer(&0u64.to_le_bytes());
         assert_eq!(next, 0);
-        assert!(records.is_empty());
+        assert_eq!(records, Vec::<UsnRecord>::new());
         assert!(!malformed);
     }
 }

@@ -304,7 +304,7 @@ mod tests {
             b.push(raw(100 + i, 5, &name, false, i, i as i64));
         }
         let idx = b.finish();
-        assert!(run(&idx, &sub_driver("cdab"), true).is_empty());
+        assert_eq!(run(&idx, &sub_driver("cdab"), true), Vec::<u32>::new());
         assert_eq!(
             run(&idx, &sub_driver("abcd"), true),
             (1..=4000).collect::<Vec<EntryId>>()
@@ -336,7 +336,7 @@ mod tests {
         let dir = idx.entry_by_record(20).unwrap();
         let zzz = idx.entry_by_record(30).unwrap();
         assert_eq!(run(&idx, &sub_driver("needle"), true), vec![zzz]);
-        assert!(run(&idx, &sub_driver("needledir"), true).is_empty());
+        assert_eq!(run(&idx, &sub_driver("needledir"), true), Vec::<u32>::new());
         assert_eq!(run(&idx, &sub_driver("renamed"), true), vec![dir]);
     }
 
@@ -351,7 +351,7 @@ mod tests {
         idx.upsert_synthetic(&raw(10, 5, &renamed, false, 1, 2));
         idx.merge_new_into_permutations(first_new)
             .expect("fixture topology remains valid");
-        assert!(run(&idx, &sub_driver("aaa"), true).is_empty());
+        assert_eq!(run(&idx, &sub_driver("aaa"), true), Vec::<u32>::new());
         let new_id = idx.entry_by_record(10).unwrap();
         assert_eq!(run(&idx, &sub_driver("bbb"), true), vec![new_id]);
     }
