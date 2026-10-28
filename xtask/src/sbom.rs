@@ -1952,8 +1952,10 @@ fn build_app_bom(
     dist_files: &[FileRecord],
 ) -> Result<Value> {
     let (root_name, resolved_version) = split_identity(&graph.root_id)?;
+    let base = semver::product_base(version);
+    semver::validate(base)?;
     ensure!(
-        root_name == APP_ROOT_NAME && resolved_version == version,
+        root_name == APP_ROOT_NAME && resolved_version == base,
         "resolved app root {} does not equal requested product {APP_ROOT_NAME}/{version}",
         graph.root_id
     );
@@ -2975,6 +2977,9 @@ mod tests {
     #[test]
     fn channel_versions_preserve_the_full_product_identity_and_cargo_package_versions() {
         let raw = complete_raw_set();
+        let app_graph = app_graph_fixture();
+        let app_dist = app_dist_fixture(b"MZpackage-a");
+        let app_packages = app_inventories(b"MZpackage-a");
         let borrowed = raw
             .iter()
             .map(|(name, value)| (*name, value))
@@ -2986,6 +2991,8 @@ mod tests {
         ] {
             let bom = merge_cargo_boms(version, &borrowed, &rust_evidence()).unwrap();
             assert_eq!(bom["metadata"]["component"]["version"], version);
+            let app_bom = build_app_bom(version, &app_graph, &app_packages, &app_dist).unwrap();
+            assert_eq!(app_bom["metadata"]["component"]["version"], version);
             for component in bom["components"].as_array().unwrap() {
                 if component["name"].as_str().unwrap().starts_with("fmf-") {
                     assert_eq!(component["version"], "0.1.1");
@@ -2998,6 +3005,7 @@ mod tests {
             "0.1.1.0-dev",
         ] {
             assert!(merge_cargo_boms(version, &borrowed, &rust_evidence()).is_err());
+            assert!(build_app_bom(version, &app_graph, &app_packages, &app_dist).is_err());
         }
     }
 
