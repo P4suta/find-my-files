@@ -33,6 +33,13 @@ pub(super) enum PipelineOutcome {
     Cancelled,
 }
 
+enum ChunkDelivery {
+    Complete,
+    Cancelled,
+}
+
+type ChunkRead = std::io::Result<(usize, Vec<u8>)>;
+
 /// Pure chunk-plan arithmetic: record-aligned logical chunks whose physical reads may cross any number of fragmented data runs.
 /// Sparse spans remain zero-filled in the destination.
 pub(super) fn plan_chunks(map: &RunMap, data_size: u64, record_size: usize) -> Option<Vec<Chunk>> {
@@ -93,15 +100,14 @@ pub(super) fn run_chunk_pipeline(
     stop: &Arc<AtomicBool>,
     on_chunk: &mut dyn FnMut(usize, &mut [u8]),
 ) -> Result<PipelineOutcome, NtfsError> {
-    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::sync::mpsc;
 
     if stop.load(Ordering::Relaxed) {
         return Ok(PipelineOutcome::Cancelled);
     }
     let mut file = open_shared_read(volume_path)?;
     let plan = chunks.to_vec();
-    let (full_tx, full_rx) =
-        mpsc::sync_channel::<std::io::Result<(usize, Vec<u8>)>>(PIPELINE_BUFFERS);
+    let (full_tx, full_rx) = mpsc::sync_channel::<ChunkRead>(PIPELINE_BUFFERS);
     let (empty_tx, empty_rx) = mpsc::channel::<Vec<u8>>();
     for _ in 0..PIPELINE_BUFFERS {
         empty_tx.send(vec![0u8; SCAN_CHUNK]).map_err(|_| {
@@ -169,60 +175,128 @@ pub(super) fn run_chunk_pipeline(
         });
     };
 
-    let mut result: Result<(), NtfsError> = Ok(());
+    let delivery = consume_chunks(chunks, stop, full_rx, empty_tx, on_chunk);
+    let read_time = handle
+        .join()
+        .map_err(|_| std::io::Error::other("scan I/O thread panicked"))?;
+    if stop.load(Ordering::Relaxed) {
+        return Ok(PipelineOutcome::Cancelled);
+    }
+    delivery.map(|delivery| match delivery {
+        ChunkDelivery::Cancelled => PipelineOutcome::Cancelled,
+        ChunkDelivery::Complete => PipelineOutcome::Complete {
+            read_time,
+            fallbacks: 0,
+        },
+    })
+}
+
+fn consume_chunks(
+    chunks: &[Chunk],
+    stop: &AtomicBool,
+    full_rx: std::sync::mpsc::Receiver<ChunkRead>,
+    empty_tx: std::sync::mpsc::Sender<Vec<u8>>,
+    on_chunk: &mut dyn FnMut(usize, &mut [u8]),
+) -> Result<ChunkDelivery, NtfsError> {
+    use std::sync::mpsc::RecvTimeoutError;
+
     let mut received = 0usize;
-    let mut cancelled = false;
     while received < chunks.len() {
         if stop.load(Ordering::Relaxed) {
-            cancelled = true;
-            break;
+            return Ok(ChunkDelivery::Cancelled);
         }
         match full_rx.recv_timeout(Duration::from_millis(CANCEL_POLL_MILLIS)) {
             Ok(Ok((i, mut buf))) => {
                 if stop.load(Ordering::Relaxed) {
-                    cancelled = true;
-                    break;
+                    return Ok(ChunkDelivery::Cancelled);
                 }
                 on_chunk(i, &mut buf[..chunks[i].want]);
                 received += 1;
                 if received < chunks.len() && empty_tx.send(buf).is_err() {
-                    result = Err(std::io::Error::other(
-                        "scan I/O thread stopped before buffer recycling",
-                    )
-                    .into());
-                    break;
+                    tracing::trace!("scan I/O reader finished; draining queued outcomes");
                 }
             }
             Ok(Err(e)) => {
-                result = Err(e.into());
-                break;
+                return Err(e.into());
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
-                result = Err(std::io::Error::other("scan I/O thread terminated early").into());
-                break;
+                return Err(std::io::Error::other("scan I/O thread terminated early").into());
             }
         }
     }
-    drop(full_rx);
-    drop(empty_tx);
-    let read_time = handle
-        .join()
-        .map_err(|_| std::io::Error::other("scan I/O thread panicked"))?;
-    if cancelled || stop.load(Ordering::Relaxed) {
-        Ok(PipelineOutcome::Cancelled)
-    } else {
-        result.map(|()| PipelineOutcome::Complete {
-            read_time,
-            fallbacks: 0,
-        })
-    }
+    Ok(ChunkDelivery::Complete)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::index::testutil::TestDir;
+
+    fn drain_after_reader_exit(
+        messages: Vec<ChunkRead>,
+    ) -> (Result<ChunkDelivery, NtfsError>, Vec<usize>) {
+        let chunks = vec![
+            Chunk {
+                logical: 0,
+                want: 1,
+                reads: Vec::new()
+            };
+            2
+        ];
+        let (full_tx, full_rx) = std::sync::mpsc::sync_channel(PIPELINE_BUFFERS);
+        for message in messages {
+            full_tx.send(message).expect("queue reader outcome");
+        }
+        drop(full_tx);
+        let (empty_tx, empty_rx) = std::sync::mpsc::channel();
+        drop(empty_rx);
+        let mut seen = Vec::new();
+        let result = consume_chunks(
+            &chunks,
+            &AtomicBool::new(false),
+            full_rx,
+            empty_tx,
+            &mut |i, _| seen.push(i),
+        );
+        (result, seen)
+    }
+
+    #[test]
+    fn completed_reader_leaves_all_prefetched_chunks_available() {
+        let (result, seen) = drain_after_reader_exit(vec![Ok((0, vec![1])), Ok((1, vec![2]))]);
+        assert!(
+            matches!(result, Ok(ChunkDelivery::Complete)),
+            "queued chunks must outlive their producer"
+        );
+        assert_eq!(seen, vec![0, 1]);
+    }
+
+    #[test]
+    fn exited_reader_preserves_its_queued_read_error() {
+        let (result, seen) = drain_after_reader_exit(vec![
+            Ok((0, vec![1])),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "read failed",
+            )),
+        ]);
+        let Err(NtfsError::Io(error)) = result else {
+            panic!("read error required")
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(seen, vec![0]);
+    }
+
+    #[test]
+    fn exited_reader_cannot_report_success_with_a_missing_chunk() {
+        let (result, seen) = drain_after_reader_exit(vec![Ok((0, vec![1]))]);
+        let Err(NtfsError::Io(error)) = result else {
+            panic!("early exit must fail")
+        };
+        assert!(error.to_string().contains("terminated early"));
+        assert_eq!(seen, vec![0]);
+    }
 
     /// Pins `plan_chunks` arithmetic: record alignment, sparse zero-fill,
     /// and full logical coverage in order.
