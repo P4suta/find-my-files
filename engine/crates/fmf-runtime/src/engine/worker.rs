@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use fmf_core::recovery::FailureKind;
+
 use crate::metrics::{Counters, ScanTrace, UsnTrace};
 use crate::usn::apply::{apply_planned, plan_batch};
 use crate::usn::{JournalGone, ReadOutcome, UsnError, UsnRecord};
@@ -136,6 +138,14 @@ pub(super) fn compact_recheck(copied_at: u64, current: Option<u64>) -> Compactio
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum WorkerError {
+    #[error("{0}")]
+    Journal(#[from] UsnError),
+    #[error("{0}")]
+    Scan(#[from] crate::mft::MftError),
+}
+
 impl Engine {
     /// Production wiring: the Windows journal seam (the snapshot seam lives on the slot, created by `index_start`).
     #[cfg(windows)]
@@ -154,17 +164,29 @@ impl Engine {
         slot: Arc<VolumeSlot>,
         journal: &mut dyn JournalSource,
     ) {
-        let this = self.clone();
-        let slot2 = slot.clone();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            this.volume_thread_inner(slot2, journal);
-        }));
-        if result.is_err() {
-            *slot.phase.lock() = VolumeState::Failed;
+        loop {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.clone().volume_thread_inner(slot.clone(), journal)
+            }));
+            if slot.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let (kind, message) = match result {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) => (FailureKind::Error, error.to_string()),
+                Err(_) => (
+                    FailureKind::Panic,
+                    "internal panic — エンジンログに詳細".to_string(),
+                ),
+            };
+            slot.phase.lock().failed(kind);
             self.emit(EngineEvent::VolumeFailed {
                 volume: slot.label.clone(),
-                message: "internal panic — エンジンログに詳細".to_string(),
+                message,
             });
+            if !slot.wait_for_retry() {
+                return;
+            }
         }
     }
 
@@ -173,21 +195,16 @@ impl Engine {
         self: Arc<Self>,
         slot: Arc<VolumeSlot>,
         journal: &mut dyn JournalSource,
-    ) {
+    ) -> Result<(), WorkerError> {
         let label = slot.label.clone();
         let store = slot.store.clone();
 
         loop {
             if slot.stop.load(Ordering::Relaxed) {
-                return;
+                return Ok(());
             }
             if let Err(e) = journal.open() {
-                *slot.phase.lock() = VolumeState::Failed;
-                self.emit(EngineEvent::VolumeFailed {
-                    volume: label,
-                    message: e.to_string(),
-                });
-                return;
+                return Err(e.into());
             }
 
             let load_stage = std::time::Instant::now();
@@ -249,7 +266,7 @@ impl Engine {
                     match scanned {
                         Ok((mut idx, stats)) => {
                             if slot.stop.load(Ordering::Relaxed) {
-                                return;
+                                return Ok(());
                             }
                             tracing::info!(
                                 volume = %label,
@@ -349,7 +366,7 @@ impl Engine {
                                 volume = %label,
                                 "scan cancelled — volume left unscanned"
                             );
-                            return;
+                            return Ok(());
                         }
                         Err(e) => {
                             if let crate::mft::MftError::CorruptRecords(count) = &e {
@@ -367,42 +384,34 @@ impl Engine {
                                 error = %crate::diag::error_chain(&e),
                                 "volume scan failed — index rejected"
                             );
-                            *slot.phase.lock() = VolumeState::Failed;
-                            self.emit(EngineEvent::VolumeFailed {
-                                volume: label,
-                                message: e.to_string(),
-                            });
-                            return;
+                            return Err(e.into());
                         }
                     }
                 }
             };
 
             if slot.stop.load(Ordering::Relaxed) {
-                return;
+                return Ok(());
             }
             let fetch = match journal.open_metadata_source(Arc::clone(&slot.stop)) {
                 Ok(fetch) => fetch,
                 Err(e) => {
-                    *slot.phase.lock() = VolumeState::Failed;
-                    self.emit(EngineEvent::VolumeFailed {
-                        volume: label,
-                        message: e.to_string(),
-                    });
-                    return;
+                    return Err(e.into());
                 }
             };
             if slot.stop.load(Ordering::Relaxed) {
-                return;
+                return Ok(());
             }
             let entries = idx.live_len() as u64;
             *slot.scanned.lock() = entries;
-            slot.install_index(idx);
-            *slot.checkpoint.lock() = Some(JournalCheckpoint {
-                journal_id: journal.journal_id(),
-                next_usn: journal.next_usn(),
-            });
-            *slot.phase.lock() = VolumeState::Ready;
+            slot.install_snapshot(
+                idx,
+                JournalCheckpoint {
+                    journal_id: journal.journal_id(),
+                    next_usn: journal.next_usn(),
+                },
+            );
+            slot.phase.lock().state = VolumeState::Ready;
             self.emit(EngineEvent::VolumeReady {
                 volume: label.clone(),
                 entries,
@@ -419,8 +428,8 @@ impl Engine {
                     ?cause,
                     "change source invalidated — full rescan"
                 );
-                *slot.checkpoint.lock() = None;
-                *slot.phase.lock() = VolumeState::Rescanning;
+                slot.index.write().set_checkpoint(None);
+                slot.phase.lock().state = VolumeState::Rescanning;
                 self.emit(EngineEvent::RescanStarted {
                     volume: label.clone(),
                 });
@@ -428,14 +437,8 @@ impl Engine {
             };
             loop {
                 if slot.stop.load(Ordering::Relaxed) {
-                    self.save_slot(
-                        &slot,
-                        JournalCheckpoint {
-                            journal_id: journal.journal_id(),
-                            next_usn: journal.next_usn(),
-                        },
-                    );
-                    return;
+                    self.save_slot(&slot, super::volume::SnapshotSave::Always);
+                    return Ok(());
                 }
                 match journal_gone_action(journal.read_blocking(&mut buf)) {
                     TailStep::Apply(rs) => {
@@ -503,15 +506,19 @@ impl Engine {
                                 apply_us: stage.elapsed_us(),
                             });
                             *slot.scanned.lock() = idx.live_len() as u64;
+                            index.set_checkpoint(if rescan.is_some() {
+                                None
+                            } else {
+                                Some(JournalCheckpoint {
+                                    journal_id: journal.journal_id(),
+                                    next_usn: journal.next_usn(),
+                                })
+                            });
                         }
                         if let Some(cause) = rescan {
                             begin_rescan(cause);
                             break;
                         }
-                        *slot.checkpoint.lock() = Some(JournalCheckpoint {
-                            journal_id: journal.journal_id(),
-                            next_usn: journal.next_usn(),
-                        });
                         self.maybe_compact(&slot);
                         if last_emit.is_none_or(|t| t.elapsed() >= INDEX_CHANGED_DEBOUNCE) {
                             last_emit = Some(Instant::now());
@@ -525,12 +532,7 @@ impl Engine {
                         break;
                     }
                     TailStep::Fail(e) => {
-                        *slot.phase.lock() = VolumeState::Failed;
-                        self.emit(EngineEvent::VolumeFailed {
-                            volume: label,
-                            message: e.to_string(),
-                        });
-                        return;
+                        return Err(e.into());
                     }
                 }
             }

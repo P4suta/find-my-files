@@ -6,8 +6,11 @@ const DRIVE_LETTER_COUNT: u32 = 26;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Instant;
 
-use parking_lot::{Mutex, RwLock};
+use fmf_core::recovery::{FailureKind, RetryState, backoff_remaining};
+use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::index::{EntryId, VolumeIndex};
 use crate::metrics::Counters;
@@ -28,29 +31,118 @@ pub(super) struct VolumeQueryCache {
     pub(super) ids: Arc<[EntryId]>,
 }
 
-/// USN position paired with the index state, shared with `Engine::flush`.
-/// The tailing thread owns the journal handle; "save now" from another thread needs (`journal_id`, `next_usn`) without touching it.
-/// Updated *after* a batch is applied, so a concurrent flush that reads the checkpoint first always saves checkpoint ≤ index — the USN replay on load covers the gap (re-applying records is idempotent; skipping them would not be).
+/// USN position paired with its index under the slot's read/write lock.
 #[derive(Clone, Copy)]
 pub(super) struct JournalCheckpoint {
     pub(super) journal_id: u64,
     pub(super) next_usn: i64,
 }
 
+#[derive(Default)]
+pub(super) struct VolumeData {
+    index: Option<VolumeIndex>,
+    checkpoint: Option<JournalCheckpoint>,
+}
+
+impl VolumeData {
+    pub(super) const fn as_ref(&self) -> Option<&VolumeIndex> {
+        self.index.as_ref()
+    }
+
+    pub(super) const fn as_mut(&mut self) -> Option<&mut VolumeIndex> {
+        self.index.as_mut()
+    }
+
+    pub(super) const fn set_checkpoint(&mut self, checkpoint: Option<JournalCheckpoint>) {
+        self.checkpoint = checkpoint;
+    }
+
+    fn replace_index(&mut self, mut index: VolumeIndex) {
+        if let Some(previous) = &self.index {
+            index.bump_structural_from(previous.structural_generation());
+        }
+        self.index = Some(index);
+    }
+}
+
+pub(super) enum SnapshotSave {
+    IfDirty,
+    Always,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum RetryControl {
+    AutomaticAvailable,
+    AutomaticSpent,
+    Backoff(Instant),
+    AwaitRequest,
+}
+
+impl RetryControl {
+    pub(super) const fn policy(self) -> RetryState {
+        match self {
+            Self::AutomaticAvailable => RetryState::AutomaticAvailable,
+            Self::AutomaticSpent => RetryState::AutomaticSpent,
+            Self::Backoff(_) => RetryState::Backoff,
+            Self::AwaitRequest => RetryState::AwaitRequest,
+        }
+    }
+
+    fn transition(&mut self, state: RetryState) {
+        *self = match state {
+            RetryState::AutomaticAvailable => Self::AutomaticAvailable,
+            RetryState::AutomaticSpent => Self::AutomaticSpent,
+            RetryState::Backoff => Self::Backoff(Instant::now()),
+            RetryState::AwaitRequest => Self::AwaitRequest,
+        };
+    }
+}
+
+pub(super) struct VolumeLifecycle {
+    pub(super) state: VolumeState,
+    pub(super) retry: RetryControl,
+}
+
+impl VolumeLifecycle {
+    pub(super) fn failed(&mut self, kind: FailureKind) {
+        self.retry.transition(self.retry.policy().failed(kind));
+        self.state = VolumeState::Failed;
+    }
+}
+
+#[cfg(test)]
+pub(super) struct SnapshotReadGate {
+    pub(super) entered: std::sync::mpsc::SyncSender<()>,
+    pub(super) resume: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+impl SnapshotReadGate {
+    pub(super) fn wait(self) {
+        self.entered
+            .send(())
+            .expect("announce pending snapshot read");
+        self.resume
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("release pending snapshot read");
+    }
+}
+
 pub(super) struct VolumeSlot {
     pub(super) label: String,
-    pub(super) phase: Mutex<VolumeState>,
+    pub(super) phase: Mutex<VolumeLifecycle>,
+    pub(super) retry_wake: Condvar,
     pub(super) scanned: Mutex<u64>,
-    pub(super) index: RwLock<Option<VolumeIndex>>,
+    pub(super) index: RwLock<VolumeData>,
     pub(super) stop: Arc<AtomicBool>,
     /// Single-entry query cache (lock order: `index` read first, then this).
     pub(super) last_query: Mutex<Option<VolumeQueryCache>>,
-    /// None until the volume is Ready (flush skips it).
-    pub(super) checkpoint: Mutex<Option<JournalCheckpoint>>,
     /// (content, structural) generations at the last snapshot save — the dirty check that keeps periodic flushes from rewriting unchanged volumes.
     pub(super) last_saved: Mutex<Option<(u64, u64)>>,
     /// Serializes snapshot writers for this slot (flush vs. stop-save).
     pub(super) save_lock: Mutex<()>,
+    #[cfg(test)]
+    pub(super) snapshot_read_gate: Mutex<Option<SnapshotReadGate>>,
     /// Snapshot persistence seam for this volume (ADR-0018) — production is `WinSnapshotStore` on `snapshot_path(...)`.
     pub(super) store: Arc<dyn SnapshotStore>,
 }
@@ -60,14 +152,19 @@ impl VolumeSlot {
     pub(super) fn scanning(label: String, store: Arc<dyn SnapshotStore>) -> Self {
         Self {
             label,
-            phase: Mutex::new(VolumeState::Scanning),
+            phase: Mutex::new(VolumeLifecycle {
+                state: VolumeState::Scanning,
+                retry: RetryControl::AutomaticAvailable,
+            }),
+            retry_wake: Condvar::new(),
             scanned: Mutex::new(0),
-            index: RwLock::new(None),
+            index: RwLock::new(VolumeData::default()),
             stop: Arc::new(AtomicBool::new(false)),
             last_query: Mutex::new(None),
-            checkpoint: Mutex::new(None),
             last_saved: Mutex::new(None),
             save_lock: Mutex::new(()),
+            #[cfg(test)]
+            snapshot_read_gate: Mutex::new(None),
             store,
         }
     }
@@ -77,13 +174,59 @@ impl VolumeSlot {
     /// A first install (initial scan or snapshot restore) keeps the value the index was built with — there are no handles to invalidate.
     ///
     /// Every index replacement goes through here, which is what makes the generation bump impossible to forget.
-    pub(super) fn install_index(&self, mut idx: VolumeIndex) {
+    pub(super) fn install_index(&self, idx: VolumeIndex) {
         let mut guard = self.index.write();
-        if let Some(prev) = guard.as_ref() {
-            idx.bump_structural_from(prev.structural_generation());
-        }
+        guard.replace_index(idx);
         *self.last_query.lock() = None;
-        *guard = Some(idx);
+    }
+
+    pub(super) fn install_snapshot(&self, idx: VolumeIndex, checkpoint: JournalCheckpoint) {
+        let mut guard = self.index.write();
+        guard.replace_index(idx);
+        guard.checkpoint = Some(checkpoint);
+        *self.last_query.lock() = None;
+    }
+
+    pub(super) fn request_retry(&self) {
+        let mut lifecycle = self.phase.lock();
+        if lifecycle.state != VolumeState::Failed || self.stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let next = lifecycle.retry.policy().requested();
+        lifecycle.retry.transition(next);
+        lifecycle.state = VolumeState::Scanning;
+        self.retry_wake.notify_one();
+    }
+
+    pub(super) fn wait_for_retry(&self) -> bool {
+        let mut lifecycle = self.phase.lock();
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return false;
+            }
+            match lifecycle.retry {
+                RetryControl::AutomaticAvailable | RetryControl::AutomaticSpent => {
+                    lifecycle.state = VolumeState::Scanning;
+                    return true;
+                }
+                RetryControl::Backoff(started) => {
+                    let remaining = backoff_remaining(started.elapsed());
+                    if remaining.is_zero() {
+                        let next = lifecycle.retry.policy().elapsed();
+                        lifecycle.retry.transition(next);
+                    } else {
+                        self.retry_wake.wait_for(&mut lifecycle, remaining);
+                    }
+                }
+                RetryControl::AwaitRequest => self.retry_wake.wait(&mut lifecycle),
+            }
+        }
+    }
+
+    pub(super) fn request_stop(&self) {
+        let _lifecycle = self.phase.lock();
+        self.stop.store(true, Ordering::Relaxed);
+        self.retry_wake.notify_all();
     }
 }
 
@@ -135,13 +278,16 @@ impl Engine {
     /// Writes the slot's snapshot (via its `SnapshotStore`) under the per-slot save lock and records the saved generations (the flush dirty check).
     /// Returns false on a failed write — already counted and logged here.
     #[cfg(windows)]
-    pub(super) fn save_slot(&self, slot: &VolumeSlot, checkpoint: JournalCheckpoint) -> bool {
+    pub(super) fn save_slot(&self, slot: &VolumeSlot, mode: SnapshotSave) -> bool {
         let _writer = slot.save_lock.lock();
         let guard = slot.index.read();
-        let Some(idx) = guard.as_ref() else {
+        let (Some(idx), Some(checkpoint)) = (guard.as_ref(), guard.checkpoint) else {
             return false;
         };
         let generations = (idx.content_generation(), idx.structural_generation());
+        if matches!(mode, SnapshotSave::IfDirty) && *slot.last_saved.lock() == Some(generations) {
+            return false;
+        }
         if let Err(e) = slot
             .store
             .save_atomic(idx, checkpoint.journal_id, checkpoint.next_usn)
