@@ -17,10 +17,11 @@ permissions:
 
 jobs:
   audit:
+    name: audit
     permissions:
       contents: read
       pull-requests: read # Permission: Select changed dependency inputs.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,7 +44,7 @@ jobs:
               - '.github/workflows/cargo-audit.yml'
       - uses: $/.github/actions/rust-toolchain
         if: github.event_name != 'pull_request' || steps.changes.outputs.dependencies == 'true'
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         if: github.event_name != 'pull_request' || steps.changes.outputs.dependencies == 'true'
         with:
           tool: cargo-audit@0.22.2

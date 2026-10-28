@@ -377,7 +377,7 @@ mod tests {
         let idx = sample();
         assert_eq!(names(&idx, "report"), vec!["Report.PDF"]);
         assert_eq!(names(&idx, "Report"), vec!["Report.PDF"]);
-        assert!(names(&idx, "REPORT.pdf").is_empty());
+        assert_eq!(names(&idx, "REPORT.pdf"), Vec::<String>::new());
         let opt = QueryOptions {
             case: CaseMode::Insensitive,
             ..Default::default()
@@ -413,7 +413,7 @@ mod tests {
         let idx = sample();
         assert_eq!(names(&idx, "size:>1gb"), vec!["big.BIN"]);
         assert_eq!(names(&idx, "size:512"), vec!["notes.txt"]);
-        assert!(names(&idx, "size:0 folder:").is_empty());
+        assert_eq!(names(&idx, "size:0 folder:"), Vec::<String>::new());
     }
 
     #[test]
@@ -439,10 +439,10 @@ mod tests {
         let idx = sample();
         assert_eq!(names(&idx, "*.rs"), vec!["main.rs"]);
         assert_eq!(names(&idx, "main.?s"), vec!["main.rs"]);
-        assert!(names(&idx, "*.r").is_empty());
+        assert_eq!(names(&idx, "*.r"), Vec::<String>::new());
         assert_eq!(names(&idx, "main*"), vec!["main.rs"]);
         assert_eq!(names(&idx, "*ain*"), vec!["main.rs"]);
-        assert!(names(&idx, "ain*").is_empty());
+        assert_eq!(names(&idx, "ain*"), Vec::<String>::new());
     }
 
     #[test]
@@ -561,7 +561,7 @@ mod tests {
             case: CaseMode::Sensitive,
             ..Default::default()
         };
-        assert!(run_ids(&idx, "école", sensitive).is_empty());
+        assert_eq!(run_ids(&idx, "école", sensitive), Vec::<u32>::new());
         assert_eq!(run_ids(&idx, "École", sensitive), vec![id(43)]);
         assert_eq!(
             run_ids(&idx, "Kelvin", sensitive),
@@ -619,18 +619,19 @@ mod tests {
             "the combining mark after the barrier remains searchable"
         );
 
-        assert!(run_ids(&idx, r#"regex:"^résumé\.txt$""#, QueryOptions::default()).is_empty());
+        assert_eq!(
+            run_ids(&idx, r#"regex:"^résumé\.txt$""#, QueryOptions::default()),
+            Vec::<u32>::new()
+        );
         let whole = super::super::compile_whole_regex(
             r"^résumé\.txt$",
             CaseMode::Smart,
             super::super::RegexScope::Name,
         )
         .unwrap();
-        assert!(
-            search(&idx, &whole, &QueryOptions::default())
-                .0
-                .ids
-                .is_empty()
+        assert_eq!(
+            search(&idx, &whole, &QueryOptions::default()).0.ids,
+            Vec::<u32>::new()
         );
 
         let sequence = ["ré", "re\u{301}s", "résu", "re\u{301}sume\u{301}"];
@@ -799,7 +800,7 @@ mod tests {
             run_re("pdf|txt", RegexScope::Name),
             vec!["Report.PDF", "notes.txt"]
         );
-        assert!(run_re(r"[0-9]", RegexScope::Name).is_empty());
+        assert_eq!(run_re(r"[0-9]", RegexScope::Name), Vec::<String>::new());
 
         assert_eq!(
             run_re(r"docs.*\.pdf$", RegexScope::Path),
@@ -850,7 +851,7 @@ mod tests {
     fn tombstones_are_excluded() {
         let mut idx = sample();
         idx.delete(11);
-        assert!(names(&idx, "report").is_empty());
+        assert_eq!(names(&idx, "report"), Vec::<String>::new());
     }
 
     #[test]
@@ -1222,7 +1223,7 @@ mod proptests {
                 }
                 Step::Truncate => {
                     let trimmed = cur.trim_end();
-                    let keep = trimmed.rfind(char::is_whitespace).map_or(0, |p| p);
+                    let keep = trimmed.rfind(char::is_whitespace).unwrap_or(0);
                     cur.truncate(keep);
                 }
             }

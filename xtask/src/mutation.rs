@@ -1958,8 +1958,11 @@ mod tests {
         )
         .expect("strictly classified report should parse");
         assert_eq!(parsed.redundant_ignored.len(), 1);
-        assert!(parsed.ignored.is_empty());
-        assert!(parsed.outside_scope_violations.is_empty());
+        assert_eq!(parsed.ignored, Vec::<CsharpIdentity>::new());
+        assert_eq!(
+            parsed.outside_scope_violations,
+            Vec::<CsharpStatusIdentity>::new()
+        );
         assert_eq!(parsed.outside_scope.file_count, 1);
         assert_eq!(parsed.outside_scope.mutant_count, 1);
         assert_eq!(parsed.outside_scope.status_counts["Ignored"], 1);
@@ -2066,7 +2069,10 @@ mod tests {
             &csharp_scope("app/FindMyFiles/Engine/PipeProtocol.cs"),
         )
         .expect("rolled-back out-of-scope mutants must not fail the report parse");
-        assert!(parsed.outside_scope_violations.is_empty());
+        assert_eq!(
+            parsed.outside_scope_violations,
+            Vec::<CsharpStatusIdentity>::new()
+        );
         assert_eq!(parsed.outside_scope.status_counts["CompileError"], 1);
         assert!(validate_csharp_conclusive(&parsed, Path::new("gate.json")).is_ok());
 

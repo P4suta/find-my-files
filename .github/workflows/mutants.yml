@@ -18,7 +18,8 @@ permissions:
 
 jobs:
   authorize:
-    runs-on: ubuntu-24.04
+    name: authorize
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -96,6 +97,7 @@ jobs:
             core.info(`Authorized trusted mutation controller ${controller} for target ${target}.`);
 
   mutation:
+    name: mutation
     needs: authorize
     permissions:
       actions: read # Permission: Bind verification to this run's raw artifacts.

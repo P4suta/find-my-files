@@ -21,10 +21,11 @@ permissions:
 
 jobs:
   changes:
+    name: changes
     permissions:
       contents: read
       pull-requests: read # Permission: Select checks from the changed PR files.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       code: ${{ steps.f.outputs.code }}
@@ -130,7 +131,8 @@ jobs:
               - '.github/workflows/ci.yml'
 
   hygiene:
-    runs-on: ubuntu-24.04
+    name: hygiene
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -142,9 +144,9 @@ jobs:
       - run: '"$ACTIONLINT"'
         env:
           ACTIONLINT: ${{ steps.actionlint.outputs.executable }}
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
-          tool: zizmor@1.30.1,typos-cli@1.47.2,taplo-cli@0.10.0
+          tool: zizmor@1.31.1,typos-cli@1.51.1,taplo-cli@0.10.0
           fallback: none
       - name: Audit GitHub Actions security
         run: zizmor --offline --strict-collection --persona auditor --min-severity low .
@@ -160,13 +162,14 @@ jobs:
         working-directory: engine/fuzz
 
   deny:
-    runs-on: ubuntu-24.04
+    name: deny
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-deny@0.20.2
           fallback: none
@@ -174,20 +177,22 @@ jobs:
         working-directory: engine
 
   machete:
-    runs-on: ubuntu-24.04
+    name: machete
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-machete@0.9.2
           fallback: none
       - run: cargo machete engine
 
   contract-lint:
-    runs-on: ubuntu-24.04
+    name: contract-lint
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -196,7 +201,7 @@ jobs:
       - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: engine
           shared-key: engine-linux
@@ -205,8 +210,9 @@ jobs:
         working-directory: engine
 
   pr-title:
+    name: pr-title
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       pull-requests: read # Permission: Validate the PR title through the API.
@@ -216,8 +222,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   xtask:
+    name: xtask
     needs: changes
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     env:
       CARGO_BUILD_JOBS: "2"
@@ -228,14 +235,14 @@ jobs:
       - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: xtask
           shared-key: xtask
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.150
           fallback: none
       - run: cargo fmt --all --check
         working-directory: xtask
@@ -255,7 +262,7 @@ jobs:
       - name: Verify the registered production harnesses
         if: needs.changes.outputs.assurance == 'true'
         run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- proof
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # zizmor: ignore[superfluous-actions] The repository requires a pinned setup action.
         if: needs.changes.outputs.assurance == 'true'
         with:
           toolchain: nightly-2026-08-21
@@ -283,6 +290,7 @@ jobs:
           overwrite: true
 
   engine-build-test:
+    name: engine-build-test
     needs: [hygiene, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-2025
@@ -294,15 +302,15 @@ jobs:
       - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy, llvm-tools-preview
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: engine
           shared-key: engine-win
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
-          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.140
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.150
           fallback: none
       - name: clippy (compiles the engine; later steps reuse it)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -356,6 +364,7 @@ jobs:
           overwrite: true
 
   app:
+    name: app
     needs: [engine-build-test]
     runs-on: windows-2025
     timeout-minutes: 25
@@ -364,12 +373,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: $/.github/actions/rust-toolchain
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: xtask
           shared-key: app-xtask
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: engine-release
           path: build/engine/release/
@@ -378,9 +387,9 @@ jobs:
           dotnet-version: 10.0.403
       - uses: $/.github/actions/setup-winapp
         id: winapp
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
-          tool: just@1.54.0,cargo-about@0.9.1
+          tool: just@1.59.0,cargo-about@0.9.3
           fallback: none
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -424,6 +433,7 @@ jobs:
           overwrite: true
 
   bench:
+    name: bench
     needs: [hygiene, changes]
     if: github.event_name == 'pull_request' && needs.changes.outputs.bench == 'true'
     runs-on: windows-2025
@@ -433,7 +443,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: $/.github/actions/rust-toolchain
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: engine
           shared-key: engine-win
@@ -442,6 +452,7 @@ jobs:
         working-directory: engine
 
   fuzz:
+    name: fuzz
     needs: changes
     if: github.event_name == 'pull_request' && needs.changes.outputs.fuzz == 'true'
     permissions:
@@ -451,9 +462,10 @@ jobs:
       surfaces: ${{ needs.changes.outputs.fuzz_surfaces }}
 
   ci-required:
+    name: ci-required
     if: ${{ always() && github.event_name == 'pull_request' }}
     needs: [hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app, bench, fuzz]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -467,7 +479,7 @@ jobs:
     name: required
     if: always()
     needs: [changes, hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app, bench, fuzz, ci-required]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:

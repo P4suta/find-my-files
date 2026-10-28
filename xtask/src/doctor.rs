@@ -936,13 +936,14 @@ fn tool_check(
     let Some(pin) = pins.get(pin_key) else {
         return Check::fail(name, "not pinned in mise.toml");
     };
-    let Some(raw) = cmd::capture(&paths::repo_root(), program, args) else {
-        return Check::fail(
-            name,
-            &format!(
-                "pinned {pin}, but the version probe via `{program}` failed — run `mise install`"
-            ),
-        );
+    let raw = match cmd::capture_stdout(&paths::repo_root(), program, args) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return Check::fail(
+                name,
+                &format!("pinned {pin}, but the version probe failed: {error:#}"),
+            );
+        }
     };
     let Some(actual) = first_version_token(&raw) else {
         return Check::fail(
@@ -1115,13 +1116,13 @@ pub fn run() -> Result<()> {
             "cargo-binstall",
             "cargo-binstall",
             "mise",
-            &["exec", "cargo-binstall", "--command", "cargo-binstall -V"][..],
+            &["exec", "cargo-binstall", "--", "cargo-binstall", "-V"][..],
         ),
         (
             "winapp",
             "http:winappcli",
             "mise",
-            &["exec", "http:winappcli", "--command", "winapp --version"][..],
+            &["exec", "http:winappcli", "--", "winapp", "--version"][..],
         ),
         ("just", "just", "just", &["--version"][..]),
         ("lefthook", "lefthook", "lefthook", &["version"][..]),
@@ -1158,8 +1159,8 @@ pub fn run() -> Result<()> {
         (
             "cargo-mutants",
             "cargo:cargo-mutants",
-            "cargo",
-            &["mutants", "--version"][..],
+            "cargo-mutants",
+            &["--version"][..],
         ),
         ("samply", "cargo:samply", "samply", &["--version"][..]),
         ("bacon", "cargo:bacon", "bacon", &["--version"][..]),
@@ -1167,7 +1168,7 @@ pub fn run() -> Result<()> {
             "mdbook",
             "cargo:mdbook",
             "mise",
-            &["exec", "cargo:mdbook", "--command", "mdbook --version"][..],
+            &["exec", "cargo:mdbook", "--", "mdbook", "--version"][..],
         ),
         ("taplo", "cargo:taplo-cli", "taplo", &["--version"][..]),
         ("typos", "cargo:typos-cli", "typos", &["--version"][..]),
@@ -1190,8 +1191,9 @@ pub fn run() -> Result<()> {
             &[
                 "exec",
                 "github:zizmorcore/zizmor",
-                "--command",
-                "zizmor --version",
+                "--",
+                "zizmor",
+                "--version",
             ][..],
         ),
     ] {

@@ -3742,8 +3742,9 @@ mod tests {
             ),
             vec![first.clone()]
         );
-        assert!(
-            reviewed_rust_survivors(&policy(Some(5)), &BTreeSet::from([second.clone()])).is_empty()
+        assert_eq!(
+            reviewed_rust_survivors(&policy(Some(5)), &BTreeSet::from([second.clone()])),
+            Vec::<RustMutant>::new()
         );
         assert_eq!(
             reviewed_rust_survivors(&policy(None), &BTreeSet::from([first, second])).len(),
