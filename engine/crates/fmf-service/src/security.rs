@@ -621,16 +621,48 @@ impl TrustedDataRoot {
     /// Deletes every descendant and finally marks the verified machine root itself for deletion on handle close.
     ///
     /// # Errors
-    /// Returns the first fail-closed traversal or exact-handle delete error.
+    /// Returns the first root-handoff, fail-closed traversal, or exact-handle delete error.
     pub fn purge(self) -> io::Result<()> {
-        delete_descendants(&self.root.file, &self.path)?;
-        delete_handle(&self.root.file)?;
+        self.purge_after_release(|_| {})
+    }
+
+    fn purge_after_release(self, before_reopen: impl FnOnce(&Path)) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt as _;
+
         let Self {
             root,
             program_data_guard,
-            path: _,
+            path,
             quarantined_root: _,
         } = self;
+        let expected_identity = root.identity;
+        let expected_security = handle_security_sddl(&root.file)?;
+        drop(root);
+        before_reopen(&path);
+        let (_, leaf) = validate_machine_root_path(&path)?;
+        let leaf: Vec<u16> = leaf.encode_wide().collect();
+        let root = open_checked_at(
+            &program_data_guard,
+            &leaf,
+            &path,
+            Some(ObjectKind::Directory),
+            DELETE_ACCESS
+                | READ_CONTROL_ACCESS
+                | FILE_READ_ATTRIBUTES_ACCESS
+                | FILE_LIST_DIRECTORY_ACCESS
+                | FILE_TRAVERSE_ACCESS,
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+        )?;
+        if root.identity != expected_identity
+            || !handle_security_matches(&root.file, &expected_security)?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "machine data root changed during operational-to-purge handoff",
+            ));
+        }
+        delete_descendants(&root.file, &path)?;
+        delete_handle(&root.file)?;
         drop(root);
         drop(program_data_guard);
         Ok(())
@@ -692,7 +724,6 @@ fn open_operational_root(path: &Path) -> io::Result<LockedObject> {
         path,
         Some(ObjectKind::Directory),
         SECURITY_WRITE_ACCESS
-            | DELETE_ACCESS
             | FILE_LIST_DIRECTORY_ACCESS
             | FILE_ADD_FILE_ACCESS
             | FILE_ADD_SUBDIRECTORY_ACCESS
@@ -2811,6 +2842,164 @@ mod tests {
     fn own_tree_sddl() -> String {
         let user = current_user_sid().expect("own sid");
         format!("O:{user}G:{user}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{user})")
+    }
+
+    #[test]
+    fn operational_root_allows_publication_parent_opens_and_atomic_replacement() {
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let anchor = tempfile::tempdir().expect("anchor");
+        let path = anchor.path().join("find-my-files");
+        let sddl = own_tree_sddl();
+        let root = TrustedDataRoot::create_or_replace_for_test(&path, &sddl).expect("root");
+        let descriptor = read_sddl(&path);
+        let parent = open_checked(
+            &path,
+            Some(ObjectKind::Directory),
+            FILE_ADD_FILE_ACCESS | SYNCHRONIZE_ACCESS,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+        )
+        .expect("publication parent open without delete sharing");
+        root.atomic_write("service.json", b"first", &sddl)
+            .expect("create");
+        root.atomic_write("service.json", b"second", &sddl)
+            .expect("replace");
+        assert_eq!(
+            std::fs::read(path.join("service.json")).expect("config"),
+            b"second"
+        );
+        let source_path = anchor.path().join("source.exe");
+        std::fs::write(&source_path, b"image").expect("source");
+        let source = TrustedSourceFile::open(&source_path).expect("source guard");
+        root.atomic_copy("fmf-service.exe", &source, &sddl)
+            .expect("copy");
+        assert_eq!(
+            std::fs::read(path.join("fmf-service.exe")).expect("image"),
+            b"image"
+        );
+        assert_eq!(read_sddl(&path), descriptor);
+        assert_eq!(
+            std::fs::rename(&path, anchor.path().join("moved"))
+                .expect_err("root pinned")
+                .raw_os_error(),
+            Some(32)
+        );
+        assert_eq!(
+            std::fs::remove_dir(&path)
+                .expect_err("root pinned")
+                .raw_os_error(),
+            Some(32)
+        );
+        drop(parent);
+        root.purge().expect("purge verified root");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn purge_rejects_a_substituted_directory_before_deleting_any_children() {
+        let anchor = tempfile::tempdir().expect("anchor");
+        let path = anchor.path().join("find-my-files");
+        let retained = anchor.path().join("retained");
+        let sddl = own_tree_sddl();
+        let root = TrustedDataRoot::create_or_replace_for_test(&path, &sddl).expect("root");
+        root.atomic_write("sentinel", b"original", &sddl)
+            .expect("sentinel");
+        let error = root
+            .purge_after_release(|released| {
+                assert!(
+                    std::fs::rename(anchor.path(), anchor.path().with_extension("moved")).is_err()
+                );
+                std::fs::rename(released, &retained).expect("retain original");
+                create_directory_new_with_security(released, &sddl).expect("replacement");
+                std::fs::write(released.join("sentinel"), b"replacement").expect("sentinel");
+            })
+            .expect_err("different identity");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read(path.join("sentinel")).expect("replacement survives"),
+            b"replacement"
+        );
+        assert_eq!(
+            std::fs::read(retained.join("sentinel")).expect("original survives"),
+            b"original"
+        );
+    }
+
+    #[test]
+    fn purge_rejects_a_substituted_file_without_modifying_it() {
+        let anchor = tempfile::tempdir().expect("anchor");
+        let path = anchor.path().join("find-my-files");
+        let retained = anchor.path().join("retained");
+        let root =
+            TrustedDataRoot::create_or_replace_for_test(&path, &own_tree_sddl()).expect("root");
+        let error = root
+            .purge_after_release(|released| {
+                std::fs::rename(released, &retained).expect("retain original");
+                std::fs::write(released, b"outside").expect("replacement file");
+            })
+            .expect_err("wrong object kind");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&path).expect("file survives"), b"outside");
+        assert!(retained.is_dir());
+    }
+
+    #[test]
+    fn purge_rejects_a_substituted_junction_without_touching_its_target() {
+        let anchor = tempfile::tempdir().expect("anchor");
+        let outside = tempfile::tempdir().expect("outside");
+        let path = anchor.path().join("find-my-files");
+        let retained = anchor.path().join("retained");
+        std::fs::write(outside.path().join("sentinel"), b"outside").expect("sentinel");
+        let descriptor = read_sddl(outside.path());
+        let root =
+            TrustedDataRoot::create_or_replace_for_test(&path, &own_tree_sddl()).expect("root");
+        let error = root
+            .purge_after_release(|released| {
+                std::fs::rename(released, &retained).expect("retain original");
+                create_junction(released, outside.path()).expect("junction");
+            })
+            .expect_err("root reparse point");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(outside.path().join("sentinel")).expect("target survives"),
+            b"outside"
+        );
+        assert_eq!(read_sddl(outside.path()), descriptor);
+        std::fs::remove_dir(&path).expect("remove junction");
+    }
+
+    #[test]
+    fn purge_rejects_security_drift_on_the_same_directory() {
+        let anchor = tempfile::tempdir().expect("anchor");
+        let path = anchor.path().join("find-my-files");
+        let sddl = own_tree_sddl();
+        let root = TrustedDataRoot::create_or_replace_for_test(&path, &sddl).expect("root");
+        let identity = root.root.identity;
+        root.atomic_write("sentinel", b"original", &sddl)
+            .expect("sentinel");
+        let replacement_sddl = format!("{sddl}(A;;GR;;;BU)");
+        let original_security = read_sddl(&path);
+        let mut replacement_security = None;
+        let error = root
+            .purge_after_release(|released| {
+                let reopened = open_root(released).expect("same root");
+                assert_eq!(reopened.identity, identity);
+                set_handle_security(&reopened.file, &replacement_sddl).expect("change descriptor");
+                replacement_security = Some(read_sddl(released));
+            })
+            .expect_err("changed descriptor");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read(path.join("sentinel")).expect("sentinel survives"),
+            b"original"
+        );
+        let reopened = open_root(&path).expect("inspect survivor");
+        assert_eq!(reopened.identity, identity);
+        assert_ne!(
+            replacement_security.as_deref(),
+            Some(original_security.as_str())
+        );
+        assert_eq!(Some(read_sddl(&path)), replacement_security);
     }
 
     /// The token Windows actually *prints* for this process's user, measured by writing one ACE naming it and reading the descriptor back.
