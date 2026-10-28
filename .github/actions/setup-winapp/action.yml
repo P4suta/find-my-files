@@ -74,7 +74,8 @@ runs:
         }
 
         $versionOutput = ((& $commands[0].FullName --version) -join "`n")
-        if ($versionOutput.Trim() -cne $env:WINAPP_VERSION) {
+        $versionLine = @($versionOutput -split "`n" | Where-Object { $_.Trim() })[-1]
+        if ($versionLine.Trim() -cne $env:WINAPP_VERSION) {
           throw "Expected WinAppCli $env:WINAPP_VERSION; --version reported: $versionOutput"
         }
 
