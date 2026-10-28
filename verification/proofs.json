@@ -6,6 +6,17 @@
   "targets": [
     {
       "package": "fmf-core",
+      "source": "engine/crates/fmf-core/src/recovery_proofs.rs",
+      "prefix": "recovery::kani_proofs::",
+      "harnesses": [
+        "failures_never_rearm_and_panics_never_back_off",
+        "backoff_consumes_the_only_automatic_allowance",
+        "explicit_requests_rearm_only_failed_workers",
+        "automatic_backoff_is_exact_for_every_elapsed_duration"
+      ]
+    },
+    {
+      "package": "fmf-core",
       "source": "engine/crates/fmf-core/src/histogram_proofs.rs",
       "prefix": "histogram::kani_proofs::",
       "harnesses": [

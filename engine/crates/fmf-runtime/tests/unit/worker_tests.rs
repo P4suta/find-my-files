@@ -131,6 +131,7 @@ struct FakeStore {
     save_attempts: AtomicU64,
     /// (`journal_id`, `next_usn`) of every *successful* save.
     saved: Mutex<Vec<(u64, i64)>>,
+    saved_names: Mutex<Vec<Vec<Vec<u8>>>>,
     removed: AtomicU64,
 }
 
@@ -141,6 +142,7 @@ impl FakeStore {
             fail_saves,
             save_attempts: AtomicU64::new(0),
             saved: Mutex::new(Vec::new()),
+            saved_names: Mutex::new(Vec::new()),
             removed: AtomicU64::new(0),
         })
     }
@@ -161,7 +163,7 @@ impl SnapshotStore for FakeStore {
 
     fn save_atomic(
         &self,
-        _idx: &VolumeIndex,
+        idx: &VolumeIndex,
         journal_id: u64,
         next_usn: i64,
     ) -> std::io::Result<()> {
@@ -170,6 +172,12 @@ impl SnapshotStore for FakeStore {
             return Err(io_err(std::io::ErrorKind::PermissionDenied));
         }
         self.saved.lock().push((journal_id, next_usn));
+        self.saved_names.lock().push(
+            (0..idx.len() as u32)
+                .filter(|&id| idx.is_live(id))
+                .map(|id| idx.name(id).to_vec())
+                .collect(),
+        );
         Ok(())
     }
 
@@ -180,6 +188,7 @@ impl SnapshotStore for FakeStore {
 
 enum FakeRead {
     Batch(Vec<UsnRecord>),
+    Fail,
     /// Parser found a valid-looking prefix followed by a malformed record.
     /// The cursor must not advance and the prefix must not be applied.
     Malformed(Vec<UsnRecord>),
@@ -209,6 +218,9 @@ struct FakeJournal {
     /// Opening the per-FRN metadata source itself fails.
     stat_open_error: bool,
     query_calls: Arc<AtomicU64>,
+    open_failures: usize,
+    open_panics: usize,
+    open_calls: Arc<AtomicU64>,
 }
 
 impl FakeJournal {
@@ -222,6 +234,9 @@ impl FakeJournal {
             stat_ok,
             stat_open_error: false,
             query_calls,
+            open_failures: 0,
+            open_panics: 0,
+            open_calls: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -229,10 +244,29 @@ impl FakeJournal {
         self.stat_open_error = true;
         self
     }
+
+    const fn with_open_failures(mut self, count: usize) -> Self {
+        self.open_failures = count;
+        self
+    }
+
+    const fn with_open_panics(mut self, count: usize) -> Self {
+        self.open_panics = count;
+        self
+    }
 }
 
 impl JournalSource for FakeJournal {
     fn open(&mut self) -> Result<(), UsnError> {
+        self.open_calls.fetch_add(1, Ordering::Relaxed);
+        if self.open_panics > 0 {
+            self.open_panics -= 1;
+            panic!("scripted journal-open panic");
+        }
+        if self.open_failures > 0 {
+            self.open_failures -= 1;
+            return Err(UsnError::Fsctl(5));
+        }
         let inc = self.opens.pop_front().ok_or(UsnError::Fsctl(0))?;
         self.journal_id = inc.journal_id;
         self.next_usn = inc.next_usn;
@@ -271,6 +305,7 @@ impl JournalSource for FakeJournal {
                 truncated: true,
             }),
             Some(FakeRead::Gone(gone)) => Ok(ReadOutcome::Gone(gone)),
+            Some(FakeRead::Fail) => Err(UsnError::Fsctl(5)),
             Some(FakeRead::Gate(_)) => unreachable!("gate handled before pop"),
             None => {
                 std::thread::sleep(Duration::from_millis(2));
@@ -412,6 +447,283 @@ fn phase_of(e: &Engine, volume: &str) -> VolumeState {
         .find(|(v, _, _)| v == volume)
         .map(|(_, p, _)| *p)
         .expect("volume registered")
+}
+
+#[test]
+fn pending_flush_keeps_the_restored_index_and_checkpoint_together() {
+    use super::volume::SnapshotReadGate;
+
+    let (_dir, engine) = test_engine();
+    let events = sink_channel(&engine);
+    let store = FakeStore::new(
+        vec![
+            LoadScript::Found(Box::new(vol("C:", &["newer.txt"])), 7, 100),
+            LoadScript::Found(Box::new(vol("C:", &["older.txt"])), 7, 50),
+        ],
+        false,
+    );
+    let fail = Arc::new(AtomicBool::new(false));
+    let view = Some(JournalView {
+        journal_id: 7,
+        first_usn: 10,
+    });
+    let journal = FakeJournal::new(
+        vec![
+            Incarnation {
+                journal_id: 7,
+                next_usn: 1000,
+                view,
+                reads: vec![FakeRead::Gate(fail.clone()), FakeRead::Fail],
+            },
+            Incarnation {
+                journal_id: 7,
+                next_usn: 1000,
+                view,
+                reads: Vec::new(),
+            },
+        ],
+        true,
+        Arc::new(AtomicU64::new(0)),
+    );
+    engine.spawn_worker_with_seams("C:", store.clone(), Box::new(journal));
+    lifecycle_until(&events, "C:", |event| {
+        matches!(event, EngineEvent::VolumeReady { .. })
+    });
+    let slot = slot_of(&engine, "C:");
+
+    let (entered, observing) = mpsc::sync_channel(0);
+    let (resume, paused) = mpsc::channel();
+    *slot.snapshot_read_gate.lock() = Some(SnapshotReadGate {
+        entered,
+        resume: paused,
+    });
+    let flushing = engine.clone();
+    let flush = std::thread::spawn(move || flushing.flush());
+    observing
+        .recv_timeout(WAIT)
+        .expect("flush reached its index-read boundary");
+
+    fail.store(true, Ordering::Relaxed);
+    lifecycle_until(&events, "C:", |event| {
+        matches!(event, EngineEvent::VolumeFailed { .. })
+    });
+    engine
+        .index_start(&["C:".into()])
+        .expect("restore the failed volume");
+    lifecycle_until(&events, "C:", |event| {
+        matches!(event, EngineEvent::VolumeReady { .. })
+    });
+    resume.send(()).expect("resume flush after restore");
+    assert_eq!(flush.join().expect("flush worker"), 1);
+    assert_eq!(*store.saved.lock(), vec![(7, 50)]);
+    assert!(
+        store.saved_names.lock()[0]
+            .iter()
+            .any(|name| name == b"older.txt")
+    );
+    engine.shutdown();
+    assert_eq!(*store.saved.lock(), vec![(7, 50), (7, 50)]);
+}
+
+#[test]
+fn retry_requested_from_the_failure_callback_reuses_the_worker() {
+    let (_dir, engine) = test_engine();
+    engine.insert_ready_volume("D:", vol("D:", &["unrelated.txt"]));
+    let (basis, _) = engine
+        .query("unrelated", &QueryOptions::default())
+        .expect("ready volume");
+    let store = FakeStore::new(
+        vec![LoadScript::Found(
+            Box::new(vol("C:", &["recovered.txt"])),
+            7,
+            50,
+        )],
+        false,
+    );
+    let journal = FakeJournal::new(
+        vec![Incarnation {
+            journal_id: 7,
+            next_usn: 100,
+            view: Some(JournalView {
+                journal_id: 7,
+                first_usn: 10,
+            }),
+            reads: Vec::new(),
+        }],
+        true,
+        Arc::new(AtomicU64::new(0)),
+    )
+    .with_open_failures(1);
+    let (send, receive) = mpsc::channel();
+    let weak = Arc::downgrade(&engine);
+    engine.set_event_sink(Some(Arc::new(move |event| {
+        if matches!(event, EngineEvent::VolumeFailed { volume, .. } if volume == "C:") {
+            weak.upgrade()
+                .expect("engine alive")
+                .index_start(&["C:".into()])
+                .expect("request explicit retry");
+        }
+        send.send(event.clone()).expect("test receiver");
+    })));
+    engine.spawn_worker_with_seams("C:", store, Box::new(journal));
+    lifecycle_until(&receive, "C:", |event| {
+        matches!(event, EngineEvent::VolumeReady { .. })
+    });
+    assert_eq!(engine.volumes.read().len(), 2);
+    assert_eq!(engine.threads.lock().len(), 1);
+    assert_eq!(
+        basis.page(0, 10).expect("unrelated result remains valid")[0].name,
+        b"unrelated.txt"
+    );
+    engine
+        .index_start(&["C:".into()])
+        .expect("active request is idempotent");
+    assert_eq!(engine.threads.lock().len(), 1);
+    engine.shutdown();
+}
+
+fn recoverable_journal() -> FakeJournal {
+    FakeJournal::new(
+        vec![Incarnation {
+            journal_id: 7,
+            next_usn: 100,
+            view: Some(JournalView {
+                journal_id: 7,
+                first_usn: 10,
+            }),
+            reads: Vec::new(),
+        }],
+        true,
+        Arc::new(AtomicU64::new(0)),
+    )
+}
+
+fn recoverable_store() -> Arc<FakeStore> {
+    FakeStore::new(
+        vec![LoadScript::Found(
+            Box::new(vol("C:", &["recovered.txt"])),
+            7,
+            50,
+        )],
+        false,
+    )
+}
+
+#[test]
+fn automatic_recovery_is_bounded_and_explicit_retry_reuses_the_slot() {
+    use fmf_core::recovery::{RetryState, backoff_remaining};
+
+    let (_dir, engine) = test_engine();
+    let events = sink_channel(&engine);
+    let journal = recoverable_journal().with_open_failures(2);
+    let calls = journal.open_calls.clone();
+    let began = Instant::now();
+    engine.spawn_worker_with_seams("C:", recoverable_store(), Box::new(journal));
+    lifecycle_until(&events, "C:", |event| {
+        matches!(event, EngineEvent::VolumeFailed { .. })
+    });
+    lifecycle_until(&events, "C:", |event| {
+        matches!(event, EngineEvent::VolumeFailed { .. })
+    });
+    assert!(began.elapsed() >= backoff_remaining(Duration::ZERO));
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        slot_of(&engine, "C:").phase.lock().retry.policy(),
+        RetryState::AwaitRequest
+    );
+    engine
+        .index_start(&["C:".into()])
+        .expect("retry exhausted worker");
+    lifecycle_until(&events, "C:", |event| {
+        matches!(event, EngineEvent::VolumeReady { .. })
+    });
+    assert_eq!(calls.load(Ordering::Relaxed), 3);
+    assert_eq!(engine.volumes.read().len(), 1);
+    assert_eq!(engine.threads.lock().len(), 1);
+    assert_eq!(
+        engine
+            .query("recovered", &QueryOptions::default())
+            .expect("recovered query")
+            .0
+            .len(),
+        1
+    );
+    engine.shutdown();
+}
+
+#[test]
+fn a_worker_panic_waits_for_explicit_retry() {
+    use fmf_core::recovery::RetryState;
+
+    let (_dir, engine) = test_engine();
+    let events = sink_channel(&engine);
+    let journal = recoverable_journal().with_open_panics(1);
+    let calls = journal.open_calls.clone();
+    engine.spawn_worker_with_seams("C:", recoverable_store(), Box::new(journal));
+    lifecycle_until(&events, "C:", |event| {
+        matches!(event, EngineEvent::VolumeFailed { .. })
+    });
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        slot_of(&engine, "C:").phase.lock().retry.policy(),
+        RetryState::AwaitRequest
+    );
+    engine
+        .index_start(&["C:".into()])
+        .expect("explicit retry after panic");
+    lifecycle_until(&events, "C:", |event| {
+        matches!(event, EngineEvent::VolumeReady { .. })
+    });
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(engine.threads.lock().len(), 1);
+    engine.shutdown();
+}
+
+#[test]
+fn shutdown_releases_an_exhausted_retry_wait() {
+    use fmf_core::recovery::RetryState;
+
+    let (_dir, engine) = test_engine();
+    let events = sink_channel(&engine);
+    let journal = recoverable_journal().with_open_failures(2);
+    let calls = journal.open_calls.clone();
+    engine.spawn_worker_with_seams("C:", recoverable_store(), Box::new(journal));
+    lifecycle_until(&events, "C:", |event| {
+        matches!(event, EngineEvent::VolumeFailed { .. })
+    });
+    lifecycle_until(&events, "C:", |event| {
+        matches!(event, EngineEvent::VolumeFailed { .. })
+    });
+    assert_eq!(
+        slot_of(&engine, "C:").phase.lock().retry.policy(),
+        RetryState::AwaitRequest
+    );
+    engine.shutdown();
+    assert!(engine.threads.lock().is_empty());
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn shutdown_cancels_backoff_before_another_attempt() {
+    let (_dir, engine) = test_engine();
+    let (send, receive) = mpsc::channel();
+    let weak = Arc::downgrade(&engine);
+    engine.set_event_sink(Some(Arc::new(move |event| {
+        if matches!(event, EngineEvent::VolumeFailed { .. }) {
+            let engine = weak.upgrade().expect("engine alive");
+            slot_of(&engine, "C:").request_stop();
+            send.send(()).expect("failure receiver");
+        }
+    })));
+    let journal = recoverable_journal().with_open_failures(1);
+    let calls = journal.open_calls.clone();
+    engine.spawn_worker_with_seams("C:", recoverable_store(), Box::new(journal));
+    receive
+        .recv_timeout(WAIT)
+        .expect("stop while backoff is pending");
+    engine.shutdown();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(engine.threads.lock().is_empty());
 }
 
 /// Corrupt snapshot → counted + warned, then degrade to the full-scan path.
@@ -908,7 +1220,7 @@ fn wait_settled(e: &Engine, volume: &str, target: u64) {
     loop {
         let slot = slot_of(e, volume);
         let now = *slot.scanned.lock();
-        let ready = *slot.phase.lock() == VolumeState::Ready;
+        let ready = slot.phase.lock().state == VolumeState::Ready;
         let pending = compaction_pending(e, volume);
         if now == target && ready && !pending {
             return;

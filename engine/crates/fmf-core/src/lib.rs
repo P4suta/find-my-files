@@ -17,5 +17,6 @@ pub mod dates;
 pub mod histogram;
 pub mod identity;
 pub mod ondisk;
+pub mod recovery;
 pub mod usn;
 pub mod wtf8;
