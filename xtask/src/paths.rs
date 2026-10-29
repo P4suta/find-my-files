@@ -16,6 +16,10 @@ pub fn build_root() -> PathBuf {
     repo_root().join("build")
 }
 
+pub fn overflow_experiment_dir() -> PathBuf {
+    perf_dir().join("overflow")
+}
+
 pub fn verification_dir() -> PathBuf {
     build_root().join("verification")
 }

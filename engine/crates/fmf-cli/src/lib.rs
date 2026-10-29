@@ -81,6 +81,18 @@ enum Command {
         #[arg(long, requires = "baseline")]
         evidence: Option<std::path::PathBuf>,
     },
+    /// Evaluate saved reports with the existing real-volume gate.
+    BenchCompare {
+        /// Actual benchmark report.
+        #[arg(long)]
+        actual: std::path::PathBuf,
+        /// Matched control report.
+        #[arg(long)]
+        baseline: std::path::PathBuf,
+        /// Write the complete gate decision before returning its verdict.
+        #[arg(long)]
+        evidence: Option<std::path::PathBuf>,
+    },
     /// Index a volume and dump per-column memory accounting as JSON.
     Stats {
         /// Volume to index and measure, e.g. `C:` (an NTFS drive root).
@@ -181,6 +193,11 @@ pub fn run() {
             evidence.as_deref(),
             ctx,
         ),
+        Command::BenchCompare {
+            actual,
+            baseline,
+            evidence,
+        } => cmd::bench::compare(&actual, &baseline, evidence.as_deref(), ctx),
         Command::Stats {
             drive,
             trigram_estimate,
