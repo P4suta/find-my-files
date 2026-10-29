@@ -677,7 +677,7 @@ machete:
 mutants:
     cargo run --locked --release -- mutation-rust
 
-# Mutation testing (C#, Stryker.NET 4.16.0 — ADR-0022). xtask first runs the
+# Mutation testing (C#, pinned Stryker.NET — ADR-0022). xtask first runs the
 # ordinary locked unit-test baseline, makes Stryker fail on an initial-test
 # failure, pins the exact reviewed mutate-file inventory, parses its strict JSON
 # report, rejects inconclusive/out-of-scope results, and compares exact
@@ -691,6 +691,12 @@ stryker:
 [doc('Run both exact-identity mutation gates (slow)')]
 [group('quality')]
 mutation: mutants stryker
+
+[doc('Plan or run one-file Stryker activation without full-campaign evidence')]
+[group('quality')]
+[working-directory('xtask')]
+stryker-smoke mode="plan":
+    cargo run --locked -- mutation-csharp-smoke {{ mode }}
 
 # Repository-ruleset drift (.github/rulesets/README.md). GitHub never applies the
 # committed templates, so nothing but this proves the hand re-export happened.

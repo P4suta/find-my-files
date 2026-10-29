@@ -25,7 +25,10 @@ const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 const CARGO_MUTANTS_NAME: &str = "cargo-mutants";
 const CARGO_MUTANTS_VERSION: &str = "27.1.0";
 const STRYKER_NAME: &str = "dotnet-stryker";
-const STRYKER_VERSION: &str = "4.16.0";
+const STRYKER_VERSION: &str = "5.0.0";
+
+#[path = "mutation_smoke.rs"]
+pub mod smoke;
 
 mod concurrency {
     use core::num::NonZeroUsize;
@@ -217,6 +220,7 @@ struct RustRun {
 #[derive(Debug)]
 struct CsharpRun {
     examined_files: Vec<String>,
+    killed: Vec<CsharpIdentity>,
     survivors: Vec<CsharpIdentity>,
     no_coverage: Vec<CsharpIdentity>,
     timeouts: Vec<CsharpIdentity>,
@@ -1059,7 +1063,7 @@ fn parse_csharp_run(
         .ok_or_else(|| anyhow!("{} has no schemaVersion", report_path.display()))?;
     if schema != "2" {
         bail!(
-            "{} schemaVersion is `{schema}`, expected exact Stryker 4.16 schema `2`",
+            "{} schemaVersion is `{schema}`, expected exact Stryker {STRYKER_VERSION} schema `2`",
             report_path.display()
         );
     }
@@ -1076,6 +1080,7 @@ fn parse_csharp_run(
     }
 
     let mut all = BTreeSet::new();
+    let mut killed = BTreeSet::new();
     let mut survivors = BTreeSet::new();
     let mut no_coverage = BTreeSet::new();
     let mut timeouts = BTreeSet::new();
@@ -1167,7 +1172,10 @@ fn parse_csharp_run(
             }
 
             match status {
-                "Killed" | "CompileError" => {}
+                "Killed" => {
+                    killed.insert(identity);
+                }
+                "CompileError" => {}
                 "Survived" => {
                     survivors.insert(identity);
                 }
@@ -1208,6 +1216,7 @@ fn parse_csharp_run(
     }
     Ok(CsharpRun {
         examined_files: reviewed_scope.iter().cloned().collect(),
+        killed: killed.into_iter().collect(),
         survivors: survivors.into_iter().collect(),
         no_coverage: no_coverage.into_iter().collect(),
         timeouts: timeouts.into_iter().collect(),
@@ -2201,6 +2210,7 @@ mod tests {
         let identity = csharp_identity("app/FindMyFiles/Engine/PipeProtocol.cs", 3);
         let clean = CsharpRun {
             examined_files: vec!["app/FindMyFiles/Engine/PipeProtocol.cs".to_owned()],
+            killed: Vec::new(),
             survivors: Vec::new(),
             no_coverage: Vec::new(),
             timeouts: Vec::new(),
@@ -2232,6 +2242,7 @@ mod tests {
     fn clean_for_policy_test() -> CsharpRun {
         CsharpRun {
             examined_files: vec!["app/FindMyFiles/Engine/PipeProtocol.cs".to_owned()],
+            killed: Vec::new(),
             survivors: Vec::new(),
             no_coverage: Vec::new(),
             timeouts: Vec::new(),

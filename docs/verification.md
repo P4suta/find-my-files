@@ -75,6 +75,15 @@ The pure proofs assume the documented Windows API contracts at those adapters.
 Elevated security tests and the real-volume performance gate keep their existing merge requirements.
 Full mutation campaigns use the reviewed baseline with bounded worker and time budgets.
 
+`just stryker-smoke` prints the one-file activation plan without restoring tools or changing output.
+`just stryker-smoke run` executes that plan with the shared Stryker configuration and app test profile.
+The smoke requires a real `Killed` mutant and rejects survivors, timeouts, missing coverage, unapproved ignored results, and activation outside the selected file.
+Compile rejections don't count as executed kills.
+The runner preserves the report hash and source identity before and after the run.
+Its separate evidence carries `full_campaign=false` and supplies no full-campaign acceptance.
+Kani checks the production activation predicate for every native unsigned outcome count.
+The mutation tool and report parser remain external and integration boundaries.
+
 Both Rust mutation lanes derive mutant jobs and nextest test threads from one nonzero CPU estimate.
 The production planner reserves at most four nextest threads per job and keeps their aggregate count within that estimate, including one-, two-, and three-CPU hosts.
 Kani checks positive counts, the thread cap, unused-slot bounds, and multiplication without overflow for every nonzero native unsigned CPU count.
