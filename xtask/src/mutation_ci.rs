@@ -25,10 +25,10 @@ use std::process::{Command, Output};
 const RECEIPT_SCHEMA_VERSION: u32 = 1;
 const REQUIRED_SHARD_COUNT: usize = 16;
 const CARGO_MUTANTS_VERSION: &str = "27.1.0";
-const CARGO_NEXTEST_VERSION: &str = "0.9.140";
+const CARGO_NEXTEST_VERSION: &str = "0.9.150";
 const DOTNET_SDK_VERSION: &str = "10.0.403";
-const STRYKER_VERSION: &str = "4.16.0";
-const RUST_TOOLCHAIN_VERSION: &str = "1.97.1";
+const STRYKER_VERSION: &str = "5.0.0";
+const RUST_TOOLCHAIN_VERSION: &str = "1.99.1";
 const CSHARP_TARGET_FRAMEWORK: &str = "net10.0-windows10.0.26100.0";
 const POLICY_REVISION: &str = "mutation-controller-v1";
 const CSHARP_UNEXECUTED_IGNORE_REASONS: &[&str] = &[
@@ -2221,7 +2221,7 @@ fn run_dotnet_baseline(work: &Path) -> Result<Output> {
 ///
 /// `mutate` is the one key a shard may change, because it is the only one that describes the *partition* rather than the program: the reviewed file lists all thirteen files and a shard narrows that to its slice.
 /// Narrowing it cannot weaken anything — Stryker does not confine *mutation* to this inventory, so `parse_csharp_report` is what actually enforces the scope, and the shard's results are compared against `reviewed_csharp_survivors` for the same slice.
-fn stryker_config(shard_sources: &[String]) -> Result<Value> {
+pub fn stryker_config(shard_sources: &[String]) -> Result<Value> {
     let reviewed_path = paths::csharp_stryker_config_in(&controller_root());
     let mut reviewed: Value = mutation::read_json(&reviewed_path)?;
     let root = reviewed
@@ -3406,6 +3406,22 @@ fn write_verified_summary(
 mod tests {
     use super::*;
 
+    #[test]
+    fn controller_tool_pins_match_the_current_project() {
+        let pins = include_bytes!("../../mise.toml");
+        super::validate_mise_rust_pin(pins).expect("current Rust pin must be accepted");
+        super::validate_mise_dotnet_pin(pins).expect("current .NET SDK pin must be accepted");
+        super::validate_stryker_manifest(include_bytes!("../../.config/dotnet-tools.json"))
+            .expect("current Stryker pin must be accepted");
+        let document = std::str::from_utf8(pins)
+            .expect("UTF-8 manifest")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("valid mise manifest");
+        assert_eq!(
+            document["tools"]["cargo:cargo-nextest"].as_str(),
+            Some(super::CARGO_NEXTEST_VERSION)
+        );
+    }
     fn complete() -> RunArgs {
         RunArgs {
             target_root: Some(PathBuf::from("target")),

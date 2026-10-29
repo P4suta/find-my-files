@@ -2,7 +2,7 @@
   "schema_version": 1,
   "tool": {
     "name": "dotnet-stryker",
-    "version": "4.16.0"
+    "version": "5.0.0"
   },
   "examined_files": [
     "app/FindMyFiles/Engine/EngineClientFactory.cs",
