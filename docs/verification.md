@@ -84,6 +84,16 @@ Its separate evidence carries `full_campaign=false` and supplies no full-campaig
 Kani checks the production activation predicate for every native unsigned outcome count.
 The mutation tool and report parser remain external and integration boundaries.
 
+The C# suite uses xUnit.net v3 with its native Microsoft Testing Platform (MTP) v2 integration.
+The executable test project enables that runner for Stryker's mutation control.
+Ordinary `dotnet test` retains the Visual Studio adapter, the coverage gate, and the existing pipe runsettings.
+The test project declares its MSBuild target as VSTest and separately enables the native MTP executable entry point.
+This avoids running MTP on the legacy VSTest target, which MTP v2 rejects under .NET 10.
+The suite keeps collection parallelism disabled.
+Stryker's MTP adapter is a preview integration, so migration requires the real one-file activation check in addition to ordinary, coverage, and pipe runs.
+The [xUnit migration guide](https://xunit.net/docs/getting-started/v3/migration), [platform integration guide](https://xunit.net/docs/getting-started/v3/microsoft-testing-platform), and [Stryker runner configuration](https://stryker-mutator.io/docs/stryker-net/configuration/#test-runner-string) define the external runner contracts.
+The source-bound activation predicate proof covers the acceptance decision; it doesn't prove the framework or its adapter.
+
 Both Rust mutation lanes derive mutant jobs and nextest test threads from one nonzero CPU estimate.
 The production planner reserves at most four nextest threads per job and keeps their aggregate count within that estimate, including one-, two-, and three-CPU hosts.
 Kani checks positive counts, the thread cap, unused-slot bounds, and multiplication without overflow for every nonzero native unsigned CPU count.

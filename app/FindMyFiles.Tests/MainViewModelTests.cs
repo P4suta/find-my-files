@@ -827,7 +827,7 @@ public sealed class MainViewModelTests
         engine.StatsTask = pending.Task;
         var vm = Vm(engine);
         var version = vm.RefreshVersionsAsync();
-        var perf = vm.Perf.RefreshStatsAsync();
+        var perf = vm.Perf.RefreshStatsAsync(TestContext.Current.CancellationToken);
         Assert.Equal(2, engine.StatsTokens.Count);
         var lifetime = Assert.IsAssignableFrom<CancellationTokenSource>(
             typeof(MainViewModel)
@@ -839,7 +839,7 @@ public sealed class MainViewModelTests
         Assert.All(engine.StatsTokens, token => Assert.True(token.IsCancellationRequested));
         Assert.Throws<ObjectDisposedException>(() => _ = lifetime.Token);
         pending.SetException(new OperationCanceledException());
-        await Task.WhenAll(version, perf).WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.WhenAll(version, perf).WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
     }
 
     [Fact]

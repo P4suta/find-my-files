@@ -296,7 +296,8 @@ fn mutation_boundary_is_secretless_read_only_and_hosted() {
 ///   Nothing else in the tree asks for the thorough set.
 /// * `coverage-analysis: off` and `disable-mix-mutants: true` — every mutant is run against the full suite, one at a time.
 ///   Coverage-driven selection and mixed mutants are how a survivor becomes unattributable to a single identity, and identity is what the baseline is written in.
-/// * `test-runner: vstest`, `configuration: Release`, `target-framework` — the gate must mutate the program the product ships, not a Debug build under a different runner.
+/// * `test-runner: mtp` — xUnit.net v3 requires native Microsoft Testing Platform mutation control.
+/// * `configuration: Release`, `target-framework` — the gate must mutate the program the product ships, not a Debug build under a different runner.
 /// * `break-on-initial-test-failure: true` — an unmutated suite that already fails makes every subsequent verdict meaningless.
 /// * `additional-timeout: 30000` — the reviewed scope includes pipe integration tests; 3s (the default) turns otherwise-killed mutants into timeouts, and `validate_stryker_exit` never accepts a timeout.
 /// * `concurrency: 2` — Stryker recommends at most two sessions on an ordinary runner, and four made otherwise-killed mutants time out under hosted Windows contention (PR #187).
@@ -327,7 +328,7 @@ fn the_reviewed_stryker_configuration_is_the_one_both_lanes_run() {
         ("mutation-level", serde_json::json!("Complete")),
         ("coverage-analysis", serde_json::json!("off")),
         ("disable-mix-mutants", serde_json::json!(true)),
-        ("test-runner", serde_json::json!("vstest")),
+        ("test-runner", serde_json::json!("mtp")),
         ("configuration", serde_json::json!("Release")),
         (
             "target-framework",
