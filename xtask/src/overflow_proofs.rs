@@ -31,7 +31,7 @@ fn every_round_contains_each_variant_in_the_required_order() {
 }
 
 #[kani::proof]
-#[kani::unwind(128)]
+#[kani::unwind(2)]
 fn profile_arguments_change_only_the_selected_overflow_checks() {
     let selector: u8 = kani::any();
     kani::assume(selector < 3);
@@ -60,7 +60,15 @@ fn profile_arguments_change_only_the_selected_overflow_checks() {
         ],
     };
     let actual = build_args(variant);
-    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), expected.len());
+    let argument: usize = kani::any();
+    kani::assume(argument < expected.len());
+    let actual = actual[argument].as_bytes();
+    let expected = expected[argument].as_bytes();
+    assert_eq!(actual.len(), expected.len());
+    let byte: usize = kani::any();
+    kani::assume(byte < expected.len());
+    assert_eq!(actual[byte], expected[byte]);
     kani::cover!(selector == 0);
     kani::cover!(selector == 1);
     kani::cover!(selector == 2);
