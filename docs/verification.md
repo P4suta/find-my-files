@@ -99,3 +99,10 @@ That scalar proof doesn't establish ECMA-335 semantic validity or correctness of
 Native regressions cover relocated IL and initialized fields, exception sections, managed resources, malformed layouts, and changed content.
 Candidate SBOM reconciliation exercises the actual published assemblies against the locked NuGet package archives.
 The [managed identity decision](adr/relocation-independent-managed-identity.md) records the supported boundary and compiler trust assumption.
+
+The product-version proof invokes the production byte scanner for every byte sequence up to its array bound.
+It checks that the returned end is contained, every earlier byte is outside the metadata delimiter set, and any ending delimiter is canonical.
+The string adapter slices at that end.
+UTF-8 guarantees that either ASCII delimiter starts at a character boundary; native tests cover multibyte text and both delimiter orders.
+The earlier direct string-pattern harness exceeded its declared solver budget, so the scanner exposes the same decision without the standard library's pattern-search machinery.
+The proof budget and accepted input bound remain unchanged.

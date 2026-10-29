@@ -1,20 +1,19 @@
 #[kani::proof]
-#[kani::unwind(130)]
-fn product_base_is_the_maximal_ascii_prefix_before_metadata() {
+#[kani::unwind(65)]
+fn product_base_ends_at_the_first_metadata_delimiter() {
     let bytes: [u8; 64] = kani::any();
     let length: usize = kani::any();
     kani::assume(length <= bytes.len());
-    for byte in &bytes[..length] {
-        kani::assume(byte.is_ascii());
+    let end = super::product_base_end(&bytes[..length]);
+    assert!(end <= length);
+    let index: usize = kani::any();
+    if index < end {
+        assert!(!matches!(bytes[index], b'-' | b'+'));
     }
-    let full = core::str::from_utf8(&bytes[..length]).expect("ASCII version");
-    let base = super::product_base(full);
-    assert!(full.starts_with(base));
-    assert!(!base.contains(['-', '+']));
-    if base.len() < full.len() {
-        assert!(matches!(full.as_bytes()[base.len()], b'-' | b'+'));
+    if end < length {
+        assert!(matches!(bytes[end], b'-' | b'+'));
     }
-    kani::cover!(full.is_empty());
-    kani::cover!(full == "1-dev+g");
-    kani::cover!(full == "1+g-dev");
+    kani::cover!(length == 0);
+    kani::cover!(end == length && length > 0);
+    kani::cover!(end < length);
 }

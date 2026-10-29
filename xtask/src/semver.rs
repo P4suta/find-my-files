@@ -9,7 +9,18 @@ mod kani_proofs;
 
 /// The release version before channel and build metadata.
 pub fn product_base(full: &str) -> &str {
-    full.split(['-', '+']).next().unwrap_or_default()
+    &full[..product_base_end(full.as_bytes())]
+}
+
+const fn product_base_end(bytes: &[u8]) -> usize {
+    let mut end = 0;
+    while end < bytes.len() {
+        if matches!(bytes[end], b'-' | b'+') {
+            break;
+        }
+        end += 1;
+    }
+    end
 }
 
 /// Accept only canonical release `SemVer` `X.Y.Z`: exactly three ASCII-decimal components, with no leading zero on a multi-digit component.
@@ -41,6 +52,22 @@ pub fn strip_tag_v(tag: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn product_base_preserves_unicode_and_stops_at_the_first_ascii_separator() {
+        for (full, expected) in [
+            ("", ""),
+            ("1.2.3", "1.2.3"),
+            ("1.2.3-dev+g", "1.2.3"),
+            ("1.2.3+g-dev", "1.2.3"),
+            ("-dev", ""),
+            ("+g", ""),
+            ("日本語–１.２.３-rc", "日本語–１.２.３"),
+            ("a\0b+meta", "a\0b"),
+        ] {
+            assert_eq!(product_base(full), expected);
+        }
+    }
 
     #[test]
     fn accepts_plain_triples() {

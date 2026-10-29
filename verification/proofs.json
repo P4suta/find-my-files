@@ -17,7 +17,7 @@
       "package": "xtask",
       "source": "xtask/src/semver_proofs.rs",
       "prefix": "semver::kani_proofs::",
-      "harnesses": ["product_base_is_the_maximal_ascii_prefix_before_metadata"]
+      "harnesses": ["product_base_ends_at_the_first_metadata_delimiter"]
     },
     {
       "package": "xtask",
