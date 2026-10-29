@@ -640,7 +640,7 @@ impl RunIdentity {
     }
 }
 
-fn repository_fingerprint(repo: &Path) -> Result<(bool, String)> {
+pub fn repository_fingerprint(repo: &Path) -> Result<(bool, String)> {
     let tracked = checked_command_output(repo, "git", &["diff", "--binary", "HEAD", "--", "."])?;
     let untracked = checked_command_output(
         repo,

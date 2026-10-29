@@ -23,7 +23,10 @@
       "package": "xtask",
       "source": "xtask/src/mutation_proofs.rs",
       "prefix": "mutation::kani_proofs::",
-      "harnesses": ["test_slots_fit_every_nonzero_cpu_budget_without_overflow"]
+      "harnesses": [
+        "test_slots_fit_every_nonzero_cpu_budget_without_overflow",
+        "activation_requires_executed_kills_and_no_unresolved_outcomes"
+      ]
     },
     {
       "package": "fmf-core",

@@ -72,6 +72,10 @@ pub fn csharp_mutation_dir() -> PathBuf {
     mutation_dir().join("csharp")
 }
 
+pub fn csharp_mutation_smoke_dir() -> PathBuf {
+    mutation_dir().join("csharp-smoke")
+}
+
 /// Reviewed exact-equivalent survivor set for cargo-mutants.
 pub fn rust_mutation_baseline() -> PathBuf {
     rust_mutation_baseline_in(&repo_root())

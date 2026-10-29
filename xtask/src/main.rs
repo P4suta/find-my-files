@@ -181,10 +181,15 @@ enum Commands {
         #[arg(long)]
         report_root: std::path::PathBuf,
     },
-    /// Run Stryker.NET 4.16.0 after a clean unit-test baseline, then compare exact survivor identities and reject no-coverage/timeout outcomes.
+    /// Run pinned Stryker.NET after a clean unit-test baseline, then compare exact survivor identities and reject no-coverage/timeout outcomes.
     MutationCsharp {
         #[command(flatten)]
         ci: mutation_ci::RunArgs,
+    },
+    /// Plan or verify real mutant activation on one reviewed C# file.
+    MutationCsharpSmoke {
+        #[arg(value_enum, default_value_t = mutation::smoke::Mode::Plan)]
+        mode: mutation::smoke::Mode,
     },
     /// Independently verify the exact 16-shard Rust mutation evidence without executing target-controlled code.
     MutationVerifyRust {
@@ -258,6 +263,7 @@ fn main() -> Result<()> {
             report_root,
         } => mutation::check_rust_report(&source_root, &report_root),
         Commands::MutationCsharp { ci } => mutation_ci::run_csharp(ci),
+        Commands::MutationCsharpSmoke { mode } => mutation::smoke::run(mode),
         Commands::MutationVerifyRust { evidence } => mutation_ci::verify_rust(evidence),
         Commands::MutationVerifyCsharp { evidence } => mutation_ci::verify_csharp(evidence),
         Commands::RulesetsFetch { out_dir } => {

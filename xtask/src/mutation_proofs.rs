@@ -3,6 +3,38 @@ use core::num::NonZeroUsize;
 
 #[kani::proof]
 #[kani::unwind(2)]
+fn activation_requires_executed_kills_and_no_unresolved_outcomes() {
+    let counts = super::smoke::ActivationCounts {
+        killed: kani::any(),
+        survived: kani::any(),
+        no_coverage: kani::any(),
+        timeouts: kani::any(),
+        ignored: kani::any(),
+        outside_scope: kani::any(),
+    };
+    if counts.verified() {
+        assert!(counts.killed > 0);
+        assert_eq!(counts.survived, 0);
+        assert_eq!(counts.no_coverage, 0);
+        assert_eq!(counts.timeouts, 0);
+        assert_eq!(counts.ignored, 0);
+        assert_eq!(counts.outside_scope, 0);
+    } else {
+        assert!(
+            counts.killed == 0
+                || counts.survived > 0
+                || counts.no_coverage > 0
+                || counts.timeouts > 0
+                || counts.ignored > 0
+                || counts.outside_scope > 0
+        );
+    }
+    kani::cover!(counts.verified() && counts.killed == usize::MAX);
+    kani::cover!(!counts.verified());
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
 fn test_slots_fit_every_nonzero_cpu_budget_without_overflow() {
     let cpus: usize = kani::any();
     kani::assume(cpus > 0);
