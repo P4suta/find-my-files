@@ -23,6 +23,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use toml_edit::DocumentMut;
 
+#[path = "overflow.rs"]
+pub mod overflow;
+
 const SAMPLE_COUNT: u8 = 6;
 const MONITOR_SAMPLE_COUNT: u16 = 3_600;
 /// ADR-0013 requires a measurement to *start* from a machine at its nominal clock.
@@ -53,7 +56,8 @@ struct Summary {
     max_processor_time: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RunIdentity {
     git_commit: String,
     git_dirty: bool,

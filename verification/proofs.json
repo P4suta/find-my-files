@@ -6,6 +6,16 @@
   "targets": [
     {
       "package": "xtask",
+      "source": "xtask/src/overflow_proofs.rs",
+      "prefix": "perf::overflow::kani_proofs::",
+      "harnesses": [
+        "a_measurement_boot_follows_preparation_and_is_not_in_the_future",
+        "every_round_contains_each_variant_in_the_required_order",
+        "profile_arguments_change_only_the_selected_overflow_checks"
+      ]
+    },
+    {
+      "package": "xtask",
       "source": "xtask/src/sbom/managed_proofs.rs",
       "prefix": "sbom::managed::kani_proofs::",
       "harnesses": [

@@ -125,3 +125,35 @@ The string adapter slices at that end.
 UTF-8 guarantees that either ASCII delimiter starts at a character boundary; native tests cover multibyte text and both delimiter orders.
 The earlier direct string-pattern harness exceeded its declared solver budget, so the scanner exposes the same decision without the standard library's pattern-search machinery.
 The proof budget and accepted input bound remain unchanged.
+
+The release overflow experiment follows [ADR-0013](adr/0013-measurement-discipline.md).
+Run `just overflow-experiment` to inspect its variants, fixed order, output location, and cooling intervals.
+The [Cargo profile reference](https://doc.rust-lang.org/cargo/reference/profiles.html#overflow-checks) defines the compiler option.
+The experiment preserves the existing boundary overrides and Windows Control Flow Guard settings.
+
+Run `just overflow-experiment prepare` from a clean committed source to build and hash the comparison binaries.
+Preparation restores the ordinary release tool after preserving each candidate.
+The manifest binds the compiler, dependency graph, source, profile arguments, machine identity, and executable hashes.
+Preparation rejects ambient compiler and profile overrides.
+Preparation changes no committed profile and performs no restart.
+
+Run `just overflow-experiment measure` only in the owner's agreed quiet window after an owner-controlled restart that follows preparation.
+The runner checks the recorded source and executables, the boot timestamp, and the process affinity before every measured command.
+The recorded logical processor count must match the process affinity on the measurement host.
+Windows clock, affinity, filesystem, compiler, Cargo, and cryptographic-library behavior remain external trust assumptions.
+Native tests and the real preparation and measurement commands exercise those boundaries.
+An unavailable or inconsistent observation stops the experiment without acceptance.
+
+Each measured command uses the existing cold preflight, continuous counters, and idle postflight.
+Every round compares saved reports with its own A control, so reversed rounds need no extra volume scan.
+The runner compares A controls with the first A measurement.
+The `fmf bench-compare` command invokes the existing real-volume evaluator and writes a failed verdict before returning failure.
+Passing controls, malformed reports, and a known over-budget report exercise that command.
+The experiment keeps valid negative performance results and collects every scheduled round before reporting a failed performance gate.
+Partial, stale, or thermally invalid evidence remains inconclusive.
+No experiment result authorizes a profile expansion without reviewing the paired costs and existing acceptance conditions.
+
+The production-bound Kani harnesses check every scheduled round, every variant's exact compiler arguments, and the boot predicate for all admitted timestamps.
+The operating system supplies the timestamp values.
+Those proofs establish the deterministic guards and don't establish an empirical performance claim.
+The full mutation campaign remains at the Release gate.
