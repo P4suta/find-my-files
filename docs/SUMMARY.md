@@ -57,3 +57,4 @@
 - [0048 — Direct-dispatch release workflow](adr/0048-direct-dispatch-release-workflow.md)
 - [Source-bound verification](adr/source-bound-verification.md)
 - [Pure core and shared runtime](adr/pure-core-and-shared-runtime.md)
+- [Relocation-independent managed identity](adr/relocation-independent-managed-identity.md)

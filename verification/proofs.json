@@ -6,6 +6,15 @@
   "targets": [
     {
       "package": "xtask",
+      "source": "xtask/src/sbom/managed_proofs.rs",
+      "prefix": "sbom::managed::kani_proofs::",
+      "harnesses": [
+        "accepted_table_ranges_are_contained_without_arithmetic_overflow",
+        "accepted_compressed_integers_consume_exactly_the_canonical_prefix"
+      ]
+    },
+    {
+      "package": "xtask",
       "source": "xtask/src/semver_proofs.rs",
       "prefix": "semver::kani_proofs::",
       "harnesses": ["product_base_is_the_maximal_ascii_prefix_before_metadata"]
