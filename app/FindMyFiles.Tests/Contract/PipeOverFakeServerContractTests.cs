@@ -1,7 +1,7 @@
 using System.Text;
 using FindMyFiles.Engine;
 using FindMyFiles.Tests.TestDoubles;
-using Xunit.Abstractions;
+using Xunit;
 using static FindMyFiles.Tests.TestDoubles.Polling;
 
 namespace FindMyFiles.Tests.Contract;

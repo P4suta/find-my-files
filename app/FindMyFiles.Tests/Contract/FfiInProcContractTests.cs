@@ -1,5 +1,5 @@
 using FindMyFiles.Engine;
-using Xunit.Abstractions;
+using Xunit;
 
 namespace FindMyFiles.Tests.Contract;
 

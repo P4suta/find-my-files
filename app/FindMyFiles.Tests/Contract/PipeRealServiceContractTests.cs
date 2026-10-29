@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using FindMyFiles.Engine;
-using Xunit.Abstractions;
+using Xunit;
 using static FindMyFiles.Tests.TestDoubles.Polling;
 
 namespace FindMyFiles.Tests.Contract;

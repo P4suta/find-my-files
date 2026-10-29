@@ -116,7 +116,8 @@ public sealed class ResultsVirtualizationEdgeTests
             null,
             RequeryOrigin.Initial,
             CompiledHighlighter.Empty,
-            () => true);
+            () => true,
+            TestContext.Current.CancellationToken);
         var pubs = new List<ResultsPublication>();
         _presenter.ResultsPublished += pubs.Add;
 
@@ -126,7 +127,8 @@ public sealed class ResultsVirtualizationEdgeTests
             null,
             RequeryOrigin.IndexChanged,
             CompiledHighlighter.Empty,
-            () => false);
+            () => false,
+            TestContext.Current.CancellationToken);
 
         Assert.True(superseded.Disposed);
         Assert.Empty(pubs);
@@ -141,7 +143,8 @@ public sealed class ResultsVirtualizationEdgeTests
             null,
             RequeryOrigin.Initial,
             CompiledHighlighter.Empty,
-            () => true);
+            () => true,
+            TestContext.Current.CancellationToken);
         var row0 = Assert.IsType<ResultRow>(_presenter.ResultsSource[0]);
         Assert.Equal("old_000000.txt", row0.Name);
 
@@ -151,7 +154,8 @@ public sealed class ResultsVirtualizationEdgeTests
             null,
             RequeryOrigin.IndexChanged,
             CompiledHighlighter.Empty,
-            () => false);
+            () => false,
+            TestContext.Current.CancellationToken);
 
         Assert.True(superseded.Disposed);
         Assert.Same(row0, Assert.IsType<ResultRow>(_presenter.ResultsSource[0]));

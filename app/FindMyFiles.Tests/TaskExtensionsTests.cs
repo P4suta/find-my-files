@@ -24,7 +24,7 @@ public sealed class TaskExtensionsTests
 
         Task.FromException(new InvalidOperationException(marker)).Forget("test-area");
 
-        var notification = await captured.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var notification = await captured.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(NotifySeverity.Error, notification.Severity);
         Assert.Contains(marker, notification.Detail!, StringComparison.Ordinal);
     }

@@ -68,7 +68,7 @@ public sealed class PipeConnectionTests
         {
             Assert.Equal(42, conn.Epoch);
             Assert.NotNull(conn.ReadLoop);
-            await Task.Delay(50);
+            await Task.Delay(50, TestContext.Current.CancellationToken);
             Assert.False(conn.ReadLoop.IsCompleted);
         }
     }
@@ -121,7 +121,7 @@ public sealed class PipeConnectionTests
         var (server, client) = await ConnectedPairAsync();
         var conn = Wrap(client);
         server.Dispose();
-        await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5));
+        await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         var frame = PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []);
         var ex = await Assert.ThrowsAsync<EngineUnavailableException>(

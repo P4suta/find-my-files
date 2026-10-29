@@ -68,7 +68,7 @@ public sealed class PipeConnectionStateMachineSpecTests
         events.Attach(client);
 
         client.Start();
-        await Task.Delay(400);
+        await Task.Delay(400, TestContext.Current.CancellationToken);
 
         Assert.Equal(EngineConnectionState.Connecting, client.Connection);
         Assert.Empty(events.Snapshot());
@@ -123,7 +123,7 @@ public sealed class PipeConnectionStateMachineSpecTests
             () => client.Connection == EngineConnectionState.Reconnecting, "noticed the drop");
 
         await events.WaitForCountAsync(2);
-        await Task.Delay(300);
+        await Task.Delay(300, TestContext.Current.CancellationToken);
         Assert.Equal(EngineConnectionState.Reconnecting, client.Connection);
         Assert.Equal(
             [EngineConnectionState.Connected, EngineConnectionState.Reconnecting],
@@ -141,7 +141,7 @@ public sealed class PipeConnectionStateMachineSpecTests
         client.Start();
         await server.WaitForAsync(PipeProtocol.Op.Hello);
         await events.WaitForCountAsync(1);
-        await Task.Delay(750);
+        await Task.Delay(750, TestContext.Current.CancellationToken);
 
         Assert.Equal(EngineConnectionState.Faulted, client.Connection);
         Assert.DoesNotContain(EngineConnectionState.Connected, events.Snapshot());
@@ -175,10 +175,10 @@ public sealed class PipeConnectionStateMachineSpecTests
             events.Snapshot());
         Assert.Equal(2, server.ConnectionCount);
 
-        await Task.Delay(750);
+        await Task.Delay(750, TestContext.Current.CancellationToken);
         Assert.Equal(2, server.ConnectionCount);
         var failure = await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => client.SearchAsync("a", SearchOptions.Default));
+            () => client.SearchAsync("a", SearchOptions.Default, TestContext.Current.CancellationToken));
         Assert.Contains("protocol", failure.Message, StringComparison.OrdinalIgnoreCase);
     }
 

@@ -3790,7 +3790,7 @@ mod tests {
             ("mutation-level", serde_json::json!("Complete")),
             ("coverage-analysis", serde_json::json!("off")),
             ("disable-mix-mutants", serde_json::json!(true)),
-            ("test-runner", serde_json::json!("vstest")),
+            ("test-runner", serde_json::json!("mtp")),
             ("configuration", serde_json::json!("Release")),
             (
                 "target-framework",

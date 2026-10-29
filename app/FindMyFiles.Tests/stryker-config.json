@@ -22,7 +22,7 @@
     "mutation-level": "Complete",
     "coverage-analysis": "off",
     "disable-mix-mutants": true,
-    "test-runner": "vstest",
+    "test-runner": "mtp",
     "configuration": "Release",
     "target-framework": "net10.0-windows10.0.26100.0",
     "break-on-initial-test-failure": true,

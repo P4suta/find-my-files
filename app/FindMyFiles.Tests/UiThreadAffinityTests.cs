@@ -105,7 +105,7 @@ public sealed class UiThreadAffinityTests : IDisposable
 
         try
         {
-            await published.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await published.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         }
         finally
         {

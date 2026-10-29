@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using FindMyFiles.Engine;
 using Xunit;
-using Xunit.Abstractions;
 using static FindMyFiles.Tests.TestDoubles.Polling;
 
 namespace FindMyFiles.Tests;
@@ -38,24 +37,24 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
                 "connect to fmf-service",
                 30_000);
 
-            var outcome = await client.SearchAsync("anything", SearchOptions.Default);
+            var outcome = await client.SearchAsync("anything", SearchOptions.Default, TestContext.Current.CancellationToken);
             Assert.Equal(0, outcome.Result.Count);
             outcome.Result.Dispose();
 
-            var stats = await client.GetStatsAsync();
+            var stats = await client.GetStatsAsync(TestContext.Current.CancellationToken);
             Assert.NotNull(stats);
             Assert.NotNull(stats!.Transport);
 
-            Assert.Empty(await client.GetStatusAsync());
+            Assert.Empty(await client.GetStatusAsync(TestContext.Current.CancellationToken));
 
             service.Kill();
-            await service.WaitForExitAsync();
+            await service.WaitForExitAsync(TestContext.Current.CancellationToken);
             await WaitUntilAsync(
                 () => client.Connection == EngineConnectionState.Reconnecting,
                 "client notices the dead service",
                 15_000);
             await Assert.ThrowsAsync<EngineUnavailableException>(
-                () => client.SearchAsync("anything", SearchOptions.Default));
+                () => client.SearchAsync("anything", SearchOptions.Default, TestContext.Current.CancellationToken));
 
             service.Dispose();
             service = StartService(exe, pipeName, dataDir);
@@ -63,7 +62,7 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
                 () => client.Connection == EngineConnectionState.Connected,
                 "reconnect to the restarted service",
                 30_000);
-            var again = await client.SearchAsync("anything", SearchOptions.Default);
+            var again = await client.SearchAsync("anything", SearchOptions.Default, TestContext.Current.CancellationToken);
             Assert.Equal(0, again.Result.Count);
             again.Result.Dispose();
         }
@@ -100,7 +99,7 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
                 30_000);
 
             await Assert.ThrowsAsync<EngineUnavailableException>(
-                () => client.SearchAsync("!!drop", SearchOptions.Default));
+                () => client.SearchAsync("!!drop", SearchOptions.Default, TestContext.Current.CancellationToken));
 
             await WaitUntilAsync(
                 () => client.Connection == EngineConnectionState.Reconnecting,
@@ -110,7 +109,7 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
                 () => client.Connection == EngineConnectionState.Connected,
                 "reconnect after !!drop",
                 30_000);
-            var outcome = await client.SearchAsync("anything", SearchOptions.Default);
+            var outcome = await client.SearchAsync("anything", SearchOptions.Default, TestContext.Current.CancellationToken);
             Assert.Equal(0, outcome.Result.Count);
             outcome.Result.Dispose();
         }
@@ -150,11 +149,11 @@ public sealed class PipeIntegrationTests(ITestOutputHelper output)
                 30_000);
 
             var ex = await Assert.ThrowsAsync<EngineException>(
-                () => client.SearchAsync("!!panic", SearchOptions.Default));
+                () => client.SearchAsync("!!panic", SearchOptions.Default, TestContext.Current.CancellationToken));
             Assert.Equal(99, ex.Code);
 
             Assert.Equal(EngineConnectionState.Connected, client.Connection);
-            var outcome = await client.SearchAsync("anything", SearchOptions.Default);
+            var outcome = await client.SearchAsync("anything", SearchOptions.Default, TestContext.Current.CancellationToken);
             Assert.Equal(0, outcome.Result.Count);
             outcome.Result.Dispose();
         }

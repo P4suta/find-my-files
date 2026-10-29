@@ -96,7 +96,7 @@ public sealed class PerfPanelViewModelTests
         var raised = 0;
         _vm.PerfDataChanged += () => raised++;
 
-        await _vm.RefreshStatsAsync();
+        await _vm.RefreshStatsAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(_vm.Stats);
         Assert.Equal(1, raised);
@@ -107,7 +107,7 @@ public sealed class PerfPanelViewModelTests
     {
         _vm.Dispose();
 
-        await _vm.RefreshStatsAsync();
+        await _vm.RefreshStatsAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(_vm.Stats);
     }
@@ -119,7 +119,7 @@ public sealed class PerfPanelViewModelTests
         _vm.PerfDataChanged += () => raised++;
         _engine.ThrowOnStats = new InvalidOperationException("engine down");
 
-        await _vm.RefreshStatsAsync();
+        await _vm.RefreshStatsAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(_vm.Stats);
         Assert.Equal(0, raised);
@@ -130,7 +130,7 @@ public sealed class PerfPanelViewModelTests
     {
         _engine.ThrowOnStats = new OperationCanceledException();
 
-        await _vm.RefreshStatsAsync();
+        await _vm.RefreshStatsAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(_vm.Stats);
     }
