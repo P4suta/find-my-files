@@ -81,7 +81,7 @@ public sealed class PipeEngineClientAdditionalTests
                 () => rejected.Connection == EngineConnectionState.Faulted,
                 "identity rejection");
             var failure = await Assert.ThrowsAsync<EngineUnavailableException>(
-                () => rejected.ListVolumesAsync());
+                () => rejected.ListVolumesAsync(TestContext.Current.CancellationToken));
             Assert.Contains(
                 $@"server on \\.\pipe\{rejectedServer.PipeName}",
                 failure.Message,
@@ -196,10 +196,10 @@ public sealed class PipeEngineClientAdditionalTests
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
 
-        Assert.Equal(["C:"], await client.ListVolumesAsync());
-        await client.StartIndexingAsync(["C:"]);
-        Assert.Equal([new VolumeStatus("C:", VolumeState.Ready, 42)], await client.GetStatusAsync());
-        Assert.NotNull(await client.GetStatsAsync());
+        Assert.Equal(["C:"], await client.ListVolumesAsync(TestContext.Current.CancellationToken));
+        await client.StartIndexingAsync(["C:"], TestContext.Current.CancellationToken);
+        Assert.Equal([new VolumeStatus("C:", VolumeState.Ready, 42)], await client.GetStatusAsync(TestContext.Current.CancellationToken));
+        Assert.NotNull(await client.GetStatsAsync(TestContext.Current.CancellationToken));
 
         client.Dispose();
         client.Dispose();
@@ -216,7 +216,7 @@ public sealed class PipeEngineClientAdditionalTests
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
 
         Assert.Equal(1, server.ConnectionCount);
     }
@@ -243,7 +243,7 @@ public sealed class PipeEngineClientAdditionalTests
             "connected");
 
         var exception = await Record.ExceptionAsync(
-            async () => await client.ListVolumesAsync());
+            async () => await client.ListVolumesAsync(TestContext.Current.CancellationToken));
 
         Assert.NotNull(exception);
         var actualKind = exception switch
@@ -315,13 +315,13 @@ public sealed class PipeEngineClientAdditionalTests
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
-        var outcome = await client.SearchAsync("one", SearchOptions.Default);
+        var outcome = await client.SearchAsync("one", SearchOptions.Default, TestContext.Current.CancellationToken);
         server.Handler = (opcode, _) => opcode == PipeProtocol.Op.ResultPage
             ? Task.FromResult((PipeProtocol.Status.Io, "detail"u8.ToArray()))
             : null;
 
         var failure = await Assert.ThrowsAsync<EngineException>(
-            () => outcome.Result.GetRangeAsync(0, 1));
+            () => outcome.Result.GetRangeAsync(0, 1, TestContext.Current.CancellationToken));
 
         Assert.Equal(
             $"ResultPage failed ({PipeProtocol.Status.Io}): detail",
@@ -355,7 +355,7 @@ public sealed class PipeEngineClientAdditionalTests
         response.SetResult((
             PipeProtocol.Status.Ok,
             PipeProtocol.EncodeQueryResp(55, 0, string.Empty)));
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
 
         Assert.DoesNotContain(PipeProtocol.Op.ResultFree, server.OpcodesOf(0));
         Assert.Equal(EngineConnectionState.Connected, client.Connection);
@@ -376,10 +376,10 @@ public sealed class PipeEngineClientAdditionalTests
         await WaitUntilAsync(
             () => connected.Connection == EngineConnectionState.Connected,
             "connected");
-        Assert.Null(await connected.GetStatsAsync());
+        Assert.Null(await connected.GetStatsAsync(TestContext.Current.CancellationToken));
 
         using var disconnected = new PipeEngineClient("fmf-test-not-started", autoStart: false);
-        Assert.Null(await disconnected.GetStatsAsync());
+        Assert.Null(await disconnected.GetStatsAsync(TestContext.Current.CancellationToken));
         Assert.Contains("area=pipe", log.Text, StringComparison.Ordinal);
         Assert.Contains("stats unavailable", log.Text, StringComparison.Ordinal);
         Assert.Contains(
@@ -445,7 +445,7 @@ public sealed class PipeEngineClientAdditionalTests
         client.Start();
         await WaitUntilAsync(() => server.ConnectionCount == 1, "first attempt");
 
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
 
         Assert.Equal(1, server.ConnectionCount);
         Assert.Equal(EngineConnectionState.Connecting, client.Connection);
@@ -466,7 +466,7 @@ public sealed class PipeEngineClientAdditionalTests
         client.Start();
         await server.WaitForAsync(PipeProtocol.Op.IndexStatus);
 
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
 
         Assert.NotEqual(EngineConnectionState.Connected, client.Connection);
     }
@@ -502,7 +502,7 @@ public sealed class PipeEngineClientAdditionalTests
         await server.SendEventAsync((uint)EventKind.VolumeReady, 13, "C:");
         await server.SendEventAsync((uint)EventKind.RescanStarted, 0, "C:");
         await server.SendEventAsync((uint)EventKind.VolumeFailed, 0, "C:");
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.Equal(EngineConnectionState.Connected, client.Connection);
         Assert.Contains("area=pipe", log.Text, StringComparison.Ordinal);
         Assert.Contains("event=VolumeUpdated", log.Text, StringComparison.Ordinal);
@@ -638,7 +638,7 @@ public sealed class PipeEngineClientAdditionalTests
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
-        var request = client.ListVolumesAsync();
+        var request = client.ListVolumesAsync(TestContext.Current.CancellationToken);
         await server.WaitForAsync(PipeProtocol.Op.ListVolumes);
         var idField = typeof(PipeEngineClient).GetField(
             "_requestId",
@@ -667,7 +667,7 @@ public sealed class PipeEngineClientAdditionalTests
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
-        var basis = await client.SearchAsync("first", SearchOptions.Default);
+        var basis = await client.SearchAsync("first", SearchOptions.Default, TestContext.Current.CancellationToken);
 
         client.AfterBasisAcquireForTests = async () =>
         {
@@ -677,7 +677,7 @@ public sealed class PipeEngineClientAdditionalTests
                     && client.Connection == EngineConnectionState.Connected,
                 "replacement connection");
         };
-        var outcome = await client.SearchAsync("second", SearchOptions.Default, basis.Result);
+        var outcome = await client.SearchAsync("second", SearchOptions.Default, basis.Result, TestContext.Current.CancellationToken);
 
         var secondQuery = server.Received.Last(r => r.Opcode == PipeProtocol.Op.Query);
         Assert.Equal(0UL, PipeProtocol.DecodeQueryReq(secondQuery.Payload).PresentationBasis);
@@ -708,7 +708,7 @@ public sealed class PipeEngineClientAdditionalTests
             return resume.Task;
         };
         client.Start();
-        await reached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await reached.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         client.Dispose();
         resume.SetResult();
@@ -737,7 +737,7 @@ public sealed class PipeEngineClientAdditionalTests
         };
         using var cancellation = new CancellationTokenSource();
         var request = client.SearchAsync("one", SearchOptions.Default, cancellation.Token);
-        await reached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await reached.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         cancellation.Cancel();
         resume.SetResult();
@@ -762,7 +762,7 @@ public sealed class PipeEngineClientAdditionalTests
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
-        var request = client.ListVolumesAsync();
+        var request = client.ListVolumesAsync(TestContext.Current.CancellationToken);
         await server.WaitForAsync(PipeProtocol.Op.ListVolumes);
 
         client.Dispose();
@@ -795,7 +795,7 @@ public sealed class PipeEngineClientAdditionalTests
         await server.WaitForAsync(PipeProtocol.Op.QueryCancel);
 
         response.SetResult((PipeProtocol.Status.Ok, []));
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.Equal(EngineConnectionState.Connected, client.Connection);
         Assert.DoesNotContain(PipeProtocol.Op.ResultFree, server.OpcodesOf(0));
         Assert.Contains("area=pipe", log.Text, StringComparison.Ordinal);
@@ -840,7 +840,7 @@ public sealed class PipeEngineClientAdditionalTests
         var cancelsBefore = server.Received.Count(
             frame => frame.Opcode == PipeProtocol.Op.QueryCancel);
         client.SendQueryCancel(stale, 123);
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
         Assert.Equal(
             cancelsBefore,
             server.Received.Count(frame => frame.Opcode == PipeProtocol.Op.QueryCancel));
@@ -874,9 +874,9 @@ public sealed class PipeEngineClientAdditionalTests
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
 
-        await client.ListVolumesAsync();
-        await client.GetStatusAsync();
-        Assert.NotNull(await client.GetStatsAsync());
+        await client.ListVolumesAsync(TestContext.Current.CancellationToken);
+        await client.GetStatusAsync(TestContext.Current.CancellationToken);
+        Assert.NotNull(await client.GetStatsAsync(TestContext.Current.CancellationToken));
         Assert.Null(await client.TryGetServiceInfoAsync(CancellationToken.None));
 
         var connection = Assert.IsType<PipeConnection>(client.CurrentPipeConnectionForTests);
@@ -926,7 +926,7 @@ public sealed class PipeEngineClientAdditionalTests
 
             client.SendQueryCancel(connection, 123);
 
-            var posted = await notification.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var posted = await notification.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             Assert.Contains("pipe.query-cancel", posted.Message, StringComparison.Ordinal);
             Assert.Contains("area=pipe.query-cancel", log.Text, StringComparison.Ordinal);
         }
@@ -966,11 +966,11 @@ public sealed class PipeEngineClientAdditionalTests
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
 
-        var timingOut = client.ListVolumesAsync();
+        var timingOut = client.ListVolumesAsync(TestContext.Current.CancellationToken);
         await server.WaitForAsync(PipeProtocol.Op.ListVolumes);
-        await timeoutReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await timeoutReached.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
-        var collateral = client.ListVolumesAsync();
+        var collateral = client.ListVolumesAsync(TestContext.Current.CancellationToken);
         await server.WaitForAsync(PipeProtocol.Op.ListVolumes, minCount: 2);
         allowRetire.SetResult();
 
@@ -1002,7 +1002,7 @@ public sealed class PipeEngineClientAdditionalTests
             frame => frame.Opcode == PipeProtocol.Op.QueryCancel);
 
         cancellation.Cancel();
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
 
         Assert.Equal(
             cancels,
@@ -1024,7 +1024,7 @@ public sealed class PipeEngineClientAdditionalTests
             "_writeLock",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         var writeLock = Assert.IsType<SemaphoreSlim>(lockField?.GetValue(connection));
-        await writeLock.WaitAsync();
+        await writeLock.WaitAsync(TestContext.Current.CancellationToken);
         using var cancellation = new CancellationTokenSource();
         try
         {
@@ -1033,7 +1033,7 @@ public sealed class PipeEngineClientAdditionalTests
                 SearchOptions.Default,
                 cancellation.Token);
             cancellation.Cancel();
-            await Task.Delay(50);
+            await Task.Delay(50, TestContext.Current.CancellationToken);
             Assert.False(search.IsCompleted);
 
             writeLock.Release();
@@ -1065,14 +1065,14 @@ public sealed class PipeEngineClientAdditionalTests
             "_writeLock",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         var writeLock = Assert.IsType<SemaphoreSlim>(lockField?.GetValue(connection));
-        await writeLock.WaitAsync();
+        await writeLock.WaitAsync(TestContext.Current.CancellationToken);
         using var cancellation = new CancellationTokenSource();
         try
         {
             var request = client.ListVolumesAsync(cancellation.Token);
             cancellation.Cancel();
 
-            var completed = await Task.WhenAny(request, Task.Delay(200));
+            var completed = await Task.WhenAny(request, Task.Delay(200, TestContext.Current.CancellationToken));
             Assert.Same(request, completed);
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
             Assert.DoesNotContain(PipeProtocol.Op.ListVolumes, server.OpcodesOf(0));
@@ -1201,10 +1201,10 @@ public sealed class PipeEngineClientAdditionalTests
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
-        var outcome = await client.SearchAsync("one", SearchOptions.Default);
+        var outcome = await client.SearchAsync("one", SearchOptions.Default, TestContext.Current.CancellationToken);
 
-        Assert.Single(await outcome.Result.GetRangeAsync(0, 1));
-        var stats = Assert.IsType<EngineStatsData>(await client.GetStatsAsync());
+        Assert.Single(await outcome.Result.GetRangeAsync(0, 1, TestContext.Current.CancellationToken));
+        var stats = Assert.IsType<EngineStatsData>(await client.GetStatsAsync(TestContext.Current.CancellationToken));
 
         Assert.NotNull(stats.Transport);
         Assert.True(stats.Transport.PageRttEwmaUs > 0);
@@ -1231,7 +1231,7 @@ public sealed class PipeEngineClientAdditionalTests
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
 
-        var outcome = await client.SearchAsync("trace", SearchOptions.Default);
+        var outcome = await client.SearchAsync("trace", SearchOptions.Default, TestContext.Current.CancellationToken);
 
         Assert.Equal(traceJson.Length > 0, outcome.Trace is not null);
         Assert.Equal(
@@ -1260,7 +1260,7 @@ public sealed class PipeEngineClientAdditionalTests
         var frees = server.Received.Count(frame => frame.Opcode == PipeProtocol.Op.ResultFree);
 
         client.ReleaseResult(99, retiredEpoch);
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
 
         Assert.Equal(
             frees,

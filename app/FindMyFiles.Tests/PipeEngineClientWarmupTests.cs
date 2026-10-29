@@ -29,7 +29,7 @@ public sealed class PipeEngineClientWarmupTests
 
         client.Start();
 
-        await Task.Delay(600);
+        await Task.Delay(600, TestContext.Current.CancellationToken);
         Assert.Equal(EngineConnectionState.Connecting, client.Connection);
         Assert.Equal(0, Volatile.Read(ref connectedSeen));
         Assert.Equal(0, server.ConnectionCount);
@@ -52,7 +52,7 @@ public sealed class PipeEngineClientWarmupTests
         };
         using var client = new PipeEngineClient(server.PipeName);
 
-        await Task.Delay(300);
+        await Task.Delay(300, TestContext.Current.CancellationToken);
         Assert.NotEqual(EngineConnectionState.Connected, client.Connection);
 
         server.ReleaseAccept();
@@ -63,7 +63,7 @@ public sealed class PipeEngineClientWarmupTests
             new[] { PipeProtocol.Op.Hello, PipeProtocol.Op.Subscribe, PipeProtocol.Op.IndexStatus },
             server.OpcodesOf(0));
 
-        var outcome = await client.SearchAsync("warm", SearchOptions.Default);
+        var outcome = await client.SearchAsync("warm", SearchOptions.Default, TestContext.Current.CancellationToken);
         Assert.Equal(3, outcome.Result.Count);
         outcome.Result.Dispose();
     }
@@ -74,12 +74,12 @@ public sealed class PipeEngineClientWarmupTests
         using var server = new FakePipeServer(startHeld: true);
         using var client = new PipeEngineClient(server.PipeName);
 
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.NotEqual(EngineConnectionState.Connected, client.Connection);
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => client.SearchAsync("a", SearchOptions.Default));
+            () => client.SearchAsync("a", SearchOptions.Default, TestContext.Current.CancellationToken));
         sw.Stop();
 
         Assert.True(

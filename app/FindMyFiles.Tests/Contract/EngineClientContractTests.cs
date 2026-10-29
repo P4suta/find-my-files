@@ -1,7 +1,6 @@
 using System.Text.Json;
 using FindMyFiles.Engine;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace FindMyFiles.Tests.Contract;
 
@@ -51,12 +50,32 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
             .Select(q => q.GetString()!)];
     }
 
-    public async Task InitializeAsync() => _client = await AcquireClientOrSkipAsync();
+    public async ValueTask InitializeAsync()
+    {
+        try
+        {
+            _client = await AcquireClientOrSkipAsync();
+        }
+        catch (Exception initializationFailure)
+        {
+            try
+            {
+                await TeardownAsync();
+            }
+            catch (Exception cleanupFailure)
+            {
+                throw new AggregateException(initializationFailure, cleanupFailure);
+            }
 
-    public async Task DisposeAsync()
+            throw;
+        }
+    }
+
+    public async ValueTask DisposeAsync()
     {
         _client?.Dispose();
         await TeardownAsync();
+        GC.SuppressFinalize(this);
     }
 
     /// <summary>Null means the gate is closed — report once, pass green.</summary>
@@ -81,10 +100,10 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         foreach (var query in GoldenInvalidQueries())
         {
             await Assert.ThrowsAsync<QuerySyntaxException>(
-                () => client.SearchAsync(query, SearchOptions.Default));
+                () => client.SearchAsync(query, SearchOptions.Default, TestContext.Current.CancellationToken));
         }
 
-        var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default);
+        var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default, TestContext.Current.CancellationToken);
         outcome.Result.Dispose();
     }
 
@@ -96,14 +115,14 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
             return;
         }
 
-        var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default);
+        var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default, TestContext.Current.CancellationToken);
         using var result = outcome.Result;
         Assert.True(result.Count >= 0, "Count must never be negative");
 
-        var page = await result.GetRangeAsync(0, 5);
+        var page = await result.GetRangeAsync(0, 5, TestContext.Current.CancellationToken);
         Assert.Equal((int)Math.Min(5, result.Count), page.Count);
 
-        var beyond = await result.GetRangeAsync(result.Count, 5);
+        var beyond = await result.GetRangeAsync(result.Count, 5, TestContext.Current.CancellationToken);
         Assert.Empty(beyond);
     }
 
@@ -115,15 +134,15 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
             return;
         }
 
-        var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default);
+        var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default, TestContext.Current.CancellationToken);
         using var result = outcome.Result;
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            async () => await result.GetRangeAsync(-1, 1));
+            async () => await result.GetRangeAsync(-1, 1, TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            async () => await result.GetRangeAsync(0, EngineContract.MaxPageRows + 1));
+            async () => await result.GetRangeAsync(0, EngineContract.MaxPageRows + 1, TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            async () => await result.GetRangeAsync(0, -1));
+            async () => await result.GetRangeAsync(0, -1, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -135,12 +154,12 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         }
 
         await Assert.ThrowsAsync<ArgumentException>(
-            async () => await client.StartIndexingAsync(["..\\escape"]));
+            async () => await client.StartIndexingAsync(["..\\escape"], TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<ArgumentException>(
-            async () => await client.StartIndexingAsync(["C:", "c:"]));
+            async () => await client.StartIndexingAsync(["C:", "c:"], TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             async () => await client.StartIndexingAsync(
-                Enumerable.Repeat("C:", EngineContract.MaxVolumes + 1).ToArray()));
+                Enumerable.Repeat("C:", EngineContract.MaxVolumes + 1).ToArray(), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -223,7 +242,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
 
         var query = new string('界', (EngineContract.MaxQueryBytes / 3) + 1);
         await Assert.ThrowsAsync<ArgumentException>(
-            () => client.SearchAsync(query, SearchOptions.Default));
+            () => client.SearchAsync(query, SearchOptions.Default, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -234,7 +253,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
             return;
         }
 
-        var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default);
+        var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default, TestContext.Current.CancellationToken);
         using var result = outcome.Result;
         using var cts = new CancellationTokenSource();
         cts.Cancel();
@@ -250,7 +269,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
             return;
         }
 
-        var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default);
+        var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default, TestContext.Current.CancellationToken);
         using var result = outcome.Result;
         if (!await TryForceStaleAsync(client))
         {
@@ -258,9 +277,9 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
             return;
         }
 
-        await Assert.ThrowsAsync<StaleResultException>(() => result.GetRangeAsync(0, 1));
+        await Assert.ThrowsAsync<StaleResultException>(() => result.GetRangeAsync(0, 1, TestContext.Current.CancellationToken));
 
-        var again = await client.SearchAsync(ValidQuery, SearchOptions.Default);
+        var again = await client.SearchAsync(ValidQuery, SearchOptions.Default, TestContext.Current.CancellationToken);
         again.Result.Dispose();
     }
 
@@ -276,7 +295,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         {
             Assert.Equal(EngineConnectionState.InProc, client.Connection);
 
-            var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default);
+            var outcome = await client.SearchAsync(ValidQuery, SearchOptions.Default, TestContext.Current.CancellationToken);
             outcome.Result.Dispose();
             Assert.Equal(EngineConnectionState.InProc, client.Connection);
         }

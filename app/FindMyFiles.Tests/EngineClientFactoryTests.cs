@@ -381,14 +381,14 @@ public sealed class EngineClientFactoryTests
         Assert.Equal(EngineClientKind.Unavailable, engine.Kind);
         Assert.Equal(EngineConnectionState.Unavailable, engine.Connection);
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => engine.ListVolumesAsync());
+            () => engine.ListVolumesAsync(TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => engine.StartIndexingAsync(["C:"]));
+            () => engine.StartIndexingAsync(["C:"], TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => engine.GetStatusAsync());
+            () => engine.GetStatusAsync(TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => engine.SearchAsync("readme", SearchOptions.Default));
-        Assert.Null(await engine.GetStatsAsync());
+            () => engine.SearchAsync("readme", SearchOptions.Default, TestContext.Current.CancellationToken));
+        Assert.Null(await engine.GetStatsAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -433,7 +433,7 @@ public sealed class EngineClientFactoryTests
 
         var resolve = Assert.Throws<ArgumentNullException>(() =>
         {
-            _ = EngineClientFactory.ResolveAsync((Func<IEngineClient>)null!);
+            _ = EngineClientFactory.ResolveAsync((Func<IEngineClient>)null!, TestContext.Current.CancellationToken);
         });
         Assert.Equal("resolve", resolve.ParamName);
     }
@@ -445,14 +445,16 @@ public sealed class EngineClientFactoryTests
         var entered = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
-        var resolving = EngineClientFactory.ResolveAsync(() =>
-        {
-            entered.TrySetResult();
-            Assert.True(release.Wait(TimeSpan.FromSeconds(5)));
-            return new UnavailableEngineClient();
-        });
+        var resolving = EngineClientFactory.ResolveAsync(
+            () =>
+            {
+                entered.TrySetResult();
+                Assert.True(release.Wait(TimeSpan.FromSeconds(5)));
+                return new UnavailableEngineClient();
+            },
+            TestContext.Current.CancellationToken);
 
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(resolving.IsCompleted);
         release.Set();
 
@@ -469,7 +471,7 @@ public sealed class EngineClientFactoryTests
         Assert.Equal(EngineConnectionState.Connecting, engine.Connection);
         Assert.Equal(Loc.Get("EngineMode_Connecting"), StatusFormatter.EngineMode(engine));
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => engine.SearchAsync("readme", SearchOptions.Default));
-        Assert.Null(await engine.GetStatsAsync());
+            () => engine.SearchAsync("readme", SearchOptions.Default, TestContext.Current.CancellationToken));
+        Assert.Null(await engine.GetStatsAsync(TestContext.Current.CancellationToken));
     }
 }
