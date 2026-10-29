@@ -153,6 +153,11 @@ enum Commands {
     DocsAssemble,
     /// Refuse performance measurement unless Windows reports a cold, idle CPU.
     PerfPreflight,
+    /// Plan, prepare, or measure the fixed release overflow-checks comparison.
+    OverflowExperiment {
+        #[arg(value_enum, default_value_t = perf::overflow::Mode::Plan)]
+        mode: perf::overflow::Mode,
+    },
     /// Compare the synthetic Criterion suite with the machine-local baseline inside a fresh, monitored run directory.
     PerfMicroCheck,
     /// Record and atomically promote a monitored Criterion baseline.
@@ -246,6 +251,7 @@ fn main() -> Result<()> {
         Commands::ContractBless => contract_bless::run(),
         Commands::DocsAssemble => docs::run(),
         Commands::PerfPreflight => perf::run(),
+        Commands::OverflowExperiment { mode } => perf::overflow::run(mode),
         Commands::PerfMicroCheck => perf::micro_check(),
         Commands::PerfMicroBaseline => perf::micro_baseline(),
         Commands::PerfRealCheck { drive } => perf::real_check(&drive),
