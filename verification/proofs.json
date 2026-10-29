@@ -6,6 +6,21 @@
   "targets": [
     {
       "package": "xtask",
+      "source": "xtask/src/sbom/managed_proofs.rs",
+      "prefix": "sbom::managed::kani_proofs::",
+      "harnesses": [
+        "accepted_table_ranges_are_contained_without_arithmetic_overflow",
+        "accepted_compressed_integers_consume_exactly_the_canonical_prefix"
+      ]
+    },
+    {
+      "package": "xtask",
+      "source": "xtask/src/semver_proofs.rs",
+      "prefix": "semver::kani_proofs::",
+      "harnesses": ["product_base_ends_at_the_first_metadata_delimiter"]
+    },
+    {
+      "package": "xtask",
       "source": "xtask/src/mutation_proofs.rs",
       "prefix": "mutation::kani_proofs::",
       "harnesses": ["test_slots_fit_every_nonzero_cpu_budget_without_overflow"]

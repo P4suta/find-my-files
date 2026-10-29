@@ -91,3 +91,18 @@ The native schedule tests use the existing snapshot and journal seams.
 A synchronization gate exists only in test builds and pauses a pending flush before it reads snapshot data.
 The test replaces the index and checkpoint during that pause, then checks the pair delivered to the store.
 Production persistence holds a single data read guard through the save, so replacement cannot separate the checkpoint from its index.
+
+The managed-content parser uses a production range validator for CLR table extents.
+Its Kani harness checks accepted ranges and complete rejection conditions for every native unsigned start, row count, row width, and buffer length.
+A second harness checks every byte sequence up to four bytes for accepted compressed-integer value, canonical width, and exact prefix consumption.
+That scalar proof doesn't establish ECMA-335 semantic validity or correctness of generated native code.
+Native regressions cover relocated IL and initialized fields, exception sections, managed resources, malformed layouts, and changed content.
+Candidate SBOM reconciliation exercises the actual published assemblies against the locked NuGet package archives.
+The [managed identity decision](adr/relocation-independent-managed-identity.md) records the supported boundary and compiler trust assumption.
+
+The product-version proof invokes the production byte scanner for every byte sequence up to its array bound.
+It checks that the returned end is contained, every earlier byte is outside the metadata delimiter set, and any ending delimiter is canonical.
+The string adapter slices at that end.
+UTF-8 guarantees that either ASCII delimiter starts at a character boundary; native tests cover multibyte text and both delimiter orders.
+The earlier direct string-pattern harness exceeded its declared solver budget, so the scanner exposes the same decision without the standard library's pattern-search machinery.
+The proof budget and accepted input bound remain unchanged.

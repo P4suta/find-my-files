@@ -195,7 +195,7 @@
                     <TextBlock
                         x:Uid="DiagStorageHeader"
                         Style="{ThemeResource BodyStrongTextBlockStyle}" />
-                    <ItemsControl ItemsSource="{x:Bind ViewModel.Stats.Indexes, Mode=OneWay}">
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.Stats.Indexes, Mode=OneWay, FallbackValue={x:Null}}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate x:DataType="eng:IndexStatsData">
                                 <StackPanel Margin="{StaticResource StorageRowMargin}">

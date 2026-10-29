@@ -167,7 +167,7 @@
                     AutomationProperties.AutomationId="StatusCount"
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                     Style="{ThemeResource CaptionTextBlockStyle}"
-                    Text="{x:Bind VM.Results.CountText, Mode=OneWay}"
+                    Text="{x:Bind VM.Results.CountText, Mode=OneWay, FallbackValue=''}"
                     Visibility="{x:Bind conv:UiConverters.VisibleIfNotEmpty(VM.Results.CountText), Mode=OneWay}" />
                 <!--  Build identity: the app version (always) and the engine/service
                       version (pipe mode only). Selectable so it can be copied into a

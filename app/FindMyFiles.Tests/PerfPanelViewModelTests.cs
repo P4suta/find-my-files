@@ -76,7 +76,7 @@ public sealed class PerfPanelViewModelTests
                 .ToList(),
         };
 
-        Assert.Contains(nameof(PerfPanelViewModel.RecentQueriesTail), notified);
+        Assert.Contains(nameof(PerfPanelViewModel.RecentQueriesTail), notified, StringComparer.Ordinal);
 
         Assert.Equal(8, _vm.RecentQueriesTail.Count);
         Assert.Equal(4UL, _vm.RecentQueriesTail[0].TotalUs);

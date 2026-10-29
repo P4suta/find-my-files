@@ -19,7 +19,7 @@ use crate::pe_format::{
 };
 use crate::{
     bundle_seal::{self, BundleState},
-    checksum, fsx, paths, prune, publish,
+    checksum, cmd, fsx, paths, prune, publish, semver, version,
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
@@ -30,6 +30,8 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use zip::ZipArchive;
+
+mod managed;
 
 const CLR_HEADER_MIN_BYTES: usize = 0x48;
 const CLR_METADATA_RVA_OFFSET: usize = 8;
@@ -93,6 +95,91 @@ struct SourceFile {
     is_pe: bool,
     managed_metadata_sha256: Option<String>,
     file_version: Option<FileVersion>,
+}
+
+fn with_locked_graph(lockfile: &Path, generate: impl FnOnce() -> Result<()>) -> Result<()> {
+    let before = fs::read(lockfile).context("read reviewed Cargo.lock")?;
+    let generated = generate();
+    let checked = fs::read(lockfile)
+        .context("read Cargo.lock after generation")
+        .and_then(|after| {
+            ensure!(before == after, "Cargo.lock changed during SBOM generation");
+            Ok(())
+        });
+    match (generated, checked) {
+        (Err(error), Err(lock_error)) => Err(error.context(lock_error)),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), checked) => checked,
+    }
+}
+
+pub fn candidate(version: &str) -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    ensure!(
+        !version.trim().is_empty(),
+        "SBOM product version must not be blank"
+    );
+    let root = paths::repo_root();
+    let source_commit =
+        version::resolve_source_commit()?.context("SBOM candidate needs a source commit")?;
+    publish::verify_bundle_identity(&paths::dist_dir(), version, Some(&source_commit))?;
+    let engine = root.join("engine");
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let work = paths::sbom_work_dir().join(format!("{}-{nonce}", std::process::id()));
+    fs::create_dir_all(paths::sbom_work_dir())?;
+    fs::create_dir(&work)?;
+    let raw = work.join("raw");
+    fs::create_dir(&raw)?;
+    with_locked_graph(&engine.join("Cargo.lock"), || {
+        cmd::capture_stdout(
+            &engine,
+            "cargo",
+            &["metadata", "--locked", "--format-version", "1", "--no-deps"],
+        )?;
+        for (package, filename) in CARGO_RAW_FILES {
+            let body = cmd::capture_stdout(
+                &engine,
+                "cargo",
+                &[
+                    "sbom",
+                    "--cargo-package",
+                    package,
+                    "--output-format",
+                    "cyclone_dx_json_1_6",
+                ],
+            )?;
+            parse_json_strict(&body)?;
+            fs::write(raw.join(filename), body)?;
+        }
+        Ok(())
+    })?;
+    run(version, &raw)?;
+    let scan = work.join("scan");
+    fs::create_dir(&scan)?;
+    for name in ["fmf-engine.cdx.json", "app.cdx.json"] {
+        fs::copy(paths::sbom_dir().join(name), scan.join(name))?;
+    }
+    verify_final_pair(version)?;
+    let scanned = cmd::run(
+        &root,
+        "osv-scanner",
+        &[
+            "scan",
+            "source",
+            "-L",
+            scan.join("fmf-engine.cdx.json")
+                .to_str()
+                .context("engine BOM path")?,
+            "-L",
+            scan.join("app.cdx.json").to_str().context("app BOM path")?,
+            "--config",
+            "osv-scanner.toml",
+        ],
+    );
+    verify_final_pair(version)?;
+    publish::verify_bundle_identity(&paths::dist_dir(), version, Some(&source_commit))?;
+    scanned
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -523,9 +610,37 @@ struct PeSection {
     raw_size: usize,
 }
 
-/// Hash the exact CLR metadata directory embedded in a managed PE.
-/// `ReadyToRun` is allowed to change native layout, but not assembly metadata identity.
+struct ManagedImage<'a> {
+    bytes: &'a [u8],
+    metadata: &'a [u8],
+    sections: Vec<PeSection>,
+    size_of_headers: usize,
+    clr_offset: usize,
+}
+
+impl ManagedImage<'_> {
+    fn read_rva(&self, rva: usize, size: usize, label: &str) -> Result<&[u8]> {
+        let offset = rva_file_offset(
+            self.bytes,
+            rva,
+            size,
+            self.size_of_headers,
+            &self.sections,
+            label,
+        )?;
+        Ok(&self.bytes[offset..offset + size])
+    }
+}
+
+/// Bind managed content while allowing validated `ReadyToRun` address relocation.
 fn managed_metadata_sha256(bytes: &[u8]) -> Result<Option<String>> {
+    managed_image(bytes)?
+        .as_ref()
+        .map(metadata_identity_sha256)
+        .transpose()
+}
+
+fn managed_image(bytes: &[u8]) -> Result<Option<ManagedImage<'_>>> {
     if !bytes.starts_with(b"MZ") {
         return Ok(None);
     }
@@ -669,7 +784,13 @@ fn managed_metadata_sha256(bytes: &[u8]) -> Result<Option<String>> {
         .checked_add(metadata_size)
         .context("CLR metadata extent overflow")?;
     let metadata = &bytes[metadata_offset..metadata_end];
-    Ok(Some(metadata_identity_sha256(metadata)?))
+    Ok(Some(ManagedImage {
+        bytes,
+        metadata,
+        sections,
+        size_of_headers,
+        clr_offset,
+    }))
 }
 
 fn rva_file_offset(
@@ -707,7 +828,8 @@ fn rva_file_offset(
     Ok(offset)
 }
 
-fn metadata_identity_sha256(metadata: &[u8]) -> Result<String> {
+fn metadata_identity_sha256(image: &ManagedImage<'_>) -> Result<String> {
+    let metadata = image.metadata;
     ensure!(
         sbom_read_u32(metadata, 0, "CLR metadata signature")? == METADATA_SIGNATURE,
         "CLR metadata has no BSJB signature"
@@ -817,16 +939,29 @@ fn metadata_identity_sha256(metadata: &[u8]) -> Result<String> {
         );
     }
 
+    let stream_bytes = |name: &str| -> Result<&[u8]> {
+        let (_, offset, size) = streams
+            .iter()
+            .find(|stream| stream.0 == name)
+            .with_context(|| format!("unsupported CLR stream layout: missing {name}"))?;
+        Ok(&metadata[*offset..offset + size])
+    };
+    let normalized = managed::normalize(image, stream_bytes("#~")?, stream_bytes("#Blob")?)?;
     streams.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut canonical = b"find-my-files:clr-metadata-identity:v1\0".to_vec();
+    let mut canonical = b"find-my-files:managed-content-identity:v2\0".to_vec();
     canonical.extend_from_slice(&(version.len() as u32).to_le_bytes());
     canonical.extend_from_slice(version);
     for (name, offset, size) in streams {
         canonical.extend_from_slice(&(name.len() as u32).to_le_bytes());
         canonical.extend_from_slice(name.as_bytes());
         canonical.extend_from_slice(&(size as u64).to_le_bytes());
-        canonical.extend_from_slice(&metadata[offset..offset + size]);
+        canonical.extend_from_slice(if name == "#~" {
+            &normalized.tables
+        } else {
+            &metadata[offset..offset + size]
+        });
     }
+    canonical.extend_from_slice(&normalized.content);
     Ok(checksum::sha256_hex(&canonical))
 }
 
@@ -1015,9 +1150,11 @@ fn merge_cargo_boms(
         root_versions.len() == 1,
         "shipped Cargo entry points do not share one workspace version: {root_versions:?}"
     );
+    let base = semver::product_base(version);
+    semver::validate(base)?;
     ensure!(
-        root_versions.contains(version),
-        "shipped Cargo entry-point version set {root_versions:?} does not equal requested release version {version}"
+        root_versions.contains(base),
+        "shipped Cargo entry-point version set {root_versions:?} does not equal requested base version {base}"
     );
 
     for component in components.values() {
@@ -1865,8 +2002,10 @@ fn build_app_bom(
     dist_files: &[FileRecord],
 ) -> Result<Value> {
     let (root_name, resolved_version) = split_identity(&graph.root_id)?;
+    let base = semver::product_base(version);
+    semver::validate(base)?;
     ensure!(
-        root_name == APP_ROOT_NAME && resolved_version == version,
+        root_name == APP_ROOT_NAME && resolved_version == base,
         "resolved app root {} does not equal requested product {APP_ROOT_NAME}/{version}",
         graph.root_id
     );
@@ -2886,6 +3025,41 @@ mod tests {
     }
 
     #[test]
+    fn channel_versions_preserve_the_full_product_identity_and_cargo_package_versions() {
+        let raw = complete_raw_set();
+        let app_graph = app_graph_fixture();
+        let app_dist = app_dist_fixture(b"MZpackage-a");
+        let app_packages = app_inventories(b"MZpackage-a");
+        let borrowed = raw
+            .iter()
+            .map(|(name, value)| (*name, value))
+            .collect::<Vec<_>>();
+        for version in [
+            "0.1.1",
+            "0.1.1-dev+g1234567",
+            "0.1.1-nightly.20261029+g1234567",
+        ] {
+            let bom = merge_cargo_boms(version, &borrowed, &rust_evidence()).unwrap();
+            assert_eq!(bom["metadata"]["component"]["version"], version);
+            let app_bom = build_app_bom(version, &app_graph, &app_packages, &app_dist).unwrap();
+            assert_eq!(app_bom["metadata"]["component"]["version"], version);
+            for component in bom["components"].as_array().unwrap() {
+                if component["name"].as_str().unwrap().starts_with("fmf-") {
+                    assert_eq!(component["version"], "0.1.1");
+                }
+            }
+        }
+        for version in [
+            "0.1.2-dev+g1234567",
+            "0.1.2-nightly.20261029+g1234567",
+            "0.1.1.0-dev",
+        ] {
+            assert!(merge_cargo_boms(version, &borrowed, &rust_evidence()).is_err());
+            assert!(build_app_bom(version, &app_graph, &app_packages, &app_dist).is_err());
+        }
+    }
+
+    #[test]
     fn cargo_wrapper_must_remain_an_unversioned_single_root_wrapper() {
         let mut raw = complete_raw_set().remove(0).1;
         raw["metadata"]["component"]["bom-ref"] = json!("wrong");
@@ -3217,6 +3391,7 @@ mod tests {
         bytes[SECTION + 16..SECTION + 20].copy_from_slice(&0x400_u32.to_le_bytes());
         bytes[SECTION + 20..SECTION + 24].copy_from_slice(&(RAW as u32).to_le_bytes());
 
+        bytes[CLR..CLR + 0x48].fill(0);
         bytes[CLR..CLR + 4].copy_from_slice(&0x48_u32.to_le_bytes());
         bytes[CLR + 8..CLR + 12].copy_from_slice(&0x1100_u32.to_le_bytes());
         bytes[CLR + 12..CLR + 16].copy_from_slice(&(METADATA_SIZE as u32).to_le_bytes());
@@ -3229,17 +3404,94 @@ mod tests {
 
         let mut stream = METADATA + 32;
         for (offset, size, name) in [
-            (0x80_u32, 0x10_u32, b"#~\0".as_slice()),
-            (0x90_u32, 0x10_u32, b"#Strings\0".as_slice()),
-            (0xa0_u32, 0x10_u32, b"#Blob\0".as_slice()),
+            (0x80_u32, 0x40_u32, b"#~\0".as_slice()),
+            (0xc0_u32, 0x10_u32, b"#Strings\0".as_slice()),
+            (0xd0_u32, 0x10_u32, b"#Blob\0".as_slice()),
         ] {
             bytes[stream..stream + 4].copy_from_slice(&offset.to_le_bytes());
             bytes[stream + 4..stream + 8].copy_from_slice(&size.to_le_bytes());
             bytes[stream + 8..stream + 8 + name.len()].copy_from_slice(name);
             stream = (stream + 8 + name.len() + 3) & !3;
         }
-        bytes[METADATA + 0x80..METADATA + 0xb0].fill(metadata_marker);
+        bytes[METADATA + 0x80..METADATA + 0xe0].fill(0);
+        let tables = METADATA + 0x80;
+        bytes[tables + 4] = 2;
+        bytes[tables + 7] = 1;
+        let valid = (1_u64 << 4) | (1_u64 << 6) | (1_u64 << 29);
+        bytes[tables + 8..tables + 16].copy_from_slice(&valid.to_le_bytes());
+        for offset in [24, 28, 32] {
+            bytes[tables + offset..tables + offset + 4].copy_from_slice(&1_u32.to_le_bytes());
+        }
+        bytes[tables + 36..tables + 38].copy_from_slice(&0x110_u16.to_le_bytes());
+        bytes[tables + 38..tables + 40].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[tables + 40..tables + 42].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[tables + 42..tables + 46].copy_from_slice(&0x1200_u32.to_le_bytes());
+        bytes[tables + 56..tables + 60].copy_from_slice(&0x1320_u32.to_le_bytes());
+        bytes[tables + 60..tables + 62].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[METADATA + 0xc1] = metadata_marker;
+        bytes[METADATA + 0xd1..METADATA + 0xd4].copy_from_slice(&[2, 0x06, 0x08]);
+        bytes[0x400..0x402].copy_from_slice(&[0x06, 0x2a]);
+        bytes[0x520..0x524].copy_from_slice(&[1, 2, 3, 4]);
         bytes
+    }
+
+    #[test]
+    fn managed_identity_preserves_il_and_field_data_across_rva_relocation() {
+        let source = synthetic_managed_pe(0x51, 0x11);
+        let mut relocated = synthetic_managed_pe(0x51, 0x77);
+        relocated[0x480..0x482].copy_from_slice(&source[0x400..0x402]);
+        relocated[0x560..0x564].copy_from_slice(&source[0x520..0x524]);
+        relocated[0x3aa..0x3ae].copy_from_slice(&0x1280_u32.to_le_bytes());
+        relocated[0x3b8..0x3bc].copy_from_slice(&0x1360_u32.to_le_bytes());
+        let expected = managed_metadata_sha256(&source).unwrap();
+        assert_eq!(expected, managed_metadata_sha256(&relocated).unwrap());
+        relocated[0x481] = 0;
+        assert_ne!(expected, managed_metadata_sha256(&relocated).unwrap());
+        relocated[0x481] = 0x2a;
+        relocated[0x562] ^= 1;
+        assert_ne!(expected, managed_metadata_sha256(&relocated).unwrap());
+    }
+
+    #[test]
+    fn managed_identity_rejects_invalid_relocation_targets() {
+        for offset in [0x3aa, 0x3b8] {
+            let mut invalid = synthetic_managed_pe(0x51, 0x11);
+            invalid[offset..offset + 4].copy_from_slice(&0xffff_fff0_u32.to_le_bytes());
+            assert!(managed_metadata_sha256(&invalid).is_err());
+        }
+        let mut tampered = synthetic_managed_pe(0x51, 0x11);
+        let expected = managed_metadata_sha256(&tampered).unwrap();
+        tampered[0x401] ^= 1;
+        assert_ne!(expected, managed_metadata_sha256(&tampered).unwrap());
+    }
+
+    #[test]
+    fn managed_identity_binds_fat_il_exception_sections_and_resources() {
+        let mut source = synthetic_managed_pe(0x51, 0x11);
+        source[0x400..0x40c].fill(0);
+        source[0x400..0x402].copy_from_slice(&0x300b_u16.to_le_bytes());
+        source[0x402..0x404].copy_from_slice(&8_u16.to_le_bytes());
+        source[0x404..0x408].copy_from_slice(&2_u32.to_le_bytes());
+        source[0x40c..0x40e].copy_from_slice(&[0, 0x2a]);
+        source[0x410..0x420].fill(0);
+        source[0x410..0x414].copy_from_slice(&[1, 16, 0, 0]);
+        source[0x218..0x21c].copy_from_slice(&0x1380_u32.to_le_bytes());
+        source[0x21c..0x220].copy_from_slice(&4_u32.to_le_bytes());
+        let expected = managed_metadata_sha256(&source).unwrap();
+        let mut relocated = source.clone();
+        relocated.copy_within(0x400..0x420, 0x480);
+        relocated[0x3aa..0x3ae].copy_from_slice(&0x1280_u32.to_le_bytes());
+        assert_eq!(expected, managed_metadata_sha256(&relocated).unwrap());
+        relocated[0x495] ^= 1;
+        assert_ne!(expected, managed_metadata_sha256(&relocated).unwrap());
+        relocated[0x495] ^= 1;
+        relocated[0x580] ^= 1;
+        assert_ne!(expected, managed_metadata_sha256(&relocated).unwrap());
+        for (offset, value) in [(0x480, 0), (0x492, 1), (0x491, 15)] {
+            let mut invalid = relocated.clone();
+            invalid[offset] = value;
+            assert!(managed_metadata_sha256(&invalid).is_err());
+        }
     }
 
     #[test]
@@ -3329,6 +3581,31 @@ mod tests {
         )
         .unwrap();
         assert!(verify_final_pair_at(&base, "0.1.1").is_err());
+        fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn raw_generation_rejects_a_changed_lockfile_even_after_a_tool_failure() {
+        let base = scratch("locked-generation");
+        fs::create_dir_all(&base).unwrap();
+        let lock = base.join("Cargo.lock");
+        fs::write(&lock, b"reviewed graph").unwrap();
+        with_locked_graph(&lock, || Ok(())).unwrap();
+        assert!(with_locked_graph(&lock, || bail!("tool failed")).is_err());
+        assert!(with_locked_graph(&lock, || {
+            fs::write(&lock, b"unreviewed graph")?;
+            Ok(())
+        })
+        .is_err());
+        fs::write(&lock, b"reviewed graph").unwrap();
+        let error = with_locked_graph(&lock, || {
+            fs::write(&lock, b"different graph")?;
+            bail!("generator failed")
+        })
+        .unwrap_err();
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("generator failed"), "{diagnostic}");
+        assert!(diagnostic.contains("Cargo.lock changed"), "{diagnostic}");
         fsx::force_remove_dir_all(&base).unwrap();
     }
 }

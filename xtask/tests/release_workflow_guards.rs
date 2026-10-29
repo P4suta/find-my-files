@@ -704,7 +704,7 @@ fn sbom_action_is_a_thin_xtask_adapter_for_three_raw_rust_graphs() {
     }
     assert!(
         justfile.contains("sbom version cargo_raw_dir:")
-            && justfile.contains("--cargo-raw-dir \"{{cargo_raw_dir}}\""),
+            && justfile.contains("--cargo-raw-dir \"{{ cargo_raw_dir }}\""),
         "justfile must expose the thin xtask SBOM entry point"
     );
     for invariant in [

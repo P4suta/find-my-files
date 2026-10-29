@@ -393,7 +393,7 @@ public sealed class ShellOpsTests : IDisposable
             () => RealIndexedShellTargetVerifier.Instance.VerifyAndPin(@"C:\dir\COM1", 1));
 
         Assert.Equal(Loc.Get("Shell_UnsafeIndexedName"), ex.Message);
-        Assert.NotEqual("Shell_UnsafeIndexedName", ex.Message);
+        Assert.NotEqual("Shell_UnsafeIndexedName", ex.Message, StringComparer.Ordinal);
     }
 
     [Theory]
@@ -444,7 +444,7 @@ public sealed class ShellOpsTests : IDisposable
                     frn));
 
             Assert.Equal(Loc.Get("Shell_ReparsePointBlocked"), ex.Message);
-            Assert.NotEqual("Shell_ReparsePointBlocked", ex.Message);
+            Assert.NotEqual("Shell_ReparsePointBlocked", ex.Message, StringComparer.Ordinal);
         }
         finally
         {

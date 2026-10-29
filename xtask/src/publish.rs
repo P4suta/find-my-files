@@ -444,7 +444,7 @@ fn place_buildinfo(dist: &Path, full: &str, source_commit: Option<&str>) -> Resu
 /// Prove the user-visible launcher metadata and the adjacent BUILDINFO describe the exact same build identity.
 /// `ProductVersion` carries the full channel/sha identity, while Win32 `FileVersion` carries its canonical clean `X.Y.Z` base.
 /// The build script already fails closed if the resource could not be embedded; this post-build readback catches a stale/wrong stamped launcher.
-fn verify_bundle_identity(
+pub fn verify_bundle_identity(
     dist: &Path,
     expected_full: &str,
     expected_source_commit: Option<&str>,
@@ -494,10 +494,7 @@ fn validate_bundle_identity(
     launcher_file: &str,
     buildinfo: &str,
 ) -> Result<()> {
-    let base = expected_full
-        .split(['-', '+'])
-        .next()
-        .context("build version has no base version")?;
+    let base = semver::product_base(expected_full);
     semver::validate(base).context("build version has a non-canonical base")?;
     for (source, actual, expected) in [
         ("launcher ProductVersion", launcher_product, expected_full),

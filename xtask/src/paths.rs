@@ -165,6 +165,10 @@ pub fn sbom_dir() -> PathBuf {
     build_root().join("sbom")
 }
 
+pub fn sbom_work_dir() -> PathBuf {
+    build_root().join("sbom-work")
+}
+
 /// `NuGet`'s resolved restore graph for the shipping app.
 /// `obj/` intentionally stays beside the project (ADR-0021); SBOM generation reads this machine output only after `dotnet publish --locked-mode` has completed.
 pub fn app_project_assets() -> PathBuf {
