@@ -40,4 +40,5 @@ The complete Windows campaign can find defects before merge without occupying an
 Release still repeats the campaign on the exact Release source.
 The owner must review candidate-controlled policy as part of the candidate diff.
 The immutable controller and raw-artifact binding identify the policy that each audit used.
-The workflow uses GitHub's [same-commit reusable workflow references](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows) and [manual branch dispatch](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow).
+GitHub selects the caller's commit for a [same-repository reusable workflow](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows).
+GitHub supports [manual workflow dispatch from a branch](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow).
