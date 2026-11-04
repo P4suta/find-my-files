@@ -115,6 +115,57 @@ public sealed class PipeConnectionTests
         Assert.Contains("msg=\"server closed the connection\"", contents, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Retirement_keeps_the_first_cause_for_late_writes(bool disposeBeforeWrite)
+    {
+        var (server, client) = await ConnectedPairAsync();
+        using (server)
+        using (var connection = Wrap(client))
+        {
+            Assert.Equal("deadline expired", connection.BeginRetirement("deadline expired"));
+            Assert.Equal("deadline expired", connection.BeginRetirement("cleanup"));
+            if (disposeBeforeWrite)
+            {
+                connection.Dispose();
+            }
+
+            var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() =>
+                connection.WriteFrameAsync(
+                    PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []),
+                    TestContext.Current.CancellationToken));
+            Assert.Equal("deadline expired", failure.Message);
+            connection.Dispose();
+            await connection.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        }
+    }
+
+    [Fact]
+    public async Task Retirement_during_an_admitted_write_preserves_its_cause()
+    {
+        var (server, client) = await ConnectedPairAsync();
+        using (server)
+        using (var connection = Wrap(client))
+        {
+            var writeAdmitted = false;
+            connection.BeforeFrameWriteForTests = () =>
+            {
+                writeAdmitted = true;
+                Assert.Equal("deadline expired", connection.BeginRetirement("deadline expired"));
+                server.Dispose();
+            };
+            var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() =>
+                connection.WriteFrameAsync(
+                    PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []),
+                    TestContext.Current.CancellationToken));
+            Assert.True(writeAdmitted);
+            Assert.Equal("deadline expired", failure.Message);
+            connection.Dispose();
+            await connection.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        }
+    }
+
     [Fact]
     public async Task BrokenPipeDuringWrite_IsNormalizedToEngineUnavailable()
     {

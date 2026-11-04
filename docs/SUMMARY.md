@@ -61,3 +61,4 @@
 - [Release candidate assurance](adr/release-candidate-assurance.md)
 - [Relocation-independent managed identity](adr/relocation-independent-managed-identity.md)
 - [Candidate mutation audits](adr/candidate-mutation-audits.md)
+- [Connection retirement cause](adr/connection-retirement-cause.md)

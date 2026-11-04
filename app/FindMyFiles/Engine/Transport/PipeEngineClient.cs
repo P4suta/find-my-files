@@ -54,6 +54,9 @@ internal sealed class PipeEngineClient : IEngineClient
     /// <summary>Deterministic race seam: pauses after a request's deadline expires but before its captured connection is retired.</summary>
     internal Func<Task>? BeforeTimeoutRetireForTests { get; set; }
 
+    /// <summary>Runs after current-connection disposal so tests can control competing supervisor cleanup.</summary>
+    internal Action? AfterRetiredConnectionDisposedForTests { get; set; }
+
     /// <summary>Deterministic race seam: pauses after a presentation basis is leased but before its epoch is admitted to the request table.</summary>
     internal Func<Task>? AfterBasisAcquireForTests { get; set; }
 
@@ -558,10 +561,17 @@ internal sealed class PipeEngineClient : IEngineClient
     /// The compare-exchange clears the public slot only when it still names this exact object; disposal and pending-request failure remain scoped to the captured epoch, so an old deadline can never tear down or fail a replacement connection.</summary>
     private bool RetireConnection(PipeConnection expected, string reason)
     {
+        reason = expected.BeginRetirement(reason);
         var wasCurrent = ReferenceEquals(
             Interlocked.CompareExchange(ref _connection, null, expected),
             expected);
         expected.Dispose();
+#if FMF_TEST_SEAMS
+        if (wasCurrent)
+        {
+            AfterRetiredConnectionDisposedForTests?.Invoke();
+        }
+#endif
         FailPendingRequests(expected.Epoch, reason);
         return wasCurrent;
     }

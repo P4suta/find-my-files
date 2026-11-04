@@ -1066,6 +1066,7 @@ public sealed class PipeEngineClientAdditionalTests
     public async Task Timeout_reason_is_preserved_for_other_requests_on_the_retired_epoch()
     {
         SyncContext.RunContinuationsInline();
+        var clock = new ObservedTimeProvider();
         var held = new TaskCompletionSource<(int Status, byte[] Payload)>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         using var server = new FakePipeServer
@@ -1074,7 +1075,10 @@ public sealed class PipeEngineClientAdditionalTests
                 ? held.Task
                 : null,
         };
-        using var client = new PipeEngineClient(server.PipeName, autoStart: false)
+        using var client = new PipeEngineClient(
+            server.PipeName,
+            autoStart: false,
+            requestTimeProvider: clock)
         {
             RequestTimeout = TimeSpan.FromMilliseconds(250),
         };
@@ -1092,12 +1096,35 @@ public sealed class PipeEngineClientAdditionalTests
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
 
+        var firstArmed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        clock.TimerCreated = () => firstArmed.TrySetResult();
         var timingOut = client.ListVolumesAsync(TestContext.Current.CancellationToken);
+        await firstArmed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await server.WaitForAsync(PipeProtocol.Op.ListVolumes);
+        clock.Advance(client.RequestTimeout);
         await timeoutReached.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
+        var secondArmed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        clock.TimerCreated = () => secondArmed.TrySetResult();
         var collateral = client.ListVolumesAsync(TestContext.Current.CancellationToken);
+        await secondArmed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await server.WaitForAsync(PipeProtocol.Op.ListVolumes, minCount: 2);
+        var cleanupObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ConnectionChanged += state =>
+        {
+            if (state == EngineConnectionState.Reconnecting)
+            {
+                cleanupObserved.TrySetResult();
+            }
+        };
+        var cleanupForced = false;
+        client.AfterRetiredConnectionDisposedForTests = () =>
+        {
+            cleanupObserved.Task
+                .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)
+                .GetAwaiter().GetResult();
+            cleanupForced = true;
+        };
         allowRetire.SetResult();
 
         var expected = $"request (opcode {PipeProtocol.Op.ListVolumes}) timed out after 0s";
@@ -1107,6 +1134,7 @@ public sealed class PipeEngineClientAdditionalTests
         Assert.Equal(
             expected,
             (await Assert.ThrowsAsync<EngineUnavailableException>(() => collateral)).Message);
+        Assert.True(cleanupForced);
     }
 
     [Fact]

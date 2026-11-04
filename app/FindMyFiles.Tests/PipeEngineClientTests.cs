@@ -495,11 +495,13 @@ public sealed class PipeEngineClientTests
     [Fact]
     public async Task OldEpochTimeout_CannotRetireReplacementConnection()
     {
+        var clock = new ObservedTimeProvider();
         using var server = new FakePipeServer();
-        using var client = new PipeEngineClient(server.PipeName)
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false, requestTimeProvider: clock)
         {
             RequestTimeout = TimeSpan.FromMilliseconds(75),
         };
+        client.Start();
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "first connection");
@@ -519,7 +521,11 @@ public sealed class PipeEngineClientTests
             return allowTimeoutRetire.Task;
         };
 
+        var timerArmed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        clock.TimerCreated = () => timerArmed.TrySetResult();
         var oldRequest = client.ListVolumesAsync(TestContext.Current.CancellationToken);
+        await timerArmed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        clock.Advance(client.RequestTimeout);
         await timeoutReached.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var pendingField = typeof(PipeEngineClient).GetField(
             "_pending",
@@ -549,7 +555,6 @@ public sealed class PipeEngineClientTests
             PipeProtocol.Status.Ok,
             PipeProtocol.EncodeVolumeStatuses(server.Statuses)));
         Assert.Equal(["C:"], await replacementRequest);
-        await Task.Delay(750, TestContext.Current.CancellationToken);
         Assert.Equal(2, server.ConnectionCount);
         Assert.Equal(EngineConnectionState.Connected, client.Connection);
     }
