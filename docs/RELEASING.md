@@ -1,36 +1,56 @@
 # Releasing
 
-The workflows are the executable release specification.
-The release guide records the human decisions that remain outside automation.
+The [release workflow](../.github/workflows/release.yml) is the executable release specification.
+The operator owns source acceptance, native performance measurements, protected approvals, and the signed installation check.
 
 ## Stable release
 
-Land Conventional Commits on main.
-Release Please maintains the version, lockfile, changelog, and draft Release PR.
-Require green CI and run `just ui-test` without elevation on the final candidate.
+Land reviewed Conventional Commits on protected `main`.
+Release Please maintains the version, lockfile, changelog, and Release PR.
+Keep the current head checks passing and run `just ui-test` without elevation.
+An unsigned development ZIP supports packaging and search checks, but the [service elevation boundary](SECURITY.md) requires a trusted Authenticode signature.
 
-On a clean standard-user account, accept the real User Account Control (UAC) service-install prompt and confirm that the same app process and window become searchable without relaunching.
-Automation can't drive the secure desktop.
+Run `just perf-gate` on the reference machine while cold and idle before signing approval.
+Keep the source identity and actual measurement reports with the acceptance evidence.
+A performance regression stops the release.
+Repeat invalidated measurements after a relevant source or configuration change.
+Hosted CI doesn't supply the reference-machine measurement described in [ADR-0048](adr/0048-direct-dispatch-release-workflow.md).
 
-Run `just perf-gate` on the idle reference machine from a cold start.
-Complete the performance gate before applying release approval or approving signing and publication.
-A regression stops the release.
-The measurement instrument requires an organization runner group that a user-owned repository can't create, so ADR-0048 keeps the performance gate local.
+Add `release: approved` to the accepted Release PR head and merge it.
+A later head update requires removing and re-adding the label.
+Release Please creates the version tag and draft Release.
+Never edit the version or create a version tag manually.
+The [automation workflow](../.github/workflows/release-please.yml) dispatches the release controller from protected `main` with the exact tag, commit, and numeric draft Release ID.
 
-Add `release: approved` to the final Release PR head and merge the PR.
-A later head update requires removing and reapplying the label.
-Never edit the version or create a v* tag manually.
-Release Please creates the draft and tag, then dispatches release.yml from protected main with the exact tag, commit, and numeric draft release ID.
+The controller binds that identity before building.
+The secretless build, dependency scan, and full mutation campaign must pass before signing.
+Approve `sign` in the protected `release` environment after checking the expected tag and immutable source commit.
+The signing job receives the verified candidate without executing candidate-controlled hooks.
 
-Approve sign and then the secretless publish-approval job in the protected release environment.
-Confirm the expected `vX.Y.Z` and immutable SHA each time.
-The API-only publication job reads the two synchronized App fields from release-please.
+Wait for `package` to upload `release-assets` before approving `publish-approval`.
+Download that artifact from the same run and check the ZIP checksum, signed bundle manifest, expected publisher, and timestamp.
+The artifact contains the signed ZIP, `SHA256SUMS.txt`, both CycloneDX SBOMs, and the unsigned and signed bundle manifests.
+Use those exact signed bytes for the remaining native acceptance checks.
 
-Preflight binds the approved tag, source SHA, and draft release ID before any later job starts.
-Every later job revalidates the same identities, and a stray tag can't publish.
-Keep individual downstream jobs on their existing admission path.
+On a clean standard-user account, accept the real User Account Control prompt for service installation.
+Confirm that the existing app process and window become searchable without relaunching.
+Verify version reporting, a useful search, upgrade from a supported installed version, and cleanup.
+Record the Windows build, candidate digest, source commit, and result.
+The secure desktop requires an operator.
+UI automation doesn't supply that acceptance result.
 
-## Verify the published artifact
+Approve the secretless `publish-approval` job after the signed candidate passes those checks.
+Check the same tag, source commit, and draft Release ID again.
+The publication job reads the two synchronized App fields from the protected `release-please` environment, creates attestations, and publishes the complete draft.
+Every later stage revalidates the original identity.
+A stray tag can't publish, and individual downstream jobs must not bypass the controller.
+
+## Verify published bytes
+
+Download the ZIP, `SHA256SUMS.txt`, and both CycloneDX SBOMs from the published Release.
+Compare the ZIP checksum before extraction.
+Verify every first-party signature in the extracted bundle, including the launcher, app executable and assembly, service, and engine library.
+The Release identity and both SBOM attestations must bind the ZIP digest.
 
 ```powershell
 $sum = (Get-Content -LiteralPath SHA256SUMS.txt) -split '\s+', 2
@@ -43,22 +63,22 @@ foreach ($path in $firstParty) { signtool verify /pa /tw /v $path }
 gh attestation verify find-my-files-vX.Y.Z-win-x64.zip --repo P4suta/find-my-files
 ```
 
-The release must contain the ZIP, SHA256SUMS.txt, and both CycloneDX SBOMs.
-The archive requires the exact release identity.
-The SBOM attestations cover the Rust engine and the .NET app.
+## Resume an existing draft
 
-If automatic dispatch fails after creating a draft, dispatch release-please.yml from main with the existing `vX.Y.Z` tag.
-The dispatcher validates the tag, draft, and target, fixes the numeric draft ID, and skips dispatch when a run already owns the same tuple.
-If release-please is unavailable, an authorized release can use the direct recovery command with the same three values:
+If automatic dispatch fails after draft creation, dispatch `release-please.yml` from `main` with the existing version tag.
+The workflow validates the tag, draft, and target before dispatching the release controller.
+An existing run that owns the same identity prevents duplicate dispatch.
+If the automation workflow itself fails, the release controller accepts the same exact tag, commit, and numeric draft ID directly.
 
 ```powershell
 gh workflow run release.yml --repo P4suta/find-my-files --ref main `
   -f tag_name=vX.Y.Z -f commit_sha=<40-hex tag commit> -f release_id=<numeric draft ID>
 ```
 
-The main ref selects the trusted workflow code.
+The dispatch must use `--ref main` because GitHub loads the workflow from the selected ref.
 Preflight and both environment deployment policies independently reject another ref.
 The production workflow has no rehearsal entry point.
+Never replace published assets or rewrite a published tag to recover a failed attempt.
 
 ## Nightly
 
