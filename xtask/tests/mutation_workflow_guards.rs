@@ -150,7 +150,25 @@ fn pinned_tools_and_trusted_runner_interfaces_cannot_be_narrowed_by_the_target()
     assert!(CONTROLLER_WORKFLOW.contains("cargo-mutants@27.1.0"));
     assert!(CONTROLLER_WORKFLOW.contains("cargo-nextest@0.9.150"));
     assert!(CONTROLLER_WORKFLOW.contains("dotnet-version: 10.0.403"));
-    assert!(CONTROLLER_WORKFLOW.contains("controller/mise.toml"));
+    assert!(MUTATION_CI_SOURCE.contains("controller_root().join(\"mise.toml\")"));
+    let pins = MISE
+        .parse::<toml_edit::DocumentMut>()
+        .expect("valid tool pins");
+    let expected_rust = pins["tools"]["rust"].as_str().expect("Rust pin");
+    let workflow =
+        yaml_rust2::YamlLoader::load_from_str(CONTROLLER_WORKFLOW).expect("valid controller");
+    for job in ["rust", "csharp", "verify"] {
+        let steps = workflow[0]["jobs"][job]["steps"].as_vec().expect("steps");
+        let setup = steps
+            .iter()
+            .find(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|action| action.starts_with("dtolnay/rust-toolchain@"))
+            })
+            .expect("pinned Rust setup");
+        assert_eq!(setup["with"]["toolchain"].as_str(), Some(expected_rust));
+    }
     assert!(CONTROLLER_WORKFLOW.contains("fallback: none"));
     assert!(CONTROLLER_WORKFLOW.contains("mutation-rust `"));
     assert!(CONTROLLER_WORKFLOW.contains("mutation-csharp `"));
