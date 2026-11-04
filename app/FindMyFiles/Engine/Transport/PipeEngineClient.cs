@@ -57,6 +57,9 @@ internal sealed class PipeEngineClient : IEngineClient
     /// <summary>Runs after current-connection disposal so tests can control competing supervisor cleanup.</summary>
     internal Action? AfterRetiredConnectionDisposedForTests { get; set; }
 
+    /// <summary>Pauses after a frame write and before attaching its response wait.</summary>
+    internal Func<Task>? AfterRequestWriteForTests { get; set; }
+
     /// <summary>Deterministic race seam: pauses after a presentation basis is leased but before its epoch is admitted to the request table.</summary>
     internal Func<Task>? AfterBasisAcquireForTests { get; set; }
 
