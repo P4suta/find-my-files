@@ -97,21 +97,9 @@ jobs:
           Assert-Checkout "controller" $env:CONTROLLER_SHA
           Assert-Checkout "target" $env:TARGET_SHA
 
-      - id: rust-pin
-        name: Read the trusted Rust pin
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $line = Get-Content -LiteralPath "controller/mise.toml" |
-            Where-Object { $_ -cmatch '^rust\s*=\s*"[0-9]+\.[0-9]+(?:\.[0-9]+)?"\s*$' }
-          if (@($line).Count -ne 1 -or $line -cnotmatch '"([^"]+)"') {
-            throw "controller/mise.toml must contain exactly one reviewable Rust pin."
-          }
-          "version=$($Matches[1])" >> $env:GITHUB_OUTPUT
-
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # zizmor: ignore[superfluous-actions] The repository requires a pinned setup action.
         with:
-          toolchain: ${{ steps.rust-pin.outputs.version }}
+          toolchain: 1.99.1
 
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
@@ -234,21 +222,9 @@ jobs:
           Assert-Checkout "controller" $env:CONTROLLER_SHA
           Assert-Checkout "target" $env:TARGET_SHA
 
-      - id: rust-pin
-        name: Read the trusted Rust pin
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $line = Get-Content -LiteralPath "controller/mise.toml" |
-            Where-Object { $_ -cmatch '^rust\s*=\s*"[0-9]+\.[0-9]+(?:\.[0-9]+)?"\s*$' }
-          if (@($line).Count -ne 1 -or $line -cnotmatch '"([^"]+)"') {
-            throw "controller/mise.toml must contain exactly one reviewable Rust pin."
-          }
-          "version=$($Matches[1])" >> $env:GITHUB_OUTPUT
-
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # zizmor: ignore[superfluous-actions] The repository requires a pinned setup action.
         with:
-          toolchain: ${{ steps.rust-pin.outputs.version }}
+          toolchain: 1.99.1
 
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
@@ -481,21 +457,9 @@ jobs:
           Assert-Checkout "controller" $env:CONTROLLER_SHA
           Assert-Checkout "target" $env:TARGET_SHA
 
-      - id: rust-pin
-        name: Read the trusted Rust pin
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $line = Get-Content -LiteralPath "controller/mise.toml" |
-            Where-Object { $_ -cmatch '^rust\s*=\s*"[0-9]+\.[0-9]+(?:\.[0-9]+)?"\s*$' }
-          if (@($line).Count -ne 1 -or $line -cnotmatch '"([^"]+)"') {
-            throw "controller/mise.toml must contain exactly one reviewable Rust pin."
-          }
-          "version=$($Matches[1])" >> $env:GITHUB_OUTPUT
-
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # zizmor: ignore[superfluous-actions] The repository requires a pinned setup action.
         with:
-          toolchain: ${{ steps.rust-pin.outputs.version }}
+          toolchain: 1.99.1
 
       - name: Independently verify both mutation evidence sets
         shell: pwsh
