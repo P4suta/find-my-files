@@ -9,6 +9,59 @@ struct DecoderChecks {
     atomic_rejection: bool,
 }
 
+#[kani::proof]
+#[kani::unwind(6)]
+fn accepted_points_consume_input_and_use_the_canonical_width() {
+    let bytes: [u8; FOUR_BYTE_WIDTH] = kani::any();
+    let length: usize = kani::any();
+    let offset: usize = kani::any();
+    kani::assume(offset <= length && length <= bytes.len());
+    let point = super::decode_point(&bytes[..length], offset);
+    if let Ok((point, width)) = point {
+        let width: usize = width.into();
+        assert!(width > 0 && width <= length - offset);
+        assert!(point <= super::MAX_CODE_POINT);
+        assert_eq!(width, super::utf8_len(point));
+        let sequence = &bytes[offset..offset + width];
+        let lead_mask = match width {
+            1 => 0x7F,
+            2 => 0x1F,
+            3 => 0x0F,
+            4 => 0x07,
+            _ => 0,
+        };
+        let mut reference = u32::from(sequence[0] & lead_mask);
+        for continuation in &sequence[1..] {
+            reference = (reference << 6) | u32::from(continuation & 0x3F);
+        }
+        assert_eq!(point, reference);
+    }
+    kani::cover!(point.is_ok_and(|(_, width)| usize::from(width) == FOUR_BYTE_WIDTH));
+    kani::cover!(point.is_err());
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+fn surrogate_pairs_encode_exactly_one_supplementary_scalar() {
+    let high: u16 = kani::any();
+    let low: u16 = kani::any();
+    let point = super::surrogate_code_point(high, low);
+    let paired = (super::HIGH_SURROGATE_START..=super::HIGH_SURROGATE_END).contains(&high)
+        && (super::LOW_SURROGATE_START..=super::LOW_SURROGATE_END).contains(&low);
+    assert_eq!(point.is_some(), paired);
+    if let Some(point) = point {
+        assert!((super::BMP_LIMIT..=super::MAX_CODE_POINT).contains(&point));
+        let mut decoded = char::decode_utf16([high, low]);
+        assert_eq!(
+            decoded.next().and_then(Result::ok).map(u32::from),
+            Some(point)
+        );
+        assert!(decoded.next().is_none());
+    }
+    kani::cover!(point.is_some());
+    kani::cover!(point.is_none());
+}
+
 fn check_length<const LENGTH: usize>() -> DecoderChecks {
     let bytes: [u8; LENGTH] = kani::any();
     let original: [u16; FOUR_BYTE_WIDTH + 1] = kani::any();

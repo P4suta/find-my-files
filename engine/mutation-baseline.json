@@ -24,7 +24,7 @@
     {
       "identity": {
         "path": "engine/crates/fmf-core/src/ondisk/fixup.rs",
-        "line": 90,
+        "line": 88,
         "column": 20,
         "mutation": "replace > with == in checked_fixup_layout"
       },
@@ -33,7 +33,7 @@
     {
       "identity": {
         "path": "engine/crates/fmf-core/src/ondisk/fixup.rs",
-        "line": 90,
+        "line": 88,
         "column": 20,
         "mutation": "replace > with >= in checked_fixup_layout"
       },

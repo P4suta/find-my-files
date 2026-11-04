@@ -49,17 +49,15 @@ pub fn apply_fixup(data: &mut [u8], sector_size: usize) -> bool {
 /// Checked update-sequence offset and word count for one record.
 #[must_use]
 pub fn fixup_layout(data: &[u8], sector_size: usize) -> Option<(usize, usize)> {
-    if data.len() < ATTRIBUTE_OFFSET_END {
-        return None;
-    }
+    let header = data.get(..ATTRIBUTE_OFFSET_END)?;
     checked_fixup_layout(
         data.len(),
         sector_size,
-        u16::from_le_bytes([data[USA_OFFSET_FIELD], data[USA_OFFSET_FIELD + 1]]),
-        u16::from_le_bytes([data[USA_LENGTH_FIELD], data[USA_LENGTH_FIELD + 1]]),
+        u16::from_le_bytes([header[USA_OFFSET_FIELD], header[USA_OFFSET_FIELD + 1]]),
+        u16::from_le_bytes([header[USA_LENGTH_FIELD], header[USA_LENGTH_FIELD + 1]]),
         u16::from_le_bytes([
-            data[ATTRIBUTES_OFFSET_FIELD],
-            data[ATTRIBUTES_OFFSET_FIELD + 1],
+            header[ATTRIBUTES_OFFSET_FIELD],
+            header[ATTRIBUTES_OFFSET_FIELD + 1],
         ]),
     )
 }
@@ -277,5 +275,15 @@ mod tests {
             r[20..22].copy_from_slice(&attributes_offset.to_le_bytes());
             assert!(!apply_fixup(&mut r, SECTOR));
         }
+    }
+
+    #[test]
+    fn layout_reads_independent_header_fields_without_neighboring_bytes() {
+        let mut record = record_with_usa(1024, 256, 0x0001, &[0xAAAA, 0xBBBB]);
+        record[3] = 0xA5;
+        record[19] = 0xA5;
+        record[20..22].copy_from_slice(&512u16.to_le_bytes());
+        assert_eq!(fixup_layout(&record, SECTOR), Some((256, 3)));
+        assert!(apply_fixup(&mut record, SECTOR));
     }
 }

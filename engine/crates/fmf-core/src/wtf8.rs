@@ -1,6 +1,7 @@
 //! WTF-8 encoding and deterministic storage folding.
 
 use alloc::vec::Vec;
+use core::num::NonZeroUsize;
 
 /// Maximum WTF-8 bytes needed for one input UTF-16 code unit.
 pub const MAX_BYTES_PER_UTF16_UNIT: usize = 3;
@@ -74,21 +75,30 @@ pub fn fold_char(c: char) -> char {
     }
 }
 
+#[inline]
+fn surrogate_code_point(high: u16, low: u16) -> Option<u32> {
+    if !(HIGH_SURROGATE_START..=HIGH_SURROGATE_END).contains(&high)
+        || !(LOW_SURROGATE_START..=LOW_SURROGATE_END).contains(&low)
+    {
+        return None;
+    }
+    Some(
+        BMP_LIMIT
+            + (u32::from(high - HIGH_SURROGATE_START) << SURROGATE_BITS)
+            + u32::from(low - LOW_SURROGATE_START),
+    )
+}
+
 /// Decode UTF-16 (with possible unpaired surrogates) into code points,
 /// invoking `f(cp)` for each.
 #[inline]
 fn for_each_code_point(mut units: &[u16], mut f: impl FnMut(u32)) {
     while let Some((&u, tail)) = units.split_first() {
         units = tail;
-        let cp: u32 = if (HIGH_SURROGATE_START..=HIGH_SURROGATE_END).contains(&u)
-            && units
-                .first()
-                .is_some_and(|low| (LOW_SURROGATE_START..=LOW_SURROGATE_END).contains(low))
-        {
-            let hi = u32::from(u - HIGH_SURROGATE_START) << SURROGATE_BITS;
-            let lo = u32::from(units[0] - LOW_SURROGATE_START);
+        let paired = units.first().and_then(|&low| surrogate_code_point(u, low));
+        let cp = if let Some(point) = paired {
             units = &units[1..];
-            BMP_LIMIT + hi + lo
+            point
         } else {
             u as u32
         };
@@ -137,18 +147,12 @@ pub fn push_wtf8le_pair(bytes: &[u8], name_out: &mut Vec<u8>, lower_out: &mut Ve
     while !bytes.is_empty() {
         let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
         bytes = &bytes[UTF16_UNIT_BYTES..];
-        let cp = if (HIGH_SURROGATE_START..=HIGH_SURROGATE_END).contains(&unit)
-            && bytes.len() >= UTF16_UNIT_BYTES
-        {
-            let low = u16::from_le_bytes([bytes[0], bytes[1]]);
-            if (LOW_SURROGATE_START..=LOW_SURROGATE_END).contains(&low) {
-                bytes = &bytes[UTF16_UNIT_BYTES..];
-                BMP_LIMIT
-                    + (u32::from(unit - HIGH_SURROGATE_START) << SURROGATE_BITS)
-                    + u32::from(low - LOW_SURROGATE_START)
-            } else {
-                u32::from(unit)
-            }
+        let paired = bytes
+            .get(..UTF16_UNIT_BYTES)
+            .and_then(|pair| surrogate_code_point(unit, u16::from_le_bytes([pair[0], pair[1]])));
+        let cp = if let Some(point) = paired {
+            bytes = &bytes[UTF16_UNIT_BYTES..];
+            point
         } else {
             u32::from(unit)
         };
@@ -178,11 +182,11 @@ const TWO_BYTE_LEAD_MASK: u8 = 0x1F;
 const THREE_BYTE_LEAD_MASK: u8 = 0x0F;
 const FOUR_BYTE_LEAD_MASK: u8 = 0x07;
 
-fn decode_point(bytes: &[u8], offset: usize) -> Result<(u32, usize), DecodeError> {
+fn decode_point(bytes: &[u8], offset: usize) -> Result<(u32, NonZeroUsize), DecodeError> {
     let error = DecodeError { offset };
     let first = *bytes.get(offset).ok_or(error)?;
     let (width, mut point, minimum) = match first {
-        0..=ASCII_LAST => return Ok((u32::from(first), 1)),
+        0..=ASCII_LAST => return Ok((u32::from(first), NonZeroUsize::MIN)),
         MIN_TWO_BYTE_LEAD..=MAX_TWO_BYTE_LEAD => (
             TWO_BYTE_WIDTH,
             u32::from(first & TWO_BYTE_LEAD_MASK),
@@ -206,28 +210,30 @@ fn decode_point(bytes: &[u8], offset: usize) -> Result<(u32, usize), DecodeError
         if continuation & !CONTINUATION_MASK as u8 != CONTINUATION_TAG {
             return Err(error);
         }
-        point = (point << CONTINUATION_BITS) | u32::from(continuation & CONTINUATION_MASK as u8);
+        point = (point << CONTINUATION_BITS) + u32::from(continuation & CONTINUATION_MASK as u8);
     }
     if point < minimum || point > MAX_CODE_POINT {
         return Err(error);
     }
-    Ok((point, width))
+    Ok((point, NonZeroUsize::new(width).ok_or(error)?))
 }
 
 fn decode_units(bytes: &[u8], out: &mut [u16]) -> Result<usize, DecodeError> {
     if out.len() < bytes.len() {
         return Err(DecodeError { offset: 0 });
     }
-    let mut offset = 0;
-    while offset < bytes.len() {
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        let offset = bytes.len() - remaining.len();
         let (_, width) = decode_point(bytes, offset)?;
-        offset += width;
+        remaining = remaining.get(width.get()..).ok_or(DecodeError { offset })?;
     }
-    offset = 0;
+    remaining = bytes;
     let mut written = 0;
-    while offset < bytes.len() {
+    while !remaining.is_empty() {
+        let offset = bytes.len() - remaining.len();
         let (point, width) = decode_point(bytes, offset)?;
-        offset += width;
+        remaining = remaining.get(width.get()..).ok_or(DecodeError { offset })?;
         if point >= BMP_LIMIT {
             let value = point - BMP_LIMIT;
             out[written] = HIGH_SURROGATE_START + (value >> SURROGATE_BITS) as u16;
@@ -272,6 +278,32 @@ mod kani_proofs;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn little_endian_encoding_matches_owned_units_at_surrogate_boundaries() {
+        for units in [
+            vec![0xD800, 0xDC00],
+            vec![0xDBFF, 0xDFFF],
+            vec![0xD801, 0xDC00],
+            vec![0xD800],
+            vec![0xDFFF],
+            vec![0xD800, u16::from(b'X'), 0xDFFF],
+            vec![u16::from(b'A'), 0xDBFF, 0xDFFF, u16::from(b'z')],
+        ] {
+            let bytes: Vec<_> = units.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+            let mut expected_name = vec![b'P'];
+            let mut expected_lower = vec![b'p'];
+            push_wtf8_pair(&units, &mut expected_name, &mut expected_lower);
+            let mut name = vec![b'P'];
+            let mut lower = vec![b'p'];
+            assert!(push_wtf8le_pair(&bytes, &mut name, &mut lower));
+            assert_eq!(name, expected_name);
+            assert_eq!(lower, expected_lower);
+            let mut decoded = Vec::new();
+            assert!(wtf8_to_utf16(&name[1..], &mut decoded).is_ok());
+            assert_eq!(decoded, units);
+        }
+    }
 
     #[test]
     fn slice_decoding_preserves_rejected_output_and_unused_units() {
