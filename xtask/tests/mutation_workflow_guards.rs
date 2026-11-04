@@ -29,7 +29,7 @@ fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
 }
 
 #[test]
-fn manual_audits_authorize_only_a_default_branch_controller() {
+fn manual_audits_default_to_protected_main_and_bind_exact_identities() {
     assert!(!MUTANTS_WORKFLOW.contains("  schedule:\n"));
     assert!(MUTANTS_WORKFLOW.contains("  workflow_dispatch:\n"));
     assert!(MUTANTS_WORKFLOW.contains("      target_sha:\n"));
@@ -62,6 +62,46 @@ fn manual_audits_authorize_only_a_default_branch_controller() {
     assert!(invocation.contains("target_sha: ${{ needs.authorize.outputs.target_sha }}"));
     assert!(!invocation.contains("actions/checkout@"));
     assert!(!invocation.contains("run: just "));
+}
+
+#[test]
+fn candidate_dispatch_keeps_release_authority_and_each_execution_guard() {
+    let caller = yaml_rust2::YamlLoader::load_from_str(MUTANTS_WORKFLOW).expect("valid caller");
+    let controller =
+        yaml_rust2::YamlLoader::load_from_str(CONTROLLER_WORKFLOW).expect("valid controller");
+    let release = yaml_rust2::YamlLoader::load_from_str(RELEASE_WORKFLOW).expect("valid release");
+    assert_eq!(
+        caller[0]["on"]["workflow_dispatch"]["inputs"]["purpose"]["default"].as_str(),
+        Some("protected-main")
+    );
+    assert_eq!(
+        controller[0]["on"]["workflow_call"]["inputs"]["purpose"]["default"].as_str(),
+        Some("protected-main")
+    );
+    assert!(release[0]["jobs"]["mutation"]["with"]["purpose"].is_badvalue());
+    assert!(MUTANTS_WORKFLOW.contains("target !== controller"));
+    assert!(MUTANTS_WORKFLOW.contains("isOwner(process.env.ACTOR)"));
+    assert!(MUTANTS_WORKFLOW.contains("isOwner(process.env.TRIGGERING_ACTOR)"));
+    for job in ["rust", "csharp", "verify"] {
+        let steps = controller[0]["jobs"][job]["steps"]
+            .as_vec()
+            .expect("controller steps");
+        let runner = steps
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .find(|run| run.contains("cargo run --locked --release -- mutation-"))
+            .expect("mutation execution step");
+        let (authorization, execution) = runner
+            .split_once("--target-sha $env:TARGET_SHA")
+            .expect("authority target binding");
+        assert!(authorization.contains("-- mutation-authorize"));
+        assert!(authorization.contains("--purpose $env:PURPOSE"));
+        assert!(authorization.contains("--controller-sha $env:CONTROLLER_SHA"));
+        assert!(execution.contains("-- mutation-"));
+    }
+    assert!(
+        CONTROLLER_WORKFLOW.contains("'mutation-candidate-audit-verified' || 'mutation-verified'")
+    );
 }
 
 #[test]

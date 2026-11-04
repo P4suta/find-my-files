@@ -11,6 +11,7 @@ mod bundle_seal;
 mod checksum;
 mod locale;
 mod mutation;
+mod mutation_authority;
 mod mutation_ci;
 mod notices;
 mod pe_digest;
@@ -174,6 +175,11 @@ enum Commands {
         #[arg(default_value = "C:")]
         drive: String,
     },
+    /// Check the mutation execution purpose against immutable workflow identities and GitHub actors.
+    MutationAuthorize {
+        #[command(flatten)]
+        authority: mutation_authority::CommandArgs,
+    },
     /// Run cargo-mutants 27.1.0 with its clean-tree baseline enabled, then compare the exact missed-mutant identities with the reviewed baseline.
     MutationRust {
         #[command(flatten)]
@@ -263,6 +269,7 @@ fn main() -> Result<()> {
         Commands::PerfMicroBaseline => perf::micro_baseline(),
         Commands::PerfRealCheck { drive } => perf::real_check(&drive),
         Commands::PerfRealBaseline { drive } => perf::real_baseline(&drive),
+        Commands::MutationAuthorize { authority } => mutation_authority::run(authority),
         Commands::MutationRust { ci } => mutation_ci::run_rust(ci),
         Commands::MutationCheckRust {
             source_root,

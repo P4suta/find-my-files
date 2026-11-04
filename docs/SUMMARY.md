@@ -60,3 +60,4 @@
 - [Pure core and shared runtime](adr/pure-core-and-shared-runtime.md)
 - [Release candidate assurance](adr/release-candidate-assurance.md)
 - [Relocation-independent managed identity](adr/relocation-independent-managed-identity.md)
+- [Candidate mutation audits](adr/candidate-mutation-audits.md)
