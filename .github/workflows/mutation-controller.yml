@@ -147,7 +147,7 @@ jobs:
         with:
           name: mutation-rust-raw-${{ matrix.shard }}
           path: controller/build/mutation/rust/shard-${{ matrix.shard }}-of-16/
-          retention-days: 30
+          retention-days: ${{ inputs.purpose == 'candidate-audit' && 7 || 30 }}
           if-no-files-found: error
           include-hidden-files: true
           overwrite: true
@@ -275,7 +275,7 @@ jobs:
         with:
           name: mutation-csharp-raw-${{ matrix.shard }}
           path: controller/build/mutation/csharp/shard-${{ matrix.shard }}-of-16/
-          retention-days: 30
+          retention-days: ${{ inputs.purpose == 'candidate-audit' && 7 || 30 }}
           if-no-files-found: error
           include-hidden-files: true
           overwrite: true
@@ -523,7 +523,7 @@ jobs:
             evidence/rust/
             evidence/csharp/
             controller/build/mutation/verified/
-          retention-days: 30
+          retention-days: ${{ inputs.purpose == 'candidate-audit' && 7 || 30 }}
           if-no-files-found: error
           include-hidden-files: true
           overwrite: true
