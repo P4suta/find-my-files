@@ -16,9 +16,15 @@ internal sealed class PipeConnection(
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2213:Disposable fields should be disposed", Justification = "SemaphoreSlim allocates no handle unless AvailableWaitHandle is used (it is not); disposing it breaks write-after-dispose normalization")]
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private volatile bool _disposed;
+    private string? _retirementReason;
 
     /// <summary>Identifies results from this connection; reconnecting assigns a new generation.</summary>
     internal int Epoch { get; } = epoch;
+
+#if FMF_TEST_SEAMS
+    /// <summary>Runs after frame admission and before the native stream write.</summary>
+    internal Action? BeforeFrameWriteForTests { get; set; }
+#endif
 
     /// <summary>Completes when the connection ends so the supervisor can reconnect.
     /// Never faults; failures are logged.</summary>
@@ -26,23 +32,32 @@ internal sealed class PipeConnection(
         () => ReadLoopAsync(stream, epoch, onEvent, onResponse, ct),
         CancellationToken.None);
 
+    /// <summary>Records the first failure cause for this connection generation.</summary> <param name="reason">Cause proposed by the retiring operation.</param> <returns>The first recorded cause.</returns>
+    internal string BeginRetirement(string reason) =>
+        Interlocked.CompareExchange(ref _retirementReason, reason, null) ?? reason;
+
     internal async Task WriteFrameAsync(byte[] frame, CancellationToken ct)
     {
         await _writeLock.WaitAsync(ct).ConfigureAwait(ConfigureAwaitOptions.None);
         try
         {
-            if (_disposed)
+            if (_disposed || Volatile.Read(ref _retirementReason) is not null)
             {
                 throw new EngineUnavailableException(
-                    "engine service connection lost: connection is closed");
+                    Volatile.Read(ref _retirementReason)
+                    ?? "engine service connection lost: connection is closed");
             }
 
+#if FMF_TEST_SEAMS
+            BeforeFrameWriteForTests?.Invoke();
+#endif
             await _stream.WriteAsync(frame, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException)
         {
             throw new EngineUnavailableException(
-                $"engine service connection lost: {ex.Message}");
+                Volatile.Read(ref _retirementReason)
+                ?? $"engine service connection lost: {ex.Message}");
         }
         finally
         {

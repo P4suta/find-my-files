@@ -59,3 +59,4 @@
 - [Pure core and shared runtime](adr/pure-core-and-shared-runtime.md)
 - [Relocation-independent managed identity](adr/relocation-independent-managed-identity.md)
 - [Candidate mutation audits](adr/candidate-mutation-audits.md)
+- [Connection retirement cause](adr/connection-retirement-cause.md)
