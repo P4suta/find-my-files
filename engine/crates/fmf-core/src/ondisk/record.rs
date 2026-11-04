@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+use super::ntfs::NtfsAttribute;
 use alloc::vec::Vec;
 
 const ATTRIBUTE_ALIGNMENT: usize = 8;
@@ -11,20 +12,8 @@ const ATTRIBUTE_TYPE_STEP: u32 = 0x10;
 const ATTRIBUTES_OFFSET_FIELD: usize = 20;
 const USED_BYTES_FIELD: usize = 24;
 const ALLOCATED_BYTES_FIELD: usize = 28;
-const ATTRIBUTE_LENGTH_FIELD: usize = 4;
-const ATTRIBUTE_RESIDENCY_FIELD: usize = 8;
-const ATTRIBUTE_NAME_UNITS_FIELD: usize = 9;
-const ATTRIBUTE_NAME_OFFSET_FIELD: usize = 10;
-const ATTRIBUTE_FLAGS_FIELD: usize = 12;
-const ATTRIBUTE_ID_FIELD: usize = 14;
-const RESIDENT_LENGTH_FIELD: usize = 16;
-const RESIDENT_OFFSET_FIELD: usize = 20;
-const MAPPING_PAIRS_OFFSET_FIELD: usize = 32;
 
 const FILE_RECORD_HEADER_BYTES: usize = 42;
-const ATTRIBUTE_HEADER_BYTES: usize = 16;
-const RESIDENT_HEADER_BYTES: usize = 24;
-const NONRESIDENT_HEADER_BYTES: usize = 64;
 const ATTRIBUTE_END: u32 = 0xFFFF_FFFF;
 const MAX_ATTRIBUTE_TYPE: u32 = 0x100;
 const STANDARD_INFORMATION_ATTRIBUTE: u32 = 0x10;
@@ -65,32 +54,32 @@ fn unique_attribute_id(id: u16, low_ids: &mut u128, high_ids: &mut Vec<u16>) -> 
 /// Resident values, attribute names, and non-resident mapping-pair offsets must stay inside their owning attribute.
 #[must_use]
 pub fn attributes_complete(record: &[u8]) -> bool {
-    if record.len() < FILE_RECORD_HEADER_BYTES {
+    if record.get(..FILE_RECORD_HEADER_BYTES).is_none() {
         return false;
     }
     let used = le_u32(record, USED_BYTES_FIELD) as usize;
     let allocated = le_u32(record, ALLOCATED_BYTES_FIELD) as usize;
-    let mut offset = le_u16(record, ATTRIBUTES_OFFSET_FIELD) as usize;
+    let offset = usize::from(le_u16(record, ATTRIBUTES_OFFSET_FIELD));
     if allocated != record.len()
-        || used > allocated
-        || offset < FILE_RECORD_HEADER_BYTES
         || !offset.is_multiple_of(ATTRIBUTE_ALIGNMENT)
-        || offset >= used
+        || record
+            .get(..offset)
+            .and_then(|prefix| prefix.get(..FILE_RECORD_HEADER_BYTES))
+            .is_none()
     {
         return false;
     }
+    let Some(mut remaining) = record.get(offset..used) else {
+        return false;
+    };
     let mut low_ids = 0u128;
     let mut high_ids = Vec::new();
     let mut previous_type = 0u32;
-
     loop {
-        let Some(type_end) = offset.checked_add(ATTRIBUTE_ALIGNMENT) else {
-            return false;
-        };
-        if type_end > used {
+        if remaining.get(..ATTRIBUTE_ALIGNMENT).is_none() {
             return false;
         }
-        let type_id = le_u32(record, offset);
+        let type_id = le_u32(remaining, 0);
         if type_id == ATTRIBUTE_END {
             return true;
         }
@@ -101,103 +90,70 @@ pub fn attributes_complete(record: &[u8]) -> bool {
         {
             return false;
         }
-        previous_type = type_id;
-        let Some(header_end) = offset.checked_add(ATTRIBUTE_HEADER_BYTES) else {
+        let Some(attribute) = NtfsAttribute::parse(remaining) else {
             return false;
         };
-        if header_end > used {
-            return false;
-        }
-        let length = le_u32(record, offset + ATTRIBUTE_LENGTH_FIELD) as usize;
-        let Some(attribute_end) = offset.checked_add(length) else {
-            return false;
-        };
-        if length < ATTRIBUTE_HEADER_BYTES
-            || !length.is_multiple_of(ATTRIBUTE_ALIGNMENT)
-            || attribute_end > used
+        let length = attribute.len();
+        if !length.is_multiple_of(ATTRIBUTE_ALIGNMENT)
+            || !unique_attribute_id(attribute.header.id, &mut low_ids, &mut high_ids)
         {
             return false;
         }
-        if !unique_attribute_id(
-            le_u16(record, offset + ATTRIBUTE_ID_FIELD),
-            &mut low_ids,
-            &mut high_ids,
-        ) {
-            return false;
-        }
-
-        let name_units = record[offset + ATTRIBUTE_NAME_UNITS_FIELD] as usize;
-        let flags = le_u16(record, offset + ATTRIBUTE_FLAGS_FIELD);
+        previous_type = type_id;
+        let header = attribute.header;
         if matches!(
             type_id,
             STANDARD_INFORMATION_ATTRIBUTE | ATTRIBUTE_LIST_ATTRIBUTE | FILE_NAME_ATTRIBUTE
-        ) && (name_units != 0 || flags != 0)
+        ) && (header.name_length != 0 || header.flags != 0)
         {
             return false;
         }
-        let name_range = if name_units > 0 {
-            let name_offset = le_u16(record, offset + ATTRIBUTE_NAME_OFFSET_FIELD) as usize;
-            let Some(name_bytes) = name_units.checked_mul(size_of::<u16>()) else {
+        let name_end = (header.name_length > 0).then(|| {
+            usize::from(header.name_offset) + usize::from(header.name_length) * size_of::<u16>()
+        });
+        if header.is_non_resident == 0 {
+            let Some(value) = attribute.resident_value_range() else {
                 return false;
             };
-            let Some(name_end) = name_offset.checked_add(name_bytes) else {
-                return false;
-            };
-            if name_end > length {
+            if name_end.is_some_and(|end| value.start < end) {
                 return false;
             }
-            Some((name_offset, name_end))
         } else {
-            None
-        };
-
-        match record[offset + ATTRIBUTE_RESIDENCY_FIELD] {
-            0 => {
-                if length < RESIDENT_HEADER_BYTES {
-                    return false;
-                }
-                let value_length = le_u32(record, offset + RESIDENT_LENGTH_FIELD) as usize;
-                let value_offset = le_u16(record, offset + RESIDENT_OFFSET_FIELD) as usize;
-                if value_offset < RESIDENT_HEADER_BYTES
-                    || name_range.is_some_and(|(start, end)| {
-                        start < RESIDENT_HEADER_BYTES || value_offset < end
-                    })
-                    || value_offset
-                        .checked_add(value_length)
-                        .is_none_or(|end| end > length)
-                {
-                    return false;
-                }
+            if matches!(
+                type_id,
+                STANDARD_INFORMATION_ATTRIBUTE | FILE_NAME_ATTRIBUTE
+            ) {
+                return false;
             }
-            1 => {
-                if matches!(
-                    type_id,
-                    STANDARD_INFORMATION_ATTRIBUTE | FILE_NAME_ATTRIBUTE
-                ) || length < NONRESIDENT_HEADER_BYTES
-                {
-                    return false;
-                }
-                let mapping_offset = le_u16(record, offset + MAPPING_PAIRS_OFFSET_FIELD) as usize;
-                if mapping_offset < NONRESIDENT_HEADER_BYTES
-                    || !mapping_offset.is_multiple_of(ATTRIBUTE_ALIGNMENT)
-                    || mapping_offset >= length
-                    || name_range.is_some_and(|(start, end)| {
-                        start < NONRESIDENT_HEADER_BYTES || mapping_offset < end
-                    })
-                {
-                    return false;
-                }
+            let Some(nonresident) = attribute.nonresident_header() else {
+                return false;
+            };
+            let mapping_offset = usize::from(nonresident.data_runs_offset);
+            if !mapping_offset.is_multiple_of(ATTRIBUTE_ALIGNMENT)
+                || mapping_offset >= length
+                || name_end.is_some_and(|end| mapping_offset < end)
+            {
+                return false;
             }
-            _ => return false,
         }
-        offset = attribute_end;
+        let Some(rest) = remaining.get(length..) else {
+            return false;
+        };
+        remaining = rest;
     }
 }
+
+#[cfg(kani)]
+#[path = "record_proofs.rs"]
+mod kani_proofs;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    const ATTRIBUTE_NAME_UNITS_FIELD: usize = 9;
+    const RESIDENT_OFFSET_FIELD: usize = 20;
 
     fn put_u16(data: &mut [u8], offset: usize, value: u16) {
         data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
@@ -257,6 +213,73 @@ mod tests {
     #[test]
     fn accepts_a_complete_resident_chain() {
         assert!(attributes_complete(&resident_record()));
+    }
+
+    #[test]
+    fn attribute_ids_are_unique_across_both_storage_ranges() {
+        let mut low = 0;
+        let mut high = Vec::new();
+        for id in [0, 1, 126, 127, 128, 129, 255, 256, u16::MAX] {
+            assert!(
+                unique_attribute_id(id, &mut low, &mut high),
+                "first id {id}"
+            );
+            assert!(
+                !unique_attribute_id(id, &mut low, &mut high),
+                "duplicate id {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn resident_name_and_payload_regions_are_bounded_and_ordered() {
+        for name_units in [0u8, 1, 4, 5, 8] {
+            for value_offset in [0u16, 23, 24, 25, 26, 31, 32, 36, 37, 40, u16::MAX] {
+                let mut record = named_resident_attribute(0x80);
+                record[48 + ATTRIBUTE_NAME_UNITS_FIELD] = name_units;
+                put_u16(&mut record, 48 + RESIDENT_OFFSET_FIELD, value_offset);
+                let value_start = usize::from(value_offset);
+                let name_end = 24 + usize::from(name_units) * 2;
+                let expected = (24..=36).contains(&value_start)
+                    && (name_units == 0 || name_end <= value_start);
+                assert_eq!(
+                    attributes_complete(&record),
+                    expected,
+                    "name units {name_units}, value offset {value_offset}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nonresident_names_precede_aligned_mapping_pairs_inside_the_attribute() {
+        for name_units in [0u8, 1, 4, 5] {
+            for name_offset in [0u16, 63, 64, 65, 66, 88, 95, u16::MAX] {
+                for mapping_offset in [0u16, 63, 64, 65, 72, 88, 96, 104, u16::MAX] {
+                    let mut record = vec![0; 160];
+                    put_u16(&mut record, 20, 48);
+                    put_u32(&mut record, 24, 152);
+                    put_u32(&mut record, 28, 160);
+                    put_u32(&mut record, 48, 0x80);
+                    put_u32(&mut record, 52, 96);
+                    record[56] = 1;
+                    record[57] = name_units;
+                    put_u16(&mut record, 58, name_offset);
+                    put_u16(&mut record, 80, mapping_offset);
+                    put_u32(&mut record, 144, ATTRIBUTE_END);
+                    let name_end = usize::from(name_offset) + usize::from(name_units) * 2;
+                    let expected = (64..96).contains(&mapping_offset)
+                        && mapping_offset.is_multiple_of(8)
+                        && (name_units == 0
+                            || (name_offset >= 64 && name_end <= usize::from(mapping_offset)));
+                    assert_eq!(
+                        attributes_complete(&record),
+                        expected,
+                        "name {name_offset}+{name_units}, mapping {mapping_offset}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

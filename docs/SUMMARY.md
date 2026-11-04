@@ -60,3 +60,4 @@
 - [Relocation-independent managed identity](adr/relocation-independent-managed-identity.md)
 - [Candidate mutation audits](adr/candidate-mutation-audits.md)
 - [Connection retirement cause](adr/connection-retirement-cause.md)
+- [Decoder bounds and progress](adr/decoder-bounds-and-progress.md)
