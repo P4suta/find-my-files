@@ -263,6 +263,60 @@ fn write_evidence(
     Ok(())
 }
 
+fn read_report(path: &std::path::Path, role: &str) -> Result<BenchReport, String> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read {role} benchmark report {}: {error}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "invalid {role} benchmark report {}: {error}",
+            path.display()
+        )
+    })
+}
+
+pub fn compare(
+    actual: &std::path::Path,
+    baseline: &std::path::Path,
+    evidence_path: Option<&std::path::Path>,
+    ctx: Ctx,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = read_report(actual, "actual").and_then(|report| {
+        read_report(baseline, "baseline").and_then(|control| evaluate(&report, &control))
+    });
+    let decision = match result {
+        Ok(decision) => decision,
+        Err(error) => {
+            let decision = failure_evidence(&error);
+            if let Some(path) = evidence_path {
+                write_evidence(path, &decision)?;
+            }
+            if ctx.is_json() {
+                super::json::emit(&decision)?;
+            }
+            return Err(error.into());
+        }
+    };
+    if let Some(path) = evidence_path {
+        write_evidence(path, &decision)?;
+    }
+    if ctx.is_json() {
+        super::json::emit(&decision)?;
+    } else {
+        println!(
+            "Real-volume comparison: {}",
+            if decision.passed { "pass" } else { "fail" }
+        );
+    }
+    if !decision.passed {
+        return Err("real-volume performance comparison failed".into());
+    }
+    Ok(())
+}
+
 pub fn bench(
     drive: &str,
     out: Option<&std::path::Path>,

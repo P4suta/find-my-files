@@ -698,6 +698,12 @@ mutation: mutants stryker
 stryker-smoke mode="plan":
     cargo run --locked -- mutation-csharp-smoke {{ mode }}
 
+[doc('Plan, prepare, or measure the fixed release overflow comparison')]
+[group('quality')]
+[working-directory('xtask')]
+overflow-experiment mode="plan":
+    cargo run --locked -- overflow-experiment {{ mode }}
+
 # Repository-ruleset drift (.github/rulesets/README.md). GitHub never applies the
 # committed templates, so nothing but this proves the hand re-export happened.
 # Two steps: rulesets-fetch captures the live rulesets through gh (read-only

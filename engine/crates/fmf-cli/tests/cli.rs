@@ -29,6 +29,83 @@ fn help_lists_the_subcommands() {
 }
 
 #[test]
+fn bench_compare_checks_saved_reports_without_reading_a_volume() {
+    let baseline =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benches/baseline.json");
+    let assert = fmf()
+        .args(["--format", "json", "bench-compare", "--actual"])
+        .arg(&baseline)
+        .arg("--baseline")
+        .arg(&baseline)
+        .assert()
+        .success();
+    let decision: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("offline comparison emits a gate decision");
+    assert_eq!(decision["kind"], "real-verdict");
+    assert_eq!(decision["passed"], true);
+    assert_eq!(decision["cases"].as_array().expect("gate cases").len(), 24);
+}
+
+#[test]
+fn bench_compare_rejects_an_invalid_report_without_reading_a_volume() {
+    let baseline =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benches/baseline.json");
+    let invalid = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    fmf()
+        .args(["bench-compare", "--actual"])
+        .arg(invalid)
+        .arg("--baseline")
+        .arg(baseline)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("invalid actual benchmark report"));
+}
+
+#[test]
+fn bench_compare_writes_a_failed_gate_before_returning_failure() {
+    let baseline =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benches/baseline.json");
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&baseline).expect("read the control report"))
+            .expect("parse the control report");
+    report["queries"][1]["p50_us"] = 100_000.into();
+    report["queries"][1]["p99_us"] = 100_000.into();
+    report["queries"][1]["max_us"] = 100_000.into();
+    let directory = tempfile::tempdir().expect("create the report fixture");
+    let actual = directory.path().join("actual.json");
+    let evidence = directory.path().join("evidence.json");
+    std::fs::write(
+        &actual,
+        serde_json::to_vec(&report).expect("encode the failed report"),
+    )
+    .expect("write the failed report");
+    fmf()
+        .args(["bench-compare", "--actual"])
+        .arg(actual)
+        .arg("--baseline")
+        .arg(baseline)
+        .arg("--evidence")
+        .arg(&evidence)
+        .assert()
+        .failure()
+        .code(1);
+    let decision: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(evidence).expect("failed comparisons keep evidence"))
+            .expect("parse the failed comparison");
+    assert_eq!(decision["kind"], "real-verdict");
+    assert_eq!(decision["finite"], true);
+    assert_eq!(decision["passed"], false);
+    assert!(
+        decision["cases"]
+            .as_array()
+            .expect("gate cases")
+            .iter()
+            .any(|case| case["id"] == "query/01/p99" && case["verdict"] == "fail")
+    );
+}
+
+#[test]
 fn completions_emit_a_script_for_each_shell() {
     for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
         fmf()
