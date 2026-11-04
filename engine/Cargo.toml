@@ -124,6 +124,7 @@ debug = "line-tables-only"
 lto = "thin"
 codegen-units = 1
 panic = "unwind"
+overflow-checks = true
 
 [profile.release.package.fmf-proto]
 overflow-checks = true
