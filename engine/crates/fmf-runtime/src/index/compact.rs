@@ -264,6 +264,58 @@ mod tests {
         assert_eq!(p, b"C:\\Note.TXT");
     }
 
+    fn policy_index() -> VolumeIndex {
+        let mut builder = super::super::VolumeIndexBuilder::new_synthetic("C:", 5);
+        for record in 100..107 {
+            builder.push(raw(
+                record,
+                5,
+                &u16s(&format!("file_{record}")),
+                false,
+                0,
+                0,
+            ));
+        }
+        builder.finish()
+    }
+
+    #[test]
+    fn compaction_pool_garbage_requires_strictly_more_than_the_byte_limit() {
+        const BYTE_LIMIT: u64 = 32 * 1024 * 1024;
+        for (bytes, expected) in [
+            (BYTE_LIMIT - 1, false),
+            (BYTE_LIMIT, false),
+            (BYTE_LIMIT + 1, true),
+        ] {
+            let mut index = policy_index();
+            index.dead_name_bytes = bytes;
+            assert_eq!(index.compaction_due(), expected);
+        }
+    }
+
+    #[test]
+    fn compaction_tombstones_require_strictly_more_than_one_eighth_and_the_row_floor() {
+        let mut index = policy_index();
+        assert_eq!(index.len(), 8);
+        assert!(!index.compaction_due_past(8));
+        index.delete(100).unwrap();
+        assert!(!index.compaction_due_past(8));
+        index.delete(101).unwrap();
+        assert!(index.compaction_due_past(8));
+        assert!(!index.compaction_due_past(9));
+        assert!(!index.compaction_due());
+    }
+
+    #[test]
+    fn compaction_dictionary_churn_requires_strictly_more_than_one_quarter() {
+        for (appended, expected) in [(1, false), (2, false), (3, true)] {
+            let mut index = policy_index();
+            assert_eq!(index.live_len(), 8);
+            index.dict_appends_since_dedup = appended;
+            assert_eq!(index.compaction_due(), expected);
+        }
+    }
+
     #[test]
     fn compaction_policy_thresholds() {
         let mut idx = build_sample();
