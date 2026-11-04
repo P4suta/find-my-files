@@ -1,5 +1,6 @@
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
+using FindMyFiles.Tests.Contract;
 using FindMyFiles.Tests.TestDoubles;
 using Xunit;
 
@@ -771,6 +772,43 @@ public sealed class PipeEngineClientAdditionalTests
         Assert.Equal("engine client disposed", failure.Message);
     }
 
+    [Fact]
+    public async Task Replacement_readiness_waits_while_retirement_has_cleared_the_slot()
+    {
+        SyncContext.RunContinuationsInline();
+        using var server = new FakePipeServer();
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        client.Start();
+        await WaitUntilAsync(
+            () => client.Connection == EngineConnectionState.Connected,
+            "connected");
+        var epochBefore = client.CurrentEpoch;
+        var cleared = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowRetirement = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.AfterRetiredConnectionDisposedForTests = () =>
+        {
+            cleared.TrySetResult();
+            allowRetirement.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)
+                .GetAwaiter().GetResult();
+        };
+        server.DisconnectAll();
+        await cleared.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        try
+        {
+            Assert.Equal(0, client.CurrentEpoch);
+            Assert.Equal(EngineConnectionState.Connected, client.Connection);
+            Assert.False(PipeOverFakeServerContractTests.IsPublishedReplacement(client, epochBefore));
+        }
+        finally
+        {
+            allowRetirement.TrySetResult();
+        }
+
+        await PipeOverFakeServerContractTests.WaitForPublishedReplacementAsync(client, epochBefore);
+        Assert.NotNull(client.CurrentPipeConnectionForTests);
+        Assert.NotEqual(epochBefore, client.CurrentEpoch);
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]
@@ -908,8 +946,7 @@ public sealed class PipeEngineClientAdditionalTests
         server.DisconnectAll();
         await WaitUntilAsync(
             () => server.ConnectionCount >= 2
-                && client.Connection == EngineConnectionState.Connected
-                && client.CurrentEpoch != stale.Epoch,
+                && PipeOverFakeServerContractTests.IsPublishedReplacement(client, stale.Epoch),
             "replacement connection");
 
         var cancelsBefore = server.Received.Count(
@@ -1357,8 +1394,7 @@ public sealed class PipeEngineClientAdditionalTests
         server.DisconnectAll();
         await WaitUntilAsync(
             () => server.ConnectionCount >= 2
-                && client.Connection == EngineConnectionState.Connected
-                && client.CurrentEpoch != retiredEpoch,
+                && PipeOverFakeServerContractTests.IsPublishedReplacement(client, retiredEpoch),
             "replacement connection");
         var frees = server.Received.Count(frame => frame.Opcode == PipeProtocol.Op.ResultFree);
 
