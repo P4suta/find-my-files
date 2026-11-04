@@ -21,6 +21,8 @@ Keep caller output unchanged when a conversion fails.
 
 Complete record-chain validation consumes the checked attribute decoder's ranges and header fields.
 The chain validator still owns ordering, unique IDs, alignment, region ordering, and complete termination.
+A private name-value decoder validates the bounded resident slice without repeating attribute geometry.
+The attribute adapter preserves the checked resident range and returns the name-value decoder's result.
 Attribute traversal consumes the remaining slice after each decoded attribute.
 The checked parser establishes a positive attribute length before traversal advances.
 Record headers share the checked update-sequence geometry validator.
@@ -43,7 +45,11 @@ Native fixtures check exact endpoints, malformed and overlapping regions, forbid
 The proof inventory records the source, harness names, and unwind bounds.
 Scalar reference and surrogate checks quantify their complete integer domains.
 Byte-array checks state finite input bounds and require reachable accepted and rejected cases.
-The record-chain harness also compares admission with a [preserved reference](../../engine/crates/fmf-core/src/ondisk/record_admission_reference.rs).
+The width harnesses partition every byte array through an independent leading-width classifier.
+Separate completeness harnesses establish that the partitions cover every input at each stated bound.
+The record-chain harnesses partition the complete attribute-offset domain without changing the byte-array or unwind bounds.
+The timeout and solver limits remain unchanged.
+The record-chain harnesses also compare admission with a [preserved reference](../../engine/crates/fmf-core/src/ondisk/record_admission_reference.rs).
 The reference retains the parser from [the source before the refactor](https://github.com/P4suta/find-my-files/blob/5f2853732cc179e5e25b165acfc49f3efb414342/engine/crates/fmf-core/src/ondisk/record.rs).
 The file-header harness compares admission with the original geometry and reference checks from [the same source](https://github.com/P4suta/find-my-files/blob/5f2853732cc179e5e25b165acfc49f3efb414342/engine/crates/fmf-core/src/ondisk/ntfs.rs).
 The byte adapter harness links each update-sequence field to its independent little-endian bytes.

@@ -178,7 +178,45 @@ pub struct NtfsFileName<'a> {
     pub utf16le: &'a [u8],
 }
 
-impl NtfsFileName<'_> {
+impl<'a> NtfsFileName<'a> {
+    fn parse(value: &'a [u8]) -> Option<Self> {
+        let name_units = NonZeroU8::new(*value.get(FILENAME_UNITS_OFFSET)?)?;
+        let name_length = usize::from(name_units.get());
+        let name_bytes = name_length.checked_mul(size_of::<u16>())?;
+        let end = FILE_NAME_HEADER_BYTES.checked_add(name_bytes)?;
+        if value.len() != end {
+            return None;
+        }
+        let encoded = value.get(FILE_NAME_HEADER_BYTES..end)?;
+        if encoded
+            .as_chunks::<UTF16_UNIT_BYTES>()
+            .0
+            .iter()
+            .any(|pair| {
+                let unit = u16::from_le_bytes([pair[0], pair[1]]);
+                unit == 0 || unit == u16::from(b'/') || unit == u16::from(b'\\')
+            })
+        {
+            return None;
+        }
+        let parent_directory_reference = le_u64(value, 0)?;
+        if parent_directory_reference >> SEQUENCE_SHIFT == 0 {
+            return None;
+        }
+        let namespace = *value.get(FILENAME_NAMESPACE_OFFSET)?;
+        if namespace > NtfsFileNamespace::Win32AndDos as u8 {
+            return None;
+        }
+        Some(Self {
+            header: NtfsFileNameHeader {
+                parent_directory_reference,
+                name_length: name_units.get(),
+                namespace,
+            },
+            utf16le: encoded,
+        })
+    }
+
     /// Copy the borrowed name into owned UTF-16 code units.
     ///
     /// Unpaired surrogates are preserved: NTFS names are not required to be valid Unicode, and the index stores them as WTF-8.
@@ -331,42 +369,7 @@ impl<'a> NtfsAttribute<'a> {
         if self.header.type_id != NtfsAttributeType::FileName as u32 {
             return None;
         }
-        let value = self.get_resident()?;
-        let name_units = NonZeroU8::new(*value.get(FILENAME_UNITS_OFFSET)?)?;
-        let name_length = usize::from(name_units.get());
-        let name_bytes = name_length.checked_mul(size_of::<u16>())?;
-        let end = FILE_NAME_HEADER_BYTES.checked_add(name_bytes)?;
-        if value.len() != end {
-            return None;
-        }
-        let encoded = value.get(FILE_NAME_HEADER_BYTES..end)?;
-        if encoded
-            .as_chunks::<UTF16_UNIT_BYTES>()
-            .0
-            .iter()
-            .any(|pair| {
-                let unit = u16::from_le_bytes([pair[0], pair[1]]);
-                unit == 0 || unit == u16::from(b'/') || unit == u16::from(b'\\')
-            })
-        {
-            return None;
-        }
-        let parent_directory_reference = le_u64(value, 0)?;
-        if parent_directory_reference >> SEQUENCE_SHIFT == 0 {
-            return None;
-        }
-        let namespace = *value.get(FILENAME_NAMESPACE_OFFSET)?;
-        if namespace > NtfsFileNamespace::Win32AndDos as u8 {
-            return None;
-        }
-        Some(NtfsFileName {
-            header: NtfsFileNameHeader {
-                parent_directory_reference,
-                name_length: name_units.get(),
-                namespace,
-            },
-            utf16le: encoded,
-        })
+        NtfsFileName::parse(self.get_resident()?)
     }
 }
 

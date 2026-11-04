@@ -36,7 +36,9 @@
       "package": "xtask",
       "source": "xtask/src/semver_proofs.rs",
       "prefix": "semver::kani_proofs::",
-      "harnesses": ["product_base_ends_at_the_first_metadata_delimiter"]
+      "harnesses": [
+        "product_base_ends_at_the_first_metadata_delimiter"
+      ]
     },
     {
       "package": "xtask",
@@ -71,7 +73,9 @@
       "package": "fmf-runtime",
       "source": "engine/crates/fmf-runtime/src/metrics_proofs.rs",
       "prefix": "metrics::kani_proofs::",
-      "harnesses": ["recording_changes_only_the_selected_bucket_without_overflow"]
+      "harnesses": [
+        "recording_changes_only_the_selected_bucket_without_overflow"
+      ]
     },
     {
       "package": "fmf-core",
@@ -81,10 +85,27 @@
         "accepted_points_consume_input_and_use_the_canonical_width",
         "surrogate_pairs_encode_exactly_one_supplementary_scalar",
         "empty_and_single_byte_decoding_preserve_prefix_or_roll_back",
-        "two_byte_decoding_preserves_prefix_or_rolls_back",
-        "three_byte_decoding_preserves_prefix_or_rolls_back",
-        "four_byte_decoding_preserves_prefix_or_rolls_back",
-        "output_lengths_preserve_the_prefix_or_reject_overflow"
+        "output_lengths_preserve_the_prefix_or_reject_overflow",
+        "two_byte_width_partitions_cover_every_input",
+        "two_byte_ascii_pair_preserves_prefix_or_rolls_back",
+        "two_byte_single_two_byte_point_preserves_prefix_or_rolls_back",
+        "two_byte_invalid_widths_preserve_output",
+        "three_byte_width_partitions_cover_every_input",
+        "three_byte_ascii_triple_preserves_prefix_or_rolls_back",
+        "three_byte_ascii_then_two_byte_preserves_prefix_or_rolls_back",
+        "three_byte_two_byte_then_ascii_preserves_prefix_or_rolls_back",
+        "three_byte_single_three_byte_point_preserves_prefix_or_rolls_back",
+        "three_byte_invalid_widths_preserve_output",
+        "four_byte_width_partitions_cover_every_input",
+        "four_byte_ascii_quad_preserves_prefix_or_rolls_back",
+        "four_byte_two_ascii_then_two_byte_preserves_prefix_or_rolls_back",
+        "four_byte_ascii_two_byte_ascii_preserves_prefix_or_rolls_back",
+        "four_byte_two_byte_then_two_ascii_preserves_prefix_or_rolls_back",
+        "four_byte_two_two_byte_points_preserves_prefix_or_rolls_back",
+        "four_byte_ascii_then_three_byte_preserves_prefix_or_rolls_back",
+        "four_byte_three_byte_then_ascii_preserves_prefix_or_rolls_back",
+        "four_byte_single_four_byte_point_preserves_prefix_or_rolls_back",
+        "four_byte_invalid_widths_preserve_output"
       ]
     },
     {
@@ -137,7 +158,7 @@
       "harnesses": [
         "shared_file_geometry_preserves_header_admission",
         "reference_bytes_preserve_record_and_sequence_fields",
-        "accepted_names_have_bounded_units_namespaces_and_parent_references",
+        "accepted_name_values_have_bounded_units_namespaces_and_parent_references",
         "attribute_traversal_consumes_bounded_positive_lengths",
         "accepted_boot_geometry_contains_a_complete_record_without_overflow",
         "every_short_boot_sector_is_rejected_before_field_access",
@@ -148,7 +169,17 @@
       "package": "fmf-core",
       "source": "engine/crates/fmf-core/src/ondisk/record_proofs.rs",
       "prefix": "ondisk::record::kani_proofs::",
-      "harnesses": ["accepted_chains_have_bounded_ordered_unique_attributes"]
+      "harnesses": [
+        "chains_at_offset_forty_eight_preserve_admission_and_invariants",
+        "chains_at_offset_fifty_six_preserve_admission_and_invariants",
+        "chains_at_offset_sixty_four_preserve_admission_and_invariants",
+        "chains_at_offset_seventy_two_preserve_admission_and_invariants",
+        "chains_at_offset_eighty_preserve_admission_and_invariants",
+        "chains_at_offset_eighty_eight_preserve_admission_and_invariants",
+        "chains_at_offset_ninety_six_preserve_admission_and_invariants",
+        "terminal_only_offsets_preserve_admission",
+        "remaining_attribute_offsets_reject_the_chain"
+      ]
     }
   ]
 }

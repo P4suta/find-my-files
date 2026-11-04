@@ -130,11 +130,11 @@ fn reference_bytes_preserve_record_and_sequence_fields() {
 
 #[kani::proof]
 #[kani::unwind(129)]
-fn accepted_names_have_bounded_units_namespaces_and_parent_references() {
+fn accepted_name_values_have_bounded_units_namespaces_and_parent_references() {
     let bytes: [u8; ATTRIBUTE_PROOF_BYTES] = kani::any();
     let length: usize = kani::any();
     kani::assume(length <= bytes.len());
-    let name = NtfsAttribute::parse(&bytes[..length]).and_then(|attribute| attribute.as_name());
+    let name = super::NtfsFileName::parse(&bytes[..length]);
     if let Some(name) = &name {
         assert!(name.header.name_length > 0);
         assert_eq!(name.utf16le.len(), usize::from(name.header.name_length) * 2);
@@ -206,6 +206,11 @@ fn accepted_attribute_ranges_remain_inside_the_declared_buffer() {
             NONRESIDENT_HEADER_BYTES
         };
         assert!(attribute.len() >= header_bytes);
+        if let Some(range) = attribute.resident_value_range() {
+            assert_eq!(attribute.header.is_non_resident, 0);
+            assert!(range.start >= RESIDENT_HEADER_BYTES);
+            assert!(range.start <= range.end && range.end <= attribute.len());
+        }
         if attribute.header.name_length > 0 {
             let start = usize::from(attribute.header.name_offset);
             let name_bytes = usize::from(attribute.header.name_length) * ATTRIBUTE_NAME_UNIT_BYTES;
