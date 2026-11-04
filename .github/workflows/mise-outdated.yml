@@ -25,7 +25,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+      - uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
         with:
           version: "v2026.11.0"
           sha256: 047d4e71d1d86e9ffea15320a212c771370debe1b818d5d6981f8c994a8ebfeb
