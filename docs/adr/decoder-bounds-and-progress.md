@@ -99,19 +99,25 @@ An insufficient bound must still fail an unwinding assertion.
 The three-header calls also branch on the storage class of the first two attribute IDs.
 Each ID either belongs to the low-ID bitset or the high-ID vector.
 The classifier covers every pair of 16-bit IDs in four disjoint classes.
-Each branch asserts its class and calls the unchanged production validator and preserved reference, or the unchanged invariant body.
+The offset-48 branches assert their classes and call the unchanged production validator and preserved reference, or the unchanged invariant body.
 The branch keeps the same byte array and slice rather than constructing replacement IDs or assuming admission.
 The split exposes the vector prefix length before a possible third membership check.
 An upstream [report](https://github.com/model-checking/kani/issues/4667) describes symbolic heap read-back costs for bounded vectors.
 Its Kani version and platform differ from the current verifier configuration.
 The current logs establish solver memory exhaustion and no specific heap-model cause.
 The classifier has a scalar harness over every ID pair, and the complete byte harnesses remain required.
-Four offset-56 obligations still exhaust memory during propositional reduction after that split.
-Those harnesses select the [Z3 SMT solver](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver).
+Four offset-56 obligations still exhaust memory after that split.
+With Z3, the two full-extent cases exhaust memory during symbolic execution.
+The two invalid-third-length cases stop with `map::at` during SMT conversion.
+An upstream [report](https://github.com/diffblue/cbmc/issues/9190) records the same exception for Rust formatting types.
+Those harnesses select the [Bitwuzla SMT solver](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver).
+The C Bounded Model Checker (CBMC) [configuration for Bitwuzla](https://github.com/diffblue/cbmc/blob/cbmc-6.11.0/src/solvers/smt2/smt2_conv.cpp) represents structs as bitvectors.
+The four offset-56 SMT cases check the same ID-class assertions before one validator call.
+The class match keeps every assertion without joining four validator copies.
 The solver change keeps every input, assertion, cover, and unwind bound.
-The checksum-verified installer and local configuration pin the same Z3 release.
+The checksum-verified installer and local configuration pin the same Bitwuzla release.
 The proof runner checks the executable version and includes the tool configuration in its source fingerprint.
-The Linux archive targets glibc 2.39.
+The installer uses the official static Linux x86-64 archive.
 The existing per-process memory limit and safety deadlines still apply.
 The invariant obligations use the same length partitions as admission.
 A dedicated harness checks the complement classifier for every 32-bit length across the supported aligned byte capacities.
