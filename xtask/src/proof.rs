@@ -589,7 +589,6 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
         fs::remove_file(&receipt)?;
     }
     let inventory = read_inventory(&root)?;
-    crate::verification_tools::require_bitwuzla(&root)?;
     let version = cmd::capture_stdout(&root, "cargo", &["kani", "--version"])?;
     ensure!(
         version.lines().next()
@@ -1088,7 +1087,7 @@ mod tests {
             let tool_bytes = fs::read(&tool_config)?;
             let mut changed =
                 fs::read_to_string(&tool_config)?.parse::<toml_edit::DocumentMut>()?;
-            changed["tools"]["http:bitwuzla"]["version"] = toml_edit::value("0.0.0");
+            changed["tools"]["rust"] = toml_edit::value("1.99.2");
             fs::write(&tool_config, changed.to_string())?;
             assert!(
                 verify_at(&root, &out).is_err(),
@@ -1234,7 +1233,7 @@ mod tests {
             let tool_bytes = fs::read(&tool_config)?;
             let mut changed =
                 fs::read_to_string(&tool_config)?.parse::<toml_edit::DocumentMut>()?;
-            changed["tools"]["http:bitwuzla"]["version"] = toml_edit::value("0.0.0");
+            changed["tools"]["rust"] = toml_edit::value("1.99.2");
             fs::write(&tool_config, changed.to_string())?;
             assert!(verify_at(&root, &out)
                 .expect_err("changed tool configuration must fail")

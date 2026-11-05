@@ -110,8 +110,7 @@ Four offset-56 obligations still exhaust memory after that split.
 With Z3, the two full-extent cases exhaust memory during symbolic execution.
 The two invalid-third-length cases stop with `map::at` during SMT conversion.
 An upstream [report](https://github.com/diffblue/cbmc/issues/9190) records the same exception for Rust formatting types.
-Those harnesses select the [Bitwuzla SMT solver](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver).
-The C Bounded Model Checker (CBMC) [configuration for Bitwuzla](https://github.com/diffblue/cbmc/blob/cbmc-6.11.0/src/solvers/smt2/smt2_conv.cpp) represents structs as bitvectors.
+The attempted [Bitwuzla SMT solver](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver) uses the C Bounded Model Checker (CBMC) [configuration](https://github.com/diffblue/cbmc/blob/cbmc-6.11.0/src/solvers/smt2/smt2_conv.cpp) for bitvector struct encoding.
 The shared-call Bitwuzla invariant case reaches SMT solving but exceeds its safety deadline.
 Each of the four offset-56 obligations has a separate harness for every prefix-ID class.
 Each harness assumes only its classifier result and then checks the corresponding ID-class assertions.
@@ -119,13 +118,11 @@ The four disjoint cases keep every original ID pair without constructing replace
 Each case calls the unchanged production validator and preserved reference, or the unchanged invariant body, once.
 All sixteen harnesses keep their original constructors, result assertions, accepted and rejected covers, and unwind bounds.
 Their union preserves every input and required property of the four former obligations.
-The independent invalid-third-length invariant cases with a second high ID or two high IDs also exceed the Bitwuzla deadline.
-The eight invalid-third-length cases use `cadical` from the pinned Kani distribution.
-The eight full-extent cases keep Bitwuzla.
-Changing the backend preserves every input, assertion, cover, and unwind bound.
-The checksum-verified installer and local configuration pin the same Bitwuzla release.
-The proof runner checks the executable version and includes the tool configuration in its source fingerprint.
-The installer uses the official static Linux x86-64 archive.
+The four independent invalid-third-length cases whose second attribute ID is high also exceed the Bitwuzla deadline.
+All sixteen independent prefix-ID cases use `cadical` from the pinned Kani distribution.
+Changing the solver preserves every input, assertion, cover, and unwind bound.
+The checksum-verified Kani bundle includes the solver.
+The proof runner checks the Kani executable version and includes the tool configuration in its source fingerprint.
 The existing per-process memory limit and safety deadlines still apply.
 The invariant obligations use the same length partitions as admission.
 A dedicated harness checks the complement classifier for every 32-bit length across the supported aligned byte capacities.
