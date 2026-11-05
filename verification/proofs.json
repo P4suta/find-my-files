@@ -162,6 +162,7 @@
         "terminal_at_offset_one_hundred_four_preserves_admission",
         "terminal_at_offset_one_hundred_twelve_preserves_admission",
         "terminal_at_offset_one_hundred_twenty_preserves_admission",
+        "inconsistent_record_lengths_reject_before_attribute_traversal",
         "remaining_attribute_offsets_reject_the_chain"
       ]
     }
