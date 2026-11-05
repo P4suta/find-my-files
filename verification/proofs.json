@@ -3,6 +3,7 @@
   "kani_version": "0.68.0",
   "jobs": 1,
   "timeout_seconds": 300,
+  "address_space_bytes": 8589934592,
   "targets": [
     {
       "package": "xtask",
@@ -108,7 +109,8 @@
       "harnesses": [
         "accepted_summary_requires_every_registered_harness_to_pass",
         "a_complete_nonempty_summary_remains_acceptable",
-        "every_ordinal_has_exactly_one_partition_owner"
+        "every_ordinal_has_exactly_one_partition_owner",
+        "process_address_space_limits_are_positive_and_bounded"
       ]
     },
     {
