@@ -38,13 +38,13 @@ const _: () = {
             < REFERENCE_NONRESIDENT_HEADER_BYTES + REFERENCE_RESIDENT_HEADER_BYTES
     );
     assert!(
-        (PROOF_BYTES - ATTRIBUTE_OFFSET_48 as usize) / REFERENCE_RESIDENT_HEADER_BYTES + 2 <= 5
+        (PROOF_BYTES - ATTRIBUTE_OFFSET_48 as usize) / REFERENCE_RESIDENT_HEADER_BYTES + 1 <= 4
     );
     assert!(
-        (PROOF_BYTES - ATTRIBUTE_OFFSET_64 as usize) / REFERENCE_RESIDENT_HEADER_BYTES + 2 <= 4
+        (PROOF_BYTES - ATTRIBUTE_OFFSET_64 as usize) / REFERENCE_RESIDENT_HEADER_BYTES + 1 <= 3
     );
     assert!(
-        (PROOF_BYTES - ATTRIBUTE_OFFSET_88 as usize) / REFERENCE_RESIDENT_HEADER_BYTES + 2 <= 3
+        (PROOF_BYTES - ATTRIBUTE_OFFSET_88 as usize) / REFERENCE_RESIDENT_HEADER_BYTES + 1 <= 2
     );
     assert!(
         PROOF_BYTES - (TERMINATOR_OFFSET_104 as usize)
@@ -210,7 +210,7 @@ fn check_chain_invariants_at<const START: u16, const MARKER: u8>() -> ChainCheck
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn resident_length_twenty_four_at_offset_forty_eight_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_48, 24>();
@@ -220,7 +220,7 @@ fn resident_length_twenty_four_at_offset_forty_eight_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn resident_length_thirty_two_at_offset_forty_eight_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_48, 32>();
@@ -230,7 +230,7 @@ fn resident_length_thirty_two_at_offset_forty_eight_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_length_forty_at_offset_forty_eight_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_48, 40>();
@@ -240,7 +240,7 @@ fn resident_length_forty_at_offset_forty_eight_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_length_forty_eight_at_offset_forty_eight_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_48, 48>();
@@ -250,7 +250,7 @@ fn resident_length_forty_eight_at_offset_forty_eight_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_length_fifty_six_at_offset_forty_eight_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_48, 56>();
@@ -260,7 +260,7 @@ fn resident_length_fifty_six_at_offset_forty_eight_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_length_sixty_four_at_offset_forty_eight_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_48, 64>();
@@ -280,7 +280,7 @@ fn resident_length_seventy_two_at_offset_forty_eight_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_other_lengths_at_offset_forty_eight_preserve_admission() {
     let checked = check_resident_admission_with_other_lengths::<ATTRIBUTE_OFFSET_48>();
@@ -290,7 +290,7 @@ fn resident_other_lengths_at_offset_forty_eight_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_forty_eight_preserve_admission() {
     let checked = check_admission_at::<ATTRIBUTE_OFFSET_48, 1>();
@@ -300,7 +300,7 @@ fn nonresident_chains_at_offset_forty_eight_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn resident_chains_at_offset_forty_eight_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_48, 0>();
@@ -315,7 +315,7 @@ fn resident_chains_at_offset_forty_eight_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_forty_eight_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_48, 1>();
@@ -326,7 +326,7 @@ fn nonresident_chains_at_offset_forty_eight_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn resident_length_twenty_four_at_offset_fifty_six_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_56, 24>();
@@ -336,7 +336,7 @@ fn resident_length_twenty_four_at_offset_fifty_six_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_length_thirty_two_at_offset_fifty_six_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_56, 32>();
@@ -346,7 +346,7 @@ fn resident_length_thirty_two_at_offset_fifty_six_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_length_forty_at_offset_fifty_six_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_56, 40>();
@@ -356,7 +356,7 @@ fn resident_length_forty_at_offset_fifty_six_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_length_forty_eight_at_offset_fifty_six_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_56, 48>();
@@ -366,7 +366,7 @@ fn resident_length_forty_eight_at_offset_fifty_six_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_length_fifty_six_at_offset_fifty_six_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_56, 56>();
@@ -386,7 +386,7 @@ fn resident_length_sixty_four_at_offset_fifty_six_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_other_lengths_at_offset_fifty_six_preserve_admission() {
     let checked = check_resident_admission_with_other_lengths::<ATTRIBUTE_OFFSET_56>();
@@ -396,7 +396,7 @@ fn resident_other_lengths_at_offset_fifty_six_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_fifty_six_preserve_admission() {
     let checked = check_admission_at::<ATTRIBUTE_OFFSET_56, 1>();
@@ -406,7 +406,7 @@ fn nonresident_chains_at_offset_fifty_six_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn resident_chains_at_offset_fifty_six_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_56, 0>();
@@ -420,7 +420,7 @@ fn resident_chains_at_offset_fifty_six_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_fifty_six_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_56, 1>();
@@ -430,7 +430,7 @@ fn nonresident_chains_at_offset_fifty_six_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_length_twenty_four_at_offset_sixty_four_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_64, 24>();
@@ -440,7 +440,7 @@ fn resident_length_twenty_four_at_offset_sixty_four_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_length_thirty_two_at_offset_sixty_four_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_64, 32>();
@@ -450,7 +450,7 @@ fn resident_length_thirty_two_at_offset_sixty_four_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_length_forty_at_offset_sixty_four_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_64, 40>();
@@ -460,7 +460,7 @@ fn resident_length_forty_at_offset_sixty_four_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_length_forty_eight_at_offset_sixty_four_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_64, 48>();
@@ -470,7 +470,7 @@ fn resident_length_forty_eight_at_offset_sixty_four_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_length_fifty_six_at_offset_sixty_four_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_64, 56>();
@@ -480,7 +480,7 @@ fn resident_length_fifty_six_at_offset_sixty_four_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_other_lengths_at_offset_sixty_four_preserve_admission() {
     let checked = check_resident_admission_with_other_lengths::<ATTRIBUTE_OFFSET_64>();
@@ -490,7 +490,7 @@ fn resident_other_lengths_at_offset_sixty_four_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_sixty_four_preserve_admission() {
     let checked = check_admission_at::<ATTRIBUTE_OFFSET_64, 1>();
@@ -500,7 +500,7 @@ fn nonresident_chains_at_offset_sixty_four_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_chains_at_offset_sixty_four_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_64, 0>();
@@ -514,7 +514,7 @@ fn resident_chains_at_offset_sixty_four_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_sixty_four_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_64, 1>();
@@ -524,7 +524,7 @@ fn nonresident_chains_at_offset_sixty_four_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_length_twenty_four_at_offset_seventy_two_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_72, 24>();
@@ -534,7 +534,7 @@ fn resident_length_twenty_four_at_offset_seventy_two_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_length_thirty_two_at_offset_seventy_two_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_72, 32>();
@@ -544,7 +544,7 @@ fn resident_length_thirty_two_at_offset_seventy_two_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_length_forty_at_offset_seventy_two_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_72, 40>();
@@ -554,7 +554,7 @@ fn resident_length_forty_at_offset_seventy_two_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_length_forty_eight_at_offset_seventy_two_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_72, 48>();
@@ -564,7 +564,7 @@ fn resident_length_forty_eight_at_offset_seventy_two_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_other_lengths_at_offset_seventy_two_preserve_admission() {
     let checked = check_resident_admission_with_other_lengths::<ATTRIBUTE_OFFSET_72>();
@@ -574,7 +574,7 @@ fn resident_other_lengths_at_offset_seventy_two_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_seventy_two_preserve_admission() {
     let checked = check_admission_at::<ATTRIBUTE_OFFSET_72, 1>();
@@ -584,7 +584,7 @@ fn nonresident_chains_at_offset_seventy_two_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_chains_at_offset_seventy_two_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_72, 0>();
@@ -598,7 +598,7 @@ fn resident_chains_at_offset_seventy_two_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_seventy_two_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_72, 1>();
@@ -608,7 +608,7 @@ fn nonresident_chains_at_offset_seventy_two_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_length_twenty_four_at_offset_eighty_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_80, 24>();
@@ -618,7 +618,7 @@ fn resident_length_twenty_four_at_offset_eighty_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_length_thirty_two_at_offset_eighty_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_80, 32>();
@@ -628,7 +628,7 @@ fn resident_length_thirty_two_at_offset_eighty_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_length_forty_at_offset_eighty_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_80, 40>();
@@ -638,7 +638,7 @@ fn resident_length_forty_at_offset_eighty_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_other_lengths_at_offset_eighty_preserve_admission() {
     let checked = check_resident_admission_with_other_lengths::<ATTRIBUTE_OFFSET_80>();
@@ -648,7 +648,7 @@ fn resident_other_lengths_at_offset_eighty_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_eighty_preserve_admission() {
     let checked = check_admission_at::<ATTRIBUTE_OFFSET_80, 1>();
@@ -658,7 +658,7 @@ fn nonresident_chains_at_offset_eighty_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn resident_chains_at_offset_eighty_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_80, 0>();
@@ -672,7 +672,7 @@ fn resident_chains_at_offset_eighty_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_eighty_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_80, 1>();
@@ -682,7 +682,7 @@ fn nonresident_chains_at_offset_eighty_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_length_twenty_four_at_offset_eighty_eight_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_88, 24>();
@@ -692,7 +692,7 @@ fn resident_length_twenty_four_at_offset_eighty_eight_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_length_thirty_two_at_offset_eighty_eight_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_88, 32>();
@@ -702,7 +702,7 @@ fn resident_length_thirty_two_at_offset_eighty_eight_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_other_lengths_at_offset_eighty_eight_preserve_admission() {
     let checked = check_resident_admission_with_other_lengths::<ATTRIBUTE_OFFSET_88>();
@@ -712,7 +712,7 @@ fn resident_other_lengths_at_offset_eighty_eight_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_eighty_eight_preserve_admission() {
     let checked = check_admission_at::<ATTRIBUTE_OFFSET_88, 1>();
@@ -722,7 +722,7 @@ fn nonresident_chains_at_offset_eighty_eight_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_chains_at_offset_eighty_eight_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_88, 0>();
@@ -736,7 +736,7 @@ fn resident_chains_at_offset_eighty_eight_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_eighty_eight_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_88, 1>();
@@ -746,7 +746,7 @@ fn nonresident_chains_at_offset_eighty_eight_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_length_twenty_four_at_offset_ninety_six_preserves_admission() {
     let checked = check_resident_admission_with_length::<ATTRIBUTE_OFFSET_96, 24>();
@@ -756,7 +756,7 @@ fn resident_length_twenty_four_at_offset_ninety_six_preserves_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_other_lengths_at_offset_ninety_six_preserve_admission() {
     let checked = check_resident_admission_with_other_lengths::<ATTRIBUTE_OFFSET_96>();
@@ -766,7 +766,7 @@ fn resident_other_lengths_at_offset_ninety_six_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_ninety_six_preserve_admission() {
     let checked = check_admission_at::<ATTRIBUTE_OFFSET_96, 1>();
@@ -776,7 +776,7 @@ fn nonresident_chains_at_offset_ninety_six_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn resident_chains_at_offset_ninety_six_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_96, 0>();
@@ -790,7 +790,7 @@ fn resident_chains_at_offset_ninety_six_preserve_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn nonresident_chains_at_offset_ninety_six_preserve_invariants() {
     let checked = check_chain_invariants_at::<ATTRIBUTE_OFFSET_96, 1>();

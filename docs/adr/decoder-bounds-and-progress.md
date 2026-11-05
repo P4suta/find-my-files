@@ -81,8 +81,12 @@ The earliest resident case covers an accepted chain with more than one attribute
 The earliest non-resident case covers an accepted non-resident attribute.
 Every other input byte stays arbitrary under the existing constructive header fields.
 The byte and length bounds remain unchanged.
-Their unwind bounds follow the smallest resident header and the remaining proof bytes.
-The bounds leave room for the terminal or rejected header after the largest admitted sequence.
+The chain loops return from inside their bodies.
+Their unwind bounds count every possible attribute advance and the final returning probe.
+The general offset bound divides the remaining proof bytes by the smallest resident header and adds one.
+A constant first length leaves only the remaining bytes for later attributes.
+The complementary length partition permits at most one advance before rejecting a missing terminator.
+The first-length cases use their corresponding bounds without removing any bytes or field values.
 The earliest terminal-only offset includes one possible resident attribute followed by rejection.
 The later terminal offsets reject every nonterminal attribute before advancing.
 The other rejected offsets permit one empty-region probe and no attribute advance.
@@ -90,7 +94,7 @@ Exhaustive constant patterns classify the terminal offsets without a separate sl
 Compile-time checks bind the bounds to the proof geometry.
 After a first non-resident header, the remaining proof bytes can't contain another complete attribute.
 The bounds for a non-resident first attribute include the attribute and final probe.
-Unwinding assertions remain enabled.
+The [unwinding assertions](https://model-checking.github.io/kani/tutorial-loop-unwinding.html) remain enabled and make an insufficient bound fail verification.
 Each proof partition verifies one harness at a time to limit concurrent resource demand.
 The [partition collector](sharded-proof-evidence.md) requires the complete inventory across the bounded jobs.
 The proof watchdog and hosted job keep their declared safety deadlines.
