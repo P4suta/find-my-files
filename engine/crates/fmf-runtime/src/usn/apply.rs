@@ -281,7 +281,7 @@ pub(crate) fn plan_batch(
         });
         let ambiguous_rename =
             a.reasons.renames() && idx.entries_by_frn(*key).count() > 1 && !exact_rename_old;
-        if !complete && (a.reasons.changes_hard_links() || ambiguous_rename) {
+        if a.reasons.rejects_link_snapshot(complete, ambiguous_rename) {
             preflight_failures += 1;
         }
         link_snapshots.insert(*key, snapshot);
@@ -341,8 +341,7 @@ pub(crate) fn apply_planned(
         let a = &agg[&key];
         let last = &records[a.last];
 
-        if a.reasons.changes_links() && !last.is_dir() {
-            let snapshot = link_snapshots.remove(&key).unwrap_or(LinkSnapshot::Failed);
+        if let Some(snapshot) = link_snapshots.remove(&key) {
             match snapshot {
                 LinkSnapshot::Present(links) if !links.is_empty() => {
                     let fetched = stat_snapshots.get(&key).copied();
@@ -396,14 +395,6 @@ pub(crate) fn apply_planned(
                     } else {
                         stats.deleted += removed;
                     }
-                    continue;
-                }
-                LinkSnapshot::Failed | LinkSnapshot::Present(_)
-                    if a.reasons.changes_hard_links() =>
-                {
-                    stats.hard_link_refresh_failures += 1;
-                    stats.ignored += 1;
-                    stats.rescan_required = true;
                     continue;
                 }
                 LinkSnapshot::Failed | LinkSnapshot::Present(_) => {}
@@ -481,7 +472,7 @@ pub(crate) fn apply_planned(
                         stats.rescan_required = true;
                         continue;
                     }
-                    if removed.is_none() && before == 1 {
+                    if before == 1 {
                         idx.upsert_usn(&entry)
                     } else {
                         idx.upsert_link_usn(&entry)
@@ -964,6 +955,128 @@ mod tests {
             for id in idx.entries_by_frn(Frn(object)) {
                 assert_eq!((idx.size(id), idx.mtime(id)), (321, FT1), "{name}");
             }
+        }
+    }
+
+    #[test]
+    fn journal_batch_shared_refresh_preserves_each_parent_exclusion() {
+        let mut idx = build_hardlink_sample();
+        let object = Frn(frn(1, 100));
+        let hidden_parent = Frn(frn(1, 20));
+        assert_eq!(
+            idx.update_object_attrs_frn(hidden_parent, false, true, false),
+            Some(true)
+        );
+        let first_new = idx.len() as u32;
+        idx.merge_new_into_permutations(first_new).unwrap();
+        let records = [rec(100, 10, reason::FILE_CREATE, 0x20, "added.txt")];
+        assert_eq!(
+            apply_batch(&mut idx, &records, &MetadataSource::constant(91, FT1)),
+            BatchStats {
+                created_or_renamed: 1,
+                ..BatchStats::default()
+            }
+        );
+        assert_eq!(idx.entries_by_frn(object).count(), 3);
+        for id in idx.entries_by_frn(object) {
+            assert_eq!((idx.size(id), idx.mtime(id)), (91, FT1));
+            assert_eq!(
+                idx.is_excluded(id),
+                idx.parent(id) == idx.entry_by_frn(hidden_parent).unwrap()
+            );
+        }
+        assert!(idx.is_excluded(idx.entry_by_frn(hidden_parent).unwrap()));
+        let mut names = visible_names(&idx, "");
+        names.sort();
+        assert_eq!(names, ["C:", "a", "added.txt", "shared.txt"]);
+    }
+
+    #[test]
+    fn journal_batch_rejected_insertion_preserves_every_sibling_metadata_value() {
+        let mut idx = build_hardlink_sample();
+        let object = Frn(frn(1, 100));
+        let before: Vec<_> = idx
+            .entries_by_frn(object)
+            .map(|id| {
+                (
+                    id,
+                    idx.size(id),
+                    idx.mtime(id),
+                    idx.is_reparse(id),
+                    idx.is_excluded(id),
+                )
+            })
+            .collect();
+        let records = [rec(100, 999, reason::FILE_CREATE, 0x406, "rejected.txt")];
+        assert_eq!(
+            apply_batch(&mut idx, &records, &MetadataSource::constant(999, FT1)),
+            BatchStats {
+                index_rejections: 1,
+                ignored: 1,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        let after: Vec<_> = idx
+            .entries_by_frn(object)
+            .map(|id| {
+                (
+                    id,
+                    idx.size(id),
+                    idx.mtime(id),
+                    idx.is_reparse(id),
+                    idx.is_excluded(id),
+                )
+            })
+            .collect();
+        assert_eq!(after, before);
+        assert!(
+            idx.entry_by_link(object, Frn(frn(1, 999)), &u16s("rejected.txt"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn journal_batch_revalidates_an_old_link_removed_after_planning() {
+        let mut idx = build_hardlink_sample();
+        let object = Frn(frn(1, 100));
+        let parent = Frn(frn(1, 10));
+        let records = [
+            rec(100, 10, reason::RENAME_OLD_NAME, 0x20, "shared.txt"),
+            rec(100, 10, reason::RENAME_NEW_NAME, 0x20, "renamed.txt"),
+        ];
+        let plan = plan_batch(&idx, &records, &MetadataSource::constant(91, FT1));
+        assert_eq!(plan.preflight_failures, 0);
+        idx.delete_link_frn(object, parent, &u16s("shared.txt"))
+            .unwrap();
+        idx.upsert_link_usn(&RawEntry {
+            frn: object,
+            parent_frn: parent,
+            name_utf16: &u16s("replacement.txt"),
+            is_dir: false,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 42,
+            mtime: 0,
+        })
+        .unwrap();
+        let first_new = idx.len() as u32;
+        idx.merge_new_into_permutations(first_new).unwrap();
+        let before = visible_names(&idx, "");
+        assert_eq!(
+            apply_planned(&mut idx, &records, plan),
+            BatchStats {
+                hard_link_refresh_failures: 1,
+                ignored: 1,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert_eq!(visible_names(&idx, ""), before);
+        assert_eq!(idx.entries_by_frn(object).count(), 2);
+        for id in idx.entries_by_frn(object) {
+            assert_eq!((idx.size(id), idx.mtime(id)), (42, 0));
         }
     }
 
