@@ -37,13 +37,23 @@ fn profile_arguments_change_only_the_selected_overflow_checks() {
     kani::assume(selector < 3);
     let variant = [Variant::A, Variant::B, Variant::C][usize::from(selector)];
     let expected: &[&str] = match variant {
-        Variant::A => &["build", "--locked", "--release", "-p", "fmf-cli"],
+        Variant::A => &[
+            "build",
+            "--locked",
+            "--release",
+            "-p",
+            "fmf-cli",
+            "--config",
+            "profile.release.overflow-checks=false",
+        ],
         Variant::B => &[
             "build",
             "--locked",
             "--release",
             "-p",
             "fmf-cli",
+            "--config",
+            "profile.release.overflow-checks=false",
             "--config",
             "profile.release.package.fmf-core.overflow-checks=true",
             "--config",

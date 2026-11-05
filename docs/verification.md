@@ -146,6 +146,9 @@ The release overflow experiment follows [ADR-0013](adr/0013-measurement-discipli
 Run `just overflow-experiment` to inspect its variants, fixed order, output location, and cooling intervals.
 The [Cargo profile reference](https://doc.rust-lang.org/cargo/reference/profiles.html#overflow-checks) defines the compiler option.
 The experiment preserves the existing boundary overrides and Windows Control Flow Guard settings.
+Variants A and B explicitly turn off the release default before applying their selected package overrides.
+Variant C explicitly enables the release default.
+The comparison scopes stay distinct after the shipping profile expands.
 
 Run `just overflow-experiment prepare` from a clean committed source to build and hash the comparison binaries.
 Preparation restores the ordinary release tool after preserving each candidate.
