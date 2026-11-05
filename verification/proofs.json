@@ -234,6 +234,14 @@
         "size_and_directory_implication_preserve_membership",
         "mtime_implication_preserves_membership"
       ]
+    },
+    {
+      "package": "fmf-runtime",
+      "source": "engine/crates/fmf-runtime/src/usn/apply_proofs.rs",
+      "prefix": "usn::apply::kani_proofs::",
+      "harnesses": [
+        "metadata_refresh_preserves_exact_rows_and_outcome_counts"
+      ]
     }
   ]
 }

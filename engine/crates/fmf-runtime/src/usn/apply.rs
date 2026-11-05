@@ -491,30 +491,13 @@ pub(crate) fn apply_planned(
                 stats.created_or_renamed += 1;
             }
             ChangeKind::Metadata => {
-                if idx.entry_by_frn(key).is_none() {
-                    stats.ignored += 1;
-                    continue;
-                }
-                let attrs_changed = idx
-                    .update_object_attrs_frn(
-                        key,
-                        last.is_reparse(),
-                        last.is_hidden(),
-                        last.is_system(),
-                    )
-                    .unwrap_or(false);
-                if let Some((size, mtime)) = stat_snapshots.get(&key).copied() {
-                    if idx.update_stat_frn(key, size, mtime).is_some() {
-                        stats.stat_updated += 1;
-                    } else {
-                        stats.ignored += 1;
-                    }
-                } else {
-                    stats.stat_failures += 1;
-                    if !attrs_changed {
-                        stats.ignored += 1;
-                    }
-                }
+                apply_metadata_change(
+                    idx,
+                    key,
+                    last,
+                    stat_snapshots.get(&key).copied(),
+                    &mut stats,
+                );
             }
             ChangeKind::Ignore => {
                 stats.ignored += 1;
@@ -528,6 +511,39 @@ pub(crate) fn apply_planned(
     }
     stats
 }
+
+fn apply_metadata_change(
+    idx: &mut VolumeIndex,
+    key: Frn,
+    record: &UsnRecord,
+    fetched: Option<(u64, i64)>,
+    stats: &mut BatchStats,
+) {
+    let attrs_changed = idx.update_object_attrs_frn(
+        key,
+        record.is_reparse(),
+        record.is_hidden(),
+        record.is_system(),
+    );
+    if let Some((size, mtime)) = fetched {
+        if idx.update_stat_frn(key, size, mtime).is_some() {
+            stats.stat_updated += 1;
+        } else {
+            stats.ignored += 1;
+        }
+    } else if let Some(attrs_changed) = attrs_changed {
+        stats.stat_failures += 1;
+        if !attrs_changed {
+            stats.ignored += 1;
+        }
+    } else {
+        stats.ignored += 1;
+    }
+}
+
+#[cfg(kani)]
+#[path = "apply_proofs.rs"]
+mod kani_proofs;
 
 #[cfg(test)]
 mod tests {
@@ -590,6 +606,147 @@ mod tests {
             mtime: FT0,
         });
         b.finish()
+    }
+
+    fn strict_base_index() -> VolumeIndex {
+        let root = Frn(frn(1, 5));
+        let mut builder = VolumeIndexBuilder::new_strict("C:", root).unwrap();
+        for (record, parent, name, directory) in
+            [(10, 5, "docs", true), (11, 10, "note.txt", false)]
+        {
+            builder.push(RawEntry {
+                parent_frn: Frn(frn(1, parent)),
+                frn: Frn(frn(1, record)),
+                name_utf16: &u16s(name),
+                is_dir: directory,
+                is_reparse: false,
+                is_hidden: false,
+                is_system: false,
+                size: if directory { 0 } else { 100 },
+                mtime: FT0,
+            });
+        }
+        builder.finish_strict().unwrap()
+    }
+
+    #[test]
+    fn rejected_link_reconciliation_counts_the_failure_and_preserves_rows() {
+        let mut idx = strict_base_index();
+        let object = frn(1, 11);
+        let existing = idx.entry_by_frn(Frn(object)).unwrap();
+        let before = (
+            idx.len(),
+            idx.live_len(),
+            visible_names(&idx, ""),
+            path_of(&idx, 11),
+            idx.size(existing),
+            idx.mtime(existing),
+        );
+        let source = MetadataSource::map_with_links(
+            HashMap::from([(object, (321, FT1))]),
+            HashMap::from([(
+                object,
+                vec![LinkInfo {
+                    parent_frn: frn(1, 999),
+                    name: u16s("moved.txt"),
+                }],
+            )]),
+        );
+        let records = [rec_full(
+            object,
+            frn(1, 999),
+            reason::HARD_LINK_CHANGE,
+            0x20,
+            "moved.txt",
+        )];
+        assert_eq!(
+            apply_batch(&mut idx, &records, &source),
+            BatchStats {
+                index_rejections: 1,
+                ignored: 1,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert_eq!(idx.entry_by_frn(Frn(object)), Some(existing));
+        assert_eq!(
+            (
+                idx.len(),
+                idx.live_len(),
+                visible_names(&idx, ""),
+                path_of(&idx, 11),
+                idx.size(existing),
+                idx.mtime(existing)
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn rejected_batch_finalization_counts_the_failure_and_completes_the_permutation() {
+        let mut idx = strict_base_index();
+        let generation = idx.content_generation();
+        let records = [rec_full(
+            frn(1, 10),
+            frn(1, 5),
+            reason::FILE_DELETE,
+            0x10,
+            "docs",
+        )];
+        assert_eq!(
+            apply_batch(&mut idx, &records, &MetadataSource::none()),
+            BatchStats {
+                deleted: 1,
+                index_rejections: 1,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert!(idx.entry_by_frn(Frn(frn(1, 10))).is_none());
+        assert!(idx.entry_by_frn(Frn(frn(1, 11))).is_some());
+        assert_eq!(idx.name_permutation().len(), idx.len());
+        assert_eq!(idx.content_generation(), generation + 1);
+    }
+
+    #[test]
+    fn metadata_outcomes_distinguish_object_presence_and_available_fields() {
+        for exists in [false, true] {
+            for fetched in [false, true] {
+                for attributes in [0x20, 0x2, 0x4, 0x400, 0x406] {
+                    let mut idx = base_index();
+                    let target = if exists { 11 } else { 999 };
+                    let records = [rec(
+                        target,
+                        10,
+                        reason::BASIC_INFO_CHANGE,
+                        attributes,
+                        "note.txt",
+                    )];
+                    let source = if fetched {
+                        MetadataSource::constant(321, FT1)
+                    } else {
+                        MetadataSource::none()
+                    };
+                    let changed_attributes = attributes & 0x406 != 0;
+                    assert_eq!(
+                        apply_batch(&mut idx, &records, &source),
+                        BatchStats {
+                            stat_updated: u32::from(exists && fetched),
+                            stat_failures: u32::from(exists && !fetched),
+                            ignored: u32::from(!exists || (!fetched && !changed_attributes)),
+                            ..BatchStats::default()
+                        },
+                        "exists {exists}, fetched {fetched}, attributes {attributes}"
+                    );
+                    let id = idx.entry_by_frn(Frn(frn(1, 11))).unwrap();
+                    assert_eq!(idx.size(id), if exists && fetched { 321 } else { 100 });
+                    assert_eq!(idx.mtime(id), if exists && fetched { FT1 } else { FT0 });
+                    assert_eq!(idx.is_reparse(id), exists && attributes & 0x400 != 0);
+                    assert_eq!(idx.is_excluded(id), exists && attributes & 0x6 != 0);
+                    assert_eq!(idx.len(), 3);
+                }
+            }
+        }
     }
 
     fn path_of(idx: &VolumeIndex, record: u64) -> String {
