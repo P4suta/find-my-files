@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "kani_version": "0.68.0",
-  "jobs": 2,
+  "jobs": 1,
   "timeout_seconds": 300,
   "targets": [
     {
@@ -159,7 +159,10 @@
         "chains_at_offset_eighty_preserve_admission_and_invariants",
         "chains_at_offset_eighty_eight_preserve_admission_and_invariants",
         "chains_at_offset_ninety_six_preserve_admission_and_invariants",
-        "terminal_only_offsets_preserve_admission",
+        "terminal_at_offset_one_hundred_four_preserves_admission",
+        "terminal_at_offset_one_hundred_twelve_preserves_admission",
+        "terminal_at_offset_one_hundred_twenty_preserves_admission",
+        "inconsistent_record_lengths_reject_before_attribute_traversal",
         "remaining_attribute_offsets_reject_the_chain"
       ]
     },
