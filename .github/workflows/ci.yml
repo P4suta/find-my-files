@@ -104,7 +104,7 @@ jobs:
           ACTIONLINT: ${{ steps.actionlint.outputs.executable }}
       - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
-          tool: zizmor@1.31.1,typos-cli@1.51.1,taplo-cli@0.10.0
+          tool: zizmor@1.31.1,typos-cli@1.52.0,taplo-cli@0.10.0
           fallback: none
       - name: Audit GitHub Actions security
         run: zizmor --offline --strict-collection --persona auditor --min-severity low .
