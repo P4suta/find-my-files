@@ -6,6 +6,7 @@ use super::{
 const MAX_SECTOR_BYTES: u64 = 4096;
 const MAX_CLUSTER_BYTES: u64 = 2 << 20;
 const ATTRIBUTE_PROOF_BYTES: usize = NONRESIDENT_HEADER_BYTES * 2;
+const _: () = assert!(ATTRIBUTE_PROOF_BYTES <= u8::MAX as usize);
 const ATTRIBUTE_NAME_UNIT_BYTES: usize = size_of::<u16>();
 const REFERENCE_USA_OFFSET_FIELD: usize = 4;
 const REFERENCE_USA_LENGTH_FIELD: usize = 6;
@@ -130,10 +131,11 @@ fn reference_bytes_preserve_record_and_sequence_fields() {
 
 #[kani::proof]
 #[kani::unwind(129)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn accepted_name_values_have_bounded_units_namespaces_and_parent_references() {
     let bytes: [u8; ATTRIBUTE_PROOF_BYTES] = kani::any();
-    let length: usize = kani::any();
+    let length: u8 = kani::any();
+    let length = usize::from(length);
     kani::assume(length <= bytes.len());
     let name = super::NtfsFileName::parse(&bytes[..length]);
     if let Some(name) = &name {
@@ -141,7 +143,9 @@ fn accepted_name_values_have_bounded_units_namespaces_and_parent_references() {
         assert_eq!(name.utf16le.len(), usize::from(name.header.name_length) * 2);
         assert!(name.header.namespace <= super::NtfsFileNamespace::Win32AndDos as u8);
         assert!(name.header.parent_directory_reference >> super::SEQUENCE_SHIFT > 0);
-        for pair in name.utf16le.chunks_exact(2) {
+        let position: u8 = kani::any();
+        let offset = usize::from(position) * ATTRIBUTE_NAME_UNIT_BYTES;
+        if let Some(pair) = name.utf16le.get(offset..offset + ATTRIBUTE_NAME_UNIT_BYTES) {
             let unit = u16::from_le_bytes([pair[0], pair[1]]);
             assert!(unit != 0 && unit != u16::from(b'/') && unit != u16::from(b'\\'));
         }

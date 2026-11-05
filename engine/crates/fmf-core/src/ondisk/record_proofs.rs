@@ -8,6 +8,7 @@ use crate::ondisk::ntfs::NtfsAttribute;
 mod admission_reference;
 
 const PROOF_BYTES: usize = 128;
+const _: () = assert!(PROOF_BYTES <= u8::MAX as usize);
 const PROOF_ATTRIBUTES: usize = 4;
 const REFERENCE_FILE_HEADER_BYTES: usize = 42;
 const REFERENCE_RESIDENT_HEADER_BYTES: usize = 24;
@@ -35,7 +36,8 @@ struct ChainChecks {
 
 fn check_chain_at<const START: u16>() -> ChainChecks {
     let bytes: [u8; PROOF_BYTES] = kani::any();
-    let length: usize = kani::any();
+    let length: u8 = kani::any();
+    let length = usize::from(length);
     kani::assume(length <= bytes.len());
     kani::assume(le_u16(&bytes, ATTRIBUTES_OFFSET_FIELD) == START);
     let record = &bytes[..length];
@@ -119,7 +121,7 @@ fn check_chain_at<const START: u16>() -> ChainChecks {
 
 #[kani::proof]
 #[kani::unwind(9)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn chains_at_offset_forty_eight_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_48>();
     assert_eq!(checked.accepted, checked.reference);
@@ -131,7 +133,7 @@ fn chains_at_offset_forty_eight_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn chains_at_offset_fifty_six_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_56>();
     assert_eq!(checked.accepted, checked.reference);
@@ -141,7 +143,7 @@ fn chains_at_offset_fifty_six_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn chains_at_offset_sixty_four_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_64>();
     assert_eq!(checked.accepted, checked.reference);
@@ -151,7 +153,7 @@ fn chains_at_offset_sixty_four_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn chains_at_offset_seventy_two_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_72>();
     assert_eq!(checked.accepted, checked.reference);
@@ -161,7 +163,7 @@ fn chains_at_offset_seventy_two_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn chains_at_offset_eighty_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_80>();
     assert_eq!(checked.accepted, checked.reference);
@@ -171,7 +173,7 @@ fn chains_at_offset_eighty_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn chains_at_offset_eighty_eight_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_88>();
     assert_eq!(checked.accepted, checked.reference);
@@ -181,7 +183,7 @@ fn chains_at_offset_eighty_eight_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn chains_at_offset_ninety_six_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_96>();
     assert_eq!(checked.accepted, checked.reference);
@@ -191,10 +193,11 @@ fn chains_at_offset_ninety_six_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn terminal_only_offsets_preserve_admission() {
     let bytes: [u8; PROOF_BYTES] = kani::any();
-    let length: usize = kani::any();
+    let length: u8 = kani::any();
+    let length = usize::from(length);
     kani::assume(length <= bytes.len());
     let start = le_u16(&bytes, ATTRIBUTES_OFFSET_FIELD);
     kani::assume(TERMINATOR_STARTS.contains(&start));
@@ -210,10 +213,11 @@ fn terminal_only_offsets_preserve_admission() {
 
 #[kani::proof]
 #[kani::unwind(9)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn remaining_attribute_offsets_reject_the_chain() {
     let bytes: [u8; PROOF_BYTES] = kani::any();
-    let length: usize = kani::any();
+    let length: u8 = kani::any();
+    let length = usize::from(length);
     kani::assume(length <= bytes.len());
     let start = le_u16(&bytes, ATTRIBUTES_OFFSET_FIELD);
     kani::assume(
