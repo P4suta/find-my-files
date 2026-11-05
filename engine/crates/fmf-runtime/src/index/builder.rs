@@ -284,7 +284,7 @@ impl VolumeIndexBuilder {
     }
 
     #[cfg(kani)]
-    pub(super) fn root_index(
+    pub(crate) fn root_index(
         volume_label: &str,
         root: Frn,
     ) -> Result<VolumeIndex, IndexBuildError> {
