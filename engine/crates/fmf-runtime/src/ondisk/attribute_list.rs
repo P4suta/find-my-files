@@ -1942,6 +1942,30 @@ mod tests {
     }
 
     #[test]
+    fn continuation_extents_do_not_repeat_base_allocation_and_data_size_rules() {
+        let mut bytes = nonresident_attr(1, 1, 0, &[0x11, 1, 2, 0]);
+        put_u64(&mut bytes, 40, 0);
+        assert_eq!(
+            decode_extent_runs(&NtfsAttribute::parse(&bytes).unwrap(), 4, 16),
+            Some((
+                0,
+                vec![StreamRun {
+                    logical: 4,
+                    physical: Some(8),
+                    len: 4
+                }]
+            ))
+        );
+    }
+
+    #[test]
+    fn otherwise_consistent_sizes_do_not_admit_non_power_of_two_clusters() {
+        let mut bytes = nonresident_attr(0, 0, 3, &[0x11, 1, 1, 0]);
+        put_u64(&mut bytes, 40, 3);
+        assert!(decode_extent_runs(&NtfsAttribute::parse(&bytes).unwrap(), 3, 12).is_none());
+    }
+
+    #[test]
     fn base_sizes_admit_exact_allocation_data_and_initialization_limits() {
         let valid = nonresident_attr(0, 1, 8, &[0x11, 2, 1, 0]);
         assert!(decode_extent_runs(&NtfsAttribute::parse(&valid).unwrap(), 4, 12).is_some());

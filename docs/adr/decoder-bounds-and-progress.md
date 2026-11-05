@@ -61,11 +61,18 @@ Its arbitrary one-byte used length covers every admitted value within the unchan
 All remaining bytes stay arbitrary.
 The rejected-header and fixed-offset partitions together cover the complete original input domain.
 Each offset has separate admission-equivalence and accepted-chain invariant harnesses.
-Both harnesses quantify the same complete byte domain for that offset.
+Each pair constructs a first residency marker of zero or one.
+An independent invalid-marker harness covers every other marker value at all seven chain offsets.
+Acceptance with an invalid first marker requires an immediate terminator and the same checked record geometry.
+The three marker partitions together cover the same complete byte domain for each offset.
 The admission harness compares the production validator with the preserved reference.
 The invariant harness calls the production validator and independently checks every accepted attribute.
 Requiring both harnesses preserves the conjunction of the former assertions without three traversals in one solver problem.
 The invariant harness also bounds the attribute count by the smallest resident header and the space before the terminator.
+The earliest resident case covers an accepted chain with more than one attribute.
+The earliest non-resident case covers an accepted non-resident attribute.
+Every other input byte stays arbitrary under the existing constructive header fields.
+The byte and length bounds remain unchanged.
 Their unwind bounds follow the smallest resident header and the remaining proof bytes.
 The bounds leave room for the terminal or rejected header after the largest admitted sequence.
 The earliest terminal-only offset includes one possible resident attribute followed by rejection.
@@ -73,6 +80,8 @@ The later terminal offsets reject every nonterminal attribute before advancing.
 The other rejected offsets permit one empty-region probe and no attribute advance.
 Exhaustive constant patterns classify the terminal offsets without a separate slice traversal.
 Compile-time checks bind the bounds to the proof geometry.
+After a first non-resident header, the remaining proof bytes can't contain another complete attribute.
+The bounds for a non-resident first attribute include the attribute and final probe.
 Unwinding assertions remain enabled.
 The runner verifies one harness at a time to reduce concurrent resource demand.
 The proof watchdog and hosted job use longer safety deadlines for the expanded inventory.
