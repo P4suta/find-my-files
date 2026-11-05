@@ -50,11 +50,16 @@ struct ChainChecks {
     nonresident: bool,
 }
 
-fn check_chain_at<const START: u16>() -> ChainChecks {
+fn record_bytes_at<const START: u16>() -> [u8; PROOF_BYTES] {
     let mut bytes: [u8; PROOF_BYTES] = kani::any();
     let [offset_low, offset_high] = START.to_le_bytes();
     bytes[ATTRIBUTES_OFFSET_FIELD] = offset_low;
     bytes[ATTRIBUTES_OFFSET_FIELD + 1] = offset_high;
+    bytes
+}
+
+fn check_chain_at<const START: u16>() -> ChainChecks {
+    let bytes = record_bytes_at::<START>();
     let length: u8 = kani::any();
     let length = usize::from(length);
     kani::assume(length <= bytes.len());
@@ -209,27 +214,63 @@ fn chains_at_offset_ninety_six_preserve_admission_and_invariants() {
     kani::cover!(!checked.accepted);
 }
 
-#[kani::proof]
-#[kani::unwind(3)]
-#[kani::solver(cadical)]
-fn terminal_only_offsets_preserve_admission() {
-    let bytes: [u8; PROOF_BYTES] = kani::any();
+struct TerminalChecks {
+    accepted: bool,
+    reference: bool,
+    type_id: Option<u32>,
+}
+
+fn check_terminal_at<const START: u16>() -> TerminalChecks {
+    let bytes = record_bytes_at::<START>();
     let length: u8 = kani::any();
     let length = usize::from(length);
     kani::assume(length <= bytes.len());
-    let start = le_u16(&bytes, ATTRIBUTES_OFFSET_FIELD);
-    kani::assume(matches!(
-        start,
-        TERMINATOR_OFFSET_104 | TERMINATOR_OFFSET_112 | TERMINATOR_OFFSET_120
-    ));
     let record = &bytes[..length];
     let accepted = attributes_complete(record);
-    assert_eq!(accepted, admission_reference::attributes_complete(record));
-    if accepted {
-        assert_eq!(le_u32(record, usize::from(start)), ATTRIBUTE_END);
+    TerminalChecks {
+        accepted,
+        reference: admission_reference::attributes_complete(record),
+        type_id: accepted.then(|| le_u32(record, usize::from(START))),
     }
-    kani::cover!(accepted);
-    kani::cover!(!accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(cadical)]
+fn terminal_at_offset_one_hundred_four_preserves_admission() {
+    let checked = check_terminal_at::<TERMINATOR_OFFSET_104>();
+    assert_eq!(checked.accepted, checked.reference);
+    if checked.accepted {
+        assert_eq!(checked.type_id, Some(ATTRIBUTE_END));
+    }
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn terminal_at_offset_one_hundred_twelve_preserves_admission() {
+    let checked = check_terminal_at::<TERMINATOR_OFFSET_112>();
+    assert_eq!(checked.accepted, checked.reference);
+    if checked.accepted {
+        assert_eq!(checked.type_id, Some(ATTRIBUTE_END));
+    }
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn terminal_at_offset_one_hundred_twenty_preserves_admission() {
+    let checked = check_terminal_at::<TERMINATOR_OFFSET_120>();
+    assert_eq!(checked.accepted, checked.reference);
+    if checked.accepted {
+        assert_eq!(checked.type_id, Some(ATTRIBUTE_END));
+    }
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
 }
 
 #[kani::proof]
