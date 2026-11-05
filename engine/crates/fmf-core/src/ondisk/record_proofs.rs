@@ -16,6 +16,10 @@ const REFERENCE_NONRESIDENT_HEADER_BYTES: usize = 64;
 const REFERENCE_ATTRIBUTE_LENGTH_FIELD: usize = 4;
 const REFERENCE_RESIDENCY_FIELD: usize = 8;
 const REFERENCE_ATTRIBUTE_ID_FIELD: usize = 14;
+const REFERENCE_NAME_LENGTH_FIELD: usize = 9;
+const REFERENCE_FLAGS_FIELD: usize = 12;
+const REFERENCE_VALUE_LENGTH_FIELD: usize = 16;
+const REFERENCE_VALUE_OFFSET_FIELD: usize = 20;
 const REFERENCE_HIGH_ID_START: u16 = u128::BITS as u16;
 const REFERENCE_ALIGNMENT: usize = 8;
 const REFERENCE_ATTRIBUTE_TYPE_STEP: u32 = 0x10;
@@ -73,6 +77,49 @@ enum PrefixIds {
     FirstHigh,
     SecondHigh,
     HighPair,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FirstTerminator {
+    First,
+    Second,
+    Third,
+    Absent,
+}
+
+fn first_terminator(first: u32, second: u32, third: u32) -> FirstTerminator {
+    match (first, second, third) {
+        (ATTRIBUTE_END, _, _) => FirstTerminator::First,
+        (_, ATTRIBUTE_END, _) => FirstTerminator::Second,
+        (_, _, ATTRIBUTE_END) => FirstTerminator::Third,
+        _ => FirstTerminator::Absent,
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(1)]
+fn first_terminator_partitions_preserve_every_type_triple() {
+    let first: u32 = kani::any();
+    let second: u32 = kani::any();
+    let third: u32 = kani::any();
+    let class = first_terminator(first, second, third);
+    assert_eq!(class == FirstTerminator::First, first == ATTRIBUTE_END);
+    assert_eq!(
+        class == FirstTerminator::Second,
+        first != ATTRIBUTE_END && second == ATTRIBUTE_END
+    );
+    assert_eq!(
+        class == FirstTerminator::Third,
+        first != ATTRIBUTE_END && second != ATTRIBUTE_END && third == ATTRIBUTE_END
+    );
+    assert_eq!(
+        class == FirstTerminator::Absent,
+        first != ATTRIBUTE_END && second != ATTRIBUTE_END && third != ATTRIBUTE_END
+    );
+    kani::cover!(class == FirstTerminator::First && second == 0 && third == u32::MAX);
+    kani::cover!(class == FirstTerminator::Second && first == 0 && third == 0);
+    kani::cover!(class == FirstTerminator::Third && first == 1 && second == 0);
+    kani::cover!(class == FirstTerminator::Absent && first == 0 && second == 0 && third == 0);
 }
 
 fn prefix_ids(first: u16, second: u16) -> PrefixIds {
@@ -498,6 +545,78 @@ fn record_bytes_with_filling_attribute<
     }
 }
 
+fn record_bytes_with_filling_terminator<const FIRST_HIGH: bool, const SECOND_HIGH: bool>(
+    terminator: FirstTerminator,
+) -> ([u8; PROOF_BYTES], usize) {
+    let (mut bytes, length) = record_bytes_with_filling_attribute::<
+        ATTRIBUTE_OFFSET_56,
+        { REFERENCE_RESIDENT_HEADER_BYTES as u32 },
+        { REFERENCE_RESIDENT_HEADER_BYTES as u32 },
+        { REFERENCE_RESIDENT_HEADER_BYTES as u32 },
+    >(true);
+    let class = match (FIRST_HIGH, SECOND_HIGH) {
+        (false, false) => PrefixIds::BitsetPair,
+        (true, false) => PrefixIds::FirstHigh,
+        (false, true) => PrefixIds::SecondHigh,
+        (true, true) => PrefixIds::HighPair,
+    };
+    kani::assume(
+        prefix_ids_at::<ATTRIBUTE_OFFSET_56, { REFERENCE_RESIDENT_HEADER_BYTES as u32 }>(&bytes)
+            == class,
+    );
+    let first = usize::from(ATTRIBUTE_OFFSET_56);
+    let second = first + REFERENCE_RESIDENT_HEADER_BYTES;
+    let third = second + REFERENCE_RESIDENT_HEADER_BYTES;
+    let marker = ATTRIBUTE_END.to_le_bytes();
+    match terminator {
+        FirstTerminator::First => {
+            bytes[first..first + size_of::<u32>()].copy_from_slice(&marker);
+        }
+        FirstTerminator::Second => {
+            kani::assume(le_u32(&bytes, first) != ATTRIBUTE_END);
+            bytes[second..second + size_of::<u32>()].copy_from_slice(&marker);
+        }
+        FirstTerminator::Third => {
+            kani::assume(le_u32(&bytes, first) != ATTRIBUTE_END);
+            kani::assume(le_u32(&bytes, second) != ATTRIBUTE_END);
+            bytes[third..third + size_of::<u32>()].copy_from_slice(&marker);
+        }
+        FirstTerminator::Absent => {
+            kani::assume(le_u32(&bytes, first) != ATTRIBUTE_END);
+            kani::assume(le_u32(&bytes, second) != ATTRIBUTE_END);
+            kani::assume(le_u32(&bytes, third) != ATTRIBUTE_END);
+        }
+    }
+    assert!(
+        first_terminator(
+            le_u32(&bytes, first),
+            le_u32(&bytes, second),
+            le_u32(&bytes, third),
+        ) == terminator
+    );
+    (bytes, length)
+}
+
+fn three_minimal_resident_attributes(bytes: &[u8; PROOF_BYTES]) -> bool {
+    let first = usize::from(ATTRIBUTE_OFFSET_56);
+    let second = first + REFERENCE_RESIDENT_HEADER_BYTES;
+    let third = second + REFERENCE_RESIDENT_HEADER_BYTES;
+    let first_id = le_u16(bytes, first + REFERENCE_ATTRIBUTE_ID_FIELD);
+    let second_id = le_u16(bytes, second + REFERENCE_ATTRIBUTE_ID_FIELD);
+    let third_id = le_u16(bytes, third + REFERENCE_ATTRIBUTE_ID_FIELD);
+    if first_id == second_id || first_id == third_id || second_id == third_id {
+        return false;
+    }
+    [first, second, third].into_iter().all(|offset| {
+        le_u32(bytes, offset) == REFERENCE_FILE_NAME
+            && bytes[offset + REFERENCE_NAME_LENGTH_FIELD] == 0
+            && le_u16(bytes, offset + REFERENCE_FLAGS_FIELD) == 0
+            && le_u32(bytes, offset + REFERENCE_VALUE_LENGTH_FIELD) == 0
+            && usize::from(le_u16(bytes, offset + REFERENCE_VALUE_OFFSET_FIELD))
+                == REFERENCE_RESIDENT_HEADER_BYTES
+    })
+}
+
 fn check_filling_attribute_admission<
     const START: u16,
     const FIRST: u32,
@@ -547,7 +666,15 @@ fn check_chain_invariants_at<const START: u16, const MARKER: u8>() -> ChainCheck
 }
 
 fn check_chain_invariants(record: &[u8]) -> ChainChecks {
-    let accepted = attributes_complete(record);
+    if attributes_complete(record) {
+        inspect_chain::<true>(record)
+    } else {
+        inspect_chain::<false>(record)
+    }
+}
+
+fn inspect_chain<const ACCEPTED: bool>(record: &[u8]) -> ChainChecks {
+    let accepted = ACCEPTED;
     let mut count = 0;
     let mut nonresident = false;
     if accepted {
@@ -1497,11 +1624,42 @@ fn filling_third_resident_at_offset_fifty_six_with_first_high_id_preserves_admis
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(bitwuzla)]
-fn filling_third_resident_at_offset_fifty_six_with_second_high_id_preserves_admission() {
+#[kani::solver(cadical)]
+fn filling_third_resident_with_second_high_id_and_first_terminator_preserves_admission() {
     let (bytes, length) =
-        record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
-    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::SecondHigh);
+        record_bytes_with_filling_terminator::<false, true>(FirstTerminator::First);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, true>(&bytes, length);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(
+        checked.accepted
+            && le_u16(
+                &bytes,
+                usize::from(ATTRIBUTE_OFFSET_56) + REFERENCE_ATTRIBUTE_ID_FIELD
+            ) == u16::MIN
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn filling_third_resident_with_second_high_id_and_second_terminator_preserves_admission() {
+    let (bytes, length) =
+        record_bytes_with_filling_terminator::<false, true>(FirstTerminator::Second);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, true>(&bytes, length);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn filling_third_resident_with_second_high_id_and_third_terminator_preserves_admission() {
+    let (bytes, length) =
+        record_bytes_with_filling_terminator::<false, true>(FirstTerminator::Third);
     let checked =
         check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, true>(&bytes, length);
     assert_eq!(checked.accepted, checked.reference);
@@ -1512,15 +1670,80 @@ fn filling_third_resident_at_offset_fifty_six_with_second_high_id_preserves_admi
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(bitwuzla)]
-fn filling_third_resident_at_offset_fifty_six_with_high_prefix_ids_preserves_admission() {
+fn filling_third_resident_with_second_high_id_and_no_terminator_rejects_both_validators() {
     let (bytes, length) =
-        record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
-    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::HighPair);
+        record_bytes_with_filling_terminator::<false, true>(FirstTerminator::Absent);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, true>(&bytes, length);
+    assert!(!checked.accepted);
+    assert!(!checked.reference);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(!checked.accepted && !checked.reference);
+    kani::cover!(
+        three_minimal_resident_attributes(&bytes) && !checked.accepted && !checked.reference
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn filling_third_resident_with_high_prefix_ids_and_first_terminator_preserves_admission() {
+    let (bytes, length) =
+        record_bytes_with_filling_terminator::<true, true>(FirstTerminator::First);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, true>(&bytes, length);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(
+        checked.accepted
+            && le_u16(
+                &bytes,
+                usize::from(ATTRIBUTE_OFFSET_56) + REFERENCE_ATTRIBUTE_ID_FIELD
+            ) == u16::MAX
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn filling_third_resident_with_high_prefix_ids_and_second_terminator_preserves_admission() {
+    let (bytes, length) =
+        record_bytes_with_filling_terminator::<true, true>(FirstTerminator::Second);
     let checked =
         check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, true>(&bytes, length);
     assert_eq!(checked.accepted, checked.reference);
     kani::cover!(checked.accepted);
     kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn filling_third_resident_with_high_prefix_ids_and_third_terminator_preserves_admission() {
+    let (bytes, length) =
+        record_bytes_with_filling_terminator::<true, true>(FirstTerminator::Third);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, true>(&bytes, length);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(bitwuzla)]
+fn filling_third_resident_with_high_prefix_ids_and_no_terminator_rejects_both_validators() {
+    let (bytes, length) =
+        record_bytes_with_filling_terminator::<true, true>(FirstTerminator::Absent);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, true>(&bytes, length);
+    assert!(!checked.accepted);
+    assert!(!checked.reference);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(!checked.accepted && !checked.reference);
+    kani::cover!(
+        three_minimal_resident_attributes(&bytes) && !checked.accepted && !checked.reference
+    );
 }
 
 #[kani::proof]
@@ -1713,11 +1936,50 @@ fn filling_third_resident_at_offset_fifty_six_with_first_high_id_preserves_invar
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(bitwuzla)]
-fn filling_third_resident_at_offset_fifty_six_with_second_high_id_preserves_invariants() {
+#[kani::solver(cadical)]
+fn filling_third_resident_with_second_high_id_and_first_terminator_preserves_invariants() {
     let (bytes, length) =
-        record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
-    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::SecondHigh);
+        record_bytes_with_filling_terminator::<false, true>(FirstTerminator::First);
+    let checked =
+        check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, true>(&bytes, length);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(
+        checked.accepted
+            && le_u16(
+                &bytes,
+                usize::from(ATTRIBUTE_OFFSET_56) + REFERENCE_ATTRIBUTE_ID_FIELD
+            ) == u16::MIN
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn filling_third_resident_with_second_high_id_and_second_terminator_preserves_invariants() {
+    let (bytes, length) =
+        record_bytes_with_filling_terminator::<false, true>(FirstTerminator::Second);
+    let checked =
+        check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, true>(&bytes, length);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn filling_third_resident_with_second_high_id_and_third_terminator_preserves_invariants() {
+    let (bytes, length) =
+        record_bytes_with_filling_terminator::<false, true>(FirstTerminator::Third);
     let checked =
         check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, true>(&bytes, length);
     assert!(
@@ -1732,10 +1994,53 @@ fn filling_third_resident_at_offset_fifty_six_with_second_high_id_preserves_inva
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(bitwuzla)]
-fn filling_third_resident_at_offset_fifty_six_with_high_prefix_ids_preserves_invariants() {
+fn filling_third_resident_with_second_high_id_and_no_terminator_preserves_rejection_invariants() {
     let (bytes, length) =
-        record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
-    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::HighPair);
+        record_bytes_with_filling_terminator::<false, true>(FirstTerminator::Absent);
+    check_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, true>(&bytes);
+    let record = &bytes[..length];
+    let accepted = attributes_complete(record);
+    assert!(!accepted);
+    let checked = inspect_chain::<false>(record);
+    assert_eq!(checked.accepted, accepted);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(!accepted);
+    kani::cover!(three_minimal_resident_attributes(&bytes) && !accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn filling_third_resident_with_high_prefix_ids_and_first_terminator_preserves_invariants() {
+    let (bytes, length) =
+        record_bytes_with_filling_terminator::<true, true>(FirstTerminator::First);
+    let checked =
+        check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, true>(&bytes, length);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(
+        checked.accepted
+            && le_u16(
+                &bytes,
+                usize::from(ATTRIBUTE_OFFSET_56) + REFERENCE_ATTRIBUTE_ID_FIELD
+            ) == u16::MAX
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn filling_third_resident_with_high_prefix_ids_and_second_terminator_preserves_invariants() {
+    let (bytes, length) =
+        record_bytes_with_filling_terminator::<true, true>(FirstTerminator::Second);
     let checked =
         check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, true>(&bytes, length);
     assert!(
@@ -1745,6 +2050,44 @@ fn filling_third_resident_at_offset_fifty_six_with_high_prefix_ids_preserves_inv
     );
     kani::cover!(checked.accepted);
     kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn filling_third_resident_with_high_prefix_ids_and_third_terminator_preserves_invariants() {
+    let (bytes, length) =
+        record_bytes_with_filling_terminator::<true, true>(FirstTerminator::Third);
+    let checked =
+        check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, true>(&bytes, length);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(bitwuzla)]
+fn filling_third_resident_with_high_prefix_ids_and_no_terminator_preserves_rejection_invariants() {
+    let (bytes, length) =
+        record_bytes_with_filling_terminator::<true, true>(FirstTerminator::Absent);
+    check_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, true>(&bytes);
+    let record = &bytes[..length];
+    let accepted = attributes_complete(record);
+    assert!(!accepted);
+    let checked = inspect_chain::<false>(record);
+    assert_eq!(checked.accepted, accepted);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(!accepted);
+    kani::cover!(three_minimal_resident_attributes(&bytes) && !accepted);
 }
 
 #[kani::proof]
