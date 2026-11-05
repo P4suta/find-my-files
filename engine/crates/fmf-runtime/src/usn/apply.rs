@@ -631,6 +631,546 @@ mod tests {
         }
     }
 
+    #[test]
+    fn journal_batch_planning_keeps_object_order_and_the_first_old_name() {
+        let mut idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let created = frn(1, 200);
+        let parent_a = frn(1, 10);
+        let parent_b = frn(1, 20);
+        let records = [
+            rec_full(
+                object,
+                parent_a,
+                reason::RENAME_OLD_NAME,
+                0x20,
+                "shared.txt",
+            ),
+            rec_full(created, parent_a, reason::FILE_CREATE, 0x20, "created.txt"),
+            rec_full(
+                object,
+                parent_a,
+                reason::RENAME_NEW_NAME,
+                0x20,
+                "temporary.txt",
+            ),
+            rec_full(
+                object,
+                parent_a,
+                reason::RENAME_OLD_NAME,
+                0x20,
+                "temporary.txt",
+            ),
+            rec_full(
+                object,
+                parent_b,
+                reason::RENAME_NEW_NAME | reason::CLOSE,
+                0x2,
+                "renamed.txt",
+            ),
+        ];
+        let plan = plan_batch(&idx, &records, &MetadataSource::constant(91, FT1));
+        assert_eq!(plan.order, [Frn(object), Frn(created)]);
+        assert_eq!(plan.agg.len(), 2);
+        assert_eq!(plan.agg[&Frn(object)].last, 4);
+        assert_eq!(plan.agg[&Frn(object)].rename_old, Some(0));
+        assert_eq!(
+            plan.agg[&Frn(object)].reasons,
+            reason::RENAME_OLD_NAME | reason::RENAME_NEW_NAME | reason::CLOSE
+        );
+        assert_eq!(plan.stat_snapshots.len(), 2);
+        assert_eq!(plan.preflight_failures, 0);
+        let stats = apply_planned(&mut idx, &records, plan);
+        assert_eq!(
+            stats,
+            BatchStats {
+                created_or_renamed: 2,
+                ..BatchStats::default()
+            }
+        );
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_a), &u16s("shared.txt"))
+                .is_none()
+        );
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_b), &u16s("renamed.txt"))
+                .is_some()
+        );
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_b), &u16s("alias.txt"))
+                .is_some()
+        );
+        for id in idx.entries_by_frn(Frn(object)) {
+            assert_eq!((idx.size(id), idx.mtime(id)), (91, FT1));
+            assert!(idx.is_excluded(id));
+        }
+        assert_eq!(idx.entries_by_frn(Frn(created)).count(), 1);
+    }
+
+    #[test]
+    fn journal_batch_planning_reads_only_the_required_metadata_answers() {
+        let idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let source = MetadataSource::map_with_links(
+            HashMap::from([(object, (900, FT1))]),
+            HashMap::from([(
+                object,
+                vec![LinkInfo {
+                    parent_frn: frn(1, 10),
+                    name: u16s("shared.txt"),
+                }],
+            )]),
+        );
+        for (flags, links, stat) in [
+            (reason::FILE_CREATE, true, true),
+            (reason::RENAME_NEW_NAME, true, true),
+            (reason::HARD_LINK_CHANGE, true, true),
+            (reason::FILE_DELETE | reason::HARD_LINK_CHANGE, true, true),
+            (reason::DATA_OVERWRITE, false, true),
+            (reason::DATA_EXTEND, false, true),
+            (reason::DATA_TRUNCATION, false, true),
+            (reason::BASIC_INFO_CHANGE, false, true),
+            (reason::REPARSE_POINT_CHANGE, false, true),
+            (reason::FILE_DELETE, false, false),
+            (reason::RENAME_OLD_NAME, false, false),
+            (reason::CLOSE, false, false),
+            (0, false, false),
+        ] {
+            let records = [rec_full(object, frn(1, 10), flags, 0x20, "shared.txt")];
+            let plan = plan_batch(&idx, &records, &source);
+            assert_eq!(plan.preflight_failures, 0, "{flags:#x}");
+            assert_eq!(
+                plan.link_snapshots.contains_key(&Frn(object)),
+                links,
+                "{flags:#x}"
+            );
+            assert_eq!(
+                plan.stat_snapshots.get(&Frn(object)).copied(),
+                stat.then_some((900, FT1)),
+                "{flags:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn journal_batch_single_link_rename_refreshes_shared_attributes_without_a_stat() {
+        let object = frn(1, 100);
+        let parent = frn(1, 10);
+        for (initially_set, attributes, reparse, excluded) in [
+            (false, 0x2, false, true),
+            (false, 0x4, false, true),
+            (false, 0x400, true, false),
+            (true, 0x20, false, false),
+        ] {
+            let mut idx = build_hardlink_sample();
+            if initially_set {
+                idx.update_object_attrs_frn(Frn(object), true, true, true);
+            }
+            let records = [
+                rec_full(
+                    object,
+                    parent,
+                    reason::RENAME_OLD_NAME,
+                    attributes,
+                    "shared.txt",
+                ),
+                rec_full(
+                    object,
+                    parent,
+                    reason::RENAME_NEW_NAME,
+                    attributes,
+                    "renamed.txt",
+                ),
+            ];
+            let stats = apply_batch(&mut idx, &records, &MetadataSource::none());
+            assert_eq!(
+                stats,
+                BatchStats {
+                    created_or_renamed: 1,
+                    stat_failures: 1,
+                    ..BatchStats::default()
+                }
+            );
+            assert_eq!(idx.entries_by_frn(Frn(object)).count(), 2);
+            for id in idx.entries_by_frn(Frn(object)) {
+                assert_eq!(
+                    idx.is_reparse(id),
+                    reparse,
+                    "{initially_set}, {attributes:#x}"
+                );
+                assert_eq!(
+                    idx.is_excluded(id),
+                    excluded,
+                    "{initially_set}, {attributes:#x}"
+                );
+                assert_eq!((idx.size(id), idx.mtime(id)), (42, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn journal_batch_link_creation_refreshes_metadata_for_surviving_siblings() {
+        let object = frn(1, 100);
+        for (name, count) in [("third.txt", 3), ("shared.txt", 2)] {
+            let mut idx = build_hardlink_sample();
+            let records = [rec_full(
+                object,
+                frn(1, 10),
+                reason::FILE_CREATE,
+                0x20,
+                name,
+            )];
+            let stats = apply_batch(&mut idx, &records, &MetadataSource::constant(321, FT1));
+            assert_eq!(
+                stats,
+                BatchStats {
+                    created_or_renamed: 1,
+                    ..BatchStats::default()
+                }
+            );
+            assert_eq!(idx.entries_by_frn(Frn(object)).count(), count);
+            for id in idx.entries_by_frn(Frn(object)) {
+                assert_eq!((idx.size(id), idx.mtime(id)), (321, FT1), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn journal_batch_stat_results_count_objects_and_missing_answers_independently() {
+        let mut idx = build_hardlink_sample();
+        let first_new = idx.len() as u32;
+        let name = u16s("other.txt");
+        idx.upsert_link_usn(&crate::index::testutil::raw(200, 10, &name, false, 5, FT0))
+            .unwrap();
+        idx.merge_new_into_permutations(first_new).unwrap();
+        let records = [
+            rec_full(
+                frn(1, 100),
+                frn(1, 10),
+                reason::DATA_EXTEND,
+                0x20,
+                "shared.txt",
+            ),
+            rec_full(
+                frn(1, 100),
+                frn(1, 10),
+                reason::DATA_EXTEND,
+                0x20,
+                "shared.txt",
+            ),
+            rec_full(
+                frn(1, 200),
+                frn(1, 10),
+                reason::DATA_EXTEND,
+                0x20,
+                "other.txt",
+            ),
+            rec_full(
+                frn(1, 300),
+                frn(1, 10),
+                reason::DATA_EXTEND,
+                0x20,
+                "missing.txt",
+            ),
+        ];
+        let refreshed = apply_batch(&mut idx, &records, &MetadataSource::constant(900, FT1));
+        assert_eq!(
+            refreshed,
+            BatchStats {
+                stat_updated: 2,
+                ignored: 1,
+                ..BatchStats::default()
+            }
+        );
+        for record in [100, 200] {
+            for id in idx.entries_by_frn(Frn(frn(1, record))) {
+                assert_eq!((idx.size(id), idx.mtime(id)), (900, FT1));
+            }
+        }
+        let unavailable = apply_batch(&mut idx, &records, &MetadataSource::none());
+        assert_eq!(
+            unavailable,
+            BatchStats {
+                stat_failures: 2,
+                ignored: 3,
+                ..BatchStats::default()
+            }
+        );
+        let mut attribute_records = records;
+        for record in &mut attribute_records {
+            record.attributes = 0x2;
+        }
+        let attributes = apply_batch(&mut idx, &attribute_records, &MetadataSource::none());
+        assert_eq!(
+            attributes,
+            BatchStats {
+                stat_failures: 2,
+                ignored: 1,
+                ..BatchStats::default()
+            }
+        );
+    }
+
+    #[test]
+    fn journal_batch_topology_rejections_report_every_rejected_operation() {
+        let mut idx = build_hardlink_sample();
+        let records = [
+            rec_full(
+                frn(1, 200),
+                frn(1, 999),
+                reason::FILE_CREATE,
+                0x20,
+                "file.txt",
+            ),
+            rec_full(
+                frn(1, 300),
+                frn(1, 999),
+                reason::FILE_CREATE,
+                0x10,
+                "directory",
+            ),
+            rec_full(
+                frn(1, 10),
+                frn(1, 10),
+                reason::RENAME_NEW_NAME,
+                0x10,
+                "cycle",
+            ),
+        ];
+        let stats = apply_batch(&mut idx, &records, &MetadataSource::none());
+        assert_eq!(
+            stats,
+            BatchStats {
+                index_rejections: 3,
+                ignored: 3,
+                stat_failures: 2,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert!(idx.entry_by_frn(Frn(frn(1, 200))).is_none());
+        assert!(idx.entry_by_frn(Frn(frn(1, 300))).is_none());
+        assert_eq!(idx.name(idx.entry_by_frn(Frn(frn(1, 10))).unwrap()), b"a");
+    }
+
+    #[test]
+    fn journal_batch_preflight_counts_each_invalid_directory_without_mutation() {
+        let mut idx = build_hardlink_sample();
+        let generation = idx.content_generation();
+        let records = [
+            rec_full(
+                frn(1, 200),
+                frn(1, 10),
+                reason::FILE_CREATE,
+                0x20,
+                "prefix.txt",
+            ),
+            rec_full(frn(1, 10), 5, reason::HARD_LINK_CHANGE, 0x10, "a"),
+            rec_full(frn(1, 20), 5, reason::HARD_LINK_CHANGE, 0x10, "b"),
+        ];
+        let plan = plan_batch(&idx, &records, &MetadataSource::constant(999, FT1));
+        assert_eq!(plan.preflight_failures, 2);
+        assert!(plan.stat_snapshots.is_empty());
+        let stats = apply_planned(&mut idx, &records, plan);
+        assert_eq!(
+            stats,
+            BatchStats {
+                hard_link_refresh_failures: 2,
+                ignored: 2,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert_eq!(idx.content_generation(), generation);
+        assert!(idx.entry_by_frn(Frn(frn(1, 200))).is_none());
+        assert_eq!(idx.entries_by_frn(Frn(frn(1, 100))).count(), 2);
+    }
+
+    #[test]
+    fn journal_batch_reconciliation_counts_independent_link_and_metadata_changes() {
+        struct LinkCase {
+            links: &'static [(u64, &'static str)],
+            fetched: bool,
+            attributes: u32,
+            expected: BatchStats,
+        }
+        let cases = [
+            LinkCase {
+                links: &[(10, "shared.txt"), (20, "alias.txt")],
+                fetched: false,
+                attributes: 0x20,
+                expected: BatchStats {
+                    stat_failures: 1,
+                    ignored: 1,
+                    ..BatchStats::default()
+                },
+            },
+            LinkCase {
+                links: &[(10, "shared.txt"), (20, "alias.txt")],
+                fetched: true,
+                attributes: 0x20,
+                expected: BatchStats {
+                    stat_updated: 1,
+                    ..BatchStats::default()
+                },
+            },
+            LinkCase {
+                links: &[(10, "shared.txt"), (20, "alias.txt")],
+                fetched: false,
+                attributes: 0x2,
+                expected: BatchStats {
+                    stat_failures: 1,
+                    ..BatchStats::default()
+                },
+            },
+            LinkCase {
+                links: &[(10, "shared.txt")],
+                fetched: false,
+                attributes: 0x20,
+                expected: BatchStats {
+                    deleted: 1,
+                    stat_failures: 1,
+                    ..BatchStats::default()
+                },
+            },
+            LinkCase {
+                links: &[(10, "shared.txt"), (20, "alias.txt"), (10, "third.txt")],
+                fetched: false,
+                attributes: 0x20,
+                expected: BatchStats {
+                    created_or_renamed: 1,
+                    stat_failures: 1,
+                    ..BatchStats::default()
+                },
+            },
+            LinkCase {
+                links: &[(10, "first.txt"), (20, "second.txt")],
+                fetched: false,
+                attributes: 0x20,
+                expected: BatchStats {
+                    created_or_renamed: 2,
+                    deleted: 2,
+                    stat_failures: 1,
+                    ..BatchStats::default()
+                },
+            },
+            LinkCase {
+                links: &[(10, "first.txt"), (20, "second.txt")],
+                fetched: true,
+                attributes: 0x20,
+                expected: BatchStats {
+                    created_or_renamed: 2,
+                    deleted: 2,
+                    ..BatchStats::default()
+                },
+            },
+        ];
+        let object = frn(1, 100);
+        for case in cases {
+            let mut idx = build_hardlink_sample();
+            let values = if case.fetched {
+                HashMap::from([(object, (900, FT1))])
+            } else {
+                HashMap::new()
+            };
+            let links = case
+                .links
+                .iter()
+                .map(|&(parent, name)| LinkInfo {
+                    parent_frn: frn(1, parent),
+                    name: u16s(name),
+                })
+                .collect();
+            let source = MetadataSource::map_with_links(values, HashMap::from([(object, links)]));
+            let records = [rec_full(
+                object,
+                frn(1, 10),
+                reason::HARD_LINK_CHANGE,
+                case.attributes,
+                "shared.txt",
+            )];
+            let stats = apply_batch(&mut idx, &records, &source);
+            assert_eq!(
+                stats, case.expected,
+                "{:?}, fetched={}",
+                case.links, case.fetched
+            );
+            assert_eq!(idx.entries_by_frn(Frn(object)).count(), case.links.len());
+            for &(parent, name) in case.links {
+                let id = idx
+                    .entry_by_link(Frn(object), Frn(frn(1, parent)), &u16s(name))
+                    .unwrap();
+                let expected_metadata = if case.fetched { (900, FT1) } else { (42, 0) };
+                assert_eq!((idx.size(id), idx.mtime(id)), expected_metadata);
+                assert_eq!(idx.is_excluded(id), case.attributes == 0x2);
+            }
+        }
+    }
+
+    #[test]
+    fn journal_batch_gone_snapshots_count_zero_and_multiple_removed_links() {
+        for (record, removed, ignored) in [(100, 2, 0), (200, 0, 1)] {
+            let mut idx = build_hardlink_sample();
+            let object = frn(1, record);
+            let records = [rec_full(
+                object,
+                frn(1, 10),
+                reason::HARD_LINK_CHANGE,
+                0x20,
+                "shared.txt",
+            )];
+            let stats = apply_batch(
+                &mut idx,
+                &records,
+                &source_with_snapshot(object, LinkSnapshot::Gone),
+            );
+            assert_eq!(
+                stats,
+                BatchStats {
+                    deleted: removed,
+                    ignored,
+                    ..BatchStats::default()
+                }
+            );
+            assert_eq!(idx.entries_by_frn(Frn(object)).count(), 0);
+        }
+    }
+
+    #[test]
+    fn journal_batch_empty_and_failed_snapshots_have_the_same_admission() {
+        let object = frn(1, 100);
+        for flags in [
+            reason::FILE_CREATE,
+            reason::RENAME_NEW_NAME,
+            reason::HARD_LINK_CHANGE,
+        ] {
+            let mut failed = build_hardlink_sample();
+            let mut empty = build_hardlink_sample();
+            let records = [rec_full(object, frn(1, 10), flags, 0x20, "shared.txt")];
+            let failure = apply_batch(
+                &mut failed,
+                &records,
+                &source_with_snapshot(object, LinkSnapshot::Failed),
+            );
+            let incomplete = apply_batch(
+                &mut empty,
+                &records,
+                &source_with_snapshot(object, LinkSnapshot::Present(Vec::new())),
+            );
+            assert_eq!(incomplete, failure);
+            assert_eq!(incomplete.rescan_required, flags != reason::FILE_CREATE);
+            assert_eq!(empty.entries_by_frn(Frn(object)).count(), 2);
+            assert_eq!(empty.content_generation(), failed.content_generation());
+            for (parent, name) in [(10, "shared.txt"), (20, "alias.txt")] {
+                assert!(
+                    empty
+                        .entry_by_link(Frn(object), Frn(frn(1, parent)), &u16s(name))
+                        .is_some()
+                );
+            }
+        }
+    }
+
     /// The mutation phase runs under the index write lock, where a blocking raw-volume read would stall every concurrent query.
     /// Its signature already forbids one, but that only helps if planning actually resolved everything: the source here is *dropped* before a single row is mutated, so any value the plan failed to prefetch shows up as a carried-over/zeroed column rather than as a silent extra `stat` call.
     /// One record per branch that can consume a stat — reconciled link set,
