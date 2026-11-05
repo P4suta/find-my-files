@@ -129,35 +129,6 @@ fn check_prefix_ids<
     );
 }
 
-fn check_prefix_id_class<const START: u16, const FIRST: u32>(bytes: &[u8; PROOF_BYTES]) {
-    match prefix_ids_at::<START, FIRST>(bytes) {
-        PrefixIds::BitsetPair => check_prefix_ids::<START, FIRST, false, false>(bytes),
-        PrefixIds::FirstHigh => check_prefix_ids::<START, FIRST, true, false>(bytes),
-        PrefixIds::SecondHigh => check_prefix_ids::<START, FIRST, false, true>(bytes),
-        PrefixIds::HighPair => check_prefix_ids::<START, FIRST, true, true>(bytes),
-    }
-}
-
-fn check_admission_after_prefix_ids<const START: u16, const FIRST: u32>(
-    bytes: &[u8; PROOF_BYTES],
-    length: usize,
-) -> AdmissionChecks {
-    check_prefix_id_class::<START, FIRST>(bytes);
-    let record = &bytes[..length];
-    AdmissionChecks {
-        accepted: attributes_complete(record),
-        reference: admission_reference::attributes_complete(record),
-    }
-}
-
-fn check_invariants_after_prefix_ids<const START: u16, const FIRST: u32>(
-    bytes: &[u8; PROOF_BYTES],
-    length: usize,
-) -> ChainChecks {
-    check_prefix_id_class::<START, FIRST>(bytes);
-    check_chain_invariants(&bytes[..length])
-}
-
 fn check_admission_for_prefix_ids<
     const START: u16,
     const FIRST: u32,
@@ -1499,11 +1470,54 @@ fn nonresident_chains_at_offset_forty_eight_preserve_invariants() {
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(bitwuzla)]
-fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fifty_six_with_full_record_extent_preserve_admission()
- {
+fn filling_third_resident_at_offset_fifty_six_with_bitset_prefix_ids_preserves_admission() {
     let (bytes, length) =
         record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
-    let checked = check_admission_after_prefix_ids::<ATTRIBUTE_OFFSET_56, 24>(&bytes, length);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::BitsetPair);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, false>(&bytes, length);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(bitwuzla)]
+fn filling_third_resident_at_offset_fifty_six_with_first_high_id_preserves_admission() {
+    let (bytes, length) =
+        record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::FirstHigh);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, false>(&bytes, length);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(bitwuzla)]
+fn filling_third_resident_at_offset_fifty_six_with_second_high_id_preserves_admission() {
+    let (bytes, length) =
+        record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::SecondHigh);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, true>(&bytes, length);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(bitwuzla)]
+fn filling_third_resident_at_offset_fifty_six_with_high_prefix_ids_preserves_admission() {
+    let (bytes, length) =
+        record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::HighPair);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, true>(&bytes, length);
     assert_eq!(checked.accepted, checked.reference);
     kani::cover!(checked.accepted);
     kani::cover!(!checked.accepted);
@@ -1512,10 +1526,50 @@ fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fift
 #[kani::proof]
 #[kani::unwind(3)]
 #[kani::solver(bitwuzla)]
-fn resident_lengths_twenty_four_then_twenty_four_with_other_third_lengths_at_offset_fifty_six_preserve_admission()
- {
+fn other_third_resident_lengths_at_offset_fifty_six_with_bitset_prefix_ids_preserve_admission() {
     let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
-    let checked = check_admission_after_prefix_ids::<ATTRIBUTE_OFFSET_56, 24>(&bytes, length);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::BitsetPair);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, false>(&bytes, length);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(bitwuzla)]
+fn other_third_resident_lengths_at_offset_fifty_six_with_first_high_id_preserve_admission() {
+    let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::FirstHigh);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, false>(&bytes, length);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(bitwuzla)]
+fn other_third_resident_lengths_at_offset_fifty_six_with_second_high_id_preserve_admission() {
+    let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::SecondHigh);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, true>(&bytes, length);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(bitwuzla)]
+fn other_third_resident_lengths_at_offset_fifty_six_with_high_prefix_ids_preserve_admission() {
+    let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::HighPair);
+    let checked =
+        check_admission_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, true>(&bytes, length);
     assert_eq!(checked.accepted, checked.reference);
     kani::cover!(checked.accepted);
     kani::cover!(!checked.accepted);
@@ -1624,11 +1678,66 @@ fn nonresident_chains_at_offset_fifty_six_preserve_admission() {
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(bitwuzla)]
-fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fifty_six_with_full_record_extent_preserve_invariants()
- {
+fn filling_third_resident_at_offset_fifty_six_with_bitset_prefix_ids_preserves_invariants() {
     let (bytes, length) =
         record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
-    let checked = check_invariants_after_prefix_ids::<ATTRIBUTE_OFFSET_56, 24>(&bytes, length);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::BitsetPair);
+    let checked =
+        check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, false>(&bytes, length);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(bitwuzla)]
+fn filling_third_resident_at_offset_fifty_six_with_first_high_id_preserves_invariants() {
+    let (bytes, length) =
+        record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::FirstHigh);
+    let checked =
+        check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, false>(&bytes, length);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(bitwuzla)]
+fn filling_third_resident_at_offset_fifty_six_with_second_high_id_preserves_invariants() {
+    let (bytes, length) =
+        record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::SecondHigh);
+    let checked =
+        check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, true>(&bytes, length);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(bitwuzla)]
+fn filling_third_resident_at_offset_fifty_six_with_high_prefix_ids_preserves_invariants() {
+    let (bytes, length) =
+        record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::HighPair);
+    let checked =
+        check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, true>(&bytes, length);
     assert!(
         checked.count
             <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
@@ -1641,10 +1750,62 @@ fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fift
 #[kani::proof]
 #[kani::unwind(3)]
 #[kani::solver(bitwuzla)]
-fn resident_lengths_twenty_four_then_twenty_four_with_other_third_lengths_at_offset_fifty_six_preserve_invariants()
- {
+fn other_third_resident_lengths_at_offset_fifty_six_with_bitset_prefix_ids_preserve_invariants() {
     let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
-    let checked = check_invariants_after_prefix_ids::<ATTRIBUTE_OFFSET_56, 24>(&bytes, length);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::BitsetPair);
+    let checked =
+        check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, false>(&bytes, length);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(bitwuzla)]
+fn other_third_resident_lengths_at_offset_fifty_six_with_first_high_id_preserve_invariants() {
+    let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::FirstHigh);
+    let checked =
+        check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, false>(&bytes, length);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(bitwuzla)]
+fn other_third_resident_lengths_at_offset_fifty_six_with_second_high_id_preserve_invariants() {
+    let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::SecondHigh);
+    let checked =
+        check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, false, true>(&bytes, length);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(bitwuzla)]
+fn other_third_resident_lengths_at_offset_fifty_six_with_high_prefix_ids_preserve_invariants() {
+    let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
+    kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::HighPair);
+    let checked =
+        check_invariants_for_prefix_ids::<ATTRIBUTE_OFFSET_56, 24, true, true>(&bytes, length);
     assert!(
         checked.count
             <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
