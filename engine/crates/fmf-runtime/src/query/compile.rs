@@ -1102,6 +1102,36 @@ mod tests {
     }
 
     #[test]
+    fn exact_name_literals_record_fold_instability_in_every_shape() {
+        let resolver = super::super::dates::UtcResolver;
+        for (needle, uppercase) in [
+            ("Report", true),
+            ("report", false),
+            ("Äpfel", true),
+            ("äpfel", false),
+        ] {
+            for (prefix, suffix) in [("", ""), ("", "*"), ("*", ""), ("*", "*")] {
+                let text = format!("{prefix}{needle}{suffix}");
+                for (case, exact) in [
+                    (CaseMode::Smart, uppercase),
+                    (CaseMode::Insensitive, false),
+                    (CaseMode::Sensitive, true),
+                ] {
+                    let query = compile(&parse(&text).unwrap(), case, &resolver).unwrap();
+                    let mut terms = query.groups[0].all_terms();
+                    let term = terms.next().expect("one name condition");
+                    assert!(terms.next().is_none());
+                    assert_eq!(
+                        term.exact_needle_unstable,
+                        exact && uppercase,
+                        "query {text:?}, case {case:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn mixed_driver_plans_choose_the_most_selective_literal() {
         let resolver = super::super::dates::UtcResolver;
         for (text, label, exact, needle) in [
