@@ -61,4 +61,5 @@
 - [Candidate mutation audits](adr/candidate-mutation-audits.md)
 - [Connection retirement cause](adr/connection-retirement-cause.md)
 - [Decoder bounds and progress](adr/decoder-bounds-and-progress.md)
+- [Sharded proof evidence](adr/sharded-proof-evidence.md)
 - [Performance execution identity](adr/performance-execution-identity.md)
