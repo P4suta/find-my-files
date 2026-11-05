@@ -483,26 +483,15 @@ fn nonresident_chains_at_offset_ninety_six_preserve_invariants() {
     kani::cover!(!checked.accepted);
 }
 
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn invalid_first_attribute_markers_allow_only_an_immediate_terminator() {
-    let bytes: [u8; PROOF_BYTES] = kani::any();
-    let length: u8 = kani::any();
-    let length = usize::from(length);
-    kani::assume(length <= bytes.len());
-    let start = le_u16(&bytes, ATTRIBUTES_OFFSET_FIELD);
-    kani::assume(matches!(
-        start,
-        ATTRIBUTE_OFFSET_48
-            | ATTRIBUTE_OFFSET_56
-            | ATTRIBUTE_OFFSET_64
-            | ATTRIBUTE_OFFSET_72
-            | ATTRIBUTE_OFFSET_80
-            | ATTRIBUTE_OFFSET_88
-            | ATTRIBUTE_OFFSET_96
-    ));
-    let marker = bytes[usize::from(start) + REFERENCE_RESIDENCY_FIELD];
+struct InvalidMarkerChecks {
+    accepted: bool,
+    marker: u8,
+    first_type: u32,
+}
+
+fn check_invalid_marker_at<const START: u16>() -> InvalidMarkerChecks {
+    let (bytes, length) = record_bytes_at::<START>();
+    let marker = bytes[usize::from(START) + REFERENCE_RESIDENCY_FIELD];
     kani::assume(marker > 1);
     let record = &bytes[..length];
     let accepted = attributes_complete(record);
@@ -511,17 +500,102 @@ fn invalid_first_attribute_markers_allow_only_an_immediate_terminator() {
         assert!(record.len() >= REFERENCE_FILE_HEADER_BYTES);
         let used = le_u32(record, USED_BYTES_FIELD) as usize;
         let allocated = le_u32(record, ALLOCATED_BYTES_FIELD) as usize;
-        let start = usize::from(start);
+        let start = usize::from(le_u16(record, ATTRIBUTES_OFFSET_FIELD));
         assert_eq!(allocated, record.len());
+        assert_eq!(start, usize::from(START));
         assert!(start >= REFERENCE_FILE_HEADER_BYTES && start < used && used <= allocated);
         assert!(start.is_multiple_of(REFERENCE_ALIGNMENT));
         assert!(used - start >= REFERENCE_ALIGNMENT);
-        assert_eq!(le_u32(record, start), ATTRIBUTE_END);
     }
-    kani::cover!(accepted);
-    kani::cover!(!accepted);
-    kani::cover!(marker == 2 && accepted);
-    kani::cover!(marker == u8::MAX && !accepted);
+    InvalidMarkerChecks {
+        accepted,
+        marker,
+        first_type: le_u32(&bytes, usize::from(START)),
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn invalid_markers_at_offset_forty_eight_allow_only_an_immediate_terminator() {
+    let checked = check_invalid_marker_at::<ATTRIBUTE_OFFSET_48>();
+    assert!(!checked.accepted || checked.first_type == ATTRIBUTE_END);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+    kani::cover!(checked.marker == 2 && checked.accepted);
+    kani::cover!(checked.marker == u8::MAX && !checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn invalid_markers_at_offset_fifty_six_allow_only_an_immediate_terminator() {
+    let checked = check_invalid_marker_at::<ATTRIBUTE_OFFSET_56>();
+    assert!(!checked.accepted || checked.first_type == ATTRIBUTE_END);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+    kani::cover!(checked.marker == 2 && checked.accepted);
+    kani::cover!(checked.marker == u8::MAX && !checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn invalid_markers_at_offset_sixty_four_allow_only_an_immediate_terminator() {
+    let checked = check_invalid_marker_at::<ATTRIBUTE_OFFSET_64>();
+    assert!(!checked.accepted || checked.first_type == ATTRIBUTE_END);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+    kani::cover!(checked.marker == 2 && checked.accepted);
+    kani::cover!(checked.marker == u8::MAX && !checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn invalid_markers_at_offset_seventy_two_allow_only_an_immediate_terminator() {
+    let checked = check_invalid_marker_at::<ATTRIBUTE_OFFSET_72>();
+    assert!(!checked.accepted || checked.first_type == ATTRIBUTE_END);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+    kani::cover!(checked.marker == 2 && checked.accepted);
+    kani::cover!(checked.marker == u8::MAX && !checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn invalid_markers_at_offset_eighty_allow_only_an_immediate_terminator() {
+    let checked = check_invalid_marker_at::<ATTRIBUTE_OFFSET_80>();
+    assert!(!checked.accepted || checked.first_type == ATTRIBUTE_END);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+    kani::cover!(checked.marker == 2 && checked.accepted);
+    kani::cover!(checked.marker == u8::MAX && !checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn invalid_markers_at_offset_eighty_eight_allow_only_an_immediate_terminator() {
+    let checked = check_invalid_marker_at::<ATTRIBUTE_OFFSET_88>();
+    assert!(!checked.accepted || checked.first_type == ATTRIBUTE_END);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+    kani::cover!(checked.marker == 2 && checked.accepted);
+    kani::cover!(checked.marker == u8::MAX && !checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn invalid_markers_at_offset_ninety_six_allow_only_an_immediate_terminator() {
+    let checked = check_invalid_marker_at::<ATTRIBUTE_OFFSET_96>();
+    assert!(!checked.accepted || checked.first_type == ATTRIBUTE_END);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+    kani::cover!(checked.marker == 2 && checked.accepted);
+    kani::cover!(checked.marker == u8::MAX && !checked.accepted);
 }
 
 struct TerminalChecks {

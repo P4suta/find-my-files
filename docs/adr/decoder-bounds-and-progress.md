@@ -62,7 +62,9 @@ All remaining bytes stay arbitrary.
 The rejected-header and fixed-offset partitions together cover the complete original input domain.
 Each offset has separate admission-equivalence and accepted-chain invariant harnesses.
 Each pair constructs a first residency marker of zero or one.
-An independent invalid-marker harness covers every other marker value at all seven chain offsets.
+Each offset has an independent invalid-marker harness for every other marker value.
+The invalid-marker constructor fixes the offset and allocation fields just as the resident constructor does.
+The inconsistent-header harness covers the rejected headers outside that construction.
 Acceptance with an invalid first marker requires an immediate terminator and the same checked record geometry.
 The three marker partitions together cover the same complete byte domain for each offset.
 The admission harness compares the production validator with the preserved reference.
