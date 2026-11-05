@@ -1366,6 +1366,45 @@ mod tests {
         }
     }
 
+    fn assert_directory_exclusion_invalidation(rename: bool) {
+        for requested_parent in [5u64, 10, 20, 999] {
+            for already_dirty in [false, true] {
+                let mut index = build_hardlink_sample();
+                let directory = index.entry_by_record(10).unwrap();
+                let old_parent = index.parent(directory);
+                index.exclusion_tree_dirty = already_dirty;
+                let changed = if rename {
+                    index.rename_dir_synthetic_in_place(10, &u16s("renamed"), requested_parent)
+                } else {
+                    index.reparent_synthetic(10, requested_parent)
+                };
+                assert_eq!(changed, Some(directory));
+                let expected_parent = if requested_parent == 20 {
+                    index.entry_by_record(20).unwrap()
+                } else {
+                    old_parent
+                };
+                assert_eq!(index.parent(directory), expected_parent);
+                assert_eq!(
+                    index.exclusion_tree_dirty,
+                    already_dirty || expected_parent != old_parent,
+                    "parent {requested_parent}, rename {rename}, dirty {already_dirty}"
+                );
+                assert_perm_name_sorted(&index);
+            }
+        }
+    }
+
+    #[test]
+    fn directory_reparenting_dirties_exclusion_only_when_the_parent_changes() {
+        assert_directory_exclusion_invalidation(false);
+    }
+
+    #[test]
+    fn directory_renaming_dirties_exclusion_only_when_the_parent_changes() {
+        assert_directory_exclusion_invalidation(true);
+    }
+
     #[test]
     fn exact_stat_updates_invalidate_once_per_changed_object_and_preserve_siblings() {
         let mut index = build_hardlink_sample();
