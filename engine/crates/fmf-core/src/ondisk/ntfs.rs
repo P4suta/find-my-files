@@ -691,6 +691,26 @@ mod tests {
     }
 
     #[test]
+    fn file_record_attributes_must_begin_before_the_used_region_ends() {
+        let mut record = vec![0; 512];
+        record[..4].copy_from_slice(FILE_RECORD_SIGNATURE);
+        put_u16(&mut record, USA_OFFSET_FIELD, 48);
+        put_u16(&mut record, USA_LENGTH_FIELD, 2);
+        put_u16(&mut record, FILE_ATTRIBUTES_OFFSET_FIELD, 56);
+        put_u32(&mut record, FILE_ALLOCATED_BYTES_OFFSET, 512);
+        for used in [55, 56, 57, 64] {
+            put_u32(&mut record, FILE_USED_BYTES_OFFSET, used);
+            let expected = used > 56;
+            assert_eq!(NtfsFile::is_valid(&record, 512), expected, "used {used}");
+            assert_eq!(
+                NtfsFile::parse(7, &record, 512).is_some(),
+                expected,
+                "used {used}"
+            );
+        }
+    }
+
+    #[test]
     fn file_name_borrows_only_the_exact_utf16le_payload() {
         let mut attribute = vec![0u8; 120];
         put_u32(&mut attribute, 0, NtfsAttributeType::FileName as u32);

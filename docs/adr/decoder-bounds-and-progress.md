@@ -61,11 +61,19 @@ Its arbitrary one-byte used length covers every admitted value within the unchan
 All remaining bytes stay arbitrary.
 The rejected-header and fixed-offset partitions together cover the complete original input domain.
 Each offset has separate admission-equivalence and accepted-chain invariant harnesses.
-Each pair constructs a first residency marker of zero or one.
-An independent invalid-marker harness covers every other marker value at all seven chain offsets.
+The two families construct a first residency marker of zero or one.
+Each offset has an independent invalid-marker harness for every other marker value.
+The invalid-marker constructor fixes the offset and allocation fields just as the resident constructor does.
+The inconsistent-header harness covers the rejected headers outside that construction.
 Acceptance with an invalid first marker requires an immediate terminator and the same checked record geometry.
 The three marker partitions together cover the same complete byte domain for each offset.
 The admission harness compares the production validator with the preserved reference.
+Resident admission uses partitions for the first attribute length.
+Each aligned length that can leave room for a terminator has a constant case.
+A complementary case keeps every other 32-bit length.
+Every case includes immediate terminators and malformed chains.
+The union preserves every original field value without assuming either validator's result.
+All later attributes keep arbitrary bytes and lengths.
 The invariant harness calls the production validator and independently checks every accepted attribute.
 Requiring both harnesses preserves the conjunction of the former assertions without three traversals in one solver problem.
 The invariant harness also bounds the attribute count by the smallest resident header and the space before the terminator.
@@ -83,15 +91,16 @@ Compile-time checks bind the bounds to the proof geometry.
 After a first non-resident header, the remaining proof bytes can't contain another complete attribute.
 The bounds for a non-resident first attribute include the attribute and final probe.
 Unwinding assertions remain enabled.
-The runner verifies one harness at a time to reduce concurrent resource demand.
-The proof watchdog and hosted job use longer safety deadlines for the expanded inventory.
+Each proof partition verifies one harness at a time to limit concurrent resource demand.
+The [partition collector](sharded-proof-evidence.md) requires the complete inventory across the bounded jobs.
+The proof watchdog and hosted job keep their declared safety deadlines.
 A deadline stop leaves the proof incomplete.
 Every registered harness must pass before release.
 The record-chain harnesses also compare admission with a [preserved reference](../../engine/crates/fmf-core/src/ondisk/record_admission_reference.rs).
 The reference retains the parser from [the source before the refactor](https://github.com/P4suta/find-my-files/blob/5f2853732cc179e5e25b165acfc49f3efb414342/engine/crates/fmf-core/src/ondisk/record.rs).
 The file-header harness compares admission with the original geometry and reference checks from [the same source](https://github.com/P4suta/find-my-files/blob/5f2853732cc179e5e25b165acfc49f3efb414342/engine/crates/fmf-core/src/ondisk/ntfs.rs).
 The byte adapter harness links each update-sequence field to its independent little-endian bytes.
-The proof results establish those properties under Kani's Rust and standard-library semantics.
+Successful proof results establish those properties under Kani's Rust and standard-library semantics.
 They don't establish validity of every file system image or Windows I/O behavior.
 Native volume tests and performance measurements remain required at those boundaries.
 

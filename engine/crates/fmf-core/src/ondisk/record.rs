@@ -216,6 +216,50 @@ mod tests {
     }
 
     #[test]
+    fn complete_chains_preserve_both_attribute_offset_bytes() {
+        let original = resident_record();
+        for start in [48u16, 304, 560, 816] {
+            let mut record = vec![0; 1024];
+            record[..FILE_RECORD_HEADER_BYTES]
+                .copy_from_slice(&original[..FILE_RECORD_HEADER_BYTES]);
+            let offset = usize::from(start);
+            record[offset..offset + 40].copy_from_slice(&original[48..88]);
+            put_u16(&mut record, ATTRIBUTES_OFFSET_FIELD, start);
+            put_u32(&mut record, USED_BYTES_FIELD, u32::from(start) + 40);
+            put_u32(&mut record, ALLOCATED_BYTES_FIELD, 1024);
+            assert!(attributes_complete(&record), "attribute offset {start}");
+        }
+    }
+
+    #[test]
+    fn complete_chains_accept_the_maximum_attribute_type() {
+        let mut record = resident_record();
+        put_u32(&mut record, 48, MAX_ATTRIBUTE_TYPE);
+        assert!(attributes_complete(&record));
+        put_u32(&mut record, 48, MAX_ATTRIBUTE_TYPE + ATTRIBUTE_TYPE_STEP);
+        assert!(!attributes_complete(&record));
+    }
+
+    #[test]
+    fn rejects_a_misaligned_complete_attribute_chain() {
+        let valid = resident_record();
+        assert!(attributes_complete(&valid));
+        let start = usize::from(le_u16(&valid, ATTRIBUTES_OFFSET_FIELD));
+        let used = le_u32(&valid, USED_BYTES_FIELD) as usize;
+        for shift in 1..ATTRIBUTE_ALIGNMENT {
+            let mut shifted = valid.clone();
+            shifted.copy_within(start..used, start + shift);
+            put_u16(
+                &mut shifted,
+                ATTRIBUTES_OFFSET_FIELD,
+                (start + shift) as u16,
+            );
+            put_u32(&mut shifted, USED_BYTES_FIELD, (used + shift) as u32);
+            assert!(!attributes_complete(&shifted), "shift {shift}");
+        }
+    }
+
+    #[test]
     fn attribute_ids_are_unique_across_both_storage_ranges() {
         let mut low = 0;
         let mut high = Vec::new();
