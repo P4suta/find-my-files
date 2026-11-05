@@ -8,6 +8,7 @@
     "engine/crates/fmf-core/src/ondisk/fixup.rs",
     "engine/crates/fmf-core/src/ondisk/ntfs.rs",
     "engine/crates/fmf-core/src/ondisk/record.rs",
+    "engine/crates/fmf-core/src/usn/reasons.rs",
     "engine/crates/fmf-core/src/wtf8.rs",
     "engine/crates/fmf-runtime/src/index/compact.rs",
     "engine/crates/fmf-runtime/src/index/mutate.rs",

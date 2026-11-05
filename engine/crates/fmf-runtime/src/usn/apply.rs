@@ -5,9 +5,10 @@
 
 use std::collections::HashMap;
 
+use fmf_core::usn::reasons::{ChangeKind, ChangeReasons};
 use rustc_hash::FxHashMap;
 
-use super::records::{UsnRecord, reason};
+use super::records::UsnRecord;
 use crate::index::{Frn, LinkReconcileStats, RawEntry, VolumeIndex};
 
 /// One searchable directory link returned by a complete live metadata read.
@@ -176,19 +177,13 @@ pub struct BatchStats {
 }
 
 struct Agg {
-    reasons: u32,
+    reasons: ChangeReasons,
     /// Index into the batch of the latest record for this FRN (carries the final name/parent/attributes).
     last: usize,
     /// Earliest old-name event in a collapsed rename storm.
     /// Its identity is the link that existed before this batch.
     rename_old: Option<usize>,
 }
-
-const STAT_REASONS: u32 = reason::DATA_OVERWRITE
-    | reason::DATA_EXTEND
-    | reason::DATA_TRUNCATION
-    | reason::BASIC_INFO_CHANGE
-    | reason::REPARSE_POINT_CHANGE;
 
 /// Everything one journal batch reads — from the volume and from the pre-mutation index — resolved before the index write lock is taken.
 ///
@@ -241,20 +236,21 @@ pub(crate) fn plan_batch(
 
     for (i, r) in records.iter().enumerate() {
         let key = Frn(r.frn);
+        let reasons = ChangeReasons::from_bits(r.reason);
         match agg.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 let a = e.get_mut();
-                a.reasons |= r.reason;
+                a.reasons = a.reasons.union(reasons);
                 a.last = i;
-                if a.rename_old.is_none() && r.reason & reason::RENAME_OLD_NAME != 0 {
+                if a.rename_old.is_none() && reasons.has_old_name() {
                     a.rename_old = Some(i);
                 }
             }
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(Agg {
-                    reasons: r.reason,
+                    reasons,
                     last: i,
-                    rename_old: (r.reason & reason::RENAME_OLD_NAME != 0).then_some(i),
+                    rename_old: reasons.has_old_name().then_some(i),
                 });
                 order.push(key);
             }
@@ -265,15 +261,12 @@ pub(crate) fn plan_batch(
     let mut preflight_failures = 0u32;
     for key in &order {
         let a = &agg[key];
-        let link_affecting = a.reasons
-            & (reason::FILE_CREATE | reason::RENAME_NEW_NAME | reason::HARD_LINK_CHANGE)
-            != 0;
-        if !link_affecting {
+        if !a.reasons.changes_links() {
             continue;
         }
         let last = &records[a.last];
         if last.is_dir() {
-            if a.reasons & reason::HARD_LINK_CHANGE != 0 {
+            if a.reasons.changes_hard_links() {
                 preflight_failures += 1;
             }
             continue;
@@ -286,10 +279,9 @@ pub(crate) fn plan_batch(
             idx.entry_by_link(*key, Frn(old.parent_frn), &old.name)
                 .is_some()
         });
-        let ambiguous_rename = a.reasons & reason::RENAME_NEW_NAME != 0
-            && idx.entries_by_frn(*key).count() > 1
-            && !exact_rename_old;
-        if !complete && (a.reasons & reason::HARD_LINK_CHANGE != 0 || ambiguous_rename) {
+        let ambiguous_rename =
+            a.reasons.renames() && idx.entries_by_frn(*key).count() > 1 && !exact_rename_old;
+        if !complete && (a.reasons.changes_hard_links() || ambiguous_rename) {
             preflight_failures += 1;
         }
         link_snapshots.insert(*key, snapshot);
@@ -303,8 +295,8 @@ pub(crate) fn plan_batch(
                 link_snapshots.get(key),
                 Some(LinkSnapshot::Present(links)) if !links.is_empty()
             );
-            let mutates_stat = a.reasons & reason::FILE_DELETE == 0
-                && a.reasons & (reason::FILE_CREATE | reason::RENAME_NEW_NAME | STAT_REASONS) != 0;
+            let mutates_stat =
+                matches!(a.reasons.kind(), ChangeKind::Upsert | ChangeKind::Metadata);
             if (has_links || mutates_stat)
                 && let Some(value) = fetch.stat(records[a.last].frn)
             {
@@ -349,10 +341,7 @@ pub(crate) fn apply_planned(
         let a = &agg[&key];
         let last = &records[a.last];
 
-        let link_affecting = a.reasons
-            & (reason::FILE_CREATE | reason::RENAME_NEW_NAME | reason::HARD_LINK_CHANGE)
-            != 0;
-        if link_affecting && !last.is_dir() {
+        if a.reasons.changes_links() && !last.is_dir() {
             let snapshot = link_snapshots.remove(&key).unwrap_or(LinkSnapshot::Failed);
             match snapshot {
                 LinkSnapshot::Present(links) if !links.is_empty() => {
@@ -410,7 +399,7 @@ pub(crate) fn apply_planned(
                     continue;
                 }
                 LinkSnapshot::Failed | LinkSnapshot::Present(_)
-                    if a.reasons & reason::HARD_LINK_CHANGE != 0 =>
+                    if a.reasons.changes_hard_links() =>
                 {
                     stats.hard_link_refresh_failures += 1;
                     stats.ignored += 1;
@@ -421,117 +410,124 @@ pub(crate) fn apply_planned(
             }
         }
 
-        if a.reasons & reason::FILE_DELETE != 0 {
-            let removed = idx.entries_by_frn(key).count() as u32;
-            idx.delete_frn(key);
-            if removed == 0 {
-                stats.ignored += 1;
-            } else {
-                stats.deleted += removed;
+        match a.reasons.kind() {
+            ChangeKind::Delete => {
+                let removed = idx.entries_by_frn(key).count() as u32;
+                idx.delete_frn(key);
+                if removed == 0 {
+                    stats.ignored += 1;
+                } else {
+                    stats.deleted += removed;
+                }
             }
-            continue;
-        }
-
-        if a.reasons & (reason::FILE_CREATE | reason::RENAME_NEW_NAME) != 0 {
-            let existing = idx.entry_by_frn(key);
-            if let Some(old) = existing
-                && idx.is_dir(old)
-                && last.is_dir()
-            {
-                if idx
-                    .rename_dir_frn_in_place(key, &last.name, Frn(last.parent_frn))
-                    .is_err()
+            ChangeKind::Upsert => {
+                let existing = idx.entry_by_frn(key);
+                if let Some(old) = existing
+                    && idx.is_dir(old)
+                    && last.is_dir()
                 {
+                    if idx
+                        .rename_dir_frn_in_place(key, &last.name, Frn(last.parent_frn))
+                        .is_err()
+                    {
+                        stats.index_rejections += 1;
+                        stats.ignored += 1;
+                        stats.rescan_required = true;
+                        continue;
+                    }
+                    idx.update_object_attrs_frn(
+                        key,
+                        last.is_reparse(),
+                        last.is_hidden(),
+                        last.is_system(),
+                    );
+                    stats.created_or_renamed += 1;
+                    continue;
+                }
+                if existing.is_none()
+                    && !a.reasons.creates()
+                    && idx.entry_by_record(key.record()).is_some()
+                {
+                    stats.ignored += 1;
+                    continue;
+                }
+                let fetched = stat_snapshots.get(&key).copied();
+                if fetched.is_none() {
+                    stats.stat_failures += 1;
+                }
+                let carried = existing.map(|id| (idx.size(id), idx.mtime(id)));
+                let (size, mtime) = fetched.or(carried).unwrap_or((0, 0));
+                let entry = RawEntry {
+                    parent_frn: Frn(last.parent_frn),
+                    frn: Frn(last.frn),
+                    name_utf16: &last.name,
+                    is_dir: last.is_dir(),
+                    is_reparse: last.is_reparse(),
+                    is_hidden: last.is_hidden(),
+                    is_system: last.is_system(),
+                    size,
+                    mtime,
+                };
+
+                let upserted = if !last.is_dir() && a.reasons.renames() {
+                    let before = idx.entries_by_frn(key).count();
+                    let removed = a.rename_old.and_then(|old| {
+                        let old = &records[old];
+                        idx.delete_link_frn(key, Frn(old.parent_frn), &old.name)
+                    });
+                    if removed.is_none() && before > 1 {
+                        stats.hard_link_refresh_failures += 1;
+                        stats.ignored += 1;
+                        stats.rescan_required = true;
+                        continue;
+                    }
+                    if removed.is_none() && before == 1 {
+                        idx.upsert_usn(&entry)
+                    } else {
+                        idx.upsert_link_usn(&entry)
+                    }
+                } else if last.is_dir() {
+                    idx.upsert_usn(&entry)
+                } else {
+                    idx.upsert_link_usn(&entry)
+                };
+                if upserted.is_err() {
                     stats.index_rejections += 1;
                     stats.ignored += 1;
                     stats.rescan_required = true;
                     continue;
                 }
-                idx.update_object_attrs_frn(
-                    key,
-                    last.is_reparse(),
-                    last.is_hidden(),
-                    last.is_system(),
-                );
                 stats.created_or_renamed += 1;
-                continue;
             }
-            if existing.is_none()
-                && a.reasons & reason::FILE_CREATE == 0
-                && idx.entry_by_record(key.record()).is_some()
-            {
-                stats.ignored += 1;
-                continue;
-            }
-            let fetched = stat_snapshots.get(&key).copied();
-            if fetched.is_none() {
-                stats.stat_failures += 1;
-            }
-            let carried = existing.map(|id| (idx.size(id), idx.mtime(id)));
-            let (size, mtime) = fetched.or(carried).unwrap_or((0, 0));
-            let entry = RawEntry {
-                parent_frn: Frn(last.parent_frn),
-                frn: Frn(last.frn),
-                name_utf16: &last.name,
-                is_dir: last.is_dir(),
-                is_reparse: last.is_reparse(),
-                is_hidden: last.is_hidden(),
-                is_system: last.is_system(),
-                size,
-                mtime,
-            };
-
-            let upserted = if !last.is_dir() && a.reasons & reason::RENAME_NEW_NAME != 0 {
-                let before = idx.entries_by_frn(key).count();
-                let removed = a.rename_old.and_then(|old| {
-                    let old = &records[old];
-                    idx.delete_link_frn(key, Frn(old.parent_frn), &old.name)
-                });
-                if removed.is_none() && before > 1 {
-                    stats.hard_link_refresh_failures += 1;
+            ChangeKind::Metadata => {
+                if idx.entry_by_frn(key).is_none() {
                     stats.ignored += 1;
-                    stats.rescan_required = true;
                     continue;
                 }
-                if removed.is_none() && before == 1 {
-                    idx.upsert_usn(&entry)
+                let attrs_changed = idx
+                    .update_object_attrs_frn(
+                        key,
+                        last.is_reparse(),
+                        last.is_hidden(),
+                        last.is_system(),
+                    )
+                    .unwrap_or(false);
+                if let Some((size, mtime)) = stat_snapshots.get(&key).copied() {
+                    if idx.update_stat_frn(key, size, mtime).is_some() {
+                        stats.stat_updated += 1;
+                    } else {
+                        stats.ignored += 1;
+                    }
                 } else {
-                    idx.upsert_link_usn(&entry)
+                    stats.stat_failures += 1;
+                    if !attrs_changed {
+                        stats.ignored += 1;
+                    }
                 }
-            } else if last.is_dir() {
-                idx.upsert_usn(&entry)
-            } else {
-                idx.upsert_link_usn(&entry)
-            };
-            if upserted.is_err() {
-                stats.index_rejections += 1;
+            }
+            ChangeKind::Ignore => {
                 stats.ignored += 1;
-                stats.rescan_required = true;
-                continue;
             }
-            stats.created_or_renamed += 1;
-        } else if a.reasons & STAT_REASONS != 0 {
-            if idx.entry_by_frn(key).is_none() {
-                stats.ignored += 1;
-                continue;
-            }
-            let attrs_changed = idx
-                .update_object_attrs_frn(key, last.is_reparse(), last.is_hidden(), last.is_system())
-                .unwrap_or(false);
-            if let Some((size, mtime)) = stat_snapshots.get(&key).copied() {
-                if idx.update_stat_frn(key, size, mtime).is_some() {
-                    stats.stat_updated += 1;
-                } else {
-                    stats.ignored += 1;
-                }
-            } else {
-                stats.stat_failures += 1;
-                if !attrs_changed {
-                    stats.ignored += 1;
-                }
-            }
-        } else {
-            stats.ignored += 1;
         }
     }
 
@@ -544,6 +540,7 @@ pub(crate) fn apply_planned(
 
 #[cfg(test)]
 mod tests {
+    use super::super::records::reason;
     use super::*;
     use crate::index::VolumeIndexBuilder;
     use crate::index::testutil::{build_hardlink_sample, u16s};
@@ -676,7 +673,9 @@ mod tests {
         assert_eq!(plan.agg[&Frn(object)].rename_old, Some(0));
         assert_eq!(
             plan.agg[&Frn(object)].reasons,
-            reason::RENAME_OLD_NAME | reason::RENAME_NEW_NAME | reason::CLOSE
+            ChangeReasons::from_bits(
+                reason::RENAME_OLD_NAME | reason::RENAME_NEW_NAME | reason::CLOSE
+            )
         );
         assert_eq!(plan.stat_snapshots.len(), 2);
         assert_eq!(plan.preflight_failures, 0);
@@ -750,6 +749,139 @@ mod tests {
                 "{flags:#x}"
             );
         }
+    }
+
+    #[test]
+    fn journal_batch_unpaired_rename_preserves_single_and_unseen_objects() {
+        for record in [11, 200] {
+            let mut idx = base_index();
+            let records = [rec(
+                record,
+                10,
+                reason::RENAME_NEW_NAME,
+                0x20,
+                "renamed.txt",
+            )];
+            let stats = apply_batch(&mut idx, &records, &MetadataSource::constant(81, FT1));
+            assert_eq!(
+                stats,
+                BatchStats {
+                    created_or_renamed: 1,
+                    ..BatchStats::default()
+                }
+            );
+            let id = idx.entry_by_frn(Frn(frn(1, record))).unwrap();
+            assert_eq!(idx.name(id), b"renamed.txt");
+            assert_eq!((idx.size(id), idx.mtime(id)), (81, FT1));
+            assert_eq!(idx.entries_by_frn(Frn(frn(1, record))).count(), 1);
+            assert!(
+                idx.entry_by_link(Frn(frn(1, record)), Frn(frn(1, 10)), &u16s("note.txt"))
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn journal_batch_only_creation_may_replace_another_object_generation() {
+        for flags in [reason::FILE_CREATE, reason::RENAME_NEW_NAME] {
+            let mut idx = base_index();
+            let records = [rec_full(frn(2, 11), frn(1, 10), flags, 0x20, "fresh.txt")];
+            let stats = apply_batch(&mut idx, &records, &MetadataSource::constant(81, FT1));
+            if flags == reason::FILE_CREATE {
+                assert_eq!(
+                    stats,
+                    BatchStats {
+                        created_or_renamed: 1,
+                        ..BatchStats::default()
+                    }
+                );
+                assert!(idx.entry_by_frn(Frn(frn(1, 11))).is_none());
+                let id = idx.entry_by_frn(Frn(frn(2, 11))).unwrap();
+                assert_eq!(idx.name(id), b"fresh.txt");
+                assert_eq!((idx.size(id), idx.mtime(id)), (81, FT1));
+            } else {
+                assert_eq!(
+                    stats,
+                    BatchStats {
+                        ignored: 1,
+                        ..BatchStats::default()
+                    }
+                );
+                assert!(idx.entry_by_frn(Frn(frn(2, 11))).is_none());
+                assert_eq!(
+                    idx.name(idx.entry_by_frn(Frn(frn(1, 11))).unwrap()),
+                    b"note.txt"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn journal_batch_file_events_cannot_rename_an_existing_directory() {
+        let mut idx = base_index();
+        let directory = idx.entry_by_frn(Frn(frn(1, 10))).unwrap();
+        let records = [rec(10, 5, reason::FILE_CREATE, 0x2, "file.txt")];
+        let stats = apply_batch(&mut idx, &records, &MetadataSource::constant(81, FT1));
+        assert_eq!(
+            stats,
+            BatchStats {
+                index_rejections: 1,
+                ignored: 1,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert_eq!(idx.entry_by_frn(Frn(frn(1, 10))), Some(directory));
+        assert!(idx.is_dir(directory));
+        assert!(!idx.is_excluded(directory));
+        assert_eq!(idx.name(directory), b"docs");
+        assert_eq!(path_of(&idx, 11), "C:\\docs\\note.txt");
+    }
+
+    #[test]
+    fn journal_batch_unhandled_reasons_neither_fetch_nor_refresh_metadata() {
+        let mut idx = base_index();
+        let records = [
+            rec(11, 10, reason::CLOSE, 0x2, "ignored.txt"),
+            rec(200, 10, 0x8, 0x20, "unknown.txt"),
+        ];
+        let plan = plan_batch(&idx, &records, &MetadataSource::constant(81, FT1));
+        assert!(plan.link_snapshots.is_empty());
+        assert!(plan.stat_snapshots.is_empty());
+        assert_eq!(
+            apply_planned(&mut idx, &records, plan),
+            BatchStats {
+                ignored: 2,
+                ..BatchStats::default()
+            }
+        );
+        let id = idx.entry_by_frn(Frn(frn(1, 11))).unwrap();
+        assert_eq!((idx.size(id), idx.mtime(id)), (100, FT0));
+        assert_eq!(idx.name(id), b"note.txt");
+        assert!(!idx.is_excluded(id));
+        assert!(idx.entry_by_frn(Frn(frn(1, 200))).is_none());
+    }
+
+    #[test]
+    fn journal_batch_revalidates_a_parent_removed_after_planning() {
+        let mut idx = base_index();
+        idx.delete_frn(Frn(frn(1, 11))).unwrap();
+        let records = [rec(200, 10, reason::FILE_CREATE, 0x20, "new.txt")];
+        let plan = plan_batch(&idx, &records, &MetadataSource::constant(81, FT1));
+        assert_eq!(plan.preflight_failures, 0);
+        assert!(plan.stat_snapshots.contains_key(&Frn(frn(1, 200))));
+        idx.delete_frn(Frn(frn(1, 10))).unwrap();
+        assert_eq!(
+            apply_planned(&mut idx, &records, plan),
+            BatchStats {
+                index_rejections: 1,
+                ignored: 1,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert!(idx.entry_by_frn(Frn(frn(1, 200))).is_none());
+        assert!(idx.is_live(VolumeIndex::ROOT));
     }
 
     #[test]

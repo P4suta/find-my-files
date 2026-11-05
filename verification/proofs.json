@@ -5,6 +5,15 @@
   "timeout_seconds": 300,
   "targets": [
     {
+      "package": "fmf-core",
+      "source": "engine/crates/fmf-core/src/usn/reason_proofs.rs",
+      "prefix": "usn::reasons::kani_proofs::",
+      "harnesses": [
+        "every_reason_bit_preserves_independent_effects_and_operation_priority",
+        "reason_accumulation_preserves_both_inputs_and_repeated_flags"
+      ]
+    },
+    {
       "package": "xtask",
       "source": "xtask/src/perf_proofs.rs",
       "prefix": "perf::kani_proofs::",
