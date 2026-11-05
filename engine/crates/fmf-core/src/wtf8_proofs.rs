@@ -2,6 +2,8 @@ use super::{
     FOUR_BYTE_WIDTH, THREE_BYTE_WIDTH, TWO_BYTE_WIDTH, completed_output_len, decode_units,
 };
 
+const _: () = assert!(FOUR_BYTE_WIDTH <= u8::MAX as usize);
+
 struct DecoderChecks {
     accepted: bool,
     prefix_preserved: bool,
@@ -67,12 +69,12 @@ fn check_length<const LENGTH: usize>() -> DecoderChecks {
     let original: [u16; FOUR_BYTE_WIDTH + 1] = kani::any();
     let mut out = original;
     let result = decode_units(&bytes, &mut out[1..LENGTH + 1]);
-    let mut atomic_rejection = result.is_ok() || result.is_err_and(|error| error.offset < LENGTH);
-    for index in 0..=FOUR_BYTE_WIDTH {
-        if result.is_err() || result.is_ok_and(|written| index > written) {
-            atomic_rejection &= out[index] == original[index];
-        }
-    }
+    let index: u8 = kani::any();
+    let index = usize::from(index);
+    kani::assume(index <= FOUR_BYTE_WIDTH);
+    let valid_offset = result.is_ok() || result.is_err_and(|error| error.offset < LENGTH);
+    let untouched = result.is_err() || result.is_ok_and(|written| index > written);
+    let atomic_rejection = valid_offset && (!untouched || out[index] == original[index]);
     DecoderChecks {
         accepted: result.is_ok(),
         prefix_preserved: out[0] == original[0],
@@ -112,7 +114,7 @@ fn output_lengths_preserve_the_prefix_or_reject_overflow() {
 
 #[kani::proof]
 #[kani::unwind(6)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn two_byte_decoding_preserves_prefix_or_rolls_back() {
     let checked = check_length::<TWO_BYTE_WIDTH>();
     assert!(checked.prefix_preserved && checked.bounded && checked.atomic_rejection);
@@ -122,7 +124,7 @@ fn two_byte_decoding_preserves_prefix_or_rolls_back() {
 
 #[kani::proof]
 #[kani::unwind(6)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn three_byte_decoding_preserves_prefix_or_rolls_back() {
     let checked = check_length::<THREE_BYTE_WIDTH>();
     assert!(checked.prefix_preserved && checked.bounded && checked.atomic_rejection);
@@ -132,7 +134,7 @@ fn three_byte_decoding_preserves_prefix_or_rolls_back() {
 
 #[kani::proof]
 #[kani::unwind(6)]
-#[kani::solver(kissat)]
+#[kani::solver(cadical)]
 fn four_byte_decoding_preserves_prefix_or_rolls_back() {
     let checked = check_length::<FOUR_BYTE_WIDTH>();
     assert!(checked.prefix_preserved && checked.bounded && checked.atomic_rejection);

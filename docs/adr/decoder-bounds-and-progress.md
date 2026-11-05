@@ -46,7 +46,11 @@ The proof inventory records the source, harness names, and unwind bounds.
 Scalar reference and surrogate checks quantify their complete integer domains.
 Byte-array checks state finite input bounds and require reachable accepted and rejected cases.
 The output harnesses quantify every byte array at each stated length.
-The name-value, complete-chain, and output byte harnesses select Kissat from the pinned Kani distribution.
+Output and filename checks choose one arbitrary observation position.
+The observation index ranges over every original output cell or name unit.
+The length variables for record and filename inputs use one byte with the original bounds.
+A compile-time check rejects proof buffers larger than the length representation.
+The byte harnesses select a solver from the pinned Kani distribution: `cadical`.
 Kani supports [per-harness solver selection](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver) without changing the property or input domain.
 The record-chain harnesses partition the complete attribute-offset domain without changing the byte-array or unwind bounds.
 The time limits, byte bounds, and unwind bounds remain unchanged.
