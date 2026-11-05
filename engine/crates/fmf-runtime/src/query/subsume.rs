@@ -74,7 +74,7 @@ fn bridge_needle(
 
 /// Does a positive match of `n` guarantee a positive match of `p`?
 fn implies(n: &Matcher, p: &Matcher) -> bool {
-    use Matcher::{Ext, IsDir, Mtime, NamePrefix, NameSub, NameSuffix, Size, True};
+    use Matcher::{Ext, Mtime, NamePrefix, NameSub, NameSuffix, Size, True};
     match (n, p) {
         (_, True) => true,
 
@@ -164,8 +164,6 @@ fn implies(n: &Matcher, p: &Matcher) -> bool {
                 max: pmax,
             },
         ) => nmin >= pmin && nmax <= pmax,
-        (IsDir(a), IsDir(b)) => a == b,
-
         _ => matcher_eq(n, p),
     }
 }
@@ -263,6 +261,10 @@ fn matcher_eq(a: &Matcher, b: &Matcher) -> bool {
     }
 }
 
+#[cfg(kani)]
+#[path = "subsume_proofs.rs"]
+mod kani_proofs;
+
 #[cfg(test)]
 mod tests {
     use super::super::dates::UtcResolver;
@@ -318,6 +320,179 @@ mod tests {
             !subsumed("rs !test", "rs !tes"),
             "¬tes does not imply ¬test"
         );
+    }
+
+    #[derive(Clone, Copy)]
+    enum TextShape {
+        Substring,
+        Prefix,
+        Suffix,
+        Path,
+    }
+
+    fn text_matcher(shape: TextShape, needle: &[u8], folded: bool, canonical: bool) -> Matcher {
+        match shape {
+            TextShape::Substring => Matcher::NameSub {
+                finder: memchr::memmem::Finder::new(needle).into_owned(),
+                folded,
+                canonical,
+            },
+            TextShape::Prefix => Matcher::NamePrefix {
+                bytes: needle.to_vec(),
+                folded,
+                canonical,
+            },
+            TextShape::Suffix => Matcher::NameSuffix {
+                bytes: needle.to_vec(),
+                folded,
+                canonical,
+            },
+            TextShape::Path => Matcher::PathSub {
+                finder: memchr::memmem::Finder::new(needle).into_owned(),
+                folded,
+                canonical,
+            },
+        }
+    }
+
+    #[test]
+    fn text_identity_checks_each_domain_field_and_needle() {
+        for shape in [
+            TextShape::Substring,
+            TextShape::Prefix,
+            TextShape::Suffix,
+            TextShape::Path,
+        ] {
+            for folded in [false, true] {
+                for canonical in [false, true] {
+                    let original = text_matcher(shape, b"ab", folded, canonical);
+                    assert!(matcher_eq(&original, &original));
+                    for changed in [
+                        text_matcher(shape, b"ac", folded, canonical),
+                        text_matcher(shape, b"ab", !folded, canonical),
+                        text_matcher(shape, b"ab", folded, !canonical),
+                    ] {
+                        assert!(!matcher_eq(&original, &changed));
+                        assert!(!matcher_eq(&changed, &original));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_and_extension_identity_distinguishes_endpoints_kinds_and_domains() {
+        let predicates = [
+            Matcher::True,
+            Matcher::Size { min: 10, max: 30 },
+            Matcher::Size { min: 11, max: 30 },
+            Matcher::Size { min: 10, max: 31 },
+            Matcher::Mtime { min: -10, max: 10 },
+            Matcher::Mtime { min: -9, max: 10 },
+            Matcher::Mtime { min: -10, max: 11 },
+            Matcher::IsDir(false),
+            Matcher::IsDir(true),
+            Matcher::Ext {
+                exts: vec![b"rs".to_vec()],
+                canonical: false,
+            },
+            Matcher::Ext {
+                exts: vec![b"rs".to_vec()],
+                canonical: true,
+            },
+            Matcher::Ext {
+                exts: vec![b"txt".to_vec()],
+                canonical: false,
+            },
+            Matcher::Ext {
+                exts: vec![b"rs".to_vec(), b"txt".to_vec()],
+                canonical: false,
+            },
+        ];
+        for (left, a) in predicates.iter().enumerate() {
+            for (right, b) in predicates.iter().enumerate() {
+                assert_eq!(
+                    matcher_eq(a, b),
+                    left == right,
+                    "predicate pair {left}, {right}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn range_implication_requires_both_endpoints_to_narrow() {
+        for (min, max, expected) in [
+            (10_u64, 30_u64, true),
+            (11, 29, true),
+            (9, 29, false),
+            (11, 31, false),
+            (9, 31, false),
+            (0, 9, false),
+            (31, 40, false),
+        ] {
+            assert_eq!(
+                implies(
+                    &Matcher::Size { min, max },
+                    &Matcher::Size { min: 10, max: 30 }
+                ),
+                expected,
+            );
+            let min = i64::try_from(min).unwrap() - 20;
+            let max = i64::try_from(max).unwrap() - 20;
+            assert_eq!(
+                implies(
+                    &Matcher::Mtime { min, max },
+                    &Matcher::Mtime { min: -10, max: 10 }
+                ),
+                expected,
+            );
+        }
+        for next in [false, true] {
+            for previous in [false, true] {
+                assert_eq!(
+                    implies(&Matcher::IsDir(next), &Matcher::IsDir(previous)),
+                    next == previous
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn anchored_typing_preserves_its_anchor_and_case_domain() {
+        for (previous, next) in [
+            ("ab*", "abc*"),
+            ("*bc", "*abc"),
+            ("ab*", "ABc*"),
+            ("*bc", "*ABc"),
+            ("é*", "e\u{301}clair*"),
+        ] {
+            assert!(subsumed(previous, next), "{previous:?} -> {next:?}");
+        }
+        for (previous, next) in [
+            ("abc*", "ab*"),
+            ("*abc", "*bc"),
+            ("AB*", "abc*"),
+            ("*BC", "*abc"),
+            ("ab*", "*ab"),
+            ("*ab", "ab*"),
+        ] {
+            assert!(!subsumed(previous, next), "{previous:?} -> {next:?}");
+        }
+    }
+
+    #[test]
+    fn true_implication_and_negation_keep_the_empty_result_distinct() {
+        for matcher in [
+            Matcher::True,
+            Matcher::IsDir(false),
+            Matcher::Size { min: 10, max: 30 },
+        ] {
+            assert!(implies(&matcher, &Matcher::True));
+        }
+        assert!(subsumed("!\"\"", "!\"\""));
+        assert!(!subsumed("!\"\"", ""));
+        assert!(subsumed("\"\"", ""));
     }
 
     #[test]

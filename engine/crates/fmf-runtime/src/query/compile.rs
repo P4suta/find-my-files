@@ -13,6 +13,7 @@ const SURROGATE_LEAD: u8 = 0xED;
 
 use memchr::memmem;
 use regex::bytes::{Regex, RegexBuilder};
+use std::num::NonZeroUsize;
 use thiserror::Error;
 
 use super::ast::{Ast, Term};
@@ -281,19 +282,24 @@ fn regex_insensitive(needle: &str, case: CaseMode) -> bool {
     }
 }
 
+fn canonical_literal(needle: &str) -> std::borrow::Cow<'_, str> {
+    if needle.is_ascii() {
+        std::borrow::Cow::Borrowed(needle)
+    } else {
+        std::borrow::Cow::Owned(
+            String::from_utf8(wtf8::normalize_str(needle, false))
+                .expect("normalizing a query string preserves valid UTF-8"),
+        )
+    }
+}
+
 /// Smart-case decision for ordinary text.
 /// Canonically equivalent query spellings must choose the same case domain (for example `K` and `K`).
 fn literal_insensitive(needle: &str, case: CaseMode) -> bool {
     match case {
         CaseMode::Insensitive => true,
         CaseMode::Sensitive => false,
-        CaseMode::Smart if needle.is_ascii() => !wtf8::has_uppercase(needle),
-        CaseMode::Smart => {
-            let canonical = wtf8::normalize_str(needle, false);
-            let canonical = std::str::from_utf8(&canonical)
-                .expect("normalizing a query string preserves valid UTF-8");
-            !wtf8::has_uppercase(canonical)
-        }
+        CaseMode::Smart => !wtf8::has_uppercase(&canonical_literal(needle)),
     }
 }
 
@@ -424,16 +430,17 @@ fn regex_to_wtf8_fallback(body: &str) -> String {
 /// We index file names only (p99 ≈110 B),
 /// so a legitimate name regex never approaches 1 MiB; capping there turns a memory-DoS pattern into a clean `CompiledTooBig` → `FMF_E_QUERY_SYNTAX` rejection (it flows through `CompileError::Regex` unchanged), instead of letting the elevated service compile it.
 /// Both default higher (10/2 MiB).
-const REGEX_SIZE_LIMIT: usize = 1 << 20;
-const REGEX_DFA_SIZE_LIMIT: usize = 1 << 20;
+const REGEX_SIZE_LIMIT: NonZeroUsize =
+    NonZeroUsize::new(1_048_576).expect("the regular expression memory limit is nonzero");
+const REGEX_DFA_SIZE_LIMIT: NonZeroUsize = REGEX_SIZE_LIMIT;
 
 fn regex_builder(body: &str, ci: bool) -> RegexBuilder {
     let mut builder = RegexBuilder::new(body);
     builder
         .case_insensitive(ci)
         .dot_matches_new_line(true)
-        .size_limit(REGEX_SIZE_LIMIT)
-        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT);
+        .size_limit(REGEX_SIZE_LIMIT.get())
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT.get());
     builder
 }
 
@@ -914,6 +921,10 @@ impl CompiledQuery {
     }
 }
 
+#[cfg(kani)]
+#[path = "compile_proofs.rs"]
+mod kani_proofs;
+
 #[cfg(test)]
 mod tests {
     use super::super::parse;
@@ -1058,6 +1069,95 @@ mod tests {
         assert!(matches!(group.driver, Driver::FullScan));
         assert_eq!(group.terms.len(), 1);
         assert_eq!(driver_score(&group.terms[0]), None);
+    }
+
+    #[test]
+    fn canonical_literals_borrow_ascii_and_normalize_owned_text() {
+        let ascii = String::from_utf8((0_u8..=127).collect()).unwrap();
+        let canonical = canonical_literal(&ascii);
+        assert!(matches!(canonical, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(canonical.as_ref(), ascii.as_str());
+        assert_eq!(canonical.as_ptr(), ascii.as_ptr());
+        for (input, expected) in [("e\u{301}", "é"), ("\u{212A}", "K"), ("é", "é")] {
+            let canonical = canonical_literal(input);
+            assert!(matches!(canonical, std::borrow::Cow::Owned(_)));
+            assert_eq!(canonical.as_ref(), expected);
+        }
+    }
+
+    #[test]
+    fn path_materialization_is_required_only_for_the_selected_path_domain() {
+        let resolver = super::super::dates::UtcResolver;
+        for (text, case, folded, original) in [
+            ("report", CaseMode::Insensitive, false, false),
+            ("Report*", CaseMode::Sensitive, false, false),
+            ("path:src", CaseMode::Insensitive, true, false),
+            ("path:Src", CaseMode::Sensitive, false, true),
+            ("path:src*", CaseMode::Insensitive, false, true),
+        ] {
+            let query = compile(&parse(text).unwrap(), case, &resolver).unwrap();
+            assert_eq!(query.needs_folded_paths, folded, "{text:?}");
+            assert_eq!(query.needs_orig_paths, original, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn mixed_driver_plans_choose_the_most_selective_literal() {
+        let resolver = super::super::dates::UtcResolver;
+        for (text, label, exact, needle) in [
+            ("ext:rs abcd", "pool-scan", true, "abcd"),
+            ("abcd ext:rs", "pool-scan", true, "abcd"),
+            ("abcdef ext:abcdef", "suffix", true, ".abcdef"),
+            ("ext:abcdef abcdef", "suffix", true, ".abcdef"),
+            ("abc ext:rst", "suffix", true, ".rst"),
+            ("ext:rst abc", "suffix", true, ".rst"),
+            ("abc abcd*", "prefix", true, "abcd"),
+            ("abcd* abc", "prefix", true, "abcd"),
+            ("abc *abcd", "suffix", true, "abcd"),
+            ("*abcd abc", "suffix", true, "abcd"),
+            ("Abcd*", "prefix", false, "abcd"),
+            ("*Abcd", "suffix", false, "abcd"),
+            ("é*", "canonical-scan", false, "é"),
+            ("*é", "canonical-scan", false, "é"),
+        ] {
+            let query = compile(&parse(text).unwrap(), CaseMode::Smart, &resolver).unwrap();
+            assert_eq!(query.driver_label(), label, "{text:?}");
+            assert_eq!(query.groups[0].driver_exact, exact, "{text:?}");
+            let driver = &query.groups[0].driver;
+            assert_eq!(driver.canonical(), label == "canonical-scan", "{text:?}");
+            match driver {
+                Driver::Sub {
+                    finder, needle_len, ..
+                } => {
+                    assert_eq!(finder.needle(), needle.as_bytes(), "{text:?}");
+                    assert_eq!(*needle_len, needle.len(), "{text:?}");
+                }
+                Driver::Prefix { bytes, .. } => assert_eq!(bytes, needle.as_bytes(), "{text:?}"),
+                Driver::Suffixes { suffixes, .. } => {
+                    assert_eq!(suffixes, &[needle.as_bytes().to_vec()], "{text:?}");
+                }
+                Driver::FullScan | Driver::MatchAll => {
+                    panic!("literal driver missing for {text:?}")
+                }
+            }
+        }
+        let term = compile_term(&Term::Name(String::new()), CaseMode::Smart, &resolver).unwrap();
+        assert!(matches!(term.matcher, Matcher::True));
+    }
+
+    #[test]
+    fn nested_regex_alternatives_match_one_lone_surrogate() {
+        for pattern in ["^(.)$", "^(?:x|.)$", "^x$|^.$", "^(?:(?:.)|x)$"] {
+            let regex = build_regex(pattern, false, pattern).unwrap();
+            for bytes in [
+                &[0xED, 0xA0, 0x80][..],
+                &[0xED, 0xBF, 0xBF][..],
+                "é".as_bytes(),
+            ] {
+                assert!(regex.is_match(bytes), "{pattern:?}, {bytes:?}");
+            }
+            assert!(!regex.is_match(b"ab"), "{pattern:?}");
+        }
     }
 
     #[test]
