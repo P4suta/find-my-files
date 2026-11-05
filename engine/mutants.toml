@@ -7,6 +7,7 @@ examine_globs = [
   "**/src/index/compact.rs",
   "**/src/scan/parse.rs",
   "**/src/usn/apply.rs",
+  "**/src/usn/reasons.rs",
   "**/src/wtf8.rs",
   "**/src/ondisk/ntfs.rs",
   "**/src/ondisk/record.rs",
