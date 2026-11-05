@@ -224,7 +224,7 @@ jobs:
             cargo-deny@0.20.2
             cargo-machete@0.9.2
             taplo-cli@0.10.0
-            typos@1.51.1
+            typos@1.52.0
           fallback: none
 
       - name: Verify tag matches the committed version
