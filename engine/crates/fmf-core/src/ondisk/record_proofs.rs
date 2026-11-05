@@ -21,6 +21,7 @@ const REFERENCE_MAX_ATTRIBUTE_TYPE: u32 = 0x100;
 const REFERENCE_STANDARD_INFORMATION: u32 = 0x10;
 const REFERENCE_ATTRIBUTE_LIST: u32 = 0x20;
 const REFERENCE_FILE_NAME: u32 = 0x30;
+const FINAL_ATTRIBUTE_CAPACITY: usize = 32;
 const TERMINATOR_OFFSET_104: u16 = 104;
 const TERMINATOR_OFFSET_112: u16 = 112;
 const TERMINATOR_OFFSET_120: u16 = 120;
@@ -81,6 +82,22 @@ fn resident_length_partitions_preserve_every_field_value() {
     kani::cover!(available == 0 && !explicit_case);
 }
 
+#[kani::proof]
+#[kani::unwind(1)]
+fn final_resident_length_partitions_preserve_every_field_value() {
+    let length: u32 = kani::any();
+    let available: u8 = kani::any();
+    kani::assume(usize::from(available) <= FINAL_ATTRIBUTE_CAPACITY && available.is_multiple_of(8));
+    let explicit_case = matches!(length, 24 | 32) && length <= u32::from(available);
+    assert_ne!(
+        resident_length_is_invalid(length, usize::from(available)),
+        explicit_case
+    );
+    kani::cover!(length == 24 && available == 32 && explicit_case);
+    kani::cover!(length == 32 && available == 32 && explicit_case);
+    kani::cover!(length == u32::MAX && !explicit_case);
+}
+
 fn record_bytes_at<const START: u16>() -> ([u8; PROOF_BYTES], usize) {
     let mut bytes: [u8; PROOF_BYTES] = kani::any();
     let length: u8 = kani::any();
@@ -109,6 +126,10 @@ fn resident_length_is_other(length: u32, available: usize) -> bool {
     let Some(maximum) = available.checked_sub(REFERENCE_ALIGNMENT) else {
         return true;
     };
+    resident_length_is_invalid(length, maximum)
+}
+
+fn resident_length_is_invalid(length: u32, maximum: usize) -> bool {
     let length = length as usize;
     length < REFERENCE_RESIDENT_HEADER_BYTES
         || !length.is_multiple_of(REFERENCE_ALIGNMENT)
@@ -197,6 +218,57 @@ fn check_resident_admission_with_second_length<const START: u16, const FIRST: u3
         accepted: attributes_complete(record),
         reference: admission_reference::attributes_complete(record),
     }
+}
+
+fn record_bytes_with_third_length<const START: u16, const FIRST: u32, const SECOND: u32>(
+    third: Option<u32>,
+) -> ([u8; PROOF_BYTES], usize) {
+    const {
+        assert!(
+            START as usize + FIRST as usize + SECOND as usize + REFERENCE_ALIGNMENT <= PROOF_BYTES
+        );
+        assert!(
+            PROOF_BYTES - START as usize - FIRST as usize - SECOND as usize
+                <= FINAL_ATTRIBUTE_CAPACITY
+        );
+    }
+    let (mut bytes, length) = record_bytes_with_second_length::<START, FIRST>(Some(SECOND));
+    let offset = usize::from(START) + FIRST as usize + SECOND as usize;
+    let field = offset + REFERENCE_ATTRIBUTE_LENGTH_FIELD;
+    if let Some(third) = third {
+        assert!(!resident_length_is_invalid(third, PROOF_BYTES - offset));
+        bytes[field..field + size_of::<u32>()].copy_from_slice(&third.to_le_bytes());
+    } else {
+        let third = le_u32(&bytes, field);
+        kani::assume(resident_length_is_invalid(third, PROOF_BYTES - offset));
+    }
+    (bytes, length)
+}
+
+fn check_resident_admission_with_third_length<
+    const START: u16,
+    const FIRST: u32,
+    const SECOND: u32,
+>(
+    third: Option<u32>,
+) -> AdmissionChecks {
+    let (bytes, length) = record_bytes_with_third_length::<START, FIRST, SECOND>(third);
+    let record = &bytes[..length];
+    AdmissionChecks {
+        accepted: attributes_complete(record),
+        reference: admission_reference::attributes_complete(record),
+    }
+}
+
+fn check_resident_invariants_with_third_length<
+    const START: u16,
+    const FIRST: u32,
+    const SECOND: u32,
+>(
+    third: Option<u32>,
+) -> ChainChecks {
+    let (bytes, length) = record_bytes_with_third_length::<START, FIRST, SECOND>(third);
+    check_chain_invariants(&bytes[..length])
 }
 
 fn check_resident_invariants_with_length<const START: u16, const LENGTH: u32>() -> ChainChecks {
@@ -299,8 +371,10 @@ fn check_chain_invariants(record: &[u8]) -> ChainChecks {
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-fn resident_lengths_twenty_four_then_twenty_four_at_offset_forty_eight_preserve_admission() {
-    let checked = check_resident_admission_with_second_length::<ATTRIBUTE_OFFSET_48, 24>(Some(24));
+fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_forty_eight_preserve_admission()
+ {
+    let checked =
+        check_resident_admission_with_third_length::<ATTRIBUTE_OFFSET_48, 24, 24>(Some(24));
     assert_eq!(checked.accepted, checked.reference);
     kani::cover!(checked.accepted);
     kani::cover!(!checked.accepted);
@@ -309,8 +383,44 @@ fn resident_lengths_twenty_four_then_twenty_four_at_offset_forty_eight_preserve_
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-fn resident_lengths_twenty_four_then_thirty_two_at_offset_forty_eight_preserve_admission() {
-    let checked = check_resident_admission_with_second_length::<ATTRIBUTE_OFFSET_48, 24>(Some(32));
+fn resident_lengths_twenty_four_then_twenty_four_then_thirty_two_at_offset_forty_eight_preserve_admission()
+ {
+    let checked =
+        check_resident_admission_with_third_length::<ATTRIBUTE_OFFSET_48, 24, 24>(Some(32));
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(cadical)]
+fn resident_lengths_twenty_four_then_twenty_four_with_other_third_lengths_at_offset_forty_eight_preserve_admission()
+ {
+    let checked = check_resident_admission_with_third_length::<ATTRIBUTE_OFFSET_48, 24, 24>(None);
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn resident_lengths_twenty_four_then_thirty_two_then_twenty_four_at_offset_forty_eight_preserve_admission()
+ {
+    let checked =
+        check_resident_admission_with_third_length::<ATTRIBUTE_OFFSET_48, 24, 32>(Some(24));
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(cadical)]
+fn resident_lengths_twenty_four_then_thirty_two_with_other_third_lengths_at_offset_forty_eight_preserve_admission()
+ {
+    let checked = check_resident_admission_with_third_length::<ATTRIBUTE_OFFSET_48, 24, 32>(None);
     assert_eq!(checked.accepted, checked.reference);
     kani::cover!(checked.accepted);
     kani::cover!(!checked.accepted);
@@ -350,8 +460,21 @@ fn resident_length_twenty_four_with_other_second_lengths_at_offset_forty_eight_p
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-fn resident_lengths_thirty_two_then_twenty_four_at_offset_forty_eight_preserve_admission() {
-    let checked = check_resident_admission_with_second_length::<ATTRIBUTE_OFFSET_48, 32>(Some(24));
+fn resident_lengths_thirty_two_then_twenty_four_then_twenty_four_at_offset_forty_eight_preserve_admission()
+ {
+    let checked =
+        check_resident_admission_with_third_length::<ATTRIBUTE_OFFSET_48, 32, 24>(Some(24));
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(cadical)]
+fn resident_lengths_thirty_two_then_twenty_four_with_other_third_lengths_at_offset_forty_eight_preserve_admission()
+ {
+    let checked = check_resident_admission_with_third_length::<ATTRIBUTE_OFFSET_48, 32, 24>(None);
     assert_eq!(checked.accepted, checked.reference);
     kani::cover!(checked.accepted);
     kani::cover!(!checked.accepted);
@@ -461,8 +584,10 @@ fn nonresident_chains_at_offset_forty_eight_preserve_admission() {
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-fn resident_lengths_twenty_four_then_twenty_four_at_offset_forty_eight_preserve_invariants() {
-    let checked = check_resident_invariants_with_second_length::<ATTRIBUTE_OFFSET_48, 24>(Some(24));
+fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_forty_eight_preserve_invariants()
+ {
+    let checked =
+        check_resident_invariants_with_third_length::<ATTRIBUTE_OFFSET_48, 24, 24>(Some(24));
     assert!(
         checked.count
             <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_48) - REFERENCE_ALIGNMENT)
@@ -477,8 +602,58 @@ fn resident_lengths_twenty_four_then_twenty_four_at_offset_forty_eight_preserve_
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-fn resident_lengths_twenty_four_then_thirty_two_at_offset_forty_eight_preserve_invariants() {
-    let checked = check_resident_invariants_with_second_length::<ATTRIBUTE_OFFSET_48, 24>(Some(32));
+fn resident_lengths_twenty_four_then_twenty_four_then_thirty_two_at_offset_forty_eight_preserve_invariants()
+ {
+    let checked =
+        check_resident_invariants_with_third_length::<ATTRIBUTE_OFFSET_48, 24, 24>(Some(32));
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_48) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+    kani::cover!(checked.accepted && checked.count > 1);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(cadical)]
+fn resident_lengths_twenty_four_then_twenty_four_with_other_third_lengths_at_offset_forty_eight_preserve_invariants()
+ {
+    let checked = check_resident_invariants_with_third_length::<ATTRIBUTE_OFFSET_48, 24, 24>(None);
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_48) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+    kani::cover!(checked.accepted && checked.count > 1);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn resident_lengths_twenty_four_then_thirty_two_then_twenty_four_at_offset_forty_eight_preserve_invariants()
+ {
+    let checked =
+        check_resident_invariants_with_third_length::<ATTRIBUTE_OFFSET_48, 24, 32>(Some(24));
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_48) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(cadical)]
+fn resident_lengths_twenty_four_then_thirty_two_with_other_third_lengths_at_offset_forty_eight_preserve_invariants()
+ {
+    let checked = check_resident_invariants_with_third_length::<ATTRIBUTE_OFFSET_48, 24, 32>(None);
     assert!(
         checked.count
             <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_48) - REFERENCE_ALIGNMENT)
@@ -534,8 +709,25 @@ fn resident_length_twenty_four_with_other_second_lengths_at_offset_forty_eight_p
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-fn resident_lengths_thirty_two_then_twenty_four_at_offset_forty_eight_preserve_invariants() {
-    let checked = check_resident_invariants_with_second_length::<ATTRIBUTE_OFFSET_48, 32>(Some(24));
+fn resident_lengths_thirty_two_then_twenty_four_then_twenty_four_at_offset_forty_eight_preserve_invariants()
+ {
+    let checked =
+        check_resident_invariants_with_third_length::<ATTRIBUTE_OFFSET_48, 32, 24>(Some(24));
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_48) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(cadical)]
+fn resident_lengths_thirty_two_then_twenty_four_with_other_third_lengths_at_offset_forty_eight_preserve_invariants()
+ {
+    let checked = check_resident_invariants_with_third_length::<ATTRIBUTE_OFFSET_48, 32, 24>(None);
     assert!(
         checked.count
             <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_48) - REFERENCE_ALIGNMENT)
@@ -686,8 +878,21 @@ fn nonresident_chains_at_offset_forty_eight_preserve_invariants() {
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-fn resident_lengths_twenty_four_then_twenty_four_at_offset_fifty_six_preserve_admission() {
-    let checked = check_resident_admission_with_second_length::<ATTRIBUTE_OFFSET_56, 24>(Some(24));
+fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fifty_six_preserve_admission()
+ {
+    let checked =
+        check_resident_admission_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(Some(24));
+    assert_eq!(checked.accepted, checked.reference);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(cadical)]
+fn resident_lengths_twenty_four_then_twenty_four_with_other_third_lengths_at_offset_fifty_six_preserve_admission()
+ {
+    let checked = check_resident_admission_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
     assert_eq!(checked.accepted, checked.reference);
     kani::cover!(checked.accepted);
     kani::cover!(!checked.accepted);
@@ -796,8 +1001,25 @@ fn nonresident_chains_at_offset_fifty_six_preserve_admission() {
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-fn resident_lengths_twenty_four_then_twenty_four_at_offset_fifty_six_preserve_invariants() {
-    let checked = check_resident_invariants_with_second_length::<ATTRIBUTE_OFFSET_56, 24>(Some(24));
+fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fifty_six_preserve_invariants()
+ {
+    let checked =
+        check_resident_invariants_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(Some(24));
+    assert!(
+        checked.count
+            <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
+                / REFERENCE_RESIDENT_HEADER_BYTES
+    );
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+#[kani::solver(cadical)]
+fn resident_lengths_twenty_four_then_twenty_four_with_other_third_lengths_at_offset_fifty_six_preserve_invariants()
+ {
+    let checked = check_resident_invariants_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
     assert!(
         checked.count
             <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
