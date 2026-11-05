@@ -116,6 +116,74 @@ struct EntryColumns {
     is_system: bool,
 }
 
+const fn with_flag(value: u8, mask: u8, enabled: bool) -> u8 {
+    if enabled { value | mask } else { value & !mask }
+}
+
+const fn excluded_by_attributes(value: u8) -> bool {
+    value & flags::HIDDEN != 0 || value & flags::SYSTEM != 0
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObjectMetadata {
+    size: u64,
+    mtime: i64,
+    is_reparse: bool,
+    is_hidden: bool,
+    is_system: bool,
+}
+
+impl From<&RawEntry<'_>> for ObjectMetadata {
+    fn from(entry: &RawEntry<'_>) -> Self {
+        Self {
+            size: entry.size,
+            mtime: entry.mtime,
+            is_reparse: entry.is_reparse,
+            is_hidden: entry.is_hidden,
+            is_system: entry.is_system,
+        }
+    }
+}
+
+struct FileLink<'entry, 'name>(&'entry RawEntry<'name>);
+
+impl<'entry, 'name> FileLink<'entry, 'name> {
+    fn checked(object: Frn, entry: &'entry RawEntry<'name>) -> Result<Self, IndexMutationError> {
+        if entry.frn != object || entry.is_dir {
+            Err(IndexMutationError::ObjectKind { object })
+        } else {
+            Ok(Self(entry))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WalkState {
+    Unseen,
+    Visiting,
+    Done,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WalkStep {
+    Visit,
+    Cycle,
+    Stop,
+}
+
+impl WalkState {
+    const fn enter(&mut self) -> WalkStep {
+        match self {
+            Self::Unseen => {
+                *self = Self::Visiting;
+                WalkStep::Visit
+            }
+            Self::Visiting => WalkStep::Cycle,
+            Self::Done => WalkStep::Stop,
+        }
+    }
+}
+
 impl VolumeIndex {
     /// Pool bytes `id` *owns* that a rebuild reclaims: its original-spelling copy.
     /// The folded bytes are shared in the dictionary (ADR-0032), so a dead entry rarely frees them; their bloat is tracked by `dict_appends_since_dedup` and collapsed at the next dedup instead.
@@ -129,7 +197,7 @@ impl VolumeIndex {
 
     pub(super) fn tombstone_id(&mut self, id: EntryId) {
         debug_assert!(self.is_live(id), "a link row is tombstoned once");
-        self.flag[id as usize] |= flags::TOMBSTONE;
+        self.flag[id as usize] = with_flag(self.flag[id as usize], flags::TOMBSTONE, true);
         self.tombstones += 1;
         self.dead_name_bytes += self.owned_name_bytes(id);
     }
@@ -280,9 +348,6 @@ impl VolumeIndex {
     }
 
     fn validate_live_topology(&self) -> Result<(), IndexMutationError> {
-        const VISITING: u8 = 1;
-        const DONE: u8 = 2;
-
         if self.is_empty()
             || !self.is_live(Self::ROOT)
             || !self.is_dir(Self::ROOT)
@@ -328,27 +393,31 @@ impl VolumeIndex {
             }
         }
 
-        let mut state = vec![0u8; self.len()];
-        state[Self::ROOT as usize] = DONE;
+        let mut state = vec![WalkState::Unseen; self.len()];
+        state[Self::ROOT as usize] = WalkState::Done;
         let mut stack = Vec::new();
         for start in 1..self.len() as EntryId {
-            if !self.is_live(start) || state[start as usize] == DONE {
+            if !self.is_live(start) {
                 continue;
             }
             stack.clear();
             let mut current = start;
-            while current != Self::ROOT && state[current as usize] != DONE {
-                if state[current as usize] == VISITING {
-                    return Err(IndexMutationError::InvalidTopology {
-                        reason: "the live parent graph contains a cycle",
-                    });
+            loop {
+                match state[current as usize].enter() {
+                    WalkStep::Visit => {
+                        stack.push(current);
+                        current = self.parent(current);
+                    }
+                    WalkStep::Cycle => {
+                        return Err(IndexMutationError::InvalidTopology {
+                            reason: "the live parent graph contains a cycle",
+                        });
+                    }
+                    WalkStep::Stop => break,
                 }
-                state[current as usize] = VISITING;
-                stack.push(current);
-                current = self.parent(current);
             }
             while let Some(entry) = stack.pop() {
-                state[entry as usize] = DONE;
+                state[entry as usize] = WalkState::Done;
             }
         }
         Ok(())
@@ -424,30 +493,23 @@ impl VolumeIndex {
         frn: Frn,
         desired: &[RawEntry<'_>],
     ) -> Result<LinkReconcileStats, IndexMutationError> {
-        if desired.is_empty() {
+        let Some((first, rest)) = desired.split_first() else {
             return Err(IndexMutationError::EmptyLinkSnapshot { object: frn });
-        }
+        };
         self.validate_mutation_reference(frn, false)?;
-        let metadata = &desired[0];
-        if metadata.frn != frn || metadata.is_dir {
-            return Err(IndexMutationError::ObjectKind { object: frn });
-        }
+        let first = FileLink::checked(frn, first)?;
+        let metadata = ObjectMetadata::from(first.0);
         self.validate_existing_object_kind(frn, false)?;
 
         let mut wanted: Vec<(EntryId, Vec<u8>, &RawEntry<'_>)> = Vec::with_capacity(desired.len());
-        for entry in desired {
-            if entry.frn != frn || entry.is_dir {
-                return Err(IndexMutationError::ObjectKind { object: frn });
-            }
+        for link in core::iter::once(Ok(first))
+            .chain(rest.iter().map(|entry| FileLink::checked(frn, entry)))
+        {
+            let entry = link?.0;
             if entry.name_utf16.is_empty() {
                 return Err(IndexMutationError::EmptyName { object: frn });
             }
-            if entry.size != metadata.size
-                || entry.mtime != metadata.mtime
-                || entry.is_reparse != metadata.is_reparse
-                || entry.is_hidden != metadata.is_hidden
-                || entry.is_system != metadata.is_system
-            {
+            if ObjectMetadata::from(entry) != metadata {
                 return Err(IndexMutationError::InconsistentLinkMetadata { object: frn });
             }
             let parent = self.resolve_parent_for_mutation(entry.frn, entry.parent_frn)?;
@@ -851,26 +913,19 @@ impl VolumeIndex {
         self.mtime
             .push(crate::query::dates::mtime_ticks_to_secs(mtime));
         self.frn.push(frn.0);
-        let mut f = 0u8;
-        if is_dir {
-            f |= flags::IS_DIR;
-        }
-        if is_reparse {
-            f |= flags::REPARSE;
-        }
-        if is_hidden {
-            f |= flags::HIDDEN;
-        }
-        if is_system {
-            f |= flags::SYSTEM;
-        }
+        let f = with_flag(0, flags::IS_DIR, is_dir);
+        let f = with_flag(f, flags::REPARSE, is_reparse);
+        let f = with_flag(f, flags::HIDDEN, is_hidden);
+        let f = with_flag(f, flags::SYSTEM, is_system);
         let parent_excluded = self
             .flag
             .get(parent as usize)
             .is_some_and(|pf| pf & flags::EXCLUDED != 0);
-        if is_hidden || is_system || parent_excluded {
-            f |= flags::EXCLUDED;
-        }
+        let f = with_flag(
+            f,
+            flags::EXCLUDED,
+            is_hidden || is_system || parent_excluded,
+        );
         self.flag.push(f);
         id
     }
@@ -879,12 +934,9 @@ impl VolumeIndex {
     pub(super) fn recompute_excluded(&mut self, id: EntryId) {
         let p = self.parent[id as usize];
         let inherited = p != NO_PARENT && p != id && self.flag[p as usize] & flags::EXCLUDED != 0;
-        let own = self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM) != 0;
-        if own || inherited {
-            self.flag[id as usize] |= flags::EXCLUDED;
-        } else {
-            self.flag[id as usize] &= !flags::EXCLUDED;
-        }
+        let own = excluded_by_attributes(self.flag[id as usize]);
+        self.flag[id as usize] =
+            with_flag(self.flag[id as usize], flags::EXCLUDED, own || inherited);
     }
 
     /// Recompute inherited HIDDEN/SYSTEM exclusion for the complete forest.
@@ -893,17 +945,11 @@ impl VolumeIndex {
     /// Each row enters and leaves the walk once, so moving a large subtree is O(index entries), never O(records × entries).
     /// Corrupt parent cycles are handled deterministically: the cycle is excluded iff any member carries its own HIDDEN/SYSTEM bit, and that state then propagates to descendants.
     pub(crate) fn recompute_all_excluded(&mut self) {
-        const VISITING: u8 = 1;
-        const DONE: u8 = 2;
-
         let n = self.len();
-        let mut state = vec![0u8; n];
+        let mut state = vec![WalkState::Unseen; n];
         let mut stack: Vec<EntryId> = Vec::new();
 
         for start in 0..n as EntryId {
-            if state[start as usize] == DONE {
-                continue;
-            }
             stack.clear();
             let mut cur = start;
             let mut inherited = false;
@@ -912,33 +958,29 @@ impl VolumeIndex {
                 if cur == NO_PARENT || cur as usize >= n {
                     break;
                 }
-                match state[cur as usize] {
-                    DONE => {
+                match state[cur as usize].enter() {
+                    WalkStep::Stop => {
                         inherited = self.is_excluded(cur);
                         break;
                     }
-                    VISITING => {
+                    WalkStep::Cycle => {
                         let cycle_start = stack
                             .iter()
                             .position(|&id| id == cur)
                             .expect("VISITING entries belong to the current parent walk");
-                        let cycle_excluded = stack[cycle_start..].iter().any(|&id| {
-                            self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM) != 0
-                        });
+                        let cycle_excluded = stack[cycle_start..]
+                            .iter()
+                            .any(|&id| excluded_by_attributes(self.flag[id as usize]));
                         for &id in &stack[cycle_start..] {
-                            if cycle_excluded {
-                                self.flag[id as usize] |= flags::EXCLUDED;
-                            } else {
-                                self.flag[id as usize] &= !flags::EXCLUDED;
-                            }
-                            state[id as usize] = DONE;
+                            self.flag[id as usize] =
+                                with_flag(self.flag[id as usize], flags::EXCLUDED, cycle_excluded);
+                            state[id as usize] = WalkState::Done;
                         }
                         stack.truncate(cycle_start);
                         inherited = cycle_excluded;
                         break;
                     }
-                    _ => {
-                        state[cur as usize] = VISITING;
+                    WalkStep::Visit => {
                         stack.push(cur);
                         cur = self.parent[cur as usize];
                     }
@@ -946,14 +988,11 @@ impl VolumeIndex {
             }
 
             while let Some(id) = stack.pop() {
-                let own = self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM) != 0;
+                let own = excluded_by_attributes(self.flag[id as usize]);
                 let excluded = own || inherited;
-                if excluded {
-                    self.flag[id as usize] |= flags::EXCLUDED;
-                } else {
-                    self.flag[id as usize] &= !flags::EXCLUDED;
-                }
-                state[id as usize] = DONE;
+                self.flag[id as usize] =
+                    with_flag(self.flag[id as usize], flags::EXCLUDED, excluded);
+                state[id as usize] = WalkState::Done;
                 inherited = excluded;
             }
         }
@@ -989,34 +1028,44 @@ impl VolumeIndex {
         if ids.is_empty() {
             return None;
         }
-        let expected = if is_reparse { flags::REPARSE } else { 0 }
-            | if is_hidden { flags::HIDDEN } else { 0 }
-            | if is_system { flags::SYSTEM } else { 0 };
-        let mask = flags::REPARSE | flags::HIDDEN | flags::SYSTEM;
-        let changed = ids
-            .iter()
-            .any(|&id| self.flag[id as usize] & mask != expected);
+        let expected = (is_reparse, is_hidden, is_system);
+        let changed = ids.iter().any(|&id| {
+            (
+                self.is_reparse(id),
+                self.flag[id as usize] & flags::HIDDEN != 0,
+                self.flag[id as usize] & flags::SYSTEM != 0,
+            ) != expected
+        });
         for id in ids {
             let flag = &mut self.flag[id as usize];
-            *flag = (*flag & !flags::REPARSE) | if is_reparse { flags::REPARSE } else { 0 };
+            *flag = with_flag(*flag, flags::REPARSE, is_reparse);
             self.update_attrs_id(id, is_hidden, is_system);
         }
         Some(changed)
     }
 
     fn update_attrs_id(&mut self, id: EntryId, is_hidden: bool, is_system: bool) {
-        let old_raw = self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM);
+        let old_raw = (
+            self.flag[id as usize] & flags::HIDDEN != 0,
+            self.flag[id as usize] & flags::SYSTEM != 0,
+        );
         let f = &mut self.flag[id as usize];
-        *f = (*f & !(flags::HIDDEN | flags::SYSTEM))
-            | if is_hidden { flags::HIDDEN } else { 0 }
-            | if is_system { flags::SYSTEM } else { 0 };
+        *f = with_flag(*f, flags::HIDDEN, is_hidden);
+        *f = with_flag(*f, flags::SYSTEM, is_system);
         self.recompute_excluded(id);
-        let new_raw = self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM);
+        let new_raw = (
+            self.flag[id as usize] & flags::HIDDEN != 0,
+            self.flag[id as usize] & flags::SYSTEM != 0,
+        );
         if self.is_dir(id) && old_raw != new_raw {
             self.exclusion_tree_dirty = true;
         }
     }
 }
+
+#[cfg(kani)]
+#[path = "mutation_proofs.rs"]
+mod kani_proofs;
 
 #[cfg(test)]
 mod tests {
@@ -1073,6 +1122,542 @@ mod tests {
             mtime: 1,
         });
         builder.finish_strict().expect("strict fixture is rooted")
+    }
+
+    fn exact_file_link(object: Frn, parent: Frn, name: &[u16]) -> RawEntry<'_> {
+        RawEntry {
+            frn: object,
+            parent_frn: parent,
+            name_utf16: name,
+            is_dir: false,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 1,
+            mtime: 0,
+        }
+    }
+
+    fn snapshot_bytes(index: &VolumeIndex) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        index.write_snapshot(&mut bytes, 1, 1).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn sequence_zero_references_are_rejected_without_changing_the_index() {
+        for (object, parent, invalid) in [
+            (Frn(200), full(10), Frn(200)),
+            (full(200), Frn(10), Frn(10)),
+            (full(200), Frn(5), Frn(5)),
+        ] {
+            let mut index = strict_index();
+            let before = snapshot_bytes(&index);
+            let name = u16s("new.txt");
+            assert_eq!(
+                index.upsert_link_usn(&exact_file_link(object, parent, &name)),
+                Err(IndexMutationError::InvalidReference { reference: invalid })
+            );
+            assert_eq!(snapshot_bytes(&index), before);
+        }
+    }
+
+    #[test]
+    fn only_a_synthetic_root_may_have_a_sequence_zero_parent_reference() {
+        let synthetic = build_sample();
+        assert_eq!(synthetic.validate_mutation_reference(Frn(5), true), Ok(()));
+        for (reference, root_allowed) in [(Frn(5), false), (Frn(10), true)] {
+            assert_eq!(
+                synthetic.validate_mutation_reference(reference, root_allowed),
+                Err(IndexMutationError::InvalidReference { reference })
+            );
+        }
+        let strict = strict_index();
+        assert!(strict.validate_mutation_reference(Frn(5), true).is_err());
+        assert_eq!(strict.validate_mutation_reference(full(5), false), Ok(()));
+    }
+
+    #[test]
+    fn object_replacement_rejects_sibling_links_without_changing_the_index() {
+        let mut index = build_hardlink_sample();
+        let before = snapshot_bytes(&index);
+        let name = u16s("replacement.txt");
+        assert_eq!(
+            index.upsert_usn(&exact_file_link(full(100), full(10), &name)),
+            Err(IndexMutationError::InvalidTopology {
+                reason: "object-level replacement would discard sibling hard links",
+            })
+        );
+        assert_eq!(snapshot_bytes(&index), before);
+        assert_eq!(index.entries_by_frn(full(100)).count(), 2);
+    }
+
+    #[test]
+    fn each_link_metadata_field_is_checked_before_any_mutation() {
+        for field in 0..5 {
+            let mut index = strict_index();
+            let before = snapshot_bytes(&index);
+            let first_name = u16s("first.txt");
+            let second_name = u16s("second.txt");
+            let first = exact_file_link(full(100), full(10), &first_name);
+            let mut second = exact_file_link(full(100), full(20), &second_name);
+            match field {
+                0 => second.size += 1,
+                1 => second.mtime += 1,
+                2 => second.is_reparse = true,
+                3 => second.is_hidden = true,
+                _ => second.is_system = true,
+            }
+            assert_eq!(
+                index.reconcile_file_links_usn(full(100), &[first, second]),
+                Err(IndexMutationError::InconsistentLinkMetadata { object: full(100) })
+            );
+            assert_eq!(snapshot_bytes(&index), before);
+        }
+    }
+
+    #[test]
+    fn every_snapshot_row_requires_the_same_file_object_before_mutation() {
+        for invalid_row in 0..2 {
+            for wrong_kind in [false, true] {
+                let mut index = strict_index();
+                let before = snapshot_bytes(&index);
+                let first_name = u16s("first.txt");
+                let second_name = u16s("second.txt");
+                let mut entries = [
+                    exact_file_link(full(100), full(10), &first_name),
+                    exact_file_link(full(100), full(20), &second_name),
+                ];
+                if wrong_kind {
+                    entries[invalid_row].is_dir = true;
+                } else {
+                    entries[invalid_row].frn = full(200);
+                }
+                assert_eq!(
+                    index.reconcile_file_links_usn(full(100), &entries),
+                    Err(IndexMutationError::ObjectKind { object: full(100) })
+                );
+                assert_eq!(snapshot_bytes(&index), before);
+            }
+        }
+    }
+
+    #[test]
+    fn an_authoritative_snapshot_counts_retired_generations_and_distinct_paths() {
+        let mut index = build_hardlink_sample();
+        let old = full(100);
+        let current = stale_generation(100);
+        let shared = u16s("Shared.TXT");
+        let other = u16s("Other.TXT");
+        let desired = [
+            exact_file_link(current, full(10), &shared),
+            exact_file_link(current, full(20), &shared),
+            exact_file_link(current, full(10), &other),
+        ];
+        let first_new = index.len() as EntryId;
+        assert_eq!(
+            index.reconcile_file_links_usn(current, &desired),
+            Ok(LinkReconcileStats {
+                added: 3,
+                removed: 2,
+                retained: 0,
+                metadata_changed: false
+            })
+        );
+        index.merge_new_into_permutations(first_new).unwrap();
+        assert_eq!(index.entries_by_frn(old).count(), 0);
+        assert_eq!(index.entries_by_frn(current).count(), 3);
+        for entry in &desired {
+            assert!(
+                index
+                    .entry_by_link(current, entry.parent_frn, entry.name_utf16)
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            index.reconcile_file_links_usn(current, &desired),
+            Ok(LinkReconcileStats {
+                added: 0,
+                removed: 0,
+                retained: 3,
+                metadata_changed: false,
+            })
+        );
+    }
+
+    #[test]
+    fn flag_updates_preserve_unselected_bits_and_are_idempotent() {
+        for original in 0..=u8::MAX {
+            for mask in 0..=u8::MAX {
+                for enabled in [false, true] {
+                    let changed = with_flag(original, mask, enabled);
+                    assert_eq!((original ^ changed) & !mask, 0);
+                    assert_eq!(changed & mask, if enabled { mask } else { 0 });
+                    assert_eq!(with_flag(changed, mask, enabled), changed);
+                }
+            }
+        }
+    }
+
+    const ATTRIBUTE_CASES: [(bool, bool, bool); 8] = [
+        (false, false, false),
+        (false, false, true),
+        (false, true, false),
+        (false, true, true),
+        (true, false, false),
+        (true, false, true),
+        (true, true, false),
+        (true, true, true),
+    ];
+
+    #[test]
+    fn object_attributes_are_shared_but_exclusion_remains_per_path() {
+        for initial in ATTRIBUTE_CASES {
+            for requested in ATTRIBUTE_CASES {
+                let mut index = build_hardlink_sample();
+                index.update_attrs(20, true, false).unwrap();
+                index.recompute_all_excluded();
+                index
+                    .update_object_attrs_frn(full(100), initial.0, initial.1, initial.2)
+                    .unwrap();
+                index.exclusion_tree_dirty = false;
+                assert_eq!(
+                    index.update_object_attrs_frn(full(100), requested.0, requested.1, requested.2),
+                    Some(initial != requested)
+                );
+                for id in index.entries_by_frn(full(100)) {
+                    assert_eq!(index.is_reparse(id), requested.0);
+                    assert_eq!(index.flag[id as usize] & flags::HIDDEN != 0, requested.1);
+                    assert_eq!(index.flag[id as usize] & flags::SYSTEM != 0, requested.2);
+                    assert_eq!(
+                        index.is_excluded(id),
+                        requested.1 || requested.2 || index.frn(index.parent(id)) == full(20)
+                    );
+                    assert!(index.is_live(id));
+                    assert!(!index.is_dir(id));
+                }
+                assert!(!index.exclusion_tree_dirty);
+                assert_eq!(
+                    index.update_object_attrs_frn(full(100), requested.0, requested.1, requested.2),
+                    Some(false)
+                );
+                assert_eq!(
+                    index.update_object_attrs_frn(stale_generation(100), true, true, true),
+                    None
+                );
+                assert_eq!(
+                    index.update_object_attrs_frn(full(999), true, true, true),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn directory_attribute_changes_dirty_the_tree_only_when_raw_bits_change() {
+        for initial in [(false, false), (false, true), (true, false), (true, true)] {
+            for requested in [(false, false), (false, true), (true, false), (true, true)] {
+                let mut index = build_hardlink_sample();
+                index.update_attrs(10, initial.0, initial.1).unwrap();
+                index.exclusion_tree_dirty = false;
+                index.update_attrs(10, requested.0, requested.1).unwrap();
+                assert_eq!(index.exclusion_tree_dirty, initial != requested);
+            }
+        }
+    }
+
+    #[test]
+    fn exact_stat_updates_invalidate_once_per_changed_object_and_preserve_siblings() {
+        let mut index = build_hardlink_sample();
+        let object = full(100);
+        let time = crate::query::dates::FILETIME_UNIX_EPOCH + crate::query::dates::TICKS_PER_SECOND;
+        let initial = index.stat_generation;
+        let first = index.update_stat_frn(object, 99, time).unwrap();
+        assert_eq!(index.stat_generation, initial + 1);
+        index.update_stat_frn(object, 100, time).unwrap();
+        assert_eq!(index.stat_generation, initial + 2);
+        let later = time + crate::query::dates::TICKS_PER_SECOND;
+        index.update_stat_frn(object, 100, later).unwrap();
+        assert_eq!(index.stat_generation, initial + 3);
+        assert_eq!(index.update_stat_frn(object, 100, later), Some(first));
+        assert_eq!(index.stat_generation, initial + 3);
+        assert_eq!(index.update_stat_frn(stale_generation(100), 0, 0), None);
+        assert_eq!(index.update_stat_frn(full(999), 0, 0), None);
+        assert_eq!(index.stat_generation, initial + 3);
+        for id in index.entries_by_frn(object) {
+            assert_eq!((index.size(id), index.mtime(id)), (100, later));
+        }
+    }
+
+    #[test]
+    fn changed_snapshot_metadata_is_reported_when_only_size_or_time_differs() {
+        for change_time in [false, true] {
+            let mut index = build_hardlink_sample();
+            let shared = u16s("shared.txt");
+            let alias = u16s("alias.txt");
+            let mut desired = [
+                exact_file_link(full(100), full(10), &shared),
+                exact_file_link(full(100), full(20), &alias),
+            ];
+            for entry in &mut desired {
+                entry.size = if change_time { 42 } else { 43 };
+                entry.mtime = if change_time {
+                    crate::query::dates::FILETIME_UNIX_EPOCH + crate::query::dates::TICKS_PER_SECOND
+                } else {
+                    2
+                };
+            }
+            assert_eq!(
+                index.reconcile_file_links_usn(full(100), &desired),
+                Ok(LinkReconcileStats {
+                    added: 0,
+                    removed: 0,
+                    retained: 2,
+                    metadata_changed: true,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn rooted_topology_requires_a_live_parentless_directory_root() {
+        for invalid in 0..3 {
+            let mut index = strict_index();
+            let root = VolumeIndex::ROOT as usize;
+            match invalid {
+                0 => index.flag[root] |= flags::TOMBSTONE,
+                1 => index.flag[root] &= !flags::IS_DIR,
+                _ => index.parent[root] = index.entry_by_frn(full(10)).unwrap(),
+            }
+            assert_eq!(
+                index.validate_live_topology(),
+                Err(IndexMutationError::InvalidTopology {
+                    reason: "the root is missing, dead, non-directory, or parented",
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn rooted_topology_rejects_missing_dead_and_non_directory_parents() {
+        for invalid in 0..4 {
+            let mut index = strict_index();
+            let child = index.entry_by_frn(full(100)).unwrap();
+            let parent = match invalid {
+                0 => NO_PARENT,
+                1 => index.len() as EntryId,
+                2 => child,
+                _ => {
+                    let dead = index.entry_by_frn(full(20)).unwrap();
+                    index.tombstone_id(dead);
+                    dead
+                }
+            };
+            index.parent[child as usize] = parent;
+            assert_eq!(
+                index.validate_live_topology(),
+                Err(IndexMutationError::InvalidTopology {
+                    reason: "a live entry lacks one live directory parent",
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn rooted_topology_rejects_self_parenting_and_longer_cycles() {
+        let mut index = strict_index();
+        let first = index.entry_by_frn(full(10)).unwrap();
+        let second = index.entry_by_frn(full(20)).unwrap();
+        index.parent[second as usize] = second;
+        assert_eq!(
+            index.validate_live_topology(),
+            Err(IndexMutationError::SelfParent { object: full(20) })
+        );
+        index.parent[second as usize] = first;
+        index.parent[first as usize] = second;
+        assert_eq!(
+            index.validate_live_topology(),
+            Err(IndexMutationError::InvalidTopology {
+                reason: "the live parent graph contains a cycle",
+            })
+        );
+    }
+
+    #[test]
+    fn batch_validation_rejects_ambiguous_generations_kinds_and_link_identities() {
+        for invalid in 0..3 {
+            let mut index = strict_index();
+            let first_new = index.len() as EntryId;
+            let name = u16s("file.txt");
+            let mut entry = exact_file_link(full(100), full(10), &name);
+            match invalid {
+                0 => entry.frn = stale_generation(100),
+                1 => entry.is_dir = true,
+                _ => {}
+            }
+            let parent = index.entry_by_frn(full(10)).unwrap();
+            index.push_raw(&entry, parent);
+            let reason = if invalid == 2 {
+                "an exact hard-link identity occurs more than once"
+            } else {
+                "record generations or object kinds are ambiguous"
+            };
+            assert_eq!(
+                index.merge_new_into_permutations(first_new),
+                Err(IndexMutationError::InvalidTopology { reason })
+            );
+        }
+    }
+
+    #[test]
+    fn parent_resolution_requires_one_exact_directory_generation() {
+        let mut index = strict_index();
+        assert_eq!(
+            index.resolve_parent_for_mutation(full(200), full(100)),
+            Err(IndexMutationError::ParentNotDirectory {
+                object: full(200),
+                parent: full(100),
+            })
+        );
+        assert_eq!(
+            index.resolve_parent_for_mutation(full(200), stale_generation(5)),
+            Err(IndexMutationError::UnresolvedParent {
+                object: full(200),
+                parent: stale_generation(5),
+            })
+        );
+        assert_eq!(
+            index.resolve_parent_for_mutation(full(100), full(100)),
+            Err(IndexMutationError::SelfParent { object: full(100) })
+        );
+        assert_eq!(
+            index.resolve_parent_for_mutation(full(200), full(5)),
+            Ok(VolumeIndex::ROOT)
+        );
+        let name = u16s("second-directory-row");
+        let mut duplicate = exact_file_link(full(10), full(5), &name);
+        duplicate.is_dir = true;
+        index.push_raw(&duplicate, VolumeIndex::ROOT);
+        assert_eq!(
+            index.resolve_parent_for_mutation(full(200), full(10)),
+            Err(IndexMutationError::AmbiguousParent {
+                object: full(200),
+                parent: full(10),
+            })
+        );
+    }
+
+    #[test]
+    fn directory_moves_reject_each_corrupt_ancestor_chain() {
+        for invalid in 0..5 {
+            let mut index = strict_index();
+            let parent = index.entry_by_frn(full(20)).unwrap();
+            let ancestor = match invalid {
+                0 => NO_PARENT,
+                1 => index.len() as EntryId,
+                2 => index.entry_by_frn(full(100)).unwrap(),
+                _ => parent,
+            };
+            index.parent[parent as usize] = ancestor;
+            if invalid == 4 {
+                index.tombstone_id(parent);
+            }
+            assert!(matches!(
+                index.ensure_parent_does_not_cycle(full(10), parent),
+                Err(IndexMutationError::InvalidTopology { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn exclusion_walk_resolves_cycles_from_any_members_raw_attributes() {
+        for hidden in [false, true] {
+            for system in [false, true] {
+                let mut index = strict_index();
+                let first = index.entry_by_frn(full(10)).unwrap();
+                let second = index.entry_by_frn(full(20)).unwrap();
+                index.update_attrs(10, hidden, false).unwrap();
+                index.update_attrs(20, false, system).unwrap();
+                index.parent[first as usize] = second;
+                index.recompute_all_excluded();
+                for object in [full(10), full(20), full(100)] {
+                    assert_eq!(
+                        index.is_excluded(index.entry_by_frn(object).unwrap()),
+                        hidden || system
+                    );
+                }
+                assert!(!index.is_excluded(VolumeIndex::ROOT));
+            }
+        }
+    }
+
+    #[test]
+    fn exclusion_walk_treats_an_out_of_range_parent_as_a_boundary() {
+        for hidden in [false, true] {
+            let mut index = strict_index();
+            let first = index.entry_by_frn(full(10)).unwrap();
+            index.update_attrs(10, hidden, false).unwrap();
+            index.parent[first as usize] = index.len() as EntryId;
+            index.recompute_all_excluded();
+            for object in [full(10), full(20), full(100)] {
+                assert_eq!(
+                    index.is_excluded(index.entry_by_frn(object).unwrap()),
+                    hidden
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_directory_changes_invalidate_paths_and_account_for_original_names() {
+        let mut index = build_hardlink_sample();
+        let directory = index.entry_by_frn(full(10)).unwrap();
+        let child = index
+            .entry_by_link(full(100), full(10), &u16s("shared.txt"))
+            .unwrap();
+        let first_name = u16s("First");
+        let second_name = u16s("Second");
+        let third_name = u16s("Third");
+        let generation = index.dir_topology_generation;
+        index.update_attrs(20, true, false).unwrap();
+        index
+            .merge_new_into_permutations(index.len() as EntryId)
+            .unwrap();
+        for (round, name, parent) in [
+            (1, &first_name, 20),
+            (2, &second_name, 5),
+            (3, &third_name, 5),
+        ] {
+            assert_eq!(
+                index.rename_dir_synthetic_in_place(10, name, parent),
+                Some(directory)
+            );
+            assert_eq!(index.dir_topology_generation, generation + round);
+            index
+                .merge_new_into_permutations(index.len() as EntryId)
+                .unwrap();
+            assert_eq!(index.is_excluded(child), parent == 20);
+            assert_eq!(
+                index.name(directory),
+                name.iter().map(|&unit| unit as u8).collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            index.dead_name_bytes,
+            (first_name.len() + second_name.len()) as u64
+        );
+        index.reparent_synthetic(10, 20).unwrap();
+        assert!(index.exclusion_tree_dirty);
+        index
+            .merge_new_into_permutations(index.len() as EntryId)
+            .unwrap();
+        assert!(index.is_excluded(child));
+        index.reparent_synthetic(10, 5).unwrap();
+        assert!(index.exclusion_tree_dirty);
+        index
+            .merge_new_into_permutations(index.len() as EntryId)
+            .unwrap();
+        assert!(!index.is_excluded(child));
     }
 
     #[test]
