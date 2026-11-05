@@ -1469,7 +1469,7 @@ fn nonresident_chains_at_offset_forty_eight_preserve_invariants() {
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(cadical)]
+#[kani::solver(z3)]
 fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fifty_six_with_full_record_extent_preserve_admission()
  {
     let checked = check_filling_attribute_admission::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
@@ -1480,7 +1480,7 @@ fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fift
 
 #[kani::proof]
 #[kani::unwind(3)]
-#[kani::solver(cadical)]
+#[kani::solver(z3)]
 fn resident_lengths_twenty_four_then_twenty_four_with_other_third_lengths_at_offset_fifty_six_preserve_admission()
  {
     let checked = check_resident_admission_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
@@ -1591,7 +1591,7 @@ fn nonresident_chains_at_offset_fifty_six_preserve_admission() {
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(cadical)]
+#[kani::solver(z3)]
 fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fifty_six_with_full_record_extent_preserve_invariants()
  {
     let checked = check_filling_attribute_invariants::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
@@ -1606,7 +1606,7 @@ fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fift
 
 #[kani::proof]
 #[kani::unwind(3)]
-#[kani::solver(cadical)]
+#[kani::solver(z3)]
 fn resident_lengths_twenty_four_then_twenty_four_with_other_third_lengths_at_offset_fifty_six_preserve_invariants()
  {
     let checked = check_resident_invariants_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);

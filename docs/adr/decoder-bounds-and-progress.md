@@ -106,6 +106,13 @@ An upstream [report](https://github.com/model-checking/kani/issues/4667) describ
 Its Kani version and platform differ from the current verifier configuration.
 The current logs establish solver memory exhaustion and no specific heap-model cause.
 The classifier has a scalar harness over every ID pair, and the complete byte harnesses remain required.
+Four offset-56 obligations still exhaust memory during propositional reduction after that split.
+Those harnesses select the [Z3 SMT solver](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver).
+The solver change keeps every input, assertion, cover, and unwind bound.
+The checksum-verified installer and local configuration pin the same Z3 release.
+The proof runner checks the executable version and includes the tool configuration in its source fingerprint.
+The Linux archive targets glibc 2.39.
+The existing per-process memory limit and safety deadlines still apply.
 The invariant obligations use the same length partitions as admission.
 A dedicated harness checks the complement classifier for every 32-bit length across the supported aligned byte capacities.
 Another harness checks the final-header complement across every 32-bit length and its supported capacities.

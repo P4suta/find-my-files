@@ -589,6 +589,7 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
         fs::remove_file(&receipt)?;
     }
     let inventory = read_inventory(&root)?;
+    crate::verification_tools::require_z3(&root)?;
     let version = cmd::capture_stdout(&root, "cargo", &["kani", "--version"])?;
     ensure!(
         version.lines().next()
@@ -1083,6 +1084,17 @@ mod tests {
             fs::write(&report, &report_bytes)?;
             fs::write(&partial, &partial_bytes)?;
             fs::write(&top, &receipt)?;
+            let tool_config = root.join("mise.toml");
+            let tool_bytes = fs::read(&tool_config)?;
+            let mut changed =
+                fs::read_to_string(&tool_config)?.parse::<toml_edit::DocumentMut>()?;
+            changed["tools"]["http:z3"]["version"] = toml_edit::value("0.0.0");
+            fs::write(&tool_config, changed.to_string())?;
+            assert!(
+                verify_at(&root, &out).is_err(),
+                "tool configuration changes invalidate every partition"
+            );
+            fs::write(tool_config, tool_bytes)?;
             let source_file = root.join("engine/crates/fmf-contract/src/lib.rs");
             fs::write(&source_file, b"changed production source")?;
             assert!(
@@ -1218,6 +1230,17 @@ mod tests {
                 })?,
             )?;
             verify_at(&root, &out)?;
+            let tool_config = root.join("mise.toml");
+            let tool_bytes = fs::read(&tool_config)?;
+            let mut changed =
+                fs::read_to_string(&tool_config)?.parse::<toml_edit::DocumentMut>()?;
+            changed["tools"]["http:z3"]["version"] = toml_edit::value("0.0.0");
+            fs::write(&tool_config, changed.to_string())?;
+            assert!(verify_at(&root, &out)
+                .expect_err("changed tool configuration must fail")
+                .to_string()
+                .contains("stale proof evidence"));
+            fs::write(tool_config, tool_bytes)?;
             let source = root.join("engine/crates/fmf-contract/src/lib.rs");
             let bytes = fs::read(&source)?;
             fs::write(&source, b"changed production source")?;
