@@ -31,6 +31,7 @@ const STRYKER_VERSION: &str = "5.0.0";
 const RUST_TOOLCHAIN_VERSION: &str = "1.99.1";
 const CSHARP_TARGET_FRAMEWORK: &str = "net10.0-windows10.0.26100.0";
 const POLICY_REVISION: &str = "mutation-controller-v1";
+const CSHARP_RUNNER_CONFIG: &str = "app/FindMyFiles.Tests/xunit.runner.json";
 const CSHARP_UNEXECUTED_IGNORE_REASONS: &[&str] = &[
     "Removed by mutate filter",
     "Removed by exclude from code coverage filter",
@@ -884,6 +885,9 @@ fn is_forbidden_auto_config(path: &str) -> bool {
         || file.eq_ignore_ascii_case("directory.build.props")
         || file.eq_ignore_ascii_case("directory.build.targets")
         || file.eq_ignore_ascii_case("directory.packages.props")
+        || file.eq_ignore_ascii_case("xunit.runner.json")
+        || file.eq_ignore_ascii_case("testconfig.json")
+        || file.to_ascii_lowercase().ends_with(".xunit.runner.json")
         || (path.contains("/.cargo/")
             && matches!(file.to_ascii_lowercase().as_str(), "config" | "config.toml"))
 }
@@ -891,7 +895,7 @@ fn is_forbidden_auto_config(path: &str) -> bool {
 fn is_trusted_auto_config(path: &str) -> bool {
     matches!(
         path,
-        "engine/.cargo/config.toml" | "xtask/.cargo/config.toml"
+        "engine/.cargo/config.toml" | "xtask/.cargo/config.toml" | CSHARP_RUNNER_CONFIG
     )
 }
 
@@ -1015,6 +1019,7 @@ const fn csharp_build_control_paths() -> &'static [&'static str] {
         "app/FindMyFiles/packages.lock.json",
         "app/FindMyFiles.Tests/FindMyFiles.Tests.csproj",
         "app/FindMyFiles.Tests/packages.lock.json",
+        CSHARP_RUNNER_CONFIG,
     ]
 }
 
@@ -1022,6 +1027,9 @@ fn csharp_policies(checkout: &Checkout, work: &Path) -> Result<Vec<PolicySeal>> 
     let mut policies = vec![policy_seal("runner-revision", POLICY_REVISION.as_bytes())];
     for path in csharp_build_control_paths() {
         let bytes = require_target_matches_controller(checkout, path)?;
+        if is_trusted_auto_config(path) {
+            write_bytes(&work.join(path), &bytes)?;
+        }
         policies.push(policy_seal(format!("controller:{path}"), &bytes));
     }
     for path in [
@@ -3405,6 +3413,85 @@ fn write_verified_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csharp_runner_configuration_is_sealed_and_rejects_target_drift() {
+        const CONFIG: &str = CSHARP_RUNNER_CONFIG;
+        let root =
+            std::env::temp_dir().join(format!("xtask-csharp-runner-policy-{}", std::process::id()));
+        let result = (|| -> Result<()> {
+            let mut tracked = rust_build_control_paths()?;
+            tracked.extend(
+                csharp_build_control_paths()
+                    .iter()
+                    .map(|path| (*path).to_owned()),
+            );
+            tracked.extend([
+                CONFIG.to_owned(),
+                "engine/.cargo/config.toml".to_owned(),
+                "app/FindMyFiles.Tests/stryker-config.json".to_owned(),
+                "app/FindMyFiles.Tests/mutation-baseline.json".to_owned(),
+            ]);
+            tracked.sort();
+            tracked.dedup();
+            for path in &tracked {
+                write_bytes(&root.join(path), &fs::read(controller_root().join(path))?)?;
+            }
+            let mut checkout = Checkout {
+                root: root.clone(),
+                tracked,
+            };
+            let work = root.join("sanitized");
+            let original = fs::read(root.join(CONFIG))?;
+            copy_target_tree(&checkout, &work, "csharp")?;
+            let seals = csharp_policies(&checkout, &work)?;
+            anyhow::ensure!(
+                seals.contains(&policy_seal(format!("controller:{CONFIG}"), &original)),
+                "runner configuration lacks a controller seal"
+            );
+            anyhow::ensure!(
+                fs::read(work.join(CONFIG))? == original,
+                "sanitized runner configuration differs from the controller"
+            );
+
+            for alternate in [
+                "app/FindMyFiles.Tests/FindMyFiles.Tests.xunit.runner.json",
+                "app/Other.Tests/XUNIT.RUNNER.JSON",
+                "app/FindMyFiles.Tests/testconfig.json",
+            ] {
+                write_bytes(&root.join(alternate), b"{\"stopOnFail\":false}\n")?;
+                checkout.tracked.push(alternate.to_owned());
+                let rejected = reject_forbidden_auto_configs(&checkout);
+                checkout.tracked.pop();
+                fs::remove_file(root.join(alternate))?;
+                anyhow::ensure!(
+                    rejected.is_err(),
+                    "alternate runner configuration was accepted: {alternate}"
+                );
+            }
+
+            fs::write(root.join(CONFIG), b"{\"stopOnFail\":false}\n")?;
+            anyhow::ensure!(
+                csharp_policies(&checkout, &work).is_err(),
+                "changed runner configuration was accepted"
+            );
+            fs::remove_file(root.join(CONFIG))?;
+            anyhow::ensure!(
+                csharp_policies(&checkout, &work).is_err(),
+                "missing runner configuration was accepted"
+            );
+            fs::write(root.join(CONFIG), &original)?;
+            checkout.tracked.retain(|path| path != CONFIG);
+            anyhow::ensure!(
+                csharp_policies(&checkout, &work).is_err(),
+                "untracked runner configuration was accepted"
+            );
+            Ok(())
+        })();
+        let cleanup = fs::remove_dir_all(&root);
+        result.expect("C# runner policy enforcement");
+        cleanup.expect("remove policy fixture");
+    }
 
     #[test]
     fn controller_tool_pins_match_the_current_project() {

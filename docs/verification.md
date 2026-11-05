@@ -90,6 +90,13 @@ Ordinary `dotnet test` retains the Visual Studio adapter, the coverage gate, and
 The test project declares its MSBuild target as VSTest and separately enables the native MTP executable entry point.
 This avoids running MTP on the legacy VSTest target, which MTP v2 rejects under .NET 10.
 The suite keeps collection parallelism disabled.
+The copied xUnit runner configuration stops further tests after a reported failure.
+Successful baselines still execute the complete suite.
+The mutation controller seals the configuration and rejects a missing, changed, or untracked copy.
+The sanitized worktree receives the controller's canonical file.
+Auto-discovered alternate xUnit and MTP configuration files fail validation.
+This keeps an actual failed test from waiting behind later tests until the mutation run times out.
+Timeouts and incomplete reports remain inconclusive.
 Stryker's MTP adapter is a preview integration, so migration requires the real one-file activation check in addition to ordinary, coverage, and pipe runs.
 The [xUnit migration guide](https://xunit.net/docs/getting-started/v3/migration), [platform integration guide](https://xunit.net/docs/getting-started/v3/microsoft-testing-platform), and [Stryker runner configuration](https://stryker-mutator.io/docs/stryker-net/configuration/#test-runner-string) define the external runner contracts.
 The source-bound activation predicate proof covers the acceptance decision; it doesn't prove the framework or its adapter.
