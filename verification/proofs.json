@@ -10,7 +10,8 @@
       "source": "xtask/src/perf_proofs.rs",
       "prefix": "perf::kani_proofs::",
       "harnesses": [
-        "execution_plans_use_only_assigned_cpus_and_positive_bounded_workers"
+        "execution_plans_use_only_assigned_cpus_and_positive_bounded_workers",
+        "admitted_counter_values_are_finite_and_nonnegative"
       ]
     },
     {
