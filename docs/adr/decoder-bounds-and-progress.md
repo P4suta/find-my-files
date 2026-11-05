@@ -112,9 +112,13 @@ The two invalid-third-length cases stop with `map::at` during SMT conversion.
 An upstream [report](https://github.com/diffblue/cbmc/issues/9190) records the same exception for Rust formatting types.
 Those harnesses select the [Bitwuzla SMT solver](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver).
 The C Bounded Model Checker (CBMC) [configuration for Bitwuzla](https://github.com/diffblue/cbmc/blob/cbmc-6.11.0/src/solvers/smt2/smt2_conv.cpp) represents structs as bitvectors.
-The four offset-56 SMT cases check the same ID-class assertions before one validator call.
-The class match keeps every assertion without joining four validator copies.
-The solver change keeps every input, assertion, cover, and unwind bound.
+The shared-call Bitwuzla invariant case reaches SMT solving but exceeds its safety deadline.
+Each of the four offset-56 obligations has a separate harness for every prefix-ID class.
+Each harness assumes only its classifier result and then checks the corresponding ID-class assertions.
+The four disjoint cases keep every original ID pair without constructing replacement IDs.
+Each case calls the unchanged production validator and preserved reference, or the unchanged invariant body, once.
+All sixteen harnesses keep their original constructors, result assertions, accepted and rejected covers, and unwind bounds.
+Their union preserves every input and required property of the four former obligations.
 The checksum-verified installer and local configuration pin the same Bitwuzla release.
 The proof runner checks the executable version and includes the tool configuration in its source fingerprint.
 The installer uses the official static Linux x86-64 archive.
