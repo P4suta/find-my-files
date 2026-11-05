@@ -165,7 +165,7 @@ pub(super) struct ParsedBatch {
 }
 
 impl ParsedBatch {
-    fn record_corruption(&mut self) {
+    const fn record_corruption(&mut self) {
         self.corrupt_records += 1;
     }
 
@@ -1556,7 +1556,7 @@ mod tests {
             deferred_name_read_failures: 50,
             deferred_stat_failures: 60,
             deferred_record_cache_spills: 70,
-            mft_bytes: 123456,
+            mft_bytes: 123_456,
             ..Default::default()
         };
         let mut arena = RecordArena::new(REC);
@@ -1580,7 +1580,7 @@ mod tests {
         assert_eq!(stats.deferred_name_read_failures, 68);
         assert_eq!(stats.deferred_stat_failures, 90);
         assert_eq!(stats.deferred_record_cache_spills, 75);
-        assert_eq!(stats.mft_bytes, 123456);
+        assert_eq!(stats.mft_bytes, 123_456);
         assert_eq!(arena.data.len(), 4 * REC);
         assert_eq!(arena.get(0), &[0xCC; REC]);
         assert_eq!(extensions.len(), 3);
