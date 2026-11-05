@@ -589,6 +589,7 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
         fs::remove_file(&receipt)?;
     }
     let inventory = read_inventory(&root)?;
+    crate::verification_tools::require_bitwuzla(&root)?;
     let version = cmd::capture_stdout(&root, "cargo", &["kani", "--version"])?;
     ensure!(
         version.lines().next()

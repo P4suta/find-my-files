@@ -50,7 +50,7 @@ Output and filename checks choose one arbitrary observation position.
 The observation index ranges over every original output cell or name unit.
 The length variables for record and filename inputs use one byte with the original bounds.
 A compile-time check rejects proof buffers larger than the length representation.
-The byte harnesses select `cadical` or `z3` from the pinned Kani distribution.
+The byte harnesses select `cadical` from the pinned Kani distribution or the pinned external Bitwuzla solver.
 Kani supports [per-harness solver selection](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver) without changing the property or input domain.
 The record-chain harnesses partition the complete attribute-offset domain without changing the byte bounds.
 An independent header partition rejects every inconsistent allocation length or used length beyond the record.
@@ -120,11 +120,13 @@ All sixteen harnesses keep their original constructors, result assertions, accep
 Their union preserves every input and required property of the four former obligations.
 The four independent invalid-third-length cases whose second attribute ID is high also exceed the Bitwuzla deadline.
 The [SAT run](https://github.com/P4suta/find-my-files/actions/runs/42115162544) exhausts memory during propositional reduction for the four full-extent admission and invariant cases with a high second ID.
-Those cases select `z3` from the pinned Kani distribution for their independent single-call problems.
-The other independent prefix-ID cases use `cadical`.
+The independent Z3 full-extent invariant cases stop with `map::at` during SMT conversion in the [following run](https://github.com/P4suta/find-my-files/actions/runs/42121112405).
+The four full-extent cases with a high second ID select `bitwuzla` for their independent single-call problems.
+The other independent prefix-ID cases use `cadical` from the Kani bundle.
 Changing the solver preserves every input, assertion, cover, and unwind bound.
-The checksum-verified Kani bundle includes both solvers.
-The proof runner checks the Kani executable version and includes the tool configuration in its source fingerprint.
+The external Linux solver has an exact version pin, archive byte count, and SHA-256 checksum.
+The proof setup installs the verified executable alongside Kani.
+The proof runner checks both executable versions and includes the tool configuration in its source fingerprint.
 The existing per-process memory limit and safety deadlines still apply.
 The invariant obligations use the same length partitions as admission.
 A dedicated harness checks the complement classifier for every 32-bit length across the supported aligned byte capacities.
