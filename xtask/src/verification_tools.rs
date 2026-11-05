@@ -10,16 +10,9 @@ use crate::{checksum::sha256_hex, cmd, paths};
 
 const OCOMMENT_URL: &str = "https://github.com/P4suta/OComment";
 const KANI_RELEASES_URL: &str = "https://github.com/model-checking/kani/releases/download";
-const BITWUZLA_RELEASES_URL: &str = "https://github.com/bitwuzla/bitwuzla/releases/download";
 const KANI_VERSION: &str = "0.68.0";
 const KANI_SHA256: &str = "32e2b484d73ede0bbf64a2cf0879c4259422497d8aec4ee67d448de9ae7843d3";
 const KANI_BUNDLE_BYTES: u64 = 140_315_343;
-const BITWUZLA_VERSION: &str = "0.9.1";
-const BITWUZLA_SHA256: &str = "057f1546ae2068df57beb178f3eeab1678f0e5f0c378787a05b7bb294617c9c6";
-const BITWUZLA_ARCHIVE_BYTES: u64 = 4_909_392;
-const BITWUZLA_ARCHIVE: &str = "Bitwuzla-Linux-x86_64-static";
-#[cfg(unix)]
-const EXECUTABLE_MODE: u32 = 0o755;
 const COMMIT_HEX_BYTES: usize = 40;
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -146,89 +139,6 @@ fn install_kani(destination: &Path) -> Result<()> {
     )
 }
 
-pub fn require_bitwuzla(root: &Path) -> Result<()> {
-    let pins = fs::read_to_string(root.join("mise.toml"))?.parse::<toml_edit::DocumentMut>()?;
-    ensure!(
-        pins["tools"]["http:bitwuzla"]["version"].as_str() == Some(BITWUZLA_VERSION),
-        "Bitwuzla archive metadata needs updating for the tool pin"
-    );
-    let version = cmd::capture_stdout(root, "bitwuzla", &["--version"])?;
-    ensure!(
-        version.trim() == BITWUZLA_VERSION,
-        "unexpected Bitwuzla executable: {version}"
-    );
-    println!("{}", version.trim());
-    Ok(())
-}
-
-fn install_bitwuzla(destination: &Path) -> Result<()> {
-    let root = paths::repo_root();
-    let pins = fs::read_to_string(root.join("mise.toml"))?.parse::<toml_edit::DocumentMut>()?;
-    let pin = &pins["tools"]["http:bitwuzla"];
-    ensure!(
-        pin["version"].as_str() == Some(BITWUZLA_VERSION)
-            && pin["checksum"].as_str() == Some(&format!("sha256:{BITWUZLA_SHA256}"))
-            && pin["size"].as_str() == Some(&BITWUZLA_ARCHIVE_BYTES.to_string()),
-        "Bitwuzla archive metadata needs updating for the tool pin"
-    );
-    let archive =
-        paths::verification_dir().join(format!("{BITWUZLA_ARCHIVE}-{BITWUZLA_VERSION}.zip"));
-    if !archive.exists() {
-        let url = format!("{BITWUZLA_RELEASES_URL}/{BITWUZLA_VERSION}/{BITWUZLA_ARCHIVE}.zip");
-        let status = Command::new("curl")
-            .current_dir(&root)
-            .args([
-                "--fail",
-                "--location",
-                "--proto",
-                "=https",
-                "--tlsv1.2",
-                "--retry",
-                "2",
-                "--max-time",
-                "120",
-                "--output",
-            ])
-            .arg(&archive)
-            .arg(url)
-            .status()?;
-        ensure!(
-            status.success(),
-            "Bitwuzla archive download failed: {status}"
-        );
-    }
-    ensure!(
-        fs::metadata(&archive)?.len() == BITWUZLA_ARCHIVE_BYTES,
-        "unexpected Bitwuzla archive size"
-    );
-    ensure!(
-        sha256_hex(&fs::read(&archive)?) == BITWUZLA_SHA256,
-        "Bitwuzla archive checksum mismatch"
-    );
-    let mut archive = zip::ZipArchive::new(fs::File::open(archive)?)?;
-    let bin = destination.join("bin");
-    fs::create_dir_all(&bin)?;
-    let mut entry = archive.by_name(&format!("{BITWUZLA_ARCHIVE}/bin/bitwuzla"))?;
-    let executable = bin.join("bitwuzla");
-    std::io::copy(&mut entry, &mut fs::File::create(&executable)?)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&executable, fs::Permissions::from_mode(EXECUTABLE_MODE))?;
-    }
-    let version = cmd::capture_stdout(
-        &root,
-        executable.to_str().context("invalid Bitwuzla path")?,
-        &["--version"],
-    )?;
-    ensure!(
-        version.trim() == BITWUZLA_VERSION,
-        "unexpected installed Bitwuzla executable: {version}"
-    );
-    println!("{}", version.trim());
-    Ok(())
-}
-
 pub fn install(tool: Tool) -> Result<()> {
     ensure!(
         cfg!(all(target_os = "linux", target_arch = "x86_64")),
@@ -238,10 +148,7 @@ pub fn install(tool: Tool) -> Result<()> {
     fs::create_dir_all(&destination)?;
     match tool {
         Tool::Comments => install_comments(&destination)?,
-        Tool::Kani => {
-            install_kani(&destination)?;
-            install_bitwuzla(&destination)?;
-        }
+        Tool::Kani => install_kani(&destination)?,
     }
     expose(&destination.join("bin"))
 }
