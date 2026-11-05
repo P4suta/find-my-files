@@ -1192,7 +1192,7 @@ mod tests {
                 let mut cursor = std::io::Cursor::new(&bytes);
                 let result =
                     visit_list_stream(&mut cursor, &runs, runs[0].len, &stop, prefix, |value| {
-                        visited.push(value)
+                        visited.push(value);
                     });
                 if prefix {
                     assert!(result.is_ok(), "tail {tail_len}");
