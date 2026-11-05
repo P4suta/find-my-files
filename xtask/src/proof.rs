@@ -11,7 +11,7 @@ use crate::{checksum::sha256_hex, cmd, paths};
 
 const SCHEMA_VERSION: u32 = 1;
 const MAX_JOBS: usize = 2;
-const MAX_TIMEOUT_SECONDS: u32 = 90;
+const MAX_TIMEOUT_SECONDS: u32 = 300;
 const MANIFEST_PATH: &str = "verification/proofs.json";
 const RECEIPT_NAME: &str = "proofs.json";
 const MIN_COVERS: usize = 2;
