@@ -12,13 +12,14 @@ const PERF_DECISION_FIELD_COUNT: usize = 7;
 use crate::checksum::hex;
 
 use crate::{cmd, fsx, paths};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -276,7 +277,7 @@ impl CounterMonitor {
             .child
             .wait_with_output()
             .context("failed to collect the whole-run processor monitor")?;
-        let samples = parse_samples(&String::from_utf8_lossy(&output.stdout))
+        let samples = counter_samples("perf-monitor", &output.stdout)
             .context("whole-run processor monitor returned no usable samples")?;
         let summary = summarize(&samples)?;
         print_summary("perf-monitor", summary, samples.len());
@@ -1040,7 +1041,7 @@ fn sample_idle(label: &str, rule: IdleRule) -> Result<Summary> {
         );
     }
 
-    let samples = parse_samples(&String::from_utf8_lossy(&output.stdout))?;
+    let samples = counter_samples(label, &output.stdout)?;
     let summary = summarize(&samples)?;
     print_summary(label, summary, samples.len());
     validate_idle(summary, rule)?;
@@ -1074,30 +1075,64 @@ fn summary_json(summary: Summary) -> Value {
     })
 }
 
+fn counter_value_is_valid(value: f64) -> bool {
+    value.is_finite() && value >= 0.0
+}
+
+fn counter_samples(label: &str, bytes: &[u8]) -> Result<Vec<Sample>> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_nanos();
+    let path = paths::perf_counter_file(timestamp, std::process::id());
+    fs::create_dir_all(
+        path.parent()
+            .context("counter output has no parent directory")?,
+    )?;
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)?;
+    file.write_all(bytes)?;
+    println!("{label}: original counter output at {}", path.display());
+    parse_samples(&String::from_utf8_lossy(bytes))
+        .with_context(|| format!("{label}: invalid counter output at {}", path.display()))
+}
+
 /// `typeperf` emits quoted PDH-CSV rows.
-/// Counter names are localized on some Windows installations, so ignore the header and parse the final two numeric fields of each data row instead of matching English column names.
+/// Counter names are localized on some Windows installations, so validate the numeric columns without matching the header names.
 fn parse_samples(text: &str) -> Result<Vec<Sample>> {
     let mut samples = Vec::new();
-    for line in text.lines() {
-        let fields: Vec<&str> = line
-            .split(',')
-            .map(|field| field.trim().trim_matches('"'))
-            .collect();
-        let Some((performance, processor_time)) = fields
-            .len()
-            .checked_sub(PERF_COUNTER_FIELDS)
-            .and_then(|start| fields.get(start..))
-            .filter(|tail| tail.len() == PERF_COUNTER_FIELDS)
-            .and_then(|tail| Some((tail[0].parse::<f64>().ok()?, tail[1].parse::<f64>().ok()?)))
-        else {
+    for (line_number, line) in text.lines().enumerate() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        if !line.starts_with('"') || line.starts_with("\"(PDH-CSV ") {
             continue;
-        };
-        if performance.is_finite() && processor_time.is_finite() {
-            samples.push(Sample {
-                performance,
-                processor_time,
-            });
         }
+        let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+        ensure!(
+            fields.len() == PERF_COUNTER_FIELDS + 1
+                && fields.iter().all(|field| field.len() >= 2
+                    && field.starts_with('"')
+                    && field.ends_with('"')),
+            "malformed counter row {}",
+            line_number + 1
+        );
+        let field = |index: usize| -> Result<f64> {
+            let value = fields[index]
+                .trim_matches('"')
+                .parse::<f64>()
+                .with_context(|| format!("invalid number in counter row {}", line_number + 1))?;
+            ensure!(
+                counter_value_is_valid(value),
+                "invalid counter value in row {}",
+                line_number + 1
+            );
+            Ok(value)
+        };
+        samples.push(Sample {
+            performance: field(1)?,
+            processor_time: field(2)?,
+        });
     }
     if samples.is_empty() {
         bail!("typeperf returned no parseable processor samples");
@@ -1198,11 +1233,18 @@ fn recorded_during_summary(measurement: &Value) -> Result<Summary> {
              re-record it so the gate can tell a thermal difference from a code \
              regression",
         )?;
+    parse_counter_summary(during)
+}
+
+fn parse_counter_summary(value: &Value) -> Result<Summary> {
     let field = |name: &str| -> Result<f64> {
-        during
+        value
             .get(name)
             .and_then(Value::as_f64)
-            .with_context(|| format!("the baseline's recorded run summary is missing `{name}`"))
+            .filter(|value| counter_value_is_valid(*value))
+            .with_context(|| {
+                format!("the baseline's counter summary has invalid or missing `{name}`")
+            })
     };
     Ok(Summary {
         mean_performance: field("mean_processor_performance")?,
@@ -1417,9 +1459,18 @@ fn validate_baseline_measurement(
         .get("counters")
         .and_then(Value::as_object)
         .context("performance baseline measurement is missing `counters`")?;
-    for phase in ["preflight", "during", "postflight"] {
-        if !counters.get(phase).is_some_and(Value::is_object) {
-            bail!("performance baseline measurement is missing `{phase}` counters");
+    for (phase, rule) in [
+        ("preflight", Some(IdleRule::ColdStart)),
+        ("during", None),
+        ("postflight", Some(IdleRule::Settled)),
+    ] {
+        let summary = parse_counter_summary(counters.get(phase).with_context(|| {
+            format!("performance baseline measurement is missing `{phase}` counters")
+        })?)
+        .with_context(|| format!("invalid baseline {phase} counters"))?;
+        if let Some(rule) = rule {
+            validate_idle(summary, rule)
+                .with_context(|| format!("invalid baseline {phase} environment"))?;
         }
     }
     Ok(())
@@ -1821,6 +1872,48 @@ checksum = "{registry_checksum}"
     fn rejects_header_only_or_malformed_output() {
         assert!(parse_samples("\"(PDH-CSV 4.0)\",\"counter\"\n").is_err());
         assert!(parse_samples("\"time\",\"not-a-number\",\"5.0\"\n").is_err());
+    }
+
+    #[test]
+    fn rejects_any_invalid_counter_row_among_valid_rows() {
+        let good = "\"time\",\"122.5\",\"5.0\"\n";
+        for row in [
+            "\"time\",\"-1.000000\",\"5.0\"\n",
+            "\"time\",\"122.5\",\"-1.000000\"\n",
+            "\"time\",\"NaN\",\"5.0\"\n",
+            "\"time\",\"122.5\",\"inf\"\n",
+            "\"time\",\"not-a-number\",\"5.0\"\n",
+            "\"time\",\"122.5\"\n",
+        ] {
+            assert!(
+                parse_samples(&format!("{good}{row}{good}")).is_err(),
+                "invalid row must fail the complete observation: {row}"
+            );
+        }
+        let boosted = parse_samples("\"time\",\"200.0\",\"0.0\"\n").unwrap();
+        assert_eq!(boosted[0].performance, 200.0);
+    }
+
+    #[test]
+    fn baseline_admission_checks_every_recorded_counter_field() {
+        let identity = identity();
+        for phase in ["preflight", "during", "postflight"] {
+            for field in [
+                "mean_processor_performance",
+                "mean_processor_time",
+                "min_processor_performance",
+                "max_processor_time",
+            ] {
+                for invalid in [json!(-1.0), Value::Null, json!("122.5")] {
+                    let mut value = measurement("micro-baseline", &identity);
+                    value["counters"][phase][field] = invalid;
+                    assert!(
+                        validate_baseline_measurement(&value, "micro-baseline", &identity).is_err(),
+                        "invalid {phase}.{field} must fail baseline admission"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

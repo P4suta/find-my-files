@@ -15,6 +15,9 @@ A performance comparison needs equal execution conditions for its baseline and c
 The processor description and an environment-provided CPU count omit the process affinity and Rayon worker count.
 Assigning sixteen workers to four logical CPUs differs from assigning four workers to the same CPUs.
 Matching clock and load summaries leave worker counts unknown.
+An AC-powered adjacent baseline also recorded a negative processor-performance observation.
+The CSV reader accepted negative values and dropped malformed rows when another row was valid.
+Baseline admission checked that counter objects existed without validating every recorded field.
 
 ## Decision
 
@@ -33,6 +36,18 @@ The prepared overflow comparison carries the same execution identity.
 The source, dependency, compiler, processor, clock, load, case inventory, and promotion checks remain in force.
 Engine contracts and saved index formats remain unchanged.
 
+Counter observations must be finite and nonnegative.
+A malformed data row fails the complete collection even when other rows are valid.
+Processor performance greater than 100 remains valid for boosted clocks.
+The runner validates the numeric summary of every recorded phase before admitting a baseline.
+Summaries before and after measurement must meet the existing idle rules.
+The runner stores original counter output in unique files before parsing it.
+A rejected collection grants no performance verdict and promotes no baseline.
+
+The [Windows counter data status guidance](https://learn.microsoft.com/en-us/windows/win32/perfctrs/checking-pdh-interface-return-values) requires valid data before use.
+The [`typeperf` command](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/typeperf) supplies the bounded counter observations.
+The saved output supports diagnosis without claiming the CSV exposes every underlying counter status.
+
 The [Windows process affinity API](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprocessaffinitymask) defines the process mask and its processor-group limitations.
 [Rayon thread count](https://docs.rs/rayon/1.12.0/rayon/struct.ThreadPoolBuilder.html#method.num_threads) defines the environment-controlled default pool.
 The runner requires one processor group because a primary-group mask can omit CPUs in other groups on the supported Windows versions.
@@ -44,6 +59,8 @@ The performance harness supports one processor group while the app keeps its exi
 Support for further groups requires a complete assignment identity and the same inheritance and comparison checks.
 The pure execution planner has a production-bound scalar harness.
 Native tests cover baseline rejection, child environment selection, and inherited Windows process affinity.
+Counter refusal tests reproduce the negative-value and malformed-row acceptance before the correction.
+The counter predicate has a production-bound harness over every floating-point bit pattern.
 
 Older readers accept incomplete records when the old format makes execution fields optional.
 Recording only the number of assigned CPUs would permit comparisons on different CPU sets.
