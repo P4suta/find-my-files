@@ -91,7 +91,8 @@ Compile-time checks bind the bounds to the proof geometry.
 After a first non-resident header, the remaining proof bytes can't contain another complete attribute.
 The bounds for a non-resident first attribute include the attribute and final probe.
 Unwinding assertions remain enabled.
-The runner verifies one harness at a time to limit concurrent resource demand.
+Each proof partition verifies one harness at a time to limit concurrent resource demand.
+The [partition collector](sharded-proof-evidence.md) requires the complete inventory across the bounded jobs.
 The proof watchdog and hosted job keep their declared safety deadlines.
 A deadline stop leaves the proof incomplete.
 Every registered harness must pass before release.

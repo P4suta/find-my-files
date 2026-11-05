@@ -68,6 +68,18 @@ enum Commands {
     ProofCheck,
     /// Verify every registered production harness and bind results to its source.
     Proof,
+    /// Verify one deterministic partition of the complete proof inventory.
+    ProofShard {
+        #[arg(long)]
+        index: usize,
+        #[arg(long)]
+        count: usize,
+    },
+    /// Collect every source-bound proof partition without rerunning the prover.
+    ProofCollect {
+        #[arg(long)]
+        count: usize,
+    },
     /// Reject missing, incomplete, failed, or stale proof evidence.
     ProofVerify,
     /// Print the canonical channel-aware version string — the source of the `FMF_BUILD_VERSION` format that the build stamp and nightly packaging use.
@@ -232,6 +244,8 @@ fn main() -> Result<()> {
         Commands::MutationRelocateCsharp => hygiene::relocate_csharp(),
         Commands::ProofCheck => proof::check(),
         Commands::Proof => proof::run(),
+        Commands::ProofShard { index, count } => proof::run_shard(index, count),
+        Commands::ProofCollect { count } => proof::collect(count),
         Commands::ProofVerify => proof::verify(),
         Commands::Version { channel, date } => version::run(&channel, date.as_deref()),
         Commands::Publish { skip_rust } => publish::run(skip_rust),
