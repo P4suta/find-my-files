@@ -870,12 +870,8 @@ fn copy_path_for_language(path: &str, language: &str) -> bool {
     }
 }
 
-/// Tool configuration that the .NET SDK, cargo and `MSBuild` discover on their own by walking up from a working directory, and that a target checkout may therefore never contribute: a file nothing on the command line names can still redirect the toolchain, the package feed or the analyzer set, and `reject_forbidden_auto_configs` fails the shard closed the moment the target carries one.
-///
-/// This is a rule about **who decides**, not about whether the file should exist.
-/// `global.json` is the clearest case of the difference: the C# lane is wrong without one — with none above the work tree the muxer resolves to the newest SDK on the image instead of the pinned one, which is how five weekly audits died (see `trusted_global_json`) — and the controller writes its own into the work tree for exactly that reason.
-/// Both halves are required and they do not contradict each other: the target supplies none of this, the controller supplies all of it.
-/// `is_trusted_auto_config` names the sole exception where a target file passes through, and only after `require_target_matches_controller` proves it is byte-identical.
+/// Implicit build and test configuration must follow the controller's policy.
+/// Only identical files named by `is_trusted_auto_config` are admitted from the target.
 fn is_forbidden_auto_config(path: &str) -> bool {
     let file = path.rsplit('/').next().unwrap_or(path);
     file.eq_ignore_ascii_case("global.json")
