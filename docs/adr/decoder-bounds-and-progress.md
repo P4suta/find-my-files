@@ -45,10 +45,11 @@ Native fixtures check exact endpoints, malformed and overlapping regions, forbid
 The proof inventory records the source, harness names, and unwind bounds.
 Scalar reference and surrogate checks quantify their complete integer domains.
 Byte-array checks state finite input bounds and require reachable accepted and rejected cases.
-The width harnesses partition every byte array through an independent leading-width classifier.
-Separate completeness harnesses establish that the partitions cover every input at each stated bound.
+The output harnesses quantify every byte array at each stated length.
+The name-value, complete-chain, and output byte harnesses select Kissat from the pinned Kani distribution.
+Kani supports [per-harness solver selection](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver) without changing the property or input domain.
 The record-chain harnesses partition the complete attribute-offset domain without changing the byte-array or unwind bounds.
-The timeout and solver limits remain unchanged.
+The time limits, byte bounds, and unwind bounds remain unchanged.
 The record-chain harnesses also compare admission with a [preserved reference](../../engine/crates/fmf-core/src/ondisk/record_admission_reference.rs).
 The reference retains the parser from [the source before the refactor](https://github.com/P4suta/find-my-files/blob/5f2853732cc179e5e25b165acfc49f3efb414342/engine/crates/fmf-core/src/ondisk/record.rs).
 The file-header harness compares admission with the original geometry and reference checks from [the same source](https://github.com/P4suta/find-my-files/blob/5f2853732cc179e5e25b165acfc49f3efb414342/engine/crates/fmf-core/src/ondisk/ntfs.rs).
