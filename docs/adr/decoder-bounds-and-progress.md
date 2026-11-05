@@ -85,8 +85,8 @@ Compile-time checks bind the bounds to the proof geometry.
 After a first non-resident header, the remaining proof bytes can't contain another complete attribute.
 The bounds for a non-resident first attribute include the attribute and final probe.
 Unwinding assertions remain enabled.
-The runner verifies one harness at a time to reduce concurrent resource demand.
-The proof watchdog and hosted job use longer safety deadlines for the expanded inventory.
+The runner verifies at most two independent harnesses concurrently within its validated worker cap.
+The proof watchdog and hosted job keep their declared safety deadlines.
 A deadline stop leaves the proof incomplete.
 Every registered harness must pass before release.
 The record-chain harnesses also compare admission with a [preserved reference](../../engine/crates/fmf-core/src/ondisk/record_admission_reference.rs).
