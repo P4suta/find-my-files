@@ -1,4 +1,20 @@
-use super::ExecutionConfig;
+use super::{counter_value_is_valid, ExecutionConfig};
+
+#[kani::proof]
+#[kani::unwind(1)]
+fn admitted_counter_values_are_finite_and_nonnegative() {
+    let value = f64::from_bits(kani::any());
+    let accepted = counter_value_is_valid(value);
+    if accepted {
+        assert!(value.is_finite());
+        assert!(value >= 0.0);
+    } else {
+        assert!(!value.is_finite() || value < 0.0);
+    }
+    kani::cover!(accepted && value > 100.0);
+    kani::cover!(!accepted && value == -1.0);
+    kani::cover!(!accepted && value.is_nan());
+}
 
 #[kani::proof]
 #[kani::unwind(1)]
