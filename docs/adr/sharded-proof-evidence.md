@@ -24,6 +24,8 @@ The shutdown logs contain no measured memory-exhaustion event.
 With the process limit, the next run uploaded original unsuccessful reports and completed normal cleanup.
 The offset-80 resident invariant report contains solver errors without a failed assertion or completed cover checks.
 The run produced no complete receipt or Miri result.
+The following regular-output run confirms solver memory exhaustion during propositional reduction.
+Earlier cases pass, but the incomplete obligations at the earliest offsets still grant no proof credit.
 
 ## Decision
 

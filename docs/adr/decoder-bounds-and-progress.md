@@ -73,11 +73,19 @@ Each aligned length that can leave room for a terminator has a constant case.
 A complementary case keeps every other 32-bit length.
 Every case includes immediate terminators and malformed chains.
 The union preserves every original field value without assuming either validator's result.
-All later attributes keep arbitrary bytes and lengths.
+The earliest offsets can contain three resident attributes.
+An arbitrary second length gives later header fields symbolic addresses.
+The affected cases at the earliest offsets also partition the second length into constant aligned lengths and their complete 32-bit complement.
+The second header keeps arbitrary values for its type, residency marker, ID, name metadata, and value metadata.
+The construction includes absent, malformed, and valid second attributes.
+Third attribute lengths remain arbitrary.
+The invariant obligations use the same first-length and second-length partitions as admission.
+A dedicated harness checks the complement classifier for every 32-bit length across the supported aligned byte capacities.
 The invariant harness calls the production validator and independently checks every accepted attribute.
 Requiring both harnesses preserves the conjunction of the former assertions without three traversals in one solver problem.
 The invariant harness also bounds the attribute count by the smallest resident header and the space before the terminator.
 The earliest resident case covers an accepted chain with more than one attribute.
+Its most detailed invariant case also requires a reachable accepted chain with three attributes.
 The earliest non-resident case covers an accepted non-resident attribute.
 Every other input byte stays arbitrary under the existing constructive header fields.
 The byte and length bounds remain unchanged.
