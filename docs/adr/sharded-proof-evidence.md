@@ -29,6 +29,8 @@ Earlier cases pass, but the incomplete obligations at the earliest offsets still
 The second-length partitions still exhaust solver memory when two attributes leave room for a third header.
 The decoder harnesses partition that final length into fitting constants and their complete complement.
 Both admission and invariant obligations preserve every original byte input.
+Constant final lengths alone still exhaust solver memory in a three-header geometry.
+The same cases also partition the later residency markers while keeping every marker pair and every third length.
 
 ## Decision
 
