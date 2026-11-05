@@ -7,6 +7,14 @@
   "targets": [
     {
       "package": "xtask",
+      "source": "xtask/src/perf_proofs.rs",
+      "prefix": "perf::kani_proofs::",
+      "harnesses": [
+        "execution_plans_use_only_assigned_cpus_and_positive_bounded_workers"
+      ]
+    },
+    {
+      "package": "xtask",
       "source": "xtask/src/mutation_authority_proofs.rs",
       "prefix": "mutation_authority::kani_proofs::",
       "harnesses": [

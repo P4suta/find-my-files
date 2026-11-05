@@ -65,3 +65,4 @@
 - [Decoder bounds and progress](adr/decoder-bounds-and-progress.md)
 - [Sharded proof evidence](adr/sharded-proof-evidence.md)
 - [Checked arithmetic verification](adr/checked-arithmetic-verification.md)
+- [Performance execution identity](adr/performance-execution-identity.md)

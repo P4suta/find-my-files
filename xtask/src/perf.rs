@@ -17,7 +17,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,6 +27,10 @@ use toml_edit::DocumentMut;
 
 #[path = "overflow.rs"]
 pub mod overflow;
+
+#[cfg(kani)]
+#[path = "perf_proofs.rs"]
+mod kani_proofs;
 
 const SAMPLE_COUNT: u8 = 6;
 const MONITOR_SAMPLE_COUNT: u16 = 3_600;
@@ -40,6 +46,7 @@ const MAX_PROCESSOR_TIME: f64 = 20.0;
 /// The smallest regression this project is willing to report is +10% (the micro gate, decision item 3), and thermal drift has to stay under the smallest thing the gates call a regression: 10 / 1.84 = 5.4 points.
 const MAX_CLOCK_DRIFT_POINTS: f64 = 5.0;
 const BASELINE_METADATA: &str = "fmf-baseline.json";
+const MEASUREMENT_SCHEMA: u32 = 2;
 const BENCHMARK_MANIFEST: &str = include_str!("../../engine/benches/criterion-benchmarks.txt");
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -66,6 +73,145 @@ struct RunIdentity {
     rustc: String,
     processor: String,
     logical_processors: String,
+    execution: ExecutionConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "RecordedExecution")]
+struct ExecutionConfig {
+    system_mask: NonZeroUsize,
+    cpu_mask: NonZeroUsize,
+    rayon_workers: NonZeroUsize,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedExecution {
+    system_mask: usize,
+    cpu_mask: usize,
+    rayon_workers: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ExecutionError {
+    EmptyCpuAssignment,
+    AssignmentOutsideSystem,
+    ZeroWorkers,
+    OversubscribedWorkers,
+}
+
+impl std::fmt::Display for ExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::EmptyCpuAssignment => "performance CPU assignments must be nonempty",
+            Self::AssignmentOutsideSystem => "the process CPU assignment exceeds the system mask",
+            Self::ZeroWorkers => "the benchmark worker count must be positive",
+            Self::OversubscribedWorkers => "the benchmark worker count exceeds the assigned CPUs",
+        })
+    }
+}
+
+impl std::error::Error for ExecutionError {}
+
+impl TryFrom<RecordedExecution> for ExecutionConfig {
+    type Error = ExecutionError;
+
+    fn try_from(recorded: RecordedExecution) -> std::result::Result<Self, Self::Error> {
+        Self::plan(
+            recorded.system_mask,
+            recorded.cpu_mask,
+            Some(recorded.rayon_workers),
+        )
+    }
+}
+
+impl ExecutionConfig {
+    fn plan(
+        system_mask: usize,
+        cpu_mask: usize,
+        requested_workers: Option<usize>,
+    ) -> std::result::Result<Self, ExecutionError> {
+        let system_mask =
+            NonZeroUsize::new(system_mask).ok_or(ExecutionError::EmptyCpuAssignment)?;
+        let cpu_mask = NonZeroUsize::new(cpu_mask).ok_or(ExecutionError::EmptyCpuAssignment)?;
+        if cpu_mask.get() & !system_mask.get() != 0 {
+            return Err(ExecutionError::AssignmentOutsideSystem);
+        }
+        let capacity = cpu_mask.get().count_ones() as usize;
+        let rayon_workers = NonZeroUsize::new(requested_workers.unwrap_or(capacity))
+            .ok_or(ExecutionError::ZeroWorkers)?;
+        if rayon_workers.get() > capacity {
+            return Err(ExecutionError::OversubscribedWorkers);
+        }
+        Ok(Self {
+            system_mask,
+            cpu_mask,
+            rayon_workers,
+        })
+    }
+
+    fn command(
+        self,
+        dir: &Path,
+        program: impl AsRef<OsStr>,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Command {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .current_dir(dir)
+            .envs(envs.iter().copied());
+        command.env("RAYON_NUM_THREADS", self.rayon_workers.get().to_string());
+        command
+    }
+
+    fn run(self, dir: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<()> {
+        let status = self
+            .command(dir, program, args, envs)
+            .status()
+            .with_context(|| format!("failed to spawn benchmark `{program}`"))?;
+        if !status.success() {
+            bail!("benchmark `{program}` exited with {status}");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn capture_execution() -> Result<ExecutionConfig> {
+    use windows_sys::Win32::System::Threading::{
+        GetActiveProcessorGroupCount, GetCurrentProcess, GetProcessAffinityMask,
+    };
+    // SAFETY: The query has no pointer arguments and does not transfer ownership.
+    let groups = unsafe { GetActiveProcessorGroupCount() };
+    if groups != 1 {
+        bail!("performance measurement requires one processor group; observed {groups}");
+    }
+    let mut cpu_mask = 0;
+    let mut system_mask = 0;
+    // SAFETY: The pseudo-handle stays valid and both outputs point to writable usize values.
+    if unsafe {
+        GetProcessAffinityMask(GetCurrentProcess(), &raw mut cpu_mask, &raw mut system_mask)
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error()).context("read the process CPU assignment");
+    }
+    let requested_workers = match env::var("RAYON_NUM_THREADS") {
+        Ok(value) => Some(
+            value
+                .parse()
+                .context("RAYON_NUM_THREADS must be a positive integer")?,
+        ),
+        Err(env::VarError::NotPresent) => None,
+        Err(error) => return Err(error).context("read RAYON_NUM_THREADS"),
+    };
+    ExecutionConfig::plan(system_mask, cpu_mask, requested_workers).map_err(Into::into)
+}
+
+#[cfg(not(windows))]
+fn capture_execution() -> Result<ExecutionConfig> {
+    bail!("performance measurement requires Windows");
 }
 
 #[derive(Debug)]
@@ -81,7 +227,7 @@ struct Measurement {
 impl Measurement {
     fn to_json(&self, kind: &str) -> Value {
         json!({
-            "schema": 1,
+            "schema": MEASUREMENT_SCHEMA,
             "kind": kind,
             "started_unix": self.started_unix,
             "finished_unix": self.finished_unix,
@@ -94,6 +240,7 @@ impl Measurement {
             "rustc": self.identity.rustc,
             "processor": self.identity.processor,
             "logical_processors": self.identity.logical_processors,
+            "execution": self.identity.execution,
             "counters": {
                 "preflight": summary_json(self.preflight),
                 "during": summary_json(self.during),
@@ -156,8 +303,8 @@ pub fn micro_check() -> Result<()> {
     let decision_path = run_dir.join("micro-verdict.json");
     let decision_arg = decision_path.to_string_lossy().into_owned();
 
-    let measured = measure_allow_failure(|| {
-        cmd::run_env(
+    let measured = measure_allow_failure(|execution| {
+        execution.run(
             &engine,
             "cargo",
             &[
@@ -176,6 +323,9 @@ pub fn micro_check() -> Result<()> {
             &[("CRITERION_HOME", criterion_home.as_str())],
         )
     })?;
+    if measured.measurement.identity != identity {
+        bail!("performance identity changed after baseline admission");
+    }
     if let Some(error) = measured.operation_error {
         return Err(error.context("Criterion measurement failed before the verdict stage"));
     }
@@ -219,8 +369,8 @@ pub fn micro_baseline() -> Result<()> {
     let criterion_home = candidate.to_string_lossy().into_owned();
     let engine = paths::engine_dir();
 
-    let measurement = measure(|| {
-        cmd::run_env(
+    let measurement = measure(|execution| {
+        execution.run(
             &engine,
             "cargo",
             &[
@@ -329,18 +479,24 @@ pub fn real_check(drive: &str) -> Result<()> {
     let decision = perf_dir.join("real-verdict.json");
     let decision_arg = decision.to_string_lossy().into_owned();
 
-    let measured = measure_allow_failure(|| {
-        run_fmf(&[
-            "bench",
-            drive,
-            "--out",
-            actual_arg.as_str(),
-            "--baseline",
-            baseline_arg.as_str(),
-            "--evidence",
-            decision_arg.as_str(),
-        ])
+    let measured = measure_allow_failure(|execution| {
+        run_benchmark_fmf(
+            *execution,
+            &[
+                "bench",
+                drive,
+                "--out",
+                actual_arg.as_str(),
+                "--baseline",
+                baseline_arg.as_str(),
+                "--evidence",
+                decision_arg.as_str(),
+            ],
+        )
     })?;
+    if measured.measurement.identity != identity {
+        bail!("performance identity changed after baseline admission");
+    }
     let evidence = assemble_gate_evidence(
         "real-gate",
         "real-verdict",
@@ -369,7 +525,12 @@ pub fn real_baseline(drive: &str) -> Result<()> {
     remove_file_if_exists(&candidate)?;
     let candidate_arg = candidate.to_string_lossy().into_owned();
 
-    let measurement = measure(|| run_fmf(&["bench", drive, "--out", candidate_arg.as_str()]))?;
+    let measurement = measure(|execution| {
+        run_benchmark_fmf(
+            *execution,
+            &["bench", drive, "--out", candidate_arg.as_str()],
+        )
+    })?;
     inject_measurement(&candidate, measurement.to_json("real-baseline"))?;
     validate_real_baseline(&candidate, &measurement.identity)?;
     replace_file_transactionally(
@@ -417,7 +578,17 @@ fn run_fmf(args: &[&str]) -> Result<()> {
     cmd::run(&paths::engine_dir(), &program, args)
 }
 
-fn measure(operation: impl FnOnce() -> Result<()>) -> Result<Measurement> {
+fn run_benchmark_fmf(execution: ExecutionConfig, args: &[&str]) -> Result<()> {
+    let executable = paths::engine_release_dir().join(format!("fmf{}", env::consts::EXE_SUFFIX));
+    execution.run(
+        &paths::engine_dir(),
+        &executable.to_string_lossy(),
+        args,
+        &[],
+    )
+}
+
+fn measure(operation: impl FnOnce(&ExecutionConfig) -> Result<()>) -> Result<Measurement> {
     let measured = measure_allow_failure(operation)?;
     if let Some(error) = measured.operation_error {
         return Err(error.context("measured command failed; no baseline was promoted"));
@@ -430,12 +601,14 @@ struct MeasuredOperation {
     operation_error: Option<anyhow::Error>,
 }
 
-fn measure_allow_failure(operation: impl FnOnce() -> Result<()>) -> Result<MeasuredOperation> {
+fn measure_allow_failure(
+    operation: impl FnOnce(&ExecutionConfig) -> Result<()>,
+) -> Result<MeasuredOperation> {
     let identity = RunIdentity::capture()?;
     let started_unix = unix_time()?;
     let preflight = sample_idle("perf-preflight", IdleRule::ColdStart)?;
     let monitor = CounterMonitor::start()?;
-    let operation_result = operation();
+    let operation_result = operation(&identity.execution);
     let during_result = monitor.finish();
     let postflight_result = sample_idle("perf-postflight", IdleRule::Settled);
     let finished_unix = unix_time()?;
@@ -447,6 +620,9 @@ fn measure_allow_failure(operation: impl FnOnce() -> Result<()>) -> Result<Measu
     );
     if let Some(failure) = counter_failure {
         bail!(failure);
+    }
+    if identity.execution != capture_execution()? {
+        bail!("the execution configuration changed during measurement");
     }
 
     Ok(MeasuredOperation {
@@ -631,6 +807,7 @@ impl RunIdentity {
         let (git_dirty, git_dirty_sha256) = repository_fingerprint(&repo)?;
         let cargo_lock_sha256 = semantic_cargo_lock_sha256(&repo)?;
         let rustc = checked_output(&repo, "rustc", &["--version", "--verbose"])?;
+        let execution = capture_execution()?;
         Ok(Self {
             git_commit,
             git_dirty,
@@ -638,8 +815,8 @@ impl RunIdentity {
             cargo_lock_sha256,
             rustc,
             processor: env::var("PROCESSOR_IDENTIFIER").unwrap_or_else(|_| "unknown".to_owned()),
-            logical_processors: env::var("NUMBER_OF_PROCESSORS")
-                .unwrap_or_else(|_| "unknown".to_owned()),
+            logical_processors: execution.system_mask.get().count_ones().to_string(),
+            execution,
         })
     }
 }
@@ -1194,8 +1371,8 @@ fn validate_baseline_measurement(
     let object = value
         .as_object()
         .context("performance baseline measurement must be a JSON object")?;
-    if object.get("schema").and_then(Value::as_u64) != Some(1) {
-        bail!("performance baseline measurement must use schema 1");
+    if object.get("schema").and_then(Value::as_u64) != Some(u64::from(MEASUREMENT_SCHEMA)) {
+        bail!("performance baseline measurement must use schema {MEASUREMENT_SCHEMA}; record a fresh baseline");
     }
     if object.get("kind").and_then(Value::as_str) != Some(expected_kind) {
         bail!("performance baseline measurement kind must be `{expected_kind}`");
@@ -1206,6 +1383,16 @@ fn validate_baseline_measurement(
         .context("performance baseline measurement is missing `git`")?;
     if git.get("dirty").and_then(Value::as_bool) != Some(false) {
         bail!("performance baselines must be recorded from a clean repository");
+    }
+    let execution: ExecutionConfig = serde_json::from_value(
+        object
+            .get("execution")
+            .context("performance baseline is missing its execution configuration")?
+            .clone(),
+    )
+    .context("invalid performance baseline execution configuration")?;
+    if execution != identity.execution {
+        bail!("performance baseline execution configuration does not match this run");
     }
 
     for (field, current) in [
@@ -1379,6 +1566,7 @@ mod tests {
             rustc: "rustc test".to_owned(),
             processor: "test processor".to_owned(),
             logical_processors: "8".to_owned(),
+            execution: ExecutionConfig::plan(255, 15, Some(4)).unwrap(),
         }
     }
 
@@ -1550,7 +1738,7 @@ checksum = "{registry_checksum}"
 
     fn measurement(kind: &str, identity: &RunIdentity) -> Value {
         json!({
-            "schema": 1,
+            "schema": MEASUREMENT_SCHEMA,
             "kind": kind,
             "started_unix": 1,
             "finished_unix": 2,
@@ -1563,6 +1751,7 @@ checksum = "{registry_checksum}"
             "rustc": identity.rustc,
             "processor": identity.processor,
             "logical_processors": identity.logical_processors,
+            "execution": identity.execution,
             "counters": {
                 "preflight": summary_json(FIXTURE_IDLE),
                 "during": summary_json(FIXTURE_DURING),
@@ -1864,9 +2053,185 @@ checksum = "{registry_checksum}"
         let identity = identity();
         inject_measurement(&path, measurement("real-baseline", &identity)).unwrap();
         let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value["measurement"]["schema"], 1);
+        assert_eq!(value["measurement"]["schema"], MEASUREMENT_SCHEMA);
         validate_real_baseline(&path, &identity).unwrap();
         fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn worker_planning_respects_the_process_assignment() {
+        for (system, assigned, requested, expected) in [
+            (255, 15, None, Ok(4)),
+            (255, 240, Some(2), Ok(2)),
+            (255, 128, None, Ok(1)),
+            (usize::MAX, usize::MAX, None, Ok(usize::BITS as usize)),
+            (0, 15, None, Err(ExecutionError::EmptyCpuAssignment)),
+            (255, 0, None, Err(ExecutionError::EmptyCpuAssignment)),
+            (15, 240, None, Err(ExecutionError::AssignmentOutsideSystem)),
+            (255, 15, Some(0), Err(ExecutionError::ZeroWorkers)),
+            (255, 15, Some(5), Err(ExecutionError::OversubscribedWorkers)),
+            (
+                255,
+                15,
+                Some(usize::MAX),
+                Err(ExecutionError::OversubscribedWorkers),
+            ),
+        ] {
+            assert_eq!(
+                ExecutionConfig::plan(system, assigned, requested)
+                    .map(|plan| plan.rayon_workers.get()),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn benchmark_children_receive_the_validated_worker_count() {
+        let execution = ExecutionConfig::plan(255, 15, Some(4)).unwrap();
+        let command = execution.command(
+            Path::new("."),
+            "benchmark",
+            &["case"],
+            &[("RAYON_NUM_THREADS", "16"), ("CRITERION_HOME", "reports")],
+        );
+        let envs: BTreeMap<_, _> = command.get_envs().collect();
+        assert_eq!(envs[OsStr::new("RAYON_NUM_THREADS")], Some(OsStr::new("4")));
+        assert_eq!(
+            envs[OsStr::new("CRITERION_HOME")],
+            Some(OsStr::new("reports"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn benchmark_child_inherits_the_recorded_cpu_assignment() {
+        const CHILD_EXECUTION: &str = "FMF_TEST_BENCHMARK_EXECUTION";
+        // SAFETY: The query has no pointer arguments and does not transfer ownership.
+        if unsafe { windows_sys::Win32::System::Threading::GetActiveProcessorGroupCount() } != 1 {
+            assert!(capture_execution().is_err());
+            return;
+        }
+        if let Some(recorded) = env::var_os(CHILD_EXECUTION) {
+            let expected: ExecutionConfig =
+                serde_json::from_str(&recorded.to_string_lossy()).unwrap();
+            assert_eq!(capture_execution().unwrap(), expected);
+            assert_eq!(
+                env::var("RAYON_NUM_THREADS").unwrap(),
+                expected.rayon_workers.get().to_string()
+            );
+            println!("benchmark execution checked");
+            return;
+        }
+        let expected = capture_execution().unwrap();
+        let output = expected
+            .command(
+                &paths::repo_root(),
+                env::current_exe().unwrap(),
+                &[
+                    "--exact",
+                    "perf::tests::benchmark_child_inherits_the_recorded_cpu_assignment",
+                    "--nocapture",
+                ],
+                &[],
+            )
+            .env(CHILD_EXECUTION, serde_json::to_string(&expected).unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("benchmark execution checked"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn benchmark_worker_environment_is_checked_in_a_fresh_process() {
+        const EXPECTED_WORKERS: &str = "FMF_TEST_BENCHMARK_WORKERS";
+        if let Ok(expected) = env::var(EXPECTED_WORKERS) {
+            let actual = capture_execution();
+            if expected == "reject" {
+                assert!(actual.is_err());
+            } else {
+                assert_eq!(
+                    actual.unwrap().rayon_workers.get(),
+                    expected.parse::<usize>().unwrap()
+                );
+            }
+            println!("benchmark worker request checked");
+            return;
+        }
+        // SAFETY: The query has no pointer arguments and does not transfer ownership.
+        if unsafe { windows_sys::Win32::System::Threading::GetActiveProcessorGroupCount() } != 1 {
+            assert!(capture_execution().is_err());
+            return;
+        }
+        let assignment = capture_execution().unwrap();
+        let capacity = assignment.cpu_mask.get().count_ones().to_string();
+        let excessive = (assignment.cpu_mask.get().count_ones() + 1).to_string();
+        for (request, expected) in [
+            (None, capacity.as_str()),
+            (Some("1"), "1"),
+            (Some("0"), "reject"),
+            (Some(""), "reject"),
+            (Some("invalid"), "reject"),
+            (Some("-1"), "reject"),
+            (Some(excessive.as_str()), "reject"),
+        ] {
+            let mut child = Command::new(env::current_exe().unwrap());
+            child
+                .current_dir(paths::repo_root())
+                .args([
+                    "--exact",
+                    "perf::tests::benchmark_worker_environment_is_checked_in_a_fresh_process",
+                    "--nocapture",
+                ])
+                .env(EXPECTED_WORKERS, expected)
+                .env_remove("RAYON_NUM_THREADS");
+            if let Some(request) = request {
+                child.env("RAYON_NUM_THREADS", request);
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{request:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout)
+                .contains("benchmark worker request checked"));
+        }
+    }
+
+    #[test]
+    fn baseline_admission_requires_exact_worker_and_cpu_assignment() {
+        let identity = identity();
+        let valid = measurement("micro-baseline", &identity);
+        validate_baseline_measurement(&valid, "micro-baseline", &identity).unwrap();
+        for execution in [
+            None,
+            Some(json!({ "system_mask": 255, "cpu_mask": 15, "rayon_workers": 16 })),
+            Some(json!({ "system_mask": 255, "cpu_mask": 15, "rayon_workers": 2 })),
+            Some(json!({ "system_mask": 255, "cpu_mask": 240, "rayon_workers": 4 })),
+            Some(json!({ "system_mask": 511, "cpu_mask": 15, "rayon_workers": 4 })),
+            Some(json!({ "system_mask": 255, "cpu_mask": 0, "rayon_workers": 4 })),
+            Some(json!({ "system_mask": 255, "cpu_mask": 15, "rayon_workers": 0 })),
+            Some(json!({ "system_mask": 255, "cpu_mask": 15 })),
+            Some(json!({ "system_mask": 255, "cpu_mask": 15, "rayon_workers": 4, "extra": true })),
+        ] {
+            let mut baseline = valid.clone();
+            baseline.as_object_mut().unwrap().remove("execution");
+            if let Some(execution) = execution {
+                baseline["execution"] = execution;
+            }
+            assert!(
+                validate_baseline_measurement(&baseline, "micro-baseline", &identity).is_err(),
+                "incompatible execution settings must fail baseline admission: {baseline}"
+            );
+        }
+        let mut legacy = valid;
+        legacy["schema"] = json!(1);
+        assert!(validate_baseline_measurement(&legacy, "micro-baseline", &identity).is_err());
     }
 
     #[test]
