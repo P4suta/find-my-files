@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path};
-use std::process::Command;
+use std::process::{Child, Command};
 
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,7 @@ use crate::{checksum::sha256_hex, cmd, paths};
 const SCHEMA_VERSION: u32 = 1;
 const MAX_JOBS: usize = 2;
 const MAX_TIMEOUT_SECONDS: u32 = 300;
+const MAX_ADDRESS_SPACE_BYTES: u64 = 8_589_934_592;
 const MANIFEST_PATH: &str = "verification/proofs.json";
 const RECEIPT_NAME: &str = "proofs.json";
 const MIN_COVERS: usize = 2;
@@ -25,6 +26,7 @@ struct Inventory {
     kani_version: String,
     jobs: usize,
     timeout_seconds: u32,
+    address_space_bytes: u64,
     targets: Vec<Target>,
 }
 
@@ -204,6 +206,10 @@ fn validate_inventory(inventory: &Inventory) -> Result<()> {
         "invalid proof timeout"
     );
     ensure!(
+        address_space_is_bounded(inventory.address_space_bytes),
+        "invalid proof process address-space budget"
+    );
+    ensure!(
         !inventory.kani_version.is_empty() && !inventory.targets.is_empty(),
         "empty proof inventory"
     );
@@ -235,6 +241,10 @@ fn validate_inventory(inventory: &Inventory) -> Result<()> {
         }
     }
     Ok(())
+}
+
+const fn address_space_is_bounded(bytes: u64) -> bool {
+    bytes > 0 && bytes <= MAX_ADDRESS_SPACE_BYTES
 }
 
 fn expected(inventory: &Inventory, package: Package) -> BTreeSet<String> {
@@ -542,6 +552,30 @@ pub fn run_shard(index: usize, count: usize) -> Result<()> {
     run_subset(Some(Shard::new(index, count)?))
 }
 
+struct MemoryTelemetry(Child);
+
+impl MemoryTelemetry {
+    fn start() -> Result<Self> {
+        Ok(Self(
+            Command::new("free")
+                .args(["--bytes", "--wide", "--seconds", "10", "--count", "360"])
+                .spawn()
+                .context("start bounded proof memory telemetry")?,
+        ))
+    }
+}
+
+impl Drop for MemoryTelemetry {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.kill() {
+            eprintln!("Failed to stop proof memory telemetry: {error}");
+        }
+        if let Err(error) = self.0.wait() {
+            eprintln!("Failed to reap proof memory telemetry: {error}");
+        }
+    }
+}
+
 fn run_subset(shard: Option<Shard>) -> Result<()> {
     ensure!(
         cfg!(all(target_os = "linux", target_arch = "x86_64")),
@@ -565,6 +599,11 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
         "unexpected Kani executable: {version}"
     );
     let before = fingerprint(&root)?;
+    println!(
+        "Proof process virtual address-space limit: {} bytes.",
+        inventory.address_space_bytes
+    );
+    let _telemetry = MemoryTelemetry::start()?;
     let mut results = BTreeMap::new();
     for package in packages(&inventory) {
         let names = selected(&inventory, package, shard);
@@ -577,9 +616,11 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
         if result_path.exists() {
             fs::remove_file(&result_path)?;
         }
-        let mut command = Command::new("cargo");
+        let mut command = Command::new("prlimit");
         command
             .current_dir(&root)
+            .arg(format!("--as={}", inventory.address_space_bytes))
+            .args(["--", "cargo"])
             .args([
                 "kani",
                 "--manifest-path",
@@ -591,6 +632,7 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
             .args([
                 "--jobs",
                 &inventory.jobs.to_string(),
+                "--fail-fast",
                 "--output-format",
                 "terse",
                 "-Z",
@@ -608,7 +650,9 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
                 command.args(["--harness", name]);
             }
         }
-        let status = command.status()?;
+        let status = command
+            .status()
+            .with_context(|| format!("start bounded Kani for {package_name}"))?;
         ensure!(status.success(), "Kani failed for {package_name}: {status}");
         let bytes = fs::read(&result_path).context("Kani produced no report")?;
         validate_report(
@@ -818,6 +862,25 @@ mod tests {
 
     fn names() -> BTreeSet<String> {
         BTreeSet::from(["proof".into()])
+    }
+
+    #[test]
+    fn inventory_requires_a_bounded_process_address_space() -> Result<()> {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(paths::repo_root().join(MANIFEST_PATH))?)?;
+        value["address_space_bytes"] = json!(8_589_934_592_u64);
+        let inventory: Inventory = serde_json::from_value(value.clone())
+            .expect("the supported address-space budget must be accepted");
+        validate_inventory(&inventory)?;
+        for limit in [0, 8_589_934_593, u64::MAX] {
+            value["address_space_bytes"] = json!(limit);
+            let invalid: Inventory = serde_json::from_value(value.clone())?;
+            assert!(
+                validate_inventory(&invalid).is_err(),
+                "invalid process limits must fail before execution"
+            );
+        }
+        Ok(())
     }
 
     fn fixture_report(names: &BTreeSet<String>, version: &str) -> Result<Vec<u8>> {

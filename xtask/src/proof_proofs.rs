@@ -1,4 +1,19 @@
-use super::{Shard, Summary, MAX_SHARDS};
+use super::{address_space_is_bounded, Shard, Summary, MAX_ADDRESS_SPACE_BYTES, MAX_SHARDS};
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn process_address_space_limits_are_positive_and_bounded() {
+    let bytes: u64 = kani::any();
+    let accepted = address_space_is_bounded(bytes);
+    if accepted {
+        assert!(bytes > 0);
+        assert!(bytes <= MAX_ADDRESS_SPACE_BYTES);
+    } else {
+        assert!(bytes == 0 || bytes > MAX_ADDRESS_SPACE_BYTES);
+    }
+    kani::cover!(accepted && bytes == MAX_ADDRESS_SPACE_BYTES);
+    kani::cover!(!accepted && bytes == 0);
+}
 
 #[kani::proof]
 #[kani::unwind(5)]
