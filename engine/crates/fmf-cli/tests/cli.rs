@@ -8,6 +8,10 @@ fn fmf() -> Command {
     Command::cargo_bin("fmf").expect("fmf binary builds")
 }
 
+fn benchmark_fixture() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/passing-benchmark.json")
+}
+
 #[test]
 fn version_prints_the_package_version() {
     fmf()
@@ -30,8 +34,7 @@ fn help_lists_the_subcommands() {
 
 #[test]
 fn bench_compare_checks_saved_reports_without_reading_a_volume() {
-    let baseline =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benches/baseline.json");
+    let baseline = benchmark_fixture();
     let assert = fmf()
         .args(["--format", "json", "bench-compare", "--actual"])
         .arg(&baseline)
@@ -48,8 +51,7 @@ fn bench_compare_checks_saved_reports_without_reading_a_volume() {
 
 #[test]
 fn bench_compare_rejects_an_invalid_report_without_reading_a_volume() {
-    let baseline =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benches/baseline.json");
+    let baseline = benchmark_fixture();
     let invalid = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     fmf()
         .args(["bench-compare", "--actual"])
@@ -64,8 +66,7 @@ fn bench_compare_rejects_an_invalid_report_without_reading_a_volume() {
 
 #[test]
 fn bench_compare_writes_a_failed_gate_before_returning_failure() {
-    let baseline =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benches/baseline.json");
+    let baseline = benchmark_fixture();
     let mut report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&baseline).expect("read the control report"))
             .expect("parse the control report");
@@ -103,6 +104,42 @@ fn bench_compare_writes_a_failed_gate_before_returning_failure() {
             .iter()
             .any(|case| case["id"] == "query/01/p99" && case["verdict"] == "fail")
     );
+}
+
+#[test]
+fn bench_compare_rejects_identical_reports_above_the_absolute_budget() {
+    let mut report: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(benchmark_fixture()).expect("read the passing fixture"),
+    )
+    .expect("parse the passing fixture");
+    report["queries"][1]["p99_us"] = 100_000.into();
+    report["queries"][1]["max_us"] = 100_000.into();
+    let directory = tempfile::tempdir().expect("create the report fixture");
+    let actual = directory.path().join("over-budget.json");
+    std::fs::write(
+        &actual,
+        serde_json::to_vec(&report).expect("encode the over-budget report"),
+    )
+    .expect("write the over-budget report");
+    let assert = fmf()
+        .args(["--format", "json", "bench-compare", "--actual"])
+        .arg(&actual)
+        .arg("--baseline")
+        .arg(&actual)
+        .assert()
+        .failure()
+        .code(1);
+    let decision: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("offline comparison emits a failed decision");
+    assert_eq!(decision["passed"], false);
+    let case = decision["cases"]
+        .as_array()
+        .expect("gate cases")
+        .iter()
+        .find(|case| case["id"] == "query/01/p99")
+        .expect("absolute query budget");
+    assert_eq!(case["delta_ratio"], 0.0);
+    assert_eq!(case["verdict"], "fail");
 }
 
 #[test]
