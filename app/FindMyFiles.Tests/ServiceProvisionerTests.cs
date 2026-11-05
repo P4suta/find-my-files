@@ -6,8 +6,58 @@ namespace FindMyFiles.Tests;
 
 /// <summary>Tests for <see cref="ServiceProvisioner"/>'s two injected boundaries — the elevated register and the pipe-forcing relaunch behind the setup screen and the service manager.
 /// Drives both as fakes so the flow runs without a real service, elevation, or exiting the process.</summary>
-public sealed class ServiceProvisionerTests
+public sealed class ServiceProvisionerTests : IDisposable
 {
+    private readonly StaticHookSnapshot<ServiceProvisionerHooks> _hookSnapshot = new(typeof(ServiceProvisioner));
+
+    public void Dispose()
+    {
+        _hookSnapshot.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
+    [Fact]
+    public async Task Test_fixture_restores_borrowed_hooks_after_a_leaked_scope()
+    {
+        var borrowed = new ProductionHarness { Exe = null };
+        var leaked = new ProductionHarness();
+        using var borrowedScope = ServiceProvisioner.UseHooksForTests(borrowed.Hooks);
+        using var fixture = new ServiceProvisionerTests();
+        using var leakedScope = ServiceProvisioner.UseHooksForTests(leaked.Hooks);
+
+        fixture.Dispose();
+
+        Assert.Equal(ServiceActionOutcome.Failed, await ServiceProvisioner.Real.RegisterAsync());
+        Assert.Empty(leaked.Runs);
+        using var laterScope = ServiceProvisioner.UseHooksForTests(leaked.Hooks);
+        fixture.Dispose();
+
+        Assert.Equal(ServiceActionOutcome.Ok, await ServiceProvisioner.Real.RegisterAsync());
+        Assert.Single(leaked.Runs);
+    }
+
+    [Fact]
+    public async Task Production_hook_scope_restores_the_previous_set_only_once()
+    {
+        var borrowed = new ProductionHarness { Exe = null };
+        var inner = new ProductionHarness();
+        var later = new ProductionHarness();
+        using var borrowedScope = ServiceProvisioner.UseHooksForTests(borrowed.Hooks);
+        using var innerScope = ServiceProvisioner.UseHooksForTests(inner.Hooks);
+        Assert.Equal(ServiceActionOutcome.Ok, await ServiceProvisioner.Real.RegisterAsync());
+        Assert.Single(inner.Runs);
+        innerScope.Dispose();
+
+        Assert.Equal(ServiceActionOutcome.Failed, await ServiceProvisioner.Real.RegisterAsync());
+        Assert.Single(inner.Runs);
+        using var laterScope = ServiceProvisioner.UseHooksForTests(later.Hooks);
+        innerScope.Dispose();
+
+        Assert.Equal(ServiceActionOutcome.Ok, await ServiceProvisioner.Real.RegisterAsync());
+        Assert.Single(later.Runs);
+        Assert.Single(inner.Runs);
+    }
+
     private sealed class ProductionHarness
     {
         public string? Exe { get; set; } = @"C:\bundle\fmf-service.exe";

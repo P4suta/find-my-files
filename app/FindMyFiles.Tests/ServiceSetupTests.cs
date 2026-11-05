@@ -6,8 +6,35 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-public sealed class ServiceSetupTests
+public sealed class ServiceSetupTests : IDisposable
 {
+    private readonly StaticHookSnapshot<ServiceSetupHooks> _hookSnapshot = new(typeof(ServiceSetup));
+
+    public void Dispose()
+    {
+        _hookSnapshot.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
+    [Fact]
+    public void Test_fixture_restores_borrowed_hooks_after_a_leaked_scope()
+    {
+        var borrowed = new ServiceSetupHarness { ProcessElevated = false };
+        var leaked = new ServiceSetupHarness { ProcessElevated = true };
+        using var borrowedScope = ServiceSetup.UseHooksForTests(borrowed.Hooks);
+        using var fixture = new ServiceSetupTests();
+        using var leakedScope = ServiceSetup.UseHooksForTests(leaked.Hooks);
+        Assert.True(ServiceSetup.IsProcessElevated());
+
+        fixture.Dispose();
+
+        Assert.False(ServiceSetup.IsProcessElevated());
+        using var laterScope = ServiceSetup.UseHooksForTests(leaked.Hooks);
+        fixture.Dispose();
+
+        Assert.True(ServiceSetup.IsProcessElevated());
+    }
+
     [Fact]
     public void Read_only_machine_probes_are_safe_without_a_registered_service()
     {

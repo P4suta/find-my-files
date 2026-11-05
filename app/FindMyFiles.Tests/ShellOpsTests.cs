@@ -7,10 +7,64 @@ namespace FindMyFiles.Tests;
 
 public sealed class ShellOpsTests : IDisposable
 {
+    private readonly StaticHookSnapshot<ShellOpsHooks> _hookSnapshot = new(typeof(ShellOps));
+
     public void Dispose()
     {
+        _hookSnapshot.Dispose();
         Notifier.ResetForTests();
         GC.SuppressFinalize(this);
+    }
+
+    [Fact]
+    public void Test_fixture_restores_borrowed_hooks_after_a_leaked_scope()
+    {
+        var borrowed = new RecordingRestart();
+        var leaked = new RecordingRestart();
+        using var borrowedScope = ShellOps.UseHooksForTests(Hooks(
+            new RecordingRunner(), new RecordingVerifier(), borrowed));
+        using var fixture = new ShellOpsTests();
+        using var leakedScope = ShellOps.UseHooksForTests(Hooks(
+            new RecordingRunner(), new RecordingVerifier(), leaked));
+
+        fixture.Dispose();
+
+        ShellOps.Relaunch();
+        Assert.Equal(1, borrowed.Calls);
+        Assert.Equal(0, leaked.Calls);
+        using var laterScope = ShellOps.UseHooksForTests(Hooks(
+            new RecordingRunner(), new RecordingVerifier(), leaked));
+        fixture.Dispose();
+
+        ShellOps.Relaunch();
+        Assert.Equal(1, borrowed.Calls);
+        Assert.Equal(1, leaked.Calls);
+    }
+
+    [Fact]
+    public void Hook_scope_restores_the_previous_set_only_once()
+    {
+        var borrowed = new RecordingRestart();
+        var inner = new RecordingRestart();
+        var later = new RecordingRestart();
+        using var borrowedScope = ShellOps.UseHooksForTests(Hooks(
+            new RecordingRunner(), new RecordingVerifier(), borrowed));
+        using var innerScope = ShellOps.UseHooksForTests(Hooks(
+            new RecordingRunner(), new RecordingVerifier(), inner));
+        ShellOps.Relaunch();
+        Assert.Equal(1, inner.Calls);
+        innerScope.Dispose();
+
+        ShellOps.Relaunch();
+        Assert.Equal(1, borrowed.Calls);
+        Assert.Equal(1, inner.Calls);
+        using var laterScope = ShellOps.UseHooksForTests(Hooks(
+            new RecordingRunner(), new RecordingVerifier(), later));
+        innerScope.Dispose();
+
+        ShellOps.Relaunch();
+        Assert.Equal(1, later.Calls);
+        Assert.Equal(1, borrowed.Calls);
     }
 
     [Theory]
