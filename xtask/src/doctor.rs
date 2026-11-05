@@ -1159,8 +1159,8 @@ pub fn run() -> Result<()> {
         (
             "cargo-mutants",
             "cargo:cargo-mutants",
-            "cargo-mutants",
-            &["--version"][..],
+            "cargo",
+            &["mutants", "--version"][..],
         ),
         ("samply", "cargo:samply", "samply", &["--version"][..]),
         ("bacon", "cargo:bacon", "bacon", &["--version"][..]),
