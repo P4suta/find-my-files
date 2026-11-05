@@ -221,8 +221,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  xtask:
-    name: xtask
+  xtask-build:
+    name: xtask-build
     needs: changes
     runs-on: ubuntu-26.04
     timeout-minutes: 60
@@ -256,12 +256,102 @@ jobs:
       - name: Check source comments
         if: needs.changes.outputs.comments == 'true'
         run: ocomment check --jobs 2 --format github engine app xtask .github mise.toml lefthook.yml renovate.local.json5
+      - name: Upload xtask nextest JUnit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: xtask-nextest-junit
+          path: build/xtask/nextest/ci/junit.xml
+          retention-days: 14
+          if-no-files-found: warn
+          overwrite: true
+
+  proof:
+    name: proof (${{ matrix.shard }})
+    needs: [changes, xtask-build]
+    if: needs.changes.outputs.assurance == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: xtask
+          shared-key: xtask
+          save-if: false
       - name: Install the checksum-verified prover
-        if: needs.changes.outputs.assurance == 'true'
         run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- verification-tools kani
       - name: Verify the registered production harnesses
+        env:
+          PROOF_SHARD: ${{ matrix.shard }}
+        run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- proof-shard --index "$PROOF_SHARD" --count 4
+      - name: Upload the original partition evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: production-proof-shard-${{ matrix.shard }}
+          path: build/verification/proof-shard-${{ matrix.shard }}/*.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  xtask:
+    name: xtask
+    needs: [changes, xtask-build, proof]
+    if: always()
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - name: Require every applicable prerequisite
+        if: needs.changes.result != 'success' || needs.xtask-build.result != 'success' || (needs.changes.outputs.assurance == 'true' && needs.proof.result != 'success')
+        run: exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.changes.outputs.assurance == 'true'
-        run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- proof
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/rust-toolchain
+        if: needs.changes.outputs.assurance == 'true'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: needs.changes.outputs.assurance == 'true'
+        with:
+          workspaces: xtask
+          shared-key: xtask
+          save-if: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.changes.outputs.assurance == 'true'
+        with:
+          name: production-proof-shard-0
+          path: build/verification/proof-shard-0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.changes.outputs.assurance == 'true'
+        with:
+          name: production-proof-shard-1
+          path: build/verification/proof-shard-1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.changes.outputs.assurance == 'true'
+        with:
+          name: production-proof-shard-2
+          path: build/verification/proof-shard-2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.changes.outputs.assurance == 'true'
+        with:
+          name: production-proof-shard-3
+          path: build/verification/proof-shard-3
+      - name: Collect every registered production harness
+        if: needs.changes.outputs.assurance == 'true'
+        run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- proof-collect --count 4
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # zizmor: ignore[superfluous-actions] The repository requires a pinned setup action.
         if: needs.changes.outputs.assurance == 'true'
         with:
@@ -275,18 +365,11 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: production-proofs
-          path: build/verification/*.json
+          path: |
+            build/verification/*.json
+            build/verification/proof-shard-*/*.json
           if-no-files-found: error
           retention-days: 7
-          overwrite: true
-      - name: Upload xtask nextest JUnit
-        if: ${{ always() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: xtask-nextest-junit
-          path: build/xtask/nextest/ci/junit.xml
-          retention-days: 14
-          if-no-files-found: warn
           overwrite: true
 
   engine-build-test:
