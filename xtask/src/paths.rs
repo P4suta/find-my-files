@@ -64,6 +64,12 @@ pub fn perf_dir() -> PathBuf {
     build_root().join("engine").join("perf")
 }
 
+pub fn perf_counter_file(timestamp_nanos: u128, process: u32) -> PathBuf {
+    perf_dir()
+        .join("counters")
+        .join(format!("{timestamp_nanos}-{process}.csv"))
+}
+
 /// Deterministic mutation-testing evidence.
 /// Tool-native reports and the canonical gate summaries stay below this one ignored build subtree.
 pub fn mutation_dir() -> PathBuf {

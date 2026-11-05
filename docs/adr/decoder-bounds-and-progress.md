@@ -73,16 +73,33 @@ Each aligned length that can leave room for a terminator has a constant case.
 A complementary case keeps every other 32-bit length.
 Every case includes immediate terminators and malformed chains.
 The union preserves every original field value without assuming either validator's result.
-All later attributes keep arbitrary bytes and lengths.
+The earliest offsets can contain three resident attributes.
+An arbitrary second length gives later header fields symbolic addresses.
+The affected cases at the earliest offsets also partition the second length into constant aligned lengths and their complete 32-bit complement.
+The second header keeps arbitrary values for its type, residency marker, ID, name metadata, and value metadata.
+The construction includes absent, malformed, and valid second attributes.
+When two attributes leave room for a third header, the affected cases also partition the third length.
+Constant cases include every aligned resident length that fits the remaining record, even a length that leaves no terminator.
+A complementary case keeps every other 32-bit length.
+The third header keeps arbitrary type, residency, ID, name, and value fields.
+The construction includes absent, malformed, and valid third attributes.
+The invariant obligations use the same length partitions as admission.
+A dedicated harness checks the complement classifier for every 32-bit length across the supported aligned byte capacities.
+Another harness checks the final-header complement across every 32-bit length and its supported capacities.
 The invariant harness calls the production validator and independently checks every accepted attribute.
 Requiring both harnesses preserves the conjunction of the former assertions without three traversals in one solver problem.
 The invariant harness also bounds the attribute count by the smallest resident header and the space before the terminator.
 The earliest resident case covers an accepted chain with more than one attribute.
+Its most detailed invariant case also requires a reachable accepted chain with three attributes.
 The earliest non-resident case covers an accepted non-resident attribute.
 Every other input byte stays arbitrary under the existing constructive header fields.
 The byte and length bounds remain unchanged.
-Their unwind bounds follow the smallest resident header and the remaining proof bytes.
-The bounds leave room for the terminal or rejected header after the largest admitted sequence.
+The chain loops return from inside their bodies.
+Their unwind bounds count every possible attribute advance and the final returning probe.
+The general offset bound divides the remaining proof bytes by the smallest resident header and adds one.
+A constant first length leaves only the remaining bytes for later attributes.
+The complementary length partition permits at most one advance before rejecting a missing terminator.
+The first-length cases use their corresponding bounds without removing any bytes or field values.
 The earliest terminal-only offset includes one possible resident attribute followed by rejection.
 The later terminal offsets reject every nonterminal attribute before advancing.
 The other rejected offsets permit one empty-region probe and no attribute advance.
@@ -90,7 +107,7 @@ Exhaustive constant patterns classify the terminal offsets without a separate sl
 Compile-time checks bind the bounds to the proof geometry.
 After a first non-resident header, the remaining proof bytes can't contain another complete attribute.
 The bounds for a non-resident first attribute include the attribute and final probe.
-Unwinding assertions remain enabled.
+The [unwinding assertions](https://model-checking.github.io/kani/tutorial-loop-unwinding.html) remain enabled and make an insufficient bound fail verification.
 Each proof partition verifies one harness at a time to limit concurrent resource demand.
 The [partition collector](sharded-proof-evidence.md) requires the complete inventory across the bounded jobs.
 The proof watchdog and hosted job keep their declared safety deadlines.
