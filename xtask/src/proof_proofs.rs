@@ -1,4 +1,26 @@
-use super::Summary;
+use super::{Shard, Summary, MAX_SHARDS};
+
+#[kani::proof]
+#[kani::unwind(5)]
+fn every_ordinal_has_exactly_one_partition_owner() {
+    let ordinal: usize = kani::any();
+    let count: usize = kani::any();
+    kani::assume((1..=MAX_SHARDS).contains(&count));
+    let mut owners = 0;
+    for index in 0..MAX_SHARDS {
+        if index < count {
+            let shard = Shard { index, count };
+            if shard.owns(ordinal) {
+                assert!(index < count);
+                assert_eq!(ordinal % count, index);
+                owners += 1;
+            }
+        }
+    }
+    assert_eq!(owners, 1);
+    kani::cover!(count == 1 && ordinal == usize::MAX);
+    kani::cover!(count == 4 && ordinal == usize::MAX);
+}
 
 #[kani::proof]
 #[kani::unwind(2)]
