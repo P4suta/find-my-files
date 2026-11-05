@@ -16,6 +16,11 @@ The hosted run for `7a1ec5e` reached its 60-minute job limit before completing t
 Completed cases passed, but the job produced no complete receipt or Miri result.
 The job deadline bounds resource use and establishes no proof verdict.
 
+The four-partition run for `f3a8836` lost every hosted runner during an offset-80 resident admission case.
+Each active case stopped before its harness watchdog.
+The logs contain no counterexample or completed verdict for the active cases.
+The shutdown logs contain no measured memory-exhaustion event.
+
 ## Decision
 
 Keep the complete inventory and partition its ordered package and harness names by ordinal modulo the partition count.
@@ -24,6 +29,18 @@ Invalid indexes fail validation.
 Hosted verification uses four jobs with one solver worker in each job.
 Each job retains the existing harness watchdog and job deadline.
 Source binding and the existing assumptions, unwind bounds, verifier pin, and assertion checks remain required.
+
+The inventory also bounds virtual address space per process.
+Every admitted limit is at most `8 GiB`.
+The runner invokes Kani through [`prlimit`](https://man7.org/linux/man-pages/man1/prlimit.1.html).
+Child processes inherit the selected limit.
+The limit applies to each process rather than the combined resident memory of the job.
+The runner records [free](https://man7.org/linux/man-pages/man1/free.1.html) memory observations every ten seconds for at most one hour.
+It owns and reaps the telemetry process on ordinary completion or error.
+Forced runner termination can prevent cleanup and final observations.
+Telemetry supplies diagnostic observations and never a proof verdict.
+Kani stops after the first unsuccessful harness with `--fail-fast`.
+The runner accepts a receipt only after every assigned harness passes.
 
 Kani receives the selected fully qualified names with `--exact` and repeated `--harness` options.
 The pinned [Kani argument definitions](https://github.com/model-checking/kani/blob/kani-0.68.0/kani-driver/src/args/mod.rs) define those selection semantics.
