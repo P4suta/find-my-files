@@ -119,6 +119,10 @@ The four disjoint cases keep every original ID pair without constructing replace
 Each case calls the unchanged production validator and preserved reference, or the unchanged invariant body, once.
 All sixteen harnesses keep their original constructors, result assertions, accepted and rejected covers, and unwind bounds.
 Their union preserves every input and required property of the four former obligations.
+The independent invalid-third-length invariant cases with a second high ID or two high IDs also exceed the Bitwuzla deadline.
+The eight invalid-third-length cases use `cadical` from the pinned Kani distribution.
+The eight full-extent cases keep Bitwuzla.
+Changing the backend preserves every input, assertion, cover, and unwind bound.
 The checksum-verified installer and local configuration pin the same Bitwuzla release.
 The proof runner checks the executable version and includes the tool configuration in its source fingerprint.
 The installer uses the official static Linux x86-64 archive.
