@@ -18,7 +18,9 @@ const REFERENCE_MAX_ATTRIBUTE_TYPE: u32 = 0x100;
 const REFERENCE_STANDARD_INFORMATION: u32 = 0x10;
 const REFERENCE_ATTRIBUTE_LIST: u32 = 0x20;
 const REFERENCE_FILE_NAME: u32 = 0x30;
-const TERMINATOR_STARTS: [u16; 3] = [104, 112, 120];
+const TERMINATOR_OFFSET_104: u16 = 104;
+const TERMINATOR_OFFSET_112: u16 = 112;
+const TERMINATOR_OFFSET_120: u16 = 120;
 const ATTRIBUTE_OFFSET_48: u16 = 48;
 const ATTRIBUTE_OFFSET_56: u16 = 56;
 const ATTRIBUTE_OFFSET_64: u16 = 64;
@@ -34,7 +36,11 @@ const _: () = {
     assert!(
         (PROOF_BYTES - ATTRIBUTE_OFFSET_64 as usize) / REFERENCE_RESIDENT_HEADER_BYTES + 2 <= 4
     );
-    assert!(TERMINATOR_STARTS.len() < 4);
+    assert!(
+        PROOF_BYTES - (TERMINATOR_OFFSET_104 as usize)
+            < REFERENCE_RESIDENT_HEADER_BYTES + REFERENCE_ALIGNMENT
+    );
+    assert!(PROOF_BYTES == TERMINATOR_OFFSET_120 as usize + REFERENCE_ALIGNMENT);
 };
 
 struct ChainChecks {
@@ -45,11 +51,13 @@ struct ChainChecks {
 }
 
 fn check_chain_at<const START: u16>() -> ChainChecks {
-    let bytes: [u8; PROOF_BYTES] = kani::any();
+    let mut bytes: [u8; PROOF_BYTES] = kani::any();
+    let [offset_low, offset_high] = START.to_le_bytes();
+    bytes[ATTRIBUTES_OFFSET_FIELD] = offset_low;
+    bytes[ATTRIBUTES_OFFSET_FIELD + 1] = offset_high;
     let length: u8 = kani::any();
     let length = usize::from(length);
     kani::assume(length <= bytes.len());
-    kani::assume(le_u16(&bytes, ATTRIBUTES_OFFSET_FIELD) == START);
     let record = &bytes[..length];
     let accepted = attributes_complete(record);
     let reference = admission_reference::attributes_complete(record);
@@ -202,7 +210,7 @@ fn chains_at_offset_ninety_six_preserve_admission_and_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn terminal_only_offsets_preserve_admission() {
     let bytes: [u8; PROOF_BYTES] = kani::any();
@@ -210,7 +218,10 @@ fn terminal_only_offsets_preserve_admission() {
     let length = usize::from(length);
     kani::assume(length <= bytes.len());
     let start = le_u16(&bytes, ATTRIBUTES_OFFSET_FIELD);
-    kani::assume(TERMINATOR_STARTS.contains(&start));
+    kani::assume(matches!(
+        start,
+        TERMINATOR_OFFSET_104 | TERMINATOR_OFFSET_112 | TERMINATOR_OFFSET_120
+    ));
     let record = &bytes[..length];
     let accepted = attributes_complete(record);
     assert_eq!(accepted, admission_reference::attributes_complete(record));
@@ -222,7 +233,7 @@ fn terminal_only_offsets_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn remaining_attribute_offsets_reject_the_chain() {
     let bytes: [u8; PROOF_BYTES] = kani::any();
@@ -230,18 +241,19 @@ fn remaining_attribute_offsets_reject_the_chain() {
     let length = usize::from(length);
     kani::assume(length <= bytes.len());
     let start = le_u16(&bytes, ATTRIBUTES_OFFSET_FIELD);
-    kani::assume(
-        !matches!(
-            start,
-            ATTRIBUTE_OFFSET_48
-                | ATTRIBUTE_OFFSET_56
-                | ATTRIBUTE_OFFSET_64
-                | ATTRIBUTE_OFFSET_72
-                | ATTRIBUTE_OFFSET_80
-                | ATTRIBUTE_OFFSET_88
-                | ATTRIBUTE_OFFSET_96
-        ) && !TERMINATOR_STARTS.contains(&start),
-    );
+    kani::assume(!matches!(
+        start,
+        ATTRIBUTE_OFFSET_48
+            | ATTRIBUTE_OFFSET_56
+            | ATTRIBUTE_OFFSET_64
+            | ATTRIBUTE_OFFSET_72
+            | ATTRIBUTE_OFFSET_80
+            | ATTRIBUTE_OFFSET_88
+            | ATTRIBUTE_OFFSET_96
+            | TERMINATOR_OFFSET_104
+            | TERMINATOR_OFFSET_112
+            | TERMINATOR_OFFSET_120
+    ));
     let record = &bytes[..length];
     assert!(!attributes_complete(record));
     assert!(!admission_reference::attributes_complete(record));
