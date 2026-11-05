@@ -21,6 +21,10 @@ Each active case stopped before its harness watchdog.
 The logs contain no counterexample or completed verdict for the active cases.
 The shutdown logs contain no measured memory-exhaustion event.
 
+With the process limit, the next run uploaded original unsuccessful reports and completed normal cleanup.
+The offset-80 resident invariant report contains solver errors without a failed assertion or completed cover checks.
+The run produced no complete receipt or Miri result.
+
 ## Decision
 
 Keep the complete inventory and partition its ordered package and harness names by ordinal modulo the partition count.
@@ -28,7 +32,9 @@ The maintained runner accepts between one and four partitions.
 Invalid indexes fail validation.
 Hosted verification uses four jobs with one solver worker in each job.
 Each job retains the existing harness watchdog and job deadline.
-Source binding and the existing assumptions, unwind bounds, verifier pin, and assertion checks remain required.
+Source binding and the existing assumptions, verifier pin, and assertion checks remain required.
+The [decoder proof](decoder-bounds-and-progress.md) derives each chain unwind bound from its possible advances and final returning probe.
+An insufficient bound must fail an unwinding assertion.
 
 The inventory also bounds virtual address space per process.
 Every admitted limit is at most `8 GiB`.
@@ -39,6 +45,7 @@ The runner records [free](https://man7.org/linux/man-pages/man1/free.1.html) mem
 It owns and reaps the telemetry process on ordinary completion or error.
 Forced runner termination can prevent cleanup and final observations.
 Telemetry supplies diagnostic observations and never a proof verdict.
+Regular verification output preserves diagnostics for unsuccessful checks.
 Kani stops after the first unsuccessful harness with `--fail-fast`.
 The runner accepts a receipt only after every assigned harness passes.
 
