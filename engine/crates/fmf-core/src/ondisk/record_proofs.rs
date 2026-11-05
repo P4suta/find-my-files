@@ -1469,7 +1469,7 @@ fn nonresident_chains_at_offset_forty_eight_preserve_invariants() {
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn filling_third_resident_at_offset_fifty_six_with_bitset_prefix_ids_preserves_admission() {
     let (bytes, length) =
         record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
@@ -1483,7 +1483,7 @@ fn filling_third_resident_at_offset_fifty_six_with_bitset_prefix_ids_preserves_a
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn filling_third_resident_at_offset_fifty_six_with_first_high_id_preserves_admission() {
     let (bytes, length) =
         record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
@@ -1497,7 +1497,7 @@ fn filling_third_resident_at_offset_fifty_six_with_first_high_id_preserves_admis
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn filling_third_resident_at_offset_fifty_six_with_second_high_id_preserves_admission() {
     let (bytes, length) =
         record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
@@ -1511,7 +1511,7 @@ fn filling_third_resident_at_offset_fifty_six_with_second_high_id_preserves_admi
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn filling_third_resident_at_offset_fifty_six_with_high_prefix_ids_preserves_admission() {
     let (bytes, length) =
         record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
@@ -1677,7 +1677,7 @@ fn nonresident_chains_at_offset_fifty_six_preserve_admission() {
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn filling_third_resident_at_offset_fifty_six_with_bitset_prefix_ids_preserves_invariants() {
     let (bytes, length) =
         record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
@@ -1695,7 +1695,7 @@ fn filling_third_resident_at_offset_fifty_six_with_bitset_prefix_ids_preserves_i
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn filling_third_resident_at_offset_fifty_six_with_first_high_id_preserves_invariants() {
     let (bytes, length) =
         record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
@@ -1713,7 +1713,7 @@ fn filling_third_resident_at_offset_fifty_six_with_first_high_id_preserves_invar
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn filling_third_resident_at_offset_fifty_six_with_second_high_id_preserves_invariants() {
     let (bytes, length) =
         record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
@@ -1731,7 +1731,7 @@ fn filling_third_resident_at_offset_fifty_six_with_second_high_id_preserves_inva
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn filling_third_resident_at_offset_fifty_six_with_high_prefix_ids_preserves_invariants() {
     let (bytes, length) =
         record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
