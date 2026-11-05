@@ -27,6 +27,16 @@ const ATTRIBUTE_OFFSET_80: u16 = 80;
 const ATTRIBUTE_OFFSET_88: u16 = 88;
 const ATTRIBUTE_OFFSET_96: u16 = 96;
 
+const _: () = {
+    assert!(
+        (PROOF_BYTES - ATTRIBUTE_OFFSET_48 as usize) / REFERENCE_RESIDENT_HEADER_BYTES + 2 <= 5
+    );
+    assert!(
+        (PROOF_BYTES - ATTRIBUTE_OFFSET_64 as usize) / REFERENCE_RESIDENT_HEADER_BYTES + 2 <= 4
+    );
+    assert!(TERMINATOR_STARTS.len() < 4);
+};
+
 struct ChainChecks {
     accepted: bool,
     reference: bool,
@@ -120,7 +130,7 @@ fn check_chain_at<const START: u16>() -> ChainChecks {
 }
 
 #[kani::proof]
-#[kani::unwind(9)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn chains_at_offset_forty_eight_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_48>();
@@ -132,7 +142,7 @@ fn chains_at_offset_forty_eight_preserve_admission_and_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(9)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn chains_at_offset_fifty_six_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_56>();
@@ -142,7 +152,7 @@ fn chains_at_offset_fifty_six_preserve_admission_and_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(9)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn chains_at_offset_sixty_four_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_64>();
@@ -152,7 +162,7 @@ fn chains_at_offset_sixty_four_preserve_admission_and_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(9)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn chains_at_offset_seventy_two_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_72>();
@@ -162,7 +172,7 @@ fn chains_at_offset_seventy_two_preserve_admission_and_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(9)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn chains_at_offset_eighty_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_80>();
@@ -172,7 +182,7 @@ fn chains_at_offset_eighty_preserve_admission_and_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(9)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn chains_at_offset_eighty_eight_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_88>();
@@ -182,7 +192,7 @@ fn chains_at_offset_eighty_eight_preserve_admission_and_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(9)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn chains_at_offset_ninety_six_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_96>();
@@ -192,7 +202,7 @@ fn chains_at_offset_ninety_six_preserve_admission_and_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(9)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn terminal_only_offsets_preserve_admission() {
     let bytes: [u8; PROOF_BYTES] = kani::any();
@@ -212,7 +222,7 @@ fn terminal_only_offsets_preserve_admission() {
 }
 
 #[kani::proof]
-#[kani::unwind(9)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn remaining_attribute_offsets_reject_the_chain() {
     let bytes: [u8; PROOF_BYTES] = kani::any();
