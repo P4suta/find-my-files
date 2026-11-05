@@ -726,8 +726,7 @@ pub fn visit_list_stream(
         if stream.remaining() < header_len as u64 {
             let tail_len =
                 usize::try_from(stream.remaining()).map_err(|_| ListStreamError::Invalid)?;
-            let mut tail = [0u8; ATTRIBUTE_LIST_ENTRY_BYTES - 1];
-            stream.read_exact(&mut tail[..tail_len])?;
+            stream.read_exact(&mut header[..tail_len])?;
             if prefix {
                 return Ok(());
             }
@@ -1053,6 +1052,31 @@ mod tests {
     }
 
     #[test]
+    fn list_targets_require_sequence_bits_above_every_record_bit() {
+        let valid = list_entry(NtfsAttributeType::AttributeList as u32, 0, frn(42), 1);
+        for reference in [1u64 << 48, frn(42), u64::MAX] {
+            let mut bytes = valid.clone();
+            put_u64(&mut bytes, ENTRY_TARGET_OFFSET, reference);
+            let parsed = parse_list_entries(&bytes, false).unwrap();
+            assert_eq!(parsed[0].target_reference, reference);
+            assert_eq!(stream_entries(&bytes).unwrap(), parsed);
+        }
+        for reference in [0, 1, 7, 16, 42, (1u64 << 48) - 1] {
+            let mut bytes = valid.clone();
+            put_u64(&mut bytes, ENTRY_TARGET_OFFSET, reference);
+            assert!(
+                parse_list_entries(&bytes, false).is_none(),
+                "reference {reference}"
+            );
+            assert!(
+                parse_list_entries(&bytes, true).is_none(),
+                "reference {reference}"
+            );
+            assert!(stream_entries(&bytes).is_none(), "reference {reference}");
+        }
+    }
+
+    #[test]
     fn provable_ordering_and_both_uniqueness_keys_are_strict() {
         let mut descending_type = list_entry(NtfsAttributeType::Data as u32, 0, 1, 1);
         descending_type.extend_from_slice(&list_entry(NtfsAttributeType::FileName as u32, 0, 2, 2));
@@ -1149,6 +1173,46 @@ mod tests {
         })
         .ok()
         .map(|()| visited)
+    }
+
+    #[test]
+    fn streaming_short_tails_preserve_complete_entries_and_prefix_policy() {
+        let entry = list_entry(NtfsAttributeType::AttributeList as u32, 0, frn(10), 1);
+        let stop = AtomicBool::new(false);
+        for tail_len in 1..ATTRIBUTE_LIST_ENTRY_BYTES {
+            let mut bytes = entry.clone();
+            bytes.resize(bytes.len() + tail_len, 0xA5);
+            let runs = [StreamRun {
+                logical: 0,
+                physical: Some(0),
+                len: bytes.len() as u64,
+            }];
+            for prefix in [false, true] {
+                let mut visited = Vec::new();
+                let mut cursor = std::io::Cursor::new(&bytes);
+                let result =
+                    visit_list_stream(&mut cursor, &runs, runs[0].len, &stop, prefix, |value| {
+                        visited.push(value)
+                    });
+                if prefix {
+                    assert!(result.is_ok(), "tail {tail_len}");
+                } else {
+                    assert!(
+                        matches!(result, Err(ListStreamError::Invalid)),
+                        "tail {tail_len}"
+                    );
+                }
+                assert_eq!(
+                    visited,
+                    [ListEntry::unnamed(
+                        NtfsAttributeType::AttributeList as u32,
+                        0,
+                        frn(10),
+                        1
+                    )]
+                );
+            }
+        }
     }
 
     #[test]
@@ -2165,6 +2229,20 @@ mod tests {
                 },
                 false,
             ),
+            (
+                ListEntry {
+                    target_reference: 42,
+                    ..valid
+                },
+                false,
+            ),
+            (
+                ListEntry {
+                    target_reference: (1u64 << 48) - 1,
+                    ..valid
+                },
+                false,
+            ),
         ] {
             let result = close_extent_runs(
                 vec![StreamRun {
@@ -2203,6 +2281,20 @@ mod tests {
             (
                 ListEntry {
                     target_reference: 7,
+                    ..valid
+                },
+                false,
+            ),
+            (
+                ListEntry {
+                    target_reference: 42,
+                    ..valid
+                },
+                false,
+            ),
+            (
+                ListEntry {
+                    target_reference: (1u64 << 48) - 1,
                     ..valid
                 },
                 false,
