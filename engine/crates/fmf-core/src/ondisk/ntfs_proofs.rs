@@ -130,6 +130,7 @@ fn reference_bytes_preserve_record_and_sequence_fields() {
 
 #[kani::proof]
 #[kani::unwind(129)]
+#[kani::solver(kissat)]
 fn accepted_name_values_have_bounded_units_namespaces_and_parent_references() {
     let bytes: [u8; ATTRIBUTE_PROOF_BYTES] = kani::any();
     let length: usize = kani::any();

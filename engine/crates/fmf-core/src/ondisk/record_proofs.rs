@@ -119,6 +119,7 @@ fn check_chain_at<const START: u16>() -> ChainChecks {
 
 #[kani::proof]
 #[kani::unwind(9)]
+#[kani::solver(kissat)]
 fn chains_at_offset_forty_eight_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_48>();
     assert_eq!(checked.accepted, checked.reference);
@@ -130,6 +131,7 @@ fn chains_at_offset_forty_eight_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
+#[kani::solver(kissat)]
 fn chains_at_offset_fifty_six_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_56>();
     assert_eq!(checked.accepted, checked.reference);
@@ -139,6 +141,7 @@ fn chains_at_offset_fifty_six_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
+#[kani::solver(kissat)]
 fn chains_at_offset_sixty_four_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_64>();
     assert_eq!(checked.accepted, checked.reference);
@@ -148,6 +151,7 @@ fn chains_at_offset_sixty_four_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
+#[kani::solver(kissat)]
 fn chains_at_offset_seventy_two_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_72>();
     assert_eq!(checked.accepted, checked.reference);
@@ -157,6 +161,7 @@ fn chains_at_offset_seventy_two_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
+#[kani::solver(kissat)]
 fn chains_at_offset_eighty_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_80>();
     assert_eq!(checked.accepted, checked.reference);
@@ -166,6 +171,7 @@ fn chains_at_offset_eighty_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
+#[kani::solver(kissat)]
 fn chains_at_offset_eighty_eight_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_88>();
     assert_eq!(checked.accepted, checked.reference);
@@ -175,6 +181,7 @@ fn chains_at_offset_eighty_eight_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
+#[kani::solver(kissat)]
 fn chains_at_offset_ninety_six_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_96>();
     assert_eq!(checked.accepted, checked.reference);
@@ -184,6 +191,7 @@ fn chains_at_offset_ninety_six_preserve_admission_and_invariants() {
 
 #[kani::proof]
 #[kani::unwind(9)]
+#[kani::solver(kissat)]
 fn terminal_only_offsets_preserve_admission() {
     let bytes: [u8; PROOF_BYTES] = kani::any();
     let length: usize = kani::any();
@@ -202,6 +210,7 @@ fn terminal_only_offsets_preserve_admission() {
 
 #[kani::proof]
 #[kani::unwind(9)]
+#[kani::solver(kissat)]
 fn remaining_attribute_offsets_reject_the_chain() {
     let bytes: [u8; PROOF_BYTES] = kani::any();
     let length: usize = kani::any();
