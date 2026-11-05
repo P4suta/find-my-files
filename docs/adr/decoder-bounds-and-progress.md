@@ -96,6 +96,16 @@ The complementary constructor keeps every other pair without changing the byte d
 The complementary cases permit at most two advances and the final probe.
 The full-extent cases still include the third advance and fourth probe.
 An insufficient bound must still fail an unwinding assertion.
+The three-header calls also branch on the storage class of the first two attribute IDs.
+Each ID either belongs to the low-ID bitset or the high-ID vector.
+The classifier covers every pair of 16-bit IDs in four disjoint classes.
+Each branch asserts its class and calls the unchanged production validator and preserved reference, or the unchanged invariant body.
+The branch keeps the same byte array and slice rather than constructing replacement IDs or assuming admission.
+The split exposes the vector prefix length before a possible third membership check.
+An upstream [report](https://github.com/model-checking/kani/issues/4667) describes symbolic heap read-back costs for bounded vectors.
+Its Kani version and platform differ from the current verifier configuration.
+The current logs establish solver memory exhaustion and no specific heap-model cause.
+The classifier has a scalar harness over every ID pair, and the complete byte harnesses remain required.
 The invariant obligations use the same length partitions as admission.
 A dedicated harness checks the complement classifier for every 32-bit length across the supported aligned byte capacities.
 Another harness checks the final-header complement across every 32-bit length and its supported capacities.

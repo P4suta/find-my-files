@@ -15,6 +15,8 @@ const REFERENCE_RESIDENT_HEADER_BYTES: usize = 24;
 const REFERENCE_NONRESIDENT_HEADER_BYTES: usize = 64;
 const REFERENCE_ATTRIBUTE_LENGTH_FIELD: usize = 4;
 const REFERENCE_RESIDENCY_FIELD: usize = 8;
+const REFERENCE_ATTRIBUTE_ID_FIELD: usize = 14;
+const REFERENCE_HIGH_ID_START: u16 = u128::BITS as u16;
 const REFERENCE_ALIGNMENT: usize = 8;
 const REFERENCE_ATTRIBUTE_TYPE_STEP: u32 = 0x10;
 const REFERENCE_MAX_ATTRIBUTE_TYPE: u32 = 0x100;
@@ -63,6 +65,138 @@ struct ChainChecks {
 struct AdmissionChecks {
     accepted: bool,
     reference: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrefixIds {
+    BitsetPair,
+    FirstHigh,
+    SecondHigh,
+    HighPair,
+}
+
+fn prefix_ids(first: u16, second: u16) -> PrefixIds {
+    match (
+        first >= REFERENCE_HIGH_ID_START,
+        second >= REFERENCE_HIGH_ID_START,
+    ) {
+        (false, false) => PrefixIds::BitsetPair,
+        (true, false) => PrefixIds::FirstHigh,
+        (false, true) => PrefixIds::SecondHigh,
+        (true, true) => PrefixIds::HighPair,
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(1)]
+fn prefix_id_partitions_preserve_every_id_pair() {
+    let first: u16 = kani::any();
+    let second: u16 = kani::any();
+    let class = prefix_ids(first, second);
+    let first_high = first >= REFERENCE_HIGH_ID_START;
+    let second_high = second >= REFERENCE_HIGH_ID_START;
+    assert_eq!(class == PrefixIds::BitsetPair, !first_high && !second_high);
+    assert_eq!(class == PrefixIds::FirstHigh, first_high && !second_high);
+    assert_eq!(class == PrefixIds::SecondHigh, !first_high && second_high);
+    assert_eq!(class == PrefixIds::HighPair, first_high && second_high);
+    kani::cover!(class == PrefixIds::BitsetPair);
+    kani::cover!(class == PrefixIds::FirstHigh && first == u16::MAX);
+    kani::cover!(class == PrefixIds::SecondHigh && second == REFERENCE_HIGH_ID_START);
+    kani::cover!(class == PrefixIds::HighPair && first != second);
+}
+
+fn prefix_ids_at<const START: u16, const FIRST: u32>(bytes: &[u8; PROOF_BYTES]) -> PrefixIds {
+    let offset = usize::from(START) + REFERENCE_ATTRIBUTE_ID_FIELD;
+    prefix_ids(
+        le_u16(bytes, offset),
+        le_u16(bytes, offset + FIRST as usize),
+    )
+}
+
+fn check_prefix_ids<
+    const START: u16,
+    const FIRST: u32,
+    const FIRST_HIGH: bool,
+    const SECOND_HIGH: bool,
+>(
+    bytes: &[u8; PROOF_BYTES],
+) {
+    let offset = usize::from(START) + REFERENCE_ATTRIBUTE_ID_FIELD;
+    assert_eq!(le_u16(bytes, offset) >= REFERENCE_HIGH_ID_START, FIRST_HIGH);
+    assert_eq!(
+        le_u16(bytes, offset + FIRST as usize) >= REFERENCE_HIGH_ID_START,
+        SECOND_HIGH
+    );
+}
+
+fn check_admission_for_prefix_ids<
+    const START: u16,
+    const FIRST: u32,
+    const FIRST_HIGH: bool,
+    const SECOND_HIGH: bool,
+>(
+    bytes: &[u8; PROOF_BYTES],
+    length: usize,
+) -> AdmissionChecks {
+    check_prefix_ids::<START, FIRST, FIRST_HIGH, SECOND_HIGH>(bytes);
+    let record = &bytes[..length];
+    AdmissionChecks {
+        accepted: attributes_complete(record),
+        reference: admission_reference::attributes_complete(record),
+    }
+}
+
+fn check_admission_by_prefix_ids<const START: u16, const FIRST: u32>(
+    bytes: &[u8; PROOF_BYTES],
+    length: usize,
+) -> AdmissionChecks {
+    match prefix_ids_at::<START, FIRST>(bytes) {
+        PrefixIds::BitsetPair => {
+            check_admission_for_prefix_ids::<START, FIRST, false, false>(bytes, length)
+        }
+        PrefixIds::FirstHigh => {
+            check_admission_for_prefix_ids::<START, FIRST, true, false>(bytes, length)
+        }
+        PrefixIds::SecondHigh => {
+            check_admission_for_prefix_ids::<START, FIRST, false, true>(bytes, length)
+        }
+        PrefixIds::HighPair => {
+            check_admission_for_prefix_ids::<START, FIRST, true, true>(bytes, length)
+        }
+    }
+}
+
+fn check_invariants_for_prefix_ids<
+    const START: u16,
+    const FIRST: u32,
+    const FIRST_HIGH: bool,
+    const SECOND_HIGH: bool,
+>(
+    bytes: &[u8; PROOF_BYTES],
+    length: usize,
+) -> ChainChecks {
+    check_prefix_ids::<START, FIRST, FIRST_HIGH, SECOND_HIGH>(bytes);
+    check_chain_invariants(&bytes[..length])
+}
+
+fn check_invariants_by_prefix_ids<const START: u16, const FIRST: u32>(
+    bytes: &[u8; PROOF_BYTES],
+    length: usize,
+) -> ChainChecks {
+    match prefix_ids_at::<START, FIRST>(bytes) {
+        PrefixIds::BitsetPair => {
+            check_invariants_for_prefix_ids::<START, FIRST, false, false>(bytes, length)
+        }
+        PrefixIds::FirstHigh => {
+            check_invariants_for_prefix_ids::<START, FIRST, true, false>(bytes, length)
+        }
+        PrefixIds::SecondHigh => {
+            check_invariants_for_prefix_ids::<START, FIRST, false, true>(bytes, length)
+        }
+        PrefixIds::HighPair => {
+            check_invariants_for_prefix_ids::<START, FIRST, true, true>(bytes, length)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,18 +442,14 @@ fn check_admission_with_later_residency<const START: u16, const FIRST: u32, cons
     class: LaterResidency,
 ) -> AdmissionChecks {
     let (bytes, length) = record_bytes_with_later_residency::<START, FIRST, SECOND>(class);
-    let record = &bytes[..length];
-    AdmissionChecks {
-        accepted: attributes_complete(record),
-        reference: admission_reference::attributes_complete(record),
-    }
+    check_admission_by_prefix_ids::<START, FIRST>(&bytes, length)
 }
 
 fn check_invariants_with_later_residency<const START: u16, const FIRST: u32, const SECOND: u32>(
     class: LaterResidency,
 ) -> ChainChecks {
     let (bytes, length) = record_bytes_with_later_residency::<START, FIRST, SECOND>(class);
-    check_chain_invariants(&bytes[..length])
+    check_invariants_by_prefix_ids::<START, FIRST>(&bytes, length)
 }
 
 fn check_resident_admission_with_third_length<
@@ -330,11 +460,7 @@ fn check_resident_admission_with_third_length<
     third: Option<u32>,
 ) -> AdmissionChecks {
     let (bytes, length) = record_bytes_with_third_length::<START, FIRST, SECOND>(third);
-    let record = &bytes[..length];
-    AdmissionChecks {
-        accepted: attributes_complete(record),
-        reference: admission_reference::attributes_complete(record),
-    }
+    check_admission_by_prefix_ids::<START, FIRST>(&bytes, length)
 }
 
 fn check_resident_invariants_with_third_length<
@@ -345,7 +471,7 @@ fn check_resident_invariants_with_third_length<
     third: Option<u32>,
 ) -> ChainChecks {
     let (bytes, length) = record_bytes_with_third_length::<START, FIRST, SECOND>(third);
-    check_chain_invariants(&bytes[..length])
+    check_invariants_by_prefix_ids::<START, FIRST>(&bytes, length)
 }
 
 fn record_bytes_with_filling_attribute<
@@ -382,11 +508,7 @@ fn check_filling_attribute_admission<
 ) -> AdmissionChecks {
     let (bytes, length) =
         record_bytes_with_filling_attribute::<START, FIRST, SECOND, THIRD>(full_extent);
-    let record = &bytes[..length];
-    AdmissionChecks {
-        accepted: attributes_complete(record),
-        reference: admission_reference::attributes_complete(record),
-    }
+    check_admission_by_prefix_ids::<START, FIRST>(&bytes, length)
 }
 
 fn check_filling_attribute_invariants<
@@ -399,7 +521,7 @@ fn check_filling_attribute_invariants<
 ) -> ChainChecks {
     let (bytes, length) =
         record_bytes_with_filling_attribute::<START, FIRST, SECOND, THIRD>(full_extent);
-    check_chain_invariants(&bytes[..length])
+    check_invariants_by_prefix_ids::<START, FIRST>(&bytes, length)
 }
 
 fn check_resident_invariants_with_length<const START: u16, const LENGTH: u32>() -> ChainChecks {

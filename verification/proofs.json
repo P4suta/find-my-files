@@ -158,6 +158,7 @@
       "harnesses": [
         "resident_length_partitions_preserve_every_field_value",
         "final_resident_length_partitions_preserve_every_field_value",
+        "prefix_id_partitions_preserve_every_id_pair",
         "later_residency_partitions_preserve_every_marker_pair",
         "other_second_markers_at_offset_forty_eight_with_lengths_twenty_four_then_twenty_four_preserve_admission",
         "other_second_markers_at_offset_forty_eight_with_lengths_twenty_four_then_twenty_four_preserve_invariants",
