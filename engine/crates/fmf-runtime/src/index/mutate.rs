@@ -116,6 +116,74 @@ struct EntryColumns {
     is_system: bool,
 }
 
+const fn with_flag(value: u8, mask: u8, enabled: bool) -> u8 {
+    if enabled { value | mask } else { value & !mask }
+}
+
+const fn excluded_by_attributes(value: u8) -> bool {
+    value & flags::HIDDEN != 0 || value & flags::SYSTEM != 0
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObjectMetadata {
+    size: u64,
+    mtime: i64,
+    is_reparse: bool,
+    is_hidden: bool,
+    is_system: bool,
+}
+
+impl From<&RawEntry<'_>> for ObjectMetadata {
+    fn from(entry: &RawEntry<'_>) -> Self {
+        Self {
+            size: entry.size,
+            mtime: entry.mtime,
+            is_reparse: entry.is_reparse,
+            is_hidden: entry.is_hidden,
+            is_system: entry.is_system,
+        }
+    }
+}
+
+struct FileLink<'entry, 'name>(&'entry RawEntry<'name>);
+
+impl<'entry, 'name> FileLink<'entry, 'name> {
+    fn checked(object: Frn, entry: &'entry RawEntry<'name>) -> Result<Self, IndexMutationError> {
+        if entry.frn != object || entry.is_dir {
+            Err(IndexMutationError::ObjectKind { object })
+        } else {
+            Ok(Self(entry))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WalkState {
+    Unseen,
+    Visiting,
+    Done,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WalkStep {
+    Visit,
+    Cycle,
+    Stop,
+}
+
+impl WalkState {
+    const fn enter(&mut self) -> WalkStep {
+        match self {
+            Self::Unseen => {
+                *self = Self::Visiting;
+                WalkStep::Visit
+            }
+            Self::Visiting => WalkStep::Cycle,
+            Self::Done => WalkStep::Stop,
+        }
+    }
+}
+
 impl VolumeIndex {
     /// Pool bytes `id` *owns* that a rebuild reclaims: its original-spelling copy.
     /// The folded bytes are shared in the dictionary (ADR-0032), so a dead entry rarely frees them; their bloat is tracked by `dict_appends_since_dedup` and collapsed at the next dedup instead.
@@ -129,7 +197,7 @@ impl VolumeIndex {
 
     pub(super) fn tombstone_id(&mut self, id: EntryId) {
         debug_assert!(self.is_live(id), "a link row is tombstoned once");
-        self.flag[id as usize] |= flags::TOMBSTONE;
+        self.flag[id as usize] = with_flag(self.flag[id as usize], flags::TOMBSTONE, true);
         self.tombstones += 1;
         self.dead_name_bytes += self.owned_name_bytes(id);
     }
@@ -280,9 +348,6 @@ impl VolumeIndex {
     }
 
     fn validate_live_topology(&self) -> Result<(), IndexMutationError> {
-        const VISITING: u8 = 1;
-        const DONE: u8 = 2;
-
         if self.is_empty()
             || !self.is_live(Self::ROOT)
             || !self.is_dir(Self::ROOT)
@@ -328,27 +393,31 @@ impl VolumeIndex {
             }
         }
 
-        let mut state = vec![0u8; self.len()];
-        state[Self::ROOT as usize] = DONE;
+        let mut state = vec![WalkState::Unseen; self.len()];
+        state[Self::ROOT as usize] = WalkState::Done;
         let mut stack = Vec::new();
         for start in 1..self.len() as EntryId {
-            if !self.is_live(start) || state[start as usize] == DONE {
+            if !self.is_live(start) {
                 continue;
             }
             stack.clear();
             let mut current = start;
-            while current != Self::ROOT && state[current as usize] != DONE {
-                if state[current as usize] == VISITING {
-                    return Err(IndexMutationError::InvalidTopology {
-                        reason: "the live parent graph contains a cycle",
-                    });
+            loop {
+                match state[current as usize].enter() {
+                    WalkStep::Visit => {
+                        stack.push(current);
+                        current = self.parent(current);
+                    }
+                    WalkStep::Cycle => {
+                        return Err(IndexMutationError::InvalidTopology {
+                            reason: "the live parent graph contains a cycle",
+                        });
+                    }
+                    WalkStep::Stop => break,
                 }
-                state[current as usize] = VISITING;
-                stack.push(current);
-                current = self.parent(current);
             }
             while let Some(entry) = stack.pop() {
-                state[entry as usize] = DONE;
+                state[entry as usize] = WalkState::Done;
             }
         }
         Ok(())
@@ -424,30 +493,23 @@ impl VolumeIndex {
         frn: Frn,
         desired: &[RawEntry<'_>],
     ) -> Result<LinkReconcileStats, IndexMutationError> {
-        if desired.is_empty() {
+        let Some((first, rest)) = desired.split_first() else {
             return Err(IndexMutationError::EmptyLinkSnapshot { object: frn });
-        }
+        };
         self.validate_mutation_reference(frn, false)?;
-        let metadata = &desired[0];
-        if metadata.frn != frn || metadata.is_dir {
-            return Err(IndexMutationError::ObjectKind { object: frn });
-        }
+        let first = FileLink::checked(frn, first)?;
+        let metadata = ObjectMetadata::from(first.0);
         self.validate_existing_object_kind(frn, false)?;
 
         let mut wanted: Vec<(EntryId, Vec<u8>, &RawEntry<'_>)> = Vec::with_capacity(desired.len());
-        for entry in desired {
-            if entry.frn != frn || entry.is_dir {
-                return Err(IndexMutationError::ObjectKind { object: frn });
-            }
+        for link in core::iter::once(Ok(first))
+            .chain(rest.iter().map(|entry| FileLink::checked(frn, entry)))
+        {
+            let entry = link?.0;
             if entry.name_utf16.is_empty() {
                 return Err(IndexMutationError::EmptyName { object: frn });
             }
-            if entry.size != metadata.size
-                || entry.mtime != metadata.mtime
-                || entry.is_reparse != metadata.is_reparse
-                || entry.is_hidden != metadata.is_hidden
-                || entry.is_system != metadata.is_system
-            {
+            if ObjectMetadata::from(entry) != metadata {
                 return Err(IndexMutationError::InconsistentLinkMetadata { object: frn });
             }
             let parent = self.resolve_parent_for_mutation(entry.frn, entry.parent_frn)?;
@@ -851,26 +913,19 @@ impl VolumeIndex {
         self.mtime
             .push(crate::query::dates::mtime_ticks_to_secs(mtime));
         self.frn.push(frn.0);
-        let mut f = 0u8;
-        if is_dir {
-            f |= flags::IS_DIR;
-        }
-        if is_reparse {
-            f |= flags::REPARSE;
-        }
-        if is_hidden {
-            f |= flags::HIDDEN;
-        }
-        if is_system {
-            f |= flags::SYSTEM;
-        }
+        let f = with_flag(0, flags::IS_DIR, is_dir);
+        let f = with_flag(f, flags::REPARSE, is_reparse);
+        let f = with_flag(f, flags::HIDDEN, is_hidden);
+        let f = with_flag(f, flags::SYSTEM, is_system);
         let parent_excluded = self
             .flag
             .get(parent as usize)
             .is_some_and(|pf| pf & flags::EXCLUDED != 0);
-        if is_hidden || is_system || parent_excluded {
-            f |= flags::EXCLUDED;
-        }
+        let f = with_flag(
+            f,
+            flags::EXCLUDED,
+            is_hidden || is_system || parent_excluded,
+        );
         self.flag.push(f);
         id
     }
@@ -879,12 +934,9 @@ impl VolumeIndex {
     pub(super) fn recompute_excluded(&mut self, id: EntryId) {
         let p = self.parent[id as usize];
         let inherited = p != NO_PARENT && p != id && self.flag[p as usize] & flags::EXCLUDED != 0;
-        let own = self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM) != 0;
-        if own || inherited {
-            self.flag[id as usize] |= flags::EXCLUDED;
-        } else {
-            self.flag[id as usize] &= !flags::EXCLUDED;
-        }
+        let own = excluded_by_attributes(self.flag[id as usize]);
+        self.flag[id as usize] =
+            with_flag(self.flag[id as usize], flags::EXCLUDED, own || inherited);
     }
 
     /// Recompute inherited HIDDEN/SYSTEM exclusion for the complete forest.
@@ -893,17 +945,11 @@ impl VolumeIndex {
     /// Each row enters and leaves the walk once, so moving a large subtree is O(index entries), never O(records × entries).
     /// Corrupt parent cycles are handled deterministically: the cycle is excluded iff any member carries its own HIDDEN/SYSTEM bit, and that state then propagates to descendants.
     pub(crate) fn recompute_all_excluded(&mut self) {
-        const VISITING: u8 = 1;
-        const DONE: u8 = 2;
-
         let n = self.len();
-        let mut state = vec![0u8; n];
+        let mut state = vec![WalkState::Unseen; n];
         let mut stack: Vec<EntryId> = Vec::new();
 
         for start in 0..n as EntryId {
-            if state[start as usize] == DONE {
-                continue;
-            }
             stack.clear();
             let mut cur = start;
             let mut inherited = false;
@@ -912,33 +958,29 @@ impl VolumeIndex {
                 if cur == NO_PARENT || cur as usize >= n {
                     break;
                 }
-                match state[cur as usize] {
-                    DONE => {
+                match state[cur as usize].enter() {
+                    WalkStep::Stop => {
                         inherited = self.is_excluded(cur);
                         break;
                     }
-                    VISITING => {
+                    WalkStep::Cycle => {
                         let cycle_start = stack
                             .iter()
                             .position(|&id| id == cur)
                             .expect("VISITING entries belong to the current parent walk");
-                        let cycle_excluded = stack[cycle_start..].iter().any(|&id| {
-                            self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM) != 0
-                        });
+                        let cycle_excluded = stack[cycle_start..]
+                            .iter()
+                            .any(|&id| excluded_by_attributes(self.flag[id as usize]));
                         for &id in &stack[cycle_start..] {
-                            if cycle_excluded {
-                                self.flag[id as usize] |= flags::EXCLUDED;
-                            } else {
-                                self.flag[id as usize] &= !flags::EXCLUDED;
-                            }
-                            state[id as usize] = DONE;
+                            self.flag[id as usize] =
+                                with_flag(self.flag[id as usize], flags::EXCLUDED, cycle_excluded);
+                            state[id as usize] = WalkState::Done;
                         }
                         stack.truncate(cycle_start);
                         inherited = cycle_excluded;
                         break;
                     }
-                    _ => {
-                        state[cur as usize] = VISITING;
+                    WalkStep::Visit => {
                         stack.push(cur);
                         cur = self.parent[cur as usize];
                     }
@@ -946,14 +988,11 @@ impl VolumeIndex {
             }
 
             while let Some(id) = stack.pop() {
-                let own = self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM) != 0;
+                let own = excluded_by_attributes(self.flag[id as usize]);
                 let excluded = own || inherited;
-                if excluded {
-                    self.flag[id as usize] |= flags::EXCLUDED;
-                } else {
-                    self.flag[id as usize] &= !flags::EXCLUDED;
-                }
-                state[id as usize] = DONE;
+                self.flag[id as usize] =
+                    with_flag(self.flag[id as usize], flags::EXCLUDED, excluded);
+                state[id as usize] = WalkState::Done;
                 inherited = excluded;
             }
         }
@@ -989,34 +1028,44 @@ impl VolumeIndex {
         if ids.is_empty() {
             return None;
         }
-        let expected = if is_reparse { flags::REPARSE } else { 0 }
-            | if is_hidden { flags::HIDDEN } else { 0 }
-            | if is_system { flags::SYSTEM } else { 0 };
-        let mask = flags::REPARSE | flags::HIDDEN | flags::SYSTEM;
-        let changed = ids
-            .iter()
-            .any(|&id| self.flag[id as usize] & mask != expected);
+        let expected = (is_reparse, is_hidden, is_system);
+        let changed = ids.iter().any(|&id| {
+            (
+                self.is_reparse(id),
+                self.flag[id as usize] & flags::HIDDEN != 0,
+                self.flag[id as usize] & flags::SYSTEM != 0,
+            ) != expected
+        });
         for id in ids {
             let flag = &mut self.flag[id as usize];
-            *flag = (*flag & !flags::REPARSE) | if is_reparse { flags::REPARSE } else { 0 };
+            *flag = with_flag(*flag, flags::REPARSE, is_reparse);
             self.update_attrs_id(id, is_hidden, is_system);
         }
         Some(changed)
     }
 
     fn update_attrs_id(&mut self, id: EntryId, is_hidden: bool, is_system: bool) {
-        let old_raw = self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM);
+        let old_raw = (
+            self.flag[id as usize] & flags::HIDDEN != 0,
+            self.flag[id as usize] & flags::SYSTEM != 0,
+        );
         let f = &mut self.flag[id as usize];
-        *f = (*f & !(flags::HIDDEN | flags::SYSTEM))
-            | if is_hidden { flags::HIDDEN } else { 0 }
-            | if is_system { flags::SYSTEM } else { 0 };
+        *f = with_flag(*f, flags::HIDDEN, is_hidden);
+        *f = with_flag(*f, flags::SYSTEM, is_system);
         self.recompute_excluded(id);
-        let new_raw = self.flag[id as usize] & (flags::HIDDEN | flags::SYSTEM);
+        let new_raw = (
+            self.flag[id as usize] & flags::HIDDEN != 0,
+            self.flag[id as usize] & flags::SYSTEM != 0,
+        );
         if self.is_dir(id) && old_raw != new_raw {
             self.exclusion_tree_dirty = true;
         }
     }
 }
+
+#[cfg(kani)]
+#[path = "mutation_proofs.rs"]
+mod kani_proofs;
 
 #[cfg(test)]
 mod tests {
@@ -1075,7 +1124,7 @@ mod tests {
         builder.finish_strict().expect("strict fixture is rooted")
     }
 
-    fn exact_file_link<'name>(object: Frn, parent: Frn, name: &'name [u16]) -> RawEntry<'name> {
+    fn exact_file_link(object: Frn, parent: Frn, name: &[u16]) -> RawEntry<'_> {
         RawEntry {
             frn: object,
             parent_frn: parent,
@@ -1234,6 +1283,20 @@ mod tests {
                 metadata_changed: false,
             })
         );
+    }
+
+    #[test]
+    fn flag_updates_preserve_unselected_bits_and_are_idempotent() {
+        for original in 0..=u8::MAX {
+            for mask in 0..=u8::MAX {
+                for enabled in [false, true] {
+                    let changed = with_flag(original, mask, enabled);
+                    assert_eq!((original ^ changed) & !mask, 0);
+                    assert_eq!(changed & mask, if enabled { mask } else { 0 });
+                    assert_eq!(with_flag(changed, mask, enabled), changed);
+                }
+            }
+        }
     }
 
     const ATTRIBUTE_CASES: [(bool, bool, bool); 8] = [
