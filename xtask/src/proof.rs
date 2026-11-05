@@ -634,7 +634,7 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
                 &inventory.jobs.to_string(),
                 "--fail-fast",
                 "--output-format",
-                "terse",
+                "regular",
                 "-Z",
                 "unstable-options",
                 "--harness-timeout",
