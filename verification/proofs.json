@@ -354,6 +354,7 @@
         "exclusion_uses_only_the_hidden_and_system_bits",
         "file_link_kind_checks_preserve_the_requested_object",
         "metadata_projection_preserves_every_object_field",
+        "single_link_refresh_updates_every_live_object_row",
         "each_walk_state_has_one_exhaustive_entry_transition"
       ]
     },

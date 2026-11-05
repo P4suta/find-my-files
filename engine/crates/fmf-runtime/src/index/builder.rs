@@ -260,6 +260,14 @@ impl VolumeIndexBuilder {
         ))
     }
 
+    #[cfg(kani)]
+    pub(super) fn root_index(
+        volume_label: &str,
+        root: Frn,
+    ) -> Result<VolumeIndex, IndexBuildError> {
+        Self::new_strict(volume_label, root).map(|builder| builder.idx)
+    }
+
     fn with_root(volume_label: &str, root: Frn, mode: FinalizeMode) -> Self {
         let mut idx = VolumeIndex {
             dict_pool: Vec::new(),
