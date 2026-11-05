@@ -50,7 +50,7 @@ Output and filename checks choose one arbitrary observation position.
 The observation index ranges over every original output cell or name unit.
 The length variables for record and filename inputs use one byte with the original bounds.
 A compile-time check rejects proof buffers larger than the length representation.
-The byte harnesses select a solver from the pinned Kani distribution: `cadical`.
+The byte harnesses select `cadical` or `z3` from the pinned Kani distribution.
 Kani supports [per-harness solver selection](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver) without changing the property or input domain.
 The record-chain harnesses partition the complete attribute-offset domain without changing the byte bounds.
 An independent header partition rejects every inconsistent allocation length or used length beyond the record.
@@ -119,9 +119,11 @@ Each case calls the unchanged production validator and preserved reference, or t
 All sixteen harnesses keep their original constructors, result assertions, accepted and rejected covers, and unwind bounds.
 Their union preserves every input and required property of the four former obligations.
 The four independent invalid-third-length cases whose second attribute ID is high also exceed the Bitwuzla deadline.
-All sixteen independent prefix-ID cases use `cadical` from the pinned Kani distribution.
+The [SAT run](https://github.com/P4suta/find-my-files/actions/runs/42115162544) exhausts memory during propositional reduction for the four full-extent admission and invariant cases with a high second ID.
+Those cases select `z3` from the pinned Kani distribution for their independent single-call problems.
+The other independent prefix-ID cases use `cadical`.
 Changing the solver preserves every input, assertion, cover, and unwind bound.
-The checksum-verified Kani bundle includes the solver.
+The checksum-verified Kani bundle includes both solvers.
 The proof runner checks the Kani executable version and includes the tool configuration in its source fingerprint.
 The existing per-process memory limit and safety deadlines still apply.
 The invariant obligations use the same length partitions as admission.
