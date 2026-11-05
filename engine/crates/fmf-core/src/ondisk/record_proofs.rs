@@ -18,7 +18,9 @@ const REFERENCE_MAX_ATTRIBUTE_TYPE: u32 = 0x100;
 const REFERENCE_STANDARD_INFORMATION: u32 = 0x10;
 const REFERENCE_ATTRIBUTE_LIST: u32 = 0x20;
 const REFERENCE_FILE_NAME: u32 = 0x30;
-const TERMINATOR_STARTS: [u16; 3] = [104, 112, 120];
+const TERMINATOR_OFFSET_104: u16 = 104;
+const TERMINATOR_OFFSET_112: u16 = 112;
+const TERMINATOR_OFFSET_120: u16 = 120;
 const ATTRIBUTE_OFFSET_48: u16 = 48;
 const ATTRIBUTE_OFFSET_56: u16 = 56;
 const ATTRIBUTE_OFFSET_64: u16 = 64;
@@ -34,7 +36,14 @@ const _: () = {
     assert!(
         (PROOF_BYTES - ATTRIBUTE_OFFSET_64 as usize) / REFERENCE_RESIDENT_HEADER_BYTES + 2 <= 4
     );
-    assert!(TERMINATOR_STARTS.len() < 4);
+    assert!(
+        (PROOF_BYTES - ATTRIBUTE_OFFSET_88 as usize) / REFERENCE_RESIDENT_HEADER_BYTES + 2 <= 3
+    );
+    assert!(
+        PROOF_BYTES - (TERMINATOR_OFFSET_104 as usize)
+            < REFERENCE_RESIDENT_HEADER_BYTES + REFERENCE_ALIGNMENT
+    );
+    assert!(PROOF_BYTES == TERMINATOR_OFFSET_120 as usize + REFERENCE_ALIGNMENT);
 };
 
 struct ChainChecks {
@@ -44,12 +53,25 @@ struct ChainChecks {
     nonresident: bool,
 }
 
-fn check_chain_at<const START: u16>() -> ChainChecks {
-    let bytes: [u8; PROOF_BYTES] = kani::any();
+fn record_bytes_at<const START: u16>() -> ([u8; PROOF_BYTES], usize) {
+    let mut bytes: [u8; PROOF_BYTES] = kani::any();
     let length: u8 = kani::any();
+    let length_bytes = u32::from(length).to_le_bytes();
     let length = usize::from(length);
     kani::assume(length <= bytes.len());
-    kani::assume(le_u16(&bytes, ATTRIBUTES_OFFSET_FIELD) == START);
+    let used: u8 = kani::any();
+    let [offset_low, offset_high] = START.to_le_bytes();
+    bytes[ATTRIBUTES_OFFSET_FIELD] = offset_low;
+    bytes[ATTRIBUTES_OFFSET_FIELD + 1] = offset_high;
+    bytes[USED_BYTES_FIELD..USED_BYTES_FIELD + size_of::<u32>()]
+        .copy_from_slice(&u32::from(used).to_le_bytes());
+    bytes[ALLOCATED_BYTES_FIELD..ALLOCATED_BYTES_FIELD + size_of::<u32>()]
+        .copy_from_slice(&length_bytes);
+    (bytes, length)
+}
+
+fn check_chain_at<const START: u16>() -> ChainChecks {
+    let (bytes, length) = record_bytes_at::<START>();
     let record = &bytes[..length];
     let accepted = attributes_complete(record);
     let reference = admission_reference::attributes_complete(record);
@@ -182,7 +204,7 @@ fn chains_at_offset_eighty_preserve_admission_and_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn chains_at_offset_eighty_eight_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_88>();
@@ -192,7 +214,7 @@ fn chains_at_offset_eighty_eight_preserve_admission_and_invariants() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
 fn chains_at_offset_ninety_six_preserve_admission_and_invariants() {
     let checked = check_chain_at::<ATTRIBUTE_OFFSET_96>();
@@ -201,28 +223,82 @@ fn chains_at_offset_ninety_six_preserve_admission_and_invariants() {
     kani::cover!(!checked.accepted);
 }
 
+struct TerminalChecks {
+    accepted: bool,
+    reference: bool,
+    type_id: Option<u32>,
+}
+
+fn check_terminal_at<const START: u16>() -> TerminalChecks {
+    let (bytes, length) = record_bytes_at::<START>();
+    let record = &bytes[..length];
+    let accepted = attributes_complete(record);
+    TerminalChecks {
+        accepted,
+        reference: admission_reference::attributes_complete(record),
+        type_id: accepted.then(|| le_u32(record, usize::from(START))),
+    }
+}
+
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(3)]
 #[kani::solver(cadical)]
-fn terminal_only_offsets_preserve_admission() {
+fn terminal_at_offset_one_hundred_four_preserves_admission() {
+    let checked = check_terminal_at::<TERMINATOR_OFFSET_104>();
+    assert_eq!(checked.accepted, checked.reference);
+    if checked.accepted {
+        assert_eq!(checked.type_id, Some(ATTRIBUTE_END));
+    }
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn terminal_at_offset_one_hundred_twelve_preserves_admission() {
+    let checked = check_terminal_at::<TERMINATOR_OFFSET_112>();
+    assert_eq!(checked.accepted, checked.reference);
+    if checked.accepted {
+        assert_eq!(checked.type_id, Some(ATTRIBUTE_END));
+    }
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn terminal_at_offset_one_hundred_twenty_preserves_admission() {
+    let checked = check_terminal_at::<TERMINATOR_OFFSET_120>();
+    assert_eq!(checked.accepted, checked.reference);
+    if checked.accepted {
+        assert_eq!(checked.type_id, Some(ATTRIBUTE_END));
+    }
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(1)]
+#[kani::solver(cadical)]
+fn inconsistent_record_lengths_reject_before_attribute_traversal() {
     let bytes: [u8; PROOF_BYTES] = kani::any();
     let length: u8 = kani::any();
     let length = usize::from(length);
     kani::assume(length <= bytes.len());
-    let start = le_u16(&bytes, ATTRIBUTES_OFFSET_FIELD);
-    kani::assume(TERMINATOR_STARTS.contains(&start));
+    let allocated = le_u32(&bytes, ALLOCATED_BYTES_FIELD) as usize;
+    let used = le_u32(&bytes, USED_BYTES_FIELD) as usize;
+    kani::assume(allocated != length || used > length);
     let record = &bytes[..length];
-    let accepted = attributes_complete(record);
-    assert_eq!(accepted, admission_reference::attributes_complete(record));
-    if accepted {
-        assert_eq!(le_u32(record, usize::from(start)), ATTRIBUTE_END);
-    }
-    kani::cover!(accepted);
-    kani::cover!(!accepted);
+    assert!(!attributes_complete(record));
+    assert!(!admission_reference::attributes_complete(record));
+    kani::cover!(length >= REFERENCE_FILE_HEADER_BYTES && allocated != length);
+    kani::cover!(length >= REFERENCE_FILE_HEADER_BYTES && allocated == length && used > length);
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(2)]
 #[kani::solver(cadical)]
 fn remaining_attribute_offsets_reject_the_chain() {
     let bytes: [u8; PROOF_BYTES] = kani::any();
@@ -230,18 +306,19 @@ fn remaining_attribute_offsets_reject_the_chain() {
     let length = usize::from(length);
     kani::assume(length <= bytes.len());
     let start = le_u16(&bytes, ATTRIBUTES_OFFSET_FIELD);
-    kani::assume(
-        !matches!(
-            start,
-            ATTRIBUTE_OFFSET_48
-                | ATTRIBUTE_OFFSET_56
-                | ATTRIBUTE_OFFSET_64
-                | ATTRIBUTE_OFFSET_72
-                | ATTRIBUTE_OFFSET_80
-                | ATTRIBUTE_OFFSET_88
-                | ATTRIBUTE_OFFSET_96
-        ) && !TERMINATOR_STARTS.contains(&start),
-    );
+    kani::assume(!matches!(
+        start,
+        ATTRIBUTE_OFFSET_48
+            | ATTRIBUTE_OFFSET_56
+            | ATTRIBUTE_OFFSET_64
+            | ATTRIBUTE_OFFSET_72
+            | ATTRIBUTE_OFFSET_80
+            | ATTRIBUTE_OFFSET_88
+            | ATTRIBUTE_OFFSET_96
+            | TERMINATOR_OFFSET_104
+            | TERMINATOR_OFFSET_112
+            | TERMINATOR_OFFSET_120
+    ));
     let record = &bytes[..length];
     assert!(!attributes_complete(record));
     assert!(!admission_reference::attributes_complete(record));

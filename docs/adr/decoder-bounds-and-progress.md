@@ -53,10 +53,22 @@ A compile-time check rejects proof buffers larger than the length representation
 The byte harnesses select a solver from the pinned Kani distribution: `cadical`.
 Kani supports [per-harness solver selection](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver) without changing the property or input domain.
 The record-chain harnesses partition the complete attribute-offset domain without changing the byte bounds.
+An independent header partition rejects every inconsistent allocation length or used length beyond the record.
+It quantifies the original arbitrary header bytes and length domain.
+Each fixed-offset partition constructs its offset and allocation bytes directly.
+The construction also applies to each terminal offset.
+Its arbitrary one-byte used length covers every admitted value within the unchanged byte bound.
+All remaining bytes stay arbitrary.
+The rejected-header and fixed-offset partitions together cover the complete original input domain.
 Their unwind bounds follow the smallest resident header and the remaining proof bytes.
 The bounds leave room for the terminal or rejected header after the largest admitted sequence.
+The earliest terminal-only offset includes one possible resident attribute followed by rejection.
+The later terminal offsets reject every nonterminal attribute before advancing.
+The other rejected offsets permit one empty-region probe and no attribute advance.
+Exhaustive constant patterns classify the terminal offsets without a separate slice traversal.
 Compile-time checks bind the bounds to the proof geometry.
 Unwinding assertions remain enabled.
+The runner verifies one harness at a time to reduce concurrent resource demand.
 The proof watchdog and hosted job use longer safety deadlines for the expanded inventory.
 A deadline stop leaves the proof incomplete.
 Every registered harness must pass before release.
