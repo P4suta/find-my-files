@@ -5,6 +5,7 @@
     "version": "27.1.0"
   },
   "examined_files": [
+    "engine/crates/fmf-core/src/ondisk/attribute_list.rs",
     "engine/crates/fmf-core/src/ondisk/fixup.rs",
     "engine/crates/fmf-core/src/ondisk/ntfs.rs",
     "engine/crates/fmf-core/src/ondisk/record.rs",
