@@ -446,6 +446,28 @@ mod tests {
     }
 
     #[test]
+    fn wildcards_keep_internal_stars_in_every_anchored_shape() {
+        let idx = sample();
+        for (text, expected) in [
+            ("m*in*", "main.rs"),
+            ("*notes*txt", "notes.txt"),
+            ("*p*o*", "Report.PDF"),
+        ] {
+            for case in [CaseMode::Smart, CaseMode::Insensitive, CaseMode::Sensitive] {
+                let options = QueryOptions {
+                    case,
+                    ..QueryOptions::default()
+                };
+                assert_eq!(
+                    run(&idx, text, options),
+                    [expected],
+                    "query {text:?}, case {case:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn regex_term() {
         let idx = sample();
         assert_eq!(names(&idx, "regex:^ma.n\\.rs$"), vec!["main.rs"]);
