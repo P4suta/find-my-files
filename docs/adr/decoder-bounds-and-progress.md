@@ -60,6 +60,12 @@ The construction also applies to each terminal offset.
 Its arbitrary one-byte used length covers every admitted value within the unchanged byte bound.
 All remaining bytes stay arbitrary.
 The rejected-header and fixed-offset partitions together cover the complete original input domain.
+Each offset has separate admission-equivalence and accepted-chain invariant harnesses.
+Both harnesses quantify the same complete byte domain for that offset.
+The admission harness compares the production validator with the preserved reference.
+The invariant harness calls the production validator and independently checks every accepted attribute.
+Requiring both harnesses preserves the conjunction of the former assertions without three traversals in one solver problem.
+The invariant harness also bounds the attribute count by the smallest resident header and the space before the terminator.
 Their unwind bounds follow the smallest resident header and the remaining proof bytes.
 The bounds leave room for the terminal or rejected header after the largest admitted sequence.
 The earliest terminal-only offset includes one possible resident attribute followed by rejection.
