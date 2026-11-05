@@ -116,14 +116,29 @@ Each of the four offset-56 obligations has a separate harness for every prefix-I
 Each harness assumes only its classifier result and then checks the corresponding ID-class assertions.
 The four disjoint cases keep every original ID pair without constructing replacement IDs.
 Each case calls the unchanged production validator and preserved reference, or the unchanged invariant body, once.
-All sixteen harnesses keep their original constructors, result assertions, accepted and rejected covers, and unwind bounds.
+The sixteen prefix-ID cases preserve every original constructor, result assertion, reachable outcome, and unwind bound.
 Their union preserves every input and required property of the four former obligations.
 The four independent invalid-third-length cases whose second attribute ID is high also exceed the Bitwuzla deadline.
 The [SAT run](https://github.com/P4suta/find-my-files/actions/runs/42115162544) exhausts memory during propositional reduction for the four full-extent admission and invariant cases with a high second ID.
 The independent Z3 full-extent invariant cases stop with `map::at` during SMT conversion in the [following run](https://github.com/P4suta/find-my-files/actions/runs/42121112405).
-The four full-extent cases with a high second ID select `bitwuzla` for their independent single-call problems.
-The other independent prefix-ID cases use `cadical` from the Kani bundle.
-Changing the solver preserves every input, assertion, cover, and unwind bound.
+The four independent full-extent Bitwuzla cases exceed the same safety deadline in the [next run](https://github.com/P4suta/find-my-files/actions/runs/42126393518).
+Those cases now partition the position of the first terminator into the first, second, or third attribute, or its absence.
+A scalar harness proves the disjoint classification over every triple of 32-bit type values.
+Each constructor keeps the original prefix-ID class and full record extent.
+The constructor writes the selected terminator and excludes earlier terminators.
+The absent case excludes all three terminators.
+The union preserves every original type value and remaining byte without assuming admission.
+Each admission case calls the production validator and preserved reference and checks equal results.
+The absent case also proves that both validators reject.
+The invariant observer retains every original assertion and selects its accepted branch from the actual validator result.
+The absent invariant case proves rejection before inspecting the rejecting branch and checks that the observer agrees with the actual result.
+First-terminator cases require reachable acceptance and acceptance at a prefix-ID boundary.
+Cases with the terminator in the second or third attribute keep accepted and rejected covers.
+Absent-terminator cases cover rejection and a distinct-ID chain with three complete minimal resident headers.
+The combined covers keep both original outcomes without requiring an impossible outcome in a partition.
+Every case keeps the original unwind bound of four.
+Absent-terminator cases use the pinned external `bitwuzla` solver.
+The remaining cases use `cadical` from the Kani bundle.
 The external Linux solver has an exact version pin, archive byte count, and SHA-256 checksum.
 The proof setup installs the verified executable alongside Kani.
 The proof runner checks both executable versions and includes the tool configuration in its source fingerprint.
