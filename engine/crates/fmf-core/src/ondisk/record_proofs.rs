@@ -129,6 +129,35 @@ fn check_prefix_ids<
     );
 }
 
+fn check_prefix_id_class<const START: u16, const FIRST: u32>(bytes: &[u8; PROOF_BYTES]) {
+    match prefix_ids_at::<START, FIRST>(bytes) {
+        PrefixIds::BitsetPair => check_prefix_ids::<START, FIRST, false, false>(bytes),
+        PrefixIds::FirstHigh => check_prefix_ids::<START, FIRST, true, false>(bytes),
+        PrefixIds::SecondHigh => check_prefix_ids::<START, FIRST, false, true>(bytes),
+        PrefixIds::HighPair => check_prefix_ids::<START, FIRST, true, true>(bytes),
+    }
+}
+
+fn check_admission_after_prefix_ids<const START: u16, const FIRST: u32>(
+    bytes: &[u8; PROOF_BYTES],
+    length: usize,
+) -> AdmissionChecks {
+    check_prefix_id_class::<START, FIRST>(bytes);
+    let record = &bytes[..length];
+    AdmissionChecks {
+        accepted: attributes_complete(record),
+        reference: admission_reference::attributes_complete(record),
+    }
+}
+
+fn check_invariants_after_prefix_ids<const START: u16, const FIRST: u32>(
+    bytes: &[u8; PROOF_BYTES],
+    length: usize,
+) -> ChainChecks {
+    check_prefix_id_class::<START, FIRST>(bytes);
+    check_chain_invariants(&bytes[..length])
+}
+
 fn check_admission_for_prefix_ids<
     const START: u16,
     const FIRST: u32,
@@ -1469,10 +1498,12 @@ fn nonresident_chains_at_offset_forty_eight_preserve_invariants() {
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(z3)]
+#[kani::solver(bitwuzla)]
 fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fifty_six_with_full_record_extent_preserve_admission()
  {
-    let checked = check_filling_attribute_admission::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
+    let (bytes, length) =
+        record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
+    let checked = check_admission_after_prefix_ids::<ATTRIBUTE_OFFSET_56, 24>(&bytes, length);
     assert_eq!(checked.accepted, checked.reference);
     kani::cover!(checked.accepted);
     kani::cover!(!checked.accepted);
@@ -1480,10 +1511,11 @@ fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fift
 
 #[kani::proof]
 #[kani::unwind(3)]
-#[kani::solver(z3)]
+#[kani::solver(bitwuzla)]
 fn resident_lengths_twenty_four_then_twenty_four_with_other_third_lengths_at_offset_fifty_six_preserve_admission()
  {
-    let checked = check_resident_admission_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
+    let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
+    let checked = check_admission_after_prefix_ids::<ATTRIBUTE_OFFSET_56, 24>(&bytes, length);
     assert_eq!(checked.accepted, checked.reference);
     kani::cover!(checked.accepted);
     kani::cover!(!checked.accepted);
@@ -1591,10 +1623,12 @@ fn nonresident_chains_at_offset_fifty_six_preserve_admission() {
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(z3)]
+#[kani::solver(bitwuzla)]
 fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fifty_six_with_full_record_extent_preserve_invariants()
  {
-    let checked = check_filling_attribute_invariants::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
+    let (bytes, length) =
+        record_bytes_with_filling_attribute::<ATTRIBUTE_OFFSET_56, 24, 24, 24>(true);
+    let checked = check_invariants_after_prefix_ids::<ATTRIBUTE_OFFSET_56, 24>(&bytes, length);
     assert!(
         checked.count
             <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
@@ -1606,10 +1640,11 @@ fn resident_lengths_twenty_four_then_twenty_four_then_twenty_four_at_offset_fift
 
 #[kani::proof]
 #[kani::unwind(3)]
-#[kani::solver(z3)]
+#[kani::solver(bitwuzla)]
 fn resident_lengths_twenty_four_then_twenty_four_with_other_third_lengths_at_offset_fifty_six_preserve_invariants()
  {
-    let checked = check_resident_invariants_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
+    let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
+    let checked = check_invariants_after_prefix_ids::<ATTRIBUTE_OFFSET_56, 24>(&bytes, length);
     assert!(
         checked.count
             <= (PROOF_BYTES - usize::from(ATTRIBUTE_OFFSET_56) - REFERENCE_ALIGNMENT)
