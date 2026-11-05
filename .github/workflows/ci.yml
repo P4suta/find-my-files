@@ -186,7 +186,7 @@ jobs:
     name: xtask
     needs: changes
     runs-on: ubuntu-26.04
-    timeout-minutes: ${{ inputs.full_assurance && 360 || 20 }}
+    timeout-minutes: ${{ inputs.full_assurance && 360 || 45 }}
     env:
       CARGO_BUILD_JOBS: "2"
     steps:

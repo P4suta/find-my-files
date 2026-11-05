@@ -2,7 +2,7 @@
   "schema_version": 1,
   "kani_version": "0.68.0",
   "jobs": 2,
-  "timeout_seconds": 90,
+  "timeout_seconds": 300,
   "targets": [
     {
       "package": "xtask",

@@ -53,7 +53,10 @@ A compile-time check rejects proof buffers larger than the length representation
 The byte harnesses select a solver from the pinned Kani distribution: `cadical`.
 Kani supports [per-harness solver selection](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver) without changing the property or input domain.
 The record-chain harnesses partition the complete attribute-offset domain without changing the byte-array or unwind bounds.
-The time limits, byte bounds, and unwind bounds remain unchanged.
+The byte bounds and unwind bounds remain unchanged.
+The proof watchdog and hosted job use longer safety deadlines for the expanded inventory.
+A deadline stop leaves the proof incomplete.
+Every registered harness must pass before release.
 The record-chain harnesses also compare admission with a [preserved reference](../../engine/crates/fmf-core/src/ondisk/record_admission_reference.rs).
 The reference retains the parser from [the source before the refactor](https://github.com/P4suta/find-my-files/blob/5f2853732cc179e5e25b165acfc49f3efb414342/engine/crates/fmf-core/src/ondisk/record.rs).
 The file-header harness compares admission with the original geometry and reference checks from [the same source](https://github.com/P4suta/find-my-files/blob/5f2853732cc179e5e25b165acfc49f3efb414342/engine/crates/fmf-core/src/ondisk/ntfs.rs).
