@@ -1525,7 +1525,7 @@ fn filling_third_resident_at_offset_fifty_six_with_high_prefix_ids_preserves_adm
 
 #[kani::proof]
 #[kani::unwind(3)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn other_third_resident_lengths_at_offset_fifty_six_with_bitset_prefix_ids_preserve_admission() {
     let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
     kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::BitsetPair);
@@ -1538,7 +1538,7 @@ fn other_third_resident_lengths_at_offset_fifty_six_with_bitset_prefix_ids_prese
 
 #[kani::proof]
 #[kani::unwind(3)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn other_third_resident_lengths_at_offset_fifty_six_with_first_high_id_preserve_admission() {
     let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
     kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::FirstHigh);
@@ -1551,7 +1551,7 @@ fn other_third_resident_lengths_at_offset_fifty_six_with_first_high_id_preserve_
 
 #[kani::proof]
 #[kani::unwind(3)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn other_third_resident_lengths_at_offset_fifty_six_with_second_high_id_preserve_admission() {
     let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
     kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::SecondHigh);
@@ -1564,7 +1564,7 @@ fn other_third_resident_lengths_at_offset_fifty_six_with_second_high_id_preserve
 
 #[kani::proof]
 #[kani::unwind(3)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn other_third_resident_lengths_at_offset_fifty_six_with_high_prefix_ids_preserve_admission() {
     let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
     kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::HighPair);
@@ -1749,7 +1749,7 @@ fn filling_third_resident_at_offset_fifty_six_with_high_prefix_ids_preserves_inv
 
 #[kani::proof]
 #[kani::unwind(3)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn other_third_resident_lengths_at_offset_fifty_six_with_bitset_prefix_ids_preserve_invariants() {
     let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
     kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::BitsetPair);
@@ -1766,7 +1766,7 @@ fn other_third_resident_lengths_at_offset_fifty_six_with_bitset_prefix_ids_prese
 
 #[kani::proof]
 #[kani::unwind(3)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn other_third_resident_lengths_at_offset_fifty_six_with_first_high_id_preserve_invariants() {
     let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
     kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::FirstHigh);
@@ -1783,7 +1783,7 @@ fn other_third_resident_lengths_at_offset_fifty_six_with_first_high_id_preserve_
 
 #[kani::proof]
 #[kani::unwind(3)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn other_third_resident_lengths_at_offset_fifty_six_with_second_high_id_preserve_invariants() {
     let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
     kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::SecondHigh);
@@ -1800,7 +1800,7 @@ fn other_third_resident_lengths_at_offset_fifty_six_with_second_high_id_preserve
 
 #[kani::proof]
 #[kani::unwind(3)]
-#[kani::solver(bitwuzla)]
+#[kani::solver(cadical)]
 fn other_third_resident_lengths_at_offset_fifty_six_with_high_prefix_ids_preserve_invariants() {
     let (bytes, length) = record_bytes_with_third_length::<ATTRIBUTE_OFFSET_56, 24, 24>(None);
     kani::assume(prefix_ids_at::<ATTRIBUTE_OFFSET_56, 24>(&bytes) == PrefixIds::HighPair);
