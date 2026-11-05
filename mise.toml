@@ -17,7 +17,7 @@ lefthook = "2.2.2"
 "github:google/osv-scanner" = "2.7.0"
 "cargo:cargo-mutants" = "27.1.0"
 "cargo:taplo-cli" = "0.10.0"
-"cargo:typos-cli" = "1.51.1"
+"cargo:typos-cli" = "1.52.0"
 "github:zizmorcore/zizmor" = "1.31.1"
 "cargo:committed" = "1.1.11"
 "github:rhysd/actionlint" = "1.7.12"
@@ -40,15 +40,6 @@ bin = "ocomment"
 [tools."cargo:kani-verifier"]
 version = "0.68.0"
 os = ["linux/x64"]
-
-[tools."http:bitwuzla"]
-version = "0.9.1"
-url = "https://github.com/bitwuzla/bitwuzla/releases/download/{{ version }}/Bitwuzla-Linux-x86_64-static.zip"
-checksum = "sha256:057f1546ae2068df57beb178f3eeab1678f0e5f0c378787a05b7bb294617c9c6"
-size = "4909392"
-os = ["linux/x64"]
-version_list_url = "https://api.github.com/repos/bitwuzla/bitwuzla/releases/latest"
-version_json_path = ".tag_name"
 
 [settings]
 cargo.binstall = true
