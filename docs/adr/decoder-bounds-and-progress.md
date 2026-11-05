@@ -78,9 +78,14 @@ An arbitrary second length gives later header fields symbolic addresses.
 The affected cases at the earliest offsets also partition the second length into constant aligned lengths and their complete 32-bit complement.
 The second header keeps arbitrary values for its type, residency marker, ID, name metadata, and value metadata.
 The construction includes absent, malformed, and valid second attributes.
-Third attribute lengths remain arbitrary.
-The invariant obligations use the same first-length and second-length partitions as admission.
+When two attributes leave room for a third header, the affected cases also partition the third length.
+Constant cases include every aligned resident length that fits the remaining record, even a length that leaves no terminator.
+A complementary case keeps every other 32-bit length.
+The third header keeps arbitrary type, residency, ID, name, and value fields.
+The construction includes absent, malformed, and valid third attributes.
+The invariant obligations use the same length partitions as admission.
 A dedicated harness checks the complement classifier for every 32-bit length across the supported aligned byte capacities.
+Another harness checks the final-header complement across every 32-bit length and its supported capacities.
 The invariant harness calls the production validator and independently checks every accepted attribute.
 Requiring both harnesses preserves the conjunction of the former assertions without three traversals in one solver problem.
 The invariant harness also bounds the attribute count by the smallest resident header and the space before the terminator.

@@ -26,6 +26,9 @@ The offset-80 resident invariant report contains solver errors without a failed 
 The run produced no complete receipt or Miri result.
 The following regular-output run confirms solver memory exhaustion during propositional reduction.
 Earlier cases pass, but the incomplete obligations at the earliest offsets still grant no proof credit.
+The second-length partitions still exhaust solver memory when two attributes leave room for a third header.
+The decoder harnesses partition that final length into fitting constants and their complete complement.
+Both admission and invariant obligations preserve every original byte input.
 
 ## Decision
 
