@@ -1049,6 +1049,7 @@ mod tests {
         assert_eq!(plan.preflight_failures, 0);
         idx.delete_link_frn(object, parent, &u16s("shared.txt"))
             .unwrap();
+        let first_new = idx.len() as u32;
         idx.upsert_link_usn(&RawEntry {
             frn: object,
             parent_frn: parent,
@@ -1061,9 +1062,9 @@ mod tests {
             mtime: 0,
         })
         .unwrap();
-        let first_new = idx.len() as u32;
         idx.merge_new_into_permutations(first_new).unwrap();
         let before = visible_names(&idx, "");
+        assert!(before.iter().any(|name| name == "replacement.txt"));
         assert_eq!(
             apply_planned(&mut idx, &records, plan),
             BatchStats {
