@@ -76,13 +76,26 @@ The union preserves every original field value without assuming either validator
 The earliest offsets can contain three resident attributes.
 An arbitrary second length gives later header fields symbolic addresses.
 The affected cases at the earliest offsets also partition the second length into constant aligned lengths and their complete 32-bit complement.
-The second header keeps arbitrary values for its type, residency marker, ID, name metadata, and value metadata.
+The second header keeps arbitrary values for its type, ID, name metadata, and value metadata.
 The construction includes absent, malformed, and valid second attributes.
 When two attributes leave room for a third header, the affected cases also partition the third length.
 Constant cases include every aligned resident length that fits the remaining record, even a length that leaves no terminator.
 A complementary case keeps every other 32-bit length.
-The third header keeps arbitrary type, residency, ID, name, and value fields.
+The third header keeps arbitrary type, ID, name, and value fields.
 The construction includes absent, malformed, and valid third attributes.
+The same geometries partition the second and third residency markers into three disjoint classes.
+The first class keeps every nonzero second marker and every third marker and length.
+The second class fixes the second marker to zero and keeps every nonzero third marker and every third length.
+The third class fixes both markers to zero and uses the complete third-length partitions.
+The combined classes preserve every original marker pair without assuming admission or complete headers.
+Separate admission and invariant harnesses cover both complementary marker classes.
+The actual classifier has a scalar harness for every pair of byte values.
+When the third attribute fills the proof buffer, two more extent partitions cover every record length and used-byte count.
+The full-extent constructor fixes both fields and the input slice to the complete proof buffer.
+The complementary constructor keeps every other pair without changing the byte domain.
+The complementary cases permit at most two advances and the final probe.
+The full-extent cases still include the third advance and fourth probe.
+An insufficient bound must still fail an unwinding assertion.
 The invariant obligations use the same length partitions as admission.
 A dedicated harness checks the complement classifier for every 32-bit length across the supported aligned byte capacities.
 Another harness checks the final-header complement across every 32-bit length and its supported capacities.
