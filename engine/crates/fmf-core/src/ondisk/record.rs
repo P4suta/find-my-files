@@ -216,6 +216,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_misaligned_complete_attribute_chain() {
+        let valid = resident_record();
+        assert!(attributes_complete(&valid));
+        let start = usize::from(le_u16(&valid, ATTRIBUTES_OFFSET_FIELD));
+        let used = le_u32(&valid, USED_BYTES_FIELD) as usize;
+        for shift in 1..ATTRIBUTE_ALIGNMENT {
+            let mut shifted = valid.clone();
+            shifted.copy_within(start..used, start + shift);
+            put_u16(
+                &mut shifted,
+                ATTRIBUTES_OFFSET_FIELD,
+                (start + shift) as u16,
+            );
+            put_u32(&mut shifted, USED_BYTES_FIELD, (used + shift) as u32);
+            assert!(!attributes_complete(&shifted), "shift {shift}");
+        }
+    }
+
+    #[test]
     fn attribute_ids_are_unique_across_both_storage_ranges() {
         let mut low = 0;
         let mut high = Vec::new();
