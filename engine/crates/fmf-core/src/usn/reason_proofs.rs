@@ -30,6 +30,12 @@ fn every_reason_bit_preserves_independent_effects_and_operation_priority() {
     assert_eq!(reasons.renames(), new_name);
     assert_eq!(reasons.changes_hard_links(), hard_link);
     assert_eq!(reasons.changes_links(), create || new_name || hard_link);
+    let complete: bool = kani::any();
+    let ambiguous: bool = kani::any();
+    assert_eq!(
+        reasons.rejects_link_snapshot(complete, ambiguous),
+        !complete && (hard_link || ambiguous)
+    );
     kani::cover!(matches!(expected, ChangeKind::Ignore));
     kani::cover!(matches!(expected, ChangeKind::Delete));
     kani::cover!(matches!(expected, ChangeKind::Upsert));

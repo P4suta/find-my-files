@@ -45,13 +45,21 @@ fn single_link_refresh_updates_every_live_object_row() {
         .unwrap();
     let previous_generation = index.stat_generation;
     let previous_mtime = index.mtime(index.entry_by_frn(object).unwrap());
+    let previous_len = index.len();
+    let previous_tombstones = index.tombstones;
     let replace_existing: bool = kani::any();
+    let valid_parent: bool = kani::any();
     let name = if replace_existing {
         [u16::from(b'a')]
     } else {
         [u16::from(b'c')]
     };
     let updated = RawEntry {
+        parent_frn: if valid_parent {
+            root
+        } else {
+            Frn((1 << 48) | 999)
+        },
         name_utf16: &name,
         size: kani::any(),
         mtime: kani::any(),
@@ -60,41 +68,73 @@ fn single_link_refresh_updates_every_live_object_row() {
         is_system: kani::any(),
         ..original
     };
-    let inserted = index.upsert_link_usn(&updated).unwrap();
-    let expected_mtime = index.mtime(inserted);
-    assert_eq!(
-        index.entries_by_frn(object).count(),
-        if replace_existing { 2 } else { 3 }
-    );
-    for id in index.entries_by_frn(object) {
-        assert_eq!(index.size(id), updated.size);
-        assert_eq!(index.mtime(id), expected_mtime);
-        assert_eq!(index.is_reparse(id), updated.is_reparse);
+    let result = index.upsert_link_usn(&updated);
+    assert_eq!(result.is_ok(), valid_parent);
+    if let Ok(inserted) = result {
+        let expected_mtime = index.mtime(inserted);
         assert_eq!(
-            index.flag[id as usize] & flags::HIDDEN != 0,
-            updated.is_hidden
+            index.entries_by_frn(object).count(),
+            if replace_existing { 2 } else { 3 }
         );
-        assert_eq!(
-            index.flag[id as usize] & flags::SYSTEM != 0,
-            updated.is_system
-        );
-        assert_eq!(
-            index.is_excluded(id),
-            updated.is_hidden || updated.is_system
-        );
+        for id in index.entries_by_frn(object) {
+            assert_eq!(index.size(id), updated.size);
+            assert_eq!(index.mtime(id), expected_mtime);
+            assert_eq!(index.is_reparse(id), updated.is_reparse);
+            assert_eq!(
+                index.flag[id as usize] & flags::HIDDEN != 0,
+                updated.is_hidden
+            );
+            assert_eq!(
+                index.flag[id as usize] & flags::SYSTEM != 0,
+                updated.is_system
+            );
+            assert_eq!(
+                index.is_excluded(id),
+                updated.is_hidden || updated.is_system
+            );
+        }
+        if original.size != updated.size || previous_mtime != expected_mtime {
+            assert!(index.stat_generation > previous_generation);
+        }
+    } else {
+        assert_eq!(index.len(), previous_len);
+        assert_eq!(index.tombstones, previous_tombstones);
+        assert_eq!(index.stat_generation, previous_generation);
+        assert_eq!(index.entries_by_frn(object).count(), 2);
+        for id in index.entries_by_frn(object) {
+            assert_eq!(index.size(id), original.size);
+            assert_eq!(index.mtime(id), previous_mtime);
+            assert_eq!(index.is_reparse(id), original.is_reparse);
+            assert_eq!(
+                index.flag[id as usize] & flags::HIDDEN != 0,
+                original.is_hidden
+            );
+            assert_eq!(
+                index.flag[id as usize] & flags::SYSTEM != 0,
+                original.is_system
+            );
+            assert_eq!(
+                index.is_excluded(id),
+                original.is_hidden || original.is_system
+            );
+        }
     }
-    if original.size != updated.size || previous_mtime != expected_mtime {
-        assert!(index.stat_generation > previous_generation);
-    }
+    assert!(index.is_live(unrelated));
+    assert_eq!(index.frn(unrelated), other);
+    assert_eq!(index.parent(unrelated), VolumeIndex::ROOT);
+    assert_eq!(index.name(unrelated), b"d");
     assert_eq!(index.size(unrelated), 7);
     assert_eq!(index.mtime(unrelated), 0);
     assert!(!index.is_reparse(unrelated));
     assert!(!index.is_excluded(unrelated));
     assert!(index.is_dir(VolumeIndex::ROOT));
-    kani::cover!(replace_existing);
-    kani::cover!(!replace_existing);
-    kani::cover!(updated.size > u64::from(u32::MAX));
-    kani::cover!(updated.size < u64::from(u32::MAX));
+    assert!(index.is_live(VolumeIndex::ROOT));
+    assert_eq!(index.frn(VolumeIndex::ROOT), root);
+    kani::cover!(valid_parent && replace_existing);
+    kani::cover!(valid_parent && !replace_existing);
+    kani::cover!(!valid_parent);
+    kani::cover!(valid_parent && updated.size > u64::from(u32::MAX));
+    kani::cover!(valid_parent && updated.size < u64::from(u32::MAX));
 }
 
 fn arbitrary_entry() -> RawEntry<'static> {

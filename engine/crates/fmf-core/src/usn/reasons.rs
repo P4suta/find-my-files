@@ -62,6 +62,12 @@ impl ChangeReasons {
         self.creates() || self.renames() || self.changes_hard_links()
     }
 
+    /// Reject an incomplete link snapshot for a hard-link change or ambiguous rename.
+    #[must_use]
+    pub const fn rejects_link_snapshot(self, complete: bool, ambiguous_rename: bool) -> bool {
+        !complete && (self.changes_hard_links() || ambiguous_rename)
+    }
+
     /// Classify the remaining mutation with deletion taking precedence.
     #[must_use]
     pub const fn kind(self) -> ChangeKind {
@@ -137,6 +143,14 @@ mod tests {
                     reasons.changes_links(),
                     selected(5) || selected(8) || selected(9)
                 );
+                for complete in [false, true] {
+                    for ambiguous in [false, true] {
+                        assert_eq!(
+                            reasons.rejects_link_snapshot(complete, ambiguous),
+                            !complete && (selected(9) || ambiguous)
+                        );
+                    }
+                }
                 assert_eq!(reasons.union(reasons), reasons);
                 assert_eq!(
                     reasons.union(ChangeReasons::from_bits(!bits)),
