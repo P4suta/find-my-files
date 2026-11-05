@@ -1,0 +1,26 @@
+{
+  "volume": "C:",
+  "entries": 1000000,
+  "index_ms": 10000,
+  "working_set_bytes": 100000000,
+  "peak_working_set_bytes": 120000000,
+  "queries": [
+    {"query": "", "hits": 1, "p50_us": 1000, "p99_us": 2000, "max_us": 3000, "p50_memo_us": 1, "p50_scan_us": 1, "p50_materialize_us": 1, "cold_us": 1000},
+    {"query": "e", "hits": 1, "p50_us": 1000, "p99_us": 2000, "max_us": 3000, "p50_memo_us": 1, "p50_scan_us": 1, "p50_materialize_us": 1, "cold_us": 1000},
+    {"query": "a", "hits": 1, "p50_us": 1000, "p99_us": 2000, "max_us": 3000, "p50_memo_us": 1, "p50_scan_us": 1, "p50_materialize_us": 1, "cold_us": 1000},
+    {"query": "win", "hits": 1, "p50_us": 1000, "p99_us": 2000, "max_us": 3000, "p50_memo_us": 1, "p50_scan_us": 1, "p50_materialize_us": 1, "cold_us": 1000},
+    {"query": "Win", "hits": 1, "p50_us": 1000, "p99_us": 2000, "max_us": 3000, "p50_memo_us": 1, "p50_scan_us": 1, "p50_materialize_us": 1, "cold_us": 1000},
+    {"query": "qzx", "hits": 1, "p50_us": 1000, "p99_us": 2000, "max_us": 3000, "p50_memo_us": 1, "p50_scan_us": 1, "p50_materialize_us": 1, "cold_us": 1000},
+    {"query": "ext:dll", "hits": 1, "p50_us": 1000, "p99_us": 2000, "max_us": 3000, "p50_memo_us": 1, "p50_scan_us": 1, "p50_materialize_us": 1, "cold_us": 1000},
+    {"query": "size:>100mb path:windows", "hits": 1, "p50_us": 1000, "p99_us": 2000, "max_us": 3000, "p50_memo_us": 1, "p50_scan_us": 1, "p50_materialize_us": 1, "cold_us": 1000},
+    {"query": "*.rs", "hits": 1, "p50_us": 1000, "p99_us": 2000, "max_us": 3000, "p50_memo_us": 1, "p50_scan_us": 1, "p50_materialize_us": 1, "cold_us": 1000},
+    {"query": "regex:win.*\\.dll", "hits": 1, "p50_us": 1000, "p99_us": 2000, "max_us": 3000, "p50_memo_us": 1, "p50_scan_us": 1, "p50_materialize_us": 1, "cold_us": 1000}
+  ],
+  "restore": {
+    "file_bytes": 1000,
+    "entries": 1000000,
+    "save_ms": 10,
+    "p50_ms": 100,
+    "min_ms": 90
+  }
+}
