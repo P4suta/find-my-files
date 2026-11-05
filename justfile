@@ -107,6 +107,18 @@ proof-check:
 proofs:
     cargo run --locked -- proof
 
+[doc('Verify one deterministic proof partition with Kani on Linux x64')]
+[group('quality')]
+[working-directory('xtask')]
+proof-shard index count:
+    cargo run --locked -- proof-shard --index {{ index }} --count {{ count }}
+
+[doc('Collect every source-bound proof partition without rerunning Kani')]
+[group('quality')]
+[working-directory('xtask')]
+proof-collect count:
+    cargo run --locked -- proof-collect --count {{ count }}
+
 [doc('Reject missing, incomplete, failed, or stale proof evidence')]
 [group('quality')]
 [working-directory('xtask')]
