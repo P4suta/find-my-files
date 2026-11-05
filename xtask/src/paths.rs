@@ -24,6 +24,14 @@ pub fn verification_dir() -> PathBuf {
     build_root().join("verification")
 }
 
+pub fn proof_shard_name(index: usize) -> String {
+    format!("proof-shard-{index}")
+}
+
+pub fn proof_shard_dir(index: usize) -> PathBuf {
+    verification_dir().join(proof_shard_name(index))
+}
+
 pub fn fuzz_corpus_dir() -> PathBuf {
     verification_dir().join("fuzz-corpus")
 }
