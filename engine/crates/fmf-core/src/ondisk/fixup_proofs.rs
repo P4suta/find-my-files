@@ -1,6 +1,28 @@
 use super::{
     FILE_HEADER_BYTES, MAX_SECTOR, SECTOR, UPDATE_SEQUENCE_WORD_BYTES, checked_fixup_layout,
+    fixup_layout,
 };
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn byte_layout_decodes_independent_little_endian_fields() {
+    let bytes: [u8; 1024] = kani::any();
+    let length: usize = kani::any();
+    let sector_size: usize = kani::any();
+    kani::assume(length <= bytes.len());
+    let actual = fixup_layout(&bytes[..length], sector_size);
+    let expected = checked_fixup_layout(
+        length,
+        sector_size,
+        u16::from_le_bytes([bytes[4], bytes[5]]),
+        u16::from_le_bytes([bytes[6], bytes[7]]),
+        u16::from_le_bytes([bytes[20], bytes[21]]),
+    );
+    assert_eq!(actual, expected);
+    kani::cover!(actual.is_none());
+    kani::cover!(actual.is_some() && length == 512);
+    kani::cover!(actual.is_some() && length == 1024);
+}
 
 #[kani::proof]
 #[kani::unwind(2)]

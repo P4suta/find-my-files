@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path};
-use std::process::Command;
+use std::process::{Child, Command};
 
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -11,11 +11,13 @@ use crate::{checksum::sha256_hex, cmd, paths};
 
 const SCHEMA_VERSION: u32 = 1;
 const MAX_JOBS: usize = 2;
-const MAX_TIMEOUT_SECONDS: u32 = 90;
+const MAX_TIMEOUT_SECONDS: u32 = 300;
+const MAX_ADDRESS_SPACE_BYTES: u64 = 8_589_934_592;
 const MANIFEST_PATH: &str = "verification/proofs.json";
 const RECEIPT_NAME: &str = "proofs.json";
 const MIN_COVERS: usize = 2;
 const QUALIFIED_ATTRIBUTE_SEGMENTS: usize = 2;
+const MAX_SHARDS: usize = 4;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +26,7 @@ struct Inventory {
     kani_version: String,
     jobs: usize,
     timeout_seconds: u32,
+    address_space_bytes: u64,
     targets: Vec<Target>,
 }
 
@@ -203,6 +206,10 @@ fn validate_inventory(inventory: &Inventory) -> Result<()> {
         "invalid proof timeout"
     );
     ensure!(
+        address_space_is_bounded(inventory.address_space_bytes),
+        "invalid proof process address-space budget"
+    );
+    ensure!(
         !inventory.kani_version.is_empty() && !inventory.targets.is_empty(),
         "empty proof inventory"
     );
@@ -234,6 +241,10 @@ fn validate_inventory(inventory: &Inventory) -> Result<()> {
         }
     }
     Ok(())
+}
+
+const fn address_space_is_bounded(bytes: u64) -> bool {
+    bytes > 0 && bytes <= MAX_ADDRESS_SPACE_BYTES
 }
 
 fn expected(inventory: &Inventory, package: Package) -> BTreeSet<String> {
@@ -449,6 +460,75 @@ struct Receipt {
     schema_version: u32,
     source: BTreeMap<String, String>,
     results: BTreeMap<String, String>,
+    #[serde(default)]
+    scope: Scope,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum Scope {
+    #[default]
+    Complete,
+    Shard {
+        index: usize,
+        count: usize,
+    },
+    Collection {
+        count: usize,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct Shard {
+    index: usize,
+    count: usize,
+}
+
+impl Shard {
+    fn new(index: usize, count: usize) -> Result<Self> {
+        ensure!(
+            (1..=MAX_SHARDS).contains(&count) && index < count,
+            "invalid proof partition"
+        );
+        Ok(Self { index, count })
+    }
+
+    const fn owns(self, ordinal: usize) -> bool {
+        ordinal % self.count == self.index
+    }
+
+    const fn scope(self) -> Scope {
+        Scope::Shard {
+            index: self.index,
+            count: self.count,
+        }
+    }
+}
+
+fn packages(inventory: &Inventory) -> BTreeSet<Package> {
+    inventory
+        .targets
+        .iter()
+        .map(|target| target.package)
+        .collect()
+}
+
+fn selected(inventory: &Inventory, package: Package, shard: Option<Shard>) -> BTreeSet<String> {
+    packages(inventory)
+        .into_iter()
+        .flat_map(|p| {
+            expected(inventory, p)
+                .into_iter()
+                .map(move |name| (p, name))
+        })
+        .enumerate()
+        .filter(|(ordinal, (p, _))| *p == package && shard.is_none_or(|s| s.owns(*ordinal)))
+        .map(|(_, (_, name))| name)
+        .collect()
+}
+
+fn shard_receipt(index: usize) -> String {
+    format!("{}/{RECEIPT_NAME}", paths::proof_shard_name(index))
 }
 
 pub fn check() -> Result<()> {
@@ -465,18 +545,51 @@ pub fn check() -> Result<()> {
 }
 
 pub fn run() -> Result<()> {
+    run_subset(None)
+}
+
+pub fn run_shard(index: usize, count: usize) -> Result<()> {
+    run_subset(Some(Shard::new(index, count)?))
+}
+
+struct MemoryTelemetry(Child);
+
+impl MemoryTelemetry {
+    fn start() -> Result<Self> {
+        Ok(Self(
+            Command::new("free")
+                .args(["--bytes", "--wide", "--seconds", "10", "--count", "360"])
+                .spawn()
+                .context("start bounded proof memory telemetry")?,
+        ))
+    }
+}
+
+impl Drop for MemoryTelemetry {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.kill() {
+            eprintln!("Failed to stop proof memory telemetry: {error}");
+        }
+        if let Err(error) = self.0.wait() {
+            eprintln!("Failed to reap proof memory telemetry: {error}");
+        }
+    }
+}
+
+fn run_subset(shard: Option<Shard>) -> Result<()> {
     ensure!(
         cfg!(all(target_os = "linux", target_arch = "x86_64")),
         "Kani requires Linux x64; run `just proofs` on the configured Linux host"
     );
     let root = paths::repo_root();
-    let out = paths::verification_dir();
+    let out = shard.map_or_else(paths::verification_dir, |s| paths::proof_shard_dir(s.index));
     fs::create_dir_all(&out)?;
     let receipt = out.join(RECEIPT_NAME);
     if receipt.exists() {
         fs::remove_file(&receipt)?;
     }
     let inventory = read_inventory(&root)?;
+    crate::verification_tools::require_bitwuzla(&root)?;
     let version = cmd::capture_stdout(&root, "cargo", &["kani", "--version"])?;
     ensure!(
         version.lines().next()
@@ -487,21 +600,28 @@ pub fn run() -> Result<()> {
         "unexpected Kani executable: {version}"
     );
     let before = fingerprint(&root)?;
+    println!(
+        "Proof process virtual address-space limit: {} bytes.",
+        inventory.address_space_bytes
+    );
+    let _telemetry = MemoryTelemetry::start()?;
     let mut results = BTreeMap::new();
-    let packages: BTreeSet<_> = inventory
-        .targets
-        .iter()
-        .map(|target| target.package)
-        .collect();
-    for package in packages {
+    for package in packages(&inventory) {
+        let names = selected(&inventory, package, shard);
+        if names.is_empty() {
+            continue;
+        }
         let package_name = package.name();
         let filename = format!("{package_name}.json");
         let result_path = out.join(&filename);
         if result_path.exists() {
             fs::remove_file(&result_path)?;
         }
-        let status = Command::new("cargo")
+        let mut command = Command::new("prlimit");
+        command
             .current_dir(&root)
+            .arg(format!("--as={}", inventory.address_space_bytes))
+            .args(["--", "cargo"])
             .args([
                 "kani",
                 "--manifest-path",
@@ -513,8 +633,9 @@ pub fn run() -> Result<()> {
             .args([
                 "--jobs",
                 &inventory.jobs.to_string(),
+                "--fail-fast",
                 "--output-format",
-                "terse",
+                "regular",
                 "-Z",
                 "unstable-options",
                 "--harness-timeout",
@@ -523,13 +644,21 @@ pub fn run() -> Result<()> {
             ])
             .arg(out.join("kani"))
             .arg("--export-json")
-            .arg(&result_path)
-            .status()?;
+            .arg(&result_path);
+        if shard.is_some() {
+            command.arg("--exact");
+            for name in &names {
+                command.args(["--harness", name]);
+            }
+        }
+        let status = command
+            .status()
+            .with_context(|| format!("start bounded Kani for {package_name}"))?;
         ensure!(status.success(), "Kani failed for {package_name}: {status}");
         let bytes = fs::read(&result_path).context("Kani produced no report")?;
         validate_report(
             &serde_json::from_slice(&bytes)?,
-            &expected(&inventory, package),
+            &names,
             &inventory.kani_version,
         )?;
         results.insert(filename, sha256_hex(&bytes));
@@ -538,15 +667,23 @@ pub fn run() -> Result<()> {
         fingerprint(&root)? == before,
         "proof source changed during verification"
     );
+    ensure!(!results.is_empty(), "empty proof partition");
     fs::write(
         receipt,
         serde_json::to_vec_pretty(&Receipt {
             schema_version: SCHEMA_VERSION,
             source: before,
             results,
+            scope: shard.map_or(Scope::Complete, Shard::scope),
         })?,
     )?;
-    verify()
+    if let Some(shard) = shard {
+        verify_shard(&out, &inventory, shard, &fingerprint(&root)?)?;
+        println!("Proof partition {} of {} passed.", shard.index, shard.count);
+        Ok(())
+    } else {
+        verify()
+    }
 }
 
 pub fn verify() -> Result<()> {
@@ -557,27 +694,97 @@ pub fn verify() -> Result<()> {
 
 fn verify_at(root: &Path, out: &Path) -> Result<()> {
     let inventory = read_inventory(root)?;
-    let receipt: Receipt = serde_json::from_slice(
-        &fs::read(out.join(RECEIPT_NAME)).context("missing proof evidence; run just proofs")?,
-    )?;
+    let receipt = read_receipt(out)?;
+    let source = fingerprint(root)?;
+    check_source(&receipt, &source)?;
+    match receipt.scope {
+        Scope::Complete => verify_reports(out, &inventory, &receipt, None)?,
+        Scope::Shard { .. } => anyhow::bail!("partial proof receipt cannot establish completeness"),
+        Scope::Collection { count } => {
+            Shard::new(0, count)?;
+            let expected: BTreeSet<_> = (0..count).map(shard_receipt).collect();
+            ensure!(
+                receipt.results.keys().cloned().collect::<BTreeSet<_>>() == expected,
+                "incomplete proof partition receipts"
+            );
+            for index in 0..count {
+                let bytes = verify_shard(
+                    &out.join(paths::proof_shard_name(index)),
+                    &inventory,
+                    Shard::new(index, count)?,
+                    &source,
+                )?;
+                ensure!(
+                    receipt.results.get(&shard_receipt(index)) == Some(&sha256_hex(&bytes)),
+                    "proof partition receipt changed"
+                );
+            }
+        }
+    }
     ensure!(
-        receipt.schema_version == SCHEMA_VERSION && receipt.source == fingerprint(root)?,
+        fingerprint(root)? == source,
+        "proof source changed during verification"
+    );
+    println!("All registered proofs passed for the current source.");
+    Ok(())
+}
+
+fn read_receipt(out: &Path) -> Result<Receipt> {
+    serde_json::from_slice(
+        &fs::read(out.join(RECEIPT_NAME)).context("missing proof evidence; run just proofs")?,
+    )
+    .context("invalid proof receipt")
+}
+
+fn check_source(receipt: &Receipt, source: &BTreeMap<String, String>) -> Result<()> {
+    ensure!(
+        receipt.schema_version == SCHEMA_VERSION && receipt.source == *source,
         "stale proof evidence"
     );
-    let packages: BTreeSet<_> = inventory
-        .targets
-        .iter()
-        .map(|target| target.package)
+    Ok(())
+}
+
+fn verify_shard(
+    out: &Path,
+    inventory: &Inventory,
+    shard: Shard,
+    source: &BTreeMap<String, String>,
+) -> Result<Vec<u8>> {
+    let bytes = fs::read(out.join(RECEIPT_NAME)).context("missing proof partition receipt")?;
+    let receipt: Receipt =
+        serde_json::from_slice(&bytes).context("invalid proof partition receipt")?;
+    check_source(&receipt, source)?;
+    ensure!(
+        receipt.scope == shard.scope(),
+        "proof partition identity mismatch"
+    );
+    verify_reports(out, inventory, &receipt, Some(shard))?;
+    Ok(bytes)
+}
+
+fn verify_reports(
+    out: &Path,
+    inventory: &Inventory,
+    receipt: &Receipt,
+    shard: Option<Shard>,
+) -> Result<()> {
+    let targets: BTreeMap<_, _> = packages(inventory)
+        .into_iter()
+        .filter_map(|package| {
+            let names = selected(inventory, package, shard);
+            (!names.is_empty()).then_some((package, names))
+        })
         .collect();
+    ensure!(!targets.is_empty(), "empty proof partition");
     ensure!(
         receipt.results.keys().cloned().collect::<BTreeSet<_>>()
-            == packages
-                .iter()
+            == targets
+                .keys()
                 .map(|package| format!("{}.json", package.name()))
                 .collect(),
         "incomplete proof receipts"
     );
-    for package in packages {
+    for (package, names) in targets {
         let filename = format!("{}.json", package.name());
         let bytes = fs::read(out.join(&filename))?;
         ensure!(
@@ -586,11 +793,53 @@ fn verify_at(root: &Path, out: &Path) -> Result<()> {
         );
         validate_report(
             &serde_json::from_slice(&bytes)?,
-            &expected(&inventory, package),
+            &names,
             &inventory.kani_version,
         )?;
     }
-    println!("All registered proofs passed for the current source.");
+    Ok(())
+}
+
+pub fn collect(count: usize) -> Result<()> {
+    collect_at(&paths::repo_root(), &paths::verification_dir(), count)
+}
+
+fn collect_at(root: &Path, out: &Path, count: usize) -> Result<()> {
+    Shard::new(0, count)?;
+    let receipt_path = out.join(RECEIPT_NAME);
+    if receipt_path.exists() {
+        fs::remove_file(&receipt_path)?;
+    }
+    let inventory = read_inventory(root)?;
+    let source = fingerprint(root)?;
+    let mut results = BTreeMap::new();
+    for index in 0..count {
+        let bytes = verify_shard(
+            &out.join(paths::proof_shard_name(index)),
+            &inventory,
+            Shard::new(index, count)?,
+            &source,
+        )?;
+        let filename = shard_receipt(index);
+        results.insert(filename, sha256_hex(&bytes));
+    }
+    ensure!(
+        fingerprint(root)? == source,
+        "proof source changed during collection"
+    );
+    fs::write(
+        &receipt_path,
+        serde_json::to_vec_pretty(&Receipt {
+            schema_version: SCHEMA_VERSION,
+            source,
+            results,
+            scope: Scope::Collection { count },
+        })?,
+    )?;
+    if let Err(error) = verify_at(root, out) {
+        fs::remove_file(receipt_path)?;
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -614,6 +863,248 @@ mod tests {
 
     fn names() -> BTreeSet<String> {
         BTreeSet::from(["proof".into()])
+    }
+
+    #[test]
+    fn inventory_requires_a_bounded_process_address_space() -> Result<()> {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(paths::repo_root().join(MANIFEST_PATH))?)?;
+        value["address_space_bytes"] = json!(8_589_934_592_u64);
+        let inventory: Inventory = serde_json::from_value(value.clone())
+            .expect("the supported address-space budget must be accepted");
+        validate_inventory(&inventory)?;
+        for limit in [0, 8_589_934_593, u64::MAX] {
+            value["address_space_bytes"] = json!(limit);
+            let invalid: Inventory = serde_json::from_value(value.clone())?;
+            assert!(
+                validate_inventory(&invalid).is_err(),
+                "invalid process limits must fail before execution"
+            );
+        }
+        Ok(())
+    }
+
+    fn fixture_report(names: &BTreeSet<String>, version: &str) -> Result<Vec<u8>> {
+        let results: Vec<_> = names.iter().map(|name| json!({
+            "harness_id":name,"status":"Success","checks":[{"status":"Success","category":"assertion"}]
+        })).collect();
+        let details: Vec<_> = names.iter().map(|name| json!({
+            "harness_id":name,"property_details":{"total_properties":3,"passed":1,"failed":0,"undetermined":0,"solver_error":0,"satisfied":2,"unsatisfiable":0,"uncovered":0}
+        })).collect();
+        Ok(serde_json::to_vec(&json!({
+            "metadata":{"kani_version":version},
+            "verification_results":{"summary":{"total_harnesses":names.len(),"executed":names.len(),"successful":names.len(),"failed":0},"results":results},
+            "property_details":details
+        }))?)
+    }
+
+    #[test]
+    fn partitions_cover_every_registered_name_once_and_refuse_invalid_geometry() -> Result<()> {
+        let inventory = read_inventory(&paths::repo_root())?;
+        for count in 1..=MAX_SHARDS {
+            for package in packages(&inventory) {
+                let mut union = BTreeSet::new();
+                for index in 0..count {
+                    for name in selected(&inventory, package, Some(Shard::new(index, count)?)) {
+                        assert!(union.insert(name), "partition ownership must be unique");
+                    }
+                }
+                assert_eq!(union, expected(&inventory, package));
+            }
+            for ordinal in (0..257).chain([usize::MAX]) {
+                let owners = (0..count)
+                    .filter(|index| {
+                        Shard {
+                            index: *index,
+                            count,
+                        }
+                        .owns(ordinal)
+                    })
+                    .count();
+                assert_eq!(owners, 1);
+            }
+        }
+        for (index, count) in [(0, 0), (4, 4), (0, 5), (usize::MAX, 4), (0, usize::MAX)] {
+            assert!(Shard::new(index, count).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn complete_partitions_require_unchanged_complete_source_bound_evidence() -> Result<()> {
+        let original = paths::repo_root();
+        let parent = paths::verification_dir().join("partition-receipt-tests");
+        fs::create_dir_all(&parent)?;
+        let root = parent.join(std::process::id().to_string());
+        fs::create_dir(&root)?;
+        let result = (|| -> Result<()> {
+            for path in fingerprint(&original)?.keys() {
+                let destination = root.join(path);
+                fs::create_dir_all(destination.parent().context("fixture parent")?)?;
+                fs::copy(original.join(path), destination)?;
+            }
+            let inventory = read_inventory(&root)?;
+            let packages: BTreeSet<_> = inventory.targets.iter().map(|t| t.package).collect();
+            let all: Vec<_> = packages
+                .iter()
+                .flat_map(|package| {
+                    expected(&inventory, *package)
+                        .into_iter()
+                        .map(|name| (*package, name))
+                })
+                .collect();
+            let source = fingerprint(&root)?;
+            let out = root.join("reports");
+            fs::create_dir(&out)?;
+            let mut receipts = BTreeMap::new();
+            for index in 0..4 {
+                let directory = format!("proof-shard-{index}");
+                fs::create_dir(out.join(&directory))?;
+                let mut reports = BTreeMap::new();
+                for package in &packages {
+                    let names: BTreeSet<_> = all
+                        .iter()
+                        .enumerate()
+                        .filter(|(ordinal, (p, _))| ordinal % 4 == index && p == package)
+                        .map(|(_, (_, name))| name.clone())
+                        .collect();
+                    if names.is_empty() {
+                        continue;
+                    }
+                    let bytes = fixture_report(&names, &inventory.kani_version)?;
+                    let filename = format!("{}.json", package.name());
+                    fs::write(out.join(&directory).join(&filename), &bytes)?;
+                    reports.insert(filename, sha256_hex(&bytes));
+                }
+                let receipt = serde_json::to_vec(&json!({
+                    "schema_version":SCHEMA_VERSION,"source":source,"results":reports,
+                    "scope":{"kind":"shard","index":index,"count":4}
+                }))?;
+                let filename = format!("{directory}/{RECEIPT_NAME}");
+                fs::write(out.join(&filename), &receipt)?;
+                receipts.insert(filename, sha256_hex(&receipt));
+            }
+            let receipt = serde_json::to_vec(&json!({
+                "schema_version":SCHEMA_VERSION,"source":source,"results":receipts,
+                "scope":{"kind":"collection","count":4}
+            }))?;
+            let top = out.join(RECEIPT_NAME);
+            fs::write(&top, &receipt)?;
+            verify_at(&root, &out).expect("every original partition passed for the current source");
+            collect_at(&root, &out, 4)?;
+            verify_at(&root, &out)?;
+
+            let partial = out.join("proof-shard-0").join(RECEIPT_NAME);
+            let partial_bytes = fs::read(&partial)?;
+            fs::write(&top, &partial_bytes)?;
+            assert!(
+                verify_at(&root, &out).is_err(),
+                "a partial receipt cannot claim completeness"
+            );
+            fs::write(&top, &receipt)?;
+            fs::remove_file(&partial)?;
+            assert!(
+                verify_at(&root, &out).is_err(),
+                "every partition receipt is required"
+            );
+            assert!(
+                collect_at(&root, &out, 4).is_err(),
+                "missing partitions cannot be collected"
+            );
+            assert!(
+                !top.exists(),
+                "failed collection must remove an earlier complete receipt"
+            );
+            fs::write(&partial, &partial_bytes)?;
+            fs::write(&top, &receipt)?;
+
+            let mut changed: serde_json::Value = serde_json::from_slice(&partial_bytes)?;
+            for (field, value) in [
+                ("scope", json!({"kind":"shard","index":1,"count":4})),
+                ("source", json!({"different":"source"})),
+            ] {
+                let saved = changed[field].clone();
+                changed[field] = value;
+                let bytes = serde_json::to_vec(&changed)?;
+                fs::write(&partial, &bytes)?;
+                let mut top_value: serde_json::Value = serde_json::from_slice(&receipt)?;
+                top_value["results"]["proof-shard-0/proofs.json"] = json!(sha256_hex(&bytes));
+                fs::write(&top, serde_json::to_vec(&top_value)?)?;
+                assert!(
+                    verify_at(&root, &out).is_err(),
+                    "partition identity and source must match"
+                );
+                changed[field] = saved;
+            }
+            fs::write(&partial, &partial_bytes)?;
+            fs::write(&top, &receipt)?;
+
+            let report = out.join("proof-shard-0/fmf-core.json");
+            let report_bytes = fs::read(&report)?;
+            fs::write(&report, b"{}")?;
+            assert!(
+                verify_at(&root, &out).is_err(),
+                "original report bytes must match"
+            );
+            fs::write(&report, &report_bytes)?;
+            for (pointer, value) in [
+                ("/verification_results/summary/executed", json!(0)),
+                ("/verification_results/results/0/status", json!("Failure")),
+                (
+                    "/verification_results/results/0/harness_id",
+                    json!("unregistered"),
+                ),
+                (
+                    "/property_details/0/property_details/unsatisfiable",
+                    json!(1),
+                ),
+            ] {
+                let mut bad_report: serde_json::Value = serde_json::from_slice(&report_bytes)?;
+                *bad_report.pointer_mut(pointer).expect("fixture field") = value;
+                let bad_bytes = serde_json::to_vec(&bad_report)?;
+                fs::write(&report, &bad_bytes)?;
+                let mut partial_value: serde_json::Value = serde_json::from_slice(&partial_bytes)?;
+                partial_value["results"]["fmf-core.json"] = json!(sha256_hex(&bad_bytes));
+                let changed_partial = serde_json::to_vec(&partial_value)?;
+                fs::write(&partial, &changed_partial)?;
+                let mut top_value: serde_json::Value = serde_json::from_slice(&receipt)?;
+                top_value["results"]["proof-shard-0/proofs.json"] =
+                    json!(sha256_hex(&changed_partial));
+                fs::write(&top, serde_json::to_vec(&top_value)?)?;
+                assert!(
+                    verify_at(&root, &out).is_err(),
+                    "valid hashes cannot hide unproved harnesses"
+                );
+                assert!(
+                    collect_at(&root, &out, 4).is_err(),
+                    "unproved reports cannot be collected"
+                );
+                assert!(!top.exists());
+            }
+            fs::write(&report, &report_bytes)?;
+            fs::write(&partial, &partial_bytes)?;
+            fs::write(&top, &receipt)?;
+            let tool_config = root.join("mise.toml");
+            let tool_bytes = fs::read(&tool_config)?;
+            let mut changed =
+                fs::read_to_string(&tool_config)?.parse::<toml_edit::DocumentMut>()?;
+            changed["tools"]["rust"] = toml_edit::value("1.99.2");
+            fs::write(&tool_config, changed.to_string())?;
+            assert!(
+                verify_at(&root, &out).is_err(),
+                "tool configuration changes invalidate every partition"
+            );
+            fs::write(tool_config, tool_bytes)?;
+            let source_file = root.join("engine/crates/fmf-contract/src/lib.rs");
+            fs::write(&source_file, b"changed production source")?;
+            assert!(
+                verify_at(&root, &out).is_err(),
+                "source changes invalidate every partition"
+            );
+            Ok(())
+        })();
+        fs::remove_dir_all(root)?;
+        result
     }
 
     #[test]
@@ -735,9 +1226,21 @@ mod tests {
                     schema_version: SCHEMA_VERSION,
                     source: fingerprint(&root)?,
                     results: reports,
+                    scope: Scope::Complete,
                 })?,
             )?;
             verify_at(&root, &out)?;
+            let tool_config = root.join("mise.toml");
+            let tool_bytes = fs::read(&tool_config)?;
+            let mut changed =
+                fs::read_to_string(&tool_config)?.parse::<toml_edit::DocumentMut>()?;
+            changed["tools"]["rust"] = toml_edit::value("1.99.2");
+            fs::write(&tool_config, changed.to_string())?;
+            assert!(verify_at(&root, &out)
+                .expect_err("changed tool configuration must fail")
+                .to_string()
+                .contains("stale proof evidence"));
+            fs::write(tool_config, tool_bytes)?;
             let source = root.join("engine/crates/fmf-contract/src/lib.rs");
             let bytes = fs::read(&source)?;
             fs::write(&source, b"changed production source")?;
