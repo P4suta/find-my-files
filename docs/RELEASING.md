@@ -1,36 +1,56 @@
 # Releasing
 
-The workflows are the executable release specification. This page contains only
-the human decisions that cannot be encoded safely.
+The [release workflow](../.github/workflows/release.yml) is the executable release specification.
+The operator owns source acceptance, native performance measurements, protected approvals, and the signed installation check.
 
 ## Stable release
 
-1. Land Conventional Commits on `main`. Release Please maintains the version,
-   lockfile, changelog, and draft Release PR.
-2. Confirm CI is green and run `just ui-test` unelevated.
-3. On a clean standard-user account, perform the one secure-desktop check
-   automation cannot drive: accept the real UAC service-install prompt and
-   confirm the same app process/window becomes searchable without relaunching.
-4. Add `release: approved` to the final Release PR head and merge it (a later
-   head update requires removing and re-adding the label). Never edit the
-   version or create a `v*` tag manually. Release Please creates the draft/tag,
-   and `release-please.yml` immediately dispatches `release.yml` from protected
-   `main` with that exact tag, commit, and draft Release ID.
-5. Run `just perf-gate` on the reference machine, cold and idle, before
-   approving anything. CI cannot do this (ADR-0048): the measurement instrument
-   requires an organization runner group that a user-owned repository cannot
-   create, so this is the performance gate. A regression here stops the release.
-6. Approve `sign` and then the secretless `publish-approval` job in the protected
-   `release` environment. Confirm the expected `vX.Y.Z` and immutable SHA each
-   time. The subsequent API-only publication job obtains App credentials from
-   `release-please`.
+Land reviewed Conventional Commits on protected `main`.
+Release Please maintains the version, lockfile, changelog, and Release PR.
+Keep the current head checks passing and run `just ui-test` without elevation.
+An unsigned development ZIP supports packaging and search checks, but the [service elevation boundary](SECURITY.md) requires a trusted Authenticode signature.
 
-The workflow is the executable specification: `preflight` binds the approved
-tag, source SHA, and draft Release ID before anything else runs, every later job
-revalidates the same identities, and a stray tag cannot publish. Do not bypass
-or replay individual downstream jobs.
+Run `just perf-gate` on the reference machine while cold and idle before signing approval.
+Keep the source identity and actual measurement reports with the acceptance evidence.
+A performance regression stops the release.
+Repeat invalidated measurements after a relevant source or configuration change.
+Hosted CI doesn't supply the reference-machine measurement described in [ADR-0048](adr/0048-direct-dispatch-release-workflow.md).
 
-## Verify the published artifact
+Add `release: approved` to the accepted Release PR head and merge it.
+A later head update requires removing and re-adding the label.
+Release Please creates the version tag and draft Release.
+Never edit the version or create a version tag manually.
+The [automation workflow](../.github/workflows/release-please.yml) dispatches the release controller from protected `main` with the exact tag, commit, and numeric draft Release ID.
+
+The controller binds that identity before building.
+The secretless build, dependency scan, and full mutation campaign must pass before signing.
+Approve `sign` in the protected `release` environment after checking the expected tag and immutable source commit.
+The signing job receives the verified candidate without executing candidate-controlled hooks.
+
+Wait for `package` to upload `release-assets` before approving `publish-approval`.
+Download that artifact from the same run and check the ZIP checksum, signed bundle manifest, expected publisher, and timestamp.
+The artifact contains the signed ZIP, `SHA256SUMS.txt`, both CycloneDX SBOMs, and the unsigned and signed bundle manifests.
+Use those exact signed bytes for the remaining native acceptance checks.
+
+On a clean standard-user account, accept the real User Account Control prompt for service installation.
+Confirm that the existing app process and window become searchable without relaunching.
+Verify version reporting, a useful search, upgrade from a supported installed version, and cleanup.
+Record the Windows build, candidate digest, source commit, and result.
+The secure desktop requires an operator.
+UI automation doesn't supply that acceptance result.
+
+Approve the secretless `publish-approval` job after the signed candidate passes those checks.
+Check the same tag, source commit, and draft Release ID again.
+The publication job obtains App credentials through `release-please`, creates attestations, and publishes the complete draft.
+Every later stage revalidates the original identity.
+A stray tag can't publish, and individual downstream jobs must not bypass the controller.
+
+## Verify published bytes
+
+Download the ZIP, `SHA256SUMS.txt`, and both CycloneDX SBOMs from the published Release.
+Compare the ZIP checksum before extraction.
+Verify every first-party signature in the extracted bundle, including the launcher, app executable and assembly, service, and engine library.
+The Release identity and both SBOM attestations must bind the ZIP digest.
 
 ```powershell
 $sum = (Get-Content -LiteralPath SHA256SUMS.txt) -split '\s+', 2
@@ -43,119 +63,102 @@ foreach ($path in $firstParty) { signtool verify /pa /tw /v $path }
 gh attestation verify find-my-files-vX.Y.Z-win-x64.zip --repo P4suta/find-my-files
 ```
 
-The Release must contain the zip, `SHA256SUMS.txt`, and both CycloneDX SBOMs.
-The ZIP must have the exact release identity plus Rust and .NET SBOM
-attestations.
+## Resume an existing draft
 
-If automatic dispatch fails after a draft was created, dispatch
-`release-please.yml` from `main` with that existing `vX.Y.Z` tag. It validates
-the tag/draft/target, fixes the draft's numeric ID once, and re-dispatches
-`release.yml` for that exact tag commit and Release ID — skipping the dispatch
-if a run already owns that triple. If release-please itself is the thing that is
-broken, dispatch the release directly with the same three values:
+If automatic dispatch fails after draft creation, dispatch `release-please.yml` from `main` with the existing version tag.
+The workflow validates the tag, draft, and target before dispatching the release controller.
+An existing run that owns the same identity prevents duplicate dispatch.
+If the automation workflow itself fails, the release controller accepts the same exact tag, commit, and numeric draft ID directly.
 
 ```powershell
 gh workflow run release.yml --repo P4suta/find-my-files --ref main `
   -f tag_name=vX.Y.Z -f commit_sha=<40-hex tag commit> -f release_id=<numeric draft ID>
 ```
 
-`--ref main` is not optional: `workflow_dispatch` loads workflow YAML from the
-selected ref. Any other ref is refused by `preflight` and, independently, by the
-protected-`main` deployment policy on the `release` and `release-please`
-environments.
+The dispatch must use `--ref main` because GitHub loads the workflow from the selected ref.
+The controller and credential identities independently require protected `main`.
+The production workflow has no rehearsal entry point.
+Never replace published assets or rewrite a published tag to recover a failed attempt.
 
-## Nightly
+## Credential delivery
 
-`nightly.yml` publishes a 14-day unsigned Actions artifact from `main`, stamped
-`X.Y.Z-nightly.<date>+g<sha>`. It receives the same SBOM scan and GitHub
-attestations as stable, but no Authenticode signature and no GitHub Release.
+Use the existing shared release-please GitHub App with its installation scoped to the repository.
+The App needs Administration:read, Contents:write, Issues:write, and Pull requests:write for the existing automation operations.
+Each consuming step requests only its required installation-token permissions.
+Keep the distinct release-plz App and its credentials separate.
 
-One-time repository setup still matters: apply `.github/rulesets/` and enable
-immutable Releases. The checked-in default-branch ruleset is solo-maintainer-safe:
-status checks and conversation resolution remain mandatory, but approving,
-code-owner, and last-push reviews are disabled. Re-enable all three review gates
-only after a distinct maintainer has been added to `CODEOWNERS` and can provide
-the independent approval.
+The `release-please` GitHub environment uses `DOPPLER_AUTOMATION_IDENTITY_ID` to read `find-my-files.automation`.
+The config exposes `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_PRIVATE_KEY` through references to `shared-automation.release_please` under the same names.
+The shared private key keeps authority across the App's installations.
+Repository-scoped installation tokens limit the normal consuming operations.
 
-Use the existing shared release-please GitHub App, installed for this repository with Administration:read, Contents:write, Issues:write, and Pull requests:write.
-The `release-please` GitHub environment selects the App-only Doppler identity and remains restricted to protected `main`.
-Keep the `release` environment restricted to protected `main`, with required reviewers and admin bypass disabled; it selects the signing-only Doppler identity.
+The protected `release` environment uses `DOPPLER_SIGN_WINDOWS_IDENTITY_ID` to read `find-my-files.sign_windows`.
+The config exposes `SSLDOTCOM_USERNAME`, `SSLDOTCOM_PASSWORD`, `SSLDOTCOM_CREDENTIAL_ID`, and `SSLDOTCOM_TOTP_SECRET` through references to `shared-signing.windows` under the same names.
+The signing workflow maps those fields to the provider inputs and its local `ES_*` validation variables.
+Keep the persistent TOTP seed in `SSLDOTCOM_TOTP_SECRET`.
+Preserve the App private key's original serialization and line breaks.
+The owner maintains credential values in the approved store.
+Agents inspect names and access metadata.
 
-## Doppler setup
+Give each Doppler Service Account read-only access to its own config without a workplace role.
+Use one OIDC identity per purpose.
+Both identities require the following claims.
 
-Create the following configs and read-only Service Accounts, with no workplace role:
+```json
+{
+  "aud": "https://github.com/P4suta",
+  "repository_id": "1267203446",
+  "repository_owner_id": "42543015",
+  "ref": "refs/heads/main"
+}
+```
 
-| Purpose | Project | Config | Service Account | GitHub environment |
-|---|---|---|---|---|
-| Release automation and publication | `find-my-files` | `automation` | `find-my-files-automation` | `release-please` |
-| Windows signing | `find-my-files` | `windows` | `find-my-files-windows` | `release` |
+The automation identity requires `sub` equal to `repo:P4suta/find-my-files:environment:release-please`.
+The allowed events are `push` and `workflow_dispatch`.
+Its allowed `workflow_ref` values name `release-please.yml`, `release.yml`, or `verify-doppler.yml` under `P4suta/find-my-files/.github/workflows/` at `refs/heads/main`.
 
-The automation config exposes `RELEASE_PLEASE_CLIENT_ID` and `RELEASE_PLEASE_PRIVATE_KEY` through references to the shared release-please App.
-The Windows config exposes only `ES_USERNAME`, `ES_PASSWORD`, `CREDENTIAL_ID`, and `ES_TOTP_SECRET`.
-Prepare missing input fields as empty strings with explanatory notes, and configure the references below before handoff.
-The owner populates existing values directly in Doppler from their protected credential store.
-Agents inspect secret names and access metadata only; they do not access 1Password.
-GitHub cannot return stored secret values.
-Keep PEM private key line breaks intact and use the persistent TOTP seed for `SSLDOTCOM_TOTP_SECRET`.
-Fill and save the four prepared fields in [shared-signing / windows](https://dashboard.doppler.com/workplace/projects/shared-signing/configs/windows) and the two prepared fields in [shared-automation / release_please](https://dashboard.doppler.com/workplace/projects/shared-automation/configs/release_please).
+The signing identity requires `sub` equal to `repo:P4suta/find-my-files:environment:release` and `event_name` equal to `workflow_dispatch`.
+Its allowed `workflow_ref` values name `release.yml` or `verify-doppler.yml` at the same protected path and ref.
+The numeric repository ID prevents a same-named replacement repository from inheriting access.
+Check `gh api repos/P4suta/find-my-files/actions/oidc/customization/sub` before provisioning.
+Update the identity subjects if the repository enables immutable subjects.
 
-Store the existing shared release-please GitHub App's Client ID and PEM private key once in `shared-automation.release_please`, under `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_PRIVATE_KEY`.
-Store the distinct release-plz App's credentials separately in `shared-automation.release_plz` for repositories using that App.
-Each repository keeps its own release-please or release-plz workflows, GitHub environments, and purpose-scoped Doppler access.
-Mint installation tokens for the consuming repository with only the permissions required by each step.
-The shared App private key retains authority across the App's installations; repository-scoped installation tokens limit the normal consuming operations.
-Use these references in `find-my-files.automation`:
+Require owner reviewers and turn off administrator bypass for the protected signing and publication environment.
+Keep automatic Release PR preparation free from a reviewer gate.
+Require protected `main` in the controller and purpose-scoped OIDC claims.
+Build, dependency scanning, mutation, collection, packaging, and publication approval need no Doppler access.
+A failed fetch, empty field, or unresolved reference stops the consuming job before signing or minting an App token.
+The [OIDC identity documentation](https://docs.doppler.com/docs/service-account-identities), [fetch action](https://github.com/DopplerHQ/secrets-fetch-action), and [reference documentation](https://docs.doppler.com/docs/secrets) define the provider interfaces.
 
-| Consuming name | Reference |
-|---|---|
-| `RELEASE_PLEASE_CLIENT_ID` | `${shared-automation.release_please.GITHUB_APP_CLIENT_ID}` |
-| `RELEASE_PLEASE_PRIVATE_KEY` | `${shared-automation.release_please.GITHUB_APP_PRIVATE_KEY}` |
+Validate workflow syntax with `mise x -- just lint-actions`.
+Before a real release, dispatch the separate read-only credential verification workflow from protected `main`.
 
-For intentionally shared Windows credentials, populate `shared-signing.windows` and use these references in `find-my-files.windows`:
+```powershell
+gh workflow run verify-doppler.yml --repo P4suta/find-my-files --ref main
+```
 
-| Consuming name | Reference |
-|---|---|
-| `ES_USERNAME` | `${shared-signing.windows.SSLDOTCOM_USERNAME}` |
-| `ES_PASSWORD` | `${shared-signing.windows.SSLDOTCOM_PASSWORD}` |
-| `CREDENTIAL_ID` | `${shared-signing.windows.SSLDOTCOM_CREDENTIAL_ID}` |
-| `ES_TOTP_SECRET` | `${shared-signing.windows.SSLDOTCOM_TOTP_SECRET}` |
+The [verification workflow](../.github/workflows/verify-doppler.yml) uses the existing protected environments and requires their approvals.
+It resolves required credentials without printing values, verifies a read-only repository App token, and requires cross-purpose config access to fail.
+It doesn't sign, tag, publish, or invoke the production release controller.
+Remove obsolete GitHub environment secrets after verification passes and the approved store still holds recoverable credentials.
 
-Create one GitHub OIDC identity for each Service Account.
-Require all of these common claims:
+## Nightly and repository protections
 
-| Claim | Exact allowed value |
-|---|---|
-| `aud` | `https://github.com/P4suta` |
-| `repository_id` | `1267203446` |
-| `repository_owner_id` | `42543015` |
-| `ref` | `refs/heads/main` |
+The [nightly workflow](../.github/workflows/nightly.yml) publishes a 14-day unsigned Actions artifact from `main`.
+Its version has the form `X.Y.Z-nightly.<date>+g<sha>`.
+It receives the same dependency scan and attestations as stable.
+It has no Authenticode signature or GitHub Release.
 
-The automation identity additionally requires `sub` = `repo:P4suta/find-my-files:environment:release-please`, `event_name` = `push` or `workflow_dispatch`, and `workflow_ref` = `P4suta/find-my-files/.github/workflows/release-please.yml@refs/heads/main`, `P4suta/find-my-files/.github/workflows/release.yml@refs/heads/main`, or `P4suta/find-my-files/.github/workflows/verify-doppler.yml@refs/heads/main`.
-The signing identity additionally requires `sub` = `repo:P4suta/find-my-files:environment:release`, `event_name` = `workflow_dispatch`, and `workflow_ref` = `P4suta/find-my-files/.github/workflows/release.yml@refs/heads/main` or `P4suta/find-my-files/.github/workflows/verify-doppler.yml@refs/heads/main`.
-The repository ID prevents a same-named replacement repository from inheriting access.
-Check `gh api repos/P4suta/find-my-files/actions/oidc/customization/sub` before provisioning: these subjects use the existing name-based prefix, and must be updated if the repository later enables immutable subjects.
-
-Set each identity's public ID as `DOPPLER_SERVICE_IDENTITY_ID` in its corresponding GitHub environment variable.
-Keep build, SBOM, mutation, collection, packaging, and publication approval jobs without Doppler access.
-A failed fetch, empty output, or unresolved reference stops the credential-consuming job before signing or minting an App token.
-
-Validate workflow syntax and security with `mise x -- just lint-actions`.
-Run `gh workflow run verify-doppler.yml --repo P4suta/find-my-files --ref main` to verify allowed and denied CI access before a real release.
-The manual verification uses the existing environments, including the signing environment's required approval, and checks resolved credentials without printing values.
-It verifies the App with a read-only repository token and requires each Doppler identity to be denied access to the other purpose's config.
-It does not sign binaries, create tags or releases, or dispatch the production release workflow.
-The production release workflow has no rehearsal entry point.
-Remove the old GitHub environment secrets only after their Doppler paths work and the original credentials remain recoverable in the approved store.
-
-[OIDC identities](https://docs.doppler.com/docs/service-account-identities), [the official fetch action](https://github.com/DopplerHQ/secrets-fetch-action), and [secret references](https://docs.doppler.com/docs/secrets) describe the provider interfaces.
+Apply `.github/rulesets/` and enable Immutable Releases.
+The solo-maintainer ruleset requires passing status checks and resolved conversations.
+Enable independent approving, code-owner, and last-push reviews after a distinct maintainer joins `CODEOWNERS`.
 
 ## Performance baselines
 
-Performance baselines are recorded by hand on the reference machine, cold and
-idle: `just bench-baseline` for the real-volume baseline and
-`just bench-micro-baseline` for the Criterion suite. The real-volume result
-(`engine/benches/baseline.json`) lands through an ordinary reviewed PR; the
-Criterion baseline is machine-local. Never hand-edit or fabricate either.
+Record performance baselines on the reference machine while cold and idle.
+Use `just bench-baseline` for the real-volume baseline and `just bench-micro-baseline` for Criterion.
+The real-volume result in `engine/benches/baseline.json` follows an ordinary reviewed PR.
+The Criterion baseline stays machine-local.
+Never fabricate or hand-edit either measurement.
 
-Design rationale lives in ADR-0013, ADR-0020, ADR-0029, ADR-0034, ADR-0035,
-ADR-0038, ADR-0040, and ADR-0048.
+The design records are ADR-0013, ADR-0020, ADR-0029, ADR-0034, ADR-0035, ADR-0038, ADR-0040, and ADR-0048.
