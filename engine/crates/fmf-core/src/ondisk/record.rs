@@ -19,6 +19,38 @@ const MAX_ATTRIBUTE_TYPE: u32 = 0x100;
 const STANDARD_INFORMATION_ATTRIBUTE: u32 = 0x10;
 const ATTRIBUTE_LIST_ATTRIBUTE: u32 = 0x20;
 const FILE_NAME_ATTRIBUTE: u32 = 0x30;
+const INLINE_HIGH_IDS: usize = 4;
+
+#[derive(Default)]
+struct AttributeIds {
+    low: u128,
+    high: [u16; INLINE_HIGH_IDS],
+    high_len: usize,
+    overflow: Vec<u16>,
+}
+
+impl AttributeIds {
+    fn insert(&mut self, id: u16) -> bool {
+        if id < u128::BITS as u16 {
+            let bit = 1u128 << id;
+            if self.low & bit != 0 {
+                return false;
+            }
+            self.low |= bit;
+            return true;
+        }
+        if self.high[..self.high_len].contains(&id) || self.overflow.contains(&id) {
+            return false;
+        }
+        if self.high_len < self.high.len() {
+            self.high[self.high_len] = id;
+            self.high_len += 1;
+        } else {
+            self.overflow.push(id);
+        }
+        true
+    }
+}
 
 const fn le_u16(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([data[offset], data[offset + 1]])
@@ -31,22 +63,6 @@ const fn le_u32(data: &[u8], offset: usize) -> u32 {
         data[offset + size_of::<u16>()],
         data[offset + size_of::<u32>() - 1],
     ])
-}
-
-fn unique_attribute_id(id: u16, low_ids: &mut u128, high_ids: &mut Vec<u16>) -> bool {
-    if id < u128::BITS as u16 {
-        let bit = 1u128 << id;
-        if *low_ids & bit != 0 {
-            return false;
-        }
-        *low_ids |= bit;
-        true
-    } else if high_ids.contains(&id) {
-        false
-    } else {
-        high_ids.push(id);
-        true
-    }
 }
 
 /// True only when the complete attribute chain is bounded, aligned, and terminated.
@@ -72,8 +88,7 @@ pub fn attributes_complete(record: &[u8]) -> bool {
     let Some(mut remaining) = record.get(offset..used) else {
         return false;
     };
-    let mut low_ids = 0u128;
-    let mut high_ids = Vec::new();
+    let mut ids = AttributeIds::default();
     let mut previous_type = 0u32;
     loop {
         if remaining.get(..ATTRIBUTE_ALIGNMENT).is_none() {
@@ -94,9 +109,7 @@ pub fn attributes_complete(record: &[u8]) -> bool {
             return false;
         };
         let length = attribute.len();
-        if !length.is_multiple_of(ATTRIBUTE_ALIGNMENT)
-            || !unique_attribute_id(attribute.header.id, &mut low_ids, &mut high_ids)
-        {
+        if !length.is_multiple_of(ATTRIBUTE_ALIGNMENT) || !ids.insert(attribute.header.id) {
             return false;
         }
         previous_type = type_id;
@@ -211,6 +224,36 @@ mod tests {
     }
 
     #[test]
+    fn first_high_attribute_ids_stay_inline() {
+        let mut ids = AttributeIds::default();
+        for id in [128, 255, 32_768, u16::MAX] {
+            assert!(ids.insert(id));
+            assert_eq!(ids.overflow.capacity(), 0);
+        }
+        assert_eq!(ids.high_len, INLINE_HIGH_IDS);
+        assert_eq!(ids.high, [128, 255, 32_768, u16::MAX]);
+    }
+
+    #[test]
+    fn duplicate_ids_preserve_membership_across_every_storage_region() {
+        let mut ids = AttributeIds::default();
+        let input = [0, 127, 128, 129, 130, 131, 132, 133, u16::MAX];
+        for id in input {
+            assert!(ids.insert(id));
+        }
+        let before = (ids.low, ids.high, ids.high_len, ids.overflow.clone());
+        for id in input {
+            assert!(!ids.insert(id));
+            assert_eq!(
+                (ids.low, ids.high, ids.high_len, &ids.overflow),
+                (before.0, before.1, before.2, &before.3)
+            );
+        }
+        assert!(ids.insert(1));
+        assert!(ids.insert(134));
+    }
+
+    #[test]
     fn accepts_a_complete_resident_chain() {
         assert!(attributes_complete(&resident_record()));
     }
@@ -261,17 +304,10 @@ mod tests {
 
     #[test]
     fn attribute_ids_are_unique_across_both_storage_ranges() {
-        let mut low = 0;
-        let mut high = Vec::new();
+        let mut ids = AttributeIds::default();
         for id in [0, 1, 126, 127, 128, 129, 255, 256, u16::MAX] {
-            assert!(
-                unique_attribute_id(id, &mut low, &mut high),
-                "first id {id}"
-            );
-            assert!(
-                !unique_attribute_id(id, &mut low, &mut high),
-                "duplicate id {id}"
-            );
+            assert!(ids.insert(id), "first id {id}");
+            assert!(!ids.insert(id), "duplicate id {id}");
         }
     }
 
@@ -442,6 +478,17 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn id_membership_matches_an_independent_set(
+            input in proptest::collection::vec(any::<u16>(), 0..96),
+        ) {
+            let mut ids = AttributeIds::default();
+            let mut expected = alloc::collections::BTreeSet::new();
+            for id in input {
+                prop_assert_eq!(ids.insert(id), expected.insert(id));
+            }
+        }
+
         #[test]
         fn arbitrary_record_bytes_never_panic(
             bytes in proptest::collection::vec(any::<u8>(), 0..4096),
