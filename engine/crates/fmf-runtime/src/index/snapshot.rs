@@ -258,8 +258,7 @@ impl VolumeIndex {
                 return Err(bad("size overflow pair invalid"));
             }
         }
-        let size_ovf: rustc_hash::FxHashMap<u32, u64> =
-            ovf_ids.into_iter().zip(ovf_sizes).collect();
+        let size_ovf: super::OverflowSizes = ovf_ids.into_iter().zip(ovf_sizes).collect();
 
         let entry_count = parent.len();
         if entry_count == 0 {

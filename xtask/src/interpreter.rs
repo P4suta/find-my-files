@@ -36,6 +36,11 @@ pub fn miri() -> Result<()> {
         "fmf-runtime",
         "read_vec_supplies_initialized_bytes_to_safe_readers",
         &["index::snapshot::tests::read_vec_supplies_initialized_bytes_to_safe_readers"],
+    )?;
+    miri_suite(
+        "fmf-runtime",
+        "operation_sequences_match_the_production_map_contract",
+        &["index::overflow_model::tests::operation_sequences_match_the_production_map_contract"],
     )
 }
 

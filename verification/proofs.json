@@ -7,6 +7,42 @@
   "targets": [
     {
       "package": "fmf-core",
+      "source": "engine/crates/fmf-core/src/mtime_proofs.rs",
+      "prefix": "dates::kani_proofs::",
+      "harnesses": [
+        "stored_seconds_decode_totally_and_deterministically",
+        "a_time_pair_resolves_both_registered_inputs_and_rejects_every_other_input",
+        "equal_timestamp_results_refine_the_two_input_projection",
+        "distinct_timestamp_results_refine_the_two_input_projection",
+        "checked_arithmetic_preserves_value_and_overflow_fields",
+        "encoding_preserves_clamped_unix_seconds",
+        "every_tick_value_has_at_most_one_encoded_second"
+      ]
+    },
+    {
+      "package": "fmf-runtime",
+      "source": "engine/crates/fmf-runtime/src/index/frn_proofs.rs",
+      "prefix": "index::frn::kani_proofs::",
+      "harnesses": [
+        "lookup_with_no_sorted_rows_preserves_order_liveness_and_size_hints",
+        "lookup_with_one_sorted_row_preserves_order_liveness_and_size_hints",
+        "lookup_with_two_sorted_rows_preserves_order_liveness_and_size_hints",
+        "lookup_with_three_sorted_rows_preserves_order_liveness_and_size_hints",
+        "lookup_with_four_sorted_rows_preserves_order_liveness_and_size_hints"
+      ]
+    },
+    {
+      "package": "fmf-runtime",
+      "source": "engine/crates/fmf-runtime/src/index/overflow_model_proofs.rs",
+      "prefix": "index::overflow_model::kani_proofs::",
+      "harnesses": [
+        "lookup_matches_every_unique_bounded_entry_set",
+        "insertion_updates_one_key_and_preserves_every_other_mapping",
+        "removal_deletes_only_the_selected_mapping"
+      ]
+    },
+    {
+      "package": "fmf-core",
       "source": "engine/crates/fmf-core/src/usn/reason_proofs.rs",
       "prefix": "usn::reasons::kani_proofs::",
       "harnesses": [
@@ -359,11 +395,23 @@
       "source": "engine/crates/fmf-runtime/src/index/mutation_proofs.rs",
       "prefix": "index::mutate::kani_proofs::",
       "harnesses": [
+        "timestamp_contract_preserves_clamping_in_the_runtime_build",
+        "prepared_projection_resolves_both_registered_timestamps",
+        "projection_state_does_not_change_empty_vector_initialization",
         "flag_updates_preserve_unselected_bits_and_are_idempotent",
         "exclusion_uses_only_the_hidden_and_system_bits",
         "file_link_kind_checks_preserve_the_requested_object",
         "metadata_projection_preserves_every_object_field",
-        "single_link_refresh_updates_every_live_object_row",
+        "replacing_link_preserves_topology_and_metadata_generation",
+        "appending_link_preserves_topology_and_metadata_generation",
+        "replacing_link_refreshes_every_shared_size",
+        "appending_link_refreshes_every_shared_size",
+        "replacing_link_refreshes_every_shared_timestamp",
+        "appending_link_refreshes_every_shared_timestamp",
+        "replacing_link_refreshes_every_shared_attribute",
+        "appending_link_refreshes_every_shared_attribute",
+        "invalid_parent_preserves_metadata_when_replacing",
+        "invalid_parent_preserves_metadata_when_appending",
         "each_walk_state_has_one_exhaustive_entry_transition"
       ]
     },

@@ -163,6 +163,10 @@ impl FrnIndex {
     }
 }
 
+#[cfg(kani)]
+#[path = "frn_proofs.rs"]
+mod kani_proofs;
+
 #[cfg(test)]
 mod tests {
     use super::EntryId;

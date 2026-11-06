@@ -16,6 +16,12 @@ const CAPACITY_GROWTH_DIVISOR: usize = 64;
 mod builder;
 mod compact;
 mod core;
+#[cfg(any(test, kani))]
+mod overflow_model;
+#[cfg(kani)]
+use overflow_model::OverflowMap as OverflowSizes;
+#[cfg(not(kani))]
+type OverflowSizes = rustc_hash::FxHashMap<EntryId, u64>;
 mod frn;
 mod mutate;
 mod snapshot;

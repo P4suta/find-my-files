@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use super::frn::FrnIndex;
-use super::{DerivedValidity, EntryId, Frn, NO_PARENT, RecordNo, SortKey, flags};
+use super::{DerivedValidity, EntryId, Frn, NO_PARENT, OverflowSizes, RecordNo, SortKey, flags};
 
 const EXPECTED_DISTINCT_DIVISOR: usize = 2;
 
@@ -33,7 +33,7 @@ pub struct VolumeIndex {
     /// File sizes < `u32::MAX`, 4 bytes per entry; `u32::MAX` is the sentinel for the overflow map (≥4GiB files, ADR-0007).
     /// Read through [`VolumeIndex::size`].
     pub(super) size_lo: Vec<u32>,
-    pub(super) size_ovf: FxHashMap<EntryId, u64>,
+    pub(super) size_ovf: OverflowSizes,
     /// Last-modification time as Unix-epoch **seconds** in a `u32` (ADR-0031,
     /// −4 B/entry vs a raw FILETIME `i64`).
     /// `0` is the "unknown timestamp" sentinel.
@@ -100,7 +100,7 @@ fn dict_lower_name<'a>(
 
 /// Size of `id` read through the u32 column + overflow map (ADR-0007).
 #[inline]
-fn column_size(size_lo: &[u32], size_ovf: &FxHashMap<EntryId, u64>, id: EntryId) -> u64 {
+fn column_size(size_lo: &[u32], size_ovf: &OverflowSizes, id: EntryId) -> u64 {
     match size_lo[id as usize] {
         u32::MAX => size_ovf[&id],
         v => v as u64,
@@ -779,7 +779,7 @@ pub(super) struct SortColumns<'a> {
     dict_off: &'a [u32],
     name_id: &'a [u32],
     size_lo: &'a [u32],
-    size_ovf: &'a FxHashMap<EntryId, u64>,
+    size_ovf: &'a OverflowSizes,
     mtime: &'a [u32],
 }
 
@@ -789,7 +789,7 @@ impl<'a> SortColumns<'a> {
         dict_off: &'a [u32],
         name_id: &'a [u32],
         size_lo: &'a [u32],
-        size_ovf: &'a FxHashMap<EntryId, u64>,
+        size_ovf: &'a OverflowSizes,
         mtime: &'a [u32],
     ) -> Self {
         Self {

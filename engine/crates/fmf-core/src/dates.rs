@@ -55,6 +55,18 @@ pub fn mtime_ticks_to_secs(ticks: i64) -> u32 {
     u32::try_from(secs).unwrap_or(if secs < 0 { 0 } else { u32::MAX })
 }
 
+#[cfg(any(test, kani))]
+fn encoding_matches(ticks: i64, seconds: u32) -> bool {
+    let elapsed = ticks.saturating_sub(FILETIME_UNIX_EPOCH) / TICKS_PER_SECOND;
+    if elapsed < 0 {
+        seconds == 0
+    } else if elapsed > i64::from(u32::MAX) {
+        seconds == u32::MAX
+    } else {
+        i64::from(seconds) == elapsed
+    }
+}
+
 /// Inverse of [`mtime_ticks_to_secs`], reconstructing a FILETIME tick count to the second.
 /// The sentinel `0` maps back to a 0 tick (not the epoch).
 #[must_use]
@@ -180,6 +192,11 @@ pub const fn utc_midnight(c: Civil) -> i64 {
     FILETIME_UNIX_EPOCH + days_from_civil(c) * SECONDS_PER_DAY * TICKS_PER_SECOND
 }
 
+#[cfg(kani)]
+#[path = "mtime_proofs.rs"]
+/// Timestamp proofs and the checked projection used by runtime harnesses.
+pub mod kani_proofs;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +229,15 @@ mod tests {
         assert_eq!(mtime_ticks_to_secs(FILETIME_UNIX_EPOCH), 0);
         assert_eq!(mtime_ticks_to_secs(i64::MAX), u32::MAX);
         assert!(mtime_ticks_to_secs(ft) < mtime_ticks_to_secs(ft + 864_000_000_000));
+    }
+
+    #[test]
+    fn mtime_encoding_rejects_seconds_below_the_saturation_limit() {
+        let ticks = 576_460_752_303_423_487;
+        assert!(!super::encoding_matches(ticks, 4_294_967_294));
+        assert!(!super::encoding_matches(ticks, 2_147_483_646));
+        assert!(super::encoding_matches(ticks, u32::MAX));
+        assert_eq!(mtime_ticks_to_secs(ticks), u32::MAX);
     }
 
     #[test]

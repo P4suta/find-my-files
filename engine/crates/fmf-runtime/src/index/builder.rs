@@ -260,7 +260,7 @@ impl VolumeIndexBuilder {
         ))
     }
 
-    #[cfg(kani)]
+    #[cfg(any(test, kani))]
     pub(crate) fn root_index(
         volume_label: &str,
         root: Frn,
@@ -277,7 +277,7 @@ impl VolumeIndexBuilder {
             orig_off: Vec::new(),
             parent: Vec::new(),
             size_lo: Vec::new(),
-            size_ovf: rustc_hash::FxHashMap::default(),
+            size_ovf: super::OverflowSizes::default(),
             mtime: Vec::new(),
             frn: Vec::new(),
             flag: Vec::new(),

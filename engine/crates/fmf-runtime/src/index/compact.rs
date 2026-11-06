@@ -69,7 +69,7 @@ impl VolumeIndex {
             orig_off: Vec::with_capacity(live as usize),
             parent: Vec::with_capacity(live as usize),
             size_lo: Vec::with_capacity(live as usize),
-            size_ovf: rustc_hash::FxHashMap::default(),
+            size_ovf: super::OverflowSizes::default(),
             mtime: Vec::with_capacity(live as usize),
             frn: Vec::with_capacity(live as usize),
             flag: Vec::with_capacity(live as usize),
