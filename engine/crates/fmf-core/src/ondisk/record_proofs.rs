@@ -554,16 +554,11 @@ fn record_bytes_with_filling_terminator<const FIRST_HIGH: bool, const SECOND_HIG
         { REFERENCE_RESIDENT_HEADER_BYTES as u32 },
         { REFERENCE_RESIDENT_HEADER_BYTES as u32 },
     >(true);
-    let class = match (FIRST_HIGH, SECOND_HIGH) {
-        (false, false) => PrefixIds::BitsetPair,
-        (true, false) => PrefixIds::FirstHigh,
-        (false, true) => PrefixIds::SecondHigh,
-        (true, true) => PrefixIds::HighPair,
-    };
-    kani::assume(
-        prefix_ids_at::<ATTRIBUTE_OFFSET_56, { REFERENCE_RESIDENT_HEADER_BYTES as u32 }>(&bytes)
-            == class,
-    );
+    let first_id: u16 = kani::any();
+    let second_id: u16 = kani::any();
+    kani::assume((first_id >= REFERENCE_HIGH_ID_START) == FIRST_HIGH);
+    kani::assume((second_id >= REFERENCE_HIGH_ID_START) == SECOND_HIGH);
+    set_filling_prefix_ids(&mut bytes, first_id, second_id);
     let first = usize::from(ATTRIBUTE_OFFSET_56);
     let second = first + REFERENCE_RESIDENT_HEADER_BYTES;
     let third = second + REFERENCE_RESIDENT_HEADER_BYTES;
@@ -595,6 +590,30 @@ fn record_bytes_with_filling_terminator<const FIRST_HIGH: bool, const SECOND_HIG
         ) == terminator
     );
     (bytes, length)
+}
+
+fn set_filling_prefix_ids(bytes: &mut [u8; PROOF_BYTES], first: u16, second: u16) {
+    let first_offset = usize::from(ATTRIBUTE_OFFSET_56) + REFERENCE_ATTRIBUTE_ID_FIELD;
+    let second_offset = first_offset + REFERENCE_RESIDENT_HEADER_BYTES;
+    bytes[first_offset..first_offset + size_of::<u16>()].copy_from_slice(&first.to_le_bytes());
+    bytes[second_offset..second_offset + size_of::<u16>()].copy_from_slice(&second.to_le_bytes());
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+fn constructing_filling_prefix_ids_preserves_every_record_byte() {
+    let before: [u8; PROOF_BYTES] = kani::any();
+    let first_offset = usize::from(ATTRIBUTE_OFFSET_56) + REFERENCE_ATTRIBUTE_ID_FIELD;
+    let first = le_u16(&before, first_offset);
+    let second = le_u16(&before, first_offset + REFERENCE_RESIDENT_HEADER_BYTES);
+    let mut after = before;
+    set_filling_prefix_ids(&mut after, first, second);
+    let observed = usize::from(kani::any::<u8>());
+    kani::assume(observed < PROOF_BYTES);
+    assert_eq!(after[observed], before[observed]);
+    kani::cover!(first == u16::MAX && second == u16::MAX);
+    kani::cover!(first == REFERENCE_HIGH_ID_START && second == u16::MAX);
+    kani::cover!(first == u16::MIN && second == REFERENCE_HIGH_ID_START);
 }
 
 fn three_minimal_resident_attributes(bytes: &[u8; PROOF_BYTES]) -> bool {
