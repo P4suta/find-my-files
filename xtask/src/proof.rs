@@ -652,7 +652,7 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
             }
         }
         if package == Package::FmfCore {
-            command.args(["--cbmc-args", "--object-bits", "32"]);
+            command.args(["--cbmc-args", "--object-bits", "48"]);
         }
         let status = command
             .status()
