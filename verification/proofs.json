@@ -108,6 +108,7 @@
       "source": "xtask/src/proof_proofs.rs",
       "prefix": "proof::kani_proofs::",
       "harnesses": [
+        "compiled_inventory_acceptance_requires_complete_unique_names",
         "accepted_summary_requires_every_registered_harness_to_pass",
         "a_complete_nonempty_summary_remains_acceptable",
         "every_ordinal_has_exactly_one_partition_owner",

@@ -1,4 +1,39 @@
-use super::{address_space_is_bounded, Shard, Summary, MAX_ADDRESS_SPACE_BYTES, MAX_SHARDS};
+use super::{
+    address_space_is_bounded, DiscoverySummary, Shard, Summary, MAX_ADDRESS_SPACE_BYTES, MAX_SHARDS,
+};
+
+#[kani::proof]
+#[kani::unwind(1)]
+fn compiled_inventory_acceptance_requires_complete_unique_names() {
+    let summary = DiscoverySummary {
+        expected: kani::any(),
+        reported: kani::any(),
+        observed: kani::any(),
+        unique: kani::any(),
+        missing: kani::any(),
+        unexpected: kani::any(),
+    };
+    let accepted = summary.complete();
+    if accepted {
+        assert!(summary.expected > 0);
+        assert_eq!(summary.reported, summary.expected);
+        assert_eq!(summary.observed, summary.expected);
+        assert_eq!(summary.unique, summary.expected);
+        assert_eq!(summary.missing, 0);
+        assert_eq!(summary.unexpected, 0);
+    } else {
+        assert!(
+            summary.expected == 0
+                || summary.reported != summary.expected
+                || summary.observed != summary.expected
+                || summary.unique != summary.expected
+                || summary.missing != 0
+                || summary.unexpected != 0
+        );
+    }
+    kani::cover!(accepted && summary.expected == usize::MAX);
+    kani::cover!(!accepted && summary.missing > 0);
+}
 
 #[kani::proof]
 #[kani::unwind(2)]

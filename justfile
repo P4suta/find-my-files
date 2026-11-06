@@ -101,6 +101,12 @@ comments-fix:
 proof-check:
     cargo run --locked -- proof-check
 
+[doc('Check every registered harness is compiled on Linux before running proofs')]
+[group('quality')]
+[working-directory('xtask')]
+proof-discover:
+    cargo run --locked -- proof-discover
+
 [doc('Verify every registered production harness with Kani on Linux x64')]
 [group('quality')]
 [working-directory('xtask')]

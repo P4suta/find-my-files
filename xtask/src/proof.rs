@@ -527,6 +527,109 @@ fn selected(inventory: &Inventory, package: Package, shard: Option<Shard>) -> BT
         .collect()
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct DiscoveryReport {
+    kani_version: String,
+    file_version: String,
+    standard_harnesses: BTreeMap<String, Vec<String>>,
+    totals: DiscoveryTotals,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct DiscoveryTotals {
+    standard_harnesses: usize,
+}
+
+struct DiscoverySummary {
+    expected: usize,
+    reported: usize,
+    observed: usize,
+    unique: usize,
+    missing: usize,
+    unexpected: usize,
+}
+
+impl DiscoverySummary {
+    const fn complete(&self) -> bool {
+        self.expected > 0
+            && self.reported == self.expected
+            && self.observed == self.expected
+            && self.unique == self.expected
+            && self.missing == 0
+            && self.unexpected == 0
+    }
+}
+
+fn validate_discovery(bytes: &[u8], names: &BTreeSet<String>, version: &str) -> Result<()> {
+    let report: DiscoveryReport = serde_json::from_slice(bytes).context("parse Kani discovery")?;
+    ensure!(
+        report.kani_version == version && report.file_version == "0.1",
+        "incompatible Kani discovery report"
+    );
+    let discovered: Vec<_> = report.standard_harnesses.into_values().flatten().collect();
+    let unique: BTreeSet<_> = discovered.iter().cloned().collect();
+    let missing: Vec<_> = names.difference(&unique).collect();
+    let unexpected: Vec<_> = unique.difference(names).collect();
+    let summary = DiscoverySummary {
+        expected: names.len(),
+        reported: report.totals.standard_harnesses,
+        observed: discovered.len(),
+        unique: unique.len(),
+        missing: missing.len(),
+        unexpected: unexpected.len(),
+    };
+    ensure!(summary.complete(), "compiled proof inventory mismatch: missing {missing:?}; unexpected {unexpected:?}; expected {}, reported {}, discovered {}, unique {}", summary.expected, summary.reported, summary.observed, summary.unique);
+    Ok(())
+}
+
+fn discover_at(root: &Path, out: &Path, inventory: &Inventory) -> Result<()> {
+    for package in packages(inventory) {
+        let directory = out.join("discovery").join(package.name());
+        fs::create_dir_all(&directory)?;
+        let report = directory.join("kani-list.json");
+        if report.exists() {
+            fs::remove_file(&report)?;
+        }
+        let status = Command::new("prlimit")
+            .current_dir(&directory)
+            .arg(format!("--as={}", inventory.address_space_bytes))
+            .args(["--", "cargo", "kani", "--manifest-path"])
+            .arg(root.join(package.manifest()))
+            .args(["--package", package.name()])
+            .args(package.selector())
+            .arg("--target-dir")
+            .arg(out.join("kani"))
+            .args(["list", "--format", "json"])
+            .status()
+            .with_context(|| format!("discover compiled Kani harnesses for {}", package.name()))?;
+        ensure!(
+            status.success(),
+            "Kani discovery failed for {}: {status}",
+            package.name()
+        );
+        validate_discovery(
+            &fs::read(report)?,
+            &expected(inventory, package),
+            &inventory.kani_version,
+        )
+        .with_context(|| format!("validate compiled harnesses for {}", package.name()))?;
+    }
+    println!("Every registered proof harness is present in the Linux build.");
+    Ok(())
+}
+
+pub fn discover() -> Result<()> {
+    ensure!(
+        cfg!(all(target_os = "linux", target_arch = "x86_64")),
+        "Kani discovery requires Linux x64"
+    );
+    let root = paths::repo_root();
+    let inventory = read_inventory(&root)?;
+    discover_at(&root, &paths::verification_dir(), &inventory)
+}
+
 fn shard_receipt(index: usize) -> String {
     format!("{}/{RECEIPT_NAME}", paths::proof_shard_name(index))
 }
@@ -600,6 +703,7 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
         "unexpected Kani executable: {version}"
     );
     let before = fingerprint(&root)?;
+    discover_at(&root, &out, &inventory)?;
     println!(
         "Proof process virtual address-space limit: {} bytes.",
         inventory.address_space_bytes
@@ -863,6 +967,54 @@ mod tests {
 
     fn names() -> BTreeSet<String> {
         BTreeSet::from(["proof".into()])
+    }
+
+    fn discovery(names: &[&str]) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "kani-version": "0.68.0",
+            "file-version": "0.1",
+            "standard-harnesses": {"src/proofs.rs": names},
+            "totals": {"standard-harnesses": names.len()}
+        }))
+        .expect("discovery fixture")
+    }
+
+    #[test]
+    fn compiled_discovery_requires_every_registered_harness_exactly_once() -> Result<()> {
+        validate_discovery(&discovery(&["proof"]), &names(), "0.68.0")?;
+        for actual in [
+            &[][..],
+            &["other"][..],
+            &["proof", "other"][..],
+            &["proof", "proof"][..],
+        ] {
+            assert!(validate_discovery(&discovery(actual), &names(), "0.68.0").is_err());
+        }
+        let expected = BTreeSet::from(["proof".into(), "windows_only::proof".into()]);
+        let error = validate_discovery(&discovery(&["proof"]), &expected, "0.68.0")
+            .expect_err("a declaration excluded from the Linux build must fail discovery");
+        assert!(error.to_string().contains("windows_only::proof"));
+        assert!(validate_discovery(&discovery(&[]), &BTreeSet::new(), "0.68.0").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn compiled_discovery_rejects_incompatible_and_inconsistent_reports() -> Result<()> {
+        let original: serde_json::Value = serde_json::from_slice(&discovery(&["proof"]))?;
+        for (field, replacement) in [
+            ("/kani-version", json!("different")),
+            ("/file-version", json!("different")),
+            ("/totals/standard-harnesses", json!(2)),
+            ("/standard-harnesses", json!({})),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(field).expect("fixture field") = replacement;
+            assert!(
+                validate_discovery(&serde_json::to_vec(&changed)?, &names(), "0.68.0").is_err()
+            );
+        }
+        assert!(validate_discovery(b"{", &names(), "0.68.0").is_err());
+        Ok(())
     }
 
     #[test]

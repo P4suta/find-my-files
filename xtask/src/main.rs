@@ -66,6 +66,8 @@ enum Commands {
     MutationRelocateCsharp,
     /// Validate the nonempty proof inventory against the Rust source.
     ProofCheck,
+    /// Check the compiled Linux harness inventory without running the solver.
+    ProofDiscover,
     /// Verify every registered production harness and bind results to its source.
     Proof,
     /// Verify one deterministic partition of the complete proof inventory.
@@ -250,6 +252,7 @@ fn main() -> Result<()> {
         Commands::VerificationTools { tool } => verification_tools::install(tool),
         Commands::MutationRelocateCsharp => hygiene::relocate_csharp(),
         Commands::ProofCheck => proof::check(),
+        Commands::ProofDiscover => proof::discover(),
         Commands::Proof => proof::run(),
         Commands::ProofShard { index, count } => proof::run_shard(index, count),
         Commands::ProofCollect { count } => proof::collect(count),
