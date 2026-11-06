@@ -151,10 +151,15 @@ A separate harness writes each original ID back into an arbitrary record and che
 The round-trip obligation requires scalar construction to reproduce every original byte array.
 The production validator, preserved reference, byte bound, unwind bounds, assertions, and outcome covers remain unchanged.
 The [scalar-ID run](https://github.com/P4suta/find-my-files/actions/runs/42148602868) still leaves three cases incomplete after SAT memory exhaustion and one after the Bitwuzla deadline.
-The runner keeps arrays unexpanded and selects CBMC's [uninterpreted-function array encoding](https://diffblue.github.io/cbmc/man/cbmc.html).
-The array theory supplies the constraints for reads and updates without flattening each bounded array into a bitvector.
-The encoding preserves every input element, index check, property, and bound.
-Absent-terminator partitions use the same SAT array encoding as the other cases.
+The [uninterpreted-function array attempt](https://github.com/P4suta/find-my-files/actions/runs/42154422423) reports assertion failures in the unchanged contract byte and field round trips.
+The candidate rejects that encoding and restores the default representation.
+The original reports preserve the failed assertions without treating them as verified production regressions.
+The [32-object-bit attempt](https://github.com/P4suta/find-my-files/actions/runs/42161020140) still leaves high-prefix-ID obligations incomplete after solver memory exhaustion and a safety deadline.
+Core byte harnesses use 48 object-ID bits in the verifier's [64-bit pointer encoding](https://diffblue.github.io/cbmc/memory-bounds-checking.html).
+The header and record buffers keep their existing array bounds.
+High-ID vectors contain only IDs visited within those bounded records.
+The remaining 16 offset bits cover those modeled objects without changing native integer fields, arithmetic, index checks, or unwind bounds.
+The contract, runtime, and tooling packages keep Kani's default pointer encoding.
 The external Linux solver has an exact version pin, archive byte count, and SHA-256 checksum.
 The proof setup installs the verified executable alongside Kani.
 The proof runner checks both executable versions and includes the tool configuration in its source fingerprint.
