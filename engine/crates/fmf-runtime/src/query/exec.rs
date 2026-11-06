@@ -446,6 +446,28 @@ mod tests {
     }
 
     #[test]
+    fn wildcards_keep_internal_stars_in_every_anchored_shape() {
+        let idx = sample();
+        for (text, expected) in [
+            ("m*in*", "main.rs"),
+            ("*notes*txt", "notes.txt"),
+            ("*p*o*", "Report.PDF"),
+        ] {
+            for case in [CaseMode::Smart, CaseMode::Insensitive, CaseMode::Sensitive] {
+                let options = QueryOptions {
+                    case,
+                    ..QueryOptions::default()
+                };
+                assert_eq!(
+                    run(&idx, text, options),
+                    [expected],
+                    "query {text:?}, case {case:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn regex_term() {
         let idx = sample();
         assert_eq!(names(&idx, "regex:^ma.n\\.rs$"), vec!["main.rs"]);
@@ -815,6 +837,32 @@ mod tests {
     fn empty_query_matches_all_live_entries() {
         let idx = sample();
         assert_eq!(names(&idx, "").len(), idx.live_len());
+    }
+
+    #[test]
+    fn fresh_and_refined_results_keep_driver_labels_and_scan_counts() {
+        let idx = sample();
+        let options = QueryOptions::default();
+        let all = compile(&parse("").unwrap(), options.case, &UtcResolver).unwrap();
+        let (previous, metrics) = search(&idx, &all, &options);
+        assert_eq!(metrics.driver, "perm-walk");
+        assert_eq!(metrics.entries_scanned, idx.len() as u64);
+        for (text, driver) in [
+            ("report", "pool-scan"),
+            ("*.rs", "suffix"),
+            ("a", "full-scan"),
+            ("é", "canonical-scan"),
+        ] {
+            let query = compile(&parse(text).unwrap(), options.case, &UtcResolver).unwrap();
+            assert!(super::super::subsumes(&all, &options, &query, &options));
+            let (fresh, fresh_metrics) = search(&idx, &query, &options);
+            let (refined, refined_metrics) = refine(&idx, &query, &options, &previous.ids);
+            assert_eq!(refined.ids, fresh.ids, "{text:?}");
+            assert_eq!(fresh_metrics.driver, driver, "{text:?}");
+            assert_eq!(refined_metrics.driver, driver, "{text:?}");
+            assert_eq!(fresh_metrics.entries_scanned, idx.len() as u64);
+            assert_eq!(refined_metrics.entries_scanned, previous.ids.len() as u64);
+        }
     }
 
     #[test]

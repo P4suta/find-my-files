@@ -346,6 +346,23 @@
         "metadata_projection_preserves_every_object_field",
         "each_walk_state_has_one_exhaustive_entry_transition"
       ]
+    },
+    {
+      "package": "fmf-runtime",
+      "source": "engine/crates/fmf-runtime/src/query/compile_proofs.rs",
+      "prefix": "query::compile::kani_proofs::",
+      "harnesses": [
+        "canonical_ascii_literals_borrow_the_original_input"
+      ]
+    },
+    {
+      "package": "fmf-runtime",
+      "source": "engine/crates/fmf-runtime/src/query/subsume_proofs.rs",
+      "prefix": "query::subsume::kani_proofs::",
+      "harnesses": [
+        "size_and_directory_implication_preserve_membership",
+        "mtime_implication_preserves_membership"
+      ]
     }
   ]
 }
