@@ -67,7 +67,7 @@ The invalid-marker constructor fixes the offset and allocation fields just as th
 The inconsistent-header harness covers the rejected headers outside that construction.
 Acceptance with an invalid first marker requires an immediate terminator and the same checked record geometry.
 The three marker partitions together cover the same complete byte domain for each offset.
-The admission harness compares the production validator with the preserved reference.
+The admission harness compares the production validator with an independent bounded reference.
 Resident admission uses partitions for the first attribute length.
 Each aligned length that can leave room for a terminator has a constant case.
 A complementary case keeps every other 32-bit length.
@@ -96,33 +96,22 @@ The complementary constructor keeps every other pair without changing the byte d
 The complementary cases permit at most two advances and the final probe.
 The full-extent cases still include the third advance and fourth probe.
 An insufficient bound must still fail an unwinding assertion.
-The three-header calls also branch on the storage class of the first two attribute IDs.
-Each ID either belongs to the low-ID bitset or the high-ID vector.
-The classifier covers every pair of 16-bit IDs in four disjoint classes.
-The offset-48 branches assert their classes and call the unchanged production validator and preserved reference, or the unchanged invariant body.
-The branch keeps the same byte array and slice rather than constructing replacement IDs or assuming admission.
-The split exposes the vector prefix length before a possible third membership check.
-An upstream [report](https://github.com/model-checking/kani/issues/4667) describes symbolic heap read-back costs for bounded vectors.
-Its Kani version and platform differ from the current verifier configuration.
-The current logs establish solver memory exhaustion and no specific heap-model cause.
-The classifier has a scalar harness over every ID pair, and the complete byte harnesses remain required.
-Four offset-56 obligations still exhaust memory after that split.
-With Z3, the two full-extent cases exhaust memory during symbolic execution.
-The two invalid-third-length cases stop with `map::at` during SMT conversion.
-An upstream [report](https://github.com/diffblue/cbmc/issues/9190) records the same exception for Rust formatting types.
-The attempted [Bitwuzla SMT solver](https://model-checking.github.io/kani/reference/attributes.html#kanisolversolver) uses the C Bounded Model Checker (CBMC) [configuration](https://github.com/diffblue/cbmc/blob/cbmc-6.11.0/src/solvers/smt2/smt2_conv.cpp) for bitvector struct encoding.
-The shared-call Bitwuzla invariant case reaches SMT solving but exceeds its safety deadline.
-Each of the four offset-56 obligations has a separate harness for every prefix-ID class.
-Each harness assumes only its classifier result and then checks the corresponding ID-class assertions.
-The four disjoint cases keep every original ID pair without constructing replacement IDs.
-Each case calls the unchanged production validator and preserved reference, or the unchanged invariant body, once.
-The sixteen prefix-ID cases preserve every original constructor, result assertion, reachable outcome, and unwind bound.
-Their union preserves every input and required property of the four former obligations.
-The four independent invalid-third-length cases whose second attribute ID is high also exceed the Bitwuzla deadline.
-The [SAT run](https://github.com/P4suta/find-my-files/actions/runs/42115162544) exhausts memory during propositional reduction for the four full-extent admission and invariant cases with a high second ID.
-The independent Z3 full-extent invariant cases stop with `map::at` during SMT conversion in the [following run](https://github.com/P4suta/find-my-files/actions/runs/42121112405).
-The four independent full-extent Bitwuzla cases exceed the same safety deadline in the [next run](https://github.com/P4suta/find-my-files/actions/runs/42126393518).
-Those cases now partition the position of the first terminator into the first, second, or third attribute, or its absence.
+Attribute ID tracking preserves the low-ID bitset and keeps the first four distinct high IDs in an inline array.
+Later high IDs spill into a vector without imposing a record or ID-count limit.
+Duplicate rejection preserves every stored ID and leaves the state unchanged.
+The inline prefix costs eight bytes of ID storage and avoids allocation for its four entries.
+A production-bound harness compares each insertion with the original membership helper and independent sequence membership.
+The harness quantifies every sequence of six arbitrary 16-bit IDs.
+The bound includes inline-prefix exhaustion, spill insertion, duplicate rejection, and reallocation in the original vector implementation.
+Native regressions require allocation-free inline insertion and unchanged state on duplicate rejection across all storage regions.
+Generated native sequences exercise longer ID histories through an independent ordered set.
+
+The bounded admission reference keeps its geometry, range, marker, type, and termination checks independent of the production parser.
+Its seen-ID array has enough slots for the complete proof byte bound divided by the smallest resident header.
+The original vector membership helper remains intact for the separate refinement check.
+The record harnesses keep the original byte bound, field domains, assertions, outcome covers, and unwind bounds.
+The ID classifier still covers every pair of 16-bit IDs in four disjoint classes.
+The three-header cases partition the position of the first terminator into the first, second, or third attribute, or its absence.
 A scalar harness proves the disjoint classification over every triple of 32-bit type values.
 Each constructor keeps the original prefix-ID class and full record extent.
 The constructor writes the selected terminator and excludes earlier terminators.
@@ -137,29 +126,20 @@ Cases with the terminator in the second or third attribute keep accepted and rej
 Absent-terminator cases cover rejection and a distinct-ID chain with three complete minimal resident headers.
 The combined covers keep both original outcomes without requiring an impossible outcome in a partition.
 Every case keeps the original unwind bound of four.
-The terminator partitions use `cadical` from the Kani bundle.
-The [terminator run](https://github.com/P4suta/find-my-files/actions/runs/42132841128) still exhausts SAT memory for three high-prefix-ID cases and reaches the Bitwuzla deadline in the absent-terminator invariant case.
-The run stops before completing its remaining harnesses.
-CBMC's [array field sensitivity setting](https://diffblue.github.io/cbmc/man/cbmc.html) controls which arrays have their elements expanded into separate fields.
-Expanding the complete record buffer still exhausts SAT memory in the high-prefix-ID third-terminator invariant case in the [array-expansion attempt](https://github.com/P4suta/find-my-files/actions/runs/42138664012).
-The [whole-array run](https://github.com/P4suta/find-my-files/actions/runs/42142997189) still exhausts SAT memory for three full-extent cases and exceeds the Bitwuzla deadline for an absent-terminator invariant case.
-The scalar-ID experiment restored CBMC's default array representation after the unsuccessful whole-array experiment.
+Absent-terminator cases use the pinned external `bitwuzla` solver.
+The remaining cases use `cadical` from the Kani bundle.
 The terminator constructor supplies each prefix ID as an independent arbitrary 16-bit scalar and writes its little-endian bytes into the original record.
 The constructor assumes only the selected ID storage classes.
 Every original ID value, duplicate pair, and remaining byte stays in the combined input domain.
 A separate harness writes each original ID back into an arbitrary record and checks equality at every arbitrary observation position.
 The round-trip obligation requires scalar construction to reproduce every original byte array.
-The production validator, preserved reference, byte bound, unwind bounds, assertions, and outcome covers remain unchanged.
-The [scalar-ID run](https://github.com/P4suta/find-my-files/actions/runs/42148602868) still leaves three cases incomplete after SAT memory exhaustion and one after the Bitwuzla deadline.
-The [uninterpreted-function array attempt](https://github.com/P4suta/find-my-files/actions/runs/42154422423) reports assertion failures in the unchanged contract byte and field round trips.
-The candidate rejects that encoding and restores the default representation.
-The original reports preserve the failed assertions without treating them as verified production regressions.
-The [32-object-bit attempt](https://github.com/P4suta/find-my-files/actions/runs/42161020140) still leaves high-prefix-ID obligations incomplete after solver memory exhaustion and a safety deadline.
-Core byte harnesses use 48 object-ID bits in the verifier's [64-bit pointer encoding](https://diffblue.github.io/cbmc/memory-bounds-checking.html).
-The header and record buffers keep their existing array bounds.
-High-ID vectors contain only IDs visited within those bounded records.
-The remaining 16 offset bits cover those modeled objects without changing native integer fields, arithmetic, index checks, or unwind bounds.
-The contract, runtime, and tooling packages keep Kani's default pointer encoding.
+The byte bound, unwind bounds, assertions, and outcome covers remain unchanged.
+
+The [scalar-ID attempt](https://github.com/P4suta/find-my-files/actions/runs/42148602868) leaves high-prefix-ID obligations incomplete after solver memory exhaustion and a safety deadline.
+Changing array representation and [32-object-bit](https://github.com/P4suta/find-my-files/actions/runs/42161020140) or [48-object-bit](https://github.com/P4suta/find-my-files/actions/runs/42164231505) pointer encoding doesn't complete the affected obligations.
+An [uninterpreted-function array attempt](https://github.com/P4suta/find-my-files/actions/runs/42154422423) also reports assertion failures in unchanged contract round trips.
+The candidate keeps Kani's default pointer and array encodings.
+Those reports establish unsuccessful verification attempts without establishing a production regression or a specific solver defect.
 The external Linux solver has an exact version pin, archive byte count, and SHA-256 checksum.
 The proof setup installs the verified executable alongside Kani.
 The proof runner checks both executable versions and includes the tool configuration in its source fingerprint.
@@ -194,8 +174,9 @@ The [partition collector](sharded-proof-evidence.md) requires the complete inven
 The proof watchdog and hosted job keep their declared safety deadlines.
 A deadline stop leaves the proof incomplete.
 Every registered harness must pass before release.
-The record-chain harnesses also compare admission with a [preserved reference](../../engine/crates/fmf-core/src/ondisk/record_admission_reference.rs).
-The reference retains the parser from [the source before the refactor](https://github.com/P4suta/find-my-files/blob/5f2853732cc179e5e25b165acfc49f3efb414342/engine/crates/fmf-core/src/ondisk/record.rs).
+The record-chain harnesses also compare admission with the [bounded reference](../../engine/crates/fmf-core/src/ondisk/record_admission_reference.rs).
+The reference retains independent header and range checks from [the source before the refactor](https://github.com/P4suta/find-my-files/blob/5f2853732cc179e5e25b165acfc49f3efb414342/engine/crates/fmf-core/src/ondisk/record.rs).
+Its original membership helper participates in the insertion refinement proof.
 The file-header harness compares admission with the original geometry and reference checks from [the same source](https://github.com/P4suta/find-my-files/blob/5f2853732cc179e5e25b165acfc49f3efb414342/engine/crates/fmf-core/src/ondisk/ntfs.rs).
 The byte adapter harness links each update-sequence field to its independent little-endian bytes.
 Successful proof results establish those properties under Kani's Rust and standard-library semantics.
