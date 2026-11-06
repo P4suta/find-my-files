@@ -481,6 +481,8 @@ impl VolumeIndex {
             };
             self.tombstone_id(old);
         }
+        self.update_stat_frn(e.frn, e.size, e.mtime);
+        self.update_object_attrs_frn(e.frn, e.is_reparse, e.is_hidden, e.is_system);
         Ok(self.push_raw(e, parent))
     }
 

@@ -6,6 +6,15 @@
   "address_space_bytes": 8589934592,
   "targets": [
     {
+      "package": "fmf-core",
+      "source": "engine/crates/fmf-core/src/usn/reason_proofs.rs",
+      "prefix": "usn::reasons::kani_proofs::",
+      "harnesses": [
+        "every_reason_bit_preserves_independent_effects_and_operation_priority",
+        "reason_accumulation_preserves_both_inputs_and_repeated_flags"
+      ]
+    },
+    {
       "package": "xtask",
       "source": "xtask/src/perf_proofs.rs",
       "prefix": "perf::kani_proofs::",
@@ -353,6 +362,7 @@
         "exclusion_uses_only_the_hidden_and_system_bits",
         "file_link_kind_checks_preserve_the_requested_object",
         "metadata_projection_preserves_every_object_field",
+        "single_link_refresh_updates_every_live_object_row",
         "each_walk_state_has_one_exhaustive_entry_transition"
       ]
     },
@@ -371,6 +381,14 @@
       "harnesses": [
         "size_and_directory_implication_preserve_membership",
         "mtime_implication_preserves_membership"
+      ]
+    },
+    {
+      "package": "fmf-runtime",
+      "source": "engine/crates/fmf-runtime/src/usn/apply_proofs.rs",
+      "prefix": "usn::apply::kani_proofs::",
+      "harnesses": [
+        "metadata_refresh_preserves_exact_rows_and_outcome_counts"
       ]
     }
   ]
