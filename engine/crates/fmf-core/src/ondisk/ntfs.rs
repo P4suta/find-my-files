@@ -47,7 +47,7 @@ const ATTRIBUTE_ID_OFFSET: usize = 14;
 
 const FILE_RECORD_HEADER_BYTES: usize = 42;
 const ATTRIBUTE_HEADER_BYTES: usize = 16;
-const RESIDENT_HEADER_BYTES: usize = 24;
+pub(super) const RESIDENT_HEADER_BYTES: usize = 24;
 /// Wire size of a non-resident attribute header, before its mapping pairs.
 pub const NONRESIDENT_HEADER_BYTES: usize = 64;
 /// Wire size of one `$ATTRIBUTE_LIST` entry header, before its stream name.
