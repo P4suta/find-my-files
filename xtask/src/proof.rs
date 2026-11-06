@@ -651,6 +651,11 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
                 command.args(["--harness", name]);
             }
         }
+        command.args([
+            "--cbmc-args",
+            "--no-array-field-sensitivity",
+            "--arrays-uf-always",
+        ]);
         let status = command
             .status()
             .with_context(|| format!("start bounded Kani for {package_name}"))?;

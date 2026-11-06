@@ -137,20 +137,24 @@ Cases with the terminator in the second or third attribute keep accepted and rej
 Absent-terminator cases cover rejection and a distinct-ID chain with three complete minimal resident headers.
 The combined covers keep both original outcomes without requiring an impossible outcome in a partition.
 Every case keeps the original unwind bound of four.
-Absent-terminator cases use the pinned external `bitwuzla` solver.
-The remaining cases use `cadical` from the Kani bundle.
+The terminator partitions use `cadical` from the Kani bundle.
 The [terminator run](https://github.com/P4suta/find-my-files/actions/runs/42132841128) still exhausts SAT memory for three high-prefix-ID cases and reaches the Bitwuzla deadline in the absent-terminator invariant case.
 The run stops before completing its remaining harnesses.
 CBMC's [array field sensitivity setting](https://diffblue.github.io/cbmc/man/cbmc.html) controls which arrays have their elements expanded into separate fields.
 Expanding the complete record buffer still exhausts SAT memory in the high-prefix-ID third-terminator invariant case in the [array-expansion attempt](https://github.com/P4suta/find-my-files/actions/runs/42138664012).
 The [whole-array run](https://github.com/P4suta/find-my-files/actions/runs/42142997189) still exhausts SAT memory for three full-extent cases and exceeds the Bitwuzla deadline for an absent-terminator invariant case.
-The runner restores CBMC's default array representation after the unsuccessful experiment.
+The scalar-ID experiment restored CBMC's default array representation after the unsuccessful whole-array experiment.
 The terminator constructor supplies each prefix ID as an independent arbitrary 16-bit scalar and writes its little-endian bytes into the original record.
 The constructor assumes only the selected ID storage classes.
 Every original ID value, duplicate pair, and remaining byte stays in the combined input domain.
 A separate harness writes each original ID back into an arbitrary record and checks equality at every arbitrary observation position.
-The round-trip property establishes that scalar construction can reproduce every original byte array.
+The round-trip obligation requires scalar construction to reproduce every original byte array.
 The production validator, preserved reference, byte bound, unwind bounds, assertions, and outcome covers remain unchanged.
+The [scalar-ID run](https://github.com/P4suta/find-my-files/actions/runs/42148602868) still leaves three cases incomplete after SAT memory exhaustion and one after the Bitwuzla deadline.
+The runner keeps arrays unexpanded and selects CBMC's [uninterpreted-function array encoding](https://diffblue.github.io/cbmc/man/cbmc.html).
+The array theory supplies the constraints for reads and updates without flattening each bounded array into a bitvector.
+The encoding preserves every input element, index check, property, and bound.
+Absent-terminator partitions use the same SAT array encoding as the other cases.
 The external Linux solver has an exact version pin, archive byte count, and SHA-256 checksum.
 The proof setup installs the verified executable alongside Kani.
 The proof runner checks both executable versions and includes the tool configuration in its source fingerprint.
