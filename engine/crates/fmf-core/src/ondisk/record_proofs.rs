@@ -1,11 +1,33 @@
 use super::{
-    ALLOCATED_BYTES_FIELD, ATTRIBUTE_END, ATTRIBUTES_OFFSET_FIELD, USED_BYTES_FIELD,
+    ALLOCATED_BYTES_FIELD, ATTRIBUTE_END, ATTRIBUTES_OFFSET_FIELD, AttributeIds, USED_BYTES_FIELD,
     attributes_complete, le_u16, le_u32,
 };
 use crate::ondisk::ntfs::NtfsAttribute;
 
 #[path = "record_admission_reference.rs"]
 mod admission_reference;
+
+#[kani::proof]
+#[kani::unwind(7)]
+fn attribute_id_storage_matches_original_and_sequence_membership() {
+    let input: [u16; 6] = kani::any();
+    let mut ids = AttributeIds::default();
+    let mut original_low = 0;
+    let mut original_high = alloc::vec::Vec::new();
+    let mut rejected = false;
+    for (index, id) in input.into_iter().enumerate() {
+        let expected = !input[..index].contains(&id);
+        let inserted = ids.insert(id);
+        assert_eq!(inserted, expected);
+        assert_eq!(
+            admission_reference::unique_attribute_id(id, &mut original_low, &mut original_high),
+            expected
+        );
+        rejected |= !inserted;
+    }
+    kani::cover!(ids.overflow.len() >= 2);
+    kani::cover!(rejected);
+}
 
 const PROOF_BYTES: usize = 128;
 const _: () = assert!(PROOF_BYTES <= u8::MAX as usize);
