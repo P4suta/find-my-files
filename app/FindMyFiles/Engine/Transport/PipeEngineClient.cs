@@ -23,6 +23,7 @@ internal sealed class PipeEngineClient : IEngineClient
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(5);
 
     private readonly string _pipeName;
+    private readonly TimeProvider _requestTimeProvider;
     private readonly Func<SafePipeHandle, bool> _isServerTrusted;
     private readonly CancellationTokenSource _cts = new();
     private readonly ConcurrentDictionary<uint, PendingRequest> _pending = new();
@@ -49,6 +50,9 @@ internal sealed class PipeEngineClient : IEngineClient
 #if FMF_TEST_SEAMS
     /// <summary>Deterministic race seam: pauses after a request's deadline expires but before its captured connection is retired.</summary>
     internal Func<Task>? BeforeTimeoutRetireForTests { get; set; }
+
+    /// <summary>Runs after current-connection disposal so tests can control competing supervisor cleanup.</summary>
+    internal Action? AfterRetiredConnectionDisposedForTests { get; set; }
 
     /// <summary>Deterministic race seam: pauses after a presentation basis is leased but before its epoch is admitted to the request table.</summary>
     internal Func<Task>? AfterBasisAcquireForTests { get; set; }
@@ -110,22 +114,31 @@ internal sealed class PipeEngineClient : IEngineClient
 
     /// <summary>Tests pass autoStart=false to attach event handlers before the supervisor races them to the first connection.</summary> <param name="pipeName">Pipe to connect to, short name or full path.</param> <param name="autoStart">Whether to start the supervisor loop immediately.</param>
     internal PipeEngineClient(string pipeName, bool autoStart)
+        : this(pipeName, autoStart, TimeProvider.System)
+    {
+    }
+
+    /// <summary>Constructs a client with an explicit request clock.</summary> <param name="pipeName">Pipe name.</param> <param name="autoStart">Whether to start the supervisor immediately.</param> <param name="requestTimeProvider">Clock used for request deadlines.</param>
+    internal PipeEngineClient(string pipeName, bool autoStart, TimeProvider requestTimeProvider)
         : this(
             pipeName,
             autoStart,
             ShouldVerifyServerIdentity(ToShortName(pipeName)),
-            PipeServerIdentity.IsServerTrusted)
+            PipeServerIdentity.IsServerTrusted,
+            requestTimeProvider)
     {
     }
 
-    /// <summary>Constructs a client with an explicit identity boundary for deterministic security-branch tests.</summary> <param name="pipeName">Pipe to connect to, short name or full path.</param> <param name="autoStart">Whether to start the supervisor immediately.</param> <param name="verifyServerIdentity">Whether this pipe requires SCM identity verification.</param> <param name="isServerTrusted">Handle-bound identity verifier.</param>
+    /// <summary>Constructs a client with an explicit identity boundary for deterministic security-branch tests.</summary> <param name="pipeName">Pipe to connect to, short name or full path.</param> <param name="autoStart">Whether to start the supervisor immediately.</param> <param name="verifyServerIdentity">Whether this pipe requires SCM identity verification.</param> <param name="isServerTrusted">Handle-bound identity verifier.</param> <param name="requestTimeProvider">Request clock, or null for the system clock.</param>
     internal PipeEngineClient(
         string pipeName,
         bool autoStart,
         bool verifyServerIdentity,
-        Func<SafePipeHandle, bool> isServerTrusted)
+        Func<SafePipeHandle, bool> isServerTrusted,
+        TimeProvider? requestTimeProvider = null)
     {
         _pipeName = ToShortName(pipeName);
+        _requestTimeProvider = requestTimeProvider ?? TimeProvider.System;
         _verifyServerIdentity = verifyServerIdentity;
         _isServerTrusted = isServerTrusted;
         if (autoStart)
@@ -545,10 +558,17 @@ internal sealed class PipeEngineClient : IEngineClient
     /// The compare-exchange clears the public slot only when it still names this exact object; disposal and pending-request failure remain scoped to the captured epoch, so an old deadline can never tear down or fail a replacement connection.</summary>
     private bool RetireConnection(PipeConnection expected, string reason)
     {
+        reason = expected.BeginRetirement(reason);
         var wasCurrent = ReferenceEquals(
             Interlocked.CompareExchange(ref _connection, null, expected),
             expected);
         expected.Dispose();
+#if FMF_TEST_SEAMS
+        if (wasCurrent)
+        {
+            AfterRetiredConnectionDisposedForTests?.Invoke();
+        }
+#endif
         FailPendingRequests(expected.Epoch, reason);
         return wasCurrent;
     }
@@ -664,7 +684,7 @@ internal sealed class PipeEngineClient : IEngineClient
             }
 
             var (status, responsePayload) = await tcs.Task
-                .WaitAsync(RequestTimeout, linked.Token)
+                .WaitAsync(RequestTimeout, _requestTimeProvider, linked.Token)
                 .ConfigureAwait(false);
             return (status, responsePayload, conn.Epoch);
         }
