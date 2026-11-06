@@ -25,6 +25,11 @@ GitHub authentication, ref metadata, runner isolation, and the authorization API
 Regression tests check the adapter's commit, ref, event, and actor interpretation.
 
 Both purposes use the same shard builders, exact inventories, accepted equivalents, and raw-evidence verifier.
+The Rust executor and independent verifier share the local runner's [cargo-mutants exit protocol](https://mutants.rs/exit-codes.html).
+Exit code 2 is consistent with a completed report containing survivors.
+Acceptance still requires the exact reviewed survivor set, a passing baseline, complete outcome partitions, and no timeout.
+Missing, mismatched, failed, or incomplete process results supply no accepted evidence.
+The source-bound exit-protocol harness checks every native outcome count and optional process code.
 Candidate evidence has a distinct artifact name and binds its exact run and controller.
 The default purpose remains protected-main.
 The Release workflow keeps that default and reruns the full campaign with its protected-main controller and Release run identity.
