@@ -32,6 +32,15 @@ os = ["windows/x64"]
 version_list_url = "https://api.github.com/repos/microsoft/winappCli/releases/latest"
 version_json_path = ".tag_name"
 
+[tools."http:z3"]
+version = "5.3.3"
+url = "https://github.com/Z3Prover/z3/releases/download/z3-{{ version }}/z3-{{ version }}-x64-glibc-2.39.zip"
+checksum = "sha256:d56f60b06f432f33de5810f7f1a384a339131f361e2d54d08ea83eea14326880"
+size = "69671358"
+os = ["linux/x64"]
+version_list_url = "https://api.github.com/repos/Z3Prover/z3/releases/latest"
+version_json_path = ".tag_name"
+
 [tools."cargo:https://github.com/P4suta/OComment"]
 version = "rev:8aaf39a3e2e8b97717c539fe52786c3eca793312"
 crate = "ocomment"

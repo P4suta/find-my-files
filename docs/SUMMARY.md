@@ -66,3 +66,5 @@
 - [Sharded proof evidence](adr/sharded-proof-evidence.md)
 - [Checked arithmetic verification](adr/checked-arithmetic-verification.md)
 - [Performance execution identity](adr/performance-execution-identity.md)
+- [Overflow map verification model](adr/overflow-map-verification-model.md)
+- [Timestamp projection verification](adr/mtime-verification-contract.md)
