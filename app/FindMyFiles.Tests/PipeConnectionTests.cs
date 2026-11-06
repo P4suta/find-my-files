@@ -9,6 +9,7 @@ namespace FindMyFiles.Tests;
 /// <summary> <see cref="PipeConnection"/> in isolation, over a raw in-test pipe pair:
 /// the connection object owns its own life — a write racing teardown is answered by the object (normalized transport exception), which is the structural replacement for the old "volatile null-check, then write" convention in PipeEngineClient.
 /// </summary>
+[Collection(PipeConnectionContractOrderer.CollectionName)]
 public sealed class PipeConnectionTests
 {
     private static async Task<(NamedPipeServerStream Server, NamedPipeClientStream Client)>
@@ -27,6 +28,20 @@ public sealed class PipeConnectionTests
 
     private static PipeConnection Wrap(NamedPipeClientStream client, int epoch = 1) =>
         new(client, epoch, (_, _, _) => { }, (_, _, _, _, _) => { }, CancellationToken.None);
+
+    private static async Task DrainFrameAsync(
+        NamedPipeServerStream server,
+        int frameLength,
+        CancellationToken ct)
+    {
+        try
+        {
+            await server.ReadExactlyAsync(new byte[frameLength], ct);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+        }
+    }
 
     private static async Task<string> CaptureLogAsync(Func<Task> action)
     {
@@ -131,13 +146,23 @@ public sealed class PipeConnectionTests
                 connection.Dispose();
             }
 
-            var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() =>
-                connection.WriteFrameAsync(
-                    PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []),
-                    TestContext.Current.CancellationToken));
-            Assert.Equal("deadline expired", failure.Message);
-            connection.Dispose();
-            await connection.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            var frame = PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []);
+            using var drainCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                TestContext.Current.CancellationToken);
+            var drain = DrainFrameAsync(server, frame.Length, drainCancellation.Token);
+            try
+            {
+                var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() =>
+                    connection.WriteFrameAsync(frame, TestContext.Current.CancellationToken));
+                Assert.Equal("deadline expired", failure.Message);
+                connection.Dispose();
+                await connection.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            }
+            finally
+            {
+                await drainCancellation.CancelAsync();
+                await drain;
+            }
         }
     }
 
@@ -153,16 +178,26 @@ public sealed class PipeConnectionTests
             {
                 writeAdmitted = true;
                 Assert.Equal("deadline expired", connection.BeginRetirement("deadline expired"));
-                server.Dispose();
+                connection.Dispose();
             };
-            var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() =>
-                connection.WriteFrameAsync(
-                    PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []),
-                    TestContext.Current.CancellationToken));
-            Assert.True(writeAdmitted);
-            Assert.Equal("deadline expired", failure.Message);
-            connection.Dispose();
-            await connection.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            var frame = PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []);
+            using var drainCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                TestContext.Current.CancellationToken);
+            var drain = DrainFrameAsync(server, frame.Length, drainCancellation.Token);
+            try
+            {
+                var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() =>
+                    connection.WriteFrameAsync(frame, TestContext.Current.CancellationToken));
+                Assert.True(writeAdmitted);
+                Assert.Equal("deadline expired", failure.Message);
+                connection.Dispose();
+                await connection.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            }
+            finally
+            {
+                await drainCancellation.CancelAsync();
+                await drain;
+            }
         }
     }
 
