@@ -215,6 +215,23 @@ fn check_prefix_id_partition<const START: u16, const FIRST: u32>(bytes: &[u8; PR
     }
 }
 
+fn check_admission_for_prefix_ids<
+    const START: u16,
+    const FIRST: u32,
+    const FIRST_HIGH: bool,
+    const SECOND_HIGH: bool,
+>(
+    bytes: &[u8; PROOF_BYTES],
+    length: usize,
+) -> AdmissionChecks {
+    check_prefix_ids::<START, FIRST, FIRST_HIGH, SECOND_HIGH>(bytes);
+    let record = &bytes[..length];
+    AdmissionChecks {
+        accepted: attributes_complete(record),
+        reference: admission_reference::attributes_complete(record),
+    }
+}
+
 fn check_admission_by_prefix_ids<const START: u16, const FIRST: u32>(
     bytes: &[u8; PROOF_BYTES],
     length: usize,
@@ -225,6 +242,19 @@ fn check_admission_by_prefix_ids<const START: u16, const FIRST: u32>(
         accepted: attributes_complete(record),
         reference: admission_reference::attributes_complete(record),
     }
+}
+
+fn check_invariants_for_prefix_ids<
+    const START: u16,
+    const FIRST: u32,
+    const FIRST_HIGH: bool,
+    const SECOND_HIGH: bool,
+>(
+    bytes: &[u8; PROOF_BYTES],
+    length: usize,
+) -> ChainChecks {
+    check_prefix_ids::<START, FIRST, FIRST_HIGH, SECOND_HIGH>(bytes);
+    check_chain_invariants(&bytes[..length])
 }
 
 fn check_invariants_by_prefix_ids<const START: u16, const FIRST: u32>(
