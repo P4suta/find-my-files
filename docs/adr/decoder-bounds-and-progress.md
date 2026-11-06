@@ -126,8 +126,7 @@ Cases with the terminator in the second or third attribute keep accepted and rej
 Absent-terminator cases cover rejection and a distinct-ID chain with three complete minimal resident headers.
 The combined covers keep both original outcomes without requiring an impossible outcome in a partition.
 Every case keeps the original unwind bound of four.
-Absent-terminator cases use the pinned external `bitwuzla` solver.
-The remaining cases use `cadical` from the Kani bundle.
+All record-chain cases use `cadical` from the Kani bundle.
 The terminator constructor supplies each prefix ID as an independent arbitrary 16-bit scalar and writes its little-endian bytes into the original record.
 The constructor assumes only the selected ID storage classes.
 Every original ID value, duplicate pair, and remaining byte stays in the combined input domain.
@@ -140,6 +139,9 @@ Changing array representation and [32-object-bit](https://github.com/P4suta/find
 An [uninterpreted-function array attempt](https://github.com/P4suta/find-my-files/actions/runs/42154422423) also reports assertion failures in unchanged contract round trips.
 The candidate keeps Kani's default pointer and array encodings.
 Those reports establish unsuccessful verification attempts without establishing a production regression or a specific solver defect.
+After inline ID storage removes allocation from bounded record chains, the [first attempt](https://github.com/P4suta/find-my-files/actions/runs/42169162607) still leaves one absent-terminator invariant unfinished at the existing 300-second SMT deadline.
+The four absent-terminator obligations use the same bundled SAT solver as the remaining record-chain obligations.
+Their input domains, assertions, covers, and unwind bounds stay unchanged.
 The external Linux solver has an exact version pin, archive byte count, and SHA-256 checksum.
 The proof setup installs the verified executable alongside Kani.
 The proof runner checks both executable versions and includes the tool configuration in its source fingerprint.
