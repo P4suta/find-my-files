@@ -1,6 +1,27 @@
 use super::{Authority, Event, Origin, Purpose};
 
 #[kani::proof]
+#[kani::unwind(1)]
+fn rust_exit_protocol_preserves_every_terminal_outcome_count() {
+    let survivors: usize = kani::any();
+    let timeouts: usize = kani::any();
+    let code: Option<i32> = kani::any();
+    let expected = crate::mutation::cargo_mutants_expected_exit(survivors, timeouts);
+    assert_eq!(expected == 0, survivors == 0 && timeouts == 0);
+    assert_eq!(expected == 2, survivors > 0 && timeouts == 0);
+    assert_eq!(expected == 3, timeouts > 0);
+    let complete = crate::mutation::cargo_mutants_completed(code, survivors, timeouts);
+    assert_eq!(
+        complete,
+        (survivors == 0 && timeouts == 0 && code == Some(0))
+            || (survivors > 0 && timeouts == 0 && code == Some(2))
+    );
+    kani::cover!(complete && survivors == 0);
+    kani::cover!(complete && survivors == usize::MAX);
+    kani::cover!(!complete && timeouts == usize::MAX);
+}
+
+#[kani::proof]
 #[kani::unwind(2)]
 fn candidate_audits_never_authorize_protected_main_execution() {
     let origin = match kani::any::<u8>() % 3 {
