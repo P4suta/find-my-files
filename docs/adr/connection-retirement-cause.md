@@ -31,6 +31,14 @@ Retirement remains scoped to the captured connection object and its epoch.
 A stale deadline can't clear a replacement connection or fail the replacement's pending requests.
 Caller cancellation and disposal without a retirement cause keep their existing behavior.
 
+For admitted requests, the completion boundary normalizes connection failures when it observes caller cancellation or client disposal.
+Caller cancellation takes priority and preserves the caller's token.
+Client disposal produces the client-disposed error when the caller hasn't canceled.
+An uncanceled live client uses the recorded connection cause.
+The [runtime wait implementation](https://github.com/dotnet/runtime/blob/v10.0.0/src/libraries/System.Private.CoreLib/src/System/Threading/Tasks/Future.cs) can return an already-completed task before checking its cancellation token.
+Native tests pause after writing the request and before attaching its response wait.
+They check all combinations of caller cancellation and client disposal.
+
 The request clock is an optional constructor dependency.
 Production constructors use the system clock.
 The tests use Microsoft's pinned virtual clock and observe timer registration before advancing time.

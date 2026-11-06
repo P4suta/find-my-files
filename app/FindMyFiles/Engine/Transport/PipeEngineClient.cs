@@ -54,6 +54,9 @@ internal sealed class PipeEngineClient : IEngineClient
     /// <summary>Runs after current-connection disposal so tests can control competing supervisor cleanup.</summary>
     internal Action? AfterRetiredConnectionDisposedForTests { get; set; }
 
+    /// <summary>Pauses after a frame write and before attaching its response wait.</summary>
+    internal Func<Task>? AfterRequestWriteForTests { get; set; }
+
     /// <summary>Deterministic race seam: pauses after a presentation basis is leased but before its epoch is admitted to the request table.</summary>
     internal Func<Task>? AfterBasisAcquireForTests { get; set; }
 
@@ -671,6 +674,12 @@ internal sealed class PipeEngineClient : IEngineClient
                 ? _cts.Token
                 : linked.Token;
             await conn.WriteFrameAsync(frame, writeCancellation).ConfigureAwait(false);
+#if FMF_TEST_SEAMS
+            if (AfterRequestWriteForTests is { } afterWrite)
+            {
+                await afterWrite().ConfigureAwait(false);
+            }
+#endif
             if (queryCancelMode == QueryCancelMode.OnCallerCancellation)
             {
                 queryCancellation = ct.UnsafeRegister(
@@ -702,6 +711,14 @@ internal sealed class PipeEngineClient : IEngineClient
                 $"request (opcode {opcode}) timed out after {RequestTimeout.TotalSeconds:F0}s");
             throw new EngineUnavailableException(
                 $"request (opcode {opcode}) timed out after {RequestTimeout.TotalSeconds:F0}s");
+        }
+        catch (EngineUnavailableException) when (ct.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(ct);
+        }
+        catch (EngineUnavailableException) when (_cts.IsCancellationRequested)
+        {
+            throw new EngineUnavailableException("engine client disposed");
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {

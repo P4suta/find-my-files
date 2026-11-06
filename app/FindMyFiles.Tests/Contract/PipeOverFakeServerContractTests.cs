@@ -59,11 +59,17 @@ public sealed class PipeOverFakeServerContractTests(ITestOutputHelper output)
         var pipe = (PipeEngineClient)client;
         var epochBefore = pipe.CurrentEpoch;
         _server!.DisconnectAll();
-        await WaitUntilAsync(
-            () => pipe.CurrentEpoch != epochBefore, "connection epoch turn");
-        await WaitUntilAsync(
-            () => pipe.Connection == EngineConnectionState.Connected,
-            "reconnect to FakePipeServer");
+        await WaitForPublishedReplacementAsync(pipe, epochBefore);
         return true;
     }
+
+    internal static Task WaitForPublishedReplacementAsync(PipeEngineClient pipe, int epochBefore) =>
+        WaitUntilAsync(
+            () => IsPublishedReplacement(pipe, epochBefore),
+            "published replacement connection");
+
+    internal static bool IsPublishedReplacement(PipeEngineClient pipe, int epochBefore) =>
+        pipe.CurrentPipeConnectionForTests is { Epoch: var epoch }
+        && epoch != epochBefore
+        && pipe.Connection == EngineConnectionState.Connected;
 }
