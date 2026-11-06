@@ -198,6 +198,23 @@ fn check_prefix_ids<
     );
 }
 
+fn check_prefix_id_partition<const START: u16, const FIRST: u32>(bytes: &[u8; PROOF_BYTES]) {
+    match prefix_ids_at::<START, FIRST>(bytes) {
+        PrefixIds::BitsetPair => {
+            check_prefix_ids::<START, FIRST, false, false>(bytes);
+        }
+        PrefixIds::FirstHigh => {
+            check_prefix_ids::<START, FIRST, true, false>(bytes);
+        }
+        PrefixIds::SecondHigh => {
+            check_prefix_ids::<START, FIRST, false, true>(bytes);
+        }
+        PrefixIds::HighPair => {
+            check_prefix_ids::<START, FIRST, true, true>(bytes);
+        }
+    }
+}
+
 fn check_admission_for_prefix_ids<
     const START: u16,
     const FIRST: u32,
@@ -219,19 +236,11 @@ fn check_admission_by_prefix_ids<const START: u16, const FIRST: u32>(
     bytes: &[u8; PROOF_BYTES],
     length: usize,
 ) -> AdmissionChecks {
-    match prefix_ids_at::<START, FIRST>(bytes) {
-        PrefixIds::BitsetPair => {
-            check_admission_for_prefix_ids::<START, FIRST, false, false>(bytes, length)
-        }
-        PrefixIds::FirstHigh => {
-            check_admission_for_prefix_ids::<START, FIRST, true, false>(bytes, length)
-        }
-        PrefixIds::SecondHigh => {
-            check_admission_for_prefix_ids::<START, FIRST, false, true>(bytes, length)
-        }
-        PrefixIds::HighPair => {
-            check_admission_for_prefix_ids::<START, FIRST, true, true>(bytes, length)
-        }
+    check_prefix_id_partition::<START, FIRST>(bytes);
+    let record = &bytes[..length];
+    AdmissionChecks {
+        accepted: attributes_complete(record),
+        reference: admission_reference::attributes_complete(record),
     }
 }
 
@@ -252,20 +261,8 @@ fn check_invariants_by_prefix_ids<const START: u16, const FIRST: u32>(
     bytes: &[u8; PROOF_BYTES],
     length: usize,
 ) -> ChainChecks {
-    match prefix_ids_at::<START, FIRST>(bytes) {
-        PrefixIds::BitsetPair => {
-            check_invariants_for_prefix_ids::<START, FIRST, false, false>(bytes, length)
-        }
-        PrefixIds::FirstHigh => {
-            check_invariants_for_prefix_ids::<START, FIRST, true, false>(bytes, length)
-        }
-        PrefixIds::SecondHigh => {
-            check_invariants_for_prefix_ids::<START, FIRST, false, true>(bytes, length)
-        }
-        PrefixIds::HighPair => {
-            check_invariants_for_prefix_ids::<START, FIRST, true, true>(bytes, length)
-        }
-    }
+    check_prefix_id_partition::<START, FIRST>(bytes);
+    check_chain_invariants(&bytes[..length])
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
