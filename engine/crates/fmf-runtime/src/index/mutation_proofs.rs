@@ -99,15 +99,13 @@ fn timestamp_contract_preserves_clamping_in_the_runtime_build() {
     kani::cover!(ticks == i64::MAX);
 }
 
-fn check_link_refresh<const REPLACE: bool, const VALID_PARENT: bool>(
-    aspect: MetadataAspect,
-) -> (bool, u64) {
+fn metadata_pair(name: &[u16]) -> (RawEntry<'_>, RawEntry<'_>) {
     let root = ROOT_FRN;
     let object = SHARED_FILE_FRN;
     let original = RawEntry {
         parent_frn: root,
         frn: object,
-        name_utf16: &[u16::from(b'a')],
+        name_utf16: name,
         is_dir: false,
         is_reparse: kani::any(),
         is_hidden: kani::any(),
@@ -126,8 +124,30 @@ fn check_link_refresh<const REPLACE: bool, const VALID_PARENT: bool>(
     prepare_time_pair(original.mtime, updated.mtime, kani::any(), kani::any());
     kani::cover!(original.mtime == i64::MIN && updated.mtime == i64::MAX);
     kani::cover!(original.mtime == updated.mtime);
+    (original, updated)
+}
+
+fn check_link_refresh<const REPLACE: bool, const VALID_PARENT: bool>(
+    aspect: MetadataAspect,
+) -> (bool, u64) {
+    let name = [u16::from(b'a')];
+    let (original, updated) = metadata_pair(&name);
     super::super::overflow_model::check_link_refresh::<REPLACE, VALID_PARENT>(
         &original, &updated, aspect,
+    )
+}
+
+fn check_generation_refresh<const REPLACE: bool>() -> (bool, u64) {
+    let name = [u16::from(b'a')];
+    let (original, updated) = metadata_pair(&name);
+    let time_changed = projected_mtime(original.mtime) != projected_mtime(updated.mtime);
+    kani::cover!(original.size != updated.size);
+    kani::cover!(original.size == updated.size && time_changed);
+    kani::cover!(original.size == updated.size && !time_changed);
+    super::super::overflow_model::check_link_refresh::<REPLACE, true>(
+        &original,
+        &updated,
+        MetadataAspect::Generation,
     )
 }
 
@@ -135,7 +155,7 @@ fn check_link_refresh<const REPLACE: bool, const VALID_PARENT: bool>(
 #[kani::unwind(6)]
 #[kani::solver(cadical)]
 #[kani::stub(fmf_core::dates::mtime_ticks_to_secs, projected_mtime)]
-fn replacing_link_preserves_topology_and_metadata_generation() {
+fn replacing_link_preserves_topology() {
     let (accepted, size) = check_link_refresh::<true, true>(MetadataAspect::Topology);
     assert!(accepted);
     kani::cover!(size >= u64::from(u32::MAX));
@@ -146,8 +166,30 @@ fn replacing_link_preserves_topology_and_metadata_generation() {
 #[kani::unwind(6)]
 #[kani::solver(cadical)]
 #[kani::stub(fmf_core::dates::mtime_ticks_to_secs, projected_mtime)]
-fn appending_link_preserves_topology_and_metadata_generation() {
+fn appending_link_preserves_topology() {
     let (accepted, size) = check_link_refresh::<false, true>(MetadataAspect::Topology);
+    assert!(accepted);
+    kani::cover!(size >= u64::from(u32::MAX));
+    kani::cover!(size < u64::from(u32::MAX));
+}
+
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::solver(cadical)]
+#[kani::stub(fmf_core::dates::mtime_ticks_to_secs, projected_mtime)]
+fn replacing_link_preserves_other_links_and_root() {
+    let (accepted, size) = check_link_refresh::<true, true>(MetadataAspect::UntouchedTopology);
+    assert!(accepted);
+    kani::cover!(size >= u64::from(u32::MAX));
+    kani::cover!(size < u64::from(u32::MAX));
+}
+
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::solver(cadical)]
+#[kani::stub(fmf_core::dates::mtime_ticks_to_secs, projected_mtime)]
+fn appending_link_preserves_other_links_and_root() {
+    let (accepted, size) = check_link_refresh::<false, true>(MetadataAspect::UntouchedTopology);
     assert!(accepted);
     kani::cover!(size >= u64::from(u32::MAX));
     kani::cover!(size < u64::from(u32::MAX));
@@ -236,6 +278,28 @@ fn replacing_link_refreshes_every_shared_attribute() {
 #[kani::stub(fmf_core::dates::mtime_ticks_to_secs, projected_mtime)]
 fn appending_link_refreshes_every_shared_attribute() {
     let (accepted, size) = check_link_refresh::<false, true>(MetadataAspect::Attributes);
+    assert!(accepted);
+    kani::cover!(size >= u64::from(u32::MAX));
+    kani::cover!(size < u64::from(u32::MAX));
+}
+
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::solver(cadical)]
+#[kani::stub(fmf_core::dates::mtime_ticks_to_secs, projected_mtime)]
+fn replacing_link_advances_generation_for_changed_shared_metadata() {
+    let (accepted, size) = check_generation_refresh::<true>();
+    assert!(accepted);
+    kani::cover!(size >= u64::from(u32::MAX));
+    kani::cover!(size < u64::from(u32::MAX));
+}
+
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::solver(cadical)]
+#[kani::stub(fmf_core::dates::mtime_ticks_to_secs, projected_mtime)]
+fn appending_link_advances_generation_for_changed_shared_metadata() {
+    let (accepted, size) = check_generation_refresh::<false>();
     assert!(accepted);
     kani::cover!(size >= u64::from(u32::MAX));
     kani::cover!(size < u64::from(u32::MAX));

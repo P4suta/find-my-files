@@ -179,6 +179,8 @@ pub(super) fn shared_metadata_fixture(original: &super::RawEntry<'_>) -> super::
 pub(super) enum MetadataAspect {
     All,
     Topology,
+    UntouchedTopology,
+    Generation,
     Sizes,
     Timestamps,
     Attributes,
@@ -201,8 +203,8 @@ pub(super) fn check_link_refresh<const REPLACE: bool, const VALID_PARENT: bool>(
     let object = original.frn;
     let mut index = shared_metadata_fixture(original);
     assert_eq!(index.len(), INITIAL_ROWS);
-    assert_eq!(index.frn(FIRST_LINK), object);
-    assert_eq!(index.frn(SECOND_LINK), object);
+    assert_eq!(index.frn(FIRST_LINK).0, object.0);
+    assert_eq!(index.frn(SECOND_LINK).0, object.0);
     assert_eq!(index.stat_generation, 0);
     let previous_generation = index.stat_generation;
     let previous_seconds = index.mtime[FIRST_LINK as usize];
@@ -216,7 +218,9 @@ pub(super) fn check_link_refresh<const REPLACE: bool, const VALID_PARENT: bool>(
     let result = index.upsert_link_usn(&updated);
     assert_eq!(result.is_ok(), VALID_PARENT);
     if VALID_PARENT {
-        let inserted = result.expect("the admitted parent must accept the file link");
+        let Ok(inserted) = result else {
+            panic!("the admitted parent must accept the file link");
+        };
         let expected_seconds = crate::query::dates::mtime_ticks_to_secs(updated.mtime);
         if aspect.includes(MetadataAspect::Topology) {
             assert_eq!(inserted, APPENDED_LINK);
@@ -231,7 +235,7 @@ pub(super) fn check_link_refresh<const REPLACE: bool, const VALID_PARENT: bool>(
         ] {
             if aspect.includes(MetadataAspect::Topology) {
                 assert!(index.is_live(id));
-                assert_eq!(index.frn(id), object);
+                assert_eq!(index.frn(id).0, object.0);
             }
             if aspect.includes(MetadataAspect::Sizes) {
                 assert_eq!(index.size(id), updated.size);
@@ -261,7 +265,7 @@ pub(super) fn check_link_refresh<const REPLACE: bool, const VALID_PARENT: bool>(
                 );
             }
         }
-        if aspect.includes(MetadataAspect::Topology)
+        if aspect.includes(MetadataAspect::Generation)
             && (original.size != updated.size || previous_seconds != expected_seconds)
         {
             assert!(index.stat_generation > previous_generation);
@@ -272,7 +276,7 @@ pub(super) fn check_link_refresh<const REPLACE: bool, const VALID_PARENT: bool>(
         assert_eq!(index.stat_generation, previous_generation);
         for id in [FIRST_LINK, SECOND_LINK] {
             assert!(index.is_live(id));
-            assert_eq!(index.frn(id), object);
+            assert_eq!(index.frn(id).0, object.0);
             assert_eq!(index.size(id), original.size);
             assert_eq!(index.mtime[id as usize], previous_seconds);
             assert_eq!(
@@ -294,14 +298,14 @@ pub(super) fn check_link_refresh<const REPLACE: bool, const VALID_PARENT: bool>(
             );
         }
     }
-    if aspect.includes(MetadataAspect::Topology) {
+    if aspect.includes(MetadataAspect::UntouchedTopology) {
         assert!(index.is_live(UNRELATED_LINK));
-        assert_eq!(index.frn(UNRELATED_LINK), UNRELATED_FRN);
+        assert_eq!(index.frn(UNRELATED_LINK).0, UNRELATED_FRN.0);
         assert_eq!(index.parent(UNRELATED_LINK), VolumeIndex::ROOT);
         assert_eq!(index.name(UNRELATED_LINK), b"x");
         assert!(index.is_dir(VolumeIndex::ROOT));
         assert!(index.is_live(VolumeIndex::ROOT));
-        assert_eq!(index.frn(VolumeIndex::ROOT), root);
+        assert_eq!(index.frn(VolumeIndex::ROOT).0, root.0);
     }
     if aspect.includes(MetadataAspect::Sizes) {
         assert_eq!(index.size(UNRELATED_LINK), u64::from(UNRELATED_SIZE));

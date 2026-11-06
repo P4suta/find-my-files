@@ -21,7 +21,7 @@ Reject insertions exceeding the bound.
 Keep production mutation calls and metadata inputs.
 Compare fixture columns with native events.
 Cover every replacement and parent-admission combination.
-Separate successful transitions into topology, size, timestamp, and attribute obligations.
+Separate successful transitions into link topology, untouched rows, generation, size, timestamp, and attribute obligations.
 Derive unwind bounds from row and name geometry.
 Prove insertion, lookup, and removal over arbitrary bounded entries, keys, and values.
 
