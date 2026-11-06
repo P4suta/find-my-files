@@ -23,6 +23,7 @@ const ADJACENT_RANGES: usize = 2;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use fmf_core::ondisk::attribute_list::{ClosureLimits, ClosureWork, ExtentLayout};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::ntfs::{
@@ -38,6 +39,11 @@ const MAX_LIST_BYTES: u64 = 16 << 20;
 const MAX_LIST_RUNS: usize = 16_384;
 const MAX_CLOSURE_PASSES: usize = 64;
 const MAX_CLOSURE_SCAN_BYTES: u64 = 64 << 20;
+const CLOSURE_LIMITS: ClosureLimits = ClosureLimits {
+    passes: MAX_CLOSURE_PASSES,
+    scanned_bytes: MAX_CLOSURE_SCAN_BYTES,
+    entries: MAX_LIST_ENTRIES,
+};
 
 /// One decoded `$ATTRIBUTE_LIST` entry: where an attribute of a split file actually lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -373,10 +379,7 @@ pub fn decode_extent_runs(
     cluster_size: u64,
     volume_size: u64,
 ) -> Option<(u64, Vec<StreamRun>)> {
-    if cluster_size == 0
-        || volume_size == 0
-        || !cluster_size.is_power_of_two()
-        || attr.header.name_length != 0
+    if attr.header.name_length != 0
         || attr.header.flags != 0
         || !matches!(
             attr.header.type_id,
@@ -388,14 +391,16 @@ pub fn decode_extent_runs(
         return None;
     }
     let header = attr.nonresident_header()?;
-    let lowest_vcn = u64::try_from(header.lowest_vcn).ok()?;
-    let highest_vcn = u64::try_from(header.highest_vcn).ok()?;
-    let extent_clusters = highest_vcn.checked_sub(lowest_vcn)?.checked_add(1)?;
-    let logical_base = lowest_vcn.checked_mul(cluster_size)?;
-    let logical_extent_end = highest_vcn.checked_add(1)?.checked_mul(cluster_size)?;
-    if logical_extent_end > volume_size {
-        return None;
-    }
+    let layout = ExtentLayout::new(
+        header.lowest_vcn,
+        header.highest_vcn,
+        cluster_size,
+        volume_size,
+    )?;
+    let lowest_vcn = layout.lowest_vcn();
+    let extent_clusters = layout.clusters();
+    let logical_base = layout.logical_base();
+    let logical_extent_end = layout.logical_end();
     let data_size = header.data_size;
     let bytes = attr.data();
     if bytes
@@ -504,13 +509,32 @@ pub fn covered_prefix(runs: &[StreamRun]) -> u64 {
 /// Returning `Some` means the runs cover `data_size` contiguously.
 /// Any decode failure or an iteration that cannot extend the prefix fails closed.
 pub fn close_extent_runs(
+    runs: Vec<StreamRun>,
+    data_size: u64,
+    base_extent: ListEntry,
+    discover: impl FnMut(&[StreamRun], u64) -> Option<Vec<ListEntry>>,
+    decode: impl FnMut(ListEntry) -> Option<Vec<StreamRun>>,
+) -> Option<Vec<StreamRun>> {
+    close_extent_runs_bounded(
+        runs,
+        data_size,
+        base_extent,
+        discover,
+        decode,
+        CLOSURE_LIMITS,
+    )
+}
+
+fn close_extent_runs_bounded(
     mut runs: Vec<StreamRun>,
     data_size: u64,
     base_extent: ListEntry,
     mut discover: impl FnMut(&[StreamRun], u64) -> Option<Vec<ListEntry>>,
     mut decode: impl FnMut(ListEntry) -> Option<Vec<StreamRun>>,
+    limits: ClosureLimits,
 ) -> Option<Vec<StreamRun>> {
-    if base_extent.type_id != NtfsAttributeType::AttributeList as u32
+    if limits.entries == 0
+        || base_extent.type_id != NtfsAttributeType::AttributeList as u32
         || base_extent.name_length != 0
         || base_extent.target_reference >> (u64::BITS - u16::BITS) == 0
         || !partial_runs_are_valid(&runs, data_size)
@@ -527,8 +551,7 @@ pub fn close_extent_runs(
         ),
     );
     let mut scanned_prefix = 0u64;
-    let mut scanned_bytes = 0u64;
-    let mut passes = 0usize;
+    let mut work = ClosureWork::default();
     loop {
         let prefix_len = covered_prefix(&runs).min(data_size);
         if prefix_len == data_size {
@@ -537,13 +560,9 @@ pub fn close_extent_runs(
         if prefix_len <= scanned_prefix {
             return None;
         }
-        passes += 1;
-        scanned_bytes = scanned_bytes.checked_add(prefix_len)?;
-        if passes > MAX_CLOSURE_PASSES || scanned_bytes > MAX_CLOSURE_SCAN_BYTES {
-            return None;
-        }
+        work = work.advance(prefix_len, limits)?;
         let entries = discover(&runs, prefix_len)?;
-        if entries.len() > MAX_LIST_ENTRIES {
+        if entries.len() > limits.entries {
             return None;
         }
         let mut added_extent = false;
@@ -556,7 +575,7 @@ pub fn close_extent_runs(
             }
             let identity = (entry.type_id, entry.name_length, entry.starting_vcn);
             let target = (entry.target_reference, entry.id);
-            if seen.len() == MAX_LIST_ENTRIES && !seen.contains_key(&target) {
+            if seen.len() == limits.entries && !seen.contains_key(&target) {
                 return None;
             }
             match seen.entry(target) {
@@ -707,8 +726,7 @@ pub fn visit_list_stream(
         if stream.remaining() < header_len as u64 {
             let tail_len =
                 usize::try_from(stream.remaining()).map_err(|_| ListStreamError::Invalid)?;
-            let mut tail = [0u8; ATTRIBUTE_LIST_ENTRY_BYTES - 1];
-            stream.read_exact(&mut tail[..tail_len])?;
+            stream.read_exact(&mut header[..tail_len])?;
             if prefix {
                 return Ok(());
             }
@@ -1034,6 +1052,31 @@ mod tests {
     }
 
     #[test]
+    fn list_targets_require_sequence_bits_above_every_record_bit() {
+        let valid = list_entry(NtfsAttributeType::AttributeList as u32, 0, frn(42), 1);
+        for reference in [1u64 << 48, frn(42), u64::MAX] {
+            let mut bytes = valid.clone();
+            put_u64(&mut bytes, ENTRY_TARGET_OFFSET, reference);
+            let parsed = parse_list_entries(&bytes, false).unwrap();
+            assert_eq!(parsed[0].target_reference, reference);
+            assert_eq!(stream_entries(&bytes).unwrap(), parsed);
+        }
+        for reference in [0, 1, 7, 16, 42, (1u64 << 48) - 1] {
+            let mut bytes = valid.clone();
+            put_u64(&mut bytes, ENTRY_TARGET_OFFSET, reference);
+            assert!(
+                parse_list_entries(&bytes, false).is_none(),
+                "reference {reference}"
+            );
+            assert!(
+                parse_list_entries(&bytes, true).is_none(),
+                "reference {reference}"
+            );
+            assert!(stream_entries(&bytes).is_none(), "reference {reference}");
+        }
+    }
+
+    #[test]
     fn provable_ordering_and_both_uniqueness_keys_are_strict() {
         let mut descending_type = list_entry(NtfsAttributeType::Data as u32, 0, 1, 1);
         descending_type.extend_from_slice(&list_entry(NtfsAttributeType::FileName as u32, 0, 2, 2));
@@ -1130,6 +1173,46 @@ mod tests {
         })
         .ok()
         .map(|()| visited)
+    }
+
+    #[test]
+    fn streaming_short_tails_preserve_complete_entries_and_prefix_policy() {
+        let entry = list_entry(NtfsAttributeType::AttributeList as u32, 0, frn(10), 1);
+        let stop = AtomicBool::new(false);
+        for tail_len in 1..ATTRIBUTE_LIST_ENTRY_BYTES {
+            let mut bytes = entry.clone();
+            bytes.resize(bytes.len() + tail_len, 0xA5);
+            let runs = [StreamRun {
+                logical: 0,
+                physical: Some(0),
+                len: bytes.len() as u64,
+            }];
+            for prefix in [false, true] {
+                let mut visited = Vec::new();
+                let mut cursor = std::io::Cursor::new(&bytes);
+                let result =
+                    visit_list_stream(&mut cursor, &runs, runs[0].len, &stop, prefix, |value| {
+                        visited.push(value);
+                    });
+                if prefix {
+                    assert!(result.is_ok(), "tail {tail_len}");
+                } else {
+                    assert!(
+                        matches!(result, Err(ListStreamError::Invalid)),
+                        "tail {tail_len}"
+                    );
+                }
+                assert_eq!(
+                    visited,
+                    [ListEntry::unnamed(
+                        NtfsAttributeType::AttributeList as u32,
+                        0,
+                        frn(10),
+                        1
+                    )]
+                );
+            }
+        }
     }
 
     #[test]
@@ -1828,6 +1911,593 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn word_decoder_uses_four_independent_bytes_without_neighbors() {
+        let mut bytes = [0xA5, 0x12, 0x34, 0x56, 0x78, 0xDE, 0xAD, 0xBE];
+        assert_eq!(le_u32(&bytes, 1), 0x7856_3412);
+        for (offset, expected) in [
+            (1, 0x7856_3400),
+            (2, 0x7856_0012),
+            (3, 0x7800_3412),
+            (4, 0x0056_3412),
+        ] {
+            let mut changed = bytes;
+            changed[offset] = 0;
+            assert_eq!(le_u32(&changed, 1), expected);
+        }
+        bytes[0] = 0;
+        bytes[5..].fill(0);
+        assert_eq!(le_u32(&bytes, 1), 0x7856_3412);
+    }
+
+    #[test]
+    fn list_targets_require_a_generation_and_admit_record_zero() {
+        for type_id in [0x20, 0x30, 0x80] {
+            let mut missing = list_entry(type_id, 0, frn(7), 1);
+            put_u64(&mut missing, 16, 7);
+            assert!(parse_list_entries(&missing, false).is_none());
+            let reference = 0x1234u64 << 48;
+            let valid = list_entry(type_id, 0, reference, 1);
+            let parsed = parse_list_entries(&valid, false).unwrap();
+            assert_eq!(parsed[0].target_reference, reference);
+            assert_eq!(parsed[0].target_record(), 0);
+        }
+    }
+
+    #[test]
+    fn mapping_pairs_admit_every_count_and_offset_width_through_eight() {
+        for count_width in 1..=8 {
+            for offset_width in 1..=8 {
+                let mut mapping = vec![(offset_width << 4 | count_width) as u8];
+                mapping.extend_from_slice(&2u64.to_le_bytes()[..count_width]);
+                mapping.extend_from_slice(&3i64.to_le_bytes()[..offset_width]);
+                mapping.push(0);
+                let bytes = nonresident_attr(0, 1, 8, &mapping);
+                let actual = decode_extent_runs(&NtfsAttribute::parse(&bytes).unwrap(), 4, 20);
+                assert_eq!(
+                    actual,
+                    Some((
+                        8,
+                        vec![StreamRun {
+                            logical: 0,
+                            physical: Some(12),
+                            len: 8
+                        }]
+                    )),
+                    "count width {count_width}, offset width {offset_width}"
+                );
+            }
+        }
+        for descriptor in [0x10, 0x19, 0x91] {
+            let mut mapping = vec![descriptor];
+            mapping.extend_from_slice(&[1; 18]);
+            mapping.push(0);
+            let bytes = nonresident_attr(0, 0, 4, &mapping);
+            assert!(decode_extent_runs(&NtfsAttribute::parse(&bytes).unwrap(), 4, 1024).is_none());
+        }
+    }
+
+    #[test]
+    fn extent_endpoints_admit_equality_for_independent_physical_and_logical_bounds() {
+        let physical = nonresident_attr(0, 1, 8, &[0x11, 2, 3, 0]);
+        let attr = NtfsAttribute::parse(&physical).unwrap();
+        assert_eq!(
+            decode_extent_runs(&attr, 4, 20).unwrap().1[0].physical,
+            Some(12)
+        );
+        assert!(decode_extent_runs(&attr, 4, 19).is_none());
+
+        let logical = nonresident_attr(3, 4, 8, &[0x11, 2, 1, 0]);
+        let attr = NtfsAttribute::parse(&logical).unwrap();
+        assert_eq!(
+            decode_extent_runs(&attr, 4, 20),
+            Some((
+                8,
+                vec![StreamRun {
+                    logical: 12,
+                    physical: Some(4),
+                    len: 8
+                }]
+            ))
+        );
+        assert!(decode_extent_runs(&attr, 4, 19).is_none());
+    }
+
+    #[test]
+    fn continuation_extents_do_not_repeat_base_allocation_and_data_size_rules() {
+        let mut bytes = nonresident_attr(1, 1, 0, &[0x11, 1, 2, 0]);
+        put_u64(&mut bytes, 40, 0);
+        assert_eq!(
+            decode_extent_runs(&NtfsAttribute::parse(&bytes).unwrap(), 4, 16),
+            Some((
+                0,
+                vec![StreamRun {
+                    logical: 4,
+                    physical: Some(8),
+                    len: 4
+                }]
+            ))
+        );
+    }
+
+    #[test]
+    fn otherwise_consistent_sizes_do_not_admit_non_power_of_two_clusters() {
+        let mut bytes = nonresident_attr(0, 0, 3, &[0x11, 1, 1, 0]);
+        put_u64(&mut bytes, 40, 3);
+        assert!(decode_extent_runs(&NtfsAttribute::parse(&bytes).unwrap(), 3, 12).is_none());
+    }
+
+    #[test]
+    fn base_sizes_admit_exact_allocation_data_and_initialization_limits() {
+        let valid = nonresident_attr(0, 1, 8, &[0x11, 2, 1, 0]);
+        assert!(decode_extent_runs(&NtfsAttribute::parse(&valid).unwrap(), 4, 12).is_some());
+        let mut allocation_at_volume = valid.clone();
+        put_u64(&mut allocation_at_volume, 40, 12);
+        assert!(
+            decode_extent_runs(&NtfsAttribute::parse(&allocation_at_volume).unwrap(), 4, 12)
+                .is_some()
+        );
+        put_u64(&mut allocation_at_volume, 40, 16);
+        assert!(
+            decode_extent_runs(&NtfsAttribute::parse(&allocation_at_volume).unwrap(), 4, 12)
+                .is_none()
+        );
+        let mut too_much_data = valid.clone();
+        put_u64(&mut too_much_data, 48, 9);
+        put_u64(&mut too_much_data, 56, 9);
+        assert!(
+            decode_extent_runs(&NtfsAttribute::parse(&too_much_data).unwrap(), 4, 12).is_none()
+        );
+        let mut too_much_initialized = valid;
+        put_u64(&mut too_much_initialized, 56, 9);
+        assert!(
+            decode_extent_runs(&NtfsAttribute::parse(&too_much_initialized).unwrap(), 4, 12)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn list_size_cap_has_an_exact_endpoint_and_does_not_limit_unnamed_data() {
+        let clusters = MAX_LIST_BYTES / 4 + 1;
+        let mut mapping = vec![0x14];
+        mapping.extend_from_slice(&(clusters as u32).to_le_bytes());
+        mapping.extend_from_slice(&[1, 0]);
+        let mut bytes = nonresident_attr(0, clusters - 1, MAX_LIST_BYTES, &mapping);
+        let volume_size = MAX_LIST_BYTES + 8;
+        assert!(
+            decode_extent_runs(&NtfsAttribute::parse(&bytes).unwrap(), 4, volume_size).is_some()
+        );
+        put_u64(&mut bytes, 48, MAX_LIST_BYTES + 1);
+        put_u64(&mut bytes, 56, MAX_LIST_BYTES + 1);
+        assert!(
+            decode_extent_runs(&NtfsAttribute::parse(&bytes).unwrap(), 4, volume_size).is_none()
+        );
+        put_u32(&mut bytes, 0, NtfsAttributeType::Data as u32);
+        assert!(
+            decode_extent_runs(&NtfsAttribute::parse(&bytes).unwrap(), 4, volume_size).is_some()
+        );
+    }
+
+    #[test]
+    fn a_later_valid_mapping_list_does_not_relax_the_required_header_offset() {
+        let original = nonresident_attr(0, 0, 4, &[0x11, 1, 1, 0]);
+        let mut shifted = vec![0u8; 80];
+        shifted[..64].copy_from_slice(&original[..64]);
+        put_u32(&mut shifted, 4, 80);
+        put_u16(&mut shifted, 32, 72);
+        shifted[72..76].copy_from_slice(&[0x11, 1, 1, 0]);
+        assert!(decode_extent_runs(&NtfsAttribute::parse(&shifted).unwrap(), 4, 1024).is_none());
+    }
+
+    fn bounded_three_run_chain(
+        limits: ClosureLimits,
+    ) -> (Option<Vec<StreamRun>>, Vec<u64>, Vec<u64>) {
+        let base = ListEntry::unnamed(0x20, 0, frn(10), 1);
+        let second = ListEntry::unnamed(0x20, 1, frn(11), 2);
+        let third = ListEntry::unnamed(0x20, 2, frn(12), 3);
+        let mut prefixes = Vec::new();
+        let mut decoded = Vec::new();
+        let result = close_extent_runs_bounded(
+            vec![StreamRun {
+                logical: 0,
+                physical: Some(100),
+                len: 32,
+            }],
+            96,
+            base,
+            |_, prefix| {
+                prefixes.push(prefix);
+                Some(if prefix == 32 {
+                    vec![second]
+                } else {
+                    vec![third, second]
+                })
+            },
+            |entry| {
+                decoded.push(entry.target_reference);
+                let logical = entry.starting_vcn * 32;
+                Some(vec![StreamRun {
+                    logical,
+                    physical: Some(100 + logical),
+                    len: 32,
+                }])
+            },
+            limits,
+        );
+        (result, prefixes, decoded)
+    }
+
+    #[test]
+    fn closure_admits_exact_work_and_identity_caps_and_stops_before_extra_callbacks() {
+        let exact = ClosureLimits {
+            passes: 2,
+            scanned_bytes: 96,
+            entries: 3,
+        };
+        let (runs, prefixes, decoded) = bounded_three_run_chain(exact);
+        assert_eq!(runs.unwrap().len(), 3);
+        assert_eq!(prefixes, [32, 64]);
+        assert_eq!(decoded, [frn(11), frn(12)]);
+
+        for limits in [
+            ClosureLimits { passes: 1, ..exact },
+            ClosureLimits {
+                scanned_bytes: 95,
+                ..exact
+            },
+        ] {
+            let (runs, prefixes, decoded) = bounded_three_run_chain(limits);
+            assert!(runs.is_none());
+            assert_eq!(prefixes, [32]);
+            assert_eq!(decoded, [frn(11)]);
+        }
+        let (runs, prefixes, decoded) = bounded_three_run_chain(ClosureLimits {
+            entries: 2,
+            ..exact
+        });
+        assert!(runs.is_none());
+        assert_eq!(prefixes, [32, 64]);
+        assert_eq!(decoded, [frn(11)]);
+        let (runs, prefixes, decoded) = bounded_three_run_chain(ClosureLimits {
+            entries: 0,
+            ..exact
+        });
+        assert!(runs.is_none());
+        assert_eq!(prefixes, [] as [u64; 0]);
+        assert_eq!(decoded, [] as [u64; 0]);
+    }
+
+    #[test]
+    fn discovery_entry_count_admits_its_exact_cap_before_decoding() {
+        let base = ListEntry::unnamed(0x20, 0, frn(10), 1);
+        let next = ListEntry::unnamed(0x20, 1, frn(11), 2);
+        for entries in [2, 3] {
+            let mut decoded = 0;
+            let runs = close_extent_runs_bounded(
+                vec![StreamRun {
+                    logical: 0,
+                    physical: Some(100),
+                    len: 32,
+                }],
+                64,
+                base,
+                |_, _| Some(vec![next, base, base]),
+                |_| {
+                    decoded += 1;
+                    Some(vec![StreamRun {
+                        logical: 32,
+                        physical: Some(132),
+                        len: 32,
+                    }])
+                },
+                ClosureLimits {
+                    passes: 1,
+                    scanned_bytes: 32,
+                    entries,
+                },
+            );
+            assert_eq!(runs.is_some(), entries == 3);
+            assert_eq!(decoded, usize::from(entries == 3));
+        }
+    }
+
+    #[test]
+    fn closure_checks_each_base_descriptor_field_before_complete_coverage() {
+        let valid = ListEntry::unnamed(0x20, 0, 0x1234u64 << 48, 1);
+        for (base, accepted) in [
+            (valid, true),
+            (
+                ListEntry {
+                    type_id: 0x30,
+                    ..valid
+                },
+                false,
+            ),
+            (
+                ListEntry {
+                    name_length: 1,
+                    ..valid
+                },
+                false,
+            ),
+            (
+                ListEntry {
+                    target_reference: 7,
+                    ..valid
+                },
+                false,
+            ),
+            (
+                ListEntry {
+                    target_reference: 42,
+                    ..valid
+                },
+                false,
+            ),
+            (
+                ListEntry {
+                    target_reference: (1u64 << 48) - 1,
+                    ..valid
+                },
+                false,
+            ),
+        ] {
+            let result = close_extent_runs(
+                vec![StreamRun {
+                    logical: 0,
+                    physical: Some(100),
+                    len: 32,
+                }],
+                32,
+                base,
+                |_, _| panic!("complete coverage needs no discovery"),
+                |_| panic!("complete coverage needs no decode"),
+            );
+            assert_eq!(result.is_some(), accepted);
+        }
+    }
+
+    #[test]
+    fn closure_checks_each_continuation_field_before_decoding() {
+        let valid = ListEntry::unnamed(0x20, 1, 0x1234u64 << 48, 2);
+        for (next, accepted) in [
+            (valid, true),
+            (
+                ListEntry {
+                    type_id: 0x30,
+                    ..valid
+                },
+                false,
+            ),
+            (
+                ListEntry {
+                    name_length: 1,
+                    ..valid
+                },
+                false,
+            ),
+            (
+                ListEntry {
+                    target_reference: 7,
+                    ..valid
+                },
+                false,
+            ),
+            (
+                ListEntry {
+                    target_reference: 42,
+                    ..valid
+                },
+                false,
+            ),
+            (
+                ListEntry {
+                    target_reference: (1u64 << 48) - 1,
+                    ..valid
+                },
+                false,
+            ),
+        ] {
+            let mut decoded = 0;
+            let result = close_extent_runs(
+                vec![StreamRun {
+                    logical: 0,
+                    physical: Some(100),
+                    len: 32,
+                }],
+                64,
+                ListEntry::unnamed(0x20, 0, frn(10), 1),
+                |_, _| Some(vec![next]),
+                |_| {
+                    decoded += 1;
+                    Some(vec![StreamRun {
+                        logical: 32,
+                        physical: Some(132),
+                        len: 32,
+                    }])
+                },
+            );
+            assert_eq!(result.is_some(), accepted);
+            assert_eq!(decoded, usize::from(accepted));
+        }
+    }
+
+    #[test]
+    fn closure_rejects_decode_failure_and_stalled_coverage_without_another_discovery() {
+        for answer in [
+            None,
+            Some(vec![]),
+            Some(vec![StreamRun {
+                logical: 64,
+                physical: Some(164),
+                len: 32,
+            }]),
+        ] {
+            let mut discoveries = 0;
+            let mut decodes = 0;
+            assert!(
+                close_extent_runs(
+                    vec![StreamRun {
+                        logical: 0,
+                        physical: Some(100),
+                        len: 32
+                    }],
+                    96,
+                    ListEntry::unnamed(0x20, 0, frn(10), 1),
+                    |_, prefix| {
+                        discoveries += 1;
+                        assert_eq!(prefix, 32);
+                        Some(vec![ListEntry::unnamed(0x20, 2, frn(11), 2)])
+                    },
+                    |_| {
+                        decodes += 1;
+                        answer.clone()
+                    },
+                )
+                .is_none()
+            );
+            assert_eq!(discoveries, 1);
+            assert_eq!(decodes, 1);
+        }
+    }
+
+    #[test]
+    fn streaming_prefixes_accept_only_incomplete_entries_and_full_reads_consume_every_entry() {
+        let bytes = list_entry(0x20, 0, frn(10), 1);
+        let stop = AtomicBool::new(false);
+        let runs = [StreamRun {
+            logical: 0,
+            physical: Some(0),
+            len: 32,
+        }];
+        for length in 1..32 {
+            for prefix in [false, true] {
+                let mut reader = std::io::Cursor::new(bytes.clone());
+                let mut visited = Vec::new();
+                let result =
+                    visit_list_stream(&mut reader, &runs, length, &stop, prefix, |entry| {
+                        visited.push(entry);
+                    });
+                assert_eq!(result.is_ok(), prefix, "length {length}, prefix {prefix}");
+                assert_eq!(visited, [] as [ListEntry; 0]);
+                assert_eq!(
+                    reader.position(),
+                    length.min(ATTRIBUTE_LIST_ENTRY_BYTES as u64)
+                );
+            }
+        }
+        for prefix in [false, true] {
+            let mut reader = std::io::Cursor::new(bytes.clone());
+            let mut visited = Vec::new();
+            visit_list_stream(&mut reader, &runs, 32, &stop, prefix, |entry| {
+                visited.push(entry);
+            })
+            .unwrap();
+            assert_eq!(visited, [ListEntry::unnamed(0x20, 0, frn(10), 1)]);
+            assert_eq!(reader.position(), 32);
+        }
+        let mut invalid = bytes;
+        put_u16(&mut invalid, 4, 24);
+        for prefix in [false, true] {
+            assert!(matches!(
+                visit_list_stream(
+                    &mut std::io::Cursor::new(invalid.clone()),
+                    &runs,
+                    ATTRIBUTE_LIST_ENTRY_BYTES as u64,
+                    &stop,
+                    prefix,
+                    |_| panic!("an invalid header must not reach the visitor"),
+                ),
+                Err(ListStreamError::Invalid)
+            ));
+        }
+    }
+
+    fn separated_entry_fragments() -> (Vec<u8>, [StreamRun; 2]) {
+        let mut entries = list_entry(0x20, 0, frn(10), 1);
+        entries.extend_from_slice(&list_entry(0x30, 0, frn(11), 2));
+        let mut backing = vec![0xA5; 256];
+        backing[8..48].copy_from_slice(&entries[..40]);
+        backing[128..152].copy_from_slice(&entries[40..]);
+        (
+            backing,
+            [
+                StreamRun {
+                    logical: 0,
+                    physical: Some(8),
+                    len: 40,
+                },
+                StreamRun {
+                    logical: 40,
+                    physical: Some(128),
+                    len: 24,
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn fragmented_stream_reads_the_remaining_run_bytes_and_leaves_the_exact_reader_position() {
+        let (backing, runs) = separated_entry_fragments();
+        for prefix in [false, true] {
+            let mut reader = std::io::Cursor::new(backing.clone());
+            let mut visited = Vec::new();
+            visit_list_stream(
+                &mut reader,
+                &runs,
+                64,
+                &AtomicBool::new(false),
+                prefix,
+                |entry| visited.push(entry),
+            )
+            .unwrap();
+            assert_eq!(
+                visited,
+                [
+                    ListEntry::unnamed(0x20, 0, frn(10), 1),
+                    ListEntry::unnamed(0x30, 0, frn(11), 2)
+                ]
+            );
+            assert_eq!(reader.position(), 152);
+        }
+    }
+
+    #[test]
+    fn streaming_cancellation_stops_before_reading_or_after_the_first_callback() {
+        let (backing, runs) = separated_entry_fragments();
+        for initially_stopped in [false, true] {
+            let stop = AtomicBool::new(initially_stopped);
+            let mut reader = std::io::Cursor::new(backing.clone());
+            let mut visited = 0;
+            let result = visit_list_stream(&mut reader, &runs, 64, &stop, false, |_| {
+                visited += 1;
+                stop.store(true, Ordering::Relaxed);
+            });
+            assert!(matches!(result, Err(ListStreamError::Cancelled)));
+            assert_eq!(visited, usize::from(!initially_stopped));
+            assert_eq!(reader.position(), if initially_stopped { 0 } else { 40 });
+        }
+    }
+
+    #[test]
+    fn a_second_fragment_io_failure_preserves_the_error_after_the_first_callback() {
+        let (mut backing, runs) = separated_entry_fragments();
+        backing.truncate(128);
+        let mut visited = Vec::new();
+        let result = visit_list_stream(
+            &mut std::io::Cursor::new(backing),
+            &runs,
+            64,
+            &AtomicBool::new(false),
+            false,
+            |entry| visited.push(entry),
+        );
+        assert!(
+            matches!(result, Err(ListStreamError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof)
+        );
+        assert_eq!(visited, [ListEntry::unnamed(0x20, 0, frn(10), 1)]);
     }
 
     proptest! {

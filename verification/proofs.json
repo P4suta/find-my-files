@@ -7,6 +7,15 @@
   "targets": [
     {
       "package": "fmf-core",
+      "source": "engine/crates/fmf-core/src/ondisk/attribute_list_proofs.rs",
+      "prefix": "ondisk::attribute_list::kani_proofs::",
+      "harnesses": [
+        "checked_extent_geometry_preserves_every_scalar_admission_boundary",
+        "discovery_work_admits_exact_caps_and_rejects_overflow_without_changing_state"
+      ]
+    },
+    {
+      "package": "fmf-core",
       "source": "engine/crates/fmf-core/src/usn/reason_proofs.rs",
       "prefix": "usn::reasons::kani_proofs::",
       "harnesses": [
