@@ -147,6 +147,10 @@ The four absent-terminator obligations use the same bundled SAT solver as the re
 Their input domains, assertions, covers, and unwind bounds stay unchanged.
 The [SAT attempt](https://github.com/P4suta/find-my-files/actions/runs/42172091984) reaches later complementary third-length cases but leaves them incomplete after solver memory exhaustion.
 Early successor validation removes invalid suffix work while preserving the independently checked admission domain.
+The [successor-validation attempt](https://github.com/P4suta/find-my-files/actions/runs/42178449410) still leaves complementary third-length obligations incomplete after solver memory exhaustion.
+Prefix-ID classification checks run before shared admission and invariant calls.
+Each admission check calls the production validator and independent reference once after classification, rather than repeating their bodies in every classification branch.
+The classification assertions, byte domains, properties, covers, and unwind bounds stay unchanged.
 The external Linux solver has an exact version pin, archive byte count, and SHA-256 checksum.
 The proof setup installs the verified executable alongside Kani.
 The proof runner checks both executable versions and includes the tool configuration in its source fingerprint.
