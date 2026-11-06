@@ -143,9 +143,14 @@ The [terminator run](https://github.com/P4suta/find-my-files/actions/runs/421328
 The run stops before completing its remaining harnesses.
 CBMC's [array field sensitivity setting](https://diffblue.github.io/cbmc/man/cbmc.html) controls which arrays have their elements expanded into separate fields.
 Expanding the complete record buffer still exhausts SAT memory in the high-prefix-ID third-terminator invariant case in the [array-expansion attempt](https://github.com/P4suta/find-my-files/actions/runs/42138664012).
-The runner disables CBMC's array field expansion for input arrays and small heap buffers.
-The setting changes expression generation while keeping every array element, property, and input bound.
-The existing source fingerprint includes the runner and rejects evidence from its previous configuration.
+The [whole-array run](https://github.com/P4suta/find-my-files/actions/runs/42142997189) still exhausts SAT memory for three full-extent cases and exceeds the Bitwuzla deadline for an absent-terminator invariant case.
+The runner restores CBMC's default array representation after the unsuccessful experiment.
+The terminator constructor supplies each prefix ID as an independent arbitrary 16-bit scalar and writes its little-endian bytes into the original record.
+The constructor assumes only the selected ID storage classes.
+Every original ID value, duplicate pair, and remaining byte stays in the combined input domain.
+A separate harness writes each original ID back into an arbitrary record and checks equality at every arbitrary observation position.
+The round-trip property establishes that scalar construction can reproduce every original byte array.
+The production validator, preserved reference, byte bound, unwind bounds, assertions, and outcome covers remain unchanged.
 The external Linux solver has an exact version pin, archive byte count, and SHA-256 checksum.
 The proof setup installs the verified executable alongside Kani.
 The proof runner checks both executable versions and includes the tool configuration in its source fingerprint.
