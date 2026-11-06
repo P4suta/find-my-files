@@ -137,7 +137,8 @@ Cases with the terminator in the second or third attribute keep accepted and rej
 Absent-terminator cases cover rejection and a distinct-ID chain with three complete minimal resident headers.
 The combined covers keep both original outcomes without requiring an impossible outcome in a partition.
 Every case keeps the original unwind bound of four.
-The terminator partitions use `cadical` from the Kani bundle.
+Absent-terminator cases use the pinned external `bitwuzla` solver.
+The remaining cases use `cadical` from the Kani bundle.
 The [terminator run](https://github.com/P4suta/find-my-files/actions/runs/42132841128) still exhausts SAT memory for three high-prefix-ID cases and reaches the Bitwuzla deadline in the absent-terminator invariant case.
 The run stops before completing its remaining harnesses.
 CBMC's [array field sensitivity setting](https://diffblue.github.io/cbmc/man/cbmc.html) controls which arrays have their elements expanded into separate fields.
@@ -151,10 +152,14 @@ A separate harness writes each original ID back into an arbitrary record and che
 The round-trip obligation requires scalar construction to reproduce every original byte array.
 The production validator, preserved reference, byte bound, unwind bounds, assertions, and outcome covers remain unchanged.
 The [scalar-ID run](https://github.com/P4suta/find-my-files/actions/runs/42148602868) still leaves three cases incomplete after SAT memory exhaustion and one after the Bitwuzla deadline.
-The runner keeps arrays unexpanded and selects CBMC's [uninterpreted-function array encoding](https://diffblue.github.io/cbmc/man/cbmc.html).
-The array theory supplies the constraints for reads and updates without flattening each bounded array into a bitvector.
-The encoding preserves every input element, index check, property, and bound.
-Absent-terminator partitions use the same SAT array encoding as the other cases.
+The [uninterpreted-function array attempt](https://github.com/P4suta/find-my-files/actions/runs/42154422423) reports assertion failures in the unchanged contract byte and field round trips.
+The candidate rejects that encoding and restores the default representation.
+The original reports preserve the failed assertions without treating them as verified production regressions.
+Core byte harnesses use 32 object-ID bits in the verifier's [64-bit pointer encoding](https://diffblue.github.io/cbmc/memory-bounds-checking.html).
+The header and record buffers keep their existing array bounds.
+High-ID vectors contain only IDs visited within those bounded records.
+The remaining 32 offset bits cover those modeled objects without changing native integer fields, arithmetic, index checks, or unwind bounds.
+The contract, runtime, and tooling packages keep Kani's default pointer encoding.
 The external Linux solver has an exact version pin, archive byte count, and SHA-256 checksum.
 The proof setup installs the verified executable alongside Kani.
 The proof runner checks both executable versions and includes the tool configuration in its source fingerprint.

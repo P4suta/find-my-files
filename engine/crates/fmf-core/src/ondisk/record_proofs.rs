@@ -1688,7 +1688,7 @@ fn filling_third_resident_with_second_high_id_and_third_terminator_preserves_adm
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(cadical)]
+#[kani::solver(bitwuzla)]
 fn filling_third_resident_with_second_high_id_and_no_terminator_rejects_both_validators() {
     let (bytes, length) =
         record_bytes_with_filling_terminator::<false, true>(FirstTerminator::Absent);
@@ -1750,7 +1750,7 @@ fn filling_third_resident_with_high_prefix_ids_and_third_terminator_preserves_ad
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(cadical)]
+#[kani::solver(bitwuzla)]
 fn filling_third_resident_with_high_prefix_ids_and_no_terminator_rejects_both_validators() {
     let (bytes, length) =
         record_bytes_with_filling_terminator::<true, true>(FirstTerminator::Absent);
@@ -2012,7 +2012,7 @@ fn filling_third_resident_with_second_high_id_and_third_terminator_preserves_inv
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(cadical)]
+#[kani::solver(bitwuzla)]
 fn filling_third_resident_with_second_high_id_and_no_terminator_preserves_rejection_invariants() {
     let (bytes, length) =
         record_bytes_with_filling_terminator::<false, true>(FirstTerminator::Absent);
@@ -2090,7 +2090,7 @@ fn filling_third_resident_with_high_prefix_ids_and_third_terminator_preserves_in
 
 #[kani::proof]
 #[kani::unwind(4)]
-#[kani::solver(cadical)]
+#[kani::solver(bitwuzla)]
 fn filling_third_resident_with_high_prefix_ids_and_no_terminator_preserves_rejection_invariants() {
     let (bytes, length) =
         record_bytes_with_filling_terminator::<true, true>(FirstTerminator::Absent);

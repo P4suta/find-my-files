@@ -10,7 +10,8 @@
       "source": "xtask/src/mutation_authority_proofs.rs",
       "prefix": "mutation_authority::kani_proofs::",
       "harnesses": [
-        "candidate_audits_never_authorize_protected_main_execution"
+        "candidate_audits_never_authorize_protected_main_execution",
+        "rust_exit_protocol_preserves_every_terminal_outcome_count"
       ]
     },
     {
