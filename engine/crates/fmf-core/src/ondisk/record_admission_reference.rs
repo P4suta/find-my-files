@@ -44,7 +44,7 @@ const fn le_u32(data: &[u8], offset: usize) -> u32 {
     ])
 }
 
-fn unique_attribute_id(id: u16, low_ids: &mut u128, high_ids: &mut Vec<u16>) -> bool {
+pub(super) fn unique_attribute_id(id: u16, low_ids: &mut u128, high_ids: &mut Vec<u16>) -> bool {
     if id < u128::BITS as u16 {
         let bit = 1u128 << id;
         if *low_ids & bit != 0 {
@@ -79,8 +79,8 @@ pub fn attributes_complete(record: &[u8]) -> bool {
     {
         return false;
     }
-    let mut low_ids = 0u128;
-    let mut high_ids = Vec::new();
+    let mut ids = [0u16; super::PROOF_BYTES / RESIDENT_HEADER_BYTES];
+    let mut ids_len = 0;
     let mut previous_type = 0u32;
 
     loop {
@@ -118,13 +118,12 @@ pub fn attributes_complete(record: &[u8]) -> bool {
         {
             return false;
         }
-        if !unique_attribute_id(
-            le_u16(record, offset + ATTRIBUTE_ID_FIELD),
-            &mut low_ids,
-            &mut high_ids,
-        ) {
+        let id = le_u16(record, offset + ATTRIBUTE_ID_FIELD);
+        if ids_len == ids.len() || ids[..ids_len].contains(&id) {
             return false;
         }
+        ids[ids_len] = id;
+        ids_len += 1;
 
         let name_units = record[offset + ATTRIBUTE_NAME_UNITS_FIELD] as usize;
         let flags = le_u16(record, offset + ATTRIBUTE_FLAGS_FIELD);
