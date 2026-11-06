@@ -25,6 +25,9 @@ A private name-value decoder validates the bounded resident slice without repeat
 The attribute adapter preserves the checked resident range and returns the name-value decoder's result.
 Attribute traversal consumes the remaining slice after each decoded attribute.
 The checked parser establishes a positive attribute length before traversal advances.
+After excluding an immediate terminator, the remaining slice must fit a resident attribute header and a complete terminator header.
+The attribute's bounded successor slice must keep that header before ID membership or value validation runs.
+Reject truncated suffixes before decoding fields that can't belong to a complete chain.
 Record headers share the checked update-sequence geometry validator.
 Fixed headers consume a checked byte prefix.
 Boot cluster counts and record-size codes have nonzero representations.
@@ -142,6 +145,8 @@ Those reports establish unsuccessful verification attempts without establishing 
 After inline ID storage removes allocation from bounded record chains, the [first attempt](https://github.com/P4suta/find-my-files/actions/runs/42169162607) still leaves one absent-terminator invariant unfinished at the existing 300-second SMT deadline.
 The four absent-terminator obligations use the same bundled SAT solver as the remaining record-chain obligations.
 Their input domains, assertions, covers, and unwind bounds stay unchanged.
+The [SAT attempt](https://github.com/P4suta/find-my-files/actions/runs/42172091984) reaches later complementary third-length cases but leaves them incomplete after solver memory exhaustion.
+Early successor validation removes invalid suffix work while preserving the independently checked admission domain.
 The external Linux solver has an exact version pin, archive byte count, and SHA-256 checksum.
 The proof setup installs the verified executable alongside Kani.
 The proof runner checks both executable versions and includes the tool configuration in its source fingerprint.
