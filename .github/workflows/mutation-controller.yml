@@ -3,6 +3,11 @@ name: mutation-controller
 on:
   workflow_call:
     inputs:
+      purpose:
+        description: "Protected-main Release evidence or an explicit candidate audit"
+        required: false
+        type: string
+        default: protected-main
       controller_sha:
         description: "Exact trusted commit containing this workflow and mutation policy"
         required: true
@@ -34,9 +39,10 @@ jobs:
           CONTROLLER_SHA: ${{ inputs.controller_sha }}
           TARGET_SHA: ${{ inputs.target_sha }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
+          PURPOSE: ${{ inputs.purpose }}
         run: |
           $ErrorActionPreference = "Stop"
-          if ($env:GITHUB_REF -cne "refs/heads/main") {
+          if ($env:GITHUB_REF -cne "refs/heads/main" -and $env:PURPOSE -cne "candidate-audit") {
             throw "Mutation controller must be called from protected main, got '$env:GITHUB_REF'."
           }
           foreach ($identity in @($env:CONTROLLER_SHA, $env:TARGET_SHA, $env:WORKFLOW_SHA)) {
@@ -114,6 +120,7 @@ jobs:
         env:
           CONTROLLER_SHA: ${{ inputs.controller_sha }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
+          PURPOSE: ${{ inputs.purpose }}
           RUN_ID: ${{ github.run_id }}
           SHARD_INDEX: ${{ matrix.shard }}
           TARGET_ROOT: ${{ github.workspace }}\target
@@ -121,6 +128,10 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
+          cargo run --locked --release -- mutation-authorize `
+            --purpose $env:PURPOSE `
+            --controller-sha $env:CONTROLLER_SHA `
+            --target-sha $env:TARGET_SHA
           cargo run --locked --release -- mutation-rust `
             --target-root $env:TARGET_ROOT `
             --target-sha $env:TARGET_SHA `
@@ -136,7 +147,7 @@ jobs:
         with:
           name: mutation-rust-raw-${{ matrix.shard }}
           path: controller/build/mutation/rust/shard-${{ matrix.shard }}-of-16/
-          retention-days: 30
+          retention-days: ${{ inputs.purpose == 'candidate-audit' && 7 || 30 }}
           if-no-files-found: error
           include-hidden-files: true
           overwrite: true
@@ -159,9 +170,10 @@ jobs:
           CONTROLLER_SHA: ${{ inputs.controller_sha }}
           TARGET_SHA: ${{ inputs.target_sha }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
+          PURPOSE: ${{ inputs.purpose }}
         run: |
           $ErrorActionPreference = "Stop"
-          if ($env:GITHUB_REF -cne "refs/heads/main") {
+          if ($env:GITHUB_REF -cne "refs/heads/main" -and $env:PURPOSE -cne "candidate-audit") {
             throw "Mutation controller must be called from protected main, got '$env:GITHUB_REF'."
           }
           foreach ($identity in @($env:CONTROLLER_SHA, $env:TARGET_SHA, $env:WORKFLOW_SHA)) {
@@ -236,6 +248,7 @@ jobs:
         env:
           CONTROLLER_SHA: ${{ inputs.controller_sha }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
+          PURPOSE: ${{ inputs.purpose }}
           RUN_ID: ${{ github.run_id }}
           SHARD_INDEX: ${{ matrix.shard }}
           TARGET_ROOT: ${{ github.workspace }}\target
@@ -243,6 +256,10 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
+          cargo run --locked --release -- mutation-authorize `
+            --purpose $env:PURPOSE `
+            --controller-sha $env:CONTROLLER_SHA `
+            --target-sha $env:TARGET_SHA
           cargo run --locked --release -- mutation-csharp `
             --target-root $env:TARGET_ROOT `
             --target-sha $env:TARGET_SHA `
@@ -258,7 +275,7 @@ jobs:
         with:
           name: mutation-csharp-raw-${{ matrix.shard }}
           path: controller/build/mutation/csharp/shard-${{ matrix.shard }}-of-16/
-          retention-days: 30
+          retention-days: ${{ inputs.purpose == 'candidate-audit' && 7 || 30 }}
           if-no-files-found: error
           include-hidden-files: true
           overwrite: true
@@ -290,9 +307,10 @@ jobs:
           CONTROLLER_SHA: ${{ inputs.controller_sha }}
           TARGET_SHA: ${{ inputs.target_sha }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
+          PURPOSE: ${{ inputs.purpose }}
         run: |
           $ErrorActionPreference = "Stop"
-          if ($env:GITHUB_REF -cne "refs/heads/main") {
+          if ($env:GITHUB_REF -cne "refs/heads/main" -and $env:PURPOSE -cne "candidate-audit") {
             throw "Mutation verifier must be called from protected main, got '$env:GITHUB_REF'."
           }
           foreach ($identity in @($env:CONTROLLER_SHA, $env:TARGET_SHA, $env:WORKFLOW_SHA)) {
@@ -467,6 +485,7 @@ jobs:
         env:
           CONTROLLER_SHA: ${{ inputs.controller_sha }}
           CSHARP_EVIDENCE_ROOT: ${{ github.workspace }}\evidence\csharp
+          PURPOSE: ${{ inputs.purpose }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_ID: ${{ github.run_id }}
           RUST_EVIDENCE_ROOT: ${{ github.workspace }}\evidence\rust
@@ -475,6 +494,10 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
+          cargo run --locked --release -- mutation-authorize `
+            --purpose $env:PURPOSE `
+            --controller-sha $env:CONTROLLER_SHA `
+            --target-sha $env:TARGET_SHA
           cargo run --locked --release -- mutation-verify-rust `
             --target-root $env:TARGET_ROOT `
             --evidence-root $env:RUST_EVIDENCE_ROOT `
@@ -495,12 +518,12 @@ jobs:
       - name: Upload independently verified mutation evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mutation-verified
+          name: ${{ inputs.purpose == 'candidate-audit' && 'mutation-candidate-audit-verified' || 'mutation-verified' }}
           path: |
             evidence/rust/
             evidence/csharp/
             controller/build/mutation/verified/
-          retention-days: 30
+          retention-days: ${{ inputs.purpose == 'candidate-audit' && 7 || 30 }}
           if-no-files-found: error
           include-hidden-files: true
           overwrite: true

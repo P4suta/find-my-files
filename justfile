@@ -667,6 +667,12 @@ deny:
 machete:
     cargo machete engine
 
+[doc('Check mutation workflow authority without running mutations')]
+[group('quality')]
+[working-directory('xtask')]
+mutation-authorize purpose controller_sha target_sha:
+    cargo run --locked --release -- mutation-authorize --purpose {{ purpose }} --controller-sha {{ controller_sha }} --target-sha {{ target_sha }}
+
 # Mutation testing (Rust, ADR-0022). xtask owns the fixed cargo-mutants 27.1.0
 # invocation, requires its unmutated nextest baseline, canonicalizes exact
 # survivors, rejects timeouts/malformed reports, and compares the reviewed
