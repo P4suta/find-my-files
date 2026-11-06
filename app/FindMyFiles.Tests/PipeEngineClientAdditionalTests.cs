@@ -1123,55 +1123,93 @@ public sealed class PipeEngineClientAdditionalTests
             TaskCreationOptions.RunContinuationsAsynchronously);
         var allowRetire = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        client.BeforeTimeoutRetireForTests = () =>
-        {
-            timeoutReached.TrySetResult();
-            return allowRetire.Task;
-        };
-        client.Start();
-        await WaitUntilAsync(
-            () => client.Connection == EngineConnectionState.Connected,
-            "connected");
-
-        var firstArmed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        clock.TimerCreated = () => firstArmed.TrySetResult();
-        var timingOut = client.ListVolumesAsync(TestContext.Current.CancellationToken);
-        await firstArmed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        await server.WaitForAsync(PipeProtocol.Op.ListVolumes);
-        clock.Advance(client.RequestTimeout);
-        await timeoutReached.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-
-        var secondArmed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        clock.TimerCreated = () => secondArmed.TrySetResult();
-        var collateral = client.ListVolumesAsync(TestContext.Current.CancellationToken);
-        await secondArmed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        await server.WaitForAsync(PipeProtocol.Op.ListVolumes, minCount: 2);
         var cleanupObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        client.ConnectionChanged += state =>
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        Task? timingOut = null;
+        Task? collateral = null;
+        try
         {
-            if (state == EngineConnectionState.Reconnecting)
+            client.BeforeTimeoutRetireForTests = () =>
             {
-                cleanupObserved.TrySetResult();
-            }
-        };
-        var cleanupForced = false;
-        client.AfterRetiredConnectionDisposedForTests = () =>
-        {
-            cleanupObserved.Task
-                .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)
-                .GetAwaiter().GetResult();
-            cleanupForced = true;
-        };
-        allowRetire.SetResult();
+                timeoutReached.TrySetResult();
+                return allowRetire.Task;
+            };
+            client.Start();
+            await WaitUntilAsync(
+                () => client.Connection == EngineConnectionState.Connected,
+                "connected");
 
-        var expected = $"request (opcode {PipeProtocol.Op.ListVolumes}) timed out after 0s";
-        Assert.Equal(
-            expected,
-            (await Assert.ThrowsAsync<EngineUnavailableException>(() => timingOut)).Message);
-        Assert.Equal(
-            expected,
-            (await Assert.ThrowsAsync<EngineUnavailableException>(() => collateral)).Message);
-        Assert.True(cleanupForced);
+            var firstArmed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            clock.TimerCreated = () => firstArmed.TrySetResult();
+            timingOut = client.ListVolumesAsync(cancellation.Token);
+            await firstArmed.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellation.Token);
+            await server.WaitForAsync(PipeProtocol.Op.ListVolumes);
+            clock.Advance(client.RequestTimeout);
+            await timeoutReached.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellation.Token);
+
+            var secondArmed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            clock.TimerCreated = () => secondArmed.TrySetResult();
+            collateral = client.ListVolumesAsync(cancellation.Token);
+            await secondArmed.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellation.Token);
+            await server.WaitForAsync(PipeProtocol.Op.ListVolumes, minCount: 2);
+            var pendingField = typeof(PipeEngineClient).GetField(
+                "_pending",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            var pending = Assert.IsAssignableFrom<System.Collections.IDictionary>(pendingField?.GetValue(client));
+            var request = Assert.Single(pending.Values.Cast<object>());
+            var completion = Assert.IsType<TaskCompletionSource<(int Status, byte[] Payload)>>(
+                request.GetType().GetProperty("Completion")?.GetValue(request));
+
+            client.ConnectionChanged += state =>
+            {
+                if (state == EngineConnectionState.Reconnecting)
+                {
+                    cleanupObserved.TrySetResult();
+                }
+            };
+            var cleanupForced = false;
+            client.AfterRetiredConnectionDisposedForTests = () =>
+            {
+                cleanupObserved.Task
+                    .WaitAsync(TimeSpan.FromSeconds(5), cancellation.Token)
+                    .GetAwaiter().GetResult();
+                cleanupForced = true;
+            };
+            allowRetire.SetResult();
+
+            var expected = $"request (opcode {PipeProtocol.Op.ListVolumes}) timed out after 0s";
+            Assert.Equal(
+                expected,
+                (await Assert.ThrowsAsync<EngineUnavailableException>(() => timingOut)).Message);
+            Assert.True(completion.Task.IsFaulted);
+            Assert.Equal(
+                expected,
+                (await Assert.ThrowsAsync<EngineUnavailableException>(() => collateral)).Message);
+            Assert.True(cleanupForced);
+        }
+        finally
+        {
+            client.BeforeTimeoutRetireForTests = null;
+            client.AfterRetiredConnectionDisposedForTests = null;
+            clock.TimerCreated = null;
+            cleanupObserved.TrySetResult();
+            allowRetire.TrySetResult();
+            await cancellation.CancelAsync();
+            held.TrySetCanceled(cancellation.Token);
+            clock.Advance(client.RequestTimeout);
+            if (timingOut is not null)
+            {
+                await timingOut.ConfigureAwait(
+                    ConfigureAwaitOptions.ContinueOnCapturedContext | ConfigureAwaitOptions.SuppressThrowing);
+            }
+
+            if (collateral is not null)
+            {
+                await collateral.ConfigureAwait(
+                    ConfigureAwaitOptions.ContinueOnCapturedContext | ConfigureAwaitOptions.SuppressThrowing);
+            }
+        }
     }
 
     [Fact]
