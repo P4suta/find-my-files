@@ -18,6 +18,7 @@ const RECEIPT_NAME: &str = "proofs.json";
 const MIN_COVERS: usize = 2;
 const QUALIFIED_ATTRIBUTE_SEGMENTS: usize = 2;
 const MAX_SHARDS: usize = 4;
+const ARRAY_FIELD_SENSITIVITY_MAX_ELEMENTS: usize = 128;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -651,6 +652,11 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
                 command.args(["--harness", name]);
             }
         }
+        command.args([
+            "--cbmc-args",
+            "--max-field-sensitivity-array-size",
+            &ARRAY_FIELD_SENSITIVITY_MAX_ELEMENTS.to_string(),
+        ]);
         let status = command
             .status()
             .with_context(|| format!("start bounded Kani for {package_name}"))?;
