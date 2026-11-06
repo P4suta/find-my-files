@@ -408,18 +408,6 @@
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
         "start_line": 557,
-        "start_column": 9,
-        "end_line": 557,
-        "end_column": 81,
-        "mutator": "Statement mutation",
-        "replacement": ";"
-      },
-      "rationale": "Lifetime cancellation has already completed pending waits as engine-client-disposed, and supervisor retirement also fails the same epoch; this fallback pass cannot change completion."
-    },
-    {
-      "identity": {
-        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 557,
         "start_column": 47,
         "end_line": 557,
         "end_column": 79,
@@ -823,18 +811,6 @@
         "replacement": "true"
       },
       "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
-    },
-    {
-      "identity": {
-        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 1090,
-        "start_column": 9,
-        "end_line": 1090,
-        "end_column": 30,
-        "mutator": "Statement mutation",
-        "replacement": ";"
-      },
-      "rationale": "Cancellation stops the read loop and supervisor finally retires and disposes its captured connection and pending epoch; Dispose is intentionally non-blocking, so cleanup remains identical."
     },
     {
       "identity": {
