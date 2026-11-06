@@ -165,6 +165,10 @@ pub(super) struct ParsedBatch {
 }
 
 impl ParsedBatch {
+    const fn record_corruption(&mut self) {
+        self.corrupt_records += 1;
+    }
+
     /// Test seam: behave exactly as if the scan never read this $MFT slot —
     /// its rows, its deferred entry, and its cached extension bytes.
     ///
@@ -305,20 +309,20 @@ fn parse_subrange(
         let rec = &mut bytes[off..off + record_size];
         if !NtfsFile::is_valid(rec, sector_size) {
             if rec.iter().any(|&byte| byte != 0) {
-                out.corrupt_records += 1;
+                out.record_corruption();
             }
             continue;
         }
         if !apply_fixup(rec, sector_size) {
-            out.corrupt_records += 1;
+            out.record_corruption();
             continue;
         }
         if !attributes_complete(rec) {
-            out.corrupt_records += 1;
+            out.record_corruption();
             continue;
         }
         let Some(f) = NtfsFile::parse(number, rec, sector_size) else {
-            out.corrupt_records += 1;
+            out.record_corruption();
             continue;
         };
         if !f.is_used() {
@@ -343,7 +347,7 @@ fn parse_subrange(
         match push_searchable_names(&mut out, &f) {
             Some(0) => out.skipped_no_name += 1,
             Some(_) => {}
-            None => out.corrupt_records += 1,
+            None => out.record_corruption(),
         }
     }
     out
@@ -443,6 +447,10 @@ fn append_batches_bounded(
     }
     corrupt_records
 }
+
+#[cfg(kani)]
+#[path = "parse_proofs.rs"]
+mod kani_proofs;
 
 #[cfg(test)]
 mod tests {
@@ -1282,7 +1290,11 @@ mod tests {
 
         let mut parallel_input = chunk.clone();
         let batches = parse_chunk(&mut parallel_input, first, REC, 512);
-        assert!(batches.len() >= 2, "the 1 MiB split must actually fan out");
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].metas.len(), 1024);
+        assert_eq!(batches[1].metas.len(), 76);
+        assert_eq!((batches[0].files, batches[1].files), (1024, 76));
+        assert_eq!(batches[1].metas[0].frn, frn(1048));
         let parallel: Vec<(u64, Vec<u8>)> = batches
             .iter()
             .flat_map(|b| b.metas.iter().map(move |m| (m.frn, name_of(b, m).to_vec())))
@@ -1301,6 +1313,304 @@ mod tests {
             parallel, sequential,
             "chunked parse must equal a sequential parse, in order"
         );
+    }
+
+    fn extract_record_attributes(attributes: Vec<Vec<u8>>) -> Option<RecordAttrs> {
+        let mut record = Rec::new();
+        for attribute in attributes {
+            record = record.attr(attribute);
+        }
+        let mut bytes = record.build();
+        assert!(apply_fixup(&mut bytes, 512));
+        extract_attrs(&NtfsFile::parse(50, &bytes, 512).unwrap())
+    }
+
+    #[test]
+    fn metadata_admission_checks_each_standard_information_field_independently() {
+        let valid = std_info(1234, A_HIDDEN | A_SYSTEM | A_REPARSE);
+        let attrs = extract_record_attributes(vec![valid.clone()]).unwrap();
+        assert_eq!((attrs.size, attrs.mtime), (0, 1234));
+        assert_eq!(
+            (attrs.is_hidden, attrs.is_system, attrs.is_reparse),
+            (true, true, true)
+        );
+
+        let mut flagged = valid.clone();
+        put_u16(&mut flagged, 12, 0x4000);
+        let mut nonresident = data_nonresident(1);
+        put_u32(&mut nonresident, 0, T_STD_INFO);
+        let mut value = vec![0u8; 48];
+        put_u64(&mut value, 8, 1234);
+        put_u32(&mut value, 32, A_HIDDEN | A_SYSTEM | A_REPARSE);
+        for invalid in [
+            named_resident_attr(T_STD_INFO, &utf16("named"), &value),
+            flagged,
+            nonresident,
+        ] {
+            assert!(extract_record_attributes(vec![invalid]).is_none());
+        }
+        assert!(extract_record_attributes(vec![valid.clone(), valid]).is_none());
+    }
+
+    #[test]
+    fn metadata_rejection_survives_a_later_valid_standard_information_or_data_attribute() {
+        let short = resident_attr(T_STD_INFO, &[0u8; 8]);
+        assert!(extract_record_attributes(vec![short, std_info(42, 0)]).is_none());
+        assert!(
+            extract_record_attributes(vec![
+                std_info(42, 0),
+                std_info(43, 0),
+                resident_attr(T_DATA, &[1, 2, 3]),
+            ])
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn metadata_admission_checks_attribute_list_name_flags_and_repetition_independently() {
+        let valid = resident_attr(T_ATTR_LIST, &[]);
+        assert!(extract_record_attributes(vec![std_info(42, 0), valid.clone()]).is_some());
+        let mut flagged = valid.clone();
+        put_u16(&mut flagged, 12, 0x4000);
+        for invalid in [
+            named_resident_attr(T_ATTR_LIST, &utf16("named"), &[]),
+            flagged,
+        ] {
+            assert!(extract_record_attributes(vec![std_info(42, 0), invalid]).is_none());
+        }
+        assert!(extract_record_attributes(vec![std_info(42, 0), valid.clone(), valid]).is_none());
+    }
+
+    fn mixed_record_batch(first: u64) -> ParsedBatch {
+        let mut records = Vec::new();
+        for _ in 0..2 {
+            let mut invalid = Rec::new().build();
+            invalid[..4].copy_from_slice(b"NOPE");
+            records.push(invalid);
+        }
+        for _ in 0..3 {
+            let mut torn = Rec::new();
+            torn.good_fixup = false;
+            records.push(torn.build());
+        }
+        for _ in 0..2 {
+            let mut flagged = std_info(42, 0);
+            put_u16(&mut flagged, 12, 0x4000);
+            records.push(Rec::new().attr(flagged).build());
+        }
+        for _ in 0..2 {
+            records.push(
+                Rec::new()
+                    .attr(resident_attr(T_STD_INFO, &[0u8; 8]))
+                    .build(),
+            );
+        }
+        for attribute in [
+            resident_attr(T_ATTR_LIST, &[]),
+            file_name(5, NS_WIN32, &utf16("extension")),
+            std_info(42, 0),
+        ] {
+            records.push(Rec::new().base(frn(99)).attr(attribute).build());
+        }
+        for _ in 0..3 {
+            records.push(
+                Rec::new()
+                    .attr(std_info(42, 0))
+                    .attr(file_name(5, NS_DOS, &utf16("DOS")))
+                    .build(),
+            );
+        }
+        records.push(vec![0u8; REC]);
+        records.push(
+            Rec::new()
+                .attr(std_info(first as i64, A_REPARSE))
+                .attr(file_name(5, NS_WIN32, &utf16(&format!("keep-{first}.txt"))))
+                .attr(data_nonresident(17))
+                .build(),
+        );
+        for suffix in ["a", "b"] {
+            records.push(
+                Rec::new()
+                    .dir()
+                    .attr(std_info(42, 0))
+                    .attr(file_name(
+                        5,
+                        NS_WIN32,
+                        &utf16(&format!("directory-{first}-{suffix}")),
+                    ))
+                    .build(),
+            );
+        }
+        for _ in 0..2 {
+            records.push(
+                Rec::new()
+                    .attr(std_info(42, 0))
+                    .attr(resident_attr(T_ATTR_LIST, &[]))
+                    .build(),
+            );
+        }
+        parse_subrange(&mut records.concat(), logical_at(first), REC, 512)
+    }
+
+    #[test]
+    fn repeated_record_failures_names_and_extensions_have_independent_exact_counts() {
+        let batch = mixed_record_batch(200);
+        assert_eq!((batch.files, batch.dirs), (1, 2));
+        assert_eq!(batch.corrupt_records, 9);
+        assert_eq!(batch.extension_records, 3);
+        assert_eq!(batch.skipped_no_name, 3);
+        assert_eq!(batch.metas.len(), 3);
+        assert_eq!(batch.metas[0].frn, frn(216));
+        assert_eq!(name_of(&batch, &batch.metas[0]), b"keep-200.txt");
+        assert_eq!(
+            (batch.metas[0].attrs.size, batch.metas[0].attrs.mtime),
+            (17, 200)
+        );
+        assert!(batch.metas[0].attrs.is_reparse);
+        assert_eq!(batch.extensions, [(209, 0..REC), (210, REC..2 * REC)]);
+        assert_eq!(
+            batch.deferred,
+            [(frn(219), 2 * REC..3 * REC), (frn(220), 3 * REC..4 * REC)]
+        );
+        assert_eq!(batch.rec_pool.len(), 4 * REC);
+    }
+
+    #[test]
+    fn directory_suppression_subtracts_each_removed_row_and_preserves_neighbors() {
+        let mut records = Vec::new();
+        for name in ["remove-a", "remove-b", "keep-directory"] {
+            records.push(
+                Rec::new()
+                    .dir()
+                    .attr(std_info(42, 0))
+                    .attr(file_name(5, NS_WIN32, &utf16(name)))
+                    .build(),
+            );
+        }
+        records.push(
+            Rec::new()
+                .attr(std_info(42, 0))
+                .attr(file_name(5, NS_WIN32, &utf16("keep-file")))
+                .build(),
+        );
+        let mut batch = parse_subrange(&mut records.concat(), logical_at(80), REC, 512);
+        assert_eq!((batch.dirs, batch.files), (3, 1));
+        batch.suppress_record(Frn(frn(80)).record());
+        assert_eq!((batch.dirs, batch.files), (2, 1));
+        batch.suppress_record(Frn(frn(81)).record());
+        batch.suppress_record(Frn(frn(80)).record());
+        batch.suppress_record(Frn(frn(900)).record());
+        assert_eq!((batch.dirs, batch.files), (1, 1));
+        assert_eq!(
+            batch
+                .metas
+                .iter()
+                .map(|meta| name_of(&batch, meta))
+                .collect::<Vec<_>>(),
+            [b"keep-directory".as_slice(), b"keep-file".as_slice()]
+        );
+        assert_eq!(
+            batch.metas.iter().map(|meta| meta.frn).collect::<Vec<_>>(),
+            [frn(82), frn(83)]
+        );
+    }
+
+    #[test]
+    fn worker_partitions_round_down_to_complete_non_power_of_two_records() {
+        const RECORD_SIZE: usize = 1536;
+        let mut chunk = Vec::new();
+        for index in 0..683 {
+            let mut bytes = Rec::new()
+                .attr(std_info(42, 0))
+                .attr(file_name(5, NS_WIN32, &utf16(&format!("aligned-{index}"))))
+                .build();
+            bytes.resize(RECORD_SIZE, 0);
+            put_u16(&mut bytes, 6, 4);
+            put_u32(&mut bytes, 28, RECORD_SIZE as u32);
+            put_u16(&mut bytes, RECORD_SIZE - 2, USN_SENTINEL);
+            chunk.extend_from_slice(&bytes);
+        }
+        let batches = parse_chunk(&mut chunk, 24 * RECORD_SIZE as u64, RECORD_SIZE, 512);
+        assert_eq!(batches.len(), 2);
+        assert_eq!((batches[0].files, batches[1].files), (682, 1));
+        assert_eq!(batches[0].metas.len(), 682);
+        assert_eq!(batches[1].metas.len(), 1);
+        assert_eq!(batches[1].metas[0].frn, frn(706));
+        assert_eq!(name_of(&batches[1], &batches[1].metas[0]), b"aligned-682");
+    }
+
+    #[test]
+    fn appending_batches_accumulates_nonzero_statistics_and_keeps_the_shared_arena_cap() {
+        let mut first = mixed_record_batch(200);
+        first.deferred_name_read_failures = 7;
+        first.deferred_stat_failures = 13;
+        let mut second = mixed_record_batch(500);
+        second.deferred_name_read_failures = 11;
+        second.deferred_stat_failures = 17;
+        let mut builder = VolumeIndexBuilder::new_synthetic("C:", 5);
+        let mut stats = ScanStats {
+            files: 10,
+            dirs: 20,
+            extension_records: 30,
+            skipped_no_name: 40,
+            deferred_name_read_failures: 50,
+            deferred_stat_failures: 60,
+            deferred_record_cache_spills: 70,
+            mft_bytes: 123_456,
+            ..Default::default()
+        };
+        let mut arena = RecordArena::new(REC);
+        assert_eq!(arena.try_push_bounded(&vec![0xCC; REC], 4 * REC), Some(0));
+        let mut deferred = vec![(frn(998), Some(0))];
+        let mut extensions = FxHashMap::default();
+        extensions.insert(999, 0);
+        let corrupt = append_batches_bounded(
+            &mut builder,
+            &mut stats,
+            &mut deferred,
+            &mut extensions,
+            &mut arena,
+            vec![first, second],
+            4 * REC,
+        );
+        assert_eq!(corrupt, 18);
+        assert_eq!((stats.files, stats.dirs), (12, 24));
+        assert_eq!(stats.extension_records, 36);
+        assert_eq!(stats.skipped_no_name, 46);
+        assert_eq!(stats.deferred_name_read_failures, 68);
+        assert_eq!(stats.deferred_stat_failures, 90);
+        assert_eq!(stats.deferred_record_cache_spills, 75);
+        assert_eq!(stats.mft_bytes, 123_456);
+        assert_eq!(arena.data.len(), 4 * REC);
+        assert_eq!(arena.get(0), &[0xCC; REC]);
+        assert_eq!(extensions.len(), 3);
+        assert_eq!(extensions.get(&999), Some(&0));
+        assert_eq!(extensions.get(&209), Some(&1));
+        assert_eq!(extensions.get(&210), Some(&2));
+        assert_eq!(
+            deferred,
+            [
+                (frn(998), Some(0)),
+                (frn(219), Some(3)),
+                (frn(220), None),
+                (frn(519), None),
+                (frn(520), None)
+            ]
+        );
+        let index = builder.finish();
+        assert_eq!(index.len(), 7);
+        let names: Vec<_> = (0..index.len() as u32)
+            .filter(|&id| index.is_live(id))
+            .map(|id| index.name(id))
+            .collect();
+        for name in [
+            b"keep-200.txt".as_slice(),
+            b"keep-500.txt".as_slice(),
+            b"directory-200-a".as_slice(),
+            b"directory-500-b".as_slice(),
+        ] {
+            assert!(names.contains(&name));
+        }
     }
 
     #[test]
