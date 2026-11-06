@@ -142,7 +142,8 @@ The remaining cases use `cadical` from the Kani bundle.
 The [terminator run](https://github.com/P4suta/find-my-files/actions/runs/42132841128) still exhausts SAT memory for three high-prefix-ID cases and reaches the Bitwuzla deadline in the absent-terminator invariant case.
 The run stops before completing its remaining harnesses.
 CBMC's [array field sensitivity setting](https://diffblue.github.io/cbmc/man/cbmc.html) controls which arrays have their elements expanded into separate fields.
-The runner raises the expansion threshold to include the complete finite record buffer.
+Expanding the complete record buffer still exhausts SAT memory in the high-prefix-ID third-terminator invariant case in the [array-expansion attempt](https://github.com/P4suta/find-my-files/actions/runs/42138664012).
+The runner disables CBMC's array field expansion for input arrays and small heap buffers.
 The setting changes expression generation while keeping every array element, property, and input bound.
 The existing source fingerprint includes the runner and rejects evidence from its previous configuration.
 The external Linux solver has an exact version pin, archive byte count, and SHA-256 checksum.
