@@ -1405,7 +1405,11 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
     let gate_passed = parsed.baseline_passed
         && parsed.survived == expected_survivors
         && parsed.timeout.is_empty()
-        && status.code() == Some(0);
+        && mutation::cargo_mutants_completed(
+            status.code(),
+            parsed.survived.len(),
+            parsed.timeout.len(),
+        );
     let outcomes = RustOutcomes {
         killed: parsed.killed,
         invalid,
@@ -3005,7 +3009,11 @@ fn verify_rust_evidence(args: VerifyArgs) -> Result<()> {
         if derived != receipt.outcomes
             || !parsed.baseline_passed
             || !receipt.baseline_passed
-            || receipt.process_exit_code != Some(0)
+            || !mutation::cargo_mutants_completed(
+                receipt.process_exit_code,
+                receipt.outcomes.survived.len(),
+                receipt.outcomes.timeout.len(),
+            )
             || !receipt.passed
             || receipt.outcomes.survived != expected_survivors
             || !receipt.outcomes.timeout.is_empty()
