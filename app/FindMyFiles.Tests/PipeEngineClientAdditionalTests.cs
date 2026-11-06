@@ -1248,17 +1248,26 @@ public sealed class PipeEngineClientAdditionalTests
     {
         using var server = new FakePipeServer();
         using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ConnectionChanged += state =>
+        {
+            if (state == EngineConnectionState.Connected)
+            {
+                connected.TrySetResult();
+            }
+        };
+
         client.Start();
-        await WaitUntilAsync(
-            () => client.Connection == EngineConnectionState.Connected,
-            "connected");
+        await connected.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal(EngineConnectionState.Connected, client.Connection);
         var publications = 0;
         client.ConnectionChanged += _ => publications++;
         var setConnection = typeof(PipeEngineClient).GetMethod(
             "SetConnection",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
 
-        setConnection?.Invoke(client, [EngineConnectionState.Connected]);
+        Assert.NotNull(setConnection);
+        setConnection.Invoke(client, [EngineConnectionState.Connected]);
 
         Assert.Equal(0, publications);
     }
