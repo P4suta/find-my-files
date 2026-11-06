@@ -334,6 +334,18 @@
         "inconsistent_record_lengths_reject_before_attribute_traversal",
         "remaining_attribute_offsets_reject_the_chain"
       ]
+    },
+    {
+      "package": "fmf-runtime",
+      "source": "engine/crates/fmf-runtime/src/index/mutation_proofs.rs",
+      "prefix": "index::mutate::kani_proofs::",
+      "harnesses": [
+        "flag_updates_preserve_unselected_bits_and_are_idempotent",
+        "exclusion_uses_only_the_hidden_and_system_bits",
+        "file_link_kind_checks_preserve_the_requested_object",
+        "metadata_projection_preserves_every_object_field",
+        "each_walk_state_has_one_exhaustive_entry_transition"
+      ]
     }
   ]
 }
