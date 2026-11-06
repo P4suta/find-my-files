@@ -4,10 +4,11 @@
 
 #![forbid(unsafe_code)]
 
-use super::ntfs::NtfsAttribute;
+use super::ntfs::{NtfsAttribute, RESIDENT_HEADER_BYTES};
 use alloc::vec::Vec;
 
 const ATTRIBUTE_ALIGNMENT: usize = 8;
+const MIN_TERMINATED_ATTRIBUTE_BYTES: usize = RESIDENT_HEADER_BYTES + ATTRIBUTE_ALIGNMENT;
 const ATTRIBUTE_TYPE_STEP: u32 = 0x10;
 const ATTRIBUTES_OFFSET_FIELD: usize = 20;
 const USED_BYTES_FIELD: usize = 24;
@@ -98,6 +99,9 @@ pub fn attributes_complete(record: &[u8]) -> bool {
         if type_id == ATTRIBUTE_END {
             return true;
         }
+        if remaining.len() < MIN_TERMINATED_ATTRIBUTE_BYTES {
+            return false;
+        }
         if type_id == 0
             || type_id > MAX_ATTRIBUTE_TYPE
             || !type_id.is_multiple_of(ATTRIBUTE_TYPE_STEP)
@@ -109,6 +113,12 @@ pub fn attributes_complete(record: &[u8]) -> bool {
             return false;
         };
         let length = attribute.len();
+        let Some(rest) = remaining.get(length..) else {
+            return false;
+        };
+        if rest.len() < ATTRIBUTE_ALIGNMENT {
+            return false;
+        }
         if !length.is_multiple_of(ATTRIBUTE_ALIGNMENT) || !ids.insert(attribute.header.id) {
             return false;
         }
@@ -149,9 +159,6 @@ pub fn attributes_complete(record: &[u8]) -> bool {
                 return false;
             }
         }
-        let Some(rest) = remaining.get(length..) else {
-            return false;
-        };
         remaining = rest;
     }
 }
@@ -256,6 +263,23 @@ mod tests {
     #[test]
     fn accepts_a_complete_resident_chain() {
         assert!(attributes_complete(&resident_record()));
+    }
+
+    #[test]
+    fn a_minimal_resident_attribute_requires_every_terminator_byte() {
+        for tail in 0..=24 {
+            let mut record = resident_record();
+            record.resize(72 + tail, 0);
+            let bytes = record.len() as u32;
+            put_u32(&mut record, USED_BYTES_FIELD, bytes);
+            put_u32(&mut record, ALLOCATED_BYTES_FIELD, bytes);
+            put_u32(&mut record, 52, 24);
+            put_u32(&mut record, 64, 0);
+            put_u16(&mut record, RESIDENT_OFFSET_FIELD + 48, 24);
+            let marker_bytes = tail.min(size_of::<u32>());
+            record[72..72 + marker_bytes].fill(0xff);
+            assert_eq!(attributes_complete(&record), tail >= 8, "tail {tail}");
+        }
     }
 
     #[test]
