@@ -129,6 +129,13 @@ The external runner contracts come from the [xUnit migration guide](https://xuni
 The source-bound activation predicate proof covers the acceptance decision.
 It doesn't prove the framework or its adapter.
 
+The timeout-reason fixture captures the sibling request's completion before releasing retirement.
+After the expiring request finishes retirement, the fixture requires the captured task's [faulted state](https://learn.microsoft.com/en-us/dotnet/api/system.threading.tasks.task.isfaulted?view=net-10.0) before awaiting the sibling.
+The [exception transition](https://learn.microsoft.com/en-us/dotnet/api/system.threading.tasks.taskcompletionsource-1.trysetexception?view=net-10.0) belongs to the captured pending completion.
+The asynchronous request adapter can finish after that transition.
+Cleanup releases both gates, cancels owned requests and the held peer response, and observes both requests.
+Native omission and predicate controls check test failures while the manual request clock remains frozen until cleanup.
+
 Both Rust mutation lanes derive mutant jobs and test threads for `nextest` from one nonzero CPU estimate.
 The production planner reserves at most four test threads per job.
 The combined thread count stays within the estimate, including hosts with one, two, or three CPUs.
