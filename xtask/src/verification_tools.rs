@@ -11,6 +11,7 @@ use crate::{checksum::sha256_hex, cmd, paths};
 const OCOMMENT_URL: &str = "https://github.com/P4suta/OComment";
 const KANI_RELEASES_URL: &str = "https://github.com/model-checking/kani/releases/download";
 const BITWUZLA_RELEASES_URL: &str = "https://github.com/bitwuzla/bitwuzla/releases/download";
+const Z3_RELEASES_URL: &str = "https://github.com/Z3Prover/z3/releases/download";
 const KANI_VERSION: &str = "0.68.0";
 const KANI_SHA256: &str = "32e2b484d73ede0bbf64a2cf0879c4259422497d8aec4ee67d448de9ae7843d3";
 const KANI_BUNDLE_BYTES: u64 = 140_315_343;
@@ -18,6 +19,10 @@ const BITWUZLA_VERSION: &str = "0.9.1";
 const BITWUZLA_SHA256: &str = "057f1546ae2068df57beb178f3eeab1678f0e5f0c378787a05b7bb294617c9c6";
 const BITWUZLA_ARCHIVE_BYTES: u64 = 4_909_392;
 const BITWUZLA_ARCHIVE: &str = "Bitwuzla-Linux-x86_64-static";
+const Z3_VERSION: &str = "5.3.3";
+const Z3_SHA256: &str = "d56f60b06f432f33de5810f7f1a384a339131f361e2d54d08ea83eea14326880";
+const Z3_ARCHIVE_BYTES: u64 = 69_671_358;
+const Z3_ARCHIVE: &str = "z3-5.3.3-x64-glibc-2.39";
 #[cfg(unix)]
 const EXECUTABLE_MODE: u32 = 0o755;
 const COMMIT_HEX_BYTES: usize = 40;
@@ -26,6 +31,7 @@ const COMMIT_HEX_BYTES: usize = 40;
 pub enum Tool {
     Comments,
     Kani,
+    Z3,
 }
 
 fn expose(directory: &Path) -> Result<()> {
@@ -161,6 +167,80 @@ pub fn require_bitwuzla(root: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn require_z3(root: &Path) -> Result<()> {
+    let pins = fs::read_to_string(root.join("mise.toml"))?.parse::<toml_edit::DocumentMut>()?;
+    let pin = &pins["tools"]["http:z3"];
+    ensure!(
+        pin["version"].as_str() == Some(Z3_VERSION)
+            && pin["checksum"].as_str() == Some(&format!("sha256:{Z3_SHA256}"))
+            && pin["size"].as_str() == Some(&Z3_ARCHIVE_BYTES.to_string()),
+        "Z3 archive metadata needs updating for the tool pin"
+    );
+    let version = cmd::capture_stdout(root, "z3", &["--version"])?;
+    ensure!(
+        version.trim() == "Z3 version 5.3.3 - 64 bit - build hashcode 430d19e697e2ec9bad79ff210d41b4a7a5fcfa3e",
+        "unexpected Z3 executable: {version}"
+    );
+    println!("{}", version.trim());
+    Ok(())
+}
+
+fn install_z3(destination: &Path) -> Result<()> {
+    let root = paths::repo_root();
+    let archive = paths::verification_dir().join(format!("{Z3_ARCHIVE}.zip"));
+    if !archive.exists() {
+        let url = format!("{Z3_RELEASES_URL}/z3-{Z3_VERSION}/{Z3_ARCHIVE}.zip");
+        let status = Command::new("curl")
+            .current_dir(&root)
+            .args([
+                "--fail",
+                "--location",
+                "--proto",
+                "=https",
+                "--tlsv1.2",
+                "--max-time",
+                "120",
+                "--output",
+            ])
+            .arg(&archive)
+            .arg(url)
+            .status()?;
+        ensure!(status.success(), "Z3 archive download failed: {status}");
+    }
+    ensure!(
+        fs::metadata(&archive)?.len() == Z3_ARCHIVE_BYTES,
+        "unexpected Z3 archive size"
+    );
+    ensure!(
+        sha256_hex(&fs::read(&archive)?) == Z3_SHA256,
+        "Z3 archive checksum mismatch"
+    );
+    let mut archive = zip::ZipArchive::new(fs::File::open(archive)?)?;
+    let bin = destination.join("bin");
+    fs::create_dir_all(&bin)?;
+    let mut entry = archive.by_name(&format!("{Z3_ARCHIVE}/bin/z3"))?;
+    let executable = bin.join("z3");
+    std::io::copy(&mut entry, &mut fs::File::create(&executable)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(EXECUTABLE_MODE))?;
+    }
+    let version = cmd::capture_stdout(
+        &root,
+        executable.to_str().context("invalid Z3 path")?,
+        &["--version"],
+    )?;
+    ensure!(
+        version
+            .trim()
+            .starts_with(&format!("Z3 version {Z3_VERSION} - ")),
+        "unexpected installed Z3 executable: {version}"
+    );
+    println!("{}", version.trim());
+    Ok(())
+}
+
 fn install_bitwuzla(destination: &Path) -> Result<()> {
     let root = paths::repo_root();
     let pins = fs::read_to_string(root.join("mise.toml"))?.parse::<toml_edit::DocumentMut>()?;
@@ -241,7 +321,9 @@ pub fn install(tool: Tool) -> Result<()> {
         Tool::Kani => {
             install_kani(&destination)?;
             install_bitwuzla(&destination)?;
+            install_z3(&destination)?;
         }
+        Tool::Z3 => install_z3(&destination)?,
     }
     expose(&destination.join("bin"))
 }

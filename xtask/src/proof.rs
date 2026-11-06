@@ -601,7 +601,7 @@ fn discover_at(root: &Path, out: &Path, inventory: &Inventory) -> Result<()> {
             .args(package.selector())
             .arg("--target-dir")
             .arg(out.join("kani"))
-            .args(["list", "--format", "json"])
+            .args(["list", "--format", "json", "-Z", "stubbing"])
             .status()
             .with_context(|| format!("discover compiled Kani harnesses for {}", package.name()))?;
         ensure!(
@@ -693,6 +693,7 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
     }
     let inventory = read_inventory(&root)?;
     crate::verification_tools::require_bitwuzla(&root)?;
+    crate::verification_tools::require_z3(&root)?;
     let version = cmd::capture_stdout(&root, "cargo", &["kani", "--version"])?;
     ensure!(
         version.lines().next()
@@ -742,6 +743,8 @@ fn run_subset(shard: Option<Shard>) -> Result<()> {
                 "regular",
                 "-Z",
                 "unstable-options",
+                "-Z",
+                "stubbing",
                 "--harness-timeout",
                 &format!("{}s", inventory.timeout_seconds),
                 "--target-dir",
