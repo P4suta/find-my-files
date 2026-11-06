@@ -165,6 +165,7 @@
       "source": "engine/crates/fmf-core/src/ondisk/record_proofs.rs",
       "prefix": "ondisk::record::kani_proofs::",
       "harnesses": [
+        "attribute_id_storage_matches_original_and_sequence_membership",
         "resident_length_partitions_preserve_every_field_value",
         "final_resident_length_partitions_preserve_every_field_value",
         "prefix_id_partitions_preserve_every_id_pair",
