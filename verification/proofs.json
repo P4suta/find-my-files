@@ -37,7 +37,8 @@
       "source": "xtask/src/mutation_authority_proofs.rs",
       "prefix": "mutation_authority::kani_proofs::",
       "harnesses": [
-        "candidate_audits_never_authorize_protected_main_execution"
+        "candidate_audits_never_authorize_protected_main_execution",
+        "rust_exit_protocol_preserves_every_terminal_outcome_count"
       ]
     },
     {
@@ -185,6 +186,7 @@
         "resident_length_partitions_preserve_every_field_value",
         "final_resident_length_partitions_preserve_every_field_value",
         "prefix_id_partitions_preserve_every_id_pair",
+        "constructing_filling_prefix_ids_preserves_every_record_byte",
         "first_terminator_partitions_preserve_every_type_triple",
         "later_residency_partitions_preserve_every_marker_pair",
         "other_second_markers_at_offset_forty_eight_with_lengths_twenty_four_then_twenty_four_preserve_admission",
