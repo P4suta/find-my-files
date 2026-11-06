@@ -7,26 +7,209 @@ use crate::ondisk::ntfs::NtfsAttribute;
 #[path = "record_admission_reference.rs"]
 mod admission_reference;
 
+struct IdInsertionChecks {
+    accepted: bool,
+    expected: bool,
+}
+
+const _: () = assert!(super::INLINE_HIGH_IDS == 4);
+const ID_INSERTION_SEQUENCE_BOUND: usize = 6;
+
+fn check_id_insertion<const INLINE_LEN: usize, const OVERFLOW_LEN: usize>() -> IdInsertionChecks {
+    assert!(INLINE_LEN <= super::INLINE_HIGH_IDS);
+    assert!(INLINE_LEN == super::INLINE_HIGH_IDS || OVERFLOW_LEN == 0);
+    assert!(INLINE_LEN + OVERFLOW_LEN < ID_INSERTION_SEQUENCE_BOUND);
+    let previous_low: u128 = kani::any();
+    let previous_high: [u16; super::INLINE_HIGH_IDS] = kani::any();
+    let previous_overflow: [u16; OVERFLOW_LEN] = kani::any();
+    let id: u16 = kani::any();
+    let mut ids = AttributeIds {
+        low: previous_low,
+        high: previous_high,
+        high_len: INLINE_LEN,
+        overflow: alloc::vec::Vec::from(previous_overflow),
+    };
+    let is_low = id < u128::BITS as u16;
+    let expected = if is_low {
+        previous_low & (1u128 << id) == 0
+    } else {
+        !previous_high[..INLINE_LEN].contains(&id) && !previous_overflow.contains(&id)
+    };
+    let accepted = ids.insert(id);
+    let added_high = accepted && !is_low;
+    let added_inline = added_high && INLINE_LEN < super::INLINE_HIGH_IDS;
+    let added_overflow = added_high && INLINE_LEN == super::INLINE_HIGH_IDS;
+    assert_eq!(ids.high_len, INLINE_LEN + usize::from(added_inline));
+    for (index, value) in previous_high.into_iter().enumerate() {
+        assert_eq!(
+            ids.high[index],
+            if added_inline && index == INLINE_LEN {
+                id
+            } else {
+                value
+            }
+        );
+    }
+    assert_eq!(
+        ids.overflow.len(),
+        OVERFLOW_LEN + usize::from(added_overflow)
+    );
+    for (index, value) in previous_overflow.into_iter().enumerate() {
+        assert_eq!(ids.overflow[index], value);
+    }
+    if added_overflow {
+        assert_eq!(ids.overflow[OVERFLOW_LEN], id);
+    }
+    assert_eq!(
+        ids.low,
+        if accepted && is_low {
+            previous_low | (1u128 << id)
+        } else {
+            previous_low
+        }
+    );
+    kani::cover!(added_high);
+    IdInsertionChecks { accepted, expected }
+}
+
 #[kani::proof]
 #[kani::unwind(7)]
-fn attribute_id_storage_matches_original_and_sequence_membership() {
-    let input: [u16; 6] = kani::any();
-    let mut ids = AttributeIds::default();
-    let mut original_low = 0;
-    let mut original_high = alloc::vec::Vec::new();
-    let mut rejected = false;
-    for (index, id) in input.into_iter().enumerate() {
-        let expected = !input[..index].contains(&id);
-        let inserted = ids.insert(id);
-        assert_eq!(inserted, expected);
-        assert_eq!(
-            admission_reference::unique_attribute_id(id, &mut original_low, &mut original_high),
-            expected
-        );
-        rejected |= !inserted;
+fn attribute_id_insertion_with_empty_inline_storage_preserves_membership() {
+    let checked = check_id_insertion::<0, 0>();
+    assert_eq!(checked.accepted, checked.expected);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(7)]
+fn attribute_id_insertion_with_one_inline_entry_preserves_membership() {
+    let checked = check_id_insertion::<1, 0>();
+    assert_eq!(checked.accepted, checked.expected);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(7)]
+fn attribute_id_insertion_with_two_inline_entries_preserves_membership() {
+    let checked = check_id_insertion::<2, 0>();
+    assert_eq!(checked.accepted, checked.expected);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(7)]
+fn attribute_id_insertion_with_three_inline_entries_preserves_membership() {
+    let checked = check_id_insertion::<3, 0>();
+    assert_eq!(checked.accepted, checked.expected);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(7)]
+fn attribute_id_insertion_with_full_inline_storage_preserves_membership() {
+    let checked = check_id_insertion::<4, 0>();
+    assert_eq!(checked.accepted, checked.expected);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(7)]
+fn attribute_id_insertion_with_one_spilled_entry_preserves_membership() {
+    let checked = check_id_insertion::<4, 1>();
+    assert_eq!(checked.accepted, checked.expected);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+fn check_reference_id_insertion<const LEN: usize>() -> IdInsertionChecks {
+    let previous: [u16; LEN] = kani::any();
+    let previous_low: u128 = kani::any();
+    let id: u16 = kani::any();
+    let mut low = previous_low;
+    let mut high = alloc::vec::Vec::from(previous);
+    let is_low = id < u128::BITS as u16;
+    let expected = if is_low {
+        previous_low & (1u128 << id) == 0
+    } else {
+        !previous.contains(&id)
+    };
+    let accepted = admission_reference::unique_attribute_id(id, &mut low, &mut high);
+    assert_eq!(high.len(), LEN + usize::from(accepted && !is_low));
+    for (index, value) in previous.into_iter().enumerate() {
+        assert_eq!(high[index], value);
     }
-    kani::cover!(ids.overflow.len() >= 2);
-    kani::cover!(rejected);
+    if accepted && !is_low {
+        assert_eq!(high[LEN], id);
+    }
+    assert_eq!(
+        low,
+        if accepted && is_low {
+            previous_low | (1u128 << id)
+        } else {
+            previous_low
+        }
+    );
+    kani::cover!(accepted && !is_low);
+    IdInsertionChecks { accepted, expected }
+}
+
+#[kani::proof]
+#[kani::unwind(7)]
+fn reference_id_insertion_without_prior_entries_preserves_membership() {
+    let checked = check_reference_id_insertion::<0>();
+    assert_eq!(checked.accepted, checked.expected);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(7)]
+fn reference_id_insertion_with_one_prior_entry_preserves_membership() {
+    let checked = check_reference_id_insertion::<1>();
+    assert_eq!(checked.accepted, checked.expected);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(7)]
+fn reference_id_insertion_with_two_prior_entries_preserves_membership() {
+    let checked = check_reference_id_insertion::<2>();
+    assert_eq!(checked.accepted, checked.expected);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(7)]
+fn reference_id_insertion_with_three_prior_entries_preserves_membership() {
+    let checked = check_reference_id_insertion::<3>();
+    assert_eq!(checked.accepted, checked.expected);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(7)]
+fn reference_id_insertion_with_four_prior_entries_preserves_membership() {
+    let checked = check_reference_id_insertion::<4>();
+    assert_eq!(checked.accepted, checked.expected);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
+}
+
+#[kani::proof]
+#[kani::unwind(7)]
+fn reference_id_insertion_with_five_prior_entries_preserves_membership() {
+    let checked = check_reference_id_insertion::<5>();
+    assert_eq!(checked.accepted, checked.expected);
+    kani::cover!(checked.accepted);
+    kani::cover!(!checked.accepted);
 }
 
 const PROOF_BYTES: usize = 128;
