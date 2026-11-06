@@ -103,9 +103,13 @@ Attribute ID tracking preserves the low-ID bitset and keeps the first four disti
 Later high IDs spill into a vector without imposing a record or ID-count limit.
 Duplicate rejection preserves every stored ID and leaves the state unchanged.
 The inline prefix costs eight bytes of ID storage and avoids allocation for its four entries.
-A production-bound harness compares each insertion with the original membership helper and independent sequence membership.
-The harness quantifies every sequence of six arbitrary 16-bit IDs.
-The bound includes inline-prefix exhaustion, spill insertion, duplicate rejection, and reallocation in the original vector implementation.
+Production-bound transition harnesses check zero through four prior inline entries and the spilled prefix reached before a sixth high-ID insertion.
+Separate transition harnesses check the original membership helper with zero through five arbitrary prior vector entries.
+Every stored ID, low-ID bitset, and incoming 16-bit ID is arbitrary in each selected storage shape.
+The harnesses assert the independent membership result, exact logical lengths, preservation of prior entries, the inserted ID, and the resulting bitset.
+They also check every unused inline slot for an unintended write.
+The vector states start at full capacity, and reachable high-ID insertions check allocation and reallocation.
+The transition properties preserve the membership invariant needed at every step through six high-ID insertions without combining their symbolic allocation histories.
 Native regressions require allocation-free inline insertion and unchanged state on duplicate rejection across all storage regions.
 Generated native sequences exercise longer ID histories through an independent ordered set.
 
