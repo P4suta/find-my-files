@@ -82,13 +82,23 @@ pub(super) const fn sequence() -> [[Variant; 3]; ROUNDS] {
 
 pub(super) const fn build_args(variant: Variant) -> &'static [&'static str] {
     match variant {
-        Variant::A => &["build", "--locked", "--release", "-p", "fmf-cli"],
+        Variant::A => &[
+            "build",
+            "--locked",
+            "--release",
+            "-p",
+            "fmf-cli",
+            "--config",
+            "profile.release.overflow-checks=false",
+        ],
         Variant::B => &[
             "build",
             "--locked",
             "--release",
             "-p",
             "fmf-cli",
+            "--config",
+            "profile.release.overflow-checks=false",
             "--config",
             "profile.release.package.fmf-core.overflow-checks=true",
             "--config",
@@ -450,8 +460,10 @@ mod tests {
     #[test]
     fn variants_change_only_the_intended_release_profile_flags() {
         let baseline = vec!["build", "--locked", "--release", "-p", "fmf-cli"];
-        assert_eq!(build_args(Variant::A), baseline.as_slice());
-        let mut runtime = baseline.clone();
+        let mut boundary = baseline.clone();
+        boundary.extend(["--config", "profile.release.overflow-checks=false"]);
+        assert_eq!(build_args(Variant::A), boundary.as_slice());
+        let mut runtime = boundary;
         runtime.extend([
             "--config",
             "profile.release.package.fmf-core.overflow-checks=true",
