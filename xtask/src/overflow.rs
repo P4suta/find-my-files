@@ -19,10 +19,9 @@ mod kani_proofs;
 
 pub(super) const ROUNDS: usize = 5;
 const VARIANTS: [Variant; 3] = [Variant::A, Variant::B, Variant::C];
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 const COOLING_SECONDS: u64 = 60;
 const GENERIC_FAILURE: i32 = 1;
-const AFFINITY_HEX_RADIX: u32 = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Mode {
@@ -160,20 +159,6 @@ fn boot_millis() -> Result<u64> {
         .context("Windows returned an invalid boot timestamp")
 }
 
-fn process_affinity() -> Result<u64> {
-    let command = format!(
-        "[Diagnostics.Process]::GetProcessById({}).ProcessorAffinity.ToInt64().ToString('X16', [Globalization.CultureInfo]::InvariantCulture)",
-        std::process::id()
-    );
-    let output = cmd::capture_stdout(
-        &paths::repo_root(),
-        "powershell.exe",
-        &["-NoProfile", "-Command", &command],
-    )?;
-    u64::from_str_radix(output.trim(), AFFINITY_HEX_RADIX)
-        .context("Windows returned an invalid processor affinity")
-}
-
 fn require_default_environment() -> Result<()> {
     for (key, _) in env::vars_os() {
         let key = key.to_string_lossy().to_ascii_uppercase();
@@ -256,15 +241,6 @@ fn require_prepared(prepared: &Prepared, output: &Path) -> Result<()> {
         "unsupported overflow experiment schema"
     );
     ensure!(!prepared.source.git_dirty, "the prepared source was dirty");
-    let recorded_processors: std::num::NonZeroUsize = prepared
-        .source
-        .logical_processors
-        .parse()
-        .context("the prepared logical processor count is invalid")?;
-    ensure!(
-        usize::try_from(process_affinity()?.count_ones())? == recorded_processors.get(),
-        "measurement requires the processor affinity recorded at preparation"
-    );
     ensure!(
         prepared.source == RunIdentity::capture()?,
         "prepared source or machine identity changed"
@@ -344,11 +320,15 @@ fn record_run(
     let label = format!("round-{round}-{}", variant.label());
     let report = output.join(format!("{label}.json"));
     ensure!(!report.exists(), "a report already exists for {label}");
-    let measured = measure_allow_failure(|| {
-        let status = Command::new(executable(output, variant))
-            .args(["bench", "C:", "--out"])
+    let measured = measure_allow_failure(|execution| {
+        let status = execution
+            .command(
+                &paths::engine_dir(),
+                executable(output, variant),
+                &["bench", "C:", "--out"],
+                &[],
+            )
             .arg(&report)
-            .current_dir(paths::engine_dir())
             .status()
             .context("run the prepared real-volume benchmark")?;
         ensure!(status.success(), "benchmark exited with {status}");
