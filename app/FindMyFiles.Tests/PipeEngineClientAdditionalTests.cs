@@ -9,6 +9,63 @@ namespace FindMyFiles.Tests;
 /// <summary>Failure/status/event branches of <see cref="PipeEngineClient"/> that are not part of the happy-path state-machine specification.</summary>
 public sealed class PipeEngineClientAdditionalTests
 {
+    private sealed class CountingSyncContext : SynchronizationContext
+    {
+        private int _posted;
+
+        public int Posted => Volatile.Read(ref _posted);
+
+        public override void Post(SendOrPostCallback d, object? state)
+        {
+            Interlocked.Increment(ref _posted);
+            Assert.True(ThreadPool.QueueUserWorkItem(
+                static work => work.Callback(work.State),
+                (Callback: d, State: state),
+                preferLocal: false));
+        }
+    }
+
+    [Fact]
+    public async Task Post_write_hook_continues_without_capturing_its_ambient_context()
+    {
+        using var server = new FakePipeServer();
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        client.Start();
+        await WaitUntilAsync(() => client.Connection == EngineConnectionState.Connected, "connected");
+
+        var suspended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowContinuation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var context = new CountingSyncContext();
+        var marker = new AsyncLocal<bool>(change =>
+        {
+            if (change.ThreadContextChanged && change.PreviousValue && !change.CurrentValue)
+            {
+                suspended.TrySetResult();
+            }
+        });
+        client.AfterRequestWriteForTests = () =>
+        {
+            SynchronizationContext.SetSynchronizationContext(context);
+            marker.Value = true;
+            return allowContinuation.Task;
+        };
+        var cancellation = TestContext.Current.CancellationToken;
+        var request = Task.Run(() => client.ListVolumesAsync(cancellation), cancellation);
+        try
+        {
+            await suspended.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellation);
+            allowContinuation.SetResult();
+            await request.WaitAsync(TimeSpan.FromSeconds(5), cancellation);
+            Assert.Equal(0, context.Posted);
+        }
+        finally
+        {
+            client.AfterRequestWriteForTests = null;
+            allowContinuation.TrySetResult();
+            await request.WaitAsync(TimeSpan.FromSeconds(5), cancellation);
+        }
+    }
+
     private sealed class ThrowingDisposable : IDisposable
     {
         public int Calls { get; private set; }
