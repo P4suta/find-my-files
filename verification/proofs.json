@@ -6,14 +6,6 @@
   "address_space_bytes": 8589934592,
   "targets": [
     {
-      "package": "fmf-runtime",
-      "source": "engine/crates/fmf-runtime/src/scan/parse_proofs.rs",
-      "prefix": "scan::parse::kani_proofs::",
-      "harnesses": [
-        "recording_corruption_increments_once_and_preserves_other_batch_counts"
-      ]
-    },
-    {
       "package": "fmf-core",
       "source": "engine/crates/fmf-core/src/mtime_proofs.rs",
       "prefix": "dates::kani_proofs::",
@@ -146,6 +138,7 @@
       "source": "engine/crates/fmf-runtime/src/metrics_proofs.rs",
       "prefix": "metrics::kani_proofs::",
       "harnesses": [
+        "recording_scan_corruption_increments_once_without_overflow",
         "recording_changes_only_the_selected_bucket_without_overflow"
       ]
     },

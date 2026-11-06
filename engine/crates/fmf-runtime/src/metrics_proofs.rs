@@ -1,4 +1,17 @@
-use super::{BUCKET_COUNT, BucketIndex, Histogram};
+use super::{BUCKET_COUNT, BucketIndex, Histogram, record_scan_corruption};
+
+#[kani::proof]
+#[kani::unwind(1)]
+fn recording_scan_corruption_increments_once_without_overflow() {
+    let previous: u64 = kani::any();
+    kani::assume(previous < u64::MAX);
+    let mut count = previous;
+    record_scan_corruption(&mut count);
+    assert!(count > previous);
+    assert_eq!(count.wrapping_sub(previous), 1);
+    kani::cover!(previous == 0);
+    kani::cover!(previous == u64::MAX - 1);
+}
 
 #[kani::proof]
 #[kani::unwind(33)]

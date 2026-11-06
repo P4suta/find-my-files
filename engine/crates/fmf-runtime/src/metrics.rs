@@ -8,6 +8,11 @@ use fmf_core::histogram::{BUCKET_COUNT, BucketIndex};
 use parking_lot::Mutex;
 use serde::Serialize;
 
+#[cfg(any(windows, kani))]
+pub(crate) const fn record_scan_corruption(count: &mut u64) {
+    *count += 1;
+}
+
 /// Median quantile.
 pub const MEDIAN_QUANTILE: f64 = 0.50;
 /// Ninetieth-percentile quantile.

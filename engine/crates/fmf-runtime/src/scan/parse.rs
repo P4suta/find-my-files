@@ -166,7 +166,7 @@ pub(super) struct ParsedBatch {
 
 impl ParsedBatch {
     const fn record_corruption(&mut self) {
-        self.corrupt_records += 1;
+        crate::metrics::record_scan_corruption(&mut self.corrupt_records);
     }
 
     /// Test seam: behave exactly as if the scan never read this $MFT slot —
@@ -447,10 +447,6 @@ fn append_batches_bounded(
     }
     corrupt_records
 }
-
-#[cfg(kani)]
-#[path = "parse_proofs.rs"]
-mod kani_proofs;
 
 #[cfg(test)]
 mod tests {
@@ -1473,6 +1469,35 @@ mod tests {
             [(frn(219), 2 * REC..3 * REC), (frn(220), 3 * REC..4 * REC)]
         );
         assert_eq!(batch.rec_pool.len(), 4 * REC);
+    }
+
+    #[test]
+    fn recording_corruption_preserves_every_other_batch_counter() {
+        for previous in [0, 1, u64::MAX - 1] {
+            let mut batch = ParsedBatch {
+                corrupt_records: previous,
+                files: 2,
+                dirs: 3,
+                extension_records: 5,
+                skipped_no_name: 7,
+                deferred_name_read_failures: 11,
+                deferred_stat_failures: 13,
+                ..Default::default()
+            };
+            batch.record_corruption();
+            assert_eq!(batch.corrupt_records, previous + 1);
+            assert_eq!(
+                (
+                    batch.files,
+                    batch.dirs,
+                    batch.extension_records,
+                    batch.skipped_no_name,
+                    batch.deferred_name_read_failures,
+                    batch.deferred_stat_failures,
+                ),
+                (2, 3, 5, 7, 11, 13)
+            );
+        }
     }
 
     #[test]
