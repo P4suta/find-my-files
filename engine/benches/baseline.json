@@ -1,26 +1,26 @@
 {
-  "entries": 3659275,
-  "index_ms": 41959,
+  "entries": 3663498,
+  "index_ms": 35905,
   "measurement": {
     "cargo_lock_sha256": "9d2eeedb79b6e48c4a618914a6f21cedb778a4bab0616bd9122491540f7d0073",
     "counters": {
       "during": {
-        "max_processor_time": 99.230999,
-        "mean_processor_performance": 118.50881830158728,
-        "mean_processor_time": 57.3050416031746,
-        "min_processor_performance": 99.36963
+        "max_processor_time": 99.713043,
+        "mean_processor_performance": 118.39776349122803,
+        "mean_processor_time": 58.5538502631579,
+        "min_processor_performance": 107.32077
       },
       "postflight": {
-        "max_processor_time": 11.681851,
-        "mean_processor_performance": 118.22506433333332,
-        "mean_processor_time": 5.540662833333333,
-        "min_processor_performance": 112.603619
+        "max_processor_time": 12.37513,
+        "mean_processor_performance": 118.32989350000001,
+        "mean_processor_time": 7.3224401666666665,
+        "min_processor_performance": 114.039846
       },
       "preflight": {
-        "max_processor_time": 13.03563,
-        "mean_processor_performance": 118.66836016666667,
-        "mean_processor_time": 7.032934,
-        "min_processor_performance": 109.483114
+        "max_processor_time": 13.055167,
+        "mean_processor_performance": 117.22844916666666,
+        "mean_processor_time": 8.182891,
+        "min_processor_performance": 108.998674
       }
     },
     "execution": {
@@ -28,7 +28,7 @@
       "rayon_workers": 16,
       "system_mask": 65535
     },
-    "finished_unix": 1793945414,
+    "finished_unix": 1793953931,
     "git": {
       "commit": "85c16d67604c8f1abe756190b9ab91d0aa29b315",
       "dirty": false,
@@ -39,128 +39,128 @@
     "processor": "AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD",
     "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.1\nLLVM version: 23.1.1",
     "schema": 2,
-    "started_unix": 1793945337
+    "started_unix": 1793953860
   },
-  "peak_working_set_bytes": 449138688,
+  "peak_working_set_bytes": 448614400,
   "queries": [
     {
-      "cold_us": 7647,
-      "hits": 2563378,
-      "max_us": 7647,
-      "p50_materialize_us": 3958,
+      "cold_us": 6067,
+      "hits": 2567965,
+      "max_us": 6067,
+      "p50_materialize_us": 3963,
       "p50_memo_us": 0,
       "p50_scan_us": 0,
-      "p50_us": 3962,
-      "p99_us": 6614,
+      "p50_us": 3967,
+      "p99_us": 5987,
       "query": ""
     },
     {
-      "cold_us": 16923,
-      "hits": 1743445,
-      "max_us": 18595,
-      "p50_materialize_us": 16660,
+      "cold_us": 16454,
+      "hits": 1747054,
+      "max_us": 20585,
+      "p50_materialize_us": 16552,
       "p50_memo_us": 0,
       "p50_scan_us": 0,
-      "p50_us": 16671,
-      "p99_us": 18421,
+      "p50_us": 16563,
+      "p99_us": 20361,
       "query": "e"
     },
     {
-      "cold_us": 16738,
-      "hits": 1392273,
-      "max_us": 18151,
-      "p50_materialize_us": 16097,
+      "cold_us": 16093,
+      "hits": 1395199,
+      "max_us": 19916,
+      "p50_materialize_us": 16052,
       "p50_memo_us": 0,
       "p50_scan_us": 0,
-      "p50_us": 16108,
-      "p99_us": 17721,
+      "p50_us": 16066,
+      "p99_us": 19340,
       "query": "a"
     },
     {
-      "cold_us": 6772,
-      "hits": 173926,
-      "max_us": 7462,
-      "p50_materialize_us": 3834,
+      "cold_us": 6963,
+      "hits": 173940,
+      "max_us": 8027,
+      "p50_materialize_us": 4102,
       "p50_memo_us": 0,
-      "p50_scan_us": 2587,
-      "p50_us": 6455,
-      "p99_us": 7282,
+      "p50_scan_us": 2373,
+      "p50_us": 6493,
+      "p99_us": 7859,
       "query": "win"
     },
     {
-      "cold_us": 7263,
+      "cold_us": 8488,
       "hits": 22937,
-      "max_us": 8813,
-      "p50_materialize_us": 4443,
+      "max_us": 9472,
+      "p50_materialize_us": 4760,
       "p50_memo_us": 0,
-      "p50_scan_us": 2554,
-      "p50_us": 7014,
-      "p99_us": 8480,
+      "p50_scan_us": 2359,
+      "p50_us": 7122,
+      "p99_us": 9314,
       "query": "Win"
     },
     {
-      "cold_us": 5818,
-      "hits": 13,
-      "max_us": 6150,
-      "p50_materialize_us": 3178,
+      "cold_us": 5774,
+      "hits": 14,
+      "max_us": 8879,
+      "p50_materialize_us": 3465,
       "p50_memo_us": 0,
-      "p50_scan_us": 1991,
-      "p50_us": 5194,
-      "p99_us": 6036,
+      "p50_scan_us": 1825,
+      "p50_us": 5309,
+      "p99_us": 8247,
       "query": "qzx"
     },
     {
-      "cold_us": 6225,
+      "cold_us": 6152,
       "hits": 57775,
-      "max_us": 7145,
-      "p50_materialize_us": 3592,
+      "max_us": 7240,
+      "p50_materialize_us": 3446,
       "p50_memo_us": 0,
-      "p50_scan_us": 2067,
-      "p50_us": 5680,
-      "p99_us": 7035,
+      "p50_scan_us": 1938,
+      "p50_us": 5421,
+      "p99_us": 6990,
       "query": "ext:dll"
     },
     {
-      "cold_us": 36789,
+      "cold_us": 36982,
       "hits": 58,
-      "max_us": 36789,
-      "p50_materialize_us": 10141,
+      "max_us": 36982,
+      "p50_materialize_us": 9951,
       "p50_memo_us": 1,
       "p50_scan_us": 0,
-      "p50_us": 10154,
-      "p99_us": 13837,
+      "p50_us": 9964,
+      "p99_us": 12221,
       "query": "size:>100mb path:windows"
     },
     {
-      "cold_us": 7511,
+      "cold_us": 5907,
       "hits": 147522,
-      "max_us": 8540,
-      "p50_materialize_us": 4545,
+      "max_us": 7242,
+      "p50_materialize_us": 3727,
       "p50_memo_us": 0,
-      "p50_scan_us": 2150,
-      "p50_us": 6685,
-      "p99_us": 8173,
+      "p50_scan_us": 1949,
+      "p50_us": 5630,
+      "p99_us": 7156,
       "query": "*.rs"
     },
     {
-      "cold_us": 8543,
+      "cold_us": 9254,
       "hits": 9276,
-      "max_us": 9935,
-      "p50_materialize_us": 5165,
+      "max_us": 11433,
+      "p50_materialize_us": 5120,
       "p50_memo_us": 0,
-      "p50_scan_us": 2217,
-      "p50_us": 7992,
-      "p99_us": 9934,
+      "p50_scan_us": 2040,
+      "p50_us": 7813,
+      "p99_us": 11219,
       "query": "regex:win.*\\.dll"
     }
   ],
   "restore": {
-    "entries": 3659275,
-    "file_bytes": 182459804,
-    "min_ms": 433,
-    "p50_ms": 447,
-    "save_ms": 104
+    "entries": 3663498,
+    "file_bytes": 182839009,
+    "min_ms": 427,
+    "p50_ms": 438,
+    "save_ms": 119
   },
   "volume": "C:",
-  "working_set_bytes": 210264064
+  "working_set_bytes": 209809408
 }
