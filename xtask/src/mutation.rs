@@ -756,16 +756,24 @@ fn run_required(command: &mut Command, description: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_cargo_mutants_exit(status: ExitStatus, run: &RustRun) -> Result<()> {
-    let expected = if run.timeouts.is_empty() {
-        if run.survivors.is_empty() {
+pub const fn cargo_mutants_expected_exit(survivors: usize, timeouts: usize) -> i32 {
+    if timeouts == 0 {
+        if survivors == 0 {
             0
         } else {
             MUTANTS_SURVIVORS_EXIT
         }
     } else {
         MUTANTS_INCOMPLETE_EXIT
-    };
+    }
+}
+
+pub fn cargo_mutants_completed(code: Option<i32>, survivors: usize, timeouts: usize) -> bool {
+    timeouts == 0 && code == Some(cargo_mutants_expected_exit(survivors, timeouts))
+}
+
+fn validate_cargo_mutants_exit(status: ExitStatus, run: &RustRun) -> Result<()> {
+    let expected = cargo_mutants_expected_exit(run.survivors.len(), run.timeouts.len());
     if status.code() != Some(expected) {
         bail!(
             "cargo-mutants exit/report mismatch: exit={:?}, expected={expected} for {} survivor(s) and {} timeout(s)",
@@ -1725,6 +1733,50 @@ fn validate_relative_path(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cargo_mutants_exit_protocol_preserves_terminal_outcome_counts() {
+        for (survivors, timeouts, expected) in [
+            (0, 0, 0),
+            (1, 0, 2),
+            (usize::MAX, 0, 2),
+            (0, 1, 3),
+            (1, 1, 3),
+            (usize::MAX, usize::MAX, 3),
+        ] {
+            assert_eq!(
+                cargo_mutants_expected_exit(survivors, timeouts),
+                expected,
+                "{survivors} survivors, {timeouts} timeouts"
+            );
+        }
+    }
+
+    #[test]
+    fn cargo_mutants_completed_reports_reject_inconsistent_and_incomplete_statuses() {
+        for (code, survivors, timeouts, expected) in [
+            (Some(0), 0, 0, true),
+            (Some(2), 1, 0, true),
+            (Some(2), usize::MAX, 0, true),
+            (Some(0), 1, 0, false),
+            (Some(2), 0, 0, false),
+            (None, 0, 0, false),
+            (None, 1, 0, false),
+            (Some(1), 0, 0, false),
+            (Some(3), 0, 0, false),
+            (Some(3), 0, 1, false),
+            (Some(2), 1, 1, false),
+            (Some(4), 0, 0, false),
+            (Some(70), 0, 0, false),
+            (Some(i32::MIN), usize::MAX, usize::MAX, false),
+        ] {
+            assert_eq!(
+                cargo_mutants_completed(code, survivors, timeouts),
+                expected,
+                "exit {code:?}, {survivors} survivors, {timeouts} timeouts"
+            );
+        }
+    }
 
     fn rust_identity(path: &str, line: u64, mutation: &str) -> RustIdentity {
         RustIdentity {
