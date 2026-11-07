@@ -114,6 +114,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="UiAutomation\ui-tests.ps1" CopyToOutputDirectory="Always" />
+    <None Update="UiAutomation\settings-lifecycle-tests.ps1" CopyToOutputDirectory="Always" />
     <!-- SkipRustBuild must reach the app project: a property set in this
          csproj's PropertyGroup does NOT cross a ProjectReference, but
          AdditionalProperties metadata does. So plain `dotnet test` never

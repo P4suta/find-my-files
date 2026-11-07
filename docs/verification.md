@@ -72,5 +72,11 @@ Regeneration or mutation campaigns must preserve existing minimized inputs.
 
 Windows handle ownership, access-control behavior, service installation, UI behavior, and concurrent schedules require their native tests and applicable integration checks.
 The pure proofs assume the documented Windows API contracts at those adapters.
+The UI settings adapter waits for the dialog to disappear and the options button to become enabled before another open request.
+Each failed invocation or readiness check stops the current operation and preserves its exit code.
+The C# lifecycle tests load the actual PowerShell function definitions through the [PowerShell parser](https://learn.microsoft.com/en-us/dotnet/api/system.management.automation.language.parser.parsefile) and control command outcomes and dismissal progress.
+The fixtures reject premature completion during delayed dismissal and every failed command phase without launching a window.
+Those checks establish adapter sequencing under the WinApp CLI contract, while `just ui-test` exercises real WinUI dismissal and input behavior on Windows.
+Reassess the adapter when the CLI readiness semantics or WinUI modal lifecycle changes.
 Elevated security tests and the real-volume performance gate keep their existing merge requirements.
 Full mutation campaigns use the reviewed baseline with bounded worker and time budgets.
