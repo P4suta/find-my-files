@@ -230,7 +230,7 @@
          package too (packages.lock.json), so its DLLs still land in the
          publish output. We reference no WebView2 type, so xtask's publish
          step strips them from the bundle (see xtask/src/prune.rs). -->
-    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="[2.6.4]" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="[2.6.5]" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="[8.4.2]" />
     <!-- Structured logging (ADR-0037): logfmt lines via a custom ITextFormatter,
          size-capped multi-generation retention via the File sink. Exact direct
@@ -249,7 +249,7 @@
     </PackageReference>
     <!-- Correctness-focused analyzers (MAxxxx): IFormatProvider/culture, async
          pitfalls, equality, etc. — little overlap with the rules above. -->
-    <PackageReference Include="Meziantou.Analyzer" Version="[3.0.317]">
+    <PackageReference Include="Meziantou.Analyzer" Version="[3.0.320]">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>

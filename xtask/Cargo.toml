@@ -55,9 +55,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-toml_edit = "0.25"
+toml_edit = "0.25.19"
 regex = "1"
-zip = { version = "9", default-features = false, features = ["deflate"] }
+zip = { version = "9.4.1", default-features = false, features = ["deflate"] }
 sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
