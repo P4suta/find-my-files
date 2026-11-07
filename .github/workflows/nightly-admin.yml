@@ -24,7 +24,7 @@ jobs:
       - uses: $/.github/actions/rust-toolchain
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
-          tool: cargo-nextest@0.9.150,just@1.59.0
+          tool: cargo-nextest@0.9.151,just@1.59.0
           fallback: none
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:

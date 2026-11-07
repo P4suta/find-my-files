@@ -204,7 +204,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
-          tool: cargo-nextest@0.9.150
+          tool: cargo-nextest@0.9.151
           fallback: none
       - run: cargo fmt --all --check
         working-directory: xtask
@@ -228,7 +228,7 @@ jobs:
         run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- proof
       - name: Install the pinned interpreter toolchain
         if: needs.changes.outputs.assurance == 'true'
-        run: rustup toolchain install nightly-2026-08-21 --profile minimal --component miri --component rust-src
+        run: rustup toolchain install nightly-2026-11-04 --profile minimal --component miri --component rust-src
       - name: Interpret the codec boundary tests
         if: needs.changes.outputs.assurance == 'true'
         run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- miri
@@ -273,7 +273,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
-          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.150
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.151
           fallback: none
       - name: clippy (compiles the engine; later steps reuse it)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -346,7 +346,7 @@ jobs:
         with:
           name: engine-release
           path: build/engine/release/
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: 10.0.403
       - uses: $/.github/actions/setup-winapp

@@ -25,10 +25,10 @@ use std::process::{Command, Output};
 const RECEIPT_SCHEMA_VERSION: u32 = 1;
 const REQUIRED_SHARD_COUNT: usize = 16;
 const CARGO_MUTANTS_VERSION: &str = "27.1.0";
-const CARGO_NEXTEST_VERSION: &str = "0.9.140";
+const CARGO_NEXTEST_VERSION: &str = "0.9.151";
 const DOTNET_SDK_VERSION: &str = "10.0.403";
 const STRYKER_VERSION: &str = "4.16.0";
-const RUST_TOOLCHAIN_VERSION: &str = "1.97.1";
+const RUST_TOOLCHAIN_VERSION: &str = "1.99.1";
 const CSHARP_TARGET_FRAMEWORK: &str = "net10.0-windows10.0.26100.0";
 const POLICY_REVISION: &str = "mutation-controller-v1";
 const CSHARP_UNEXECUTED_IGNORE_REASONS: &[&str] = &[
