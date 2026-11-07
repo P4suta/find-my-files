@@ -12,7 +12,47 @@ public sealed class UiSettingsLifecycleTests
     [InlineData("close-ready-error")]
     [InlineData("open-invoke-error")]
     [InlineData("open-wait-error")]
-    public async Task Settings_operations_wait_for_completion_and_preserve_failures(string scenario)
+    public Task Settings_operations_wait_for_completion_and_preserve_failures(string scenario) =>
+        RunScenarioAsync(scenario, TestContext.Current.CancellationToken);
+
+    [Fact]
+    public async Task Cancellation_reaps_its_owned_child()
+    {
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        Process? observer = null;
+        try
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                RunScenarioAsync("wait-for-cancel", cancellation.Token, process =>
+                {
+                    observer = Process.GetProcessById(process.Id);
+                    _ = observer.SafeHandle;
+                    cancellation.Cancel();
+                }));
+            Assert.NotNull(observer);
+            Assert.True(observer.HasExited);
+        }
+        finally
+        {
+            if (observer is not null)
+            {
+                try
+                {
+                    if (!observer.HasExited)
+                    {
+                        observer.Kill(entireProcessTree: true);
+                        await observer.WaitForExitAsync(CancellationToken.None);
+                    }
+                }
+                finally
+                {
+                    observer.Dispose();
+                }
+            }
+        }
+    }
+
+    private static async Task RunScenarioAsync(string scenario, CancellationToken token, Action<Process>? started = null)
     {
         var directory = Path.Combine(AppContext.BaseDirectory, "UiAutomation");
         var start = new ProcessStartInfo("pwsh")
@@ -34,17 +74,34 @@ public sealed class UiSettingsLifecycleTests
         }
 
         using var process = Process.Start(start) ?? throw new InvalidOperationException("PowerShell did not start.");
-        var output = process.StandardOutput.ReadToEndAsync();
-        var error = process.StandardError.ReadToEndAsync();
+        started?.Invoke(process);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        cancellation.CancelAfter(TimeSpan.FromSeconds(30));
+        var output = process.StandardOutput.ReadToEndAsync(cancellation.Token);
+        var error = process.StandardError.ReadToEndAsync(cancellation.Token);
         try
         {
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+            await process.WaitForExitAsync(cancellation.Token);
         }
-        catch (TimeoutException)
+        catch (OperationCanceledException)
         {
-            process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync();
-            await Task.WhenAll(output, error);
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException) when (process.HasExited)
+            {
+            }
+
+            await process.WaitForExitAsync(CancellationToken.None);
+            try
+            {
+                await Task.WhenAll(output, error);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+            }
+
             throw;
         }
 

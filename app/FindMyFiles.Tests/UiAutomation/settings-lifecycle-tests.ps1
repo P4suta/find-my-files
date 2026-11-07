@@ -1,9 +1,13 @@
 param(
     [Parameter(Mandatory)][string]$TestScriptPath,
-    [Parameter(Mandatory)][ValidateSet('delayed-close', 'close-invoke-error', 'close-wait-error', 'close-ready-error', 'open-invoke-error', 'open-wait-error')][string]$Scenario
+    [Parameter(Mandatory)][ValidateSet('delayed-close', 'close-invoke-error', 'close-wait-error', 'close-ready-error', 'open-invoke-error', 'open-wait-error', 'wait-for-cancel')][string]$Scenario
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Scenario -eq 'wait-for-cancel') {
+    [Threading.Thread]::Sleep([Threading.Timeout]::Infinite)
+    throw 'The cancellation fixture resumed without termination.'
+}
 $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile(
