@@ -948,6 +948,86 @@ public sealed class PipeEngineClientAdditionalTests
         }
     }
 
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, false)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, false)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    [InlineData(true, true, true)]
+    public async Task Caller_cancellation_keeps_its_token_before_and_during_response_wait(
+        bool queryRequest,
+        bool cancelBeforeWait,
+        bool disposeClient)
+    {
+        var clock = new ObservedTimeProvider();
+        var held = new TaskCompletionSource<(int Status, byte[] Payload)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var opcode = queryRequest ? PipeProtocol.Op.Query : PipeProtocol.Op.ListVolumes;
+        using var server = new FakePipeServer
+        {
+            Handler = (operation, _) => operation == opcode ? held.Task : null,
+        };
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false, requestTimeProvider: clock);
+        client.Start();
+        await WaitUntilAsync(
+            () => client.Connection == EngineConnectionState.Connected,
+            "connected");
+        var written = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowWait = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        clock.TimerCreated = () => waiting.TrySetResult();
+        client.AfterRequestWriteForTests = () =>
+        {
+            written.TrySetResult();
+            return allowWait.Task;
+        };
+        using var cancellation = new CancellationTokenSource();
+        Task request = queryRequest
+            ? client.SearchAsync("pending", SearchOptions.Default, cancellation.Token)
+            : client.ListVolumesAsync(cancellation.Token);
+        try
+        {
+            await written.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            if (cancelBeforeWait)
+            {
+                cancellation.Cancel();
+                allowWait.SetResult();
+            }
+            else
+            {
+                allowWait.SetResult();
+                await waiting.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+                cancellation.Cancel();
+            }
+
+            if (disposeClient)
+            {
+                client.Dispose();
+            }
+
+            var completed = await Task.WhenAny(
+                request,
+                Task.Delay(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+            Assert.Same(request, completed);
+            var failure = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+            Assert.Equal(cancellation.Token, failure.CancellationToken);
+        }
+        finally
+        {
+            client.AfterRequestWriteForTests = null;
+            clock.TimerCreated = null;
+            allowWait.TrySetResult();
+            await cancellation.CancelAsync();
+            held.TrySetCanceled(cancellation.Token);
+            clock.Advance(client.RequestTimeout);
+            await request.ConfigureAwait(
+                ConfigureAwaitOptions.ContinueOnCapturedContext | ConfigureAwaitOptions.SuppressThrowing);
+        }
+    }
+
     [Fact]
     public async Task Disposing_with_a_pending_request_normalizes_lifetime_cancellation()
     {

@@ -720,8 +720,9 @@ internal sealed class PipeEngineClient : IEngineClient
         {
             throw new EngineUnavailableException("engine client disposed");
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
+            ct.ThrowIfCancellationRequested();
             throw new EngineUnavailableException("engine client disposed");
         }
         finally
