@@ -114,6 +114,17 @@ pub const fn csharp_test_profile() -> [(&'static str, &'static str); 2] {
     CSHARP_TEST_PROFILE
 }
 
+pub fn csharp_build_args(configuration: &Value) -> Result<[String; 2]> {
+    let profile = configuration
+        .pointer("/stryker-config/configuration")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty() && value.trim() == *value && !value.chars().any(char::is_control)
+        })
+        .ok_or_else(|| anyhow!("Stryker build configuration must be a nonempty clean string"))?;
+    Ok(["--configuration".to_owned(), profile.to_owned()])
+}
+
 /// Where cargo-mutants actually writes its reports for a given `--output` dir.
 ///
 /// `--output <D>` is the *parent*: cargo-mutants 27.1.0 creates `<D>/mutants.out` (rotating any previous one to `mutants.out.old`) and puts `outcomes.json`,
@@ -729,6 +740,7 @@ pub fn run_csharp() -> Result<()> {
         &repo,
         &baseline.examined_files,
     )?;
+    let configuration: Value = read_json(&paths::csharp_stryker_config())?;
     let output = paths::csharp_mutation_dir();
     let tool_manifest = repo.join(".config").join("dotnet-tools.json");
     let tool_manifest_arg = tool_manifest.to_string_lossy().into_owned();
@@ -758,6 +770,7 @@ pub fn run_csharp() -> Result<()> {
                 "-p:FmfTestSeams=true",
                 "-p:FmfArtifactKind=ui-test",
             ])
+            .args(csharp_build_args(&configuration)?)
             .current_dir(&test_dir),
         "run the unmutated C# baseline tests",
     )?;
@@ -2074,6 +2087,48 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn csharp_baseline_arguments_preserve_the_selected_build_configuration() {
+        for profile in ["Debug", "Release", "Profile with spaces"] {
+            let configuration = serde_json::json!({
+                "stryker-config": {"configuration": profile}
+            });
+            assert_eq!(
+                csharp_build_args(&configuration).expect("configured baseline arguments"),
+                ["--configuration", profile]
+            );
+        }
+    }
+
+    #[test]
+    fn csharp_baseline_arguments_reject_missing_or_malformed_configuration() {
+        for configuration in [
+            Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"stryker-config": {}}),
+            serde_json::json!({"stryker-config": []}),
+        ] {
+            assert!(csharp_build_args(&configuration).is_err());
+        }
+        for profile in [
+            Value::Null,
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(""),
+            serde_json::json!(" "),
+            serde_json::json!(" Release"),
+            serde_json::json!("Release\n"),
+            serde_json::json!("Rel\0ease"),
+        ] {
+            assert!(csharp_build_args(&serde_json::json!({
+                "stryker-config": {"configuration": profile}
+            }))
+            .is_err());
+        }
     }
 
     #[test]

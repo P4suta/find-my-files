@@ -150,6 +150,20 @@ pub fn run(mode: Mode) -> Result<()> {
             .current_dir(&test_dir),
         "restore the pinned Stryker activation tool",
     )?;
+    run_required(
+        Command::new("dotnet")
+            .args(["test", "FindMyFiles.Tests.csproj", "--results-directory"])
+            .arg(plan.output.join("baseline"))
+            .args(super::csharp_build_args(&plan.configuration)?)
+            .args([
+                "-p:SkipRustBuild=true",
+                "-p:RestoreLockedMode=true",
+                "-p:FmfTestSeams=true",
+                "-p:FmfArtifactKind=ui-test",
+            ])
+            .current_dir(&test_dir),
+        "prepare the configured C# activation baseline",
+    )?;
     let output_arg = plan.output.to_string_lossy().into_owned();
     let config_arg = config.to_string_lossy().into_owned();
     let status = Command::new("dotnet")

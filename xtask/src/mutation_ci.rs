@@ -2193,12 +2193,9 @@ fn build_csharp_native_dependency(work: &Path) -> Result<()> {
 fn run_dotnet_baseline(work: &Path) -> Result<Output> {
     let mut command = dotnet_command(work);
     command
+        .args(["test", "FindMyFiles.Tests.csproj", "--no-restore"])
+        .args(mutation::csharp_build_args(&stryker_config(&[])?)?)
         .args([
-            "test",
-            "FindMyFiles.Tests.csproj",
-            "--no-restore",
-            "--configuration",
-            "Release",
             "--framework",
             CSHARP_TARGET_FRAMEWORK,
             "--runtime",
