@@ -1413,6 +1413,124 @@ public sealed class PipeEngineClientAdditionalTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2025:Do not pass IDisposable instances into unawaited tasks", Justification = "Disposal deliberately races the write, which the test joins before returning.")]
+    public async Task Query_cancel_write_treats_lifetime_cancellation_as_completion(bool writeAdmitted)
+    {
+        Notifier.ResetForTests();
+        using var log = new LogCapture();
+        var notifications = new List<AppNotification>();
+        using var subscription = Notifier.Attach(notifications.Add);
+        using var server = new FakePipeServer();
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        using var lifetime = new CancellationTokenSource();
+        client.Start();
+        await WaitUntilAsync(() => client.Connection == EngineConnectionState.Connected, "connected");
+        var connection = Assert.IsType<PipeConnection>(client.CurrentPipeConnectionForTests);
+        var lockField = typeof(PipeConnection).GetField(
+            "_writeLock",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var writeLock = Assert.IsType<SemaphoreSlim>(lockField?.GetValue(connection));
+        Task? write = null;
+        try
+        {
+            if (writeAdmitted)
+            {
+                connection.BeforeFrameWriteForTests = () =>
+                {
+                    lifetime.Cancel();
+                    client.Dispose();
+                };
+            }
+            else
+            {
+                await writeLock.WaitAsync(TestContext.Current.CancellationToken);
+            }
+
+            write = PipeEngineClient.WriteQueryCancelFrameAsync(
+                connection,
+                PipeProtocol.EncodeFrame(PipeProtocol.Op.QueryCancel, 0, 123, 0, []),
+                lifetime.Token);
+            write.Forget("pipe.query-cancel");
+            if (!writeAdmitted)
+            {
+                Assert.False(write.IsCompleted);
+                lifetime.Cancel();
+                client.Dispose();
+            }
+
+            await write.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.True(write.IsCompletedSuccessfully);
+            Assert.Empty(notifications);
+            Assert.DoesNotContain("area=pipe.query-cancel", log.Text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            connection.BeforeFrameWriteForTests = null;
+            lifetime.Cancel();
+            client.Dispose();
+            if (!writeAdmitted && writeLock.CurrentCount == 0)
+            {
+                writeLock.Release();
+            }
+
+            if (write is not null)
+            {
+                try
+                {
+                    await write.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (EngineUnavailableException)
+                {
+                }
+            }
+
+            Notifier.ResetForTests();
+        }
+    }
+
+    [Theory]
+    [InlineData(typeof(OperationCanceledException), false)]
+    [InlineData(typeof(EngineUnavailableException), false)]
+    [InlineData(typeof(InvalidOperationException), true)]
+    public async Task Query_cancel_write_preserves_unexpected_failures(Type failureType, bool cancelLifetime)
+    {
+        using var server = new FakePipeServer();
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        using var lifetime = new CancellationTokenSource();
+        client.Start();
+        await WaitUntilAsync(() => client.Connection == EngineConnectionState.Connected, "connected");
+        var connection = Assert.IsType<PipeConnection>(client.CurrentPipeConnectionForTests);
+        var expected = Assert.IsAssignableFrom<Exception>(
+            Activator.CreateInstance(failureType, "unexpected query-cancel write failure"));
+        connection.BeforeFrameWriteForTests = () =>
+        {
+            if (cancelLifetime)
+            {
+                lifetime.Cancel();
+            }
+
+            throw expected;
+        };
+        try
+        {
+            var failure = await Assert.ThrowsAnyAsync<Exception>(() => PipeEngineClient.WriteQueryCancelFrameAsync(
+                connection,
+                PipeProtocol.EncodeFrame(PipeProtocol.Op.QueryCancel, 0, 123, 0, []),
+                lifetime.Token));
+            Assert.Same(expected, failure);
+        }
+        finally
+        {
+            connection.BeforeFrameWriteForTests = null;
+        }
+    }
+
     [Fact]
     public async Task Timeout_reason_is_preserved_for_other_requests_on_the_retired_epoch()
     {

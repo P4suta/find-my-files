@@ -749,9 +749,23 @@ internal sealed class PipeEngineClient : IEngineClient
             requestId,
             0,
             []);
-        connection
-            .WriteFrameAsync(frame, _cts.Token)
+        WriteQueryCancelFrameAsync(connection, frame, _cts.Token)
             .Forget("pipe.query-cancel");
+    }
+
+    internal static async Task WriteQueryCancelFrameAsync(
+        PipeConnection connection, byte[] frame, CancellationToken lifetime)
+    {
+        try
+        {
+            await connection.WriteFrameAsync(frame, lifetime).ConfigureAwait(ConfigureAwaitOptions.None);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (EngineUnavailableException) when (lifetime.IsCancellationRequested)
+        {
+        }
     }
 
     /// <summary>Whether a best-effort query cancel still targets the live connection.</summary> <param name="connectionEpoch">Epoch captured by the original query.</param> <param name="currentEpoch">Currently published connection epoch.</param> <param name="disposed">Whether the client lifetime has ended.</param> <returns>True only while the captured connection remains current and usable.</returns>
