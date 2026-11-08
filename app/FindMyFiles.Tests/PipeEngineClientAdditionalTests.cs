@@ -1090,6 +1090,165 @@ public sealed class PipeEngineClientAdditionalTests
         Assert.NotEqual(epochBefore, client.CurrentEpoch);
     }
 
+
+    private sealed class HeldConnectedNotification : IAsyncDisposable
+    {
+        private readonly PipeEngineClient _client;
+        private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public HeldConnectedNotification(PipeEngineClient client)
+        {
+            _client = client;
+            client.ConnectionChanged += OnConnectionChanged;
+        }
+
+        public Task Entered => _entered.Task;
+
+        public bool IsHeld => _entered.Task.IsCompleted && !_exited.Task.IsCompleted;
+
+        private void OnConnectionChanged(EngineConnectionState state)
+        {
+            if (state != EngineConnectionState.Connected)
+            {
+                return;
+            }
+
+            _entered.TrySetResult();
+            try
+            {
+                _release.Task.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            }
+            finally
+            {
+                _exited.TrySetResult();
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            _client.ConnectionChanged -= OnConnectionChanged;
+            _release.TrySetResult();
+            if (_entered.Task.IsCompleted)
+            {
+                await _exited.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Disposal_retires_existing_results_before_supervisor_cleanup()
+    {
+        using var server = new FakePipeServer { Rows = [Rows.File(1, "one.txt")] };
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        await using var notification = new HeldConnectedNotification(client);
+        Task<SearchOutcome>? request = null;
+        ISearchResult? result = null;
+        client.Start();
+        try
+        {
+            await notification.Entered.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            request = client.SearchAsync("one", SearchOptions.Default, TestContext.Current.CancellationToken);
+            result = (await request.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)).Result;
+            Assert.Single(await result.GetRangeAsync(0, 1, TestContext.Current.CancellationToken));
+            Assert.True(notification.IsHeld);
+
+            client.Dispose();
+
+            await Assert.ThrowsAsync<StaleResultException>(
+                () => result.GetRangeAsync(0, 1, TestContext.Current.CancellationToken));
+            Assert.True(notification.IsHeld);
+        }
+        finally
+        {
+            client.Dispose();
+            result?.Dispose();
+            if (request is not null)
+            {
+                try
+                {
+                    await request.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+                }
+                catch (EngineUnavailableException)
+                {
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Disposal_rejects_a_late_success_before_supervisor_cleanup()
+    {
+        var response = new TaskCompletionSource<(int Status, byte[] Payload)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var server = new FakePipeServer
+        {
+            Handler = (opcode, _) => opcode == PipeProtocol.Op.ListVolumes ? response.Task : null,
+        };
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        await using var notification = new HeldConnectedNotification(client);
+        var written = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowWait = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<IReadOnlyList<string>>? request = null;
+        client.Start();
+        try
+        {
+            await notification.Entered.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            var epoch = client.CurrentEpoch;
+            client.AfterRequestWriteForTests = () =>
+            {
+                written.TrySetResult();
+                return allowWait.Task;
+            };
+            request = client.ListVolumesAsync(CancellationToken.None);
+            await written.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            await server.WaitForAsync(PipeProtocol.Op.ListVolumes);
+            var idField = typeof(PipeEngineClient).GetField(
+                "_requestId",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            var requestId = unchecked((uint)Assert.IsType<int>(idField?.GetValue(client)));
+            Assert.True(notification.IsHeld);
+
+            client.Dispose();
+            client.DispatchResponseForTests(
+                epoch,
+                requestId,
+                PipeProtocol.Op.ListVolumes,
+                PipeProtocol.Status.Ok,
+                PipeProtocol.EncodeVolumeStatuses(server.Statuses));
+            allowWait.SetResult();
+
+            var failure = await Assert.ThrowsAsync<EngineUnavailableException>(
+                () => request.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+            Assert.Equal("engine client disposed", failure.Message);
+            Assert.True(notification.IsHeld);
+        }
+        finally
+        {
+            client.AfterRequestWriteForTests = null;
+            client.Dispose();
+            allowWait.TrySetResult();
+            response.TrySetCanceled(CancellationToken.None);
+            if (request is not null)
+            {
+                try
+                {
+                    await request.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+                }
+                catch (EngineUnavailableException)
+                {
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+        }
+    }
+
     [Fact]
     public async Task Cancelled_query_with_malformed_late_response_is_contained()
     {
