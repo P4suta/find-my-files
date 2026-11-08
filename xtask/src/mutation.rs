@@ -1325,6 +1325,18 @@ fn parse_rust_identity(name: &str) -> Result<RustIdentity> {
     })
 }
 
+pub fn validate_csharp_activation(status: &str, static_metadata: Option<&Value>) -> Result<()> {
+    let is_static = static_metadata
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("mutant static metadata must be boolean"))?;
+    if is_static && matches!(status, "Killed" | "Survived") {
+        bail!(
+            "Stryker MTP cannot accept a static initialization verdict `{status}` from a reused process"
+        );
+    }
+    Ok(())
+}
+
 fn parse_csharp_run(
     report_path: &Path,
     repo_root: &Path,
@@ -1451,6 +1463,7 @@ fn parse_csharp_run(
                 continue;
             }
 
+            validate_csharp_activation(status, mutant.get("static"))?;
             match status {
                 "Killed" => {
                     killed.insert(identity);
@@ -2409,6 +2422,76 @@ mod tests {
     }
 
     #[test]
+    fn csharp_rejects_static_initialization_verdicts() {
+        let base = std::env::temp_dir().join(format!(
+            "xtask-csharp-static-activation-{}",
+            std::process::id()
+        ));
+        let _ = fsx::force_remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("create test directory");
+        let path = base.join("mutation-report.json");
+        let mut report = serde_json::json!({
+            "schemaVersion": "2",
+            "projectRoot": "C:/repo/app/FindMyFiles",
+            "files": {
+                "Services/ShellOps.cs": {
+                    "language": "cs",
+                    "mutants": [{
+                        "id": "1",
+                        "mutatorName": "String mutation",
+                        "replacement": "\"\"",
+                        "status": "Killed",
+                        "static": false,
+                        "location": {
+                            "start": {"line": 20, "column": 84},
+                            "end": {"line": 20, "column": 98}
+                        }
+                    }]
+                }
+            }
+        });
+        let write_report = |report: &Value| {
+            fs::write(
+                &path,
+                serde_json::to_vec(report).expect("serialize fixture"),
+            )
+            .expect("write fixture");
+        };
+        let scope = csharp_scope("app/FindMyFiles/Services/ShellOps.cs");
+        for status in ["Killed", "Survived"] {
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["status"] = status.into();
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["static"] = false.into();
+            write_report(&report);
+            parse_csharp_run(&path, Path::new("C:/repo"), &scope)
+                .expect("ordinary mutation verdict should parse");
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["static"] = true.into();
+            write_report(&report);
+            let error = parse_csharp_run(&path, Path::new("C:/repo"), &scope)
+                .expect_err("a reused process cannot supply a static initialization verdict");
+            assert!(error.to_string().contains("static"), "{error}");
+        }
+        report["files"]["Services/ShellOps.cs"]["mutants"][0]["status"] = "Killed".into();
+        for metadata in [
+            Value::Null,
+            serde_json::json!(0),
+            serde_json::json!("false"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["static"] = metadata;
+            write_report(&report);
+            assert!(parse_csharp_run(&path, Path::new("C:/repo"), &scope).is_err());
+        }
+        report["files"]["Services/ShellOps.cs"]["mutants"][0]
+            .as_object_mut()
+            .expect("mutant object")
+            .remove("static");
+        write_report(&report);
+        assert!(parse_csharp_run(&path, Path::new("C:/repo"), &scope).is_err());
+        fsx::force_remove_dir_all(&base).expect("remove test directory");
+    }
+
+    #[test]
     fn csharp_report_extracts_exact_terminal_problem_identities() {
         let report = serde_json::json!({
             "schemaVersion": "2",
@@ -2422,6 +2505,7 @@ mod tests {
                             "mutatorName": "Boolean",
                             "replacement": "false",
                             "status": "Survived",
+                            "static": false,
                             "location": {
                                 "start": {"line": 8, "column": 2},
                                 "end": {"line": 8, "column": 6}
@@ -2432,6 +2516,7 @@ mod tests {
                             "mutatorName": "Equality",
                             "replacement": "!=",
                             "status": "NoCoverage",
+                            "static": false,
                             "location": {
                                 "start": {"line": 9, "column": 1},
                                 "end": {"line": 9, "column": 3}
@@ -2442,6 +2527,7 @@ mod tests {
                             "mutatorName": "Block",
                             "replacement": "{}",
                             "status": "Timeout",
+                            "static": false,
                             "location": {
                                 "start": {"line": 10, "column": 0},
                                 "end": {"line": 12, "column": 1}
@@ -2489,6 +2575,7 @@ mod tests {
                         "mutatorName": "Block removal mutation",
                         "replacement": "{}",
                         "status": "Ignored",
+                        "static": false,
                         "statusReason": "Removed by block already covered filter",
                         "location": {
                             "start": {"line": 8, "column": 2},
@@ -2602,6 +2689,7 @@ mod tests {
                         "mutatorName": "Boolean mutation",
                         "replacement": "false",
                         "status": "Killed",
+                        "static": false,
                         "location": {
                             "start": {"line": 8, "column": 2},
                             "end": {"line": 8, "column": 6}
@@ -2657,6 +2745,7 @@ mod tests {
             "mutatorName": "Boolean",
             "replacement": "false",
             "status": "Killed",
+            "static": false,
             "location": {
                 "start": {"line": 8, "column": 2},
                 "end": {"line": 8, "column": 6}

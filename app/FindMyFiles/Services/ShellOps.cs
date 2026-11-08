@@ -16,7 +16,7 @@ internal static partial class ShellOps
     /// <summary>Full path to explorer.exe (<c>%WINDIR%\explorer.exe</c>).
     /// Launching by bare name under <c>UseShellExecute=false</c> lets CreateProcess search the current directory first — a binary-planting vector.
     /// Pin it to the Windows directory.</summary>
-    private static readonly string ExplorerPath =
+    private static string ExplorerPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
 
     private static ShellOpsHooks _hooks = ShellOpsHooks.Production;

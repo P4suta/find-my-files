@@ -237,6 +237,7 @@ mod tests {
                 "mutatorName": "Boolean mutation",
                 "replacement": "false",
                 "status": status,
+                "static": false,
                 "location": {
                     "start": {"line": line, "column": 4},
                     "end": {"line": line, "column": 8}

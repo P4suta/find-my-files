@@ -381,7 +381,7 @@ fn the_reviewed_stryker_configuration_is_the_one_both_lanes_run() {
             "test-projects",
             serde_json::json!(["FindMyFiles.Tests.csproj"]),
         ),
-        ("concurrency", serde_json::json!(2)),
+        ("concurrency", serde_json::json!(1)),
         ("additional-timeout", serde_json::json!(30_000)),
         ("mutation-level", serde_json::json!("Complete")),
         ("coverage-analysis", serde_json::json!("off")),

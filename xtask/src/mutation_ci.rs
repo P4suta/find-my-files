@@ -2480,6 +2480,7 @@ fn parse_csharp_report(
                 }
                 continue;
             }
+            mutation::validate_csharp_activation(&status, object.get("static"))?;
             match status.as_str() {
                 "Killed" => {
                     killed.insert(identity);
@@ -4044,6 +4045,80 @@ mod tests {
             "fixture",
         )
         .is_err());
+    }
+
+    #[test]
+    fn csharp_rejects_static_initialization_verdicts() {
+        let base = std::env::temp_dir().join(format!(
+            "xtask-csharp-ci-static-activation-{}",
+            std::process::id()
+        ));
+        let _ = fsx::force_remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("create test directory");
+        let path = base.join("mutation-report.json");
+        let mut report = serde_json::json!({
+            "schemaVersion": "2",
+            "projectRoot": "C:/repo/app/FindMyFiles",
+            "testFiles": {},
+            "thresholds": {"high": 80, "low": 60, "break": 0},
+            "files": {
+                "Services/ShellOps.cs": {
+                    "language": "cs",
+                    "source": "",
+                    "mutants": [{
+                        "id": "1",
+                        "mutatorName": "String mutation",
+                        "replacement": "\"\"",
+                        "status": "Killed",
+                        "static": false,
+                        "coveredBy": [],
+                        "killedBy": [],
+                        "location": {
+                            "start": {"line": 20, "column": 84},
+                            "end": {"line": 20, "column": 98}
+                        }
+                    }]
+                }
+            }
+        });
+        let write_report = |report: &Value| {
+            fs::write(
+                &path,
+                serde_json::to_vec(report).expect("serialize fixture"),
+            )
+            .expect("write fixture");
+        };
+        let scope = ["app/FindMyFiles/Services/ShellOps.cs".to_owned()];
+        for status in ["Killed", "Survived"] {
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["status"] = status.into();
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["static"] = false.into();
+            write_report(&report);
+            parse_csharp_report(&path, None, &scope)
+                .expect("ordinary mutation verdict should parse");
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["static"] = true.into();
+            write_report(&report);
+            let error = parse_csharp_report(&path, None, &scope)
+                .expect_err("a reused process cannot supply a static initialization verdict");
+            assert!(error.to_string().contains("static"), "{error}");
+        }
+        for metadata in [
+            Value::Null,
+            serde_json::json!(0),
+            serde_json::json!("false"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["static"] = metadata;
+            write_report(&report);
+            assert!(parse_csharp_report(&path, None, &scope).is_err());
+        }
+        report["files"]["Services/ShellOps.cs"]["mutants"][0]
+            .as_object_mut()
+            .expect("mutant object")
+            .remove("static");
+        write_report(&report);
+        assert!(parse_csharp_report(&path, None, &scope).is_err());
+        fsx::force_remove_dir_all(&base).expect("remove test directory");
     }
 
     #[test]
