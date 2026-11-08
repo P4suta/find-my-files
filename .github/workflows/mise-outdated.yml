@@ -27,8 +27,8 @@ jobs:
 
       - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
-          version: "v2026.11.0"
-          sha256: 047d4e71d1d86e9ffea15320a212c771370debe1b818d5d6981f8c994a8ebfeb
+          version: "v2026.11.2"
+          sha256: 490326d33fcde0686f1280f69b9b021e1842ee2bbd71249c1ebadc2a0efad26b
           install: false
 
       - name: Check pins against latest (beyond-pin)

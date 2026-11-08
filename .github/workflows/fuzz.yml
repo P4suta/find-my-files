@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
-      RUSTUP_TOOLCHAIN: nightly-2026-11-04
+      RUSTUP_TOOLCHAIN: nightly-2026-11-05
       FUZZ_SECONDS: "60"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,7 +36,7 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.target_sha || github.sha }}
       - name: Install the pinned fuzzing toolchain
-        run: rustup toolchain install nightly-2026-11-04 --profile minimal
+        run: rustup toolchain install nightly-2026-11-05 --profile minimal
       - name: Install cargo-fuzz from its locked crates.io package
         run: cargo install cargo-fuzz --locked --version 0.13.2 --root "$RUNNER_TEMP/fmf-cargo-fuzz"
       - name: Expose the isolated cargo-fuzz subcommand
