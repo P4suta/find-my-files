@@ -133,7 +133,7 @@ fn fixture_column<T: Copy>(values: &[T]) -> Vec<T> {
     values.to_vec()
 }
 
-pub(super) fn shared_metadata_fixture(original: &super::RawEntry<'_>) -> super::VolumeIndex {
+pub fn shared_metadata_fixture(original: &super::RawEntry<'_>) -> super::VolumeIndex {
     use super::{NO_PARENT, VolumeIndex, flags};
 
     let attributes = (u8::from(original.is_reparse) * flags::REPARSE)

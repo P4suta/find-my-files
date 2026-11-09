@@ -1067,7 +1067,7 @@ impl VolumeIndex {
 
 #[cfg(kani)]
 #[path = "mutation_proofs.rs"]
-mod kani_proofs;
+pub(super) mod kani_proofs;
 
 #[cfg(test)]
 mod tests {

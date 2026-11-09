@@ -25,7 +25,7 @@ static TIME_PROJECTION: TimeProjectionState = TimeProjectionState {
     _identity: *b"FMFtime!",
 };
 
-fn prepare_time_pair(first: i64, second: i64, first_seconds: u32, second_seconds: u32) {
+pub fn prepare_time_pair(first: i64, second: i64, first_seconds: u32, second_seconds: u32) {
     TIME_PROJECTION.first_ticks.store(first, Ordering::Relaxed);
     TIME_PROJECTION
         .second_ticks
@@ -38,7 +38,7 @@ fn prepare_time_pair(first: i64, second: i64, first_seconds: u32, second_seconds
         .store(second_seconds, Ordering::Relaxed);
 }
 
-fn projected_mtime(ticks: i64) -> u32 {
+pub fn projected_mtime(ticks: i64) -> u32 {
     let pair = fmf_core::dates::kani_proofs::EncodedTimePair::new(
         TIME_PROJECTION.first_ticks.load(Ordering::Relaxed),
         TIME_PROJECTION.second_ticks.load(Ordering::Relaxed),
@@ -47,6 +47,10 @@ fn projected_mtime(ticks: i64) -> u32 {
     );
     pair.resolve(ticks)
         .expect("timestamp is outside the checked input pair")
+}
+
+pub fn stored_mtime_seconds(index: &super::VolumeIndex, id: super::EntryId) -> u32 {
+    index.mtime[id as usize]
 }
 
 #[kani::proof]

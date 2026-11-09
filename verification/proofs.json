@@ -441,7 +441,11 @@
       "source": "engine/crates/fmf-runtime/src/usn/apply_proofs.rs",
       "prefix": "usn::apply::kani_proofs::",
       "harnesses": [
-        "metadata_refresh_preserves_exact_rows_and_outcome_counts"
+        "metadata_refresh_counts_each_outcome",
+        "metadata_refresh_preserves_link_topology",
+        "metadata_refresh_updates_every_matching_size",
+        "metadata_refresh_updates_every_matching_timestamp",
+        "metadata_refresh_updates_only_matching_attributes"
       ]
     }
   ]

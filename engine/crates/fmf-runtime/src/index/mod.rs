@@ -31,6 +31,12 @@ pub mod testutil;
 pub use self::builder::{FinalizeMode, FinishTimings, IndexBuildError, VolumeIndexBuilder};
 pub use self::core::VolumeIndex;
 pub(crate) use self::mutate::LinkReconcileStats;
+#[cfg(kani)]
+pub(crate) use self::mutate::kani_proofs::{
+    prepare_time_pair, projected_mtime, stored_mtime_seconds,
+};
+#[cfg(kani)]
+pub(crate) use self::overflow_model::shared_metadata_fixture;
 
 /// The validity predicate every content-derived cache value must supply.
 ///
