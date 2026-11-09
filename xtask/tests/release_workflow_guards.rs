@@ -1,6 +1,253 @@
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
+use yaml_rust2::Yaml;
+
+const APP_CLIENT: &str = "${{ secrets.RELEASE_APP_CLIENT_ID }}";
+const APP_KEY: &str = "${{ secrets.RELEASE_APP_PRIVATE_KEY }}";
+const APP_CHECK: &str = "set -euo pipefail\nfor name in RELEASE_PLEASE_CLIENT_ID RELEASE_PLEASE_PRIVATE_KEY; do\n  if [[ -z \"${!name}\" || \"${!name}\" =~ ^\\$\\{[^}]+\\}$ ]]; then\n    echo \"::error::$name is empty or contains an unresolved Doppler reference.\"\n    exit 1\n  fi\ndone";
+const APP_INPUTS_VALID: &str = "secrets.RELEASE_APP_CLIENT_ID != '' && !startsWith(secrets.RELEASE_APP_CLIENT_ID, '${') && secrets.RELEASE_APP_PRIVATE_KEY != '' && !startsWith(secrets.RELEASE_APP_PRIVATE_KEY, '${')";
+
+fn expression(value: &Yaml) -> String {
+    value
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches("${{")
+        .trim_end_matches("}}")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn has_secret_context(value: &Yaml, pattern: &regex::Regex) -> bool {
+    match value {
+        Yaml::String(text) => pattern.is_match(text),
+        Yaml::Array(values) => values
+            .iter()
+            .any(|value| has_secret_context(value, pattern)),
+        Yaml::Hash(values) => values.iter().any(|(key, value)| {
+            key.as_str() == Some("secrets")
+                || has_secret_context(key, pattern)
+                || has_secret_context(value, pattern)
+        }),
+        _ => false,
+    }
+}
+
+fn secret_fields_are_named(value: &Yaml, fields: &[&str], pattern: &regex::Regex) -> bool {
+    value.as_hash().is_some_and(|mapping| {
+        mapping.iter().all(|(key, value)| {
+            key.as_str().is_some_and(|name| {
+                name != "secrets"
+                    && !pattern.is_match(name)
+                    && (fields.contains(&name) || !has_secret_context(value, pattern))
+            })
+        })
+    })
+}
+
+fn native_app_token(step: &Yaml, job: &str, pattern: &regex::Regex) -> bool {
+    let Some(action) = step["uses"].as_str() else {
+        return false;
+    };
+    if ![
+        "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
+        "actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510",
+    ]
+    .contains(&action)
+        || !secret_fields_are_named(step, &["with"], pattern)
+    {
+        return false;
+    }
+    let permissions: &[(&str, &str)] = match (job, step["id"].as_str()) {
+        ("release-please", Some("app-token")) => &[
+            ("permission-contents", "write"),
+            ("permission-issues", "write"),
+            ("permission-pull-requests", "write"),
+        ],
+        ("commit-release-lock", Some("app-token")) | ("publish", Some("publication-token")) => {
+            &[("permission-contents", "write")]
+        }
+        ("publish", Some("immutable-settings-token")) => &[("permission-administration", "read")],
+        ("automation_0", Some("app-token")) => &[("permission-contents", "read")],
+        _ => return false,
+    };
+    let inputs = &step["with"];
+    inputs
+        .as_hash()
+        .is_some_and(|mapping| mapping.len() == permissions.len() + 4)
+        && inputs["client-id"].as_str() == Some(APP_CLIENT)
+        && inputs["private-key"].as_str() == Some(APP_KEY)
+        && inputs["owner"].as_str() == Some("${{ github.repository_owner }}")
+        && inputs["repositories"].as_str() == Some("find-my-files")
+        && permissions
+            .iter()
+            .all(|(permission, value)| inputs[*permission].as_str() == Some(*value))
+}
+
+fn native_app_job(job: &Yaml, name: &str, expected_mints: usize, pattern: &regex::Regex) -> bool {
+    let guard = match name {
+        "commit-release-lock" => "always() && github.repository_id == '1267203446' && github.ref == 'refs/heads/main' && needs.release-please.result == 'success' && needs.sync-release-lock.result == 'success' && needs.release-please.outputs.pr_branch != ''",
+        "automation_0" => "github.repository_id == '1267203446' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+        _ => "github.repository_id == '1267203446' && github.ref == 'refs/heads/main'",
+    };
+    if expression(&job["if"]) != guard
+        || job["environment"].as_str() != Some("release-please")
+        || !secret_fields_are_named(job, &["steps", "env"], pattern)
+        || (name != "publish" && !job["permissions"]["id-token"].is_badvalue())
+        || (name == "publish" && job["permissions"]["id-token"].as_str() != Some("write"))
+    {
+        return false;
+    }
+    let manual = name == "automation_0";
+    if manual {
+        if job["env"]
+            .as_hash()
+            .is_none_or(|mapping| mapping.len() != 1)
+            || expression(&job["env"]["APP_INPUTS_VALID"]) != APP_INPUTS_VALID
+        {
+            return false;
+        }
+    } else if has_secret_context(&job["env"], pattern) {
+        return false;
+    }
+    let Some(steps) = job["steps"].as_vec() else {
+        return false;
+    };
+    if manual && steps.len() != 2 {
+        return false;
+    }
+    let mut guarded = false;
+    let mut mints = 0;
+    for step in steps {
+        if native_app_token(step, name, pattern) {
+            if !guarded {
+                return false;
+            }
+            mints += 1;
+        } else if (!manual
+            && step["name"].as_str() == Some("Require complete App credentials")
+            && step["shell"].as_str() == Some("bash")
+            && step["run"]
+                .as_str()
+                .is_some_and(|run| run.trim() == APP_CHECK)
+            && secret_fields_are_named(step, &["env"], pattern)
+            && step["env"]
+                .as_hash()
+                .is_some_and(|mapping| mapping.len() == 2)
+            && step["env"]["RELEASE_PLEASE_CLIENT_ID"].as_str() == Some(APP_CLIENT)
+            && step["env"]["RELEASE_PLEASE_PRIVATE_KEY"].as_str() == Some(APP_KEY))
+            || (manual
+                && step["if"].as_str() == Some("env.APP_INPUTS_VALID != 'true'")
+                && step["shell"].as_str() == Some("bash")
+                && step["run"].as_str() == Some("exit 1")
+                && !has_secret_context(step, pattern))
+        {
+            guarded = true;
+        } else if has_secret_context(step, pattern)
+            || step["uses"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("dopplerhq/secrets-fetch-action@"))
+        {
+            return false;
+        }
+    }
+    guarded && mints == expected_mints
+}
+
+fn native_app_secrets_are_scoped(source: &str, consumers: &[(&str, usize)]) -> bool {
+    let Ok(documents) = yaml_rust2::YamlLoader::load_from_str(source) else {
+        return false;
+    };
+    let [document] = documents.as_slice() else {
+        return false;
+    };
+    let pattern = regex::Regex::new(r"(?is)\$\{\{.*\bsecrets\b.*\}\}")
+        .expect("the secret context pattern is valid");
+    let Some(jobs) = document["jobs"].as_hash() else {
+        return false;
+    };
+    if consumers.iter().any(|(name, _)| *name == "automation_0") {
+        let trigger = &document["on"];
+        let selection = &trigger["workflow_dispatch"]["inputs"]["verify_signing"];
+        if trigger.as_hash().is_none_or(|mapping| mapping.len() != 1)
+            || selection["type"].as_str() != Some("boolean")
+            || selection["default"].as_bool() != Some(false)
+            || selection["required"].as_bool() != Some(false)
+            || expression(&document["jobs"]["sign_windows_0"]["if"])
+                != "github.repository_id == '1267203446' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.verify_signing"
+        {
+            return false;
+        }
+    }
+    secret_fields_are_named(document, &["jobs"], &pattern)
+        && consumers
+            .iter()
+            .all(|(name, count)| native_app_job(&document["jobs"][*name], name, *count, &pattern))
+        && jobs.iter().all(|(name, job)| {
+            name.as_str().is_some_and(|name| {
+                consumers.iter().any(|(consumer, _)| *consumer == name)
+                    || !has_secret_context(job, &pattern)
+            })
+        })
+}
+
+#[test]
+fn native_app_credentials_stay_in_the_protected_consumer_jobs() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask has the repository as its parent");
+    let consumers: &[(&str, &[(&str, usize)])] = &[
+        (
+            "release-please.yml",
+            &[("release-please", 1), ("commit-release-lock", 1)],
+        ),
+        ("release.yml", &[("publish", 2)]),
+        ("verify-doppler.yml", &[("automation_0", 1)]),
+    ];
+    for (workflow, jobs) in consumers {
+        let source = fs::read_to_string(repo.join(".github/workflows").join(workflow))
+            .expect("the App consumer workflow is readable");
+        assert!(native_app_secrets_are_scoped(&source, jobs), "{workflow}");
+        for (needle, replacement) in [
+            ("secrets.RELEASE_APP_PRIVATE_KEY", "secrets.UNRELATED_PRIVATE_KEY"),
+            ("repositories: find-my-files", "repositories: unrelated"),
+            ("github.ref == 'refs/heads/main'", "github.ref == 'refs/heads/unreviewed'"),
+            ("github.repository_id == '1267203446'", "github.repository_id == '1'"),
+            ("permission-contents:", "permission-workflows:"),
+            ("private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}", "private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}\n          skip-token-revoke: true"),
+        ] {
+            let invalid = source.replacen(needle, replacement, 1);
+            assert_ne!(invalid, source, "{workflow}: {needle}");
+            assert!(yaml_rust2::YamlLoader::load_from_str(&invalid).is_ok());
+            assert!(!native_app_secrets_are_scoped(&invalid, jobs), "{workflow}: {needle}");
+        }
+        let disclosure = source.replacen(
+            "\njobs:\n",
+            "\njobs:\n  unexpected:\n    runs-on: ubuntu-24.04\n    environment: release-please\n    env:\n      LEAKED_APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}\n    steps:\n      - run: exit 1\n",
+            1,
+        );
+        assert_ne!(disclosure, source);
+        assert!(yaml_rust2::YamlLoader::load_from_str(&disclosure).is_ok());
+        assert!(!native_app_secrets_are_scoped(&disclosure, jobs));
+        if *workflow == "verify-doppler.yml" {
+            for (needle, replacement) in [
+                ("default: false", "default: true"),
+                ("&& inputs.verify_signing", "&& true"),
+                (
+                    "env.APP_INPUTS_VALID != 'true'",
+                    "env.APP_INPUTS_VALID == 'true'",
+                ),
+            ] {
+                let invalid = source.replacen(needle, replacement, 1);
+                assert_ne!(invalid, source);
+                assert!(yaml_rust2::YamlLoader::load_from_str(&invalid).is_ok());
+                assert!(!native_app_secrets_are_scoped(&invalid, jobs));
+            }
+        }
+    }
+}
 
 fn workflow_job<'a>(workflow: &'a str, name: &str, next_name: &str) -> &'a str {
     let start_marker = format!("\n  {name}:");
@@ -127,13 +374,8 @@ fn artifact_producers_are_safe_to_rerun() {
     }
 }
 
-/// ADR-0048 replaced the four-stage `workflow_dispatch` -> `workflow_run` ->
-/// `workflow_run` -> `workflow_call` chain with one dispatch from protected
-/// main. The property the chain bought — a tag identifies build data, never
-/// workflow code — now rests on three things this test pins: the entry point is
-/// a dispatch and nothing else, `preflight` binds that dispatch before any other
-/// job runs, and the orchestrator's dedupe title is character-identical to the
-/// `run-name` release.yml renders.
+/// ADR-0048 replaced the four-stage `workflow_dispatch` -> `workflow_run` -> `workflow_run` -> `workflow_call` chain with one dispatch from protected main.
+/// The property the chain bought — a tag identifies build data, never workflow code — now rests on three things this test pins: the entry point is a dispatch and nothing else, `preflight` binds that dispatch before any other job runs, and the orchestrator's dedupe title is character-identical to the `run-name` release.yml renders.
 #[test]
 fn release_publication_is_directly_dispatched_and_exactly_bound() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -237,16 +479,14 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
     assert!(release.contains("publish-approval:"));
     assert!(release.contains("environment: release-please"));
     assert!(!release.contains("The two repository-level App credentials"));
-    assert!(!release.contains("\n    secrets:"));
-    assert!(!release.contains("secrets: inherit"));
-    assert!(!release.contains("${{ secrets."));
+    assert!(native_app_secrets_are_scoped(&release, &[("publish", 2)]));
     let sign = workflow_job(&release, "sign", "sign-collect");
     let publish = release
         .split_once("\n  publish:")
         .expect("publication credential island must exist")
         .1;
     assert!(sign.contains("doppler-config: sign_windows"));
-    assert!(publish.contains("doppler-config: automation"));
+    assert!(!publish.contains("doppler-config: automation"));
     for secret in [
         "steps.doppler.outputs.SSLDOTCOM_USERNAME",
         "steps.doppler.outputs.SSLDOTCOM_PASSWORD",
@@ -261,8 +501,8 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
         );
     }
     for secret in [
-        "steps.doppler.outputs.GITHUB_APP_CLIENT_ID",
-        "steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY",
+        "secrets.RELEASE_APP_CLIENT_ID",
+        "secrets.RELEASE_APP_PRIVATE_KEY",
     ] {
         assert!(publish.contains(secret));
         assert_eq!(
@@ -283,11 +523,8 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
     assert!(settings_mint < attestations);
     assert!(publication_mint > attestations);
 
-    // The alerts this change removes were structural: CodeQL's cache-poisoning
-    // query binds `workflow_run` through `runsOnDefaultBranch`, and zizmor's
-    // dangerous-triggers audit had to be suppressed wherever we used one. Both
-    // constructs are gone from the release path, so keep them gone repo-wide
-    // rather than re-earning the alerts one workflow at a time.
+    // The alerts this change removes were structural: CodeQL's cache-poisoning query binds `workflow_run` through `runsOnDefaultBranch`, and zizmor's dangerous-triggers audit had to be suppressed wherever we used one.
+    // Both constructs are gone from the release path, so keep them gone repo-wide rather than re-earning the alerts one workflow at a time.
     let mut dangerous_trigger_suppressions = Vec::new();
     for entry in
         fs::read_dir(repo.join(".github/workflows")).expect("workflow directory must be readable")
@@ -312,9 +549,8 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
             );
         }
     }
-    // The one remaining suppression is the `pull_request_target` auto-merge
-    // guard, which never checks out PR code and is unrelated to the release
-    // path. Nothing on the release path may need one.
+    // The one remaining suppression is the `pull_request_target` auto-merge guard, which never checks out PR code and is unrelated to the release path.
+    // Nothing on the release path may need one.
     assert_eq!(
         dangerous_trigger_suppressions,
         vec!["no-automerge-on-release-pr.yml".to_owned()],

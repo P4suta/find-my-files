@@ -1,17 +1,13 @@
 # release-please — the version/CHANGELOG/tag bot (ADR-0035).
 #
-# Conventional Commits land on main → this action keeps a "Release PR" open that
-# bumps engine/Cargo.toml + engine/Cargo.lock and the C# csproj, and updates
-# CHANGELOG.md. Merging that PR makes release-please create both the `vX.Y.Z`
-# tag (`force-tag-creation`: true) and a DRAFT GitHub Release. This workflow then
-# dispatches release.yml from protected `main` with that exact tag, commit, and
-# numeric draft release ID as inert inputs (ADR-0048). Dispatching with
-# `--ref main` loads main's copy of release.yml, so the checkout, environment
-# approvals, and provenance all identify the same immutable commit while the tag
-# stays pure data. Humans never hand-pick or hand-edit a version.
+# Conventional Commits land on main → this action keeps a "Release PR" open that bumps engine/Cargo.toml + engine/Cargo.lock and the C# csproj, and updates CHANGELOG.md.
+# Merging that PR makes release-please create both the `vX.Y.Z` tag (`force-tag-creation`: true) and a DRAFT GitHub Release.
+# This workflow then dispatches release.yml from protected `main` with that exact tag, commit, and numeric draft release ID as inert inputs (ADR-0048).
+# Dispatching with `--ref main` loads main's copy of release.yml, so the checkout, environment approvals, and provenance all identify the same immutable commit while the tag stays pure data.
+# Humans never hand-pick or hand-edit a version.
 #
 # Runs as a GitHub App: a short-lived installation token lets release-please write release metadata with a signed identity.
-# Doppler OIDC supplies RELEASE_PLEASE_CLIENT_ID and RELEASE_PLEASE_PRIVATE_KEY only inside the release-please environment.
+# Doppler synchronizes the two App fields into the main-only release-please environment.
 # Missing credentials fail visibly instead of silently abandoning release maintenance.
 # Release mutation and workflow dispatch are separate jobs with separate least-privilege tokens.
 # See docs/RELEASING.md.
@@ -38,9 +34,13 @@ permissions:
 
 jobs:
   release-please:
+    name: Maintain release proposal
+    if: >-
+      github.repository_id == '1267203446' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # The App identity is fetched only by jobs in this environment, including the publication job's narrower token.
+    # Jobs in this environment read the two synchronized App fields.
     # Its deployment policy allows main only and has no required reviewers so release-please can run unattended.
     # Merging the Release PR remains the human gate; signing and publication approvals use the release environment (ADR-0035).
     environment: release-please
@@ -50,39 +50,17 @@ jobs:
       sha: ${{ steps.rp.outputs.sha }}
       upload_url: ${{ steps.rp.outputs.upload_url }}
       pr_branch: ${{ steps.rp_branch.outputs.branch }}
-    permissions:
-      id-token: write # authenticate to the purpose-scoped Doppler identity
+    permissions: {}
     env:
       # A tag input means "recover dispatch only"; do not also run the version bot.
       RUN_BOT: ${{ github.event_name == 'push' || inputs.tag_name == '' }}
     steps:
-      - name: Fetch automation credentials
-        id: doppler
-        if: "env.RUN_BOT == 'true'"
-        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534
-        with:
-          auth-method: oidc
-          doppler-identity-id: ${{ vars.DOPPLER_AUTOMATION_IDENTITY_ID }}
-          doppler-project: find-my-files
-          doppler-config: automation
-          inject-env-vars: false
-      - name: Reject missing or unresolved automation credentials
-        if: >-
-          ${{ steps.doppler.outcome == 'success' && (
-          steps.doppler.outputs.GITHUB_APP_CLIENT_ID == '' ||
-          startsWith(steps.doppler.outputs.GITHUB_APP_CLIENT_ID, '${') ||
-          steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY == '' ||
-          startsWith(steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY, '${')
-          ) }}
-        shell: bash
-        run: exit 1
-
-      - name: Require complete Doppler credentials
+      - name: Require complete App credentials
         if: env.RUN_BOT == 'true'
         shell: bash
         env:
-          RELEASE_PLEASE_CLIENT_ID: ${{ steps.doppler.outputs.GITHUB_APP_CLIENT_ID }}
-          RELEASE_PLEASE_PRIVATE_KEY: ${{ steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY }}
+          RELEASE_PLEASE_CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          RELEASE_PLEASE_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           for name in RELEASE_PLEASE_CLIENT_ID RELEASE_PLEASE_PRIVATE_KEY; do
@@ -92,16 +70,18 @@ jobs:
             fi
           done
 
-      # Mint a short-lived installation token scoped to this repo. It lets
-      # release-please write the release commit/tag and maintain its PR/release;
+      # Mint a short-lived installation token scoped to this repo.
+      # It lets release-please write the release commit/tag and maintain its PR/release;
       # credentialed release.yml remains dispatchable only from protected main.
       - name: Mint GitHub App token
         id: app-token
         if: env.RUN_BOT == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ steps.doppler.outputs.GITHUB_APP_CLIENT_ID }}
-          private-key: ${{ steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: find-my-files
           permission-contents: write
           permission-issues: write
           permission-pull-requests: write
@@ -115,17 +95,12 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # release-please bumps engine/Cargo.toml's [workspace.package] version (toml
-      # updater) but not engine/Cargo.lock — release-please's rust strategy can't
-      # write workspace-inherited versions (googleapis/release-please#2478), so we
-      # use a generic toml bump + sync the lock here. Without this the Release PR's
-      # own `--locked` CI would fail. `cargo update --workspace` only rewrites the
-      # path-crate versions in the lock (no compile). It re-runs whenever a Release
-      # PR is (re)built, so a later rebuild that resets the lock self-heals.
-      # Parse the PR JSON in bash (jq), never `fromJSON()` in YAML: a step's `env:`
-      # is evaluated eagerly regardless of `if:`, so a `fromJSON('')` there crashes
-      # the run on the no-op release-please runs where `pr` is empty. This step is
-      # gated on a plain string compare and emits a plain string output.
+      # release-please bumps engine/Cargo.toml's [workspace.package] version (toml updater) but not engine/Cargo.lock — release-please's rust strategy can't write workspace-inherited versions (googleapis/release-please#2478), so we use a generic toml bump + sync the lock here.
+      # Without this the Release PR's own `--locked` CI would fail.
+      # `cargo update --workspace` only rewrites the path-crate versions in the lock (no compile).
+      # It re-runs whenever a Release PR is (re)built, so a later rebuild that resets the lock self-heals.
+      # Parse the PR JSON in bash (jq), never `fromJSON()` in YAML: a step's `env:` is evaluated eagerly regardless of `if:`, so a `fromJSON('')` there crashes the run on the no-op release-please runs where `pr` is empty.
+      # This step is gated on a plain string compare and emits a plain string output.
       - name: Resolve the Release PR branch
         id: rp_branch
         if: ${{ env.RUN_BOT == 'true' && steps.rp.outputs.pr != '' }}
@@ -133,10 +108,10 @@ jobs:
           PR_JSON: ${{ steps.rp.outputs.pr }}
         run: echo "branch=$(printf '%s' "$PR_JSON" | jq -r '.headBranchName')" >> "$GITHUB_OUTPUT"
 
-  # Mutable Release PR code may calculate the lockfile, but it receives no App
-  # write token. Its only output is one inert Cargo.lock artifact plus the exact
-  # branch-head SHA observed before any branch-controlled action ran.
+  # Mutable Release PR code may calculate the lockfile, but it receives no App write token.
+  # Its only output is one inert Cargo.lock artifact plus the exact branch-head SHA observed before any branch-controlled action ran.
   sync-release-lock:
+    name: Calculate release lockfile
     needs: release-please
     if: >-
       ${{
@@ -157,8 +132,8 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      # Capture the checkout identity before executing even the branch-local
-      # toolchain action. The later API-only job uses this as an atomic CAS.
+      # Capture the checkout identity before executing even the branch-local toolchain action.
+      # The later API-only job uses this as an atomic CAS.
       - name: Pin the checked-out Release PR head
         id: head
         shell: bash
@@ -194,14 +169,16 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  # A fresh runner receives the candidate as data, mints the App token only
-  # after download, and performs one atomic GraphQL commit. No checkout, local
-  # action, toolchain, gh executable, or mutable-branch process shares the token.
+  # A fresh runner receives the candidate as data, mints the App token only after download, and performs one atomic GraphQL commit.
+  # No checkout, local action, toolchain, gh executable, or mutable-branch process shares the token.
   commit-release-lock:
+    name: Commit release lockfile
     needs: [release-please, sync-release-lock]
     if: >-
       ${{
         always() &&
+        github.repository_id == '1267203446' &&
+        github.ref == 'refs/heads/main' &&
         needs.release-please.result == 'success' &&
         needs.sync-release-lock.result == 'success' &&
         needs.release-please.outputs.pr_branch != ''
@@ -209,8 +186,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: release-please
-    permissions:
-      id-token: write # authenticate to the purpose-scoped Doppler identity
+    permissions: {}
     steps:
       - name: Download the lockfile candidate before minting write authority
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -218,31 +194,11 @@ jobs:
           name: release-lock-candidate
           path: build/release-lock
 
-      - name: Fetch automation credentials
-        id: doppler
-        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534
-        with:
-          auth-method: oidc
-          doppler-identity-id: ${{ vars.DOPPLER_AUTOMATION_IDENTITY_ID }}
-          doppler-project: find-my-files
-          doppler-config: automation
-          inject-env-vars: false
-      - name: Reject missing or unresolved automation credentials
-        if: >-
-          ${{ steps.doppler.outcome == 'success' && (
-          steps.doppler.outputs.GITHUB_APP_CLIENT_ID == '' ||
-          startsWith(steps.doppler.outputs.GITHUB_APP_CLIENT_ID, '${') ||
-          steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY == '' ||
-          startsWith(steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY, '${')
-          ) }}
-        shell: bash
-        run: exit 1
-
-      - name: Require complete Doppler credentials
+      - name: Require complete App credentials
         shell: bash
         env:
-          RELEASE_PLEASE_CLIENT_ID: ${{ steps.doppler.outputs.GITHUB_APP_CLIENT_ID }}
-          RELEASE_PLEASE_PRIVATE_KEY: ${{ steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY }}
+          RELEASE_PLEASE_CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          RELEASE_PLEASE_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           for name in RELEASE_PLEASE_CLIENT_ID RELEASE_PLEASE_PRIVATE_KEY; do
@@ -256,8 +212,10 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ steps.doppler.outputs.GITHUB_APP_CLIENT_ID }}
-          private-key: ${{ steps.doppler.outputs.GITHUB_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: find-my-files
           permission-contents: write
 
       - name: Commit only Cargo.lock with an atomic branch-head guard
@@ -348,12 +306,11 @@ jobs:
               `Committed Cargo.lock as ${result.createCommitOnBranch.commit.oid}`,
             );
 
-  # Keep dispatch authority away from the job that checks out and executes the
-  # mutable Release PR branch. This job holds no publication authority of its own:
-  # it resolves the exact draft identity from release-please's own `upload_url`
-  # and hands that triple to release.yml, which re-derives and revalidates every
-  # one of those facts from protected main before doing anything (ADR-0048).
+  # Keep dispatch authority away from the job that checks out and executes the mutable Release PR branch.
+  # This job holds no publication authority of its own:
+  # it resolves the exact draft identity from release-please's own `upload_url` and hands that triple to release.yml, which re-derives and revalidates every one of those facts from protected main before doing anything (ADR-0048).
   dispatch-release:
+    name: Dispatch verified release
     needs: release-please
     if: >-
       ${{
