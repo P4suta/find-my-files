@@ -19,12 +19,27 @@ use fmf_proto::messages::{
     encode_page, encode_query_req, encode_result_free, opcode,
 };
 
+const MUTATION_SOURCE_ROOT_ENV: &str = "FMF_MUTATION_SOURCE_ROOT";
+
 fn golden_dir() -> PathBuf {
+    if let Some(source_root) = std::env::var_os(MUTATION_SOURCE_ROOT_ENV) {
+        let source_root = PathBuf::from(source_root);
+        assert!(
+            source_root.is_absolute(),
+            "{MUTATION_SOURCE_ROOT_ENV} must be an absolute trusted source root"
+        );
+        return source_root.join("contract/golden");
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../contract/golden")
 }
 
 fn bless_mode() -> bool {
-    std::env::var("FMF_BLESS").as_deref() == Ok("1")
+    let requested = std::env::var("FMF_BLESS").as_deref() == Ok("1");
+    assert!(
+        !(requested && std::env::var_os(MUTATION_SOURCE_ROOT_ENV).is_some()),
+        "the mutation scratch tree may only read the canonical golden corpus"
+    );
+    requested
 }
 
 /// One contiguous frame exactly as it crosses the pipe.

@@ -1326,7 +1326,7 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
         .join(".config")
         .join("nextest-mutation.toml");
     let nextest_config_arg = path_arg(&nextest_config)?;
-    let cpus = std::thread::available_parallelism().context("query Rust mutation CPU budget")?;
+    let cpus = mutation::cpu_budget()?;
     let mut command = rust_command("cargo", &work);
     command.arg("mutants").args(rust_ci_run_args(
         &rust_scope_config()?,

@@ -262,6 +262,7 @@ pub fn rust_scope_args(config: &str) -> Vec<String> {
         "--annotations",
         "none",
         "--cargo-arg=--locked",
+        "--cargo-arg=--workspace",
     ]
     .map(str::to_owned)
     .to_vec()
@@ -321,8 +322,6 @@ pub fn rust_run_args(
             output,
             "--baseline",
             "run",
-            "--test-workspace",
-            "true",
             "--minimum-test-timeout",
             MINIMUM_TEST_TIMEOUT_SECS,
             "--jobs",
@@ -378,9 +377,35 @@ pub fn stryker_args(output: &str, config_file: Option<&str>) -> Vec<String> {
     args
 }
 
+/// Bound the mutation planner by the process CPU assignment.
+pub fn cpu_budget() -> Result<NonZeroUsize> {
+    let estimated =
+        std::thread::available_parallelism().context("query Rust mutation CPU budget")?;
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
+        let mut assigned = 0;
+        let mut system = 0;
+        // SAFETY: The pseudo-handle is valid and both outputs point to writable usize values.
+        if unsafe {
+            GetProcessAffinityMask(GetCurrentProcess(), &raw mut assigned, &raw mut system)
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error()).context("read the process CPU assignment");
+        }
+        let count = usize::try_from(assigned.count_ones()).context("convert process CPU count")?;
+        let assigned = NonZeroUsize::new(count).context("the process CPU assignment is empty")?;
+        Ok(estimated.min(assigned))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(estimated)
+    }
+}
+
 pub fn run_rust() -> Result<()> {
     verify_cargo_mutants_version()?;
-    let cpus = std::thread::available_parallelism().context("query Rust mutation CPU budget")?;
+    let cpus = cpu_budget()?;
 
     let output = paths::rust_mutation_dir();
     fsx::force_remove_dir_all(&output)
@@ -1716,6 +1741,63 @@ fn validate_relative_path(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_workspace_selection_also_applies_to_the_unmutated_baseline() {
+        let cpus = NonZeroUsize::new(1).expect("one CPU");
+        let args = rust_run_args("scope.toml", "output", "nextest.toml", cpus, None);
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "--cargo-arg=--workspace")
+                .count(),
+            1
+        );
+        assert!(!args.iter().any(|arg| arg == "--test-workspace"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_cpu_budget_uses_assigned_processor() {
+        const CHILD: &str = "FMF_MUTATION_CPU_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            use windows_sys::Win32::System::Threading::{
+                GetCurrentProcess, GetProcessAffinityMask, SetProcessAffinityMask,
+            };
+            let mut assigned = 0;
+            let mut system = 0;
+            // SAFETY: The pseudo-handle is valid and both outputs point to writable usize values.
+            assert_ne!(
+                unsafe {
+                    GetProcessAffinityMask(GetCurrentProcess(), &raw mut assigned, &raw mut system)
+                },
+                0
+            );
+            assert_ne!(assigned, 0);
+            let single = 1 << assigned.trailing_zeros();
+            // SAFETY: The mask retains one processor already assigned to this child process.
+            assert_ne!(
+                unsafe { SetProcessAffinityMask(GetCurrentProcess(), single) },
+                0
+            );
+            assert_eq!(cpu_budget().expect("assigned CPU budget").get(), 1);
+            return;
+        }
+        let output = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "mutation::tests::native_cpu_budget_uses_assigned_processor",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("run the restricted child test");
+        assert!(
+            output.status.success(),
+            "restricted child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     fn rust_identity(path: &str, line: u64, mutation: &str) -> RustIdentity {
         RustIdentity {
