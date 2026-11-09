@@ -389,7 +389,7 @@ pub fn stryker_args(output: &str, config_file: Option<&str>) -> Vec<String> {
     if let Some(config_file) = config_file {
         args.extend(["--config-file", config_file].map(str::to_owned));
     }
-    args.extend(["--output", output, "--skip-version-check"].map(str::to_owned));
+    args.extend(["--output", output, "--skip-version-check", "--log-to-file"].map(str::to_owned));
     args
 }
 

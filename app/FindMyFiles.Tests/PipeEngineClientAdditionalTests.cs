@@ -1,8 +1,10 @@
 using System.Diagnostics;
+using System.IO.Pipes;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
 using FindMyFiles.Tests.Contract;
 using FindMyFiles.Tests.TestDoubles;
+using Microsoft.Win32.SafeHandles;
 using Xunit;
 
 namespace FindMyFiles.Tests;
@@ -22,14 +24,22 @@ public sealed class PipeEngineClientAdditionalTests
     }
 
     [Fact]
-    public void Synchronous_probe_reports_success_and_failure_without_throwing()
+    public async Task Synchronous_probe_reports_success_and_failure_without_throwing()
     {
         using var server = new FakePipeServer();
 
-        Assert.True(PipeEngineClient.Probe(server.PipeName, TimeSpan.FromSeconds(2)));
-        Assert.False(PipeEngineClient.Probe(
-            "fmf-test-no-such-sync-pipe",
-            TimeSpan.FromMilliseconds(100)));
+        await Task.Factory.StartNew(
+            () =>
+            {
+                Assert.False(Thread.CurrentThread.IsThreadPoolThread);
+                Assert.True(PipeEngineClient.Probe(server.PipeName, TimeSpan.FromSeconds(2)));
+                Assert.False(PipeEngineClient.Probe(
+                    "fmf-test-no-such-sync-pipe",
+                    TimeSpan.FromMilliseconds(100)));
+            },
+            TestContext.Current.CancellationToken,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
     }
 
     [Fact]
@@ -71,21 +81,33 @@ public sealed class PipeEngineClientAdditionalTests
     {
         SyncContext.RunContinuationsInline();
         using var log = new LogCapture();
-        using var rejectedServer = new FakePipeServer();
+        var rejectedPipeName = "fmf-test-rejected-" + Guid.NewGuid().ToString("N");
+        using var rejectedServer = new NamedPipeServerStream(
+            rejectedPipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        SafePipeHandle? rejectedHandle = null;
         using (var rejected = new PipeEngineClient(
-            rejectedServer.PipeName,
+            rejectedPipeName,
             autoStart: false,
             verifyServerIdentity: true,
-            _ => false))
+            handle =>
+            {
+                rejectedHandle = handle;
+                return false;
+            }))
         {
             rejected.Start();
-            await WaitUntilAsync(
-                () => rejected.Connection == EngineConnectionState.Faulted,
-                "identity rejection");
+            var supervisorField = typeof(PipeEngineClient).GetField(
+                "_supervisor",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            var supervisor = Assert.IsAssignableFrom<Task>(supervisorField?.GetValue(rejected));
+            await supervisor.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.Equal(EngineConnectionState.Faulted, rejected.Connection);
+            Assert.True(Assert.IsType<SafePipeHandle>(rejectedHandle).IsClosed);
+            Assert.False(rejectedServer.IsConnected);
             var failure = await Assert.ThrowsAsync<EngineUnavailableException>(
                 () => rejected.ListVolumesAsync(TestContext.Current.CancellationToken));
             Assert.Contains(
-                $@"server on \\.\pipe\{rejectedServer.PipeName}",
+                $@"server on \\.\pipe\{rejectedPipeName}",
                 failure.Message,
                 StringComparison.Ordinal);
             Assert.Contains(
@@ -100,10 +122,6 @@ public sealed class PipeEngineClientAdditionalTests
             "error_type=FindMyFiles.Engine.PipeEngineClient+ServerIdentityException",
             log.Text,
             StringComparison.Ordinal);
-        await WaitUntilAsync(
-            () => rejectedServer.ClosedConnectionCount >= 1,
-            "rejected stream disposal");
-
         using var trustedServer = new FakePipeServer();
         using var trusted = new PipeEngineClient(
             trustedServer.PipeName,

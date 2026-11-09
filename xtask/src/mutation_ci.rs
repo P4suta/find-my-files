@@ -3937,6 +3937,10 @@ mod tests {
             Some(".trusted-stryker-shard.json"),
         );
         for (lane, args) in [("local", &local), ("ci", &ci)] {
+            assert!(
+                args.iter().any(|arg| arg == "--log-to-file"),
+                "{lane} must retain native test server diagnostics"
+            );
             for key in reviewed_root.keys() {
                 assert!(
                     !args.contains(&format!("--{key}")),
