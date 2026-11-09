@@ -1,0 +1,13 @@
+workplace = "8f95af89faf8535b63a6"
+repository = "P4suta/find-my-files"
+repository_id = 1267203446
+owner_id = 42543015
+environment = "release-please"
+branches = ["main"]
+project = "find-my-files"
+source_config = "automation"
+config = "github_automation"
+
+[fields]
+RELEASE_APP_CLIENT_ID = "GITHUB_APP_CLIENT_ID"
+RELEASE_APP_PRIVATE_KEY = "GITHUB_APP_PRIVATE_KEY"
