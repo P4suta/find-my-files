@@ -299,6 +299,10 @@ impl VolumeIndex {
     /// A temporary hash set is therefore allocated only for the uncommon multi-row group,
     /// not for every entry in a million-row snapshot.
     pub(super) fn has_unique_live_link_identities(&self) -> bool {
+        self.duplicate_live_link_object().is_none()
+    }
+
+    pub(super) fn duplicate_live_link_object(&self) -> Option<Frn> {
         let ids = self.frn_index.sorted_ids();
         let mut start = 0usize;
         while start < ids.len() {
@@ -313,13 +317,13 @@ impl VolumeIndex {
                     if self.is_live(id)
                         && !seen.insert((self.frn(id), self.parent(id), self.name(id)))
                     {
-                        return false;
+                        return Some(self.frn(id));
                     }
                 }
             }
             start = end;
         }
-        true
+        None
     }
 
     #[inline]

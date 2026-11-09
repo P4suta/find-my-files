@@ -170,29 +170,6 @@ impl VolumeIndexBuilder {
         found
     }
 
-    fn duplicate_link_object(&self) -> Option<Frn> {
-        let ids = self.idx.frn_index.sorted_ids();
-        let mut start = 0usize;
-        while start < ids.len() {
-            let record = self.idx.frn(ids[start]).record();
-            let mut end = start + 1;
-            while end < ids.len() && self.idx.frn(ids[end]).record() == record {
-                end += 1;
-            }
-            if end - start > 1 {
-                let mut seen = rustc_hash::FxHashSet::default();
-                for &id in &ids[start..end] {
-                    let identity = (self.idx.frn(id), self.idx.parent(id), self.idx.name(id));
-                    if !seen.insert(identity) {
-                        return Some(self.idx.frn(id));
-                    }
-                }
-            }
-            start = end;
-        }
-        None
-    }
-
     /// Drop the rows whose parent the scan never saw, and report how many.
     ///
     /// Marked by parent resolution as [`NO_PARENT`] — a value only the root may legitimately carry.
@@ -546,7 +523,7 @@ impl VolumeIndexBuilder {
         } else {
             timings.unresolved_parents = self.tombstone_unresolved_parents();
             tracing::debug!(area = "index", "finish: parents resolved");
-            if let Some(object) = self.duplicate_link_object() {
+            if let Some(object) = self.idx.duplicate_live_link_object() {
                 return Err(IndexBuildError::DuplicateLink { object });
             }
             self.validate_strict_parent_graph()?;
@@ -779,6 +756,65 @@ mod tests {
             "the directory and both descendants"
         );
         assert_eq!(index.live_len(), 2, "root plus the rooted row");
+    }
+
+    #[test]
+    fn strict_builder_ignores_pruned_links_when_checking_uniqueness() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum ParentRecord {
+            Unseen,
+            Current,
+            StaleGeneration,
+        }
+
+        let states = [
+            ParentRecord::Unseen,
+            ParentRecord::Current,
+            ParentRecord::StaleGeneration,
+        ];
+        let left_name = u16s("left");
+        let right_name = u16s("right");
+        let shared_name = u16s("object.o");
+        let retained_name = u16s("retained.o");
+
+        for left in states {
+            for right in states {
+                let mut builder =
+                    VolumeIndexBuilder::new_strict("C:", full(5)).expect("exact NTFS root");
+                for (record, state, name) in [
+                    (10, left, left_name.as_slice()),
+                    (11, right, right_name.as_slice()),
+                ] {
+                    if state != ParentRecord::Unseen {
+                        builder.push(strict_entry(record, full(5), name, true));
+                    }
+                    let parent = if state == ParentRecord::StaleGeneration {
+                        stale_generation(record)
+                    } else {
+                        full(record)
+                    };
+                    builder.push(strict_entry(20, parent, &shared_name, false));
+                }
+                builder.push(strict_entry(20, full(5), &retained_name, false));
+
+                let (index, finish) = builder
+                    .finish_timed_cancellable(&AtomicBool::new(false))
+                    .expect("pruned hard links must not reject the volume")
+                    .expect("not cancelled");
+                let current = [left, right]
+                    .into_iter()
+                    .filter(|state| *state == ParentRecord::Current)
+                    .count();
+                let directories = [left, right]
+                    .into_iter()
+                    .filter(|state| *state != ParentRecord::Unseen)
+                    .count();
+                assert_eq!(finish.unresolved_parents, (2 - current) as u64);
+                assert_eq!(index.live_len(), 2 + directories + current);
+                assert_eq!(index.entries_by_frn(full(20)).count(), 1 + current);
+                assert!(index.has_unique_live_link_identities());
+            }
+        }
     }
 
     #[test]
