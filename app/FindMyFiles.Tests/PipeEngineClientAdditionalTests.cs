@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using FindMyFiles.Engine;
 using FindMyFiles.Services;
 using FindMyFiles.Tests.TestDoubles;
@@ -432,23 +433,61 @@ public sealed class PipeEngineClientAdditionalTests
                 && line.Contains(expectedMessage, StringComparison.Ordinal));
     }
 
-    [Fact]
-    public async Task Recoverable_handshake_failures_observe_the_initial_retry_backoff()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Recoverable_handshake_failures_observe_the_initial_retry_backoff(
+        bool deferObservationUntilRetry)
     {
-        using var server = new FakePipeServer
+        var firstAttempt = new TaskCompletionSource<(long Timestamp, int Connections)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var retryAttempt = new TaskCompletionSource<(long Timestamp, int Connections)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var retryResponse = (PipeProtocol.Status.Io, "retry"u8.ToArray());
+        var releaseRetry = new TaskCompletionSource<(int Status, byte[] Payload)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var handshakes = 0;
+        using var server = new FakePipeServer();
+        server.Handler = (opcode, _) =>
         {
-            Handler = (opcode, _) => opcode == PipeProtocol.Op.Subscribe
-                ? Task.FromResult((PipeProtocol.Status.Io, "retry"u8.ToArray()))
-                : null,
+            if (opcode != PipeProtocol.Op.Subscribe)
+            {
+                return null;
+            }
+
+            var observation = (Stopwatch.GetTimestamp(), server.ConnectionCount);
+            if (Interlocked.Increment(ref handshakes) == 1)
+            {
+                firstAttempt.TrySetResult(observation);
+                return Task.FromResult(retryResponse);
+            }
+
+            retryAttempt.TrySetResult(observation);
+            return releaseRetry.Task;
         };
         using var client = new PipeEngineClient(server.PipeName, autoStart: false);
         client.Start();
-        await WaitUntilAsync(() => server.ConnectionCount == 1, "first attempt");
+        try
+        {
+            if (deferObservationUntilRetry)
+            {
+                await retryAttempt.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            }
 
-        await Task.Delay(100);
-
-        Assert.Equal(1, server.ConnectionCount);
-        Assert.Equal(EngineConnectionState.Connecting, client.Connection);
+            var first = await firstAttempt.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var retry = await retryAttempt.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(1, first.Connections);
+            Assert.Equal(2, retry.Connections);
+            Assert.InRange(
+                Stopwatch.GetElapsedTime(first.Timestamp, retry.Timestamp),
+                TimeSpan.FromMilliseconds(100),
+                TimeSpan.MaxValue);
+            Assert.Equal(EngineConnectionState.Connecting, client.Connection);
+        }
+        finally
+        {
+            releaseRetry.TrySetResult(retryResponse);
+        }
     }
 
     [Fact]
