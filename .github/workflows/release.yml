@@ -43,7 +43,6 @@
 #              checks out and executes no repository build code.
 #
 # Auth: a short-lived Release Please App token publishes the release.
-# Doppler OIDC supplies eSigner credentials to the approval-gated sign job and App credentials to publication through separate configs and identities.
 # The GitHub release and release-please environments retain their existing approval and protected-main boundaries.
 # Signing is gated at publish: the run re-verifies the bundle is validly signed and FAILS before publishing the existing draft if it is not, so a missing/misconfigured secret can never ship an unsigned release unnoticed.
 # Human procedure lives in docs/RELEASING.md; rationale is in docs/adr/0020-code-signing-provider.md (provider/cert) and docs/adr/0029-ci-signing-cka-pipeline.md (official Action, this split pipeline;
