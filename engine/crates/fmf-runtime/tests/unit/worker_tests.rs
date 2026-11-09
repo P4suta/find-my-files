@@ -221,6 +221,8 @@ struct FakeJournal {
     open_failures: usize,
     open_panics: usize,
     open_calls: Arc<AtomicU64>,
+    batches_returned: u64,
+    completed_batches: Arc<AtomicU64>,
 }
 
 impl FakeJournal {
@@ -237,6 +239,8 @@ impl FakeJournal {
             open_failures: 0,
             open_panics: 0,
             open_calls: Arc::new(AtomicU64::new(0)),
+            batches_returned: 0,
+            completed_batches: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -281,6 +285,8 @@ impl JournalSource for FakeJournal {
     }
 
     fn read_blocking(&mut self, _buf: &mut Vec<u8>) -> Result<ReadOutcome, UsnError> {
+        self.completed_batches
+            .store(self.batches_returned, Ordering::Release);
         while let Some(FakeRead::Gate(gate)) = self.reads.front() {
             if gate.load(Ordering::Relaxed) {
                 self.reads.pop_front();
@@ -294,6 +300,7 @@ impl JournalSource for FakeJournal {
         }
         match self.reads.pop_front() {
             Some(FakeRead::Batch(records)) => {
+                self.batches_returned += 1;
                 self.next_usn += records.len() as i64;
                 Ok(ReadOutcome::Records {
                     records,
@@ -346,15 +353,104 @@ impl JournalSource for FakeJournal {
 
 const WAIT: Duration = Duration::from_secs(10);
 
+#[test]
+fn journal_read_boundary_acknowledges_prior_batches() {
+    let gate = Arc::new(AtomicBool::new(false));
+    let mut journal = FakeJournal::new(
+        vec![Incarnation {
+            journal_id: 7,
+            next_usn: 50,
+            view: Some(JournalView {
+                journal_id: 7,
+                first_usn: 0,
+            }),
+            reads: vec![
+                FakeRead::Batch(vec![usn_create(100, "first.txt")]),
+                FakeRead::Gate(gate.clone()),
+                FakeRead::Batch(vec![usn_create(101, "second.txt")]),
+            ],
+        }],
+        true,
+        Arc::new(AtomicU64::new(0)),
+    );
+    let completed = journal.completed_batches.clone();
+    journal.open().unwrap();
+    let mut buffer = Vec::new();
+    assert_eq!(completed.load(Ordering::Acquire), 0);
+    journal.read_blocking(&mut buffer).unwrap();
+    assert_eq!(completed.load(Ordering::Acquire), 0);
+    journal.read_blocking(&mut buffer).unwrap();
+    assert_eq!(completed.load(Ordering::Acquire), 1);
+    gate.store(true, Ordering::Release);
+    journal.read_blocking(&mut buffer).unwrap();
+    assert_eq!(completed.load(Ordering::Acquire), 1);
+    journal.read_blocking(&mut buffer).unwrap();
+    assert_eq!(completed.load(Ordering::Acquire), 2);
+}
+
+#[test]
+fn worker_fixture_unwinding_releases_writer_lock() {
+    let mut directory = None;
+    let mut worker = None;
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (dir, engine) = test_engine();
+        directory = Some(dir);
+        worker = Some(Arc::downgrade(&engine));
+        let events = sink_channel(&engine);
+        engine.spawn_worker_with_seams("C:", recoverable_store(), Box::new(recoverable_journal()));
+        lifecycle_until(&events, "C:", |event| {
+            matches!(event, EngineEvent::VolumeReady { .. })
+        });
+        panic!("scripted fixture failure");
+    }));
+    let expected_panic = matches!(unwound, Err(ref payload)
+        if payload.downcast_ref::<&str>().copied() == Some("scripted fixture failure"));
+    let directory = directory.unwrap();
+    let reopened = Engine::new(EngineConfig {
+        index_dir: directory.path().to_path_buf(),
+    });
+    let released = reopened.is_ok();
+    if let Ok(engine) = reopened {
+        engine.shutdown();
+    }
+    if let Some(engine) = worker.and_then(|weak| weak.upgrade()) {
+        engine.shutdown();
+    }
+    assert!(
+        expected_panic,
+        "the fixture must reach its scripted failure"
+    );
+    assert!(
+        released,
+        "unwinding must stop the owned worker and release its writer lock"
+    );
+}
+
+struct WorkerFixture(Arc<Engine>);
+
+impl std::ops::Deref for WorkerFixture {
+    type Target = Arc<Engine>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for WorkerFixture {
+    fn drop(&mut self) {
+        self.0.shutdown();
+    }
+}
+
 /// Engine on a fresh [`TestDir`] — the writer lock makes a shared dir a cross-test collision under the default parallel test runner.
 /// Callers hold the guard (`let (_dir, e) = …`) so it drops *after* the engine.
-fn test_engine() -> (TestDir, Arc<Engine>) {
+fn test_engine() -> (TestDir, WorkerFixture) {
     let dir = TestDir::new();
     let e = Engine::new(EngineConfig {
         index_dir: dir.path().to_path_buf(),
     })
     .expect("engine create");
-    (dir, e)
+    (dir, WorkerFixture(e))
 }
 
 fn sink_channel(e: &Arc<Engine>) -> mpsc::Receiver<EngineEvent> {
@@ -1199,39 +1295,22 @@ fn rows_for_prefix(e: &Engine, prefix: &str) -> Vec<(String, u64)> {
     out
 }
 
-/// Poll until `volume` has *finished* the batch that brings its published `scanned` count to `target` — including the post-batch work the worker does after publishing that count.
-/// Lets a test wait for one volume to finish its scripted batches without ordering it against the others.
-///
-/// `scanned` alone is not that signal.
-/// The worker writes it inside the apply step and only then takes the batch checkpoint and calls `maybe_compact` (`worker.rs`).
-/// Compaction renumbers every `EntryId` and swaps the index in through `VolumeSlot::install_index`, which bumps the structural generation — and both `Engine::query`'s k-way merge and `ResultSet::page` correctly answer `Stale` when that generation moves under a captured id column.
-/// These scripts do reach the trigger: `compaction_due` puts no entry floor on the dictionary-churn term, so a handful of USN creates on a 3-5 entry restored index is already `dict_appends_since_dedup > live_len / 4`.
-/// Resuming on `scanned` therefore parked the test inside a structural replacement it never asked for.
-///
-/// Waiting for the churn flag to clear makes that ordering explicit instead of probable, and the ordering is airtight rather than merely likely:
-///
-///   * the apply writes the dictionary-churn counter and `scanned` under the *same* index write guard, so `scanned == target` can never be observed before the churn that arms the trigger is visible;
-///   * only the compacted copy landing through `install_index` clears the flag (the copy resets the tombstone, dead-byte and dict-append counters), and both that swap and this poll go through the index lock — so reading `false` here happens-after the swap;
-///   * a compacted index never re-arms the trigger, and with every scripted batch applied the journals only idle from here (an idle read applies nothing), so no further structural replacement is pending.
-///
-/// `a_churny_batch_compacts_before_the_volume_is_settled` pins the middle step, so this extra wait cannot quietly become dead weight.
-fn wait_settled(e: &Engine, volume: &str, target: u64) {
+fn wait_settled(e: &Engine, volume: &str, target: u64, completed: &AtomicU64, batches: u64) {
     let deadline = Instant::now() + WAIT;
-    loop {
-        let slot = slot_of(e, volume);
-        let now = *slot.scanned.lock();
-        let ready = slot.phase.lock().state == VolumeState::Ready;
-        let pending = compaction_pending(e, volume);
-        if now == target && ready && !pending {
-            return;
-        }
+    while completed.load(Ordering::Acquire) < batches {
+        assert_ne!(
+            phase_of(e, volume),
+            VolumeState::Failed,
+            "{volume} failed before completing its batch"
+        );
         assert!(
             Instant::now() < deadline,
-            "{volume} never settled at {target} entries \
-             (scanned {now}, ready {ready}, compaction pending {pending})"
+            "{volume} never reached the read after batch {batches}"
         );
         std::thread::sleep(Duration::from_millis(2));
     }
+    assert_eq!(phase_of(e, volume), VolumeState::Ready);
+    assert_eq!(*slot_of(e, volume).scanned.lock(), target);
 }
 
 fn slot_of(e: &Engine, volume: &str) -> Arc<super::volume::VolumeSlot> {
@@ -1243,9 +1322,7 @@ fn slot_of(e: &Engine, volume: &str) -> Arc<super::volume::VolumeSlot> {
         .expect("volume registered")
 }
 
-/// Is a structural replacement still owed on `volume`?
-/// (The half of [`wait_settled`]'s predicate that outlives the `scanned` count.)
-fn compaction_pending(e: &Engine, volume: &str) -> bool {
+fn compaction_due(e: &Engine, volume: &str) -> bool {
     slot_of(e, volume)
         .index
         .read()
@@ -1307,12 +1384,6 @@ fn restore_and_apply_script(
     (store, journal)
 }
 
-/// The premise `wait_settled` rests on: these deliberately tiny scripted volumes really do compact, so "the batch is applied" and "the volume is done changing structurally" are two different moments.
-///
-/// A restored 2-entry index plus a 2-create batch is already over the dictionary-churn trigger (`dict_appends_since_dedup` 2 > `live_len` 4 / 4) — that term carries no `COMPACT_MIN_ENTRIES` floor, by design, so a small volume's dictionary cannot leak.
-/// So the worker compacts right after the batch, and compaction is a *structural* replacement: `install_index` bumps the generation, every `EntryId` is renumbered and every open result handle hard-stales.
-///
-/// Asserting the bump here keeps `wait_settled`'s extra condition honest: if the compaction policy ever stops firing on this shape, this fails loudly instead of leaving that wait as silent dead weight.
 #[test]
 fn a_churny_batch_compacts_before_the_volume_is_settled() {
     let label = "FMFCP1:";
@@ -1327,9 +1398,10 @@ fn a_churny_batch_compacts_before_the_volume_is_settled() {
         1000,
         false,
     );
+    let completed = journal.completed_batches.clone();
     e.spawn_worker_with_seams(label, store, Box::new(journal));
 
-    wait_settled(&e, label, 1 + 1 + 2);
+    wait_settled(&e, label, 1 + 1 + 2, &completed, 1);
     let stats = e.index_stats();
     let stats = stats.iter().find(|s| s.volume == label).unwrap();
     assert_eq!(
@@ -1337,7 +1409,7 @@ fn a_churny_batch_compacts_before_the_volume_is_settled() {
         "the restored index (generation 0) must have been replaced exactly \
          once, by the post-batch compaction"
     );
-    assert!(!compaction_pending(&e, label));
+    assert!(!compaction_due(&e, label));
     assert_eq!(
         rows_for_prefix(&e, "cp_"),
         vec![
@@ -1401,6 +1473,7 @@ fn multi_volume_results_independent_of_scheduling() {
 
     let run = |reversed: bool| -> Vec<Vec<(String, u64)>> {
         let (_dir, e) = test_engine();
+        let mut completions = vec![None; scripts.len()];
         let order: Vec<usize> = if reversed {
             (0..scripts.len()).rev().collect()
         } else {
@@ -1417,10 +1490,17 @@ fn multi_volume_results_independent_of_scheduling() {
                 frn_base,
                 false,
             );
+            completions[i] = Some(journal.completed_batches.clone());
             e.spawn_worker_with_seams(label, store, Box::new(journal));
         }
         for (i, (label, ..)) in scripts.iter().enumerate() {
-            wait_settled(&e, label, final_counts[i]);
+            wait_settled(
+                &e,
+                label,
+                final_counts[i],
+                completions[i].as_ref().unwrap(),
+                scripts[i].3.len() as u64,
+            );
         }
         let rows = scripts
             .iter()
@@ -1479,6 +1559,7 @@ fn flush_checkpoint_never_passes_unapplied_records() {
         true,
         Arc::new(AtomicU64::new(0)),
     );
+    let gated_completed = gated_journal.completed_batches.clone();
     e.spawn_worker_with_seams("FMFCK1:", gated_store.clone(), Box::new(gated_journal));
 
     let (other_store, other_journal) = restore_and_apply_script(
@@ -1490,10 +1571,11 @@ fn flush_checkpoint_never_passes_unapplied_records() {
         600,
         false,
     );
+    let other_completed = other_journal.completed_batches.clone();
     e.spawn_worker_with_seams("FMFCK2:", other_store, Box::new(other_journal));
 
-    wait_settled(&e, "FMFCK1:", 1 + 1 + 2);
-    wait_settled(&e, "FMFCK2:", 1 + 1 + 1);
+    wait_settled(&e, "FMFCK1:", 1 + 1 + 2, &gated_completed, 1);
+    wait_settled(&e, "FMFCK2:", 1 + 1 + 1, &other_completed, 1);
 
     let saved = e.flush();
     assert_eq!(saved, 2, "both dirty Ready volumes save");
@@ -1507,7 +1589,7 @@ fn flush_checkpoint_never_passes_unapplied_records() {
     assert_eq!(rows_for_prefix(&e, "ga_").len(), 1 + 2);
 
     gate.store(true, Ordering::Relaxed);
-    wait_settled(&e, "FMFCK1:", 1 + 1 + 3);
+    wait_settled(&e, "FMFCK1:", 1 + 1 + 3, &gated_completed, 2);
     let saved2 = e.flush();
     assert_eq!(
         saved2, 1,
@@ -1547,11 +1629,13 @@ fn save_failure_on_one_volume_spares_index_and_siblings() {
         800,
         false,
     );
+    let bad_completed = bad_journal.completed_batches.clone();
+    let good_completed = good_journal.completed_batches.clone();
     e.spawn_worker_with_seams("FMFSF1:", bad_store.clone(), Box::new(bad_journal));
     e.spawn_worker_with_seams("FMFSF2:", good_store.clone(), Box::new(good_journal));
 
-    wait_settled(&e, "FMFSF1:", 1 + 1 + 2);
-    wait_settled(&e, "FMFSF2:", 1 + 1 + 1);
+    wait_settled(&e, "FMFSF1:", 1 + 1 + 2, &bad_completed, 1);
+    wait_settled(&e, "FMFSF2:", 1 + 1 + 1, &good_completed, 1);
 
     let bad_before = rows_for_prefix(&e, "sa_");
     let good_before = rows_for_prefix(&e, "sb_");
@@ -1598,8 +1682,9 @@ fn journal_gone_on_one_volume_does_not_disturb_siblings() {
         900,
         false,
     );
+    let steady_completed = steady_journal.completed_batches.clone();
     e.spawn_worker_with_seams("FMFJG2:", steady_store, Box::new(steady_journal));
-    wait_settled(&e, "FMFJG2:", 1 + 1 + 1);
+    wait_settled(&e, "FMFJG2:", 1 + 1 + 1, &steady_completed, 1);
     let steady_before = rows_for_prefix(&e, "jb_");
     let steady_gen_before = e
         .index_stats()
