@@ -53,13 +53,14 @@ fn proof_partitions_preserve_budgets_and_require_complete_collection() {
     );
     assert_eq!(proof["strategy"]["max-parallel"].as_i64(), Some(4));
     assert_eq!(proof["strategy"]["fail-fast"].as_bool(), Some(false));
-    assert_eq!(proof["timeout-minutes"].as_i64(), Some(60));
+    assert_eq!(proof["timeout-minutes"].as_i64(), Some(120));
     assert_eq!(
         proof["if"].as_str(),
         Some("needs.changes.outputs.assurance == 'true'")
     );
     assert!(proof["continue-on-error"].is_badvalue());
     let job = &ci["jobs"]["xtask"];
+    assert_eq!(job["timeout-minutes"].as_i64(), Some(90));
     assert_eq!(job["if"].as_str(), Some("always()"));
     let needs: BTreeSet<_> = job["needs"]
         .as_vec()

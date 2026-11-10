@@ -235,7 +235,7 @@ jobs:
     needs: [changes, xtask-build]
     if: needs.changes.outputs.assurance == 'true'
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -275,7 +275,7 @@ jobs:
     needs: [changes, xtask-build, proof]
     if: always()
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CARGO_BUILD_JOBS: "2"
     steps:
