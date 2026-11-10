@@ -1434,6 +1434,7 @@ public sealed class PipeEngineClientAdditionalTests
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         var writeLock = Assert.IsType<SemaphoreSlim>(lockField?.GetValue(connection));
         Task? write = null;
+        var ownsWriteLock = false;
         try
         {
             if (writeAdmitted)
@@ -1447,6 +1448,7 @@ public sealed class PipeEngineClientAdditionalTests
             else
             {
                 await writeLock.WaitAsync(TestContext.Current.CancellationToken);
+                ownsWriteLock = true;
             }
 
             write = PipeEngineClient.WriteQueryCancelFrameAsync(
@@ -1471,7 +1473,7 @@ public sealed class PipeEngineClientAdditionalTests
             connection.BeforeFrameWriteForTests = null;
             lifetime.Cancel();
             client.Dispose();
-            if (!writeAdmitted && writeLock.CurrentCount == 0)
+            if (ownsWriteLock)
             {
                 writeLock.Release();
             }
