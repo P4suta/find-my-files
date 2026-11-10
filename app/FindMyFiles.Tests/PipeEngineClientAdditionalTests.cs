@@ -1995,6 +1995,120 @@ public sealed class PipeEngineClientAdditionalTests
         Assert.Null(Record.Exception(client.Dispose));
     }
 
+    [Fact]
+    public async Task A_failed_frame_write_observes_its_retired_response_completion()
+    {
+        const int collectionAttempts = 3;
+        WeakReference<Task>? completion = null;
+        var unobserved = 0;
+        void Observe(object? sender, UnobservedTaskExceptionEventArgs failure)
+        {
+            if (completion is not null
+                && completion.TryGetTarget(out var owned)
+                && ReferenceEquals(sender, owned))
+            {
+                Interlocked.Increment(ref unobserved);
+                failure.SetObserved();
+            }
+        }
+
+        TaskScheduler.UnobservedTaskException += Observe;
+        try
+        {
+            await RetireQueuedResponseAsync(value => completion = value);
+            Assert.NotNull(completion);
+            for (var attempt = 0; attempt < collectionAttempts; attempt++)
+            {
+                TestContext.Current.CancellationToken.ThrowIfCancellationRequested();
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+                if (!ResponseIsAlive(completion))
+                {
+                    break;
+                }
+            }
+
+            Assert.False(ResponseIsAlive(completion));
+            Assert.Equal(0, Volatile.Read(ref unobserved));
+        }
+        finally
+        {
+            TaskScheduler.UnobservedTaskException -= Observe;
+        }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool ResponseIsAlive(WeakReference<Task> completion) =>
+        completion.TryGetTarget(out _);
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool ResponseIsFaulted(WeakReference<Task> completion) =>
+        completion.TryGetTarget(out var response) && response.IsFaulted;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static async Task RetireQueuedResponseAsync(Action<WeakReference<Task>> capture)
+    {
+        using var server = new FakePipeServer();
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        client.Start();
+        await WaitUntilAsync(() => client.Connection == EngineConnectionState.Connected, "connected");
+        var connection = Assert.IsType<PipeConnection>(client.CurrentPipeConnectionForTests);
+        const System.Reflection.BindingFlags privateInstance =
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var writeLock = Assert.IsType<SemaphoreSlim>(
+            typeof(PipeConnection).GetField("_writeLock", privateInstance)?.GetValue(connection));
+        Task<IReadOnlyList<string>>? request = null;
+        var ownsWriteLock = false;
+        try
+        {
+            await writeLock.WaitAsync(TestContext.Current.CancellationToken);
+            ownsWriteLock = true;
+            request = client.ListVolumesAsync(TestContext.Current.CancellationToken);
+            Assert.False(request.IsCompleted);
+            var response = PendingResponseReference(client);
+            capture(response);
+
+            server.DisconnectAll();
+            await PipeOverFakeServerContractTests.WaitForPublishedReplacementAsync(client, connection.Epoch);
+            Assert.True(ResponseIsFaulted(response));
+            Assert.False(request.IsCompleted);
+            ownsWriteLock = false;
+            writeLock.Release();
+            await Assert.ThrowsAsync<EngineUnavailableException>(
+                () => request.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            client.Dispose();
+            if (ownsWriteLock)
+            {
+                writeLock.Release();
+            }
+
+            if (request is not null)
+            {
+                await ((Task)request).WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None)
+                    .ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            }
+
+            request = null;
+        }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static WeakReference<Task> PendingResponseReference(PipeEngineClient client)
+    {
+        const System.Reflection.BindingFlags privateInstance =
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var requests = Assert.IsAssignableFrom<System.Collections.IDictionary>(
+            typeof(PipeEngineClient).GetField("_pending", privateInstance)?.GetValue(client));
+        var pending = Assert.Single(requests.Values.Cast<object>());
+        var response = Assert.IsType<TaskCompletionSource<(int Status, byte[] Payload)>>(
+            pending.GetType().GetProperty("Completion")?.GetValue(pending));
+        return new WeakReference<Task>(response.Task, trackResurrection: true);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> predicate, string what)
     {
         var deadline = Environment.TickCount64 + 5000;

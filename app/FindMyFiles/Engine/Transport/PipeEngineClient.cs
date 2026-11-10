@@ -729,6 +729,8 @@ internal sealed class PipeEngineClient : IEngineClient
         {
             await queryCancellation.DisposeAsync().ConfigureAwait(false);
             TryRemovePending(id, pending);
+            tcs.TrySetCanceled();
+            await ((Task)tcs.Task).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }
     }
 

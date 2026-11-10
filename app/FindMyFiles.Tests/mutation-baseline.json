@@ -491,9 +491,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 789,
+        "start_line": 791,
         "start_column": 32,
-        "end_line": 789,
+        "end_line": 791,
         "end_column": 37,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -503,9 +503,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 799,
+        "start_line": 801,
         "start_column": 92,
-        "end_line": 799,
+        "end_line": 801,
         "end_column": 97,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -515,9 +515,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 815,
+        "start_line": 817,
         "start_column": 32,
-        "end_line": 815,
+        "end_line": 817,
         "end_column": 37,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -527,33 +527,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 838,
-        "start_column": 9,
-        "end_line": 838,
-        "end_column": 43,
-        "mutator": "Statement mutation",
-        "replacement": ";"
-      },
-      "rationale": "Every public caller performs the same cancellation check before reaching this helper, while private handshake callers use the client lifetime token observed by their awaited pipe operation."
-    },
-    {
-      "identity": {
-        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
         "start_line": 840,
-        "start_column": 29,
+        "start_column": 9,
         "end_line": 840,
-        "end_column": 34,
-        "mutator": "Boolean mutation",
-        "replacement": "true"
-      },
-      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
-    },
-    {
-      "identity": {
-        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 848,
-        "start_column": 9,
-        "end_line": 848,
         "end_column": 43,
         "mutator": "Statement mutation",
         "replacement": ";"
@@ -563,9 +539,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 851,
+        "start_line": 842,
         "start_column": 29,
-        "end_line": 851,
+        "end_line": 842,
         "end_column": 34,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -575,21 +551,45 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 857,
+        "start_line": 850,
         "start_column": 9,
-        "end_line": 857,
+        "end_line": 850,
         "end_column": 43,
         "mutator": "Statement mutation",
         "replacement": ";"
       },
       "rationale": "Every public caller performs the same cancellation check before reaching this helper, while private handshake callers use the client lifetime token observed by their awaited pipe operation."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 853,
+        "start_column": 29,
+        "end_line": 853,
+        "end_column": 34,
+        "mutator": "Boolean mutation",
+        "replacement": "true"
+      },
+      "rationale": "This continuation owns only pipe-client scalar or transport state and is reached without a UI SynchronizationContext; ConfigureAwait capture cannot change the wire result or state transition."
     },
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
         "start_line": 859,
-        "start_column": 29,
+        "start_column": 9,
         "end_line": 859,
+        "end_column": 43,
+        "mutator": "Statement mutation",
+        "replacement": ";"
+      },
+      "rationale": "Every public caller performs the same cancellation check before reaching this helper, while private handshake callers use the client lifetime token observed by their awaited pipe operation."
+    },
+    {
+      "identity": {
+        "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
+        "start_line": 861,
+        "start_column": 29,
+        "end_line": 861,
         "end_column": 34,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -599,9 +599,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 866,
+        "start_line": 868,
         "start_column": 68,
-        "end_line": 866,
+        "end_line": 868,
         "end_column": 73,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -611,9 +611,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 875,
+        "start_line": 877,
         "start_column": 9,
-        "end_line": 875,
+        "end_line": 877,
         "end_column": 43,
         "mutator": "Statement mutation",
         "replacement": ";"
@@ -623,9 +623,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 893,
+        "start_line": 895,
         "start_column": 54,
-        "end_line": 893,
+        "end_line": 895,
         "end_column": 59,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -635,9 +635,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 909,
+        "start_line": 911,
         "start_column": 40,
-        "end_line": 909,
+        "end_line": 911,
         "end_column": 45,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -647,9 +647,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 922,
+        "start_line": 924,
         "start_column": 40,
-        "end_line": 922,
+        "end_line": 924,
         "end_column": 45,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -659,9 +659,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 937,
+        "start_line": 939,
         "start_column": 59,
-        "end_line": 937,
+        "end_line": 939,
         "end_column": 64,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -671,9 +671,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 959,
+        "start_line": 961,
         "start_column": 79,
-        "end_line": 959,
+        "end_line": 961,
         "end_column": 84,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -683,9 +683,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 967,
+        "start_line": 969,
         "start_column": 9,
-        "end_line": 967,
+        "end_line": 969,
         "end_column": 43,
         "mutator": "Statement mutation",
         "replacement": ";"
@@ -695,9 +695,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 973,
+        "start_line": 975,
         "start_column": 33,
-        "end_line": 973,
+        "end_line": 975,
         "end_column": 38,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -707,9 +707,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 1000,
+        "start_line": 1002,
         "start_column": 77,
-        "end_line": 1000,
+        "end_line": 1002,
         "end_column": 82,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -719,9 +719,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 1012,
+        "start_line": 1014,
         "start_column": 33,
-        "end_line": 1012,
+        "end_line": 1014,
         "end_column": 38,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -731,9 +731,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 1034,
+        "start_line": 1036,
         "start_column": 9,
-        "end_line": 1034,
+        "end_line": 1036,
         "end_column": 43,
         "mutator": "Statement mutation",
         "replacement": ";"
@@ -743,9 +743,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 1041,
+        "start_line": 1043,
         "start_column": 32,
-        "end_line": 1041,
+        "end_line": 1043,
         "end_column": 37,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -755,9 +755,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 1057,
+        "start_line": 1059,
         "start_column": 61,
-        "end_line": 1057,
+        "end_line": 1059,
         "end_column": 75,
         "mutator": "String mutation",
         "replacement": "\"\""
@@ -767,9 +767,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 1064,
+        "start_line": 1066,
         "start_column": 13,
-        "end_line": 1064,
+        "end_line": 1066,
         "end_column": 20,
         "mutator": "Statement mutation",
         "replacement": ";"
@@ -779,9 +779,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 1069,
+        "start_line": 1071,
         "start_column": 70,
-        "end_line": 1069,
+        "end_line": 1071,
         "end_column": 75,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -791,9 +791,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 1087,
+        "start_line": 1089,
         "start_column": 17,
-        "end_line": 1087,
+        "end_line": 1089,
         "end_column": 29,
         "mutator": "String mutation",
         "replacement": "\"\""
@@ -803,9 +803,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 1089,
+        "start_line": 1091,
         "start_column": 33,
-        "end_line": 1089,
+        "end_line": 1091,
         "end_column": 38,
         "mutator": "Boolean mutation",
         "replacement": "true"
@@ -815,9 +815,9 @@
     {
       "identity": {
         "path": "app/FindMyFiles/Engine/Transport/PipeEngineClient.cs",
-        "start_line": 1119,
+        "start_line": 1121,
         "start_column": 47,
-        "end_line": 1119,
+        "end_line": 1121,
         "end_column": 61,
         "mutator": "String mutation",
         "replacement": "\"\""
