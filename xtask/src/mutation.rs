@@ -24,6 +24,7 @@ const BASELINE_SCHEMA_VERSION: u32 = 1;
 const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 const CARGO_MUTANTS_NAME: &str = "cargo-mutants";
 const CARGO_MUTANTS_VERSION: &str = "27.1.0";
+const RUST_SELECTED_FILES: &str = "selected-files.json";
 const STRYKER_NAME: &str = "dotnet-stryker";
 const STRYKER_VERSION: &str = "4.16.0";
 
@@ -406,6 +407,20 @@ pub fn cpu_budget() -> Result<NonZeroUsize> {
 pub fn run_rust() -> Result<()> {
     verify_cargo_mutants_version()?;
     let cpus = cpu_budget()?;
+    let repo = paths::repo_root();
+    let baseline: AcceptedBaseline<RustIdentity> = read_baseline(
+        &paths::rust_mutation_baseline(),
+        CARGO_MUTANTS_NAME,
+        CARGO_MUTANTS_VERSION,
+    )?;
+    let selection = rust_listing(&repo, RustListing::SelectedFiles)?;
+    let selected_files = parse_rust_selected_files(selection.clone())?;
+    compare_exact_files(
+        &baseline.examined_files,
+        &selected_files,
+        &paths::rust_mutation_baseline(),
+    )?;
+    let source = rust_input_files(&repo)?;
 
     let output = paths::rust_mutation_dir();
     fsx::force_remove_dir_all(&output)
@@ -424,8 +439,7 @@ pub fn run_rust() -> Result<()> {
     let output_arg = output.to_string_lossy().into_owned();
     let nextest_config_arg = nextest_config.to_string_lossy().into_owned();
     let config_arg = paths::rust_mutants_config().to_string_lossy().into_owned();
-    let status = Command::new("cargo")
-        .arg("mutants")
+    let status = rust_command(&repo)
         .args(rust_run_args(
             &config_arg,
             &output_arg,
@@ -439,7 +453,10 @@ pub fn run_rust() -> Result<()> {
         .status()
         .context("spawn pinned cargo-mutants")?;
 
-    let run = parse_rust_run(&cargo_mutants_report_dir(&output))?;
+    require_same_rust_inputs(&source, &rust_input_files(&repo)?)?;
+    let reports = cargo_mutants_report_dir(&output);
+    write_json_atomic(&reports.join(RUST_SELECTED_FILES), &selection)?;
+    let run = parse_rust_run(&reports)?;
     write_json_atomic(
         &output.join("gate.json"),
         &RustEvidence {
@@ -461,11 +478,6 @@ pub fn run_rust() -> Result<()> {
         );
     }
 
-    let baseline: AcceptedBaseline<RustIdentity> = read_baseline(
-        &paths::rust_mutation_baseline(),
-        CARGO_MUTANTS_NAME,
-        CARGO_MUTANTS_VERSION,
-    )?;
     compare_exact_files(
         &baseline.examined_files,
         &run.examined_files,
@@ -478,6 +490,225 @@ pub fn run_rust() -> Result<()> {
         paths::rust_mutation_baseline().display(),
         run.survivors.len()
     );
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum RustListing {
+    SelectedFiles,
+    Mutants,
+}
+
+fn rust_command(repo: &Path) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .arg("mutants")
+        .env_remove("FMF_BLESS")
+        .current_dir(repo.join("engine"));
+    command
+}
+
+fn rust_listing(repo: &Path, listing: RustListing) -> Result<Value> {
+    let config = repo.join("engine/mutants.toml");
+    let output = rust_command(repo)
+        .args(rust_scope_args(&config.to_string_lossy()))
+        .args([
+            match listing {
+                RustListing::SelectedFiles => "--list-files",
+                RustListing::Mutants => "--list",
+            },
+            "--json",
+        ])
+        .env_remove("FMF_BLESS")
+        .current_dir(repo.join("engine"))
+        .output()
+        .context("discover the pinned Rust mutation scope")?;
+    if !output.status.success() {
+        bail!(
+            "Rust mutation discovery failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    crate::strict_json::decode(&output.stdout).context("decode native Rust mutation discovery")
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RustSelectedFile {
+    path: String,
+    package: String,
+}
+
+fn parse_rust_selected_files(value: Value) -> Result<Vec<String>> {
+    let files: Vec<RustSelectedFile> = serde_json::from_value(value)?;
+    let mut selected = BTreeSet::new();
+    for file in files {
+        let path = format!("engine/{}", file.path);
+        validate_relative_path(&path)?;
+        if parse_path(&path)?.render() != path
+            || !file
+                .path
+                .starts_with(&format!("crates/{}/src/", file.package))
+            || !selected.insert(path)
+        {
+            bail!("Rust selected-file listing contains a duplicate or inconsistent package path");
+        }
+    }
+    let selected: Vec<String> = selected.into_iter().collect();
+    validate_examined_files(Path::new(RUST_SELECTED_FILES), &selected)?;
+    Ok(selected)
+}
+
+fn rust_input_files(repo: &Path) -> Result<BTreeMap<String, String>> {
+    let output = Command::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            "engine",
+            "contract",
+            "mise.toml",
+        ])
+        .current_dir(repo)
+        .output()
+        .context("list Rust mutation inputs")?;
+    if !output.status.success() {
+        bail!("list Rust mutation inputs failed with {}", output.status);
+    }
+    let names = String::from_utf8(output.stdout)?;
+    let names = names
+        .strip_suffix('\0')
+        .context("Rust mutation input listing is empty or incomplete")?;
+    let mut inputs = BTreeMap::new();
+    for name in names.split('\0') {
+        validate_relative_path(name)?;
+        let path = repo.join(name);
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || fsx::is_reparse_point(&metadata)
+        {
+            bail!("Rust mutation input is not an ordinary file: {name}");
+        }
+        let digest = crate::checksum::sha256_hex(&fs::read(path)?);
+        if inputs.insert(name.to_owned(), digest).is_some() {
+            bail!("Rust mutation input listing contains a duplicate: {name}");
+        }
+    }
+    for required in ["engine/Cargo.toml", "engine/Cargo.lock", "mise.toml"] {
+        if !inputs.contains_key(required) {
+            bail!("Rust mutation input listing lacks {required}");
+        }
+    }
+    Ok(inputs)
+}
+
+fn require_same_rust_inputs(
+    expected: &BTreeMap<String, String>,
+    actual: &BTreeMap<String, String>,
+) -> Result<()> {
+    if expected != actual {
+        bail!("Rust engine, tests, corpus, or configuration changed since the frozen run");
+    }
+    Ok(())
+}
+
+fn canonical_rust_discovery(value: Value) -> Result<BTreeMap<RustIdentity, Value>> {
+    let entries = value
+        .as_array()
+        .context("native discovery has no mutant array")?;
+    let mut mutants = BTreeMap::new();
+    for entry in entries {
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .context("discovered mutant has no name")?;
+        if mutants
+            .insert(parse_rust_identity(name)?, entry.clone())
+            .is_some()
+        {
+            bail!("native discovery contains a duplicate mutant identity");
+        }
+    }
+    if mutants.is_empty() {
+        bail!("native discovery contains no mutants");
+    }
+    Ok(mutants)
+}
+
+fn frozen_rust_report_directory(source_root: &Path, reports: &Path) -> Result<PathBuf> {
+    let root = fs::canonicalize(source_root)?;
+    let local_output = paths::rust_mutation_dir();
+    let relative = local_output.strip_prefix(paths::repo_root())?;
+    let expected = fs::canonicalize(cargo_mutants_report_dir(&root.join(relative)))?;
+    let actual = fs::canonicalize(reports)?;
+    let metadata = fs::symlink_metadata(reports)?;
+    if actual != expected
+        || !actual.starts_with(&root)
+        || !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || fsx::is_reparse_point(&metadata)
+    {
+        bail!("saved Rust reports must belong to the supplied frozen checkout");
+    }
+    Ok(actual)
+}
+
+pub fn check_rust_report(source_root: &Path, reports: &Path) -> Result<()> {
+    verify_cargo_mutants_version()?;
+    let reports = frozen_rust_report_directory(source_root, reports)?;
+    let frozen_status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(source_root)
+        .output()
+        .context("inspect the frozen mutation source")?;
+    if !frozen_status.status.success() || !frozen_status.stdout.is_empty() {
+        bail!("saved Rust mutation results require a clean frozen source checkout");
+    }
+    let repo = paths::repo_root();
+    let source = rust_input_files(&repo)?;
+    let frozen_source = rust_input_files(source_root)?;
+    require_same_rust_inputs(&frozen_source, &source)?;
+    let selection = parse_rust_selected_files(rust_listing(&repo, RustListing::SelectedFiles)?)?;
+    let baseline_path = paths::rust_mutation_baseline();
+    let baseline: AcceptedBaseline<RustIdentity> =
+        read_baseline(&baseline_path, CARGO_MUTANTS_NAME, CARGO_MUTANTS_VERSION)?;
+    compare_exact_files(&baseline.examined_files, &selection, &baseline_path)?;
+    let generated = canonical_rust_discovery(rust_listing(&repo, RustListing::Mutants)?)?;
+    let recorded = canonical_rust_discovery(read_json(&reports.join("mutants.json"))?)?;
+    if generated != recorded {
+        bail!("saved Rust mutations differ from fresh native discovery");
+    }
+    let policy = reports
+        .parent()
+        .context("mutation report has no output parent")?
+        .join("nextest-mutation.toml");
+    if fs::read(policy)? != NEXTEST_POLICY.as_bytes() {
+        bail!("saved Rust mutation runner policy differs from the current policy");
+    }
+    let run = parse_rust_run_selected(&reports, selection)?;
+    if !run.timeouts.is_empty() {
+        bail!("saved Rust mutation results contain inconclusive timeouts");
+    }
+    compare_exact_survivors(&baseline, &run.survivors, &baseline_path)?;
+    require_same_rust_inputs(&source, &rust_input_files(&repo)?)?;
+    require_same_rust_inputs(&frozen_source, &rust_input_files(source_root)?)?;
+    write_json_atomic(
+        &paths::rust_mutation_dir().join("gate.json"),
+        &RustEvidence {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            tool: expected_tool(CARGO_MUTANTS_NAME, CARGO_MUTANTS_VERSION),
+            baseline_passed: true,
+            examined_files: &run.examined_files,
+            survivors: &run.survivors,
+            timeouts: &run.timeouts,
+        },
+    )?;
+    println!("Saved Rust mutation gate passed: complete results match the frozen engine, tests, native discovery, and exact survivor baseline.");
     Ok(())
 }
 
@@ -580,9 +811,7 @@ pub fn run_csharp() -> Result<()> {
 /// The trusted CI controller uses this instead of accepting mutation policy from the target checkout, exactly as the C# lane does below.
 /// `read_baseline` validates the tool pin, the strict ordering, every identity and every rationale.
 ///
-/// Unlike the C# reader there is no second file to cross-check: the scope lives in `engine/mutants.toml` as globs, and xtask deliberately never parses it —
-/// cargo-mutants owns glob matching at run time, and a second matcher here would be a second answer.
-/// The proof that the config and this baseline agree is therefore after the fact and already exists in both lanes: the files cargo-mutants reports as examined are compared to `examined_files`.
+/// The native selected-file listing supplies glob semantics, including declaration-only modules.
 pub fn read_rust_reviewed_policy(repo: &Path) -> Result<RustReviewedPolicy> {
     let baseline_path = paths::rust_mutation_baseline_in(repo);
     let baseline: AcceptedBaseline<RustIdentity> =
@@ -841,8 +1070,20 @@ fn validate_csharp_conclusive(run: &CsharpRun, evidence: &Path) -> Result<()> {
 }
 
 fn parse_rust_run(output: &Path) -> Result<RustRun> {
+    let selected = parse_rust_selected_files(read_json(&output.join(RUST_SELECTED_FILES))?)?;
+    parse_rust_run_selected(output, selected)
+}
+
+fn parse_rust_run_selected(output: &Path, examined_files: Vec<String>) -> Result<RustRun> {
     let outcomes_path = output.join("outcomes.json");
     let outcomes: Value = read_json(&outcomes_path)?;
+    if outcomes
+        .get("end_time")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        bail!("{} has no completed end time", outcomes_path.display());
+    }
     let version = outcomes
         .get("cargo_mutants_version")
         .and_then(Value::as_str)
@@ -948,12 +1189,18 @@ fn parse_rust_run(output: &Path) -> Result<RustRun> {
             outcomes_path.display()
         );
     }
-    let examined_files: Vec<String> = generated
-        .iter()
-        .map(|identity| identity.path.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    if outcomes.get("total_mutants").and_then(Value::as_u64) != u64::try_from(generated.len()).ok()
+    {
+        bail!("{} has an incomplete mutant count", outcomes_path.display());
+    }
+    for mutant in &generated {
+        if examined_files.binary_search(&mutant.path).is_err() {
+            bail!(
+                "generated mutant is outside the native selected-file listing: {}",
+                mutant.path
+            );
+        }
+    }
 
     for (file, status) in [
         ("caught.txt", "CaughtMutant"),
@@ -1901,6 +2148,188 @@ mod tests {
     }
 
     #[test]
+    fn selected_declaration_only_files_remain_in_the_rust_inventory() {
+        let base = std::env::temp_dir().join(format!(
+            "xtask-mutation-selected-files-{}",
+            std::process::id()
+        ));
+        let _ = fsx::force_remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("create report directory");
+        let name = "crates/fmf-core/src/ondisk/ntfs.rs:10:3: replace value with false";
+        write_json_atomic(
+            &base.join("outcomes.json"),
+            &serde_json::json!({
+                "cargo_mutants_version": CARGO_MUTANTS_VERSION,
+                "end_time": "2026-11-10T06:40:23Z",
+                "total_mutants": 1,
+                "outcomes": [
+                    {"scenario": "Baseline", "summary": "Success"},
+                    {"scenario": {"Mutant": {"name": name}}, "summary": "CaughtMutant"}
+                ]
+            }),
+        )
+        .expect("write outcomes");
+        write_json_atomic(
+            &base.join("mutants.json"),
+            &serde_json::json!([{"name": name}]),
+        )
+        .expect("write generated mutants");
+        write_json_atomic(
+            &base.join("selected-files.json"),
+            &serde_json::json!([
+                {"path": "crates/fmf-core/src/ondisk/ntfs.rs", "package": "fmf-core"},
+                {"path": "crates/fmf-runtime/src/ondisk/ntfs.rs", "package": "fmf-runtime"}
+            ]),
+        )
+        .expect("write native selection");
+        fs::write(base.join("caught.txt"), format!("{name}\n")).expect("write caught result");
+        for file in ["missed.txt", "timeout.txt", "unviable.txt"] {
+            fs::write(base.join(file), "").expect("write empty terminal set");
+        }
+        let run = parse_rust_run(&base).expect("parse complete report");
+        let expected = vec![
+            "engine/crates/fmf-core/src/ondisk/ntfs.rs".to_owned(),
+            "engine/crates/fmf-runtime/src/ondisk/ntfs.rs".to_owned(),
+        ];
+        assert_eq!(run.examined_files, expected);
+        let original: Value = read_json(&base.join("outcomes.json")).expect("read valid outcomes");
+        for field in ["end_time", "total_mutants", "outcomes"] {
+            let mut incomplete = original.clone();
+            incomplete[field] = Value::Null;
+            write_json_atomic(&base.join("outcomes.json"), &incomplete)
+                .expect("write incomplete outcomes");
+            assert!(parse_rust_run(&base).is_err(), "accepted missing {field}");
+        }
+        write_json_atomic(&base.join("outcomes.json"), &original).expect("restore outcomes");
+        write_json_atomic(
+            &base.join(RUST_SELECTED_FILES),
+            &serde_json::json!([
+                {"path": "crates/fmf-runtime/src/ondisk/ntfs.rs", "package": "fmf-runtime"}
+            ]),
+        )
+        .expect("write selection omitting the mutated file");
+        assert!(parse_rust_run(&base).is_err());
+        fsx::force_remove_dir_all(&base).expect("remove report directory");
+    }
+
+    #[test]
+    fn native_rust_selection_rejects_duplicate_empty_and_inconsistent_paths() {
+        let file = serde_json::json!({
+            "path": "crates/fmf-core/src/ondisk/ntfs.rs", "package": "fmf-core"
+        });
+        for invalid in [
+            serde_json::json!([]),
+            serde_json::json!([file.clone(), file]),
+            serde_json::json!([{"path": "../outside.rs", "package": "fmf-core"}]),
+            serde_json::json!([{"path": "crates/fmf-core/src/../outside.rs", "package": "fmf-core"}]),
+            serde_json::json!([{"path": "crates/fmf-core/src/ondisk/ntfs.rs", "package": "fmf-runtime"}]),
+            serde_json::json!([{"path": "crates/fmf-core/src/ondisk/ntfs.rs", "package": "fmf-core", "ignored": true}]),
+        ] {
+            assert!(parse_rust_selected_files(invalid).is_err());
+        }
+        assert_eq!(
+            parse_rust_selected_files(serde_json::json!([file]))
+                .expect("valid listing")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn saved_discovery_preserves_source_diffs_and_rejects_duplicate_mutants() {
+        let first = serde_json::json!({
+            "name": "crates/fmf-core/src/wtf8.rs:10:3: replace value with false",
+            "diff": "original source"
+        });
+        let mut changed = first.clone();
+        changed["diff"] = serde_json::json!("different source");
+        assert_ne!(
+            canonical_rust_discovery(serde_json::json!([first])).expect("first discovery"),
+            canonical_rust_discovery(serde_json::json!([changed])).expect("changed discovery")
+        );
+        assert!(canonical_rust_discovery(serde_json::json!([first.clone(), first])).is_err());
+        assert!(canonical_rust_discovery(serde_json::json!([])).is_err());
+    }
+
+    #[test]
+    fn frozen_rust_inputs_detect_source_test_corpus_and_configuration_changes() {
+        let base =
+            std::env::temp_dir().join(format!("xtask-mutation-inputs-{}", std::process::id()));
+        let _ = fsx::force_remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("create source fixture");
+        let status = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&base)
+            .status()
+            .expect("initialize source fixture");
+        assert!(status.success());
+        let files = [
+            "engine/Cargo.toml",
+            "engine/Cargo.lock",
+            "engine/crates/example/src/lib.rs",
+            "engine/crates/example/tests/recovery.rs",
+            "contract/golden/frame.bin",
+            "mise.toml",
+        ];
+        for file in files {
+            let path = base.join(file);
+            fs::create_dir_all(path.parent().expect("input parent")).expect("create input parent");
+            fs::write(path, "original").expect("write original input");
+        }
+        let before = rust_input_files(&base).expect("capture frozen inputs");
+        assert_eq!(before.len(), files.len());
+        for file in files {
+            fs::write(base.join(file), "changed").expect("change source input");
+            let after = rust_input_files(&base).expect("capture changed inputs");
+            assert!(
+                require_same_rust_inputs(&before, &after).is_err(),
+                "accepted changed {file}"
+            );
+            fs::write(base.join(file), "original").expect("restore source input");
+        }
+        require_same_rust_inputs(&before, &rust_input_files(&base).expect("restored inputs"))
+            .expect("exact restoration");
+        fs::write(base.join("engine/new.rs"), "new source").expect("add source input");
+        assert!(require_same_rust_inputs(
+            &before,
+            &rust_input_files(&base).expect("extended inputs")
+        )
+        .is_err());
+        fs::remove_file(base.join("engine/new.rs")).expect("remove added source");
+        fs::remove_file(base.join("engine/crates/example/tests/recovery.rs"))
+            .expect("remove test input");
+        assert!(
+            require_same_rust_inputs(&before, &rust_input_files(&base).expect("missing test"))
+                .is_err()
+        );
+        fsx::force_remove_dir_all(&base).expect("remove source fixture");
+    }
+
+    #[test]
+    fn saved_rust_reports_require_their_own_frozen_checkout() {
+        let base = std::env::temp_dir().join(format!(
+            "xtask-mutation-report-owner-{}",
+            std::process::id()
+        ));
+        let _ = fsx::force_remove_dir_all(&base);
+        let root = base.join("frozen");
+        let output = paths::rust_mutation_dir();
+        let relative = output
+            .strip_prefix(paths::repo_root())
+            .expect("owned output");
+        let reports = cargo_mutants_report_dir(&root.join(relative));
+        let foreign = base.join("unrelated-report");
+        fs::create_dir_all(&reports).expect("create owned report");
+        fs::create_dir_all(&foreign).expect("create unrelated report");
+        assert_eq!(
+            frozen_rust_report_directory(&root, &reports).expect("owned report"),
+            fs::canonicalize(&reports).expect("canonical report")
+        );
+        assert!(frozen_rust_report_directory(&root, &foreign).is_err());
+        fsx::force_remove_dir_all(&base).expect("remove report fixture");
+    }
+
+    #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
         let base = std::env::temp_dir().join(format!(
             "xtask-mutation-json-duplicate-{}",
@@ -2441,8 +2870,7 @@ mod tests {
         Ok(scope.into_iter().collect())
     }
 
-    /// The Rust gate's reviewed scope lives in two files that must agree, and nothing at run time notices when they don't until `just mutants` has already burned hours: cargo-mutants derives `examined_files` from what `examine_globs` actually matched, and only then is it compared with the baseline.
-    /// This is that comparison, seconds after the edit.
+    /// Check configured file coverage, including modules that produce no mutations.
     #[test]
     fn rust_examine_globs_and_baseline_name_the_same_files() {
         let baseline_path = paths::rust_mutation_baseline();

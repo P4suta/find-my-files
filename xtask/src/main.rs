@@ -169,6 +169,13 @@ enum Commands {
         #[command(flatten)]
         ci: mutation_ci::RunArgs,
     },
+    /// Check complete saved Rust mutation results for an unchanged frozen engine and test source.
+    MutationCheckRust {
+        #[arg(long)]
+        source_root: std::path::PathBuf,
+        #[arg(long)]
+        report_root: std::path::PathBuf,
+    },
     /// Run Stryker.NET 4.16.0 after a clean unit-test baseline, then compare exact survivor identities and reject no-coverage/timeout outcomes.
     MutationCsharp {
         #[command(flatten)]
@@ -240,6 +247,10 @@ fn main() -> Result<()> {
         Commands::PerfRealCheck { drive } => perf::real_check(&drive),
         Commands::PerfRealBaseline { drive } => perf::real_baseline(&drive),
         Commands::MutationRust { ci } => mutation_ci::run_rust(ci),
+        Commands::MutationCheckRust {
+            source_root,
+            report_root,
+        } => mutation::check_rust_report(&source_root, &report_root),
         Commands::MutationCsharp { ci } => mutation_ci::run_csharp(ci),
         Commands::MutationVerifyRust { evidence } => mutation_ci::verify_rust(evidence),
         Commands::MutationVerifyCsharp { evidence } => mutation_ci::verify_csharp(evidence),
