@@ -1264,7 +1264,7 @@ public sealed class PipeEngineClientAdditionalTests
         };
 
         client.Start();
-        await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await connected.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.Equal(EngineConnectionState.Connected, client.Connection);
         var publications = 0;
         client.ConnectionChanged += _ => publications++;
