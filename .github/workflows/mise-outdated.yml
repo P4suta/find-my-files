@@ -68,7 +68,44 @@ jobs:
     permissions:
       actions: read # Permission: Download the bounded dependency report.
       issues: write # Permission: Maintain the dependency freshness issue.
+    env:
+      TRACKING_ISSUE_QUERY: 'if length >= 100 then error("toolchain issue listing may be truncated") else map(select(.title == "mise toolchain pins are behind latest" and .author.is_bot == true and .author.login == "app/github-actions")) | if length > 1 then error("duplicate toolchain tracking issues") else .[0].number // empty end end'
     steps:
+      - name: Verify tracking issue ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidates='[
+            {"number":2,"title":"Unrelated issue","author":{"login":"owner","is_bot":false}},
+            {"number":3,"title":"mise toolchain pins are behind latest","author":{"login":"owner","is_bot":false}},
+            {"number":4,"title":"mise toolchain pins are behind latest","author":{"login":"app/renovate","is_bot":true}},
+            {"number":5,"title":"Another workflow issue","author":{"login":"app/github-actions","is_bot":true}},
+            {"number":7,"title":"mise toolchain pins are behind latest","author":{"login":"app/github-actions","is_bot":false}},
+            {"number":8,"title":"mise toolchain pins are behind latest","author":null},
+            {"number":1,"title":"mise toolchain pins are behind latest","author":{"login":"app/github-actions","is_bot":true}}
+          ]'
+          selected=$(printf '%s\n' "$candidates" | jq -r "$TRACKING_ISSUE_QUERY")
+          if [ "$selected" != 1 ]; then
+            echo 'Issue selection must reject unrelated authors and titles.' >&2
+            exit 1
+          fi
+          unrelated=$(printf '%s\n' "$candidates" | jq 'map(select(.number != 1))')
+          if [ -n "$(printf '%s\n' "$unrelated" | jq -r "$TRACKING_ISSUE_QUERY")" ]; then
+            echo 'Issue selection must return no target when the tracker is absent.' >&2
+            exit 1
+          fi
+          duplicates=$(printf '%s\n' "$candidates" | jq '[.[] | select(.number == 1)] | . + [.[0] | .number = 6]')
+          if printf '%s\n' "$duplicates" | jq -r "$TRACKING_ISSUE_QUERY" >/dev/null 2>&1; then
+            echo 'Issue selection must reject duplicate owned trackers.' >&2
+            exit 1
+          fi
+          truncated=$(jq -cn '[range(0;100) | {number:.,title:"Unrelated issue",author:{login:"owner",is_bot:false}}]')
+          if printf '%s\n' "$truncated" | jq -r "$TRACKING_ISSUE_QUERY" >/dev/null 2>&1; then
+            echo 'Issue selection must reject a potentially incomplete listing.' >&2
+            exit 1
+          fi
+          echo 'Tracking issue ownership and ambiguity checks passed.'
+
       - name: Download the bounded drift report
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -82,9 +119,10 @@ jobs:
           DRIFT: ${{ needs.check.outputs.drift }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          set -euo pipefail
+          existing=$(gh issue list --label mise-outdated --state open --limit 100 --json number,title,author --jq "$TRACKING_ISSUE_QUERY")
           gh label create mise-outdated --color FBCA04 --force \
             --description "A mise.toml toolchain pin has fallen behind its latest version (mise-outdated.yml)"
-          existing=$(gh issue list --label mise-outdated --state open --json number --jq '.[0].number // empty')
 
           if [ "$DRIFT" -gt 0 ]; then
             {

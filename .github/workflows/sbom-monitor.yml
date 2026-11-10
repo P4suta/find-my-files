@@ -244,7 +244,46 @@ jobs:
     permissions:
       actions: read # Permission: Download the scanner report.
       issues: write # Permission: Maintain the vulnerability tracking issue.
+    env:
+      TRACKING_ISSUE_QUERY: 'if length >= 100 then error("vulnerability issue listing may be truncated") else .[] | select(.author.is_bot == true and .author.login == "app/github-actions" and ((.title // "") | startswith("Vulnerable dependency in shipped release ")) and ((.body // "") | startswith("## 🛡️ Vulnerability in a shipped release ("))) | .number end'
     steps:
+      - name: Verify tracking issue ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidates='[
+            {"number":2,"title":"Unrelated issue","body":"Unrelated report","author":{"login":"owner","is_bot":false}},
+            {"number":3,"title":"Vulnerable dependency in shipped release v0.1.1","body":"## 🛡️ Vulnerability in a shipped release (v0.1.1)","author":{"login":"owner","is_bot":false}},
+            {"number":4,"title":"Vulnerable dependency in shipped release v0.1.1","body":"## 🛡️ Vulnerability in a shipped release (v0.1.1)","author":{"login":"app/renovate","is_bot":true}},
+            {"number":5,"title":"Another workflow issue","body":"## 🛡️ Vulnerability in a shipped release (v0.1.1)","author":{"login":"app/github-actions","is_bot":true}},
+            {"number":7,"title":"Vulnerable dependency in shipped release v0.1.1","body":"Another report","author":{"login":"app/github-actions","is_bot":true}},
+            {"number":8,"title":"Vulnerable dependency in shipped release v0.1.1","body":"## 🛡️ Vulnerability in a shipped release (v0.1.1)","author":{"login":"app/github-actions","is_bot":false}},
+            {"number":9,"title":null,"body":null,"author":null},
+            {"number":1,"title":"Vulnerable dependency in shipped release v0.1.1","body":"## 🛡️ Vulnerability in a shipped release (v0.1.1)","author":{"login":"app/github-actions","is_bot":true}}
+          ]'
+          selected=$(printf '%s\n' "$candidates" | jq -r "$TRACKING_ISSUE_QUERY")
+          if [ "$selected" != 1 ]; then
+            echo '::error::Issue selection must reject unrelated authors, titles, and reports.' >&2
+            exit 1
+          fi
+          unrelated=$(printf '%s\n' "$candidates" | jq 'map(select(.number != 1))')
+          if [ -n "$(printf '%s\n' "$unrelated" | jq -r "$TRACKING_ISSUE_QUERY")" ]; then
+            echo '::error::Issue selection must return no target when the report is absent.' >&2
+            exit 1
+          fi
+          duplicates=$(printf '%s\n' "$candidates" | jq '[.[] | select(.number == 1)] | . + [.[0] | .number = 6]')
+          expected=$(printf '1\n6')
+          if [ "$(printf '%s\n' "$duplicates" | jq -r "$TRACKING_ISSUE_QUERY")" != "$expected" ]; then
+            echo '::error::Issue selection must preserve owned reports for consolidation.' >&2
+            exit 1
+          fi
+          truncated=$(jq -cn '[range(0;100) | {number:.,title:"Unrelated issue",body:"",author:{login:"owner",is_bot:false}}]')
+          if printf '%s\n' "$truncated" | jq -r "$TRACKING_ISSUE_QUERY" >/dev/null 2>&1; then
+            echo '::error::Issue selection must reject a potentially incomplete listing.' >&2
+            exit 1
+          fi
+          echo 'Tracking issue ownership and consolidation checks passed.'
+
       - name: Download vulnerability report
         if: needs.scan.outputs.code == '1'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -260,12 +299,15 @@ jobs:
           CODE: ${{ needs.scan.outputs.code }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          set -euo pipefail
+          existing_ids=$(gh issue list --label sbom-vuln --state open --limit 100 \
+            --json number,title,author,body --jq "$TRACKING_ISSUE_QUERY")
+          existing=()
+          if [ -n "$existing_ids" ]; then
+            mapfile -t existing <<< "$existing_ids"
+          fi
           gh label create sbom-vuln --color B60205 --force \
             --description "Vulnerability found in a shipped release's SBOM (sbom-monitor.yml)"
-          mapfile -t existing < <(
-            gh issue list --label sbom-vuln --state open --limit 100 \
-              --json number --jq '.[].number'
-          )
 
           if [ "$CODE" = "1" ]; then
             {
@@ -284,7 +326,7 @@ jobs:
             } > issue-body.md
             if [ "${#existing[@]}" -gt 0 ]; then
               primary=${existing[0]}
-              gh issue edit "$primary" --body-file issue-body.md
+              gh issue edit "$primary" --title "Vulnerable dependency in shipped release $TAG" --body-file issue-body.md
               echo "Updated issue #$primary."
               for duplicate in "${existing[@]:1}"; do
                 gh issue comment "$duplicate" \
