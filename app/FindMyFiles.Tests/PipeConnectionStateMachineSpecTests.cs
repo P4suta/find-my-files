@@ -5,23 +5,7 @@ using static FindMyFiles.Tests.TestDoubles.Polling;
 
 namespace FindMyFiles.Tests;
 
-/// <summary> The canonical, executable specification of the pipe client's connection state machine.
-/// Each edge below is PROVEN by a test that drives the real <see cref="PipeEngineClient"/> supervisor against a <see cref="FakePipeServer"/> and asserts both the resulting <see cref="EngineConnectionState"/> and the exact ordered sequence of <c>ConnectionChanged</c> events it emits.
-/// The shipped onboarding bug was a transition (Connecting while the freshly-started service is still warming up → Connected) that no test observed; this file makes every edge a named, event-exact obligation, so a gap or a wrong emission fails loudly.
-///
-/// Transition table (this IS the spec — add a row AND a test for any new edge):
-/// <code>
-///   (initial)                                  → Connecting        [no event]
-///   Connecting    + handshake succeeds         → Connected         [emit Connected]
-///   Connecting    + connect fails (warm-up)    → Connecting        [no event — retry]
-///   Connecting    + fatal (proto/identity)     → Faulted           [emit Faulted, supervisor stops]
-///   Connected     + connection drops           → Reconnecting      [emit Reconnecting]
-///   Reconnecting  + handshake succeeds         → Connected         [emit Connected]
-///   Reconnecting  + connect fails              → Reconnecting      [no event — retry]
-///   Reconnecting  + fatal (proto/identity)      → Faulted           [emit Faulted, supervisor stops]
-/// </code> Invariant proven across the suite: <c>ConnectionChanged</c> never emits the same state twice in a row (the Connecting/Reconnecting retry self-loops are silent),
-/// and Connected is only ever reached from Connecting (first time) or Reconnecting.
-/// </summary>
+/// <summary>Exercises connection transitions and their ordered notifications against a named-pipe peer.</summary>
 public sealed class PipeConnectionStateMachineSpecTests
 {
     /// <summary>Thread-safe recorder of the emitted ConnectionChanged sequence (events fire on the supervisor / read-loop thread).</summary>
@@ -38,6 +22,9 @@ public sealed class PipeConnectionStateMachineSpecTests
                     _events.Add(s);
                 }
             };
+
+        public Task WaitForCountAsync(int minimum) =>
+            WaitUntilAsync(() => Snapshot().Length >= minimum, $"connection event count {minimum}");
 
         public EngineConnectionState[] Snapshot()
         {
@@ -68,6 +55,7 @@ public sealed class PipeConnectionStateMachineSpecTests
         client.Start();
         await WaitUntilAsync(() => client.Connection == EngineConnectionState.Connected, "connected");
 
+        await events.WaitForCountAsync(1);
         Assert.Equal([EngineConnectionState.Connected], events.Snapshot());
     }
 
@@ -88,6 +76,7 @@ public sealed class PipeConnectionStateMachineSpecTests
         server.ReleaseAccept();
         await WaitUntilAsync(() => client.Connection == EngineConnectionState.Connected, "connected");
 
+        await events.WaitForCountAsync(1);
         Assert.Equal([EngineConnectionState.Connected], events.Snapshot());
     }
 
@@ -107,6 +96,7 @@ public sealed class PipeConnectionStateMachineSpecTests
             () => server.ConnectionCount == 2 && client.Connection == EngineConnectionState.Connected,
             "reconnected");
 
+        await events.WaitForCountAsync(3);
         Assert.Equal(
             new[]
             {
@@ -132,6 +122,7 @@ public sealed class PipeConnectionStateMachineSpecTests
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Reconnecting, "noticed the drop");
 
+        await events.WaitForCountAsync(2);
         await Task.Delay(300);
         Assert.Equal(EngineConnectionState.Reconnecting, client.Connection);
         Assert.Equal(
@@ -149,6 +140,7 @@ public sealed class PipeConnectionStateMachineSpecTests
 
         client.Start();
         await server.WaitForAsync(PipeProtocol.Op.Hello);
+        await events.WaitForCountAsync(1);
         await Task.Delay(750);
 
         Assert.Equal(EngineConnectionState.Faulted, client.Connection);
@@ -172,6 +164,7 @@ public sealed class PipeConnectionStateMachineSpecTests
         server.DisconnectAll();
         await WaitUntilAsync(() => client.Connection == EngineConnectionState.Faulted, "faulted");
 
+        await events.WaitForCountAsync(3);
         Assert.Equal(
             new[]
             {
@@ -204,7 +197,9 @@ public sealed class PipeConnectionStateMachineSpecTests
             () => server.ConnectionCount == 2 && client.Connection == EngineConnectionState.Connected,
             "reconnect");
 
+        await events.WaitForCountAsync(3);
         var seq = events.Snapshot();
+        Assert.Equal(3, seq.Length);
         for (var i = 1; i < seq.Length; i++)
         {
             Assert.NotEqual(seq[i - 1], seq[i]);

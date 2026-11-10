@@ -1026,6 +1026,8 @@ public sealed class PipeEngineClientAdditionalTests
         var writeLock = Assert.IsType<SemaphoreSlim>(lockField?.GetValue(connection));
         await writeLock.WaitAsync();
         using var cancellation = new CancellationTokenSource();
+        var ownsWriteLock = true;
+        var replacementWriterOwnsLock = false;
         try
         {
             var search = client.SearchAsync(
@@ -1036,19 +1038,37 @@ public sealed class PipeEngineClientAdditionalTests
             await Task.Delay(50);
             Assert.False(search.IsCompleted);
 
+            ownsWriteLock = false;
             writeLock.Release();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => search);
+            await server.WaitForAsync(PipeProtocol.Op.Query);
+            await server.WaitForAsync(PipeProtocol.Op.QueryCancel);
+            using var handoffTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await writeLock.WaitAsync(handoffTimeout.Token);
+            replacementWriterOwnsLock = true;
         }
         finally
         {
-            if (writeLock.CurrentCount == 0)
+            try
             {
-                writeLock.Release();
+                if (ownsWriteLock)
+                {
+                    writeLock.Release();
+                }
+
+                if (replacementWriterOwnsLock)
+                {
+                    Assert.Equal(0, writeLock.CurrentCount);
+                }
+            }
+            finally
+            {
+                if (replacementWriterOwnsLock && writeLock.CurrentCount == 0)
+                {
+                    writeLock.Release();
+                }
             }
         }
-
-        await server.WaitForAsync(PipeProtocol.Op.Query);
-        await server.WaitForAsync(PipeProtocol.Op.QueryCancel);
     }
 
     [Fact]
@@ -1108,17 +1128,26 @@ public sealed class PipeEngineClientAdditionalTests
     {
         using var server = new FakePipeServer();
         using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ConnectionChanged += state =>
+        {
+            if (state == EngineConnectionState.Connected)
+            {
+                connected.TrySetResult();
+            }
+        };
+
         client.Start();
-        await WaitUntilAsync(
-            () => client.Connection == EngineConnectionState.Connected,
-            "connected");
+        await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(EngineConnectionState.Connected, client.Connection);
         var publications = 0;
         client.ConnectionChanged += _ => publications++;
         var setConnection = typeof(PipeEngineClient).GetMethod(
             "SetConnection",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
 
-        setConnection?.Invoke(client, [EngineConnectionState.Connected]);
+        Assert.NotNull(setConnection);
+        setConnection.Invoke(client, [EngineConnectionState.Connected]);
 
         Assert.Equal(0, publications);
     }

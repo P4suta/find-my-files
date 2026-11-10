@@ -5,11 +5,7 @@ using static FindMyFiles.Tests.TestDoubles.Polling;
 
 namespace FindMyFiles.Tests;
 
-/// <summary> The connection <em>warm-up</em> path: a freshly registered fmf-service is not serving its pipe yet (writer-lock wait, cold MFT scan, SCM start), so the client's first connect attempts find no pipe.
-/// The supervisor must keep retrying (250ms→5s backoff) and reach Connected once the service starts serving — with no external nudge.
-/// This is the exact window the shipped onboarding bug fell into: the old code gave up after a fixed ~8s probe and dead-ended on the setup screen.
-/// These tests pin that the transport itself rides out an arbitrarily long warm-up, which is what the relaunch-into-pipe fix relies on.
-/// </summary>
+/// <summary>Exercises a held server, handshake readiness, and requests before connection.</summary>
 public sealed class PipeEngineClientWarmupTests
 {
     [Fact]
@@ -17,6 +13,16 @@ public sealed class PipeEngineClientWarmupTests
     {
         using var server = new FakePipeServer(startHeld: true);
         using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        var notificationHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseNotification = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ConnectionChanged += state =>
+        {
+            if (state == EngineConnectionState.Connected)
+            {
+                notificationHeld.TrySetResult();
+                releaseNotification.Task.GetAwaiter().GetResult();
+            }
+        };
 
         var connectedSeen = 0;
         client.ConnectionChanged += s =>
@@ -29,18 +35,32 @@ public sealed class PipeEngineClientWarmupTests
 
         client.Start();
 
-        await Task.Delay(600);
-        Assert.Equal(EngineConnectionState.Connecting, client.Connection);
-        Assert.Equal(0, Volatile.Read(ref connectedSeen));
-        Assert.Equal(0, server.ConnectionCount);
+        try
+        {
+            await Task.Delay(600);
+            Assert.Equal(EngineConnectionState.Connecting, client.Connection);
+            Assert.Equal(0, Volatile.Read(ref connectedSeen));
+            Assert.Equal(0, server.ConnectionCount);
 
-        server.ReleaseAccept();
-        await WaitUntilAsync(
-            () => client.Connection == EngineConnectionState.Connected,
-            "connected after warm-up");
+            server.ReleaseAccept();
+            await notificationHeld.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(
+                () => client.Connection == EngineConnectionState.Connected,
+                "connected after warm-up");
 
-        Assert.Equal(1, server.ConnectionCount);
-        Assert.Equal(1, Volatile.Read(ref connectedSeen));
+            Assert.Equal(0, Volatile.Read(ref connectedSeen));
+            releaseNotification.TrySetResult();
+            await WaitUntilAsync(
+                () => Volatile.Read(ref connectedSeen) >= 1,
+                "connected notification after warm-up");
+
+            Assert.Equal(1, server.ConnectionCount);
+            Assert.Equal(1, Volatile.Read(ref connectedSeen));
+        }
+        finally
+        {
+            releaseNotification.TrySetResult();
+        }
     }
 
     [Fact]

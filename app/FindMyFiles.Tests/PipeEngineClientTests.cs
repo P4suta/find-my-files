@@ -321,23 +321,61 @@ public sealed class PipeEngineClientTests
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
+        var originalConnection = client.CurrentPipeConnectionForTests;
+        Assert.NotNull(originalConnection);
 
-        server.ResponseOpcode = opcode =>
-            opcode == PipeProtocol.Op.ListVolumes ? PipeProtocol.Op.Stats : opcode;
+        var retirementObserved = new TaskCompletionSource<(PipeConnection? Connection, int Connections)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseNotification = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reconnectPublished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void ObserveConnection(EngineConnectionState state)
+        {
+            if (state == EngineConnectionState.Reconnecting)
+            {
+                retirementObserved.TrySetResult((client.CurrentPipeConnectionForTests, server.ConnectionCount));
+                releaseNotification.Task.GetAwaiter().GetResult();
+            }
+            else if (state == EngineConnectionState.Connected && server.ConnectionCount >= 2)
+            {
+                reconnectPublished.TrySetResult();
+            }
+        }
 
-        var request = client.ListVolumesAsync();
-        var completed = await Task.WhenAny(request, Task.Delay(250));
-        Assert.Same(request, completed);
-        var ex = await Assert.ThrowsAsync<EngineUnavailableException>(() => request);
-        Assert.Contains("response opcode mismatch for request", ex.Message, StringComparison.Ordinal);
-        Assert.Contains(
-            $"expected {PipeProtocol.Op.ListVolumes}, received {PipeProtocol.Op.Stats}",
-            ex.Message,
-            StringComparison.Ordinal);
-        await WaitUntilAsync(
-            () => server.ConnectionCount >= 2,
-            "protocol-violating connection retired",
-            timeoutMs: 500);
+        client.ConnectionChanged += ObserveConnection;
+        try
+        {
+            server.ResponseOpcode = opcode =>
+                opcode == PipeProtocol.Op.ListVolumes ? PipeProtocol.Op.Stats : opcode;
+
+            var request = client.ListVolumesAsync();
+            var completed = await Task.WhenAny(request, Task.Delay(250));
+            Assert.Same(request, completed);
+            var ex = await Assert.ThrowsAsync<EngineUnavailableException>(() => request);
+            Assert.Contains("response opcode mismatch for request", ex.Message, StringComparison.Ordinal);
+            Assert.Contains(
+                $"expected {PipeProtocol.Op.ListVolumes}, received {PipeProtocol.Op.Stats}",
+                ex.Message,
+                StringComparison.Ordinal);
+            var retired = await retirementObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Null(retired.Connection);
+            Assert.Equal(1, retired.Connections);
+            Assert.Equal(EngineConnectionState.Reconnecting, client.Connection);
+            Assert.Null(client.CurrentPipeConnectionForTests);
+            Assert.False(reconnectPublished.Task.IsCompleted);
+            server.ResponseOpcode = null;
+            releaseNotification.TrySetResult();
+            await reconnectPublished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(EngineConnectionState.Connected, client.Connection);
+            var replacement = client.CurrentPipeConnectionForTests;
+            Assert.NotNull(replacement);
+            Assert.NotSame(originalConnection, replacement);
+            Assert.Equal(["C:"], await client.ListVolumesAsync());
+        }
+        finally
+        {
+            releaseNotification.TrySetResult();
+            client.ConnectionChanged -= ObserveConnection;
+        }
     }
 
     [Fact]
