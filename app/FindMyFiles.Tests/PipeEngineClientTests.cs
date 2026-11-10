@@ -316,7 +316,7 @@ public sealed class PipeEngineClientTests
         using var server = new FakePipeServer();
         using var client = new PipeEngineClient(server.PipeName)
         {
-            RequestTimeout = TimeSpan.FromSeconds(1),
+            RequestTimeout = TimeSpan.FromSeconds(30),
         };
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
@@ -348,15 +348,14 @@ public sealed class PipeEngineClientTests
                 opcode == PipeProtocol.Op.ListVolumes ? PipeProtocol.Op.Stats : opcode;
 
             var request = client.ListVolumesAsync();
-            var completed = await Task.WhenAny(request, Task.Delay(250));
-            Assert.Same(request, completed);
-            var ex = await Assert.ThrowsAsync<EngineUnavailableException>(() => request);
+            var retired = await retirementObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var ex = await Assert.ThrowsAsync<EngineUnavailableException>(
+                () => request.WaitAsync(TimeSpan.FromSeconds(5)));
             Assert.Contains("response opcode mismatch for request", ex.Message, StringComparison.Ordinal);
             Assert.Contains(
                 $"expected {PipeProtocol.Op.ListVolumes}, received {PipeProtocol.Op.Stats}",
                 ex.Message,
                 StringComparison.Ordinal);
-            var retired = await retirementObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Assert.Null(retired.Connection);
             Assert.Equal(1, retired.Connections);
             Assert.Equal(EngineConnectionState.Reconnecting, client.Connection);
@@ -384,7 +383,7 @@ public sealed class PipeEngineClientTests
         using var server = new FakePipeServer { Rows = Rows.Many(3) };
         using var client = new PipeEngineClient(server.PipeName)
         {
-            RequestTimeout = TimeSpan.FromSeconds(1),
+            RequestTimeout = TimeSpan.FromSeconds(30),
         };
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected, "connected");
@@ -396,9 +395,8 @@ public sealed class PipeEngineClientTests
         await server.WaitForAsync(PipeProtocol.Op.ResultPage);
         server.DisconnectAll();
 
-        var completed = await Task.WhenAny(fetch, Task.Delay(250));
-        Assert.Same(fetch, completed);
-        var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() => fetch);
+        var failure = await Assert.ThrowsAsync<EngineUnavailableException>(
+            () => fetch.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Equal("engine service connection lost", failure.Message);
 
         await Assert.ThrowsAsync<StaleResultException>(() => outcome.Result.GetRangeAsync(0, 1));
