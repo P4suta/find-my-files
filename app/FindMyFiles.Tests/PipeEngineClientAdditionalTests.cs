@@ -988,9 +988,11 @@ public sealed class PipeEngineClientAdditionalTests
         Task request = queryRequest
             ? client.SearchAsync("pending", SearchOptions.Default, cancellation.Token)
             : client.ListVolumesAsync(cancellation.Token);
+        TaskCompletionSource<(int Status, byte[] Payload)>? response = null;
         try
         {
             await written.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            response = PendingResponseCompletion(client);
             if (cancelBeforeWait)
             {
                 cancellation.Cancel();
@@ -1022,6 +1024,14 @@ public sealed class PipeEngineClientAdditionalTests
             allowWait.TrySetResult();
             await cancellation.CancelAsync();
             held.TrySetCanceled(cancellation.Token);
+            if (response is not null)
+            {
+                response.TrySetCanceled(cancellation.Token);
+                await ((Task)response.Task).ConfigureAwait(
+                    ConfigureAwaitOptions.ContinueOnCapturedContext | ConfigureAwaitOptions.SuppressThrowing);
+            }
+
+            client.Dispose();
             clock.Advance(client.RequestTimeout);
             await request.ConfigureAwait(
                 ConfigureAwaitOptions.ContinueOnCapturedContext | ConfigureAwaitOptions.SuppressThrowing);
@@ -1998,14 +2008,12 @@ public sealed class PipeEngineClientAdditionalTests
     [Fact]
     public async Task A_failed_frame_write_observes_its_retired_response_completion()
     {
-        const int collectionAttempts = 3;
         WeakReference<Task>? completion = null;
+        var completionId = 0;
         var unobserved = 0;
         void Observe(object? sender, UnobservedTaskExceptionEventArgs failure)
         {
-            if (completion is not null
-                && completion.TryGetTarget(out var owned)
-                && ReferenceEquals(sender, owned))
+            if (sender is Task response && response.Id == completionId)
             {
                 Interlocked.Increment(ref unobserved);
                 failure.SetObserved();
@@ -2015,22 +2023,25 @@ public sealed class PipeEngineClientAdditionalTests
         TaskScheduler.UnobservedTaskException += Observe;
         try
         {
-            await RetireQueuedResponseAsync(value => completion = value);
-            Assert.NotNull(completion);
-            for (var attempt = 0; attempt < collectionAttempts; attempt++)
+            await RetireQueuedResponseAsync((value, id) =>
             {
-                TestContext.Current.CancellationToken.ThrowIfCancellationRequested();
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
-                GC.Collect();
-                if (!ResponseIsAlive(completion))
+                completion = value;
+                completionId = id;
+            });
+            Assert.NotNull(completion);
+            await WaitUntilAsync(
+                () =>
                 {
-                    break;
-                }
-            }
+                    TestContext.Current.CancellationToken.ThrowIfCancellationRequested();
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect();
+                    return Volatile.Read(ref unobserved) != 0 || !ResponseIsAlive(completion);
+                },
+                "owned response task collection");
 
-            Assert.False(ResponseIsAlive(completion));
             Assert.Equal(0, Volatile.Read(ref unobserved));
+            Assert.False(ResponseIsAlive(completion));
         }
         finally
         {
@@ -2047,7 +2058,7 @@ public sealed class PipeEngineClientAdditionalTests
         completion.TryGetTarget(out var response) && response.IsFaulted;
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static async Task RetireQueuedResponseAsync(Action<WeakReference<Task>> capture)
+    private static async Task RetireQueuedResponseAsync(Action<WeakReference<Task>, int> capture)
     {
         using var server = new FakePipeServer();
         using var client = new PipeEngineClient(server.PipeName, autoStart: false);
@@ -2056,6 +2067,8 @@ public sealed class PipeEngineClientAdditionalTests
         var connection = Assert.IsType<PipeConnection>(client.CurrentPipeConnectionForTests);
         const System.Reflection.BindingFlags privateInstance =
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var supervisor = Assert.IsAssignableFrom<Task>(
+            typeof(PipeEngineClient).GetField("_supervisor", privateInstance)?.GetValue(client));
         var writeLock = Assert.IsType<SemaphoreSlim>(
             typeof(PipeConnection).GetField("_writeLock", privateInstance)?.GetValue(connection));
         Task<IReadOnlyList<string>>? request = null;
@@ -2066,8 +2079,8 @@ public sealed class PipeEngineClientAdditionalTests
             ownsWriteLock = true;
             request = client.ListVolumesAsync(TestContext.Current.CancellationToken);
             Assert.False(request.IsCompleted);
-            var response = PendingResponseReference(client);
-            capture(response);
+            var response = PendingResponseReference(client, out var responseId);
+            capture(response, responseId);
 
             server.DisconnectAll();
             await PipeOverFakeServerContractTests.WaitForPublishedReplacementAsync(client, connection.Epoch);
@@ -2090,23 +2103,32 @@ public sealed class PipeEngineClientAdditionalTests
             {
                 await ((Task)request).WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None)
                     .ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                Assert.True(request.IsCompleted);
             }
 
             request = null;
+            await supervisor.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
         }
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static WeakReference<Task> PendingResponseReference(PipeEngineClient client)
+    private static WeakReference<Task> PendingResponseReference(PipeEngineClient client, out int responseId)
+    {
+        var response = PendingResponseCompletion(client);
+        responseId = response.Task.Id;
+        return new WeakReference<Task>(response.Task, trackResurrection: true);
+    }
+
+    private static TaskCompletionSource<(int Status, byte[] Payload)> PendingResponseCompletion(
+        PipeEngineClient client)
     {
         const System.Reflection.BindingFlags privateInstance =
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
         var requests = Assert.IsAssignableFrom<System.Collections.IDictionary>(
             typeof(PipeEngineClient).GetField("_pending", privateInstance)?.GetValue(client));
         var pending = Assert.Single(requests.Values.Cast<object>());
-        var response = Assert.IsType<TaskCompletionSource<(int Status, byte[] Payload)>>(
+        return Assert.IsType<TaskCompletionSource<(int Status, byte[] Payload)>>(
             pending.GetType().GetProperty("Completion")?.GetValue(pending));
-        return new WeakReference<Task>(response.Task, trackResurrection: true);
     }
 
     private static async Task WaitUntilAsync(Func<bool> predicate, string what)
