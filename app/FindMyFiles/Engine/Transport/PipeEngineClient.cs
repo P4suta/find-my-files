@@ -23,6 +23,7 @@ internal sealed class PipeEngineClient : IEngineClient
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(5);
 
     private readonly string _pipeName;
+    private readonly TimeProvider _requestTimeProvider;
     private readonly Func<SafePipeHandle, bool> _isServerTrusted;
     private readonly CancellationTokenSource _cts = new();
     private readonly ConcurrentDictionary<uint, PendingRequest> _pending = new();
@@ -47,6 +48,9 @@ internal sealed class PipeEngineClient : IEngineClient
         TaskCompletionSource<(int Status, byte[] Payload)> Completion);
 
 #if FMF_TEST_SEAMS
+    /// <summary>Pause after a request frame is written and before its response is awaited.</summary>
+    internal Func<Task>? AfterRequestWriteForTests { get; set; }
+
     /// <summary>Deterministic race seam: pauses after a request's deadline expires but before its captured connection is retired.</summary>
     internal Func<Task>? BeforeTimeoutRetireForTests { get; set; }
 
@@ -110,22 +114,31 @@ internal sealed class PipeEngineClient : IEngineClient
 
     /// <summary>Tests pass autoStart=false to attach event handlers before the supervisor races them to the first connection.</summary> <param name="pipeName">Pipe to connect to, short name or full path.</param> <param name="autoStart">Whether to start the supervisor loop immediately.</param>
     internal PipeEngineClient(string pipeName, bool autoStart)
+        : this(pipeName, autoStart, TimeProvider.System)
+    {
+    }
+
+    /// <summary>Constructs a client with an explicit request clock.</summary> <param name="pipeName">Pipe name.</param> <param name="autoStart">Whether to start the supervisor immediately.</param> <param name="requestTimeProvider">Clock used for request deadlines.</param>
+    internal PipeEngineClient(string pipeName, bool autoStart, TimeProvider requestTimeProvider)
         : this(
             pipeName,
             autoStart,
             ShouldVerifyServerIdentity(ToShortName(pipeName)),
-            PipeServerIdentity.IsServerTrusted)
+            PipeServerIdentity.IsServerTrusted,
+            requestTimeProvider)
     {
     }
 
-    /// <summary>Constructs a client with an explicit identity boundary for deterministic security-branch tests.</summary> <param name="pipeName">Pipe to connect to, short name or full path.</param> <param name="autoStart">Whether to start the supervisor immediately.</param> <param name="verifyServerIdentity">Whether this pipe requires SCM identity verification.</param> <param name="isServerTrusted">Handle-bound identity verifier.</param>
+    /// <summary>Constructs a client with an explicit identity boundary for deterministic security-branch tests.</summary> <param name="pipeName">Pipe to connect to, short name or full path.</param> <param name="autoStart">Whether to start the supervisor immediately.</param> <param name="verifyServerIdentity">Whether this pipe requires SCM identity verification.</param> <param name="isServerTrusted">Handle-bound identity verifier.</param> <param name="requestTimeProvider">Request clock, or null for the system clock.</param>
     internal PipeEngineClient(
         string pipeName,
         bool autoStart,
         bool verifyServerIdentity,
-        Func<SafePipeHandle, bool> isServerTrusted)
+        Func<SafePipeHandle, bool> isServerTrusted,
+        TimeProvider? requestTimeProvider = null)
     {
         _pipeName = ToShortName(pipeName);
+        _requestTimeProvider = requestTimeProvider ?? TimeProvider.System;
         _verifyServerIdentity = verifyServerIdentity;
         _isServerTrusted = isServerTrusted;
         if (autoStart)
@@ -651,6 +664,12 @@ internal sealed class PipeEngineClient : IEngineClient
                 ? _cts.Token
                 : linked.Token;
             await conn.WriteFrameAsync(frame, writeCancellation).ConfigureAwait(false);
+#if FMF_TEST_SEAMS
+            if (AfterRequestWriteForTests is { } afterWrite)
+            {
+                await afterWrite().ConfigureAwait(false);
+            }
+#endif
             if (queryCancelMode == QueryCancelMode.OnCallerCancellation)
             {
                 queryCancellation = ct.UnsafeRegister(
@@ -664,7 +683,7 @@ internal sealed class PipeEngineClient : IEngineClient
             }
 
             var (status, responsePayload) = await tcs.Task
-                .WaitAsync(RequestTimeout, linked.Token)
+                .WaitAsync(RequestTimeout, _requestTimeProvider, linked.Token)
                 .ConfigureAwait(false);
             return (status, responsePayload, conn.Epoch);
         }
@@ -682,6 +701,14 @@ internal sealed class PipeEngineClient : IEngineClient
                 $"request (opcode {opcode}) timed out after {RequestTimeout.TotalSeconds:F0}s");
             throw new EngineUnavailableException(
                 $"request (opcode {opcode}) timed out after {RequestTimeout.TotalSeconds:F0}s");
+        }
+        catch (EngineUnavailableException) when (ct.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(ct);
+        }
+        catch (EngineUnavailableException) when (_cts.IsCancellationRequested)
+        {
+            throw new EngineUnavailableException("engine client disposed");
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {

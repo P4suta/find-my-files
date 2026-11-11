@@ -452,11 +452,12 @@ public sealed class EngineClientFactoryTests
             return new UnavailableEngineClient();
         });
 
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.False(resolving.IsCompleted);
+        var returnedBeforeResolution = !resolving.IsCompleted;
         release.Set();
 
         using var engine = await resolving;
+        Assert.True(returnedBeforeResolution);
+        Assert.True(entered.Task.IsCompletedSuccessfully);
         Assert.IsType<UnavailableEngineClient>(engine);
     }
 

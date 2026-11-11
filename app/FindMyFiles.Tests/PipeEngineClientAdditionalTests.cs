@@ -746,6 +746,93 @@ public sealed class PipeEngineClientAdditionalTests
         await server.WaitForAsync(PipeProtocol.Op.ResultFree);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Cancellation_and_disposal_normalize_an_already_completed_connection_failure(
+        bool cancelCaller,
+        bool disposeClient)
+    {
+        var held = new TaskCompletionSource<(int Status, byte[] Payload)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var server = new FakePipeServer
+        {
+            Handler = (opcode, _) => opcode == PipeProtocol.Op.ListVolumes
+                ? held.Task
+                : null,
+        };
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false);
+        client.Start();
+        await WaitUntilAsync(
+            () => client.Connection == EngineConnectionState.Connected,
+            "connected");
+
+        var written = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowWait = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.AfterRequestWriteForTests = () =>
+        {
+            written.TrySetResult();
+            return allowWait.Task;
+        };
+        using var cancellation = new CancellationTokenSource();
+        var request = client.ListVolumesAsync(cancellation.Token);
+        try
+        {
+            await written.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await server.WaitForAsync(PipeProtocol.Op.ListVolumes);
+            client.AfterRequestWriteForTests = null;
+
+            if (cancelCaller)
+            {
+                cancellation.Cancel();
+            }
+
+            if (disposeClient)
+            {
+                client.Dispose();
+            }
+            else
+            {
+                var cleanupObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                client.ConnectionChanged += state =>
+                {
+                    if (state == EngineConnectionState.Reconnecting)
+                    {
+                        cleanupObserved.TrySetResult();
+                    }
+                };
+                server.DisconnectAll();
+                await cleanupObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+
+            allowWait.SetResult();
+
+            if (cancelCaller)
+            {
+                var failure = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+                Assert.Equal(cancellation.Token, failure.CancellationToken);
+            }
+            else
+            {
+                var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() => request);
+                Assert.Equal(
+                    disposeClient ? "engine client disposed" : "engine service connection lost",
+                    failure.Message);
+            }
+        }
+        finally
+        {
+            client.AfterRequestWriteForTests = null;
+            allowWait.TrySetResult();
+            client.Dispose();
+            held.TrySetCanceled();
+            await ((Task)request).ConfigureAwait(
+                ConfigureAwaitOptions.ContinueOnCapturedContext | ConfigureAwaitOptions.SuppressThrowing);
+        }
+    }
+
     [Fact]
     public async Task Disposing_with_a_pending_request_normalizes_lifetime_cancellation()
     {

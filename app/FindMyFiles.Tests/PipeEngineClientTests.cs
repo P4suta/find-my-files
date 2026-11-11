@@ -428,33 +428,66 @@ public sealed class PipeEngineClientTests
     [Fact]
     public async Task RequestTimeout_RetiresHungEpoch_AndReconnects()
     {
+        var clock = new ObservedTimeProvider();
         using var server = new FakePipeServer();
-        using var client = new PipeEngineClient(server.PipeName)
+        using var client = new PipeEngineClient(server.PipeName, autoStart: false, requestTimeProvider: clock)
         {
             RequestTimeout = TimeSpan.FromMilliseconds(75),
         };
+        client.Start();
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
 
-        var hung = new TaskCompletionSource<(int Status, byte[] Payload)>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        server.Handler = (opcode, _) =>
-            opcode == PipeProtocol.Op.ListVolumes ? hung.Task : null;
+        var reconnectHandshake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowReconnectPublication = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reconnectPublished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.AfterHandshakeForTests = () =>
+        {
+            reconnectHandshake.TrySetResult();
+            return allowReconnectPublication.Task;
+        };
+        void ObserveReconnect(EngineConnectionState state)
+        {
+            if (state == EngineConnectionState.Connected && server.ConnectionCount >= 2)
+            {
+                reconnectPublished.TrySetResult();
+            }
+        }
 
-        var failure = await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => client.ListVolumesAsync());
-        Assert.Equal(
-            $"request (opcode {PipeProtocol.Op.ListVolumes}) timed out after 0s",
-            failure.Message);
-        await WaitUntilAsync(
-            () => server.ConnectionCount >= 2
-                && client.Connection == EngineConnectionState.Connected,
-            "hung epoch retired and reconnected",
-            timeoutMs: 500);
+        client.ConnectionChanged += ObserveReconnect;
+        try
+        {
+            var hung = new TaskCompletionSource<(int Status, byte[] Payload)>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            server.Handler = (opcode, _) =>
+                opcode == PipeProtocol.Op.ListVolumes ? hung.Task : null;
 
-        server.Handler = null;
-        Assert.Equal(["C:"], await client.ListVolumesAsync());
+            var timerArmed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            clock.TimerCreated = () => timerArmed.TrySetResult();
+            var request = client.ListVolumesAsync();
+            await timerArmed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            clock.Advance(client.RequestTimeout);
+            var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() => request);
+            Assert.Equal(
+                $"request (opcode {PipeProtocol.Op.ListVolumes}) timed out after 0s",
+                failure.Message);
+            await reconnectHandshake.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(EngineConnectionState.Reconnecting, client.Connection);
+            Assert.Null(client.CurrentPipeConnectionForTests);
+            Assert.False(reconnectPublished.Task.IsCompleted);
+
+            allowReconnectPublication.SetResult();
+            await reconnectPublished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            server.Handler = null;
+            Assert.Equal(["C:"], await client.ListVolumesAsync());
+        }
+        finally
+        {
+            client.AfterHandshakeForTests = null;
+            client.ConnectionChanged -= ObserveReconnect;
+            allowReconnectPublication.TrySetResult();
+        }
     }
 
     [Fact]
