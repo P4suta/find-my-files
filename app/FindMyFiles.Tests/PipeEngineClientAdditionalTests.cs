@@ -819,7 +819,7 @@ public sealed class PipeEngineClientAdditionalTests
         var request = client.ListVolumesAsync(cancellation.Token);
         try
         {
-            await written.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await written.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             await server.WaitForAsync(PipeProtocol.Op.ListVolumes);
             client.AfterRequestWriteForTests = null;
 
@@ -843,7 +843,7 @@ public sealed class PipeEngineClientAdditionalTests
                     }
                 };
                 server.DisconnectAll();
-                await cleanupObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await cleanupObserved.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             }
 
             allowWait.SetResult();
@@ -866,7 +866,7 @@ public sealed class PipeEngineClientAdditionalTests
             client.AfterRequestWriteForTests = null;
             allowWait.TrySetResult();
             client.Dispose();
-            held.TrySetCanceled();
+            held.TrySetCanceled(TestContext.Current.CancellationToken);
             await ((Task)request).ConfigureAwait(
                 ConfigureAwaitOptions.ContinueOnCapturedContext | ConfigureAwaitOptions.SuppressThrowing);
         }
