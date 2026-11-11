@@ -1100,7 +1100,6 @@ public sealed class PipeEngineClientAdditionalTests
         Assert.NotEqual(epochBefore, client.CurrentEpoch);
     }
 
-
     private sealed class HeldConnectedNotification : IAsyncDisposable
     {
         private readonly PipeEngineClient _client;
