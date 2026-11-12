@@ -320,6 +320,8 @@ pub(super) fn check_link_refresh<const REPLACE: bool, const VALID_PARENT: bool>(
         assert!(!index.is_reparse(UNRELATED_LINK));
         assert!(!index.is_excluded(UNRELATED_LINK));
     }
+    #[cfg(kani)]
+    std::mem::forget(index);
     (result.is_ok(), updated.size)
 }
 
