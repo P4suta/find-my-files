@@ -582,4 +582,3 @@ jobs:
         run: |
           echo "${RESULTS}"
           jq -e 'length > 0 and all(.[]; . == "success" or . == "skipped")' <<< "${RESULTS}"
-
