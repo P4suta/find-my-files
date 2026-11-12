@@ -1,7 +1,7 @@
 min_version = "2026.7.5"
 
 [tools]
-dotnet = "10.0.403"
+dotnet = "10.0.404"
 cargo-binstall = "1.26.2"
 just = "1.59.0"
 lefthook = "2.2.2"
