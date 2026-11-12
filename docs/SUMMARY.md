@@ -58,3 +58,4 @@
 - [Sync release App credentials to the protected environment](adr/sync-release-app-credentials-to-the-protected-environment.md)
 - [Source-bound verification](adr/source-bound-verification.md)
 - [Pure core and shared runtime](adr/pure-core-and-shared-runtime.md)
+- [Release candidate assurance](adr/release-candidate-assurance.md)

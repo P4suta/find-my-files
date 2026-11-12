@@ -416,8 +416,8 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
     );
     assert_eq!(
         release.matches("needs: preflight").count(),
-        2,
-        "both build and the 16-shard mutation gate must wait on admission control"
+        3,
+        "build, mutation, and full assurance must wait on admission control"
     );
     assert!(release.contains("${{ github.triggering_actor }}"));
     assert!(release.contains("GITHUB_EVENT_NAME"));
@@ -708,7 +708,7 @@ fn release_artifacts_are_exactly_sealed_across_every_handoff() {
     }
 
     let sign_stage = workflow_job(&release, "sign-stage", "sign");
-    assert!(sign_stage.contains("needs: [build, sbom, mutation]"));
+    assert!(sign_stage.contains("needs: [build, sbom, mutation, assurance]"));
     assert!(sign_stage.contains("path: build/dist"));
     assert!(!sign_stage.contains("actions/checkout@"));
     assert!(!sign_stage.contains("./.github/actions/"));

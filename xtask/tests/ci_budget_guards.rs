@@ -132,7 +132,7 @@ fn parser_changes_select_their_surface_and_shared_inputs_select_all() {
 fn fuzz_uses_one_runner_and_never_duplicates_a_main_push() {
     let fuzz = yaml(FUZZ);
     assert!(fuzz["on"]["push"].is_badvalue(), "no main fuzz campaign");
-    assert!(!fuzz["on"]["schedule"].is_badvalue());
+    assert!(fuzz["on"]["schedule"].is_badvalue());
     assert!(!fuzz["on"]["workflow_dispatch"].is_badvalue());
     assert_eq!(fuzz["jobs"].as_hash().expect("fuzz jobs").len(), 1);
     assert!(
@@ -141,17 +141,17 @@ fn fuzz_uses_one_runner_and_never_duplicates_a_main_push() {
     );
     assert_eq!(FUZZ.matches("cargo install cargo-fuzz").count(), 1);
     let ci = yaml(CI);
-    assert!(ci["jobs"]["fuzz"]["if"]
-        .as_str()
-        .expect("fuzz condition")
-        .contains("pull_request"));
+    assert_eq!(
+        ci["jobs"]["fuzz"]["if"].as_str(),
+        Some("needs.changes.outputs.fuzz == 'true'")
+    );
     assert!(ci["jobs"]["ci-required"]["needs"]
         .as_vec()
         .expect("required needs")
         .contains(&Yaml::String("fuzz".to_owned())));
-    assert!(
-        FUZZ.contains("'10' || '60'"),
-        "bounded PR and weekly budgets"
+    assert_eq!(
+        fuzz["jobs"]["fuzz"]["env"]["FUZZ_SECONDS"].as_str(),
+        Some("60")
     );
     let lock_check = fuzz["jobs"]["fuzz"]["steps"]
         .as_vec()

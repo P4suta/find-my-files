@@ -4,12 +4,15 @@ on:
   workflow_call:
     inputs:
       surfaces:
-        description: JSON array of changed parser surfaces from the CI path filter.
+        description: JSON array of parser surfaces to verify.
         type: string
         required: false
         default: '["fuzz_all"]'
-  schedule:
-    - cron: "43 4 * * 1"
+      target_sha:
+        description: Exact candidate commit admitted by release preflight.
+        type: string
+        required: false
+        default: ''
   workflow_dispatch:
 
 permissions:
@@ -21,18 +24,19 @@ concurrency:
 
 jobs:
   fuzz:
+    name: fuzz
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-07-24
-      FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '10' || '60' }}
+      FUZZ_SECONDS: "60"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-        with:
-          toolchain: nightly-2026-07-24
+          ref: ${{ inputs.target_sha || github.sha }}
+      - name: Install the pinned fuzzing toolchain
+        run: rustup toolchain install nightly-2026-07-24 --profile minimal
       - name: Install cargo-fuzz from its locked crates.io package
         run: cargo install cargo-fuzz --locked --version 0.13.2 --root "$RUNNER_TEMP/fmf-cargo-fuzz"
       - name: Expose the isolated cargo-fuzz subcommand

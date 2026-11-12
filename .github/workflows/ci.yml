@@ -1,13 +1,23 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
+  merge_group:
+    types: [checks_requested]
+  workflow_call:
+    inputs:
+      full_assurance:
+        description: Run the full release candidate verification inventory.
+        type: boolean
+        default: false
+      target_sha:
+        description: Exact candidate commit admitted by release preflight.
+        type: string
+        required: true
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -21,22 +31,24 @@ permissions:
 
 jobs:
   changes:
+    name: changes
     permissions:
       contents: read
       pull-requests: read # Permission: Select checks from the changed PR files.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      code: ${{ steps.f.outputs.code }}
-      assurance: ${{ steps.f.outputs.assurance }}
-      comments: ${{ steps.f.outputs.comments }}
-      fuzz: ${{ steps.f.outputs.fuzz_all == 'true' || steps.f.outputs.fuzz_wire == 'true' || steps.f.outputs.fuzz_core == 'true' || steps.f.outputs.fuzz_usn == 'true' || steps.f.outputs.fuzz_ntfs == 'true' }}
-      fuzz_surfaces: ${{ steps.f.outputs.changes }}
-      bench: ${{ steps.f.outputs.bench }}
+      code: ${{ inputs.full_assurance || steps.f.outputs.code }}
+      assurance: ${{ inputs.full_assurance || false }}
+      comments: ${{ inputs.full_assurance || steps.f.outputs.comments }}
+      fuzz: ${{ inputs.full_assurance || false }}
+      fuzz_surfaces: '["fuzz_all"]'
+      bench: ${{ inputs.full_assurance || steps.f.outputs.bench }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: f
         with:
@@ -130,12 +142,14 @@ jobs:
               - '.github/workflows/ci.yml'
 
   hygiene:
+    name: hygiene
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       # shellcheck over run: blocks. Catches workflow errors before a release run.
       - uses: $/.github/actions/setup-actionlint
         id: actionlint
@@ -160,12 +174,14 @@ jobs:
         working-directory: engine/fuzz
 
   deny:
+    name: deny
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-deny@0.20.2
@@ -174,12 +190,14 @@ jobs:
         working-directory: engine
 
   machete:
+    name: machete
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-machete@0.9.2
@@ -187,12 +205,14 @@ jobs:
       - run: cargo machete engine
 
   contract-lint:
+    name: contract-lint
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy
@@ -205,6 +225,7 @@ jobs:
         working-directory: engine
 
   pr-title:
+    name: pr-title
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -216,15 +237,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   xtask:
+    name: xtask
     needs: changes
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: ${{ inputs.full_assurance && 360 || 20 }}
     env:
       CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy, rustfmt
@@ -243,6 +266,8 @@ jobs:
         working-directory: xtask
       - run: cargo nextest run --locked --profile ci
         working-directory: xtask
+      - name: Check the registered proof inventory
+        run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- proof-check
       - name: Install the source-pinned comment checker
         if: needs.changes.outputs.comments == 'true'
         run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- verification-tools comments
@@ -255,11 +280,9 @@ jobs:
       - name: Verify the registered production harnesses
         if: needs.changes.outputs.assurance == 'true'
         run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- proof
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - name: Install the pinned interpreter toolchain
         if: needs.changes.outputs.assurance == 'true'
-        with:
-          toolchain: nightly-2026-08-21
-          components: miri, rust-src
+        run: rustup toolchain install nightly-2026-08-21 --profile minimal --component miri --component rust-src
       - name: Interpret the codec boundary tests
         if: needs.changes.outputs.assurance == 'true'
         run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- miri
@@ -283,6 +306,7 @@ jobs:
           overwrite: true
 
   engine-build-test:
+    name: engine-build-test
     needs: [hygiene, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-2025
@@ -291,6 +315,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy, llvm-tools-preview
@@ -356,6 +381,7 @@ jobs:
           overwrite: true
 
   app:
+    name: app
     needs: [engine-build-test]
     runs-on: windows-2025
     timeout-minutes: 25
@@ -363,6 +389,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: $/.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
@@ -424,14 +451,16 @@ jobs:
           overwrite: true
 
   bench:
+    name: bench
     needs: [hygiene, changes]
-    if: github.event_name == 'pull_request' && needs.changes.outputs.bench == 'true'
+    if: needs.changes.outputs.bench == 'true'
     runs-on: windows-2025
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: $/.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
@@ -442,26 +471,71 @@ jobs:
         working-directory: engine
 
   fuzz:
+    name: fuzz
     needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.fuzz == 'true'
+    if: needs.changes.outputs.fuzz == 'true'
     permissions:
       contents: read
     uses: $/.github/workflows/fuzz.yml
     with:
       surfaces: ${{ needs.changes.outputs.fuzz_surfaces }}
+      target_sha: ${{ inputs.target_sha || github.sha }}
 
   ci-required:
-    if: ${{ always() && github.event_name == 'pull_request' }}
-    needs: [hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app, bench, fuzz]
+    name: ci-required
+    if: ${{ always() }}
+    needs: [changes, hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app, bench, fuzz]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: gate on needed job results
-        uses: $/.github/actions/gate-results
-        with:
-          results: ${{ join(needs.*.result, ',') }}
+      - name: Require complete candidate verification
+        env:
+          FULL_ASSURANCE: ${{ inputs.full_assurance || false }}
+          JOBS: ${{ toJSON(needs) }}
+        run: |
+          jq -n -e --argjson full "$FULL_ASSURANCE" --argjson jobs "$JOBS" '
+            def fast_ready:
+              type == "object" and length > 0 and
+              all(.[]; type == "object" and (.result == "success" or .result == "skipped"));
+            def release_ready:
+              . as $jobs |
+              .changes.outputs.assurance == "true" and
+              all(["hygiene", "deny", "machete", "contract-lint", "xtask",
+                   "engine-build-test", "app", "bench", "fuzz"][];
+                  $jobs[.].result == "success");
+            def accepts($full):
+              fast_ready and (if $full then release_ready else true end);
+            {
+              changes: {result: "success", outputs: {assurance: "true"}},
+              hygiene: {result: "success"},
+              deny: {result: "success"},
+              machete: {result: "success"},
+              "contract-lint": {result: "success"},
+              "pr-title": {result: "skipped"},
+              xtask: {result: "success"},
+              "engine-build-test": {result: "success"},
+              app: {result: "success"},
+              bench: {result: "success"},
+              fuzz: {result: "success"}
+            } as $complete |
+            [
+              ($complete | accepts(true)),
+              ($complete | .xtask.result = "failure" | accepts(true) | not),
+              ($complete | .xtask.result = "cancelled" | accepts(true) | not),
+              ($complete | .xtask.result = "skipped" | accepts(true) | not),
+              ($complete | del(.xtask) | accepts(true) | not),
+              ($complete | .fuzz.result = "skipped" | accepts(true) | not),
+              ($complete | del(.fuzz) | accepts(true) | not),
+              ($complete | .changes.outputs.assurance = "false" | accepts(true) | not),
+              ($complete | del(.changes.outputs.assurance) | accepts(true) | not),
+              ($complete | .app.result = "unknown" | accepts(true) | not),
+              ({} | accepts(false) | not),
+              ({job: {result: "skipped"}} | accepts(false)),
+              ({job: {result: "cancelled"}} | accepts(false) | not),
+              ({job: {}} | accepts(false) | not)
+            ] | all and ($jobs | accepts($full))
+          '
 
   required:
     name: required
@@ -476,4 +550,4 @@ jobs:
           RESULTS: ${{ toJSON(needs.*.result) }}
         run: |
           echo "${RESULTS}"
-          jq -e 'all(.[]; IN("success", "skipped"))' <<< "${RESULTS}"
+          jq -e 'length > 0 and all(.[]; . == "success" or . == "skipped")' <<< "${RESULTS}"

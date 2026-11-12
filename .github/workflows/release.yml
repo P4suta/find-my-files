@@ -326,6 +326,16 @@ jobs:
           include-hidden-files: true
           overwrite: true
 
+  assurance:
+    needs: preflight
+    permissions:
+      contents: read
+      pull-requests: read # Permission: Reuse the source gate with candidate path selection.
+    uses: $/.github/workflows/ci.yml
+    with:
+      full_assurance: true
+      target_sha: ${{ inputs.commit_sha }}
+
   mutation:
     needs: preflight
     permissions:
@@ -393,7 +403,7 @@ jobs:
 
   sign-stage:
     name: Stage signing inputs
-    needs: [build, sbom, mutation]
+    needs: [build, sbom, mutation, assurance]
     runs-on: windows-2025
     timeout-minutes: 15
     permissions:
