@@ -107,9 +107,9 @@ The mutation tool and report parser remain external and integration boundaries.
 
 The C# suite uses the released `xunit.v3` package with its native Microsoft Testing Platform (MTP) integration.
 The executable test project enables that runner for Stryker's mutation control.
-Ordinary `dotnet test` retains the Visual Studio adapter, the coverage gate, and the existing pipe runsettings.
+Ordinary `dotnet test` retains the Visual Studio adapter, the coverage gate, and the existing pipe test settings.
 The test project declares its MSBuild target as VSTest and enables the native MTP executable entry point.
-This avoids running MTP on the legacy VSTest target, which [Microsoft Testing Platform 2 rejects under .NET 10](https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-with-dotnet-test#run-mtp-projects-with-vstest-mode).
+The runner selection avoids running MTP on the legacy VSTest target, which [Microsoft Testing Platform 2 rejects under .NET 10](https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-with-dotnet-test#run-mtp-projects-with-vstest-mode).
 The suite turns off collection parallelism.
 The named pipe connection contract collection runs before client tests that require a working connection.
 The stable ordering preserves every collection and the relative order of the remaining collections.
@@ -144,6 +144,16 @@ The operating system supplies the CPU estimate.
 Compiler workers and thread pools inside individual tests keep their own resource policies.
 Argument tests check the actual local and CI vectors, including placement of each concurrency flag and the shared timeout floor.
 Timeouts and incomplete mutation reports still fail the existing exact-identity gate.
+
+Rust `Unviable` outcomes require exactly one failed build phase and a diagnostic for the same mutant.
+Classification uses the pinned tool's phase records and native diagnostic format.
+The gate accepts only recognized compiler rejections.
+Linker failures, missing tools or files, unknown diagnostics, and mixed compiler and infrastructure failures remain inconclusive.
+Empty logs, mismatched mutants, and incomplete phase results fail the gate.
+The local run, saved-report check, CI producer, and independent verifier use the same classification.
+The CI producer preserves a rejected diagnostic before failing.
+Compiler rejections don't count as test detections.
+Adding a compiler diagnostic requires a parser change and regression fixtures.
 
 Recovery harnesses invoke the production transitions for every retry state and failure class.
 The delay harness quantifies every valid duration and checks when the wait ends and how much time remains without overflow.

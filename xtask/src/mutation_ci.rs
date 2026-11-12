@@ -1370,14 +1370,7 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
                 mutant.name
             );
         }
-        let identity_hash = checksum::sha256_hex(&serde_json::to_vec(&mutant)?);
-        let relative = format!("invalid/{identity_hash}.log");
-        write_bytes(&evidence.join(&relative), &bytes)?;
-        invalid.push(RustInvalid {
-            mutant,
-            diagnostic: seal_file(&evidence, &relative)?,
-            reason: "Unviable".to_owned(),
-        });
+        invalid.push(retain_rust_invalid(&evidence, mutant, &bytes)?);
     }
     invalid.sort();
 
@@ -1706,6 +1699,7 @@ fn parse_rust_outcomes(evidence: &Path, generated: &BTreeSet<RustMutant>) -> Res
                 }
             }
             "Unviable" => {
+                mutation::require_rust_build_failure(value)?;
                 if invalid.insert(mutant, log_path).is_some() {
                     bail!("duplicate Unviable Rust mutant outcome");
                 }
@@ -1878,7 +1872,7 @@ fn require_generated_sources_in_inventory(
     Ok(())
 }
 
-fn safe_report_path(root: &Path, relative: &str, label: &str) -> Result<PathBuf> {
+pub fn safe_report_path(root: &Path, relative: &str, label: &str) -> Result<PathBuf> {
     validate_report_relative_path(relative)?;
     let path = root.join(relative);
     let metadata = fs::symlink_metadata(&path)
@@ -2996,7 +2990,7 @@ fn verify_rust_evidence(args: VerifyArgs) -> Result<()> {
 
         let parsed = parse_rust_outcomes(directory, &shard_set)?;
         let derived_invalid =
-            verify_rust_invalid_diagnostics(directory, &parsed.invalid, &receipt)?;
+            verify_rust_invalid_diagnostics(directory, &parsed.invalid, &receipt.outcomes.invalid)?;
         let derived = RustOutcomes {
             killed: parsed.killed,
             invalid: derived_invalid,
@@ -3119,19 +3113,17 @@ fn validate_rust_allowed_files(root: &Path, receipt: &RustReceipt) -> Result<()>
 fn verify_rust_invalid_diagnostics(
     root: &Path,
     parsed: &[(RustMutant, String)],
-    receipt: &RustReceipt,
+    invalid_records: &[RustInvalid],
 ) -> Result<Vec<RustInvalid>> {
     let parsed: BTreeSet<RustMutant> = parsed.iter().map(|(mutant, _)| mutant.clone()).collect();
-    let receipt_set: BTreeSet<RustMutant> = receipt
-        .outcomes
-        .invalid
+    let receipt_set: BTreeSet<RustMutant> = invalid_records
         .iter()
         .map(|invalid| invalid.mutant.clone())
         .collect();
-    if parsed != receipt_set || parsed.len() != receipt.outcomes.invalid.len() {
+    if parsed != receipt_set || parsed.len() != invalid_records.len() {
         bail!("Rust Unviable inventory is not 1:1 between report and receipt");
     }
-    for invalid in &receipt.outcomes.invalid {
+    for invalid in invalid_records {
         let bytes = fs::read(root.join(&invalid.diagnostic.path))?;
         if bytes.is_empty() || seal_file(root, &invalid.diagnostic.path)? != invalid.diagnostic {
             bail!(
@@ -3139,8 +3131,21 @@ fn verify_rust_invalid_diagnostics(
                 invalid.mutant.name
             );
         }
+        mutation::require_rust_compiler_rejection(&invalid.mutant.name, &bytes)?;
     }
-    Ok(receipt.outcomes.invalid.clone())
+    Ok(invalid_records.to_vec())
+}
+
+fn retain_rust_invalid(root: &Path, mutant: RustMutant, bytes: &[u8]) -> Result<RustInvalid> {
+    let identity_hash = checksum::sha256_hex(&serde_json::to_vec(&mutant)?);
+    let relative = format!("invalid/{identity_hash}.log");
+    write_bytes(&root.join(&relative), bytes)?;
+    mutation::require_rust_compiler_rejection(&mutant.name, bytes)?;
+    Ok(RustInvalid {
+        mutant,
+        diagnostic: seal_file(root, &relative)?,
+        reason: "Unviable".to_owned(),
+    })
 }
 
 fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
@@ -4216,5 +4221,91 @@ mod tests {
             &empty_set,
         )
         .is_err());
+    }
+
+    fn diagnostic_mutant() -> RustMutant {
+        RustMutant {
+            name: "crates/fmf-core/src/lib.rs:1:1: replace value with false".to_owned(),
+            package: "fmf-core".to_owned(),
+            path: "engine/crates/fmf-core/src/lib.rs".to_owned(),
+            line: 1,
+            column: 1,
+            mutation: "replace value with false".to_owned(),
+        }
+    }
+
+    #[test]
+    fn rust_diagnostic_producer_and_independent_verifier_reject_sealed_linker_failures(
+    ) -> Result<()> {
+        let temporary = std::env::temp_dir();
+        let root = temporary.join(format!(
+            "xtask-mutation-sealed-invalid-{}",
+            std::process::id()
+        ));
+        assert!(root.is_absolute() && root.starts_with(&temporary));
+        fsx::force_remove_dir_all(&root)?;
+        let mutant = diagnostic_mutant();
+        let compiler = format!("*** {}\n*** cargo nextest run --no-run --verbose\nerror[E0277]: trait bound is not satisfied\n*** result: Failure(101)\n", mutant.name);
+        let parsed = vec![(mutant.clone(), "log/native.log".to_owned())];
+        let invalid = retain_rust_invalid(&root, mutant.clone(), compiler.as_bytes())?;
+        verify_rust_invalid_diagnostics(&root, &parsed, std::slice::from_ref(&invalid))?;
+
+        for diagnostic in [
+            "error: linking with `link.exe` failed: exit code: 1104",
+            "error[E0277]: trait bound is not satisfied\nerror: linking with `link.exe` failed: exit code: 1104",
+        ] {
+            let log = format!("*** {}\n*** cargo nextest run --no-run --verbose\n{diagnostic}\n*** result: Failure(101)\n", mutant.name);
+            assert!(retain_rust_invalid(&root, mutant.clone(), log.as_bytes()).is_err());
+            assert_eq!(fs::read(root.join(&invalid.diagnostic.path))?, log.as_bytes());
+            let sealed = RustInvalid {
+                diagnostic: seal_file(&root, &invalid.diagnostic.path)?,
+                ..invalid.clone()
+            };
+            assert!(verify_rust_invalid_diagnostics(&root, &parsed, &[sealed]).is_err());
+        }
+        fsx::force_remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn native_ci_unviable_outcomes_require_the_build_phase_before_receipt_creation() -> Result<()> {
+        let temporary = std::env::temp_dir();
+        let root = temporary.join(format!(
+            "xtask-mutation-ci-build-phase-{}",
+            std::process::id()
+        ));
+        assert!(root.is_absolute() && root.starts_with(&temporary));
+        fsx::force_remove_dir_all(&root)?;
+        fs::create_dir_all(&root)?;
+        let mutant = diagnostic_mutant();
+        let native = serde_json::json!({
+            "name":mutant.name,"package":mutant.package,
+            "file":mutant.path.strip_prefix("engine/").expect("fixture engine path"),
+            "function":null,"genre":"BinOp","replacement":"false",
+            "span":{"start":{"line":1,"column":1},"end":{"line":1,"column":2}}
+        });
+        let phase = serde_json::json!({"phase":"Build","duration":0.1,
+            "process_status":{"Failure":101},"argv":["cargo","nextest","run","--no-run"]});
+        let mut report = serde_json::json!({
+            "cargo_mutants_version":CARGO_MUTANTS_VERSION,
+            "start_time":"2026-11-12T00:00:00Z","end_time":"2026-11-12T00:00:01Z",
+            "caught":0,"missed":0,"timeout":0,"unviable":1,"success":1,"total_mutants":1,
+            "outcomes":[
+                {"scenario":"Baseline","summary":"Success","log_path":"log/baseline.log","diff_path":null,"phase_results":[]},
+                {"scenario":{"Mutant":native},"summary":"Unviable","log_path":"log/mutant.log","diff_path":"diff/mutant.diff","phase_results":[phase]}
+            ]
+        });
+        for filename in ["caught.txt", "missed.txt", "timeout.txt"] {
+            fs::write(root.join(filename), "")?;
+        }
+        fs::write(root.join("unviable.txt"), format!("{}\n", mutant.name))?;
+        let generated = BTreeSet::from([mutant]);
+        mutation::write_json_atomic(&root.join("outcomes.json"), &report)?;
+        parse_rust_outcomes(&root, &generated)?;
+        report["outcomes"][1]["phase_results"][0]["phase"] = serde_json::json!("Test");
+        mutation::write_json_atomic(&root.join("outcomes.json"), &report)?;
+        assert!(parse_rust_outcomes(&root, &generated).is_err());
+        fsx::force_remove_dir_all(&root)?;
+        Ok(())
     }
 }

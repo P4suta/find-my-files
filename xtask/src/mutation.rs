@@ -1099,6 +1099,124 @@ fn parse_rust_run(output: &Path) -> Result<RustRun> {
     parse_rust_run_selected(output, selected)
 }
 
+pub fn require_rust_build_failure(entry: &Value) -> Result<()> {
+    let phases = entry
+        .get("phase_results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Unviable outcome has no build phase"))?;
+    let [phase] = phases.as_slice() else {
+        bail!("Unviable outcome must contain exactly one failed build phase");
+    };
+    if phase.get("phase").and_then(Value::as_str) != Some("Build")
+        || phase.get("process_status") != Some(&serde_json::json!({"Failure":101}))
+        || phase
+            .get("duration")
+            .and_then(Value::as_f64)
+            .is_none_or(|duration| !duration.is_finite() || duration < 0.0)
+    {
+        bail!("Unviable outcome does not record a completed build failure with exit code 101");
+    }
+    let argv = phase
+        .get("argv")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Unviable build has no command arguments"))?;
+    let argv: Vec<_> = argv
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| anyhow!("Unviable build argument is not a string"))
+        })
+        .collect::<Result<_>>()?;
+    let executable = argv
+        .first()
+        .and_then(|path| path.rsplit(['/', '\\']).next());
+    if !executable.is_some_and(|name| {
+        name.eq_ignore_ascii_case("cargo") || name.eq_ignore_ascii_case("cargo.exe")
+    }) || argv.get(1) != Some(&"nextest")
+        || argv.get(2) != Some(&"run")
+        || argv
+            .iter()
+            .filter(|&&argument| argument == "--no-run")
+            .count()
+            != 1
+    {
+        bail!("Unviable build does not use the pinned nextest compilation command");
+    }
+    Ok(())
+}
+
+fn compiler_rejection(line: &str) -> bool {
+    ["error[E0080]: ", "error[E0271]: ", "error[E0277]: ", "error[E0433]: ", "error[E0599]: "]
+        .iter().any(|prefix| line.starts_with(prefix))
+        || [
+            "error: `<` is interpreted as a start of generic arguments for `usize`, not a comparison",
+            "error: `||` operators are not supported in let chain conditions",
+            "error: cannot find macro `vec` in this scope",
+            "error: this arithmetic operation will overflow",
+        ].contains(&line)
+}
+
+fn cargo_rejection_summary(line: &str) -> bool {
+    if line.starts_with("error: command `") {
+        return line.contains("cargo")
+            && line.contains("test --no-run")
+            && line.ends_with("exited with code 101");
+    }
+    let (summary, warning) = line.split_once("; ").unwrap_or((line, ""));
+    if !warning.is_empty() {
+        let Some((count, description)) = warning.split_once(' ') else {
+            return false;
+        };
+        match (count.parse::<u64>(), description) {
+            (Ok(1), "warning emitted") => {}
+            (Ok(count), "warnings emitted") if count > 1 => {}
+            _ => return false,
+        }
+    }
+    summary.starts_with("error: could not compile `")
+        && summary.contains(" due to ")
+        && (summary.ends_with(" previous error") || summary.ends_with(" previous errors"))
+}
+
+pub fn require_rust_compiler_rejection(name: &str, diagnostic: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(diagnostic).context("Unviable diagnostic is not UTF-8")?;
+    let mut lines = text.lines().skip_while(|line| line.trim().is_empty());
+    if lines.next() != Some(format!("*** {name}").as_str()) {
+        bail!("Unviable diagnostic does not identify mutant `{name}`");
+    }
+    let command = lines
+        .find(|line| line.starts_with("*** ") && *line != "*** mutation diff:")
+        .ok_or_else(|| anyhow!("Unviable diagnostic has no build command"))?;
+    if !command.contains("cargo") || !command.contains(" nextest run --no-run ") {
+        bail!("Unviable diagnostic does not record the nextest build command");
+    }
+    let mut compiler_error = false;
+    let mut complete = false;
+    for line in lines.by_ref() {
+        if line == "*** result: Failure(101)" {
+            complete = true;
+            break;
+        }
+        if compiler_rejection(line) {
+            compiler_error = true;
+        } else if (line.starts_with("error")
+            || line.starts_with("Error:")
+            || line.starts_with("*** ")
+            || line.contains("fatal error"))
+            && (!compiler_error || !cargo_rejection_summary(line))
+        {
+            bail!(
+                "Unviable mutant `{name}` has an infrastructure or unsupported diagnostic: {line}"
+            );
+        }
+    }
+    if !compiler_error || !complete || lines.any(|line| !line.trim().is_empty()) {
+        bail!("Unviable mutant `{name}` has no complete, recognized compiler rejection");
+    }
+    Ok(())
+}
+
 fn parse_rust_run_selected(output: &Path, examined_files: Vec<String>) -> Result<RustRun> {
     let outcomes_path = output.join("outcomes.json");
     let outcomes: Value = read_json(&outcomes_path)?;
@@ -1177,6 +1295,16 @@ fn parse_rust_run_selected(output: &Path, examined_files: Vec<String>) -> Result
             )
         })?;
         let identity = parse_rust_identity(name)?;
+        if summary == "Unviable" {
+            require_rust_build_failure(entry)?;
+            let relative = entry
+                .get("log_path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Unviable mutant `{name}` has no diagnostic path"))?;
+            let log =
+                crate::mutation_ci::safe_report_path(output, relative, "Unviable diagnostic")?;
+            require_rust_compiler_rejection(name, &fs::read(log)?)?;
+        }
         if !all_outcomes.insert(identity.clone()) {
             bail!(
                 "{} contains duplicate mutant identity `{name}`",
@@ -2339,6 +2467,186 @@ mod tests {
         .expect("write selection omitting the mutated file");
         assert!(parse_rust_run(&base).is_err());
         fsx::force_remove_dir_all(&base).expect("remove report directory");
+    }
+
+    const UNVIABLE_NAME: &str = "crates/fmf-core/src/ondisk/ntfs.rs:10:3: replace value with false";
+
+    fn unviable_log(diagnostic: &str) -> String {
+        format!(
+            "\n*** {UNVIABLE_NAME}\n\n*** mutation diff:\n--- source\n+++ mutation\n\n*** cargo nextest run --no-run --verbose --package=fmf-core@0.1.1 --locked --workspace --target-dir target\n{diagnostic}\n\n*** result: Failure(101)\n"
+        )
+    }
+
+    fn write_unviable_report(base: &Path, diagnostic: &str) -> Result<Value> {
+        fs::create_dir_all(base.join("log"))?;
+        let outcomes = serde_json::json!({
+            "cargo_mutants_version": CARGO_MUTANTS_VERSION,
+            "end_time": "2026-11-12T06:40:23Z",
+            "total_mutants": 1,
+            "outcomes": [
+                {"scenario": "Baseline", "summary": "Success"},
+                {
+                    "scenario": {"Mutant": {"name": UNVIABLE_NAME}},
+                    "summary": "Unviable", "log_path": "log/mutant.log",
+                    "phase_results": [{"phase":"Build", "duration":0.1,
+                        "process_status":{"Failure":101},
+                        "argv":["cargo","nextest","run","--no-run","--verbose","--package=fmf-core@0.1.1","--locked","--workspace","--target-dir","target"]}]
+                }
+            ]
+        });
+        write_json_atomic(&base.join("outcomes.json"), &outcomes)?;
+        write_json_atomic(
+            &base.join("mutants.json"),
+            &serde_json::json!([{"name":UNVIABLE_NAME}]),
+        )?;
+        write_json_atomic(
+            &base.join(RUST_SELECTED_FILES),
+            &serde_json::json!([
+                {"path":"crates/fmf-core/src/ondisk/ntfs.rs","package":"fmf-core"}
+            ]),
+        )?;
+        for file in ["caught.txt", "missed.txt", "timeout.txt"] {
+            fs::write(base.join(file), "")?;
+        }
+        fs::write(base.join("unviable.txt"), format!("{UNVIABLE_NAME}\n"))?;
+        fs::write(base.join("log/mutant.log"), unviable_log(diagnostic))?;
+        Ok(outcomes)
+    }
+
+    #[test]
+    fn saved_rust_reports_reject_linker_failures_classified_as_unviable() -> Result<()> {
+        let temporary = std::env::temp_dir();
+        let base = temporary.join(format!("xtask-mutation-linker-{}", std::process::id()));
+        assert!(base.is_absolute() && base.starts_with(&temporary));
+        fsx::force_remove_dir_all(&base)?;
+        write_unviable_report(&base,
+            "error: linking with `link.exe` failed: exit code: 1104\n  = note: LINK : fatal error LNK1104: cannot open file 'fixture.exe'\nerror: could not compile `fmf-core` (lib) due to 1 previous error")?;
+        let result = parse_rust_run(&base);
+        fsx::force_remove_dir_all(&base)?;
+        assert!(
+            result.is_err(),
+            "infrastructure failures must stay inconclusive: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compiler_rejections_require_native_identity_completion_and_supported_diagnostics(
+    ) -> Result<()> {
+        for diagnostic in [
+            "error[E0080]: evaluation failed",
+            "error[E0271]: type mismatch",
+            "error[E0277]: trait bound is not satisfied",
+            "error[E0433]: use of undeclared type",
+            "error[E0599]: method not found",
+            "error: `<` is interpreted as a start of generic arguments for `usize`, not a comparison",
+            "error: `||` operators are not supported in let chain conditions",
+            "error: cannot find macro `vec` in this scope",
+            "error: this arithmetic operation will overflow",
+        ] {
+            let log = unviable_log(&format!("{diagnostic}\nerror: could not compile `fmf-core` (lib) due to 1 previous error\nerror: command `cargo test --no-run` exited with code 101"));
+            require_rust_compiler_rejection(UNVIABLE_NAME, log.as_bytes())?;
+            require_rust_compiler_rejection(UNVIABLE_NAME, log.replace('\n', "\r\n").as_bytes())?;
+        }
+        for diagnostic in [
+            "",
+            "error: could not compile `fmf-core` (lib) due to 1 previous error",
+            "note: example `error[E0277]: unsupported bound`",
+            "error[E0463]: cannot find crate",
+            "error: could not execute process `rustc`",
+            "error: No space left on device (os error 28)",
+            "error[E0277]: trait bound is not satisfied\nerror: linking with `link.exe` failed: exit code: 1104",
+            "error[E0277]: trait bound is not satisfied\nLINK : fatal error LNK1104: cannot open file",
+            "error[E0277]: trait bound is not satisfied\nerror: unknown build failure",
+        ] {
+            assert!(require_rust_compiler_rejection(UNVIABLE_NAME, unviable_log(diagnostic).as_bytes()).is_err(), "{diagnostic}");
+        }
+        let valid = unviable_log("error[E0277]: trait bound is not satisfied");
+        for log in [
+            valid.replace(UNVIABLE_NAME, "another mutant"),
+            valid.replace("*** result: Failure(101)", "*** result: Success"),
+            valid.replace("*** result: Failure(101)", ""),
+            valid.replace("nextest run --no-run", "nextest run"),
+            format!("{valid}\nerror: late failure"),
+            unviable_log("").replace("+++ mutation", "+error[E0277]: quoted mutation source"),
+        ] {
+            assert!(
+                require_rust_compiler_rejection(UNVIABLE_NAME, log.as_bytes()).is_err(),
+                "{log}"
+            );
+        }
+        assert!(require_rust_compiler_rejection(UNVIABLE_NAME, &[0xff]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn saved_unviable_reports_require_their_compilation_phase_and_diagnostic_file() -> Result<()> {
+        let temporary = std::env::temp_dir();
+        let base = temporary.join(format!("xtask-mutation-unviable-{}", std::process::id()));
+        assert!(base.is_absolute() && base.starts_with(&temporary));
+        fsx::force_remove_dir_all(&base)?;
+        let valid = write_unviable_report(&base, "error[E0277]: trait bound is not satisfied")?;
+        parse_rust_run(&base)?;
+        let phase = valid["outcomes"][1]["phase_results"][0].clone();
+        let mut invalid = vec![
+            Value::Null,
+            serde_json::json!([]),
+            serde_json::json!([phase, phase]),
+        ];
+        for (key, value) in [
+            ("phase", serde_json::json!("Test")),
+            ("process_status", serde_json::json!("Success")),
+            ("process_status", serde_json::json!({"Failure":1})),
+            ("duration", Value::Null),
+            (
+                "argv",
+                serde_json::json!(["rustc", "nextest", "run", "--no-run"]),
+            ),
+            ("argv", serde_json::json!(["cargo", "test", "--no-run"])),
+            ("argv", serde_json::json!(["cargo", "nextest", "run"])),
+        ] {
+            let mut phase = valid["outcomes"][1]["phase_results"][0].clone();
+            phase[key] = value;
+            invalid.push(serde_json::json!([phase]));
+        }
+        for phases in invalid {
+            let mut report = valid.clone();
+            report["outcomes"][1]["phase_results"] = phases;
+            write_json_atomic(&base.join("outcomes.json"), &report)?;
+            assert!(parse_rust_run(&base).is_err(), "{report}");
+        }
+        write_json_atomic(&base.join("outcomes.json"), &valid)?;
+        fs::write(base.join("log/mutant.log"), "")?;
+        assert!(parse_rust_run(&base).is_err());
+        fs::remove_file(base.join("log/mutant.log"))?;
+        assert!(parse_rust_run(&base).is_err());
+        let mut report = valid;
+        report["outcomes"][1]["log_path"] = serde_json::json!("../outside.log");
+        write_json_atomic(&base.join("outcomes.json"), &report)?;
+        assert!(parse_rust_run(&base).is_err());
+        fsx::force_remove_dir_all(&base)?;
+        Ok(())
+    }
+
+    #[test]
+    fn compiler_rejection_summaries_allow_native_warning_counts() -> Result<()> {
+        for warning in [
+            "1 warning emitted",
+            "2 warnings emitted",
+            "17 warnings emitted",
+        ] {
+            let log = unviable_log(&format!("error[E0277]: trait bound is not satisfied\nerror: could not compile `fmf-core` (lib) due to 1 previous error; {warning}"));
+            require_rust_compiler_rejection(UNVIABLE_NAME, log.as_bytes())?;
+        }
+        for warning in [
+            "unknown warning",
+            "0 warnings emitted",
+            "1 warning emitted; error: link failed",
+        ] {
+            let log = unviable_log(&format!("error[E0277]: trait bound is not satisfied\nerror: could not compile `fmf-core` (lib) due to 1 previous error; {warning}"));
+            assert!(require_rust_compiler_rejection(UNVIABLE_NAME, log.as_bytes()).is_err());
+        }
+        Ok(())
     }
 
     #[test]
