@@ -300,16 +300,26 @@ public sealed class PipeEngineClientTests
         using var cts = new CancellationTokenSource();
         var search = client.SearchAsync("a", SearchOptions.Default, cts.Token);
         await server.WaitForAsync(PipeProtocol.Op.Query);
-        cts.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => search);
+        await using var pending = PendingRequestFixture.CaptureSingle(client, search);
+        try
+        {
+            cts.Cancel();
+            await pending.AssertCompletesAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => search);
 
-        responseGate.SetResult((
-            PipeProtocol.Status.Ok,
-            PipeProtocol.EncodeQueryResp(resultId, 1, "{}")));
-        await server.WaitForAsync(PipeProtocol.Op.ResultFree, timeoutMs: 500);
+            responseGate.SetResult((
+                PipeProtocol.Status.Ok,
+                PipeProtocol.EncodeQueryResp(resultId, 1, "{}")));
+            await server.WaitForAsync(PipeProtocol.Op.ResultFree, timeoutMs: 500);
 
-        var free = server.Received.Last(r => r.Opcode == PipeProtocol.Op.ResultFree);
-        Assert.Equal(resultId, PipeProtocol.DecodeResultFreeReq(free.Payload));
+            var free = server.Received.Last(r => r.Opcode == PipeProtocol.Op.ResultFree);
+            Assert.Equal(resultId, PipeProtocol.DecodeResultFreeReq(free.Payload));
+        }
+        finally
+        {
+            client.Dispose();
+            responseGate.TrySetCanceled(TestContext.Current.CancellationToken);
+        }
     }
 
     [Fact]
@@ -457,11 +467,12 @@ public sealed class PipeEngineClientTests
             }
         }
 
+        PendingRequestFixture? pending = null;
+        var hung = new TaskCompletionSource<(int Status, byte[] Payload)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         client.ConnectionChanged += ObserveReconnect;
         try
         {
-            var hung = new TaskCompletionSource<(int Status, byte[] Payload)>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
             server.Handler = (opcode, _) =>
                 opcode == PipeProtocol.Op.ListVolumes ? hung.Task : null;
 
@@ -469,7 +480,9 @@ public sealed class PipeEngineClientTests
             clock.TimerCreated = () => timerArmed.TrySetResult();
             var request = client.ListVolumesAsync(TestContext.Current.CancellationToken);
             await timerArmed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            pending = PendingRequestFixture.CaptureSingle(client, request);
             clock.Advance(client.RequestTimeout);
+            await pending.AssertCompletesAsync();
             var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() => request);
             Assert.Equal(
                 $"request (opcode {PipeProtocol.Op.ListVolumes}) timed out after 0s",
@@ -489,6 +502,12 @@ public sealed class PipeEngineClientTests
             client.AfterHandshakeForTests = null;
             client.ConnectionChanged -= ObserveReconnect;
             allowReconnectPublication.TrySetResult();
+            client.Dispose();
+            hung.TrySetCanceled(TestContext.Current.CancellationToken);
+            if (pending is not null)
+            {
+                await pending.DisposeAsync();
+            }
         }
     }
 
@@ -525,38 +544,58 @@ public sealed class PipeEngineClientTests
         clock.TimerCreated = () => timerArmed.TrySetResult();
         var oldRequest = client.ListVolumesAsync(TestContext.Current.CancellationToken);
         await timerArmed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        clock.Advance(client.RequestTimeout);
-        await timeoutReached.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        var pendingField = typeof(PipeEngineClient).GetField(
-            "_pending",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        Assert.Empty(Assert.IsAssignableFrom<System.Collections.IEnumerable>(
-            pendingField?.GetValue(client)));
-
-        server.DisconnectAll();
-        await WaitUntilAsync(
-            () => server.ConnectionCount == 2
-                && client.Connection == EngineConnectionState.Connected,
-            "replacement connection");
-
+        await using var pending = PendingRequestFixture.CaptureSingle(client, oldRequest);
+        PendingRequestFixture? replacementPending = null;
         var replacementResponse = new TaskCompletionSource<(int Status, byte[] Payload)>(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        server.Handler = (opcode, _) => opcode == PipeProtocol.Op.ListVolumes
-            ? replacementResponse.Task
-            : null;
-        var replacementRequest = client.ListVolumesAsync(TestContext.Current.CancellationToken);
-        await server.WaitForAsync(PipeProtocol.Op.ListVolumes, minCount: 2);
-        client.BeforeTimeoutRetireForTests = null;
-        allowTimeoutRetire.SetResult();
-        await Assert.ThrowsAsync<EngineUnavailableException>(() => oldRequest);
+        try
+        {
+            clock.Advance(client.RequestTimeout);
+            await timeoutReached.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            var pendingField = typeof(PipeEngineClient).GetField(
+                "_pending",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.Empty(Assert.IsAssignableFrom<System.Collections.IEnumerable>(
+                pendingField?.GetValue(client)));
 
-        Assert.False(replacementRequest.IsCompleted);
-        replacementResponse.SetResult((
-            PipeProtocol.Status.Ok,
-            PipeProtocol.EncodeVolumeStatuses(server.Statuses)));
-        Assert.Equal(["C:"], await replacementRequest);
-        Assert.Equal(2, server.ConnectionCount);
-        Assert.Equal(EngineConnectionState.Connected, client.Connection);
+            server.DisconnectAll();
+            await WaitUntilAsync(
+                () => server.ConnectionCount == 2
+                    && client.Connection == EngineConnectionState.Connected,
+                "replacement connection");
+
+            server.Handler = (opcode, _) => opcode == PipeProtocol.Op.ListVolumes
+                ? replacementResponse.Task
+                : null;
+            var replacementRequest = client.ListVolumesAsync(TestContext.Current.CancellationToken);
+            await server.WaitForAsync(PipeProtocol.Op.ListVolumes, minCount: 2);
+            replacementPending = PendingRequestFixture.CaptureSingle(client, replacementRequest);
+            client.BeforeTimeoutRetireForTests = null;
+            allowTimeoutRetire.SetResult();
+            await pending.AssertCompletesAsync();
+            await Assert.ThrowsAsync<EngineUnavailableException>(() => oldRequest);
+
+            Assert.False(replacementRequest.IsCompleted);
+            replacementResponse.SetResult((
+                PipeProtocol.Status.Ok,
+                PipeProtocol.EncodeVolumeStatuses(server.Statuses)));
+            await replacementPending.AssertCompletesAsync();
+            Assert.Equal(["C:"], await replacementRequest);
+            Assert.Equal(2, server.ConnectionCount);
+            Assert.Equal(EngineConnectionState.Connected, client.Connection);
+        }
+        finally
+        {
+            client.BeforeTimeoutRetireForTests = null;
+            allowTimeoutRetire.TrySetResult();
+            client.Dispose();
+            hung.TrySetCanceled(TestContext.Current.CancellationToken);
+            replacementResponse.TrySetCanceled(TestContext.Current.CancellationToken);
+            if (replacementPending is not null)
+            {
+                await replacementPending.DisposeAsync();
+            }
+        }
     }
 
     [Fact]
