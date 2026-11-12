@@ -14,7 +14,12 @@ public sealed class ServiceLifecycleTests
         var root = Directory.CreateTempSubdirectory("fmf-lifecycle-test");
         try
         {
-            var baseDir = Path.Combine(root.FullName, "app", "bin");
+            var baseDir = root.FullName;
+            for (var depth = 0; depth < 7; depth++)
+            {
+                baseDir = Path.Combine(baseDir, "nested");
+            }
+
             Directory.CreateDirectory(baseDir);
 
             Assert.Null(ServiceSetup.LocateServiceExe(baseDir));
