@@ -34,7 +34,7 @@ jobs:
     name: changes
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: read # Permission: Select checks from the changed PR files.
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
@@ -176,7 +176,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
-      pull-requests: read
+      pull-requests: read # Permission: Validate the PR title through the API.
     steps:
       - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
         env:
@@ -226,7 +226,7 @@ jobs:
         with:
           name: xtask-nextest-junit
           path: build/xtask/nextest/ci/junit.xml
-          retention-days: 14
+          retention-days: 7
           if-no-files-found: warn
           overwrite: true
 
