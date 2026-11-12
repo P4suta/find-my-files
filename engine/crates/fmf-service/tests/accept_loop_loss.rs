@@ -1,34 +1,26 @@
-//! Unelevated regression: a fatal accept-loop exit must take the *service*
-//! down instead of leaving it Running behind a pipe nobody can reach.
+//! Unelevated regression: a fatal accept-loop exit must take the *service* down instead of leaving it Running behind a pipe nobody can reach.
 //!
 //! Failing closed on a broken client-verification API (docs/SECURITY.md layer
 //! 4) is correct — the dangerous alternative is admitting clients no one could
-//! check. What must not happen is the silent half: the listener disappears, the
-//! SCM keeps reporting Running, clients reconnect forever, and `fmf-service
-//! start` is a no-op against a "running" service. With `idle_stop_secs = 0`, or
-//! before any client has ever connected, nothing else could ever end that state.
+//! check.
+//! What must not happen is the silent half: the listener disappears, the SCM keeps reporting Running, clients reconnect forever, and `fmf-service start` is a no-op against a "running" service.
+//! With `idle_stop_secs = 0`, or before any client has ever connected, nothing else could ever end that state.
 //!
-//! The verifier is injected (`ServerOptions::client_verifier` /
-//! `ServeOptions::client_verifier`) because the real `security::verify_client`
-//! only returns `Err` against live Windows tokens — an OS API failure, or a
-//! client that vanished between `ConnectNamedPipe` and
-//! `ImpersonateNamedPipeClient`. Injection makes that deterministic and keeps
-//! the whole regression unelevated: both tests drive the real accept loop, the
-//! real named pipe, and (below) the real `serve()` park loop.
+//! The verifier is injected (`ServerOptions::client_verifier` / `ServeOptions::client_verifier`) because the real `security::verify_client` only returns `Err` against live Windows tokens — an OS API failure, or a client that vanished between `ConnectNamedPipe` and `ImpersonateNamedPipeClient`.
+//! Injection makes that deterministic and keeps the whole regression unelevated: both tests drive the real accept loop, the real named pipe, and (below) the real `serve()` park loop.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use fmf_core::engine::{Engine, EngineConfig};
-use fmf_core::index::testutil::TestDir;
+use fmf_runtime::engine::{Engine, EngineConfig};
+use fmf_runtime::index::testutil::TestDir;
 use fmf_service::pipe::PipeStream;
 use fmf_service::server::{Server, ServerOptions};
 use fmf_service::svc::{self, ServeOptions};
 
-/// Generous enough for a loaded machine; every wait below is a hard failure, so
-/// none of them may be "flaky-tuned" down.
+/// Generous enough for a loaded machine; every wait below is a hard failure, so none of them may be "flaky-tuned" down.
 const DEADLINE: Duration = Duration::from_secs(30);
 
 fn unique_name(tag: &str) -> String {
@@ -104,9 +96,8 @@ fn a_broken_client_verifier_makes_the_lost_listener_observable() {
     engine.set_event_sink(None);
 }
 
-/// The service half: `serve()` must return (flushing on the way out) instead of
-/// parking forever with a dead accept loop. `idle_stop_secs = 0` is the
-/// configuration that used to be permanently unrecoverable.
+/// The service half: `serve()` must return (flushing on the way out) instead of parking forever with a dead accept loop.
+/// `idle_stop_secs = 0` is the configuration that used to be permanently unrecoverable.
 #[test]
 fn serve_stops_when_the_accept_loop_dies_even_with_idle_stop_disabled() {
     let data_dir = TestDir::new();
@@ -117,8 +108,6 @@ fn serve_stops_when_the_accept_loop_dies_even_with_idle_stop_disabled() {
     .expect("write service config");
     let pipe_name = unique_name("serve-accept-loss");
 
-    // The only stop signal the SCM/Ctrl+C would ever raise. The test never sets
-    // it: whatever ends `serve()` below has to come from inside.
     let stop = Arc::new(AtomicBool::new(false));
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let (done_tx, done_rx) = mpsc::sync_channel(1);

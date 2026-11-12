@@ -1,7 +1,3 @@
-# The engine contract — the machine-readable single source every consumer
-# radiates from (ADR-0018). [dependencies] is empty BY DESIGN and must stay
-# empty: leaf-ness is what lets fmf-core, fmf-ffi (cdylib), fmf-proto and
-# fmf-service all depend on it, and tests/drift.rs assumes nothing but std.
 [package]
 name = "fmf-contract"
 version.workspace = true

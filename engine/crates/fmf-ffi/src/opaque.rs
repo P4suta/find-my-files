@@ -1,7 +1,7 @@
 //! Process-wide opaque-handle identifiers.
 //!
-//! C callers transport these values as pointers but Rust never dereferences
-//! them. A single monotonic namespace is shared by engine and result handles,
+//! C callers transport these values as pointers but Rust never dereferences them.
+//! A single monotonic namespace is shared by engine and result handles,
 //! preventing both ABA reuse and accidental cross-kind aliasing.
 
 use std::ffi::c_void;
@@ -14,7 +14,7 @@ static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
 
 pub fn next_id(kind: &str) -> Result<usize, i32> {
     NEXT_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         })
         .map_err(|_| {

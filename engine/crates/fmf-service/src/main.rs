@@ -1,10 +1,20 @@
-//! fmf-service entry: console `run` (dev loop / test harness), the hidden
-//! SCM entry, and the lifecycle subcommands. `install` is a subcommand and
-//! not an sc.exe one-liner because it must coordinate four things:
-//! capture the installing user's SID into service.json, harden the data-dir
-//! DACLs, register with on-demand (demand) start + crash recovery, and set the
-//! preshutdown/privilege configs (ADR-0017) plus the service-object DACL and GC
-//! task (ADR-0027).
+//! fmf-service entry: console `run` (dev loop / test harness), the hidden SCM entry, and the lifecycle subcommands.
+//! `install` is a subcommand and not an sc.exe one-liner because it must coordinate four things:
+//! capture the installing user's SID into service.json, harden the data-dir DACLs, register with on-demand (demand) start + crash recovery, and set the preshutdown/privilege configs (ADR-0017) plus the service-object DACL and GC task (ADR-0027).
+
+const STOP_POLL_MILLIS: u64 = 200;
+const STOP_POLL_ATTEMPTS: usize = 100;
+const RECOVERY_RESTART_ATTEMPTS: usize = 3;
+const PRESHUTDOWN_MINS: u64 = 3;
+const RESTART_DELAY_SECS: u64 = 10;
+const FAILURE_RESET_HOURS: u64 = 24;
+const SCM_MARKED_FOR_DELETE: i32 =
+    windows_sys::Win32::Foundation::ERROR_SERVICE_MARKED_FOR_DELETE as i32;
+const SCM_ALREADY_EXISTS: i32 = windows_sys::Win32::Foundation::ERROR_SERVICE_EXISTS as i32;
+const SCM_NOT_INSTALLED: i32 = windows_sys::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST as i32;
+const SHARING_VIOLATION: i32 = windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION as i32;
+const SCM_ALREADY_RUNNING: i32 =
+    windows_sys::Win32::Foundation::ERROR_SERVICE_ALREADY_RUNNING as i32;
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -12,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use clap::Parser;
-use fmf_core::diag::error_chain;
+use fmf_runtime::diag::error_chain;
 use fmf_service::pipe::PipeStream;
 use fmf_service::svc::{EXIT_LOCKED, SERVICE_NAME, ServeOptions};
 use fmf_service::{config, lifecycle, security, svc};
@@ -39,28 +49,23 @@ enum Cli {
         #[arg(long)]
         no_index: bool,
     },
-    /// Register the Windows service (elevated; captures your SID, hardens
-    /// the data dir, sets on-demand start + crash recovery + preshutdown, and
-    /// grants the user unelevated start/stop + the daily GC task, ADR-0027).
+    /// Register the Windows service (elevated; captures your SID, hardens the data dir, sets on-demand start + crash recovery + preshutdown, and grants the user unelevated start/stop + the daily GC task, ADR-0027).
     Install {
-        /// Also authorize this user SID on the pipe. The unelevated app
-        /// forwards the daily user's SID here so OTS elevation (install runs
-        /// as a *different* admin account) does not lock that user out of its
-        /// own service (docs/SECURITY.md threat 1). Validated before trusting.
+        /// Also authorize this user SID on the pipe.
+        /// The unelevated app forwards the daily user's SID here so OTS elevation (install runs as a *different* admin account) does not lock that user out of its own service (docs/SECURITY.md threat 1).
+        /// Validated before trusting.
         #[arg(long)]
         owner_sid: Option<String>,
     },
-    /// Install (idempotent) then restart, in one elevated step — the
-    /// unelevated app's per-action-UAC "register / re-register" button. Equivalent
-    /// to `install [--owner-sid] && restart`, so the freshly written
-    /// authorized-SID list takes effect without a second UAC prompt.
+    /// Install (idempotent) then restart, in one elevated step — the unelevated app's per-action-UAC "register / re-register" button.
+    /// Equivalent to `install [--owner-sid] && restart`, so the freshly written authorized-SID list takes effect without a second UAC prompt.
     Setup {
         #[arg(long)]
         owner_sid: Option<String>,
     },
-    /// Deregister the service. Machine data under
-    /// %ProgramData%\find-my-files is kept unless --purge-data. User settings
-    /// and UI logs under %APPDATA%\find-my-files are never removed by this command.
+    /// Deregister the service.
+    /// Machine data under %ProgramData%\find-my-files is kept unless --purge-data.
+    /// User settings and UI logs under %APPDATA%\find-my-files are never removed by this command.
     Uninstall {
         /// Also delete machine engine data under %ProgramData%\find-my-files.
         /// Never deletes user UI settings or app logs under %APPDATA%\find-my-files.
@@ -71,15 +76,13 @@ enum Cli {
     Start,
     /// Stop the installed service.
     Stop,
-    /// Stop (if running) then start, so a rewritten service.json — e.g. a
-    /// freshly added authorized SID — takes effect. The service reads its
-    /// config only at startup, so an in-place `install` alone does not apply.
+    /// Stop (if running) then start, so a rewritten service.json — e.g. a freshly added authorized SID — takes effect.
+    /// The service reads its config only at startup, so an in-place `install` alone does not apply.
     Restart,
     /// SCM state + a live pipe handshake ping.
     Status,
-    /// (internal) Daily GC: uninstall the on-demand service when it has gone
-    /// unused past the idle threshold (ADR-0027). Run by the SYSTEM Scheduled
-    /// Task that `install` registers; a no-op while the install is in use.
+    /// (internal) Daily GC: uninstall the on-demand service when it has gone unused past the idle threshold (ADR-0027).
+    /// Run by the SYSTEM Scheduled Task that `install` registers; a no-op while the install is in use.
     Gc {
         /// Override the `service.json` `gc_max_idle_days` threshold (0 = never).
         #[arg(long)]
@@ -145,10 +148,10 @@ fn run_console(
     };
     let config_path = data_dir.join("service.json");
     let (cfg, config_warning) = config::ServiceConfig::load_or_default_with_error(&config_path);
-    fmf_core::diag::init_diag(
+    fmf_runtime::diag::init_diag(
         Some(&data_dir.join("logs")),
         &cfg.log_level,
-        fmf_core::diag::SERVICE_MAX_LOG_FILES,
+        fmf_runtime::diag::SERVICE_MAX_LOG_FILES,
     );
     if let Some(error) = config_warning {
         tracing::warn!(
@@ -203,7 +206,7 @@ fn install_ctrl_c() -> std::io::Result<()> {
         if let Some(stop) = CONSOLE_STOP.get() {
             stop.store(true, Ordering::Relaxed);
         }
-        1 // handled — give main time to flush
+        1
     }
     if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
         Err(std::io::Error::last_os_error())
@@ -212,8 +215,6 @@ fn install_ctrl_c() -> std::io::Result<()> {
     }
 }
 
-// ── Lifecycle subcommands ───────────────────────────────────────────────
-
 fn install(owner_sid: Option<String>) -> Result<(), String> {
     use windows_service::service::{
         ServiceAccess, ServiceAction, ServiceActionType, ServiceErrorControl,
@@ -221,11 +222,6 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
     };
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
-    // Pin the running image before any blocking account/service/filesystem
-    // work. The unelevated UI additionally holds its verified image and parent
-    // directory leases until this child exits (SECURITY.md threat 10); this
-    // service-side guard ensures all later identity checks and copying use the
-    // same file object rather than resolving this path again.
     let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let current_image = security::TrustedSourceFile::open(&current_exe).map_err(|e| {
         format!(
@@ -234,12 +230,7 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
         )
     })?;
 
-    // 1. Capture the installing user — the one identity allowed on the pipe.
     let sid = security::current_user_sid().map_err(|e| format!("SID capture: {e}"))?;
-    // A forwarded owner SID (OTS elevation runs install as a *different* admin
-    // than the daily user) must be validated before touching the machine-wide
-    // tree. Account lookup may block; do not leave a newly created,
-    // ProgramData-inherited directory writable during that work.
     let owner_sid = match owner_sid.filter(|owner| owner != &sid) {
         Some(owner)
             if security::validate_user_sid(&owner)
@@ -257,23 +248,9 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
         authorized_sids.push(owner.clone());
     }
 
-    // 2. Disable first, then remove user start rights, then stop. ACL changes do
-    //    not revoke an already-open SERVICE_START handle, but SERVICE_DISABLED
-    //    is enforced when that handle calls StartService. Any start that won the
-    //    race just before disable is covered by the subsequent stop/wait.
-    //    Failure leaves the service disabled/restricted rather than restoring a
-    //    partially updated runnable LocalSystem registration.
     quarantine_service_for_maintenance()?;
-    // Retire the old task now. If deletion fails, continue only through root
-    // validation/rotation so its fixed action can no longer resolve an
-    // attacker-owned image, then abort: an existing task object is never
-    // "repaired" in place.
     let old_task_delete_error = delete_gc_task().err();
 
-    // 3. Create and pin the data tree before the SCM knows about a new image.
-    //    TrustedDataRoot keeps both ProgramData and the fixed child open for the
-    //    complete ritual, rejects pre-open mutation handles/reparse points/hard
-    //    links, and applies security to the same handles it verified.
     let data_dir =
         config::default_data_dir().map_err(|e| format!("ProgramData resolution: {e}"))?;
     let protected_sddl = security::data_dir_sddl();
@@ -301,18 +278,10 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
     data_root
         .ensure_directory("index", &protected_sddl)
         .map_err(|e| format!("index directory: {e}"))?;
-    // Create logs protected first; its narrowly-scoped read ACE is applied
-    // only after the forwarded/installer SID set is fully validated.
     data_root
         .ensure_directory("logs", &protected_sddl)
         .map_err(|e| format!("logs directory: {e}"))?;
 
-    // 4. Harden the tree (SECURITY.md threat 7): the data root AND index/ —
-    //    machine-wide file-name snapshots — are SYSTEM+Administrators only; logs/
-    //    additionally grants the installing admin + forwarded owner read for the
-    //    F12 copy path. Every mutation is attached to the verified handle, not a
-    //    check-then-reopened path. The (subdir, SDDL) policy lives in the
-    //    unit-pinned security::data_tree_security_descriptors builder.
     let log_readers: Vec<_> = authorized_sids.iter().map(String::as_str).collect();
     for (sub, sddl) in security::data_tree_security_descriptors(&log_readers) {
         let result = if sub.is_empty() {
@@ -331,8 +300,6 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => config::ServiceConfig::default(),
         Err(e) => return Err(format!("service.json is invalid; refusing overwrite: {e}")),
     };
-    // Never merge an existing allowlist. A valid JSON file may predate owner
-    // hardening; only identities validated in this install ritual are trusted.
     cfg.authorized_sids.clone_from(&authorized_sids);
     let config_bytes = cfg
         .to_json_bytes()
@@ -344,14 +311,6 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
         .harden_file_if_exists("last_use", &protected_sddl)
         .map_err(|e| format!("last_use security: {e}"))?;
 
-    // 4b. Copy fmf-service.exe out of the (portable) app bundle into the
-    //     hardened data root, and point the registration + GC task at this
-    //     stable copy (ADR-0027): both then survive the app folder being
-    //     deleted, and a standard user — who cannot write the SYSTEM+Admins
-    //     data root — cannot replace the SYSTEM binary (docs/SECURITY.md). The
-    //     publication uses a protected staging handle and FILE_RENAME_INFO
-    //     relative to the pinned root handle, so neither source completion nor
-    //     destination replacement depends on a re-opened path.
     let stable_exe = lifecycle::stable_exe_path(&data_dir);
     if !data_root
         .child_is_same_file("fmf-service.exe", &current_image)
@@ -370,9 +329,6 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
     data_root
         .harden_file_if_exists("fmf-service.exe", &protected_sddl)
         .map_err(|e| format!("stable exe security: {e}"))?;
-    // The user SIDs allowed to start/stop the service unelevated (ADR-0027) —
-    // the same identities authorized on the pipe.
-    // 4. Register: LocalSystem, on-demand (manual) start, restart-on-crash.
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -387,8 +343,6 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
         executable_path: stable_exe.clone(),
         launch_arguments: vec!["service-entry".into()],
         dependencies: vec![],
-        // Keep the recreated object unambiguously bound to LocalSystem rather
-        // than relying on wrapper/default-account behavior.
         account_name: Some("LocalSystem".into()),
         account_password: Some("".into()),
     };
@@ -396,16 +350,18 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
         &service_info,
         ServiceAccess::CHANGE_CONFIG
             | ServiceAccess::DELETE
-            // Required by ChangeServiceConfig2(SERVICE_CONFIG_FAILURE_ACTIONS)
-            // because the recovery actions are SC_ACTION_RESTART: the handle
-            // that configures a restart action must itself be able to start.
             | ServiceAccess::START
             | ServiceAccess::WRITE_DAC
             | ServiceAccess::WRITE_OWNER
             | ServiceAccess::READ_CONTROL,
     ) {
         Ok(service) => service,
-        Err(error) if matches!(raw_os_error(&error), Some(1072 | 1073)) => {
+        Err(error)
+            if matches!(
+                raw_os_error(&error),
+                Some(SCM_MARKED_FOR_DELETE | SCM_ALREADY_EXISTS)
+            ) =>
+        {
             return Err(format!(
                 "the retired service object still has an open handle; close find-my-files processes and rerun setup (SCM: {})",
                 error_chain(&error)
@@ -414,45 +370,31 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
         Err(error) => return Err(format!("create_service: {}", error_chain(&error))),
     };
     let configure = (|| -> Result<(), String> {
-        // `CreateService` does not accept an explicit security descriptor. Close
-        // its unavoidable default-descriptor interval immediately, before any
-        // other fallible work: keep the disabled object writable only by
-        // SYSTEM/Administrators, then add the validated start/stop principals at
-        // the final commit boundary below.
         security::set_service_handle_security(&service, &security::service_sddl(&[]))
             .map_err(|e| format!("initial service owner/group/DACL: {e}"))?;
         service
             .set_description(fmf_proto::SERVICE_PROTOCOL_MARKER)
             .map_err(|e| format!("service protocol marker: {}", error_chain(&e)))?;
-        // SC_ACTION_RESTART is what makes SERVICE_START a *required* right on the
-        // handle here, over and above SERVICE_CHANGE_CONFIG — see the access
-        // mask requested at `create_service`. Without it this call is denied
-        // while the description write just above, needing only CHANGE_CONFIG,
-        // succeeds.
         service
             .update_failure_actions(ServiceFailureActions {
                 reset_period: windows_service::service::ServiceFailureResetPeriod::After(
-                    Duration::from_hours(24),
+                    Duration::from_hours(FAILURE_RESET_HOURS),
                 ),
                 reboot_msg: None,
                 command: None,
                 actions: Some(vec![
                     ServiceAction {
                         action_type: ServiceActionType::Restart,
-                        delay: Duration::from_secs(10),
+                        delay: Duration::from_secs(RESTART_DELAY_SECS),
                     };
-                    3
+                    RECOVERY_RESTART_ATTEMPTS
                 ]),
             })
             .map_err(|e| format!("failure actions: {}", error_chain(&e)))?;
 
-        // 5. Raw config2: strip privileges, stretch the preshutdown window
-        //    (modern default is only 10s — docs/RESEARCH.md).
         set_required_privileges(&service, &["SeChangeNotifyPrivilege"])?;
-        set_preshutdown_timeout(&service, Duration::from_mins(3))?;
+        set_preshutdown_timeout(&service, Duration::from_mins(PRESHUTDOWN_MINS))?;
 
-        // 6. Finish every fallible machine mutation while the service remains
-        //    disabled and restricted to SYSTEM/Administrators.
         if cfg.gc_max_idle_days > 0 {
             register_gc_task(&data_root, &stable_exe, &protected_sddl)?;
         } else {
@@ -460,18 +402,10 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
         }
         security::set_service_handle_security(&service, &security::service_sddl(&authorized_sids))
             .map_err(|e| format!("service DACL: {e}"))?;
-        // Absolute commit point: only after config/image/task/DACL are complete
-        // does the LocalSystem service become startable again.
         set_start_type_demand(&service)?;
         Ok(())
     })();
     if let Err(primary) = configure {
-        // An install must not leave a startable, partially configured
-        // LocalSystem service. The create handle retained DELETE before the
-        // service DACL was narrowed, so rollback remains possible at every
-        // later step. Secure data files are deliberately retained: a retry is
-        // idempotent, and recursively deleting a machine data root here would
-        // risk unrelated pre-existing index data.
         let mut rollback_errors = Vec::new();
         if let Err(e) = delete_gc_task() {
             rollback_errors.push(format!("task rollback: {e}"));
@@ -499,13 +433,9 @@ fn install(owner_sid: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-/// `install` (idempotent) then `restart` in one elevated process, so the
-/// unelevated app's "register / re-register" button is a single UAC prompt. The
-/// authorized-SID list is read only at service startup, so the restart is
-/// what actually applies a freshly installed SID — the same install+restart
-/// pairing the in-app `InstallAndRestart` does, moved server-side. Covers both
-/// first install (service stopped → restart just starts it) and re-register
-/// (service running → restart re-reads service.json).
+/// `install` (idempotent) then `restart` in one elevated process, so the unelevated app's "register / re-register" button is a single UAC prompt.
+/// The authorized-SID list is read only at service startup, so the restart is what actually applies a freshly installed SID — the same install+restart pairing the in-app `InstallAndRestart` does, moved server-side.
+/// Covers both first install (service stopped → restart just starts it) and re-register (service running → restart re-reads service.json).
 fn setup(owner_sid: Option<String>) -> Result<(), String> {
     install(owner_sid)?;
     restart_service()
@@ -514,8 +444,6 @@ fn setup(owner_sid: Option<String>) -> Result<(), String> {
 fn uninstall(purge_data: bool) -> Result<(), String> {
     let data_dir =
         config::default_data_dir().map_err(|e| format!("ProgramData resolution: {e}"))?;
-    // Remove the startable SYSTEM service first. Afterwards no authorized
-    // standard user can restart it while the filesystem ritual takes locks.
     deregister_service_and_task()?;
     let protected_sddl = security::data_dir_sddl();
     let data_root = match security::TrustedDataRoot::open_and_harden_machine(&protected_sddl) {
@@ -534,11 +462,6 @@ fn uninstall(purge_data: bool) -> Result<(), String> {
             data_dir.display()
         );
     } else {
-        // Remove the stable binary copy too — it is program clutter, not user
-        // data (a re-install copies it fresh from the bundle). Keep only the
-        // index/logs/service.json the user may want to reuse; --purge-data
-        // removes those as well. uninstall runs from the bundle exe, so the
-        // stable copy is not in use and deletes cleanly (no reboot needed).
         if let Some(root) = data_root {
             root.remove_file_if_exists("fmf-service.exe")
                 .map_err(|e| format!("remove stable service binary: {e}"))?;
@@ -552,8 +475,8 @@ fn uninstall(purge_data: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Stops (if running) and deletes the SCM service, then removes the GC
-/// Scheduled Task. Shared by `uninstall` and `gc`.
+/// Stops (if running) and deletes the SCM service, then removes the GC Scheduled Task.
+/// Shared by `uninstall` and `gc`.
 fn deregister_service_and_task() -> Result<(), String> {
     use windows_service::service::ServiceAccess;
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -565,14 +488,10 @@ fn deregister_service_and_task() -> Result<(), String> {
         ServiceAccess::DELETE | ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
     ) {
         Ok(service) => Some(service),
-        Err(e) if raw_os_error(&e) == Some(1060) => None,
+        Err(e) if raw_os_error(&e) == Some(SCM_NOT_INSTALLED) => None,
         Err(e) => return Err(format!("open service for delete: {}", error_chain(&e))),
     };
     if let Some(service) = &service {
-        // Mark for deletion before stop/wait. Once marked, even an authorized
-        // user holding a stale SERVICE_START handle cannot create a fresh
-        // startable registration under this name; this retained handle remains
-        // valid for the stop/status sequence.
         service.delete().map_err(|e| format!("delete: {e}"))?;
         stop_service_handle(service)?;
     }
@@ -585,29 +504,21 @@ fn deregister_service_and_task() -> Result<(), String> {
     Ok(())
 }
 
-/// Daily GC entry (ADR-0027): when the install has gone unused past the idle
-/// threshold, tear it down completely — service, Scheduled Task, index/logs/
-/// config. The running stable binary and its (then-empty) directory cannot be
-/// deleted while this process holds them, so they are scheduled for deletion on
-/// the next reboot. Otherwise a no-op. Deliberately does NOT init the file log
-/// (that would lock the logs dir this may delete).
+/// Daily GC entry (ADR-0027): when the install has gone unused past the idle threshold, tear it down completely — service, Scheduled Task, index/logs/ config.
+/// The running stable binary and its (then-empty) directory cannot be deleted while this process holds them, so they are scheduled for deletion on the next reboot.
+/// Otherwise a no-op.
+/// Deliberately does NOT init the file log (that would lock the logs dir this may delete).
 fn gc(max_idle_days: Option<u64>) -> Result<(), String> {
     let data_dir =
         config::default_data_dir().map_err(|e| format!("ProgramData resolution: {e}"))?;
-    // A running/pending service intentionally holds a non-delete-shared root
-    // guard. Check SCM before requesting DELETE on that directory so the daily
-    // task is a clean no-op, not a deterministic sharing violation.
     if service_is_active()? {
         println!("gc: service is active — nothing to do");
         return Ok(());
     }
     let protected_sddl = security::data_dir_sddl();
-    // The GC binary runs as SYSTEM from inside this tree. Pin and verify the
-    // root before reading age/config inputs; an unexpected descriptor is never
-    // repaired in place and no check-then-path-open window is allowed.
     let data_root = match security::TrustedDataRoot::open_and_harden_machine(&protected_sddl) {
         Ok(root) => root,
-        Err(error) if error.raw_os_error() == Some(32) && service_is_active()? => {
+        Err(error) if error.raw_os_error() == Some(SHARING_VIOLATION) && service_is_active()? => {
             println!("gc: service became active — nothing to do");
             return Ok(());
         }
@@ -630,11 +541,6 @@ fn gc(max_idle_days: Option<u64>) -> Result<(), String> {
         println!("gc: in use or disabled (threshold {threshold}d) — nothing to do");
         return Ok(());
     }
-    // `last_use` is stamped on connection/stop boundaries, not continuously.
-    // A tray-resident UI may therefore keep one healthy pipe session open past
-    // the age threshold. SCM state is the authoritative live lease: never stop
-    // or deregister a service that is running/pending merely because its stamp
-    // is old.
     if service_is_active()? {
         println!("gc: service is active — nothing to do");
         return Ok(());
@@ -642,7 +548,6 @@ fn gc(max_idle_days: Option<u64>) -> Result<(), String> {
 
     println!("gc: unused > {threshold}d — removing the on-demand install");
     deregister_service_and_task()?;
-    // The service is stopped now, so these are free to delete.
     for sub in ["index", "logs"] {
         data_root
             .remove_tree_if_exists(sub)
@@ -654,7 +559,6 @@ fn gc(max_idle_days: Option<u64>) -> Result<(), String> {
     data_root
         .remove_file_if_exists("last_use")
         .map_err(|e| format!("gc remove last_use: {e}"))?;
-    // The running stable image (and its now-empty dir) self-delete on reboot.
     schedule_delete_on_reboot(&lifecycle::stable_exe_path(&data_dir))?;
     schedule_delete_on_reboot(&data_dir)?;
     println!("gc: done (binary + data dir scheduled for deletion on next reboot)");
@@ -669,8 +573,7 @@ fn service_is_active() -> Result<bool, String> {
         .map_err(|e| format!("gc SCM open: {}", error_chain(&e)))?;
     let service = match manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
         Ok(service) => service,
-        // Service already absent: stale data/task cleanup may proceed.
-        Err(error) if raw_os_error(&error) == Some(1060) => return Ok(false),
+        Err(error) if raw_os_error(&error) == Some(SCM_NOT_INSTALLED) => return Ok(false),
         Err(error) => {
             return Err(format!(
                 "gc open service for status: {}",
@@ -699,8 +602,7 @@ fn start_service() -> Result<(), String> {
         .map_err(|e| format!("open service (installed?): {}", error_chain(&e)))?;
     match service.start(&[] as &[&str]) {
         Ok(()) => {}
-        // ERROR_SERVICE_ALREADY_RUNNING(1056): starting is idempotent too.
-        Err(e) if raw_os_error(&e) == Some(1056) => {
+        Err(e) if raw_os_error(&e) == Some(SCM_ALREADY_RUNNING) => {
             println!("'{SERVICE_NAME}' is already running");
             return Ok(());
         }
@@ -710,16 +612,13 @@ fn start_service() -> Result<(), String> {
     Ok(())
 }
 
-/// Stop (if running) then start, so the service re-reads service.json — the
-/// authorized-SID list is consulted only at startup, so a fresh `install`
-/// that adds a SID does nothing for a running instance until this runs.
+/// Stop (if running) then start, so the service re-reads service.json — the authorized-SID list is consulted only at startup, so a fresh `install` that adds a SID does nothing for a running instance until this runs.
 fn restart_service() -> Result<(), String> {
     stop_service()?;
     start_service()
 }
 
-/// The OS error behind a windows-service wrapper error, when there is one
-/// (the crate's Display hides it — "IO error in winapi call").
+/// The OS error behind a windows-service wrapper error, when there is one (the crate's Display hides it — "IO error in winapi call").
 fn raw_os_error(e: &windows_service::Error) -> Option<i32> {
     use std::error::Error as _;
     e.source()?.downcast_ref::<std::io::Error>()?.raw_os_error()
@@ -735,7 +634,7 @@ fn stop_service() -> Result<(), String> {
         ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
     ) {
         Ok(service) => service,
-        Err(e) if raw_os_error(&e) == Some(1060) => {
+        Err(e) if raw_os_error(&e) == Some(SCM_NOT_INSTALLED) => {
             println!("'{SERVICE_NAME}' is not installed");
             return Ok(());
         }
@@ -762,7 +661,7 @@ fn stop_service_handle(service: &windows_service::service::Service) -> Result<()
             .stop()
             .map_err(|e| format!("stop: {}", error_chain(&e)))?;
     }
-    for _ in 0..100 {
+    for _ in 0..STOP_POLL_ATTEMPTS {
         if service
             .query_status()
             .map_err(|e| format!("query while stopping: {}", error_chain(&e)))?
@@ -772,7 +671,7 @@ fn stop_service_handle(service: &windows_service::service::Service) -> Result<()
             println!("stopped '{SERVICE_NAME}' (snapshots flushed)");
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(STOP_POLL_MILLIS));
     }
     Err("service did not stop within 20s".into())
 }
@@ -793,7 +692,6 @@ fn status() -> Result<(), String> {
         Err(e) => println!("SCM: not installed ({e})"),
     }
 
-    // Live handshake — the first diagnostic for "is anything answering?".
     match ping(fmf_proto::PIPE_NAME) {
         Ok((pid, abi)) => println!("pipe: serving (pid {pid}, abi {abi})"),
         Err(e) => println!("pipe: no answer ({e})"),
@@ -826,11 +724,8 @@ fn ping(pipe_name: &str) -> std::io::Result<(u32, u32)> {
     Ok((resp.server_pid, resp.abi_version))
 }
 
-// ── On-demand lifecycle helpers (ADR-0027) ─────────────────────────────
-
-/// Registers the daily GC Scheduled Task as SYSTEM. The XML definition (and the
-/// UTF-16 encoding `schtasks` needs across locales) is built by
-/// [`lifecycle::gc_task_xml`]; here we only drop it to a file and shell out.
+/// Registers the daily GC Scheduled Task as SYSTEM.
+/// The XML definition (and the UTF-16 encoding `schtasks` needs across locales) is built by [`lifecycle::gc_task_xml`]; here we only drop it to a file and shell out.
 fn register_gc_task(
     data_root: &security::TrustedDataRoot,
     stable_exe: &std::path::Path,
@@ -856,9 +751,6 @@ fn register_gc_task(
         }
     };
     let status = std::process::Command::new(&schtasks)
-        // The old object was synchronously removed and verified absent. Do not
-        // pass /F: a racing replacement must fail instead of being updated in
-        // place while a creator-owned task handle could retain control.
         .args(["/Create", "/TN", lifecycle::GC_TASK_NAME, "/XML"])
         .arg(&xml_path)
         .stdin(std::process::Stdio::null())
@@ -904,9 +796,8 @@ fn register_gc_task(
     }
 }
 
-/// Removes the GC Scheduled Task. `schtasks` uses exit 1 for both "not found"
-/// and real failures, so the trusted Task Scheduler store is checked before
-/// classifying it as an idempotent no-op.
+/// Removes the GC Scheduled Task.
+/// `schtasks` uses exit 1 for both "not found" and real failures, so the trusted Task Scheduler store is checked before classifying it as an idempotent no-op.
 fn delete_gc_task() -> Result<(), String> {
     let schtasks = trusted_schtasks_path()?;
     let status = std::process::Command::new(&schtasks)
@@ -978,7 +869,7 @@ fn quarantine_service_for_maintenance() -> Result<(), String> {
             | ServiceAccess::READ_CONTROL,
     ) {
         Ok(service) => service,
-        Err(error) if raw_os_error(&error) == Some(1060) => return Ok(()),
+        Err(error) if raw_os_error(&error) == Some(SCM_NOT_INSTALLED) => return Ok(()),
         Err(error) => {
             return Err(format!(
                 "open service for maintenance: {}",
@@ -986,8 +877,6 @@ fn quarantine_service_for_maintenance() -> Result<(), String> {
             ));
         }
     };
-    // Use this same retained object for the entire maintenance transaction.
-    // Disabling blocks StartService even through a pre-open SERVICE_START handle.
     set_start_type_handle(service.raw_handle(), SERVICE_DISABLED)
         .map_err(|e| format!("disable old service for maintenance: {e}"))?;
     let security_error =
@@ -1011,8 +900,8 @@ fn quarantine_service_for_maintenance() -> Result<(), String> {
     ))
 }
 
-/// Forces the final service start type to `DEMAND_START`. This is the install
-/// transaction's last commit operation.
+/// Forces the final service start type to `DEMAND_START`.
+/// This is the install transaction's last commit operation.
 fn set_start_type_demand(service: &windows_service::service::Service) -> Result<(), String> {
     use windows_sys::Win32::System::Services::SERVICE_DEMAND_START;
 
@@ -1026,9 +915,8 @@ fn set_start_type_handle(
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::Services::{ChangeServiceConfigW, SERVICE_NO_CHANGE};
 
-    // SAFETY: callers retain a live service handle with CHANGE_CONFIG, all
-    // optional string/buffer arguments are intentionally null, and no pointer
-    // is retained by ChangeServiceConfigW after it returns.
+    /* SAFETY: Callers retain a live service handle with CHANGE_CONFIG and supply null optional string and buffer arguments.
+    ChangeServiceConfigW retains no pointers after returning. */
     let ok = unsafe {
         ChangeServiceConfigW(
             service,
@@ -1052,8 +940,7 @@ fn set_start_type_handle(
     Ok(())
 }
 
-/// Schedules `path` for deletion on the next reboot — the self-delete idiom for
-/// the running GC binary and its directory (`MoveFileEx` + delay-until-reboot).
+/// Schedules `path` for deletion on the next reboot — the self-delete idiom for the running GC binary and its directory (`MoveFileEx` + delay-until-reboot).
 fn schedule_delete_on_reboot(path: &std::path::Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::GetLastError;
@@ -1069,8 +956,6 @@ fn schedule_delete_on_reboot(path: &std::path::Path) -> Result<(), String> {
     }
     Ok(())
 }
-
-// ── Raw SERVICE_CONFIG_* the wrapper crate does not cover ───────────────
 
 fn set_required_privileges(
     service: &windows_service::service::Service,
@@ -1122,9 +1007,8 @@ fn change_config2_handle(
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::Services::ChangeServiceConfig2W;
 
-    // SAFETY: `service` is the retained create/maintenance handle with
-    // CHANGE_CONFIG; `info` points to the live level-specific struct and no
-    // pointer is retained after this synchronous call.
+    /* SAFETY: `service` retains CHANGE_CONFIG access and `info` points to the live level-specific struct.
+    This synchronous call retains no pointers after returning. */
     if unsafe { ChangeServiceConfig2W(service, level, info.cast_mut()) } == 0 {
         return Err(std::io::Error::from_raw_os_error(
             // SAFETY: queried immediately after the failed Win32 call.

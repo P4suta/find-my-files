@@ -1,6 +1,5 @@
-//! The committed C# binding must equal a fresh generation. This runs inside
-//! the canonical nextest workspace run, so the ordinary test gate catches a contract edit
-//! whose C# radiation was not regenerated (ADR-0018).
+//! The committed C# binding must equal a fresh generation.
+//! This runs inside the canonical nextest workspace run, so the ordinary test gate catches a contract edit whose C# radiation was not regenerated (ADR-0018).
 
 #[test]
 fn generated_artifacts_match_the_contract() {

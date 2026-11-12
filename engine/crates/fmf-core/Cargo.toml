@@ -9,47 +9,5 @@ repository.workspace = true
 [lints]
 workspace = true
 
-[dependencies]
-fmf-contract = { workspace = true }
-memchr = { workspace = true }
-rustc-hash = { workspace = true }
-rayon = { workspace = true }
-parking_lot = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing-appender = { workspace = true }
-xxhash-rust = { workspace = true }
-regex = { workspace = true }
-regex-syntax = { workspace = true }
-unicode-normalization = { workspace = true }
-serde = { workspace = true }
-
-# Windows-only dependency: raw $MFT/USN calls use windows-sys and are gated to
-# the Windows target so the crate's pure parsers
-# (query / index::snapshot / usn::records / wtf8) compile on Linux too — that is
-# what lets engine/fuzz host libFuzzer targets for them (the modules that use
-# these deps — mft / scan / engine — are `#[cfg(windows)]` in lib.rs).
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true }
-
-[features]
-# Exposes index::testutil (TestDir RAII + sample-index builders) to the
-# other workspace crates' test suites via their dev-dependencies. Never
-# enabled by production builds.
-testutil = []
-
 [dev-dependencies]
-criterion = "0.8"
-# Property-based tests (ADR-0022): invariants + arbitrary-input robustness
-# (fold length-preservation, query-parser no-panic) across the whole input
-# space, not a handful of examples.
 proptest = "1"
-# Golden JSON-shape pins (tests/golden_json.rs) — the serde output consumed
-# by the C# side is contract surface (ADR-0018).
-serde_json = { workspace = true }
-
-[[bench]]
-name = "search"
-harness = false
-required-features = ["testutil"]

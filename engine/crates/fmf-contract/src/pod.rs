@@ -1,24 +1,17 @@
-//! `#[repr(C)]` POD types shared by the FFI (by layout) and the pipe wire
-//! (by explicit little-endian serialization in fmf-proto).
+//! `#[repr(C)]` POD types shared by the FFI (by layout) and the pipe wire (by explicit little-endian serialization in fmf-proto).
 //!
-//! The `const`
-//! blocks pin every size and offset at `cargo check` time — the same pins
-//! fmf-ffi's `contract_tests` re-assert at run time as an independent
-//! tripwire, and gen-contract radiates to C# `[FieldOffset]` values.
+//! The `const` blocks pin every size and offset at `cargo check` time — the same pins fmf-ffi's `contract_tests` re-assert at run time as an independent tripwire, and gen-contract radiates to C# `[FieldOffset]` values.
 
 use core::mem::{align_of, offset_of, size_of};
 
 use crate::volume;
 
-/// Canonical `FmfRow.flags` values. Unknown bits are reserved and producers
-/// write them as zero.
+/// Canonical `FmfRow.flags` values.
+/// Unknown bits are reserved and producers write them as zero.
 ///
-/// This set is deliberately minimal: a flag belongs here only when the client
-/// must *render* the row differently. Hidden/system is query policy
-/// (`include_hidden_system` decides whether such an entry is a result at all),
-/// not row presentation state, so it is intentionally absent — adding it would
-/// invite the UI to re-filter rows the engine already decided on, splitting one
-/// rule across two processes.
+/// This set is deliberately minimal: a flag belongs here only when the client must *render* the row differently.
+/// Hidden/system is query policy (`include_hidden_system` decides whether such an entry is a result at all),
+/// not row presentation state, so it is intentionally absent — adding it would invite the UI to re-filter rows the engine already decided on, splitting one rule across two processes.
 pub mod row_flags {
     /// The row represents a directory rather than a file.
     pub const DIRECTORY: u32 = 1 << 0;
@@ -26,8 +19,9 @@ pub mod row_flags {
     pub const KNOWN_MASK: u32 = DIRECTORY;
 }
 
-/// 56-byte result row, no padding. Offsets index into the page's
-/// trailing string blob (WTF-8). Mirrored by C# `LayoutKind.Explicit`.
+/// 56-byte result row, no padding.
+/// Offsets index into the page's trailing string blob (WTF-8).
+/// Mirrored by C# `LayoutKind.Explicit`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FmfRow {
@@ -75,8 +69,7 @@ const _: () = {
 };
 
 /// FFI page descriptor for an engine-owned row array and string blob.
-/// Pointers and the monotonic allocation-owner ID make this FFI-only — the
-/// pipe sends rows and blob inline.
+/// Pointers and the monotonic allocation-owner ID make this FFI-only — the pipe sends rows and blob inline.
 #[repr(C)]
 pub struct FmfPage {
     /// Number of rows in the `rows` array.
@@ -95,8 +88,8 @@ pub struct FmfPage {
     pub _pad2: u32,
     /// Monotonic allocation-owner ID passed to `fmf_page_free`.
     ///
-    /// Zero means no allocation. IDs are never reused, so a stale descriptor
-    /// cannot free a newer allocation whose address happened to be recycled.
+    /// Zero means no allocation.
+    /// IDs are never reused, so a stale descriptor cannot free a newer allocation whose address happened to be recycled.
     pub owner_id: u64,
 }
 
@@ -110,8 +103,7 @@ const _: () = {
     assert!(offset_of!(FmfPage, owner_id) == 32);
 };
 
-/// Engine-owned UTF-8 JSON payload (stats, query traces); release its
-/// monotonic allocation-owner ID with `fmf_blob_free`.
+/// Engine-owned UTF-8 JSON payload (stats, query traces); release its monotonic allocation-owner ID with `fmf_blob_free`.
 #[repr(C)]
 pub struct FmfBlob {
     /// Pointer to the UTF-8 JSON payload bytes.
@@ -123,7 +115,8 @@ pub struct FmfBlob {
     pub _pad: u32,
     /// Monotonic allocation-owner ID passed to `fmf_blob_free`.
     ///
-    /// Zero means no allocation. IDs are never reused.
+    /// Zero means no allocation.
+    /// IDs are never reused.
     pub owner_id: u64,
 }
 
@@ -136,8 +129,8 @@ const _: () = {
     assert!(offset_of!(FmfBlob, owner_id) == 16);
 };
 
-/// POD event payload — FFI callback argument and pipe event-push body
-/// (32 bytes). `volume` is the zero-padded UTF-8 drive label ("C:").
+/// POD event payload — FFI callback argument and pipe event-push body (32 bytes).
+/// `volume` is the zero-padded UTF-8 drive label ("C:").
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FmfEvent {
@@ -183,9 +176,9 @@ const _: () = {
     assert!(offset_of!(FmfEvent, volume) == 16);
 };
 
-/// Query options — 32 bytes, LE on the wire. Field values are the
-/// [`crate::options`] enums as u32. The explicit reserved word makes the
-/// `u64` basis naturally aligned in both Rust and C.
+/// Query options — 32 bytes, LE on the wire.
+/// Field values are the [`crate::options`] enums as u32.
+/// The explicit reserved word makes the `u64` basis naturally aligned in both Rust and C.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FmfQueryOptions {
@@ -197,18 +190,16 @@ pub struct FmfQueryOptions {
     pub case_mode: u32,
     /// Nonzero shows hidden/system entries (default-excluded otherwise).
     pub include_hidden_system: u32,
-    /// Packed regex mode (ADR-0023): bit0 = treat the whole query as one
-    /// regex, bit1 = scope (0 = file name, 1 = full path). 0 = off (the
-    /// query parses normally; `regex:` per-term syntax still works). Higher
-    /// bits are reserved 0.
+    /// Packed regex mode (ADR-0023): bit0 = treat the whole query as one regex, bit1 = scope (0 = file name, 1 = full path).
+    /// 0 = off (the query parses normally; `regex:` per-term syntax still works).
+    /// Higher bits are reserved 0.
     pub regex_mode: u32,
     /// Reserved; callers and wire decoders require zero.
     #[expect(clippy::pub_underscore_fields, reason = "C ABI reserved field")]
     pub _reserved: u32,
     /// Optional live result handle currently presented by the caller.
-    /// Zero means no basis. The boundary validates ownership before passing
-    /// the referenced `ResultSet` to core; this opaque ID is never interpreted
-    /// by core itself.
+    /// Zero means no basis.
+    /// The boundary validates ownership before passing the referenced `ResultSet` to core; this opaque ID is never interpreted by core itself.
     pub presentation_basis: u64,
 }
 
@@ -229,7 +220,8 @@ const _: () = {
     assert!(offset_of!(FmfQueryOptions, presentation_basis) == 24);
 };
 
-/// FFI volume status. `state` is [`crate::options::VolumeState`] as u32.
+/// FFI volume status.
+/// `state` is [`crate::options::VolumeState`] as u32.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FmfVolumeStatus {
@@ -252,9 +244,8 @@ const _: () = {
     assert!(offset_of!(FmfVolumeStatus, entries) == 24);
 };
 
-/// 16-byte little-endian pipe frame header. `to_bytes`/`from_bytes` are
-/// pure byte conversions — the `MAX_PAYLOAD_LEN` *policy* lives in
-/// fmf-proto's `decode_header`/`read_frame`.
+/// 16-byte little-endian pipe frame header.
+/// `to_bytes`/`from_bytes` are pure byte conversions — the `MAX_PAYLOAD_LEN` *policy* lives in fmf-proto's `decode_header`/`read_frame`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
@@ -271,30 +262,60 @@ pub struct FrameHeader {
 }
 
 impl FrameHeader {
-    /// Size of the frame header in bytes (16).
+    /// Size of the frame header in bytes.
     pub const LEN: usize = size_of::<Self>();
 
-    /// Serializes the header to its 16-byte little-endian wire form.
-    #[must_use]
-    pub fn to_bytes(self) -> [u8; Self::LEN] {
-        let mut b = [0u8; Self::LEN];
-        b[0..4].copy_from_slice(&self.len.to_le_bytes());
-        b[4..6].copy_from_slice(&self.opcode.to_le_bytes());
-        b[6..8].copy_from_slice(&self.flags.to_le_bytes());
-        b[8..12].copy_from_slice(&self.request_id.to_le_bytes());
-        b[12..16].copy_from_slice(&self.status.to_le_bytes());
-        b
+    fn write_field<const N: usize>(bytes: &mut [u8; Self::LEN], offset: usize, field: [u8; N]) {
+        bytes[offset..offset + N].copy_from_slice(&field);
     }
 
-    /// Parses a header from its 16-byte little-endian wire form.
+    const fn read_field<const N: usize>(bytes: &[u8; Self::LEN], offset: usize) -> [u8; N] {
+        let mut field = [0; N];
+        let mut index = 0;
+        while index < N {
+            field[index] = bytes[offset + index];
+            index += 1;
+        }
+        field
+    }
+
+    /// Serialize the header as little-endian wire bytes.
     #[must_use]
-    pub const fn from_bytes(b: &[u8; Self::LEN]) -> Self {
+    pub fn to_bytes(self) -> [u8; Self::LEN] {
+        let mut bytes = [0; Self::LEN];
+        Self::write_field(&mut bytes, offset_of!(Self, len), self.len.to_le_bytes());
+        Self::write_field(
+            &mut bytes,
+            offset_of!(Self, opcode),
+            self.opcode.to_le_bytes(),
+        );
+        Self::write_field(
+            &mut bytes,
+            offset_of!(Self, flags),
+            self.flags.to_le_bytes(),
+        );
+        Self::write_field(
+            &mut bytes,
+            offset_of!(Self, request_id),
+            self.request_id.to_le_bytes(),
+        );
+        Self::write_field(
+            &mut bytes,
+            offset_of!(Self, status),
+            self.status.to_le_bytes(),
+        );
+        bytes
+    }
+
+    /// Parse a complete little-endian wire header.
+    #[must_use]
+    pub const fn from_bytes(bytes: &[u8; Self::LEN]) -> Self {
         Self {
-            len: u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-            opcode: u16::from_le_bytes([b[4], b[5]]),
-            flags: u16::from_le_bytes([b[6], b[7]]),
-            request_id: u32::from_le_bytes([b[8], b[9], b[10], b[11]]),
-            status: i32::from_le_bytes([b[12], b[13], b[14], b[15]]),
+            len: u32::from_le_bytes(Self::read_field(bytes, offset_of!(Self, len))),
+            opcode: u16::from_le_bytes(Self::read_field(bytes, offset_of!(Self, opcode))),
+            flags: u16::from_le_bytes(Self::read_field(bytes, offset_of!(Self, flags))),
+            request_id: u32::from_le_bytes(Self::read_field(bytes, offset_of!(Self, request_id))),
+            status: i32::from_le_bytes(Self::read_field(bytes, offset_of!(Self, status))),
         }
     }
 }

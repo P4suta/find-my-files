@@ -1,0 +1,2341 @@
+//! Reduce a journal batch to per-object final operations and apply them to the link-row index.
+//!
+//! Reason flags are aggregated per FRN first (a rename storm touching one file collapses to one final state), then ops run in first-touch order so that `mkdir a; touch a\b` resolves parents.
+//! Hard-link changes reconcile an authoritative complete set; one event name is never mistaken for the object's only path.
+
+use std::collections::HashMap;
+
+use fmf_core::usn::reasons::{ChangeKind, ChangeReasons};
+use rustc_hash::FxHashMap;
+
+use super::records::UsnRecord;
+use crate::index::{Frn, LinkReconcileStats, RawEntry, VolumeIndex};
+
+/// One searchable directory link returned by a complete live metadata read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkInfo {
+    /// Complete record+sequence reference of the parent directory.
+    pub parent_frn: u64,
+    /// Original NTFS name, preserving arbitrary UTF-16 code units.
+    pub name: Vec<u16>,
+}
+
+/// Authoritative outcome of reading one file object's current link set.
+///
+/// `Gone` is intentionally distinct from `Failed`: only an exact OS-level proof that the requested object generation no longer exists permits the index to discard every known path.
+/// A malformed record, incomplete `$ATTRIBUTE_LIST`, or transient I/O failure instead rejects the journal batch and requests a clean rescan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LinkSnapshot {
+    /// Complete, non-empty set of searchable links.
+    Present(Vec<LinkInfo>),
+    /// The exact full-FRN object generation is proven not to exist.
+    Gone,
+    /// No authoritative answer is available.
+    Failed,
+}
+
+/// Concrete metadata source for created/changed files.
+///
+/// The USN record carries neither size/mtime nor a complete hard-link set (RESEARCH.md): production reads the current NTFS volume, while deterministic replays select none, one constant, or FRN-keyed fixture maps.
+///
+/// This deliberately is not a trait/port.
+/// The engine's two OS seams remain exactly `SnapshotStore` and `JournalSource` (ADR-0018).
+pub struct MetadataSource {
+    kind: MetadataSourceKind,
+}
+
+enum MetadataSourceKind {
+    None,
+    Constant((u64, i64)),
+    Map {
+        stats: HashMap<u64, (u64, i64)>,
+        links: HashMap<u64, LinkSnapshot>,
+    },
+    #[cfg(windows)]
+    Volume(super::session::VolumeMetadataFetcher),
+}
+
+impl MetadataSource {
+    /// A source with no answer; values are carried over or initialized to 0.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            kind: MetadataSourceKind::None,
+        }
+    }
+
+    /// Return the same size/mtime for every FRN (deterministic tests).
+    #[must_use]
+    pub const fn constant(size: u64, mtime: i64) -> Self {
+        Self {
+            kind: MetadataSourceKind::Constant((size, mtime)),
+        }
+    }
+
+    /// Return canned size/mtime values keyed by full FRN (fixture replays).
+    #[must_use]
+    pub fn map(values: HashMap<u64, (u64, i64)>) -> Self {
+        Self {
+            kind: MetadataSourceKind::Map {
+                stats: values,
+                links: HashMap::new(),
+            },
+        }
+    }
+
+    /// Return canned metadata and complete hard-link sets keyed by full FRN.
+    #[must_use]
+    pub fn map_with_links(
+        stats: HashMap<u64, (u64, i64)>,
+        links: HashMap<u64, Vec<LinkInfo>>,
+    ) -> Self {
+        let links = links
+            .into_iter()
+            .map(|(frn, links)| {
+                let snapshot = if links.is_empty() {
+                    LinkSnapshot::Failed
+                } else {
+                    LinkSnapshot::Present(links)
+                };
+                (frn, snapshot)
+            })
+            .collect();
+        Self {
+            kind: MetadataSourceKind::Map { stats, links },
+        }
+    }
+
+    /// Open a live NTFS volume source for per-FRN metadata reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`super::UsnError::OpenVolume`] when the volume cannot be opened.
+    #[cfg(windows)]
+    pub fn open_volume(drive: &str) -> Result<Self, super::UsnError> {
+        Self::open_volume_cancellable(
+            drive,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn open_volume_cancellable(
+        drive: &str,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<Self, super::UsnError> {
+        Ok(Self {
+            kind: MetadataSourceKind::Volume(super::session::VolumeMetadataFetcher::open(
+                drive, stop,
+            )?),
+        })
+    }
+
+    pub(crate) fn stat(&self, frn: u64) -> Option<(u64, i64)> {
+        match &self.kind {
+            MetadataSourceKind::None => None,
+            MetadataSourceKind::Constant(value) => Some(*value),
+            MetadataSourceKind::Map { stats, .. } => stats.get(&frn).copied(),
+            #[cfg(windows)]
+            MetadataSourceKind::Volume(source) => source.stat(frn),
+        }
+    }
+
+    pub(crate) fn links(&self, frn: u64) -> LinkSnapshot {
+        match &self.kind {
+            MetadataSourceKind::None | MetadataSourceKind::Constant(_) => LinkSnapshot::Failed,
+            MetadataSourceKind::Map { links, .. } => {
+                links.get(&frn).cloned().unwrap_or(LinkSnapshot::Failed)
+            }
+            #[cfg(windows)]
+            MetadataSourceKind::Volume(source) => source.links(frn),
+        }
+    }
+}
+
+/// Outcome tally for one applied journal batch, one counter per op kind.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BatchStats {
+    /// Files/dirs created or renamed (upserted or moved in place).
+    pub created_or_renamed: u32,
+    /// Entries removed from the index because they were tombstoned.
+    pub deleted: u32,
+    /// Existing entries whose size/mtime were refreshed.
+    pub stat_updated: u32,
+    /// Records that resolved to no index change (e.g. delete of an entry that was never present, or a stat with no fetchable value).
+    pub ignored: u32,
+    /// Volume lookups (size/mtime) that came back empty — usually the file vanished before we could stat it; floods indicate a real problem.
+    pub stat_failures: u32,
+    /// Complete hard-link snapshots that could not be read or were empty.
+    /// The entire batch is left unapplied and the worker performs a full rescan; checkpointing past one of these would make stale links permanent.
+    pub hard_link_refresh_failures: u32,
+    /// Records the live index refused because applying them would have broken a topology invariant (parent cycle, unresolved or non-directory parent,
+    /// ambiguous hard link).
+    /// The record is dropped rather than half-applied and the batch is rescanned.
+    pub index_rejections: u32,
+    /// The batch could not be applied atomically and must not be checkpointed.
+    pub rescan_required: bool,
+}
+
+struct Agg {
+    reasons: ChangeReasons,
+    /// Index into the batch of the latest record for this FRN (carries the final name/parent/attributes).
+    last: usize,
+    /// Earliest old-name event in a collapsed rename storm.
+    /// Its identity is the link that existed before this batch.
+    rename_old: Option<usize>,
+}
+
+/// Everything one journal batch reads — from the volume and from the pre-mutation index — resolved before the index write lock is taken.
+///
+/// Those reads are blocking `DeviceIoControl` round-trips: a complete hard-link set per link-affecting object, then size/mtime per object.
+/// Performing them inside the mutation would hold the single-writer lock across raw-volume I/O and stall every concurrent query for its duration,
+/// against a search budget measured in single-digit milliseconds.
+/// Splitting the phases makes that structural rather than conventional:
+/// [`apply_planned`] takes no [`MetadataSource`], so it cannot do I/O at all.
+///
+/// Planning reads the index only to *classify* records — is this rename ambiguous, does this exact link already exist — never to decide a row's final value, and the index has a single writer: the volume worker that runs both phases back to back.
+/// Nothing can mutate between them.
+/// Even if a future caller broke that, every planned decision is re-validated by the mutation itself (`upsert_*` / `reconcile_*` return `IndexMutationError`),
+/// which rejects the batch and rescans rather than applying a stale one.
+pub(crate) struct BatchPlan {
+    /// Distinct objects in first-touch order (parents before their children).
+    order: Vec<Frn>,
+    /// Per-object collapsed reason flags and record positions.
+    agg: FxHashMap<Frn, Agg>,
+    /// Authoritative link sets read for link-affecting file events.
+    link_snapshots: FxHashMap<Frn, LinkSnapshot>,
+    /// Prefetched size/mtime.
+    /// A missing key is exactly what [`MetadataSource::stat`] reports as `None`: no answer available.
+    stat_snapshots: FxHashMap<Frn, (u64, i64)>,
+    /// Preflight rejections.
+    /// Non-zero means the batch is already inapplicable and [`apply_planned`] mutates nothing.
+    preflight_failures: u32,
+}
+
+/// Apply one journal batch.
+/// Bumps the content generation exactly once.
+pub fn apply_batch(
+    idx: &mut VolumeIndex,
+    records: &[UsnRecord],
+    fetch: &MetadataSource,
+) -> BatchStats {
+    let plan = plan_batch(idx, records, fetch);
+    apply_planned(idx, records, plan)
+}
+
+/// Read-only phase: collapse the batch, then resolve every volume read it will need.
+/// Safe to run under a shared index lock (see [`BatchPlan`]).
+#[must_use]
+pub(crate) fn plan_batch(
+    idx: &VolumeIndex,
+    records: &[UsnRecord],
+    fetch: &MetadataSource,
+) -> BatchPlan {
+    let mut order: Vec<Frn> = Vec::new();
+    let mut agg: FxHashMap<Frn, Agg> = FxHashMap::default();
+
+    for (i, r) in records.iter().enumerate() {
+        let key = Frn(r.frn);
+        let reasons = ChangeReasons::from_bits(r.reason);
+        match agg.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let a = e.get_mut();
+                a.reasons = a.reasons.union(reasons);
+                a.last = i;
+                if a.rename_old.is_none() && reasons.has_old_name() {
+                    a.rename_old = Some(i);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(Agg {
+                    reasons,
+                    last: i,
+                    rename_old: reasons.has_old_name().then_some(i),
+                });
+                order.push(key);
+            }
+        }
+    }
+
+    let mut link_snapshots = FxHashMap::default();
+    let mut preflight_failures = 0u32;
+    for key in &order {
+        let a = &agg[key];
+        if !a.reasons.changes_links() {
+            continue;
+        }
+        let last = &records[a.last];
+        if last.is_dir() {
+            if a.reasons.changes_hard_links() {
+                preflight_failures += 1;
+            }
+            continue;
+        }
+        let snapshot = fetch.links(last.frn);
+        let complete = matches!(&snapshot, LinkSnapshot::Present(links) if !links.is_empty())
+            || matches!(&snapshot, LinkSnapshot::Gone);
+        let exact_rename_old = a.rename_old.is_some_and(|old| {
+            let old = &records[old];
+            idx.entry_by_link(*key, Frn(old.parent_frn), &old.name)
+                .is_some()
+        });
+        let ambiguous_rename =
+            a.reasons.renames() && idx.entries_by_frn(*key).count() > 1 && !exact_rename_old;
+        if a.reasons.rejects_link_snapshot(complete, ambiguous_rename) {
+            preflight_failures += 1;
+        }
+        link_snapshots.insert(*key, snapshot);
+    }
+
+    let mut stat_snapshots = FxHashMap::default();
+    if preflight_failures == 0 {
+        for key in &order {
+            let a = &agg[key];
+            let has_links = matches!(
+                link_snapshots.get(key),
+                Some(LinkSnapshot::Present(links)) if !links.is_empty()
+            );
+            let mutates_stat =
+                matches!(a.reasons.kind(), ChangeKind::Upsert | ChangeKind::Metadata);
+            if (has_links || mutates_stat)
+                && let Some(value) = fetch.stat(records[a.last].frn)
+            {
+                stat_snapshots.insert(*key, value);
+            }
+        }
+    }
+
+    BatchPlan {
+        order,
+        agg,
+        link_snapshots,
+        stat_snapshots,
+        preflight_failures,
+    }
+}
+
+/// Mutation phase: apply a [`BatchPlan`] under the index write lock.
+/// Performs no I/O — every volume answer it needs is already in the plan.
+pub(crate) fn apply_planned(
+    idx: &mut VolumeIndex,
+    records: &[UsnRecord],
+    plan: BatchPlan,
+) -> BatchStats {
+    let BatchPlan {
+        order,
+        agg,
+        mut link_snapshots,
+        stat_snapshots,
+        preflight_failures,
+    } = plan;
+    let mut stats = BatchStats::default();
+    if preflight_failures > 0 {
+        stats.hard_link_refresh_failures = preflight_failures;
+        stats.ignored = preflight_failures;
+        stats.rescan_required = true;
+        return stats;
+    }
+
+    let first_new = idx.len() as u32;
+    for key in order {
+        let a = &agg[&key];
+        let last = &records[a.last];
+
+        if let Some(snapshot) = link_snapshots.remove(&key) {
+            match snapshot {
+                LinkSnapshot::Present(links) if !links.is_empty() => {
+                    let fetched = stat_snapshots.get(&key).copied();
+                    if fetched.is_none() {
+                        stats.stat_failures += 1;
+                    }
+                    let carried = idx
+                        .entry_by_frn(key)
+                        .map(|id| (idx.size(id), idx.mtime(id)));
+                    let (size, mtime) = fetched.or(carried).unwrap_or((0, 0));
+                    let entries: Vec<_> = links
+                        .iter()
+                        .map(|link| RawEntry {
+                            parent_frn: Frn(link.parent_frn),
+                            frn: key,
+                            name_utf16: &link.name,
+                            is_dir: false,
+                            is_reparse: last.is_reparse(),
+                            is_hidden: last.is_hidden(),
+                            is_system: last.is_system(),
+                            size,
+                            mtime,
+                        })
+                        .collect();
+                    let Ok(LinkReconcileStats {
+                        added,
+                        removed,
+                        retained,
+                        metadata_changed,
+                    }) = idx.reconcile_file_links_usn(key, &entries)
+                    else {
+                        stats.index_rejections += 1;
+                        stats.ignored += 1;
+                        stats.rescan_required = true;
+                        continue;
+                    };
+                    stats.created_or_renamed += added;
+                    stats.deleted += removed;
+                    if fetched.is_some() && retained > 0 {
+                        stats.stat_updated += 1;
+                    } else if fetched.is_none() && added == 0 && removed == 0 && !metadata_changed {
+                        stats.ignored += 1;
+                    }
+                    continue;
+                }
+                LinkSnapshot::Gone => {
+                    let removed = idx.entries_by_frn(key).count() as u32;
+                    idx.delete_frn(key);
+                    if removed == 0 {
+                        stats.ignored += 1;
+                    } else {
+                        stats.deleted += removed;
+                    }
+                    continue;
+                }
+                LinkSnapshot::Failed | LinkSnapshot::Present(_) => {}
+            }
+        }
+
+        match a.reasons.kind() {
+            ChangeKind::Delete => {
+                let removed = idx.entries_by_frn(key).count() as u32;
+                idx.delete_frn(key);
+                if removed == 0 {
+                    stats.ignored += 1;
+                } else {
+                    stats.deleted += removed;
+                }
+            }
+            ChangeKind::Upsert => {
+                let existing = idx.entry_by_frn(key);
+                if let Some(old) = existing
+                    && idx.is_dir(old)
+                    && last.is_dir()
+                {
+                    if idx
+                        .rename_dir_frn_in_place(key, &last.name, Frn(last.parent_frn))
+                        .is_err()
+                    {
+                        stats.index_rejections += 1;
+                        stats.ignored += 1;
+                        stats.rescan_required = true;
+                        continue;
+                    }
+                    idx.update_object_attrs_frn(
+                        key,
+                        last.is_reparse(),
+                        last.is_hidden(),
+                        last.is_system(),
+                    );
+                    stats.created_or_renamed += 1;
+                    continue;
+                }
+                if existing.is_none()
+                    && !a.reasons.creates()
+                    && idx.entry_by_record(key.record()).is_some()
+                {
+                    stats.ignored += 1;
+                    continue;
+                }
+                let fetched = stat_snapshots.get(&key).copied();
+                if fetched.is_none() {
+                    stats.stat_failures += 1;
+                }
+                let carried = existing.map(|id| (idx.size(id), idx.mtime(id)));
+                let (size, mtime) = fetched.or(carried).unwrap_or((0, 0));
+                let entry = RawEntry {
+                    parent_frn: Frn(last.parent_frn),
+                    frn: Frn(last.frn),
+                    name_utf16: &last.name,
+                    is_dir: last.is_dir(),
+                    is_reparse: last.is_reparse(),
+                    is_hidden: last.is_hidden(),
+                    is_system: last.is_system(),
+                    size,
+                    mtime,
+                };
+
+                let upserted = if !last.is_dir() && a.reasons.renames() {
+                    let before = idx.entries_by_frn(key).count();
+                    let removed = a.rename_old.and_then(|old| {
+                        let old = &records[old];
+                        idx.delete_link_frn(key, Frn(old.parent_frn), &old.name)
+                    });
+                    if removed.is_none() && before > 1 {
+                        stats.hard_link_refresh_failures += 1;
+                        stats.ignored += 1;
+                        stats.rescan_required = true;
+                        continue;
+                    }
+                    if before == 1 {
+                        idx.upsert_usn(&entry)
+                    } else {
+                        idx.upsert_link_usn(&entry)
+                    }
+                } else if last.is_dir() {
+                    idx.upsert_usn(&entry)
+                } else {
+                    idx.upsert_link_usn(&entry)
+                };
+                if upserted.is_err() {
+                    stats.index_rejections += 1;
+                    stats.ignored += 1;
+                    stats.rescan_required = true;
+                    continue;
+                }
+                stats.created_or_renamed += 1;
+            }
+            ChangeKind::Metadata => {
+                apply_metadata_change(
+                    idx,
+                    key,
+                    last,
+                    stat_snapshots.get(&key).copied(),
+                    &mut stats,
+                );
+            }
+            ChangeKind::Ignore => {
+                stats.ignored += 1;
+            }
+        }
+    }
+
+    if idx.merge_new_into_permutations(first_new).is_err() {
+        stats.index_rejections += 1;
+        stats.rescan_required = true;
+    }
+    stats
+}
+
+fn apply_metadata_change(
+    idx: &mut VolumeIndex,
+    key: Frn,
+    record: &UsnRecord,
+    fetched: Option<(u64, i64)>,
+    stats: &mut BatchStats,
+) {
+    let attrs_changed = idx.update_object_attrs_frn(
+        key,
+        record.is_reparse(),
+        record.is_hidden(),
+        record.is_system(),
+    );
+    if let Some((size, mtime)) = fetched {
+        if idx.update_stat_frn(key, size, mtime).is_some() {
+            stats.stat_updated += 1;
+        } else {
+            stats.ignored += 1;
+        }
+    } else if let Some(attrs_changed) = attrs_changed {
+        stats.stat_failures += 1;
+        if !attrs_changed {
+            stats.ignored += 1;
+        }
+    } else {
+        stats.ignored += 1;
+    }
+}
+
+#[cfg(kani)]
+#[path = "apply_proofs.rs"]
+mod kani_proofs;
+
+#[cfg(test)]
+mod tests {
+    use super::super::records::reason;
+    use super::*;
+    use crate::index::VolumeIndexBuilder;
+    use crate::index::testutil::{build_hardlink_sample, u16s};
+    use crate::query::{CaseMode, QueryOptions, UtcResolver, compile, parse, search};
+
+    fn frn(sequence: u16, record: u64) -> u64 {
+        (u64::from(sequence) << 48) | record
+    }
+
+    fn full_ref(record: u64) -> u64 {
+        if record == 5 { record } else { frn(1, record) }
+    }
+
+    fn rec(frn: u64, parent: u64, reason: u32, attrs: u32, name: &str) -> UsnRecord {
+        rec_full(full_ref(frn), full_ref(parent), reason, attrs, name)
+    }
+
+    fn rec_full(frn: u64, parent_frn: u64, reason: u32, attrs: u32, name: &str) -> UsnRecord {
+        UsnRecord {
+            usn: 0,
+            frn,
+            parent_frn,
+            reason,
+            attributes: attrs,
+            name: name.encode_utf16().collect(),
+        }
+    }
+
+    const FT0: i64 = 132_539_040_000_000_000;
+    const FT1: i64 = 132_854_688_000_000_000;
+
+    fn base_index() -> VolumeIndex {
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
+        let docs: Vec<u16> = "docs".encode_utf16().collect();
+        let note: Vec<u16> = "note.txt".encode_utf16().collect();
+        b.push(RawEntry {
+            parent_frn: Frn(5),
+            frn: Frn(frn(1, 10)),
+            name_utf16: &docs,
+            is_dir: true,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 0,
+            mtime: 0,
+        });
+        b.push(RawEntry {
+            parent_frn: Frn(10),
+            frn: Frn(frn(1, 11)),
+            name_utf16: &note,
+            is_dir: false,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 100,
+            mtime: FT0,
+        });
+        b.finish()
+    }
+
+    fn strict_base_index() -> VolumeIndex {
+        let root = Frn(frn(1, 5));
+        let mut builder = VolumeIndexBuilder::new_strict("C:", root).unwrap();
+        for (record, parent, name, directory) in
+            [(10, 5, "docs", true), (11, 10, "note.txt", false)]
+        {
+            builder.push(RawEntry {
+                parent_frn: Frn(frn(1, parent)),
+                frn: Frn(frn(1, record)),
+                name_utf16: &u16s(name),
+                is_dir: directory,
+                is_reparse: false,
+                is_hidden: false,
+                is_system: false,
+                size: if directory { 0 } else { 100 },
+                mtime: FT0,
+            });
+        }
+        builder.finish_strict().unwrap()
+    }
+
+    #[test]
+    fn rejected_link_reconciliation_counts_the_failure_and_preserves_rows() {
+        let mut idx = strict_base_index();
+        let object = frn(1, 11);
+        let existing = idx.entry_by_frn(Frn(object)).unwrap();
+        let before = (
+            idx.len(),
+            idx.live_len(),
+            visible_names(&idx, ""),
+            path_of(&idx, 11),
+            idx.size(existing),
+            idx.mtime(existing),
+        );
+        let source = MetadataSource::map_with_links(
+            HashMap::from([(object, (321, FT1))]),
+            HashMap::from([(
+                object,
+                vec![LinkInfo {
+                    parent_frn: frn(1, 999),
+                    name: u16s("moved.txt"),
+                }],
+            )]),
+        );
+        let records = [rec_full(
+            object,
+            frn(1, 999),
+            reason::HARD_LINK_CHANGE,
+            0x20,
+            "moved.txt",
+        )];
+        assert_eq!(
+            apply_batch(&mut idx, &records, &source),
+            BatchStats {
+                index_rejections: 1,
+                ignored: 1,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert_eq!(idx.entry_by_frn(Frn(object)), Some(existing));
+        assert_eq!(
+            (
+                idx.len(),
+                idx.live_len(),
+                visible_names(&idx, ""),
+                path_of(&idx, 11),
+                idx.size(existing),
+                idx.mtime(existing)
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn rejected_batch_finalization_counts_the_failure_and_completes_the_permutation() {
+        let mut idx = strict_base_index();
+        let generation = idx.content_generation();
+        let records = [rec_full(
+            frn(1, 10),
+            frn(1, 5),
+            reason::FILE_DELETE,
+            0x10,
+            "docs",
+        )];
+        assert_eq!(
+            apply_batch(&mut idx, &records, &MetadataSource::none()),
+            BatchStats {
+                deleted: 1,
+                index_rejections: 1,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert!(idx.entry_by_frn(Frn(frn(1, 10))).is_none());
+        assert!(idx.entry_by_frn(Frn(frn(1, 11))).is_some());
+        assert_eq!(idx.name_permutation().len(), idx.len());
+        assert_eq!(idx.content_generation(), generation + 1);
+    }
+
+    #[test]
+    fn metadata_outcomes_distinguish_object_presence_and_available_fields() {
+        for exists in [false, true] {
+            for fetched in [false, true] {
+                for attributes in [0x20, 0x2, 0x4, 0x400, 0x406] {
+                    let mut idx = base_index();
+                    let target = if exists { 11 } else { 999 };
+                    let records = [rec(
+                        target,
+                        10,
+                        reason::BASIC_INFO_CHANGE,
+                        attributes,
+                        "note.txt",
+                    )];
+                    let source = if fetched {
+                        MetadataSource::constant(321, FT1)
+                    } else {
+                        MetadataSource::none()
+                    };
+                    let changed_attributes = attributes & 0x406 != 0;
+                    assert_eq!(
+                        apply_batch(&mut idx, &records, &source),
+                        BatchStats {
+                            stat_updated: u32::from(exists && fetched),
+                            stat_failures: u32::from(exists && !fetched),
+                            ignored: u32::from(!exists || (!fetched && !changed_attributes)),
+                            ..BatchStats::default()
+                        },
+                        "exists {exists}, fetched {fetched}, attributes {attributes}"
+                    );
+                    let id = idx.entry_by_frn(Frn(frn(1, 11))).unwrap();
+                    assert_eq!(idx.size(id), if exists && fetched { 321 } else { 100 });
+                    assert_eq!(idx.mtime(id), if exists && fetched { FT1 } else { FT0 });
+                    assert_eq!(idx.is_reparse(id), exists && attributes & 0x400 != 0);
+                    assert_eq!(idx.is_excluded(id), exists && attributes & 0x6 != 0);
+                    assert_eq!(idx.len(), 3);
+                }
+            }
+        }
+    }
+
+    fn path_of(idx: &VolumeIndex, record: u64) -> String {
+        let id = idx.entry_by_record(record).unwrap();
+        let mut p = Vec::new();
+        idx.append_path(id, &mut p).unwrap();
+        String::from_utf8(p).unwrap()
+    }
+
+    fn visible_names(idx: &VolumeIndex, text: &str) -> Vec<String> {
+        let ast = parse(text).unwrap();
+        let query = compile(&ast, CaseMode::Smart, &UtcResolver).unwrap();
+        search(idx, &query, &QueryOptions::default())
+            .0
+            .ids
+            .iter()
+            .map(|&id| String::from_utf8(idx.name(id).to_vec()).unwrap())
+            .collect()
+    }
+
+    fn source_with_snapshot(frn: u64, snapshot: LinkSnapshot) -> MetadataSource {
+        MetadataSource {
+            kind: MetadataSourceKind::Map {
+                stats: HashMap::new(),
+                links: HashMap::from([(frn, snapshot)]),
+            },
+        }
+    }
+
+    #[test]
+    fn journal_batch_planning_keeps_object_order_and_the_first_old_name() {
+        let mut idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let created = frn(1, 200);
+        let parent_a = frn(1, 10);
+        let parent_b = frn(1, 20);
+        let records = [
+            rec_full(
+                object,
+                parent_a,
+                reason::RENAME_OLD_NAME,
+                0x20,
+                "shared.txt",
+            ),
+            rec_full(created, parent_a, reason::FILE_CREATE, 0x20, "created.txt"),
+            rec_full(
+                object,
+                parent_a,
+                reason::RENAME_NEW_NAME,
+                0x20,
+                "temporary.txt",
+            ),
+            rec_full(
+                object,
+                parent_a,
+                reason::RENAME_OLD_NAME,
+                0x20,
+                "temporary.txt",
+            ),
+            rec_full(
+                object,
+                parent_b,
+                reason::RENAME_NEW_NAME | reason::CLOSE,
+                0x2,
+                "renamed.txt",
+            ),
+        ];
+        let plan = plan_batch(&idx, &records, &MetadataSource::constant(91, FT1));
+        assert_eq!(plan.order, [Frn(object), Frn(created)]);
+        assert_eq!(plan.agg.len(), 2);
+        assert_eq!(plan.agg[&Frn(object)].last, 4);
+        assert_eq!(plan.agg[&Frn(object)].rename_old, Some(0));
+        assert_eq!(
+            plan.agg[&Frn(object)].reasons,
+            ChangeReasons::from_bits(
+                reason::RENAME_OLD_NAME | reason::RENAME_NEW_NAME | reason::CLOSE
+            )
+        );
+        assert_eq!(plan.stat_snapshots.len(), 2);
+        assert_eq!(plan.preflight_failures, 0);
+        let stats = apply_planned(&mut idx, &records, plan);
+        assert_eq!(
+            stats,
+            BatchStats {
+                created_or_renamed: 2,
+                ..BatchStats::default()
+            }
+        );
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_a), &u16s("shared.txt"))
+                .is_none()
+        );
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_b), &u16s("renamed.txt"))
+                .is_some()
+        );
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_b), &u16s("alias.txt"))
+                .is_some()
+        );
+        for id in idx.entries_by_frn(Frn(object)) {
+            assert_eq!((idx.size(id), idx.mtime(id)), (91, FT1));
+            assert!(idx.is_excluded(id));
+        }
+        assert_eq!(idx.entries_by_frn(Frn(created)).count(), 1);
+    }
+
+    #[test]
+    fn journal_batch_planning_reads_only_the_required_metadata_answers() {
+        let idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let source = MetadataSource::map_with_links(
+            HashMap::from([(object, (900, FT1))]),
+            HashMap::from([(
+                object,
+                vec![LinkInfo {
+                    parent_frn: frn(1, 10),
+                    name: u16s("shared.txt"),
+                }],
+            )]),
+        );
+        for (flags, links, stat) in [
+            (reason::FILE_CREATE, true, true),
+            (reason::RENAME_NEW_NAME, true, true),
+            (reason::HARD_LINK_CHANGE, true, true),
+            (reason::FILE_DELETE | reason::HARD_LINK_CHANGE, true, true),
+            (reason::DATA_OVERWRITE, false, true),
+            (reason::DATA_EXTEND, false, true),
+            (reason::DATA_TRUNCATION, false, true),
+            (reason::BASIC_INFO_CHANGE, false, true),
+            (reason::REPARSE_POINT_CHANGE, false, true),
+            (reason::FILE_DELETE, false, false),
+            (reason::RENAME_OLD_NAME, false, false),
+            (reason::CLOSE, false, false),
+            (0, false, false),
+        ] {
+            let records = [rec_full(object, frn(1, 10), flags, 0x20, "shared.txt")];
+            let plan = plan_batch(&idx, &records, &source);
+            assert_eq!(plan.preflight_failures, 0, "{flags:#x}");
+            assert_eq!(
+                plan.link_snapshots.contains_key(&Frn(object)),
+                links,
+                "{flags:#x}"
+            );
+            assert_eq!(
+                plan.stat_snapshots.get(&Frn(object)).copied(),
+                stat.then_some((900, FT1)),
+                "{flags:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn journal_batch_unpaired_rename_preserves_single_and_unseen_objects() {
+        for record in [11, 200] {
+            let mut idx = base_index();
+            let records = [rec(
+                record,
+                10,
+                reason::RENAME_NEW_NAME,
+                0x20,
+                "renamed.txt",
+            )];
+            let stats = apply_batch(&mut idx, &records, &MetadataSource::constant(81, FT1));
+            assert_eq!(
+                stats,
+                BatchStats {
+                    created_or_renamed: 1,
+                    ..BatchStats::default()
+                }
+            );
+            let id = idx.entry_by_frn(Frn(frn(1, record))).unwrap();
+            assert_eq!(idx.name(id), b"renamed.txt");
+            assert_eq!((idx.size(id), idx.mtime(id)), (81, FT1));
+            assert_eq!(idx.entries_by_frn(Frn(frn(1, record))).count(), 1);
+            assert!(
+                idx.entry_by_link(Frn(frn(1, record)), Frn(frn(1, 10)), &u16s("note.txt"))
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn journal_batch_only_creation_may_replace_another_object_generation() {
+        for flags in [reason::FILE_CREATE, reason::RENAME_NEW_NAME] {
+            let mut idx = base_index();
+            let records = [rec_full(frn(2, 11), frn(1, 10), flags, 0x20, "fresh.txt")];
+            let stats = apply_batch(&mut idx, &records, &MetadataSource::constant(81, FT1));
+            if flags == reason::FILE_CREATE {
+                assert_eq!(
+                    stats,
+                    BatchStats {
+                        created_or_renamed: 1,
+                        ..BatchStats::default()
+                    }
+                );
+                assert!(idx.entry_by_frn(Frn(frn(1, 11))).is_none());
+                let id = idx.entry_by_frn(Frn(frn(2, 11))).unwrap();
+                assert_eq!(idx.name(id), b"fresh.txt");
+                assert_eq!((idx.size(id), idx.mtime(id)), (81, FT1));
+            } else {
+                assert_eq!(
+                    stats,
+                    BatchStats {
+                        ignored: 1,
+                        ..BatchStats::default()
+                    }
+                );
+                assert!(idx.entry_by_frn(Frn(frn(2, 11))).is_none());
+                assert_eq!(
+                    idx.name(idx.entry_by_frn(Frn(frn(1, 11))).unwrap()),
+                    b"note.txt"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn journal_batch_file_events_cannot_rename_an_existing_directory() {
+        let mut idx = base_index();
+        let directory = idx.entry_by_frn(Frn(frn(1, 10))).unwrap();
+        let records = [rec(10, 5, reason::FILE_CREATE, 0x2, "file.txt")];
+        let stats = apply_batch(&mut idx, &records, &MetadataSource::constant(81, FT1));
+        assert_eq!(
+            stats,
+            BatchStats {
+                index_rejections: 1,
+                ignored: 1,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert_eq!(idx.entry_by_frn(Frn(frn(1, 10))), Some(directory));
+        assert!(idx.is_dir(directory));
+        assert!(!idx.is_excluded(directory));
+        assert_eq!(idx.name(directory), b"docs");
+        assert_eq!(path_of(&idx, 11), "C:\\docs\\note.txt");
+    }
+
+    #[test]
+    fn journal_batch_unhandled_reasons_neither_fetch_nor_refresh_metadata() {
+        let mut idx = base_index();
+        let records = [
+            rec(11, 10, reason::CLOSE, 0x2, "ignored.txt"),
+            rec(200, 10, 0x8, 0x20, "unknown.txt"),
+        ];
+        let plan = plan_batch(&idx, &records, &MetadataSource::constant(81, FT1));
+        assert!(plan.link_snapshots.is_empty());
+        assert!(plan.stat_snapshots.is_empty());
+        assert_eq!(
+            apply_planned(&mut idx, &records, plan),
+            BatchStats {
+                ignored: 2,
+                ..BatchStats::default()
+            }
+        );
+        let id = idx.entry_by_frn(Frn(frn(1, 11))).unwrap();
+        assert_eq!((idx.size(id), idx.mtime(id)), (100, FT0));
+        assert_eq!(idx.name(id), b"note.txt");
+        assert!(!idx.is_excluded(id));
+        assert!(idx.entry_by_frn(Frn(frn(1, 200))).is_none());
+    }
+
+    #[test]
+    fn journal_batch_revalidates_a_parent_removed_after_planning() {
+        let mut idx = base_index();
+        idx.delete_frn(Frn(frn(1, 11))).unwrap();
+        let records = [rec(200, 10, reason::FILE_CREATE, 0x20, "new.txt")];
+        let plan = plan_batch(&idx, &records, &MetadataSource::constant(81, FT1));
+        assert_eq!(plan.preflight_failures, 0);
+        assert!(plan.stat_snapshots.contains_key(&Frn(frn(1, 200))));
+        idx.delete_frn(Frn(frn(1, 10))).unwrap();
+        assert_eq!(
+            apply_planned(&mut idx, &records, plan),
+            BatchStats {
+                index_rejections: 1,
+                ignored: 1,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert!(idx.entry_by_frn(Frn(frn(1, 200))).is_none());
+        assert!(idx.is_live(VolumeIndex::ROOT));
+    }
+
+    #[test]
+    fn journal_batch_single_link_rename_refreshes_shared_attributes_without_a_stat() {
+        let object = frn(1, 100);
+        let parent = frn(1, 10);
+        for (initially_set, attributes, reparse, excluded) in [
+            (false, 0x2, false, true),
+            (false, 0x4, false, true),
+            (false, 0x400, true, false),
+            (true, 0x20, false, false),
+        ] {
+            let mut idx = build_hardlink_sample();
+            if initially_set {
+                idx.update_object_attrs_frn(Frn(object), true, true, true);
+            }
+            let records = [
+                rec_full(
+                    object,
+                    parent,
+                    reason::RENAME_OLD_NAME,
+                    attributes,
+                    "shared.txt",
+                ),
+                rec_full(
+                    object,
+                    parent,
+                    reason::RENAME_NEW_NAME,
+                    attributes,
+                    "renamed.txt",
+                ),
+            ];
+            let stats = apply_batch(&mut idx, &records, &MetadataSource::none());
+            assert_eq!(
+                stats,
+                BatchStats {
+                    created_or_renamed: 1,
+                    stat_failures: 1,
+                    ..BatchStats::default()
+                }
+            );
+            assert_eq!(idx.entries_by_frn(Frn(object)).count(), 2);
+            for id in idx.entries_by_frn(Frn(object)) {
+                assert_eq!(
+                    idx.is_reparse(id),
+                    reparse,
+                    "{initially_set}, {attributes:#x}"
+                );
+                assert_eq!(
+                    idx.is_excluded(id),
+                    excluded,
+                    "{initially_set}, {attributes:#x}"
+                );
+                assert_eq!((idx.size(id), idx.mtime(id)), (42, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn journal_batch_link_creation_refreshes_metadata_for_surviving_siblings() {
+        let object = frn(1, 100);
+        for (name, count) in [("third.txt", 3), ("shared.txt", 2)] {
+            let mut idx = build_hardlink_sample();
+            let records = [rec_full(
+                object,
+                frn(1, 10),
+                reason::FILE_CREATE,
+                0x20,
+                name,
+            )];
+            let stats = apply_batch(&mut idx, &records, &MetadataSource::constant(321, FT1));
+            assert_eq!(
+                stats,
+                BatchStats {
+                    created_or_renamed: 1,
+                    ..BatchStats::default()
+                }
+            );
+            assert_eq!(idx.entries_by_frn(Frn(object)).count(), count);
+            for id in idx.entries_by_frn(Frn(object)) {
+                assert_eq!((idx.size(id), idx.mtime(id)), (321, FT1), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn journal_batch_shared_refresh_preserves_each_parent_exclusion() {
+        let mut idx = build_hardlink_sample();
+        let object = Frn(frn(1, 100));
+        let hidden_parent = Frn(frn(1, 20));
+        assert_eq!(
+            idx.update_object_attrs_frn(hidden_parent, false, true, false),
+            Some(true)
+        );
+        let first_new = idx.len() as u32;
+        idx.merge_new_into_permutations(first_new).unwrap();
+        let records = [rec(100, 10, reason::FILE_CREATE, 0x20, "added.txt")];
+        assert_eq!(
+            apply_batch(&mut idx, &records, &MetadataSource::constant(91, FT1)),
+            BatchStats {
+                created_or_renamed: 1,
+                ..BatchStats::default()
+            }
+        );
+        assert_eq!(idx.entries_by_frn(object).count(), 3);
+        for id in idx.entries_by_frn(object) {
+            assert_eq!((idx.size(id), idx.mtime(id)), (91, FT1));
+            assert_eq!(
+                idx.is_excluded(id),
+                idx.parent(id) == idx.entry_by_frn(hidden_parent).unwrap()
+            );
+        }
+        assert!(idx.is_excluded(idx.entry_by_frn(hidden_parent).unwrap()));
+        let mut names = visible_names(&idx, "");
+        names.sort();
+        assert_eq!(names, ["C:", "a", "added.txt", "shared.txt"]);
+    }
+
+    #[test]
+    fn journal_batch_rejected_insertion_preserves_every_sibling_metadata_value() {
+        let mut idx = build_hardlink_sample();
+        let object = Frn(frn(1, 100));
+        let before: Vec<_> = idx
+            .entries_by_frn(object)
+            .map(|id| {
+                (
+                    id,
+                    idx.size(id),
+                    idx.mtime(id),
+                    idx.is_reparse(id),
+                    idx.is_excluded(id),
+                )
+            })
+            .collect();
+        let records = [rec(100, 999, reason::FILE_CREATE, 0x406, "rejected.txt")];
+        assert_eq!(
+            apply_batch(&mut idx, &records, &MetadataSource::constant(999, FT1)),
+            BatchStats {
+                index_rejections: 1,
+                ignored: 1,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        let after: Vec<_> = idx
+            .entries_by_frn(object)
+            .map(|id| {
+                (
+                    id,
+                    idx.size(id),
+                    idx.mtime(id),
+                    idx.is_reparse(id),
+                    idx.is_excluded(id),
+                )
+            })
+            .collect();
+        assert_eq!(after, before);
+        assert!(
+            idx.entry_by_link(object, Frn(frn(1, 999)), &u16s("rejected.txt"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn journal_batch_revalidates_an_old_link_removed_after_planning() {
+        let mut idx = build_hardlink_sample();
+        let object = Frn(frn(1, 100));
+        let parent = Frn(frn(1, 10));
+        let records = [
+            rec(100, 10, reason::RENAME_OLD_NAME, 0x20, "shared.txt"),
+            rec(100, 10, reason::RENAME_NEW_NAME, 0x20, "renamed.txt"),
+        ];
+        let plan = plan_batch(&idx, &records, &MetadataSource::constant(91, FT1));
+        assert_eq!(plan.preflight_failures, 0);
+        idx.delete_link_frn(object, parent, &u16s("shared.txt"))
+            .unwrap();
+        let first_new = idx.len() as u32;
+        idx.upsert_link_usn(&RawEntry {
+            frn: object,
+            parent_frn: parent,
+            name_utf16: &u16s("replacement.txt"),
+            is_dir: false,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 42,
+            mtime: 0,
+        })
+        .unwrap();
+        idx.merge_new_into_permutations(first_new).unwrap();
+        let before = visible_names(&idx, "");
+        assert!(before.iter().any(|name| name == "replacement.txt"));
+        assert_eq!(
+            apply_planned(&mut idx, &records, plan),
+            BatchStats {
+                hard_link_refresh_failures: 1,
+                ignored: 1,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert_eq!(visible_names(&idx, ""), before);
+        assert_eq!(idx.entries_by_frn(object).count(), 2);
+        for id in idx.entries_by_frn(object) {
+            assert_eq!((idx.size(id), idx.mtime(id)), (42, 0));
+        }
+    }
+
+    #[test]
+    fn journal_batch_stat_results_count_objects_and_missing_answers_independently() {
+        let mut idx = build_hardlink_sample();
+        let first_new = idx.len() as u32;
+        let name = u16s("other.txt");
+        idx.upsert_link_usn(&crate::index::testutil::raw(200, 10, &name, false, 5, FT0))
+            .unwrap();
+        idx.merge_new_into_permutations(first_new).unwrap();
+        let records = [
+            rec_full(
+                frn(1, 100),
+                frn(1, 10),
+                reason::DATA_EXTEND,
+                0x20,
+                "shared.txt",
+            ),
+            rec_full(
+                frn(1, 100),
+                frn(1, 10),
+                reason::DATA_EXTEND,
+                0x20,
+                "shared.txt",
+            ),
+            rec_full(
+                frn(1, 200),
+                frn(1, 10),
+                reason::DATA_EXTEND,
+                0x20,
+                "other.txt",
+            ),
+            rec_full(
+                frn(1, 300),
+                frn(1, 10),
+                reason::DATA_EXTEND,
+                0x20,
+                "missing.txt",
+            ),
+        ];
+        let refreshed = apply_batch(&mut idx, &records, &MetadataSource::constant(900, FT1));
+        assert_eq!(
+            refreshed,
+            BatchStats {
+                stat_updated: 2,
+                ignored: 1,
+                ..BatchStats::default()
+            }
+        );
+        for record in [100, 200] {
+            for id in idx.entries_by_frn(Frn(frn(1, record))) {
+                assert_eq!((idx.size(id), idx.mtime(id)), (900, FT1));
+            }
+        }
+        let unavailable = apply_batch(&mut idx, &records, &MetadataSource::none());
+        assert_eq!(
+            unavailable,
+            BatchStats {
+                stat_failures: 2,
+                ignored: 3,
+                ..BatchStats::default()
+            }
+        );
+        let mut attribute_records = records;
+        for record in &mut attribute_records {
+            record.attributes = 0x2;
+        }
+        let attributes = apply_batch(&mut idx, &attribute_records, &MetadataSource::none());
+        assert_eq!(
+            attributes,
+            BatchStats {
+                stat_failures: 2,
+                ignored: 1,
+                ..BatchStats::default()
+            }
+        );
+    }
+
+    #[test]
+    fn journal_batch_topology_rejections_report_every_rejected_operation() {
+        let mut idx = build_hardlink_sample();
+        let records = [
+            rec_full(
+                frn(1, 200),
+                frn(1, 999),
+                reason::FILE_CREATE,
+                0x20,
+                "file.txt",
+            ),
+            rec_full(
+                frn(1, 300),
+                frn(1, 999),
+                reason::FILE_CREATE,
+                0x10,
+                "directory",
+            ),
+            rec_full(
+                frn(1, 10),
+                frn(1, 10),
+                reason::RENAME_NEW_NAME,
+                0x10,
+                "cycle",
+            ),
+        ];
+        let stats = apply_batch(&mut idx, &records, &MetadataSource::none());
+        assert_eq!(
+            stats,
+            BatchStats {
+                index_rejections: 3,
+                ignored: 3,
+                stat_failures: 2,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert!(idx.entry_by_frn(Frn(frn(1, 200))).is_none());
+        assert!(idx.entry_by_frn(Frn(frn(1, 300))).is_none());
+        assert_eq!(idx.name(idx.entry_by_frn(Frn(frn(1, 10))).unwrap()), b"a");
+    }
+
+    #[test]
+    fn journal_batch_preflight_counts_each_invalid_directory_without_mutation() {
+        let mut idx = build_hardlink_sample();
+        let generation = idx.content_generation();
+        let records = [
+            rec_full(
+                frn(1, 200),
+                frn(1, 10),
+                reason::FILE_CREATE,
+                0x20,
+                "prefix.txt",
+            ),
+            rec_full(frn(1, 10), 5, reason::HARD_LINK_CHANGE, 0x10, "a"),
+            rec_full(frn(1, 20), 5, reason::HARD_LINK_CHANGE, 0x10, "b"),
+        ];
+        let plan = plan_batch(&idx, &records, &MetadataSource::constant(999, FT1));
+        assert_eq!(plan.preflight_failures, 2);
+        assert!(plan.stat_snapshots.is_empty());
+        let stats = apply_planned(&mut idx, &records, plan);
+        assert_eq!(
+            stats,
+            BatchStats {
+                hard_link_refresh_failures: 2,
+                ignored: 2,
+                rescan_required: true,
+                ..BatchStats::default()
+            }
+        );
+        assert_eq!(idx.content_generation(), generation);
+        assert!(idx.entry_by_frn(Frn(frn(1, 200))).is_none());
+        assert_eq!(idx.entries_by_frn(Frn(frn(1, 100))).count(), 2);
+    }
+
+    #[test]
+    fn journal_batch_reconciliation_counts_independent_link_and_metadata_changes() {
+        struct LinkCase {
+            links: &'static [(u64, &'static str)],
+            fetched: bool,
+            attributes: u32,
+            expected: BatchStats,
+        }
+        let cases = [
+            LinkCase {
+                links: &[(10, "shared.txt"), (20, "alias.txt")],
+                fetched: false,
+                attributes: 0x20,
+                expected: BatchStats {
+                    stat_failures: 1,
+                    ignored: 1,
+                    ..BatchStats::default()
+                },
+            },
+            LinkCase {
+                links: &[(10, "shared.txt"), (20, "alias.txt")],
+                fetched: true,
+                attributes: 0x20,
+                expected: BatchStats {
+                    stat_updated: 1,
+                    ..BatchStats::default()
+                },
+            },
+            LinkCase {
+                links: &[(10, "shared.txt"), (20, "alias.txt")],
+                fetched: false,
+                attributes: 0x2,
+                expected: BatchStats {
+                    stat_failures: 1,
+                    ..BatchStats::default()
+                },
+            },
+            LinkCase {
+                links: &[(10, "shared.txt")],
+                fetched: false,
+                attributes: 0x20,
+                expected: BatchStats {
+                    deleted: 1,
+                    stat_failures: 1,
+                    ..BatchStats::default()
+                },
+            },
+            LinkCase {
+                links: &[(10, "shared.txt"), (20, "alias.txt"), (10, "third.txt")],
+                fetched: false,
+                attributes: 0x20,
+                expected: BatchStats {
+                    created_or_renamed: 1,
+                    stat_failures: 1,
+                    ..BatchStats::default()
+                },
+            },
+            LinkCase {
+                links: &[(10, "first.txt"), (20, "second.txt")],
+                fetched: false,
+                attributes: 0x20,
+                expected: BatchStats {
+                    created_or_renamed: 2,
+                    deleted: 2,
+                    stat_failures: 1,
+                    ..BatchStats::default()
+                },
+            },
+            LinkCase {
+                links: &[(10, "first.txt"), (20, "second.txt")],
+                fetched: true,
+                attributes: 0x20,
+                expected: BatchStats {
+                    created_or_renamed: 2,
+                    deleted: 2,
+                    ..BatchStats::default()
+                },
+            },
+        ];
+        let object = frn(1, 100);
+        for case in cases {
+            let mut idx = build_hardlink_sample();
+            let values = if case.fetched {
+                HashMap::from([(object, (900, FT1))])
+            } else {
+                HashMap::new()
+            };
+            let links = case
+                .links
+                .iter()
+                .map(|&(parent, name)| LinkInfo {
+                    parent_frn: frn(1, parent),
+                    name: u16s(name),
+                })
+                .collect();
+            let source = MetadataSource::map_with_links(values, HashMap::from([(object, links)]));
+            let records = [rec_full(
+                object,
+                frn(1, 10),
+                reason::HARD_LINK_CHANGE,
+                case.attributes,
+                "shared.txt",
+            )];
+            let stats = apply_batch(&mut idx, &records, &source);
+            assert_eq!(
+                stats, case.expected,
+                "{:?}, fetched={}",
+                case.links, case.fetched
+            );
+            assert_eq!(idx.entries_by_frn(Frn(object)).count(), case.links.len());
+            for &(parent, name) in case.links {
+                let id = idx
+                    .entry_by_link(Frn(object), Frn(frn(1, parent)), &u16s(name))
+                    .unwrap();
+                let expected_metadata = if case.fetched { (900, FT1) } else { (42, 0) };
+                assert_eq!((idx.size(id), idx.mtime(id)), expected_metadata);
+                assert_eq!(idx.is_excluded(id), case.attributes == 0x2);
+            }
+        }
+    }
+
+    #[test]
+    fn journal_batch_gone_snapshots_count_zero_and_multiple_removed_links() {
+        for (record, removed, ignored) in [(100, 2, 0), (200, 0, 1)] {
+            let mut idx = build_hardlink_sample();
+            let object = frn(1, record);
+            let records = [rec_full(
+                object,
+                frn(1, 10),
+                reason::HARD_LINK_CHANGE,
+                0x20,
+                "shared.txt",
+            )];
+            let stats = apply_batch(
+                &mut idx,
+                &records,
+                &source_with_snapshot(object, LinkSnapshot::Gone),
+            );
+            assert_eq!(
+                stats,
+                BatchStats {
+                    deleted: removed,
+                    ignored,
+                    ..BatchStats::default()
+                }
+            );
+            assert_eq!(idx.entries_by_frn(Frn(object)).count(), 0);
+        }
+    }
+
+    #[test]
+    fn journal_batch_empty_and_failed_snapshots_have_the_same_admission() {
+        let object = frn(1, 100);
+        for flags in [
+            reason::FILE_CREATE,
+            reason::RENAME_NEW_NAME,
+            reason::HARD_LINK_CHANGE,
+        ] {
+            let mut failed = build_hardlink_sample();
+            let mut empty = build_hardlink_sample();
+            let records = [rec_full(object, frn(1, 10), flags, 0x20, "shared.txt")];
+            let failure = apply_batch(
+                &mut failed,
+                &records,
+                &source_with_snapshot(object, LinkSnapshot::Failed),
+            );
+            let incomplete = apply_batch(
+                &mut empty,
+                &records,
+                &source_with_snapshot(object, LinkSnapshot::Present(Vec::new())),
+            );
+            assert_eq!(incomplete, failure);
+            assert_eq!(incomplete.rescan_required, flags != reason::FILE_CREATE);
+            assert_eq!(empty.entries_by_frn(Frn(object)).count(), 2);
+            assert_eq!(empty.content_generation(), failed.content_generation());
+            for (parent, name) in [(10, "shared.txt"), (20, "alias.txt")] {
+                assert!(
+                    empty
+                        .entry_by_link(Frn(object), Frn(frn(1, parent)), &u16s(name))
+                        .is_some()
+                );
+            }
+        }
+    }
+
+    /// The mutation phase runs under the index write lock, where a blocking raw-volume read would stall every concurrent query.
+    /// Its signature already forbids one, but that only helps if planning actually resolved everything: the source here is *dropped* before a single row is mutated, so any value the plan failed to prefetch shows up as a carried-over/zeroed column rather than as a silent extra `stat` call.
+    /// One record per branch that can consume a stat — reconciled link set,
+    /// create, in-place stat update.
+    #[test]
+    fn planning_carries_every_volume_answer_the_mutation_needs() {
+        let mut idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let parent_a = frn(1, 10);
+        let parent_b = frn(1, 20);
+        let created = frn(1, 200);
+        let batch = [
+            rec_full(
+                object,
+                parent_a,
+                reason::HARD_LINK_CHANGE | reason::CLOSE,
+                0x20,
+                "shared.txt",
+            ),
+            rec_full(
+                created,
+                parent_b,
+                reason::FILE_CREATE | reason::CLOSE,
+                0x20,
+                "created.txt",
+            ),
+        ];
+
+        let plan = {
+            let fetch = MetadataSource::map_with_links(
+                HashMap::from([(object, (500, FT1)), (created, (700, FT1))]),
+                HashMap::from([(
+                    object,
+                    vec![
+                        LinkInfo {
+                            parent_frn: parent_a,
+                            name: u16s("shared.txt"),
+                        },
+                        LinkInfo {
+                            parent_frn: parent_b,
+                            name: u16s("alias.txt"),
+                        },
+                    ],
+                )]),
+            );
+            plan_batch(&idx, &batch, &fetch)
+        };
+        let stats = apply_planned(&mut idx, &batch, plan);
+
+        assert_eq!(stats.stat_failures, 0, "no branch fell back to a live read");
+        assert_eq!(stats.stat_updated, 1, "the retained links were refreshed");
+        for id in idx.entries_by_frn(Frn(object)) {
+            assert_eq!((idx.size(id), idx.mtime(id)), (500, FT1));
+        }
+        let new_id = idx.entry_by_frn(Frn(created)).expect("the create applied");
+        assert_eq!((idx.size(new_id), idx.mtime(new_id)), (700, FT1));
+
+        let touch = [rec_full(
+            object,
+            parent_a,
+            reason::DATA_EXTEND | reason::CLOSE,
+            0x20,
+            "shared.txt",
+        )];
+        let plan = {
+            let fetch = MetadataSource::constant(9_001, FT0);
+            plan_batch(&idx, &touch, &fetch)
+        };
+        let stats = apply_planned(&mut idx, &touch, plan);
+        assert_eq!((stats.stat_updated, stats.stat_failures), (1, 0));
+        for id in idx.entries_by_frn(Frn(object)) {
+            assert_eq!((idx.size(id), idx.mtime(id)), (9_001, FT0));
+        }
+    }
+
+    #[test]
+    fn hard_link_change_reconciles_the_complete_authoritative_set() {
+        let mut idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let parent_a = frn(1, 10);
+        let parent_b = frn(1, 20);
+        let source = MetadataSource::map_with_links(
+            HashMap::from([(object, (500, FT1))]),
+            HashMap::from([(
+                object,
+                vec![
+                    LinkInfo {
+                        parent_frn: parent_a,
+                        name: u16s("shared.txt"),
+                    },
+                    LinkInfo {
+                        parent_frn: parent_b,
+                        name: u16s("third.txt"),
+                    },
+                ],
+            )]),
+        );
+
+        let stats = apply_batch(
+            &mut idx,
+            &[rec_full(
+                object,
+                parent_a,
+                reason::HARD_LINK_CHANGE | reason::CLOSE,
+                0x20,
+                "shared.txt",
+            )],
+            &source,
+        );
+
+        assert_eq!(
+            (stats.created_or_renamed, stats.deleted),
+            (1, 1),
+            "one link was added and one disappeared"
+        );
+        assert_eq!(stats.hard_link_refresh_failures, 0);
+        assert_eq!(stats.stat_updated, 1, "the retained link was refreshed");
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_a), &u16s("shared.txt"))
+                .is_some()
+        );
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_b), &u16s("alias.txt"))
+                .is_none()
+        );
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_b), &u16s("third.txt"))
+                .is_some()
+        );
+        for id in idx.entries_by_frn(Frn(object)) {
+            assert_eq!((idx.size(id), idx.mtime(id)), (500, FT1));
+        }
+    }
+
+    #[test]
+    fn hard_link_refresh_failure_preserves_the_last_known_good_paths() {
+        let mut idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let before: Vec<_> = idx
+            .entries_by_frn(Frn(object))
+            .map(|id| (idx.parent(id), idx.name(id).to_vec()))
+            .collect();
+
+        let stats = apply_batch(
+            &mut idx,
+            &[rec_full(
+                object,
+                frn(1, 10),
+                reason::FILE_DELETE | reason::HARD_LINK_CHANGE | reason::CLOSE,
+                0x20,
+                "shared.txt",
+            )],
+            &MetadataSource::none(),
+        );
+        let after: Vec<_> = idx
+            .entries_by_frn(Frn(object))
+            .map(|id| (idx.parent(id), idx.name(id).to_vec()))
+            .collect();
+
+        assert_eq!(after, before);
+        assert_eq!((stats.hard_link_refresh_failures, stats.ignored), (1, 1));
+        assert!(stats.rescan_required);
+    }
+
+    #[test]
+    fn combined_delete_and_hard_link_change_uses_the_authoritative_live_set() {
+        let mut idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let parent_a = frn(1, 10);
+        let parent_b = frn(1, 20);
+        let source = MetadataSource::map_with_links(
+            HashMap::new(),
+            HashMap::from([(
+                object,
+                vec![LinkInfo {
+                    parent_frn: parent_b,
+                    name: u16s("alias.txt"),
+                }],
+            )]),
+        );
+
+        let stats = apply_batch(
+            &mut idx,
+            &[rec_full(
+                object,
+                parent_a,
+                reason::FILE_DELETE | reason::HARD_LINK_CHANGE | reason::CLOSE,
+                0x20,
+                "shared.txt",
+            )],
+            &source,
+        );
+
+        assert_eq!(stats.deleted, 1);
+        assert_eq!(idx.entries_by_frn(Frn(object)).count(), 1);
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_b), &u16s("alias.txt"))
+                .is_some(),
+            "an accumulated FILE_DELETE flag cannot erase a surviving sibling link"
+        );
+    }
+
+    #[test]
+    fn combined_delete_and_hard_link_change_deletes_all_only_when_gone_is_proven() {
+        let mut idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let source = source_with_snapshot(object, LinkSnapshot::Gone);
+
+        let stats = apply_batch(
+            &mut idx,
+            &[rec_full(
+                object,
+                frn(1, 10),
+                reason::FILE_DELETE | reason::HARD_LINK_CHANGE | reason::CLOSE,
+                0x20,
+                "shared.txt",
+            )],
+            &source,
+        );
+
+        assert_eq!(stats.deleted, 2);
+        assert_eq!(stats.hard_link_refresh_failures, 0);
+        assert_eq!(idx.entries_by_frn(Frn(object)).count(), 0);
+    }
+
+    #[test]
+    fn unchanged_link_set_without_a_stat_answer_is_ignored_not_refreshed() {
+        let mut idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let source = MetadataSource::map_with_links(
+            HashMap::new(),
+            HashMap::from([(
+                object,
+                vec![
+                    LinkInfo {
+                        parent_frn: frn(1, 10),
+                        name: u16s("shared.txt"),
+                    },
+                    LinkInfo {
+                        parent_frn: frn(1, 20),
+                        name: u16s("alias.txt"),
+                    },
+                ],
+            )]),
+        );
+
+        let stats = apply_batch(
+            &mut idx,
+            &[rec_full(
+                object,
+                frn(1, 10),
+                reason::HARD_LINK_CHANGE | reason::CLOSE,
+                0x20,
+                "shared.txt",
+            )],
+            &source,
+        );
+
+        assert_eq!(stats.stat_failures, 1);
+        assert_eq!(stats.stat_updated, 0);
+        assert_eq!(stats.ignored, 1);
+    }
+
+    #[test]
+    fn reparse_change_without_a_stat_answer_is_applied_not_ignored() {
+        let mut idx = build_hardlink_sample();
+        let object = frn(1, 100);
+
+        let stats = apply_batch(
+            &mut idx,
+            &[rec_full(
+                object,
+                frn(1, 10),
+                reason::REPARSE_POINT_CHANGE | reason::CLOSE,
+                super::super::records::FILE_ATTRIBUTE_REPARSE_POINT,
+                "shared.txt",
+            )],
+            &MetadataSource::none(),
+        );
+
+        assert_eq!(stats.stat_failures, 1);
+        assert_eq!(stats.stat_updated, 0);
+        assert_eq!(stats.ignored, 0);
+        assert!(
+            idx.entries_by_frn(Frn(object)).all(|id| idx.is_reparse(id)),
+            "object-owned reparse state reaches every hard-link row"
+        );
+    }
+
+    #[test]
+    fn rename_pair_replaces_only_the_named_link_when_siblings_exist() {
+        let mut idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let parent_a = frn(1, 10);
+        let parent_b = frn(1, 20);
+        let batch = [
+            rec_full(
+                object,
+                parent_a,
+                reason::RENAME_OLD_NAME,
+                0x20,
+                "shared.txt",
+            ),
+            rec_full(
+                object,
+                parent_a,
+                reason::RENAME_NEW_NAME | reason::CLOSE,
+                0x20,
+                "renamed.txt",
+            ),
+        ];
+
+        let stats = apply_batch(&mut idx, &batch, &MetadataSource::constant(42, FT1));
+
+        assert_eq!(stats.created_or_renamed, 1);
+        assert_eq!(idx.entries_by_frn(Frn(object)).count(), 2);
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_a), &u16s("shared.txt"))
+                .is_none()
+        );
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_a), &u16s("renamed.txt"))
+                .is_some()
+        );
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_b), &u16s("alias.txt"))
+                .is_some(),
+            "the other hard link survives"
+        );
+    }
+
+    #[test]
+    fn ambiguous_multi_link_rename_rejects_the_entire_batch_before_mutation() {
+        let mut idx = build_hardlink_sample();
+        let object = frn(1, 100);
+        let parent_a = frn(1, 10);
+        let generation = idx.content_generation();
+        let batch = [
+            rec_full(
+                frn(1, 200),
+                parent_a,
+                reason::FILE_CREATE | reason::CLOSE,
+                0x20,
+                "prefix.txt",
+            ),
+            rec_full(
+                object,
+                parent_a,
+                reason::RENAME_NEW_NAME | reason::CLOSE,
+                0x20,
+                "ambiguous.txt",
+            ),
+        ];
+
+        let stats = apply_batch(&mut idx, &batch, &MetadataSource::none());
+
+        assert!(stats.rescan_required);
+        assert_eq!(stats.hard_link_refresh_failures, 1);
+        assert_eq!(stats.created_or_renamed, 0);
+        assert_eq!(idx.content_generation(), generation);
+        assert!(idx.entry_by_frn(Frn(frn(1, 200))).is_none());
+        assert_eq!(idx.entries_by_frn(Frn(object)).count(), 2);
+        assert!(
+            idx.entry_by_link(Frn(object), Frn(parent_a), &u16s("shared.txt"))
+                .is_some(),
+            "the known-good link set is unchanged"
+        );
+    }
+
+    #[test]
+    fn create_in_new_dir_within_one_batch() {
+        let mut idx = base_index();
+        let batch = [
+            rec(20, 5, reason::FILE_CREATE | reason::CLOSE, 0x10, "src"),
+            rec(21, 20, reason::FILE_CREATE | reason::CLOSE, 0x20, "main.rs"),
+        ];
+        let s = apply_batch(&mut idx, &batch, &MetadataSource::constant(42, FT0));
+        assert_eq!(s.created_or_renamed, 2);
+        assert_eq!(path_of(&idx, 21), r"C:\src\main.rs");
+        let id = idx.entry_by_record(21).unwrap();
+        assert_eq!((idx.size(id), idx.mtime(id)), (42, FT0));
+    }
+
+    #[test]
+    fn rename_storm_collapses_to_final_name() {
+        let mut idx = base_index();
+        let batch = [
+            rec(11, 10, reason::RENAME_OLD_NAME, 0x20, "note.txt"),
+            rec(11, 10, reason::RENAME_NEW_NAME, 0x20, "tmp1.txt"),
+            rec(11, 10, reason::RENAME_OLD_NAME, 0x20, "tmp1.txt"),
+            rec(
+                11,
+                10,
+                reason::RENAME_NEW_NAME | reason::CLOSE,
+                0x20,
+                "final.txt",
+            ),
+        ];
+        let s = apply_batch(&mut idx, &batch, &MetadataSource::none());
+        assert_eq!(s.created_or_renamed, 1);
+        assert_eq!(path_of(&idx, 11), r"C:\docs\final.txt");
+        let id = idx.entry_by_record(11).unwrap();
+        assert_eq!((idx.size(id), idx.mtime(id)), (100, FT0));
+    }
+
+    #[test]
+    fn move_to_other_dir_updates_child_paths() {
+        let mut idx = base_index();
+        let batch = [
+            rec(20, 5, reason::FILE_CREATE | reason::CLOSE, 0x10, "archive"),
+            rec(
+                10,
+                20,
+                reason::RENAME_NEW_NAME | reason::CLOSE,
+                0x10,
+                "docs",
+            ),
+        ];
+        apply_batch(&mut idx, &batch, &MetadataSource::none());
+        assert_eq!(path_of(&idx, 11), r"C:\archive\docs\note.txt");
+    }
+
+    #[test]
+    fn create_then_delete_in_one_batch_is_a_delete() {
+        let mut idx = base_index();
+        let n = idx.live_len();
+        let batch = [
+            rec(30, 5, reason::FILE_CREATE, 0x20, "ghost.tmp"),
+            rec(
+                30,
+                5,
+                reason::FILE_DELETE | reason::CLOSE,
+                0x20,
+                "ghost.tmp",
+            ),
+        ];
+        let s = apply_batch(&mut idx, &batch, &MetadataSource::none());
+        assert_eq!(s.deleted, 0);
+        assert_eq!(s.ignored, 1);
+        assert_eq!(idx.live_len(), n);
+    }
+
+    #[test]
+    fn stat_update_changes_size_and_mtime() {
+        let mut idx = base_index();
+        let batch = [rec(
+            11,
+            10,
+            reason::DATA_EXTEND | reason::CLOSE,
+            0x20,
+            "note.txt",
+        )];
+        let s = apply_batch(&mut idx, &batch, &MetadataSource::constant(5000, FT1));
+        assert_eq!(s.stat_updated, 1);
+        let id = idx.entry_by_record(11).unwrap();
+        assert_eq!((idx.size(id), idx.mtime(id)), (5000, FT1));
+    }
+
+    #[test]
+    fn delete_removes_from_results_and_generation_bumps() {
+        let mut idx = base_index();
+        let g0 = idx.content_generation();
+        let batch = [rec(
+            11,
+            10,
+            reason::FILE_DELETE | reason::CLOSE,
+            0x20,
+            "note.txt",
+        )];
+        let s = apply_batch(&mut idx, &batch, &MetadataSource::none());
+        assert_eq!(s.deleted, 1);
+        assert!(idx.entry_by_record(11).is_none());
+        assert_eq!(idx.content_generation(), g0 + 1);
+    }
+
+    #[test]
+    fn renamed_entry_lands_sorted_in_permutation() {
+        let mut idx = base_index();
+        let batch = [rec(
+            11,
+            10,
+            reason::RENAME_NEW_NAME | reason::CLOSE,
+            0x20,
+            "aaa_first.txt",
+        )];
+        apply_batch(&mut idx, &batch, &MetadataSource::none());
+        let perm = idx.name_permutation();
+        let live: Vec<&[u8]> = perm
+            .iter()
+            .filter(|&&id| idx.is_live(id))
+            .map(|&id| idx.lower_name(id))
+            .collect();
+        let mut sorted = live.clone();
+        sorted.sort();
+        assert_eq!(live, sorted);
+    }
+
+    #[test]
+    fn recycled_record_old_delete_then_new_create_keeps_new_generation() {
+        let mut idx = base_index();
+        let old = frn(1, 11);
+        let new = frn(2, 11);
+        let docs = frn(1, 10);
+        let batch = [
+            rec_full(
+                old,
+                docs,
+                reason::FILE_DELETE | reason::CLOSE,
+                0x20,
+                "note.txt",
+            ),
+            rec_full(
+                new,
+                docs,
+                reason::FILE_CREATE | reason::CLOSE,
+                0x20,
+                "reborn.txt",
+            ),
+        ];
+
+        let stats = apply_batch(&mut idx, &batch, &MetadataSource::constant(7, FT1));
+
+        assert_eq!((stats.deleted, stats.created_or_renamed), (1, 1));
+        assert!(idx.entry_by_frn(Frn(old)).is_none());
+        let id = idx.entry_by_frn(Frn(new)).expect("new generation is live");
+        assert_eq!(idx.entry_by_record(11), Some(id));
+        assert_eq!(idx.name(id), b"reborn.txt");
+    }
+
+    #[test]
+    fn delayed_old_generation_delete_cannot_remove_recycled_record() {
+        let mut idx = base_index();
+        let old = frn(1, 11);
+        let new = frn(2, 11);
+        let docs = frn(1, 10);
+        apply_batch(
+            &mut idx,
+            &[rec_full(
+                new,
+                docs,
+                reason::FILE_CREATE | reason::CLOSE,
+                0x20,
+                "current.txt",
+            )],
+            &MetadataSource::constant(9, FT1),
+        );
+        let current = idx.entry_by_frn(Frn(new)).unwrap();
+
+        let stats = apply_batch(
+            &mut idx,
+            &[rec_full(
+                old,
+                docs,
+                reason::FILE_DELETE | reason::CLOSE,
+                0x20,
+                "old.txt",
+            )],
+            &MetadataSource::none(),
+        );
+
+        assert_eq!((stats.deleted, stats.ignored), (0, 1));
+        assert_eq!(idx.entry_by_frn(Frn(new)), Some(current));
+        assert!(idx.is_live(current));
+        assert_eq!(idx.name(current), b"current.txt");
+
+        let stale_stat = apply_batch(
+            &mut idx,
+            &[rec_full(
+                old,
+                docs,
+                reason::DATA_EXTEND | reason::BASIC_INFO_CHANGE | reason::CLOSE,
+                0x2 | 0x20,
+                "old.txt",
+            )],
+            &MetadataSource::constant(999, FT0),
+        );
+        assert_eq!((stale_stat.stat_updated, stale_stat.ignored), (0, 1));
+        assert_eq!((idx.size(current), idx.mtime(current)), (9, FT1));
+        assert!(
+            !idx.is_excluded(current),
+            "stale attributes cannot hide the new generation"
+        );
+    }
+
+    #[test]
+    fn recycled_directory_is_replaced_not_renamed_and_stale_rename_is_ignored() {
+        let mut idx = base_index();
+        let old = frn(1, 10);
+        let new = frn(2, 10);
+        let old_id = idx.entry_by_frn(Frn(old)).unwrap();
+
+        apply_batch(
+            &mut idx,
+            &[rec_full(
+                new,
+                5,
+                reason::FILE_CREATE | reason::CLOSE,
+                0x10,
+                "newdocs",
+            )],
+            &MetadataSource::none(),
+        );
+        let new_id = idx.entry_by_frn(Frn(new)).unwrap();
+        assert_ne!(new_id, old_id, "record reuse must not rename in place");
+        assert!(!idx.is_live(old_id));
+
+        let stats = apply_batch(
+            &mut idx,
+            &[rec_full(
+                old,
+                5,
+                reason::RENAME_NEW_NAME | reason::CLOSE,
+                0x10,
+                "stale-old-name",
+            )],
+            &MetadataSource::none(),
+        );
+        assert_eq!((stats.created_or_renamed, stats.ignored), (0, 1));
+        assert_eq!(idx.entry_by_frn(Frn(new)), Some(new_id));
+        assert_eq!(idx.name(new_id), b"newdocs");
+    }
+
+    fn exclusion_index() -> VolumeIndex {
+        let mut b = VolumeIndexBuilder::new_synthetic("C:", 5);
+        let hidden: Vec<u16> = "hidden".encode_utf16().collect();
+        let visible: Vec<u16> = "visible".encode_utf16().collect();
+        let subtree: Vec<u16> = "subtree".encode_utf16().collect();
+        let leaf: Vec<u16> = "needle.txt".encode_utf16().collect();
+        b.push(RawEntry {
+            parent_frn: Frn(5),
+            frn: Frn(frn(1, 20)),
+            name_utf16: &hidden,
+            is_dir: true,
+            is_reparse: false,
+            is_hidden: true,
+            is_system: false,
+            size: 0,
+            mtime: 0,
+        });
+        b.push(RawEntry {
+            parent_frn: Frn(5),
+            frn: Frn(frn(1, 30)),
+            name_utf16: &visible,
+            is_dir: true,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 0,
+            mtime: 0,
+        });
+        b.push(RawEntry {
+            parent_frn: Frn(30),
+            frn: Frn(frn(1, 40)),
+            name_utf16: &subtree,
+            is_dir: true,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 0,
+            mtime: 0,
+        });
+        b.push(RawEntry {
+            parent_frn: Frn(40),
+            frn: Frn(frn(1, 41)),
+            name_utf16: &leaf,
+            is_dir: false,
+            is_reparse: false,
+            is_hidden: false,
+            is_system: false,
+            size: 1,
+            mtime: FT0,
+        });
+        b.finish()
+    }
+
+    #[test]
+    fn directory_moves_and_renames_recompute_descendant_query_visibility() {
+        let mut idx = exclusion_index();
+        let subtree = frn(1, 40);
+        let hidden = frn(1, 20);
+        let visible = frn(1, 30);
+        let leaf = idx.entry_by_frn(Frn(frn(1, 41))).unwrap();
+        assert_eq!(visible_names(&idx, "needle"), vec!["needle.txt"]);
+
+        apply_batch(
+            &mut idx,
+            &[rec_full(
+                subtree,
+                hidden,
+                reason::RENAME_NEW_NAME | reason::CLOSE,
+                0x10,
+                "inside-hidden",
+            )],
+            &MetadataSource::none(),
+        );
+        assert!(idx.is_excluded(leaf));
+        assert_eq!(visible_names(&idx, "needle"), Vec::<String>::new());
+
+        apply_batch(
+            &mut idx,
+            &[rec_full(
+                subtree,
+                hidden,
+                reason::RENAME_NEW_NAME | reason::CLOSE,
+                0x10,
+                "renamed-again",
+            )],
+            &MetadataSource::none(),
+        );
+        assert!(
+            idx.is_excluded(leaf),
+            "name-only rename preserves inheritance"
+        );
+
+        apply_batch(
+            &mut idx,
+            &[rec_full(
+                subtree,
+                visible,
+                reason::RENAME_NEW_NAME | reason::CLOSE,
+                0x10,
+                "outside-hidden",
+            )],
+            &MetadataSource::none(),
+        );
+        assert!(!idx.is_excluded(leaf));
+        assert_eq!(visible_names(&idx, "needle"), vec!["needle.txt"]);
+    }
+
+    #[test]
+    fn directory_hidden_attribute_toggle_recomputes_all_descendants() {
+        let mut idx = exclusion_index();
+        let subtree = frn(1, 40);
+        let visible = frn(1, 30);
+        let leaf = idx.entry_by_frn(Frn(frn(1, 41))).unwrap();
+
+        apply_batch(
+            &mut idx,
+            &[rec_full(
+                subtree,
+                visible,
+                reason::BASIC_INFO_CHANGE | reason::CLOSE,
+                0x10 | 0x2,
+                "subtree",
+            )],
+            &MetadataSource::none(),
+        );
+        assert!(idx.is_excluded(leaf));
+        assert_eq!(visible_names(&idx, "needle"), Vec::<String>::new());
+
+        apply_batch(
+            &mut idx,
+            &[rec_full(
+                subtree,
+                visible,
+                reason::BASIC_INFO_CHANGE | reason::CLOSE,
+                0x10,
+                "subtree",
+            )],
+            &MetadataSource::none(),
+        );
+        assert!(!idx.is_excluded(leaf));
+        assert_eq!(visible_names(&idx, "needle"), vec!["needle.txt"]);
+    }
+}

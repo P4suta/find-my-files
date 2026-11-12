@@ -1,22 +1,21 @@
 //! Exact-identity mutation-testing gates (ADR-0022).
 //!
-//! Mutation scores are deliberately not policy: a score can stay flat while a
-//! critical old survivor disappears and a new security-relevant survivor takes
-//! its place. These gates run each tool's unmutated baseline, parse its
-//! machine-readable report, canonicalize exact mutant identities, and compare
-//! the survivor set with a reviewed, rationale-bearing baseline.
+//! Mutation scores are deliberately not policy: a score can stay flat while a critical old survivor disappears and a new security-relevant survivor takes its place.
+//! These gates run each tool's unmutated baseline, parse its machine-readable report, canonicalize exact mutant identities, and compare the survivor set with a reviewed, rationale-bearing baseline.
+
+const MUTANTS_INCOMPLETE_EXIT: i32 = 3;
+const WINDOWS_DRIVE_ROOT_BYTES: usize = b"C:/".len();
+const MUTANTS_SURVIVORS_EXIT: i32 = 2;
+const MIN_EQUIVALENCE_RATIONALE_BYTES: usize = 12;
 
 use crate::{fsx, paths};
 use anyhow::{anyhow, bail, Context, Result};
 use regex::Regex;
-use serde::{
-    de::{self, DeserializeOwned, MapAccess, SeqAccess, Visitor},
-    Deserialize, Deserializer, Serialize,
-};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::LazyLock;
@@ -25,46 +24,113 @@ const BASELINE_SCHEMA_VERSION: u32 = 1;
 const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 const CARGO_MUTANTS_NAME: &str = "cargo-mutants";
 const CARGO_MUTANTS_VERSION: &str = "27.1.0";
+const RUST_SELECTED_FILES: &str = "selected-files.json";
 const STRYKER_NAME: &str = "dotnet-stryker";
-const STRYKER_VERSION: &str = "4.16.0";
+const STRYKER_VERSION: &str = "5.0.0";
 
-/// The app-project build profile every C# mutation run must use, as environment
-/// variables (`MSBuild` reads the environment as properties).
+#[path = "mutation_smoke.rs"]
+pub mod smoke;
+
+mod concurrency {
+    use core::num::NonZeroUsize;
+
+    pub(super) const TEST_THREADS_PER_JOB: usize = 4;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) struct Plan {
+        jobs: usize,
+        test_threads: usize,
+    }
+
+    impl Plan {
+        pub(super) const fn for_cpus(cpus: NonZeroUsize) -> Self {
+            if cpus.get() < TEST_THREADS_PER_JOB {
+                Self {
+                    jobs: 1,
+                    test_threads: cpus.get(),
+                }
+            } else {
+                Self {
+                    jobs: cpus.get() / TEST_THREADS_PER_JOB,
+                    test_threads: TEST_THREADS_PER_JOB,
+                }
+            }
+        }
+
+        pub(super) const fn jobs(self) -> usize {
+            self.jobs
+        }
+
+        pub(super) const fn test_threads(self) -> usize {
+            self.test_threads
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::Plan;
+        use core::num::NonZeroUsize;
+
+        #[test]
+        fn test_slots_fit_small_and_large_cpu_budgets() {
+            for (cpus, jobs, threads) in [
+                (1, 1, 1),
+                (2, 1, 2),
+                (3, 1, 3),
+                (4, 1, 4),
+                (7, 1, 4),
+                (8, 2, 4),
+                (16, 4, 4),
+                (usize::MAX, usize::MAX / 4, 4),
+            ] {
+                let plan =
+                    Plan::for_cpus(NonZeroUsize::new(cpus).expect("nonzero test CPU budget"));
+                assert_eq!((plan.jobs(), plan.test_threads()), (jobs, threads));
+                assert!(plan.jobs() * plan.test_threads() <= cpus);
+            }
+        }
+    }
+}
+
+#[cfg(kani)]
+#[path = "mutation_proofs.rs"]
+mod kani_proofs;
+
+/// The app-project build profile every C# mutation run must use, as environment variables (`MSBuild` reads the environment as properties).
 ///
-/// `FindMyFiles.Tests.csproj` carries these on its `ProjectReference` as
-/// `AdditionalProperties`, which is enough for `dotnet test` but **not** for
-/// Stryker: Stryker analyses `FindMyFiles.csproj` on its own (Buildalyzer,
-/// standalone) to build the mutated compilation, so those reference-scoped
-/// properties are simply absent. The app then compiles with `FmfTestSeams=false`
-/// — no `InternalsVisibleTo("FindMyFiles.Tests")`, and `FakeEngineClient.cs`
-/// removed from the compile — and the injected assembly makes the test host throw
-/// `TypeLoadException: Access is denied: 'FindMyFiles.ViewModels.SearchRequest'`
-/// during discovery. Zero tests found, every mutant Timeout.
+/// `FindMyFiles.Tests.csproj` carries these on its `ProjectReference` as `AdditionalProperties`, which is enough for `dotnet test` but **not** for Stryker: Stryker analyses `FindMyFiles.csproj` on its own (Buildalyzer,
+/// standalone) to build the mutated compilation, so those reference-scoped properties are simply absent.
+/// The app then compiles with `FmfTestSeams=false` — no `InternalsVisibleTo("FindMyFiles.Tests")`, and `FakeEngineClient.cs` removed from the compile — and the injected assembly makes the test host throw `TypeLoadException: Access is denied: 'FindMyFiles.ViewModels.SearchRequest'` during discovery.
+/// Zero tests found, every mutant Timeout.
 ///
-/// Stryker has no `-p:` passthrough, so the environment is the only channel. It
-/// lives here, on the command the gate itself spawns, rather than in a shell or a
-/// workflow `env:` block: there is no step for an operator or a YAML author to
-/// forget. `mutation_ci::dotnet_command` sets the identical pair for the same
-/// reason, so both entry points build one app profile.
+/// Stryker has no `-p:` passthrough, so the environment is the only channel.
+/// It lives here, on the command the gate itself spawns, rather than in a shell or a workflow `env:` block: there is no step for an operator or a YAML author to forget.
+/// `mutation_ci::dotnet_command` sets the identical pair for the same reason, so both entry points build one app profile.
 const CSHARP_TEST_PROFILE: [(&str, &str); 2] =
     [("FmfTestSeams", "true"), ("FmfArtifactKind", "ui-test")];
 
-/// [`CSHARP_TEST_PROFILE`] for the CI shard runner, so neither entry point can
-/// carry its own copy of the pair.
+/// [`CSHARP_TEST_PROFILE`] for the CI shard runner, so neither entry point can carry its own copy of the pair.
 pub const fn csharp_test_profile() -> [(&'static str, &'static str); 2] {
     CSHARP_TEST_PROFILE
 }
 
+pub fn csharp_build_args(configuration: &Value) -> Result<[String; 2]> {
+    let profile = configuration
+        .pointer("/stryker-config/configuration")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty() && value.trim() == *value && !value.chars().any(char::is_control)
+        })
+        .ok_or_else(|| anyhow!("Stryker build configuration must be a nonempty clean string"))?;
+    Ok(["--configuration".to_owned(), profile.to_owned()])
+}
+
 /// Where cargo-mutants actually writes its reports for a given `--output` dir.
 ///
-/// `--output <D>` is the *parent*: cargo-mutants 27.1.0 creates `<D>/mutants.out`
-/// (rotating any previous one to `mutants.out.old`) and puts `outcomes.json`,
-/// `mutants.json`, the `*.txt` verdict lists and the per-mutant logs there. Both
-/// callers — the local gate and the CI shard runner — need the same mapping, and
-/// having each spell it out is exactly how they drifted: the CI path joined
-/// `mutants.out` while the local path read `<D>/outcomes.json` and failed with
-/// `os error 2` after a complete run. One function, pinned by a test, next to the
-/// tool version it is a fact about.
+/// `--output <D>` is the *parent*: cargo-mutants 27.1.0 creates `<D>/mutants.out` (rotating any previous one to `mutants.out.old`) and puts `outcomes.json`,
+/// `mutants.json`, the `*.txt` verdict lists and the per-mutant logs there.
+/// Both callers — the local gate and the CI shard runner — need the same mapping, and having each spell it out is exactly how they drifted: the CI path joined `mutants.out` while the local path read `<D>/outcomes.json` and failed with `os error 2` after a complete run.
+/// One function, pinned by a test, next to the tool version it is a fact about.
 pub fn cargo_mutants_report_dir(output: &Path) -> PathBuf {
     output.join("mutants.out")
 }
@@ -166,6 +232,7 @@ struct RustRun {
 #[derive(Debug)]
 struct CsharpRun {
     examined_files: Vec<String>,
+    killed: Vec<CsharpIdentity>,
     survivors: Vec<CsharpIdentity>,
     no_coverage: Vec<CsharpIdentity>,
     timeouts: Vec<CsharpIdentity>,
@@ -189,24 +256,16 @@ struct OutsideScopeSummary {
     status_counts: BTreeMap<String, usize>,
 }
 
-/// The cargo-mutants arguments that decide **which mutants exist** and **how
-/// each one is judged**, shared verbatim by every lane.
+/// The cargo-mutants arguments that decide **which mutants exist** and **how each one is judged**, shared verbatim by every lane.
 ///
-/// `engine/mutants.toml` owns the answers: `examine_globs` (the twelve reviewed
-/// fmf-core files), `test_tool`, `timeout_multiplier`, and the per-sandbox
-/// `--target-dir`. A lane that does not pass `--config` judges a different
-/// program than the reviewed baseline describes, and nothing downstream
-/// notices: the CI controller ran `--no-config --workspace` for five weeks and
-/// reported ~1,900 survivors — nearly all of them in `fmf-service/src/security.rs`,
-/// the file `mutants.toml` excludes precisely because `#[ignore]` tests cannot
-/// run under this gate — while `just mutants` was green over the same commits.
+/// `engine/mutants.toml` owns the answers: `examine_globs` (the twelve reviewed fmf-core files), `test_tool`, `timeout_multiplier`, and the per-sandbox `--target-dir`.
+/// A lane that does not pass `--config` judges a different program than the reviewed baseline describes, and nothing downstream notices: the CI controller ran `--no-config --workspace` for five weeks and reported ~1,900 survivors — nearly all of them in `fmf-service/src/security.rs`,
+/// the file `mutants.toml` excludes precisely because `#[ignore]` tests cannot run under this gate — while `just mutants` was green over the same commits.
 ///
 /// Nothing here may restate a key the config already owns (`test_tool`,
-/// `timeout_multiplier`, `additional_cargo_args`). cargo-mutants lets the CLI
-/// win silently, so a duplicate is not an error, it is the next drift.
-/// `--workspace` is generation-only and measured to be a no-op against these
-/// globs (identical 1,760-mutant list with and without it); it stays so that a
-/// new crate matching a glob fails the inventory check instead of vanishing.
+/// `timeout_multiplier`, `additional_cargo_args`).
+/// cargo-mutants lets the CLI win silently, so a duplicate is not an error, it is the next drift.
+/// `--workspace` is generation-only and measured to be a no-op against these globs (identical 1,760-mutant list with and without it); it stays so that a new crate matching a glob fails the inventory check instead of vanishing.
 pub fn rust_scope_args(config: &str) -> Vec<String> {
     [
         "--config",
@@ -219,22 +278,18 @@ pub fn rust_scope_args(config: &str) -> Vec<String> {
         "--annotations",
         "none",
         "--cargo-arg=--locked",
+        "--cargo-arg=--workspace",
     ]
     .map(str::to_owned)
     .to_vec()
 }
 
-/// The nextest policy both Rust mutation lanes run under. It is written to a
-/// file and passed as `--config-file`, which *replaces* the repository's own
-/// configuration rather than layering on it.
+/// The nextest policy both Rust mutation lanes run under.
+/// It is written to a file and passed as `--config-file`, which *replaces* the repository's own configuration rather than layering on it.
 ///
-/// It has to be spelled out, because `engine/.config/nextest.toml`'s `default`
-/// profile is tuned for the ordinary suite and is actively wrong here:
-/// `slow-timeout = { period = "15s", terminate-after = 4 }` kills any test still
-/// running after a minute, so a slow-but-correct mutant is reported **caught**
-/// — by nextest, on a stopwatch, not by an assertion — and cargo-mutants' own
-/// `timeout_multiplier` never gets to call it a timeout. `leak-timeout` with
-/// `result = "fail"` can manufacture a second such verdict.
+/// It has to be spelled out, because `engine/.config/nextest.toml`'s `default` profile is tuned for the ordinary suite and is actively wrong here:
+/// `slow-timeout = { period = "15s", terminate-after = 4 }` kills any test still running after a minute, so a slow-but-correct mutant is reported **caught** — by nextest, on a stopwatch, not by an assertion — and cargo-mutants' own `timeout_multiplier` never gets to call it a timeout.
+/// `leak-timeout` with `result = "fail"` can manufacture a second such verdict.
 pub const NEXTEST_POLICY: &str = r#"nextest-version = "0.9.140"
 
 [store]
@@ -246,10 +301,8 @@ retries = 0
 flaky-result = "fail"
 "#;
 
-/// `--cargo-arg=--locked` is forwarded by cargo-mutants to both the build and
-/// the nextest invocation. Keep the nextest-only policy here so `--locked`
-/// cannot accidentally be supplied a second time (nextest rejects duplicate
-/// uses).
+/// `--cargo-arg=--locked` is forwarded by cargo-mutants to both the build and the nextest invocation.
+/// Keep the nextest-only policy here so `--locked` cannot accidentally be supplied a second time (nextest rejects duplicate uses).
 pub const RUST_MUTATION_NEXTEST_ARGS: &[&str] = &[
     "--user-config-file",
     "none",
@@ -264,52 +317,31 @@ pub const RUST_MUTATION_NEXTEST_ARGS: &[&str] = &[
     "fail",
 ];
 
-/// The whole executing argument vector, for both lanes. `shard` is the only
-/// thing either lane may vary.
-///
-/// Everything else is here because a lane that decides it for itself is a lane
-/// running a different program, which is the defect this gate spent five weeks
-/// failing on. Two options moved here after being measured rather than reasoned
-/// about, against `mutants.yml` run 34832581942 and a full local `just mutants`
-/// over the same tree:
-///
-/// * `--test-workspace true` was CI-only, on the stated theory that it "strictly
-///   increases what the gate demands". It does not only do that. Building the
-///   whole workspace unifies features differently from building just the mutated
-///   package, so it also changes which mutants *compile*: local reported 107
-///   unviable against CI's 67, and the 40-mutant difference reappeared in CI as
-///   15 missed, 24 caught and 1 timeout. The local gate was green-able while CI
-///   was red, on the same commit.
-/// * `--minimum-test-timeout 60` was CI-only as a concession to slow hosted
-///   runners. A floor that one lane has and the other does not is a floor that
-///   makes them disagree about timeouts, which this gate never accepts.
-///
-/// `--skip-calls-defaults false` used to be in the CI half, on the theory that a
-/// tool default could narrow the reviewed scope. It cannot any more — the scope
-/// arrives from the controller — and it was not free: it re-enables mutation of
-/// the arguments of `with_capacity` calls, adding 14 mutants (1,760 -> 1,774)
-/// which are all arithmetic inside a capacity hint (`Vec::with_capacity(len * 3)`
-/// -> `len + 3`). Capacity is not observable behaviour, so every one of them
-/// survives by construction, against a reviewed baseline recorded with the
-/// default skip list. Keeping it would have meant 14 permanent survivors in a
-/// gate whose whole design is exact survivor equality.
+/// The measured healthy test phases reached 60.1 seconds across four concurrent jobs.
+const MINIMUM_TEST_TIMEOUT_SECS: &str = "300";
+
+/// Build both lanes' complete mutation arguments from the same CPU budget and reviewed scope.
 pub fn rust_run_args(
     config: &str,
     output: &str,
     nextest_config: &str,
+    cpus: NonZeroUsize,
     shard: Option<(usize, usize)>,
 ) -> Vec<String> {
     let mut args = rust_scope_args(config);
+    let plan = concurrency::Plan::for_cpus(cpus);
+    let jobs = plan.jobs().to_string();
+    let test_threads = plan.test_threads().to_string();
     args.extend(
         [
             "--output",
             output,
             "--baseline",
             "run",
-            "--test-workspace",
-            "true",
             "--minimum-test-timeout",
-            "60",
+            MINIMUM_TEST_TIMEOUT_SECS,
+            "--jobs",
+            jobs.as_str(),
         ]
         .into_iter()
         .map(str::to_owned),
@@ -323,9 +355,15 @@ pub fn rust_run_args(
         );
     }
     args.extend(
-        ["--", "--config-file", nextest_config]
-            .into_iter()
-            .map(str::to_owned),
+        [
+            "--",
+            "--config-file",
+            nextest_config,
+            "--test-threads",
+            &test_threads,
+        ]
+        .into_iter()
+        .map(str::to_owned),
     );
     args.extend(
         RUST_MUTATION_NEXTEST_ARGS
@@ -336,26 +374,13 @@ pub fn rust_run_args(
     args
 }
 
-/// The Stryker.NET argument vector shared by every lane, `rust_scope_args` for
-/// the C# half of the gate.
+/// The Stryker.NET argument vector shared by every lane, `rust_scope_args` for the C# half of the gate.
 ///
-/// Everything that decides **which mutants exist** and **how each one is judged**
-/// lives in `app/FindMyFiles.Tests/stryker-config.json`
-/// (see [`paths::csharp_stryker_config`]), and nothing here may restate one of
-/// those keys. Stryker lets a command-line option win over the configuration
-/// file without saying so, which is how a lane drifts — and this gate had
-/// drifted twice over: `--break-on-initial-test-failure` was spelled on both
-/// command lines *and* in the configuration the CI runner generated, while
-/// `mutation-level: Complete`, `coverage-analysis: off`, `test-runner: vstest`
-/// and `configuration: Release` were spelled only in that generated copy, so
-/// `just stryker` mutated a different program at `Standard` level against the
-/// same 103-entry reviewed baseline.
+/// Everything that decides **which mutants exist** and **how each one is judged** lives in `app/FindMyFiles.Tests/stryker-config.json` (see [`paths::csharp_stryker_config`]), and nothing here may restate one of those keys.
+/// Stryker lets a command-line option win over the configuration file without saying so, which is how a lane drifts — and this gate had drifted twice over: `--break-on-initial-test-failure` was spelled on both command lines *and* in the configuration the CI runner generated, while `mutation-level: Complete`, `coverage-analysis: off`, `test-runner: vstest` and `configuration: Release` were spelled only in that generated copy, so `just stryker` mutated a different program at `Standard` level against the same 103-entry reviewed baseline.
 ///
-/// What is left is per-lane placement, which no shared configuration file can
-/// own: where the report goes, and — CI only — the file name of the generated
-/// shard configuration, because the trusted runner writes it *beside* the
-/// reviewed file rather than over it. `--skip-version-check` is not a
-/// configuration key at all; it suppresses Stryker's outbound version query,
+/// What is left is per-lane placement, which no shared configuration file can own: where the report goes, and — CI only — the file name of the generated shard configuration, because the trusted runner writes it *beside* the reviewed file rather than over it.
+/// `--skip-version-check` is not a configuration key at all; it suppresses Stryker's outbound version query,
 /// which both lanes must stay offline for.
 pub fn stryker_args(output: &str, config_file: Option<&str>) -> Vec<String> {
     let mut args = ["tool", "run", "dotnet-stryker", "--"]
@@ -364,25 +389,60 @@ pub fn stryker_args(output: &str, config_file: Option<&str>) -> Vec<String> {
     if let Some(config_file) = config_file {
         args.extend(["--config-file", config_file].map(str::to_owned));
     }
-    args.extend(["--output", output, "--skip-version-check"].map(str::to_owned));
+    args.extend(["--output", output, "--skip-version-check", "--log-to-file"].map(str::to_owned));
     args
+}
+
+/// Bound the mutation planner by the process CPU assignment.
+pub fn cpu_budget() -> Result<NonZeroUsize> {
+    let estimated =
+        std::thread::available_parallelism().context("query Rust mutation CPU budget")?;
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
+        let mut assigned = 0;
+        let mut system = 0;
+        // SAFETY: The pseudo-handle is valid and both outputs point to writable usize values.
+        if unsafe {
+            GetProcessAffinityMask(GetCurrentProcess(), &raw mut assigned, &raw mut system)
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error()).context("read the process CPU assignment");
+        }
+        let count = usize::try_from(assigned.count_ones()).context("convert process CPU count")?;
+        let assigned = NonZeroUsize::new(count).context("the process CPU assignment is empty")?;
+        Ok(estimated.min(assigned))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(estimated)
+    }
 }
 
 pub fn run_rust() -> Result<()> {
     verify_cargo_mutants_version()?;
+    let cpus = cpu_budget()?;
+    let repo = paths::repo_root();
+    let baseline: AcceptedBaseline<RustIdentity> = read_baseline(
+        &paths::rust_mutation_baseline(),
+        CARGO_MUTANTS_NAME,
+        CARGO_MUTANTS_VERSION,
+    )?;
+    let selection = rust_listing(&repo, RustListing::SelectedFiles)?;
+    let selected_files = parse_rust_selected_files(selection.clone())?;
+    compare_exact_files(
+        &baseline.examined_files,
+        &selected_files,
+        &paths::rust_mutation_baseline(),
+    )?;
+    let source = rust_input_files(&repo)?;
 
     let output = paths::rust_mutation_dir();
     fsx::force_remove_dir_all(&output)
         .with_context(|| format!("remove stale Rust mutation output {}", output.display()))?;
-    // cargo-mutants creates only the last component of `--output` itself, so a
-    // fresh checkout (or the removal above) leaves it dying with `create output
-    // parent directory` before a single mutant is built.
     fs::create_dir_all(&output)
         .with_context(|| format!("create Rust mutation output {}", output.display()))?;
 
-    // The same nextest policy the CI shard writes into its work tree. Without
-    // it this lane silently inherits `engine/.config/nextest.toml`, whose
-    // `default` profile stops a test at 60s and calls the mutant caught.
     let nextest_config = output.join("nextest-mutation.toml");
     fs::write(&nextest_config, NEXTEST_POLICY).with_context(|| {
         format!(
@@ -394,12 +454,12 @@ pub fn run_rust() -> Result<()> {
     let output_arg = output.to_string_lossy().into_owned();
     let nextest_config_arg = nextest_config.to_string_lossy().into_owned();
     let config_arg = paths::rust_mutants_config().to_string_lossy().into_owned();
-    let status = Command::new("cargo")
-        .arg("mutants")
+    let status = rust_command(&repo)
         .args(rust_run_args(
             &config_arg,
             &output_arg,
             &nextest_config_arg,
+            cpus,
             None,
         ))
         .env("FMF_MUTATION_SOURCE_ROOT", paths::repo_root())
@@ -408,7 +468,10 @@ pub fn run_rust() -> Result<()> {
         .status()
         .context("spawn pinned cargo-mutants")?;
 
-    let run = parse_rust_run(&cargo_mutants_report_dir(&output))?;
+    require_same_rust_inputs(&source, &rust_input_files(&repo)?)?;
+    let reports = cargo_mutants_report_dir(&output);
+    write_json_atomic(&reports.join(RUST_SELECTED_FILES), &selection)?;
+    let run = parse_rust_run(&reports)?;
     write_json_atomic(
         &output.join("gate.json"),
         &RustEvidence {
@@ -430,11 +493,6 @@ pub fn run_rust() -> Result<()> {
         );
     }
 
-    let baseline: AcceptedBaseline<RustIdentity> = read_baseline(
-        &paths::rust_mutation_baseline(),
-        CARGO_MUTANTS_NAME,
-        CARGO_MUTANTS_VERSION,
-    )?;
     compare_exact_files(
         &baseline.examined_files,
         &run.examined_files,
@@ -447,6 +505,225 @@ pub fn run_rust() -> Result<()> {
         paths::rust_mutation_baseline().display(),
         run.survivors.len()
     );
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum RustListing {
+    SelectedFiles,
+    Mutants,
+}
+
+fn rust_command(repo: &Path) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .arg("mutants")
+        .env_remove("FMF_BLESS")
+        .current_dir(repo.join("engine"));
+    command
+}
+
+fn rust_listing(repo: &Path, listing: RustListing) -> Result<Value> {
+    let config = repo.join("engine/mutants.toml");
+    let output = rust_command(repo)
+        .args(rust_scope_args(&config.to_string_lossy()))
+        .args([
+            match listing {
+                RustListing::SelectedFiles => "--list-files",
+                RustListing::Mutants => "--list",
+            },
+            "--json",
+        ])
+        .env_remove("FMF_BLESS")
+        .current_dir(repo.join("engine"))
+        .output()
+        .context("discover the pinned Rust mutation scope")?;
+    if !output.status.success() {
+        bail!(
+            "Rust mutation discovery failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    crate::strict_json::decode(&output.stdout).context("decode native Rust mutation discovery")
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RustSelectedFile {
+    path: String,
+    package: String,
+}
+
+fn parse_rust_selected_files(value: Value) -> Result<Vec<String>> {
+    let files: Vec<RustSelectedFile> = serde_json::from_value(value)?;
+    let mut selected = BTreeSet::new();
+    for file in files {
+        let path = format!("engine/{}", file.path);
+        validate_relative_path(&path)?;
+        if parse_path(&path)?.render() != path
+            || !file
+                .path
+                .starts_with(&format!("crates/{}/src/", file.package))
+            || !selected.insert(path)
+        {
+            bail!("Rust selected-file listing contains a duplicate or inconsistent package path");
+        }
+    }
+    let selected: Vec<String> = selected.into_iter().collect();
+    validate_examined_files(Path::new(RUST_SELECTED_FILES), &selected)?;
+    Ok(selected)
+}
+
+fn rust_input_files(repo: &Path) -> Result<BTreeMap<String, String>> {
+    let output = Command::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            "engine",
+            "contract",
+            "mise.toml",
+        ])
+        .current_dir(repo)
+        .output()
+        .context("list Rust mutation inputs")?;
+    if !output.status.success() {
+        bail!("list Rust mutation inputs failed with {}", output.status);
+    }
+    let names = String::from_utf8(output.stdout)?;
+    let names = names
+        .strip_suffix('\0')
+        .context("Rust mutation input listing is empty or incomplete")?;
+    let mut inputs = BTreeMap::new();
+    for name in names.split('\0') {
+        validate_relative_path(name)?;
+        let path = repo.join(name);
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || fsx::is_reparse_point(&metadata)
+        {
+            bail!("Rust mutation input is not an ordinary file: {name}");
+        }
+        let digest = crate::checksum::sha256_hex(&fs::read(path)?);
+        if inputs.insert(name.to_owned(), digest).is_some() {
+            bail!("Rust mutation input listing contains a duplicate: {name}");
+        }
+    }
+    for required in ["engine/Cargo.toml", "engine/Cargo.lock", "mise.toml"] {
+        if !inputs.contains_key(required) {
+            bail!("Rust mutation input listing lacks {required}");
+        }
+    }
+    Ok(inputs)
+}
+
+fn require_same_rust_inputs(
+    expected: &BTreeMap<String, String>,
+    actual: &BTreeMap<String, String>,
+) -> Result<()> {
+    if expected != actual {
+        bail!("Rust engine, tests, corpus, or configuration changed since the frozen run");
+    }
+    Ok(())
+}
+
+fn canonical_rust_discovery(value: Value) -> Result<BTreeMap<RustIdentity, Value>> {
+    let entries = value
+        .as_array()
+        .context("native discovery has no mutant array")?;
+    let mut mutants = BTreeMap::new();
+    for entry in entries {
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .context("discovered mutant has no name")?;
+        if mutants
+            .insert(parse_rust_identity(name)?, entry.clone())
+            .is_some()
+        {
+            bail!("native discovery contains a duplicate mutant identity");
+        }
+    }
+    if mutants.is_empty() {
+        bail!("native discovery contains no mutants");
+    }
+    Ok(mutants)
+}
+
+fn frozen_rust_report_directory(source_root: &Path, reports: &Path) -> Result<PathBuf> {
+    let root = fs::canonicalize(source_root)?;
+    let local_output = paths::rust_mutation_dir();
+    let relative = local_output.strip_prefix(paths::repo_root())?;
+    let expected = fs::canonicalize(cargo_mutants_report_dir(&root.join(relative)))?;
+    let actual = fs::canonicalize(reports)?;
+    let metadata = fs::symlink_metadata(reports)?;
+    if actual != expected
+        || !actual.starts_with(&root)
+        || !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || fsx::is_reparse_point(&metadata)
+    {
+        bail!("saved Rust reports must belong to the supplied frozen checkout");
+    }
+    Ok(actual)
+}
+
+pub fn check_rust_report(source_root: &Path, reports: &Path) -> Result<()> {
+    verify_cargo_mutants_version()?;
+    let reports = frozen_rust_report_directory(source_root, reports)?;
+    let frozen_status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(source_root)
+        .output()
+        .context("inspect the frozen mutation source")?;
+    if !frozen_status.status.success() || !frozen_status.stdout.is_empty() {
+        bail!("saved Rust mutation results require a clean frozen source checkout");
+    }
+    let repo = paths::repo_root();
+    let source = rust_input_files(&repo)?;
+    let frozen_source = rust_input_files(source_root)?;
+    require_same_rust_inputs(&frozen_source, &source)?;
+    let selection = parse_rust_selected_files(rust_listing(&repo, RustListing::SelectedFiles)?)?;
+    let baseline_path = paths::rust_mutation_baseline();
+    let baseline: AcceptedBaseline<RustIdentity> =
+        read_baseline(&baseline_path, CARGO_MUTANTS_NAME, CARGO_MUTANTS_VERSION)?;
+    compare_exact_files(&baseline.examined_files, &selection, &baseline_path)?;
+    let generated = canonical_rust_discovery(rust_listing(&repo, RustListing::Mutants)?)?;
+    let recorded = canonical_rust_discovery(read_json(&reports.join("mutants.json"))?)?;
+    if generated != recorded {
+        bail!("saved Rust mutations differ from fresh native discovery");
+    }
+    let policy = reports
+        .parent()
+        .context("mutation report has no output parent")?
+        .join("nextest-mutation.toml");
+    if fs::read(policy)? != NEXTEST_POLICY.as_bytes() {
+        bail!("saved Rust mutation runner policy differs from the current policy");
+    }
+    let run = parse_rust_run_selected(&reports, selection)?;
+    if !run.timeouts.is_empty() {
+        bail!("saved Rust mutation results contain inconclusive timeouts");
+    }
+    compare_exact_survivors(&baseline, &run.survivors, &baseline_path)?;
+    require_same_rust_inputs(&source, &rust_input_files(&repo)?)?;
+    require_same_rust_inputs(&frozen_source, &rust_input_files(source_root)?)?;
+    write_json_atomic(
+        &paths::rust_mutation_dir().join("gate.json"),
+        &RustEvidence {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            tool: expected_tool(CARGO_MUTANTS_NAME, CARGO_MUTANTS_VERSION),
+            baseline_passed: true,
+            examined_files: &run.examined_files,
+            survivors: &run.survivors,
+            timeouts: &run.timeouts,
+        },
+    )?;
+    println!("Saved Rust mutation gate passed: complete results match the frozen engine, tests, native discovery, and exact survivor baseline.");
     Ok(())
 }
 
@@ -463,6 +740,7 @@ pub fn run_csharp() -> Result<()> {
         &repo,
         &baseline.examined_files,
     )?;
+    let configuration: Value = read_json(&paths::csharp_stryker_config())?;
     let output = paths::csharp_mutation_dir();
     let tool_manifest = repo.join(".config").join("dotnet-tools.json");
     let tool_manifest_arg = tool_manifest.to_string_lossy().into_owned();
@@ -492,6 +770,7 @@ pub fn run_csharp() -> Result<()> {
                 "-p:FmfTestSeams=true",
                 "-p:FmfArtifactKind=ui-test",
             ])
+            .args(csharp_build_args(&configuration)?)
             .current_dir(&test_dir),
         "run the unmutated C# baseline tests",
     )?;
@@ -546,17 +825,10 @@ pub fn run_csharp() -> Result<()> {
 
 /// Load the canonical Rust mutation scope and reviewed survivor identities.
 ///
-/// The trusted CI controller uses this instead of accepting mutation policy
-/// from the target checkout, exactly as the C# lane does below. `read_baseline`
-/// validates the tool pin, the strict ordering, every identity and every
-/// rationale.
+/// The trusted CI controller uses this instead of accepting mutation policy from the target checkout, exactly as the C# lane does below.
+/// `read_baseline` validates the tool pin, the strict ordering, every identity and every rationale.
 ///
-/// Unlike the C# reader there is no second file to cross-check: the scope lives
-/// in `engine/mutants.toml` as globs, and xtask deliberately never parses it —
-/// cargo-mutants owns glob matching at run time, and a second matcher here
-/// would be a second answer. The proof that the config and this baseline agree
-/// is therefore after the fact and already exists in both lanes: the files
-/// cargo-mutants reports as examined are compared to `examined_files`.
+/// The native selected-file listing supplies glob semantics, including declaration-only modules.
 pub fn read_rust_reviewed_policy(repo: &Path) -> Result<RustReviewedPolicy> {
     let baseline_path = paths::rust_mutation_baseline_in(repo);
     let baseline: AcceptedBaseline<RustIdentity> =
@@ -582,10 +854,8 @@ pub fn read_rust_reviewed_policy(repo: &Path) -> Result<RustReviewedPolicy> {
 
 /// Load the canonical C# mutation scope and reviewed survivor identities.
 ///
-/// The trusted CI controller uses this instead of accepting mutation policy
-/// from the target checkout. `read_baseline` validates the tool pin, exact
-/// ordering, identities, and rationales; `read_stryker_scope` additionally
-/// proves that every exact mutate entry resolves to the same file inventory.
+/// The trusted CI controller uses this instead of accepting mutation policy from the target checkout.
+/// `read_baseline` validates the tool pin, exact ordering, identities, and rationales; `read_stryker_scope` additionally proves that every exact mutate entry resolves to the same file inventory.
 pub fn read_csharp_reviewed_policy(repo: &Path) -> Result<CsharpReviewedPolicy> {
     let baseline_path = paths::csharp_mutation_baseline_in(repo);
     let baseline: AcceptedBaseline<CsharpIdentity> =
@@ -753,16 +1023,24 @@ fn run_required(command: &mut Command, description: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_cargo_mutants_exit(status: ExitStatus, run: &RustRun) -> Result<()> {
-    let expected = if run.timeouts.is_empty() {
-        if run.survivors.is_empty() {
+pub const fn cargo_mutants_expected_exit(survivors: usize, timeouts: usize) -> i32 {
+    if timeouts == 0 {
+        if survivors == 0 {
             0
         } else {
-            2
+            MUTANTS_SURVIVORS_EXIT
         }
     } else {
-        3
-    };
+        MUTANTS_INCOMPLETE_EXIT
+    }
+}
+
+pub fn cargo_mutants_completed(code: Option<i32>, survivors: usize, timeouts: usize) -> bool {
+    timeouts == 0 && code == Some(cargo_mutants_expected_exit(survivors, timeouts))
+}
+
+fn validate_cargo_mutants_exit(status: ExitStatus, run: &RustRun) -> Result<()> {
+    let expected = cargo_mutants_expected_exit(run.survivors.len(), run.timeouts.len());
     if status.code() != Some(expected) {
         bail!(
             "cargo-mutants exit/report mismatch: exit={:?}, expected={expected} for {} survivor(s) and {} timeout(s)",
@@ -817,8 +1095,138 @@ fn validate_csharp_conclusive(run: &CsharpRun, evidence: &Path) -> Result<()> {
 }
 
 fn parse_rust_run(output: &Path) -> Result<RustRun> {
+    let selected = parse_rust_selected_files(read_json(&output.join(RUST_SELECTED_FILES))?)?;
+    parse_rust_run_selected(output, selected)
+}
+
+pub fn require_rust_build_failure(entry: &Value) -> Result<()> {
+    let phases = entry
+        .get("phase_results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Unviable outcome has no build phase"))?;
+    let [phase] = phases.as_slice() else {
+        bail!("Unviable outcome must contain exactly one failed build phase");
+    };
+    if phase.get("phase").and_then(Value::as_str) != Some("Build")
+        || phase.get("process_status") != Some(&serde_json::json!({"Failure":101}))
+        || phase
+            .get("duration")
+            .and_then(Value::as_f64)
+            .is_none_or(|duration| !duration.is_finite() || duration < 0.0)
+    {
+        bail!("Unviable outcome does not record a completed build failure with exit code 101");
+    }
+    let argv = phase
+        .get("argv")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Unviable build has no command arguments"))?;
+    let argv: Vec<_> = argv
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| anyhow!("Unviable build argument is not a string"))
+        })
+        .collect::<Result<_>>()?;
+    let executable = argv
+        .first()
+        .and_then(|path| path.rsplit(['/', '\\']).next());
+    if !executable.is_some_and(|name| {
+        name.eq_ignore_ascii_case("cargo") || name.eq_ignore_ascii_case("cargo.exe")
+    }) || argv.get(1) != Some(&"nextest")
+        || argv.get(2) != Some(&"run")
+        || argv
+            .iter()
+            .filter(|&&argument| argument == "--no-run")
+            .count()
+            != 1
+    {
+        bail!("Unviable build does not use the pinned nextest compilation command");
+    }
+    Ok(())
+}
+
+fn compiler_rejection(line: &str) -> bool {
+    ["error[E0080]: ", "error[E0271]: ", "error[E0277]: ", "error[E0433]: ", "error[E0599]: "]
+        .iter().any(|prefix| line.starts_with(prefix))
+        || [
+            "error: `<` is interpreted as a start of generic arguments for `usize`, not a comparison",
+            "error: `||` operators are not supported in let chain conditions",
+            "error: cannot find macro `vec` in this scope",
+            "error: this arithmetic operation will overflow",
+        ].contains(&line)
+}
+
+fn cargo_rejection_summary(line: &str) -> bool {
+    if line.starts_with("error: command `") {
+        return line.contains("cargo")
+            && line.contains("test --no-run")
+            && line.ends_with("exited with code 101");
+    }
+    let (summary, warning) = line.split_once("; ").unwrap_or((line, ""));
+    if !warning.is_empty() {
+        let Some((count, description)) = warning.split_once(' ') else {
+            return false;
+        };
+        match (count.parse::<u64>(), description) {
+            (Ok(1), "warning emitted") => {}
+            (Ok(count), "warnings emitted") if count > 1 => {}
+            _ => return false,
+        }
+    }
+    summary.starts_with("error: could not compile `")
+        && summary.contains(" due to ")
+        && (summary.ends_with(" previous error") || summary.ends_with(" previous errors"))
+}
+
+pub fn require_rust_compiler_rejection(name: &str, diagnostic: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(diagnostic).context("Unviable diagnostic is not UTF-8")?;
+    let mut lines = text.lines().skip_while(|line| line.trim().is_empty());
+    if lines.next() != Some(format!("*** {name}").as_str()) {
+        bail!("Unviable diagnostic does not identify mutant `{name}`");
+    }
+    let command = lines
+        .find(|line| line.starts_with("*** ") && *line != "*** mutation diff:")
+        .ok_or_else(|| anyhow!("Unviable diagnostic has no build command"))?;
+    if !command.contains("cargo") || !command.contains(" nextest run --no-run ") {
+        bail!("Unviable diagnostic does not record the nextest build command");
+    }
+    let mut compiler_error = false;
+    let mut complete = false;
+    for line in lines.by_ref() {
+        if line == "*** result: Failure(101)" {
+            complete = true;
+            break;
+        }
+        if compiler_rejection(line) {
+            compiler_error = true;
+        } else if (line.starts_with("error")
+            || line.starts_with("Error:")
+            || line.starts_with("*** ")
+            || line.contains("fatal error"))
+            && (!compiler_error || !cargo_rejection_summary(line))
+        {
+            bail!(
+                "Unviable mutant `{name}` has an infrastructure or unsupported diagnostic: {line}"
+            );
+        }
+    }
+    if !compiler_error || !complete || lines.any(|line| !line.trim().is_empty()) {
+        bail!("Unviable mutant `{name}` has no complete, recognized compiler rejection");
+    }
+    Ok(())
+}
+
+fn parse_rust_run_selected(output: &Path, examined_files: Vec<String>) -> Result<RustRun> {
     let outcomes_path = output.join("outcomes.json");
     let outcomes: Value = read_json(&outcomes_path)?;
+    if outcomes
+        .get("end_time")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        bail!("{} has no completed end time", outcomes_path.display());
+    }
     let version = outcomes
         .get("cargo_mutants_version")
         .and_then(Value::as_str)
@@ -887,6 +1295,16 @@ fn parse_rust_run(output: &Path) -> Result<RustRun> {
             )
         })?;
         let identity = parse_rust_identity(name)?;
+        if summary == "Unviable" {
+            require_rust_build_failure(entry)?;
+            let relative = entry
+                .get("log_path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Unviable mutant `{name}` has no diagnostic path"))?;
+            let log =
+                crate::mutation_ci::safe_report_path(output, relative, "Unviable diagnostic")?;
+            require_rust_compiler_rejection(name, &fs::read(log)?)?;
+        }
         if !all_outcomes.insert(identity.clone()) {
             bail!(
                 "{} contains duplicate mutant identity `{name}`",
@@ -924,12 +1342,18 @@ fn parse_rust_run(output: &Path) -> Result<RustRun> {
             outcomes_path.display()
         );
     }
-    let examined_files: Vec<String> = generated
-        .iter()
-        .map(|identity| identity.path.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    if outcomes.get("total_mutants").and_then(Value::as_u64) != u64::try_from(generated.len()).ok()
+    {
+        bail!("{} has an incomplete mutant count", outcomes_path.display());
+    }
+    for mutant in &generated {
+        if examined_files.binary_search(&mutant.path).is_err() {
+            bail!(
+                "generated mutant is outside the native selected-file listing: {}",
+                mutant.path
+            );
+        }
+    }
 
     for (file, status) in [
         ("caught.txt", "CaughtMutant"),
@@ -1042,6 +1466,18 @@ fn parse_rust_identity(name: &str) -> Result<RustIdentity> {
     })
 }
 
+pub fn validate_csharp_activation(status: &str, static_metadata: Option<&Value>) -> Result<()> {
+    let is_static = static_metadata
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("mutant static metadata must be boolean"))?;
+    if is_static && matches!(status, "Killed" | "Survived") {
+        bail!(
+            "Stryker MTP cannot accept a static initialization verdict `{status}` from a reused process"
+        );
+    }
+    Ok(())
+}
+
 fn parse_csharp_run(
     report_path: &Path,
     repo_root: &Path,
@@ -1060,7 +1496,7 @@ fn parse_csharp_run(
         .ok_or_else(|| anyhow!("{} has no schemaVersion", report_path.display()))?;
     if schema != "2" {
         bail!(
-            "{} schemaVersion is `{schema}`, expected exact Stryker 4.16 schema `2`",
+            "{} schemaVersion is `{schema}`, expected exact Stryker {STRYKER_VERSION} schema `2`",
             report_path.display()
         );
     }
@@ -1077,6 +1513,7 @@ fn parse_csharp_run(
     }
 
     let mut all = BTreeSet::new();
+    let mut killed = BTreeSet::new();
     let mut survivors = BTreeSet::new();
     let mut no_coverage = BTreeSet::new();
     let mut timeouts = BTreeSet::new();
@@ -1167,8 +1604,12 @@ fn parse_csharp_run(
                 continue;
             }
 
+            validate_csharp_activation(status, mutant.get("static"))?;
             match status {
-                "Killed" | "CompileError" => {}
+                "Killed" => {
+                    killed.insert(identity);
+                }
+                "CompileError" => {}
                 "Survived" => {
                     survivors.insert(identity);
                 }
@@ -1209,6 +1650,7 @@ fn parse_csharp_run(
     }
     Ok(CsharpRun {
         examined_files: reviewed_scope.iter().cloned().collect(),
+        killed: killed.into_iter().collect(),
         survivors: survivors.into_iter().collect(),
         no_coverage: no_coverage.into_iter().collect(),
         timeouts: timeouts.into_iter().collect(),
@@ -1219,9 +1661,8 @@ fn parse_csharp_run(
     })
 }
 
-/// Stryker's reasons for an `Ignored` mutant that was dropped before any test
-/// could run it. `Removed by mutate filter` is how the reviewed `mutate`
-/// inventory is enforced in the first place.
+/// Stryker's reasons for an `Ignored` mutant that was dropped before any test could run it.
+/// `Removed by mutate filter` is how the reviewed `mutate` inventory is enforced in the first place.
 const UNEXECUTED_IGNORE_REASONS: [&str; 2] = [
     "Removed by mutate filter",
     "Removed by exclude from code coverage filter",
@@ -1229,27 +1670,19 @@ const UNEXECUTED_IGNORE_REASONS: [&str; 2] = [
 
 /// Whether an out-of-scope mutant result proves the mutant was never executed.
 ///
-/// Stryker does not narrow *mutation* to the `mutate` inventory. It mutates the
-/// whole project, compiles that, and only then filters: with a single file in
-/// scope this app still produced `6308 mutants created`, of which `5001 mutants
-/// got status Ignored. Reason: Removed by mutate filter` and `3 total mutants
-/// will be tested`. Files outside the reviewed inventory therefore appear in the
-/// report by construction, so the question the gate must answer is not "was
-/// anything mutated outside the scope" (always yes) but "was anything *executed*
-/// outside it".
+/// Stryker does not narrow *mutation* to the `mutate` inventory.
+/// It mutates the whole project, compiles that, and only then filters: with a single file in scope this app still produced `6308 mutants created`, of which `5001 mutants got status Ignored. Reason: Removed by mutate filter` and `3 total mutants will be tested`.
+/// Files outside the reviewed inventory therefore appear in the report by construction, so the question the gate must answer is not "was anything mutated outside the scope" (always yes) but "was anything *executed* outside it".
 ///
 /// Two outcomes answer no:
 /// * `Ignored` for a filter reason — dropped before testing.
-/// * `CompileError` — the mutated tree did not build, so Safe Mode rolled every
-///   mutant in the enclosing method back out of the assembly (`Safe Mode! Stryker
-///   will remove all mutations in <method>`). Compilation precedes filtering,
-///   which is why these carry `CompileError` rather than the mutate-filter
-///   reason. In-scope `CompileError` is accepted for exactly the same reason: a
-///   mutant that is not in the binary cannot change a verdict.
+/// * `CompileError` — the mutated tree did not build, so Safe Mode rolled every mutant in the enclosing method back out of the assembly (`Safe Mode! Stryker will remove all mutations in <method>`).
+///   Compilation precedes filtering,
+///   which is why these carry `CompileError` rather than the mutate-filter reason.
+///   In-scope `CompileError` is accepted for exactly the same reason: a mutant that is not in the binary cannot change a verdict.
 ///
-/// Everything else — `Killed`, `Survived`, `NoCoverage`, `Timeout` — means
-/// Stryker activated a mutant the reviewed inventory does not cover. That is the
-/// mutate scope failing to hold, and the gate must not absorb it.
+/// Everything else — `Killed`, `Survived`, `NoCoverage`, `Timeout` — means Stryker activated a mutant the reviewed inventory does not cover.
+/// That is the mutate scope failing to hold, and the gate must not absorb it.
 fn outside_scope_is_unexecuted(status: &str, status_reason: Option<&str>) -> bool {
     match status {
         "CompileError" => true,
@@ -1404,7 +1837,7 @@ where
             .validate()
             .with_context(|| format!("{} accepted_equivalents[{index}]", path.display()))?;
         if accepted.rationale.trim() != accepted.rationale
-            || accepted.rationale.len() < 12
+            || accepted.rationale.len() < MIN_EQUIVALENCE_RATIONALE_BYTES
             || accepted.rationale.chars().any(char::is_control)
         {
             bail!(
@@ -1543,106 +1976,8 @@ fn expected_tool(name: &str, version: &str) -> ToolPin {
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let bytes = fs::read(path).with_context(|| format!("read required JSON {}", path.display()))?;
-    let value: StrictJsonValue = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parse strict JSON {}", path.display()))?;
-    serde_json::from_value(value.0)
+    crate::strict_json::decode(&bytes)
         .with_context(|| format!("decode strict JSON {}", path.display()))
-}
-
-struct StrictJsonValue(Value);
-
-impl<'de> Deserialize<'de> for StrictJsonValue {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(StrictJsonVisitor)
-    }
-}
-
-struct StrictJsonVisitor;
-
-impl<'de> Visitor<'de> for StrictJsonVisitor {
-    type Value = StrictJsonValue;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a JSON value with no duplicate object keys")
-    }
-
-    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Bool(value)))
-    }
-
-    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Number(value.into())))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Number(value.into())))
-    }
-
-    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        let number = serde_json::Number::from_f64(value)
-            .ok_or_else(|| E::custom("JSON number is not finite"))?;
-        Ok(StrictJsonValue(Value::Number(number)))
-    }
-
-    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        self.visit_string(value.to_owned())
-    }
-
-    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::String(value)))
-    }
-
-    fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Null))
-    }
-
-    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Null))
-    }
-
-    fn visit_some<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        StrictJsonValue::deserialize(deserializer)
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut values = Vec::new();
-        while let Some(value) = sequence.next_element::<StrictJsonValue>()? {
-            values.push(value.0);
-        }
-        Ok(StrictJsonValue(Value::Array(values)))
-    }
-
-    fn visit_map<A>(self, mut object: A) -> std::result::Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut values = serde_json::Map::new();
-        while let Some(key) = object.next_key::<String>()? {
-            if values.contains_key(&key) {
-                return Err(de::Error::custom(format!(
-                    "duplicate JSON object key `{key}`"
-                )));
-            }
-            let value = object.next_value::<StrictJsonValue>()?;
-            values.insert(key, value.0);
-        }
-        Ok(StrictJsonValue(Value::Object(values)))
-    }
 }
 
 pub fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -1726,14 +2061,14 @@ fn parse_path(input: &str) -> Result<LexicalPath> {
             PathRoot::Unc(server.to_owned(), share.to_owned()),
             parts.collect::<Vec<_>>().join("/"),
         )
-    } else if normalized.len() >= 3
+    } else if normalized.len() >= WINDOWS_DRIVE_ROOT_BYTES
         && normalized.as_bytes()[1] == b':'
-        && normalized.as_bytes()[2] == b'/'
+        && normalized.as_bytes()[b"C:".len()] == b'/'
         && normalized.as_bytes()[0].is_ascii_alphabetic()
     {
         (
             PathRoot::Drive(char::from(normalized.as_bytes()[0]).to_ascii_uppercase()),
-            normalized[3..].to_owned(),
+            normalized[WINDOWS_DRIVE_ROOT_BYTES..].to_owned(),
         )
     } else if let Some(rest) = normalized.strip_prefix('/') {
         (PathRoot::Unix, rest.to_owned())
@@ -1825,6 +2160,149 @@ fn validate_relative_path(path: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn rust_workspace_selection_also_applies_to_the_unmutated_baseline() {
+        let cpus = NonZeroUsize::new(1).expect("one CPU");
+        let args = rust_run_args("scope.toml", "output", "nextest.toml", cpus, None);
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "--cargo-arg=--workspace")
+                .count(),
+            1
+        );
+        assert!(!args.iter().any(|arg| arg == "--test-workspace"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_cpu_budget_uses_assigned_processor() {
+        const CHILD: &str = "FMF_MUTATION_CPU_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            use windows_sys::Win32::System::Threading::{
+                GetCurrentProcess, GetProcessAffinityMask, SetProcessAffinityMask,
+            };
+            let mut assigned = 0;
+            let mut system = 0;
+            // SAFETY: The pseudo-handle is valid and both outputs point to writable usize values.
+            assert_ne!(
+                unsafe {
+                    GetProcessAffinityMask(GetCurrentProcess(), &raw mut assigned, &raw mut system)
+                },
+                0
+            );
+            assert_ne!(assigned, 0);
+            let single = 1 << assigned.trailing_zeros();
+            // SAFETY: The mask retains one processor already assigned to this child process.
+            assert_ne!(
+                unsafe { SetProcessAffinityMask(GetCurrentProcess(), single) },
+                0
+            );
+            assert_eq!(cpu_budget().expect("assigned CPU budget").get(), 1);
+            return;
+        }
+        let output = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "mutation::tests::native_cpu_budget_uses_assigned_processor",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("run the restricted child test");
+        assert!(
+            output.status.success(),
+            "restricted child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn csharp_baseline_arguments_preserve_the_selected_build_configuration() {
+        for profile in ["Debug", "Release", "Profile with spaces"] {
+            let configuration = serde_json::json!({
+                "stryker-config": {"configuration": profile}
+            });
+            assert_eq!(
+                csharp_build_args(&configuration).expect("configured baseline arguments"),
+                ["--configuration", profile]
+            );
+        }
+    }
+
+    #[test]
+    fn csharp_baseline_arguments_reject_missing_or_malformed_configuration() {
+        for configuration in [
+            Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"stryker-config": {}}),
+            serde_json::json!({"stryker-config": []}),
+        ] {
+            assert!(csharp_build_args(&configuration).is_err());
+        }
+        for profile in [
+            Value::Null,
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(""),
+            serde_json::json!(" "),
+            serde_json::json!(" Release"),
+            serde_json::json!("Release\n"),
+            serde_json::json!("Rel\0ease"),
+        ] {
+            assert!(csharp_build_args(&serde_json::json!({
+                "stryker-config": {"configuration": profile}
+            }))
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn cargo_mutants_exit_protocol_preserves_terminal_outcome_counts() {
+        for (survivors, timeouts, expected) in [
+            (0, 0, 0),
+            (1, 0, 2),
+            (usize::MAX, 0, 2),
+            (0, 1, 3),
+            (1, 1, 3),
+            (usize::MAX, usize::MAX, 3),
+        ] {
+            assert_eq!(
+                cargo_mutants_expected_exit(survivors, timeouts),
+                expected,
+                "{survivors} survivors, {timeouts} timeouts"
+            );
+        }
+    }
+
+    #[test]
+    fn cargo_mutants_completed_reports_reject_inconsistent_and_incomplete_statuses() {
+        for (code, survivors, timeouts, expected) in [
+            (Some(0), 0, 0, true),
+            (Some(2), 1, 0, true),
+            (Some(2), usize::MAX, 0, true),
+            (Some(0), 1, 0, false),
+            (Some(2), 0, 0, false),
+            (None, 0, 0, false),
+            (None, 1, 0, false),
+            (Some(1), 0, 0, false),
+            (Some(3), 0, 0, false),
+            (Some(3), 0, 1, false),
+            (Some(2), 1, 1, false),
+            (Some(4), 0, 0, false),
+            (Some(70), 0, 0, false),
+            (Some(i32::MIN), usize::MAX, usize::MAX, false),
+        ] {
+            assert_eq!(
+                cargo_mutants_completed(code, survivors, timeouts),
+                expected,
+                "exit {code:?}, {survivors} survivors, {timeouts} timeouts"
+            );
+        }
+    }
+
     fn rust_identity(path: &str, line: u64, mutation: &str) -> RustIdentity {
         RustIdentity {
             path: path.to_owned(),
@@ -1888,10 +2366,8 @@ mod tests {
         assert!(parse_rust_identity("crates/fmf-core/src/wtf8.rs:42:0: replace x").is_err());
     }
 
-    /// The local gate and the CI shard runner must resolve the same directory
-    /// from the same `--output` argument. They disagreed once (`<D>` vs
-    /// `<D>/mutants.out`), which made a fully completed local run die reading a
-    /// report that was never going to be there.
+    /// The local gate and the CI shard runner must resolve the same directory from the same `--output` argument.
+    /// They disagreed once (`<D>` vs `<D>/mutants.out`), which made a fully completed local run die reading a report that was never going to be there.
     #[test]
     fn cargo_mutants_reports_live_one_level_below_the_output_argument() {
         assert_eq!(
@@ -1929,6 +2405,368 @@ mod tests {
     }
 
     #[test]
+    fn selected_declaration_only_files_remain_in_the_rust_inventory() {
+        let base = std::env::temp_dir().join(format!(
+            "xtask-mutation-selected-files-{}",
+            std::process::id()
+        ));
+        let _ = fsx::force_remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("create report directory");
+        let name = "crates/fmf-core/src/ondisk/ntfs.rs:10:3: replace value with false";
+        write_json_atomic(
+            &base.join("outcomes.json"),
+            &serde_json::json!({
+                "cargo_mutants_version": CARGO_MUTANTS_VERSION,
+                "end_time": "2026-11-10T06:40:23Z",
+                "total_mutants": 1,
+                "outcomes": [
+                    {"scenario": "Baseline", "summary": "Success"},
+                    {"scenario": {"Mutant": {"name": name}}, "summary": "CaughtMutant"}
+                ]
+            }),
+        )
+        .expect("write outcomes");
+        write_json_atomic(
+            &base.join("mutants.json"),
+            &serde_json::json!([{"name": name}]),
+        )
+        .expect("write generated mutants");
+        write_json_atomic(
+            &base.join("selected-files.json"),
+            &serde_json::json!([
+                {"path": "crates/fmf-core/src/ondisk/ntfs.rs", "package": "fmf-core"},
+                {"path": "crates/fmf-runtime/src/ondisk/ntfs.rs", "package": "fmf-runtime"}
+            ]),
+        )
+        .expect("write native selection");
+        fs::write(base.join("caught.txt"), format!("{name}\n")).expect("write caught result");
+        for file in ["missed.txt", "timeout.txt", "unviable.txt"] {
+            fs::write(base.join(file), "").expect("write empty terminal set");
+        }
+        let run = parse_rust_run(&base).expect("parse complete report");
+        let expected = vec![
+            "engine/crates/fmf-core/src/ondisk/ntfs.rs".to_owned(),
+            "engine/crates/fmf-runtime/src/ondisk/ntfs.rs".to_owned(),
+        ];
+        assert_eq!(run.examined_files, expected);
+        let original: Value = read_json(&base.join("outcomes.json")).expect("read valid outcomes");
+        for field in ["end_time", "total_mutants", "outcomes"] {
+            let mut incomplete = original.clone();
+            incomplete[field] = Value::Null;
+            write_json_atomic(&base.join("outcomes.json"), &incomplete)
+                .expect("write incomplete outcomes");
+            assert!(parse_rust_run(&base).is_err(), "accepted missing {field}");
+        }
+        write_json_atomic(&base.join("outcomes.json"), &original).expect("restore outcomes");
+        write_json_atomic(
+            &base.join(RUST_SELECTED_FILES),
+            &serde_json::json!([
+                {"path": "crates/fmf-runtime/src/ondisk/ntfs.rs", "package": "fmf-runtime"}
+            ]),
+        )
+        .expect("write selection omitting the mutated file");
+        assert!(parse_rust_run(&base).is_err());
+        fsx::force_remove_dir_all(&base).expect("remove report directory");
+    }
+
+    const UNVIABLE_NAME: &str = "crates/fmf-core/src/ondisk/ntfs.rs:10:3: replace value with false";
+
+    fn unviable_log(diagnostic: &str) -> String {
+        format!(
+            "\n*** {UNVIABLE_NAME}\n\n*** mutation diff:\n--- source\n+++ mutation\n\n*** cargo nextest run --no-run --verbose --package=fmf-core@0.1.1 --locked --workspace --target-dir target\n{diagnostic}\n\n*** result: Failure(101)\n"
+        )
+    }
+
+    fn write_unviable_report(base: &Path, diagnostic: &str) -> Result<Value> {
+        fs::create_dir_all(base.join("log"))?;
+        let outcomes = serde_json::json!({
+            "cargo_mutants_version": CARGO_MUTANTS_VERSION,
+            "end_time": "2026-11-12T06:40:23Z",
+            "total_mutants": 1,
+            "outcomes": [
+                {"scenario": "Baseline", "summary": "Success"},
+                {
+                    "scenario": {"Mutant": {"name": UNVIABLE_NAME}},
+                    "summary": "Unviable", "log_path": "log/mutant.log",
+                    "phase_results": [{"phase":"Build", "duration":0.1,
+                        "process_status":{"Failure":101},
+                        "argv":["cargo","nextest","run","--no-run","--verbose","--package=fmf-core@0.1.1","--locked","--workspace","--target-dir","target"]}]
+                }
+            ]
+        });
+        write_json_atomic(&base.join("outcomes.json"), &outcomes)?;
+        write_json_atomic(
+            &base.join("mutants.json"),
+            &serde_json::json!([{"name":UNVIABLE_NAME}]),
+        )?;
+        write_json_atomic(
+            &base.join(RUST_SELECTED_FILES),
+            &serde_json::json!([
+                {"path":"crates/fmf-core/src/ondisk/ntfs.rs","package":"fmf-core"}
+            ]),
+        )?;
+        for file in ["caught.txt", "missed.txt", "timeout.txt"] {
+            fs::write(base.join(file), "")?;
+        }
+        fs::write(base.join("unviable.txt"), format!("{UNVIABLE_NAME}\n"))?;
+        fs::write(base.join("log/mutant.log"), unviable_log(diagnostic))?;
+        Ok(outcomes)
+    }
+
+    #[test]
+    fn saved_rust_reports_reject_linker_failures_classified_as_unviable() -> Result<()> {
+        let temporary = std::env::temp_dir();
+        let base = temporary.join(format!("xtask-mutation-linker-{}", std::process::id()));
+        assert!(base.is_absolute() && base.starts_with(&temporary));
+        fsx::force_remove_dir_all(&base)?;
+        write_unviable_report(&base,
+            "error: linking with `link.exe` failed: exit code: 1104\n  = note: LINK : fatal error LNK1104: cannot open file 'fixture.exe'\nerror: could not compile `fmf-core` (lib) due to 1 previous error")?;
+        let result = parse_rust_run(&base);
+        fsx::force_remove_dir_all(&base)?;
+        assert!(
+            result.is_err(),
+            "infrastructure failures must stay inconclusive: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compiler_rejections_require_native_identity_completion_and_supported_diagnostics(
+    ) -> Result<()> {
+        for diagnostic in [
+            "error[E0080]: evaluation failed",
+            "error[E0271]: type mismatch",
+            "error[E0277]: trait bound is not satisfied",
+            "error[E0433]: use of undeclared type",
+            "error[E0599]: method not found",
+            "error: `<` is interpreted as a start of generic arguments for `usize`, not a comparison",
+            "error: `||` operators are not supported in let chain conditions",
+            "error: cannot find macro `vec` in this scope",
+            "error: this arithmetic operation will overflow",
+        ] {
+            let log = unviable_log(&format!("{diagnostic}\nerror: could not compile `fmf-core` (lib) due to 1 previous error\nerror: command `cargo test --no-run` exited with code 101"));
+            require_rust_compiler_rejection(UNVIABLE_NAME, log.as_bytes())?;
+            require_rust_compiler_rejection(UNVIABLE_NAME, log.replace('\n', "\r\n").as_bytes())?;
+        }
+        for diagnostic in [
+            "",
+            "error: could not compile `fmf-core` (lib) due to 1 previous error",
+            "note: example `error[E0277]: unsupported bound`",
+            "error[E0463]: cannot find crate",
+            "error: could not execute process `rustc`",
+            "error: No space left on device (os error 28)",
+            "error[E0277]: trait bound is not satisfied\nerror: linking with `link.exe` failed: exit code: 1104",
+            "error[E0277]: trait bound is not satisfied\nLINK : fatal error LNK1104: cannot open file",
+            "error[E0277]: trait bound is not satisfied\nerror: unknown build failure",
+        ] {
+            assert!(require_rust_compiler_rejection(UNVIABLE_NAME, unviable_log(diagnostic).as_bytes()).is_err(), "{diagnostic}");
+        }
+        let valid = unviable_log("error[E0277]: trait bound is not satisfied");
+        for log in [
+            valid.replace(UNVIABLE_NAME, "another mutant"),
+            valid.replace("*** result: Failure(101)", "*** result: Success"),
+            valid.replace("*** result: Failure(101)", ""),
+            valid.replace("nextest run --no-run", "nextest run"),
+            format!("{valid}\nerror: late failure"),
+            unviable_log("").replace("+++ mutation", "+error[E0277]: quoted mutation source"),
+        ] {
+            assert!(
+                require_rust_compiler_rejection(UNVIABLE_NAME, log.as_bytes()).is_err(),
+                "{log}"
+            );
+        }
+        assert!(require_rust_compiler_rejection(UNVIABLE_NAME, &[0xff]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn saved_unviable_reports_require_their_compilation_phase_and_diagnostic_file() -> Result<()> {
+        let temporary = std::env::temp_dir();
+        let base = temporary.join(format!("xtask-mutation-unviable-{}", std::process::id()));
+        assert!(base.is_absolute() && base.starts_with(&temporary));
+        fsx::force_remove_dir_all(&base)?;
+        let valid = write_unviable_report(&base, "error[E0277]: trait bound is not satisfied")?;
+        parse_rust_run(&base)?;
+        let phase = valid["outcomes"][1]["phase_results"][0].clone();
+        let mut invalid = vec![
+            Value::Null,
+            serde_json::json!([]),
+            serde_json::json!([phase, phase]),
+        ];
+        for (key, value) in [
+            ("phase", serde_json::json!("Test")),
+            ("process_status", serde_json::json!("Success")),
+            ("process_status", serde_json::json!({"Failure":1})),
+            ("duration", Value::Null),
+            (
+                "argv",
+                serde_json::json!(["rustc", "nextest", "run", "--no-run"]),
+            ),
+            ("argv", serde_json::json!(["cargo", "test", "--no-run"])),
+            ("argv", serde_json::json!(["cargo", "nextest", "run"])),
+        ] {
+            let mut phase = valid["outcomes"][1]["phase_results"][0].clone();
+            phase[key] = value;
+            invalid.push(serde_json::json!([phase]));
+        }
+        for phases in invalid {
+            let mut report = valid.clone();
+            report["outcomes"][1]["phase_results"] = phases;
+            write_json_atomic(&base.join("outcomes.json"), &report)?;
+            assert!(parse_rust_run(&base).is_err(), "{report}");
+        }
+        write_json_atomic(&base.join("outcomes.json"), &valid)?;
+        fs::write(base.join("log/mutant.log"), "")?;
+        assert!(parse_rust_run(&base).is_err());
+        fs::remove_file(base.join("log/mutant.log"))?;
+        assert!(parse_rust_run(&base).is_err());
+        let mut report = valid;
+        report["outcomes"][1]["log_path"] = serde_json::json!("../outside.log");
+        write_json_atomic(&base.join("outcomes.json"), &report)?;
+        assert!(parse_rust_run(&base).is_err());
+        fsx::force_remove_dir_all(&base)?;
+        Ok(())
+    }
+
+    #[test]
+    fn compiler_rejection_summaries_allow_native_warning_counts() -> Result<()> {
+        for warning in [
+            "1 warning emitted",
+            "2 warnings emitted",
+            "17 warnings emitted",
+        ] {
+            let log = unviable_log(&format!("error[E0277]: trait bound is not satisfied\nerror: could not compile `fmf-core` (lib) due to 1 previous error; {warning}"));
+            require_rust_compiler_rejection(UNVIABLE_NAME, log.as_bytes())?;
+        }
+        for warning in [
+            "unknown warning",
+            "0 warnings emitted",
+            "1 warning emitted; error: link failed",
+        ] {
+            let log = unviable_log(&format!("error[E0277]: trait bound is not satisfied\nerror: could not compile `fmf-core` (lib) due to 1 previous error; {warning}"));
+            assert!(require_rust_compiler_rejection(UNVIABLE_NAME, log.as_bytes()).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_rust_selection_rejects_duplicate_empty_and_inconsistent_paths() {
+        let file = serde_json::json!({
+            "path": "crates/fmf-core/src/ondisk/ntfs.rs", "package": "fmf-core"
+        });
+        for invalid in [
+            serde_json::json!([]),
+            serde_json::json!([file.clone(), file]),
+            serde_json::json!([{"path": "../outside.rs", "package": "fmf-core"}]),
+            serde_json::json!([{"path": "crates/fmf-core/src/../outside.rs", "package": "fmf-core"}]),
+            serde_json::json!([{"path": "crates/fmf-core/src/ondisk/ntfs.rs", "package": "fmf-runtime"}]),
+            serde_json::json!([{"path": "crates/fmf-core/src/ondisk/ntfs.rs", "package": "fmf-core", "ignored": true}]),
+        ] {
+            assert!(parse_rust_selected_files(invalid).is_err());
+        }
+        assert_eq!(
+            parse_rust_selected_files(serde_json::json!([file]))
+                .expect("valid listing")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn saved_discovery_preserves_source_diffs_and_rejects_duplicate_mutants() {
+        let first = serde_json::json!({
+            "name": "crates/fmf-core/src/wtf8.rs:10:3: replace value with false",
+            "diff": "original source"
+        });
+        let mut changed = first.clone();
+        changed["diff"] = serde_json::json!("different source");
+        assert_ne!(
+            canonical_rust_discovery(serde_json::json!([first])).expect("first discovery"),
+            canonical_rust_discovery(serde_json::json!([changed])).expect("changed discovery")
+        );
+        assert!(canonical_rust_discovery(serde_json::json!([first.clone(), first])).is_err());
+        assert!(canonical_rust_discovery(serde_json::json!([])).is_err());
+    }
+
+    #[test]
+    fn frozen_rust_inputs_detect_source_test_corpus_and_configuration_changes() {
+        let base =
+            std::env::temp_dir().join(format!("xtask-mutation-inputs-{}", std::process::id()));
+        let _ = fsx::force_remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("create source fixture");
+        let status = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&base)
+            .status()
+            .expect("initialize source fixture");
+        assert!(status.success());
+        let files = [
+            "engine/Cargo.toml",
+            "engine/Cargo.lock",
+            "engine/crates/example/src/lib.rs",
+            "engine/crates/example/tests/recovery.rs",
+            "contract/golden/frame.bin",
+            "mise.toml",
+        ];
+        for file in files {
+            let path = base.join(file);
+            fs::create_dir_all(path.parent().expect("input parent")).expect("create input parent");
+            fs::write(path, "original").expect("write original input");
+        }
+        let before = rust_input_files(&base).expect("capture frozen inputs");
+        assert_eq!(before.len(), files.len());
+        for file in files {
+            fs::write(base.join(file), "changed").expect("change source input");
+            let after = rust_input_files(&base).expect("capture changed inputs");
+            assert!(
+                require_same_rust_inputs(&before, &after).is_err(),
+                "accepted changed {file}"
+            );
+            fs::write(base.join(file), "original").expect("restore source input");
+        }
+        require_same_rust_inputs(&before, &rust_input_files(&base).expect("restored inputs"))
+            .expect("exact restoration");
+        fs::write(base.join("engine/new.rs"), "new source").expect("add source input");
+        assert!(require_same_rust_inputs(
+            &before,
+            &rust_input_files(&base).expect("extended inputs")
+        )
+        .is_err());
+        fs::remove_file(base.join("engine/new.rs")).expect("remove added source");
+        fs::remove_file(base.join("engine/crates/example/tests/recovery.rs"))
+            .expect("remove test input");
+        assert!(
+            require_same_rust_inputs(&before, &rust_input_files(&base).expect("missing test"))
+                .is_err()
+        );
+        fsx::force_remove_dir_all(&base).expect("remove source fixture");
+    }
+
+    #[test]
+    fn saved_rust_reports_require_their_own_frozen_checkout() {
+        let base = std::env::temp_dir().join(format!(
+            "xtask-mutation-report-owner-{}",
+            std::process::id()
+        ));
+        let _ = fsx::force_remove_dir_all(&base);
+        let root = base.join("frozen");
+        let output = paths::rust_mutation_dir();
+        let relative = output
+            .strip_prefix(paths::repo_root())
+            .expect("owned output");
+        let reports = cargo_mutants_report_dir(&root.join(relative));
+        let foreign = base.join("unrelated-report");
+        fs::create_dir_all(&reports).expect("create owned report");
+        fs::create_dir_all(&foreign).expect("create unrelated report");
+        assert_eq!(
+            frozen_rust_report_directory(&root, &reports).expect("owned report"),
+            fs::canonicalize(&reports).expect("canonical report")
+        );
+        assert!(frozen_rust_report_directory(&root, &foreign).is_err());
+        fsx::force_remove_dir_all(&base).expect("remove report fixture");
+    }
+
+    #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
         let base = std::env::temp_dir().join(format!(
             "xtask-mutation-json-duplicate-{}",
@@ -1947,6 +2785,76 @@ mod tests {
     }
 
     #[test]
+    fn csharp_rejects_static_initialization_verdicts() {
+        let base = std::env::temp_dir().join(format!(
+            "xtask-csharp-static-activation-{}",
+            std::process::id()
+        ));
+        let _ = fsx::force_remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("create test directory");
+        let path = base.join("mutation-report.json");
+        let mut report = serde_json::json!({
+            "schemaVersion": "2",
+            "projectRoot": "C:/repo/app/FindMyFiles",
+            "files": {
+                "Services/ShellOps.cs": {
+                    "language": "cs",
+                    "mutants": [{
+                        "id": "1",
+                        "mutatorName": "String mutation",
+                        "replacement": "\"\"",
+                        "status": "Killed",
+                        "static": false,
+                        "location": {
+                            "start": {"line": 20, "column": 84},
+                            "end": {"line": 20, "column": 98}
+                        }
+                    }]
+                }
+            }
+        });
+        let write_report = |report: &Value| {
+            fs::write(
+                &path,
+                serde_json::to_vec(report).expect("serialize fixture"),
+            )
+            .expect("write fixture");
+        };
+        let scope = csharp_scope("app/FindMyFiles/Services/ShellOps.cs");
+        for status in ["Killed", "Survived"] {
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["status"] = status.into();
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["static"] = false.into();
+            write_report(&report);
+            parse_csharp_run(&path, Path::new("C:/repo"), &scope)
+                .expect("ordinary mutation verdict should parse");
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["static"] = true.into();
+            write_report(&report);
+            let error = parse_csharp_run(&path, Path::new("C:/repo"), &scope)
+                .expect_err("a reused process cannot supply a static initialization verdict");
+            assert!(error.to_string().contains("static"), "{error}");
+        }
+        report["files"]["Services/ShellOps.cs"]["mutants"][0]["status"] = "Killed".into();
+        for metadata in [
+            Value::Null,
+            serde_json::json!(0),
+            serde_json::json!("false"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["static"] = metadata;
+            write_report(&report);
+            assert!(parse_csharp_run(&path, Path::new("C:/repo"), &scope).is_err());
+        }
+        report["files"]["Services/ShellOps.cs"]["mutants"][0]
+            .as_object_mut()
+            .expect("mutant object")
+            .remove("static");
+        write_report(&report);
+        assert!(parse_csharp_run(&path, Path::new("C:/repo"), &scope).is_err());
+        fsx::force_remove_dir_all(&base).expect("remove test directory");
+    }
+
+    #[test]
     fn csharp_report_extracts_exact_terminal_problem_identities() {
         let report = serde_json::json!({
             "schemaVersion": "2",
@@ -1960,6 +2868,7 @@ mod tests {
                             "mutatorName": "Boolean",
                             "replacement": "false",
                             "status": "Survived",
+                            "static": false,
                             "location": {
                                 "start": {"line": 8, "column": 2},
                                 "end": {"line": 8, "column": 6}
@@ -1970,6 +2879,7 @@ mod tests {
                             "mutatorName": "Equality",
                             "replacement": "!=",
                             "status": "NoCoverage",
+                            "static": false,
                             "location": {
                                 "start": {"line": 9, "column": 1},
                                 "end": {"line": 9, "column": 3}
@@ -1980,6 +2890,7 @@ mod tests {
                             "mutatorName": "Block",
                             "replacement": "{}",
                             "status": "Timeout",
+                            "static": false,
                             "location": {
                                 "start": {"line": 10, "column": 0},
                                 "end": {"line": 12, "column": 1}
@@ -2027,6 +2938,7 @@ mod tests {
                         "mutatorName": "Block removal mutation",
                         "replacement": "{}",
                         "status": "Ignored",
+                        "static": false,
                         "statusReason": "Removed by block already covered filter",
                         "location": {
                             "start": {"line": 8, "column": 2},
@@ -2068,8 +2980,11 @@ mod tests {
         )
         .expect("strictly classified report should parse");
         assert_eq!(parsed.redundant_ignored.len(), 1);
-        assert!(parsed.ignored.is_empty());
-        assert!(parsed.outside_scope_violations.is_empty());
+        assert_eq!(parsed.ignored, Vec::<CsharpIdentity>::new());
+        assert_eq!(
+            parsed.outside_scope_violations,
+            Vec::<CsharpStatusIdentity>::new()
+        );
         assert_eq!(parsed.outside_scope.file_count, 1);
         assert_eq!(parsed.outside_scope.mutant_count, 1);
         assert_eq!(parsed.outside_scope.status_counts["Ignored"], 1);
@@ -2091,9 +3006,8 @@ mod tests {
         assert!(validate_csharp_conclusive(&run, Path::new("gate.json")).is_err());
     }
 
-    /// Out of scope, the only acceptable outcomes are the ones that prove the
-    /// mutant never ran. A verdict there means the `mutate` inventory did not
-    /// hold, which is the whole point of tracking out-of-scope results.
+    /// Out of scope, the only acceptable outcomes are the ones that prove the mutant never ran.
+    /// A verdict there means the `mutate` inventory did not hold, which is the whole point of tracking out-of-scope results.
     #[test]
     fn outside_scope_accepts_only_unexecuted_mutant_outcomes() {
         for (status, reason) in [
@@ -2126,9 +3040,7 @@ mod tests {
         }
     }
 
-    /// The exact shape the smoke run produced: 22 Safe-Mode rollbacks in
-    /// `MainPage.xaml.cs` / `MainWindow.xaml.cs`, which used to bail the gate
-    /// before it ever compared survivors.
+    /// The exact shape the smoke run produced: 22 Safe-Mode rollbacks in `MainPage.xaml.cs` / `MainWindow.xaml.cs`, which used to bail the gate before it ever compared survivors.
     #[test]
     fn csharp_scope_tolerates_safe_mode_rollbacks_outside_the_reviewed_inventory() {
         let report = serde_json::json!({
@@ -2140,6 +3052,7 @@ mod tests {
                         "mutatorName": "Boolean mutation",
                         "replacement": "false",
                         "status": "Killed",
+                        "static": false,
                         "location": {
                             "start": {"line": 8, "column": 2},
                             "end": {"line": 8, "column": 6}
@@ -2179,7 +3092,10 @@ mod tests {
             &csharp_scope("app/FindMyFiles/Engine/PipeProtocol.cs"),
         )
         .expect("rolled-back out-of-scope mutants must not fail the report parse");
-        assert!(parsed.outside_scope_violations.is_empty());
+        assert_eq!(
+            parsed.outside_scope_violations,
+            Vec::<CsharpStatusIdentity>::new()
+        );
         assert_eq!(parsed.outside_scope.status_counts["CompileError"], 1);
         assert!(validate_csharp_conclusive(&parsed, Path::new("gate.json")).is_ok());
 
@@ -2192,6 +3108,7 @@ mod tests {
             "mutatorName": "Boolean",
             "replacement": "false",
             "status": "Killed",
+            "static": false,
             "location": {
                 "start": {"line": 8, "column": 2},
                 "end": {"line": 8, "column": 6}
@@ -2308,6 +3225,7 @@ mod tests {
         let identity = csharp_identity("app/FindMyFiles/Engine/PipeProtocol.cs", 3);
         let clean = CsharpRun {
             examined_files: vec!["app/FindMyFiles/Engine/PipeProtocol.cs".to_owned()],
+            killed: Vec::new(),
             survivors: Vec::new(),
             no_coverage: Vec::new(),
             timeouts: Vec::new(),
@@ -2339,6 +3257,7 @@ mod tests {
     fn clean_for_policy_test() -> CsharpRun {
         CsharpRun {
             examined_files: vec!["app/FindMyFiles/Engine/PipeProtocol.cs".to_owned()],
+            killed: Vec::new(),
             survivors: Vec::new(),
             no_coverage: Vec::new(),
             timeouts: Vec::new(),
@@ -2381,11 +3300,9 @@ mod tests {
         fsx::force_remove_dir_all(&base).expect("remove test directory");
     }
 
-    /// Repository-relative (`/`-separated) paths of every Rust source file
-    /// `cargo mutants`, run from `engine/`, can reach.
+    /// Repository-relative (`/`-separated) paths of every Rust source file `cargo mutants`, run from `engine/`, can reach.
     ///
-    /// `engine/fuzz` is a standalone workspace (like `xtask/`), so the engine
-    /// workspace never builds it and cargo-mutants never examines it;
+    /// `engine/fuzz` is a standalone workspace (like `xtask/`), so the engine workspace never builds it and cargo-mutants never examines it;
     /// `target`/`build` are generated output, not source.
     fn engine_source_files() -> BTreeSet<String> {
         let repo = paths::repo_root();
@@ -2424,18 +3341,11 @@ mod tests {
         files
     }
 
-    /// Resolve `engine/mutants.toml`'s `examine_globs` to the exact repository
-    /// -relative files they select.
+    /// Resolve `engine/mutants.toml`'s `examine_globs` to the exact repository -relative files they select.
     ///
-    /// cargo-mutants owns the real matching at run time and xtask never parses
-    /// `mutants.toml`, so — unlike the C# side, where the gate itself reads the
-    /// Stryker scope through `read_stryker_scope` — there is no runtime
-    /// function to reuse. What makes the resolution exact rather than a second
-    /// glob engine is the pinned form the config already documents and this
-    /// function enforces: `**/` followed by a wildcard-free path tail
-    /// containing at least one `/`, which selects a file if and only if the
-    /// file's path ends with `/<tail>`. Anything looser is rejected instead of
-    /// approximated.
+    /// cargo-mutants owns the real matching at run time and xtask never parses `mutants.toml`, so — unlike the C# side, where the gate itself reads the Stryker scope through `read_stryker_scope` — there is no runtime function to reuse.
+    /// What makes the resolution exact rather than a second glob engine is the pinned form the config already documents and this function enforces: `**/` followed by a wildcard-free path tail containing at least one `/`, which selects a file if and only if the file's path ends with `/<tail>`.
+    /// Anything looser is rejected instead of approximated.
     fn resolve_examine_globs(config: &str, sources: &BTreeSet<String>) -> Result<Vec<String>> {
         let document = config
             .parse::<toml_edit::DocumentMut>()
@@ -2481,11 +3391,7 @@ mod tests {
         Ok(scope.into_iter().collect())
     }
 
-    /// The Rust gate's reviewed scope lives in two files that must agree, and
-    /// nothing at run time notices when they don't until `just mutants` has
-    /// already burned hours: cargo-mutants derives `examined_files` from what
-    /// `examine_globs` actually matched, and only then is it compared with the
-    /// baseline. This is that comparison, seconds after the edit.
+    /// Check configured file coverage, including modules that produce no mutations.
     #[test]
     fn rust_examine_globs_and_baseline_name_the_same_files() {
         let baseline_path = paths::rust_mutation_baseline();
@@ -2505,11 +3411,8 @@ mod tests {
         );
     }
 
-    /// The C# half of the same invariant, through the very function the gate
-    /// calls at run time (`read_stryker_scope` canonicalizes every `mutate`
-    /// pattern, rejects wildcards, requires each target to exist on disk, and
-    /// ends in the same `compare_exact_files`). Reimplementing that here would
-    /// only give the reimplementation something to drift from.
+    /// The C# half of the same invariant, through the very function the gate calls at run time (`read_stryker_scope` canonicalizes every `mutate` pattern, rejects wildcards, requires each target to exist on disk, and ends in the same `compare_exact_files`).
+    /// Reimplementing that here would only give the reimplementation something to drift from.
     #[test]
     fn csharp_mutate_scope_and_baseline_name_the_same_files() {
         let repo = paths::repo_root();

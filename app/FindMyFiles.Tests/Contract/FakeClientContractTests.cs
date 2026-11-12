@@ -1,12 +1,10 @@
 using FindMyFiles.Engine;
-using Xunit.Abstractions;
+using Xunit;
 
 namespace FindMyFiles.Tests.Contract;
 
-/// <summary>
-/// Contract run #1: <see cref="FakeEngineClient"/>, always on. The fake is
-/// what `--fake-engine` UI tests build on, so its conformance (shared syntax
-/// fixture, cancellation, BumpEpoch staleness) is load-bearing.
+/// <summary> Contract run #1: <see cref="FakeEngineClient"/>, always on.
+/// The fake is what `--fake-engine` UI tests build on, so its conformance (shared syntax fixture, cancellation, BumpEpoch staleness) is load-bearing.
 /// </summary>
 public sealed class FakeClientContractTests(ITestOutputHelper output)
     : EngineClientContractTests(output)

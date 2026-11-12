@@ -6,13 +6,10 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// <see cref="PipeConnection"/> in isolation, over a raw in-test pipe pair:
-/// the connection object owns its own life — a write racing teardown is
-/// answered by the object (normalized transport exception), which is the
-/// structural replacement for the old "volatile null-check, then write"
-/// convention in PipeEngineClient.
+/// <summary> <see cref="PipeConnection"/> in isolation, over a raw in-test pipe pair:
+/// the connection object owns its own life — a write racing teardown is answered by the object (normalized transport exception), which is the structural replacement for the old "volatile null-check, then write" convention in PipeEngineClient.
 /// </summary>
+[Collection(PipeConnectionContractOrderer.CollectionName)]
 public sealed class PipeConnectionTests
 {
     private static async Task<(NamedPipeServerStream Server, NamedPipeClientStream Client)>
@@ -31,6 +28,20 @@ public sealed class PipeConnectionTests
 
     private static PipeConnection Wrap(NamedPipeClientStream client, int epoch = 1) =>
         new(client, epoch, (_, _, _) => { }, (_, _, _, _, _) => { }, CancellationToken.None);
+
+    private static async Task DrainFrameAsync(
+        NamedPipeServerStream server,
+        int frameLength,
+        CancellationToken ct)
+    {
+        try
+        {
+            await server.ReadExactlyAsync(new byte[frameLength], ct);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+        }
+    }
 
     private static async Task<string> CaptureLogAsync(Func<Task> action)
     {
@@ -72,7 +83,7 @@ public sealed class PipeConnectionTests
         {
             Assert.Equal(42, conn.Epoch);
             Assert.NotNull(conn.ReadLoop);
-            await Task.Delay(50);
+            await Task.Delay(50, TestContext.Current.CancellationToken);
             Assert.False(conn.ReadLoop.IsCompleted);
         }
     }
@@ -84,11 +95,8 @@ public sealed class PipeConnectionTests
         using (server)
         {
             var conn = Wrap(client);
-            conn.Dispose(); // the supervisor tore this connection down
+            conn.Dispose();
 
-            // The grabbed object answers its own liveness: the racing writer
-            // gets the transport exception, never a raw
-            // ObjectDisposedException leaking from the dead stream.
             var frame = PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []);
             var ex = await Assert.ThrowsAsync<EngineUnavailableException>(
                 () => conn.WriteFrameAsync(frame, CancellationToken.None));
@@ -106,14 +114,12 @@ public sealed class PipeConnectionTests
             var (server, client) = await ConnectedPairAsync();
             var conn = Wrap(client);
 
-            server.Dispose(); // server side goes away under the connection
+            server.Dispose();
 
-            // The supervisor awaits ReadLoop to know the connection died — it
-            // must complete (never fault, never hang).
             await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5));
 
             conn.Dispose();
-            conn.Dispose(); // double-dispose must be harmless
+            conn.Dispose();
             await Assert.ThrowsAsync<EngineUnavailableException>(
                 () => conn.WriteFrameAsync(
                     PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []),
@@ -124,13 +130,84 @@ public sealed class PipeConnectionTests
         Assert.Contains("msg=\"server closed the connection\"", contents, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Retirement_keeps_the_first_cause_for_late_writes(bool disposeBeforeWrite)
+    {
+        var (server, client) = await ConnectedPairAsync();
+        using (server)
+        using (var connection = Wrap(client))
+        {
+            Assert.Equal("deadline expired", connection.BeginRetirement("deadline expired"));
+            Assert.Equal("deadline expired", connection.BeginRetirement("cleanup"));
+            if (disposeBeforeWrite)
+            {
+                connection.Dispose();
+            }
+
+            var frame = PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []);
+            using var drainCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                TestContext.Current.CancellationToken);
+            var drain = DrainFrameAsync(server, frame.Length, drainCancellation.Token);
+            try
+            {
+                var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() =>
+                    connection.WriteFrameAsync(frame, TestContext.Current.CancellationToken));
+                Assert.Equal("deadline expired", failure.Message);
+                connection.Dispose();
+                await connection.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            }
+            finally
+            {
+                await drainCancellation.CancelAsync();
+                await drain;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Retirement_during_an_admitted_write_preserves_its_cause()
+    {
+        var (server, client) = await ConnectedPairAsync();
+        using (server)
+        using (var connection = Wrap(client))
+        {
+            var writeAdmitted = false;
+            connection.BeforeFrameWriteForTests = () =>
+            {
+                writeAdmitted = true;
+                Assert.Equal("deadline expired", connection.BeginRetirement("deadline expired"));
+                connection.Dispose();
+            };
+            var frame = PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []);
+            using var drainCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                TestContext.Current.CancellationToken);
+            var drain = DrainFrameAsync(server, frame.Length, drainCancellation.Token);
+            try
+            {
+                var failure = await Assert.ThrowsAsync<EngineUnavailableException>(() =>
+                    connection.WriteFrameAsync(frame, TestContext.Current.CancellationToken));
+                Assert.True(writeAdmitted);
+                Assert.Equal("deadline expired", failure.Message);
+                connection.Dispose();
+                await connection.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            }
+            finally
+            {
+                await drainCancellation.CancelAsync();
+                await drain;
+            }
+        }
+    }
+
     [Fact]
     public async Task BrokenPipeDuringWrite_IsNormalizedToEngineUnavailable()
     {
         var (server, client) = await ConnectedPairAsync();
         var conn = Wrap(client);
-        server.Dispose(); // not our Dispose: the far end died (IOException path)
-        await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5));
+        server.Dispose();
+        await conn.ReadLoop.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         var frame = PipeProtocol.EncodeFrame(PipeProtocol.Op.Stats, 0, 1, 0, []);
         var ex = await Assert.ThrowsAsync<EngineUnavailableException>(

@@ -7,9 +7,8 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Behavioural tests for <see cref="MainViewModel"/> — the main page's
-/// composition root, previously untested. Built entirely from the existing
-/// injectable boundaries (fake engine + manual dispatcher), so no real engine,
+/// <summary>Behavioural tests for <see cref="MainViewModel"/> — the main page's composition root, previously untested.
+/// Built entirely from the existing injectable boundaries (fake engine + manual dispatcher), so no real engine,
 /// thread, or window is involved.</summary>
 public sealed class MainViewModelTests
 {
@@ -536,7 +535,6 @@ public sealed class MainViewModelTests
     [Fact]
     public async Task RefreshVersions_exposes_the_engine_version_and_clears_mismatch_on_same_base()
     {
-        // Same X.Y.Z base as the app (different channel/sha) → no mismatch.
         string sameBase = $"{BuildInfo.BaseOf(BuildInfo.Version)}-nightly.20260629+gabc1234";
         using var vm = Vm(EngineReportingVersion(sameBase));
 
@@ -650,8 +648,6 @@ public sealed class MainViewModelTests
     [Fact]
     public async Task RefreshVersions_stays_empty_for_in_proc_clients_without_a_service()
     {
-        // Even misleading stats must be ignored for in-proc/Fake clients: there
-        // is no separately installed service whose build can be repaired.
         using var vm = Vm(new StubEngineClient
         {
             Stats = new EngineStatsData
@@ -831,7 +827,7 @@ public sealed class MainViewModelTests
         engine.StatsTask = pending.Task;
         var vm = Vm(engine);
         var version = vm.RefreshVersionsAsync();
-        var perf = vm.Perf.RefreshStatsAsync();
+        var perf = vm.Perf.RefreshStatsAsync(TestContext.Current.CancellationToken);
         Assert.Equal(2, engine.StatsTokens.Count);
         var lifetime = Assert.IsAssignableFrom<CancellationTokenSource>(
             typeof(MainViewModel)
@@ -843,7 +839,7 @@ public sealed class MainViewModelTests
         Assert.All(engine.StatsTokens, token => Assert.True(token.IsCancellationRequested));
         Assert.Throws<ObjectDisposedException>(() => _ = lifetime.Token);
         pending.SetException(new OperationCanceledException());
-        await Task.WhenAll(version, perf).WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.WhenAll(version, perf).WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
     }
 
     [Fact]

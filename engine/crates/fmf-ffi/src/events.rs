@@ -2,24 +2,21 @@ use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use fmf_core::engine::EngineEvent;
+use fmf_runtime::engine::EngineEvent;
 use parking_lot::{Condvar, Mutex};
 
 use crate::error::{guard, set_error};
 use crate::handle::{EngineHandle, engine};
 use crate::{FMF_E_INVALID_ARG, FMF_OK};
 
-// ── Events ──────────────────────────────────────────────────────────────
-
-// Event kinds and the POD radiate from the contract (ADR-0018).
 pub use fmf_contract::events::{
     FMF_EVENT_ENGINE_ERROR, FMF_EVENT_INDEX_CHANGED, FMF_EVENT_PROGRESS, FMF_EVENT_RESCAN_STARTED,
     FMF_EVENT_VOLUME_FAILED, FMF_EVENT_VOLUME_READY,
 };
 pub use fmf_contract::pod::FmfEvent;
 
-/// Callback the host registers to receive engine events; invoked with a borrowed
-/// `FmfEvent` and the opaque `user` token. `None` clears the registration.
+/// Callback the host registers to receive engine events; invoked with a borrowed `FmfEvent` and the opaque `user` token.
+/// `None` clears the registration.
 pub type FmfEventCb = Option<unsafe extern "C" fn(ev: *const FmfEvent, user: *mut c_void)>;
 
 pub(crate) struct CallbackSink {
@@ -34,8 +31,6 @@ struct CallbackState {
     in_flight: usize,
 }
 
-// Contract: the callback must be callable from any thread; the user pointer
-// is treated as an opaque token.
 unsafe impl Send for CallbackSink {}
 unsafe impl Sync for CallbackSink {}
 
@@ -106,8 +101,8 @@ pub(crate) fn callback_active_on_current_thread() -> bool {
     CALLBACK_DEPTH.with(|depth| depth.get() != 0)
 }
 
-/// Detach the engine closure, then wait for callbacks that cloned it before
-/// detachment. On return the foreign `user` token is no longer observable.
+/// Detach the engine closure, then wait for callbacks that cloned it before detachment.
+/// On return the foreign `user` token is no longer observable.
 pub(crate) fn clear_event_callback(handle: &EngineHandle) {
     let mut registered = handle._sink_keepalive.lock();
     handle.engine.set_event_sink(None);
@@ -116,24 +111,19 @@ pub(crate) fn clear_event_callback(handle: &EngineHandle) {
     }
 }
 
-/// Registers (or clears, when `cb` is `None`) the event callback for the engine
-/// handle `h`; the callback may fire from any thread.
+/// Registers (or clears, when `cb` is `None`) the event callback for the engine handle `h`; the callback may fire from any thread.
 ///
-/// Successful replacement or
-/// clearing is a quiescence barrier: the old callback cannot run after this
-/// function returns. Lifecycle mutation from inside a callback is rejected to
-/// avoid self-wait deadlock. Returns `FMF_OK` or an error code.
+/// Successful replacement or clearing is a quiescence barrier: the old callback cannot run after this function returns.
+/// Lifecycle mutation from inside a callback is rejected to avoid self-wait deadlock.
+/// Returns `FMF_OK` or an error code.
 ///
 /// # Safety
 ///
-/// When `cb` is non-null, it must remain callable with the C ABI from any
-/// thread until a later replacement, clear, or engine destruction returns.
-/// Each `ev` passed to it is borrowed only for that callback invocation and
-/// must not be retained. `user` is returned verbatim to every invocation, so
-/// any pointee or managed delegate/GC handle it represents must remain alive
-/// for the same interval. Invocations may overlap: `cb` and every state object
-/// reachable through `user` must support concurrent access or synchronize it
-/// internally. The callback must not unwind across the ABI boundary.
+/// When `cb` is non-null, it must remain callable with the C ABI from any thread until a later replacement, clear, or engine destruction returns.
+/// Each `ev` passed to it is borrowed only for that callback invocation and must not be retained.
+/// `user` is returned verbatim to every invocation, so any pointee or managed delegate/GC handle it represents must remain alive for the same interval.
+/// Invocations may overlap: `cb` and every state object reachable through `user` must support concurrent access or synchronize it internally.
+/// The callback must not unwind across the ABI boundary.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmf_set_event_callback(
     h: *mut c_void,
@@ -166,7 +156,6 @@ pub unsafe extern "C" fn fmf_set_event_callback(
             handle
                 .engine
                 .set_event_sink(Some(Arc::new(move |ev: &EngineEvent| {
-                    // EngineEvent::to_wire is the single kind mapping.
                     let payload = ev.to_wire();
                     dispatch.invoke(&payload);
                 })));

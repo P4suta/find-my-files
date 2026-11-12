@@ -14,8 +14,8 @@ pub mod stats;
 pub mod term;
 
 use ctx::Ctx;
-use fmf_core::index::VolumeIndex;
-use fmf_core::query::{self, QueryOptions};
+use fmf_runtime::index::VolumeIndex;
+use fmf_runtime::query::{self, QueryOptions};
 
 #[cfg(windows)]
 fn date_resolver() -> impl query::DateResolver {
@@ -28,14 +28,10 @@ fn date_resolver() -> impl query::DateResolver {
 
 fn build_index(drive: &str, ctx: Ctx) -> Result<VolumeIndex, Box<dyn std::error::Error>> {
     let pb = term::spinner(ctx, format!("indexing {drive}"));
-    let scan = fmf_core::mft::scan_volume(drive);
+    let scan = fmf_runtime::mft::scan_volume(drive);
     pb.finish_and_clear();
     let (mut idx, s) = scan?;
-    // Mirror the engine (volume thread does the same): the build leaves
-    // power-of-two capacity slack that would distort every RAM number.
     idx.shrink_to_fit();
-    // These scan stats are decorative stderr chrome; stay silent under
-    // --quiet/--format json so machine output is not crowded.
     if ctx.human_chrome() {
         let per_entry = if idx.is_empty() {
             0
@@ -58,7 +54,8 @@ fn build_index(drive: &str, ctx: Ctx) -> Result<VolumeIndex, Box<dyn std::error:
         );
         eprintln!(
             "peak working set {:.1} MiB (≈{} B/entry incl. $MFT buffer)",
-            s.peak_working_set_bytes as f64 / (1024.0 * 1024.0),
+            s.peak_working_set_bytes as f64
+                / (fmf_runtime::units::KIBIBYTE * fmf_runtime::units::KIBIBYTE),
             per_entry
         );
         if s.unresolved_parents > 0 {

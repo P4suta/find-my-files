@@ -1,0 +1,18 @@
+version = 1
+
+[policy]
+mode = "conservative"
+layout = "compact"
+keep_regex = [
+  '^#\s*v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?\s*$',
+  '^#\s*(?:renovate|zizmor):',
+  '^#\s*Permission:',
+]
+
+[policy.allow]
+tags = ["SAFETY", "INVARIANT"]
+
+[style]
+wrap = "sentence"
+space_after_marker = true
+trailing_whitespace = false

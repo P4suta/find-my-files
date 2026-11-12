@@ -3,12 +3,8 @@ using FindMyFiles.Engine;
 
 namespace FindMyFiles.Services;
 
-/// <summary>
-/// In-app service setup — the GUI half ADR-0016 left to a terminal: detects
-/// the fmf-engine SCM registration, controls an installed service directly
-/// through its narrowly delegated SCM rights, and uses the pinned
-/// fmf-service.exe only for one-time elevated setup/removal. Mutations are
-/// strictly user-initiated; install is idempotent on the service side.
+/// <summary> In-app service setup — the GUI half ADR-0016 left to a terminal: detects the fmf-engine SCM registration, controls an installed service directly through its narrowly delegated SCM rights, and uses the pinned fmf-service.exe only for one-time elevated setup/removal.
+/// Mutations are strictly user-initiated; install is idempotent on the service side.
 /// </summary>
 internal static class ServiceSetup
 {
@@ -28,9 +24,7 @@ internal static class ServiceSetup
 
     private static ServiceSetupHooks _hooks = ServiceSetupHooks.Production;
 
-    /// <summary>Replace every operating-system boundary for one deterministic test scope.</summary>
-    /// <param name="hooks">Complete boundary implementation.</param>
-    /// <returns>A scope that restores the previous implementation.</returns>
+    /// <summary>Replace every operating-system boundary for one deterministic test scope.</summary> <param name="hooks">Complete boundary implementation.</param> <returns>A scope that restores the previous implementation.</returns>
     internal static IDisposable UseHooksForTests(ServiceSetupHooks hooks)
     {
         ArgumentNullException.ThrowIfNull(hooks);
@@ -38,15 +32,11 @@ internal static class ServiceSetup
         return new ActionOnDispose(() => Interlocked.Exchange(ref _hooks, previous));
     }
 
-    /// <summary>True when *this* process is already running with an
-    /// Administrator token — the in-proc engine path needs it, and when set the
-    /// in-app install/start verbs can skip their own UAC prompt.</summary>
-    /// <returns>True when the current process token is in the Administrators role.</returns>
+    /// <summary>True when *this* process is already running with an Administrator token — the in-proc engine path needs it, and when set the in-app install/start verbs can skip their own UAC prompt.</summary> <returns>True when the current process token is in the Administrators role.</returns>
     public static bool IsProcessElevated() =>
         Volatile.Read(ref _hooks).IsProcessElevated();
 
-    /// <summary>Read-only SCM query for <see cref="EngineContract.ServiceName"/>.</summary>
-    /// <returns>The service's install/run state for the offer logic.</returns>
+    /// <summary>Read-only SCM query for <see cref="EngineContract.ServiceName"/>.</summary> <returns>The service's install/run state for the offer logic.</returns>
     public static EngineServiceState QueryState()
     {
         const uint ScManagerConnect = 0x0001;
@@ -74,19 +64,14 @@ internal static class ServiceSetup
         return MapServiceState(state);
     }
 
-    /// <summary>Map raw SERVICE_STATUS state. Only SERVICE_STOPPED proves the
-    /// process and its writer lock are gone; every transition/paused state stays
-    /// on the pipe-safe path.</summary>
-    /// <param name="currentState">Win32 <c>dwCurrentState</c>.</param>
-    /// <returns>The conservative app lifecycle state.</returns>
+    /// <summary>Map raw SERVICE_STATUS state.
+    /// Only SERVICE_STOPPED proves the process and its writer lock are gone; every transition/paused state stays on the pipe-safe path.</summary> <param name="currentState">Win32 <c>dwCurrentState</c>.</param> <returns>The conservative app lifecycle state.</returns>
     internal static EngineServiceState MapServiceState(uint currentState) =>
         currentState == 1 ? EngineServiceState.Stopped : EngineServiceState.Running;
 
-    /// <summary>Whether the installed stable service advertises the exact
-    /// protocol marker generated from fmf-contract. The query needs only
-    /// SERVICE_QUERY_CONFIG, which install grants to the authorized user.
-    /// Missing/old descriptions fail closed to re-registration.</summary>
-    /// <returns>True only for the current service protocol marker.</returns>
+    /// <summary>Whether the installed stable service advertises the exact protocol marker generated from fmf-contract.
+    /// The query needs only SERVICE_QUERY_CONFIG, which install grants to the authorized user.
+    /// Missing/old descriptions fail closed to re-registration.</summary> <returns>True only for the current service protocol marker.</returns>
     public static bool IsInstalledServiceCompatible()
     {
         const uint ScManagerConnect = 0x0001;
@@ -115,21 +100,15 @@ internal static class ServiceSetup
             && IsServiceProtocolMarkerCompatible(description);
     }
 
-    /// <summary>Exact marker comparison, split out for deterministic tests.</summary>
-    /// <param name="description">SCM service Description text.</param>
-    /// <returns>True only for this build's generated marker.</returns>
+    /// <summary>Exact marker comparison, split out for deterministic tests.</summary> <param name="description">SCM service Description text.</param> <returns>True only for this build's generated marker.</returns>
     internal static bool IsServiceProtocolMarkerCompatible(string? description) =>
         string.Equals(
             description,
             EngineContract.ServiceProtocolMarker,
             StringComparison.Ordinal);
 
-    /// <summary>PID of the running fmf-engine service process, or 0 when it is
-    /// not installed/running. The client-side fake-server check (threat 4)
-    /// compares this to the pipe's server PID — an unelevated client can read
-    /// it (unlike a SYSTEM process's token), and a squatter never matches
-    /// because registering the service needs admin.</summary>
-    /// <returns>The running service's process id, or 0 when not installed/running.</returns>
+    /// <summary>PID of the running fmf-engine service process, or 0 when it is not installed/running.
+    /// The client-side fake-server check (threat 4) compares this to the pipe's server PID — an unelevated client can read it (unlike a SYSTEM process's token), and a squatter never matches because registering the service needs admin.</summary> <returns>The running service's process id, or 0 when not installed/running.</returns>
     public static uint QueryServiceProcessId()
         => QueryServiceProcessId(Volatile.Read(ref _hooks));
 
@@ -150,16 +129,11 @@ internal static class ServiceSetup
             return 0;
         }
 
-        // dwProcessId is only meaningful while RUNNING.
         return state == ServiceRunning ? processId : 0;
     }
 
     /// <summary>Resolve the exact bundled companion next to the app.
-    /// Test-seam builds additionally search the repository build tree; that
-    /// ancestor walk is compiled out of stable artifacts so elevation can
-    /// never select an unrelated developer binary.</summary>
-    /// <param name="baseDir">Directory to start the search from (typically the app's bin dir).</param>
-    /// <returns>Full path to fmf-service.exe, or null when it cannot be found.</returns>
+    /// Test-seam builds additionally search the repository build tree; that ancestor walk is compiled out of stable artifacts so elevation can never select an unrelated developer binary.</summary> <param name="baseDir">Directory to start the search from (typically the app's bin dir).</param> <returns>Full path to fmf-service.exe, or null when it cannot be found.</returns>
     public static string? LocateServiceExe(string baseDir)
     {
         var bundled = Path.Combine(baseDir, "fmf-service.exe");
@@ -183,16 +157,14 @@ internal static class ServiceSetup
         return null;
     }
 
-    /// <summary>Run one fmf-service lifecycle verb elevated via a per-action
-    /// UAC prompt (Verb=runas) — the in-app service manager, where the app
-    /// itself stays asInvoker. Output can't be captured under ShellExecute,
+    /// <summary>Run one fmf-service lifecycle verb elevated via a per-action UAC prompt (Verb=runas) — the in-app service manager, where the app itself stays asInvoker.
+    /// Output can't be captured under ShellExecute,
     /// so the verdict is the exit code; a declined prompt (ERROR_CANCELLED
-    /// 1223) is reported distinctly. <paramref name="args"/> is built from
-    /// fixed verbs plus SID-validated flags, never raw user text. Blocking —
-    /// call off the UI thread.</summary>
-    /// <param name="exe">Path to fmf-service.exe to launch elevated.</param>
-    /// <param name="args">Service verb plus SID-validated flags to pass on the command line.</param>
-    /// <returns>The classified outcome and raw exit code of the elevated action.</returns>
+    /// 1223) is reported distinctly.
+    ///       <paramref name="args"/> is built from
+    /// fixed verbs plus SID-validated flags, never raw user text.
+    /// Blocking —
+    /// call off the UI thread.</summary> <param name="exe">Path to fmf-service.exe to launch elevated.</param> <param name="args">Service verb plus SID-validated flags to pass on the command line.</param> <returns>The classified outcome and raw exit code of the elevated action.</returns>
     public static ServiceActionResult RunElevated(string exe, string args)
     {
         try
@@ -203,11 +175,9 @@ internal static class ServiceSetup
             {
                 FileName = trusted.Path,
                 Arguments = args,
-                UseShellExecute = true, // required for the runas verb
-                Verb = "runas", // elevate just this action; the app stays asInvoker
+                UseShellExecute = true,
+                Verb = "runas",
 
-                // A console exe under ShellExecute ignores CreateNoWindow; hide
-                // the window so the verb doesn't flash a console.
                 WindowStyle = ProcessWindowStyle.Hidden,
             });
             if (p is null)
@@ -227,7 +197,6 @@ internal static class ServiceSetup
         }
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
         {
-            // ERROR_CANCELLED — the user dismissed the UAC prompt.
             return new ServiceActionResult(ServiceActionOutcome.Cancelled, -1);
         }
         catch (Exception ex)
@@ -237,36 +206,26 @@ internal static class ServiceSetup
         }
     }
 
-    /// <summary>Starts the installed service WITHOUT elevation (on-demand
-    /// lifecycle, ADR-0027) by calling SCM directly with only
-    /// SERVICE_START|SERVICE_QUERY_STATUS. No helper process, UAC, executable
-    /// lookup, or command-line surface is involved. Returns true once SCM
-    /// reaches RUNNING; the caller must still verify that the current protocol
-    /// pipe appears. False on any failure —
-    /// including an older install that never granted the right — so the caller
-    /// falls back to the setup screen, whose re-register migrates it. Blocking;
-    /// call off the UI thread.</summary>
-    /// <returns>True when the unelevated start request succeeded.</returns>
+    /// <summary>Starts the installed service WITHOUT elevation (on-demand lifecycle, ADR-0027) by calling SCM directly with only SERVICE_START|SERVICE_QUERY_STATUS.
+    /// No helper process, UAC, executable lookup, or command-line surface is involved.
+    /// Returns true once SCM reaches RUNNING; the caller must still verify that the current protocol pipe appears.
+    /// False on any failure —
+    /// including an older install that never granted the right — so the caller falls back to the setup screen, whose re-register migrates it.
+    /// Blocking;
+    /// call off the UI thread.</summary> <returns>True when the unelevated start request succeeded.</returns>
     public static bool TryStartUnelevated() =>
         TryControlUnelevated(ScmControlVerb.Start);
 
-    /// <summary>Stops the installed service directly through SCM without
-    /// elevation using only the install-time SERVICE_STOP|SERVICE_QUERY_STATUS
-    /// grant. Used to unwind an obsolete service that started successfully but
-    /// never exposed this build's protocol pipe.</summary>
-    /// <returns>True when the stop completed successfully.</returns>
+    /// <summary>Stops the installed service directly through SCM without elevation using only the install-time SERVICE_STOP|SERVICE_QUERY_STATUS grant.
+    /// Used to unwind an obsolete service that started successfully but never exposed this build's protocol pipe.</summary> <returns>True when the stop completed successfully.</returns>
     public static bool TryStopUnelevated() =>
         TryControlUnelevated(ScmControlVerb.Stop);
 
-    /// <summary>Restarts the installed service directly through SCM without
-    /// elevation using only the install-time START/STOP/QUERY grants.</summary>
-    /// <returns>True when stop + start completed successfully.</returns>
+    /// <summary>Restarts the installed service directly through SCM without elevation using only the install-time START/STOP/QUERY grants.</summary> <returns>True when stop + start completed successfully.</returns>
     public static bool TryRestartUnelevated() =>
         TryControlUnelevated(ScmControlVerb.Restart);
 
-    /// <summary>Contains failures from the native SCM boundary for one verb.</summary>
-    /// <param name="verb">Requested service lifecycle operation.</param>
-    /// <returns>True only when the requested terminal state is observed.</returns>
+    /// <summary>Contains failures from the native SCM boundary for one verb.</summary> <param name="verb">Requested service lifecycle operation.</param> <returns>True only when the requested terminal state is observed.</returns>
     internal static bool TryControlUnelevated(ScmControlVerb verb)
     {
         try
@@ -343,17 +302,8 @@ internal static class ServiceSetup
         Restart,
     }
 
-    /// <summary>Deterministic bounded SCM lifecycle state machine. Native
-    /// wrappers supply states and Win32 result codes; one shared poll budget
-    /// covers the whole restart, preventing stop+start from each consuming a
-    /// full timeout.</summary>
-    /// <param name="verb">Target lifecycle operation.</param>
-    /// <param name="queryState">Returns the latest SCM state, or null on query failure.</param>
-    /// <param name="start">Issues StartService and returns zero or a Win32 error.</param>
-    /// <param name="stop">Issues SERVICE_CONTROL_STOP and returns zero or a Win32 error.</param>
-    /// <param name="maxPollAttempts">Shared maximum status queries for the whole operation.</param>
-    /// <param name="wait">Bounded delay between status queries.</param>
-    /// <returns>True only when the requested terminal state is observed.</returns>
+    /// <summary>Deterministic bounded SCM lifecycle state machine.
+    /// Native wrappers supply states and Win32 result codes; one shared poll budget covers the whole restart, preventing stop+start from each consuming a full timeout.</summary> <param name="verb">Target lifecycle operation.</param> <param name="queryState">Returns the latest SCM state, or null on query failure.</param> <param name="start">Issues StartService and returns zero or a Win32 error.</param> <param name="stop">Issues SERVICE_CONTROL_STOP and returns zero or a Win32 error.</param> <param name="maxPollAttempts">Shared maximum status queries for the whole operation.</param> <param name="wait">Bounded delay between status queries.</param> <returns>True only when the requested terminal state is observed.</returns>
     internal static bool DriveServiceControl(
         ScmControlVerb verb,
         Func<uint?> queryState,
@@ -391,7 +341,7 @@ internal static class ServiceSetup
                 case ServiceRunning:
                     return true;
                 case ServiceStopped when startIssued:
-                    return false; // accepted start terminated before RUNNING
+                    return false;
                 case ServiceStopped:
                 {
                     var error = start();
@@ -408,7 +358,7 @@ internal static class ServiceSetup
                 case ServiceStopPending:
                     break;
                 default:
-                    return false; // paused/malformed state is not a usable pipe host
+                    return false;
             }
 
             if (!WaitForNextPoll(wait, remaining))
@@ -445,7 +395,7 @@ internal static class ServiceSetup
                         var error = stop();
                         if (error == ErrorServiceCannotAcceptControl)
                         {
-                            break; // transition raced us; query and retry
+                            break;
                         }
 
                         if (error is not 0 and not ErrorServiceNotActive)
@@ -502,10 +452,8 @@ internal static class ServiceSetup
         return true;
     }
 
-    /// <summary>
-    /// A timed-out lifecycle helper must not keep mutating SCM state after the
-    /// UI has reported failure and allowed a retry. Best-effort termination is
-    /// intentionally bounded; an elevated process handle may deny termination,
+    /// <summary> A timed-out lifecycle helper must not keep mutating SCM state after the UI has reported failure and allowed a retry.
+    /// Best-effort termination is intentionally bounded; an elevated process handle may deny termination,
     /// in which case the failure is logged rather than hidden.
     /// </summary>
     private static void TryTerminateTimedOutProcess(IElevatedProcess process, string mode)
@@ -529,14 +477,10 @@ internal static class ServiceSetup
         }
     }
 
-    /// <summary>Wait for a just-started SCM service to expose the protocol pipe
-    /// this app speaks. The service PID separates START_PENDING from RUNNING;
-    /// once running, a short probe grace accommodates older compatible services
-    /// that reported RUNNING just before creating their first pipe instance.
-    /// A service on an obsolete versioned pipe never passes and is handed back
-    /// to the caller for stop + setup recovery.</summary>
-    /// <param name="pipeName">Current contract pipe name.</param>
-    /// <returns>True only when a protocol-compatible Hello succeeds.</returns>
+    /// <summary>Wait for a just-started SCM service to expose the protocol pipe this app speaks.
+    /// The service PID separates START_PENDING from RUNNING;
+    /// once running, a short probe grace accommodates older compatible services that reported RUNNING just before creating their first pipe instance.
+    /// A service on an obsolete versioned pipe never passes and is handed back to the caller for stop + setup recovery.</summary> <param name="pipeName">Current contract pipe name.</param> <returns>True only when a protocol-compatible Hello succeeds.</returns>
     public static bool WaitForCompatibleStartedService(string pipeName)
     {
         var hooks = Volatile.Read(ref _hooks);
@@ -548,14 +492,7 @@ internal static class ServiceSetup
             () => hooks.Wait(TimeSpan.FromMilliseconds(100)));
     }
 
-    /// <summary>Purely injected polling core for
-    /// <see cref="WaitForCompatibleStartedService"/>.</summary>
-    /// <param name="servicePid">Returns a nonzero PID only once SCM is RUNNING.</param>
-    /// <param name="probe">Attempts the current protocol Hello.</param>
-    /// <param name="startPollAttempts">Maximum PID polls.</param>
-    /// <param name="compatibilityProbeAttempts">Maximum Hello probes after RUNNING.</param>
-    /// <param name="wait">Delay between attempts.</param>
-    /// <returns>True only when a current-protocol Hello succeeds.</returns>
+    /// <summary>Purely injected polling core for <see cref="WaitForCompatibleStartedService"/>.</summary> <param name="servicePid">Returns a nonzero PID only once SCM is RUNNING.</param> <param name="probe">Attempts the current protocol Hello.</param> <param name="startPollAttempts">Maximum PID polls.</param> <param name="compatibilityProbeAttempts">Maximum Hello probes after RUNNING.</param> <param name="wait">Delay between attempts.</param> <returns>True only when a current-protocol Hello succeeds.</returns>
     internal static bool PollForCompatibleStartedService(
         Func<uint> servicePid,
         Func<bool> probe,
@@ -599,13 +536,9 @@ internal static class ServiceSetup
         return false;
     }
 
-    /// <summary>The current user's SID string, forwarded to
-    /// `fmf-service install --owner-sid` so OTS elevation (a *different*
-    /// admin account) does not lock this user out of the pipe (threat 1).
-    /// Null when unavailable. Callers must fail closed rather than starting an
-    /// owner-less setup: under over-the-shoulder elevation the administrator is
-    /// a different identity and the daily user would be locked out.</summary>
-    /// <returns>The current user's SID string, or null when it cannot be read.</returns>
+    /// <summary>The current user's SID string, forwarded to `fmf-service install --owner-sid` so OTS elevation (a *different* admin account) does not lock this user out of the pipe (threat 1).
+    /// Null when unavailable.
+    /// Callers must fail closed rather than starting an owner-less setup: under over-the-shoulder elevation the administrator is a different identity and the daily user would be locked out.</summary> <returns>The current user's SID string, or null when it cannot be read.</returns>
     public static string? CurrentUserSid()
     {
         try
@@ -619,20 +552,12 @@ internal static class ServiceSetup
         }
     }
 
-    /// <summary>Build the one supported setup command line for the current daily
-    /// user. There is deliberately no owner-less fallback: failing to bind the
-    /// unelevated identity before UAC would install a service that the caller
-    /// cannot connect to or control.</summary>
-    /// <param name="arguments">The injection-safe setup arguments on success.</param>
-    /// <returns>True only when the current user's SID can be captured and validated.</returns>
+    /// <summary>Build the one supported setup command line for the current daily user.
+    /// There is deliberately no owner-less fallback: failing to bind the unelevated identity before UAC would install a service that the caller cannot connect to or control.</summary> <param name="arguments">The injection-safe setup arguments on success.</param> <returns>True only when the current user's SID can be captured and validated.</returns>
     public static bool TryCreateSetupArguments(out string arguments) =>
         TryCreateSetupArguments(CurrentUserSid(), out arguments);
 
-    /// <summary>Pure setup-argument builder used by the fail-closed boundary and
-    /// its tests.</summary>
-    /// <param name="sid">Candidate daily-user SID.</param>
-    /// <param name="arguments">The exact setup arguments, or empty on failure.</param>
-    /// <returns>True only for a command-line-safe canonical SID.</returns>
+    /// <summary>Pure setup-argument builder used by the fail-closed boundary and its tests.</summary> <param name="sid">Candidate daily-user SID.</param> <param name="arguments">The exact setup arguments, or empty on failure.</param> <returns>True only for a command-line-safe canonical SID.</returns>
     internal static bool TryCreateSetupArguments(string? sid, out string arguments)
     {
         if (!IsValidSid(sid))
@@ -645,12 +570,8 @@ internal static class ServiceSetup
         return true;
     }
 
-    /// <summary>A canonical decimal SID string: revision 1, a 48-bit identifier
-    /// authority, and at most 15 32-bit sub-authorities. This guards the value
-    /// going onto the fmf-service command line before it is interpolated; the
-    /// elevated service additionally resolves it to a real user account.</summary>
-    /// <param name="s">Candidate SID string to validate.</param>
-    /// <returns>True when the value is a well-formed SID safe to pass on the command line.</returns>
+    /// <summary>A canonical decimal SID string: revision 1, a 48-bit identifier authority, and at most 15 32-bit sub-authorities.
+    /// This guards the value going onto the fmf-service command line before it is interpolated; the elevated service additionally resolves it to a real user account.</summary> <param name="s">Candidate SID string to validate.</param> <returns>True when the value is a well-formed SID safe to pass on the command line.</returns>
     public static bool IsValidSid(string? s)
     {
         const ulong MaxIdentifierAuthority = 0x0000_FFFF_FFFF_FFFF;

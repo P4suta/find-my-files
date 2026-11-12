@@ -1,16 +1,10 @@
 namespace FindMyFiles.Services;
 
-/// <summary>Extensions for safely launching fire-and-forget <see cref="Task"/>s
-/// (AGENTS.md rule: never <c>_ = SomeAsync()</c>).</summary>
+/// <summary>Extensions for safely launching fire-and-forget <see cref="Task"/>s (AGENTS.md rule: never <c>_ = SomeAsync()</c>).</summary>
 internal static class TaskExtensions
 {
-    /// <summary>
-    /// The only sanctioned way to fire-and-forget (AGENTS.md rule): unexpected
-    /// exceptions land in the log and the notification bar instead of being
-    /// silently dropped by an abandoned Task.
-    /// </summary>
-    /// <param name="task">The task to observe to completion.</param>
-    /// <param name="area">Subsystem tag for the log/notification if it faults.</param>
+    /// <summary> The only sanctioned way to fire-and-forget (AGENTS.md rule): unexpected exceptions land in the log and the notification bar instead of being silently dropped by an abandoned Task.
+    /// </summary> <param name="task">The task to observe to completion.</param> <param name="area">Subsystem tag for the log/notification if it faults.</param>
     public static async void Forget(this Task task, string area)
     {
         try

@@ -3,6 +3,7 @@
 - [Security](SECURITY.md)
 - [Research](RESEARCH.md)
 - [Releasing](RELEASING.md)
+- [Verification scope](verification.md)
 
 # Design decisions (ADR)
 
@@ -55,3 +56,15 @@
 - [0047 — NTFS grammar outside the Windows gate](adr/0047-ntfs-grammar-outside-the-windows-gate.md)
 - [0048 — Direct-dispatch release workflow](adr/0048-direct-dispatch-release-workflow.md)
 - [Sync release App credentials to the protected environment](adr/sync-release-app-credentials-to-the-protected-environment.md)
+- [Source-bound verification](adr/source-bound-verification.md)
+- [Pure core and shared runtime](adr/pure-core-and-shared-runtime.md)
+- [Release candidate assurance](adr/release-candidate-assurance.md)
+- [Relocation-independent managed identity](adr/relocation-independent-managed-identity.md)
+- [Candidate mutation audits](adr/candidate-mutation-audits.md)
+- [Connection retirement cause](adr/connection-retirement-cause.md)
+- [Decoder bounds and progress](adr/decoder-bounds-and-progress.md)
+- [Sharded proof evidence](adr/sharded-proof-evidence.md)
+- [Checked arithmetic verification](adr/checked-arithmetic-verification.md)
+- [Performance execution identity](adr/performance-execution-identity.md)
+- [Overflow map verification model](adr/overflow-map-verification-model.md)
+- [Timestamp projection verification](adr/mtime-verification-contract.md)

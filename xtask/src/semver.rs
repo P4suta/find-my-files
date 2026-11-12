@@ -1,15 +1,33 @@
 //! Release versions are plain `X.Y.Z` triples (no pre-release/build metadata).
-//! Validating up front turns a typo into a clear error before any file is
-//! rewritten or any tag is cut — the old PowerShell recipe had no such guard.
+//! Validating up front turns a typo into a clear error before any file is rewritten or any tag is cut — the old PowerShell recipe had no such guard.
 
 use anyhow::{bail, Result};
 
-/// Accept only canonical release `SemVer` `X.Y.Z`: exactly three ASCII-decimal
-/// components, with no leading zero on a multi-digit component. Pre-release and
-/// build metadata are deliberately excluded from release-source versions.
+#[cfg(kani)]
+#[path = "semver_proofs.rs"]
+mod kani_proofs;
+
+/// The release version before channel and build metadata.
+pub fn product_base(full: &str) -> &str {
+    &full[..product_base_end(full.as_bytes())]
+}
+
+const fn product_base_end(bytes: &[u8]) -> usize {
+    let mut end = 0;
+    while end < bytes.len() {
+        if matches!(bytes[end], b'-' | b'+') {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
+/// Accept only canonical release `SemVer` `X.Y.Z`: exactly three ASCII-decimal components, with no leading zero on a multi-digit component.
+/// Pre-release and build metadata are deliberately excluded from release-source versions.
 pub fn validate(version: &str) -> Result<()> {
     let parts: Vec<&str> = version.split('.').collect();
-    let ok = parts.len() == 3
+    let ok = matches!(parts.as_slice(), [_, _, _])
         && parts.iter().all(|p| {
             !p.is_empty()
                 && p.bytes().all(|b| b.is_ascii_digit())
@@ -34,6 +52,22 @@ pub fn strip_tag_v(tag: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn product_base_preserves_unicode_and_stops_at_the_first_ascii_separator() {
+        for (full, expected) in [
+            ("", ""),
+            ("1.2.3", "1.2.3"),
+            ("1.2.3-dev+g", "1.2.3"),
+            ("1.2.3+g-dev", "1.2.3"),
+            ("-dev", ""),
+            ("+g", ""),
+            ("日本語–１.２.３-rc", "日本語–１.２.３"),
+            ("a\0b+meta", "a\0b"),
+        ] {
+            assert_eq!(product_base(full), expected);
+        }
+    }
 
     #[test]
     fn accepts_plain_triples() {
@@ -66,7 +100,6 @@ mod tests {
         assert_eq!(strip_tag_v("v0.2.0"), "0.2.0");
         assert_eq!(strip_tag_v("V0.2.0"), "0.2.0");
         assert_eq!(strip_tag_v("0.2.0"), "0.2.0");
-        // Only one leading v is stripped.
         assert_eq!(strip_tag_v("vv1.0.0"), "v1.0.0");
     }
 }

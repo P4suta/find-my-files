@@ -7,14 +7,9 @@ using Microsoft.Win32.SafeHandles;
 
 namespace FindMyFiles.Services;
 
-/// <summary>
-/// Fail-closed trust boundary for the companion executable that crosses UAC.
-/// The exact PE image is pinned at publish time using Windows' Authenticode
-/// digest stream, so release signing can add its certificate without changing
-/// the identity. The image handle denies replacement/rename from validation
-/// through process creation; each non-root parent directory is locked the same
-/// way wherever this token may delete it (see <see cref="OpenAndValidate"/> for
-/// the components that can only be observed).
+/// <summary> Fail-closed trust boundary for the companion executable that crosses UAC.
+/// The exact PE image is pinned at publish time using Windows' Authenticode digest stream, so release signing can add its certificate without changing the identity.
+/// The image handle denies replacement/rename from validation through process creation; each non-root parent directory is locked the same way wherever this token may delete it (see <see cref="OpenAndValidate"/> for the components that can only be observed).
 /// </summary>
 internal static unsafe partial class ServiceExecutableTrust
 {
@@ -232,14 +227,6 @@ internal static unsafe partial class ServiceExecutableTrust
         var flags = FileFlagOpenReparsePoint
             | (directory ? FileFlagBackupSemantics : FileFlagSequentialScan);
 
-        // The image is opened for data (GenericRead), which already registers
-        // read access with the Win32 share check, so FileShareRead alone denies
-        // every rename/delete of the PE while it is being hashed and launched.
-        // A directory opened for attributes only registers nothing at all — its
-        // share mode would be decorative — so DELETE is requested to make the
-        // handle participate (the lesson fmf-service's security.rs::open_root
-        // records). No data-access bits are added: they would fail the moment
-        // another process legitimately enumerates the directory.
         var handle = CreateFile(
             path,
             directory ? FileReadAttributes | Delete : GenericRead,
@@ -250,13 +237,6 @@ internal static unsafe partial class ServiceExecutableTrust
             IntPtr.Zero);
         if (handle.IsInvalid && directory)
         {
-            // %ProgramData% and its peers withhold DELETE from a standard user,
-            // and a component may already be held by a process that denies
-            // delete sharing. Both mean this token cannot register the lock —
-            // and, for ACCESS_DENIED, that the same DACL denies an attacker in
-            // this token the rename. Observe the component instead of refusing
-            // to launch; the type/reparse checks below still run, and the
-            // Authenticode digest of the image remains the decisive gate.
             var lockError = Marshal.GetLastWin32Error();
             if (lockError is not (ErrorAccessDenied or ErrorSharingViolation))
             {

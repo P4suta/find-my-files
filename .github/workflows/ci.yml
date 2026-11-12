@@ -1,51 +1,67 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
-    # Label-only events belong to release-gate.yml. Keeping them out of this
-    # workflow is a security invariant: a cheap label run must never replace a
-    # failed ci-required result for the same commit with a skipped/green result.
     types: [opened, synchronize, reopened]
+  merge_group:
+    types: [checks_requested]
+  workflow_call:
+    inputs:
+      full_assurance:
+        description: Run the full release candidate verification inventory.
+        type: boolean
+        default: false
+      target_sha:
+        description: Exact candidate commit admitted by release preflight.
+        type: string
+        required: true
 
-# Cancel superseded PR runs; never cancel main (post-merge lineage/artifacts).
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  CARGO_INCREMENTAL: "0" # CI-only; does not touch local incremental (ADR-0014)
+  CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
   DOTNET_NOLOGO: "1"
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
 
-# Least privilege by default; the only job needing more (pr-title) sets its own.
 permissions:
   contents: read
 
 jobs:
-  # Skip the heavy windows jobs on docs-only PRs (ci-required treats their
-  # `skipped` as success, so branch protection still passes).
   changes:
+    name: changes
     permissions:
       contents: read
-      pull-requests: read # Read changed PR files for parser selection.
-    runs-on: ubuntu-24.04
+      pull-requests: read # Permission: Select checks from the changed PR files.
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
-      code: ${{ steps.f.outputs.code }}
-      fuzz: ${{ steps.f.outputs.fuzz_all == 'true' || steps.f.outputs.fuzz_wire == 'true' || steps.f.outputs.fuzz_core == 'true' || steps.f.outputs.fuzz_usn == 'true' || steps.f.outputs.fuzz_ntfs == 'true' }}
-      fuzz_surfaces: ${{ steps.f.outputs.changes }}
-      bench: ${{ steps.f.outputs.bench }}
+      code: ${{ inputs.full_assurance || steps.f.outputs.code }}
+      assurance: ${{ inputs.full_assurance || false }}
+      comments: ${{ inputs.full_assurance || steps.f.outputs.comments }}
+      fuzz: ${{ inputs.full_assurance || false }}
+      fuzz_surfaces: '["fuzz_all"]'
+      bench: ${{ inputs.full_assurance || steps.f.outputs.bench }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: f
         with:
           filters: |
+            comments:
+              - 'engine/**'
+              - 'app/**'
+              - 'xtask/**'
+              - '.github/**'
+              - 'mise.toml'
+              - 'lefthook.yml'
+              - 'renovate.local.json5'
+              - '.ocomment.toml'
             code:
               - 'engine/**'
               - 'app/**'
@@ -61,36 +77,9 @@ jobs:
               # future-proof instead of hand-maintaining an allowlist that can
               # silently omit a newly added gate.
               - '.github/workflows/**'
-            fuzz_all:
-              - 'engine/fuzz/**'
-              - 'engine/Cargo.toml'
-              - 'engine/Cargo.lock'
-              - 'engine/.cargo/**'
-              - 'engine/crates/fmf-core/Cargo.toml'
-              - 'engine/crates/fmf-core/build.rs'
-              - 'engine/crates/fmf-core/src/lib.rs'
-              - 'engine/crates/fmf-core/src/metrics.rs'
-              - 'engine/crates/fmf-core/src/diag/**'
-              - 'engine/crates/fmf-proto/Cargo.toml'
-              - 'engine/crates/fmf-proto/build.rs'
-              - 'engine/crates/fmf-contract/**'
-              - 'mise.toml'
-              - '.github/actions/rust-toolchain/**'
-              - '.github/actions/fuzz-target/**'
-              - '.github/workflows/fuzz.yml'
-              - '.github/workflows/ci.yml'
-            fuzz_wire:
-              - 'engine/crates/fmf-proto/**'
-            fuzz_core:
-              - 'engine/crates/fmf-core/src/query/**'
-              - 'engine/crates/fmf-core/src/index/**'
-              - 'engine/crates/fmf-core/src/wtf8.rs'
-            fuzz_usn:
-              - 'engine/crates/fmf-core/src/usn/**'
-            fuzz_ntfs:
-              - 'engine/crates/fmf-core/src/ondisk/**'
             bench:
               - 'engine/crates/fmf-core/**'
+              - 'engine/crates/fmf-runtime/**'
               - 'engine/benches/**'
               - 'engine/Cargo.toml'
               - 'engine/Cargo.lock'
@@ -98,51 +87,48 @@ jobs:
               - '.github/actions/rust-toolchain/**'
               - '.github/workflows/ci.yml'
 
-  # ── ubuntu hygiene tier: parallel, no needs, cheap fast-fail signal ──
   hygiene:
-    runs-on: ubuntu-24.04
+    name: hygiene
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Lint the workflow YAML itself: syntax, ${{ }} expression types, and
+          ref: ${{ inputs.target_sha || github.sha }}
       # shellcheck over run: blocks. Catches workflow errors before a release run.
       - uses: $/.github/actions/setup-actionlint
         id: actionlint
       - run: '"$ACTIONLINT"'
         env:
           ACTIONLINT: ${{ steps.actionlint.outputs.executable }}
-      # CI uses the ecosystem-standard checksummed release installer directly;
-      # mise remains the local developer environment manager. The doctor checks
-      # that both lanes pin the same tool versions.
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: zizmor@1.30.1,typos-cli@1.47.2,taplo-cli@0.10.0
+          tool: zizmor@1.32.0,typos-cli@1.52.0,taplo-cli@0.10.0
           fallback: none
       - name: Audit GitHub Actions security
         run: zizmor --offline --strict-collection --persona auditor --min-severity low .
       - name: Check spelling
         run: typos
-      # fmt --check from the repo root enforces TOML *formatting* (taplo.toml),
-      # not just validity, across every crate + the root configs.
       - run: taplo fmt --check
       - uses: $/.github/actions/rust-toolchain
         with:
           components: rustfmt
       - run: cargo fmt --all --check
         working-directory: engine
+      - run: cargo fmt --all --check
+        working-directory: engine/fuzz
 
   deny:
-    runs-on: ubuntu-24.04
+    name: deny
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Prebuilt binary (cargo install from source took minutes); advisories
-      # are owned by cargo-audit.yml, so this checks bans/licenses/sources.
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+          ref: ${{ inputs.target_sha || github.sha }}
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-deny@0.20.2
           fallback: none
@@ -150,36 +136,33 @@ jobs:
         working-directory: engine
 
   machete:
-    runs-on: ubuntu-24.04
+    name: machete
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+          ref: ${{ inputs.target_sha || github.sha }}
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-machete@0.9.2
           fallback: none
       - run: cargo machete engine
 
-  # A cheap Linux lint of the contract/proto layer. These are not the only
-  # crates that build off-Windows: fmf-core's windows-sys dependency is
-  # cfg-gated, so its pure parsers (ondisk / query / index::snapshot /
-  # usn::records / wtf8) compile on Linux too — that is what the `fuzz` job
-  # below exercises (ADR-0047). fmf-core is deliberately not linted here: the
-  # Linux view of it is a strict subset of the Windows `engine-build-test`
-  # clippy run, so adding it would only duplicate that gate.
   contract-lint:
-    runs-on: ubuntu-24.04
+    name: contract-lint
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: engine
           shared-key: engine-linux
@@ -188,38 +171,40 @@ jobs:
         working-directory: engine
 
   pr-title:
+    name: pr-title
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
-      pull-requests: read # validate the PR title through the event's API object
+      pull-requests: read # Permission: Validate the PR title through the API.
     steps:
-      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+      - uses: amannn/action-semantic-pull-request@2252a14e810aa9b85c2d560bd7070c802206ecf6 # v6.1.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # The xtask dev-tooling crate (build/release plumbing) is its own workspace of
-  # pure, OS-agnostic logic, so it tests on cheap ubuntu. Always runs — xtask/
-  # isn't in the `changes` filter and ci-required gates on it. Advisory scanning
-  # lives in cargo-audit.yml alongside the engine's.
-  xtask:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+  xtask-build:
+    name: xtask-build
+    needs: changes
+    runs-on: ubuntu-26.04
+    timeout-minutes: ${{ inputs.full_assurance && 360 || 60 }}
+    env:
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: xtask
           shared-key: xtask
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.151
           fallback: none
       - run: cargo fmt --all --check
         working-directory: xtask
@@ -227,18 +212,132 @@ jobs:
         working-directory: xtask
       - run: cargo nextest run --locked --profile ci
         working-directory: xtask
+      - name: Check the registered proof inventory
+        run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- proof-check
+      - name: Install the source-pinned comment checker
+        if: needs.changes.outputs.comments == 'true'
+        run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- verification-tools comments
+      - name: Check source comments
+        if: needs.changes.outputs.comments == 'true'
+        run: ocomment check --jobs 2 --format github engine app xtask .github mise.toml lefthook.yml renovate.local.json5
       - name: Upload xtask nextest JUnit
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xtask-nextest-junit
           path: build/xtask/nextest/ci/junit.xml
-          retention-days: 14
+          retention-days: 7
           if-no-files-found: warn
           overwrite: true
 
-  # ── windows engine tier: engine compiles once here, the app reuses the dll ──
+  proof:
+    name: proof (${{ matrix.shard }})
+    needs: [changes, xtask-build]
+    if: needs.changes.outputs.assurance == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
+      - uses: $/.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: xtask
+          shared-key: xtask
+          save-if: false
+      - name: Install the checksum-verified prover
+        run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- verification-tools kani
+      - name: Verify the registered production harnesses
+        env:
+          PROOF_SHARD: ${{ matrix.shard }}
+        run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- proof-shard --index "$PROOF_SHARD" --count 4
+      - name: Upload the original partition evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: production-proof-shard-${{ matrix.shard }}
+          path: build/verification/proof-shard-${{ matrix.shard }}/*.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  xtask:
+    name: xtask
+    needs: [changes, xtask-build, proof]
+    if: always()
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - name: Require every applicable prerequisite
+        if: needs.changes.result != 'success' || needs.xtask-build.result != 'success' || (needs.changes.outputs.assurance == 'true' && needs.proof.result != 'success')
+        run: exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.changes.outputs.assurance == 'true'
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
+      - uses: $/.github/actions/rust-toolchain
+        if: needs.changes.outputs.assurance == 'true'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: needs.changes.outputs.assurance == 'true'
+        with:
+          workspaces: xtask
+          shared-key: xtask
+          save-if: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.changes.outputs.assurance == 'true'
+        with:
+          name: production-proof-shard-0
+          path: build/verification/proof-shard-0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.changes.outputs.assurance == 'true'
+        with:
+          name: production-proof-shard-1
+          path: build/verification/proof-shard-1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.changes.outputs.assurance == 'true'
+        with:
+          name: production-proof-shard-2
+          path: build/verification/proof-shard-2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.changes.outputs.assurance == 'true'
+        with:
+          name: production-proof-shard-3
+          path: build/verification/proof-shard-3
+      - name: Collect every registered production harness
+        if: needs.changes.outputs.assurance == 'true'
+        run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- proof-collect --count 4
+      - name: Install the pinned interpreter toolchain
+        if: needs.changes.outputs.assurance == 'true'
+        run: rustup toolchain install nightly-2026-11-05 --profile minimal --component miri --component rust-src
+      - name: Interpret the codec boundary tests
+        if: needs.changes.outputs.assurance == 'true'
+        run: cargo run --locked --manifest-path xtask/Cargo.toml --target-dir build/xtask -- miri
+      - name: Upload proof evidence
+        if: always() && needs.changes.outputs.assurance == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: production-proofs
+          path: |
+            build/verification/*.json
+            build/verification/proof-shard-*/*.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
   engine-build-test:
+    name: engine-build-test
     needs: [hygiene, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-2025
@@ -247,46 +346,40 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: $/.github/actions/rust-toolchain
         with:
           components: clippy, llvm-tools-preview
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: engine
-          shared-key: engine-win # shared with codeql/nightly to reuse deps
+          shared-key: engine-win
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.140
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.151
           fallback: none
       - name: clippy (compiles the engine; later steps reuse it)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
         working-directory: engine
-      # Contract drift is gated by drift.rs inside the workspace test run below
-      # (it runs `gen-contract --check` for EngineContract.g.cs), so no separate
-      # codegen + git-diff step is needed here
-      # (ADR-0018).
       - name: uninstrumented pipe page latency gate
         run: cargo nextest run --locked --workspace --profile ci-latency -E 'test(page_roundtrip_stays_inside_the_latency_budget)'
         working-directory: engine
       - name: test + line coverage gate
-        # Measured 77.99% (just cov); gate held ~2pt below for tool/run headroom.
-        # LLVM instrumentation invalidates the 5 ms wall-clock pipe budget; the
-        # uninstrumented step above owns it.
         run: |
           mkdir -p ../build/coverage
           cargo llvm-cov nextest --locked --workspace --profile ci-coverage --fail-under-lines 76 --lcov --output-path ../build/coverage/engine-lcov.info -E 'not test(page_roundtrip_stays_inside_the_latency_budget)'
         working-directory: engine
       - name: Upload engine nextest JUnit
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engine-nextest-junit
           path: |
             build/engine/nextest/ci-latency/latency.xml
             build/engine/nextest/ci-coverage/coverage.xml
-          retention-days: 14
+          retention-days: 7
           if-no-files-found: warn
           overwrite: true
       - name: doctest
@@ -300,7 +393,7 @@ jobs:
       - name: build shipped engine dll + service + launcher (release)
         run: cargo build --locked --release -p fmf-ffi -p fmf-service -p fmf-launcher
         working-directory: engine
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engine-release
           path: |
@@ -310,15 +403,16 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           overwrite: true
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-coverage
           path: build/coverage/engine-lcov.info
-          retention-days: 14
+          retention-days: 7
           if-no-files-found: error
           overwrite: true
 
   app:
+    name: app
     needs: [engine-build-test]
     runs-on: windows-2025
     timeout-minutes: 25
@@ -326,40 +420,31 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Reuse the engine binaries built upstream. The publish recipes still run
-      # the independent xtask workspace, so provision and cache Rust for xtask
-      # without rebuilding the engine.
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: $/.github/actions/rust-toolchain
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: xtask
           shared-key: app-xtask
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: engine-release
           path: build/engine/release/
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: 10.0.401
+          dotnet-version: 10.0.404
       - uses: $/.github/actions/setup-winapp
         id: winapp
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          # just: the publish recipe. cargo-about: publish generates the bundle's
-          # THIRD-PARTY-NOTICES.txt from the Rust crate graph.
-          tool: just@1.54.0,cargo-about@0.9.1
+          tool: just@1.59.0,cargo-about@0.9.3
           fallback: none
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('app/**/packages.lock.json') }}
           restore-keys: nuget-${{ runner.os }}-
-      # Publish (not bare `dotnet build`): only the publish output is a runnable
-      # bundle — the WinUI component package wires WinRT.Runtime.dll, the native
-      # helpers and compiled XAML in at publish time. Reuses the same xtask-owned
-      # path as release.yml (including its locked-graph fetch for offline legal
-      # notices); skip_rust=true since the engine dll/exe are prebuilt above.
       - name: publish app (SkipRustBuild — engine binaries are prebuilt)
         run: just publish-app true
       - name: shipping bundle startup smoke (no test seams)
@@ -373,8 +458,6 @@ jobs:
           dotnet test app/FindMyFiles.Tests --settings app/FindMyFiles.Tests/pipe.runsettings
           --results-directory build/test-results/pipe
           -p:SkipRustBuild=true -p:RestoreLockedMode=true
-      # Stable artifacts exclude fake/custom engine seams. Build the explicitly
-      # marked, isolated UI-test bundle for deterministic full UI automation.
       - name: publish isolated UI-test bundle
         run: just publish-ui-test true
       - name: UI-test bundle automation
@@ -383,16 +466,14 @@ jobs:
           FMF_UI_CLI: ${{ steps.winapp.outputs.cli-path }}
       - name: upload UI automation evidence on failure
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ui-automation-failure
           path: build/ui-automation/
           retention-days: 7
           if-no-files-found: warn
           overwrite: true
-      # The shipping bundle's runnability and absence of test seams are verified
-      # by xtask; the separate UI-test bundle above is never uploaded here.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: find-my-files-win-x64
           path: build/dist/FindMyFiles/
@@ -400,68 +481,98 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  # Required compile/run smoke on PRs. Hosted-runner timing is intentionally
-  # not judged here (ADR-0013); the authoritative regression verdict is the
-  # instrument-bound `just perf-gate`. A broken benchmark binary or crashing
-  # benchmark is nevertheless a release-blocking defect.
   bench:
+    name: bench
     needs: [hygiene, changes]
-    if: github.event_name == 'pull_request' && needs.changes.outputs.bench == 'true'
+    if: needs.changes.outputs.bench == 'true'
     runs-on: windows-2025
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.target_sha || github.sha }}
       - uses: $/.github/actions/rust-toolchain
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: engine
           shared-key: engine-win
           save-if: false
-      - run: cargo bench --locked -p fmf-core --features testutil -- --test
+      - run: cargo bench --locked -p fmf-runtime --features testutil -- --test
         working-directory: engine
 
-  # Bounded libFuzzer smoke over the untrusted-input parsers, folded into the
-  # required gate (#93: it used to be a separate non-required workflow, so
-  # auto-merge could merge with fuzz red). Reuses the fuzz workflow definition
-  # (single source) and runs only when the fuzzable surface changes; otherwise
-  # skipped, which ci-required treats as success.
   fuzz:
+    name: fuzz
     needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.fuzz == 'true'
+    if: needs.changes.outputs.fuzz == 'true'
     permissions:
       contents: read
     uses: $/.github/workflows/fuzz.yml
     with:
       surfaces: ${{ needs.changes.outputs.fuzz_surfaces }}
+      target_sha: ${{ inputs.target_sha || github.sha }}
 
-  # Single required status check. Transitively enforces the leaves and treats
-  # `skipped` (docs-only / paths-gated) as success — avoids the "Expected —
-  # Waiting" deadlock. PR-only: it gates PR merges, so there is nothing to gate
-  # on a push to main — and a cancelled post-merge push run would otherwise make
-  # gate-results (which counts `cancelled` as failure) paint main spuriously red.
   ci-required:
-    if: ${{ always() && github.event_name == 'pull_request' }}
-    needs: [hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app, bench, fuzz]
-    runs-on: ubuntu-24.04
+    name: ci-required
+    if: ${{ always() }}
+    needs: [changes, hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app, bench, fuzz]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions: {}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: gate on needed job results
-        uses: $/.github/actions/gate-results
-        with:
-          results: ${{ join(needs.*.result, ',') }}
+      - name: Require complete candidate verification
+        env:
+          FULL_ASSURANCE: ${{ inputs.full_assurance || false }}
+          JOBS: ${{ toJSON(needs) }}
+        run: |
+          jq -n -e --argjson full "$FULL_ASSURANCE" --argjson jobs "$JOBS" '
+            def fast_ready:
+              type == "object" and length > 0 and
+              all(.[]; type == "object" and (.result == "success" or .result == "skipped"));
+            def release_ready:
+              . as $jobs |
+              .changes.outputs.assurance == "true" and
+              all(["hygiene", "deny", "machete", "contract-lint", "xtask",
+                   "engine-build-test", "app", "bench", "fuzz"][];
+                  $jobs[.].result == "success");
+            def accepts($full):
+              fast_ready and (if $full then release_ready else true end);
+            {
+              changes: {result: "success", outputs: {assurance: "true"}},
+              hygiene: {result: "success"},
+              deny: {result: "success"},
+              machete: {result: "success"},
+              "contract-lint": {result: "success"},
+              "pr-title": {result: "skipped"},
+              xtask: {result: "success"},
+              "engine-build-test": {result: "success"},
+              app: {result: "success"},
+              bench: {result: "success"},
+              fuzz: {result: "success"}
+            } as $complete |
+            [
+              ($complete | accepts(true)),
+              ($complete | .xtask.result = "failure" | accepts(true) | not),
+              ($complete | .xtask.result = "cancelled" | accepts(true) | not),
+              ($complete | .xtask.result = "skipped" | accepts(true) | not),
+              ($complete | del(.xtask) | accepts(true) | not),
+              ($complete | .fuzz.result = "skipped" | accepts(true) | not),
+              ($complete | del(.fuzz) | accepts(true) | not),
+              ($complete | .changes.outputs.assurance = "false" | accepts(true) | not),
+              ($complete | del(.changes.outputs.assurance) | accepts(true) | not),
+              ($complete | .app.result = "unknown" | accepts(true) | not),
+              ({} | accepts(false) | not),
+              ({job: {result: "skipped"}} | accepts(false)),
+              ({job: {result: "cancelled"}} | accepts(false) | not),
+              ({job: {}} | accepts(false) | not)
+            ] | all and ($jobs | accepts($full))
+          '
 
-  # The one status check branch protection requires,
-  # named the same in every P4suta repository.
-  # It passes only when every job it needs succeeded or was skipped.
   required:
     name: required
     if: always()
     needs: [changes, hygiene, deny, machete, contract-lint, pr-title, xtask, engine-build-test, app, bench, fuzz, ci-required]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -470,4 +581,4 @@ jobs:
           RESULTS: ${{ toJSON(needs.*.result) }}
         run: |
           echo "${RESULTS}"
-          jq -e 'all(.[]; IN("success", "skipped"))' <<< "${RESULTS}"
+          jq -e 'length > 0 and all(.[]; . == "success" or . == "skipped")' <<< "${RESULTS}"

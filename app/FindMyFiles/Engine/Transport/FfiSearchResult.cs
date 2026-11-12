@@ -2,12 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// A native query result held as a <see cref="SafeHandle"/>. Every page fetch
-/// brackets itself with DangerousAddRef/DangerousRelease, so a
-/// <c>Dispose()</c> racing an in-flight fetch defers
-/// <c>fmf_result_free</c> until that fetch has finished reading the native
-/// result — the handle can never be freed under a live page read.
+/// <summary> A native query result held as a <see cref="SafeHandle"/>. Every page fetch brackets itself with DangerousAddRef/DangerousRelease, so a <c>Dispose()</c> racing an in-flight fetch defers <c>fmf_result_free</c> until that fetch has finished reading the native result — the handle can never be freed under a live page read.
 /// </summary>
 internal sealed unsafe class FfiSearchResult : SafeHandle, ISearchResult
 {
@@ -24,17 +19,10 @@ internal sealed unsafe class FfiSearchResult : SafeHandle, ISearchResult
 
     public override bool IsInvalid => this.handle == IntPtr.Zero;
 
-    /// <summary>
-    /// Takes ownership of a successful query's native handle before validating
-    /// any other returned field. A malformed count therefore cannot orphan the
-    /// native result allocation.
-    /// </summary>
-    /// <param name="handle">
-    /// Native result handle, cleared when ownership transfers.
-    /// </param>
-    /// <param name="count">Unsigned result count returned beside the handle.</param>
-    /// <param name="owner">Identity of the FFI engine session that created it.</param>
-    /// <returns>The owning managed result.</returns>
+    /// <summary> Takes ownership of a successful query's native handle before validating any other returned field.
+    /// A malformed count therefore cannot orphan the native result allocation.
+    /// </summary> <param name="handle"> Native result handle, cleared when ownership transfers.
+    /// </param> <param name="count">Unsigned result count returned beside the handle.</param> <param name="owner">Identity of the FFI engine session that created it.</param> <returns>The owning managed result.</returns>
     internal static FfiSearchResult TakeOwnership(
         ref IntPtr handle,
         ulong count,
@@ -60,15 +48,9 @@ internal sealed unsafe class FfiSearchResult : SafeHandle, ISearchResult
         }
     }
 
-    /// <summary>
-    /// Acquires a SafeHandle reference only when this result belongs to the
-    /// exact engine session issuing the next query. Foreign or disposed
-    /// results behave as no presentation basis.
-    /// </summary>
-    /// <param name="expectedOwner">Identity of the engine session issuing the query.</param>
-    /// <param name="added">Set when the caller must later call DangerousRelease.</param>
-    /// <param name="id">The owned native result ID, or zero when unavailable.</param>
-    /// <returns>True only when a live same-session basis was acquired.</returns>
+    /// <summary> Acquires a SafeHandle reference only when this result belongs to the exact engine session issuing the next query.
+    /// Foreign or disposed results behave as no presentation basis.
+    /// </summary> <param name="expectedOwner">Identity of the engine session issuing the query.</param> <param name="added">Set when the caller must later call DangerousRelease.</param> <param name="id">The owned native result ID, or zero when unavailable.</param> <returns>True only when a live same-session basis was acquired.</returns>
     internal bool TryAcquirePresentationBasis(
         object expectedOwner,
         out bool added,
@@ -125,8 +107,6 @@ internal sealed unsafe class FfiSearchResult : SafeHandle, ISearchResult
         return Task.Run<IReadOnlyList<RowData>>(
             () =>
         {
-            // AddRef/Release keep the native result alive across an in-flight
-            // fetch even if Dispose() races (see the class summary).
             var added = false;
             DangerousAddRef(ref added);
             try
@@ -157,8 +137,6 @@ internal sealed unsafe class FfiSearchResult : SafeHandle, ISearchResult
 
                     var lengths = NativeEngine.ValidatePage(descriptor, request.Count);
 
-                    // The native page is the same layout the pipe carries:
-                    // 56-byte rows + blob, decoded by the shared PageCodec.
                     return (IReadOnlyList<RowData>)PageCodec.Decode(
                         new ReadOnlySpan<byte>(
                             descriptor.Rows.ToPointer(), lengths.RowBytes),
@@ -168,8 +146,6 @@ internal sealed unsafe class FfiSearchResult : SafeHandle, ISearchResult
                 }
                 finally
                 {
-                    // Free every allocation the native side returned, including
-                    // malformed success values and unexpected error outputs.
                     _ = NativeEngine.fmf_page_free(ownerId);
                 }
             }

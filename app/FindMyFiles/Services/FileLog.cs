@@ -4,15 +4,12 @@ using Serilog;
 
 namespace FindMyFiles.Services;
 
-/// <summary>
-/// Static logging facade for the app process. Routes through the Serilog logger
-/// installed by <see cref="LogSetup"/>, which writes logfmt lines to
-/// <c>…\logs\app.log</c> (resolved by <see cref="AppPaths"/>) — the same dir the
-/// scope engine logs into (ADR-0037). The facade keeps a tiny scalar-only
-/// surface so call sites can never accidentally destructure (and leak) an
-/// object. Exception text and stack traces are deliberately never persisted:
-/// they routinely contain user paths, query text, pipe names, and machine
-/// details. Only type/HRESULT/native error code cross this boundary.
+/// <summary> Static logging facade for the app process.
+/// Routes through the Serilog logger installed by <see cref="LogSetup"/>, which writes logfmt lines to <c>…\logs\app.log</c> (resolved by <see cref="AppPaths"/>) — the same dir the scope engine logs into (ADR-0037).
+/// The facade keeps a tiny scalar-only surface so call sites can never accidentally destructure (and leak) an object.
+/// Exception text and stack traces are deliberately never persisted:
+/// they routinely contain user paths, query text, pipe names, and machine details.
+/// Only type/HRESULT/native error code cross this boundary.
 /// Best-effort: logging must never become a crash source itself.
 /// </summary>
 internal static class FileLog
@@ -22,62 +19,36 @@ internal static class FileLog
         new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     /// <summary>Absolute path to the active log file (<c>…\logs\app.log</c>) —
-    /// surfaced for the diagnostics "open log folder" affordance and
-    /// <see cref="Tail"/>.</summary>
+    /// surfaced for the diagnostics "open log folder" affordance and <see cref="Tail"/>.</summary>
     public static string LogPath => Path.Combine(AppPaths.LogDir, "app.log");
 
-    /// <summary>Absolute path to the crash marker dropped on a fatal exit and
-    /// read back on the next launch (see <see cref="WriteCrashMarker"/> /
-    /// <see cref="TakeCrashMarker"/>).</summary>
+    /// <summary>Absolute path to the crash marker dropped on a fatal exit and read back on the next launch (see <see cref="WriteCrashMarker"/> / <see cref="TakeCrashMarker"/>).</summary>
     public static string CrashMarkerPath => Path.Combine(AppPaths.LogDir, "crash.marker");
 
-    /// <summary>Log an informational line under <paramref name="area"/>.</summary>
-    /// <param name="area">Subsystem tag, e.g. "notify" or "settings".</param>
-    /// <param name="message">The message text.</param>
+    /// <summary>Log an informational line under <paramref name="area"/>.</summary> <param name="area">Subsystem tag, e.g. "notify" or "settings".</param> <param name="message">The message text.</param>
     public static void Info(string area, string message) =>
         ForArea(area).Information("{Msg}", message);
 
-    /// <summary>Log a debug line under <paramref name="area"/> (suppressed unless
-    /// the level is lowered via <c>FMF_LOG</c> / <see cref="LogSetup.LevelSwitch"/>).</summary>
-    /// <param name="area">Subsystem tag.</param>
-    /// <param name="message">The message text.</param>
+    /// <summary>Log a debug line under <paramref name="area"/> (suppressed unless the level is lowered via <c>FMF_LOG</c> / <see cref="LogSetup.LevelSwitch"/>).</summary> <param name="area">Subsystem tag.</param> <param name="message">The message text.</param>
     public static void Debug(string area, string message) =>
         ForArea(area).Debug("{Msg}", message);
 
-    /// <summary>Log a warning under <paramref name="area"/>, optionally appending
-    /// privacy-safe exception metadata.</summary>
-    /// <param name="area">Subsystem tag.</param>
-    /// <param name="message">The message text.</param>
-    /// <param name="ex">Optional exception to record.</param>
+    /// <summary>Log a warning under <paramref name="area"/>, optionally appending privacy-safe exception metadata.</summary> <param name="area">Subsystem tag.</param> <param name="message">The message text.</param> <param name="ex">Optional exception to record.</param>
     public static void Warn(string area, string message, Exception? ex = null) =>
         WithFailure(ForArea(area), ex).Warning("{Msg}", message);
 
-    /// <summary>Log an error under <paramref name="area"/>, optionally appending
-    /// privacy-safe exception metadata.</summary>
-    /// <param name="area">Subsystem tag.</param>
-    /// <param name="message">The message text.</param>
-    /// <param name="ex">Optional exception to record.</param>
+    /// <summary>Log an error under <paramref name="area"/>, optionally appending privacy-safe exception metadata.</summary> <param name="area">Subsystem tag.</param> <param name="message">The message text.</param> <param name="ex">Optional exception to record.</param>
     public static void Error(string area, string message, Exception? ex = null) =>
         WithFailure(ForArea(area), ex).Error("{Msg}", message);
 
-    /// <summary>Log one structured informational line carrying explicit logfmt
-    /// <paramref name="fields"/> (e.g. the per-query <c>rid</c>/<c>hits</c>
-    /// correlation line). Values are logged as scalars only — never
-    /// destructured — so no object graph can leak.</summary>
-    /// <param name="area">Subsystem tag.</param>
-    /// <param name="message">The message text (the trailing <c>msg=</c>).</param>
-    /// <param name="fields">Ordered key/value pairs emitted as inline fields.</param>
+    /// <summary>Log one structured informational line carrying explicit logfmt <paramref name="fields"/> (e.g. the per-query <c>rid</c>/<c>hits</c> correlation line).
+    /// Values are logged as scalars only — never destructured — so no object graph can leak.</summary> <param name="area">Subsystem tag.</param> <param name="message">The message text (the trailing <c>msg=</c>).</param> <param name="fields">Ordered key/value pairs emitted as inline fields.</param>
     public static void Event(string area, string message, params (string Key, object Value)[] fields)
     {
         WithFields(ForArea(area), fields).Information("{Msg}", message);
     }
 
-    /// <summary>Warning counterpart of <see cref="Event"/>. Exception content
-    /// is reduced to non-sensitive scalar metadata.</summary>
-    /// <param name="area">Subsystem tag.</param>
-    /// <param name="message">Constant, non-sensitive message text.</param>
-    /// <param name="ex">Optional exception reduced to scalar metadata.</param>
-    /// <param name="fields">Explicit scalar fields.</param>
+    /// <summary>Warning counterpart of <see cref="Event"/>. Exception content is reduced to non-sensitive scalar metadata.</summary> <param name="area">Subsystem tag.</param> <param name="message">Constant, non-sensitive message text.</param> <param name="ex">Optional exception reduced to scalar metadata.</param> <param name="fields">Explicit scalar fields.</param>
     internal static void WarnEvent(
         string area,
         string message,
@@ -85,12 +56,7 @@ internal static class FileLog
         params (string Key, object Value)[] fields) =>
         WithFailure(WithFields(ForArea(area), fields), ex).Warning("{Msg}", message);
 
-    /// <summary>Error counterpart of <see cref="Event"/>. Exception content
-    /// is reduced to non-sensitive scalar metadata.</summary>
-    /// <param name="area">Subsystem tag.</param>
-    /// <param name="message">Constant, non-sensitive message text.</param>
-    /// <param name="ex">Optional exception reduced to scalar metadata.</param>
-    /// <param name="fields">Explicit scalar fields.</param>
+    /// <summary>Error counterpart of <see cref="Event"/>. Exception content is reduced to non-sensitive scalar metadata.</summary> <param name="area">Subsystem tag.</param> <param name="message">Constant, non-sensitive message text.</param> <param name="ex">Optional exception reduced to scalar metadata.</param> <param name="fields">Explicit scalar fields.</param>
     internal static void ErrorEvent(
         string area,
         string message,
@@ -128,26 +94,18 @@ internal static class FileLog
             : log;
     }
 
-    /// <summary>Last <paramref name="lines"/> of the active log — for the
-    /// diagnostics clipboard dump.</summary>
-    /// <param name="lines">How many trailing lines to return.</param>
-    /// <returns>The joined tail, or a placeholder if missing/unreadable.</returns>
+    /// <summary>Last <paramref name="lines"/> of the active log — for the diagnostics clipboard dump.</summary> <param name="lines">How many trailing lines to return.</param> <returns>The joined tail, or a placeholder if missing/unreadable.</returns>
     public static string Tail(int lines) => TailFrom(LogPath, lines);
 
-    /// <summary>Privacy-safe log tail for copied diagnostics. It keeps only
-    /// timestamp, level, area and explicitly whitelisted scalar counters;
-    /// messages and arbitrary fields are always redacted.</summary>
-    /// <param name="lines">How many trailing records to inspect.</param>
-    /// <returns>A redacted, newline-separated log tail.</returns>
+    /// <summary>Privacy-safe log tail for copied diagnostics.
+    /// It keeps only timestamp, level, area and explicitly whitelisted scalar counters;
+    /// messages and arbitrary fields are always redacted.</summary> <param name="lines">How many trailing records to inspect.</param> <returns>A redacted, newline-separated log tail.</returns>
     public static string SafeTail(int lines) => SafeTailFrom(LogPath, lines);
 
     /// <summary>Last <paramref name="lines"/> lines of <paramref name="logPath"/>,
-    /// or a placeholder if missing/unreadable. Path-parameterised for tests. The
-    /// Serilog File sink keeps the file open shared-read, so this can read it
-    /// while logging continues.</summary>
-    /// <param name="logPath">The log file to tail.</param>
-    /// <param name="lines">How many trailing lines to return.</param>
-    /// <returns>The joined tail (newline-separated), or a placeholder string.</returns>
+    /// or a placeholder if missing/unreadable.
+    /// Path-parameterised for tests.
+    /// The Serilog File sink keeps the file open shared-read, so this can read it while logging continues.</summary> <param name="logPath">The log file to tail.</param> <param name="lines">How many trailing lines to return.</param> <returns>The joined tail (newline-separated), or a placeholder string.</returns>
     internal static string TailFrom(string logPath, int lines)
     {
         try
@@ -226,13 +184,10 @@ internal static class FileLog
         return ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out _);
     }
 
-    /// <summary>Drop a privacy-safe crash marker so the next launch can detect
-    /// an abnormal exit and offer to report it.
-    /// Best-effort; failures are swallowed. Kept as a direct synchronous write
-    /// (not a log line) so it survives a hard crash that never flushes the
-    /// logger. Exception messages and stack traces never cross this boundary.</summary>
-    /// <param name="reason">Finite crash category.</param>
-    /// <param name="ex">Optional exception reduced to scalar metadata.</param>
+    /// <summary>Drop a privacy-safe crash marker so the next launch can detect an abnormal exit and offer to report it.
+    /// Best-effort; failures are swallowed.
+    /// Kept as a direct synchronous write (not a log line) so it survives a hard crash that never flushes the logger.
+    /// Exception messages and stack traces never cross this boundary.</summary> <param name="reason">Finite crash category.</param> <param name="ex">Optional exception reduced to scalar metadata.</param>
     public static void WriteCrashMarker(CrashReason reason, Exception? ex)
     {
         try
@@ -244,16 +199,10 @@ internal static class FileLog
         }
         catch
         {
-            // Best-effort: nowhere left to report to.
         }
     }
 
-    /// <summary>Pure crash-marker serializer, exposed internally for a
-    /// regression test that pins the privacy boundary.</summary>
-    /// <param name="timestamp">Crash time.</param>
-    /// <param name="reason">Finite crash category.</param>
-    /// <param name="ex">Optional exception reduced to scalar metadata.</param>
-    /// <returns>The newline-separated marker body.</returns>
+    /// <summary>Pure crash-marker serializer, exposed internally for a regression test that pins the privacy boundary.</summary> <param name="timestamp">Crash time.</param> <param name="reason">Finite crash category.</param> <param name="ex">Optional exception reduced to scalar metadata.</param> <returns>The newline-separated marker body.</returns>
     internal static string FormatCrashMarker(
         DateTimeOffset timestamp,
         CrashReason reason,
@@ -282,8 +231,7 @@ internal static class FileLog
         return string.Join('\n', lines);
     }
 
-    /// <summary>Returns and clears the crash marker from the previous run.</summary>
-    /// <returns>The marker contents, or <c>null</c> if absent or unreadable.</returns>
+    /// <summary>Returns and clears the crash marker from the previous run.</summary> <returns>The marker contents, or <c>null</c> if absent or unreadable.</returns>
     public static string? TakeCrashMarker() => TakeCrashMarkerFrom(CrashMarkerPath);
 
     internal static string? TakeCrashMarkerFrom(string path)

@@ -28,8 +28,6 @@ public sealed class AppSettingsTests
             var loaded = AppSettings.LoadFrom(path);
             Assert.False(loaded.FocusedSearch);
 
-            // Only user-facing settings are persisted. Focus policy is
-            // code-owned rather than a hidden hand-edited schema.
             var json = File.ReadAllText(path);
             Assert.Contains("\"focused_search\"", json, StringComparison.Ordinal);
             Assert.DoesNotContain("\"engine\"", json, StringComparison.Ordinal);
@@ -78,7 +76,6 @@ public sealed class AppSettingsTests
     [Fact]
     public void MissingKeys_FallBackToDefaults()
     {
-        // Legacy hidden keys are ignored and visible settings retain defaults.
         var dir = Path.Combine(Path.GetTempPath(), "fmf-settings-" + Guid.NewGuid().ToString("N"));
         var path = Path.Combine(dir, "settings.json");
         try
@@ -101,8 +98,6 @@ public sealed class AppSettingsTests
     [Fact]
     public void CloseToTray_DefaultOff_AndRoundTrip()
     {
-        // Default off keeps the unchanged ADR-0027 on-demand behaviour for
-        // users who never opt in (ADR-0030).
         Assert.False(new AppSettings().CloseToTray);
 
         var dir = Path.Combine(Path.GetTempPath(), "fmf-settings-" + Guid.NewGuid().ToString("N"));
@@ -114,7 +109,6 @@ public sealed class AppSettingsTests
             var loaded = AppSettings.LoadFrom(path);
             Assert.True(loaded.CloseToTray);
 
-            // Stable snake_case wire name — what users hand-edit.
             var json = File.ReadAllText(path);
             Assert.Contains("\"close_to_tray\"", json, StringComparison.Ordinal);
         }

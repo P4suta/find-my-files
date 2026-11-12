@@ -1,17 +1,18 @@
-//! `spike`, `index` (query REPL) and `watch` — the interactive volume tools
-//! (all require an elevated terminal: they read the real $MFT/USN journal).
+//! `spike`, `index` (query REPL) and `watch` — the interactive volume tools (all require an elevated terminal: they read the real $MFT/USN journal).
+
+const RESULT_PREVIEW_ROWS: usize = 20;
 
 use std::io::{BufRead, Write};
 use std::time::Instant;
 
-use fmf_core::index::SortKey;
-use fmf_core::query::{CaseMode, QueryOptions};
+use fmf_runtime::index::SortKey;
+use fmf_runtime::query::{CaseMode, QueryOptions};
 
 use super::ctx::Ctx;
 use super::{build_index, run_query};
 
 pub fn spike(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
-    let (_, s) = fmf_core::mft::scan_volume(drive)?;
+    let (_, s) = fmf_runtime::mft::scan_volume(drive)?;
     if ctx.is_json() {
         return super::json::emit(&serde_json::json!({
             "volume": s.volume,
@@ -36,7 +37,7 @@ pub fn spike(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "read $MFT            : {} ms  ({:.1} MiB)",
         s.elapsed_mft_load_ms,
-        s.mft_bytes as f64 / (1024.0 * 1024.0)
+        s.mft_bytes as f64 / (fmf_runtime::units::KIBIBYTE * fmf_runtime::units::KIBIBYTE)
     );
     println!("parse records        : {} ms", s.elapsed_parse_ms);
     println!("deferred links       : {} ms", s.elapsed_deferred_ms);
@@ -51,7 +52,8 @@ pub fn spike(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
     println!("unresolved parents   : {}", s.unresolved_parents);
     println!(
         "peak working set     : {:.1} MiB",
-        s.peak_working_set_bytes as f64 / (1024.0 * 1024.0)
+        s.peak_working_set_bytes as f64
+            / (fmf_runtime::units::KIBIBYTE * fmf_runtime::units::KIBIBYTE)
     );
     Ok(())
 }
@@ -72,8 +74,6 @@ pub fn index(
         desc: false,
         case: CaseMode::Smart,
         include_hidden_system,
-        // The REPL parses queries normally; `regex:` per-term syntax covers
-        // regex without a whole-query mode here.
         ..QueryOptions::default()
     };
     let stdin = std::io::stdin();
@@ -94,7 +94,7 @@ pub fn index(
             Ok((r, m)) => {
                 let elapsed = t.elapsed();
                 let mut path = Vec::new();
-                for &id in r.ids.iter().take(20) {
+                for &id in r.ids.iter().take(RESULT_PREVIEW_ROWS) {
                     path.clear();
                     idx.append_path(id, &mut path)?;
                     out.write_all(&path)?;
@@ -117,10 +117,10 @@ pub fn index(
     Ok(())
 }
 
-/// Scan, then tail the journal. The checkpoint is taken *before* the scan so
-/// changes made during the scan are replayed, not lost.
+/// Scan, then tail the journal.
+/// The checkpoint is taken *before* the scan so changes made during the scan are replayed, not lost.
 pub fn watch(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
-    use fmf_core::usn::{MetadataSource, ReadOutcome, UsnJournal, apply_batch};
+    use fmf_runtime::usn::{MetadataSource, ReadOutcome, UsnJournal, apply_batch};
 
     let mut journal = UsnJournal::open(drive, None)?;
     let mut idx = build_index(drive, ctx)?;
@@ -146,8 +146,6 @@ pub fn watch(drive: &str, ctx: Ctx) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let s = apply_batch(&mut idx, &rs, &fetch);
                 if ctx.is_json() {
-                    // One NDJSON record per applied batch, so the stream can be
-                    // piped to a processor live.
                     super::json::emit_line(&Batch {
                         records: rs.len() as u64,
                         upserted: s.created_or_renamed as u64,

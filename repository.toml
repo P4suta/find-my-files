@@ -1,0 +1,13 @@
+name = "`find-my-files`"
+summary = "Instant filename search for Windows in a native WinUI 3 app"
+install = "explorer.exe https://github.com/P4suta/find-my-files/releases/latest"
+usage_language = "powershell"
+usage = '.\FindMyFiles.exe'
+documentation_index = true
+license = "Apache-2.0"
+
+[preserved_licenses]
+
+[[preserved_licenses.assets]]
+path = "LICENSE"
+sha256 = "8d2cf6cdb6fc6c62a125568f00d1b4620a8853eee7befc86dbcfc3e5d56e5625"

@@ -10,8 +10,6 @@ inputs:
 runs:
   using: composite
   steps:
-    # Pass the results through the environment rather than interpolating into
-    # the script body — the GitHub-recommended way to avoid expression injection.
     - shell: bash
       env:
         RESULTS: ${{ inputs.results }}

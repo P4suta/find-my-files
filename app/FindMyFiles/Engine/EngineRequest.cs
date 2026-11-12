@@ -3,9 +3,8 @@ using System.Text;
 
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// Checked representations of caller-controlled engine requests. Converting
-/// signed managed values to the unsigned FFI/wire contract happens only here,
+/// <summary> Checked representations of caller-controlled engine requests.
+/// Converting signed managed values to the unsigned FFI/wire contract happens only here,
 /// after the shared bounds have been enforced.
 /// </summary>
 internal static class EngineRequest

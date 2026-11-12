@@ -1,19 +1,14 @@
 using System.Text;
 using FindMyFiles.Engine;
 using FindMyFiles.Tests.TestDoubles;
-using Xunit.Abstractions;
+using Xunit;
 using static FindMyFiles.Tests.TestDoubles.Polling;
 
 namespace FindMyFiles.Tests.Contract;
 
-/// <summary>
-/// Contract run #2: <see cref="PipeEngineClient"/> over an in-test
-/// <see cref="FakePipeServer"/>, always on. This exercises the full client
-/// wire path (frames, correlation, epochs) hermetically; the QuerySyntax
-/// verdicts are scripted onto the server from the same shared golden fixture
-/// (FakePipeServer itself deliberately has no query semantics — see its
-/// docstring). Staleness is forced the way production produces it: a dropped
-/// connection turning the client epoch.
+/// <summary> Contract run #2: <see cref="PipeEngineClient"/> over an in-test <see cref="FakePipeServer"/>, always on.
+/// This exercises the full client wire path (frames, correlation, epochs) hermetically; the QuerySyntax verdicts are scripted onto the server from the same shared golden fixture (FakePipeServer itself deliberately has no query semantics — see its docstring).
+/// Staleness is forced the way production produces it: a dropped connection turning the client epoch.
 /// </summary>
 public sealed class PipeOverFakeServerContractTests(ITestOutputHelper output)
     : EngineClientContractTests(output)
@@ -39,7 +34,7 @@ public sealed class PipeOverFakeServerContractTests(ITestOutputHelper output)
                     }
                 }
 
-                return null; // default handlers
+                return null;
             },
         };
         var client = new PipeEngineClient(_server.PipeName);
@@ -64,11 +59,17 @@ public sealed class PipeOverFakeServerContractTests(ITestOutputHelper output)
         var pipe = (PipeEngineClient)client;
         var epochBefore = pipe.CurrentEpoch;
         _server!.DisconnectAll();
-        await WaitUntilAsync(
-            () => pipe.CurrentEpoch != epochBefore, "connection epoch turn");
-        await WaitUntilAsync(
-            () => pipe.Connection == EngineConnectionState.Connected,
-            "reconnect to FakePipeServer");
+        await WaitForPublishedReplacementAsync(pipe, epochBefore);
         return true;
     }
+
+    internal static Task WaitForPublishedReplacementAsync(PipeEngineClient pipe, int epochBefore) =>
+        WaitUntilAsync(
+            () => IsPublishedReplacement(pipe, epochBefore),
+            "published replacement connection");
+
+    internal static bool IsPublishedReplacement(PipeEngineClient pipe, int epochBefore) =>
+        pipe.CurrentPipeConnectionForTests is { Epoch: var epoch }
+        && epoch != epochBefore
+        && pipe.Connection == EngineConnectionState.Connected;
 }

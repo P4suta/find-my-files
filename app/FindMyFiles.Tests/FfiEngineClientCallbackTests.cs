@@ -50,7 +50,7 @@ public sealed class FfiEngineClientCallbackTests
             checked((int)EngineContract.MaxQueryBytes + 1));
 
         await Assert.ThrowsAsync<ArgumentException>(
-            () => client.SearchAsync(oversized, SearchOptions.Default));
+            () => client.SearchAsync(oversized, SearchOptions.Default, TestContext.Current.CancellationToken));
     }
 
     [Fact]

@@ -5,9 +5,8 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Behavioural tests for <see cref="ResultsPresenter"/> — the result
-/// lifecycle (seeded publish, in-place refresh, empty, stale disposal) that the
-/// flicker-free virtualization depends on. Driven by <see cref="StubSearchResult"/>
+/// <summary>Behavioural tests for <see cref="ResultsPresenter"/> — the result lifecycle (seeded publish, in-place refresh, empty, stale disposal) that the flicker-free virtualization depends on.
+/// Driven by <see cref="StubSearchResult"/>
 /// + <see cref="ManualDispatcher"/>; no real engine or list view.</summary>
 public sealed class ResultsPresenterTests
 {
@@ -24,7 +23,7 @@ public sealed class ResultsPresenterTests
         var result = new StubSearchResult(Rows.Many(5));
 
         await _presenter.PublishAsync(
-            result, null, RequeryOrigin.Initial, CompiledHighlighter.Empty, () => true);
+            result, null, RequeryOrigin.Initial, CompiledHighlighter.Empty, () => true, TestContext.Current.CancellationToken);
 
         Assert.Equal(5, _presenter.ResultsSource.Count);
         Assert.Equal("5 items", _presenter.CountText);
@@ -41,7 +40,7 @@ public sealed class ResultsPresenterTests
         var result = new StubSearchResult(Rows.Many(5));
 
         await _presenter.PublishAsync(
-            result, null, RequeryOrigin.Typing, CompiledHighlighter.Empty, () => false);
+            result, null, RequeryOrigin.Typing, CompiledHighlighter.Empty, () => false, TestContext.Current.CancellationToken);
 
         Assert.True(result.Disposed);
         Assert.Empty(pubs);
@@ -58,7 +57,7 @@ public sealed class ResultsPresenterTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             _presenter.PublishAsync(
-                result, null, RequeryOrigin.Initial, CompiledHighlighter.Empty, () => true));
+                result, null, RequeryOrigin.Initial, CompiledHighlighter.Empty, () => true, TestContext.Current.CancellationToken));
 
         Assert.True(result.Disposed);
     }
@@ -71,7 +70,8 @@ public sealed class ResultsPresenterTests
             null,
             RequeryOrigin.Initial,
             CompiledHighlighter.Empty,
-            () => true);
+            () => true,
+            TestContext.Current.CancellationToken);
         Assert.Equal(3, _presenter.ResultsSource.Count);
 
         _presenter.PresentEmpty();
@@ -88,7 +88,8 @@ public sealed class ResultsPresenterTests
             null,
             RequeryOrigin.Initial,
             CompiledHighlighter.Empty,
-            () => true);
+            () => true,
+            TestContext.Current.CancellationToken);
         var pubs = new List<ResultsPublication>();
         _presenter.ResultsPublished += pubs.Add;
 
@@ -97,10 +98,11 @@ public sealed class ResultsPresenterTests
             null,
             RequeryOrigin.IndexChanged,
             CompiledHighlighter.Empty,
-            () => true);
+            () => true,
+            TestContext.Current.CancellationToken);
 
         Assert.Equal(8, _presenter.ResultsSource.Count);
-        Assert.Single(pubs); // the fallback went through the announcing publish path
+        Assert.Single(pubs);
     }
 
     [Fact]
@@ -111,7 +113,8 @@ public sealed class ResultsPresenterTests
             null,
             RequeryOrigin.Initial,
             CompiledHighlighter.Empty,
-            () => true);
+            () => true,
+            TestContext.Current.CancellationToken);
         var pubs = new List<ResultsPublication>();
         _presenter.ResultsPublished += pubs.Add;
 
@@ -120,9 +123,10 @@ public sealed class ResultsPresenterTests
             null,
             RequeryOrigin.IndexChanged,
             CompiledHighlighter.Empty,
-            () => true);
+            () => true,
+            TestContext.Current.CancellationToken);
 
-        Assert.Empty(pubs); // RefreshInPlace path raises no Reset/announce
+        Assert.Empty(pubs);
         Assert.Equal(5, _presenter.ResultsSource.Count);
     }
 

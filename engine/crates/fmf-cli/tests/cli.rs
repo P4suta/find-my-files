@@ -1,12 +1,15 @@
-//! Behavioural tests for the `fmf` binary's non-elevated surface: the parts
-//! that need neither an administrator terminal nor a real volume. Anything
-//! that touches the $MFT/USN lives behind the `FMF_ADMIN_TESTS` gate elsewhere.
+//! Behavioural tests for the `fmf` binary's non-elevated surface: the parts that need neither an administrator terminal nor a real volume.
+//! Anything that touches the $MFT/USN lives behind the `FMF_ADMIN_TESTS` gate elsewhere.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn fmf() -> Command {
     Command::cargo_bin("fmf").expect("fmf binary builds")
+}
+
+fn benchmark_fixture() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/passing-benchmark.json")
 }
 
 #[test]
@@ -30,13 +33,122 @@ fn help_lists_the_subcommands() {
 }
 
 #[test]
+fn bench_compare_checks_saved_reports_without_reading_a_volume() {
+    let baseline = benchmark_fixture();
+    let assert = fmf()
+        .args(["--format", "json", "bench-compare", "--actual"])
+        .arg(&baseline)
+        .arg("--baseline")
+        .arg(&baseline)
+        .assert()
+        .success();
+    let decision: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("offline comparison emits a gate decision");
+    assert_eq!(decision["kind"], "real-verdict");
+    assert_eq!(decision["passed"], true);
+    assert_eq!(decision["cases"].as_array().expect("gate cases").len(), 24);
+}
+
+#[test]
+fn bench_compare_rejects_an_invalid_report_without_reading_a_volume() {
+    let baseline = benchmark_fixture();
+    let invalid = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    fmf()
+        .args(["bench-compare", "--actual"])
+        .arg(invalid)
+        .arg("--baseline")
+        .arg(baseline)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("invalid actual benchmark report"));
+}
+
+#[test]
+fn bench_compare_writes_a_failed_gate_before_returning_failure() {
+    let baseline = benchmark_fixture();
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&baseline).expect("read the control report"))
+            .expect("parse the control report");
+    report["queries"][1]["p50_us"] = 100_000.into();
+    report["queries"][1]["p99_us"] = 100_000.into();
+    report["queries"][1]["max_us"] = 100_000.into();
+    let directory = tempfile::tempdir().expect("create the report fixture");
+    let actual = directory.path().join("actual.json");
+    let evidence = directory.path().join("evidence.json");
+    std::fs::write(
+        &actual,
+        serde_json::to_vec(&report).expect("encode the failed report"),
+    )
+    .expect("write the failed report");
+    fmf()
+        .args(["bench-compare", "--actual"])
+        .arg(actual)
+        .arg("--baseline")
+        .arg(baseline)
+        .arg("--evidence")
+        .arg(&evidence)
+        .assert()
+        .failure()
+        .code(1);
+    let decision: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(evidence).expect("failed comparisons keep evidence"))
+            .expect("parse the failed comparison");
+    assert_eq!(decision["kind"], "real-verdict");
+    assert_eq!(decision["finite"], true);
+    assert_eq!(decision["passed"], false);
+    assert!(
+        decision["cases"]
+            .as_array()
+            .expect("gate cases")
+            .iter()
+            .any(|case| case["id"] == "query/01/p99" && case["verdict"] == "fail")
+    );
+}
+
+#[test]
+fn bench_compare_rejects_identical_reports_above_the_absolute_budget() {
+    let mut report: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(benchmark_fixture()).expect("read the passing fixture"),
+    )
+    .expect("parse the passing fixture");
+    report["queries"][1]["p99_us"] = 100_000.into();
+    report["queries"][1]["max_us"] = 100_000.into();
+    let directory = tempfile::tempdir().expect("create the report fixture");
+    let actual = directory.path().join("over-budget.json");
+    std::fs::write(
+        &actual,
+        serde_json::to_vec(&report).expect("encode the over-budget report"),
+    )
+    .expect("write the over-budget report");
+    let assert = fmf()
+        .args(["--format", "json", "bench-compare", "--actual"])
+        .arg(&actual)
+        .arg("--baseline")
+        .arg(&actual)
+        .assert()
+        .failure()
+        .code(1);
+    let decision: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("offline comparison emits a failed decision");
+    assert_eq!(decision["passed"], false);
+    let case = decision["cases"]
+        .as_array()
+        .expect("gate cases")
+        .iter()
+        .find(|case| case["id"] == "query/01/p99")
+        .expect("absolute query budget");
+    assert_eq!(case["delta_ratio"], 0.0);
+    assert_eq!(case["verdict"], "fail");
+}
+
+#[test]
 fn completions_emit_a_script_for_each_shell() {
     for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
         fmf()
             .args(["completions", shell])
             .assert()
             .success()
-            // Every shell's script references the binary name somewhere.
             .stdout(predicate::str::contains("fmf"));
     }
 }
@@ -52,7 +164,6 @@ fn completions_reject_an_unknown_shell() {
 
 #[test]
 fn no_subcommand_is_a_usage_error() {
-    // clap sets exit code 2 for usage errors, before our dispatch runs.
     fmf().assert().failure().code(2);
 }
 
@@ -72,8 +183,6 @@ fn color_flag_rejects_an_invalid_value() {
 
 #[test]
 fn diag_runs_unelevated_and_reports_the_version() {
-    // `diag` reads versions/log paths/the diag ring — no volume, no admin. It
-    // reports the channel-aware build identity (same as `--version`).
     let assert = fmf()
         .env("ProgramData", r"C:\TestProgramData")
         .arg("diag")
@@ -86,13 +195,8 @@ fn diag_runs_unelevated_and_reports_the_version() {
     ));
     assert!(!stdout.contains(r"\logs\engine.log"));
 
-    // Each section says whose diagnostics it is. The ring belongs to this
-    // `fmf` process and is therefore empty on every normal run; the service's
-    // are the ones a developer came for, and reading one as the other is the
-    // confusion this labelling exists to prevent.
     assert!(stdout.contains("service process —"), "{stdout}");
     assert!(stdout.contains("this fmf process —"), "{stdout}");
-    // And an empty section explains itself rather than just being empty.
     assert!(
         stdout.contains(r"! cannot read C:\TestProgramData\find-my-files\logs"),
         "{stdout}"
@@ -109,8 +213,6 @@ fn diag_json_is_a_versioned_object() {
     let v: serde_json::Value =
         serde_json::from_slice(&assert.get_output().stdout).expect("diag --format json is JSON");
     assert_eq!(v["format_version"].as_u64(), Some(2));
-    // The channel-aware build identity, not the bare CARGO_PKG_VERSION — must
-    // agree with `fmf --version` (both read fmf_buildstamp::VERSION).
     assert_eq!(v["version"].as_str(), Some(fmf_buildstamp::VERSION));
     assert_eq!(
         v["engine_log_dir"].as_str(),
@@ -119,8 +221,6 @@ fn diag_json_is_a_versioned_object() {
     assert!(v.get("engine_log").is_none());
     assert!(v["recent_errors"].is_array());
 
-    // Additive (format_version stays 2, ADR-0026): the service's own log,
-    // which is where the diagnostics worth reading actually are.
     assert_eq!(
         v["service_log"]["dir"].as_str(),
         Some(r"C:\TestProgramData\find-my-files\logs")
@@ -134,9 +234,6 @@ fn diag_json_is_a_versioned_object() {
 
 #[test]
 fn json_format_errors_are_structured() {
-    // `index Q:` fails fast (no such volume / not elevated) — either way the
-    // failure must surface as a JSON envelope on stderr, as the last line
-    // (any diagnostics logging precedes it).
     let assert = fmf()
         .args(["--format", "json", "index", "Q:"])
         .assert()

@@ -4,26 +4,14 @@ using FindMyFiles.Services;
 
 namespace FindMyFiles.Tests.TestDoubles;
 
-/// <summary>
-/// In-test named pipe server speaking the fmf wire protocol on a unique pipe
-/// name. Default handlers answer every opcode from scriptable data
-/// (<see cref="Statuses"/>, <see cref="Rows"/>); <see cref="Handler"/>
-/// overrides individual requests (return null to fall through), and
-/// <see cref="ChunkedWrites"/> writes responses one byte at a time to prove
-/// the client reassembles frames across arbitrary boundaries. Requests are
-/// handled concurrently (out-of-order completion is wire-legal), so a held
-/// response never blocks the next incoming frame.
+/// <summary> In-test named pipe server speaking the fmf wire protocol on a unique pipe name.
+/// Default handlers answer every opcode from scriptable data (<see cref="Statuses"/>, <see cref="Rows"/>); <see cref="Handler"/> overrides individual requests (return null to fall through), and <see cref="ChunkedWrites"/> writes responses one byte at a time to prove the client reassembles frames across arbitrary boundaries.
+/// Requests are handled concurrently (out-of-order completion is wire-legal), so a held response never blocks the next incoming frame.
 ///
-/// Mimicry scope and guarantees: the wire is faithful — every frame this
-/// server emits is well-formed (PipeProtocol codecs both ways), the
-/// handshake sequence, response correlation and event push match
-/// fmf-service. The semantics behind the wire are deliberately shallow:
-/// Query ignores the query text and always answers Ok from
-/// <see cref="Rows"/> (no syntax verdicts), results never go stale on their
-/// own, nothing is indexed. Tests that need behavioral semantics (e.g. the
-/// contract suite's QuerySyntax case) script them through
-/// <see cref="Handler"/>; tests that need the real semantics use the real
-/// service (FMF_PIPE_TESTS).
+/// Mimicry scope and guarantees: the wire is faithful — every frame this server emits is well-formed (PipeProtocol codecs both ways), the handshake sequence, response correlation and event push match fmf-service.
+/// The semantics behind the wire are deliberately shallow:
+/// Query ignores the query text and always answers Ok from <see cref="Rows"/> (no syntax verdicts), results never go stale on their own, nothing is indexed.
+/// Tests that need behavioral semantics (e.g. the contract suite's QuerySyntax case) script them through <see cref="Handler"/>; tests that need the real semantics use the real service (FMF_PIPE_TESTS).
 /// </summary>
 internal sealed class FakePipeServer : IDisposable
 {
@@ -41,9 +29,7 @@ internal sealed class FakePipeServer : IDisposable
     private int _connections;
     private int _closedConnections;
 
-    /// <summary>When non-null, the accept loop waits on this before creating the
-    /// next pipe instance — so the pipe simply does not exist yet and a client's
-    /// connect attempts fail, modelling a service still warming up.</summary>
+    /// <summary>When non-null, the accept loop waits on this before creating the next pipe instance — so the pipe simply does not exist yet and a client's connect attempts fail, modelling a service still warming up.</summary>
     private TaskCompletionSource? _acceptGate;
 
     public string PipeName { get; } = "fmf-test-" + Guid.NewGuid().ToString("N");
@@ -57,8 +43,7 @@ internal sealed class FakePipeServer : IDisposable
     /// <summary>Write every response one byte at a time.</summary>
     public bool ChunkedWrites { get; set; }
 
-    /// <summary>Optional malformed-response injection: maps a request opcode
-    /// to the opcode echoed in its response header.</summary>
+    /// <summary>Optional malformed-response injection: maps a request opcode to the opcode echoed in its response header.</summary>
     public Func<ushort, ushort>? ResponseOpcode { get; set; }
 
     /// <summary>Answer for ListVolumes and IndexStatus.</summary>
@@ -67,20 +52,15 @@ internal sealed class FakePipeServer : IDisposable
     /// <summary>Result set every Query answers with; ResultPage slices it.</summary>
     public List<RowData> Rows { get; set; } = [];
 
-    /// <summary>Per-request override: a non-null task short-circuits the
-    /// default handler (and may be held open by the test).</summary>
+    /// <summary>Per-request override: a non-null task short-circuits the default handler (and may be held open by the test).</summary>
     public Func<ushort, byte[], Task<(int Status, byte[] Payload)>?>? Handler { get; set; }
 
     public int ConnectionCount => Volatile.Read(ref _connections);
 
     public int ClosedConnectionCount => Volatile.Read(ref _closedConnections);
 
-    /// <summary>Creates the server and starts accepting. Pass
-    /// <paramref name="startHeld"/> to begin in the warm-up state (no pipe created
-    /// until <see cref="ReleaseAccept"/>) so a client connects only after the gate
-    /// is released — the deterministic way to exercise the supervisor's
-    /// connect-retry/backoff and the Connecting→Connected transition.</summary>
-    /// <param name="startHeld">Begin with the accept gate closed (warm-up).</param>
+    /// <summary>Creates the server and starts accepting.
+    /// Pass <paramref name="startHeld"/> to begin in the warm-up state (no pipe created until <see cref="ReleaseAccept"/>) so a client connects only after the gate is released — the deterministic way to exercise the supervisor's connect-retry/backoff and the Connecting→Connected transition.</summary> <param name="startHeld">Begin with the accept gate closed (warm-up).</param>
     public FakePipeServer(bool startHeld = false)
     {
         if (startHeld)
@@ -91,15 +71,12 @@ internal sealed class FakePipeServer : IDisposable
         Task.Run(AcceptLoopAsync).Forget("test-fake-pipe-accept");
     }
 
-    /// <summary>Close the accept gate: no new pipe instance is created until
-    /// <see cref="ReleaseAccept"/>, modelling a service that hasn't started serving
-    /// yet. Take effect only before the next accept — set it via the constructor to
-    /// guarantee the very first connection is held.</summary>
+    /// <summary>Close the accept gate: no new pipe instance is created until <see cref="ReleaseAccept"/>, modelling a service that hasn't started serving yet.
+    /// Take effect only before the next accept — set it via the constructor to guarantee the very first connection is held.</summary>
     public void HoldAccept() =>
         _acceptGate ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    /// <summary>Release a <see cref="HoldAccept"/> / start-held gate so the server
-    /// resumes accepting connections.</summary>
+    /// <summary>Release a <see cref="HoldAccept"/> / start-held gate so the server resumes accepting connections.</summary>
     public void ReleaseAccept() => Interlocked.Exchange(ref _acceptGate, null)?.SetResult();
 
     public IReadOnlyList<(int Connection, ushort Opcode, byte[] Payload)> Received
@@ -178,8 +155,7 @@ internal sealed class FakePipeServer : IDisposable
             PipeProtocol.EncodeEvent(kind, entries, volume));
     }
 
-    /// <summary>Hard-drops every live connection (the accept loop keeps
-    /// running, so clients can reconnect).</summary>
+    /// <summary>Hard-drops every live connection (the accept loop keeps running, so clients can reconnect).</summary>
     public void DisconnectAll()
     {
         lock (_gate)
@@ -209,8 +185,6 @@ internal sealed class FakePipeServer : IDisposable
     {
         while (!_cts.IsCancellationRequested)
         {
-            // Warm-up gate: while held, no pipe instance exists, so the client's
-            // connect attempts fail and its supervisor retries with backoff.
             var gate = Volatile.Read(ref _acceptGate);
             if (gate is not null)
             {
@@ -272,19 +246,11 @@ internal sealed class FakePipeServer : IDisposable
                     _received.Add((index, h.Opcode, payload));
                 }
 
-                // QueryCancel is a one-way control frame: the real service
-                // consumes it in the reader and never emits a response. A
-                // fake response would reuse the query request id with opcode
-                // QueryCancel, look like an opcode mismatch to the client,
-                // and tear down the connection before a late Query response
-                // can release its orphaned result.
                 if (h.Opcode == PipeProtocol.Op.QueryCancel)
                 {
                     continue;
                 }
 
-                // Concurrent dispatch: a held response (Handler gate) must
-                // not stop the server from reading the next request.
                 Task.Run(async () =>
                 {
                     try
@@ -300,14 +266,12 @@ internal sealed class FakePipeServer : IDisposable
                     }
                     catch
                     {
-                        // Connection torn down mid-response — fine in tests.
                     }
                 }).Forget("test-fake-pipe-response");
             }
         }
         catch
         {
-            // Client went away or the test dropped the connection.
         }
         finally
         {

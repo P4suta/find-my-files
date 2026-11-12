@@ -13,11 +13,12 @@ public sealed class FakeEngineClientTests
         using var engine = new FakeEngineClient();
         var outcome = await engine.SearchAsync(
             @"file_0 !path:""\windows\"" ext:txt;pdf",
-            SearchOptions.Default);
+            SearchOptions.Default,
+            TestContext.Current.CancellationToken);
         using var result = outcome.Result;
 
         Assert.True(result.Count > 0);
-        var page = await result.GetRangeAsync(0, EngineContract.MaxPageRows);
+        var page = await result.GetRangeAsync(0, EngineContract.MaxPageRows, TestContext.Current.CancellationToken);
         Assert.NotEmpty(page);
         Assert.All(
             page,
@@ -37,34 +38,24 @@ public sealed class FakeEngineClientTests
     [Fact]
     public async Task FaultInjection_reproduces_every_token_the_service_implements()
     {
-        // The fake is the engine a developer can reach without installing a
-        // service, so a fault token it does not implement is a fault that can
-        // only be reproduced by the people who least need to. `!!drop` was
-        // that token: a response that never arrives is the shape of failure
-        // that looks like a hang, and it was reachable only through the pipe.
-        // (xtask's fault_injection_tokens_match_on_both_engines holds the two
-        // token sets equal; this pins what the fake's half actually does.)
         using var engine = new FakeEngineClient();
 
         await Assert.ThrowsAsync<EngineException>(
-            () => engine.SearchAsync("!!panic", SearchOptions.Default));
+            () => engine.SearchAsync("!!panic", SearchOptions.Default, TestContext.Current.CancellationToken));
 
-        // The service severs the pipe; the fake has none, so it raises what
-        // the pipe client raises once its connection is gone.
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => engine.SearchAsync("!!drop", SearchOptions.Default));
+            () => engine.SearchAsync("!!drop", SearchOptions.Default, TestContext.Current.CancellationToken));
 
-        // `!!warn` and `!!lag` degrade rather than fail: the query still runs.
-        var warned = await engine.SearchAsync("!!warn", SearchOptions.Default);
+        var warned = await engine.SearchAsync("!!warn", SearchOptions.Default, TestContext.Current.CancellationToken);
         warned.Result.Dispose();
-        var stats = await engine.GetStatsAsync();
+        var stats = await engine.GetStatsAsync(TestContext.Current.CancellationToken);
         Assert.NotNull(stats);
         Assert.Contains(
             stats.RecentErrors,
             e => string.Equals(e.Severity, "warn", StringComparison.Ordinal)
                 && e.Message.StartsWith("fault injection:", StringComparison.Ordinal));
 
-        var lagged = await engine.SearchAsync("!!lag file_0", SearchOptions.Default);
+        var lagged = await engine.SearchAsync("!!lag file_0", SearchOptions.Default, TestContext.Current.CancellationToken);
         using var laggedResult = lagged.Result;
         Assert.True(laggedResult.Count > 0);
     }
@@ -76,11 +67,11 @@ public sealed class FakeEngineClientTests
         using var engine = new FakeEngineClient();
         var hidden = SearchOptions.Default with { IncludeHiddenSystem = true };
 
-        var excludedOutcome = await engine.SearchAsync("hidden_sys ext:dat", SearchOptions.Default);
+        var excludedOutcome = await engine.SearchAsync("hidden_sys ext:dat", SearchOptions.Default, TestContext.Current.CancellationToken);
         using var excluded = excludedOutcome.Result;
         Assert.Equal(0, excluded.Count);
 
-        var includedOutcome = await engine.SearchAsync("hidden_sys ext:dat", hidden);
+        var includedOutcome = await engine.SearchAsync("hidden_sys ext:dat", hidden, TestContext.Current.CancellationToken);
         using var included = includedOutcome.Result;
         Assert.True(included.Count > 0);
     }

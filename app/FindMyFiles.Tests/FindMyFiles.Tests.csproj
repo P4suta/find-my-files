@@ -2,6 +2,10 @@
   <PropertyGroup>
     <!-- Mirror the app's TFM/platform so the ProjectReference resolves 1:1. -->
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+    <!-- The MSBuild test target uses VSTest; the executable exposes native MTP for Stryker. -->
+    <IsTestingPlatformApplication>false</IsTestingPlatformApplication>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -65,22 +69,23 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="[18.7.0]" />
-    <PackageReference Include="xunit" Version="[2.9.3]" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="[3.1.5]" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="[10.11.0]" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="[18.11.0]" />
+    <PackageReference Include="xunit.v3" Version="[4.0.2]" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="[4.0.1]" />
     <!-- Coverage gate: `dotnet test -p:CollectCoverage=true` exits non-zero below the
          line+branch bar set in the PropertyGroup above (CI app job runs it through
          `just test-app-cov`). -->
-    <PackageReference Include="coverlet.msbuild" Version="[10.0.1]">
+    <PackageReference Include="coverlet.msbuild" Version="[10.1.0]">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <!-- Match the app's exactly pinned analyzer toolchain. -->
-    <PackageReference Include="Roslynator.Analyzers" Version="[4.15.0]">
+    <PackageReference Include="Roslynator.Analyzers" Version="[5.0.1]">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Meziantou.Analyzer" Version="[3.0.117]">
+    <PackageReference Include="Meziantou.Analyzer" Version="[3.0.320]">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
@@ -91,6 +96,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
     <!-- Shared golden corpus (contract/golden at the repo root) — the exact
          files fmf-proto/fmf-core pin. Both languages reading one corpus is
          the contract gate (ADR-0018). FMF_GOLDEN_DIR overrides at runtime. -->
@@ -114,6 +120,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="UiAutomation\ui-tests.ps1" CopyToOutputDirectory="Always" />
+    <None Update="UiAutomation\settings-lifecycle-tests.ps1" CopyToOutputDirectory="Always" />
     <!-- SkipRustBuild must reach the app project: a property set in this
          csproj's PropertyGroup does NOT cross a ProjectReference, but
          AdditionalProperties metadata does. So plain `dotnet test` never

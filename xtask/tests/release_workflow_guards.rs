@@ -386,7 +386,6 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
     let release = fs::read_to_string(repo.join(".github/workflows/release.yml"))
         .expect("release workflow must be readable");
 
-    // The entry point, and the absence of everything the chain contributed.
     assert!(release.contains("workflow_dispatch:"));
     assert!(
         !release.contains("workflow_call:"),
@@ -405,7 +404,6 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
     assert!(release.contains("commit_sha:"));
     assert!(release.contains("release_id:"));
 
-    // Admission control runs first and gates both long jobs.
     let preflight = release
         .find("\n  preflight:")
         .expect("release.yml must open with the admission-control job");
@@ -418,8 +416,8 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
     );
     assert_eq!(
         release.matches("needs: preflight").count(),
-        2,
-        "both build and the 16-shard mutation gate must wait on admission control"
+        3,
+        "build, mutation, and full assurance must wait on admission control"
     );
     assert!(release.contains("${{ github.triggering_actor }}"));
     assert!(release.contains("GITHUB_EVENT_NAME"));
@@ -432,7 +430,6 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
         "preflight plus every later job must independently refuse a non-main controller ref"
     );
 
-    // The dedupe contract: one string, pinned from both sides.
     assert!(release.contains(
         "run-name: release publish ${{ inputs.tag_name }} ${{ inputs.commit_sha }} release ${{ inputs.release_id }}"
     ));
@@ -465,9 +462,14 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
         !orchestrator.contains("permission-workflows:"),
         "release-please does not edit workflow files and must retain least privilege"
     );
+    let parsed = yaml_rust2::YamlLoader::load_from_str(&orchestrator).expect("valid orchestrator");
+    assert_ne!(parsed[0]["permissions"]["actions"].as_str(), Some("write"));
     assert_eq!(
-        orchestrator
-            .matches("actions: write # dispatch the trusted-main release workflow")
+        parsed[0]["jobs"]
+            .as_hash()
+            .expect("orchestrator jobs")
+            .values()
+            .filter(|job| job["permissions"]["actions"].as_str() == Some("write"))
             .count(),
         1,
         "the isolated trusted-main dispatcher is the sole Actions write boundary"
@@ -523,8 +525,6 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
     assert!(settings_mint < attestations);
     assert!(publication_mint > attestations);
 
-    // The alerts this change removes were structural: CodeQL's cache-poisoning query binds `workflow_run` through `runsOnDefaultBranch`, and zizmor's dangerous-triggers audit had to be suppressed wherever we used one.
-    // Both constructs are gone from the release path, so keep them gone repo-wide rather than re-earning the alerts one workflow at a time.
     let mut dangerous_trigger_suppressions = Vec::new();
     for entry in
         fs::read_dir(repo.join(".github/workflows")).expect("workflow directory must be readable")
@@ -549,8 +549,6 @@ fn release_publication_is_directly_dispatched_and_exactly_bound() {
             );
         }
     }
-    // The one remaining suppression is the `pull_request_target` auto-merge guard, which never checks out PR code and is unrelated to the release path.
-    // Nothing on the release path may need one.
     assert_eq!(
         dangerous_trigger_suppressions,
         vec!["no-automerge-on-release-pr.yml".to_owned()],
@@ -710,7 +708,7 @@ fn release_artifacts_are_exactly_sealed_across_every_handoff() {
     }
 
     let sign_stage = workflow_job(&release, "sign-stage", "sign");
-    assert!(sign_stage.contains("needs: [build, sbom, mutation]"));
+    assert!(sign_stage.contains("needs: [build, sbom, mutation, assurance]"));
     assert!(sign_stage.contains("path: build/dist"));
     assert!(!sign_stage.contains("actions/checkout@"));
     assert!(!sign_stage.contains("./.github/actions/"));
@@ -951,7 +949,7 @@ fn sbom_action_is_a_thin_xtask_adapter_for_three_raw_rust_graphs() {
     }
     assert!(
         justfile.contains("sbom version cargo_raw_dir:")
-            && justfile.contains("--cargo-raw-dir \"{{cargo_raw_dir}}\""),
+            && justfile.contains("--cargo-raw-dir \"{{ cargo_raw_dir }}\""),
         "justfile must expose the thin xtask SBOM entry point"
     );
     for invariant in [

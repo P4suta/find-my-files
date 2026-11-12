@@ -5,13 +5,9 @@ using RegexScopeKind = FindMyFiles.Engine.RegexScope;
 
 namespace FindMyFiles.ViewModels;
 
-/// <summary>
-/// Composition root of the main page: owns the UI state (search text, sort,
-/// filter, status line) and the user-facing wording for failures, and wires
-/// the focused components together — <see cref="SearchOrchestrator"/> (when
-/// to search), <see cref="ResultsPresenter"/> (how results land),
-/// <see cref="NotificationCenter"/> (InfoBar stack) and
-/// <see cref="PerfPanelViewModel"/> (F12).
+/// <summary> Composition root of the main page: owns the UI state (search text, sort,
+/// filter, status line) and the user-facing wording for failures, and wires the focused components together — <see cref="SearchOrchestrator"/> (when to search), <see cref="ResultsPresenter"/> (how results land),
+/// <see cref="NotificationCenter"/> (InfoBar stack) and <see cref="PerfPanelViewModel"/> (F12).
 /// </summary>
 internal sealed partial class MainViewModel : ObservableObject, IDisposable
 {
@@ -23,28 +19,25 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     private readonly EngineEventMarshaler _engineEvents;
     private int _disposed;
 
-    /// <summary>The search box text (two-way). Changes flow to the
-    /// orchestrator's debounce via <c>OnSearchTextChanged</c>.</summary>
+    /// <summary>The search box text (two-way).
+    /// Changes flow to the orchestrator's debounce via <c>OnSearchTextChanged</c>.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(NoResultsText))]
     public partial string SearchText { get; set; } = string.Empty;
 
-    /// <summary>The status-bar line — index progress, result count, or an
-    /// error summary, all already localized (<see cref="StatusFormatter"/>).</summary>
+    /// <summary>The status-bar line — index progress, result count, or an error summary, all already localized (<see cref="StatusFormatter"/>).</summary>
     [ObservableProperty]
     public partial string StatusText { get; set; } = Loc.Get("Status_Preparing");
 
-    /// <summary>True when the current non-empty query completed with zero results
-    /// — drives the "no results" empty state. Set when results land, cleared on
-    /// each keystroke and on search failure so it never flashes mid-load.</summary>
+    /// <summary>True when the current non-empty query completed with zero results — drives the "no results" empty state.
+    /// Set when results land, cleared on each keystroke and on search failure so it never flashes mid-load.</summary>
     [ObservableProperty]
     public partial bool HasNoResults { get; set; }
 
     /// <summary>The "no results" body line, naming the searched query.</summary>
     public string NoResultsText => Loc.Get("NoResults_Body", SearchText);
 
-    /// <summary>Active sort column (name/size/mtime); changing it via
-    /// <see cref="SetSort"/> requeries with <see cref="RequeryOrigin.Sort"/>.</summary>
+    /// <summary>Active sort column (name/size/mtime); changing it via <see cref="SetSort"/> requeries with <see cref="RequeryOrigin.Sort"/>.</summary>
     [ObservableProperty]
     public partial FmfSort Sort { get; set; } = FmfSort.Name;
 
@@ -52,87 +45,74 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     public partial bool SortDescending { get; set; }
 
-    /// <summary>Include hidden/system files in results; flipping it is a filter
-    /// change (requery with <see cref="RequeryOrigin.Filter"/>, top reset).</summary>
+    /// <summary>Include hidden/system files in results; flipping it is a filter change (requery with <see cref="RequeryOrigin.Filter"/>, top reset).</summary>
     [ObservableProperty]
     public partial bool IncludeHiddenSystem { get; set; }
 
     /// <summary>Focused search (ADR-0019): the toolbar toggle.
-    /// Initialized from settings in the ctor; flips push down to the
-    /// orchestrator, persist, and requery as a filter change (top reset).</summary>
+    /// Initialized from settings in the ctor; flips push down to the orchestrator, persist, and requery as a filter change (top reset).</summary>
     [ObservableProperty]
     public partial bool FocusedSearch { get; set; }
 
     /// <summary>Regex mode (ADR-0023): treat the whole query as one regex.
-    /// Restored from settings in the ctor; flips persist and requery as a
-    /// filter change (the same text now means something different).</summary>
+    /// Restored from settings in the ctor; flips persist and requery as a filter change (the same text now means something different).</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SearchPlaceholder))]
     [NotifyPropertyChangedFor(nameof(SearchInputPlaceholder))]
     public partial bool RegexMode { get; set; }
 
-    /// <summary>Which haystack the whole-query regex matches (name/path). Only
-    /// affects results while <see cref="RegexMode"/> is on, but persisted
-    /// independently so it survives toggling regex off and on.</summary>
+    /// <summary>Which haystack the whole-query regex matches (name/path).
+    /// Only affects results while <see cref="RegexMode"/> is on, but persisted independently so it survives toggling regex off and on.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SearchPlaceholder))]
     [NotifyPropertyChangedFor(nameof(SearchInputPlaceholder))]
     public partial RegexScopeKind RegexScope { get; set; }
 
-    /// <summary>Tray-resident mode (ADR-0030): the gear-menu toggle. When on,
-    /// closing (×) hides to the tray instead of exiting and the engine stays
-    /// hot. Restored from settings in the ctor; a flip just persists — the close
-    /// handler re-reads the setting from disk.</summary>
+    /// <summary>Tray-resident mode (ADR-0030): the gear-menu toggle.
+    /// When on,
+    /// closing (×) hides to the tray instead of exiting and the engine stays hot.
+    /// Restored from settings in the ctor; a flip just persists — the close handler re-reads the setting from disk.</summary>
     [ObservableProperty]
     public partial bool CloseToTray { get; set; }
 
-    /// <summary>The search box hint — regex/scope-aware, so the box itself
-    /// signals that regex mode is on (the toggle lives in the gear menu).</summary>
+    /// <summary>The search box hint — regex/scope-aware, so the box itself signals that regex mode is on (the toggle lives in the gear menu).</summary>
     public string SearchPlaceholder => RegexMode
         ? Loc.Get(RegexScope == RegexScopeKind.Path
             ? "Search_PlaceholderRegexPath"
             : "Search_PlaceholderRegexName")
         : Loc.Get("Search_Placeholder");
 
-    /// <summary>The accessible search hint. While the pipe is warming up the
-    /// disabled box explains that state instead of accepting a doomed query.</summary>
+    /// <summary>The accessible search hint.
+    /// While the pipe is warming up the disabled box explains that state instead of accepting a doomed query.</summary>
     public string SearchInputPlaceholder =>
         CanSearch ? SearchPlaceholder : Loc.Get("Status_Preparing");
 
-    // ── Disconnected setup screen (explicit unavailable engine state) ──
-
-    /// <summary>True when no engine transport is currently available
-    /// — the page shows the setup screen instead of a search box that can only
-    /// return zero rows. A fatal pipe identity/protocol failure also transitions
-    /// here so repair is actionable without continuing on a broken transport.</summary>
+    /// <summary>True when no engine transport is currently available — the page shows the setup screen instead of a search box that can only return zero rows.
+    /// A fatal pipe identity/protocol failure also transitions here so repair is actionable without continuing on a broken transport.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsReady))]
     public partial bool IsDisconnected { get; set; }
 
-    /// <summary>Inverse of <see cref="IsDisconnected"/> — true when the search
-    /// UI (box + result list) should be shown instead of the setup screen.</summary>
+    /// <summary>Inverse of <see cref="IsDisconnected"/> — true when the search UI (box + result list) should be shown instead of the setup screen.</summary>
     public bool IsReady => !IsDisconnected;
 
-    /// <summary>True only while requests can reach an engine. The search box is
-    /// disabled during initial connect and reconnect, while settings and repair
-    /// remain available.</summary>
+    /// <summary>True only while requests can reach an engine.
+    /// The search box is disabled during initial connect and reconnect, while settings and repair remain available.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SearchInputPlaceholder))]
     public partial bool CanSearch { get; set; }
 
-    /// <summary>The current index mode for the status submenu's info row
-    /// (fixed NTFS drives only). Fixed for this page's lifetime (ADR-0036),
+    /// <summary>The current index mode for the status submenu's info row (fixed NTFS drives only).
+    /// Fixed for this page's lifetime (ADR-0036),
     /// so x:Bind OneTime.</summary>
     public string ModeText { get; } = Loc.Get("Status_ModePrivileged");
 
-    /// <summary>This app's channel-aware build version line for the Settings About
-    /// block (always available, from <see cref="BuildInfo"/>). Static — bound via
-    /// the type in XAML; the app version is fixed for the process lifetime.</summary>
+    /// <summary>This app's channel-aware build version line for the Settings About block (always available, from <see cref="BuildInfo"/>).
+    /// Static — bound via the type in XAML; the app version is fixed for the process lifetime.</summary>
     public static string AppVersionText => Loc.Get("About_AppVersion", BuildInfo.Version);
 
-    /// <summary>The engine/service build version, refreshed after every pipe
-    /// connection and on demand by Settings. Empty until known and for in-proc
-    /// clients (Ffi/Fake) where there is no separate service to ask.</summary>
+    /// <summary>The engine/service build version, refreshed after every pipe connection and on demand by Settings.
+    /// Empty until known and for in-proc clients (Ffi/Fake) where there is no separate service to ask.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasEngineVersion))]
     [NotifyPropertyChangedFor(nameof(EngineVersionText))]
@@ -146,16 +126,13 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     public string EngineVersionText => Loc.Get("About_EngineVersion", EngineVersion);
 
     /// <summary>True when app and engine come from different <c>X.Y.Z</c> bases —
-    /// surfaces a warning so a stale app/service pairing is visible at a glance
-    /// (both stamp the same <c>fmf-buildstamp</c> format, so the bases compare).</summary>
+    /// surfaces a warning so a stale app/service pairing is visible at a glance (both stamp the same <c>fmf-buildstamp</c> format, so the bases compare).</summary>
     public bool HasVersionMismatch =>
         HasEngineVersion && !BuildInfo.SameBase(BuildInfo.Version, EngineVersion);
 
-    /// <summary>Best-effort fetch of the service version for About and the main
-    /// version-skew warning. Stays empty for in-proc clients or if stats are
-    /// unavailable, so a fetch failure never becomes a misleading warning. Call
-    /// on the UI thread (it writes bound state; no ConfigureAwait(false), ADR-0036).</summary>
-    /// <returns>A task that completes once the engine version has been fetched.</returns>
+    /// <summary>Best-effort fetch of the service version for About and the main version-skew warning.
+    /// Stays empty for in-proc clients or if stats are unavailable, so a fetch failure never becomes a misleading warning.
+    /// Call on the UI thread (it writes bound state; no ConfigureAwait(false), ADR-0036).</summary> <returns>A task that completes once the engine version has been fetched.</returns>
     public async Task RefreshVersionsAsync()
     {
         var generation = Interlocked.Increment(ref _versionRefreshGeneration);
@@ -193,12 +170,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    /// <summary>Accept a version response only while its owner is alive and
-    /// no newer refresh has superseded it.</summary>
-    /// <param name="disposed">Whether the ViewModel lifetime has ended.</param>
-    /// <param name="candidate">Generation captured by this refresh.</param>
-    /// <param name="current">Most recently issued refresh generation.</param>
-    /// <returns>True only when the response may still update bound state.</returns>
+    /// <summary>Accept a version response only while its owner is alive and no newer refresh has superseded it.</summary> <param name="disposed">Whether the ViewModel lifetime has ended.</param> <param name="candidate">Generation captured by this refresh.</param> <param name="current">Most recently issued refresh generation.</param> <returns>True only when the response may still update bound state.</returns>
     internal static bool ShouldApplyVersion(bool disposed, int candidate, int current) =>
         !disposed && candidate == current;
 
@@ -229,32 +201,28 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    /// <summary>Setup screen progress text ("waiting for admin permission…" etc.);
+    /// <summary>Setup screen progress text ("waiting for admin permission…"
+    /// etc.);
     /// empty hides the progress row.</summary>
     [ObservableProperty]
     public partial string SetupStatus { get; set; } = string.Empty;
 
-    /// <summary>The setup screen's one-click action (<see cref="EnableSearchAsync"/>)
-    /// is running — disables the button (<see cref="SetupNotBusy"/>) so it can't
-    /// be re-triggered while a UAC prompt is up.</summary>
+    /// <summary>The setup screen's one-click action (<see cref="EnableSearchAsync"/>) is running — disables the button (<see cref="SetupNotBusy"/>) so it can't be re-triggered while a UAC prompt is up.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SetupNotBusy))]
     public partial bool SetupBusy { get; set; }
 
-    /// <summary>Inverse of <see cref="SetupBusy"/> — gates the setup button's
-    /// enabled state.</summary>
+    /// <summary>Inverse of <see cref="SetupBusy"/> — gates the setup button's enabled state.</summary>
     public bool SetupNotBusy => !SetupBusy;
 
-    /// <summary>How results land in the virtualized list (publish / refresh
-    /// in place / empty) — the seam the orchestrator hands outcomes to.</summary>
+    /// <summary>How results land in the virtualized list (publish / refresh in place / empty) — the seam the orchestrator hands outcomes to.</summary>
     public ResultsPresenter Results { get; }
 
     /// <summary>Decides when and what to search (debounce, generation,
     /// requery triggers); the page forwards box edits and toggles to it.</summary>
     public SearchOrchestrator Search { get; }
 
-    /// <summary>The InfoBar stack — failures and transient notices are pushed
-    /// here.</summary>
+    /// <summary>The InfoBar stack — failures and transient notices are pushed here.</summary>
     public NotificationCenter Notifications { get; }
 
     /// <summary>State behind the F12 performance panel (last trace, stats,
@@ -264,30 +232,16 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     private readonly AppSettings _settings;
     private readonly Func<bool> _saveSettings;
 
-    /// <summary>The "make search usable" steps (register elevated → soft restart
-    /// into the pipe), injected so <see cref="EnableSearchAsync"/> is testable
-    /// without elevation or rebuilding the page. Defaults to
-    /// <see cref="ServiceProvisioner.Real"/>.</summary>
+    /// <summary>The "make search usable" steps (register elevated → soft restart into the pipe), injected so <see cref="EnableSearchAsync"/> is testable without elevation or rebuilding the page.
+    /// Defaults to <see cref="ServiceProvisioner.Real"/>.</summary>
     private readonly ServiceProvisioner _provisioner;
     private readonly Action _openServiceManager;
     private bool _restoringPersistedSetting;
     private int _versionRefreshGeneration;
 
     /// <summary>Builds the focused components, restores focused-search settings,
-    /// and subscribes the engine events (volume updates, errors, connection
-    /// changes). Call <see cref="StartAsync"/> afterwards to begin indexing.</summary>
-    /// <param name="engine">The engine client (Fake / Ffi / Pipe) this page drives.</param>
-    /// <param name="dispatcher">UI dispatcher used to marshal engine callbacks
-    /// and back timers.</param>
-    /// <param name="settings">App settings to read/persist; loaded from disk
-    /// when null.</param>
-    /// <param name="provisioner">The register→wait→relaunch steps behind the setup
-    /// screen's one-click button; defaults to <see cref="ServiceProvisioner.Real"/>
-    /// (tests inject fakes so <see cref="EnableSearchAsync"/> runs without UAC).</param>
-    /// <param name="saveSettings">Persistence seam; defaults to
-    /// <see cref="AppSettings.Save"/> and is injected by failure-path tests.</param>
-    /// <param name="openServiceManager">Opens the service-management surface
-    /// when the persistent version-skew warning's repair action is invoked.
+    /// and subscribes the engine events (volume updates, errors, connection changes).
+    /// Call <see cref="StartAsync"/> afterwards to begin indexing.</summary> <param name="engine">The engine client (Fake / Ffi / Pipe) this page drives.</param> <param name="dispatcher">UI dispatcher used to marshal engine callbacks and back timers.</param> <param name="settings">App settings to read/persist; loaded from disk when null.</param> <param name="provisioner">The register→wait→relaunch steps behind the setup screen's one-click button; defaults to <see cref="ServiceProvisioner.Real"/> (tests inject fakes so <see cref="EnableSearchAsync"/> runs without UAC).</param> <param name="saveSettings">Persistence seam; defaults to <see cref="AppSettings.Save"/> and is injected by failure-path tests.</param> <param name="openServiceManager">Opens the service-management surface when the persistent version-skew warning's repair action is invoked.
     /// The callback keeps this ViewModel independent of WinUI view types.</param>
     public MainViewModel(
         IEngineClient engine,
@@ -318,16 +272,10 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
                 SearchText,
                 new SearchOptions(Sort, SortDescending, FmfCase.Smart, IncludeHiddenSystem, RegexMode, RegexScope)));
 
-        // Restore bound settings without starting async work from a partially
-        // constructed ViewModel. Search/Notifications/Perf wiring is completed
-        // below; user-initiated changes requery after construction.
         RestorePersistedSetting(() =>
         {
-            // Focused-search policy is code-owned; only the user-facing on/off
-            // preference is persisted.
             FocusedSearch = _settings.FocusedSearch;
 
-            // Regex mode/scope are restored as one constructor transaction.
             RegexScope = string.Equals(_settings.RegexScope, "path", StringComparison.Ordinal) ? RegexScopeKind.Path : RegexScopeKind.Name;
             RegexMode = _settings.RegexMode;
             CloseToTray = _settings.CloseToTray;
@@ -352,18 +300,16 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     /// Non-Info notifications never auto-dissolve (NotificationCenter).</summary>
     private AppNotification? _reconnectBanner;
 
-    /// <summary>The non-expiring app/service version warning. Reference identity
-    /// prevents repeated stats refreshes and reconnects from stacking copies.</summary>
+    /// <summary>The non-expiring app/service version warning.
+    /// Reference identity prevents repeated stats refreshes and reconnects from stacking copies.</summary>
     private AppNotification? _versionMismatchNotification;
 
-    /// <summary>The actionable startup failure currently shown. Held by
-    /// reference so a connect-driven retry or button retry replaces/removes
-    /// the exact notification instead of accumulating stale errors.</summary>
+    /// <summary>The actionable startup failure currently shown.
+    /// Held by reference so a connect-driven retry or button retry replaces/removes the exact notification instead of accumulating stale errors.</summary>
     private AppNotification? _startupFailureNotification;
 
     /// <summary>True once <see cref="RunStartupAsync"/> has successfully run.
-    /// Guards against the Loaded call and the first Connected event both running
-    /// startup; cleared on a startup failure so a later connect can retry.</summary>
+    /// Guards against the Loaded call and the first Connected event both running startup; cleared on a startup failure so a later connect can retry.</summary>
     private bool _started;
 
     private void OnEngineErrorOccurred(EngineErrorSeverity severity) =>
@@ -391,10 +337,6 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         if (state is EngineConnectionState.Faulted
             or EngineConnectionState.Unavailable)
         {
-            // A fatal identity/protocol mismatch stops the supervisor. Do not
-            // leave the persistent "reconnecting" banner claiming recovery is
-            // still in progress; the transport badge now reads disconnected
-            // and the exact cause remains in app.log.
             if (_reconnectBanner is not null)
             {
                 Notifications.Remove(_reconnectBanner);
@@ -418,45 +360,24 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             _reconnectBanner = null;
         }
 
-        // ServiceInfo belongs to the newly connected pipe session. Refresh it
-        // after every connect (including reconnect) so replacing a stale service
-        // is reflected without requiring the user to reopen Settings.
         RefreshVersionsAsync().Forget("service-version");
 
-        // First successful connection over a pipe — the service may have been
-        // warming up when the page loaded (freshly registered, cold MFT scan). Run
-        // the startup sequence now so the UI leaves "preparing" and becomes usable.
-        // RunStartupAsync self-guards on _started, so a reconnect only clears the
-        // banner above. Marshaled onto the UI thread by EngineEventMarshaler.
         if (!_started)
         {
             RunStartupAsync().Forget("engine.startup");
         }
     }
 
-    /// <summary>Startup entry, called from the page's Loaded. Branches on engine
-    /// readiness: an unavailable client shows setup; a pipe client that hasn't
-    /// connected yet stays on "preparing" and lets <see cref="OnConnectionChanged"/>
-    /// drive the real startup once it connects; an already-usable engine (FFI, or a
-    /// pipe that connected before Loaded) runs it now.</summary>
-    /// <returns>A task that completes once startup is kicked off (or deferred to the connect).</returns>
+    /// <summary>Startup entry, called from the page's Loaded.
+    /// Branches on engine readiness: an unavailable client shows setup; a pipe client that hasn't connected yet stays on "preparing" and lets <see cref="OnConnectionChanged"/> drive the real startup once it connects; an already-usable engine (FFI, or a pipe that connected before Loaded) runs it now.</summary> <returns>A task that completes once startup is kicked off (or deferred to the connect).</returns>
     public async Task StartAsync()
     {
         if (IsDisconnected)
         {
-            // Unelevated, no service → the page shows the setup screen
-            // (IsDisconnected); don't pretend to index.
             StatusText = Loc.Get("Status_ServiceUnregistered");
             return;
         }
 
-        // A pipe supervisor connects asynchronously; until it has, the engine is in
-        // the Connecting state and ListVolumes/StartIndexing would throw
-        // EngineUnavailableException and surface a bogus "index start failed". This
-        // is exactly the warm-up window a freshly registered, still-starting service
-        // sits in. Hold "preparing" and let the first Connected event
-        // (OnConnectionChanged) run the startup. Only a never-connected pipe reports
-        // Connecting — FFI / fake / connected-pipe report InProc or Connected.
         if (_engine.Connection is EngineConnectionState.Connecting
             or EngineConnectionState.Reconnecting)
         {
@@ -476,12 +397,8 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         await RunStartupAsync();
     }
 
-    /// <summary>The actual startup work once a usable engine is connected: list
-    /// volumes, kick indexing, reflect status, initial requery. Self-guarding via
-    /// <see cref="_started"/> so the Loaded call and a later Connected event don't
-    /// double-run it; on failure it clears the flag so a subsequent Connected
-    /// (e.g. after a transient warm-up error) can retry.</summary>
-    /// <returns>A task that completes once startup indexing and the initial requery are kicked off.</returns>
+    /// <summary>The actual startup work once a usable engine is connected: list volumes, kick indexing, reflect status, initial requery.
+    /// Self-guarding via <see cref="_started"/> so the Loaded call and a later Connected event don't double-run it; on failure it clears the flag so a subsequent Connected (e.g. after a transient warm-up error) can retry.</summary> <returns>A task that completes once startup indexing and the initial requery are kicked off.</returns>
     private async Task RunStartupAsync()
     {
         if (_started || Volatile.Read(ref _disposed) != 0)
@@ -492,18 +409,10 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         _started = true;
         try
         {
-            // Stay on the dispatcher (no ConfigureAwait): the continuation sets the
-            // bound StatusText and pushes notifications, so it must resume on the UI
-            // thread — resuming off it throws RPC_E_WRONG_THREAD (see .editorconfig
-            // CA2007/MA0004, disabled for exactly this UI-app reason).
             var ct = _lifetime.Token;
             var volumes = await _engine.ListVolumesAsync(ct);
             await _engine.StartIndexingAsync(volumes, ct);
 
-            // Reflect the real state at startup (over a pipe the service may
-            // already be indexed before we connect). Drop the unconditional
-            // "preparing" and show "ready" when already Ready; later
-            // Scanning→Ready transitions are picked up by OnVolumeUpdated.
             StatusText = StatusFormatter.Overall(await _engine.GetStatusAsync(ct), volumes);
             if (_startupFailureNotification is not null)
             {
@@ -517,7 +426,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         catch (Exception ex)
         {
-            _started = false; // let a later Connected retry the startup
+            _started = false;
             FileLog.Error("engine", "startup indexing failed", ex);
             StatusText = Loc.Get("Status_IndexStartFailed");
             if (_startupFailureNotification is not null)
@@ -550,11 +459,8 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>Setup screen's one-click action: register the service elevated,
-    /// then (on success) re-resolve the engine in-process into the pipe — so a
-    /// first-time user goes from the setup screen to a working search box in one
-    /// click. The app stays unelevated; only fmf-service is elevated (per-action UAC).</summary>
-    /// <returns>A task that completes when registration finishes (the soft restart
-    /// rebuilds the page on success).</returns>
+    /// then (on success) re-resolve the engine in-process into the pipe — so a first-time user goes from the setup screen to a working search box in one click.
+    /// The app stays unelevated; only fmf-service is elevated (per-action UAC).</summary> <returns>A task that completes when registration finishes (the soft restart rebuilds the page on success).</returns>
     public async Task EnableSearchAsync()
     {
         if (SetupBusy)
@@ -566,10 +472,6 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         SetupStatus = Loc.Get("Setup_WaitingForPermission");
         try
         {
-            // Stay on the dispatcher (no ConfigureAwait): every branch sets the bound
-            // SetupStatus / SetupBusy, which drive the setup-screen controls
-            // (button IsEnabled, progress ring, info bar) — resuming off the UI thread
-            // throws RPC_E_WRONG_THREAD.
             switch (await _provisioner.RegisterAsync())
             {
                 case ServiceActionOutcome.Ok:
@@ -580,10 +482,6 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
 
                     SetupStatus = Loc.Get("Setup_Connecting");
 
-                    // Re-resolve the engine in-process forcing the pipe transport
-                    // (ADR-0036): the rebuilt page's pipe supervisor waits out the
-                    // just-started service's warm-up (no fixed budget), and the UI
-                    // flips Setup→Ready the moment it connects.
                     _provisioner.RelaunchIntoPipe();
                     break;
                 case ServiceActionOutcome.Cancelled:
@@ -605,27 +503,24 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
 
     partial void OnSearchTextChanged(string value)
     {
-        // Hide the no-results state the moment a new query is pending so it never
-        // flashes mid-load; OnResultsPublished re-shows it if the query lands empty.
         HasNoResults = false;
         Search.NotifyTextChanged(value);
     }
 
-    /// <summary>Results landed (including zero-hit publishes): show the empty
-    /// state only when a non-empty query produced no rows. Authoritative signal —
+    /// <summary>Results landed (including zero-hit publishes): show the empty state only when a non-empty query produced no rows.
+    /// Authoritative signal —
     /// fires after the count is set in <see cref="ResultsPresenter.PublishAsync"/>.</summary>
     private void OnResultsPublished(ResultsPublication published)
     {
-        _ = published; // the publication payload isn't needed; only that results landed
+        _ = published;
         HasNoResults = !string.IsNullOrEmpty(SearchText) && Results.ResultsSource.Count == 0;
     }
 
     partial void OnIncludeHiddenSystemChanged(bool value) =>
         Search.Requery(RequeryOrigin.Filter);
 
-    /// <summary>Toggle → orchestrator + persistence + filter requery. Constructor
-    /// restoration updates the orchestrator but suppresses persistence and async
-    /// requery until the ViewModel is fully wired.</summary>
+    /// <summary>Toggle → orchestrator + persistence + filter requery.
+    /// Constructor restoration updates the orchestrator but suppresses persistence and async requery until the ViewModel is fully wired.</summary>
     partial void OnFocusedSearchChanged(bool value)
     {
         Search.FocusedSearch = value;
@@ -647,9 +542,8 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    /// <summary>Regex toggle → persist + filter requery (the live query text
-    /// switches between substring and whole-regex semantics). Constructor
-    /// restoration suppresses persistence and requery until wiring completes.</summary>
+    /// <summary>Regex toggle → persist + filter requery (the live query text switches between substring and whole-regex semantics).
+    /// Constructor restoration suppresses persistence and requery until wiring completes.</summary>
     partial void OnRegexModeChanged(bool value)
     {
         if (!_restoringPersistedSetting && _settings.RegexMode != value)
@@ -670,8 +564,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    /// <summary>Scope radio → persist; requery only while regex mode is on
-    /// (scope is inert otherwise).</summary>
+    /// <summary>Scope radio → persist; requery only while regex mode is on (scope is inert otherwise).</summary>
     partial void OnRegexScopeChanged(RegexScopeKind value)
     {
         var s = value == RegexScopeKind.Path ? "path" : "name";
@@ -696,9 +589,9 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    /// <summary>Tray-resident toggle → persist only (no requery; the setting is
-    /// irrelevant to search). App's close handler re-reads it from settings. Also
-    /// runs once from the ctor; the save is skipped when unchanged.</summary>
+    /// <summary>Tray-resident toggle → persist only (no requery; the setting is irrelevant to search).
+    /// App's close handler re-reads it from settings.
+    /// Also runs once from the ctor; the save is skipped when unchanged.</summary>
     partial void OnCloseToTrayChanged(bool value)
     {
         if (!_restoringPersistedSetting && _settings.CloseToTray != value)
@@ -733,10 +626,8 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             Loc.Get("Settings_SaveFailedTitle"),
             Loc.Get("Settings_SaveFailedBody")));
 
-    /// <summary>Column-header click: re-clicking the active <see cref="Sort"/>
-    /// column toggles <see cref="SortDescending"/>, a new column switches to it
-    /// ascending. Either way requeries with <see cref="RequeryOrigin.Sort"/>.</summary>
-    /// <param name="key">The sort column the clicked header maps to.</param>
+    /// <summary>Column-header click: re-clicking the active <see cref="Sort"/> column toggles <see cref="SortDescending"/>, a new column switches to it ascending.
+    /// Either way requeries with <see cref="RequeryOrigin.Sort"/>.</summary> <param name="key">The sort column the clicked header maps to.</param>
     public void SetSort(FmfSort key)
     {
         if (Sort == key)
@@ -752,10 +643,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         Search.Requery(RequeryOrigin.Sort);
     }
 
-    /// <summary>Settings UI: set the sort direction explicitly — the settings
-    /// dialog has a dedicated descending toggle, unlike the result header's
-    /// click-to-flip <see cref="SetSort"/>. Requeries only on an actual change.</summary>
-    /// <param name="descending">True to sort results descending.</param>
+    /// <summary>Settings UI: set the sort direction explicitly — the settings dialog has a dedicated descending toggle, unlike the result header's click-to-flip <see cref="SetSort"/>. Requeries only on an actual change.</summary> <param name="descending">True to sort results descending.</param>
     public void SetSortDescending(bool descending)
     {
         if (SortDescending == descending)
@@ -786,17 +674,12 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
 
     private void OnSearchFailed(Exception e)
     {
-        HasNoResults = false; // an error surfaces via the InfoBar, not the empty state
+        HasNoResults = false;
         if (_engine.Connection is EngineConnectionState.Reconnecting or EngineConnectionState.Connecting)
         {
-            // The connection is still settling — the reconnect banner (Reconnecting)
-            // or the "preparing" startup state (Connecting) already explains it; a
-            // failure here is just a request that raced the connect.
             return;
         }
 
-        // Service-side errors are localized by status code here (the app absorbs
-        // the service's English detail, which is appended for diagnostics).
         var known = e is EngineException or QuerySyntaxException or StaleResultException;
         Notifications.Push(new AppNotification(
             NotifySeverity.Error,
@@ -804,10 +687,7 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
             known ? $"{EngineErrorText(e)}\n{e.Message}" : e.Message));
     }
 
-    /// <summary>Localize a service/engine error by type or FMF_E_* code — the
-    /// app-side absorption of the service's English-only error surface.</summary>
-    /// <param name="e">The engine/service exception to map to a localized message.</param>
-    /// <returns>The localized error text for the exception's type or FMF_E_* code.</returns>
+    /// <summary>Localize a service/engine error by type or FMF_E_* code — the app-side absorption of the service's English-only error surface.</summary> <param name="e">The engine/service exception to map to a localized message.</param> <returns>The localized error text for the exception's type or FMF_E_* code.</returns>
     internal static string EngineErrorText(Exception e) => e switch
     {
         QuerySyntaxException => Loc.Get("Err_QuerySyntax"),
@@ -826,13 +706,9 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
         _ => Loc.Get("Err_Generic"),
     };
 
-    /// <summary>Engine diagnostics: pull the detail text behind the POD event.</summary>
-    /// <param name="severity">The generated contract severity reported by the engine.</param>
+    /// <summary>Engine diagnostics: pull the detail text behind the POD event.</summary> <param name="severity">The generated contract severity reported by the engine.</param>
     private async Task HandleEngineErrorAsync(EngineErrorSeverity severity)
     {
-        // EngineEventMarshaler already marshaled this onto the UI thread; stay there
-        // (no ConfigureAwait) — RefreshStatsAsync sets bound Perf state and the
-        // continuation pushes a bound Notification.
         await Perf.RefreshStatsAsync(_lifetime.Token);
         if (Volatile.Read(ref _disposed) != 0)
         {
@@ -855,8 +731,8 @@ internal sealed partial class MainViewModel : ObservableObject, IDisposable
     private static string Truncate(string s, int max) =>
         s.Length <= max ? s : s[..max] + "…";
 
-    /// <summary>Cancel every owned async flow, detach all event graphs and
-    /// release the lifetime-single result handle. Idempotent.</summary>
+    /// <summary>Cancel every owned async flow, detach all event graphs and release the lifetime-single result handle.
+    /// Idempotent.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)

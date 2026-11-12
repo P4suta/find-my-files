@@ -6,17 +6,14 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Behavioural tests for <see cref="MainViewModel"/>'s engine-event and
-/// error handling — the startup sequence, reconnect banner, failed-volume and
-/// error-code paths that the happy-path constructor tests do not reach. Engine
-/// events are raised on the stub and marshalled through the manual dispatcher.</summary>
+/// <summary>Behavioural tests for <see cref="MainViewModel"/>'s engine-event and error handling — the startup sequence, reconnect banner, failed-volume and error-code paths that the happy-path constructor tests do not reach.
+/// Engine events are raised on the stub and marshalled through the manual dispatcher.</summary>
 public sealed class MainViewModelEventTests : IDisposable
 {
     private readonly ManualDispatcher _dispatcher = new();
     private readonly StubEngineClient _engine = new();
     private readonly MainViewModel _vm;
 
-    // The volume set the stub's ListVolumesAsync returns (CA1861: not inline).
     private static readonly string[] StubVolumes = ["F:"];
 
     public MainViewModelEventTests()
@@ -189,7 +186,6 @@ public sealed class MainViewModelEventTests : IDisposable
         Assert.Equal(Loc.Get("Notify_ReconnectingTitle"), reconnecting.Message);
         Assert.Equal(Loc.Get("Notify_ReconnectingBody"), reconnecting.Detail);
 
-        // A second Reconnecting must not duplicate the held banner.
         _engine.RaiseConnectionChanged(EngineConnectionState.Reconnecting);
         _dispatcher.DrainQueue();
         Assert.Single(_vm.Notifications.Items);
@@ -312,14 +308,14 @@ public sealed class MainViewModelEventTests : IDisposable
     }
 
     [Theory]
-    [InlineData(2)] // FMF_E_STALE
-    [InlineData(3)] // FMF_E_NOT_ADMIN
-    [InlineData(4)] // FMF_E_VOLUME
-    [InlineData(5)] // FMF_E_QUERY_SYNTAX
-    [InlineData(6)] // FMF_E_IO
-    [InlineData(7)] // FMF_E_LOCKED
-    [InlineData(99)] // FMF_E_PANIC
-    [InlineData(42)] // unknown → generic
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(99)]
+    [InlineData(42)]
     public void EngineErrorText_maps_every_engine_code_to_a_localized_message(int code)
     {
         var text = MainViewModel.EngineErrorText(new EngineException("detail", code));

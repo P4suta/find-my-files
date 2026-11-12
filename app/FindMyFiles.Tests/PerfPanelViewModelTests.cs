@@ -5,9 +5,7 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Behavioural tests for <see cref="PerfPanelViewModel"/> — the F12
-/// panel's state (trace history with a FIFO cap, stats pull, toggle), built on
-/// the existing engine stub.</summary>
+/// <summary>Behavioural tests for <see cref="PerfPanelViewModel"/> — the F12 panel's state (trace history with a FIFO cap, stats pull, toggle), built on the existing engine stub.</summary>
 public sealed class PerfPanelViewModelTests
 {
     private readonly StubEngineClient _engine = new();
@@ -49,7 +47,7 @@ public sealed class PerfPanelViewModelTests
         _vm.RecordTrace(null);
 
         Assert.Null(_vm.LastTrace);
-        Assert.Single(_vm.RecentTotalsUs); // the null trace contributes no total
+        Assert.Single(_vm.RecentTotalsUs);
     }
 
     [Fact]
@@ -61,19 +59,13 @@ public sealed class PerfPanelViewModelTests
         }
 
         Assert.Equal(64, _vm.RecentTotalsUs.Count);
-        Assert.Equal(6UL, _vm.RecentTotalsUs[0]);    // 0..5 dropped off the front
+        Assert.Equal(6UL, _vm.RecentTotalsUs[0]);
         Assert.Equal(69UL, _vm.RecentTotalsUs[^1]);
     }
 
     [Fact]
     public void Stats_publishes_the_recent_query_feed_and_notifies_when_it_swaps()
     {
-        // The engine has always sent this ring; nothing bound to it, so the
-        // panel discarded the one piece of evidence that explains a slow
-        // search. Two halves have to hold: the tail must be derived, and the
-        // property must re-notify when Stats swaps — omitting the
-        // NotifyPropertyChangedFor is the silent version of the same bug,
-        // since the list would render once and then never update.
         var notified = new List<string?>();
         _vm.PropertyChanged += (_, e) => notified.Add(e.PropertyName);
 
@@ -84,9 +76,8 @@ public sealed class PerfPanelViewModelTests
                 .ToList(),
         };
 
-        Assert.Contains(nameof(PerfPanelViewModel.RecentQueriesTail), notified);
+        Assert.Contains(nameof(PerfPanelViewModel.RecentQueriesTail), notified, StringComparer.Ordinal);
 
-        // Capped and newest-last, the same shape as the USN feed beside it.
         Assert.Equal(8, _vm.RecentQueriesTail.Count);
         Assert.Equal(4UL, _vm.RecentQueriesTail[0].TotalUs);
         Assert.Equal(11UL, _vm.RecentQueriesTail[^1].TotalUs);
@@ -105,10 +96,8 @@ public sealed class PerfPanelViewModelTests
         var raised = 0;
         _vm.PerfDataChanged += () => raised++;
 
-        await _vm.RefreshStatsAsync();
+        await _vm.RefreshStatsAsync(TestContext.Current.CancellationToken);
 
-        // The stub returns null stats; the behaviour under test is the pull +
-        // assignment + notification, not a specific snapshot value.
         Assert.Null(_vm.Stats);
         Assert.Equal(1, raised);
     }
@@ -116,13 +105,9 @@ public sealed class PerfPanelViewModelTests
     [Fact]
     public async Task RefreshStatsAsync_after_dispose_is_a_silent_no_op()
     {
-        // The poll and the panel teardown race by construction (a 1 Hz timer tick
-        // that is already in flight when the window closes). Reading the disposed
-        // lifetime token used to throw ObjectDisposedException, which the
-        // fire-and-forget funnel turns into a user-visible error notification.
         _vm.Dispose();
 
-        await _vm.RefreshStatsAsync();
+        await _vm.RefreshStatsAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(_vm.Stats);
     }
@@ -130,27 +115,22 @@ public sealed class PerfPanelViewModelTests
     [Fact]
     public async Task RefreshStatsAsync_contains_engine_failures()
     {
-        // Stats are diagnostics: an unreachable engine must not produce an error
-        // notification every second. The failure is logged, not thrown.
         var raised = 0;
         _vm.PerfDataChanged += () => raised++;
         _engine.ThrowOnStats = new InvalidOperationException("engine down");
 
-        await _vm.RefreshStatsAsync();
+        await _vm.RefreshStatsAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(_vm.Stats);
-        Assert.Equal(0, raised); // nothing moved, so nothing is announced
+        Assert.Equal(0, raised);
     }
 
     [Fact]
     public async Task RefreshStatsAsync_contains_a_cancellation_it_did_not_request()
     {
-        // An engine-side cancellation (its own internal deadline) is still just an
-        // abandoned poll — it must not escape merely because *our* linked source
-        // was never cancelled.
         _engine.ThrowOnStats = new OperationCanceledException();
 
-        await _vm.RefreshStatsAsync();
+        await _vm.RefreshStatsAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(_vm.Stats);
     }

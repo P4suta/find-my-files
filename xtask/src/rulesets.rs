@@ -1,28 +1,21 @@
 //! Repository-ruleset drift detection.
 //!
-//! `.github/rulesets/*.json` is the reviewable, version-controlled definition of
-//! this repository's protection — but GitHub never applies those files. They are
-//! disaster-recovery templates a maintainer re-exports by hand after every UI or
-//! API change, and nothing proved the re-export actually happened. An
-//! un-exported change is invisible in both directions: the tree keeps describing
-//! protection the repository does not have, and the repository keeps enforcing
-//! rules no reviewed file describes.
+//! `.github/rulesets/*.json` is the reviewable, version-controlled definition of this repository's protection — but GitHub never applies those files.
+//! They are disaster-recovery templates a maintainer re-exports by hand after every UI or API change, and nothing proved the re-export actually happened.
+//! An un-exported change is invisible in both directions: the tree keeps describing protection the repository does not have, and the repository keeps enforcing rules no reviewed file describes.
 //!
 //! The check is split into two halves that never mix:
 //!
-//! * [`run_fetch`] captures the live rulesets through `gh`. This is the only
-//!   network call in xtask. It lives here rather than in the `just` recipe
-//!   because capturing needs one API call *per ruleset id*: GitHub's list
-//!   endpoint returns identity and enforcement only — no `rules`, no
-//!   `conditions`, no `bypass_actors` — so the ids must be read first and then
-//!   followed one by one. A loop over a value discovered at run time cannot be
-//!   written in a `just` recipe without shell-specific syntax, which AGENTS.md
-//!   and the `task_definitions_never_depend_on_one_shell` guard both forbid.
-//! * [`run_check`] compares the two sides. It is pure, offline and unit-tested:
+//! * [`run_fetch`] captures the live rulesets through `gh`.
+//!   This is the only network call in xtask.
+//!   It lives here rather than in the `just` recipe because capturing needs one API call *per ruleset id*: GitHub's list endpoint returns identity and enforcement only — no `rules`, no `conditions`, no `bypass_actors` — so the ids must be read first and then followed one by one.
+//!   A loop over a value discovered at run time cannot be written in a `just` recipe without shell-specific syntax, which AGENTS.md and the `task_definitions_never_depend_on_one_shell` guard both forbid.
+//! * [`run_check`] compares the two sides.
+//!   It is pure, offline and unit-tested:
 //!   it reads two directories and reports what differs.
 //!
-//! Both halves are read-only with respect to GitHub. Applying a template is a
-//! maintainer action in the UI; this command only ever says what differs.
+//! Both halves are read-only with respect to GitHub.
+//! Applying a template is a maintainer action in the UI; this command only ever says what differs.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{Map, Value};
@@ -33,20 +26,12 @@ use std::path::{Path, PathBuf};
 
 use crate::{cmd, fsx, paths};
 
-/// Top-level fields the API attaches to describe *its own* bookkeeping rather
-/// than the protection a ruleset applies: identity (`id`, `node_id`), history
-/// (`created_at`, `updated_at`), navigation (`_links`), where the ruleset is
-/// configured (`source`, `source_type`), and what the *calling* token happens to
-/// be allowed to bypass (`current_user_can_bypass`). None of them can be
-/// expressed in a checked-in template, so comparing them would report drift on
-/// every single run and train the reader to ignore the report.
+/// Top-level fields the API attaches to describe *its own* bookkeeping rather than the protection a ruleset applies: identity (`id`, `node_id`), history (`created_at`, `updated_at`), navigation (`_links`), where the ruleset is configured (`source`, `source_type`), and what the *calling* token happens to be allowed to bypass (`current_user_can_bypass`).
+/// None of them can be expressed in a checked-in template, so comparing them would report drift on every single run and train the reader to ignore the report.
 ///
-/// `bypass_actors` is deliberately **not** in this list: who may bypass a
-/// ruleset is part of the protection, so a live bypass actor the template does
-/// not declare is drift, not noise.
+/// `bypass_actors` is deliberately **not** in this list: who may bypass a ruleset is part of the protection, so a live bypass actor the template does not declare is drift, not noise.
 ///
-/// This set is policy, not an implementation detail, so a test pins it as a
-/// literal: the list cannot grow without a reviewed edit to that test.
+/// This set is policy, not an implementation detail, so a test pins it as a literal: the list cannot grow without a reviewed edit to that test.
 const SERVER_ASSIGNED_FIELDS: &[&str] = &[
     "_links",
     "created_at",
@@ -58,18 +43,16 @@ const SERVER_ASSIGNED_FIELDS: &[&str] = &[
     "updated_at",
 ];
 
-/// The rulesets REST collection of whichever repository `gh` resolves from its
-/// working directory. `{owner}`/`{repo}` are gh's own placeholders, so the
-/// repository name is never hard-coded here.
+/// The rulesets REST collection of whichever repository `gh` resolves from its working directory.
+/// `{owner}`/`{repo}` are gh's own placeholders, so the repository name is never hard-coded here.
 const RULESETS_ENDPOINT: &str = "repos/{owner}/{repo}/rulesets";
 
-/// The one path whose membership difference is the whole point of the required-
-/// status-checks rule, so the report spells out what the list means.
+/// The one path whose membership difference is the whole point of the required- status-checks rule, so the report spells out what the list means.
 const REQUIRED_CHECKS_PATH: &str =
     "rules[required_status_checks].parameters.required_status_checks";
 
-/// Whether a difference is about a plain field or a whole rule. Only the wording
-/// differs, and the wording is the entire value of this report.
+/// Whether a difference is about a plain field or a whole rule.
+/// Only the wording differs, and the wording is the entire value of this report.
 #[derive(Debug, Clone, Copy)]
 enum What {
     Field,
@@ -92,8 +75,7 @@ enum Detail {
     Changed { template: String, live: String },
     /// The template declares it and the live ruleset has nothing there.
     OnlyInTemplate { what: What, value: String },
-    /// The live ruleset has it and the template never mentions it — normally a
-    /// field GitHub introduced after the template was last exported.
+    /// The live ruleset has it and the template never mentions it — normally a field GitHub introduced after the template was last exported.
     OnlyInLive { what: What, value: String },
     /// Order-independent membership difference for a list.
     Members {
@@ -102,8 +84,7 @@ enum Detail {
     },
 }
 
-/// One difference, addressed by a path such as
-/// `rules[pull_request].parameters.allowed_merge_methods`.
+/// One difference, addressed by a path such as `rules[pull_request].parameters.allowed_merge_methods`.
 #[derive(Debug)]
 struct Difference {
     path: String,
@@ -113,12 +94,9 @@ struct Difference {
 /// One ruleset-level finding.
 #[derive(Debug)]
 enum Finding {
-    /// A committed template with no live ruleset of that name: the protection
-    /// the tree describes is not applied to the repository at all.
+    /// A committed template with no live ruleset of that name: the protection the tree describes is not applied to the repository at all.
     NotApplied { name: String, summary: String },
-    /// A live ruleset with no committed template: real protection that no
-    /// reviewable file describes, and that a disaster-recovery restore from
-    /// this tree would silently drop.
+    /// A live ruleset with no committed template: real protection that no reviewable file describes, and that a disaster-recovery restore from this tree would silently drop.
     Untracked { name: String, summary: String },
     /// The same name on both sides, with different content.
     Drifted {
@@ -151,118 +129,118 @@ struct Report {
 impl Report {
     /// The human-readable report body, printed whether or not there is drift —
     /// a check that says nothing when it passes cannot be trusted when it fails.
-    fn render(&self) -> String {
+    fn render(&self) -> Result<String> {
         let mut out = String::new();
-        let _ = writeln!(out, "ruleset drift check");
-        let _ = writeln!(out, "  templates: {}", self.template_dir.display());
-        let _ = writeln!(out, "  live:      {}", self.live_dir.display());
-        let _ = writeln!(
+        writeln!(out, "ruleset drift check")?;
+        writeln!(out, "  templates: {}", self.template_dir.display())?;
+        writeln!(out, "  live:      {}", self.live_dir.display())?;
+        writeln!(
             out,
             "  compared:  {} committed template(s) against {} live ruleset(s), by name",
             self.template_count, self.live_count
-        );
-        let _ = writeln!(out);
+        )?;
+        writeln!(out)?;
 
         if self.findings.is_empty() {
-            let _ = writeln!(out, "in sync: every ruleset matches its template.");
-            return out;
+            writeln!(out, "in sync: every ruleset matches its template.")?;
+            return Ok(out);
         }
 
         for finding in &self.findings {
             match finding {
                 Finding::NotApplied { name, summary } => {
-                    let _ = writeln!(out, "NOT APPLIED  {name}");
-                    let _ = writeln!(
+                    writeln!(out, "NOT APPLIED  {name}")?;
+                    writeln!(
                         out,
                         "    no live ruleset has this name: the repository does not enforce \
                          the committed template at all"
-                    );
-                    let _ = writeln!(out, "    template: {summary}");
+                    )?;
+                    writeln!(out, "    template: {summary}")?;
                 }
                 Finding::Untracked { name, summary } => {
-                    let _ = writeln!(out, "UNTRACKED    {name}");
-                    let _ = writeln!(
+                    writeln!(out, "UNTRACKED    {name}")?;
+                    writeln!(
                         out,
                         "    the repository enforces a ruleset that no committed template \
                          describes"
-                    );
-                    let _ = writeln!(out, "    live: {summary}");
+                    )?;
+                    writeln!(out, "    live: {summary}")?;
                 }
                 Finding::Drifted { name, differences } => {
-                    let _ = writeln!(
+                    writeln!(
                         out,
                         "DRIFTED      {name}  ({} difference(s))",
                         differences.len()
-                    );
+                    )?;
                     for difference in differences {
-                        render_difference(&mut out, difference);
+                        render_difference(&mut out, difference)?;
                     }
                 }
             }
-            let _ = writeln!(out);
+            writeln!(out)?;
         }
 
-        let _ = writeln!(
+        writeln!(
             out,
             "{} ruleset(s) differ from the committed templates.",
             self.findings.len()
-        );
-        out
+        )?;
+        Ok(out)
     }
 
-    /// The finding recorded for `name`, if any. Tests assert on this rather than
-    /// on a position in the list.
+    /// The finding recorded for `name`, if any.
+    /// Tests assert on this rather than on a position in the list.
     #[cfg(test)]
     fn finding(&self, name: &str) -> Option<&Finding> {
         self.findings.iter().find(|finding| finding.name() == name)
     }
 }
 
-fn render_difference(out: &mut String, difference: &Difference) {
-    let _ = writeln!(out, "    {}", describe_path(&difference.path));
+fn render_difference(out: &mut String, difference: &Difference) -> Result<()> {
+    writeln!(out, "    {}", describe_path(&difference.path))?;
     match &difference.detail {
         Detail::Changed { template, live } => {
-            let _ = writeln!(out, "        template: {template}");
-            let _ = writeln!(out, "        live:     {live}");
+            writeln!(out, "        template: {template}")?;
+            writeln!(out, "        live:     {live}")?;
         }
         Detail::OnlyInTemplate { what, value } => {
-            let _ = writeln!(
+            writeln!(
                 out,
                 "        missing from live — the live ruleset has no such {} (template: {value})",
                 what.noun()
-            );
+            )?;
         }
         Detail::OnlyInLive { what, value } => {
-            let _ = writeln!(
+            writeln!(
                 out,
                 "        live only — the template predates this {} (live: {value})",
                 what.noun()
-            );
+            )?;
         }
         Detail::Members {
             missing_from_live,
             only_in_live,
         } => {
             if !missing_from_live.is_empty() {
-                let _ = writeln!(
+                writeln!(
                     out,
                     "        missing from live: {}",
                     missing_from_live.join(", ")
-                );
+                )?;
             }
             if !only_in_live.is_empty() {
-                let _ = writeln!(
+                writeln!(
                     out,
                     "        live only:         {}",
                     only_in_live.join(", ")
-                );
+                )?;
             }
         }
     }
+    Ok(())
 }
 
-/// The required-status-checks list is the one path where "which members differ"
-/// is the whole finding, so it gets a sentence instead of only a JSON path.
+/// The required-status-checks list is the one path where "which members differ" is the whole finding, so it gets a sentence instead of only a JSON path.
 fn describe_path(path: &str) -> String {
     if path == REQUIRED_CHECKS_PATH {
         format!("{path}  (the contexts that must pass before a merge)")
@@ -273,8 +251,7 @@ fn describe_path(path: &str) -> String {
 
 /// Capture every live ruleset into `out_dir`, one `<id>.json` per ruleset.
 ///
-/// The directory is replaced, not merged: a ruleset deleted in the UI must not
-/// survive as a stale file that makes the next check look clean.
+/// The directory is replaced, not merged: a ruleset deleted in the UI must not survive as a stale file that makes the next check look clean.
 pub fn run_fetch(out_dir: &Path) -> Result<()> {
     let repo = paths::repo_root();
     let listing = gh(&repo, RULESETS_ENDPOINT)?;
@@ -318,8 +295,8 @@ pub fn run_fetch(out_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// One read-only `gh api` GET. Every ruleset request in this module goes through
-/// here, so the module can be audited for writes by reading this one function:
+/// One read-only `gh api` GET.
+/// Every ruleset request in this module goes through here, so the module can be audited for writes by reading this one function:
 /// no `--method`, no fields, nothing but a GET.
 fn gh(dir: &Path, endpoint: &str) -> Result<String> {
     cmd::capture_stdout(dir, "gh", &["api", endpoint]).with_context(|| {
@@ -330,11 +307,10 @@ fn gh(dir: &Path, endpoint: &str) -> Result<String> {
     })
 }
 
-/// Compare the committed templates with a captured live snapshot, print the
-/// report, and fail when anything differs.
+/// Compare the committed templates with a captured live snapshot, print the report, and fail when anything differs.
 pub fn run_check(live_dir: &Path) -> Result<()> {
     let report = compare(&paths::ruleset_templates_dir(), live_dir)?;
-    print!("{}", report.render());
+    print!("{}", report.render()?);
     if report.findings.is_empty() {
         return Ok(());
     }
@@ -372,7 +348,6 @@ fn compare(template_dir: &Path, live_dir: &Path) -> Result<Report> {
                 name: name.clone(),
                 summary: summarize(live),
             }),
-            // Unreachable: `name` came out of one of the two maps.
             (None, None) => {}
         }
     }
@@ -388,11 +363,8 @@ fn compare(template_dir: &Path, live_dir: &Path) -> Result<Report> {
 
 /// Load every `*.json` in `dir`, keyed by the `name` each one declares.
 ///
-/// Non-JSON files are skipped by extension, which is what keeps the templates'
-/// own `README.md` out of the comparison. An empty directory is an error: a
-/// check that reads nothing reports no drift, and a silent pass is exactly the
-/// failure this command exists to prevent (a failed `gh` fetch would otherwise
-/// read as "every template is unapplied").
+/// Non-JSON files are skipped by extension, which is what keeps the templates' own `README.md` out of the comparison.
+/// An empty directory is an error: a check that reads nothing reports no drift, and a silent pass is exactly the failure this command exists to prevent (a failed `gh` fetch would otherwise read as "every template is unapplied").
 fn load_directory(dir: &Path, side: &str) -> Result<BTreeMap<String, Value>> {
     let entries = fs::read_dir(dir)
         .with_context(|| format!("cannot read the {side} ruleset directory {}", dir.display()))?;
@@ -444,8 +416,7 @@ fn load_directory(dir: &Path, side: &str) -> Result<BTreeMap<String, Value>> {
 
 /// Drop the [`SERVER_ASSIGNED_FIELDS`] from the top level of one ruleset.
 ///
-/// Top level only, on purpose: a rule parameter that happens to be called
-/// `source` is part of the protection and must still be compared.
+/// Top level only, on purpose: a rule parameter that happens to be called `source` is part of the protection and must still be compared.
 fn normalize(mut value: Value) -> Result<Value> {
     let object = value
         .as_object_mut()
@@ -456,8 +427,7 @@ fn normalize(mut value: Value) -> Result<Value> {
     Ok(value)
 }
 
-/// A one-line description of a ruleset, for the sides that have no counterpart
-/// to diff against.
+/// A one-line description of a ruleset, for the sides that have no counterpart to diff against.
 fn summarize(body: &Value) -> String {
     let target = body
         .get("target")
@@ -532,7 +502,6 @@ fn diff_objects(
                     value: display(live_value),
                 },
             }),
-            // Unreachable: `key` came out of one of the two maps.
             (None, None) => {}
         }
     }
@@ -566,11 +535,8 @@ fn diff_values(
     }
 }
 
-/// `rules` is an array whose order carries no meaning — GitHub returns the rules
-/// in whatever order it likes — so it is compared as a map keyed by rule type.
-/// That also makes every nested difference addressable as
-/// `rules[<type>].parameters.<field>` instead of `rules[3]`, which would move
-/// the moment a rule is added.
+/// `rules` is an array whose order carries no meaning — GitHub returns the rules in whatever order it likes — so it is compared as a map keyed by rule type.
+/// That also makes every nested difference addressable as `rules[<type>].parameters.<field>` instead of `rules[3]`, which would move the moment a rule is added.
 fn diff_rules(template: &[Value], live: &[Value], out: &mut Vec<Difference>) -> Result<()> {
     let template = rules_by_type(template, "template")?;
     let live = rules_by_type(live, "live")?;
@@ -595,7 +561,6 @@ fn diff_rules(template: &[Value], live: &[Value], out: &mut Vec<Difference>) -> 
                     value: canonical(live_rule),
                 },
             }),
-            // Unreachable: `rule_type` came out of one of the two maps.
             (None, None) => {}
         }
     }
@@ -619,9 +584,7 @@ fn rules_by_type<'a>(rules: &'a [Value], side: &str) -> Result<BTreeMap<String, 
     Ok(by_type)
 }
 
-/// Lists are compared as multisets: a status-check context or a merge method
-/// means the same thing wherever it sits in the array, and GitHub does not
-/// promise an order.
+/// Lists are compared as multisets: a status-check context or a merge method means the same thing wherever it sits in the array, and GitHub does not promise an order.
 fn diff_lists(path: &str, template: &[Value], live: &[Value], out: &mut Vec<Difference>) {
     let template = members(template);
     let live = members(live);
@@ -639,8 +602,7 @@ fn diff_lists(path: &str, template: &[Value], live: &[Value], out: &mut Vec<Diff
     });
 }
 
-/// One list element, in both the form that decides equality and the form a
-/// human reads.
+/// One list element, in both the form that decides equality and the form a human reads.
 struct Member {
     canonical: String,
     display: String,
@@ -658,9 +620,7 @@ fn members(values: &[Value]) -> Vec<Member> {
     members
 }
 
-/// The members of `mine` that `theirs` does not also contain, counting
-/// duplicates — so a template that lists a context twice against a live ruleset
-/// that lists it once still reports a difference.
+/// The members of `mine` that `theirs` does not also contain, counting duplicates — so a template that lists a context twice against a live ruleset that lists it once still reports a difference.
 fn surplus(mine: &[Member], theirs: &[Member]) -> Vec<String> {
     let mut remaining: BTreeMap<&str, usize> = BTreeMap::new();
     for member in theirs {
@@ -676,15 +636,13 @@ fn surplus(mine: &[Member], theirs: &[Member]) -> Vec<String> {
     out
 }
 
-/// The form that decides equality. `serde_json`'s map is a `BTreeMap` here (the
-/// `preserve_order` feature is off), so this is key-sorted and therefore stable.
+/// The form that decides equality.
+/// `serde_json`'s map is a `BTreeMap` here (the `preserve_order` feature is off), so this is key-sorted and therefore stable.
 fn canonical(value: &Value) -> String {
     value.to_string()
 }
 
-/// The form a human reads: bare strings without their JSON quotes, and a
-/// single-key `{"context": "..."}` as just the context, because a required
-/// status check reads as its context and nothing else.
+/// The form a human reads: bare strings without their JSON quotes, and a single-key `{"context": "..."}` as just the context, because a required status check reads as its context and nothing else.
 fn display(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
@@ -709,12 +667,8 @@ fn join_path(parent: &str, key: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The captured pair under `xtask/tests/fixtures/rulesets`: one real export
-    /// of this repository's live rulesets and the committed templates as they
-    /// stood beside it. It is a *snapshot*, deliberately not a mirror of
-    /// `.github/rulesets` — these tests pin what the detector does with a known
-    /// input, and must not start failing because a maintainer later fixed one
-    /// side or the other.
+    /// The captured pair under `xtask/tests/fixtures/rulesets`: one real export of this repository's live rulesets and the committed templates as they stood beside it.
+    /// It is a *snapshot*, deliberately not a mirror of `.github/rulesets` — these tests pin what the detector does with a known input, and must not start failing because a maintainer later fixed one side or the other.
     fn fixture(side: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
@@ -748,9 +702,6 @@ mod tests {
 
     #[test]
     fn server_assigned_fields_are_exactly_the_reviewed_set() {
-        // What the comparison ignores is policy, not an implementation detail:
-        // anything added here stops being protected by the check, so growing the
-        // list has to be a reviewed edit to this test as well.
         assert_eq!(
             SERVER_ASSIGNED_FIELDS,
             [
@@ -777,21 +728,19 @@ mod tests {
             report.finding("require-signed-commits").is_none(),
             "the captured require-signed-commits pair is identical once the \
              server-assigned fields are dropped, but the report says:\n{}",
-            report.render()
+            report.render().expect("render ruleset report")
         );
     }
 
     #[test]
     fn a_template_that_is_not_applied_at_all_is_reported() {
-        // The heaviest failure mode: the tree says shipped version tags cannot be
-        // moved or deleted, and no live ruleset enforces it.
         let report = captured();
         let finding = report.finding("protect-version-tags");
         assert!(
             matches!(finding, Some(Finding::NotApplied { .. })),
             "a template with no live ruleset of that name must be reported as not applied"
         );
-        let rendered = report.render();
+        let rendered = report.render().expect("render ruleset report");
         assert!(rendered.contains("NOT APPLIED  protect-version-tags"));
         assert!(
             rendered.contains("does not enforce"),
@@ -823,17 +772,14 @@ mod tests {
             report.finding("surprise"),
             Some(Finding::Untracked { .. })
         ));
-        let rendered = report.render();
+        let rendered = report.render().expect("render ruleset report");
         assert!(rendered.contains("UNTRACKED    surprise"), "{rendered}");
         assert!(rendered.contains("target tag"), "{rendered}");
     }
 
     #[test]
     fn every_required_check_missing_from_live_is_named() {
-        // The drift that actually matters: three required contexts the template
-        // declares are not required by the live ruleset, so they cannot block a
-        // merge. Naming them is the whole point of the report.
-        let rendered = captured().render();
+        let rendered = captured().render().expect("render ruleset report");
         let checks = rendered
             .lines()
             .skip_while(|line| !line.contains(REQUIRED_CHECKS_PATH))
@@ -859,7 +805,7 @@ mod tests {
 
     #[test]
     fn differences_are_reported_per_rule_type() {
-        let rendered = captured().render();
+        let rendered = captured().render().expect("render ruleset report");
         assert!(
             rendered.contains("rules[pull_request].parameters.dismiss_stale_reviews_on_push"),
             "a changed rule parameter must be addressed by rule type:\n{rendered}"
@@ -876,7 +822,7 @@ mod tests {
 
     #[test]
     fn a_field_only_github_sets_is_reported_as_predating_the_template() {
-        let rendered = captured().render();
+        let rendered = captured().render().expect("render ruleset report");
         assert!(
             rendered.contains(
                 "rules[pull_request].parameters.require_extra_approval_for_unattributed_changes"
@@ -892,8 +838,6 @@ mod tests {
 
     #[test]
     fn only_server_assigned_fields_differing_is_in_sync() {
-        // Non-vacuity of the normalization: both bodies carry every ignored
-        // field, with different values, and nothing else differs.
         let (template_dir, live_dir) = dirs(
             "normalized",
             &[(
@@ -919,14 +863,12 @@ mod tests {
         assert!(
             report.findings.is_empty(),
             "only the ignored fields differ, so this must be in sync:\n{}",
-            report.render()
+            report.render().expect("render ruleset report")
         );
     }
 
     #[test]
     fn a_bypass_actor_only_in_live_is_reported() {
-        // bypass_actors is empty on both sides of the captured fixtures, so
-        // without this the "never drop bypass_actors" rule would pass vacuously.
         let (template_dir, live_dir) = dirs(
             "bypass",
             &[(
@@ -942,7 +884,7 @@ mod tests {
         );
         let report = compare(&template_dir, &live_dir).unwrap();
         assert!(matches!(report.finding("a"), Some(Finding::Drifted { .. })));
-        let rendered = report.render();
+        let rendered = report.render().expect("render ruleset report");
         assert!(rendered.contains("bypass_actors"), "{rendered}");
         assert!(rendered.contains("RepositoryRole"), "{rendered}");
     }
@@ -970,7 +912,7 @@ mod tests {
         assert!(
             report.findings.is_empty(),
             "rules and check contexts are unordered sets:\n{}",
-            report.render()
+            report.render().expect("render ruleset report")
         );
     }
 
@@ -988,7 +930,6 @@ mod tests {
 
     #[test]
     fn an_empty_live_directory_is_an_error() {
-        // A failed capture must not read as "every template is unapplied".
         let (template_dir, live_dir) = dirs(
             "empty-live",
             &[("a.json", r#"{"name":"a","target":"branch"}"#)],
@@ -1032,10 +973,6 @@ mod tests {
 
     #[test]
     fn the_committed_templates_all_load() {
-        // Content-independent: this must keep passing whichever way the drift is
-        // resolved. It pins that the real directory is readable, that the
-        // templates parse and declare unique names, and that README.md beside
-        // them is skipped rather than treated as a malformed ruleset.
         let templates = load_directory(&paths::ruleset_templates_dir(), "template")
             .expect("the committed ruleset templates must load");
         assert!(

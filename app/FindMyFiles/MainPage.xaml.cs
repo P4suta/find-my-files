@@ -11,20 +11,15 @@ using Windows.System;
 
 namespace FindMyFiles;
 
-/// <summary>
-/// Wiring only: builds the ViewModel graph and connects view events to it.
-/// Imperative ListView work (viewport/selection restore, row actions) lives
-/// in <see cref="ResultsViewportManager"/>; the F12 panel chrome in
-/// <see cref="Views.PerfPanel"/>; converters in
-/// <see cref="Converters.UiConverters"/>.
+/// <summary> Wiring only: builds the ViewModel graph and connects view events to it.
+/// Imperative ListView work (viewport/selection restore, row actions) lives in <see cref="ResultsViewportManager"/>; the F12 panel chrome in <see cref="Views.PerfPanel"/>; converters in <see cref="Converters.UiConverters"/>.
 /// </summary>
-// View code-behind: imperative ListView/keyboard/menu wiring, not unit-tested (ADR-0022).
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed partial class MainPage : Page
 {
-    /// <summary>Root of the page's ViewModel graph. The sole `x:Bind` source;
-    /// it ties together the search, results, notification and diagnostics-panel
-    /// sub-ViewModels.</summary>
+    /// <summary>Root of the page's ViewModel graph.
+    /// The sole `x:Bind` source;
+    /// it ties together the search, results, notification and diagnostics-panel sub-ViewModels.</summary>
     internal MainViewModel ViewModel { get; }
 
     private readonly ResultsViewportManager _viewport;
@@ -32,9 +27,7 @@ public sealed partial class MainPage : Page
     private bool _initialPrimaryFocusPending = true;
 
     /// <summary>Builds the ViewModel graph and wires view events (IME composition,
-    /// drag &amp; drop, keyboard, sort headers) to the ViewModel and
-    /// <see cref="ResultsViewportManager"/>. Localized tooltips/automation names
-    /// are set in code here, and the language radio reflects persisted settings.
+    /// drag &amp; drop, keyboard, sort headers) to the ViewModel and <see cref="ResultsViewportManager"/>. Localized tooltips/automation names are set in code here, and the language radio reflects persisted settings.
     /// Finally initializes the empty/results visual state and starts `StartAsync`.</summary>
     public MainPage()
     {
@@ -44,8 +37,6 @@ public sealed partial class MainPage : Page
             openServiceManager: OpenServiceManager);
         InitializeComponent();
 
-        // Attached properties (tooltip / accessibility name) localize in code —
-        // simpler than the x:Uid attached-property resw syntax.
         ToolTipService.SetToolTip(OptionsButton, Loc.Get("OptionsButton_ToolTip"));
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
             OptionsButton, Loc.Get("OptionsButton_Name"));
@@ -57,28 +48,17 @@ public sealed partial class MainPage : Page
         _viewport = new ResultsViewportManager(ResultsList);
         ViewModel.Results.ResultsPublished += _viewport.OnResultsPublished;
 
-        // IME: half-composed text (romaji fragments, candidate strings)
-        // must not query — search the final string on commit/cancel.
         SearchBox.TextCompositionStarted += (_, _) => ViewModel.Search.NotifyCompositionStarted();
         SearchBox.TextCompositionEnded += (_, _) =>
             ViewModel.Search.NotifyCompositionEnded(ViewModel.SearchText);
 
-        // A soft restart (ADR-0036) re-navigates the Frame to a fresh MainPage; the
-        // Frame does not dispose the page it replaces, so release the old view
-        // model's engine-event subscriptions here. The disposal is idempotent, so
-        // it coexists with the Window.Closed engine dispose in App.
         Unloaded += OnUnloaded;
 
-        // Empty query = large centered search bar (Empty); on input it moves up
-        // and shows results (Results).
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         Loaded += (_, _) =>
         {
             UpdateSearchState(useTransitions: false);
 
-            // Loaded precedes WinUI's final custom-title-bar focus assignment on
-            // some launches. Defer one dispatcher turn so our primary control is
-            // the last intentional focus decision, not transient window chrome.
             DispatcherQueue.TryEnqueue(
                 () => UpdateAvailabilityFocusAndAnnouncement(
                     announceSetup: ViewModel.IsDisconnected,
@@ -92,10 +72,8 @@ public sealed partial class MainPage : Page
     }
 
 #if FMF_TEST_SEAMS
-    /// <summary>UI-test bundle only: after the real fake-engine startup path has
-    /// completed, optionally inject a stale service version through the same
-    /// ViewModel method used by pipe ServiceInfo. Stable artifacts compile out
-    /// both the flag string and this method.</summary>
+    /// <summary>UI-test bundle only: after the real fake-engine startup path has completed, optionally inject a stale service version through the same ViewModel method used by pipe ServiceInfo.
+    /// Stable artifacts compile out both the flag string and this method.</summary>
     private async Task StartForUiAutomationAsync()
     {
         await ViewModel.StartAsync();
@@ -135,9 +113,6 @@ public sealed partial class MainPage : Page
             nameof(MainViewModel.IsDisconnected),
             StringComparison.Ordinal))
         {
-            // Defer until x:Bind has applied both sides' Visibility. Moving
-            // focus before the old subtree collapses can leave the UIA focus
-            // on an element that no longer exists visually.
             DispatcherQueue.TryEnqueue(
                 () => UpdateAvailabilityFocusAndAnnouncement(announceSetup: true));
         }
@@ -220,18 +195,14 @@ public sealed partial class MainPage : Page
                 ("can_search", ViewModel.CanSearch));
         }
 
-        // Resolving starts before either availability surface is focusable.
-        // Preserve the one-shot handoff across those expected failed attempts;
-        // after the first real primary control accepts focus, later state
-        // transitions resume the normal "preserve user focus" policy above.
         if (focusMoved)
         {
             _initialPrimaryFocusPending = false;
         }
     }
 
-    /// <summary>Called by the window after activation when global focus is still
-    /// on window chrome. Content/dialog focus never enters this path.</summary>
+    /// <summary>Called by the window after activation when global focus is still on window chrome.
+    /// Content/dialog focus never enters this path.</summary>
     internal void FocusPrimaryAction() =>
         UpdateAvailabilityFocusAndAnnouncement(
             announceSetup: false,
@@ -267,10 +238,6 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        // Style-setter bindings are not reliably applied to recycled WinUI
-        // ListViewItem automation peers. Bind explicitly to the current row so
-        // every realized container has a stable position ID and receives the
-        // completed screen-reader summary after its virtual page is filled.
         container.SetBinding(
             Microsoft.UI.Xaml.Automation.AutomationProperties.AutomationIdProperty,
             new Microsoft.UI.Xaml.Data.Binding
@@ -289,11 +256,9 @@ public sealed partial class MainPage : Page
             });
     }
 
-    /// <summary>Empty (large centered search bar only) ↔ Results (search bar on
-    /// top + results). Switches on whether SearchText is empty. ContentHost's
-    /// RepositionThemeTransition smooths the search bar's move and the ListView's
-    /// AddDeleteThemeTransition smooths the results' appearance (virtualization
-    /// runs only on container realization and does not conflict with Reset).</summary>
+    /// <summary>Empty (large centered search bar only) ↔ Results (search bar on top + results).
+    /// Switches on whether SearchText is empty.
+    /// ContentHost's RepositionThemeTransition smooths the search bar's move and the ListView's AddDeleteThemeTransition smooths the results' appearance (virtualization runs only on container realization and does not conflict with Reset).</summary>
     private void UpdateSearchState(bool useTransitions)
     {
         var state = string.IsNullOrEmpty(ViewModel.SearchText) ? "EmptyState" : "ResultsState";
@@ -308,26 +273,18 @@ public sealed partial class MainPage : Page
         }
     }
 
-    // Gear button → the settings / status / diagnostics dialog.
     private void OptionsButton_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         Views.SettingsDialog.OpenAsync(ViewModel).Forget("settings-ui");
 
-    // Primary button of the disconnected setup screen → one-click register → auto relaunch.
     private void EnableSearch_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         ViewModel.EnableSearchAsync().Forget("service-ui");
 
-    // Recovery must remain reachable when no engine can be resolved. The settings
-    // surface owns diagnostics plus service repair/uninstall; unlike the search
-    // gear this button is part of the disconnected setup screen itself.
     private void SetupRecovery_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         Views.SettingsDialog.OpenAsync(ViewModel).Forget("settings-ui");
 
-    // Injected into MainViewModel's version-skew notification. Keeping this
-    // coordination here prevents the ViewModel from referencing a WinUI view.
     private void OpenServiceManager() =>
         Views.ServiceManagerDialog.OpenAsync().Forget("service-ui");
 
-    // ── Drag & drop: folder → path: filter, file → name search ──────────
     private void Page_DragOver(object sender, Microsoft.UI.Xaml.DragEventArgs e)
     {
         if (e.DataView.Contains(StandardDataFormats.StorageItems))
@@ -340,9 +297,8 @@ public sealed partial class MainPage : Page
         }
     }
 
-    /// <summary>Drop-in only (rows are not drag-out sources). Anything that
-    /// goes wrong is logged and swallowed — a failed drop must never take
-    /// the app down (don't crash).</summary>
+    /// <summary>Drop-in only (rows are not drag-out sources).
+    /// Anything that goes wrong is logged and swallowed — a failed drop must never take the app down (don't crash).</summary>
     private async void Page_Drop(object sender, Microsoft.UI.Xaml.DragEventArgs e)
     {
         var deferral = e.GetDeferral();
@@ -362,7 +318,6 @@ public sealed partial class MainPage : Page
 
             if (item.IsOfType(StorageItemTypes.Folder))
             {
-                // Scope the current query to the dropped folder.
                 ViewModel.SearchText = $"path:\"{item.Path}\" " + ViewModel.SearchText;
             }
             else
@@ -380,7 +335,6 @@ public sealed partial class MainPage : Page
         }
     }
 
-    // ── Keyboard / pointer / menu → viewport manager and ViewModel ──────
     private void SearchBox_KeyDown(object sender, KeyRoutedEventArgs e)
     {
         switch (e.Key)

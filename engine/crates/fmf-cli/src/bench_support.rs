@@ -1,33 +1,29 @@
-//! Shared support for the `bench` command: the fixed query set, the report
-//! shapes (= the baseline JSON in/out format), percentile helpers and the
-//! snapshot restore scenario. Measurement discipline is pinned by ADR-0013 —
-//! any logic change here invalidates every recorded baseline, so this module
-//! is collect-and-relocate only.
+//! Shared support for the `bench` command: the fixed query set, the report shapes (= the baseline JSON in/out format), percentile helpers and the snapshot restore scenario.
+//! Measurement discipline is pinned by ADR-0013 —
+//! any logic change here invalidates every recorded baseline, so this module is collect-and-relocate only.
 
 use std::time::Instant;
 
-use fmf_core::index::VolumeIndex;
+use fmf_runtime::index::VolumeIndex;
+
+const MEDIAN_DIVISOR: usize = 2;
+/// Maximum ready working-set bytes per indexed entry.
+pub const MAX_INDEX_BYTES_PER_ENTRY: u64 = 110;
+const MAX_ENTRY_COUNT_DRIFT_DENOMINATOR: u64 = 10;
+/// Maximum relative entry-count drift.
+pub const MAX_ENTRY_COUNT_DRIFT_RATIO: f64 = 1.0 / MAX_ENTRY_COUNT_DRIFT_DENOMINATOR as f64;
 
 pub const BENCH_QUERIES: &[&str] = &[
-    "",                         // match-all (engine capability; the UI keeps an empty box blank)
-    "e",                        // 1 char, huge hit count
-    "a",                        // 1 char, huge hit count
-    "win",                      // common 3-char substring
-    "Win",                      // smart case w/ uppercase: original-name verification path
-    "qzx",                      // rare substring
-    "ext:dll",                  // extension filter
-    "size:>100mb path:windows", // composite
-    "*.rs",                     // wildcard
-    // Regex with a literal → the prefilter keeps it on the pool sweep, so it
-    // honors the p99 budget like any indexed query (ADR-0023).
+    "",
+    "e",
+    "a",
+    "win",
+    "Win",
+    "qzx",
+    "ext:dll",
+    "size:>100mb path:windows",
+    "*.rs",
     "regex:win.*\\.dll",
-    // NOTE: a literal-less regex (e.g. `[0-9]{6,}`) has no literal to prefilter
-    // on, so it is a full scan whose cost scales linearly with entry count —
-    // ~29 ms @1M (within budget) but past the fixed 50 ms line on volumes well
-    // over the 1M spec scale. It is measured in the criterion micro-bench
-    // (query/regex_scan, ungated) rather than gated here, where the absolute
-    // budget would fail purely because the machine holds more files than spec
-    // (ADR-0023). Indexing regex is rejected by ADR-0001/0002.
 ];
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -40,17 +36,14 @@ pub struct QueryBench {
     pub p50_memo_us: u64,
     pub p50_scan_us: u64,
     pub p50_materialize_us: u64,
-    /// First iteration of the run. Single sample: recorded for diagnosis,
-    /// never gated — it also pays for building this query's lazy derived
-    /// caches, so it measures a different thing than the steady-state
-    /// percentiles beside it.
+    /// First iteration of the run.
+    /// Single sample: recorded for diagnosis,
+    /// never gated — it also pays for building this query's lazy derived caches, so it measures a different thing than the steady-state percentiles beside it.
     #[serde(default)]
     pub cold_us: u64,
 }
 
-/// Snapshot save/restore timings (page-cache warm: the reproducible
-/// CPU-bound part of the ≤2s restore gate; cold I/O is not benchable
-/// without admin cache-purge APIs and is too noisy anyway).
+/// Snapshot save/restore timings (page-cache warm: the reproducible CPU-bound part of the ≤2s restore gate; cold I/O is not benchable without admin cache-purge APIs and is too noisy anyway).
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct RestoreBench {
     pub file_bytes: u64,
@@ -67,9 +60,8 @@ pub struct BenchReport {
     /// Wall time for the real-volume initial index build.
     #[serde(default)]
     pub index_ms: u64,
-    /// Ready-state process working set, captured once the index is built and
-    /// before any query has caused a lazy derived cache to be built. This is
-    /// the steady state the B/entry gate is defined against.
+    /// Ready-state process working set, captured once the index is built and before any query has caused a lazy derived cache to be built.
+    /// This is the steady state the B/entry gate is defined against.
     #[serde(default)]
     pub working_set_bytes: u64,
     pub peak_working_set_bytes: u64,
@@ -79,8 +71,7 @@ pub struct BenchReport {
     pub restore: Option<RestoreBench>,
 }
 
-/// Initial-index acceptance budget: 8 s at/below 250k entries, then linearly
-/// relax to 60 s at 1M (and continue with that slope for larger real volumes).
+/// Initial-index acceptance budget: 8 s at/below 250k entries, then linearly relax to 60 s at 1M (and continue with that slope for larger real volumes).
 #[must_use]
 pub const fn index_budget_ms(entries: u64) -> u64 {
     const BASE_ENTRIES: u64 = 250_000;
@@ -99,36 +90,31 @@ pub const fn index_budget_ms(entries: u64) -> u64 {
     }
 }
 
-/// Ready-state process RAM acceptance line (ADR-0013 / project performance
-/// target), expressed without floating-point rounding.
+/// Ready-state process RAM acceptance line (ADR-0013 / project performance target), expressed without floating-point rounding.
 #[must_use]
 pub const fn working_set_within_budget(report: &BenchReport) -> bool {
-    report.entries == 0 || report.working_set_bytes <= report.entries.saturating_mul(110)
+    report.entries == 0
+        || report.working_set_bytes <= report.entries.saturating_mul(MAX_INDEX_BYTES_PER_ENTRY)
 }
 
 /// Whether a real-volume run is still comparable with its recorded baseline.
 ///
-/// A larger corpus can make every relative timing look slower even when the
-/// implementation is unchanged, while a smaller one can hide a regression.
-/// The ±10% boundary is inclusive; anything beyond it requires an explicit
-/// baseline refresh before a verdict is meaningful.
+/// A larger corpus can make every relative timing look slower even when the implementation is unchanged, while a smaller one can hide a regression.
+/// The ±10% boundary is inclusive; anything beyond it requires an explicit baseline refresh before a verdict is meaningful.
 #[must_use]
 pub const fn entry_count_within_baseline(entries: u64, baseline_entries: u64) -> bool {
-    entries.abs_diff(baseline_entries) <= baseline_entries / 10
+    entries.abs_diff(baseline_entries) <= baseline_entries / MAX_ENTRY_COUNT_DRIFT_DENOMINATOR
 }
 
 pub fn median(mut v: Vec<u64>) -> u64 {
-    // Defensive only — every caller passes a fixed RUNS-sized vector.
     if v.is_empty() {
         return 0;
     }
     v.sort_unstable();
-    v[v.len() / 2]
+    v[v.len() / MEDIAN_DIVISOR]
 }
 
-/// Removes the bench's temporary snapshot on every exit path — the `?`
-/// returns in [`bench_restore`] used to leak it, and the old `remove_file`
-/// failure was silent.
+/// Removes the bench's temporary snapshot on every exit path — the `?` returns in [`bench_restore`] used to leak it, and the old `remove_file` failure was silent.
 struct TempSnapshotGuard(std::path::PathBuf);
 
 impl Drop for TempSnapshotGuard {
@@ -143,8 +129,7 @@ impl Drop for TempSnapshotGuard {
 }
 
 /// Save the freshly built index to a temp snapshot and measure restores.
-/// Page-cache-warm by design: reproducible CPU-bound numbers for the
-/// restore→ready gate's deserialization + `frn_map` rebuild share.
+/// Page-cache-warm by design: reproducible CPU-bound numbers for the restore→ready gate's deserialization + `frn_map` rebuild share.
 pub fn bench_restore(idx: &VolumeIndex) -> Result<RestoreBench, Box<dyn std::error::Error>> {
     const RUNS: usize = 10;
     let temp = std::env::temp_dir().join(format!("fmf-bench-{}.fmfidx", std::process::id()));
@@ -167,7 +152,7 @@ pub fn bench_restore(idx: &VolumeIndex) -> Result<RestoreBench, Box<dyn std::err
         file_bytes,
         entries,
         save_ms,
-        p50_ms: runs[RUNS / 2],
+        p50_ms: runs[RUNS / MEDIAN_DIVISOR],
         min_ms: runs[0],
     })
 }

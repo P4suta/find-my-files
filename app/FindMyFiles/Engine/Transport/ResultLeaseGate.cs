@@ -1,9 +1,7 @@
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// Linearizable admission gate shared by page fetches and presentation-basis
-/// use. Disposal closes admission first and claims the one wire release only
-/// after all already-admitted operations drain.
+/// <summary> Linearizable admission gate shared by page fetches and presentation-basis use.
+/// Disposal closes admission first and claims the one wire release only after all already-admitted operations drain.
 /// </summary>
 internal sealed class ResultLeaseGate
 {
@@ -12,8 +10,7 @@ internal sealed class ResultLeaseGate
     private bool _disposed;
     private bool _releaseClaimed;
 
-    /// <summary>Attempts to admit one operation before disposal closes the gate.</summary>
-    /// <returns>True when the caller owns a lease that it must release.</returns>
+    /// <summary>Attempts to admit one operation before disposal closes the gate.</summary> <returns>True when the caller owns a lease that it must release.</returns>
     internal bool TryAcquire()
     {
         lock (_gate)
@@ -28,8 +25,7 @@ internal sealed class ResultLeaseGate
         }
     }
 
-    /// <summary>Returns one admitted operation to the gate.</summary>
-    /// <returns>True exactly once when the caller must release the result.</returns>
+    /// <summary>Returns one admitted operation to the gate.</summary> <returns>True exactly once when the caller must release the result.</returns>
     internal bool Release()
     {
         lock (_gate)
@@ -44,8 +40,7 @@ internal sealed class ResultLeaseGate
         }
     }
 
-    /// <summary>Closes admission and marks the result for deferred release.</summary>
-    /// <returns>True exactly once when the caller must release the result.</returns>
+    /// <summary>Closes admission and marks the result for deferred release.</summary> <returns>True exactly once when the caller must release the result.</returns>
     internal bool Dispose()
     {
         lock (_gate)

@@ -1,22 +1,8 @@
-# Watches the mise toolchain pins (mise.toml) for versions that have fallen
-# behind their pin — the gap Dependabot can't see.
-#
-# Dependabot covers cargo (engine + xtask), nuget and github-actions, majors
-# included (group filters only *group* the PRs; out-of-filter majors still open
-# as individual PRs). It has no mise ecosystem, so the pinned local-development
-# toolchain (rust, mdbook, cargo-llvm-cov, cargo-deny, …) drifts silently —
-# exactly how cargo-deny sat on 0.16 while 0.19 shipped. CI provisions only its
-# job-specific subset, with mirror parity enforced by `just doctor`.
-#
-# `mise outdated --bump` compares each pin against the latest available version
-# *beyond* the pin (not just within it), so a pin of "0.16" against a 0.19
-# release reports bump=0.19. We act only on entries with a non-null bump; a
-# within-pin patch (e.g. dotnet "10" → 10.0.301) is left to `mise install`.
 name: mise-outdated
 
 on:
   schedule:
-    - cron: "17 5 * * 1" # weekly Mon 05:17 UTC (offset from cargo-audit/scorecard/sbom-monitor)
+    - cron: "17 5 * * 1"
   workflow_dispatch:
 
 permissions: {}
@@ -27,8 +13,7 @@ concurrency:
 
 jobs:
   check:
-    # Use the product platform so OS-gated tools (notably WinAppCli) participate
-    # in the same freshness calculation as the portable toolchain.
+    name: check
     runs-on: windows-2025
     timeout-minutes: 10
     permissions:
@@ -40,13 +25,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # install: false — we only need the mise binary to *query* registries for
-      # latest versions; provisioning every pinned tool (cargo: backends build
-      # from source) would be slow and pointless for a version check.
-      - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: "v2026.10.15"
-          sha256: 8b53511db7d036db984a92eb63e139d9942a8d179ddbe4e880addfa04a924f96
+          version: "v2026.11.2"
+          sha256: 490326d33fcde0686f1280f69b9b021e1842ee2bbd71249c1ebadc2a0efad26b
           install: false
 
       - name: Check pins against latest (beyond-pin)
@@ -70,7 +52,7 @@ jobs:
           echo "Tools whose pin is behind: $drift"
 
       - name: Hand the bounded drift report to the issue writer
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mise-outdated-report
           path: drift-table.md
@@ -78,18 +60,54 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  # Only this API-only runner receives Issues write authority. It never checks
-  # out repository code or executes mise / registry responses.
   report:
+    name: report
     needs: check
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
-      actions: read # download the bounded outdated-report handoff artifact
-      issues: write # open, update, or close the dependency freshness issue
+      actions: read # Permission: Download the bounded dependency report.
+      issues: write # Permission: Maintain the dependency freshness issue.
+    env:
+      TRACKING_ISSUE_QUERY: 'if length >= 100 then error("toolchain issue listing may be truncated") else map(select(.title == "mise toolchain pins are behind latest" and .author.is_bot == true and .author.login == "app/github-actions")) | if length > 1 then error("duplicate toolchain tracking issues") else .[0].number // empty end end'
     steps:
+      - name: Verify tracking issue ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidates='[
+            {"number":2,"title":"Unrelated issue","author":{"login":"owner","is_bot":false}},
+            {"number":3,"title":"mise toolchain pins are behind latest","author":{"login":"owner","is_bot":false}},
+            {"number":4,"title":"mise toolchain pins are behind latest","author":{"login":"app/renovate","is_bot":true}},
+            {"number":5,"title":"Another workflow issue","author":{"login":"app/github-actions","is_bot":true}},
+            {"number":7,"title":"mise toolchain pins are behind latest","author":{"login":"app/github-actions","is_bot":false}},
+            {"number":8,"title":"mise toolchain pins are behind latest","author":null},
+            {"number":1,"title":"mise toolchain pins are behind latest","author":{"login":"app/github-actions","is_bot":true}}
+          ]'
+          selected=$(printf '%s\n' "$candidates" | jq -r "$TRACKING_ISSUE_QUERY")
+          if [ "$selected" != 1 ]; then
+            echo 'Issue selection must reject unrelated authors and titles.' >&2
+            exit 1
+          fi
+          unrelated=$(printf '%s\n' "$candidates" | jq 'map(select(.number != 1))')
+          if [ -n "$(printf '%s\n' "$unrelated" | jq -r "$TRACKING_ISSUE_QUERY")" ]; then
+            echo 'Issue selection must return no target when the tracker is absent.' >&2
+            exit 1
+          fi
+          duplicates=$(printf '%s\n' "$candidates" | jq '[.[] | select(.number == 1)] | . + [.[0] | .number = 6]')
+          if printf '%s\n' "$duplicates" | jq -r "$TRACKING_ISSUE_QUERY" >/dev/null 2>&1; then
+            echo 'Issue selection must reject duplicate owned trackers.' >&2
+            exit 1
+          fi
+          truncated=$(jq -cn '[range(0;100) | {number:.,title:"Unrelated issue",author:{login:"owner",is_bot:false}}]')
+          if printf '%s\n' "$truncated" | jq -r "$TRACKING_ISSUE_QUERY" >/dev/null 2>&1; then
+            echo 'Issue selection must reject a potentially incomplete listing.' >&2
+            exit 1
+          fi
+          echo 'Tracking issue ownership and ambiguity checks passed.'
+
       - name: Download the bounded drift report
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: mise-outdated-report
 
@@ -101,9 +119,10 @@ jobs:
           DRIFT: ${{ needs.check.outputs.drift }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          set -euo pipefail
+          existing=$(gh issue list --label mise-outdated --state open --limit 100 --json number,title,author --jq "$TRACKING_ISSUE_QUERY")
           gh label create mise-outdated --color FBCA04 --force \
             --description "A mise.toml toolchain pin has fallen behind its latest version (mise-outdated.yml)"
-          existing=$(gh issue list --label mise-outdated --state open --json number --jq '.[0].number // empty')
 
           if [ "$DRIFT" -gt 0 ]; then
             {

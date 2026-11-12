@@ -1,9 +1,6 @@
-//! `just doctor` — a fast check that the dev environment matches `mise.toml`
-//! and the gate prerequisites, so a contributor knows right after `just setup`
-//! whether anything is off.
+//! `just doctor` — a fast check that the dev environment matches `mise.toml` and the gate prerequisites, so a contributor knows right after `just setup` whether anything is off.
 //!
-//! The pure helpers (pin parsing, CI-mirror parity, version matching, rendering)
-//! are unit-tested; `run` is the only part that shells out to the tools.
+//! The pure helpers (pin parsing, CI-mirror parity, version matching, rendering) are unit-tested; `run` is the only part that shells out to the tools.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -63,10 +60,6 @@ impl Check {
     }
 }
 
-// Pull every tool pin out of mise.toml. Most pins are bare strings; download
-// backends use a table with a `version` field so identity, URL, and checksum can
-// stay together. Backend-qualified tools are kept: a required subcommand must
-// not disappear behind a falsely green doctor.
 fn parse_mise_pins(mise_toml: &str) -> BTreeMap<String, String> {
     let mut pins = BTreeMap::new();
     let Ok(doc) = mise_toml.parse::<DocumentMut>() else {
@@ -214,9 +207,6 @@ fn load_ci_yaml(path: &str, source: &str) -> std::result::Result<CiYaml, String>
         ));
     }
 
-    // YamlLoader is itself a parser-event receiver. In addition to producing the
-    // typed tree, it rejects duplicate keys at every mapping depth before a
-    // LinkedHashMap could hide the earlier value.
     let documents = YamlLoader::load_from_str(source)
         .map_err(|error| format!("{path}: invalid YAML: {error}"))?;
     if documents.len() != 1 {
@@ -352,14 +342,12 @@ fn parse_ci_steps(node: &Yaml, context: &str) -> std::result::Result<Vec<CiStep>
     Ok(parsed)
 }
 
-// Explicit aliases for CI binaries whose upstream executable/package name is
-// not the mise key. Adding a new mirrored taiki-e tool without updating this
-// policy is a hard failure instead of a silently unverified duplicate pin.
 fn taiki_mise_key(tool: &str) -> Option<&'static str> {
     match tool {
         "just" => Some("just"),
         "mdbook" => Some("cargo:mdbook"),
         "cargo-about" => Some("cargo:cargo-about"),
+        "osv-scanner" => Some("github:google/osv-scanner"),
         "cargo-nextest" | "nextest" => Some("cargo:cargo-nextest"),
         "cargo-deny" => Some("cargo:cargo-deny"),
         "cargo-machete" => Some("cargo:cargo-machete"),
@@ -372,14 +360,9 @@ fn taiki_mise_key(tool: &str) -> Option<&'static str> {
     }
 }
 
-// These binaries intentionally have no local mise mirror. They are narrow,
-// CI-only tools: advisory scanning and remote SBOM monitoring. Every exception
-// remains version-pinned in YAML. cargo-fuzz is audited separately because its
-// upstream has no checksummed prebuilt manifest.
 fn taiki_mirror_exception(tool: &str) -> Option<&'static str> {
     match tool {
         "cargo-audit" => Some("CI-only advisory scanner"),
-        "osv-scanner" => Some("CI-only release SBOM monitor"),
         _ => None,
     }
 }
@@ -688,7 +671,7 @@ fn ci_mirror_parity(
                         "{path}: cargo-sbom must be the sole audited locked crates.io install under runner temp"
                     ));
                     } else {
-                        parity.excepted += 1;
+                        compare_mirror_pin(&mut parity, pins, path, "cargo:cargo-sbom", "0.10.0");
                     }
                 }
             }
@@ -922,9 +905,6 @@ fn ci_mirror_check_at(root: &Path, pins: &BTreeMap<String, String>, mise_toml: &
     }
 }
 
-// Whether `actual` satisfies the loose mise `pin`: each dot-separated part of the
-// pin must equal the matching leading part of `actual`. Pin `10` accepts
-// `10.0.118`; pin `1.95` accepts `1.95.3` but not `1.96.0`.
 fn version_satisfies(pin: &str, actual: &str) -> bool {
     let mut actual_parts = actual.split('.');
     for p in pin.split('.') {
@@ -935,8 +915,6 @@ fn version_satisfies(pin: &str, actual: &str) -> bool {
     true
 }
 
-// Return the first whitespace-separated version token, accepting an optional
-// leading `v` as well as output such as `rustc 1.95.0`.
 fn first_version_token(raw: &str) -> Option<&str> {
     raw.split_whitespace().find_map(|tok| {
         let numeric = tok.strip_prefix('v').unwrap_or(tok);
@@ -948,7 +926,6 @@ fn first_version_token(raw: &str) -> Option<&str> {
     })
 }
 
-// Probe one tool: compare the version it reports against its mise pin.
 fn tool_check(
     name: &str,
     pin_key: &str,
@@ -959,13 +936,14 @@ fn tool_check(
     let Some(pin) = pins.get(pin_key) else {
         return Check::fail(name, "not pinned in mise.toml");
     };
-    let Some(raw) = cmd::capture(&paths::repo_root(), program, args) else {
-        return Check::fail(
-            name,
-            &format!(
-                "pinned {pin}, but the version probe via `{program}` failed — run `mise install`"
-            ),
-        );
+    let raw = match cmd::capture_stdout(&paths::repo_root(), program, args) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return Check::fail(
+                name,
+                &format!("pinned {pin}, but the version probe failed: {error:#}"),
+            );
+        }
     };
     let Some(actual) = first_version_token(&raw) else {
         return Check::fail(
@@ -985,8 +963,6 @@ fn tool_check(
 
 #[cfg(windows)]
 fn elevation_detail() -> String {
-    // High Mandatory Level (S-1-16-12288) or System (S-1-16-16384) in whoami's
-    // group list means an elevated token — no extra crate dependency needed.
     match cmd::capture(&paths::repo_root(), "whoami", &["/groups"]) {
         Some(groups) if groups.contains("S-1-16-12288") || groups.contains("S-1-16-16384") => {
             "ADMIN — full $MFT / USN access".to_owned()
@@ -1001,10 +977,6 @@ fn elevation_detail() -> String {
     "n/a (non-Windows host)".to_owned()
 }
 
-// ADR-0021: every generated artifact except C# obj lives under build/. The
-// required `build/` ignore rule also matches nested directories, and the WinUI
-// project's local ignore file masks its conventional output directories, so
-// doctor probes these paths directly instead of relying on `git status`.
 const MISPLACED_OUTPUT_PATHS: &[&str] = &[
     "target",
     "engine/target",
@@ -1119,8 +1091,7 @@ fn overall(checks: &[Check]) -> Status {
     }
 }
 
-/// Print the environment report and fail (non-zero exit) only when a `[FAIL]`
-/// item is present — a `[WARN]` leaves the environment usable.
+/// Print the environment report and fail (non-zero exit) only when a `[FAIL]` item is present — a `[WARN]` leaves the environment usable.
 pub fn run() -> Result<()> {
     let mise_toml = std::fs::read_to_string(paths::mise_toml()).unwrap_or_default();
     let pins = parse_mise_pins(&mise_toml);
@@ -1145,13 +1116,13 @@ pub fn run() -> Result<()> {
             "cargo-binstall",
             "cargo-binstall",
             "mise",
-            &["exec", "cargo-binstall", "--command", "cargo-binstall -V"][..],
+            &["exec", "cargo-binstall", "--", "cargo-binstall", "-V"][..],
         ),
         (
             "winapp",
             "http:winappcli",
             "mise",
-            &["exec", "http:winappcli", "--command", "winapp --version"][..],
+            &["exec", "http:winappcli", "--", "winapp", "--version"][..],
         ),
         ("just", "just", "just", &["--version"][..]),
         ("lefthook", "lefthook", "lefthook", &["version"][..]),
@@ -1197,7 +1168,7 @@ pub fn run() -> Result<()> {
             "mdbook",
             "cargo:mdbook",
             "mise",
-            &["exec", "cargo:mdbook", "--command", "mdbook --version"][..],
+            &["exec", "cargo:mdbook", "--", "mdbook", "--version"][..],
         ),
         ("taplo", "cargo:taplo-cli", "taplo", &["--version"][..]),
         ("typos", "cargo:typos-cli", "typos", &["--version"][..]),
@@ -1220,8 +1191,9 @@ pub fn run() -> Result<()> {
             &[
                 "exec",
                 "github:zizmorcore/zizmor",
-                "--command",
-                "zizmor --version",
+                "--",
+                "zizmor",
+                "--version",
             ][..],
         ),
     ] {
@@ -1440,6 +1412,8 @@ jobs:
             ("just".to_owned(), "1.54.0".to_owned()),
             ("cargo:mdbook".to_owned(), "0.5.3".to_owned()),
             ("cargo:cargo-about".to_owned(), "0.9.1".to_owned()),
+            ("cargo:cargo-sbom".to_owned(), "0.10.0".to_owned()),
+            ("github:google/osv-scanner".to_owned(), "2.3.6".to_owned()),
             ("cargo:cargo-nextest".to_owned(), "0.9.140".to_owned()),
             ("cargo:cargo-deny".to_owned(), "0.20.2".to_owned()),
             ("cargo:cargo-machete".to_owned(), "0.9.2".to_owned()),
@@ -1559,8 +1533,8 @@ runs:
         );
 
         assert!(parity.problems.is_empty(), "{:?}", parity.problems);
-        assert_eq!(parity.compared, 16);
-        assert_eq!(parity.excepted, 4);
+        assert_eq!(parity.compared, 18);
+        assert_eq!(parity.excepted, 2);
     }
 
     #[test]

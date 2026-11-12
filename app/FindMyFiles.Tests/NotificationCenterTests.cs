@@ -22,7 +22,7 @@ public sealed class NotificationCenterTests : IDisposable
         var second = new AppNotification(NotifySeverity.Info, "second");
 
         Assert.Equal($"NotificationAction-{first.Id}", first.ActionAutomationId);
-        Assert.NotEqual(first.ActionAutomationId, second.ActionAutomationId);
+        Assert.NotEqual(first.ActionAutomationId, second.ActionAutomationId, StringComparer.Ordinal);
     }
 
     [Fact]
@@ -34,7 +34,7 @@ public sealed class NotificationCenterTests : IDisposable
         }
 
         Assert.Equal(3, _center.Items.Count);
-        Assert.Equal(["n1", "n2", "n3"], _center.Items.Select(n => n.Message));
+        Assert.Equal(["n1", "n2", "n3"], _center.Items.Select(n => n.Message), StringComparer.Ordinal);
     }
 
     [Fact]
@@ -58,7 +58,7 @@ public sealed class NotificationCenterTests : IDisposable
         _center.Push(new AppNotification(NotifySeverity.Error, "boom"));
         _center.Push(new AppNotification(NotifySeverity.Warning, "hmm"));
 
-        Assert.Empty(_dispatcher.Timers); // no dissolve timer was even created
+        Assert.Empty(_dispatcher.Timers);
         _dispatcher.FireTimers();
         Assert.Equal(2, _center.Items.Count);
     }

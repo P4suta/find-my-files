@@ -1,9 +1,7 @@
 namespace FindMyFiles.Engine;
 
-/// <summary>
-/// Empty, non-privileged placeholder used only while startup resolves the real
-/// engine off the UI thread. Its Connecting state keeps recovery/search actions
-/// disabled without falsely presenting the service as absent.
+/// <summary> Empty, non-privileged placeholder used only while startup resolves the real engine off the UI thread.
+/// Its Connecting state keeps recovery/search actions disabled without falsely presenting the service as absent.
 /// </summary>
 internal sealed class ResolvingEngineClient : IEngineClient
 {

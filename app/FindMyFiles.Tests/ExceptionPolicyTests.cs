@@ -5,9 +5,7 @@ namespace FindMyFiles.Tests;
 
 public sealed class ExceptionPolicyTests
 {
-    /// <summary>Pins the XAML suppression rule: the first three unhandled
-    /// exceptions are absorbed, the fourth declares a storm (crash marker +
-    /// honest death).</summary>
+    /// <summary>Pins the XAML suppression rule: the first three unhandled exceptions are absorbed, the fourth declares a storm (crash marker + honest death).</summary>
     [Theory]
     [InlineData(1, true)]
     [InlineData(2, true)]

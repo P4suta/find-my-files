@@ -4,27 +4,21 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>
-/// Unit tests for the in-process soft restart core (<see cref="AppReload"/>,
+/// <summary> Unit tests for the in-process soft restart core (<see cref="AppReload"/>,
 /// ADR-0036) — the part that the view-shell wiring in <c>App</c> cannot cover.
-/// Pins the load-bearing ordering: the diagnostics window closes first, the
-/// freshly resolved engine is published <em>before</em> the page rebuild, and the
-/// old engine is disposed exactly once and only <em>after</em> the rebuild. These
-/// are the invariants that, if reordered, reintroduce the disappearing-app /
-/// half-torn-down-engine failure modes the relaunch design had.
+/// Pins the load-bearing ordering: the diagnostics window closes first, the freshly resolved engine is published <em>before</em> the page rebuild, and the old engine is disposed exactly once and only <em>after</em> the rebuild.
+/// These are the invariants that, if reordered, reintroduce the disappearing-app / half-torn-down-engine failure modes the relaunch design had.
 /// </summary>
 public sealed class AppReloadTests
 {
-    /// <summary>Records when it is disposed so the ordering and once-only contract
-    /// can be asserted; every other member is an unused default (never called by
-    /// <see cref="AppReload"/>).</summary>
+    /// <summary>Records when it is disposed so the ordering and once-only contract can be asserted; every other member is an unused default (never called by <see cref="AppReload"/>).</summary>
     private sealed class RecordingEngine(List<string> log, string name) : IEngineClient
     {
         public int Disposes { get; private set; }
 
         public EngineClientKind Kind => EngineClientKind.InProcess;
 
-#pragma warning disable CS0067 // events are part of the interface but unused here
+#pragma warning disable CS0067
         public event Action<string>? IndexChanged;
 
         public event Action<VolumeStatus>? VolumeUpdated;
@@ -88,22 +82,15 @@ public sealed class AppReloadTests
 
         reload.Run(["--engine=pipe"]);
 
-        // The whole point of the ordering: diagnostics gone first (it polls the old
-        // engine), the new engine published before the page rebuilds against it, and
-        // the old engine torn down only after the rebuild.
         Assert.Equal(["closeDiag", "resolve", "set", "renavigate", "dispose:old"], log);
         Assert.Same(fresh, current);
         Assert.Equal(1, old.Disposes);
-        Assert.Equal(0, fresh.Disposes); // the live engine is never disposed
+        Assert.Equal(0, fresh.Disposes);
     }
 
     [Fact]
     public void Run_dismisses_open_modals_before_the_page_is_rebuilt()
     {
-        // A ContentDialog is hosted in the XamlRoot's popup layer, not in the root
-        // Frame, so re-navigating the Frame leaves it on screen bound to the page
-        // this restart is tearing down (disposed engine, disposed Perf view model).
-        // It has to go down with its page, and before the rebuild.
         var log = new List<string>();
         var old = new RecordingEngine(log, "old");
         var fresh = new RecordingEngine(log, "fresh");
@@ -133,9 +120,6 @@ public sealed class AppReloadTests
     [Fact]
     public void Run_leaves_closed_modals_alone()
     {
-        // The registration token is released when the dialog's ShowAsync returns,
-        // however it closed. A stale entry would call Hide on a dead dialog on
-        // every future soft restart.
         var log = new List<string>();
         var old = new RecordingEngine(log, "old");
         IEngineClient current = old;
@@ -148,17 +132,15 @@ public sealed class AppReloadTests
 
         var registration = AppReload.TrackModal(() => log.Add("dismiss"));
         registration.Dispose();
-        registration.Dispose(); // idempotent: must not unregister someone else
+        registration.Dispose();
         reload.Run(["--engine=pipe"]);
 
-        Assert.Empty(log); // nothing dismissed, and the same engine is kept
+        Assert.Empty(log);
     }
 
     [Fact]
     public void Run_completes_even_when_a_modal_refuses_to_close()
     {
-        // Teardown of a UI surface is best-effort; the engine swap is not. A dialog
-        // that throws on Hide must not strand the app on a half-resolved engine.
         var log = new List<string>();
         var old = new RecordingEngine(log, "old");
         var fresh = new RecordingEngine(log, "fresh");
@@ -198,9 +180,6 @@ public sealed class AppReloadTests
             setEngine: e => current = e,
             renavigate: () =>
             {
-                // A page rebuild that re-enters Run (e.g. a Loaded handler that
-                // triggers another soft restart) must be a no-op, not a recursive
-                // teardown.
                 log.Add("renavigate");
                 reload.Run(["--engine=pipe"]);
                 return true;
@@ -209,9 +188,6 @@ public sealed class AppReloadTests
 
         reload.Run(["--engine=pipe"]);
 
-        // Exactly one cycle ran: the nested Run (during renavigate) was rejected by
-        // the re-entry guard, so closeDiag/renavigate happen once and the old engine
-        // is disposed once — no recursive teardown.
         Assert.Equal(["closeDiag", "renavigate", "dispose:old"], log);
         Assert.Equal(1, old.Disposes);
     }

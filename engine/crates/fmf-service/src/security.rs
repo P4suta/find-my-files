@@ -1,10 +1,13 @@
-//! Pipe DACL and token checks (docs/SECURITY.md layers 1 and 4 of the 4-layer
-//! defense; rationale ADR-0017).
+//! Pipe DACL and token checks (docs/SECURITY.md layers 1 and 4 of the 4-layer defense; rationale ADR-0017).
 //!
-//! The SDDL string is built by one pure, unit-pinned function — a hand-rolled
-//! SDDL elsewhere is exactly the "silently wide open" accident the pin exists
-//! to prevent. Never create a pipe without going through
-//! `pipe_security_attributes`.
+//! The SDDL string is built by one pure, unit-pinned function — a hand-rolled SDDL elsewhere is exactly the "silently wide open" accident the pin exists to prevent.
+//! Never create a pipe without going through `pipe_security_attributes`.
+
+const ACCOUNT_LOOKUP_ATTEMPTS: usize = 4;
+const STAGING_NAME_ATTEMPTS: usize = 32;
+const MAX_SID_TEXT_BYTES: usize = 184;
+const PROVENANCE_FILE_ID_OFFSET: usize = PROVENANCE_MAGIC.len() + size_of::<u32>();
+const PROVENANCE_BYTES: usize = PROVENANCE_FILE_ID_OFFSET + size_of::<u64>();
 
 use std::io;
 use std::io::Seek as _;
@@ -30,9 +33,8 @@ fn last_error() -> io::Error {
     io::Error::from_raw_os_error(unsafe { GetLastError() } as i32)
 }
 
-/// Strict decimal SID grammar accepted in service-owned configuration and on
-/// the elevation command line. Account existence/type is a separate check in
-/// [`validate_user_sid`].
+/// Strict decimal SID grammar accepted in service-owned configuration and on the elevation command line.
+/// Account existence/type is a separate check in [`validate_user_sid`].
 #[must_use]
 pub fn is_canonical_sid(value: &str) -> bool {
     const MAX_IDENTIFIER_AUTHORITY: u64 = 0x0000_FFFF_FFFF_FFFF;
@@ -44,7 +46,7 @@ pub fn is_canonical_sid(value: &str) -> bool {
             && component.bytes().all(|byte| byte.is_ascii_digit())
     }
 
-    if value.len() > 184 {
+    if value.len() > MAX_SID_TEXT_BYTES {
         return false;
     }
     let mut components = value.split('-');
@@ -91,12 +93,10 @@ fn classify_lookup_failure(code: u32) -> io::Result<LookupFailure> {
     }
 }
 
-/// `D:P(A;;GA;;;SY)(A;;GRGW;;;<sid>)…` — SYSTEM gets full control, each
-/// authorized SID read+write, nobody else (protected DACL, no inheritance,
+/// `D:P(A;;GA;;;SY)(A;;GRGW;;;<sid>)…` — SYSTEM gets full control, each authorized SID read+write, nobody else (protected DACL, no inheritance,
 /// no Everyone/anonymous ACE → default deny).
 ///
-/// Administrators is deliberately absent: a UAC-filtered token carries it
-/// deny-only and would not gain access anyway (docs/RESEARCH.md).
+/// Administrators is deliberately absent: a UAC-filtered token carries it deny-only and would not gain access anyway (docs/RESEARCH.md).
 #[must_use]
 pub fn pipe_sddl(authorized_sids: &[String]) -> String {
     let mut s = String::from("D:P(A;;GA;;;SY)");
@@ -108,20 +108,19 @@ pub fn pipe_sddl(authorized_sids: &[String]) -> String {
     s
 }
 
-/// Owns the security descriptor `LocalAlloc`'d by the SDDL conversion; the
-/// `SECURITY_ATTRIBUTES` it hands out stays valid for its lifetime.
+/// Owns the security descriptor `LocalAlloc`'d by the SDDL conversion; the `SECURITY_ATTRIBUTES` it hands out stays valid for its lifetime.
 pub struct PipeSecurity {
     descriptor: *mut core::ffi::c_void,
 }
 
-// The descriptor is an opaque, immutable blob after creation.
+/* SAFETY: Construction initializes an opaque descriptor; shared access never mutates it. */
 unsafe impl Send for PipeSecurity {}
+/* SAFETY: Shared access only borrows the initialized descriptor; the owner frees it after all borrows end. */
 unsafe impl Sync for PipeSecurity {}
 
 impl PipeSecurity {
     /// # Errors
-    /// Returns the OS error if the SDDL string fails to convert to a security
-    /// descriptor (`ConvertStringSecurityDescriptorToSecurityDescriptorW`).
+    /// Returns the OS error if the SDDL string fails to convert to a security descriptor (`ConvertStringSecurityDescriptorToSecurityDescriptorW`).
     pub fn from_sddl(sddl: &str) -> io::Result<Self> {
         let wide: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
         let mut descriptor: *mut core::ffi::c_void = std::ptr::null_mut();
@@ -139,9 +138,8 @@ impl PipeSecurity {
         Ok(Self { descriptor })
     }
 
-    /// A `SECURITY_ATTRIBUTES` pointing at this owned descriptor, ready to pass
-    /// to pipe creation. The handle is non-inheritable; valid only while `self`
-    /// lives.
+    /// A `SECURITY_ATTRIBUTES` pointing at this owned descriptor, ready to pass to pipe creation.
+    /// The handle is non-inheritable; valid only while `self` lives.
     #[must_use]
     pub const fn attributes(&self) -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES {
@@ -169,8 +167,8 @@ const FILE_ADD_FILE_ACCESS: u32 = 0x0000_0002;
 const FILE_ADD_SUBDIRECTORY_ACCESS: u32 = 0x0000_0004;
 const FILE_TRAVERSE_ACCESS: u32 = 0x0000_0020;
 const FILE_READ_ATTRIBUTES_ACCESS: u32 = 0x0000_0080;
-/// `NtCreateFile` grants no implicit synchronization. Without this right the
-/// handle cannot be waited on and `FILE_SYNCHRONOUS_IO_NONALERT` is rejected,
+/// `NtCreateFile` grants no implicit synchronization.
+/// Without this right the handle cannot be waited on and `FILE_SYNCHRONOUS_IO_NONALERT` is rejected,
 /// so every relative open asks for it on top of the caller's mask.
 const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
 const SECURITY_WRITE_ACCESS: u32 =
@@ -207,8 +205,7 @@ struct LockedObject {
     kind: ObjectKind,
 }
 
-/// An exact, non-reparse, singly-linked source file whose write/delete sharing
-/// is excluded for the lifetime of this guard.
+/// An exact, non-reparse, singly-linked source file whose write/delete sharing is excluded for the lifetime of this guard.
 #[derive(Debug)]
 pub struct TrustedSourceFile(LockedObject);
 
@@ -217,8 +214,7 @@ impl TrustedSourceFile {
     ///
     /// # Errors
     /// Returns `InvalidData` for a reparse point/type mismatch/hard link,
-    /// `SharingViolation` when a writer/deleter already has the file open, or
-    /// the underlying Win32 error.
+    /// `SharingViolation` when a writer/deleter already has the file open, or the underlying Win32 error.
     pub fn open(path: &Path) -> io::Result<Self> {
         open_checked(
             path,
@@ -232,20 +228,14 @@ impl TrustedSourceFile {
 
 /// A verified, pinned `%ProgramData%\find-my-files` tree.
 ///
-/// Construction opens the Known-Folder-resolved `ProgramData` directory and
-/// the fixed `find-my-files` child with `FILE_FLAG_OPEN_REPARSE_POINT`. The
-/// construction first excludes write/delete sharing so every pre-existing data
-/// or delete mutation handle fails closed. After the exact owner/group/DACL is
-/// installed and read back, the same object identity is reopened for operation
-/// with write sharing (needed by child renames) but still without delete
-/// sharing. The protected DACL denies unprivileged writers, while the live
-/// delete lease prevents replacement of the fixed root name. Security-only
-/// handles are neutralized by requiring protected object-identity provenance or
-/// rotating the old object out of the privileged fixed name.
+/// Construction opens the Known-Folder-resolved `ProgramData` directory and the fixed `find-my-files` child with `FILE_FLAG_OPEN_REPARSE_POINT`.
+/// The construction first excludes write/delete sharing so every pre-existing data or delete mutation handle fails closed.
+/// After the exact owner/group/DACL is installed and read back, the same object identity is reopened for operation with write sharing (needed by child renames) but still without delete sharing.
+/// The protected DACL denies unprivileged writers, while the live delete lease prevents replacement of the fixed root name.
+/// Security-only handles are neutralized by requiring protected object-identity provenance or rotating the old object out of the privileged fixed name.
 ///
-/// Existing descendants are likewise locked before their owner/group/DACL is
-/// changed on that same handle. Reparse points and multiply-linked files are
-/// rejected rather than followed.
+/// Existing descendants are likewise locked before their owner/group/DACL is changed on that same handle.
+/// Reparse points and multiply-linked files are rejected rather than followed.
 #[derive(Debug)]
 pub struct TrustedDataRoot {
     root: LockedObject,
@@ -257,13 +247,9 @@ pub struct TrustedDataRoot {
 impl TrustedDataRoot {
     /// Creates or opens the fixed Known-Folder-resolved machine data root.
     ///
-    /// An existing object is reused only when its NTFS identity matches the
-    /// identity pinned in the protected HKLM provenance key. A provenance-less
-    /// object is renamed out of the privileged fixed name without modifying its
-    /// ACL or walking its descendants; a fresh protected directory is then
-    /// created. This is deliberately stricter than repairing an arbitrary
-    /// pre-existing `ProgramData` child in place: changing a DACL does not revoke
-    /// a standard user's already-open `WRITE_DAC`/`WRITE_OWNER` handle.
+    /// An existing object is reused only when its NTFS identity matches the identity pinned in the protected HKLM provenance key.
+    /// A provenance-less object is renamed out of the privileged fixed name without modifying its ACL or walking its descendants; a fresh protected directory is then created.
+    /// This is deliberately stricter than repairing an arbitrary pre-existing `ProgramData` child in place: changing a DACL does not revoke a standard user's already-open `WRITE_DAC`/`WRITE_OWNER` handle.
     ///
     /// # Errors
     /// Returns Known Folder, registry, reparse/type/link, sharing, or ACL errors.
@@ -273,13 +259,10 @@ impl TrustedDataRoot {
         Self::create_or_harden_at(&path, sddl, expected, true)
     }
 
-    /// Opens the existing fixed machine root only when its current NTFS object
-    /// identity matches the protected HKLM provenance record.
+    /// Opens the existing fixed machine root only when its current NTFS object identity matches the protected HKLM provenance record.
     ///
     /// # Errors
-    /// Returns `NotFound` for an absent root, `PermissionDenied` for missing or
-    /// mismatched provenance, or the same fail-closed errors as
-    /// [`Self::create_or_harden_machine`].
+    /// Returns `NotFound` for an absent root, `PermissionDenied` for missing or mismatched provenance, or the same fail-closed errors as [`Self::create_or_harden_machine`].
     pub fn open_and_harden_machine(sddl: &str) -> io::Result<Self> {
         let path = crate::config::default_data_dir()?;
         let expected = read_root_provenance()?.ok_or_else(|| {
@@ -328,10 +311,6 @@ impl TrustedDataRoot {
         )?;
         let (root, quarantined_root) = match open_root(path) {
             Ok(root) => {
-                // Provenance identifies the object, but it does not prove that
-                // its security descriptor still excludes an untrusted principal.
-                // Never repair a drifted root in place: a WRITE_DAC/WRITE_OWNER
-                // handle opened while it was weak would survive that repair.
                 let reusable =
                     expected == Some(root.identity) && handle_security_matches(&root.file, sddl)?;
                 if reusable {
@@ -346,9 +325,6 @@ impl TrustedDataRoot {
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                // A reparse point or wrong-kind object is still safe to remove
-                // from the privileged fixed name: open the link/object itself,
-                // rename that exact handle, and never inspect its descendants.
                 let untrusted = open_untrusted_object_for_quarantine(path)?;
                 let quarantined_leaf = quarantine_untrusted_root(untrusted, &program_data.file)?;
                 (
@@ -376,10 +352,6 @@ impl TrustedDataRoot {
         sddl: &str,
         quarantined_root: Option<PathBuf>,
     ) -> io::Result<Self> {
-        // Subtree first, root last, and no DACL is touched on the way down.
-        // Every object ends up carrying its own protected descriptor, so a
-        // parent's inheritable ACEs never decide a child's access — see
-        // `harden_descendants`.
         harden_descendants(&root.file, path, sddl)?;
         set_handle_security(&root.file, sddl)?;
         if !handle_security_matches(&root.file, sddl)? {
@@ -389,12 +361,6 @@ impl TrustedDataRoot {
             ));
         }
         let identity = root.identity;
-        // The strict admission lease intentionally denies write sharing, which
-        // also blocks this process's atomic child rename. Once the protected
-        // DACL is exact, release that admission-only lease and reopen the same
-        // identity with write sharing. An unprivileged process cannot enter the
-        // gap because the final DACL is already active; identity and DACL are
-        // both revalidated before the operational handle is published.
         drop(root);
         let root = open_operational_root(path)?;
         if root.identity != identity || !handle_security_matches(&root.file, sddl)? {
@@ -411,20 +377,18 @@ impl TrustedDataRoot {
         })
     }
 
-    /// Explicit arbitrary-parent seam for adversarial integration tests. It is
-    /// absent from release builds and never consults or mutates HKLM.
+    /// Explicit arbitrary-parent seam for adversarial integration tests.
+    /// It is absent from release builds and never consults or mutates HKLM.
     ///
     /// # Errors
-    /// Returns the same validation, sharing, creation, and ACL failures as the
-    /// production constructor, except registry provenance is deliberately absent.
+    /// Returns the same validation, sharing, creation, and ACL failures as the production constructor, except registry provenance is deliberately absent.
     #[cfg(any(test, debug_assertions))]
     #[doc(hidden)]
     pub fn create_or_replace_for_test(path: &Path, sddl: &str) -> io::Result<Self> {
         Self::create_or_harden_at(path, sddl, None, false)
     }
 
-    /// Captures the current exact root identity for a subsequent test-only
-    /// provenance-verified reopen.
+    /// Captures the current exact root identity for a subsequent test-only provenance-verified reopen.
     #[cfg(any(test, debug_assertions))]
     #[doc(hidden)]
     #[must_use]
@@ -449,8 +413,7 @@ impl TrustedDataRoot {
     /// Returns the verified root path for APIs that only accept a path.
     ///
     /// The returned name is safe to use only while this guard remains alive:
-    /// its root and `ProgramData` handles prevent replacement, and construction
-    /// has removed every untrusted mutation handle from the protected tree.
+    /// its root and `ProgramData` handles prevent replacement, and construction has removed every untrusted mutation handle from the protected tree.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
@@ -472,8 +435,7 @@ impl TrustedDataRoot {
         set_handle_security(&self.root.file, sddl)
     }
 
-    /// Creates one fixed direct child directory if absent and hardens its
-    /// complete existing subtree on verified handles.
+    /// Creates one fixed direct child directory if absent and hardens its complete existing subtree on verified handles.
     ///
     /// # Errors
     /// Returns invalid-leaf, creation, type/reparse/link, sharing, or ACL errors.
@@ -488,8 +450,7 @@ impl TrustedDataRoot {
     /// Hardens one existing direct child directory and every descendant.
     ///
     /// # Errors
-    /// Returns `NotFound` for an absent child or a fail-closed validation/ACL
-    /// error for the verified subtree.
+    /// Returns `NotFound` for an absent child or a fail-closed validation/ACL error for the verified subtree.
     pub fn harden_tree(&self, leaf: &str, sddl: &str) -> io::Result<()> {
         let path = self.child_path(leaf)?;
         let locked = harden_path(&path, Some(ObjectKind::Directory), sddl)?;
@@ -500,8 +461,8 @@ impl TrustedDataRoot {
     /// Hardens one direct child file when it exists.
     ///
     /// # Errors
-    /// Returns validation/sharing/ACL errors. A missing file is a successful
-    /// no-op.
+    /// Returns validation/sharing/ACL errors.
+    /// A missing file is a successful no-op.
     pub fn harden_file_if_exists(&self, leaf: &str, sddl: &str) -> io::Result<()> {
         let path = self.child_path(leaf)?;
         match harden_path(&path, Some(ObjectKind::File), sddl) {
@@ -516,8 +477,7 @@ impl TrustedDataRoot {
 
     /// Opens one direct child file for an exact, locked read.
     ///
-    /// The returned `File` is the same handle whose type, reparse state, and
-    /// link count were verified; callers never reopen the path.
+    /// The returned `File` is the same handle whose type, reparse state, and link count were verified; callers never reopen the path.
     ///
     /// # Errors
     /// Returns open, sharing, type/reparse, or hard-link errors.
@@ -532,8 +492,7 @@ impl TrustedDataRoot {
         .file)
     }
 
-    /// Reports whether an existing direct child file is the same NTFS object
-    /// as `other` (volume serial + file ID).
+    /// Reports whether an existing direct child file is the same NTFS object as `other` (volume serial + file ID).
     ///
     /// # Errors
     /// Returns validation or open errors other than a missing child.
@@ -556,8 +515,7 @@ impl TrustedDataRoot {
     /// protected staging-file handle and a handle-relative rename.
     ///
     /// # Errors
-    /// Returns leaf/target validation, create/write/sync/ACL/rename, or exact
-    /// staging-handle cleanup errors.
+    /// Returns leaf/target validation, create/write/sync/ACL/rename, or exact staging-handle cleanup errors.
     pub fn atomic_write(&self, leaf: &str, bytes: &[u8], sddl: &str) -> io::Result<()> {
         self.atomic_replace_with(leaf, sddl, |file| file.write_all(bytes))
     }
@@ -574,8 +532,6 @@ impl TrustedDataRoot {
         sddl: &str,
     ) -> io::Result<()> {
         self.atomic_replace_with(leaf, sddl, |destination| {
-            // `try_clone` duplicates this exact file object; it never resolves
-            // the source path again after trust validation.
             let mut source = source.0.file.try_clone()?;
             source.rewind()?;
             io::copy(&mut source, destination)?;
@@ -610,16 +566,12 @@ impl TrustedDataRoot {
                 )),
             };
         }
-        // The staging handle was deliberately opened with no sharing. After
-        // rename it names the published target, so release it before reporting
-        // success; otherwise an immediate reader would correctly receive
-        // ERROR_SHARING_VIOLATION while this function's scope is still alive.
         drop(staging);
         Ok(())
     }
 
     fn create_staging_file(&self, sddl: &str) -> io::Result<(String, std::fs::File)> {
-        for _ in 0..32 {
+        for _ in 0..STAGING_NAME_ATTEMPTS {
             let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
             let leaf = format!(".fmf-stage-{}-{nonce}", std::process::id());
             let path = self.path.join(&leaf);
@@ -641,8 +593,8 @@ impl TrustedDataRoot {
     /// Deletes one direct child file through the exact verified handle.
     ///
     /// # Errors
-    /// Returns validation, sharing, or `SetFileInformationByHandle` errors. A
-    /// missing file is a successful no-op.
+    /// Returns validation, sharing, or `SetFileInformationByHandle` errors.
+    /// A missing file is a successful no-op.
     pub fn remove_file_if_exists(&self, leaf: &str) -> io::Result<()> {
         let path = self.child_path(leaf)?;
         match delete_path(&path, Some(ObjectKind::File)) {
@@ -652,8 +604,7 @@ impl TrustedDataRoot {
         }
     }
 
-    /// Recursively deletes one direct child directory without following any
-    /// reparse point; every removal is bound to its verified handle.
+    /// Recursively deletes one direct child directory without following any reparse point; every removal is bound to its verified handle.
     ///
     /// # Errors
     /// Returns validation, enumeration, sharing, or exact-handle delete errors.
@@ -667,20 +618,51 @@ impl TrustedDataRoot {
         }
     }
 
-    /// Deletes every descendant and finally marks the verified machine root
-    /// itself for deletion on handle close.
+    /// Deletes every descendant and finally marks the verified machine root itself for deletion on handle close.
     ///
     /// # Errors
-    /// Returns the first fail-closed traversal or exact-handle delete error.
+    /// Returns the first root-handoff, fail-closed traversal, or exact-handle delete error.
     pub fn purge(self) -> io::Result<()> {
-        delete_descendants(&self.root.file, &self.path)?;
-        delete_handle(&self.root.file)?;
+        self.purge_after_release(|_| {})
+    }
+
+    fn purge_after_release(self, before_reopen: impl FnOnce(&Path)) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt as _;
+
         let Self {
             root,
             program_data_guard,
-            path: _,
+            path,
             quarantined_root: _,
         } = self;
+        let expected_identity = root.identity;
+        let expected_security = handle_security_sddl(&root.file)?;
+        drop(root);
+        before_reopen(&path);
+        let (_, leaf) = validate_machine_root_path(&path)?;
+        let leaf: Vec<u16> = leaf.encode_wide().collect();
+        let root = open_checked_at(
+            &program_data_guard,
+            &leaf,
+            &path,
+            Some(ObjectKind::Directory),
+            DELETE_ACCESS
+                | READ_CONTROL_ACCESS
+                | FILE_READ_ATTRIBUTES_ACCESS
+                | FILE_LIST_DIRECTORY_ACCESS
+                | FILE_TRAVERSE_ACCESS,
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+        )?;
+        if root.identity != expected_identity
+            || !handle_security_matches(&root.file, &expected_security)?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "machine data root changed during operational-to-purge handoff",
+            ));
+        }
+        delete_descendants(&root.file, &path)?;
+        delete_handle(&root.file)?;
         drop(root);
         drop(program_data_guard);
         Ok(())
@@ -722,10 +704,6 @@ fn validate_machine_root_path(path: &Path) -> io::Result<(&Path, &std::ffi::OsSt
 }
 
 fn open_root(path: &Path) -> io::Result<LockedObject> {
-    // FILE_SHARE_READ permits scanners/diagnostics but deliberately excludes
-    // write and delete sharing. Security-only handles do not participate in
-    // Win32 share checks; protected provenance, rather than an in-place DACL
-    // rewrite, is what makes those already-granted handles harmless.
     open_checked(
         path,
         Some(ObjectKind::Directory),
@@ -746,7 +724,6 @@ fn open_operational_root(path: &Path) -> io::Result<LockedObject> {
         path,
         Some(ObjectKind::Directory),
         SECURITY_WRITE_ACCESS
-            | DELETE_ACCESS
             | FILE_LIST_DIRECTORY_ACCESS
             | FILE_ADD_FILE_ACCESS
             | FILE_ADD_SUBDIRECTORY_ACCESS
@@ -759,7 +736,7 @@ fn quarantine_untrusted_root(
     root: std::fs::File,
     program_data: &std::fs::File,
 ) -> io::Result<String> {
-    for _ in 0..32 {
+    for _ in 0..STAGING_NAME_ATTEMPTS {
         let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
         let leaf = format!(".find-my-files.untrusted-{}-{nonce}", std::process::id());
         match rename_handle_relative_with_replace(&root, program_data, &leaf, false) {
@@ -798,7 +775,7 @@ fn create_root_from_staging(
             )
         })?;
 
-    for _ in 0..32 {
+    for _ in 0..STAGING_NAME_ATTEMPTS {
         let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
         let staging_leaf = format!(".find-my-files.new-{}-{nonce}", std::process::id());
         let staging_path = parent.join(&staging_leaf);
@@ -814,9 +791,6 @@ fn create_root_from_staging(
             Err(error) => return Err(error),
         }
 
-        // The directory was protected at creation. Pin that exact object before
-        // giving it the privileged fixed name, then publish it relative to the
-        // already pinned ProgramData handle without replacement.
         let root = open_root(&staging_path).map_err(|error| {
             io::Error::new(
                 error.kind(),
@@ -867,8 +841,7 @@ fn open_untrusted_object_for_quarantine(path: &Path) -> io::Result<std::fs::File
     };
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-    // SAFETY: `wide` is NUL-terminated and lives through the call; all optional
-    // pointers are null, and the returned handle is checked before ownership.
+    /* SAFETY: `wide` remains live with a NUL terminator throughout the call; optional pointers contain null values, and the result check precedes ownership transfer. */
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -883,8 +856,7 @@ fn open_untrusted_object_for_quarantine(path: &Path) -> io::Result<std::fs::File
     if handle == INVALID_HANDLE_VALUE {
         return Err(last_error());
     }
-    // SAFETY: a successful CreateFileW returns one owned kernel handle, which is
-    // transferred exactly once to `File` for CloseHandle-on-drop.
+    /* SAFETY: Successful CreateFileW returns one owned kernel handle; transferring it once to `File` ensures CloseHandle on drop. */
     Ok(unsafe { std::fs::File::from_raw_handle(handle.cast()) })
 }
 
@@ -892,8 +864,7 @@ struct OwnedRegistryKey(windows_sys::Win32::System::Registry::HKEY);
 
 impl Drop for OwnedRegistryKey {
     fn drop(&mut self) {
-        // SAFETY: this wrapper is constructed only from a successful registry
-        // open/create and owns that non-null HKEY exactly once.
+        /* SAFETY: Only a successful registry open or create constructs this wrapper, which exclusively owns the non-null HKEY. */
         unsafe {
             windows_sys::Win32::System::Registry::RegCloseKey(self.0);
         }
@@ -930,8 +901,7 @@ fn security_descriptor_sddl_for(
 
     let mut text: *mut u16 = std::ptr::null_mut();
     let mut len = 0u32;
-    // SAFETY: callers pass a live self-relative descriptor; output pointers
-    // refer to initialized locals and the API allocates `text` with LocalAlloc.
+    /* SAFETY: Callers pass a live self-relative descriptor; output pointers refer to initialized locals, and the API allocates `text` with LocalAlloc. */
     if unsafe {
         ConvertSecurityDescriptorToStringSecurityDescriptorW(
             descriptor,
@@ -950,12 +920,10 @@ fn security_descriptor_sddl_for(
             "security descriptor conversion returned null",
         ));
     }
-    // SAFETY: success guarantees `text` addresses at least `len` UTF-16 code
-    // units and the allocation remains live until LocalFree below.
+    /* SAFETY: Success guarantees that `text` addresses at least `len` UTF-16 code units; the allocation remains live until LocalFree below. */
     let result =
         String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len as usize) });
-    // SAFETY: `text` is the still-owned LocalAlloc result from the successful
-    // conversion call above.
+    /* SAFETY: This function retains ownership of the LocalAlloc result from the successful conversion above. */
     unsafe { LocalFree(text.cast()) };
     Ok(result)
 }
@@ -970,8 +938,7 @@ fn handle_security_sddl(file: &std::fs::File) -> io::Result<String> {
     let information =
         OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    // SAFETY: `file` owns a live handle with READ_CONTROL; unused component
-    // outputs are null and `descriptor` is a valid out-pointer.
+    /* SAFETY: `file` owns a live handle with READ_CONTROL; unused component outputs contain null pointers, and `descriptor` provides writable output storage. */
     let status = unsafe {
         GetSecurityInfo(
             raw_handle(file),
@@ -994,8 +961,7 @@ fn handle_security_sddl(file: &std::fs::File) -> io::Result<String> {
         ));
     }
     let result = security_descriptor_sddl(descriptor);
-    // SAFETY: GetSecurityInfo allocated this non-null descriptor with LocalAlloc
-    // and ownership has not escaped this function.
+    /* SAFETY: GetSecurityInfo allocated this non-null descriptor with LocalAlloc; ownership remains within this function. */
     unsafe { LocalFree(descriptor.cast()) };
     result
 }
@@ -1008,14 +974,6 @@ fn handle_security_matches(file: &std::fs::File, sddl: &str) -> io::Result<bool>
 }
 
 fn normalize_auto_inherited_control(sddl: &str) -> std::borrow::Cow<'_, str> {
-    // SetSecurityInfo marks a directory DACL `AI` after it has propagated the
-    // explicitly supplied OI/CI ACEs. CreateDirectoryW does not, even when both
-    // calls receive the same descriptor. `AI` records that completed operation;
-    // it neither changes an ACE nor permits future inheritance while `P` is set.
-    //
-    // Normalize only that one documented, canonical control spelling. Owner,
-    // group, protected state, every ACE, and every other control bit still have
-    // to match byte-for-byte in the canonical SDDL emitted by Windows.
     if sddl.contains("D:PAI(") {
         std::borrow::Cow::Owned(sddl.replacen("D:PAI(", "D:P(", 1))
     } else {
@@ -1034,8 +992,7 @@ fn verify_provenance_key_security(
     let information =
         OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
     let mut bytes = 0u32;
-    // SAFETY: `key` is a live HKEY opened with READ_CONTROL; a null buffer with
-    // zero capacity is the documented size-query form.
+    /* SAFETY: `key` retains READ_CONTROL access; the API accepts a null buffer with zero capacity for a size query. */
     let status =
         unsafe { RegGetKeySecurity(key, information, std::ptr::null_mut(), &raw mut bytes) };
     if status != ERROR_INSUFFICIENT_BUFFER {
@@ -1049,8 +1006,7 @@ fn verify_provenance_key_security(
     }
     let word_bytes = size_of::<usize>();
     let mut buffer = vec![0usize; (bytes as usize).div_ceil(word_bytes)];
-    // SAFETY: the usize-backed buffer is suitably aligned and at least `bytes`
-    // bytes long; the HKEY and out-size pointer remain valid through the call.
+    /* SAFETY: The usize-backed buffer provides suitable alignment and at least `bytes` bytes; the HKEY and output-size pointer remain valid throughout the call. */
     let status =
         unsafe { RegGetKeySecurity(key, information, buffer.as_mut_ptr().cast(), &raw mut bytes) };
     if status != 0 {
@@ -1074,13 +1030,12 @@ fn read_root_provenance() -> io::Result<Option<ObjectIdentity>> {
         RegQueryValueExW,
     };
 
-    const ENCODED_LEN: usize = 16;
+    const ENCODED_LEN: usize = PROVENANCE_BYTES;
 
     let key_name = provenance_wide(PROVENANCE_KEY);
     let value_name = provenance_wide(PROVENANCE_VALUE);
     let mut raw_key = std::ptr::null_mut();
-    // SAFETY: `key_name` is NUL-terminated; `raw_key` is a valid out-pointer and
-    // the predefined HKLM handle is borrowed, not closed by us.
+    /* SAFETY: `key_name` has a NUL terminator and `raw_key` provides writable output storage; the predefined HKLM handle remains borrowed throughout the call. */
     let status = unsafe {
         RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
@@ -1106,8 +1061,7 @@ fn read_root_provenance() -> io::Result<Option<ObjectIdentity>> {
     verify_provenance_key_security(key.0)?;
     let mut value_type = 0;
     let mut size = 0u32;
-    // SAFETY: `key` is live, `value_name` is NUL-terminated, and null data with a
-    // valid size pointer is the documented value-size query.
+    /* SAFETY: `key` remains live and `value_name` has a NUL terminator; the API accepts null data with a writable size pointer for a size query. */
     let status = unsafe {
         RegQueryValueExW(
             key.0,
@@ -1131,8 +1085,7 @@ fn read_root_provenance() -> io::Result<Option<ObjectIdentity>> {
         ));
     }
     let mut encoded = [0u8; ENCODED_LEN];
-    // SAFETY: `encoded` is exactly the previously validated size and all out
-    // pointers remain valid; RegQueryValueExW respects the supplied capacity.
+    /* SAFETY: `encoded` provides exactly the validated size and all output pointers remain valid; RegQueryValueExW respects the supplied capacity. */
     let status = unsafe {
         RegQueryValueExW(
             key.0,
@@ -1146,7 +1099,9 @@ fn read_root_provenance() -> io::Result<Option<ObjectIdentity>> {
     if status != 0 {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
-    if value_type != REG_BINARY || size as usize != ENCODED_LEN || &encoded[..4] != PROVENANCE_MAGIC
+    if value_type != REG_BINARY
+        || size as usize != ENCODED_LEN
+        || &encoded[..PROVENANCE_MAGIC.len()] != PROVENANCE_MAGIC
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1154,9 +1109,9 @@ fn read_root_provenance() -> io::Result<Option<ObjectIdentity>> {
         ));
     }
     let mut volume_serial = [0u8; 4];
-    volume_serial.copy_from_slice(&encoded[4..8]);
+    volume_serial.copy_from_slice(&encoded[PROVENANCE_MAGIC.len()..PROVENANCE_FILE_ID_OFFSET]);
     let mut file_id = [0u8; 8];
-    file_id.copy_from_slice(&encoded[8..16]);
+    file_id.copy_from_slice(&encoded[PROVENANCE_FILE_ID_OFFSET..PROVENANCE_BYTES]);
     Ok(Some(ObjectIdentity {
         volume_serial: u32::from_le_bytes(volume_serial),
         file_id: u64::from_le_bytes(file_id),
@@ -1176,8 +1131,7 @@ fn write_root_provenance(identity: ObjectIdentity) -> io::Result<()> {
     let value_name = provenance_wide(PROVENANCE_VALUE);
     let mut raw_key = std::ptr::null_mut();
     let mut disposition = 0;
-    // SAFETY: all strings are NUL-terminated, the security descriptor outlives
-    // the call, and both registry outputs point to initialized storage.
+    /* SAFETY: All strings have NUL terminators, the security descriptor outlives the call, and both registry outputs point to initialized storage. */
     let status = unsafe {
         RegCreateKeyExW(
             HKEY_LOCAL_MACHINE,
@@ -1207,17 +1161,15 @@ fn write_root_provenance(identity: ObjectIdentity) -> io::Result<()> {
             "RegCreateKeyExW returned an unknown provenance-key disposition",
         ));
     }
-    // Never "repair" an existing registry boundary in place. Like a filesystem
-    // DACL, that would not revoke already-open security handles. Exact owner,
-    // group, protected-DACL and ACE equality is required before trusting it.
     verify_provenance_key_security(key.0)?;
 
-    let mut encoded = [0u8; 16];
-    encoded[..4].copy_from_slice(PROVENANCE_MAGIC);
-    encoded[4..8].copy_from_slice(&identity.volume_serial.to_le_bytes());
-    encoded[8..16].copy_from_slice(&identity.file_id.to_le_bytes());
-    // SAFETY: the HKEY is live, the value name is NUL-terminated, and `encoded`
-    // remains a readable 16-byte buffer for the duration of the call.
+    let mut encoded = [0u8; PROVENANCE_BYTES];
+    encoded[..PROVENANCE_MAGIC.len()].copy_from_slice(PROVENANCE_MAGIC);
+    encoded[PROVENANCE_MAGIC.len()..PROVENANCE_FILE_ID_OFFSET]
+        .copy_from_slice(&identity.volume_serial.to_le_bytes());
+    encoded[PROVENANCE_FILE_ID_OFFSET..PROVENANCE_BYTES]
+        .copy_from_slice(&identity.file_id.to_le_bytes());
+    /* SAFETY: The HKEY remains live, the value name has a NUL terminator, and `encoded` provides 16 readable bytes throughout the call. */
     let status = unsafe {
         RegSetValueExW(
             key.0,
@@ -1249,18 +1201,13 @@ fn validate_leaf(leaf: &str) -> io::Result<()> {
     }
 }
 
-/// The UTF-16 counterpart of [`validate_leaf`], for names that arrive from a
-/// directory enumeration rather than from configuration.
+/// The UTF-16 counterpart of [`validate_leaf`], for names that arrive from a directory enumeration rather than from configuration.
 ///
-/// Deliberately not "convert to `String` and reuse `validate_leaf`": a lossy
-/// conversion turns an unpaired surrogate into U+FFFD, so the name that got
-/// validated would not be the name that gets opened. This inspects the exact
-/// code units that will be handed to the object manager and returns their byte
-/// length for `UNICODE_STRING`.
+/// Deliberately not "convert to `String` and reuse `validate_leaf`": a lossy conversion turns an unpaired surrogate into U+FFFD, so the name that got validated would not be the name that gets opened.
+/// This inspects the exact code units that will be handed to the object manager and returns their byte length for `UNICODE_STRING`.
 ///
-/// Defense in depth only. A name yielded by the kernel's own enumeration of a
-/// verified directory handle is already a leaf; this refuses to be the layer
-/// that assumes it.
+/// Defense in depth only.
+/// A name yielded by the kernel's own enumeration of a verified directory handle is already a leaf; this refuses to be the layer that assumes it.
 fn validate_leaf_utf16(leaf: &[u16]) -> io::Result<u16> {
     const DOT: u16 = b'.' as u16;
     const BACKSLASH: u16 = b'\\' as u16;
@@ -1285,8 +1232,6 @@ fn validate_leaf_utf16(leaf: &[u16]) -> io::Result<u16> {
     if leaf.contains(&0) {
         return Err(refuse("embedded NUL"));
     }
-    // `UNICODE_STRING::Length` is a byte count in a `u16`; leave room for the
-    // terminator the object manager does not need but callers may assume.
     leaf.len()
         .checked_mul(size_of::<u16>())
         .filter(|bytes| *bytes < usize::from(u16::MAX))
@@ -1294,26 +1239,17 @@ fn validate_leaf_utf16(leaf: &[u16]) -> io::Result<u16> {
         .ok_or_else(|| refuse("name too long"))
 }
 
-/// Opens `leaf` **relative to an already-verified parent handle** and subjects
-/// it to exactly the checks [`open_checked`] applies.
+/// Opens `leaf` **relative to an already-verified parent handle** and subjects it to exactly the checks [`open_checked`] applies.
 ///
-/// This is the primitive the managed-tree walks are built on. `open_checked`
-/// hands `CreateFileW` a full path, so the kernel re-resolves every ancestor
-/// name; between the moment a walk learned a child's name and the moment it
-/// opens it, an ancestor can be repointed at another object. The reparse-point
-/// rejection catches a link, but a swap to a *non*-reparse object at the same
-/// name is invisible to it — and the walk would then apply the protected
-/// descriptor to, or delete, whatever now sits there.
+/// This is the primitive the managed-tree walks are built on.
+/// `open_checked` hands `CreateFileW` a full path, so the kernel re-resolves every ancestor name; between the moment a walk learned a child's name and the moment it opens it, an ancestor can be repointed at another object.
+/// The reparse-point rejection catches a link, but a swap to a *non*-reparse object at the same name is invisible to it — and the walk would then apply the protected descriptor to, or delete, whatever now sits there.
 ///
-/// `NtCreateFile` with `OBJECT_ATTRIBUTES.RootDirectory` set to the parent
-/// handle and a leaf-only `ObjectName` resolves nothing but the final
-/// component, against the directory *object* that handle is bound to rather
-/// than against its name. There is no ancestor chain left to swap.
+/// `NtCreateFile` with `OBJECT_ATTRIBUTES.RootDirectory` set to the parent handle and a leaf-only `ObjectName` resolves nothing but the final component, against the directory *object* that handle is bound to rather than against its name.
+/// There is no ancestor chain left to swap.
 ///
 /// `OBJ_DONT_REPARSE` augments — it does not replace — the existing defense:
-/// `FILE_OPEN_REPARSE_POINT` is still requested and [`inspect_handle`] remains
-/// the authority that refuses a reparse point, so the guarantee does not become
-/// contingent on a flag whose failure mode is a different error code.
+/// `FILE_OPEN_REPARSE_POINT` is still requested and [`inspect_handle`] remains the authority that refuses a reparse point, so the guarantee does not become contingent on a flag whose failure mode is a different error code.
 ///
 /// `diagnostic` is used for error messages only and is never resolved.
 fn open_checked_at(
@@ -1337,11 +1273,6 @@ fn open_checked_at(
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
     let name_bytes = validate_leaf_utf16(leaf)?;
-    // `UNICODE_STRING` is *counted*: the object manager reads exactly `Length`
-    // bytes and never scans for a terminator, so `leaf` is passed as-is. This
-    // is the exact opposite of the `FILE_RENAME_INFO` buffer below, whose name
-    // is consumed past `FileNameLength` up to the first zero unit and therefore
-    // must carry one. Do not "fix" one to look like the other.
     let name = UNICODE_STRING {
         Length: name_bytes,
         MaximumLength: name_bytes,
@@ -1357,12 +1288,10 @@ fn open_checked_at(
     };
     let mut handle: HANDLE = std::ptr::null_mut();
     let mut status_block = IO_STATUS_BLOCK::default();
-    // SAFETY: `attributes` borrows `name`, which borrows `leaf`; all three
-    // outlive the call and none is mutated during it. `parent` is a live owned
-    // directory handle, so `RootDirectory` names an open kernel object. The two
-    // out-parameters are exclusive borrows of correctly typed local storage.
-    // The optional allocation-size and EA-buffer pointers are null, which the
-    // contract permits exactly when the EA length is zero, as it is here.
+    /* SAFETY: `attributes` borrows `name`, which borrows `leaf`; all three remain live and unchanged throughout the call.
+    `parent` owns a live directory handle, so `RootDirectory` names an open kernel object.
+    The two output parameters exclusively borrow correctly typed local storage.
+    The contract accepts null allocation-size and EA-buffer pointers with the supplied zero EA length. */
     let status = unsafe {
         NtCreateFile(
             &raw mut handle,
@@ -1380,10 +1309,6 @@ fn open_checked_at(
     };
     if status < 0 {
         if status == STATUS_REPARSE_POINT_ENCOUNTERED {
-            // `OBJ_DONT_REPARSE` fired before `inspect_handle` could. Report it
-            // in that layer's words so a caller — or a test — asserting on the
-            // fail-closed property does not have to know which one won the
-            // race to refuse.
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("refusing reparse point {}", diagnostic.display()),
@@ -1393,8 +1318,7 @@ fn open_checked_at(
         let code = unsafe { RtlNtStatusToDosError(status) };
         return Err(io::Error::from_raw_os_error(code as i32));
     }
-    // SAFETY: `NtCreateFile` succeeded, so `handle` is one owned kernel handle,
-    // transferred exactly once to `File` for CloseHandle-on-drop.
+    /* SAFETY: Successful NtCreateFile returns one owned kernel handle; transferring it once to `File` ensures CloseHandle on drop. */
     let file = unsafe { std::fs::File::from_raw_handle(handle.cast()) };
     inspect_handle(diagnostic, file, expected)
 }
@@ -1483,7 +1407,7 @@ fn inspect_handle(
         file,
         identity: ObjectIdentity {
             volume_serial: info.dwVolumeSerialNumber,
-            file_id: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+            file_id: (u64::from(info.nFileIndexHigh) << u32::BITS) | u64::from(info.nFileIndexLow),
         },
         kind,
     })
@@ -1589,9 +1513,6 @@ fn harden_path(path: &Path, expected: Option<ObjectKind>, sddl: &str) -> io::Res
     if locked.kind == ObjectKind::Directory {
         harden_descendants(&locked.file, path, sddl)?;
     }
-    // Only now may an inheritable ACE reach this level: the complete descendant
-    // set has been opened without following reparse points, and every object
-    // below already carries a protected DACL of its own.
     set_handle_security(&locked.file, sddl)?;
     Ok(locked)
 }
@@ -1600,22 +1521,13 @@ fn harden_path(path: &Path, expected: Option<ObjectKind>, sddl: &str) -> io::Res
 /// one batch at a time.
 ///
 /// This replaces `std::fs::read_dir`, which opens the directory again by path.
-/// Enumerating from the handle the walk already holds keeps the child list
-/// dependent only on the object that was verified, and — for the hardening
-/// walk specifically — stops enumeration from depending on the very ACL the
-/// walk is in the middle of rewriting.
+/// Enumerating from the handle the walk already holds keeps the child list dependent only on the object that was verified, and — for the hardening walk specifically — stops enumeration from depending on the very ACL the walk is in the middle of rewriting.
 ///
-/// The names it yields are an **untrusted hint about what to try next**. They
-/// are not evidence about what an object is; the relative open and
-/// [`inspect_handle`] remain the sole authority for that.
+/// The names it yields are an **untrusted hint about what to try next**. They are not evidence about what an object is; the relative open and [`inspect_handle`] remain the sole authority for that.
 struct DirectoryEnumeration {
-    /// `u64`-backed, and that is load-bearing twice over. `FILE_FULL_DIR_INFO`
-    /// carries `i64` fields, so its alignment is 8 and the API requires a
-    /// suitably aligned buffer; a `Vec<u8>` would guarantee only 1, making
-    /// every record access a genuine unaligned access rather than merely a
-    /// lint-flagged one. It is therefore also what lets the record cast
-    /// satisfy the denied `cast_ptr_alignment` lint honestly, instead of by
-    /// suppressing it.
+    /// `u64`-backed, and that is load-bearing twice over.
+    /// `FILE_FULL_DIR_INFO` carries `i64` fields, so its alignment is 8 and the API requires a suitably aligned buffer; a `Vec<u8>` would guarantee only 1, making every record access a genuine unaligned access rather than merely a lint-flagged one.
+    /// It is therefore also what lets the record cast satisfy the denied `cast_ptr_alignment` lint honestly, instead of by suppressing it.
     buffer: Vec<u64>,
     /// Bytes of `buffer` the kernel may have written in the current batch.
     valid: usize,
@@ -1638,8 +1550,7 @@ impl DirectoryEnumeration {
     }
 }
 
-/// Yields the next child leaf name in `dir`, refilling the batch as needed and
-/// skipping the `.` and `..` entries.
+/// Yields the next child leaf name in `dir`, refilling the batch as needed and skipping the `.` and `..` entries.
 fn next_directory_entry(
     dir: &std::fs::File,
     state: &mut DirectoryEnumeration,
@@ -1669,10 +1580,9 @@ fn next_directory_entry(
                 .checked_mul(size_of::<u64>())
                 .and_then(|bytes| u32::try_from(bytes).ok())
                 .ok_or_else(|| malformed("enumeration buffer exceeds u32"))?;
-            // SAFETY: `dir` is a live owned directory handle. The buffer is an
-            // exclusively borrowed, initialized allocation of exactly
-            // `capacity` bytes, aligned to 8 as `FILE_FULL_DIR_INFO` requires,
-            // and the kernel writes no further than the length it is given.
+            /* SAFETY: `dir` owns a live directory handle.
+            The exclusively borrowed, initialized allocation provides exactly `capacity` bytes and the 8-byte alignment required by FILE_FULL_DIR_INFO.
+            The kernel respects the supplied length. */
             let ok = unsafe {
                 GetFileInformationByHandleEx(
                     raw_handle(dir),
@@ -1693,9 +1603,6 @@ fn next_directory_entry(
             state.offset = 0;
         }
 
-        // The kernel places every record on an 8-byte boundary. Checking that
-        // rather than assuming it is what makes the name slice below sound: it
-        // is the only step whose alignment is not otherwise self-evident.
         if !state
             .offset
             .is_multiple_of(align_of::<FILE_FULL_DIR_INFO>())
@@ -1710,22 +1617,12 @@ fn next_directory_entry(
             return Err(malformed("record header runs past the batch"));
         }
 
-        // Offset the `*const u64` directly and cast from that, rather than by
-        // way of a `*const u8`: going through a byte pointer would throw the
-        // alignment away and the cast would then be a genuine 1-to-8 widening,
-        // which `cast_ptr_alignment` is right to deny. From `u64` the cast
-        // preserves alignment (8 to 8) and the lint is satisfied on the merits.
-        //
-        // SAFETY: the bounds check above proves `offset` — and a whole record
-        // header after it — lies inside the single `buffer` allocation, and the
-        // alignment check proves the resulting address is suitably aligned for
-        // `FILE_FULL_DIR_INFO`.
+        /* SAFETY: The bounds check places `offset` and a complete record header inside the single `buffer` allocation.
+        The alignment check establishes the alignment required by FILE_FULL_DIR_INFO. */
         let record =
             unsafe { state.buffer.as_ptr().byte_add(state.offset) }.cast::<FILE_FULL_DIR_INFO>();
-        // SAFETY: `record` points at an in-bounds, initialized header. The
-        // scalars are read with `read_unaligned`, so these reads stay sound
-        // even if the alignment invariant above were ever weakened; no
-        // reference into the packed kernel buffer is formed at any point.
+        /* SAFETY: `record` points at an initialized header within the buffer.
+        `read_unaligned` reads the scalars without forming references into the packed kernel buffer. */
         let (next_offset, name_length) = unsafe {
             (
                 std::ptr::read_unaligned(&raw const (*record).NextEntryOffset),
@@ -1751,16 +1648,9 @@ fn next_directory_entry(
             return Err(malformed("name runs past the batch"));
         }
 
-        // `FileName` is a one-element array standing in for the variable-length
-        // tail; take its address and reinterpret it at the declared length.
-        // Deriving the pointer from the field rather than by casting a `u8`
-        // pointer keeps the cast alignment-preserving (`[u16; 1]` to `u16`).
-        //
-        // SAFETY: the two checks above prove `name_bytes` starting at the
-        // field lie inside `buffer`; the record alignment proves the address
-        // is `u16`-aligned; the memory is initialized (the allocation is
-        // zeroed and the kernel wrote over it); and the slice is copied out
-        // before `state` can be touched again, so no aliasing outlives it.
+        /* SAFETY: The two checks place the complete `name_bytes` range inside `buffer`, and record alignment supplies u16 alignment.
+        Zeroing the allocation initializes every byte before the kernel writes to it.
+        Copying the slice before the next access to `state` ends the borrow. */
         let name = unsafe {
             std::slice::from_raw_parts(
                 (&raw const (*record).FileName).cast::<u16>(),
@@ -1770,7 +1660,6 @@ fn next_directory_entry(
         .to_vec();
 
         state.offset = if next_offset == 0 {
-            // Last record of this batch: force a refill on the next call.
             state.valid
         } else {
             state
@@ -1787,12 +1676,11 @@ fn next_directory_entry(
     }
 }
 
-/// A test-only seam that runs **inside** the window this whole design exists to
-/// close: after a walk has learned a child's name, before it opens it.
+/// A test-only seam that runs **inside** the window this whole design exists to close: after a walk has learned a child's name, before it opens it.
 ///
-/// Without it the swap tests could only race the walk and hope. With it they
-/// are deterministic. It compiles out entirely outside `cfg(test)` — the
-/// shipped service carries no hook, no branch, and no thread-local.
+/// Without it the swap tests could only race the walk and hope.
+/// With it they are deterministic.
+/// It compiles out entirely outside `cfg(test)` — the shipped service carries no hook, no branch, and no thread-local.
 #[cfg(test)]
 mod walk_seam {
     use std::cell::RefCell;
@@ -1804,8 +1692,7 @@ mod walk_seam {
         static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
     }
 
-    /// Removes the hook on drop, so a panicking test cannot leak one into
-    /// whatever the harness runs next on this thread.
+    /// Removes the hook on drop, so a panicking test cannot leak one into whatever the harness runs next on this thread.
     pub struct Installed;
 
     impl Drop for Installed {
@@ -1821,8 +1708,6 @@ mod walk_seam {
     }
 
     pub fn fire(child: &Path) {
-        // The hook runs with the slot borrowed: the seam is deliberately not
-        // reentrant, so a hook cannot arrange to fire itself.
         HOOK.with(|slot| {
             if let Some(hook) = slot.borrow_mut().as_mut() {
                 hook(child);
@@ -1834,31 +1719,19 @@ mod walk_seam {
 /// Applies the protected descriptor to every existing object below `path`,
 /// bottom-up, on handles that were opened without following reparse points.
 ///
-/// Nothing is written on the way down. A directory receives its descriptor only
-/// after its whole subtree has been opened, type-checked, and given a protected
-/// descriptor of its own, so an inheritable ACE can never reach a level that has
-/// not been proven free of reparse points. The result is a tree in which no
-/// object's access depends on what it inherits, which is what
-/// [`data_tree_security_descriptors`] states as the invariant.
+/// Nothing is written on the way down.
+/// A directory receives its descriptor only after its whole subtree has been opened, type-checked, and given a protected descriptor of its own, so an inheritable ACE can never reach a level that has not been proven free of reparse points.
+/// The result is a tree in which no object's access depends on what it inherits, which is what [`data_tree_security_descriptors`] states as the invariant.
 ///
-/// An earlier revision wrote a non-inheriting "quarantine" descriptor to each
-/// directory on the way down, intending to lock attackers out for the duration
-/// of the walk. Both halves of that were measured and neither held: the
-/// descriptor removes the inherited ACEs of every child — plain files included —
-/// so the walk denied itself access to `index/c.fmfidx`, while the junction
-/// propagation the ordering existed to prevent never reaches the target at all.
-/// Pinned by `hardening_walk_survives_a_production_shaped_tree` and
-/// `planted_junction_target_is_never_reached_by_propagation`.
+/// An earlier revision wrote a non-inheriting "quarantine" descriptor to each directory on the way down, intending to lock attackers out for the duration of the walk.
+/// Both halves of that were measured and neither held: the descriptor removes the inherited ACEs of every child — plain files included —
+/// so the walk denied itself access to `index/c.fmfidx`, while the junction propagation the ordering existed to prevent never reaches the target at all.
+/// Pinned by `hardening_walk_survives_a_production_shaped_tree` and `planted_junction_target_is_never_reached_by_propagation`.
 ///
-/// Every step is **handle-relative**. `root` is the verified handle for
-/// `root_path`; each level's children are enumerated from the handle held for
-/// that level, and each child is opened with [`open_checked_at`] against that
-/// same handle under a leaf-only name. No step re-resolves a full path, so the
-/// ancestor chain a child is reached through is the one already proven, not
-/// whatever the names happen to point at when the open is issued.
+/// Every step is **handle-relative**. `root` is the verified handle for `root_path`; each level's children are enumerated from the handle held for that level, and each child is opened with [`open_checked_at`] against that same handle under a leaf-only name.
+/// No step re-resolves a full path, so the ancestor chain a child is reached through is the one already proven, not whatever the names happen to point at when the open is issued.
 ///
-/// `root_path` is **diagnostic only** — it seeds the paths that appear in error
-/// messages and is never resolved.
+/// `root_path` is **diagnostic only** — it seeds the paths that appear in error messages and is never resolved.
 fn harden_descendants(root: &std::fs::File, root_path: &Path, sddl: &str) -> io::Result<()> {
     use std::os::windows::ffi::OsStringExt as _;
 
@@ -1884,8 +1757,6 @@ fn harden_descendants(root: &std::fs::File, root_path: &Path, sddl: &str) -> io:
             let frame = stack.last_mut().ok_or_else(|| {
                 io::Error::other("managed-tree hardening stack unexpectedly became empty")
             })?;
-            // Disjoint field borrows: the enumeration state is advanced through
-            // the very handle whose level it belongs to.
             let Frame {
                 locked, entries, ..
             } = frame;
@@ -1920,8 +1791,6 @@ fn harden_descendants(root: &std::fs::File, root_path: &Path, sddl: &str) -> io:
                 io::Error::other("managed-tree hardening stack unexpectedly became empty")
             })?;
             let child = frame.path.join(std::ffi::OsString::from_wide(&leaf));
-            // The window this design closes: everything between learning a name
-            // and acting on it. The seam exists so a test can actually run in it.
             #[cfg(test)]
             walk_seam::fire(&child);
             let parent = frame.locked.as_ref().map_or(root, |locked| &locked.file);
@@ -2023,10 +1892,6 @@ fn rename_handle_relative_with_replace(
     const MAX_FINAL_PATH_UNITS: u32 = 32_768;
 
     validate_leaf(target_leaf)?;
-    // Resolve the destination prefix from the already verified parent handle,
-    // never from an attacker-controlled path. The parent handle was opened
-    // without FILE_SHARE_DELETE, so its DOS name cannot be renamed or replaced
-    // between this query and the rename operation.
     let required = unsafe {
         GetFinalPathNameByHandleW(
             raw_handle(root),
@@ -2071,15 +1936,6 @@ fn rename_handle_relative_with_replace(
         .len()
         .checked_mul(size_of::<u16>())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rename name is too long"))?;
-    // FILE_RENAME_INFO ends in a one-element variable-length array. Reserve the
-    // declared name *plus a terminating NUL*: measured behaviour is that the
-    // name is consumed past `FileNameLength` up to the first zero unit, so an
-    // unterminated buffer appends whatever follows it in memory to the created
-    // name. That went unnoticed because the `usize`-backed allocation rounds up
-    // to a word, which supplies a stray zero for some lengths and none for
-    // others — the bug is name-length dependent, not absent.
-    // `FileNameLength` itself stays the name without the terminator, as
-    // documented.
     let buffer_bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName)
         .checked_add(name_bytes)
         .and_then(|bytes| bytes.checked_add(size_of::<u16>()))
@@ -2087,14 +1943,11 @@ fn rename_handle_relative_with_replace(
     let word_bytes = size_of::<usize>();
     let mut buffer = vec![0usize; buffer_bytes.div_ceil(word_bytes)];
     let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    // SAFETY: the usize-backed allocation satisfies FILE_RENAME_INFO alignment;
-    // `buffer_bytes` covers the complete fixed structure plus every UTF-16 name
-    // byte, and each field is written without first forming an unaligned ref.
+    /* SAFETY: The usize-backed allocation satisfies FILE_RENAME_INFO alignment.
+    `buffer_bytes` covers the fixed structure and every UTF-16 name byte; raw pointer writes avoid forming unaligned references. */
     unsafe {
-        // Write the union through its widest member. Writing `ReplaceIfExists`
-        // instead copies the union's full four bytes from a value whose other
-        // three are uninitialized, handing them to the kernel; `Flags` covers
-        // all four, and its low byte is the BOOLEAN the filesystem reads.
+        /* SAFETY: Writing `Flags` initializes all four union bytes, including the low byte read as a BOOLEAN by the filesystem.
+        Writing only `ReplaceIfExists` would leave three bytes uninitialized before the kernel reads the union. */
         std::ptr::addr_of_mut!((*info).Anonymous).write(FILE_RENAME_INFO_0 {
             Flags: u32::from(replace),
         });
@@ -2110,8 +1963,7 @@ fn rename_handle_relative_with_replace(
             name.len(),
         );
     }
-    // SAFETY: source/root are live owned handles; the initialized aligned
-    // buffer remains valid for exactly the checked byte count through the call.
+    /* SAFETY: Source and root retain live owned handles; the initialized, aligned buffer supplies the checked byte count throughout the call. */
     let ok = unsafe {
         SetFileInformationByHandle(
             raw_handle(source),
@@ -2146,17 +1998,12 @@ fn delete_path(path: &Path, expected: Option<ObjectKind>) -> io::Result<()> {
     Ok(())
 }
 
-/// Marks every object below `root` for deletion, bottom-up, on handles opened
-/// without following reparse points.
+/// Marks every object below `root` for deletion, bottom-up, on handles opened without following reparse points.
 ///
-/// Handle-relative for the same reason [`harden_descendants`] is, and with more
-/// at stake: this walk unlinks what it opens, so a name repointed between
-/// enumeration and open would decide what gets deleted. `root` is the verified
-/// handle; children are enumerated from the handle held for their level and
-/// opened by leaf name against it, so no full path is ever resolved again.
+/// Handle-relative for the same reason [`harden_descendants`] is, and with more at stake: this walk unlinks what it opens, so a name repointed between enumeration and open would decide what gets deleted.
+/// `root` is the verified handle; children are enumerated from the handle held for their level and opened by leaf name against it, so no full path is ever resolved again.
 ///
-/// `root_path` is **diagnostic only** — it seeds the paths that appear in error
-/// messages and is never resolved.
+/// `root_path` is **diagnostic only** — it seeds the paths that appear in error messages and is never resolved.
 fn delete_descendants(root: &std::fs::File, root_path: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStringExt as _;
 
@@ -2185,8 +2032,6 @@ fn delete_descendants(root: &std::fs::File, root_path: &Path) -> io::Result<()> 
             let frame = stack.last_mut().ok_or_else(|| {
                 io::Error::other("managed-tree deletion stack unexpectedly became empty")
             })?;
-            // Disjoint field borrows: the enumeration state is advanced through
-            // the very handle whose level it belongs to.
             let Frame {
                 locked, entries, ..
             } = frame;
@@ -2223,8 +2068,6 @@ fn delete_descendants(root: &std::fs::File, root_path: &Path) -> io::Result<()> 
                 io::Error::other("managed-tree deletion stack unexpectedly became empty")
             })?;
             let child = frame.path.join(std::ffi::OsString::from_wide(&leaf));
-            // The window this design closes: everything between learning a name
-            // and acting on it. The seam exists so a test can actually run in it.
             #[cfg(test)]
             walk_seam::fire(&child);
             let parent = frame.locked.as_ref().map_or(root, |locked| &locked.file);
@@ -2283,8 +2126,7 @@ fn delete_handle(file: &std::fs::File) -> io::Result<()> {
 /// `install` captures the installing user this way (docs/SECURITY.md threat 1).
 ///
 /// # Errors
-/// Returns the OS error if opening the process token, querying its user, or
-/// stringifying the SID fails.
+/// Returns the OS error if opening the process token, querying its user, or stringifying the SID fails.
 pub fn current_user_sid() -> io::Result<String> {
     unsafe {
         let mut token: HANDLE = std::ptr::null_mut();
@@ -2306,10 +2148,6 @@ pub fn current_user_sid() -> io::Result<String> {
         {
             return Err(last_error());
         }
-        // TOKEN_USER's first field is a PSID (pointer, 8-byte aligned), but the
-        // Vec<u8> backing `buf` is only byte-aligned — forming a `&TOKEN_USER` to it
-        // would be a misaligned reference (UB). Read the value out unaligned instead;
-        // its `Sid` still points into `buf`, which outlives this use.
         let user = std::ptr::read_unaligned(buf.as_ptr().cast::<TOKEN_USER>());
         sid_to_string(user.User.Sid)
     }
@@ -2317,10 +2155,9 @@ pub fn current_user_sid() -> io::Result<String> {
 
 /// Does `sid_str` name a real *user* account on this machine?
 ///
-/// `install` uses it to vet a forwarded `--owner-sid` before trusting it onto
-/// the pipe allowlist (docs/SECURITY.md threat 1/7): a SID that resolves to
-/// nothing — or to a group / well-known principal (SYSTEM, BUILTIN\Users…)
-/// — is refused. Malformed/unresolvable → `Ok(false)`.
+/// `install` uses it to vet a forwarded `--owner-sid` before trusting it onto the pipe allowlist (docs/SECURITY.md threat 1/7): a SID that resolves to nothing — or to a group / well-known principal (SYSTEM, BUILTIN\Users…)
+/// — is refused.
+/// Malformed/unresolvable → `Ok(false)`.
 ///
 /// # Errors
 /// Genuine account-lookup API faults are `Err`; install fails closed.
@@ -2328,7 +2165,6 @@ pub fn validate_user_sid(sid_str: &str) -> io::Result<bool> {
     use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
     use windows_sys::Win32::Security::{LookupAccountSidW, PSID, SID_NAME_USE, SidTypeUser};
 
-    // ConvertStringSidToSidW LocalAlloc's the SID — free it on every path.
     struct LocalSid(PSID);
     impl Drop for LocalSid {
         fn drop(&mut self) {
@@ -2342,12 +2178,10 @@ pub fn validate_user_sid(sid_str: &str) -> io::Result<bool> {
     let wide: Vec<u16> = sid_str.encode_utf16().chain([0]).collect();
     let mut psid: PSID = std::ptr::null_mut();
     if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &raw mut psid) } == 0 {
-        return Ok(false); // not even a well-formed SID string
+        return Ok(false);
     }
     let owned = LocalSid(psid);
 
-    // First call sizes the name/domain buffers; a SID that maps to no
-    // account leaves them at zero (ERROR_NONE_MAPPED).
     let mut name_len = 0u32;
     let mut domain_len = 0u32;
     let mut use_kind: SID_NAME_USE = 0;
@@ -2379,10 +2213,7 @@ pub fn validate_user_sid(sid_str: &str) -> io::Result<bool> {
         ));
     }
 
-    // Account metadata can change between the sizing and fill calls. Retry a
-    // bounded number of times when Windows reports a larger required buffer;
-    // every other OS fault is propagated unchanged.
-    for _ in 0..4 {
+    for _ in 0..ACCOUNT_LOOKUP_ATTEMPTS {
         let mut name = vec![0u16; name_len as usize];
         let mut domain = vec![0u16; domain_len as usize];
         let domain_ptr = if domain.is_empty() {
@@ -2436,19 +2267,16 @@ unsafe fn sid_to_string(sid: windows_sys::Win32::Security::PSID) -> io::Result<S
     Ok(s)
 }
 
-/// Protected DACL for the data root: SYSTEM + Administrators only. The
-/// snapshots inside hold every file name on the machine (SECURITY.md threat 7).
+/// Protected DACL for the data root: SYSTEM + Administrators only.
+/// The snapshots inside hold every file name on the machine (SECURITY.md threat 7).
 #[must_use]
 pub fn data_dir_sddl() -> String {
     "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_string()
 }
 
-/// logs/ keeps user read so the unelevated F12 "copy diagnostics" can tail
-/// the rolling engine logs.
+/// logs/ keeps user read so the unelevated F12 "copy diagnostics" can tail the rolling engine logs.
 ///
-/// Each authorized user (the installing admin *and* a forwarded owner SID
-/// under OTS elevation) gets read, so the daily user is never locked out of
-/// its own diagnostics.
+/// Each authorized user (the installing admin *and* a forwarded owner SID under OTS elevation) gets read, so the daily user is never locked out of its own diagnostics.
 #[must_use]
 pub fn logs_dir_sddl(user_sids: &[&str]) -> String {
     let mut s = String::from("O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
@@ -2462,10 +2290,8 @@ pub fn logs_dir_sddl(user_sids: &[&str]) -> String {
 
 /// Protected Task Scheduler object descriptor for the SYSTEM-run daily GC.
 ///
-/// The creating administrator is deliberately not the owner: otherwise the
-/// same person's filtered unelevated token could retain implicit owner control
-/// over a task that executes as SYSTEM. The descriptor is embedded in the task
-/// XML so it applies atomically at registration, not in a racy post-create fix.
+/// The creating administrator is deliberately not the owner: otherwise the same person's filtered unelevated token could retain implicit owner control over a task that executes as SYSTEM.
+/// The descriptor is embedded in the task XML so it applies atomically at registration, not in a racy post-create fix.
 #[must_use]
 pub const fn gc_task_sddl() -> &'static str {
     "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"
@@ -2473,12 +2299,10 @@ pub const fn gc_task_sddl() -> &'static str {
 
 /// Verifies the exact Task Scheduler file created for the daily SYSTEM GC.
 ///
-/// The path is resolved internally from the trusted System directory and the
-/// fixed task name; callers cannot redirect this privileged check.
+/// The path is resolved internally from the trusted System directory and the fixed task name; callers cannot redirect this privileged check.
 ///
 /// # Errors
-/// Returns Known Folder, type/reparse/link, sharing, ACL-read, or exact
-/// owner/group/DACL mismatch errors.
+/// Returns Known Folder, type/reparse/link, sharing, ACL-read, or exact owner/group/DACL mismatch errors.
 pub fn verify_gc_task_security() -> io::Result<()> {
     let path = crate::config::system_dir()?
         .join("Tasks")
@@ -2503,22 +2327,14 @@ pub fn verify_gc_task_security() -> io::Result<()> {
     Ok(())
 }
 
-/// Whether the registered GC task's descriptor still admits nobody but SYSTEM
-/// and Administrators.
+/// Whether the registered GC task's descriptor still admits nobody but SYSTEM and Administrators.
 ///
-/// Deliberately a property, not an equality. The task file's descriptor is
-/// written by the Task Scheduler, not by this process: the registration XML
-/// asks for one and the registrar is free to add ACEs of its own — an `SY` read
-/// grant has been observed on a real install and *not* on an otherwise identical
-/// re-registration. Comparing against a fixed literal therefore fails on an
-/// accident of the registrar rather than on any weakening, which is what broke
-/// `install` outright.
+/// Deliberately a property, not an equality.
+/// The task file's descriptor is written by the Task Scheduler, not by this process: the registration XML asks for one and the registrar is free to add ACEs of its own — an `SY` read grant has been observed on a real install and *not* on an otherwise identical re-registration.
+/// Comparing against a fixed literal therefore fails on an accident of the registrar rather than on any weakening, which is what broke `install` outright.
 ///
-/// What actually matters is unchanged and is what this checks: Administrators
-/// own the object, the DACL is protected so nothing is inherited into it, and
-/// every ACE is an allow grant to SYSTEM or Administrators. A standard user
-/// gaining any access to a task that runs as SYSTEM is the escalation; an extra
-/// SYSTEM ACE is not.
+/// What actually matters is unchanged and is what this checks: Administrators own the object, the DACL is protected so nothing is inherited into it, and every ACE is an allow grant to SYSTEM or Administrators.
+/// A standard user gaining any access to a task that runs as SYSTEM is the escalation; an extra SYSTEM ACE is not.
 fn gc_task_security_is_acceptable(sddl: &str) -> bool {
     const ADMINISTRATORS: [&str; 2] = ["BA", "S-1-5-32-544"];
     const SYSTEM: [&str; 2] = ["SY", "S-1-5-18"];
@@ -2536,9 +2352,6 @@ fn gc_task_security_is_acceptable(sddl: &str) -> bool {
     if !ADMINISTRATORS.contains(&owner) || !ADMINISTRATORS.contains(&group) {
         return false;
     }
-    // A SACL, if Windows ever emitted one here, would follow the DACL; this
-    // function is only ever handed OWNER|GROUP|DACL, so its presence means the
-    // string is not the shape assumed and the check must fail closed.
     let Some((flags, aces)) = dacl.split_once('(') else {
         return false;
     };
@@ -2567,12 +2380,9 @@ fn gc_task_security_is_acceptable(sddl: &str) -> bool {
 
 /// The owner/group/DACL descriptors `install` applies across the data tree.
 ///
-/// Returned as `(subdir, sddl)` pairs (`""` = the data root). Centralized here so
-/// the threat 7 invariant — `index/` (machine-wide file-name snapshots) is
-/// SYSTEM+Administrators only, never world-readable — is unit-pinned next to the
-/// SDDL builders, without needing an elevated install to verify it. `install`
-/// applies `index/` explicitly so the invariant does not depend on inheritance
-/// history or propagation behavior.
+/// Returned as `(subdir, sddl)` pairs (`""` = the data root).
+/// Centralized here so the threat 7 invariant — `index/` (machine-wide file-name snapshots) is SYSTEM+Administrators only, never world-readable — is unit-pinned next to the SDDL builders, without needing an elevated install to verify it.
+/// `install` applies `index/` explicitly so the invariant does not depend on inheritance history or propagation behavior.
 #[must_use]
 pub fn data_tree_security_descriptors(log_readers: &[&str]) -> Vec<(&'static str, String)> {
     vec![
@@ -2584,21 +2394,13 @@ pub fn data_tree_security_descriptors(log_readers: &[&str]) -> Vec<(&'static str
 
 /// The service-object DACL (ADR-0027): SYSTEM/Admins full, each user start/stop.
 ///
-/// `O:BAG:BAD:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(…;;;BA)(A;;CCLCSWRPWPLORC;;;<sid>)…`
-/// — Administrators owns the object (so a split-token installer is not an
-/// implicit unelevated owner), SYSTEM and Administrators keep full control, and
-/// each authorized user gets query-config/status + start + stop + interrogate +
-/// read, nobody else.
+/// `O:BAG:BAD:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(…;;;BA)(A;;CCLCSWRPWPLORC;;;<sid>)…` — Administrators owns the object (so a split-token installer is not an implicit unelevated owner), SYSTEM and Administrators keep full control, and each authorized user gets query-config/status + start + stop + interrogate + read, nobody else.
 ///
 /// The user ACE deliberately omits change-config (`DC`), delete (`SD`),
-/// write-DAC (`WD`) and write-owner (`WO`): granting any of those to a standard
-/// user on a `LocalSystem` service would let them repoint the service binary and
-/// run arbitrary code as SYSTEM (local privilege escalation, docs/SECURITY.md).
+/// write-DAC (`WD`) and write-owner (`WO`): granting any of those to a standard user on a `LocalSystem` service would let them repoint the service binary and run arbitrary code as SYSTEM (local privilege escalation, docs/SECURITY.md).
 /// SYSTEM keeps full control so the SYSTEM-run GC task can `DeleteService`.
 #[must_use]
 pub fn service_sddl(user_sids: &[String]) -> String {
-    // SERVICE_ALL_ACCESS in SDDL rights letters (matches Windows' default SY/BA
-    // ACEs); the per-user set is query+start+stop+interrogate+read only.
     const FULL: &str = "CCDCLCSWRPWPDTLOCRSDRCWDWO";
     let mut s = format!("O:BAG:BAD:P(A;;{FULL};;;SY)(A;;{FULL};;;BA)");
     for sid in user_sids {
@@ -2611,14 +2413,12 @@ pub fn service_sddl(user_sids: &[String]) -> String {
 
 /// Applies the protected service-object DACL to an exact open service handle.
 ///
-/// The Administrators owner/group are applied at the same boundary. Callers
-/// must have requested `WRITE_OWNER | WRITE_DAC` on that handle before any
-/// maintenance transition. This is the only service-security mutation API, so
-/// callers cannot race a name-based reopen onto a different service object.
+/// The Administrators owner/group are applied at the same boundary.
+/// Callers must have requested `WRITE_OWNER | WRITE_DAC` on that handle before any maintenance transition.
+/// This is the only service-security mutation API, so callers cannot race a name-based reopen onto a different service object.
 ///
 /// # Errors
-/// Returns SDDL conversion, descriptor-component extraction, set/query, or
-/// exact read-back mismatch errors.
+/// Returns SDDL conversion, descriptor-component extraction, set/query, or exact read-back mismatch errors.
 pub fn set_service_handle_security(
     service: &windows_service::service::Service,
     sddl: &str,
@@ -2636,8 +2436,7 @@ pub fn set_service_handle_security(
     let mut dacl: *mut ACL = std::ptr::null_mut();
     let mut present = 0;
     let mut defaulted = 0;
-    // SAFETY: `descriptor` is a live descriptor created by the SDDL converter;
-    // all outputs refer to initialized local pointer/BOOL storage.
+    /* SAFETY: The SDDL converter created the live `descriptor`; every output points at initialized local pointer or BOOL storage. */
     if unsafe {
         GetSecurityDescriptorOwner(descriptor.descriptor, &raw mut owner, &raw mut defaulted)
     } == 0
@@ -2661,9 +2460,9 @@ pub fn set_service_handle_security(
             "service SDDL must contain owner, group, and a non-null DACL",
         ));
     }
-    // SAFETY: callers retain a live service handle with WRITE_OWNER|WRITE_DAC;
-    // owner/group/DACL point inside `descriptor`, which remains live through
-    // this synchronous call. The null SACL matches the selected information.
+    /* SAFETY: Callers retain a live service handle with WRITE_OWNER and WRITE_DAC.
+    Owner, group, and DACL point inside `descriptor`, which remains live throughout this synchronous call.
+    The selected information permits a null SACL. */
     let status = unsafe {
         SetSecurityInfo(
             service.raw_handle().cast(),
@@ -2697,8 +2496,7 @@ fn verify_service_handle_security(
     let information =
         OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
     let mut bytes = 0u32;
-    // SAFETY: the retained service handle has READ_CONTROL; null/zero is the
-    // documented size-query form and `bytes` is a valid out-pointer.
+    /* SAFETY: The service handle retains READ_CONTROL access; the API accepts a null buffer and zero capacity for a size query, with `bytes` providing writable output storage. */
     if unsafe {
         QueryServiceObjectSecurity(
             service.raw_handle(),
@@ -2726,8 +2524,7 @@ fn verify_service_handle_security(
     }
     let word_bytes = size_of::<usize>();
     let mut buffer = vec![0usize; (bytes as usize).div_ceil(word_bytes)];
-    // SAFETY: the usize-backed buffer is aligned for a security descriptor and
-    // contains at least the byte count returned by the size query.
+    /* SAFETY: The usize-backed buffer provides security descriptor alignment and at least the byte count returned by the size query. */
     if unsafe {
         QueryServiceObjectSecurity(
             service.raw_handle(),
@@ -2752,17 +2549,15 @@ fn verify_service_handle_security(
     Ok(())
 }
 
-/// Connect-time token check — defense in depth behind the DACL (a DACL
-/// construction bug must not become full exposure). Empty `authorized` =
-/// check disabled (console/test mode).
+/// Connect-time token check — defense in depth behind the DACL (a DACL construction bug must not become full exposure).
+/// Empty `authorized` = check disabled (console/test mode).
 ///
 /// # Errors
-/// Returns the OS error if impersonating the pipe client or reading its token
-/// fails. A successfully read token that is not authorized returns `Ok(false)`.
+/// Returns the OS error if impersonating the pipe client or reading its token fails.
+/// A successfully read token that is not authorized returns `Ok(false)`.
 ///
-/// If `RevertToSelf` fails, continuing this process could run later privileged
-/// service work under the untrusted client token. Windows explicitly requires
-/// fail-stop handling for that condition, so this function aborts the process;
+/// If `RevertToSelf` fails, continuing this process could run later privileged service work under the untrusted client token.
+/// Windows explicitly requires fail-stop handling for that condition, so this function aborts the process;
 /// SCM recovery then treats it as a service failure.
 pub fn verify_client(pipe: &crate::pipe::PipeStream, authorized: &[String]) -> io::Result<bool> {
     use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
@@ -2776,35 +2571,28 @@ pub fn verify_client(pipe: &crate::pipe::PipeStream, authorized: &[String]) -> i
             return Err(last_error());
         }
     }
-    // From here on we *must* revert — the closure scopes the impersonation.
-    let result = (|| {
-        unsafe {
-            let mut token: HANDLE = std::ptr::null_mut();
-            if OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &raw mut token) == 0 {
-                return Err(last_error());
-            }
-            let token = OwnedToken(token);
-            let mut needed = 0u32;
-            GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &raw mut needed);
-            let mut buf = vec![0u8; needed as usize];
-            if GetTokenInformation(
-                token.0,
-                TokenUser,
-                buf.as_mut_ptr().cast(),
-                needed,
-                &raw mut needed,
-            ) == 0
-            {
-                return Err(last_error());
-            }
-            // See current_user_sid: read TOKEN_USER out unaligned (its leading PSID
-            // wants 8-byte alignment; the Vec<u8> is byte-aligned) so we never form a
-            // misaligned reference. `buf` outlives the Sid read below.
-            let user = std::ptr::read_unaligned(buf.as_ptr().cast::<TOKEN_USER>());
-            let sid = sid_to_string(user.User.Sid)?;
-            Ok(sid == "S-1-5-18" /* SYSTEM (self-connections) */
-                || authorized.iter().any(|a| a == &sid))
+    let result = (|| unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &raw mut token) == 0 {
+            return Err(last_error());
         }
+        let token = OwnedToken(token);
+        let mut needed = 0u32;
+        GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &raw mut needed);
+        let mut buf = vec![0u8; needed as usize];
+        if GetTokenInformation(
+            token.0,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            needed,
+            &raw mut needed,
+        ) == 0
+        {
+            return Err(last_error());
+        }
+        let user = std::ptr::read_unaligned(buf.as_ptr().cast::<TOKEN_USER>());
+        let sid = sid_to_string(user.User.Sid)?;
+        Ok(sid == "S-1-5-18" || authorized.iter().any(|a| a == &sid))
     })();
     let reverted = unsafe { windows_sys::Win32::Security::RevertToSelf() };
     if impersonation_revert_disposition(reverted != 0) == ImpersonationRevertDisposition::Abort {
@@ -2833,8 +2621,6 @@ mod tests {
 
     #[test]
     fn sddl_structure_is_pinned() {
-        // Protected DACL, SYSTEM full control, per-SID read+write, nothing
-        // else — the literal shape SECURITY.md documents.
         assert_eq!(pipe_sddl(&[]), "D:P(A;;GA;;;SY)");
         assert_eq!(
             pipe_sddl(&["S-1-5-21-1-2-3-1001".to_string()]),
@@ -2887,7 +2673,6 @@ mod tests {
 
     #[test]
     fn service_sddl_grants_user_start_stop_not_config_or_delete() {
-        // SYSTEM + Administrators full control; no user → just those two ACEs.
         const FULL: &str = "CCDCLCSWRPWPDTLOCRSDRCWDWO";
         assert_eq!(
             service_sddl(&[]),
@@ -2901,9 +2686,6 @@ mod tests {
             )
         );
 
-        // The user ACE grants start (RP) and stop (WP) — the whole point — but
-        // NEVER change-config / delete / write-DAC / write-owner, which on a
-        // LocalSystem service would be local privilege escalation.
         let user_ace = "(A;;CCLCSWRPWPLORC;;;S-1-5-21-1-2-3-1001)";
         assert!(one.contains(user_ace));
         assert!(user_ace.contains("RP"), "user can start (RP)");
@@ -2914,41 +2696,34 @@ mod tests {
                 "user ACE must not grant {forbidden} on a LocalSystem service"
             );
         }
-        // And it converts to a real security descriptor.
         PipeSecurity::from_sddl(&one).expect("service SDDL converts");
         PipeSecurity::from_sddl(gc_task_sddl()).expect("GC task SDDL converts");
     }
 
     #[test]
     fn sddl_converts_and_user_sid_resolves() {
-        // Conversion exercises the real API (unelevated-safe).
         let sec = PipeSecurity::from_sddl(&pipe_sddl(&["S-1-5-32-545".to_string()]))
             .expect("valid SDDL converts");
         assert!(!sec.attributes().lpSecurityDescriptor.is_null());
 
         let sid = current_user_sid().expect("own token is readable");
         assert!(sid.starts_with("S-1-"), "stringified SID: {sid}");
-        // The full loop: a captured SID round-trips through the builder.
         PipeSecurity::from_sddl(&pipe_sddl(&[sid])).expect("captured SID is SDDL-legal");
     }
 
     #[test]
     fn validate_user_sid_accepts_self() {
-        // The process's own token is a real user account.
         let sid = current_user_sid().expect("own sid");
         assert!(validate_user_sid(&sid).expect("validate own sid"));
     }
 
     #[test]
     fn validate_user_sid_rejects_system_and_garbage() {
-        // SYSTEM resolves but is a well-known group, not a user.
         assert!(!validate_user_sid("S-1-5-18").expect("validate SYSTEM"));
-        // A syntactically valid but unmapped local SID.
         assert!(
             !validate_user_sid("S-1-5-21-1111111111-2222222222-3333333333-4444")
                 .expect("validate unmapped")
         );
-        // Not even a SID string.
         assert!(!validate_user_sid("not-a-sid").expect("validate garbage"));
     }
 
@@ -3006,10 +2781,6 @@ mod tests {
     fn data_tree_hardens_index_like_root_with_no_users() {
         let t = data_tree_security_descriptors(&["S-1-5-21-1-2-3-1001"]);
         let find = |k: &str| t.iter().find(|(s, _)| *s == k).map(|(_, v)| v.clone());
-        // threat 7: index/ — machine-wide file-name snapshots — gets the SAME
-        // protected SYSTEM+Admins-only DACL as the data root. Regressing this
-        // (e.g. dropping the explicit index/ hardening) re-exposes every file
-        // name on the machine to any local user.
         assert_eq!(find("index").as_deref(), Some(data_dir_sddl().as_str()));
         assert_eq!(find("").as_deref(), Some(data_dir_sddl().as_str()));
         assert!(
@@ -3024,7 +2795,6 @@ mod tests {
                 "index/ must not grant {forbidden}"
             );
         }
-        // logs/ additionally grants the per-user read ACE for the F12 copy path.
         assert!(
             find("logs")
                 .unwrap()
@@ -3059,18 +2829,8 @@ mod tests {
         }
     }
 
-    // --- managed-tree hardening (DEV-323) ------------------------------------
-    //
-    // These run unelevated. The arbitrary-parent seam takes any owner, so the
-    // whole walk executes under the real process SID; elevation would only
-    // change the owner to Administrators. That matters, because the defect
-    // these pin was invisible for exactly as long as the only tests that
-    // reached the walk needed an elevated session to run at all.
-
-    /// Fails closed. `#[ignore]` is what *skips* an elevated test; reaching the
-    /// body without the arming variable means the harness was invoked outside
-    /// `just test-admin`, and a silent early return would be indistinguishable
-    /// from a boundary that was actually proven.
+    /// Fails closed.
+    /// `#[ignore]` is what *skips* an elevated test; reaching the body without the arming variable means the harness was invoked outside `just test-admin`, and a silent early return would be indistinguishable from a boundary that was actually proven.
     fn require_admin_gate() {
         assert_eq!(
             std::env::var("FMF_ADMIN_TESTS").as_deref(),
@@ -3084,31 +2844,178 @@ mod tests {
         format!("O:{user}G:{user}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{user})")
     }
 
-    /// The token Windows actually *prints* for this process's user, measured
-    /// by writing one ACE naming it and reading the descriptor back.
+    #[test]
+    fn operational_root_allows_publication_parent_opens_and_atomic_replacement() {
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let anchor = tempfile::tempdir().expect("anchor");
+        let path = anchor.path().join("find-my-files");
+        let sddl = own_tree_sddl();
+        let root = TrustedDataRoot::create_or_replace_for_test(&path, &sddl).expect("root");
+        let descriptor = read_sddl(&path);
+        let parent = open_checked(
+            &path,
+            Some(ObjectKind::Directory),
+            FILE_ADD_FILE_ACCESS | SYNCHRONIZE_ACCESS,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+        )
+        .expect("publication parent open without delete sharing");
+        root.atomic_write("service.json", b"first", &sddl)
+            .expect("create");
+        root.atomic_write("service.json", b"second", &sddl)
+            .expect("replace");
+        assert_eq!(
+            std::fs::read(path.join("service.json")).expect("config"),
+            b"second"
+        );
+        let source_path = anchor.path().join("source.exe");
+        std::fs::write(&source_path, b"image").expect("source");
+        let source = TrustedSourceFile::open(&source_path).expect("source guard");
+        root.atomic_copy("fmf-service.exe", &source, &sddl)
+            .expect("copy");
+        assert_eq!(
+            std::fs::read(path.join("fmf-service.exe")).expect("image"),
+            b"image"
+        );
+        assert_eq!(read_sddl(&path), descriptor);
+        assert_eq!(
+            std::fs::rename(&path, anchor.path().join("moved"))
+                .expect_err("root pinned")
+                .raw_os_error(),
+            Some(32)
+        );
+        assert_eq!(
+            std::fs::remove_dir(&path)
+                .expect_err("root pinned")
+                .raw_os_error(),
+            Some(32)
+        );
+        drop(parent);
+        root.purge().expect("purge verified root");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn purge_rejects_a_substituted_directory_before_deleting_any_children() {
+        let anchor = tempfile::tempdir().expect("anchor");
+        let path = anchor.path().join("find-my-files");
+        let retained = anchor.path().join("retained");
+        let sddl = own_tree_sddl();
+        let root = TrustedDataRoot::create_or_replace_for_test(&path, &sddl).expect("root");
+        root.atomic_write("sentinel", b"original", &sddl)
+            .expect("sentinel");
+        let error = root
+            .purge_after_release(|released| {
+                assert!(
+                    std::fs::rename(anchor.path(), anchor.path().with_extension("moved")).is_err()
+                );
+                std::fs::rename(released, &retained).expect("retain original");
+                create_directory_new_with_security(released, &sddl).expect("replacement");
+                std::fs::write(released.join("sentinel"), b"replacement").expect("sentinel");
+            })
+            .expect_err("different identity");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read(path.join("sentinel")).expect("replacement survives"),
+            b"replacement"
+        );
+        assert_eq!(
+            std::fs::read(retained.join("sentinel")).expect("original survives"),
+            b"original"
+        );
+    }
+
+    #[test]
+    fn purge_rejects_a_substituted_file_without_modifying_it() {
+        let anchor = tempfile::tempdir().expect("anchor");
+        let path = anchor.path().join("find-my-files");
+        let retained = anchor.path().join("retained");
+        let root =
+            TrustedDataRoot::create_or_replace_for_test(&path, &own_tree_sddl()).expect("root");
+        let error = root
+            .purge_after_release(|released| {
+                std::fs::rename(released, &retained).expect("retain original");
+                std::fs::write(released, b"outside").expect("replacement file");
+            })
+            .expect_err("wrong object kind");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&path).expect("file survives"), b"outside");
+        assert!(retained.is_dir());
+    }
+
+    #[test]
+    fn purge_rejects_a_substituted_junction_without_touching_its_target() {
+        let anchor = tempfile::tempdir().expect("anchor");
+        let outside = tempfile::tempdir().expect("outside");
+        let path = anchor.path().join("find-my-files");
+        let retained = anchor.path().join("retained");
+        std::fs::write(outside.path().join("sentinel"), b"outside").expect("sentinel");
+        let descriptor = read_sddl(outside.path());
+        let root =
+            TrustedDataRoot::create_or_replace_for_test(&path, &own_tree_sddl()).expect("root");
+        let error = root
+            .purge_after_release(|released| {
+                std::fs::rename(released, &retained).expect("retain original");
+                create_junction(released, outside.path()).expect("junction");
+            })
+            .expect_err("root reparse point");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(outside.path().join("sentinel")).expect("target survives"),
+            b"outside"
+        );
+        assert_eq!(read_sddl(outside.path()), descriptor);
+        std::fs::remove_dir(&path).expect("remove junction");
+    }
+
+    #[test]
+    fn purge_rejects_security_drift_on_the_same_directory() {
+        let anchor = tempfile::tempdir().expect("anchor");
+        let path = anchor.path().join("find-my-files");
+        let sddl = own_tree_sddl();
+        let root = TrustedDataRoot::create_or_replace_for_test(&path, &sddl).expect("root");
+        let identity = root.root.identity;
+        root.atomic_write("sentinel", b"original", &sddl)
+            .expect("sentinel");
+        let replacement_sddl = format!("{sddl}(A;;GR;;;BU)");
+        let original_security = read_sddl(&path);
+        let mut replacement_security = None;
+        let error = root
+            .purge_after_release(|released| {
+                let reopened = open_root(released).expect("same root");
+                assert_eq!(reopened.identity, identity);
+                set_handle_security(&reopened.file, &replacement_sddl).expect("change descriptor");
+                replacement_security = Some(read_sddl(released));
+            })
+            .expect_err("changed descriptor");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read(path.join("sentinel")).expect("sentinel survives"),
+            b"original"
+        );
+        let reopened = open_root(&path).expect("inspect survivor");
+        assert_eq!(reopened.identity, identity);
+        assert_ne!(
+            replacement_security.as_deref(),
+            Some(original_security.as_str())
+        );
+        assert_eq!(Some(read_sddl(&path)), replacement_security);
+    }
+
+    /// The token Windows actually *prints* for this process's user, measured by writing one ACE naming it and reading the descriptor back.
     ///
     /// A test must not assume the SID it wrote is the string it will read.
-    /// `ConvertSecurityDescriptorToStringSecurityDescriptor` renders
-    /// well-known accounts as two-letter SDDL aliases, and CI's Windows
-    /// runners execute as `runneradmin` — the built-in Administrator, RID 500
-    /// — so an ACE written with the raw `S-1-5-21-…` SID reads back as
-    /// `;;;LA)` and counting the SID as a substring finds nothing. On an
-    /// ordinary developer account, whose SID has no alias, the two spellings
-    /// coincide and the wrong assumption is invisible.
+    /// `ConvertSecurityDescriptorToStringSecurityDescriptor` renders well-known accounts as two-letter SDDL aliases, and CI's Windows runners execute as `runneradmin` — the built-in Administrator, RID 500 — so an ACE written with the raw `S-1-5-21-…` SID reads back as `;;;LA)` and counting the SID as a substring finds nothing.
+    /// On an ordinary developer account, whose SID has no alias, the two spellings coincide and the wrong assumption is invisible.
     ///
-    /// The product never depends on that round trip — `handle_security_matches`
-    /// renders both sides through the same converter before comparing, so
-    /// aliases cancel. Only a test counting ACEs by substring does, so it asks
-    /// Windows once rather than assuming.
+    /// The product never depends on that round trip — `handle_security_matches` renders both sides through the same converter before comparing, so aliases cancel.
+    /// Only a test counting ACEs by substring does, so it asks Windows once rather than assuming.
     fn rendered_user_token() -> &'static str {
         static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         TOKEN.get_or_init(|| {
             let user = current_user_sid().expect("own sid");
             let anchor = tempfile::tempdir().expect("probe anchor");
             let probe = anchor.path().join("sid-probe");
-            // A protected DACL with exactly one ACE: nothing is inherited in,
-            // so whatever sits between the last `;;;` and its `)` is the
-            // rendering of `user` and nothing else.
             create_directory_new_with_security(&probe, &format!("D:P(A;;FA;;;{user})"))
                 .expect("probe directory naming this process's own user");
             let sddl = read_sddl(&probe);
@@ -3123,9 +3030,8 @@ mod tests {
         })
     }
 
-    /// Reads a descriptor with `READ_CONTROL` only. The owner keeps that right
-    /// implicitly even when the DACL grants nothing, so a stripped object stays
-    /// *observable* instead of merely inaccessible.
+    /// Reads a descriptor with `READ_CONTROL` only.
+    /// The owner keeps that right implicitly even when the DACL grants nothing, so a stripped object stays *observable* instead of merely inaccessible.
     fn read_sddl(path: &Path) -> String {
         use windows_sys::Win32::Storage::FileSystem::{
             FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -3145,12 +3051,8 @@ mod tests {
 
     /// Opens a root the way a walk's caller does, but with permissive sharing.
     ///
-    /// The product opens it `FILE_SHARE_READ`, which is right for the product
-    /// and wrong for these tests: the swap tests must mutate the tree *while*
-    /// the walk holds the root, which is precisely the concurrency a walk in
-    /// production is entitled to exclude. Relaxing it here is what lets the
-    /// attacker exist at all; it does not weaken what is being measured, which
-    /// is what the walk does once a name has been repointed under it.
+    /// The product opens it `FILE_SHARE_READ`, which is right for the product and wrong for these tests: the swap tests must mutate the tree *while* the walk holds the root, which is precisely the concurrency a walk in production is entitled to exclude.
+    /// Relaxing it here is what lets the attacker exist at all; it does not weaken what is being measured, which is what the walk does once a name has been repointed under it.
     fn walk_root(path: &Path, access: u32) -> LockedObject {
         use windows_sys::Win32::Storage::FileSystem::{
             FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -3176,10 +3078,8 @@ mod tests {
 
     /// Plants an NTFS junction at `link` pointing at `target`.
     ///
-    /// Deliberately not `symlink_dir`: a symlink needs `SeCreateSymbolicLink`
-    /// or Developer Mode, while any standard user can create a junction. The
-    /// unprivileged one is the case the threat model cares about, and it is the
-    /// one an elevation-gated test would never have covered.
+    /// Deliberately not `symlink_dir`: a symlink needs `SeCreateSymbolicLink` or Developer Mode, while any standard user can create a junction.
+    /// The unprivileged one is the case the threat model cares about, and it is the one an elevation-gated test would never have covered.
     fn create_junction(link: &Path, target: &Path) -> io::Result<()> {
         use std::os::windows::io::FromRawHandle as _;
         use windows_sys::Win32::Storage::FileSystem::{
@@ -3208,18 +3108,17 @@ mod tests {
         buffer.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
         let data_length = 8 + u16::try_from(path_buffer.len() * 2).expect("reparse data fits");
         buffer.extend_from_slice(&data_length.to_le_bytes());
-        buffer.extend_from_slice(&0u16.to_le_bytes()); // Reserved
-        buffer.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
+        buffer.extend_from_slice(&0u16.to_le_bytes());
+        buffer.extend_from_slice(&0u16.to_le_bytes());
         buffer.extend_from_slice(&substitute_bytes.to_le_bytes());
-        buffer.extend_from_slice(&(substitute_bytes + 2).to_le_bytes()); // PrintNameOffset
+        buffer.extend_from_slice(&(substitute_bytes + 2).to_le_bytes());
         buffer.extend_from_slice(&print_bytes.to_le_bytes());
         for unit in path_buffer {
             buffer.extend_from_slice(&unit.to_le_bytes());
         }
 
         let wide: Vec<u16> = link.as_os_str().encode_wide().chain([0]).collect();
-        // SAFETY: `wide` is NUL-terminated and outlives the call; the optional
-        // pointers are null and the handle is checked before ownership.
+        /* SAFETY: `wide` remains live with a NUL terminator throughout the call; optional pointers contain null values, and the result check precedes ownership transfer. */
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
@@ -3234,12 +3133,10 @@ mod tests {
         if handle == INVALID_HANDLE_VALUE {
             return Err(last_error());
         }
-        // SAFETY: one owned kernel handle, transferred exactly once to `File`
-        // for CloseHandle-on-drop.
+        /* SAFETY: Transferring the single owned kernel handle once to `File` ensures CloseHandle on drop. */
         let file = unsafe { std::fs::File::from_raw_handle(handle.cast()) };
         let mut returned = 0u32;
-        // SAFETY: `buffer` is a correctly laid out mount-point REPARSE_DATA_BUFFER
-        // whose declared length matches its allocation; no output is requested.
+        /* SAFETY: `buffer` contains a mount-point REPARSE_DATA_BUFFER with the required layout and matching declared length; the call requests no output. */
         let ok = unsafe {
             DeviceIoControl(
                 raw_handle(&file),
@@ -3258,10 +3155,8 @@ mod tests {
         Ok(())
     }
 
-    /// The shape every install *after the first one* walks, and the shape no
-    /// previously passing test built: a child directory that holds only files.
-    /// Every earlier test created an empty root, so `harden_descendants`
-    /// iterated nothing and the walk was never executed at all.
+    /// The shape every install *after the first one* walks, and the shape no previously passing test built: a child directory that holds only files.
+    /// Every earlier test created an empty root, so `harden_descendants` iterated nothing and the walk was never executed at all.
     #[test]
     fn hardening_walk_survives_a_production_shaped_tree() {
         let sddl = own_tree_sddl();
@@ -3284,8 +3179,6 @@ mod tests {
         let trusted = TrustedDataRoot::open_verified_for_test(&root, provenance, &sddl)
             .expect("a populated managed tree must harden without denying the walk its own access");
 
-        // The second site: `ensure_directory` hardens one child subtree through
-        // `harden_path`, which is what the real install calls for `index/`.
         trusted
             .ensure_directory("index", &sddl)
             .expect("re-hardening an existing populated child must succeed");
@@ -3321,19 +3214,11 @@ mod tests {
 
     /// DEV-322 #1, measured rather than argued.
     ///
-    /// A handle holding only `FILE_DELETE_CHILD` cannot be excluded by any share
-    /// mode — Windows buckets share access into read/write/delete and that right
-    /// is in none of them — so `create_or_replace_for_test` cannot fail closed
-    /// on one, and does not. The open question was whether rotating the squatted
-    /// object out of the privileged name is *sufficient*, which only a real
-    /// standard-user token can answer: in the arbitrary-parent seam this process
-    /// is the owner and holds full control, so any attempt it makes would
-    /// succeed for the wrong reason.
+    /// A handle holding only `FILE_DELETE_CHILD` cannot be excluded by any share mode — Windows buckets share access into read/write/delete and that right is in none of them — so `create_or_replace_for_test` cannot fail closed on one, and does not.
+    /// The open question was whether rotating the squatted object out of the privileged name is *sufficient*, which only a real standard-user token can answer: in the arbitrary-parent seam this process is the owner and holds full control, so any attempt it makes would succeed for the wrong reason.
     ///
-    /// The answer is that the handle is bound to the object, not the name. It
-    /// keeps its capability over the quarantined directory it was opened on, and
-    /// has none over the fresh root, whose descriptor admits only SYSTEM and
-    /// Administrators.
+    /// The answer is that the handle is bound to the object, not the name.
+    /// It keeps its capability over the quarantined directory it was opened on, and has none over the fresh root, whose descriptor admits only SYSTEM and Administrators.
     #[test]
     #[ignore = "creates a real local account and impersonates it; gated by FMF_ADMIN_TESTS=1"]
     fn a_delete_child_handle_keeps_the_quarantined_object_and_never_reaches_the_new_root() {
@@ -3349,8 +3234,7 @@ mod tests {
 
         fn open_for(path: &Path, access: u32) -> io::Result<std::fs::File> {
             let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-            // SAFETY: `wide` is NUL-terminated and outlives the call; optional
-            // pointers are null and the handle is checked before ownership.
+            /* SAFETY: `wide` remains live with a NUL terminator throughout the call; optional pointers contain null values, and the result check precedes ownership transfer. */
             let handle = unsafe {
                 CreateFileW(
                     wide.as_ptr(),
@@ -3371,9 +3255,6 @@ mod tests {
 
         require_admin_gate();
         let anchor = tempfile::tempdir().expect("anchor");
-        // The squatter needs somewhere it can create the fixed name. Users, not
-        // a looked-up SID: the ephemeral account is a member and this is a temp
-        // directory that exists for the length of the test.
         set_handle_security(
             &open_for(anchor.path(), SECURITY_WRITE_ACCESS).expect("anchor handle"),
             "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;BU)",
@@ -3384,16 +3265,12 @@ mod tests {
         let token = user.logon();
         let root = anchor.path().join("find-my-files");
 
-        // 1. The squatter creates the fixed name, puts something in it, and
-        //    keeps a delete-child handle open across the whole install.
         let stale = with_impersonated_user(&token, || {
             std::fs::create_dir(&root).expect("squatted root");
             std::fs::write(root.join("loot"), b"x").expect("squatted child");
             open_for(&root, FILE_DELETE_CHILD).expect("delete-child handle")
         });
 
-        // 2. Install proceeds — it cannot fail closed on this right — and
-        //    rotates the squatted object out of the privileged name.
         let trusted = TrustedDataRoot::create_or_replace_for_test(&root, &data_dir_sddl())
             .expect("a delete-child handle cannot be excluded by share mode");
         let quarantine = trusted
@@ -3404,7 +3281,6 @@ mod tests {
             .atomic_write("service.json", b"{}", &data_dir_sddl())
             .expect("publish into the fresh root");
 
-        // 3. What the squatter can still do, and what it cannot.
         with_impersonated_user(&token, || {
             std::fs::remove_file(quarantine.join("loot"))
                 .expect("the capability follows the object it was opened on");
@@ -3423,9 +3299,8 @@ mod tests {
         user.remove();
     }
 
-    /// Both descriptors below were observed on this machine from the *same*
-    /// registration XML — the registrar appended an `SY` read ACE on one install
-    /// and not on a re-registration. That is why this is a property check.
+    /// Both descriptors below were observed on this machine from the *same* registration XML — the registrar appended an `SY` read ACE on one install and not on a re-registration.
+    /// That is why this is a property check.
     #[test]
     fn gc_task_security_accepts_registrar_variation_but_no_other_principal() {
         for accepted in [
@@ -3434,7 +3309,6 @@ mod tests {
             "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)",
             gc_task_sddl(),
             "O:S-1-5-32-544G:S-1-5-32-544D:PAI(A;;FA;;;S-1-5-18)(A;;FA;;;S-1-5-32-544)",
-            // A trailing NUL is how the readback arrives from Windows.
             "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)\0",
         ] {
             assert!(
@@ -3444,18 +3318,13 @@ mod tests {
         }
 
         for rejected in [
-            // Any other principal on a task that runs as SYSTEM is the escalation.
             "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)",
             "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)",
             "O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;S-1-5-21-1-2-3-1001)",
-            // Unprotected: the descriptor could then be widened by inheritance.
             "O:BAG:BAD:AI(A;;FA;;;SY)(A;;FA;;;BA)",
-            // Owned or grouped by anyone else.
             "O:BUG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)",
             "O:BAG:BUD:PAI(A;;FA;;;SY)(A;;FA;;;BA)",
-            // Deny ACEs are not part of the shape this accepts.
             "O:BAG:BAD:PAI(D;;FA;;;SY)(A;;FA;;;BA)",
-            // Malformed rather than merely different — must fail closed.
             "O:BAG:BAD:PAI(A;;FA;;;SY",
             "not-a-descriptor",
             "",
@@ -3469,16 +3338,11 @@ mod tests {
 
     /// A handle-relative rename must produce *exactly* the requested leaf.
     ///
-    /// Found on a real install: the quarantined root landed on disk as
-    /// `.find-my-files.untrusted-7156-0` followed by four UTF-16 units of
-    /// unrelated process memory. The caller's reported path and the object that
-    /// exists then disagree, and install fails looking for a name that is not
-    /// there — which is how it surfaced.
+    /// Found on a real install: the quarantined root landed on disk as `.find-my-files.untrusted-7156-0` followed by four UTF-16 units of unrelated process memory.
+    /// The caller's reported path and the object that exists then disagree, and install fails looking for a name that is not there — which is how it surfaced.
     ///
-    /// Every leaf length is swept, because the defect is length-dependent: the
-    /// `usize`-backed buffer rounds up to a word, so some lengths happen to
-    /// leave a stray zero after the name and terminate correctly while others
-    /// do not. Testing one name proves nothing about another.
+    /// Every leaf length is swept, because the defect is length-dependent: the `usize`-backed buffer rounds up to a word, so some lengths happen to leave a stray zero after the name and terminate correctly while others do not.
+    /// Testing one name proves nothing about another.
     #[test]
     fn handle_relative_rename_produces_exactly_the_requested_leaf() {
         use windows_sys::Win32::Storage::FileSystem::{
@@ -3527,12 +3391,11 @@ mod tests {
         }
     }
 
-    /// The recursion bound is the property that matters: an unbounded walk is a
-    /// stack-overflow denial of service against a `LocalSystem` service.
+    /// The recursion bound is the property that matters: an unbounded walk is a stack-overflow denial of service against a `LocalSystem` service.
     ///
     /// Its elevated sibling asserted this and never reached the depth check —
-    /// the walk denied itself access first, and `PermissionDenied` was mistaken
-    /// for the bound holding. Proving it unelevated means every PR proves it.
+    /// the walk denied itself access first, and `PermissionDenied` was mistaken for the bound holding.
+    /// Proving it unelevated means every PR proves it.
     #[test]
     fn depth_bound_is_what_stops_the_walk() {
         let sddl = own_tree_sddl();
@@ -3560,14 +3423,12 @@ mod tests {
         );
     }
 
-    /// The root-level walk applies one descriptor to the whole tree, so it
-    /// flattens `logs/`'s narrower policy along with everything else.
+    /// The root-level walk applies one descriptor to the whole tree, so it flattens `logs/`'s narrower policy along with everything else.
     ///
     /// That is never a widening — `data_dir_sddl` is the strictest of the set —
-    /// but it does mean the re-application of `data_tree_security_descriptors`
-    /// after `open_and_harden_machine` is load-bearing, not belt-and-braces:
-    /// without it the unelevated F12 diagnostics read is gone. Pinned here so
-    /// that coupling cannot be deleted as redundant.
+    /// but it does mean the re-application of `data_tree_security_descriptors` after `open_and_harden_machine` is load-bearing, not belt-and-braces:
+    /// without it the unelevated F12 diagnostics read is gone.
+    /// Pinned here so that coupling cannot be deleted as redundant.
     #[test]
     fn root_walk_flattens_per_path_policy_and_must_be_followed_by_reapplication() {
         let user = current_user_sid().expect("own sid");
@@ -3588,11 +3449,6 @@ mod tests {
             .expect("apply the logs policy to the file too");
         drop(trusted);
 
-        // Count ACEs naming the user rather than matching `GR`: a generic right
-        // is mapped to specific rights when it lands on a real object, so the
-        // literal does not survive application. The *trustee* spelling does not
-        // survive either when the account is well-known, hence the probed
-        // token instead of the SID this test wrote (see `rendered_user_token`).
         let log_file = root.join("logs").join("engine.log");
         let printed = rendered_user_token();
         let user_aces = |path: &Path| read_sddl(path).matches(&format!(";;;{printed})")).count();
@@ -3602,7 +3458,6 @@ mod tests {
             "precondition: the log file carries both the owner grant and the reader grant"
         );
 
-        // A service start re-verifies the root with the *root* descriptor.
         let trusted = TrustedDataRoot::open_verified_for_test(&root, provenance, &root_sddl)
             .expect("root verification");
         assert_eq!(
@@ -3612,7 +3467,6 @@ mod tests {
              being true, the re-application below is no longer load-bearing"
         );
 
-        // …which is exactly why the caller re-applies the per-path policy.
         trusted.harden_tree("logs", &logs_sddl).expect("re-apply");
         assert_eq!(
             user_aces(&log_file),
@@ -3623,10 +3477,8 @@ mod tests {
 
     /// The junction-propagation threat, measured rather than assumed.
     ///
-    /// The walk's ordering exists to stop an inheritable DACL from reaching a
-    /// planted junction's target. This pins both halves: applying that DACL to
-    /// a root containing a junction leaves the target untouched, and the walk
-    /// rejects the junction instead of descending through it.
+    /// The walk's ordering exists to stop an inheritable DACL from reaching a planted junction's target.
+    /// This pins both halves: applying that DACL to a root containing a junction leaves the target untouched, and the walk rejects the junction instead of descending through it.
     #[test]
     fn planted_junction_target_is_never_reached_by_propagation() {
         let sddl = own_tree_sddl();
@@ -3655,8 +3507,6 @@ mod tests {
             before_file,
             "propagation must not cross a junction into the target's contents"
         );
-        // The walk is handle-relative now, so it is driven from the root handle
-        // this test already holds rather than from the root's name.
         let error = harden_descendants(&root_locked.file, &root, &sddl)
             .expect_err("a planted junction must be rejected");
         drop(root_locked);
@@ -3670,30 +3520,7 @@ mod tests {
         std::fs::remove_dir(&link).expect("remove the junction, not its target");
     }
 
-    // --- handle-relative walks (DEV-166) -------------------------------------
-    //
-    // What these two pin, stated honestly.
-    //
-    // They pin the *fail-closed* property across a real swap performed inside
-    // the walk's own window: a child replaced after it was enumerated and
-    // before it was opened is refused, and nothing outside the managed tree is
-    // touched. That property is not new — the old path-re-opening walk also
-    // refused these two shapes, because a junction and a hard link are both
-    // things `inspect_handle` rejects on the handle.
-    //
-    // What *is* new cannot be written as an assertion, because it is the
-    // absence of an operation: no step of either walk resolves a full path any
-    // more, so an ancestor's name is never consulted a second time and a
-    // repointed ancestor has nothing left to influence. Enumeration likewise no
-    // longer depends on the ACL the hardening walk is rewriting. Those are
-    // structural, argued in the code and in docs/SECURITY.md threat 7 rather
-    // than measured here.
-    //
-    // These are unelevated on purpose. A junction and a hard link are both
-    // creatable by a standard user, so every PR runs the swap.
-
-    /// The hardening walk, with a child swapped for a junction inside the
-    /// window between enumeration and open.
+    /// The hardening walk, with a child swapped for a junction inside the window between enumeration and open.
     #[test]
     fn hardening_walk_refuses_a_child_swapped_after_enumeration() {
         let sddl = own_tree_sddl();
@@ -3715,9 +3542,6 @@ mod tests {
             SECURITY_WRITE_ACCESS | FILE_LIST_DIRECTORY_ACCESS | FILE_TRAVERSE_ACCESS,
         );
 
-        // Fires once, after `victim` has been enumerated and before it is
-        // opened: park the real child under another name and put a junction to
-        // an outside directory in its place.
         let swap = {
             let victim = victim.clone();
             let parked = root.join("parked");
@@ -3758,8 +3582,7 @@ mod tests {
         std::fs::remove_dir(&victim).expect("remove the junction, not its target");
     }
 
-    /// The deletion walk, with a child swapped for a second link to a file
-    /// outside the managed tree — the shape where being wrong destroys data.
+    /// The deletion walk, with a child swapped for a second link to a file outside the managed tree — the shape where being wrong destroys data.
     #[test]
     fn deletion_walk_refuses_a_child_swapped_after_enumeration() {
         let sddl = own_tree_sddl();
@@ -3781,8 +3604,6 @@ mod tests {
                 | FILE_TRAVERSE_ACCESS,
         );
 
-        // Both temporary directories live under `%TEMP%`, so they are on one
-        // volume and a hard link between them is possible.
         let swap = {
             let victim = victim.clone();
             let target = sentinel.clone();

@@ -1,22 +1,12 @@
-//! `xtask test-admin` — run the elevation-gated `#[ignore]` engine tests
-//! (real-volume MFT/USN and machine-security boundaries) with the
-//! `FMF_ADMIN_TESTS` gate set.
+//! `xtask test-admin` — run the elevation-gated `#[ignore]` engine tests (real-volume MFT/USN and machine-security boundaries) with the `FMF_ADMIN_TESTS` gate set.
 //!
-//! Exists so the just recipe needs no shell-specific env syntax: the gate flag
-//! is handed straight to the child `cargo` via [`cmd::run_env`], never through
-//! powershell.exe (which mangles `cargo --config 'env.X="1"'` into a bare `1`
-//! cargo rejects — the reason the recipe used to hard-code a `$env:` line).
+//! Exists so the just recipe needs no shell-specific env syntax: the gate flag is handed straight to the child `cargo` via [`cmd::run_env`], never through powershell.exe (which mangles `cargo --config 'env.X="1"'` into a bare `1` cargo rejects — the reason the recipe used to hard-code a `$env:` line).
 //!
-//! The inventory below is the machine-checked census of that privileged
-//! surface. It is pinned from two independent directions, because a gate that
-//! reports green while executing nothing is worse than no gate at all:
+//! The inventory below is the machine-checked census of that privileged surface.
+//! It is pinned from two independent directions, because a gate that reports green while executing nothing is worse than no gate at all:
 //!
-//! * the non-elevated tripwires in this file's test module compare it against
-//!   the working tree, so a test that is added, renamed, moved or deleted
-//!   without updating the inventory fails on an ordinary `just test-xtask`;
-//! * [`require_admin_test_inventory`] compares it against the real
-//!   cargo-nextest listing before an elevated run starts, so a test that no
-//!   longer compiles into the suite can never be reported as covered.
+//! * the non-elevated tripwires in this file's test module compare it against the working tree, so a test that is added, renamed, moved or deleted without updating the inventory fails on an ordinary `just test-xtask`;
+//! * [`require_admin_test_inventory`] compares it against the real cargo-nextest listing before an elevated run starts, so a test that no longer compiles into the suite can never be reported as covered.
 
 use std::collections::BTreeSet;
 
@@ -35,64 +25,51 @@ struct AdminTest {
 
 /// The complete census of elevation-gated tests in the engine workspace.
 ///
-/// `#[ignore]` in this repository means exactly one thing — "needs an elevated
-/// Administrator terminal" (CLAUDE.md / AGENTS.md) — so this list and the set
-/// of ignored tests must be identical, not merely overlapping. The equality is
-/// enforced in both directions rather than "every required test exists":
+/// `#[ignore]` in this repository means exactly one thing — "needs an elevated Administrator terminal" (CLAUDE.md / AGENTS.md) — so this list and the set of ignored tests must be identical, not merely overlapping.
+/// The equality is enforced in both directions rather than "every required test exists":
 /// a one-way check cannot notice the failure mode that actually happened here,
-/// namely a privileged surface growing to fifteen tests while the gate still
-/// looked at one.
+/// namely a privileged surface growing to fifteen tests while the gate still looked at one.
 const ADMIN_TESTS: &[AdminTest] = &[
     AdminTest {
-        source: "engine/crates/fmf-core/src/engine/tests.rs",
-        binary_id: "fmf-core",
+        source: "engine/crates/fmf-runtime/tests/unit/engine_tests.rs",
+        binary_id: "fmf-runtime",
         name: "engine::tests::engine_e2e_scan_query_snapshot_restore",
     },
-    // Reinjects the real defect shape — a parent whose $MFT slot the scan never
-    // read — into a scan of the live C:, and proves the drop is subtree-scoped,
-    // counted, and reported.
     AdminTest {
-        source: "engine/crates/fmf-core/src/scan/mod.rs",
-        binary_id: "fmf-core",
+        source: "engine/crates/fmf-runtime/src/scan/mod.rs",
+        binary_id: "fmf-runtime",
         name: "scan::tests::a_suppressed_parent_record_drops_its_subtree_not_the_volume",
     },
     AdminTest {
-        source: "engine/crates/fmf-core/src/scan/mod.rs",
-        binary_id: "fmf-core",
+        source: "engine/crates/fmf-runtime/src/scan/mod.rs",
+        binary_id: "fmf-runtime",
         name: "scan::tests::streaming_scan_matches_live_exact_records",
     },
     AdminTest {
-        source: "engine/crates/fmf-core/src/usn/session.rs",
-        binary_id: "fmf-core",
+        source: "engine/crates/fmf-runtime/src/usn/session.rs",
+        binary_id: "fmf-runtime",
         name: "usn::session::tests::live_metadata_returns_the_complete_hard_link_set",
     },
     AdminTest {
-        source: "engine/crates/fmf-core/src/usn/session.rs",
-        binary_id: "fmf-core",
+        source: "engine/crates/fmf-runtime/src/usn/session.rs",
+        binary_id: "fmf-runtime",
         name: "usn::session::tests::usn_journal_live_open_query_and_one_read",
     },
     AdminTest {
-        source: "engine/crates/fmf-core/src/usn/session.rs",
-        binary_id: "fmf-core",
+        source: "engine/crates/fmf-runtime/src/usn/session.rs",
+        binary_id: "fmf-runtime",
         name: "usn::session::tests::usn_quiet_journal_read_returns_bounded",
     },
-    // Impersonates a real standard user to measure what a squatter's
-    // delete-child handle can still reach after install rotates its object out.
     AdminTest {
         source: "engine/crates/fmf-service/src/security.rs",
         binary_id: "fmf-service",
         name: "security::tests::a_delete_child_handle_keeps_the_quarantined_object_and_never_reaches_the_new_root",
     },
-    // docs/SECURITY.md declares this one the required machine-security gate:
-    // real Windows tokens, a real second local user, three pipe boundaries.
     AdminTest {
         source: "engine/crates/fmf-service/src/pipe.rs",
         binary_id: "fmf-service",
         name: "pipe::admin_security_tests::named_pipe_security_boundaries_are_enforced_on_real_tokens_and_transports",
     },
-    // Registers a real Scheduled Task: the only way to prove the GC task
-    // document is one the registrar accepts. A string assertion over the same
-    // XML stayed green for an element `schtasks` rejects outright.
     AdminTest {
         source: "engine/crates/fmf-service/tests/lifecycle_admin.rs",
         binary_id: "fmf-service::lifecycle_admin",
@@ -155,16 +132,14 @@ fn require_elevated_process() -> Result<()> {
     };
 
     let mut token = ptr::null_mut();
-    // SAFETY: `token` is a valid out pointer; the returned handle is closed on
-    // every path after a successful call.
+    /* SAFETY: `token` provides a writable output pointer; every path closes the returned handle after a successful call. */
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
         return Err(std::io::Error::last_os_error()).context("query current process token");
     }
 
     let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
     let mut returned = 0;
-    // SAFETY: `elevation` is writable for the declared size and `token` is a
-    // live process-token handle returned above.
+    /* SAFETY: `elevation` provides the declared writable capacity and `token` holds the live process-token handle returned above. */
     let queried = unsafe {
         GetTokenInformation(
             token,
@@ -221,11 +196,9 @@ fn require_admin_test_inventory() -> Result<()> {
 
 /// Every `(binary id, test name)` cargo-nextest reports as ignored.
 ///
-/// A missing or renamed schema key is reported as a schema error, never as an
-/// absent test: the two demand opposite responses (fix the parser vs. restore
-/// the test), so they must never share an error path. The key is `testcases`,
-/// with no hyphen — verified against `cargo-nextest 0.9.140`, the version
-/// pinned by `engine/.config/nextest.toml` and the CI install steps.
+/// A missing or renamed schema key is reported as a schema error, never as an absent test: the two demand opposite responses (fix the parser vs. restore the test), so they must never share an error path.
+/// The key is `testcases`,
+/// with no hyphen — verified against `cargo-nextest 0.9.140`, the version pinned by `engine/.config/nextest.toml` and the CI install steps.
 fn ignored_tests_in(listing: &str) -> Result<BTreeSet<(String, String)>> {
     let listing: serde_json::Value =
         serde_json::from_str(listing).context("parse cargo-nextest admin-test inventory")?;
@@ -261,21 +234,23 @@ fn registered_tests() -> BTreeSet<(String, String)> {
         .collect()
 }
 
-/// Renders a difference for a human who now has to act on it, so each line
-/// also carries the file the inventory expects to find the test in.
+/// Renders a difference for a human who now has to act on it, so each line also carries the file the inventory expects to find the test in.
 fn describe(tests: &BTreeSet<(String, String)>) -> String {
-    use std::fmt::Write as _;
-
-    tests
-        .iter()
-        .fold(String::new(), |mut rendered, (binary_id, name)| {
-            let source = ADMIN_TESTS
-                .iter()
-                .find(|test| test.binary_id == binary_id && test.name == name)
-                .map_or("not registered in ADMIN_TESTS", |test| test.source);
-            let _ = write!(rendered, "\n  {binary_id} {name}  ({source})");
-            rendered
-        })
+    let mut rendered = String::new();
+    for (binary_id, name) in tests {
+        let source = ADMIN_TESTS
+            .iter()
+            .find(|test| test.binary_id == binary_id && test.name == name)
+            .map_or("not registered in ADMIN_TESTS", |test| test.source);
+        rendered.push_str("\n  ");
+        rendered.push_str(binary_id);
+        rendered.push(' ');
+        rendered.push_str(name);
+        rendered.push_str("  (");
+        rendered.push_str(source);
+        rendered.push(')');
+    }
+    rendered
 }
 
 fn require_admin_test_inventory_in(listing: &str) -> Result<()> {
@@ -341,11 +316,8 @@ mod tests {
         name.rsplit("::").next().unwrap_or(name)
     }
 
-    /// A cargo-nextest listing, reduced from real `cargo nextest list
-    /// --message-format json` output (0.9.140) to two suites. It is checked in
-    /// verbatim in shape — key spellings included — because the previous
-    /// fixture was invented rather than captured, and the invented key
-    /// (`test-cases`) meant the preflight could never see any test at all.
+    /// A cargo-nextest listing, reduced from real `cargo nextest list --message-format json` output (0.9.140) to two suites.
+    /// It is checked in verbatim in shape — key spellings included — because the previous fixture was invented rather than captured, and the invented key (`test-cases`) meant the preflight could never see any test at all.
     const LISTING: &str = r#"{
       "rust-build-meta": {},
       "test-count": 3,
@@ -397,9 +369,8 @@ mod tests {
         );
     }
 
-    /// The defect this whole gate existed to prevent: the parser looked for a
-    /// key cargo-nextest does not emit, so *no* test was ever found. That must
-    /// read as a broken parser, not as a deleted security test.
+    /// The defect this whole gate existed to prevent: the parser looked for a key cargo-nextest does not emit, so *no* test was ever found.
+    /// That must read as a broken parser, not as a deleted security test.
     #[test]
     fn a_renamed_schema_key_is_a_schema_error_not_a_missing_test() {
         let renamed = LISTING.replace("\"testcases\"", "\"test-cases\"");
@@ -454,7 +425,7 @@ mod tests {
 
         let mut added = registered;
         added.push((
-            "fmf-core".to_owned(),
+            "fmf-runtime".to_owned(),
             "newly_added_privileged_test".to_owned(),
         ));
         let error = require_admin_test_inventory_in(&listing_from(&added))
@@ -472,9 +443,8 @@ mod tests {
             .to_path_buf()
     }
 
-    /// Every `.rs` file under `engine/`, as `(repo-relative forward-slashed
-    /// path, contents)`. Read from the working tree rather than the git index
-    /// so an untracked new test file is caught too.
+    /// Every `.rs` file under `engine/`, as `(repo-relative forward-slashed path, contents)`.
+    /// Read from the working tree rather than the git index so an untracked new test file is caught too.
     fn engine_sources() -> Vec<(String, String)> {
         let root = repo_root();
         let mut sources = Vec::new();
@@ -526,9 +496,8 @@ mod tests {
         index
     }
 
-    /// The body of the item whose signature is on `signature`, i.e. everything
-    /// up to the closing brace at the signature's own indentation. `cargo fmt
-    /// --check` is a required gate, so that brace is always alone on its line.
+    /// The body of the item whose signature is on `signature`, i.e. everything up to the closing brace at the signature's own indentation.
+    /// `cargo fmt --check` is a required gate, so that brace is always alone on its line.
     fn body(lines: &[&str], signature: usize) -> String {
         let line = lines[signature];
         let indent = line.len() - line.trim_start().len();
@@ -567,10 +536,8 @@ mod tests {
         declared
     }
 
-    /// The census that closes the hole this module exists for: the privileged
-    /// surface is whatever the tree declares, so the inventory has to equal it.
-    /// Non-elevated on purpose — it reads source text and never runs a single
-    /// admin test, so every ordinary `just test-xtask` re-proves it.
+    /// The census that closes the hole this module exists for: the privileged surface is whatever the tree declares, so the inventory has to equal it.
+    /// Non-elevated on purpose — it reads source text and never runs a single admin test, so every ordinary `just test-xtask` re-proves it.
     #[test]
     fn the_inventory_lists_exactly_the_ignored_tests_in_the_tree() {
         let declared = declared_admin_tests();
@@ -597,11 +564,8 @@ mod tests {
         );
     }
 
-    /// The second half of the vacuous-pass defect: a body that returns early
-    /// when `FMF_ADMIN_TESTS` is unset is indistinguishable from a body that
-    /// proved the boundary. `#[ignore]` is what *skips* these tests; reaching
-    /// the body without the arming variable means the harness was invoked
-    /// wrong, and the only honest answer to that is a failure.
+    /// The second half of the vacuous-pass defect: a body that returns early when `FMF_ADMIN_TESTS` is unset is indistinguishable from a body that proved the boundary.
+    /// `#[ignore]` is what *skips* these tests; reaching the body without the arming variable means the harness was invoked wrong, and the only honest answer to that is a failure.
     #[test]
     fn every_admin_test_fails_closed_when_the_gate_is_unarmed() {
         let mut checked = 0;

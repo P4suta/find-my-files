@@ -1,36 +1,29 @@
 #![no_main]
-//! Fuzz the `$ATTRIBUTE_LIST` entry grammar, both from a flat buffer
-//! (`parse_list_entries`, the resident case) and streamed over a volume
-//! (`visit_list_stream`, the non-resident case). A file whose attributes spill
-//! into extension records makes the scanner follow attacker-chosen references,
-//! so this grammar decides how much work and memory a crafted volume can make
-//! `fmf-service` do as `LocalSystem` (ADR-0047).
-//!
-//! Input shaping. One entry only starts decoding when its declared length is a
-//! multiple of eight and at least 26, *and* its type code is a non-zero
-//! multiple of 0x10 no greater than 0x100, *and* its target reference carries a
-//! non-zero sequence value. Random bytes clear all three about once in
-//! 2^27 entries, and a *sequence* of them never — which is a problem, because
-//! the caps that actually bound `LocalSystem` (entry count, `$FILE_NAME`
-//! fan-out, target/instance de-duplication, per-name monotonic VCN) only exist
-//! across entries. `framed_entries` therefore stamps those three gates plus the
-//! two shape rules that make an entry decodable at all (`$ATTRIBUTE_LIST` and
-//! `$FILE_NAME` are unnamed; `$FILE_NAME` is not a split extent), and leaves
-//! the target reference, the instance id, the starting VCN, the stream name and
-//! the entry lengths to the fuzzer. Those are precisely the fields the caps
-//! read. The raw input is still parsed alongside, so the fail-closed paths stay
-//! under coverage.
-//!
-//! The streamed pass lays the same bytes on a synthetic volume as two runs with
-//! the *second* half stored first, so `RunReader` must switch runs and seek
-//! backwards to reassemble entries that straddle the boundary — the split point
-//! is fuzzer-chosen, which is what makes an entry header land across it.
+//! Compare flat and streamed list decoding across reversed physical runs and cancellation.
 
 use std::io::Cursor;
 use std::sync::atomic::AtomicBool;
 
-use fmf_core::ondisk::attribute_list::{parse_list_entries, visit_list_stream, StreamRun};
+use fmf_runtime::ondisk::attribute_list::{
+    parse_list_entries, visit_list_stream, ListEntry, ListStreamError, StreamRun,
+};
 use libfuzzer_sys::fuzz_target;
+
+const ATTRIBUTE_ALIGNMENT: usize = 8;
+const LENGTH_OFFSET: usize = 4;
+const NAME_UNITS_OFFSET: usize = 6;
+const NAME_OFFSET_FIELD: usize = 7;
+const VCN_OFFSET: usize = 8;
+const VCN_JITTER_OFFSET: usize = 9;
+const TARGET_OFFSET: usize = 16;
+const TARGET_HIGH_BYTE: usize = 23;
+const SEQUENCE_SHIFT: u32 = u64::BITS - u16::BITS;
+const LENGTH_SHAPE_MASK: u8 = 3;
+const TYPE_SHAPE_SHIFT: u32 = 4;
+const VCN_JITTER_MASK: u8 = 7;
+const VCN_STEP: u64 = 4;
+const CONTROL_BYTES: usize = 2;
+const MAX_LIST_ENTRIES: usize = 262_144;
 
 const ENTRY_HEADER_BYTES: usize = 26;
 const ATTRIBUTE_LIST: u32 = 0x20;
@@ -41,28 +34,26 @@ const TYPES: [u32; 6] = [0x10, 0x20, 0x30, 0x40, 0x80, 0x100];
 const MAX_FRAMED_BYTES: usize = 64 << 10;
 
 fn put_u16(data: &mut [u8], offset: usize, value: u16) {
-    data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    data[offset..offset + size_of::<u16>()].copy_from_slice(&value.to_le_bytes());
 }
 
 fn put_u64(data: &mut [u8], offset: usize, value: u64) {
-    data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    data[offset..offset + size_of::<u64>()].copy_from_slice(&value.to_le_bytes());
 }
 
 fn put_u32(data: &mut [u8], offset: usize, value: u32) {
-    data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    data[offset..offset + size_of::<u32>()].copy_from_slice(&value.to_le_bytes());
 }
 
 fn le_u64(data: &[u8], offset: usize) -> u64 {
     let mut out = [0u8; 8];
-    out.copy_from_slice(&data[offset..offset + 8]);
+    out.copy_from_slice(&data[offset..offset + size_of::<u64>()]);
     u64::from_le_bytes(out)
 }
 
-/// Turn `body` into a sequence of entries the decoder will admit, repairing
-/// only the fields that gate entry and leaving the rest as fuzz bytes.
+/// Turn `body` into a sequence of entries the decoder will admit, repairing only the fields that gate entry and leaving the rest as fuzz bytes.
 ///
-/// A short trailing chunk is emitted truncated on purpose: that is the exact
-/// shape `prefix` mode exists to accept and a complete stream must reject.
+/// A short trailing chunk is emitted truncated on purpose: that is the exact shape `prefix` mode exists to accept and a complete stream must reject.
 fn framed_entries(body: &[u8]) -> Vec<u8> {
     let mut list: Vec<u8> = Vec::new();
     let mut cursor = 0usize;
@@ -71,50 +62,39 @@ fn framed_entries(body: &[u8]) -> Vec<u8> {
 
     while cursor < body.len() && list.len() < MAX_FRAMED_BYTES {
         let shape = body[cursor];
-        // 32, 40, 48 or 56 bytes: a multiple of eight, at least the header.
-        let length = ENTRY_HEADER_BYTES.next_multiple_of(8) + usize::from(shape & 3) * 8;
+        let length = ENTRY_HEADER_BYTES.next_multiple_of(ATTRIBUTE_ALIGNMENT)
+            + usize::from(shape & LENGTH_SHAPE_MASK) * ATTRIBUTE_ALIGNMENT;
         let taken = (body.len() - cursor).min(length);
         let mut entry = vec![0u8; length];
         entry[..taken].copy_from_slice(&body[cursor..cursor + taken]);
         cursor += taken;
 
-        // Type codes must not descend across the list; let the fuzzer pick from
-        // the valid set and lift the choice to the running maximum rather than
-        // discarding every input whose second entry sorts low.
-        let type_id = TYPES[usize::from(shape >> 4) % TYPES.len()].max(previous_type);
+        let type_id =
+            TYPES[usize::from(shape >> TYPE_SHAPE_SHIFT) % TYPES.len()].max(previous_type);
         previous_type = type_id;
         put_u32(&mut entry, 0, type_id);
-        put_u16(&mut entry, 4, length as u16);
+        put_u16(&mut entry, LENGTH_OFFSET, length as u16);
 
-        // Stream names are legal for every type except the two the scanner
-        // follows, and must start immediately after the header.
         let name_units = if type_id == ATTRIBUTE_LIST || type_id == FILE_NAME {
             0
         } else {
-            usize::from(entry[6]) % ((length - ENTRY_HEADER_BYTES) / 2 + 1)
+            usize::from(entry[NAME_UNITS_OFFSET])
+                % ((length - ENTRY_HEADER_BYTES) / size_of::<u16>() + 1)
         };
-        entry[6] = name_units as u8;
-        entry[7] = if name_units == 0 {
+        entry[NAME_UNITS_OFFSET] = name_units as u8;
+        entry[NAME_OFFSET_FIELD] = if name_units == 0 {
             0
         } else {
             ENTRY_HEADER_BYTES as u8
         };
-        // Entries of one attribute must carry strictly increasing VCNs, which a
-        // random 64-bit field satisfies for a *pair* half the time and for a
-        // whole list essentially never: leaving this raw had under 1% of framed
-        // lists decode past their second entry, so the cross-entry caps (entry
-        // count, `$FILE_NAME` fan-out, target/instance de-duplication) — the
-        // rules that actually bound LocalSystem — were unreachable. Walking a
-        // base forward by four with a 0..=7 jitter keeps lists mostly ordered
-        // while still letting the fuzzer drive a decrease.
-        let jitter = u64::from(entry[9] & 7);
-        vcn_base += 4;
-        put_u64(&mut entry, 8, vcn_base + jitter);
+        let jitter = u64::from(entry[VCN_JITTER_OFFSET] & VCN_JITTER_MASK);
+        vcn_base += VCN_STEP;
+        put_u64(&mut entry, VCN_OFFSET, vcn_base + jitter);
         if type_id == FILE_NAME {
-            entry[8..16].fill(0); // resident-only: never a split extent
+            entry[VCN_OFFSET..TARGET_OFFSET].fill(0);
         }
-        if le_u64(&entry, 16) >> 48 == 0 {
-            entry[23] |= 1; // a target reference needs a sequence value
+        if le_u64(&entry, TARGET_OFFSET) >> SEQUENCE_SHIFT == 0 {
+            entry[TARGET_HIGH_BYTE] |= 1;
         }
 
         entry.truncate(taken);
@@ -123,25 +103,38 @@ fn framed_entries(body: &[u8]) -> Vec<u8> {
     list
 }
 
+fn check_entries(entries: &[ListEntry]) {
+    assert!(entries.len() <= MAX_LIST_ENTRIES);
+    let mut targets = std::collections::HashSet::new();
+    let mut previous_type = 0;
+    for entry in entries {
+        assert!(entry.type_id >= previous_type);
+        assert_ne!(entry.target_reference >> SEQUENCE_SHIFT, 0);
+        assert!(targets.insert((entry.target_reference, entry.id)));
+        previous_type = entry.type_id;
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let control = |index: usize| data.get(index).copied().unwrap_or(0);
-    let body = data.get(2..).unwrap_or_default();
+    let body = data.get(CONTROL_BYTES..).unwrap_or_default();
 
-    // Raw bytes, both completeness modes: the fail-closed paths.
     for prefix in [false, true] {
-        let _ = parse_list_entries(data, prefix);
+        if let Some(entries) = parse_list_entries(data, prefix) {
+            check_entries(&entries);
+        }
     }
 
     let list = framed_entries(body);
     for prefix in [false, true] {
-        let _ = parse_list_entries(&list, prefix);
+        if let Some(entries) = parse_list_entries(&list, prefix) {
+            check_entries(&entries);
+        }
     }
     if list.is_empty() {
         return;
     }
 
-    // Lay the list on a synthetic volume as two runs, storing the second half
-    // first so reassembly has to seek backwards across the run boundary.
     let data_size = list.len() as u64;
     let split = 1 + usize::from(control(1)) % list.len();
     let (head, tail) = list.split_at(split);
@@ -164,11 +157,27 @@ fuzz_target!(|data: &[u8]| {
     let mut cursor = Cursor::new(volume);
     let stop = AtomicBool::new(false);
     for prefix in [false, true] {
-        let _ = visit_list_stream(&mut cursor, &runs, data_size, &stop, prefix, |_| {});
+        let flat = parse_list_entries(&list, prefix);
+        let mut streamed = Vec::new();
+        let result = visit_list_stream(&mut cursor, &runs, data_size, &stop, prefix, |entry| {
+            streamed.push(entry)
+        });
+        assert_eq!(result.is_ok(), flat.is_some());
+        if let Some(entries) = flat {
+            assert_eq!(streamed, entries);
+        }
     }
 
-    // The cancellation path: a stop flag already set must unwind cleanly rather
-    // than leave the reader mid-entry.
     let cancelled = AtomicBool::new(true);
-    let _ = visit_list_stream(&mut cursor, &runs, data_size, &cancelled, false, |_| {});
+    assert!(matches!(
+        visit_list_stream(
+            &mut cursor,
+            &runs,
+            data_size,
+            &cancelled,
+            false,
+            |_| panic!("cancelled stream visited an entry")
+        ),
+        Err(ListStreamError::Cancelled)
+    ));
 });

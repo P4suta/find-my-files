@@ -1,16 +1,17 @@
-# Manual exact-identity mutation audit (ADR-0022).
-#
-# A valid audit binds its controller to the protected default-branch workflow
-# commit. A manual run from main may name a different exact repository commit as
-# inert target data (for example, a reviewed PR head); dispatches from any other
-# ref fail before target execution. The verified receipt records both identities;
-# consumers accept it only together with this run's protected-main identity.
 name: mutants
-run-name: mutation audit ${{ github.event.inputs.target_sha || github.workflow_sha }}
+run-name: ${{ inputs.purpose || 'protected-main' }} mutation audit ${{ inputs.target_sha || github.workflow_sha }}
 
 on:
   workflow_dispatch:
     inputs:
+      purpose:
+        description: "Candidate audits use one owner-dispatched branch commit and grant no Release evidence"
+        required: true
+        type: choice
+        default: protected-main
+        options:
+          - protected-main
+          - candidate-audit
       target_sha:
         description: "Optional exact 40-character repository commit SHA (defaults to controller)"
         required: false
@@ -25,7 +26,8 @@ permissions:
 
 jobs:
   authorize:
-    runs-on: ubuntu-24.04
+    name: authorize
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -33,13 +35,16 @@ jobs:
       controller_sha: ${{ steps.identity.outputs.controller_sha }}
       target_sha: ${{ steps.identity.outputs.target_sha }}
     steps:
-      - name: Bind protected-main controller and exact target
+      - name: Bind the execution purpose and exact target
         id: identity
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CONTROLLER_REF: ${{ github.ref }}
           CONTROLLER_SHA: ${{ github.sha }}
           EVENT_NAME: ${{ github.event_name }}
+          PURPOSE: ${{ inputs.purpose || 'protected-main' }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           REPO: ${{ github.repository }}
           REQUESTED_TARGET: ${{ github.event.inputs.target_sha || '' }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
@@ -52,10 +57,15 @@ jobs:
             const workflow = String(process.env.WORKFLOW_SHA ?? "");
             const requested = String(process.env.REQUESTED_TARGET ?? "");
             const repository = process.env.REPO;
+            const purpose = process.env.PURPOSE;
+            if (purpose !== "protected-main" && purpose !== "candidate-audit") {
+              throw new Error(`Unsupported mutation purpose '${purpose}'.`);
+            }
+            const candidate = purpose === "candidate-audit";
             if (event !== "schedule" && event !== "workflow_dispatch") {
               throw new Error(`Unsupported mutation audit event '${event}'.`);
             }
-            if (ref !== "refs/heads/main") {
+            if (!candidate && ref !== "refs/heads/main") {
               throw new Error(`Mutation audit controller must run from protected main, got '${ref}'.`);
             }
             if (
@@ -76,17 +86,32 @@ jobs:
                 `Mutation controller requires default branch 'main', got '${repositoryRecord.default_branch}'.`,
               );
             }
-            const { data: lineage } = await github.rest.repos.compareCommitsWithBasehead({
-              owner,
-              repo,
-              basehead: `${controller}...main`,
-            });
-            if (lineage.status !== "ahead" && lineage.status !== "identical") {
-              throw new Error(
-                `Controller ${controller} is not on main's protected lineage (${lineage.status}).`,
-              );
+            if (candidate) {
+              const isOwner = (actor) =>
+                String(actor).toLowerCase() === String(repositoryRecord.owner.login).toLowerCase();
+              if (
+                event !== "workflow_dispatch" ||
+                !/^refs\/heads\/.+$/.test(ref) || ref === "refs/heads/main" ||
+                !isOwner(process.env.ACTOR) || !isOwner(process.env.TRIGGERING_ACTOR)
+              ) {
+                throw new Error("Candidate audits require the owner's manual branch dispatch.");
+              }
+            } else {
+              const { data: lineage } = await github.rest.repos.compareCommitsWithBasehead({
+                owner,
+                repo,
+                basehead: `${controller}...main`,
+              });
+              if (lineage.status !== "ahead" && lineage.status !== "identical") {
+                throw new Error(
+                  `Controller ${controller} is not on main's protected lineage (${lineage.status}).`,
+                );
+              }
             }
             const target = requested.length === 0 ? controller : requested;
+            if (candidate && target !== controller) {
+              throw new Error("Candidate target and controller must be the same immutable commit.");
+            }
             if (!/^[0-9a-f]{40}$/.test(target)) {
               throw new Error(`Mutation target '${target}' is not an exact lowercase commit SHA.`);
             }
@@ -100,14 +125,16 @@ jobs:
             }
             core.setOutput("controller_sha", controller);
             core.setOutput("target_sha", target);
-            core.info(`Authorized trusted mutation controller ${controller} for target ${target}.`);
+            core.info(`Authorized ${purpose} controller ${controller} for target ${target}.`);
 
   mutation:
+    name: mutation
     needs: authorize
     permissions:
-      actions: read # let the fresh nested verifier bind this run's raw artifacts
+      actions: read # Permission: Bind verification to this run's raw artifacts.
       contents: read
     uses: $/.github/workflows/mutation-controller.yml
     with:
+      purpose: ${{ inputs.purpose || 'protected-main' }}
       controller_sha: ${{ needs.authorize.outputs.controller_sha }}
       target_sha: ${{ needs.authorize.outputs.target_sha }}

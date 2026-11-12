@@ -1,10 +1,15 @@
 //! Trusted mutation-CI controller and independent evidence verifier.
 //!
-//! The reusable workflow checks out the immutable controller and the exact
-//! target into separate trees. This module is compiled only from the
-//! controller. A target checkout contributes source and tests, but never
-//! mutation policy, accepted baselines, task-runner code, Cargo configuration,
+//! The reusable workflow checks out the immutable controller and the exact target into separate trees.
+//! This module is compiled only from the controller.
+//! A target checkout contributes source and tests, but never mutation policy, accepted baselines, task-runner code, Cargo configuration,
 //! nextest configuration, Stryker configuration, or tool pins.
+
+const WINDOWS_DRIVE_ROOT_BYTES: usize = 3;
+const ADJACENT_FILES: usize = 2;
+const SHA256_HEX_BYTES: usize = 64;
+const NUMBERED_DEVICE_NAME_BYTES: usize = 4;
+const GIT_COMMIT_HEX_BYTES: usize = 40;
 
 use crate::{checksum, fsx, mutation, paths};
 use anyhow::{anyhow, bail, Context, Result};
@@ -20,20 +25,17 @@ use std::process::{Command, Output};
 const RECEIPT_SCHEMA_VERSION: u32 = 1;
 const REQUIRED_SHARD_COUNT: usize = 16;
 const CARGO_MUTANTS_VERSION: &str = "27.1.0";
-const CARGO_NEXTEST_VERSION: &str = "0.9.140";
-const DOTNET_SDK_VERSION: &str = "10.0.401";
-const STRYKER_VERSION: &str = "4.16.0";
-const RUST_TOOLCHAIN_VERSION: &str = "1.97.1";
+const CARGO_NEXTEST_VERSION: &str = "0.9.151";
+const DOTNET_SDK_VERSION: &str = "10.0.404";
+const STRYKER_VERSION: &str = "5.0.0";
+const RUST_TOOLCHAIN_VERSION: &str = "1.99.1";
 const CSHARP_TARGET_FRAMEWORK: &str = "net10.0-windows10.0.26100.0";
 const POLICY_REVISION: &str = "mutation-controller-v1";
+const CSHARP_RUNNER_CONFIG: &str = "app/FindMyFiles.Tests/xunit.runner.json";
 const CSHARP_UNEXECUTED_IGNORE_REASONS: &[&str] = &[
     "Removed by mutate filter",
     "Removed by exclude from code coverage filter",
 ];
-// The nextest policy and the nextest argument tail both lanes run under live in
-// `mutation.rs` beside the argument builder that emits them: a copy here is a
-// second place for the two lanes to drift apart, which is the whole defect this
-// gate exists to not have.
 use mutation::NEXTEST_POLICY;
 
 const RUST_REPORT_FILES: &[&str] = &[
@@ -190,9 +192,8 @@ struct CsharpReceipt {
 
 /// Optional CI identity for the local mutation commands.
 ///
-/// Supplying none of these options preserves the developer-facing `just
-/// mutants`/`just stryker` commands. CI must supply the complete set; a partial
-/// identity is rejected rather than silently falling back to the local gate.
+/// Supplying none of these options preserves the developer-facing `just mutants`/`just stryker` commands.
+/// CI must supply the complete set; a partial identity is rejected rather than silently falling back to the local gate.
 #[derive(Args, Clone, Debug, Default)]
 pub struct RunArgs {
     /// Exact separately checked-out target repository root.
@@ -213,7 +214,8 @@ pub struct RunArgs {
     /// Zero-based shard index.
     #[arg(long)]
     shard_index: Option<usize>,
-    /// Total shard count. The release gate fixes this to sixteen.
+    /// Total shard count.
+    /// The release gate fixes this to sixteen.
     #[arg(long)]
     shard_count: Option<usize>,
 }
@@ -239,13 +241,13 @@ pub struct VerifyArgs {
     /// GitHub Actions workflow run attempt.
     #[arg(long)]
     run_attempt: u64,
-    /// Total shard count. The release gate fixes this to sixteen.
+    /// Total shard count.
+    /// The release gate fixes this to sixteen.
     #[arg(long)]
     shard_count: usize,
 }
 
-/// Run the local Rust gate or the trusted CI runner when a complete CI identity
-/// is supplied.
+/// Run the local Rust gate or the trusted CI runner when a complete CI identity is supplied.
 pub fn run_rust(args: RunArgs) -> Result<()> {
     match args.into_ci()? {
         Some(args) => run_rust_ci(args),
@@ -253,8 +255,7 @@ pub fn run_rust(args: RunArgs) -> Result<()> {
     }
 }
 
-/// Run the local C# gate or the trusted CI runner when a complete CI identity
-/// is supplied.
+/// Run the local C# gate or the trusted CI runner when a complete CI identity is supplied.
 pub fn run_csharp(args: RunArgs) -> Result<()> {
     match args.into_ci()? {
         Some(args) => run_csharp_ci(args),
@@ -368,7 +369,7 @@ fn validate_identity(
     shard_count: usize,
 ) -> Result<()> {
     for (label, sha) in [("target", target_sha), ("controller", controller_sha)] {
-        if sha.len() != 40
+        if sha.len() != GIT_COMMIT_HEX_BYTES
             || !sha
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -581,7 +582,7 @@ fn parse_tracked_files(root: &Path, bytes: &[u8]) -> Result<Vec<String>> {
         files.push(path.to_owned());
     }
     files.sort();
-    if files.windows(2).any(|pair| pair[0] >= pair[1]) {
+    if files.windows(ADJACENT_FILES).any(|pair| pair[0] >= pair[1]) {
         bail!("tracked file inventory is not strictly unique");
     }
     Ok(files)
@@ -622,9 +623,9 @@ fn is_windows_reserved_name(component: &str) -> bool {
         .trim_end_matches([' ', '.'])
         .to_ascii_lowercase();
     matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
-        || (stem.len() == 4
+        || (stem.len() == NUMBERED_DEVICE_NAME_BYTES
             && (stem.starts_with("com") || stem.starts_with("lpt"))
-            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+            && matches!(stem.as_bytes()[b"com".len()], b'1'..=b'9'))
 }
 
 fn reject_links_and_streams(root: &Path) -> Result<()> {
@@ -677,8 +678,7 @@ fn reject_alternate_streams(path: &Path) -> Result<()> {
         StreamSize: 0,
         cStreamName: [0; 296],
     };
-    // SAFETY: `wide` is a live NUL-terminated UTF-16 path and `data` is a
-    // correctly initialized output buffer for the synchronous Windows call.
+    /* SAFETY: `wide` remains a live NUL-terminated UTF-16 path and `data` provides an initialized output buffer throughout the synchronous call. */
     let handle = unsafe {
         FindFirstStreamW(
             wide.as_ptr(),
@@ -709,8 +709,7 @@ fn reject_alternate_streams(path: &Path) -> Result<()> {
                     path.display()
                 );
             }
-            // SAFETY: `handle` is live until the scope guard below and `data`
-            // remains a valid writable output buffer.
+            /* SAFETY: `handle` remains live until the scope guard below and `data` provides a writable output buffer. */
             if unsafe { FindNextStreamW(handle, (&raw mut data).cast::<c_void>()) } == 0 {
                 let error = std::io::Error::last_os_error();
                 if error.raw_os_error() == Some(ERROR_HANDLE_EOF as i32) {
@@ -757,13 +756,9 @@ fn parse_single_line(bytes: &[u8], label: &str) -> Result<String> {
 
 /// The exact reviewed inventory the shard's evidence is sealed against.
 ///
-/// Both lanes take the file list from the controller's reviewed baseline, never
-/// from the target: the target contributes bytes to hash, not the decision about
-/// which bytes matter. The Rust lane additionally reads *every* production
-/// source, reviewed or not, because `#[mutants::skip]` is rejected repo-wide —
-/// `engine/mutants.toml` cites that rejection as a reason narrowing a file to
-/// its testable helpers is not available, so it must keep holding for files
-/// outside the reviewed twelve (today's exclusion is tomorrow's inclusion).
+/// Both lanes take the file list from the controller's reviewed baseline, never from the target: the target contributes bytes to hash, not the decision about which bytes matter.
+/// The Rust lane additionally reads *every* production source, reviewed or not, because `#[mutants::skip]` is rejected repo-wide —
+/// `engine/mutants.toml` cites that rejection as a reason narrowing a file to its testable helpers is not available, so it must keep holding for files outside the reviewed twelve (today's exclusion is tomorrow's inclusion).
 fn source_inventory(checkout: &Checkout, language: &str) -> Result<Vec<SourceFile>> {
     let reviewed: BTreeSet<String> = match language {
         "rust" => mutation::read_rust_reviewed_policy(&controller_root())?
@@ -875,23 +870,8 @@ fn copy_path_for_language(path: &str, language: &str) -> bool {
     }
 }
 
-/// Tool configuration that the .NET SDK, cargo and `MSBuild` discover on their own
-/// by walking up from a working directory, and that a target checkout may
-/// therefore never contribute: a file nothing on the command line names can
-/// still redirect the toolchain, the package feed or the analyzer set, and
-/// `reject_forbidden_auto_configs` fails the shard closed the moment the target
-/// carries one.
-///
-/// This is a rule about **who decides**, not about whether the file should
-/// exist. `global.json` is the clearest case of the difference: the C# lane is
-/// wrong without one — with none above the work tree the muxer resolves to the
-/// newest SDK on the image instead of the pinned one, which is how five weekly
-/// audits died (see `trusted_global_json`) — and the controller writes its own
-/// into the work tree for exactly that reason. Both halves are required and they
-/// do not contradict each other: the target supplies none of this, the
-/// controller supplies all of it. `is_trusted_auto_config` names the sole
-/// exception where a target file passes through, and only after
-/// `require_target_matches_controller` proves it is byte-identical.
+/// Implicit build and test configuration must follow the controller's policy.
+/// Only identical files named by `is_trusted_auto_config` are admitted from the target.
 fn is_forbidden_auto_config(path: &str) -> bool {
     let file = path.rsplit('/').next().unwrap_or(path);
     file.eq_ignore_ascii_case("global.json")
@@ -901,6 +881,9 @@ fn is_forbidden_auto_config(path: &str) -> bool {
         || file.eq_ignore_ascii_case("directory.build.props")
         || file.eq_ignore_ascii_case("directory.build.targets")
         || file.eq_ignore_ascii_case("directory.packages.props")
+        || file.eq_ignore_ascii_case("xunit.runner.json")
+        || file.eq_ignore_ascii_case("testconfig.json")
+        || file.to_ascii_lowercase().ends_with(".xunit.runner.json")
         || (path.contains("/.cargo/")
             && matches!(file.to_ascii_lowercase().as_str(), "config" | "config.toml"))
 }
@@ -908,7 +891,7 @@ fn is_forbidden_auto_config(path: &str) -> bool {
 fn is_trusted_auto_config(path: &str) -> bool {
     matches!(
         path,
-        "engine/.cargo/config.toml" | "xtask/.cargo/config.toml"
+        "engine/.cargo/config.toml" | "xtask/.cargo/config.toml" | CSHARP_RUNNER_CONFIG
     )
 }
 
@@ -1032,6 +1015,7 @@ const fn csharp_build_control_paths() -> &'static [&'static str] {
         "app/FindMyFiles/packages.lock.json",
         "app/FindMyFiles.Tests/FindMyFiles.Tests.csproj",
         "app/FindMyFiles.Tests/packages.lock.json",
+        CSHARP_RUNNER_CONFIG,
     ]
 }
 
@@ -1039,6 +1023,9 @@ fn csharp_policies(checkout: &Checkout, work: &Path) -> Result<Vec<PolicySeal>> 
     let mut policies = vec![policy_seal("runner-revision", POLICY_REVISION.as_bytes())];
     for path in csharp_build_control_paths() {
         let bytes = require_target_matches_controller(checkout, path)?;
+        if is_trusted_auto_config(path) {
+            write_bytes(&work.join(path), &bytes)?;
+        }
         policies.push(policy_seal(format!("controller:{path}"), &bytes));
     }
     for path in [
@@ -1053,8 +1040,6 @@ fn csharp_policies(checkout: &Checkout, work: &Path) -> Result<Vec<PolicySeal>> 
     validate_mise_dotnet_pin(&mise)?;
     policies.push(policy_seal("controller:mise.toml", &mise));
 
-    // Before any `dotnet` process starts: `restore_and_verify_csharp_tools` is
-    // the first one, and it is what compares `dotnet --version` to the pin.
     let global_json = trusted_global_json()?;
     write_bytes(&work.join("global.json"), &global_json)?;
     policies.push(policy_seal("generated:global.json", &global_json));
@@ -1095,34 +1080,19 @@ fn csharp_policies(checkout: &Checkout, work: &Path) -> Result<Vec<PolicySeal>> 
 
 /// The SDK selector the sanitized C# work tree resolves under.
 ///
-/// `actions/setup-dotnet` *installs* [`DOTNET_SDK_VERSION`]; it does not make
-/// `dotnet` *use* it. With no `global.json` anywhere above the working
-/// directory, the muxer picks the highest SDK on the machine — so when the
-/// hosted image started shipping 10.0.400 beside the 10.0.302 the workflow had
-/// just downloaded, `dotnet --version` began answering 10.0.400 and
-/// `restore_and_verify_csharp_tools` failed every C# shard with
-/// `.NET SDK runtime pin mismatch: expected 10.0.302, got 10.0.400`. Five
-/// consecutive weekly audits died there, and with them `release.yml`'s
-/// `sign-stage`, which needs `mutation`. Raising the constant would have bought
-/// one week: the runner image moves again, and the pin would once more be a
-/// statement about what is installed rather than about what runs.
+/// `actions/setup-dotnet` *installs* [`DOTNET_SDK_VERSION`]; it does not make `dotnet` *use* it.
+/// With no `global.json` anywhere above the working directory, the muxer picks the highest SDK on the machine — so when the hosted image started shipping 10.0.400 beside the 10.0.302 the workflow had just downloaded, `dotnet --version` began answering 10.0.400 and `restore_and_verify_csharp_tools` failed every C# shard with `.NET SDK runtime pin mismatch: expected 10.0.302, got 10.0.400`.
+/// Five consecutive weekly audits died there, and with them `release.yml`'s `sign-stage`, which needs `mutation`.
+/// Raising the constant would have bought one week: the runner image moves again, and the pin would once more be a statement about what is installed rather than about what runs.
 ///
-/// `rollForward: disable` is the only policy that agrees with the exact string
-/// comparison the pin check makes. Every other value — including the default,
-/// `latestPatch` — lets the muxer answer with a version other than the one
-/// written here, which is precisely the gap this file closes.
+/// `rollForward: disable` is the only policy that agrees with the exact string comparison the pin check makes.
+/// Every other value — including the default,
+/// `latestPatch` — lets the muxer answer with a version other than the one written here, which is precisely the gap this file closes.
 ///
-/// It is *generated* rather than copied because the repository deliberately has
-/// no `global.json` to copy: `is_forbidden_auto_config` rejects one anywhere in
-/// the target checkout, so committing one would fail the shard at
-/// `reject_forbidden_auto_configs` before reaching this line. The two are not in
-/// tension — that rejection is about *who decides*. A target must not be able to
-/// choose the toolchain it is measured with; the controller choosing it is the
-/// whole point.
+/// It is *generated* rather than copied because the repository deliberately has no `global.json` to copy: `is_forbidden_auto_config` rejects one anywhere in the target checkout, so committing one would fail the shard at `reject_forbidden_auto_configs` before reaching this line.
+/// The two are not in tension — that rejection is about *who decides*. A target must not be able to choose the toolchain it is measured with; the controller choosing it is the whole point.
 ///
-/// `work/` is the right level: `dotnet_command` runs in
-/// `work/app/FindMyFiles.Tests`, and SDK resolution walks up from the working
-/// directory to the first `global.json` it finds.
+/// `work/` is the right level: `dotnet_command` runs in `work/app/FindMyFiles.Tests`, and SDK resolution walks up from the working directory to the first `global.json` it finds.
 fn trusted_global_json() -> Result<Vec<u8>> {
     canonical_json_bytes(&serde_json::json!({
         "sdk": {
@@ -1134,17 +1104,11 @@ fn trusted_global_json() -> Result<Vec<u8>> {
 
 /// The `mise.toml` the C# lane seals is only half-checked without this.
 ///
-/// The SDK pin is spelled three times: here as [`DOTNET_SDK_VERSION`], in
-/// `mise.toml` for the developer machine, and in `mutation-controller.yml` for
-/// `actions/setup-dotnet`. `validate_mise_rust_pin` has always held the Rust pin
-/// to that standard, while the .NET pin went into the sealed policy list with
-/// nobody checking that it said the same thing. A bulk tool bump (issue #175)
-/// that moves `mise.toml` and the workflow but not this constant would recreate
-/// the failure `trusted_global_json` just fixed, wearing a better disguise:
-/// `dotnet --version` would report the version the workflow installed, and the
-/// mismatch would read like an SDK bug rather than a pin edit.
-/// `mutation_workflow_guards` pins the third spelling, which no controller can
-/// read at run time.
+/// The SDK pin is spelled three times: here as [`DOTNET_SDK_VERSION`], in `mise.toml` for the developer machine, and in `mutation-controller.yml` for `actions/setup-dotnet`.
+/// `validate_mise_rust_pin` has always held the Rust pin to that standard, while the .NET pin went into the sealed policy list with nobody checking that it said the same thing.
+/// A bulk tool bump (issue #175) that moves `mise.toml` and the workflow but not this constant would recreate the failure `trusted_global_json` just fixed, wearing a better disguise:
+/// `dotnet --version` would report the version the workflow installed, and the mismatch would read like an SDK bug rather than a pin edit.
+/// `mutation_workflow_guards` pins the third spelling, which no controller can read at run time.
 fn validate_mise_dotnet_pin(bytes: &[u8]) -> Result<()> {
     let text = std::str::from_utf8(bytes).context("trusted mise.toml is not UTF-8")?;
     let document = text
@@ -1366,11 +1330,13 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
         .join(".config")
         .join("nextest-mutation.toml");
     let nextest_config_arg = path_arg(&nextest_config)?;
+    let cpus = mutation::cpu_budget()?;
     let mut command = rust_command("cargo", &work);
     command.arg("mutants").args(rust_ci_run_args(
         &rust_scope_config()?,
         &raw_parent_arg,
         &nextest_config_arg,
+        cpus,
         args.shard_index,
         args.shard_count,
     ));
@@ -1404,14 +1370,7 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
                 mutant.name
             );
         }
-        let identity_hash = checksum::sha256_hex(&serde_json::to_vec(&mutant)?);
-        let relative = format!("invalid/{identity_hash}.log");
-        write_bytes(&evidence.join(&relative), &bytes)?;
-        invalid.push(RustInvalid {
-            mutant,
-            diagnostic: seal_file(&evidence, &relative)?,
-            reason: "Unviable".to_owned(),
-        });
+        invalid.push(retain_rust_invalid(&evidence, mutant, &bytes)?);
     }
     invalid.sort();
 
@@ -1439,7 +1398,11 @@ fn run_rust_ci(args: CiRunArgs) -> Result<()> {
     let gate_passed = parsed.baseline_passed
         && parsed.survived == expected_survivors
         && parsed.timeout.is_empty()
-        && status.code() == Some(0);
+        && mutation::cargo_mutants_completed(
+            status.code(),
+            parsed.survived.len(),
+            parsed.timeout.len(),
+        );
     let outcomes = RustOutcomes {
         killed: parsed.killed,
         invalid,
@@ -1520,23 +1483,17 @@ fn run_rust_list(work: &Path) -> Result<Output> {
 
 /// The reviewed scope file, resolved in the protected controller checkout.
 ///
-/// `copy_path_for_language` keeps the target's `engine/mutants.toml` out of the
-/// sanitized work tree, so a target cannot widen or narrow what gets mutated.
-/// That exclusion is only half a policy: passing `--no-config` to make up for
-/// the missing file is what turned this gate into a whole-workspace run with
-/// ~1,900 structural survivors. The controller supplies its own copy instead.
+/// `copy_path_for_language` keeps the target's `engine/mutants.toml` out of the sanitized work tree, so a target cannot widen or narrow what gets mutated.
+/// That exclusion is only half a policy: passing `--no-config` to make up for the missing file is what turned this gate into a whole-workspace run with ~1,900 structural survivors.
+/// The controller supplies its own copy instead.
 fn rust_scope_config() -> Result<String> {
     path_arg(&paths::rust_mutants_config_in(&controller_root()))
 }
 
-/// Enumerate every mutant the reviewed scope generates, for the trusted
-/// round-robin partition.
+/// Enumerate every mutant the reviewed scope generates, for the trusted round-robin partition.
 ///
-/// This must agree with [`rust_ci_run_args`] on every option that changes the
-/// generated set. If it does not, the shard cargo-mutants actually runs cannot
-/// equal the partition computed from this listing and
-/// `validate_parsed_rust_partition` fails the shard closed — a real defect
-/// reported as an unexplained inventory mismatch.
+/// This must agree with [`rust_ci_run_args`] on every option that changes the generated set.
+/// If it does not, the shard cargo-mutants actually runs cannot equal the partition computed from this listing and `validate_parsed_rust_partition` fails the shard closed — a real defect reported as an unexplained inventory mismatch.
 fn rust_ci_list_args(config: &str) -> Vec<String> {
     let mut args = mutation::rust_scope_args(config);
     args.extend(["--list", "--json"].into_iter().map(str::to_owned));
@@ -1545,16 +1502,14 @@ fn rust_ci_list_args(config: &str) -> Vec<String> {
 
 /// One shard of the reviewed scope, run against the sanitized target tree.
 ///
-/// Every option that selects mutants or judges them — the scope, the clean-tree
-/// baseline, the workspace test policy, the timeout floor and the nextest
-/// profile — comes from [`mutation::rust_run_args`], so this lane and
-/// `just mutants` run one program. **The shard is the only thing this lane adds**,
-/// and `every_rust_lane_runs_the_one_reviewed_scope` asserts exactly that by
-/// comparing the two vectors rather than trusting this comment.
+/// Every option that selects mutants or judges them — the scope, the clean-tree baseline, the workspace test policy, the timeout floor and the nextest profile — comes from [`mutation::rust_run_args`], so this lane and `just mutants` run one program.
+/// **The shard is the only thing this lane adds**,
+/// and `every_rust_lane_runs_the_one_reviewed_scope` asserts exactly that by comparing the two vectors rather than trusting this comment.
 fn rust_ci_run_args(
     config: &str,
     output: &str,
     nextest_config: &str,
+    cpus: std::num::NonZeroUsize,
     shard_index: usize,
     shard_count: usize,
 ) -> Vec<String> {
@@ -1562,6 +1517,7 @@ fn rust_ci_run_args(
         config,
         output,
         nextest_config,
+        cpus,
         Some((shard_index, shard_count)),
     )
 }
@@ -1743,6 +1699,7 @@ fn parse_rust_outcomes(evidence: &Path, generated: &BTreeSet<RustMutant>) -> Res
                 }
             }
             "Unviable" => {
+                mutation::require_rust_build_failure(value)?;
                 if invalid.insert(mutant, log_path).is_some() {
                     bail!("duplicate Unviable Rust mutant outcome");
                 }
@@ -1915,7 +1872,7 @@ fn require_generated_sources_in_inventory(
     Ok(())
 }
 
-fn safe_report_path(root: &Path, relative: &str, label: &str) -> Result<PathBuf> {
+pub fn safe_report_path(root: &Path, relative: &str, label: &str) -> Result<PathBuf> {
     validate_report_relative_path(relative)?;
     let path = root.join(relative);
     let metadata = fs::symlink_metadata(&path)
@@ -1971,7 +1928,7 @@ fn verify_file_seals(root: &Path, expected: &[FileSeal]) -> Result<()> {
 }
 
 fn validate_sha256(value: &str, label: &str) -> Result<()> {
-    if value.len() != 64
+    if value.len() != SHA256_HEX_BYTES
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -2230,12 +2187,9 @@ fn build_csharp_native_dependency(work: &Path) -> Result<()> {
 fn run_dotnet_baseline(work: &Path) -> Result<Output> {
     let mut command = dotnet_command(work);
     command
+        .args(["test", "FindMyFiles.Tests.csproj", "--no-restore"])
+        .args(mutation::csharp_build_args(&stryker_config(&[])?)?)
         .args([
-            "test",
-            "FindMyFiles.Tests.csproj",
-            "--no-restore",
-            "--configuration",
-            "Release",
             "--framework",
             CSHARP_TARGET_FRAMEWORK,
             "--runtime",
@@ -2255,31 +2209,18 @@ fn run_dotnet_baseline(work: &Path) -> Result<Output> {
 
 /// The one reviewed Stryker configuration, narrowed to this shard's files.
 ///
-/// Read, never rebuilt. Everything that decides **which mutants exist** and
-/// **how each one is judged** — `mutation-level`, `coverage-analysis`,
+/// Read, never rebuilt.
+/// Everything that decides **which mutants exist** and **how each one is judged** — `mutation-level`, `coverage-analysis`,
 /// `disable-mix-mutants`, `test-runner`, `configuration`, `target-framework`,
-/// `break-on-initial-test-failure`, `concurrency`, `additional-timeout` — comes
-/// verbatim out of `app/FindMyFiles.Tests/stryker-config.json` in the
-/// *controller's* checkout, which `csharp_policies` seals as
-/// `controller:app/FindMyFiles.Tests/stryker-config.json` after proving the
-/// target's copy is byte-identical to it.
+/// `break-on-initial-test-failure`, `concurrency`, `additional-timeout` — comes verbatim out of `app/FindMyFiles.Tests/stryker-config.json` in the *controller's* checkout, which `csharp_policies` seals as `controller:app/FindMyFiles.Tests/stryker-config.json` after proving the target's copy is byte-identical to it.
 ///
-/// This function used to restate that whole object as a `json!` literal, and the
-/// two spellings said different things. CI mutated at `Complete` level with
-/// coverage analysis off, `vstest`, and a `Release` build; the committed file
-/// named none of those, so `just stryker` mutated at Stryker's `Standard`
-/// default with `perTest` coverage under `Debug` — and then compared the result
-/// to the same 103-entry reviewed baseline. Green locally and red in CI (or the
-/// reverse) was structural rather than bad luck, and no test could see it
-/// because each lane only ever read its own copy.
+/// This function used to restate that whole object as a `json!` literal, and the two spellings said different things.
+/// CI mutated at `Complete` level with coverage analysis off, `vstest`, and a `Release` build; the committed file named none of those, so `just stryker` mutated at Stryker's `Standard` default with `perTest` coverage under `Debug` — and then compared the result to the same 103-entry reviewed baseline.
+/// Green locally and red in CI (or the reverse) was structural rather than bad luck, and no test could see it because each lane only ever read its own copy.
 ///
-/// `mutate` is the one key a shard may change, because it is the only one that
-/// describes the *partition* rather than the program: the reviewed file lists all
-/// thirteen files and a shard narrows that to its slice. Narrowing it cannot
-/// weaken anything — Stryker does not confine *mutation* to this inventory, so
-/// `parse_csharp_report` is what actually enforces the scope, and the shard's
-/// results are compared against `reviewed_csharp_survivors` for the same slice.
-fn stryker_config(shard_sources: &[String]) -> Result<Value> {
+/// `mutate` is the one key a shard may change, because it is the only one that describes the *partition* rather than the program: the reviewed file lists all thirteen files and a shard narrows that to its slice.
+/// Narrowing it cannot weaken anything — Stryker does not confine *mutation* to this inventory, so `parse_csharp_report` is what actually enforces the scope, and the shard's results are compared against `reviewed_csharp_survivors` for the same slice.
+pub fn stryker_config(shard_sources: &[String]) -> Result<Value> {
     let reviewed_path = paths::csharp_stryker_config_in(&controller_root());
     let mut reviewed: Value = mutation::read_json(&reviewed_path)?;
     let root = reviewed
@@ -2311,18 +2252,12 @@ fn stryker_config(shard_sources: &[String]) -> Result<Value> {
 
 /// The reviewed survivors this Rust shard is allowed to report.
 ///
-/// The C# lane can project its accepted equivalents by file because its shards
-/// *are* a file partition. Rust shards are round-robin over mutants, so every
-/// shard touches all twelve reviewed files and a file-based projection would
-/// expect the same survivor in sixteen shards at once. The projection is over
-/// mutant identity instead: an accepted equivalent counts for exactly the shard
-/// that generated it.
+/// The C# lane can project its accepted equivalents by file because its shards *are* a file partition.
+/// Rust shards are round-robin over mutants, so every shard touches all twelve reviewed files and a file-based projection would expect the same survivor in sixteen shards at once.
+/// The projection is over mutant identity instead: an accepted equivalent counts for exactly the shard that generated it.
 ///
-/// A baseline identity may omit the column (`cargo-mutants` only prints one when
-/// `--line-col` is on, and the reviewed file is written by hand), in which case
-/// it matches any column on that line. Iterating the shard's `BTreeSet` keeps
-/// the result in the same order as the parsed `MissedMutant` set it is compared
-/// against.
+/// A baseline identity may omit the column (`cargo-mutants` only prints one when `--line-col` is on, and the reviewed file is written by hand), in which case it matches any column on that line.
+/// Iterating the shard's `BTreeSet` keeps the result in the same order as the parsed `MissedMutant` set it is compared against.
 fn reviewed_rust_survivors(
     policy: &mutation::RustReviewedPolicy,
     shard: &BTreeSet<RustMutant>,
@@ -2536,6 +2471,7 @@ fn parse_csharp_report(
                 }
                 continue;
             }
+            mutation::validate_csharp_activation(&status, object.get("static"))?;
             match status.as_str() {
                 "Killed" => {
                     killed.insert(identity);
@@ -2633,10 +2569,10 @@ fn text_paths_equal(left: &str, right: &str) -> bool {
 
 fn is_absolute_path_text(path: &str) -> bool {
     path.starts_with('/')
-        || (path.len() >= 3
+        || (path.len() >= WINDOWS_DRIVE_ROOT_BYTES
             && path.as_bytes()[0].is_ascii_alphabetic()
             && path.as_bytes()[1] == b':'
-            && path.as_bytes()[2] == b'/')
+            && path.as_bytes()[b"C:".len()] == b'/')
 }
 
 fn normalize_absolute_path_text(path: &str) -> Result<String> {
@@ -2658,7 +2594,7 @@ fn normalize_absolute_path_text(path: &str) -> Result<String> {
                 "{}:/",
                 normalized.as_bytes()[0].to_ascii_uppercase() as char
             ),
-            &normalized[3..],
+            &normalized[WINDOWS_DRIVE_ROOT_BYTES..],
         )
     };
     let relative = normalize_relative_text(remainder)?;
@@ -2884,10 +2820,11 @@ fn trusted_command(program: impl AsRef<OsStr>) -> Command {
 }
 
 const fn null_device() -> &'static str {
+    const UNIX_NULL_DEVICE: &str = "/dev/null";
     if cfg!(windows) {
         "NUL"
     } else {
-        "/dev/null"
+        UNIX_NULL_DEVICE
     }
 }
 
@@ -2895,9 +2832,6 @@ fn rust_command(program: &str, work: &Path) -> Command {
     let mut command = trusted_command(program);
     command
         .current_dir(work.join("engine"))
-        // cargo-mutants creates `<TEMP>/cargo-mutants-engine-*/crates/...`.
-        // Making TEMP the sanitized root preserves the engine/crates ancestry,
-        // so the launcher's canonical ../../../app asset path stays valid.
         .env("TEMP", work)
         .env("TMP", work)
         .env("RUSTUP_TOOLCHAIN", RUST_TOOLCHAIN_VERSION)
@@ -2913,26 +2847,15 @@ fn rust_command(program: &str, work: &Path) -> Command {
 fn dotnet_command(work: &Path) -> Command {
     let mut command = trusted_command("dotnet");
     command
-        // Inside `work`, always: the generated `global.json` at the root of the
-        // work tree only selects an SDK for processes that resolve upward
-        // through it (see `trusted_global_json`).
         .current_dir(paths::csharp_test_dir(work))
-        // The SDK remains exactly pinned and verified above. Testhost targets
-        // Microsoft.NETCore.App 10.0.0 and must accept the runner's serviced
-        // patch (for example 10.0.10) instead of requiring an insecure RTM copy.
         .env("DOTNET_ROLL_FORWARD", "LatestPatch")
         .env("DOTNET_MULTILEVEL_LOOKUP", "0")
         .env("DOTNET_NOLOGO", "1")
         .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
         .env("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", "1")
-        // XAML Compiler dependency resolution is still MAX_PATH-sensitive.
         .env("NUGET_PACKAGES", work.join(".n"))
         .env("RestoreLockedMode", "true")
         .env("SkipRustBuild", "true")
-        // Stryker analyses FindMyFiles.csproj standalone and never sees the test
-        // project's ProjectReference AdditionalProperties, so without these the
-        // mutated assembly ships no InternalsVisibleTo and no FakeEngineClient and
-        // discovery finds zero tests. See mutation::CSHARP_TEST_PROFILE.
         .envs(mutation::csharp_test_profile())
         .env("FMF_GOLDEN_DIR", work.join("contract").join("golden"));
     command
@@ -3067,21 +2990,22 @@ fn verify_rust_evidence(args: VerifyArgs) -> Result<()> {
 
         let parsed = parse_rust_outcomes(directory, &shard_set)?;
         let derived_invalid =
-            verify_rust_invalid_diagnostics(directory, &parsed.invalid, &receipt)?;
+            verify_rust_invalid_diagnostics(directory, &parsed.invalid, &receipt.outcomes.invalid)?;
         let derived = RustOutcomes {
             killed: parsed.killed,
             invalid: derived_invalid,
             survived: parsed.survived,
             timeout: parsed.timeout,
         };
-        // Recomputed from the controller's reviewed policy, never read out of
-        // the receipt: a shard that decided for itself which survivors were
-        // acceptable would be grading its own homework.
         let expected_survivors = reviewed_rust_survivors(&reviewed_policy, &shard_set);
         if derived != receipt.outcomes
             || !parsed.baseline_passed
             || !receipt.baseline_passed
-            || receipt.process_exit_code != Some(0)
+            || !mutation::cargo_mutants_completed(
+                receipt.process_exit_code,
+                receipt.outcomes.survived.len(),
+                receipt.outcomes.timeout.len(),
+            )
             || !receipt.passed
             || receipt.outcomes.survived != expected_survivors
             || !receipt.outcomes.timeout.is_empty()
@@ -3189,19 +3113,17 @@ fn validate_rust_allowed_files(root: &Path, receipt: &RustReceipt) -> Result<()>
 fn verify_rust_invalid_diagnostics(
     root: &Path,
     parsed: &[(RustMutant, String)],
-    receipt: &RustReceipt,
+    invalid_records: &[RustInvalid],
 ) -> Result<Vec<RustInvalid>> {
     let parsed: BTreeSet<RustMutant> = parsed.iter().map(|(mutant, _)| mutant.clone()).collect();
-    let receipt_set: BTreeSet<RustMutant> = receipt
-        .outcomes
-        .invalid
+    let receipt_set: BTreeSet<RustMutant> = invalid_records
         .iter()
         .map(|invalid| invalid.mutant.clone())
         .collect();
-    if parsed != receipt_set || parsed.len() != receipt.outcomes.invalid.len() {
+    if parsed != receipt_set || parsed.len() != invalid_records.len() {
         bail!("Rust Unviable inventory is not 1:1 between report and receipt");
     }
-    for invalid in &receipt.outcomes.invalid {
+    for invalid in invalid_records {
         let bytes = fs::read(root.join(&invalid.diagnostic.path))?;
         if bytes.is_empty() || seal_file(root, &invalid.diagnostic.path)? != invalid.diagnostic {
             bail!(
@@ -3209,8 +3131,21 @@ fn verify_rust_invalid_diagnostics(
                 invalid.mutant.name
             );
         }
+        mutation::require_rust_compiler_rejection(&invalid.mutant.name, &bytes)?;
     }
-    Ok(receipt.outcomes.invalid.clone())
+    Ok(invalid_records.to_vec())
+}
+
+fn retain_rust_invalid(root: &Path, mutant: RustMutant, bytes: &[u8]) -> Result<RustInvalid> {
+    let identity_hash = checksum::sha256_hex(&serde_json::to_vec(&mutant)?);
+    let relative = format!("invalid/{identity_hash}.log");
+    write_bytes(&root.join(&relative), bytes)?;
+    mutation::require_rust_compiler_rejection(&mutant.name, bytes)?;
+    Ok(RustInvalid {
+        mutant,
+        diagnostic: seal_file(root, &relative)?,
+        reason: "Unviable".to_owned(),
+    })
 }
 
 fn verify_csharp_evidence(args: VerifyArgs) -> Result<()> {
@@ -3486,6 +3421,101 @@ fn write_verified_summary(
 mod tests {
     use super::*;
 
+    #[test]
+    fn csharp_runner_configuration_is_sealed_and_rejects_target_drift() {
+        const CONFIG: &str = CSHARP_RUNNER_CONFIG;
+        let root =
+            std::env::temp_dir().join(format!("xtask-csharp-runner-policy-{}", std::process::id()));
+        let result = (|| -> Result<()> {
+            let mut tracked = rust_build_control_paths()?;
+            tracked.extend(
+                csharp_build_control_paths()
+                    .iter()
+                    .map(|path| (*path).to_owned()),
+            );
+            tracked.extend([
+                CONFIG.to_owned(),
+                "engine/.cargo/config.toml".to_owned(),
+                "app/FindMyFiles.Tests/stryker-config.json".to_owned(),
+                "app/FindMyFiles.Tests/mutation-baseline.json".to_owned(),
+            ]);
+            tracked.sort();
+            tracked.dedup();
+            for path in &tracked {
+                write_bytes(&root.join(path), &fs::read(controller_root().join(path))?)?;
+            }
+            let mut checkout = Checkout {
+                root: root.clone(),
+                tracked,
+            };
+            let work = root.join("sanitized");
+            let original = fs::read(root.join(CONFIG))?;
+            copy_target_tree(&checkout, &work, "csharp")?;
+            let seals = csharp_policies(&checkout, &work)?;
+            anyhow::ensure!(
+                seals.contains(&policy_seal(format!("controller:{CONFIG}"), &original)),
+                "runner configuration lacks a controller seal"
+            );
+            anyhow::ensure!(
+                fs::read(work.join(CONFIG))? == original,
+                "sanitized runner configuration differs from the controller"
+            );
+
+            for alternate in [
+                "app/FindMyFiles.Tests/FindMyFiles.Tests.xunit.runner.json",
+                "app/Other.Tests/XUNIT.RUNNER.JSON",
+                "app/FindMyFiles.Tests/testconfig.json",
+            ] {
+                write_bytes(&root.join(alternate), b"{\"stopOnFail\":false}\n")?;
+                checkout.tracked.push(alternate.to_owned());
+                let rejected = reject_forbidden_auto_configs(&checkout);
+                checkout.tracked.pop();
+                fs::remove_file(root.join(alternate))?;
+                anyhow::ensure!(
+                    rejected.is_err(),
+                    "alternate runner configuration was accepted: {alternate}"
+                );
+            }
+
+            fs::write(root.join(CONFIG), b"{\"stopOnFail\":false}\n")?;
+            anyhow::ensure!(
+                csharp_policies(&checkout, &work).is_err(),
+                "changed runner configuration was accepted"
+            );
+            fs::remove_file(root.join(CONFIG))?;
+            anyhow::ensure!(
+                csharp_policies(&checkout, &work).is_err(),
+                "missing runner configuration was accepted"
+            );
+            fs::write(root.join(CONFIG), &original)?;
+            checkout.tracked.retain(|path| path != CONFIG);
+            anyhow::ensure!(
+                csharp_policies(&checkout, &work).is_err(),
+                "untracked runner configuration was accepted"
+            );
+            Ok(())
+        })();
+        let cleanup = fs::remove_dir_all(&root);
+        result.expect("C# runner policy enforcement");
+        cleanup.expect("remove policy fixture");
+    }
+
+    #[test]
+    fn controller_tool_pins_match_the_current_project() {
+        let pins = include_bytes!("../../mise.toml");
+        super::validate_mise_rust_pin(pins).expect("current Rust pin must be accepted");
+        super::validate_mise_dotnet_pin(pins).expect("current .NET SDK pin must be accepted");
+        super::validate_stryker_manifest(include_bytes!("../../.config/dotnet-tools.json"))
+            .expect("current Stryker pin must be accepted");
+        let document = std::str::from_utf8(pins)
+            .expect("UTF-8 manifest")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("valid mise manifest");
+        assert_eq!(
+            document["tools"]["cargo:cargo-nextest"].as_str(),
+            Some(super::CARGO_NEXTEST_VERSION)
+        );
+    }
     fn complete() -> RunArgs {
         RunArgs {
             target_root: Some(PathBuf::from("target")),
@@ -3603,12 +3633,10 @@ mod tests {
         assert!(!mutation::RUST_MUTATION_NEXTEST_ARGS.contains(&"--locked"));
     }
 
-    /// Options `engine/mutants.toml` answers. A CLI copy is not an error —
-    /// cargo-mutants silently prefers it — so it is how the reviewed scope and
-    /// the executed scope come apart. `--skip-calls-defaults` is here for the
-    /// same reason even though the config does not set it: turning the built-in
-    /// `with_capacity` skip off adds 14 capacity-hint mutants that survive by
-    /// construction, which the reviewed baseline does not (and should not) list.
+    /// Options `engine/mutants.toml` answers.
+    /// A CLI copy is not an error —
+    /// cargo-mutants silently prefers it — so it is how the reviewed scope and the executed scope come apart.
+    /// `--skip-calls-defaults` is here for the same reason even though the config does not set it: turning the built-in `with_capacity` skip off adds 14 capacity-hint mutants that survive by construction, which the reviewed baseline does not (and should not) list.
     const CONFIG_OWNED_FLAGS: [&str; 3] = [
         "--test-tool",
         "--timeout-multiplier",
@@ -3616,9 +3644,7 @@ mod tests {
     ];
 
     /// Every cargo-mutants 27.1.0 option that changes *which* mutants exist.
-    /// `engine/mutants.toml` is the only place this repository decides that, so
-    /// none of these may appear on any lane's command line — an enumeration and
-    /// an execution that disagree on one of them cannot form a partition.
+    /// `engine/mutants.toml` is the only place this repository decides that, so none of these may appear on any lane's command line — an enumeration and an execution that disagree on one of them cannot form a partition.
     const SELECTION_FLAGS: [&str; 15] = [
         "--file",
         "-f",
@@ -3663,28 +3689,20 @@ mod tests {
             .collect()
     }
 
-    /// The local `just mutants` gate and both CI cargo-mutants invocations run
-    /// one reviewed scope.
+    /// The local `just mutants` gate and both CI cargo-mutants invocations run one reviewed scope.
     ///
-    /// This compares the argument vectors the three lanes actually build, not
-    /// the fact that they mention the same file: for five weeks CI *did* exclude
-    /// the target's `engine/mutants.toml` and then ran `--no-config --workspace`,
-    /// so it enumerated the whole workspace while `just mutants` enumerated the
-    /// twelve reviewed files, and nothing compared the two.
+    /// This compares the argument vectors the three lanes actually build, not the fact that they mention the same file: for five weeks CI *did* exclude the target's `engine/mutants.toml` and then ran `--no-config --workspace`,
+    /// so it enumerated the whole workspace while `just mutants` enumerated the twelve reviewed files, and nothing compared the two.
     #[test]
     fn every_rust_lane_runs_the_one_reviewed_scope() {
         let config = r"C:\controller\engine\mutants.toml";
         let scope = mutation::rust_scope_args(config);
         let nextest = r"C:\work\engine\.config\nextest-mutation.toml";
         let output = r"C:\work\tool-output\rust";
-        let local = mutation::rust_run_args(config, output, nextest, None);
-        let ci_run = rust_ci_run_args(config, output, nextest, 3, 16);
+        let cpus = std::num::NonZeroUsize::new(8).expect("nonzero test CPU budget");
+        let local = mutation::rust_run_args(config, output, nextest, cpus, None);
+        let ci_run = rust_ci_run_args(config, output, nextest, cpus, 3, 16);
 
-        // The whole point, asserted on the vectors rather than described in a
-        // comment: the CI shard runs the local gate's program plus a shard, and
-        // nothing else. `--test-workspace` and `--minimum-test-timeout` were
-        // CI-only until run 34832581942 was compared against a local run over
-        // the same tree and the two lanes disagreed about 40 mutants.
         let mut expected = local.clone();
         let cut = expected
             .iter()
@@ -3746,12 +3764,6 @@ mod tests {
             );
         }
 
-        // The enumeration that defines the trusted round-robin partition and the
-        // run that has to reproduce it must generate the same mutants, or the
-        // shard fails closed on a partition mismatch that reads like a tool bug.
-        // Both open with the same scope (asserted above), so it is enough that
-        // neither adds a selection option of its own: what is left over decides
-        // only how mutants are *tested*, never which ones exist.
         let (list, _) = halves(&lanes[1].1);
         let (run, _) = halves(&lanes[2].1);
         for (lane, args) in [("ci-list", &list), ("ci-run", &run)] {
@@ -3766,8 +3778,32 @@ mod tests {
         }
     }
 
-    /// The scope and the reviewed baseline the CI controller supplies are the
-    /// same two files the local gate reads, and the real ones parse.
+    #[test]
+    fn rust_lanes_pair_jobs_and_test_threads_within_the_cpu_budget() {
+        for budget in [1, 2, 3, 4, 7, 8, 16, usize::MAX] {
+            let cpus = std::num::NonZeroUsize::new(budget).expect("nonzero test CPU budget");
+            for args in [
+                mutation::rust_run_args("scope.toml", "output", "nextest.toml", cpus, None),
+                rust_ci_run_args("scope.toml", "output", "nextest.toml", cpus, 0, 2),
+            ] {
+                let (mutants, runner) = halves(&args);
+                let jobs = flag_values(&mutants, "--jobs");
+                let threads = flag_values(&runner, "--test-threads");
+                assert_eq!(jobs.len(), 1);
+                assert_eq!(threads.len(), 1);
+                let jobs: usize = jobs[0].parse().expect("integer jobs");
+                let threads: usize = threads[0].parse().expect("integer test threads");
+                assert!(jobs > 0 && threads > 0);
+                assert!(jobs * threads <= budget);
+                assert_eq!(flag_values(&mutants, "--minimum-test-timeout"), ["300"]);
+                assert!(!runner.contains(&"--jobs"));
+                assert!(!mutants.contains(&"--test-threads"));
+            }
+        }
+        assert!(!NEXTEST_POLICY.contains("test-threads"));
+    }
+
+    /// The scope and the reviewed baseline the CI controller supplies are the same two files the local gate reads, and the real ones parse.
     #[test]
     fn the_controller_supplies_the_reviewed_policy_the_local_gate_uses() {
         assert_eq!(
@@ -3809,9 +3845,6 @@ mod tests {
             accepted_equivalents: vec![identity(column)],
         };
 
-        // Round-robin sharding puts both mutants of one file in different
-        // shards, so only the shard that generated the accepted mutant may
-        // report it.
         assert_eq!(
             reviewed_rust_survivors(
                 &policy(Some(5)),
@@ -3819,32 +3852,23 @@ mod tests {
             ),
             vec![first.clone()]
         );
-        assert!(
-            reviewed_rust_survivors(&policy(Some(5)), &BTreeSet::from([second.clone()])).is_empty()
+        assert_eq!(
+            reviewed_rust_survivors(&policy(Some(5)), &BTreeSet::from([second.clone()])),
+            Vec::<RustMutant>::new()
         );
-        // A hand-written identity may omit the column; it then accepts any
-        // mutant of that description on the line, and nothing else.
         assert_eq!(
             reviewed_rust_survivors(&policy(None), &BTreeSet::from([first, second])).len(),
             1
         );
     }
 
-    /// The local `just stryker` gate and the CI shard hand Stryker one
-    /// configuration.
+    /// The local `just stryker` gate and the CI shard hand Stryker one configuration.
     ///
-    /// This compares the settings each lane *effectively* runs under, not the
-    /// fact that both mention a file called `stryker-config.json`: for as long
-    /// as this gate has existed, CI built its own configuration object in code
-    /// while the committed file said something else, so the two lanes mutated a
-    /// different program at a different mutation level and then compared the
-    /// results to the same reviewed baseline. Nothing could observe that,
+    /// This compares the settings each lane *effectively* runs under, not the fact that both mention a file called `stryker-config.json`: for as long as this gate has existed, CI built its own configuration object in code while the committed file said something else, so the two lanes mutated a different program at a different mutation level and then compared the results to the same reviewed baseline.
+    /// Nothing could observe that,
     /// because each lane only ever read its own copy.
     ///
-    /// Equality alone would be a hollow gate — deleting `mutation-level` from
-    /// the reviewed file keeps both lanes perfectly equal and quietly returns
-    /// both to Stryker's `Standard` default — so the absolute values are pinned
-    /// here too.
+    /// Equality alone would be a hollow gate — deleting `mutation-level` from the reviewed file keeps both lanes perfectly equal and quietly returns both to Stryker's `Standard` default — so the absolute values are pinned here too.
     #[test]
     fn every_csharp_lane_runs_the_one_reviewed_configuration() {
         let reviewed_path = paths::csharp_stryker_config_in(&controller_root());
@@ -3856,13 +3880,11 @@ mod tests {
             .and_then(Value::as_object)
             .expect("reviewed stryker-config object");
 
-        // What the reviewed file says, in full. Nothing downstream can restore a
-        // setting this file loses.
         for (key, expected) in [
             ("mutation-level", serde_json::json!("Complete")),
             ("coverage-analysis", serde_json::json!("off")),
             ("disable-mix-mutants", serde_json::json!(true)),
-            ("test-runner", serde_json::json!("vstest")),
+            ("test-runner", serde_json::json!("mtp")),
             ("configuration", serde_json::json!("Release")),
             (
                 "target-framework",
@@ -3877,17 +3899,11 @@ mod tests {
                 "the reviewed Stryker configuration no longer sets `{key}`"
             );
         }
-        // `break: 0` is load-bearing where `high`/`low` are report colouring:
-        // `validate_stryker_exit` requires exit 0, and any break threshold above
-        // the achieved score makes Stryker exit 1 — failing the gate on a score
-        // instead of on the survivor identities it actually judges.
         assert_eq!(
             reviewed.pointer("/stryker-config/thresholds/break"),
             Some(&serde_json::json!(0))
         );
 
-        // The shard configuration is the reviewed one with a narrower `mutate`,
-        // and nothing else.
         let shard = vec![
             "app/FindMyFiles/Engine/Wtf8.cs".to_owned(),
             "app/FindMyFiles/Engine/Transport/PipeConnection.cs".to_owned(),
@@ -3920,16 +3936,16 @@ mod tests {
             );
         }
 
-        // Neither lane may answer on the command line a question the reviewed
-        // file answers. Stryker prefers the command line without saying so, so a
-        // duplicate is not an error — it is the next drift, and
-        // `--break-on-initial-test-failure` was already exactly that.
         let local = mutation::stryker_args(r"C:\repo\build\mutation\csharp", None);
         let ci = mutation::stryker_args(
             r"C:\work\tool-output\csharp",
             Some(".trusted-stryker-shard.json"),
         );
         for (lane, args) in [("local", &local), ("ci", &ci)] {
+            assert!(
+                args.iter().any(|arg| arg == "--log-to-file"),
+                "{lane} must retain native test server diagnostics"
+            );
             for key in reviewed_root.keys() {
                 assert!(
                     !args.contains(&format!("--{key}")),
@@ -3938,8 +3954,6 @@ mod tests {
             }
         }
 
-        // Reduced to the same report location and the same file name, the two
-        // command lines are one command line.
         let mut normalized = ci;
         let config_file = normalized
             .iter()
@@ -3960,8 +3974,7 @@ mod tests {
         );
     }
 
-    /// The controller pins the SDK the work tree actually resolves, and the
-    /// target still cannot pin one of its own.
+    /// The controller pins the SDK the work tree actually resolves, and the target still cannot pin one of its own.
     #[test]
     fn the_controller_supplies_the_sdk_selector_the_target_may_not() {
         let bytes = trusted_global_json().expect("generated global.json");
@@ -3970,20 +3983,11 @@ mod tests {
             value.pointer("/sdk/version"),
             Some(&serde_json::json!(DOTNET_SDK_VERSION))
         );
-        // Any roll-forward policy lets the muxer answer with a version other
-        // than this one, and `restore_and_verify_csharp_tools` compares that
-        // answer for exact equality.
         assert_eq!(
             value.pointer("/sdk/rollForward"),
             Some(&serde_json::json!("disable"))
         );
 
-        // Correct bytes in the wrong place are inert, and inert is the state
-        // this commit fixed. SDK resolution walks up from the *working
-        // directory*, so the selector at the root of the work tree only binds
-        // while every `dotnet` process the lane spawns runs underneath it. This
-        // reads that working directory off the real command rather than
-        // restating the layout.
         let work = Path::new(r"C:\c\build\mw\c\1-1-3");
         let command = dotnet_command(work);
         let cwd = command
@@ -3996,16 +4000,11 @@ mod tests {
             cwd.display()
         );
 
-        // The file the controller writes is precisely the file a target may not
-        // carry. The exclusion and the generation are two halves of one policy,
-        // not a contradiction: only the exclusion was ever implemented.
         assert!(is_forbidden_auto_config("global.json"));
         assert!(!is_trusted_auto_config("global.json"));
         assert!(!copy_path_for_language("global.json", "csharp"));
         assert!(!copy_path_for_language("global.json", "rust"));
 
-        // ...and the one pin it is generated from is the pin the developer
-        // machine installs.
         let mise = fs::read(controller_root().join("mise.toml")).expect("read mise.toml");
         validate_mise_dotnet_pin(&mise)
             .expect("mise.toml tools.dotnet must equal DOTNET_SDK_VERSION");
@@ -4052,6 +4051,80 @@ mod tests {
             "fixture",
         )
         .is_err());
+    }
+
+    #[test]
+    fn csharp_rejects_static_initialization_verdicts() {
+        let base = std::env::temp_dir().join(format!(
+            "xtask-csharp-ci-static-activation-{}",
+            std::process::id()
+        ));
+        let _ = fsx::force_remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("create test directory");
+        let path = base.join("mutation-report.json");
+        let mut report = serde_json::json!({
+            "schemaVersion": "2",
+            "projectRoot": "C:/repo/app/FindMyFiles",
+            "testFiles": {},
+            "thresholds": {"high": 80, "low": 60, "break": 0},
+            "files": {
+                "Services/ShellOps.cs": {
+                    "language": "cs",
+                    "source": "",
+                    "mutants": [{
+                        "id": "1",
+                        "mutatorName": "String mutation",
+                        "replacement": "\"\"",
+                        "status": "Killed",
+                        "static": false,
+                        "coveredBy": [],
+                        "killedBy": [],
+                        "location": {
+                            "start": {"line": 20, "column": 84},
+                            "end": {"line": 20, "column": 98}
+                        }
+                    }]
+                }
+            }
+        });
+        let write_report = |report: &Value| {
+            fs::write(
+                &path,
+                serde_json::to_vec(report).expect("serialize fixture"),
+            )
+            .expect("write fixture");
+        };
+        let scope = ["app/FindMyFiles/Services/ShellOps.cs".to_owned()];
+        for status in ["Killed", "Survived"] {
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["status"] = status.into();
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["static"] = false.into();
+            write_report(&report);
+            parse_csharp_report(&path, None, &scope)
+                .expect("ordinary mutation verdict should parse");
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["static"] = true.into();
+            write_report(&report);
+            let error = parse_csharp_report(&path, None, &scope)
+                .expect_err("a reused process cannot supply a static initialization verdict");
+            assert!(error.to_string().contains("static"), "{error}");
+        }
+        for metadata in [
+            Value::Null,
+            serde_json::json!(0),
+            serde_json::json!("false"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            report["files"]["Services/ShellOps.cs"]["mutants"][0]["static"] = metadata;
+            write_report(&report);
+            assert!(parse_csharp_report(&path, None, &scope).is_err());
+        }
+        report["files"]["Services/ShellOps.cs"]["mutants"][0]
+            .as_object_mut()
+            .expect("mutant object")
+            .remove("static");
+        write_report(&report);
+        assert!(parse_csharp_report(&path, None, &scope).is_err());
+        fsx::force_remove_dir_all(&base).expect("remove test directory");
     }
 
     #[test]
@@ -4148,5 +4221,91 @@ mod tests {
             &empty_set,
         )
         .is_err());
+    }
+
+    fn diagnostic_mutant() -> RustMutant {
+        RustMutant {
+            name: "crates/fmf-core/src/lib.rs:1:1: replace value with false".to_owned(),
+            package: "fmf-core".to_owned(),
+            path: "engine/crates/fmf-core/src/lib.rs".to_owned(),
+            line: 1,
+            column: 1,
+            mutation: "replace value with false".to_owned(),
+        }
+    }
+
+    #[test]
+    fn rust_diagnostic_producer_and_independent_verifier_reject_sealed_linker_failures(
+    ) -> Result<()> {
+        let temporary = std::env::temp_dir();
+        let root = temporary.join(format!(
+            "xtask-mutation-sealed-invalid-{}",
+            std::process::id()
+        ));
+        assert!(root.is_absolute() && root.starts_with(&temporary));
+        fsx::force_remove_dir_all(&root)?;
+        let mutant = diagnostic_mutant();
+        let compiler = format!("*** {}\n*** cargo nextest run --no-run --verbose\nerror[E0277]: trait bound is not satisfied\n*** result: Failure(101)\n", mutant.name);
+        let parsed = vec![(mutant.clone(), "log/native.log".to_owned())];
+        let invalid = retain_rust_invalid(&root, mutant.clone(), compiler.as_bytes())?;
+        verify_rust_invalid_diagnostics(&root, &parsed, std::slice::from_ref(&invalid))?;
+
+        for diagnostic in [
+            "error: linking with `link.exe` failed: exit code: 1104",
+            "error[E0277]: trait bound is not satisfied\nerror: linking with `link.exe` failed: exit code: 1104",
+        ] {
+            let log = format!("*** {}\n*** cargo nextest run --no-run --verbose\n{diagnostic}\n*** result: Failure(101)\n", mutant.name);
+            assert!(retain_rust_invalid(&root, mutant.clone(), log.as_bytes()).is_err());
+            assert_eq!(fs::read(root.join(&invalid.diagnostic.path))?, log.as_bytes());
+            let sealed = RustInvalid {
+                diagnostic: seal_file(&root, &invalid.diagnostic.path)?,
+                ..invalid.clone()
+            };
+            assert!(verify_rust_invalid_diagnostics(&root, &parsed, &[sealed]).is_err());
+        }
+        fsx::force_remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn native_ci_unviable_outcomes_require_the_build_phase_before_receipt_creation() -> Result<()> {
+        let temporary = std::env::temp_dir();
+        let root = temporary.join(format!(
+            "xtask-mutation-ci-build-phase-{}",
+            std::process::id()
+        ));
+        assert!(root.is_absolute() && root.starts_with(&temporary));
+        fsx::force_remove_dir_all(&root)?;
+        fs::create_dir_all(&root)?;
+        let mutant = diagnostic_mutant();
+        let native = serde_json::json!({
+            "name":mutant.name,"package":mutant.package,
+            "file":mutant.path.strip_prefix("engine/").expect("fixture engine path"),
+            "function":null,"genre":"BinOp","replacement":"false",
+            "span":{"start":{"line":1,"column":1},"end":{"line":1,"column":2}}
+        });
+        let phase = serde_json::json!({"phase":"Build","duration":0.1,
+            "process_status":{"Failure":101},"argv":["cargo","nextest","run","--no-run"]});
+        let mut report = serde_json::json!({
+            "cargo_mutants_version":CARGO_MUTANTS_VERSION,
+            "start_time":"2026-11-12T00:00:00Z","end_time":"2026-11-12T00:00:01Z",
+            "caught":0,"missed":0,"timeout":0,"unviable":1,"success":1,"total_mutants":1,
+            "outcomes":[
+                {"scenario":"Baseline","summary":"Success","log_path":"log/baseline.log","diff_path":null,"phase_results":[]},
+                {"scenario":{"Mutant":native},"summary":"Unviable","log_path":"log/mutant.log","diff_path":"diff/mutant.diff","phase_results":[phase]}
+            ]
+        });
+        for filename in ["caught.txt", "missed.txt", "timeout.txt"] {
+            fs::write(root.join(filename), "")?;
+        }
+        fs::write(root.join("unviable.txt"), format!("{}\n", mutant.name))?;
+        let generated = BTreeSet::from([mutant]);
+        mutation::write_json_atomic(&root.join("outcomes.json"), &report)?;
+        parse_rust_outcomes(&root, &generated)?;
+        report["outcomes"][1]["phase_results"][0]["phase"] = serde_json::json!("Test");
+        mutation::write_json_atomic(&root.join("outcomes.json"), &report)?;
+        assert!(parse_rust_outcomes(&root, &generated).is_err());
+        fsx::force_remove_dir_all(&root)?;
+        Ok(())
     }
 }

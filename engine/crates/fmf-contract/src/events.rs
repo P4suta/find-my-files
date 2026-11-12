@@ -1,9 +1,7 @@
-//! Event kinds — FFI callback `FmfEvent.kind` and pipe event-push opcodes
-//! carry the same values.
+//! Event kinds — FFI callback `FmfEvent.kind` and pipe event-push opcodes carry the same values.
 //!
-//! On the pipe an event frame puts the kind in the *opcode* field, so its
-//! numbering overlaps [`crate::opcodes`]. A receiver must therefore branch on
-//! the event bit in `flags` before it looks at the opcode.
+//! On the pipe an event frame puts the kind in the *opcode* field, so its numbering overlaps [`crate::opcodes`].
+//! A receiver must therefore branch on the event bit in `flags` before it looks at the opcode.
 
 /// `u32` on the wire and in the FFI POD.
 #[repr(u32)]
@@ -19,8 +17,7 @@ pub enum EventKind {
     RescanStarted = 4,
     /// The volume could not be indexed and is no longer being served.
     VolumeFailed = 5,
-    /// `entries` = severity ([`SEVERITY_WARN`] etc.); details are pulled
-    /// from the stats JSON (push notification + pull detail).
+    /// `entries` = severity ([`SEVERITY_WARN`] etc.); details are pulled from the stats JSON (push notification + pull detail).
     EngineError = 6,
 }
 

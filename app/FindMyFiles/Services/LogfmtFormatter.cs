@@ -5,29 +5,21 @@ using Serilog.Formatting;
 
 namespace FindMyFiles.Services;
 
-/// <summary>
-/// Serilog text formatter that renders each event as one logfmt line —
-/// <c>ts level area key=value … msg="…"</c> — matching the Rust engine's
-/// the rolling engine logs so the two streams interleave and parse identically
-/// (ADR-0037). The quoting rules double as the log-injection defence: any
-/// value carrying CR/LF or control characters is escaped, so it can never
-/// forge a second log line.
+/// <summary> Serilog text formatter that renders each event as one logfmt line —
+/// <c>ts level area key=value … msg="…"
+/// </c> — matching the Rust engine's the rolling engine logs so the two streams interleave and parse identically (ADR-0037).
+/// The quoting rules double as the log-injection defence: any value carrying CR/LF or control characters is escaped, so it can never forge a second log line.
 /// </summary>
 internal sealed class LogfmtFormatter : ITextFormatter
 {
-    /// <summary>Cap on one field value's length, mirroring the engine's 1 KiB
-    /// cap so a pathological external value cannot balloon a line. The
-    /// FileLog privacy boundary rejects filenames, query text, and exception
-    /// bodies before this formatter sees them.</summary>
+    /// <summary>Cap on one field value's length, mirroring the engine's 1 KiB cap so a pathological external value cannot balloon a line.
+    /// The FileLog privacy boundary rejects filenames, query text, and exception bodies before this formatter sees them.</summary>
     private const int ValueCap = 1024;
 
-    /// <summary>Property holding the subsystem tag, emitted right after the
-    /// level rather than as an inline field.</summary>
+    /// <summary>Property holding the subsystem tag, emitted right after the level rather than as an inline field.</summary>
     private const string AreaKey = "area";
 
-    /// <summary>Property holding the message text (the constant template the
-    /// <see cref="FileLog"/> facade uses); rendered as the trailing <c>msg=</c>
-    /// rather than duplicated as an inline field.</summary>
+    /// <summary>Property holding the message text (the constant template the <see cref="FileLog"/> facade uses); rendered as the trailing <c>msg=</c> rather than duplicated as an inline field.</summary>
     private const string MessageKey = "Msg";
 
     /// <inheritdoc/>
@@ -40,9 +32,7 @@ internal sealed class LogfmtFormatter : ITextFormatter
     }
 
     /// <summary>Render one event as a logfmt line with no trailing newline —
-    /// pure, so the exact shape is unit-testable without a sink.</summary>
-    /// <param name="e">The event to render.</param>
-    /// <returns>The formatted logfmt line.</returns>
+    /// pure, so the exact shape is unit-testable without a sink.</summary> <param name="e">The event to render.</param> <returns>The formatted logfmt line.</returns>
     internal static string Render(LogEvent e)
     {
         var sb = new StringBuilder(128);
@@ -52,8 +42,6 @@ internal sealed class LogfmtFormatter : ITextFormatter
         sb.Append(" area=");
         AppendValue(sb, AreaOf(e));
 
-        // Inline fields (e.g. rid, hits), ordinal-sorted for deterministic
-        // output, with the two reserved keys held back for fixed positions.
         foreach (var prop in e.Properties
             .Where(p => !string.Equals(p.Key, AreaKey, StringComparison.Ordinal)
                 && !string.Equals(p.Key, MessageKey, StringComparison.Ordinal))
@@ -63,9 +51,6 @@ internal sealed class LogfmtFormatter : ITextFormatter
             AppendValue(sb, Scalar(prop.Value));
         }
 
-        // Use the raw Msg property value, not RenderMessage: a "{Msg}" template
-        // renders a string property *with* surrounding quotes (Serilog's
-        // structured form), which our own quoting would then double.
         var message = e.Properties.TryGetValue(MessageKey, out var msg)
             ? Scalar(msg)
             : e.RenderMessage(CultureInfo.InvariantCulture);
@@ -92,8 +77,6 @@ internal sealed class LogfmtFormatter : ITextFormatter
             };
         }
 
-        // Structured values aren't expected (the facade never destructures) but
-        // must not throw — render culture-invariantly.
         using var writer = new StringWriter(CultureInfo.InvariantCulture);
         v.Render(writer, formatProvider: CultureInfo.InvariantCulture);
         return writer.ToString();
@@ -110,12 +93,9 @@ internal sealed class LogfmtFormatter : ITextFormatter
         _ => "INFO ",
     };
 
-    /// <summary>Append <paramref name="value"/> as a logfmt value: emitted bare
-    /// when safe, else wrapped in <c>"…"</c> with control characters escaped
-    /// (the log-injection defence). Capped at <see cref="ValueCap"/> with a
-    /// <c>…</c> marker.</summary>
-    /// <param name="sb">Destination buffer.</param>
-    /// <param name="value">The raw value text.</param>
+    /// <summary>Append <paramref name="value"/> as a logfmt value: emitted bare when safe, else wrapped in <c>"…"
+    /// </c> with control characters escaped (the log-injection defence).
+    /// Capped at <see cref="ValueCap"/> with a <c>…</c> marker.</summary> <param name="sb">Destination buffer.</param> <param name="value">The raw value text.</param>
     internal static void AppendValue(StringBuilder sb, string value)
     {
         var truncated = value.Length > ValueCap;
@@ -124,7 +104,7 @@ internal sealed class LogfmtFormatter : ITextFormatter
             value = value[..ValueCap];
             if (char.IsHighSurrogate(value[^1]))
             {
-                value = value[..^1]; // never split a surrogate pair
+                value = value[..^1];
             }
         }
 

@@ -1,7 +1,6 @@
 //! Elevated adversarial filesystem tests for the `LocalSystem` install boundary.
 //!
-//! Gated like every machine-security test: `#[ignore]` plus
-//! `FMF_ADMIN_TESTS=1` (`just test-admin`, from an elevated shell).
+//! Gated like every machine-security test: `#[ignore]` plus `FMF_ADMIN_TESTS=1` (`just test-admin`, from an elevated shell).
 
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::FromRawHandle as _;
@@ -15,10 +14,8 @@ const DELETE: u32 = 0x0001_0000;
 const WRITE_DAC: u32 = 0x0004_0000;
 const WRITE_OWNER: u32 = 0x0008_0000;
 
-/// Fails closed. `#[ignore]` is what *skips* these tests; reaching the body
-/// without the arming variable means the harness was invoked outside
-/// `just test-admin`, and a silent early return would be indistinguishable
-/// from a proven boundary.
+/// Fails closed.
+/// `#[ignore]` is what *skips* these tests; reaching the body without the arming variable means the harness was invoked outside `just test-admin`, and a silent early return would be indistinguishable from a proven boundary.
 fn require_admin_gate() {
     assert_eq!(
         std::env::var("FMF_ADMIN_TESTS").as_deref(),
@@ -61,8 +58,6 @@ fn reparse_and_preopened_mutation_handles_fail_closed() {
     require_admin_gate();
     let sddl = data_dir_sddl();
 
-    // A root reparse point must be opened as the link itself and rotated out of
-    // the privileged fixed name. The target is never traversed or modified.
     let root_case = tempfile::tempdir().expect("root-case anchor");
     let root_target = tempfile::tempdir().expect("root-case target");
     let root_sentinel = root_target.path().join("sentinel");
@@ -83,8 +78,6 @@ fn reparse_and_preopened_mutation_handles_fail_closed() {
     );
     std::fs::remove_dir(&quarantined_reparse).expect("remove quarantined root symlink");
 
-    // A descendant reparse point is found while the real root handle remains
-    // locked. No inheritable ACL is propagated until traversal has completed.
     let descendant_target = tempfile::tempdir().expect("descendant target");
     let descendant_sentinel = descendant_target.path().join("sentinel");
     std::fs::write(&descendant_sentinel, b"outside-child").expect("child sentinel");
@@ -99,18 +92,12 @@ fn reparse_and_preopened_mutation_handles_fail_closed() {
     );
     std::fs::remove_dir(root.join("index")).expect("remove index symlink");
 
-    // An attacker retaining FILE_ADD_FILE/FILE_DELETE_CHILD before validation
-    // must cause a sharing violation. Changing a DACL would not revoke that
-    // already-open handle, so the object is never accepted in that state.
     let mutation = open_directory_handle(&root, FILE_ADD_FILE | FILE_DELETE_CHILD);
     let error = TrustedDataRoot::open_verified_for_test(&root, provenance, &sddl)
         .expect_err("mutation handle must block");
     assert_eq!(error.raw_os_error(), Some(32), "{error}");
     drop(mutation);
 
-    // Once no mutation handle exists, the same root can be pinned. Its live
-    // guard prevents a remove→symlink swap, and handle-relative publication
-    // writes only below the verified root.
     let trusted =
         TrustedDataRoot::open_verified_for_test(&root, provenance, &sddl).expect("trusted root");
     let swap_target = tempfile::tempdir().expect("swap target");
@@ -135,9 +122,6 @@ fn reparse_and_preopened_mutation_handles_fail_closed() {
         b"outside-swap"
     );
 
-    // The executable source is pinned once too. A writer cannot change the
-    // path after validation, and the copy duplicates that same file object
-    // instead of resolving the path again.
     let source_path = root_case.path().join("source.exe");
     std::fs::write(&source_path, b"verified-image").expect("source image");
     let source = TrustedSourceFile::open(&source_path).expect("pin source image");
@@ -203,9 +187,8 @@ fn file_identity(file: &std::fs::File) -> (u32, u64) {
     )
 }
 
-/// Shared body of the two rotation tests. The gate stays in each `#[ignore]`
-/// test rather than here, so the arming check is visible at every entry point
-/// to the privileged surface instead of hiding one level down.
+/// Shared body of the two rotation tests.
+/// The gate stays in each `#[ignore]` test rather than here, so the arming check is visible at every entry point to the privileged surface instead of hiding one level down.
 fn assert_preopened_security_handle_is_rotated(access: u32, label: &str) {
     let anchor = tempfile::tempdir().expect("anchor");
     let root = anchor.path().join("find-my-files");
@@ -320,24 +303,16 @@ fn provenance_match_never_repairs_a_drifted_root_acl_in_place() {
     );
 }
 
-/// `FILE_DELETE_CHILD` is rotated out, not failed closed — and that is the
-/// correct guarantee, not a concession.
+/// `FILE_DELETE_CHILD` is rotated out, not failed closed — and that is the correct guarantee, not a concession.
 ///
 /// Windows buckets share access into read (`FILE_READ_DATA`/`FILE_EXECUTE`),
 /// write (`FILE_WRITE_DATA`/`FILE_APPEND_DATA`) and delete (`DELETE`).
-/// `FILE_DELETE_CHILD` is in none of them, so a handle holding only that right
-/// does not participate in sharing at all and *no* share mode can exclude it.
-/// This test asserted a sharing violation and had never run; it could not have
-/// passed. Its sibling holding `DELETE` — which does participate — still does
-/// fail closed, so the two behaviours are genuinely different and
-/// `docs/SECURITY.md` threat 7 records which right gets which.
+/// `FILE_DELETE_CHILD` is in none of them, so a handle holding only that right does not participate in sharing at all and *no* share mode can exclude it.
+/// This test asserted a sharing violation and had never run; it could not have passed.
+/// Its sibling holding `DELETE` — which does participate — still does fail closed, so the two behaviours are genuinely different and `docs/SECURITY.md` threat 7 records which right gets which.
 ///
 /// That rotation is *sufficient* is measured, not assumed:
-/// `security::tests::a_delete_child_handle_keeps_the_quarantined_object_and_never_reaches_the_new_root`
-/// impersonates a real standard user and shows the capability follows the
-/// object it was opened on — the squatter still deletes inside the quarantined
-/// directory and is denied on the fresh root, which admits only SYSTEM and
-/// Administrators.
+/// `security::tests::a_delete_child_handle_keeps_the_quarantined_object_and_never_reaches_the_new_root` impersonates a real standard user and shows the capability follows the object it was opened on — the squatter still deletes inside the quarantined directory and is denied on the fresh root, which admits only SYSTEM and Administrators.
 #[test]
 #[ignore = "requires elevation; gated by FMF_ADMIN_TESTS=1"]
 fn preopened_delete_child_handle_is_rotated_out_of_the_privileged_name() {

@@ -9,9 +9,8 @@ using Xunit;
 
 namespace FindMyFiles.Tests;
 
-/// <summary>Tests for <see cref="EngineClientFactory"/>'s startup transport
-/// decision — the auto-mode branch table and command-line helpers. A wrong
-/// transport choice disables every feature.</summary>
+/// <summary>Tests for <see cref="EngineClientFactory"/>'s startup transport decision — the auto-mode branch table and command-line helpers.
+/// A wrong transport choice disables every feature.</summary>
 public sealed class EngineClientFactoryTests
 {
     private sealed class Harness
@@ -255,12 +254,6 @@ public sealed class EngineClientFactoryTests
     [Fact]
     public void DecideAuto_never_falls_back_to_in_proc_when_no_service_is_installed()
     {
-        // Security: an elevated launch used to auto-select the in-proc engine,
-        // which creates %ProgramData%\find-my-files itself — without the hardened
-        // descriptor service install applies — leaving the machine index (every
-        // file name on the box, docs/SECURITY.md threat 7) under C:\ProgramData's
-        // inherited "Users: read + write" ACL. The absent service must instead
-        // route to the setup screen, whatever token this process holds.
         var choice = EngineClientFactory.DecideAuto(
             () => EngineServiceState.NotInstalled,
             () => throw new InvalidOperationException("absent service must not be probed"),
@@ -272,9 +265,6 @@ public sealed class EngineClientFactoryTests
     [Fact]
     public void EngineChoice_offers_no_in_proc_outcome_at_all()
     {
-        // Structural companion to the test above: elevation is not even an input
-        // to the auto decision, so the only way to re-introduce the ProgramData
-        // ACL hole is to re-introduce an in-proc member here.
         Assert.All(
             Enum.GetNames<EngineChoice>(),
             name =>
@@ -287,9 +277,6 @@ public sealed class EngineClientFactoryTests
     [Fact]
     public void DecideAuto_resolves_every_scm_state_to_a_pipe_or_unavailable_outcome()
     {
-        // Whole-domain sweep (every SCM state × probe × marker): auto mode has no
-        // in-proc escape hatch from any starting point, so no combination can put
-        // the machine index outside the service-hardened data root.
         var allowed = new[]
         {
             EngineChoice.Pipe,
@@ -319,7 +306,6 @@ public sealed class EngineClientFactoryTests
     [Fact]
     public void DecideAuto_starts_on_demand_when_service_installed_but_stopped()
     {
-        // ADR-0027: only a marker-compatible stopped service starts on demand.
         var choice = EngineClientFactory.DecideAuto(
             () => EngineServiceState.Stopped,
             () => throw new InvalidOperationException("stopped service must not be probed"),
@@ -363,8 +349,8 @@ public sealed class EngineClientFactoryTests
 
     [Theory]
     [InlineData(new[] { "--fake-engine" }, true)]
-    [InlineData(new[] { "--FAKE-ENGINE" }, true)] // case-insensitive
-    [InlineData(new[] { "--engine=pipe" }, false)] // flag absent
+    [InlineData(new[] { "--FAKE-ENGINE" }, true)]
+    [InlineData(new[] { "--engine=pipe" }, false)]
     public void HasFlag_matches_case_insensitively(string[] args, bool expected) =>
         Assert.Equal(expected, EngineClientFactory.HasFlag(args, "--fake-engine"));
 
@@ -389,22 +375,20 @@ public sealed class EngineClientFactoryTests
     [Fact]
     public async Task Resolve_unavailable_engine_seam_returns_an_explicit_unavailable_client()
     {
-        // `--engine=unavailable` (the UI-automation seam) forces disconnected setup
-        // state that `--fake-engine` can't reach (it returns the data-bearing fake).
         using var engine = EngineClientFactory.Resolve(["--engine=unavailable"]);
 
         Assert.IsType<UnavailableEngineClient>(engine);
         Assert.Equal(EngineClientKind.Unavailable, engine.Kind);
         Assert.Equal(EngineConnectionState.Unavailable, engine.Connection);
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => engine.ListVolumesAsync());
+            () => engine.ListVolumesAsync(TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => engine.StartIndexingAsync(["C:"]));
+            () => engine.StartIndexingAsync(["C:"], TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => engine.GetStatusAsync());
+            () => engine.GetStatusAsync(TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => engine.SearchAsync("readme", SearchOptions.Default));
-        Assert.Null(await engine.GetStatsAsync());
+            () => engine.SearchAsync("readme", SearchOptions.Default, TestContext.Current.CancellationToken));
+        Assert.Null(await engine.GetStatsAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -449,7 +433,7 @@ public sealed class EngineClientFactoryTests
 
         var resolve = Assert.Throws<ArgumentNullException>(() =>
         {
-            _ = EngineClientFactory.ResolveAsync((Func<IEngineClient>)null!);
+            _ = EngineClientFactory.ResolveAsync((Func<IEngineClient>)null!, TestContext.Current.CancellationToken);
         });
         Assert.Equal("resolve", resolve.ParamName);
     }
@@ -461,18 +445,21 @@ public sealed class EngineClientFactoryTests
         var entered = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
-        var resolving = EngineClientFactory.ResolveAsync(() =>
-        {
-            entered.TrySetResult();
-            Assert.True(release.Wait(TimeSpan.FromSeconds(5)));
-            return new UnavailableEngineClient();
-        });
+        var resolving = EngineClientFactory.ResolveAsync(
+            () =>
+            {
+                entered.TrySetResult();
+                Assert.True(release.Wait(TimeSpan.FromSeconds(5)));
+                return new UnavailableEngineClient();
+            },
+            TestContext.Current.CancellationToken);
 
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.False(resolving.IsCompleted);
+        var returnedBeforeResolution = !resolving.IsCompleted;
         release.Set();
 
         using var engine = await resolving;
+        Assert.True(returnedBeforeResolution);
+        Assert.True(entered.Task.IsCompletedSuccessfully);
         Assert.IsType<UnavailableEngineClient>(engine);
     }
 
@@ -485,7 +472,7 @@ public sealed class EngineClientFactoryTests
         Assert.Equal(EngineConnectionState.Connecting, engine.Connection);
         Assert.Equal(Loc.Get("EngineMode_Connecting"), StatusFormatter.EngineMode(engine));
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => engine.SearchAsync("readme", SearchOptions.Default));
-        Assert.Null(await engine.GetStatsAsync());
+            () => engine.SearchAsync("readme", SearchOptions.Default, TestContext.Current.CancellationToken));
+        Assert.Null(await engine.GetStatsAsync(TestContext.Current.CancellationToken));
     }
 }

@@ -1,71 +1,97 @@
 # Contributing
 
-Thanks for looking. This file covers **how a change gets accepted**. It does not
-restate how to build or test — `just --list` is the task menu and each recipe
-carries its own description, and [README.md](README.md#building) has the setup
-steps. Duplicating those here would just create a second copy to drift.
+This guide explains how contributors prepare and submit changes.
 
-## Before you write code
+Use `just --list` to find build and test commands, and read the [Building guide](docs/README.md#building) for setup.
 
-**Check the change is in scope.** The project indexes file *names* and nothing
-else, and that restriction is where the speed comes from. Permanently out of
-scope: content search, property/tag indexes, file preview, FTP/HTTP/ETP serving,
-FAT/exFAT/network drives, ReFS, and any non-Windows port. See
-[ADR-0001](docs/adr/0001-filename-only-index.md).
+## Change scope
 
-**Structural changes need an ADR first.** Anything that moves a dependency
-boundary, changes the wire contract, adds a seam, or alters the security model
-is decided in [docs/adr/](docs/adr/) before it is implemented — including
-decisions to *reject* something, which stay in the tree as `Rejected` or
-`Superseded` rather than being deleted. The engine contract itself is the
-`fmf-contract` crate, not a document; never write a prose copy of a constant,
-offset, or layout.
+The project indexes file names only, and that restriction is central to its speed.
 
-**Security-relevant work:** read [docs/SECURITY.md](docs/SECURITY.md) first. It
-is the canonical description of the named-pipe trust boundary and the service's
-privilege model.
+Content search, property indexes, tag indexes, and file previews are out of scope.
 
-## Opening a pull request
+The product won't serve searches over `FTP`, `HTTP`, or `ETP`, or support non-Windows ports.
 
-- **Conventional Commits are required.** A `commit-msg` hook and a CI PR-title
-  check both enforce the format, and release versions are derived from it — no
-  one picks a version number by hand. See [docs/RELEASING.md](docs/RELEASING.md).
-- **Run `just verify` before pushing.** The `pre-push` hook runs it for you.
-  Never bypass hooks with `--no-verify`: they are the gate, not a formality.
-- **If you touched `fmf-core`, run `just perf-gate`** from an elevated shell on
-  a cool machine. The performance bar is a real acceptance criterion, not a
-  guideline ([ADR-0013](docs/adr/0013-measurement-discipline.md)).
-- **Tests describe behaviour, not implementation.** A test name should state the
-  invariant it pins, so it keeps its value when the code underneath changes.
-  Test doubles live behind the same seam as the real implementation.
-- Fill in the pull-request template. Explain *why*, and say what you measured —
-  claims about performance, memory, or coverage are expected to come with the
-  numbers that back them.
+The project excludes `FAT` and `exFAT` volumes, network drives, and `ReFS`.
 
-## Quality gates
+Read [ADR-0001](docs/adr/0001-filename-only-index.md) before proposing a scope change.
 
-Every gate is executable, and a gate that cannot fail is treated as a bug.
-Besides the usual build and test gates, this repository runs strict mutation
-testing on a reviewed scope in both languages: the policy is the **exact set of
-surviving mutants**, never a percentage, and a survivor is either killed by a
-test or recorded with a written proof that no test could kill it
-([ADR-0022](docs/adr/0022-boundary-seams-behavioral-tests.md)). Expect to do one
-or the other; "add it to the baseline" on its own is not accepted.
+## Design and security
+
+Record structural decisions in [docs/adr/](docs/adr/) before implementation when a change moves a dependency boundary, changes the wire contract, adds a seam, or alters the security model.
+
+Keep rejected decisions in the ADR history as `Rejected` or `Superseded` rather than deleting them.
+
+The `fmf-contract` crate is the sole source of wire constants, offsets, layouts, and pure byte conversions.
+
+Don't copy those details into prose.
+
+Read [docs/SECURITY.md](docs/SECURITY.md) before security-relevant work because it defines the named-pipe trust boundary and service privilege model.
+
+## Changes and verification
+
+Use Conventional Commits because the commit-message hook and CI pull-request title check enforce the format.
+
+Release Please derives release versions and changelog entries from those commits.
+
+Contributors must not choose version numbers manually.
+
+See [docs/RELEASING.md](docs/RELEASING.md) for release details.
+
+Run the full Windows `just verify` gate before merging.
+
+Run the configured Git hooks and don't bypass them with `--no-verify`.
+
+The pre-push hook invokes `just verify-push`.
+
+On Windows, that task runs the full `just verify` gate, including native app tests.
+
+Non-Windows hosts run `just verify-portable`, which doesn't replace the required Windows gate before merge.
+
+When `fmf-core` or `fmf-runtime` changes, also run `just perf-gate` from an elevated shell on a cool machine before merging, as required by [ADR-0013](docs/adr/0013-measurement-discipline.md).
+
+Write tests around observable behavior and keep test doubles behind the same seam as the real implementation.
+Name each test after the invariant it checks.
+
+Prefer types and executable checks for invariants.
+Keep source comments for public contracts, safety requirements, legal notices, tool directives, and external constraints that the implementation can't express.
+Write prose one sentence per line.
+
+Complete the pull-request template with the reason for the change and measured evidence for performance, memory, or coverage claims.
+
+Every gate must run an executable check and fail when its condition fails.
+Treat a gate that can't fail as a bug.
+
+[Verification scope](docs/verification.md) defines the production proofs, interpreter checks, preserved fuzz corpora, and native boundaries.
+The applicable Linux lanes supplement the Windows source gate.
+
+Strict mutation checks cover a reviewed scope in both Rust and C# and require accounting for the exact survivor set.
+
+The policy uses the survivor set, not a percentage.
+
+Detect each new survivor with a meaningful test or prove equivalent behavior for every admitted input.
+
+A baseline entry alone is insufficient.
+Follow [ADR-0022](docs/adr/0022-boundary-seams-behavioral-tests.md) for mutation checks.
+Full mutation campaigns run at the Release gate.
+Timeouts and incomplete runs supply no passing evidence.
 
 ## Reporting problems
 
-- **Security vulnerabilities:** follow [SECURITY.md](.github/SECURITY.md). Do not
-  open a public issue.
-- **Bugs:** include the build identity (the About screen, or `fmf --version`),
-  what you expected, and what happened. The F12 panel's **Copy diagnostics**
-  button collects the useful state for you. Logs are at
-  `%APPDATA%\find-my-files\logs\app.log` and
-  `%ProgramData%\find-my-files\logs\engine.<date>.log`.
-- **Environment problems:** run `just doctor` first — it checks the toolchain
-  against the pins and reports drift.
+Report security vulnerabilities through [.github/SECURITY.md](.github/SECURITY.md), and don't disclose them in a public issue.
 
-## Licence and conduct
+For bugs, include the build identity from the About screen or `fmf --version`, the expected behavior, and the observed behavior.
 
-Contributions are licensed under Apache-2.0, the same as the project. All
-participation is governed by the
-[Code of Conduct](.github/CODE_OF_CONDUCT.md).
+Use the F12 panel's **Copy diagnostics** button to collect useful state.
+
+Find app logs at `%APPDATA%\find-my-files\logs\app.log`.
+
+Find engine logs at `%ProgramData%\find-my-files\logs\engine.<date>.log`.
+
+For environment problems, run `just doctor` to compare installed tools with the repository's pinned versions.
+
+## License and conduct
+
+Contributors license their contributions under the project's Apache-2.0 license.
+
+Follow the [Code of Conduct](.github/CODE_OF_CONDUCT.md).

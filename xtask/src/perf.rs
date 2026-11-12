@@ -1,42 +1,53 @@
 //! Transactional performance measurement (ADR-0013).
 //!
-//! Compiles happen before the environment check. Every measured command then
-//! gets an idle preflight, a whole-run clock monitor, and an idle postflight.
-//! Criterion comparisons use a fresh `CRITERION_HOME`, seeded only with the
-//! canonical baseline, so a same-named report from an older run cannot pass the
-//! gate. Baselines are recorded into a candidate and promoted only after every
-//! measurement/environment check succeeds.
+//! Compiles happen before the environment check.
+//! Every measured command then gets an idle preflight, a whole-run clock monitor, and an idle postflight.
+//! Criterion comparisons use a fresh `CRITERION_HOME`, seeded only with the canonical baseline, so a same-named report from an older run cannot pass the gate.
+//! Baselines are recorded into a candidate and promoted only after every measurement/environment check succeeds.
+
+const NO_CLOCK_DRIFT: f64 = 0.0;
+const PERF_COUNTER_FIELDS: usize = 2;
+const PERF_DECISION_FIELD_COUNT: usize = 7;
+
+use crate::checksum::hex;
 
 use crate::{cmd, fsx, paths};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use toml_edit::DocumentMut;
 
+#[path = "overflow.rs"]
+pub mod overflow;
+
+#[cfg(kani)]
+#[path = "perf_proofs.rs"]
+mod kani_proofs;
+
 const SAMPLE_COUNT: u8 = 6;
 const MONITOR_SAMPLE_COUNT: u16 = 3_600;
-/// ADR-0013 requires a measurement to *start* from a machine at its nominal
-/// clock. It judges the idle preflight, never the loaded run in between.
+/// ADR-0013 requires a measurement to *start* from a machine at its nominal clock.
+/// It judges the idle preflight, never the loaded run in between.
 const MIN_IDLE_PROCESSOR_PERFORMANCE: f64 = 95.0;
-/// ADR-0013's definition of idle: foreign work below this does not perturb a
-/// measurement.
+/// ADR-0013's definition of idle: foreign work below this does not perturb a measurement.
 const MAX_PROCESSOR_TIME: f64 = 20.0;
-/// How far the clock during a measured run may sit from the clock the baseline
-/// recorded while measuring itself.
+/// How far the clock during a measured run may sit from the clock the baseline recorded while measuring itself.
 ///
-/// Derived, not chosen. ADR-0013's rationale measures a 25-point clock drop
-/// (100% to 75%) drifting p50 by at most +46%, so at most 1.84% of time per
-/// point of clock. The smallest regression this project is willing to report is
-/// +10% (the micro gate, decision item 3), and thermal drift has to stay under
-/// the smallest thing the gates call a regression: 10 / 1.84 = 5.4 points.
+/// Derived, not chosen.
+/// ADR-0013's rationale measures a 25-point clock drop (100% to 75%) drifting p50 by at most +46%, so at most 1.84% of time per point of clock.
+/// The smallest regression this project is willing to report is +10% (the micro gate, decision item 3), and thermal drift has to stay under the smallest thing the gates call a regression: 10 / 1.84 = 5.4 points.
 const MAX_CLOCK_DRIFT_POINTS: f64 = 5.0;
 const BASELINE_METADATA: &str = "fmf-baseline.json";
+const MEASUREMENT_SCHEMA: u32 = 2;
 const BENCHMARK_MANIFEST: &str = include_str!("../../engine/benches/criterion-benchmarks.txt");
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -53,7 +64,8 @@ struct Summary {
     max_processor_time: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RunIdentity {
     git_commit: String,
     git_dirty: bool,
@@ -62,6 +74,145 @@ struct RunIdentity {
     rustc: String,
     processor: String,
     logical_processors: String,
+    execution: ExecutionConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "RecordedExecution")]
+struct ExecutionConfig {
+    system_mask: NonZeroUsize,
+    cpu_mask: NonZeroUsize,
+    rayon_workers: NonZeroUsize,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedExecution {
+    system_mask: usize,
+    cpu_mask: usize,
+    rayon_workers: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ExecutionError {
+    EmptyCpuAssignment,
+    AssignmentOutsideSystem,
+    ZeroWorkers,
+    OversubscribedWorkers,
+}
+
+impl std::fmt::Display for ExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::EmptyCpuAssignment => "performance CPU assignments must be nonempty",
+            Self::AssignmentOutsideSystem => "the process CPU assignment exceeds the system mask",
+            Self::ZeroWorkers => "the benchmark worker count must be positive",
+            Self::OversubscribedWorkers => "the benchmark worker count exceeds the assigned CPUs",
+        })
+    }
+}
+
+impl std::error::Error for ExecutionError {}
+
+impl TryFrom<RecordedExecution> for ExecutionConfig {
+    type Error = ExecutionError;
+
+    fn try_from(recorded: RecordedExecution) -> std::result::Result<Self, Self::Error> {
+        Self::plan(
+            recorded.system_mask,
+            recorded.cpu_mask,
+            Some(recorded.rayon_workers),
+        )
+    }
+}
+
+impl ExecutionConfig {
+    fn plan(
+        system_mask: usize,
+        cpu_mask: usize,
+        requested_workers: Option<usize>,
+    ) -> std::result::Result<Self, ExecutionError> {
+        let system_mask =
+            NonZeroUsize::new(system_mask).ok_or(ExecutionError::EmptyCpuAssignment)?;
+        let cpu_mask = NonZeroUsize::new(cpu_mask).ok_or(ExecutionError::EmptyCpuAssignment)?;
+        if cpu_mask.get() & !system_mask.get() != 0 {
+            return Err(ExecutionError::AssignmentOutsideSystem);
+        }
+        let capacity = cpu_mask.get().count_ones() as usize;
+        let rayon_workers = NonZeroUsize::new(requested_workers.unwrap_or(capacity))
+            .ok_or(ExecutionError::ZeroWorkers)?;
+        if rayon_workers.get() > capacity {
+            return Err(ExecutionError::OversubscribedWorkers);
+        }
+        Ok(Self {
+            system_mask,
+            cpu_mask,
+            rayon_workers,
+        })
+    }
+
+    fn command(
+        self,
+        dir: &Path,
+        program: impl AsRef<OsStr>,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Command {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .current_dir(dir)
+            .envs(envs.iter().copied());
+        command.env("RAYON_NUM_THREADS", self.rayon_workers.get().to_string());
+        command
+    }
+
+    fn run(self, dir: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<()> {
+        let status = self
+            .command(dir, program, args, envs)
+            .status()
+            .with_context(|| format!("failed to spawn benchmark `{program}`"))?;
+        if !status.success() {
+            bail!("benchmark `{program}` exited with {status}");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn capture_execution() -> Result<ExecutionConfig> {
+    use windows_sys::Win32::System::Threading::{
+        GetActiveProcessorGroupCount, GetCurrentProcess, GetProcessAffinityMask,
+    };
+    // SAFETY: The query has no pointer arguments and does not transfer ownership.
+    let groups = unsafe { GetActiveProcessorGroupCount() };
+    if groups != 1 {
+        bail!("performance measurement requires one processor group; observed {groups}");
+    }
+    let mut cpu_mask = 0;
+    let mut system_mask = 0;
+    // SAFETY: The pseudo-handle stays valid and both outputs point to writable usize values.
+    if unsafe {
+        GetProcessAffinityMask(GetCurrentProcess(), &raw mut cpu_mask, &raw mut system_mask)
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error()).context("read the process CPU assignment");
+    }
+    let requested_workers = match env::var("RAYON_NUM_THREADS") {
+        Ok(value) => Some(
+            value
+                .parse()
+                .context("RAYON_NUM_THREADS must be a positive integer")?,
+        ),
+        Err(env::VarError::NotPresent) => None,
+        Err(error) => return Err(error).context("read RAYON_NUM_THREADS"),
+    };
+    ExecutionConfig::plan(system_mask, cpu_mask, requested_workers).map_err(Into::into)
+}
+
+#[cfg(not(windows))]
+fn capture_execution() -> Result<ExecutionConfig> {
+    bail!("performance measurement requires Windows");
 }
 
 #[derive(Debug)]
@@ -77,7 +228,7 @@ struct Measurement {
 impl Measurement {
     fn to_json(&self, kind: &str) -> Value {
         json!({
-            "schema": 1,
+            "schema": MEASUREMENT_SCHEMA,
             "kind": kind,
             "started_unix": self.started_unix,
             "finished_unix": self.finished_unix,
@@ -90,6 +241,7 @@ impl Measurement {
             "rustc": self.identity.rustc,
             "processor": self.identity.processor,
             "logical_processors": self.identity.logical_processors,
+            "execution": self.identity.execution,
             "counters": {
                 "preflight": summary_json(self.preflight),
                 "during": summary_json(self.during),
@@ -120,36 +272,27 @@ impl CounterMonitor {
     }
 
     fn finish(mut self) -> Result<Summary> {
-        // A finite, deliberately oversized sample count avoids shell-specific
-        // signal handling. Terminating our own child after the measured command
-        // preserves all rows already written to its pipe.
         let _kill_result = self.child.kill();
         let output = self
             .child
             .wait_with_output()
             .context("failed to collect the whole-run processor monitor")?;
-        let samples = parse_samples(&String::from_utf8_lossy(&output.stdout))
+        let samples = counter_samples("perf-monitor", &output.stdout)
             .context("whole-run processor monitor returned no usable samples")?;
         let summary = summarize(&samples)?;
         print_summary("perf-monitor", summary, samples.len());
-        // The loaded run is not judged here. The engine scans and queries on
-        // every core, and ADR-0013's rationale measures this machine falling to
-        // ~75% under exactly that load, so the idle bar cannot be met while the
-        // benchmark runs. `validate_comparable_run` judges this summary against
-        // the clock the baseline recorded for its own run instead.
         Ok(summary)
     }
 }
 
-/// Standalone, fast environment probe used before asking an administrator to
-/// run a full gate.
+/// Standalone, fast environment probe used before asking an administrator to run a full gate.
 pub fn run() -> Result<()> {
     let _summary = sample_idle("perf-preflight", IdleRule::ColdStart)?;
     Ok(())
 }
 
-/// Compare all synthetic benchmarks in a clean run directory. The canonical
-/// baseline is read-only throughout this operation.
+/// Compare all synthetic benchmarks in a clean run directory.
+/// The canonical baseline is read-only throughout this operation.
 pub fn micro_check() -> Result<()> {
     let canonical = canonical_micro_baseline_dir()?;
     compile_micro_tools()?;
@@ -161,15 +304,15 @@ pub fn micro_check() -> Result<()> {
     let decision_path = run_dir.join("micro-verdict.json");
     let decision_arg = decision_path.to_string_lossy().into_owned();
 
-    let measured = measure_allow_failure(|| {
-        cmd::run_env(
+    let measured = measure_allow_failure(|execution| {
+        execution.run(
             &engine,
             "cargo",
             &[
                 "bench",
                 "--locked",
                 "-p",
-                "fmf-core",
+                "fmf-runtime",
                 "--features",
                 "testutil",
                 "--bench",
@@ -181,6 +324,9 @@ pub fn micro_check() -> Result<()> {
             &[("CRITERION_HOME", criterion_home.as_str())],
         )
     })?;
+    if measured.measurement.identity != identity {
+        bail!("performance identity changed after baseline admission");
+    }
     if let Some(error) = measured.operation_error {
         return Err(error.context("Criterion measurement failed before the verdict stage"));
     }
@@ -211,9 +357,8 @@ pub fn micro_check() -> Result<()> {
     require_passing_evidence(&evidence, &evidence_path)
 }
 
-/// Record the full synthetic suite into an isolated candidate. Promotion of
-/// the whole directory occurs only after the monitored run and structural
-/// validation both succeed.
+/// Record the full synthetic suite into an isolated candidate.
+/// Promotion of the whole directory occurs only after the monitored run and structural validation both succeed.
 pub fn micro_baseline() -> Result<()> {
     let canonical = canonical_micro_baseline_dir()?;
     compile_micro_tools()?;
@@ -225,15 +370,15 @@ pub fn micro_baseline() -> Result<()> {
     let criterion_home = candidate.to_string_lossy().into_owned();
     let engine = paths::engine_dir();
 
-    let measurement = measure(|| {
-        cmd::run_env(
+    let measurement = measure(|execution| {
+        execution.run(
             &engine,
             "cargo",
             &[
                 "bench",
                 "--locked",
                 "-p",
-                "fmf-core",
+                "fmf-runtime",
                 "--features",
                 "testutil",
                 "--bench",
@@ -319,8 +464,8 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
 }
 
-/// Run the real-volume acceptance gate after compilation, with continuous
-/// environment validation. The committed baseline is never modified.
+/// Run the real-volume acceptance gate after compilation, with continuous environment validation.
+/// The committed baseline is never modified.
 pub fn real_check(drive: &str) -> Result<()> {
     compile_real_tool()?;
     let baseline = paths::real_baseline();
@@ -335,18 +480,24 @@ pub fn real_check(drive: &str) -> Result<()> {
     let decision = perf_dir.join("real-verdict.json");
     let decision_arg = decision.to_string_lossy().into_owned();
 
-    let measured = measure_allow_failure(|| {
-        run_fmf(&[
-            "bench",
-            drive,
-            "--out",
-            actual_arg.as_str(),
-            "--baseline",
-            baseline_arg.as_str(),
-            "--evidence",
-            decision_arg.as_str(),
-        ])
+    let measured = measure_allow_failure(|execution| {
+        run_benchmark_fmf(
+            *execution,
+            &[
+                "bench",
+                drive,
+                "--out",
+                actual_arg.as_str(),
+                "--baseline",
+                baseline_arg.as_str(),
+                "--evidence",
+                decision_arg.as_str(),
+            ],
+        )
     })?;
+    if measured.measurement.identity != identity {
+        bail!("performance identity changed after baseline admission");
+    }
     let evidence = assemble_gate_evidence(
         "real-gate",
         "real-verdict",
@@ -356,9 +507,6 @@ pub fn real_check(drive: &str) -> Result<()> {
     );
     let run_record = perf_dir.join("real-check.json");
     write_json(&run_record, &evidence)?;
-    // Before the verdict is read at all: a run made in a different thermal
-    // regime than the baseline produces a verdict in either direction that says
-    // more about the machine than about the code.
     validate_comparable_run(baseline_run, measured.measurement.during).with_context(|| {
         format!(
             "the verdict recorded in {} cannot be trusted",
@@ -368,8 +516,7 @@ pub fn real_check(drive: &str) -> Result<()> {
     require_passing_evidence(&evidence, &run_record)
 }
 
-/// Record a real-volume candidate and atomically replace the committed JSON
-/// only after the run, counter checks, and JSON validation all succeed.
+/// Record a real-volume candidate and atomically replace the committed JSON only after the run, counter checks, and JSON validation all succeed.
 pub fn real_baseline(drive: &str) -> Result<()> {
     compile_real_tool()?;
     let perf_dir = paths::perf_dir();
@@ -379,7 +526,12 @@ pub fn real_baseline(drive: &str) -> Result<()> {
     remove_file_if_exists(&candidate)?;
     let candidate_arg = candidate.to_string_lossy().into_owned();
 
-    let measurement = measure(|| run_fmf(&["bench", drive, "--out", candidate_arg.as_str()]))?;
+    let measurement = measure(|execution| {
+        run_benchmark_fmf(
+            *execution,
+            &["bench", drive, "--out", candidate_arg.as_str()],
+        )
+    })?;
     inject_measurement(&candidate, measurement.to_json("real-baseline"))?;
     validate_real_baseline(&candidate, &measurement.identity)?;
     replace_file_transactionally(
@@ -398,7 +550,7 @@ fn compile_micro_tools() -> Result<()> {
             "bench",
             "--locked",
             "-p",
-            "fmf-core",
+            "fmf-runtime",
             "--features",
             "testutil",
             "--bench",
@@ -427,7 +579,17 @@ fn run_fmf(args: &[&str]) -> Result<()> {
     cmd::run(&paths::engine_dir(), &program, args)
 }
 
-fn measure(operation: impl FnOnce() -> Result<()>) -> Result<Measurement> {
+fn run_benchmark_fmf(execution: ExecutionConfig, args: &[&str]) -> Result<()> {
+    let executable = paths::engine_release_dir().join(format!("fmf{}", env::consts::EXE_SUFFIX));
+    execution.run(
+        &paths::engine_dir(),
+        &executable.to_string_lossy(),
+        args,
+        &[],
+    )
+}
+
+fn measure(operation: impl FnOnce(&ExecutionConfig) -> Result<()>) -> Result<Measurement> {
     let measured = measure_allow_failure(operation)?;
     if let Some(error) = measured.operation_error {
         return Err(error.context("measured command failed; no baseline was promoted"));
@@ -440,20 +602,18 @@ struct MeasuredOperation {
     operation_error: Option<anyhow::Error>,
 }
 
-fn measure_allow_failure(operation: impl FnOnce() -> Result<()>) -> Result<MeasuredOperation> {
+fn measure_allow_failure(
+    operation: impl FnOnce(&ExecutionConfig) -> Result<()>,
+) -> Result<MeasuredOperation> {
     let identity = RunIdentity::capture()?;
     let started_unix = unix_time()?;
     let preflight = sample_idle("perf-preflight", IdleRule::ColdStart)?;
     let monitor = CounterMonitor::start()?;
-    let operation_result = operation();
+    let operation_result = operation(&identity.execution);
     let during_result = monitor.finish();
     let postflight_result = sample_idle("perf-postflight", IdleRule::Settled);
     let finished_unix = unix_time()?;
 
-    // Report every check that failed. Propagating them through struct field
-    // initialisers hid whichever one came later in declaration order: a run
-    // whose postflight and whole-run monitor both failed reported only the
-    // monitor, so the printed cause was not the whole cause.
     let counter_failure = describe_counter_failures(
         operation_result.as_ref().err(),
         during_result.as_ref().err(),
@@ -461,6 +621,9 @@ fn measure_allow_failure(operation: impl FnOnce() -> Result<()>) -> Result<Measu
     );
     if let Some(failure) = counter_failure {
         bail!(failure);
+    }
+    if identity.execution != capture_execution()? {
+        bail!("the execution configuration changed during measurement");
     }
 
     Ok(MeasuredOperation {
@@ -476,9 +639,8 @@ fn measure_allow_failure(operation: impl FnOnce() -> Result<()>) -> Result<Measu
     })
 }
 
-/// Fold the measured run's failures into one message. Returns `None` when the
-/// counter checks both passed, so a failing measured command still reaches the
-/// caller as a recordable verdict rather than as a lost error.
+/// Fold the measured run's failures into one message.
+/// Returns `None` when the counter checks both passed, so a failing measured command still reaches the caller as a recordable verdict rather than as a lost error.
 fn describe_counter_failures(
     operation: Option<&anyhow::Error>,
     during: Option<&anyhow::Error>,
@@ -536,7 +698,9 @@ fn assemble_gate_evidence(
         }
     };
 
-    let valid_shape = decision.as_object().is_some_and(|object| object.len() == 7)
+    let valid_shape = decision
+        .as_object()
+        .is_some_and(|object| object.len() == PERF_DECISION_FIELD_COUNT)
         && decision.get("schema").and_then(Value::as_u64) == Some(1)
         && decision.get("kind").and_then(Value::as_str) == Some(verdict_kind)
         && decision.get("expected_cases").is_some_and(Value::is_array)
@@ -644,6 +808,7 @@ impl RunIdentity {
         let (git_dirty, git_dirty_sha256) = repository_fingerprint(&repo)?;
         let cargo_lock_sha256 = semantic_cargo_lock_sha256(&repo)?;
         let rustc = checked_output(&repo, "rustc", &["--version", "--verbose"])?;
+        let execution = capture_execution()?;
         Ok(Self {
             git_commit,
             git_dirty,
@@ -651,13 +816,13 @@ impl RunIdentity {
             cargo_lock_sha256,
             rustc,
             processor: env::var("PROCESSOR_IDENTIFIER").unwrap_or_else(|_| "unknown".to_owned()),
-            logical_processors: env::var("NUMBER_OF_PROCESSORS")
-                .unwrap_or_else(|_| "unknown".to_owned()),
+            logical_processors: execution.system_mask.get().count_ones().to_string(),
+            execution,
         })
     }
 }
 
-fn repository_fingerprint(repo: &Path) -> Result<(bool, String)> {
+pub fn repository_fingerprint(repo: &Path) -> Result<(bool, String)> {
     let tracked = checked_command_output(repo, "git", &["diff", "--binary", "HEAD", "--", "."])?;
     let untracked = checked_command_output(
         repo,
@@ -713,10 +878,8 @@ fn checked_command_output(dir: &Path, program: &str, args: &[&str]) -> Result<Ve
     Ok(output.stdout)
 }
 
-/// Hash the dependency graph while ignoring only the release-please-managed
-/// versions of source-less workspace packages. A version-only Release PR must
-/// not invalidate a machine baseline; registry/git sources, versions, and
-/// checksums remain byte-for-byte significant.
+/// Hash the dependency graph while ignoring only the release-please-managed versions of source-less workspace packages.
+/// A version-only Release PR must not invalidate a machine baseline; registry/git sources, versions, and checksums remain byte-for-byte significant.
 fn semantic_cargo_lock_sha256(repo: &Path) -> Result<String> {
     let metadata = checked_output(
         repo,
@@ -803,10 +966,6 @@ fn semantic_cargo_lock_sha256_from_text(
         );
     }
 
-    // Keep every byte significant except the two exact version spellings that
-    // release-please owns. This intentionally simple canonical form can be
-    // reproduced by the hosted evidence verifier with Python's standard
-    // library; no target code or package manager is executed there.
     let normalized_newlines = text.replace("\r\n", "\n");
     let marker = "[[package]]";
     let mut parts = normalized_newlines.split(marker);
@@ -849,16 +1008,6 @@ fn semantic_cargo_lock_sha256_from_text(
     Ok(hex(&Sha256::digest(canonical.as_bytes())))
 }
 
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    output
-}
-
 fn unix_time() -> Result<u64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -869,12 +1018,9 @@ fn unix_time() -> Result<u64> {
 /// What an idle sample has to prove.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IdleRule {
-    /// Before the run: the machine must be at its nominal clock and carrying no
-    /// foreign work, so the measurement starts from a known state.
+    /// Before the run: the machine must be at its nominal clock and carrying no foreign work, so the measurement starts from a known state.
     ColdStart,
-    /// After the run: the clock is legitimately still depressed by the
-    /// workload's own all-core load, so only the foreign-work half is judged and
-    /// the clock is kept as the run's thermal evidence.
+    /// After the run: the clock is legitimately still depressed by the workload's own all-core load, so only the foreign-work half is judged and the clock is kept as the run's thermal evidence.
     Settled,
 }
 
@@ -895,7 +1041,7 @@ fn sample_idle(label: &str, rule: IdleRule) -> Result<Summary> {
         );
     }
 
-    let samples = parse_samples(&String::from_utf8_lossy(&output.stdout))?;
+    let samples = counter_samples(label, &output.stdout)?;
     let summary = summarize(&samples)?;
     print_summary(label, summary, samples.len());
     validate_idle(summary, rule)?;
@@ -929,31 +1075,64 @@ fn summary_json(summary: Summary) -> Value {
     })
 }
 
-/// `typeperf` emits quoted PDH-CSV rows. Counter names are localized on some
-/// Windows installations, so ignore the header and parse the final two numeric
-/// fields of each data row instead of matching English column names.
+fn counter_value_is_valid(value: f64) -> bool {
+    value.is_finite() && value >= 0.0
+}
+
+fn counter_samples(label: &str, bytes: &[u8]) -> Result<Vec<Sample>> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_nanos();
+    let path = paths::perf_counter_file(timestamp, std::process::id());
+    fs::create_dir_all(
+        path.parent()
+            .context("counter output has no parent directory")?,
+    )?;
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)?;
+    file.write_all(bytes)?;
+    println!("{label}: original counter output at {}", path.display());
+    parse_samples(&String::from_utf8_lossy(bytes))
+        .with_context(|| format!("{label}: invalid counter output at {}", path.display()))
+}
+
+/// `typeperf` emits quoted PDH-CSV rows.
+/// Counter names are localized on some Windows installations, so validate the numeric columns without matching the header names.
 fn parse_samples(text: &str) -> Result<Vec<Sample>> {
     let mut samples = Vec::new();
-    for line in text.lines() {
-        let fields: Vec<&str> = line
-            .split(',')
-            .map(|field| field.trim().trim_matches('"'))
-            .collect();
-        let Some((performance, processor_time)) = fields
-            .len()
-            .checked_sub(2)
-            .and_then(|start| fields.get(start..))
-            .filter(|tail| tail.len() == 2)
-            .and_then(|tail| Some((tail[0].parse::<f64>().ok()?, tail[1].parse::<f64>().ok()?)))
-        else {
+    for (line_number, line) in text.lines().enumerate() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        if !line.starts_with('"') || line.starts_with("\"(PDH-CSV ") {
             continue;
-        };
-        if performance.is_finite() && processor_time.is_finite() {
-            samples.push(Sample {
-                performance,
-                processor_time,
-            });
         }
+        let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+        ensure!(
+            fields.len() == PERF_COUNTER_FIELDS + 1
+                && fields.iter().all(|field| field.len() >= 2
+                    && field.starts_with('"')
+                    && field.ends_with('"')),
+            "malformed counter row {}",
+            line_number + 1
+        );
+        let field = |index: usize| -> Result<f64> {
+            let value = fields[index]
+                .trim_matches('"')
+                .parse::<f64>()
+                .with_context(|| format!("invalid number in counter row {}", line_number + 1))?;
+            ensure!(
+                counter_value_is_valid(value),
+                "invalid counter value in row {}",
+                line_number + 1
+            );
+            Ok(value)
+        };
+        samples.push(Sample {
+            performance: field(1)?,
+            processor_time: field(2)?,
+        });
     }
     if samples.is_empty() {
         bail!("typeperf returned no parseable processor samples");
@@ -1007,16 +1186,12 @@ fn validate_idle(summary: Summary, rule: IdleRule) -> Result<()> {
 
 /// Judge a measured run against the run the baseline recorded for itself.
 ///
-/// Absolute clock stability cannot be required *while* a benchmark runs — the
-/// engine scans and queries on every core by design — but two runs are only
-/// comparable when they were made in the same thermal regime and under the same
-/// amount of foreign work. Both summaries are already part of the recorded
-/// measurement identity, so this judgement needs no instrument the gate does
-/// not already carry.
+/// Absolute clock stability cannot be required *while* a benchmark runs — the engine scans and queries on every core by design — but two runs are only comparable when they were made in the same thermal regime and under the same amount of foreign work.
+/// Both summaries are already part of the recorded measurement identity, so this judgement needs no instrument the gate does not already carry.
 fn validate_comparable_run(baseline: Summary, actual: Summary) -> Result<()> {
     let drift = actual.mean_performance - baseline.mean_performance;
     if drift.abs() > MAX_CLOCK_DRIFT_POINTS {
-        let direction = if drift < 0.0 {
+        let direction = if drift < NO_CLOCK_DRIFT {
             "slower, which inflates every measured time and can read as a regression that is not there"
         } else {
             "faster, which deflates every measured time and can hide a real regression"
@@ -1058,11 +1233,18 @@ fn recorded_during_summary(measurement: &Value) -> Result<Summary> {
              re-record it so the gate can tell a thermal difference from a code \
              regression",
         )?;
+    parse_counter_summary(during)
+}
+
+fn parse_counter_summary(value: &Value) -> Result<Summary> {
     let field = |name: &str| -> Result<f64> {
-        during
+        value
             .get(name)
             .and_then(Value::as_f64)
-            .with_context(|| format!("the baseline's recorded run summary is missing `{name}`"))
+            .filter(|value| counter_value_is_valid(*value))
+            .with_context(|| {
+                format!("the baseline's counter summary has invalid or missing `{name}`")
+            })
     };
     Ok(Summary {
         mean_performance: field("mean_processor_performance")?,
@@ -1231,8 +1413,8 @@ fn validate_baseline_measurement(
     let object = value
         .as_object()
         .context("performance baseline measurement must be a JSON object")?;
-    if object.get("schema").and_then(Value::as_u64) != Some(1) {
-        bail!("performance baseline measurement must use schema 1");
+    if object.get("schema").and_then(Value::as_u64) != Some(u64::from(MEASUREMENT_SCHEMA)) {
+        bail!("performance baseline measurement must use schema {MEASUREMENT_SCHEMA}; record a fresh baseline");
     }
     if object.get("kind").and_then(Value::as_str) != Some(expected_kind) {
         bail!("performance baseline measurement kind must be `{expected_kind}`");
@@ -1243,6 +1425,16 @@ fn validate_baseline_measurement(
         .context("performance baseline measurement is missing `git`")?;
     if git.get("dirty").and_then(Value::as_bool) != Some(false) {
         bail!("performance baselines must be recorded from a clean repository");
+    }
+    let execution: ExecutionConfig = serde_json::from_value(
+        object
+            .get("execution")
+            .context("performance baseline is missing its execution configuration")?
+            .clone(),
+    )
+    .context("invalid performance baseline execution configuration")?;
+    if execution != identity.execution {
+        bail!("performance baseline execution configuration does not match this run");
     }
 
     for (field, current) in [
@@ -1267,9 +1459,18 @@ fn validate_baseline_measurement(
         .get("counters")
         .and_then(Value::as_object)
         .context("performance baseline measurement is missing `counters`")?;
-    for phase in ["preflight", "during", "postflight"] {
-        if !counters.get(phase).is_some_and(Value::is_object) {
-            bail!("performance baseline measurement is missing `{phase}` counters");
+    for (phase, rule) in [
+        ("preflight", Some(IdleRule::ColdStart)),
+        ("during", None),
+        ("postflight", Some(IdleRule::Settled)),
+    ] {
+        let summary = parse_counter_summary(counters.get(phase).with_context(|| {
+            format!("performance baseline measurement is missing `{phase}` counters")
+        })?)
+        .with_context(|| format!("invalid baseline {phase} counters"))?;
+        if let Some(rule) = rule {
+            validate_idle(summary, rule)
+                .with_context(|| format!("invalid baseline {phase} environment"))?;
         }
     }
     Ok(())
@@ -1416,6 +1617,7 @@ mod tests {
             rustc: "rustc test".to_owned(),
             processor: "test processor".to_owned(),
             logical_processors: "8".to_owned(),
+            execution: ExecutionConfig::plan(255, 15, Some(4)).unwrap(),
         }
     }
 
@@ -1446,14 +1648,14 @@ mod tests {
             r#"version = 4
 
 [[package]]
-name = "fmf-core"
+name = "fmf-runtime"
 version = "{workspace_version}"
 
 [[package]]
 name = "local-helper"
 version = "{local_helper_version}"
 dependencies = [
- "fmf-core {workspace_version}",
+ "fmf-runtime {workspace_version}",
 ]
 
 [[package]]
@@ -1469,8 +1671,8 @@ checksum = "{registry_checksum}"
     fn lock_fingerprint_ignores_only_workspace_package_versions() {
         let first = lockfile("0.1.0", "1.0.0", "abc", "2.0.0");
         let version_bump = lockfile("0.2.0", "1.0.0", "abc", "2.0.0");
-        let workspace_v1 = BTreeMap::from([("fmf-core".to_owned(), "0.1.0".to_owned())]);
-        let workspace_v2 = BTreeMap::from([("fmf-core".to_owned(), "0.2.0".to_owned())]);
+        let workspace_v1 = BTreeMap::from([("fmf-runtime".to_owned(), "0.1.0".to_owned())]);
+        let workspace_v2 = BTreeMap::from([("fmf-runtime".to_owned(), "0.2.0".to_owned())]);
         assert_eq!(
             semantic_cargo_lock_sha256_from_text(&first, &workspace_v1).unwrap(),
             semantic_cargo_lock_sha256_from_text(&version_bump, &workspace_v2).unwrap(),
@@ -1493,7 +1695,7 @@ checksum = "{registry_checksum}"
             );
         }
 
-        let wrong_identity = BTreeMap::from([("fmf-core".to_owned(), "9.9.9".to_owned())]);
+        let wrong_identity = BTreeMap::from([("fmf-runtime".to_owned(), "9.9.9".to_owned())]);
         assert!(
             semantic_cargo_lock_sha256_from_text(&first, &wrong_identity).is_err(),
             "metadata/lock disagreement must fail closed"
@@ -1587,7 +1789,7 @@ checksum = "{registry_checksum}"
 
     fn measurement(kind: &str, identity: &RunIdentity) -> Value {
         json!({
-            "schema": 1,
+            "schema": MEASUREMENT_SCHEMA,
             "kind": kind,
             "started_unix": 1,
             "finished_unix": 2,
@@ -1600,8 +1802,7 @@ checksum = "{registry_checksum}"
             "rustc": identity.rustc,
             "processor": identity.processor,
             "logical_processors": identity.logical_processors,
-            // A real measurement always carries its counter summaries; the
-            // gate now reads `during` back to judge comparability.
+            "execution": identity.execution,
             "counters": {
                 "preflight": summary_json(FIXTURE_IDLE),
                 "during": summary_json(FIXTURE_DURING),
@@ -1674,6 +1875,48 @@ checksum = "{registry_checksum}"
     }
 
     #[test]
+    fn rejects_any_invalid_counter_row_among_valid_rows() {
+        let good = "\"time\",\"122.5\",\"5.0\"\n";
+        for row in [
+            "\"time\",\"-1.000000\",\"5.0\"\n",
+            "\"time\",\"122.5\",\"-1.000000\"\n",
+            "\"time\",\"NaN\",\"5.0\"\n",
+            "\"time\",\"122.5\",\"inf\"\n",
+            "\"time\",\"not-a-number\",\"5.0\"\n",
+            "\"time\",\"122.5\"\n",
+        ] {
+            assert!(
+                parse_samples(&format!("{good}{row}{good}")).is_err(),
+                "invalid row must fail the complete observation: {row}"
+            );
+        }
+        let boosted = parse_samples("\"time\",\"200.0\",\"0.0\"\n").unwrap();
+        assert_eq!(boosted[0].performance, 200.0);
+    }
+
+    #[test]
+    fn baseline_admission_checks_every_recorded_counter_field() {
+        let identity = identity();
+        for phase in ["preflight", "during", "postflight"] {
+            for field in [
+                "mean_processor_performance",
+                "mean_processor_time",
+                "min_processor_performance",
+                "max_processor_time",
+            ] {
+                for invalid in [json!(-1.0), Value::Null, json!("122.5")] {
+                    let mut value = measurement("micro-baseline", &identity);
+                    value["counters"][phase][field] = invalid;
+                    assert!(
+                        validate_baseline_measurement(&value, "micro-baseline", &identity).is_err(),
+                        "invalid {phase}.{field} must fail baseline admission"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn summary_and_thresholds_are_exact() {
         let good = summarize(&[
             Sample {
@@ -1698,17 +1941,13 @@ checksum = "{registry_checksum}"
         assert!(validate_idle(good, IdleRule::ColdStart).is_ok());
         assert!(validate_idle(good, IdleRule::Settled).is_ok());
 
-        // A measurement still may not start from a warm machine.
         let warm = Summary {
             mean_performance: 94.99,
             ..good
         };
         assert!(validate_idle(warm, IdleRule::ColdStart).is_err());
-        // ...but after the run the workload's own all-core load is why the
-        // clock is down, so the settled sample judges foreign work only.
         assert!(validate_idle(warm, IdleRule::Settled).is_ok());
 
-        // Foreign work invalidates a sample taken at either end.
         let busy = Summary {
             mean_processor_time: 20.01,
             ..good
@@ -1717,8 +1956,8 @@ checksum = "{registry_checksum}"
         assert!(validate_idle(busy, IdleRule::Settled).is_err());
     }
 
-    /// The loaded run is judged against the baseline's own recorded run. These
-    /// are the states that must fail, re-injected one at a time.
+    /// The loaded run is judged against the baseline's own recorded run.
+    /// These are the states that must fail, re-injected one at a time.
     #[test]
     fn a_run_is_only_comparable_in_the_baselines_thermal_regime() {
         let baseline = Summary {
@@ -1728,9 +1967,6 @@ checksum = "{registry_checksum}"
             max_processor_time: 97.5,
         };
 
-        // The regime the real-volume baseline was recorded in: an all-core
-        // workload holding ~78% clock passes, where the old absolute 95% bar
-        // rejected it and left the gate impossible to satisfy.
         assert!(validate_comparable_run(baseline, baseline).is_ok());
         assert!(validate_comparable_run(
             baseline,
@@ -1741,8 +1977,6 @@ checksum = "{registry_checksum}"
         )
         .is_ok());
 
-        // Colder clock than the baseline: every time inflates, so a regression
-        // verdict would be the machine's, not the code's.
         let slower = validate_comparable_run(
             baseline,
             Summary {
@@ -1753,8 +1987,6 @@ checksum = "{registry_checksum}"
         .expect_err("a 5.4-point colder clock must not be judged");
         assert!(format!("{slower:#}").contains("inflates"), "{slower:#}");
 
-        // Faster clock than the baseline: every time deflates, so a pass could
-        // be hiding a real regression.
         let faster = validate_comparable_run(
             baseline,
             Summary {
@@ -1765,7 +1997,6 @@ checksum = "{registry_checksum}"
         .expect_err("a 5.4-point faster clock must not be judged");
         assert!(format!("{faster:#}").contains("hide"), "{faster:#}");
 
-        // Foreign work the baseline did not carry.
         assert!(validate_comparable_run(
             baseline,
             Summary {
@@ -1817,7 +2048,6 @@ checksum = "{registry_checksum}"
             .expect("a recorded measurement carries its own run summary");
         assert_eq!(recorded, measurement.during);
 
-        // The shape the committed baseline had before this schema existed.
         let error = recorded_during_summary(&json!({ "schema": 1 }))
             .expect_err("a baseline with no counters cannot be compared against");
         assert!(format!("{error:#}").contains("re-record"), "{error:#}");
@@ -1832,7 +2062,6 @@ checksum = "{registry_checksum}"
         let postflight = anyhow!("the machine was still busy");
 
         assert!(describe_counter_failures(None, None, None).is_none());
-        // A failing command with healthy counters stays a recordable verdict.
         assert!(describe_counter_failures(Some(&operation), None, None).is_none());
 
         let both = describe_counter_failures(Some(&operation), Some(&during), Some(&postflight))
@@ -1841,8 +2070,6 @@ checksum = "{registry_checksum}"
         assert!(both.contains("the clock fell over"), "{both}");
         assert!(both.contains("the machine was still busy"), "{both}");
 
-        // The regression this guards: a postflight failure used to be dropped
-        // because the monitor's error was propagated first.
         let postflight_only = describe_counter_failures(None, None, Some(&postflight))
             .expect("a lone postflight failure must be reported");
         assert!(
@@ -1919,9 +2146,185 @@ checksum = "{registry_checksum}"
         let identity = identity();
         inject_measurement(&path, measurement("real-baseline", &identity)).unwrap();
         let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value["measurement"]["schema"], 1);
+        assert_eq!(value["measurement"]["schema"], MEASUREMENT_SCHEMA);
         validate_real_baseline(&path, &identity).unwrap();
         fsx::force_remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn worker_planning_respects_the_process_assignment() {
+        for (system, assigned, requested, expected) in [
+            (255, 15, None, Ok(4)),
+            (255, 240, Some(2), Ok(2)),
+            (255, 128, None, Ok(1)),
+            (usize::MAX, usize::MAX, None, Ok(usize::BITS as usize)),
+            (0, 15, None, Err(ExecutionError::EmptyCpuAssignment)),
+            (255, 0, None, Err(ExecutionError::EmptyCpuAssignment)),
+            (15, 240, None, Err(ExecutionError::AssignmentOutsideSystem)),
+            (255, 15, Some(0), Err(ExecutionError::ZeroWorkers)),
+            (255, 15, Some(5), Err(ExecutionError::OversubscribedWorkers)),
+            (
+                255,
+                15,
+                Some(usize::MAX),
+                Err(ExecutionError::OversubscribedWorkers),
+            ),
+        ] {
+            assert_eq!(
+                ExecutionConfig::plan(system, assigned, requested)
+                    .map(|plan| plan.rayon_workers.get()),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn benchmark_children_receive_the_validated_worker_count() {
+        let execution = ExecutionConfig::plan(255, 15, Some(4)).unwrap();
+        let command = execution.command(
+            Path::new("."),
+            "benchmark",
+            &["case"],
+            &[("RAYON_NUM_THREADS", "16"), ("CRITERION_HOME", "reports")],
+        );
+        let envs: BTreeMap<_, _> = command.get_envs().collect();
+        assert_eq!(envs[OsStr::new("RAYON_NUM_THREADS")], Some(OsStr::new("4")));
+        assert_eq!(
+            envs[OsStr::new("CRITERION_HOME")],
+            Some(OsStr::new("reports"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn benchmark_child_inherits_the_recorded_cpu_assignment() {
+        const CHILD_EXECUTION: &str = "FMF_TEST_BENCHMARK_EXECUTION";
+        // SAFETY: The query has no pointer arguments and does not transfer ownership.
+        if unsafe { windows_sys::Win32::System::Threading::GetActiveProcessorGroupCount() } != 1 {
+            assert!(capture_execution().is_err());
+            return;
+        }
+        if let Some(recorded) = env::var_os(CHILD_EXECUTION) {
+            let expected: ExecutionConfig =
+                serde_json::from_str(&recorded.to_string_lossy()).unwrap();
+            assert_eq!(capture_execution().unwrap(), expected);
+            assert_eq!(
+                env::var("RAYON_NUM_THREADS").unwrap(),
+                expected.rayon_workers.get().to_string()
+            );
+            println!("benchmark execution checked");
+            return;
+        }
+        let expected = capture_execution().unwrap();
+        let output = expected
+            .command(
+                &paths::repo_root(),
+                env::current_exe().unwrap(),
+                &[
+                    "--exact",
+                    "perf::tests::benchmark_child_inherits_the_recorded_cpu_assignment",
+                    "--nocapture",
+                ],
+                &[],
+            )
+            .env(CHILD_EXECUTION, serde_json::to_string(&expected).unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("benchmark execution checked"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn benchmark_worker_environment_is_checked_in_a_fresh_process() {
+        const EXPECTED_WORKERS: &str = "FMF_TEST_BENCHMARK_WORKERS";
+        if let Ok(expected) = env::var(EXPECTED_WORKERS) {
+            let actual = capture_execution();
+            if expected == "reject" {
+                assert!(actual.is_err());
+            } else {
+                assert_eq!(
+                    actual.unwrap().rayon_workers.get(),
+                    expected.parse::<usize>().unwrap()
+                );
+            }
+            println!("benchmark worker request checked");
+            return;
+        }
+        // SAFETY: The query has no pointer arguments and does not transfer ownership.
+        if unsafe { windows_sys::Win32::System::Threading::GetActiveProcessorGroupCount() } != 1 {
+            assert!(capture_execution().is_err());
+            return;
+        }
+        let assignment = capture_execution().unwrap();
+        let capacity = assignment.cpu_mask.get().count_ones().to_string();
+        let excessive = (assignment.cpu_mask.get().count_ones() + 1).to_string();
+        for (request, expected) in [
+            (None, capacity.as_str()),
+            (Some("1"), "1"),
+            (Some("0"), "reject"),
+            (Some(""), "reject"),
+            (Some("invalid"), "reject"),
+            (Some("-1"), "reject"),
+            (Some(excessive.as_str()), "reject"),
+        ] {
+            let mut child = Command::new(env::current_exe().unwrap());
+            child
+                .current_dir(paths::repo_root())
+                .args([
+                    "--exact",
+                    "perf::tests::benchmark_worker_environment_is_checked_in_a_fresh_process",
+                    "--nocapture",
+                ])
+                .env(EXPECTED_WORKERS, expected)
+                .env_remove("RAYON_NUM_THREADS");
+            if let Some(request) = request {
+                child.env("RAYON_NUM_THREADS", request);
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{request:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout)
+                .contains("benchmark worker request checked"));
+        }
+    }
+
+    #[test]
+    fn baseline_admission_requires_exact_worker_and_cpu_assignment() {
+        let identity = identity();
+        let valid = measurement("micro-baseline", &identity);
+        validate_baseline_measurement(&valid, "micro-baseline", &identity).unwrap();
+        for execution in [
+            None,
+            Some(json!({ "system_mask": 255, "cpu_mask": 15, "rayon_workers": 16 })),
+            Some(json!({ "system_mask": 255, "cpu_mask": 15, "rayon_workers": 2 })),
+            Some(json!({ "system_mask": 255, "cpu_mask": 240, "rayon_workers": 4 })),
+            Some(json!({ "system_mask": 511, "cpu_mask": 15, "rayon_workers": 4 })),
+            Some(json!({ "system_mask": 255, "cpu_mask": 0, "rayon_workers": 4 })),
+            Some(json!({ "system_mask": 255, "cpu_mask": 15, "rayon_workers": 0 })),
+            Some(json!({ "system_mask": 255, "cpu_mask": 15 })),
+            Some(json!({ "system_mask": 255, "cpu_mask": 15, "rayon_workers": 4, "extra": true })),
+        ] {
+            let mut baseline = valid.clone();
+            baseline.as_object_mut().unwrap().remove("execution");
+            if let Some(execution) = execution {
+                baseline["execution"] = execution;
+            }
+            assert!(
+                validate_baseline_measurement(&baseline, "micro-baseline", &identity).is_err(),
+                "incompatible execution settings must fail baseline admission: {baseline}"
+            );
+        }
+        let mut legacy = valid;
+        legacy["schema"] = json!(1);
+        assert!(validate_baseline_measurement(&legacy, "micro-baseline", &identity).is_err());
     }
 
     #[test]

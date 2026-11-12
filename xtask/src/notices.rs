@@ -1,33 +1,22 @@
 //! Assembly of the bundle's `THIRD-PARTY-NOTICES.txt`.
 //!
-//! The shipped zip redistributes third-party code under permissive licenses that
-//! require their notices to travel with the binaries: Apache-2.0 §4 wants the
+//! The shipped zip redistributes third-party code under permissive licenses that require their notices to travel with the binaries: Apache-2.0 §4 wants the
 //! license text shipped, MIT wants the copyright + permission notice preserved.
 //! Two families of dependency need covering:
 //!
 //!   1. The Rust crates statically linked into `fmf_engine.dll`,
-//!      `fmf-service.exe` and the launcher. Their external runtime dependencies
-//!      are a subset of the service's dependency closure, which `cargo-about`
-//!      enumerates mechanically (config: `engine/about.toml`, template:
+//!      `fmf-service.exe` and the launcher.
+//!      Their external runtime dependencies are a subset of the service's dependency closure, which `cargo-about` enumerates mechanically (config: `engine/about.toml`, template:
 //!      `engine/about.hbs`); its rendered text is passed in as `rust_notices`.
-//!   2. The .NET runtime + `NuGet` components the `WinUI` app publishes — a
-//!      small, slow-moving, curated set (below), because they are not in the
-//!      Cargo graph cargo-about walks.
+//!   2. The .NET runtime + `NuGet` components the `WinUI` app publishes — a small, slow-moving, curated set (below), because they are not in the Cargo graph cargo-about walks.
 //!
-//! This module owns only the *pure* assembly (header + curated .NET section +
-//! the Rust block) so it can be unit-tested without running cargo-about; the
-//! placement + BOM/CRLF encoding + the cargo-about invocation live in `publish`.
+//! This module owns only the *pure* assembly (header + curated .NET section + the Rust block) so it can be unit-tested without running cargo-about; the placement + BOM/CRLF encoding + the cargo-about invocation live in `publish`.
 
-/// Curated notices for the redistributed .NET / Windows App SDK / `NuGet`
-/// components. These are the *shipped* `PackageReferences` from
-/// `app/FindMyFiles/FindMyFiles.csproj` — the analyzers (`PrivateAssets=all`) and
-/// the build-time SDKs (`Microsoft.Windows.SDK.BuildTools*`) are not
-/// redistributed, and `WebView2` is stripped from the bundle (see `prune`), so
-/// none of those appear here. Versions are given as the pinned major line
-/// (the csproj floats the patch) so this text does not churn on a point bump.
+/// Curated notices for the redistributed .NET / Windows App SDK / `NuGet` components.
+/// These are the *shipped* `PackageReferences` from `app/FindMyFiles/FindMyFiles.csproj` — the analyzers (`PrivateAssets=all`) and the build-time SDKs (`Microsoft.Windows.SDK.BuildTools*`) are not redistributed, and `WebView2` is stripped from the bundle (see `prune`), so none of those appear here.
+/// Versions are given as the pinned major line (the csproj floats the patch) so this text does not churn on a point bump.
 ///
-/// The Apache-2.0 full text ships as the bundle's `LICENSE.txt` (the project's
-/// own license) and the MIT text appears verbatim in the Rust block below, so
+/// The Apache-2.0 full text ships as the bundle's `LICENSE.txt` (the project's own license) and the MIT text appears verbatim in the Rust block below, so
 /// this section reproduces each component's copyright + license identification
 /// and points at the canonical full terms rather than duplicating them.
 pub const DOTNET_SECTION: &str = "\
@@ -63,10 +52,9 @@ Serilog.Sinks.File 6.x
 const RULE: &str =
     "================================================================================";
 
-/// Assemble the full `THIRD-PARTY-NOTICES.txt` body (LF; the caller adds the BOM
-/// and CRLF for Notepad). `rust_notices` is the text `cargo-about` rendered from
-/// `engine/about.hbs`. Pure — no cargo-about, no filesystem — so the shape is
-/// unit-tested here and only the tool invocation lives in `publish`.
+/// Assemble the full `THIRD-PARTY-NOTICES.txt` body (LF; the caller adds the BOM and CRLF for Notepad).
+/// `rust_notices` is the text `cargo-about` rendered from `engine/about.hbs`.
+/// Pure — no cargo-about, no filesystem — so the shape is unit-tested here and only the tool invocation lives in `publish`.
 #[must_use]
 pub fn assemble(rust_notices: &str) -> String {
     let mut out = String::new();
@@ -98,8 +86,6 @@ pub fn assemble(rust_notices: &str) -> String {
     );
     out.push_str(RULE);
     out.push('\n');
-    // The cargo-about render already begins with its own section banner per
-    // license; keep exactly one blank line before it.
     out.push('\n');
     out.push_str(rust_notices.trim_start_matches('\n'));
     if !out.ends_with('\n') {
@@ -130,8 +116,6 @@ mod tests {
 
     #[test]
     fn dotnet_section_names_every_shipped_component() {
-        // The four shipped PackageReferences + the embedded runtime. A dropped
-        // line here would ship a notice missing a redistributed component.
         for needle in [
             "Microsoft .NET runtime",
             "Windows App SDK / WinUI",
@@ -148,8 +132,6 @@ mod tests {
 
     #[test]
     fn dotnet_section_omits_non_shipped_dependencies() {
-        // Analyzers (PrivateAssets), build-time SDKs and the pruned WebView2
-        // payload are not redistributed — they must not appear in the notice.
         for absent in [
             "Roslynator",
             "StyleCop",
@@ -186,7 +168,6 @@ mod tests {
         let part1 = body.find("PART 1").expect("part 1 present");
         let part2 = body.find("PART 2").expect("part 2 present");
         assert!(part1 < part2, "PART 1 must precede PART 2");
-        // The curated .NET text lands in part 1, the cargo-about render in part 2.
         let dotnet = body.find("Microsoft .NET runtime").expect("dotnet present");
         let rust = body
             .find("RUST_LICENSE_BLOCK_MARKER")

@@ -4,22 +4,12 @@ using Microsoft.Win32.SafeHandles;
 
 namespace FindMyFiles.Services;
 
-/// <summary>
-/// Pins every component of an MFT-sourced path and proves that its leaf is
-/// still the exact NTFS file reference returned by the engine.  The lease is
-/// held through shell dispatch: every component this token may delete is
-/// opened with <c>DELETE</c> and without delete sharing, so a rename or
-/// delete of that component fails for as long as the lease lives — that, not
-/// the share mode alone, is what closes the check-to-use window (see
-/// <see cref="RealIndexedShellTargetVerifier"/> for the two cases where a
-/// component can only be observed, never locked).
+/// <summary> Pins every component of an MFT-sourced path and proves that its leaf is still the exact NTFS file reference returned by the engine.
+/// The lease is held through shell dispatch: every component this token may delete is opened with <c>DELETE</c> and without delete sharing, so a rename or delete of that component fails for as long as the lease lives — that, not the share mode alone, is what closes the check-to-use window (see <see cref="RealIndexedShellTargetVerifier"/> for the two cases where a component can only be observed, never locked).
 /// </summary>
 internal interface IIndexedShellTargetVerifier
 {
-    /// <summary>Verify and pin one indexed target until the returned lease is disposed.</summary>
-    /// <param name="fullPath">MFT-sourced absolute path.</param>
-    /// <param name="expectedFrn">Exact NTFS record-and-sequence identity.</param>
-    /// <returns>A lease holding every path component against replacement.</returns>
+    /// <summary>Verify and pin one indexed target until the returned lease is disposed.</summary> <param name="fullPath">MFT-sourced absolute path.</param> <param name="expectedFrn">Exact NTFS record-and-sequence identity.</param> <returns>A lease holding every path component against replacement.</returns>
     IDisposable VerifyAndPin(string fullPath, ulong expectedFrn);
 }
 
@@ -35,11 +25,8 @@ internal sealed partial class RealIndexedShellTargetVerifier : IIndexedShellTarg
     private const uint FileFlagOpenReparsePoint = 0x00200000;
     private const uint FileAttributeReparsePoint = 0x00000400;
 
-    /// <summary>
-    /// <c>IO_REPARSE_TAG_NAME_SURROGATE_BIT</c>: set on every tag whose reparse
-    /// point stands in for another named object (junction, directory/file
-    /// symlink).  Windows exposes it as the <c>IsReparseTagNameSurrogate</c>
-    /// macro; this constant is that macro.
+    /// <summary> <c>IO_REPARSE_TAG_NAME_SURROGATE_BIT</c>: set on every tag whose reparse point stands in for another named object (junction, directory/file symlink).
+    /// Windows exposes it as the <c>IsReparseTagNameSurrogate</c> macro; this constant is that macro.
     /// </summary>
     private const uint ReparseTagNameSurrogateBit = 0x2000_0000;
 
@@ -69,8 +56,6 @@ internal sealed partial class RealIndexedShellTargetVerifier : IIndexedShellTarg
                 var handle = OpenPinnedComponent(componentPath);
                 handles.Add(handle);
 
-                // Fail closed: a component whose reparse state cannot be read
-                // is a component we cannot classify, so it is never dispatched.
                 if (!GetFileAttributeTagInformation(
                         handle,
                         FileAttributeTagInfo,
@@ -100,14 +85,9 @@ internal sealed partial class RealIndexedShellTargetVerifier : IIndexedShellTarg
         }
     }
 
-    /// <summary>
-    /// Reads the NTFS file reference (record number plus sequence number) the
-    /// engine indexes for <paramref name="fullPath"/>, without pinning it.
-    /// This is the identity <see cref="VerifyAndPin"/> proves, exposed so a
-    /// test can pin a real file it just created.
-    /// </summary>
-    /// <param name="fullPath">Absolute path of an existing NTFS object.</param>
-    /// <returns>The 64-bit NTFS file reference of the leaf.</returns>
+    /// <summary> Reads the NTFS file reference (record number plus sequence number) the engine indexes for <paramref name="fullPath"/>, without pinning it.
+    /// This is the identity <see cref="VerifyAndPin"/> proves, exposed so a test can pin a real file it just created.
+    /// </summary> <param name="fullPath">Absolute path of an existing NTFS object.</param> <returns>The 64-bit NTFS file reference of the leaf.</returns>
     internal static ulong ReadFileReference(string fullPath)
     {
         using var handle = OpenComponent(fullPath, FileReadAttributes);
@@ -119,19 +99,11 @@ internal sealed partial class RealIndexedShellTargetVerifier : IIndexedShellTarg
         return ReadFileReference(handle);
     }
 
-    /// <summary>
-    /// Opens one path component so the handle takes part in the Win32 share
-    /// check.  <c>DELETE</c> is what makes the open register delete access
-    /// with the file object; withholding <c>FILE_SHARE_DELETE</c> then makes
-    /// every later rename/delete open of that component fail while the lease
-    /// lives.  An attributes-only open registers nothing at all, so its share
-    /// mode is decorative — the same lesson fmf-service's
-    /// <c>security.rs::open_root</c> already records.  Only <c>DELETE</c> is
-    /// added: data-access bits would additionally fail whenever another
-    /// process legitimately holds the target open.
-    /// </summary>
-    /// <param name="componentPath">Absolute prefix of the path to pin.</param>
-    /// <returns>The pinned handle, or an observing handle in the two degraded cases.</returns>
+    /// <summary> Opens one path component so the handle takes part in the Win32 share check.
+    /// <c>DELETE</c> is what makes the open register delete access with the file object; withholding <c>FILE_SHARE_DELETE</c> then makes every later rename/delete open of that component fail while the lease lives.
+    /// An attributes-only open registers nothing at all, so its share mode is decorative — the same lesson fmf-service's <c>security.rs::open_root</c> already records.
+    /// Only <c>DELETE</c> is added: data-access bits would additionally fail whenever another process legitimately holds the target open.
+    /// </summary> <param name="componentPath">Absolute prefix of the path to pin.</param> <returns>The pinned handle, or an observing handle in the two degraded cases.</returns>
     private static SafeFileHandle OpenPinnedComponent(string componentPath)
     {
         var handle = OpenComponent(componentPath, FileReadAttributes | Delete);
@@ -143,21 +115,6 @@ internal sealed partial class RealIndexedShellTargetVerifier : IIndexedShellTarg
         int error = Marshal.GetLastPInvokeError();
         handle.Dispose();
 
-        // Two components cannot be locked, and failing them would disable
-        // every shell action instead of hardening it:
-        //   ACCESS_DENIED     the DACL withholds DELETE from this token (true
-        //                     of C:\, C:\Users, %ProgramFiles%, …).  It
-        //                     withholds rename/delete from an attacker in this
-        //                     token just as strictly, so the component is not
-        //                     swappable to begin with.
-        //   SHARING_VIOLATION someone already holds the component without
-        //                     delete sharing (a process whose current
-        //                     directory it is, an editor holding a document).
-        //                     That holder blocks rename/delete for everyone
-        //                     while it lives.
-        // Both degrade to an observing open: the reparse-point and identity
-        // checks still run, only the lease is weaker.  Anything else — the
-        // component is gone, the volume is unreachable — stays fail-closed.
         if (error is not (ErrorAccessDenied or ErrorSharingViolation))
         {
             throw new Win32Exception(error);
@@ -174,11 +131,7 @@ internal sealed partial class RealIndexedShellTargetVerifier : IIndexedShellTarg
         return observed;
     }
 
-    /// <summary>Opens a component with the given access, always denying delete
-    /// sharing and never following a reparse point.</summary>
-    /// <param name="componentPath">Absolute prefix of the path to open.</param>
-    /// <param name="desiredAccess">Access mask to request.</param>
-    /// <returns>The raw handle, invalid when the open failed.</returns>
+    /// <summary>Opens a component with the given access, always denying delete sharing and never following a reparse point.</summary> <param name="componentPath">Absolute prefix of the path to open.</param> <param name="desiredAccess">Access mask to request.</param> <returns>The raw handle, invalid when the open failed.</returns>
     private static SafeFileHandle OpenComponent(string componentPath, uint desiredAccess) =>
         CreateFile(
             componentPath,
@@ -189,45 +142,24 @@ internal sealed partial class RealIndexedShellTargetVerifier : IIndexedShellTarg
             FileFlagBackupSemantics | FileFlagOpenReparsePoint,
             IntPtr.Zero);
 
-    /// <summary>
-    /// True when a path component's reparse point can make the path resolve
-    /// somewhere other than where its spelling says — the only reparse
-    /// behaviour this verifier exists to stop.
-    /// <para>
-    /// That behaviour is exactly a <em>name surrogate</em>: junctions and
-    /// directory/file symlinks substitute another name during path parsing, so
-    /// an attacker who can plant one redirects a verified-looking path at a
-    /// target of their choosing.  Every other reparse tag — Cloud Files
-    /// (OneDrive placeholders, on by default since Windows 10 1809 and covering
-    /// Known-Folder-Moved Desktop/Documents/Pictures), HSM, deduplication,
-    /// WOF/compression, AppExecLink — keeps the object exactly where it is and
-    /// only changes how its data is fetched.  Rejecting those disabled "Open"
-    /// and "Open file location" for entire user profiles while buying no
-    /// safety, so only the surrogate bit is rejected.
-    /// </para>
-    /// <para>
-    /// Fail-closed detail: a component that reports the reparse attribute but
-    /// no tag cannot be classified, so it is treated as redirecting.
-    /// </para>
-    /// </summary>
-    /// <param name="fileAttributes">FileAttributes from FILE_ATTRIBUTE_TAG_INFO.</param>
-    /// <param name="reparseTag">ReparseTag from the same structure.</param>
-    /// <returns>True when the component must not be traversed.</returns>
+    /// <summary> True when a path component's reparse point can make the path resolve somewhere other than where its spelling says — the only reparse behaviour this verifier exists to stop.
+    /// <para> That behaviour is exactly a <em>name surrogate</em>: junctions and directory/file symlinks substitute another name during path parsing, so an attacker who can plant one redirects a verified-looking path at a target of their choosing.
+    /// Every other reparse tag — Cloud Files (OneDrive placeholders, on by default since Windows 10 1809 and covering Known-Folder-Moved Desktop/Documents/Pictures), HSM, deduplication,
+    /// WOF/compression, AppExecLink — keeps the object exactly where it is and only changes how its data is fetched.
+    /// Rejecting those disabled "Open" and "Open file location" for entire user profiles while buying no safety, so only the surrogate bit is rejected.
+    /// </para> <para> Fail-closed detail: a component that reports the reparse attribute but no tag cannot be classified, so it is treated as redirecting.
+    /// </para> </summary> <param name="fileAttributes">FileAttributes from FILE_ATTRIBUTE_TAG_INFO.</param> <param name="reparseTag">ReparseTag from the same structure.</param> <returns>True when the component must not be traversed.</returns>
     internal static bool RedirectsPathResolution(uint fileAttributes, uint reparseTag)
     {
         if ((fileAttributes & FileAttributeReparsePoint) == 0)
         {
-            // No reparse point at all: the tag field is meaningless here and
-            // must not be consulted (Windows leaves it zero).
             return false;
         }
 
         return reparseTag == 0 || (reparseTag & ReparseTagNameSurrogateBit) != 0;
     }
 
-    /// <summary>Reads the NTFS file reference behind an open handle.</summary>
-    /// <param name="handle">Handle to an open NTFS object.</param>
-    /// <returns>The 64-bit NTFS file reference.</returns>
+    /// <summary>Reads the NTFS file reference behind an open handle.</summary> <param name="handle">Handle to an open NTFS object.</param> <returns>The 64-bit NTFS file reference.</returns>
     private static ulong ReadFileReference(SafeFileHandle handle)
     {
         if (!GetFileInformationByHandleEx(
@@ -239,9 +171,6 @@ internal sealed partial class RealIndexedShellTargetVerifier : IIndexedShellTarg
             throw new Win32Exception(Marshal.GetLastPInvokeError());
         }
 
-        // find-my-files indexes NTFS only.  NTFS identifiers occupy the low 64
-        // bits; a non-zero high half is an unsupported identity format, never
-        // something to truncate into a plausible FRN.
         if (identity.FileId.High != 0)
         {
             throw new IOException(Loc.Get("Shell_IdentityChanged"));
@@ -250,13 +179,9 @@ internal sealed partial class RealIndexedShellTargetVerifier : IIndexedShellTarg
         return identity.FileId.Low;
     }
 
-    /// <summary>
-    /// Reject spellings whose normal Win32 interpretation can normalize to a
-    /// different directory entry.  NTFS can store these names, so search and
-    /// copy remain available; only path-based shell actions are disabled.
-    /// </summary>
-    /// <param name="fullPath">Path to classify.</param>
-    /// <returns>True only for an unambiguous absolute drive path.</returns>
+    /// <summary> Reject spellings whose normal Win32 interpretation can normalize to a different directory entry.
+    /// NTFS can store these names, so search and copy remain available; only path-based shell actions are disabled.
+    /// </summary> <param name="fullPath">Path to classify.</param> <returns>True only for an unambiguous absolute drive path.</returns>
     internal static bool IsLexicallySafe(string fullPath)
     {
         if (string.IsNullOrEmpty(fullPath)
@@ -335,15 +260,9 @@ internal sealed partial class RealIndexedShellTargetVerifier : IIndexedShellTarg
         }
     }
 
-    /// <summary>
-    /// True when Win32 would resolve the component to a DOS device instead of
-    /// a directory entry.  The stem is taken up to the first dot and then
-    /// stripped of trailing spaces, because Win32 resolves <c>COM1 .txt</c> to
-    /// <c>COM1</c> — that trailing-space rule belongs here, to the reserved
-    /// stems, and must not reject ordinary names such as <c>report .txt</c>.
-    /// </summary>
-    /// <param name="component">One path component.</param>
-    /// <returns>True when the component names a DOS device.</returns>
+    /// <summary> True when Win32 would resolve the component to a DOS device instead of a directory entry.
+    /// The stem is taken up to the first dot and then stripped of trailing spaces, because Win32 resolves <c>COM1 .txt</c> to <c>COM1</c> — that trailing-space rule belongs here, to the reserved stems, and must not reject ordinary names such as <c>report .txt</c>.
+    /// </summary> <param name="component">One path component.</param> <returns>True when the component names a DOS device.</returns>
     private static bool IsDosDeviceName(string component)
     {
         string stem = component.Split('.', 2)[0].TrimEnd(' ');

@@ -1,8 +1,3 @@
-# bacon — background `cargo` watcher for the engine inner loop (`just dev`).
-# Recompiles on save and shows only what is wrong. Defaults to clippy so the
-# watch loop mirrors the lint gate; switch jobs from bacon's footer menu.
-# Output lands in build/engine (the engine .cargo/config.toml target-dir), so
-# this never resurrects engine/target (ADR-0021).
 
 default_job = "clippy"
 

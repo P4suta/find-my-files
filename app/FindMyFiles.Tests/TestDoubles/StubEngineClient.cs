@@ -2,17 +2,10 @@ using FindMyFiles.Engine;
 
 namespace FindMyFiles.Tests.TestDoubles;
 
-/// <summary>
-/// <see cref="IEngineClient"/> stub whose SearchAsync hands back
-/// caller-controlled TaskCompletionSources — the test decides when (and in
-/// which order) each query completes, which makes generation/supersede races
-/// fully deterministic.
+/// <summary> <see cref="IEngineClient"/> stub whose SearchAsync hands back caller-controlled TaskCompletionSources — the test decides when (and in which order) each query completes, which makes generation/supersede races fully deterministic.
 ///
-/// Recording-only: this stub does NOT claim contract conformance and is
-/// deliberately excluded from EngineClientContractTests — queries never fail
-/// with QuerySyntaxException, nothing goes stale, cancellation is ignored.
-/// Use <see cref="FindMyFiles.Engine.FakeEngineClient"/> when a test needs a
-/// contract-conforming in-proc engine.
+/// Recording-only: this stub does NOT claim contract conformance and is deliberately excluded from EngineClientContractTests — queries never fail with QuerySyntaxException, nothing goes stale, cancellation is ignored.
+/// Use <see cref="FindMyFiles.Engine.FakeEngineClient"/> when a test needs a contract-conforming in-proc engine.
 /// </summary>
 internal sealed class StubEngineClient : IEngineClient
 {
@@ -31,8 +24,7 @@ internal sealed class StubEngineClient : IEngineClient
 
         public TaskCompletionSource<SearchOutcome> Tcs { get; } = new();
 
-        /// <summary>Complete this query with rows; returns the result so the
-        /// test can assert on its dispose state.</summary>
+        /// <summary>Complete this query with rows; returns the result so the test can assert on its dispose state.</summary>
         public StubSearchResult CompleteWith(IReadOnlyList<RowData> rows, QueryTraceData? trace = null)
         {
             var result = new StubSearchResult(rows);
@@ -44,15 +36,13 @@ internal sealed class StubEngineClient : IEngineClient
             Tcs.SetResult(new SearchOutcome(result, trace));
     }
 
-    /// <summary>Every SearchAsync call, in order, still awaiting completion
-    /// until the test calls CompleteWith / sets the Tcs.</summary>
+    /// <summary>Every SearchAsync call, in order, still awaiting completion until the test calls CompleteWith / sets the Tcs.</summary>
     public List<PendingSearch> Searches { get; } = [];
 
     /// <summary>When set, SearchAsync throws instead of recording a call.</summary>
     public Exception? ThrowOnSearch { get; set; }
 
-    /// <summary>When set, ListVolumesAsync faults — drives the StartAsync failure
-    /// path (status + error notification) without a real engine.</summary>
+    /// <summary>When set, ListVolumesAsync faults — drives the StartAsync failure path (status + error notification) without a real engine.</summary>
     public Exception? ThrowOnStartup { get; set; }
 
     public Task<IReadOnlyList<string>>? ListVolumesTask { get; set; }
@@ -65,10 +55,7 @@ internal sealed class StubEngineClient : IEngineClient
 
     public event Action<EngineConnectionState>? ConnectionChanged;
 
-    /// <summary>Settable so a test can simulate the pipe warm-up window: start as
-    /// <see cref="EngineConnectionState.Connecting"/> (the VM's startup defers to
-    /// "preparing"), then flip to <see cref="EngineConnectionState.Connected"/> and
-    /// call <see cref="RaiseConnectionChanged"/> to drive the deferred startup.
+    /// <summary>Settable so a test can simulate the pipe warm-up window: start as <see cref="EngineConnectionState.Connecting"/> (the VM's startup defers to "preparing"), then flip to <see cref="EngineConnectionState.Connected"/> and call <see cref="RaiseConnectionChanged"/> to drive the deferred startup.
     /// Defaults to InProc so existing tests treat the stub as already usable.</summary>
     public EngineConnectionState Connection { get; set; } = EngineConnectionState.InProc;
 
@@ -82,8 +69,7 @@ internal sealed class StubEngineClient : IEngineClient
     public void RaiseConnectionChanged(EngineConnectionState state) =>
         ConnectionChanged?.Invoke(state);
 
-    /// <summary>Live subscriber count per event — lets tests pin that
-    /// Dispose paths actually unsubscribe.</summary>
+    /// <summary>Live subscriber count per event — lets tests pin that Dispose paths actually unsubscribe.</summary>
     public int IndexChangedSubscribers => IndexChanged?.GetInvocationList().Length ?? 0;
 
     public int VolumeUpdatedSubscribers => VolumeUpdated?.GetInvocationList().Length ?? 0;
@@ -92,9 +78,7 @@ internal sealed class StubEngineClient : IEngineClient
 
     public int ConnectionChangedSubscribers => ConnectionChanged?.GetInvocationList().Length ?? 0;
 
-    /// <summary>How many times <see cref="ListVolumesAsync"/> was called — lets a
-    /// test pin that the startup sequence runs exactly once (e.g. the Loaded call
-    /// and a later Connected event must not double-run it).</summary>
+    /// <summary>How many times <see cref="ListVolumesAsync"/> was called — lets a test pin that the startup sequence runs exactly once (e.g. the Loaded call and a later Connected event must not double-run it).</summary>
     public int ListVolumesCalls { get; private set; }
 
     public int StartIndexingCalls { get; private set; }
@@ -120,9 +104,8 @@ internal sealed class StubEngineClient : IEngineClient
     public Task<IReadOnlyList<VolumeStatus>> GetStatusAsync(CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<VolumeStatus>>([]);
 
-    /// <summary>Stats returned by <see cref="GetStatsAsync"/>; null (default)
-    /// mirrors an in-proc client with no snapshot. Set to exercise the About
-    /// block's engine-version path.</summary>
+    /// <summary>Stats returned by <see cref="GetStatsAsync"/>; null (default) mirrors an in-proc client with no snapshot.
+    /// Set to exercise the About block's engine-version path.</summary>
     public EngineStatsData? Stats { get; set; }
 
     public Exception? ThrowOnStats { get; set; }
@@ -146,9 +129,6 @@ internal sealed class StubEngineClient : IEngineClient
             throw ex;
         }
 
-        // The UI product contract is "no query, no results". Fail fast if a
-        // ViewModel test accidentally crosses that boundary: recording an
-        // incomplete pending search would turn the defect into a test hang.
         if (string.IsNullOrWhiteSpace(query))
         {
             throw new InvalidOperationException("empty query reached the test engine");

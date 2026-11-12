@@ -1,17 +1,19 @@
-//! The serve core (shared by console `run` and the SCM entry) and the SCM
-//! plumbing.
+//! The serve core (shared by console `run` and the SCM entry) and the SCM plumbing.
 //!
-//! Stop sources — Ctrl+C, `SERVICE_CONTROL_STOP`, PRESHUTDOWN — all funnel
-//! into one shared `AtomicBool`; teardown is always stop-accepting →
-//! flush → shutdown (ADR-0016). Flushing before shutdown is what makes a
-//! restart resume from a snapshot instead of a full rescan.
+//! Stop sources — Ctrl+C, `SERVICE_CONTROL_STOP`, PRESHUTDOWN — all funnel into one shared `AtomicBool`; teardown is always stop-accepting → flush → shutdown (ADR-0016).
+//! Flushing before shutdown is what makes a restart resume from a snapshot instead of a full rescan.
+
+const DEFAULT_STOP_TIMEOUT_SECS: u64 = 30;
+const SHUTDOWN_POLL_MILLIS: u64 = 200;
+const RESTART_POLL_MILLIS: u64 = 500;
+const ENGINE_CREATE_ATTEMPTS: u32 = 10;
 
 use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use fmf_core::engine::VolumeState;
+use fmf_runtime::engine::VolumeState;
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
 };
@@ -20,14 +22,11 @@ use windows_service::{define_windows_service, service_dispatcher};
 
 use crate::{config, host, lifecycle, security, server};
 
-// The SCM name is contract surface (the app's in-app service setup needs
-// it too — ADR-0018 radiation).
 pub use fmf_proto::SERVICE_NAME;
 
 /// Knobs for [`serve`]: where data lives, which pipe to bind, and dev toggles.
 pub struct ServeOptions {
-    /// Machine-wide data root (`%ProgramData%\find-my-files`); holds
-    /// `service.json`, the `index` snapshot dir, and `logs`.
+    /// Machine-wide data root (`%ProgramData%\find-my-files`); holds `service.json`, the `index` snapshot dir, and `logs`.
     pub data_dir: std::path::PathBuf,
     /// Exact verified root guard for installed-service control-file mutation.
     /// `None` is permitted only for console/test mode.
@@ -37,28 +36,25 @@ pub struct ServeOptions {
     /// Enable the `--debug-faults` query hooks (`!!panic` / `!!drop` / `!!lag`);
     /// always off for an installed service.
     pub debug_faults: bool,
-    /// Skip the initial volume index on startup (serve the existing snapshot
-    /// only); used for fast bring-up in dev.
+    /// Skip the initial volume index on startup (serve the existing snapshot only); used for fast bring-up in dev.
     pub no_index: bool,
-    /// Require a valid config with at least one authorized SID. Always true for
-    /// the installed SCM service; console/test mode explicitly opts out.
+    /// Require a valid config with at least one authorized SID.
+    /// Always true for the installed SCM service; console/test mode explicitly opts out.
     pub require_authorization: bool,
-    /// Connect-time client verification handed to the pipe server. Always
-    /// [`security::verify_client`] outside tests.
+    /// Connect-time client verification handed to the pipe server.
+    /// Always [`security::verify_client`] outside tests.
     pub client_verifier: server::ClientVerifier,
 }
 
 /// Exit code reported when the writer lock never came free.
 ///
-/// Visible in the event log, but a clean `SERVICE_STOPPED` so the SCM does not
-/// crash-loop us against whichever process holds the index writer lock.
+/// Visible in the event log, but a clean `SERVICE_STOPPED` so the SCM does not crash-loop us against whichever process holds the index writer lock.
 pub const EXIT_LOCKED: u32 = fmf_proto::codes::LOCKED as u32;
 
 /// Brings the engine + pipe server up, parks until `stop`, tears down.
 ///
 /// # Errors
-/// Returns a shared contract status on startup failure: [`EXIT_LOCKED`] when
-/// the writer lock never freed, or `FMF_E_IO` for other bring-up failures.
+/// Returns a shared contract status on startup failure: [`EXIT_LOCKED`] when the writer lock never freed, or `FMF_E_IO` for other bring-up failures.
 pub fn serve(
     opts: &ServeOptions,
     stop: &Arc<AtomicBool>,
@@ -70,12 +66,15 @@ pub fn serve(
         opts.require_authorization,
         opts.data_root.as_deref(),
     )?;
-    // On-demand idle self-stop (ADR-0027); 0 = disabled (legacy resident).
     let idle_stop = Duration::from_secs(cfg.idle_stop_secs);
 
-    let engine = match host::create_engine_with_retry(opts.data_dir.join("index"), stop, 10) {
+    let engine = match host::create_engine_with_retry(
+        opts.data_dir.join("index"),
+        stop,
+        ENGINE_CREATE_ATTEMPTS,
+    ) {
         Ok(e) => e,
-        Err(fmf_core::engine::EngineCreateError::Locked(_)) => return Err(EXIT_LOCKED),
+        Err(fmf_runtime::engine::EngineCreateError::Locked(_)) => return Err(EXIT_LOCKED),
         Err(e) => {
             tracing::error!(error = %e, "engine create failed");
             return Err(fmf_proto::codes::IO as u32);
@@ -83,12 +82,9 @@ pub fn serve(
     };
 
     if !opts.no_index {
-        let volumes = fmf_core::engine::Engine::list_ntfs_volumes();
+        let volumes = fmf_runtime::engine::Engine::list_ntfs_volumes();
         tracing::info!(?volumes, "indexing");
         if let Err(error) = engine.index_start(&volumes) {
-            // The OS volume set can change between enumeration and start.
-            // Keep serving the remaining engine surface; a later explicit
-            // IndexStart re-enumerates and can succeed.
             tracing::warn!(%error, "startup volume set changed before indexing");
         }
     }
@@ -109,7 +105,6 @@ pub fn serve(
             return Err(fmf_proto::codes::IO as u32);
         }
     };
-    // Periodic flush: dirty volumes only (Engine::flush's contract).
     let flush_engine = engine.clone();
     let flush_stop = stop.clone();
     let interval = Duration::from_secs(cfg.flush_interval_secs);
@@ -122,8 +117,8 @@ pub fn serve(
                     if flush_stop.load(Ordering::Relaxed) {
                         return;
                     }
-                    std::thread::sleep(Duration::from_millis(500));
-                    waited += Duration::from_millis(500);
+                    std::thread::sleep(Duration::from_millis(RESTART_POLL_MILLIS));
+                    waited += Duration::from_millis(RESTART_POLL_MILLIS);
                 }
                 let saved = flush_engine.flush();
                 if saved > 0 {
@@ -156,29 +151,11 @@ pub fn serve(
     }
     tracing::info!(pipe = %opts.pipe_name, "serving");
 
-    // Park until stopped (SCM Stop / Ctrl+C), until the listener is gone, or,
-    // when idle-stop is enabled, until the service has sat with no live
-    // connection past its timeout (ADR-0027). The idle clock starts only once a
-    // client has connected and dropped (`seen_client`), and a self-stop is held
-    // off while an initial scan is still running.
-    //
-    // Two stop signals meet here and neither can be dropped: `stop` (this
-    // AtomicBool — SCM Stop / PRESHUTDOWN / Ctrl+C / self-stop; also what the
-    // periodic-flush thread polls) and the pipe server's Win32 stop event
-    // (`srv.stop()`, which breaks the accept wait and disconnects clients).
-    // `stop` is raised first and teardown below raises the server's; the accept
-    // loop can also die on its own, which is what `is_accepting` reports back.
     let mut seen_client = false;
     let mut accept_lost = false;
     let mut idle_since = Instant::now();
     while !stop.load(Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_millis(200));
-        // No listener means the pipe is unreachable for good: clients retry
-        // forever and `fmf-service start` is a no-op against a Running service.
-        // Stop the process instead — teardown still flushes, the SCM reports
-        // Stopped, and the next on-demand start rebuilds the listener. This is
-        // checked before the idle logic on purpose: `idle_stop_secs = 0` (and a
-        // service no client ever reached) must recover too.
+        std::thread::sleep(Duration::from_millis(SHUTDOWN_POLL_MILLIS));
         if !srv.is_accepting() {
             tracing::error!(
                 "pipe accept loop is gone — stopping so the next on-demand start restores the listener"
@@ -198,9 +175,6 @@ pub fn serve(
         if !seen_client || idle_since.elapsed() < idle_stop {
             continue;
         }
-        // Idle past the timeout with no client. Stop unless an initial scan is
-        // still in flight (the rare client-less bring-up); status() is consulted
-        // only here, at most once per idle window.
         let indexing = engine
             .status()
             .iter()
@@ -210,12 +184,10 @@ pub fn serve(
                 idle_secs = idle_stop.as_secs(),
                 "idle — self-stopping (on-demand)"
             );
-            // Signal stop so the periodic-flush thread exits and the teardown
-            // below (flusher.join) doesn't block.
             stop.store(true, Ordering::Relaxed);
             break;
         }
-        idle_since = Instant::now(); // a scan held us off; re-check next window
+        idle_since = Instant::now();
     }
     tracing::info!("stopping — flushing snapshots");
     let last_use_error = opts
@@ -237,9 +209,6 @@ pub fn serve(
     engine.flush();
     engine.set_event_sink(None);
     engine.shutdown();
-    // A lost listener is a failure exit, not a clean stop: the SCM records it
-    // (and applies the registered restart actions) instead of logging a normal
-    // shutdown for a service that stopped serving without being asked to.
     if last_use_error.is_some() || accept_lost {
         Err(fmf_proto::codes::IO as u32)
     } else {
@@ -281,8 +250,6 @@ fn validate_installed_service_config(
     }
 }
 
-// ── SCM entry ───────────────────────────────────────────────────────────
-
 define_windows_service!(ffi_service_main, service_main);
 
 fn service_status(state: ServiceState, exit: ServiceExitCode) -> ServiceStatus {
@@ -297,7 +264,7 @@ fn service_status(state: ServiceState, exit: ServiceExitCode) -> ServiceStatus {
         exit_code: exit,
         checkpoint: u32::from(state == ServiceState::StartPending),
         wait_hint: if state == ServiceState::StartPending {
-            Duration::from_secs(30)
+            Duration::from_secs(DEFAULT_STOP_TIMEOUT_SECS)
         } else {
             Duration::ZERO
         },
@@ -346,10 +313,6 @@ fn service_main(_args: Vec<OsString>) {
             return;
         }
     };
-    // Pin and verify the machine root before LocalSystem opens a config, log,
-    // or index path. A drifted boundary fails closed instead of being repaired
-    // in place. The guard stays alive until `serve` returns, so a verified root
-    // cannot be replaced during the service lifetime.
     let protected_sddl = security::data_dir_sddl();
     let data_root = match security::TrustedDataRoot::open_and_harden_machine(&protected_sddl) {
         Ok(root) => Arc::new(root),
@@ -364,8 +327,6 @@ fn service_main(_args: Vec<OsString>) {
             return;
         }
     };
-    // The required load inside `serve` records any error after this bootstrap
-    // logger exists; this pre-read only selects the filter used to create it.
     let cfg = data_root
         .open_file_read("service.json")
         .and_then(config::ServiceConfig::try_load_file)
@@ -373,11 +334,6 @@ fn service_main(_args: Vec<OsString>) {
             eprintln!("fmf-service: bootstrap service.json read failed: {error}");
             config::ServiceConfig::default()
         });
-    // Load-bearing, not belt-and-braces: `open_and_harden_machine` above walks
-    // the whole tree with the *root* descriptor, which flattens logs/'s narrower
-    // policy. Without this re-application the unelevated F12 diagnostics read is
-    // gone. Pinned by
-    // `security::tests::root_walk_flattens_per_path_policy_and_must_be_followed_by_reapplication`.
     if !cfg.authorized_sids.is_empty() {
         let readers: Vec<_> = cfg.authorized_sids.iter().map(String::as_str).collect();
         if let Err(e) = data_root.harden_tree("logs", &security::logs_dir_sddl(&readers)) {
@@ -391,10 +347,10 @@ fn service_main(_args: Vec<OsString>) {
             return;
         }
     }
-    fmf_core::diag::init_diag(
+    fmf_runtime::diag::init_diag(
         Some(&data_dir.join("logs")),
         &cfg.log_level,
-        fmf_core::diag::SERVICE_MAX_LOG_FILES,
+        fmf_runtime::diag::SERVICE_MAX_LOG_FILES,
     );
 
     let exit = match serve(
@@ -432,8 +388,7 @@ fn service_main(_args: Vec<OsString>) {
 /// Blocks for the service lifetime; fails fast when not launched by the SCM.
 ///
 /// # Errors
-/// Returns the `windows_service` error when the SCM dispatcher cannot start
-/// (e.g. the process was launched directly rather than by the SCM).
+/// Returns the `windows_service` error when the SCM dispatcher cannot start (e.g. the process was launched directly rather than by the SCM).
 pub fn dispatch() -> windows_service::Result<()> {
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)
 }

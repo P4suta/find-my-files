@@ -551,14 +551,18 @@ function Invoke-ReleasePolishPhase {
 # ──────────────────────────────────────────────────────────────────────────────
 function Open-Settings {
     Invoke-Ui invoke 'OptionsButton' -a $AppPid | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Settings open invocation failed (exit $LASTEXITCODE)." }
     Invoke-Ui wait-for 'SettingsDialog' -a $AppPid -t 3000 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Settings dialog did not open (exit $LASTEXITCODE)." }
 }
 
 function Close-Settings {
-    # WinUI names the ContentDialog's close button 'CloseButton' (template part),
-    # which surfaces as that AutomationId — language-independent, unlike its text.
-    Invoke-Ui invoke 'CloseButton' -a $AppPid 2>$null | Out-Null
-    Start-Sleep -Milliseconds 200
+    Invoke-Ui invoke 'CloseButton' -a $AppPid | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Settings close invocation failed (exit $LASTEXITCODE)." }
+    Invoke-Ui wait-for 'SettingsDialog' -a $AppPid --gone -t 3000 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Settings dialog did not close (exit $LASTEXITCODE)." }
+    Invoke-Ui wait-for 'OptionsButton' -a $AppPid -p IsEnabled --value 'True' -t 3000 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Settings controls did not become interactive (exit $LASTEXITCODE)." }
 }
 
 function Get-StatusCountText {
