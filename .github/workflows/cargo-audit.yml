@@ -44,7 +44,7 @@ jobs:
               - '.github/workflows/cargo-audit.yml'
       - uses: $/.github/actions/rust-toolchain
         if: github.event_name != 'pull_request' || steps.changes.outputs.dependencies == 'true'
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         if: github.event_name != 'pull_request' || steps.changes.outputs.dependencies == 'true'
         with:
           tool: cargo-audit@0.22.2
