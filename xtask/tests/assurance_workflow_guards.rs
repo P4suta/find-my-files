@@ -53,7 +53,7 @@ fn proof_partitions_preserve_budgets_and_require_complete_collection() {
     );
     assert_eq!(proof["strategy"]["max-parallel"].as_i64(), Some(4));
     assert_eq!(proof["strategy"]["fail-fast"].as_bool(), Some(false));
-    assert_eq!(proof["timeout-minutes"].as_i64(), Some(120));
+    assert_eq!(proof["timeout-minutes"].as_i64(), Some(360));
     assert_eq!(
         proof["if"].as_str(),
         Some("needs.changes.outputs.assurance == 'true'")

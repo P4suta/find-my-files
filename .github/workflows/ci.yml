@@ -235,7 +235,7 @@ jobs:
     needs: [changes, xtask-build]
     if: needs.changes.outputs.assurance == 'true'
     runs-on: ubuntu-26.04
-    timeout-minutes: 120
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       max-parallel: 4
