@@ -10,44 +10,32 @@ Proposed.
 
 ## Context
 
-The service decodes client messages and disk structures across privilege boundaries.
-Native tests and fuzzing exercise particular executions.
-They don't establish properties for every admitted input.
-Untracked fuzz inputs also discard regressions between CI runs.
-
-The product remains Windows-only.
-Portable verification follows the parser boundary established by [ADR-0047](0047-ntfs-grammar-outside-the-windows-gate.md).
-The contract crate remains the only authority for wire types and byte conversions.
+Client and disk bytes cross privilege boundaries.
+Tests sample executions, and untracked fuzz inputs lose regressions.
 
 ## Decision
 
-Kani harnesses call the production byte conversions and layout validators directly.
-The checked [inventory](../../verification/proofs.json) declares the required harnesses and their execution budget.
-Each harness supplies an explicit unwind bound, assertions, and reachable cover cases.
-The gate rejects missing harnesses, failed checks, incomplete runs, unreachable cover cases, and stale evidence.
-Evidence binds the results to source files, dependency locks, tool configuration, and the runner implementation.
+Kani harnesses call production conversions and validators with explicit bounds, assertions, and reachable covers.
+The inventory binds harnesses to source, dependencies, tools, and runners.
+Reject missing, failed, incomplete, unreachable, or stale results.
+Miri checks applicable contract boundaries.
+Initialize snapshot buffers before safe reads.
+Commit fuzz regressions and replay them before bounded exploration.
+Keep native integration for Windows APIs, privileges, and scheduling.
 
-Miri executes the applicable contract tests with its isolation and borrow checks enabled.
-Snapshot byte views use `bytemuck::Pod`, and the reader initializes each chunk before passing it to a safe `Read` implementation.
-This keeps raw byte access inside the dependency's checked API and preserves initialized prefixes during buffer growth.
-Windows APIs, process scheduling, and privileges remain native integration boundaries.
-[Verification scope](../verification.md) records the distinction between these claims.
+## Alternatives
 
-Fuzz targets keep regression inputs in the repository and replay them before bounded exploration.
-Round-trip and metamorphic properties check decoded values where the format permits an inverse.
-The existing CI jobs enforce these checks without adding a runner matrix.
-
-Comments explain public contracts, safety, legal requirements, tool directives, or constraints that types and executable checks can't express.
-Ordinary narration and source history belong outside the implementation.
-Prose uses one sentence per line.
+Detached models do not verify production code.
+Longer fuzzing without preserved seeds loses reproducibility.
+Compilation establishes no behavioral property.
 
 ## Consequences
 
-Pure validation may need a small internal function so the verifier can cover its complete scalar input domain without modeling unrelated standard-library machinery.
-The public API, wire layout, persistence format, and native behavior keep their existing contracts.
-The mutation baseline keeps its operators, replacements, and rationale when comment edits move source positions.
+Small pure helpers may expose scalar invariants.
+Native behavior, formats, generated contracts, mutation scope, and reviewed identities remain unchanged.
 
-Detached models don't substitute for a production-code proof.
-Increasing fuzz duration doesn't substitute for preserved regressions or reachable success paths.
-Passing a bounded harness establishes its stated input domain.
-It doesn't establish correctness of every engine function or native adapter.
+## Confirmation
+
+Run [verification gates](../verification.md) and ensure missing reports and broken invariants fail.
+[Original scope](https://github.com/P4suta/find-my-files/blob/198680fcf43d9de21d7be88c4cd270146af94a2e/docs/adr/source-bound-verification.md) records the boundaries.
+Reconsider if verifier semantics or required native boundaries change.
