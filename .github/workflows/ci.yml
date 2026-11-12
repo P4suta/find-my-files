@@ -53,18 +53,6 @@ jobs:
         id: f
         with:
           filters: |
-            assurance:
-              - 'engine/Cargo.*'
-              - 'engine/.cargo/**'
-              - 'engine/crates/fmf-contract/**'
-              - 'engine/crates/fmf-core/**'
-              - 'engine/crates/fmf-runtime/**'
-              - 'engine/crates/fmf-proto/**'
-              - 'xtask/**'
-              - 'verification/**'
-              - 'mise.toml'
-              - '.github/actions/rust-toolchain/**'
-              - '.github/workflows/ci.yml'
             comments:
               - 'engine/**'
               - 'app/**'
@@ -89,48 +77,6 @@ jobs:
               # future-proof instead of hand-maintaining an allowlist that can
               # silently omit a newly added gate.
               - '.github/workflows/**'
-            fuzz_all:
-              - 'engine/fuzz/**'
-              - 'xtask/src/strict_json.rs'
-              - 'xtask/src/interpreter.rs'
-              - 'xtask/src/paths.rs'
-              - 'xtask/src/cmd.rs'
-              - 'xtask/src/main.rs'
-              - 'xtask/Cargo.toml'
-              - 'xtask/Cargo.lock'
-              - 'verification/fuzz/**'
-              - 'engine/Cargo.toml'
-              - 'engine/Cargo.lock'
-              - 'engine/.cargo/**'
-              - 'engine/crates/fmf-core/Cargo.toml'
-              - 'engine/crates/fmf-runtime/Cargo.toml'
-              - 'engine/crates/fmf-core/build.rs'
-              - 'engine/crates/fmf-runtime/build.rs'
-              - 'engine/crates/fmf-core/src/lib.rs'
-              - 'engine/crates/fmf-runtime/src/lib.rs'
-              - 'engine/crates/fmf-runtime/src/metrics.rs'
-              - 'engine/crates/fmf-runtime/src/diag/**'
-              - 'engine/crates/fmf-proto/Cargo.toml'
-              - 'engine/crates/fmf-proto/build.rs'
-              - 'engine/crates/fmf-contract/**'
-              - 'mise.toml'
-              - '.github/actions/rust-toolchain/**'
-              - '.github/actions/fuzz-target/**'
-              - '.github/workflows/fuzz.yml'
-              - '.github/workflows/ci.yml'
-            fuzz_wire:
-              - 'engine/crates/fmf-proto/**'
-            fuzz_core:
-              - 'engine/crates/fmf-runtime/src/query/**'
-              - 'engine/crates/fmf-runtime/src/index/**'
-              - 'engine/crates/fmf-core/src/wtf8.rs'
-              - 'engine/crates/fmf-runtime/src/wtf8.rs'
-            fuzz_usn:
-              - 'engine/crates/fmf-core/src/usn/**'
-              - 'engine/crates/fmf-runtime/src/usn/**'
-            fuzz_ntfs:
-              - 'engine/crates/fmf-core/src/ondisk/**'
-              - 'engine/crates/fmf-runtime/src/ondisk/**'
             bench:
               - 'engine/crates/fmf-core/**'
               - 'engine/crates/fmf-runtime/**'
@@ -301,7 +247,7 @@ jobs:
         with:
           name: xtask-nextest-junit
           path: build/xtask/nextest/ci/junit.xml
-          retention-days: 14
+          retention-days: 7
           if-no-files-found: warn
           overwrite: true
 
@@ -348,7 +294,7 @@ jobs:
           path: |
             build/engine/nextest/ci-latency/latency.xml
             build/engine/nextest/ci-coverage/coverage.xml
-          retention-days: 14
+          retention-days: 7
           if-no-files-found: warn
           overwrite: true
       - name: doctest
@@ -376,7 +322,7 @@ jobs:
         with:
           name: rust-coverage
           path: build/coverage/engine-lcov.info
-          retention-days: 14
+          retention-days: 7
           if-no-files-found: error
           overwrite: true
 

@@ -36,7 +36,8 @@ fn yaml(source: &str) -> Yaml {
     documents.remove(0)
 }
 
-fn fuzz_surfaces(path: &str) -> BTreeSet<String> {
+#[test]
+fn only_fast_gates_use_changed_path_filters() {
     let ci = yaml(CI);
     let filter_step = ci["jobs"]["changes"]["steps"]
         .as_vec()
@@ -45,87 +46,41 @@ fn fuzz_surfaces(path: &str) -> BTreeSet<String> {
         .find(|step| step["id"].as_str() == Some("f"))
         .expect("path filter");
     let filters = yaml(filter_step["with"]["filters"].as_str().expect("filters"));
-    filters
+    let names: BTreeSet<_> = filters
         .as_hash()
         .expect("filter map")
-        .iter()
-        .filter_map(|(name, patterns)| {
-            let name = name.as_str().expect("filter name");
-            if name != "fuzz" && !name.starts_with("fuzz_") {
-                return None;
-            }
-            patterns
-                .as_vec()
-                .expect("path patterns")
-                .iter()
-                .any(|pattern| {
-                    let pattern = pattern.as_str().expect("literal glob");
-                    if let Some(prefix) = pattern.strip_suffix("/**") {
-                        assert!(!prefix.contains('*'), "only terminal recursive globs");
-                        path.strip_prefix(prefix)
-                            .is_some_and(|suffix| suffix.starts_with('/'))
-                    } else {
-                        assert!(!pattern.contains('*'), "exact paths or recursive globs");
-                        path == pattern
-                    }
-                })
-                .then(|| name.to_owned())
-        })
-        .collect()
-}
-
-#[test]
-fn unrelated_changes_never_start_a_parser_campaign() {
-    for path in [
-        "engine/crates/fmf-runtime/src/engine/worker.rs",
-        "engine/crates/fmf-service/src/security.rs",
-        "app/FindMyFiles/MainWindow.xaml.cs",
-        "docs/SECURITY.md",
-    ] {
-        assert!(fuzz_surfaces(path).is_empty(), "unrelated input: {path}");
-    }
-}
-
-#[test]
-fn parser_changes_select_their_surface_and_shared_inputs_select_all() {
-    for (path, expected) in [
-        ("engine/crates/fmf-proto/src/frame.rs", "fuzz_wire"),
-        ("engine/crates/fmf-runtime/src/query/parse.rs", "fuzz_core"),
-        (
-            "engine/crates/fmf-runtime/src/index/snapshot.rs",
-            "fuzz_core",
-        ),
-        ("engine/crates/fmf-core/src/wtf8.rs", "fuzz_core"),
-        ("engine/crates/fmf-core/src/usn/records.rs", "fuzz_usn"),
-        ("engine/crates/fmf-core/src/ondisk/ntfs.rs", "fuzz_ntfs"),
-    ] {
-        assert_eq!(fuzz_surfaces(path), BTreeSet::from([expected.to_owned()]));
-    }
-    for path in [
-        "engine/Cargo.toml",
-        "engine/Cargo.lock",
-        "engine/.cargo/config.toml",
-        "engine/crates/fmf-core/Cargo.toml",
-        "engine/crates/fmf-contract/src/lib.rs",
-        "engine/fuzz/fuzz_targets/frame_decode.rs",
-        "xtask/src/strict_json.rs",
-        "xtask/src/interpreter.rs",
-        "xtask/src/paths.rs",
-        "xtask/src/cmd.rs",
-        "xtask/src/main.rs",
-        "xtask/Cargo.toml",
-        "xtask/Cargo.lock",
-        ".github/actions/fuzz-target/action.yml",
-        ".github/actions/rust-toolchain/action.yml",
-        ".github/workflows/ci.yml",
-        ".github/workflows/fuzz.yml",
-        "mise.toml",
-    ] {
-        assert!(
-            fuzz_surfaces(path).contains("fuzz_all"),
-            "shared input: {path}"
+        .keys()
+        .map(|name| name.as_str().expect("filter name"))
+        .collect();
+    assert_eq!(names, BTreeSet::from(["bench", "code", "comments"]));
+    for name in names {
+        let expected = format!("${{{{ inputs.full_assurance || steps.f.outputs.{name} }}}}");
+        assert_eq!(
+            ci["jobs"]["changes"]["outputs"][name].as_str(),
+            Some(expected.as_str())
         );
     }
+}
+
+#[test]
+fn ci_artifacts_expire_within_seven_days() {
+    let ci = yaml(CI);
+    let mut uploads = 0;
+    for job in ci["jobs"].as_hash().expect("CI jobs").values() {
+        for step in job["steps"].as_vec().into_iter().flatten() {
+            if step["uses"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("actions/upload-artifact@"))
+            {
+                uploads += 1;
+                let days = step["with"]["retention-days"]
+                    .as_i64()
+                    .expect("fixed artifact retention");
+                assert!((1..=7).contains(&days), "artifact retention: {days}");
+            }
+        }
+    }
+    assert!(uploads > 0);
 }
 
 #[test]
