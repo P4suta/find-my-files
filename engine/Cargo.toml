@@ -108,7 +108,7 @@ xxhash-rust = { version = "0.8", features = ["xxh64"] }
 regex = "1"
 regex-syntax = "0.8"
 unicode-normalization = "0.1"
-clap = { version = "=4.6.7", features = ["derive", "wrap_help"] }
+clap = { version = "=4.6.8", features = ["derive", "wrap_help"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 anstream = "1.0"
